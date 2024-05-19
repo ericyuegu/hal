@@ -63,8 +63,8 @@ class TrainerConfig:
     # Hyperparameters
     local_batch_size: int = 1024
     lr: float = 3e-4
-    train_samples: int = 2 ** 27
-    val_samples: int = 2 ** 17
+    train_samples: int = 2 ** 20
+    val_samples: int = 2 ** 16
     num_checkpoints: int = 4
     report_len: int = int(train_samples / 8)
     betas: Tuple[float, float] = (0.9, 0.999)

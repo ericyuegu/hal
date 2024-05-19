@@ -2,11 +2,13 @@ import functools
 import subprocess
 
 from pathlib import Path
-from typing import Iterable, Any
+from typing import Iterable, Any, TypeVar
 
 import numpy as np
 import torch
 import os
+
+T = TypeVar("T")
 
 
 def get_project_root() -> Path:
@@ -61,7 +63,7 @@ def time_format(t: float) -> str:
     return f'{hours:02d}:{mins:02d}:{secs:02d}'
 
 
-def move_tensors_to_device(inputs: Any, device: str, non_blocking=True) -> Any:
+def move_tensors_to_device(inputs: T, device: str, non_blocking=True) -> T:
     if isinstance(inputs, dict):
         return {k: move_tensors_to_device(v, device) for k, v in inputs.items()}
     elif isinstance(inputs, (list, tuple)):
