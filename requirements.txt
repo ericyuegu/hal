@@ -1,1 +1,8 @@
+attrs
+black
+isort
 melee @ git+https://github.com/vladfi1/libmelee
+numpy
+pandas
+pyarrow
+torch

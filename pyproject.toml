@@ -1,0 +1,47 @@
+[tool.isort]
+profile = "black"
+line_length = 119
+known_first_party = ["hal"]
+known_third_party = ["docker", "libmelee", "slippi-Ishiiruka"]
+indent = '    '
+force_single_line = true
+case_sensitive = true
+order_by_type = false
+
+[tool.black]
+line_length = 119
+target_version = ['py311']
+exclude = '''
+(
+    /(
+        \.git
+    |   \.mypy_cache
+    |   \.tox
+    |   \.venv
+    |   build
+    |   venv
+  )
+)
+'''
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyfixfmt"
+version = "0.10.0"
+readme = "README.md"
+dependencies = [
+    "autoflake",
+    "autotyping",
+    "black",
+    "isort",
+    "toml",
+]
+
+[project.scripts]
+pyfixfmt = "pyfixfmt:main"
+
+[tool.setuptools]
+packages = ["pyfixfmt"]
