@@ -1,3 +1,9 @@
+melee @ git+https://github.com/vladfi1/libmelee
+numpy==1.24.4
+pandas==2.1.0
+pyarrow==14.0.2
+pyarrow-hotfix==0.6
+torch==2.3.0
 autoflake==2.1.1
 autotyping==23.3.0
 black==23.9.1
@@ -18,3 +24,4 @@ tomli==2.0.1
 typing-inspect==0.9.0
 typing_extensions==4.9.0
 wheel==0.38.4
+pip-tools==7.4.1
