@@ -1,27 +1,32 @@
 from pathlib import Path
-from typing import Optional, Sequence, Tuple, Literal
+from typing import Optional
+from typing import Tuple
 
 import attr
 import torch
 
-from hal.types import DEVICES, EVAL_MODE, EVAL_STAGES
+from hal.constants import DEVICES
+from hal.constants import EVAL_MODE
+from hal.constants import EVAL_STAGES
 
 
 @attr.s(auto_attribs=True, frozen=True)
 class DatasetConfig:
     """Training & eval dataset metadata."""
+
     data_dir: str
     meta_path: Optional[str] = None
     test_ratio: float = 0.1
     # comma-separated lists of characters, or "all"
-    allowed_characters: str = 'all'
-    allowed_opponents: str = 'all'
+    allowed_characters: str = "all"
+    allowed_opponents: str = "all"
     seed: int = 0
 
 
 @attr.s(auto_attribs=True, frozen=True)
 class RolloutConfig:
     """Number of gamestate frames for each training example ('rollout')."""
+
     input_frame_count: int = 64
     target_frame_count: int = 16
 
@@ -46,6 +51,7 @@ class DataConfig:
 
     Useful for input/output data consistency across training and eval.
     """
+
     dataset: DatasetConfig
     rollout: RolloutConfig
     embed: EmbeddingConfig
@@ -63,8 +69,8 @@ class TrainerConfig:
     # Hyperparameters
     local_batch_size: int = 1024
     lr: float = 3e-4
-    train_samples: int = 2 ** 20
-    val_samples: int = 2 ** 16
+    train_samples: int = 2**20
+    val_samples: int = 2**16
     num_checkpoints: int = 4
     report_len: int = int(train_samples / 8)
     betas: Tuple[float, float] = (0.9, 0.999)

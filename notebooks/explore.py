@@ -2,18 +2,18 @@ import random
 import time
 import uuid
 from collections import defaultdict
-from typing import Dict, List, Any
+from typing import Any
+from typing import Dict
+from typing import List
 
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
 import melee
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from hal.types import STAGES, CHARACTERS
+from hal.constants import CHARACTERS
+from hal.constants import STAGES
 
 
 def stack_playerstate(states: List[melee.PlayerState]) -> Dict[str, Any]:
@@ -25,12 +25,11 @@ def stack_playerstate(states: List[melee.PlayerState]) -> Dict[str, Any]:
 
     return stacked_states
 
-def main():
+
+def main() -> None:
     replay_path = "/Users/ericgu/data/ssbm-il/mang0/Game_20230614T212502.slp"
 
-    console = melee.Console(is_dolphin=False,
-                            allow_old_version=False,
-                            path=replay_path)
+    console = melee.Console(is_dolphin=False, allow_old_version=False, path=replay_path)
     console.connect()
 
     gamestate: melee.GameState = console.step()
@@ -68,7 +67,8 @@ def generate_random_episode(ep_len: int = 10800):
 
     return dummy_episode
 
-def test_pyarrow(num_eps: int = 100):
+
+def test_pyarrow(num_eps: int = 100) -> None:
     eps = []
     for i in range(num_eps):
         ep_len = np.random.randint(3600, 21600)
@@ -86,7 +86,7 @@ def test_pyarrow(num_eps: int = 100):
     print("saved parquet file, done!")
 
 
-def test_filter():
+def test_filter() -> None:
     file_path = "./test.parquet"
     table = pq.read_table(file_path)
     t0 = time.perf_counter()
@@ -95,7 +95,6 @@ def test_filter():
     t1 = time.perf_counter()
 
     print(f"Filtered in {t1 - t0:2f} sec")
-
 
 
 if __name__ == "__main__":
