@@ -1,26 +1,24 @@
-from pathlib import Path
 import signal
 import sys
-
-from datetime import datetime
+from pathlib import Path
 from typing import Final
+
 import melee
 
 from hal.emulator_paths import REMOTE_CISO_PATH
 from hal.emulator_paths import REMOTE_EMULATOR_PATH
 
-REPLAY_OUTPUT_PATH: Final[Path] = Path("/opt/projects/hal/replays")
+DOLPHIN_HOME_PATH: Final[Path] = Path("/opt/slippi/home")
 
 
 def run_episode() -> None:
-    now = datetime.now()
-    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-    replay_output_path = REPLAY_OUTPUT_PATH / timestamp
+    DOLPHIN_HOME_PATH.mkdir(exist_ok=True)
     console = melee.Console(
         path=REMOTE_EMULATOR_PATH,
         is_dolphin=True,
-        dolphin_home_path=str(replay_output_path),
+        dolphin_home_path=str(DOLPHIN_HOME_PATH),
         tmp_home_directory=False,
+        blocking_input=True,
         gfx_backend="Null",
         disable_audio=True,
         use_exi_inputs=True,
@@ -36,7 +34,7 @@ def run_episode() -> None:
     PLAYER_1_PORT = 1
     PLAYER_2_PORT = 2
     controller = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
-    controller_opponent = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.GCN_ADAPTER)
+    controller_opponent = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
 
     # This isn't necessary, but makes it so that Dolphin will get killed when you ^C
     def signal_handler(sig, frame) -> None:
@@ -50,7 +48,7 @@ def run_episode() -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
     # Run the console
-    console.run(iso_path=REMOTE_CISO_PATH, dolphin_user_path=)
+    console.run(iso_path=REMOTE_CISO_PATH, dolphin_user_path=str(DOLPHIN_HOME_PATH))
 
     # Connect to the console
     print("Connecting to console...")
@@ -79,6 +77,7 @@ def run_episode() -> None:
         gamestate = console.step()
         if gamestate is None:
             continue
+        print(f"{gamestate.menu_state=}")
 
         # The console object keeps track of how long your bot is taking to process frames
         #   And can warn you if it's taking too long
@@ -87,15 +86,15 @@ def run_episode() -> None:
 
         # What menu are we in?
         if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-            print(f"Frame {i}")
             melee.techskill.multishine(ai_state=gamestate.players[PLAYER_1_PORT], controller=controller)
+            print(f"Frame {i}")
+            i += 1
 
             # Log this frame's detailed info if we're in game
             if log:
                 log.logframe(gamestate)
                 log.writeframe()
 
-            i += 1
         else:
             melee.MenuHelper.menu_helper_simple(
                 gamestate,
@@ -103,7 +102,17 @@ def run_episode() -> None:
                 character_selected=melee.Character.FOX,
                 stage_selected=melee.Stage.YOSHIS_STORY,
                 connect_code="",
-                costume=costume,
+                costume=0,
+                autostart=True,
+                swag=False,
+            )
+            melee.MenuHelper.menu_helper_simple(
+                gamestate,
+                controller_opponent,
+                character_selected=melee.Character.FOX,
+                stage_selected=melee.Stage.YOSHIS_STORY,
+                connect_code="",
+                costume=1,
                 autostart=True,
                 swag=False,
             )
