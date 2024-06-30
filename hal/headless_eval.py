@@ -78,7 +78,7 @@ def run_episode() -> None:
         "gfx_backend": "Null",
         "disable_audio": True,
         "use_exi_inputs": True,
-        "enable_ffw": False,  # TODO(eric): causes
+        "enable_ffw": False,  # TODO(eric): causes incorrect memory reads, ask Fizzi about it
     }
     if args.local:
         dolphin_home_path = LOCAL_DOLPHIN_HOME_PATH
