@@ -7,8 +7,8 @@ import melee
 from melee import enums
 from melee.menuhelper import MenuHelper
 
-from hal.emulator_paths import REMOTE_CISO_PATH
-from hal.emulator_paths import REMOTE_EMULATOR_PATH
+from hal.emulator_paths import LOCAL_CISO_PATH
+from hal.emulator_paths import LOCAL_HEADLESS_EMULATOR_PATH
 
 DOLPHIN_HOME_PATH: Final[Path] = Path("/home/egu/Slippi")
 PLAYER_1_PORT = 1
@@ -67,7 +67,7 @@ def self_play_menu_helper(
 def run_episode() -> None:
     DOLPHIN_HOME_PATH.mkdir(exist_ok=True)
     console = melee.Console(
-        path=REMOTE_EMULATOR_PATH,
+        path=LOCAL_HEADLESS_EMULATOR_PATH,
         is_dolphin=True,
         dolphin_home_path=str(DOLPHIN_HOME_PATH),
         tmp_home_directory=False,
@@ -99,7 +99,7 @@ def run_episode() -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
     # Run the console
-    console.run(iso_path=REMOTE_CISO_PATH, dolphin_user_path=str(DOLPHIN_HOME_PATH))
+    console.run(iso_path=LOCAL_CISO_PATH, dolphin_user_path=str(DOLPHIN_HOME_PATH))
 
     # Connect to the console
     print("Connecting to console...")
