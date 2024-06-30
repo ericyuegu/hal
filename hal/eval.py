@@ -12,7 +12,7 @@ from hal.emulator_paths import REMOTE_EMULATOR_PATH
 
 DOLPHIN_HOME_PATH: Final[Path] = Path("/opt/slippi/home")
 PLAYER_1_PORT = 1
-PLAYER_2_PORT = 2
+PLAYER_2_PORT = 4
 
 
 def self_play_menu_helper(
@@ -62,32 +62,15 @@ def self_play_menu_helper(
         #         start=True,
         #     )
 
-        if not player_2_character_selected:
-            MenuHelper.choose_character(
-                character=character_2,
-                gamestate=gamestate,
-                controller=controller_2,
-                cpu_level=0,
-                costume=0,
-                swag=False,
-                start=False,
-            )
-        else:
-            if not released and player_2.coin_down:
-                # eric: this seems to prevent controller 1 from pressing A at all?
-                controller_2.release_all()
-                released = True
-
-            MenuHelper.choose_character(
-                character=character_1,
-                gamestate=gamestate,
-                controller=controller_1,
-                cpu_level=0,
-                costume=1,
-                swag=False,
-                start=True,
-            )
-
+        MenuHelper.choose_character(
+            character=character_2,
+            gamestate=gamestate,
+            controller=controller_2,
+            cpu_level=0,
+            costume=0,
+            swag=False,
+            start=False,
+        )
         active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
         print(f"Controller 1: {active_buttons=}")
         active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
