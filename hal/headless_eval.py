@@ -71,11 +71,22 @@ def run_episode() -> None:
     parser = argparse.ArgumentParser(description="Run Melee in emulator")
     parser.add_argument("--local", action="store_true", help="Run in local mode")
     parser.add_argument("--no-gui", action="store_true", help="Run without GUI")
+    parser.add_argument("--debug", action="store_true", help="Run with debug mode")
     args = parser.parse_args()
 
+    headless_console_kwargs = {
+        "gfx_backend": "Null",
+        "disable_audio": True,
+        "use_exi_inputs": True,
+        "enable_ffw": True,
+    }
     if args.local:
         dolphin_home_path = LOCAL_DOLPHIN_HOME_PATH
-        emulator_path = LOCAL_HEADLESS_EMULATOR_PATH if args.no_gui else LOCAL_GUI_EMULATOR_PATH
+        if args.no_gui:
+            emulator_path = LOCAL_HEADLESS_EMULATOR_PATH
+        else:
+            emulator_path = LOCAL_GUI_EMULATOR_PATH
+            headless_console_kwargs = {}
     else:
         dolphin_home_path = REMOTE_DOLPHIN_HOME_PATH
         if not args.no_gui:
@@ -89,13 +100,8 @@ def run_episode() -> None:
         "dolphin_home_path": dolphin_home_path,
         "tmp_home_directory": False,
         "blocking_input": True,
-        "gfx_backend": "Null",
-        "disable_audio": True,
-        "use_exi_inputs": True,
+        **headless_console_kwargs,
     }
-
-    if args.no_gui:
-        console_kwargs["enable_ffw"] = True
 
     console = melee.Console(**console_kwargs)
 
