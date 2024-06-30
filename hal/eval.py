@@ -32,6 +32,8 @@ def self_play_menu_helper(
         player_2 = gamestate.players[controller_2.port]
         player_2_character_selected = player_2.character == character_2
 
+        released = False
+
         # print(f"{player_1_character_selected=}")
         # print(f"{player_2_character_selected=}")
         if not player_1_character_selected:
@@ -45,6 +47,9 @@ def self_play_menu_helper(
                 start=False,
             )
         else:
+            if not released:
+                controller_1.release_all()
+
             MenuHelper.choose_character(
                 character=character_2,
                 gamestate=gamestate,
