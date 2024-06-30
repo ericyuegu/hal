@@ -78,7 +78,7 @@ def run_episode() -> None:
         "gfx_backend": "Null",
         "disable_audio": True,
         "use_exi_inputs": True,
-        "enable_ffw": True,
+        "enable_ffw": False,  # TODO(eric): causes
     }
     if args.local:
         dolphin_home_path = LOCAL_DOLPHIN_HOME_PATH
@@ -99,7 +99,7 @@ def run_episode() -> None:
         "is_dolphin": True,
         "dolphin_home_path": dolphin_home_path,
         "tmp_home_directory": False,
-        "blocking_input": False,  # eric: reenable
+        "blocking_input": False,  # TODO(eric): investigate why this is stopping menuhelper
         **headless_console_kwargs,
     }
 
