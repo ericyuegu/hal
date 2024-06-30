@@ -47,7 +47,8 @@ def self_play_menu_helper(
                 start=False,
             )
         else:
-            if not released:
+            if not released and player_1.coin_down:
+                # eric: this seems to prevent controller 1 from pressing A at all?
                 controller_1.release_all()
                 released = True
 
