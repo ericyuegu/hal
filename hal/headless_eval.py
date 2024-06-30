@@ -139,7 +139,7 @@ def run_episode() -> None:
         if console.processingtime * 1000 > 12:
             print("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
-        print(f"frame {i}: {gamestate.menu_state=}")
+        print(f"frame {i}: {gamestate.menu_state=} {gamestate.submenu=}")
         active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
         print(f"Controller 1: {active_buttons=}")
         active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
