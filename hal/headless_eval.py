@@ -1,3 +1,4 @@
+import argparse
 import signal
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from melee import enums
 from melee.menuhelper import MenuHelper
 
 from hal.emulator_paths import LOCAL_CISO_PATH
+from hal.emulator_paths import LOCAL_GUI_EMULATOR_PATH
 from hal.emulator_paths import LOCAL_HEADLESS_EMULATOR_PATH
 
 DOLPHIN_HOME_PATH: Final[Path] = Path("/home/egu/Slippi")
@@ -65,18 +67,35 @@ def self_play_menu_helper(
 
 
 def run_episode() -> None:
+    parser = argparse.ArgumentParser(description="Run a Melee episode")
+    parser.add_argument("--local", action="store_true", help="Run in local mode")
+    parser.add_argument("--no-gui", action="store_true", help="Run without GUI")
+    args = parser.parse_args()
+
     DOLPHIN_HOME_PATH.mkdir(exist_ok=True)
-    console = melee.Console(
-        path=LOCAL_HEADLESS_EMULATOR_PATH,
-        is_dolphin=True,
-        dolphin_home_path=str(DOLPHIN_HOME_PATH),
-        tmp_home_directory=False,
-        blocking_input=True,
-        gfx_backend="Null",
-        disable_audio=True,
-        use_exi_inputs=True,
-        enable_ffw=True,
-    )
+
+    if args.local:
+        emulator_path = LOCAL_HEADLESS_EMULATOR_PATH if args.no_gui else LOCAL_GUI_EMULATOR_PATH
+    else:
+        if not args.no_gui:
+            print("Remote mode only supports headless operation. Forcing --no-gui.")
+        emulator_path = LOCAL_HEADLESS_EMULATOR_PATH
+
+    console_kwargs = {
+        "path": emulator_path,
+        "is_dolphin": True,
+        "dolphin_home_path": str(DOLPHIN_HOME_PATH),
+        "tmp_home_directory": False,
+        "blocking_input": True,
+        "gfx_backend": "Null",
+        "disable_audio": True,
+        "use_exi_inputs": True,
+    }
+
+    if args.no_gui:
+        console_kwargs["enable_ffw"] = True
+
+    console = melee.Console(**console_kwargs)
 
     log = melee.Logger()
 
@@ -122,9 +141,6 @@ def run_episode() -> None:
         print("ERROR: Failed to connect the controller.")
         sys.exit(-1)
     print("Controller 2 connected")
-
-    costume = 0
-    framedata = melee.framedata.FrameData()
 
     # Main loop
     i = 0
