@@ -10,7 +10,7 @@ from melee.menuhelper import MenuHelper
 from hal.emulator_paths import REMOTE_CISO_PATH
 from hal.emulator_paths import REMOTE_EMULATOR_PATH
 
-DOLPHIN_HOME_PATH: Final[Path] = Path("/opt/slippi/home")
+DOLPHIN_HOME_PATH: Final[Path] = Path("/home/egu/Slippi")
 PLAYER_1_PORT = 1
 PLAYER_2_PORT = 4
 
