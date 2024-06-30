@@ -126,7 +126,7 @@ def run_episode() -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
     # Run the console
-    console.run(iso_path=LOCAL_CISO_PATH, dolphin_user_path=str(DOLPHIN_HOME_PATH))
+    console.run(iso_path=LOCAL_CISO_PATH, dolphin_user_path=dolphin_home_path)
 
     # Connect to the console
     print("Connecting to console...")
