@@ -79,8 +79,8 @@ def run_episode() -> None:
     #   The controller is the second primary object your bot will interact with
     #   Your controller is your way of sending button presses to the game, whether
     #   virtual or physical.
-    controller = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
-    controller_opponent = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
+    controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
+    controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
 
     # This isn't necessary, but makes it so that Dolphin will get killed when you ^C
     def signal_handler(sig, frame) -> None:
@@ -108,7 +108,7 @@ def run_episode() -> None:
     #   NOTE: If you're loading a movie file, don't connect the controller,
     #   dolphin will hang waiting for input and never receive it
     print("Connecting controller to console...")
-    if not controller.connect():
+    if not controller_1.connect():
         print("ERROR: Failed to connect the controller.")
         sys.exit(-1)
     print("Controller connected")
@@ -132,7 +132,8 @@ def run_episode() -> None:
 
         # What menu are we in?
         if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-            melee.techskill.multishine(ai_state=gamestate.players[PLAYER_1_PORT], controller=controller)
+            melee.techskill.multishine(ai_state=gamestate.players[PLAYER_1_PORT], controller=controller_1)
+            melee.techskill.multishine(ai_state=gamestate.players[PLAYER_2_PORT], controller=controller_2)
             print(f"Frame {i}")
             i += 1
 
@@ -143,12 +144,12 @@ def run_episode() -> None:
 
         else:
             self_play_menu_helper(
-                gamestate,
-                controller,
-                controller_opponent,
-                melee.Character.FOX,
-                melee.Character.FOX,
-                melee.Stage.YOSHIS_STORY,
+                gamestate=gamestate,
+                controller_1=controller_1,
+                controller_2=controller_2,
+                character_1=melee.Character.FOX,
+                character_2=melee.Character.FOX,
+                stage_selected=melee.Stage.YOSHIS_STORY,
             )
 
             # If we're not in game, don't log the frame
