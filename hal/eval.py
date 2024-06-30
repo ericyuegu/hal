@@ -29,8 +29,11 @@ def self_play_menu_helper(
     elif gamestate.menu_state == enums.Menu.CHARACTER_SELECT:
         player_1 = gamestate.players[controller_1.port]
         player_1_character_selected = player_1.character == character_1
+        player_2 = gamestate.players[controller_2.port]
+        player_2_character_selected = player_2.character == character_2
 
         print(f"{player_1_character_selected=}")
+        print(f"{player_2_character_selected=}")
         if not player_1_character_selected:
             MenuHelper.choose_character(
                 character=character_1,
