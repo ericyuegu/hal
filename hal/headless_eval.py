@@ -99,7 +99,7 @@ def run_episode() -> None:
         "is_dolphin": True,
         "dolphin_home_path": dolphin_home_path,
         "tmp_home_directory": False,
-        "blocking_input": True,
+        "blocking_input": False,  # eric: reenable
         **headless_console_kwargs,
     }
 
