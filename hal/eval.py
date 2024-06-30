@@ -4,11 +4,59 @@ from pathlib import Path
 from typing import Final
 
 import melee
+from melee import enums
+from melee.menuhelper import MenuHelper
 
 from hal.emulator_paths import REMOTE_CISO_PATH
 from hal.emulator_paths import REMOTE_EMULATOR_PATH
 
 DOLPHIN_HOME_PATH: Final[Path] = Path("/opt/slippi/home")
+PLAYER_1_PORT = 1
+PLAYER_2_PORT = 2
+
+
+def self_play_menu_helper(
+    gamestate: melee.GameState,
+    controller_1: melee.Controller,
+    controller_2: melee.Controller,
+    character_1: melee.Character,
+    character_2: melee.Character,
+    stage_selected: melee.Stage,
+) -> None:
+    if gamestate.menu_state == enums.Menu.MAIN_MENU:
+        MenuHelper.choose_versus_mode(gamestate=gamestate, controller=controller_1)
+    # If we're at the character select screen, choose our character
+    elif gamestate.menu_state == enums.Menu.CHARACTER_SELECT:
+        player_1 = gamestate.players[controller_1.port]
+        player_1_character_selected = player_1.character == character_1
+        if not player_1_character_selected:
+            MenuHelper.choose_character(
+                character=character_1,
+                gamestate=gamestate,
+                controller=controller_1,
+                cpu_level=0,
+                costume=0,
+                swag=False,
+                start=False,
+            )
+        else:
+            MenuHelper.choose_character(
+                character=character_2,
+                gamestate=gamestate,
+                controller=controller_2,
+                cpu_level=0,
+                costume=0,
+                swag=False,
+                start=False,
+            )
+    # If we're at the stage select screen, choose a stage
+    elif gamestate.menu_state == enums.Menu.STAGE_SELECT:
+        MenuHelper.choose_stage(
+            stage=stage_selected, gamestate=gamestate, controller=controller_1, character=character_1
+        )
+    # If we're at the postgame scores screen, spam START
+    elif gamestate.menu_state == enums.Menu.POSTGAME_SCORES:
+        MenuHelper.skip_postgame(controller=controller_1)
 
 
 def run_episode() -> None:
@@ -31,8 +79,6 @@ def run_episode() -> None:
     #   The controller is the second primary object your bot will interact with
     #   Your controller is your way of sending button presses to the game, whether
     #   virtual or physical.
-    PLAYER_1_PORT = 1
-    PLAYER_2_PORT = 2
     controller = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
     controller_opponent = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
 
@@ -96,25 +142,13 @@ def run_episode() -> None:
                 log.writeframe()
 
         else:
-            melee.MenuHelper.menu_helper_simple(
+            self_play_menu_helper(
                 gamestate,
                 controller,
-                character_selected=melee.Character.FOX,
-                stage_selected=melee.Stage.YOSHIS_STORY,
-                connect_code="",
-                costume=0,
-                autostart=True,
-                swag=False,
-            )
-            melee.MenuHelper.menu_helper_simple(
-                gamestate,
                 controller_opponent,
-                character_selected=melee.Character.FOX,
-                stage_selected=melee.Stage.YOSHIS_STORY,
-                connect_code="",
-                costume=1,
-                autostart=True,
-                swag=False,
+                melee.Character.FOX,
+                melee.Character.FOX,
+                melee.Stage.YOSHIS_STORY,
             )
 
             # If we're not in game, don't log the frame
