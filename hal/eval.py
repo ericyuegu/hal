@@ -32,45 +32,29 @@ def self_play_menu_helper(
         player_2 = gamestate.players[controller_2.port]
         player_2_character_selected = player_2.character == character_2
 
-        released = False
+        print(f"{player_1_character_selected=}")
+        print(f"{player_2_character_selected=}")
+        if not player_1_character_selected:
+            MenuHelper.choose_character(
+                character=character_1,
+                gamestate=gamestate,
+                controller=controller_1,
+                cpu_level=0,
+                costume=0,
+                swag=False,
+                start=False,
+            )
+        else:
+            MenuHelper.choose_character(
+                character=character_2,
+                gamestate=gamestate,
+                controller=controller_2,
+                cpu_level=0,
+                costume=1,
+                swag=False,
+                start=True,
+            )
 
-        # print(f"{player_1_character_selected=}")
-        # print(f"{player_2_character_selected=}")
-        # if not player_1_character_selected:
-        #     MenuHelper.choose_character(
-        #         character=character_1,
-        #         gamestate=gamestate,
-        #         controller=controller_1,
-        #         cpu_level=0,
-        #         costume=0,
-        #         swag=False,
-        #         start=False,
-        #     )
-        # else:
-        #     if not released and player_1.coin_down:
-        #         # eric: this seems to prevent controller 1 from pressing A at all?
-        #         controller_1.release_all()
-        #         released = True
-
-        #     MenuHelper.choose_character(
-        #         character=character_2,
-        #         gamestate=gamestate,
-        #         controller=controller_2,
-        #         cpu_level=0,
-        #         costume=1,
-        #         swag=False,
-        #         start=True,
-        #     )
-
-        MenuHelper.choose_character(
-            character=character_2,
-            gamestate=gamestate,
-            controller=controller_2,
-            cpu_level=0,
-            costume=0,
-            swag=False,
-            start=False,
-        )
         active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
         print(f"Controller 1: {active_buttons=}")
         active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
@@ -134,11 +118,16 @@ def run_episode() -> None:
     #   Due to how named pipes work, this has to come AFTER running dolphin
     #   NOTE: If you're loading a movie file, don't connect the controller,
     #   dolphin will hang waiting for input and never receive it
-    print("Connecting controller to console...")
+    print("Connecting controller 1 to console...")
     if not controller_1.connect():
         print("ERROR: Failed to connect the controller.")
         sys.exit(-1)
-    print("Controller connected")
+    print("Controller 1 connected")
+    print("Connecting controller 2 to console...")
+    if not controller_2.connect():
+        print("ERROR: Failed to connect the controller.")
+        sys.exit(-1)
+    print("Controller 2 connected")
 
     costume = 0
     framedata = melee.framedata.FrameData()
