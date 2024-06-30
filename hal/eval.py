@@ -32,8 +32,8 @@ def self_play_menu_helper(
         player_2 = gamestate.players[controller_2.port]
         player_2_character_selected = player_2.character == character_2
 
-        print(f"{player_1_character_selected=}")
-        print(f"{player_2_character_selected=}")
+        # print(f"{player_1_character_selected=}")
+        # print(f"{player_2_character_selected=}")
         if not player_1_character_selected:
             MenuHelper.choose_character(
                 character=character_1,
@@ -54,6 +54,9 @@ def self_play_menu_helper(
                 swag=False,
                 start=True,
             )
+            active_buttons = tuple(state for state in controller_1.current.button.values() if state == True)
+            print(f"{active_buttons=}")
+
     # If we're at the stage select screen, choose a stage
     elif gamestate.menu_state == enums.Menu.STAGE_SELECT:
         MenuHelper.choose_stage(
