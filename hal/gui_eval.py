@@ -72,10 +72,8 @@ def run_episode() -> None:
         dolphin_home_path=str(DOLPHIN_HOME_PATH),
         tmp_home_directory=False,
         blocking_input=True,
-        gfx_backend="Null",
-        disable_audio=True,
-        use_exi_inputs=True,
-        enable_ffw=True,
+        use_exi_inputs=False,
+        enable_ffw=False,
     )
 
     log = melee.Logger()
