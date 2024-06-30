@@ -54,7 +54,6 @@ def self_play_menu_helper(
                 swag=False,
                 start=True,
             )
-
     # If we're at the stage select screen, choose a stage
     elif gamestate.menu_state == enums.Menu.STAGE_SELECT:
         MenuHelper.choose_stage(
