@@ -6,6 +6,7 @@ SCHEMA = pa.schema(
         ("replay_uuid", pa.int64()),
         ("frame", pa.int32()),
         ("stage", pa.int8()),
+        # Player 1
         ("p1_port", pa.int8()),
         ("p1_character", pa.int8()),
         ("p1_position_x", pa.float32()),
@@ -13,15 +14,15 @@ SCHEMA = pa.schema(
         ("p1_percent", pa.float32()),
         ("p1_shield_strength", pa.float32()),
         ("p1_stock", pa.int8()),
-        ("p1_facing", pa.bool_()),
+        ("p1_facing", pa.int8()),
         ("p1_action", pa.int16()),
         ("p1_action_frame", pa.int16()),
-        ("p1_invulnerable", pa.bool_()),
+        ("p1_invulnerable", pa.int8()),
         ("p1_invulnerability_left", pa.int16()),
         ("p1_hitlag_left", pa.int16()),
         ("p1_hitstun_left", pa.int16()),
         ("p1_jumps_left", pa.int8()),
-        ("p1_on_ground", pa.bool_()),
+        ("p1_on_ground", pa.int8()),
         ("p1_speed_air_x_self", pa.float32()),
         ("p1_speed_y_self", pa.float32()),
         ("p1_speed_x_attack", pa.float32()),
@@ -43,15 +44,15 @@ SCHEMA = pa.schema(
         ("p2_percent", pa.float32()),
         ("p2_shield_strength", pa.float32()),
         ("p2_stock", pa.int8()),
-        ("p2_facing", pa.bool_()),
+        ("p2_facing", pa.int8()),
         ("p2_action", pa.int16()),
         ("p2_action_frame", pa.int16()),
-        ("p2_invulnerable", pa.bool_()),
+        ("p2_invulnerable", pa.int8()),
         ("p2_invulnerability_left", pa.int16()),
         ("p2_hitlag_left", pa.int16()),
         ("p2_hitstun_left", pa.int16()),
         ("p2_jumps_left", pa.int8()),
-        ("p2_on_ground", pa.bool_()),
+        ("p2_on_ground", pa.int8()),
         ("p2_speed_air_x_self", pa.float32()),
         ("p2_speed_y_self", pa.float32()),
         ("p2_speed_x_attack", pa.float32()),
@@ -69,7 +70,6 @@ SCHEMA = pa.schema(
 )
 
 
-
 @attr.s(auto_attribs=True, frozen=True)
 class FrameData:
     replay_uuid: int
@@ -85,7 +85,6 @@ class FrameData:
     p1_stock: int
     p1_facing: bool
     p1_action: int
-    p1_action_frame: int
     p1_action_frame: int
     p1_invulnerable: bool
     p1_invulnerability_left: int
@@ -116,7 +115,6 @@ class FrameData:
     p2_stock: int
     p2_facing: bool
     p2_action: int
-    p2_action_frame: int
     p2_action_frame: int
     p2_invulnerable: bool
     p2_invulnerability_left: int
