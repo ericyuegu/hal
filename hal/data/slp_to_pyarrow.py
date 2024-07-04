@@ -1,6 +1,5 @@
 import argparse
-import multiprocessing
-import os
+import multiprocessing as mp
 import random
 from pathlib import Path
 from typing import Tuple
@@ -11,6 +10,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from loguru import logger
+from tqdm import tqdm
 
 from hal.data.primitives import FrameData
 from hal.data.primitives import SCHEMA
@@ -114,18 +114,21 @@ def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
     return tuple(frame_data)
 
 
-def write_dataset_incrementally(replay_paths: Tuple[Path, ...], output_path: str, batch_size: int = 1000) -> None:
-    logger.info(f"Processing {len(replay_paths)} replays")
+def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, batch_size: int) -> None:
+    logger.info(f"Processing {len(replay_paths)} replays and writing to {output_path}")
     batch = []
     frames_processed = 0
 
     part = ds.partitioning(pa.schema([SCHEMA.field("stage")]))
 
     try:
-        with pq.ParquetWriter(output_path, schema=SCHEMA, partitioning=part) as writer:
-            for replay_path in replay_paths:
-                try:
-                    replay_data = process_replay(str(replay_path))
+        with mp.Pool() as pool:
+            data_generator = tqdm(
+                pool.imap(process_replay, replay_paths), total=len(replay_paths), desc="Processing replays"
+            )
+
+            with pq.ParquetWriter(output_path, schema=SCHEMA, partitioning=part) as writer:
+                for replay_data in data_generator:
                     batch.extend(replay_data)
                     frames_processed += len(replay_data)
 
@@ -135,12 +138,10 @@ def write_dataset_incrementally(replay_paths: Tuple[Path, ...], output_path: str
 
                         batch = []
                         logger.info(f"Processed {frames_processed} frames")
-                except Exception as e:
-                    logger.error(f"Error processing replay {replay_path}: {e}")
 
-            if batch:
-                table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
-                writer.write_table(table)
+                if batch:
+                    table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+                    writer.write_table(table)
     except Exception as e:
         logger.error(f"Error writing dataset: {e}")
 
@@ -148,8 +149,8 @@ def write_dataset_incrementally(replay_paths: Tuple[Path, ...], output_path: str
 
 
 def split_train_val_test(
-    input_paths: Tuple[Path, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
-) -> dict[str, Tuple[Path, ...]]:
+    input_paths: Tuple[str, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
+) -> dict[str, Tuple[str, ...]]:
     assert train_split + val_split + test_split == 1.0
     n = len(input_paths)
     train_end = int(n * train_split)
@@ -161,39 +162,24 @@ def split_train_val_test(
     }
 
 
-def process_replays_chunk(chunk: Tuple[Path, ...], output_dir: str, split: str, batch_size: int) -> None:
-    split_dir = Path(output_dir) / split
-    split_dir.mkdir(parents=True, exist_ok=True)
-    write_dataset_incrementally(replay_paths=chunk, output_path=str(split_dir), batch_size=batch_size)
-
-
-def process_replays(replay_dir: str, output_dir: str, seed: int, batch_size: int = 100, num_workers: int = 4) -> None:
-    replay_paths = list(Path(replay_dir).rglob("*.slp"))
+def process_replays(replay_dir: str, output_dir: str, seed: int, batch_size: int) -> None:
+    replay_paths = list(str(Path(replay_dir).rglob("*.slp")))
     random.seed(seed)
     random.shuffle(replay_paths)
-
     splits = split_train_val_test(input_paths=tuple(replay_paths))
 
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        for split, split_paths in splits.items():
-            chunk_size = len(split_paths) // num_workers
-            chunks = [split_paths[i : i + chunk_size] for i in range(0, len(split_paths), chunk_size)]
-
-            pool.starmap(process_replays_chunk, [(chunk, output_dir, split, batch_size) for chunk in chunks])
+    for split, split_paths in splits.items():
+        split_dir = Path(output_dir) / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+        write_dataset_incrementally(replay_paths=split_paths, output_path=str(split_dir), batch_size=batch_size)
 
 
-def validate_input(replay_dir: str, output_dir: str, seed: int, batch_size: int, num_workers: int) -> None:
-    if not os.path.isdir(replay_dir):
+def validate_input(replay_dir: str, output_dir: str, batch_size: int) -> None:
+    if not Path(replay_dir).exists():
         raise ValueError(f"Replay directory does not exist: {replay_dir}")
-
-    if not os.path.isdir(output_dir):
-        raise ValueError(f"Output directory does not exist: {output_dir}")
 
     if batch_size <= 0:
         raise ValueError(f"Batch size must be a positive integer, got: {batch_size}")
-
-    if num_workers <= 0:
-        raise ValueError(f"Number of workers must be a positive integer, got: {num_workers}")
 
 
 if __name__ == "__main__":
@@ -201,12 +187,13 @@ if __name__ == "__main__":
     parser.add_argument("--replay_dir", required=True, help="Input directory containing .slp replay files")
     parser.add_argument("--output-dir", required=True, help="Output directory for processed data")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--batch-size", type=int, default=1000, help="Number of replay files to process in each batch")
-    parser.add_argument("--num-workers", type=int, default=4, help="Number of worker processes to use")
+    parser.add_argument("--batch-size", type=int, default=100, help="Number of replay files to process in each batch")
     args = parser.parse_args()
 
     try:
-        validate_input(args.replay_dir, args.output_dir, args.seed, args.batch_size, args.num_workers)
-        process_replays(args.replay_dir, args.output_dir, args.seed, args.batch_size, args.num_workers)
+        validate_input(replay_dir=args.replay_dir, output_dir=args.output_dir, batch_size=args.batch_size)
+        process_replays(
+            replay_dir=args.replay_dir, output_dir=args.output_dir, seed=args.seed, batch_size=args.batch_size
+        )
     except Exception as e:
         logger.error(f"Error processing replays: {e}")
