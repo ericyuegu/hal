@@ -146,7 +146,7 @@ def extract_single_frame(gamestate: melee.GameState, replay_uuid: int) -> Tuple[
     return gamestate_frame, controller_frame
 
 
-def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
+def process_replay(replay_path: str, min_frames: int = 1500) -> Tuple[FrameData, ...]:
     logger.trace(f"Processing replay {replay_path}")
     try:
         console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
@@ -177,6 +177,10 @@ def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
         logger.debug(f"Error processing replay {replay_path}: {e}")
     finally:
         console.stop()
+
+    if len(frame_data) < min_frames:
+        logger.trace(f"Replay {replay_path} was less than {min_frames} frames, skipping.")
+        return tuple()
 
     return tuple(frame_data)
 

@@ -3,7 +3,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 import seaborn as sns
 from pyarrow import parquet as pq
 
@@ -16,8 +15,12 @@ table: pa.Table = pq.read_table("/opt/projects/hal2/data/train.parquet")
 table.column_names
 
 # %%
-uuid_filter = pc.field("replay_uuid") == 5393121284994579877
-replay = table.filter(uuid_filter)
+# randomly sample rows
+table = table.take(np.random.choice(len(table), 100000, replace=False))
+
+# %%
+# uuid_filter = pc.field("replay_uuid") == 5393121284994579877
+# replay = table.filter(uuid_filter)
 
 # p1_l_shoulder = replay["p1_l_shoulder"].to_pylist()
 # p1_button_l = replay["p1_button_l"].to_pylist()
