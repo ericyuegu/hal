@@ -123,20 +123,16 @@ def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str,
     frames_processed = 0
 
     # try:
-    with mp.Pool() as pool:
-        data_generator = tqdm(
-            pool.imap(process_replay, replay_paths), total=len(replay_paths), desc="Processing replays"
-        )
-
+    with mp.Pool(4) as pool:
+        data_generator = pool.imap(process_replay, replay_paths)
         with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
-            for replay_data in data_generator:
+            for replay_data in tqdm(data_generator, total=len(replay_paths), desc="Processing replays"):
                 batch.extend(replay_data)
                 frames_processed += len(replay_data)
 
                 if len(batch) >= batch_size:
                     table = pa.Table.from_pylist(batch, schema=SCHEMA)
                     writer.write_table(table)
-
                     batch = []
                     logger.info(f"Processed {frames_processed} frames")
 
@@ -191,11 +187,8 @@ if __name__ == "__main__":
     parser.add_argument("--replay_dir", required=True, help="Input directory containing .slp replay files")
     parser.add_argument("--output_dir", required=True, help="Output directory for processed data")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--batch", type=int, default=100, help="Number of replay files to process in each batch")
+    parser.add_argument("--batch", type=int, default=4, help="Number of replay files to process in each batch")
     args = parser.parse_args()
 
-    try:
-        validate_input(replay_dir=args.replay_dir, batch_size=args.batch)
-        process_replays(replay_dir=args.replay_dir, output_dir=args.output_dir, seed=args.seed, batch_size=args.batch)
-    except Exception as e:
-        logger.error(f"Error processing replays: {e}")
+    validate_input(replay_dir=args.replay_dir, batch_size=args.batch)
+    process_replays(replay_dir=args.replay_dir, output_dir=args.output_dir, seed=args.seed, batch_size=args.batch)
