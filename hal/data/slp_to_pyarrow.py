@@ -1,19 +1,20 @@
 import argparse
-import multiprocessing as mp
 import random
 from pathlib import Path
+from typing import Any
+from typing import Dict
 from typing import Tuple
 
 import attr
 import melee
 import pyarrow as pa
-import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from loguru import logger
 from tqdm import tqdm
 
-from hal.data.primitives import FrameData
 from hal.data.primitives import SCHEMA
+
+FrameData = Dict[str, Any]
 
 
 def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameData:
@@ -24,7 +25,7 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
     p1_port, p1 = players[0]
     p2_port, p2 = players[1]
 
-    return FrameData(
+    return dict(
         replay_uuid=replay_uuid,
         frame=gamestate.frame,
         stage=gamestate.stage.value,
@@ -90,6 +91,7 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
 
 
 def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
+    logger.info(f"Processing replay {replay_path}")
     try:
         console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
         console.connect()
@@ -114,34 +116,61 @@ def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
     return tuple(frame_data)
 
 
+# def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, batch_size: int) -> None:
+#     logger.info(f"Processing {len(replay_paths)} replays and writing to {output_path}")
+#     batch = []
+#     frames_processed = 0
+
+#     try:
+#         with mp.Pool(2) as pool:
+#             data_generator = tqdm(
+#                 pool.imap(process_replay, replay_paths), total=len(replay_paths), desc="Processing replays"
+#             )
+
+#             with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
+#                 for replay_data in data_generator:
+#                     batch.extend(replay_data)
+#                     frames_processed += len(replay_data)
+
+#                     if len(batch) >= batch_size:
+#                         table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+#                         writer.write_table(table)
+
+#                         batch = []
+#                         logger.info(f"Processed {frames_processed} frames")
+
+#                 if batch:
+#                     table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+#                     writer.write_table(table)
+#     except Exception as e:
+#         logger.error(f"Error writing dataset: {e}")
+
+#     logger.info(f"Finished processing. Total frames: {frames_processed}")
+
+
 def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, batch_size: int) -> None:
     logger.info(f"Processing {len(replay_paths)} replays and writing to {output_path}")
     batch = []
     frames_processed = 0
 
-    part = ds.partitioning(pa.schema([SCHEMA.field("stage")]))
-
     try:
-        with mp.Pool() as pool:
-            data_generator = tqdm(
-                pool.imap(process_replay, replay_paths), total=len(replay_paths), desc="Processing replays"
-            )
+        data_generator = tqdm(map(process_replay, replay_paths), total=len(replay_paths), desc="Processing replays")
 
-            with pq.ParquetWriter(output_path, schema=SCHEMA, partitioning=part) as writer:
-                for replay_data in data_generator:
-                    batch.extend(replay_data)
-                    frames_processed += len(replay_data)
+        with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
+            for replay_data in data_generator:
+                batch.extend(replay_data)
+                frames_processed += len(replay_data)
 
-                    if len(batch) >= batch_size:
-                        table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
-                        writer.write_table(table)
-
-                        batch = []
-                        logger.info(f"Processed {frames_processed} frames")
-
-                if batch:
+                if len(batch) >= batch_size:
                     table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
                     writer.write_table(table)
+
+                    batch = []
+                    logger.info(f"Processed {frames_processed} frames")
+
+            if batch:
+                table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+                writer.write_table(table)
     except Exception as e:
         logger.error(f"Error writing dataset: {e}")
 
