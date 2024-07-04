@@ -1,7 +1,7 @@
 import attr
 import pyarrow as pa
 
-SCHEMA = pa.schema(
+SCHEMA: pa.Schema = pa.schema(
     [
         ("replay_uuid", pa.int64()),
         ("frame", pa.int32()),
