@@ -7,6 +7,7 @@ import attr
 import melee
 import pyarrow as pa
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 from loguru import logger
 
 from hal.data.primitives import FrameData
@@ -111,47 +112,27 @@ def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
 
 
 def write_dataset_incrementally(replay_paths: Tuple[Path, ...], output_path: str, batch_size: int = 1000) -> None:
-    dataset = None
     batch = []
     frames_processed = 0
 
-    part = ds.partitioning(pa.schema([("stage", pa.string())]))
+    part = ds.partitioning(pa.schema([SCHEMA.field("stage")]))
 
-    for replay_path in replay_paths:
-        replay_data = process_replay(str(replay_path))
-        batch.extend(replay_data)
-        frames_processed += len(replay_data)
+    with pq.ParquetWriter(output_path, schema=SCHEMA, partitioning=part) as writer:
+        for replay_path in replay_paths:
+            replay_data = process_replay(str(replay_path))
+            batch.extend(replay_data)
+            frames_processed += len(replay_data)
 
-        if len(batch) >= batch_size:
+            if len(batch) >= batch_size:
+                table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+                writer.write_table(table)
+
+                batch = []
+                logger.info(f"Processed {frames_processed} frames")
+
+        if batch:
             table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
-
-            if dataset is None:
-                dataset = ds.write_dataset(
-                    table,
-                    output_path,
-                    format="parquet",
-                    partitioning=ds.partitioning(pa.schema([("stage", pa.int8())])),
-                    existing_data_behavior="overwrite_or_ignore",
-                )
-            else:
-                dataset.append_partition(table)
-
-            batch = []
-            logger.info(f"Processed {frames_processed} frames")
-
-    # Write any remaining data
-    if batch:
-        table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
-        if dataset is None:
-            ds.write_dataset(
-                table,
-                output_path,
-                format="parquet",
-                partitioning=ds.partitioning(pa.schema([("stage", pa.int8())])),
-                existing_data_behavior="overwrite_or_ignore",
-            )
-        else:
-            dataset.append_partition(table)
+            writer.write_table(table)
 
     logger.info(f"Finished processing. Total frames: {frames_processed}")
 
