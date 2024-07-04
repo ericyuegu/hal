@@ -1,8 +1,7 @@
 import argparse
-import multiprocessing as mp
 import random
 from pathlib import Path
-from typing import List
+from typing import Tuple
 
 import attr
 import melee
@@ -87,13 +86,13 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
     )
 
 
-def process_replay(replay_path: str) -> List[FrameData]:
+def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
     console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
     try:
         console.connect()
     except Exception as e:
         logger.error(f"Error connecting to console: {e}")
-        return []
+        return tuple()
 
     frame_data = []
     replay_uuid = hash(replay_path)
@@ -108,25 +107,58 @@ def process_replay(replay_path: str) -> List[FrameData]:
             logger.debug(f"Could not read gamestate from {replay_path}: {e}")
             break
 
-    return frame_data
+    return tuple(frame_data)
 
 
-def write_dataset(data: List[FrameData], output_path: str) -> None:
-    table = pa.Table.from_pylist([attr.asdict(frame) for frame in data], schema=SCHEMA)
-    ds.write_dataset(table, output_path, format="parquet", partitioning=["stage"])
+def write_dataset_incrementally(replay_paths: Tuple[Path, ...], output_path: str, batch_size: int = 1000) -> None:
+    dataset = None
+    batch = []
+    frames_processed = 0
 
+    part = ds.partitioning(pa.schema([("stage", pa.string())]))
 
-def process_and_write(replay_path: str, output_path: str) -> None:
-    data = process_replay(replay_path)
-    if data:
-        write_dataset(data, output_path)
-    else:
-        logger.warning(f"No data extracted from {replay_path}")
+    for replay_path in replay_paths:
+        replay_data = process_replay(str(replay_path))
+        batch.extend(replay_data)
+        frames_processed += len(replay_data)
+
+        if len(batch) >= batch_size:
+            table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+
+            if dataset is None:
+                dataset = ds.write_dataset(
+                    table,
+                    output_path,
+                    format="parquet",
+                    partitioning=ds.partitioning(pa.schema([("stage", pa.int8())])),
+                    existing_data_behavior="overwrite_or_ignore",
+                )
+            else:
+                dataset.append_partition(table)
+
+            batch = []
+            logger.info(f"Processed {frames_processed} frames")
+
+    # Write any remaining data
+    if batch:
+        table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
+        if dataset is None:
+            ds.write_dataset(
+                table,
+                output_path,
+                format="parquet",
+                partitioning=ds.partitioning(pa.schema([("stage", pa.int8())])),
+                existing_data_behavior="overwrite_or_ignore",
+            )
+        else:
+            dataset.append_partition(table)
+
+    logger.info(f"Finished processing. Total frames: {frames_processed}")
 
 
 def split_train_val_test(
-    input_paths: tuple[Path, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
-) -> dict[str, tuple[Path, ...]]:
+    input_paths: Tuple[Path, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
+) -> dict[str, Tuple[Path, ...]]:
     assert train_split + val_split + test_split == 1.0
     n = len(input_paths)
     train_end = int(n * train_split)
@@ -138,18 +170,17 @@ def split_train_val_test(
     }
 
 
-def process_replays(replay_dir: str, output_dir: str, seed: int) -> None:
-    # Randomly shuffle the replay paths and split into train, val, and test
+def process_replays(replay_dir: str, output_dir: str, seed: int, batch_size: int = 100) -> None:
     random.seed(seed)
     replay_paths = list(Path(replay_dir).rglob("*.slp"))
     random.shuffle(replay_paths)
 
     splits = split_train_val_test(input_paths=tuple(replay_paths))
-    for split, paths in splits.items():
+    for split, split_paths in splits.items():
         split_dir = Path(output_dir) / split
         split_dir.mkdir(parents=True, exist_ok=True)
-        with mp.Pool() as pool:
-            pool.starmap(process_and_write, [(path, split_dir) for path in paths])
+
+        write_dataset_incrementally(replay_paths=split_paths, output_path=str(split_dir), batch_size=batch_size)
 
 
 if __name__ == "__main__":
@@ -157,6 +188,7 @@ if __name__ == "__main__":
     parser.add_argument("--replay_dir", required=True, help="Input directory containing .slp replay files")
     parser.add_argument("--output-dir", required=True, help="Output directory for processed data")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--batch-size", type=int, default=1000, help="Number of replay files to process in each batch")
     args = parser.parse_args()
 
-    process_replays(args.replay_paths, args.output_dir, args.seed)
+    process_replays(args.replay_dir, args.output_dir, args.seed, args.batch_size)
