@@ -15,24 +15,46 @@ schema = pa.schema(
         ("stage", pa.int8()),
         ("p1_port", pa.int8()),
         ("p1_character", pa.int8()),
-        ("p1_stock", pa.int8()),
-        ("p1_facing", pa.bool_()),
-        ("p1_invulnerable", pa.bool_()),
         ("p1_position_x", pa.float32()),
         ("p1_position_y", pa.float32()),
         ("p1_percent", pa.float32()),
         ("p1_shield_strength", pa.float32()),
+        ("p1_stock", pa.int8()),
+        ("p1_facing", pa.bool_()),
+        ("p1_action", pa.int16()),
+        ("p1_action_frame", pa.int16()),
+        ("p1_invulnerable", pa.bool_()),
+        ("p1_invulnerability_left", pa.int16()),
+        ("p1_hitlag_left", pa.int16()),
+        ("p1_hitstun_left", pa.int16()),
         ("p1_jumps_left", pa.int8()),
+        ("p1_on_ground", pa.bool_()),
+        ("p1_speed_air_x_self", pa.float32()),
+        ("p1_speed_y_self", pa.float32()),
+        ("p1_speed_x_attack", pa.float32()),
+        ("p1_speed_y_attack", pa.float32()),
+        ("p1_speed_ground_x_self", pa.float32()),
         ("p2_port", pa.int8()),
         ("p2_character", pa.int8()),
-        ("p2_stock", pa.int8()),
-        ("p2_facing", pa.bool_()),
-        ("p2_invulnerable", pa.bool_()),
         ("p2_position_x", pa.float32()),
         ("p2_position_y", pa.float32()),
         ("p2_percent", pa.float32()),
         ("p2_shield_strength", pa.float32()),
+        ("p2_stock", pa.int8()),
+        ("p2_facing", pa.bool_()),
+        ("p2_action", pa.int16()),
+        ("p2_action_frame", pa.int16()),
+        ("p2_invulnerable", pa.bool_()),
+        ("p2_invulnerability_left", pa.int16()),
+        ("p2_hitlag_left", pa.int16()),
+        ("p2_hitstun_left", pa.int16()),
         ("p2_jumps_left", pa.int8()),
+        ("p2_on_ground", pa.bool_()),
+        ("p2_speed_air_x_self", pa.float32()),
+        ("p2_speed_y_self", pa.float32()),
+        ("p2_speed_x_attack", pa.float32()),
+        ("p2_speed_y_attack", pa.float32()),
+        ("p2_speed_ground_x_self", pa.float32()),
     ]
 )
 
@@ -61,26 +83,52 @@ class FrameData:
     replay_uuid: int
     frame: int
     stage: int
+
     p1_port: int
     p1_character: int
-    p1_stock: int
-    p1_facing: bool
-    p1_invulnerable: bool
     p1_position_x: float
     p1_position_y: float
     p1_percent: float
     p1_shield_strength: float
+    p1_stock: int
+    p1_facing: bool
+    p1_action: int
+    p1_action_frame: int
+    p1_action_frame: int
+    p1_invulnerable: bool
+    p1_invulnerability_left: int
+    p1_hitlag_left: int
+    p1_hitstun_left: int
     p1_jumps_left: int
+    p1_on_ground: bool
+    p1_speed_air_x_self: float
+    p1_speed_y_self: float
+    p1_speed_x_attack: float
+    p1_speed_y_attack: float
+    p1_speed_ground_x_self: float
+
     p2_port: int
     p2_character: int
-    p2_stock: int
-    p2_facing: bool
-    p2_invulnerable: bool
     p2_position_x: float
     p2_position_y: float
     p2_percent: float
     p2_shield_strength: float
+    p2_stock: int
+    p2_facing: bool
+    p2_action: int
+    p2_action_frame: int
+    p2_action_frame: int
+    p2_invulnerable: bool
+    p2_invulnerability_left: int
+    p2_hitlag_left: int
+    p2_hitstun_left: int
     p2_jumps_left: int
+    p2_on_ground: bool
+    p2_speed_air_x_self: float
+    p2_speed_y_self: float
+    p2_speed_x_attack: float
+    p2_speed_y_attack: float
+    p2_speed_ground_x_self: float
 
 
 def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameData:
@@ -105,6 +153,17 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
         p1_percent=p1.percent,
         p1_shield_strength=p1.shield_strength,
         p1_jumps_left=p1.jumps_left,
+        p1_action=p1.action.value,
+        p1_action_frame=p1.action_frame,
+        p1_invulnerability_left=p1.invulnerability_left,
+        p1_hitlag_left=p1.hitlag_left,
+        p1_hitstun_left=p1.hitstun_frames_left,
+        p1_on_ground=p1.on_ground,
+        p1_speed_air_x_self=p1.speed_air_x_self,
+        p1_speed_y_self=p1.speed_y_self,
+        p1_speed_x_attack=p1.speed_x_attack,
+        p1_speed_y_attack=p1.speed_y_attack,
+        p1_speed_ground_x_self=p1.speed_ground_x_self,
         p2_port=p2_port,
         p2_character=p2.character.value,
         p2_stock=p2.stock,
@@ -115,6 +174,17 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
         p2_percent=p2.percent,
         p2_shield_strength=p2.shield_strength,
         p2_jumps_left=p2.jumps_left,
+        p2_action=p2.action.value,
+        p2_action_frame=p2.action_frame,
+        p2_invulnerability_left=p2.invulnerability_left,
+        p2_hitlag_left=p2.hitlag_left,
+        p2_hitstun_left=p2.hitstun_frames_left,
+        p2_on_ground=p2.on_ground,
+        p2_speed_air_x_self=p2.speed_air_x_self,
+        p2_speed_y_self=p2.speed_y_self,
+        p2_speed_x_attack=p2.speed_x_attack,
+        p2_speed_y_attack=p2.speed_y_attack,
+        p2_speed_ground_x_self=p2.speed_ground_x_self,
     )
 
 
