@@ -1,6 +1,7 @@
 import argparse
 import multiprocessing as mp
 import random
+import sys
 from pathlib import Path
 from typing import Any
 from typing import Dict
@@ -33,8 +34,8 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
         p1_port=p1_port,
         p1_character=p1.character.value,
         p1_stock=p1.stock,
-        p1_facing=p1.facing,
-        p1_invulnerable=p1.invulnerable,
+        p1_facing=int(p1.facing),
+        p1_invulnerable=int(p1.invulnerable),
         p1_position_x=float(p1.position.x),
         p1_position_y=float(p1.position.y),
         p1_percent=p1.percent,
@@ -45,7 +46,7 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
         p1_invulnerability_left=p1.invulnerability_left,
         p1_hitlag_left=p1.hitlag_left,
         p1_hitstun_left=p1.hitstun_frames_left,
-        p1_on_ground=p1.on_ground,
+        p1_on_ground=int(p1.on_ground),
         p1_speed_air_x_self=p1.speed_air_x_self,
         p1_speed_y_self=p1.speed_y_self,
         p1_speed_x_attack=p1.speed_x_attack,
@@ -62,8 +63,8 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
         p2_port=p2_port,
         p2_character=p2.character.value,
         p2_stock=p2.stock,
-        p2_facing=p2.facing,
-        p2_invulnerable=p2.invulnerable,
+        p2_facing=int(p2.facing),
+        p2_invulnerable=int(p2.invulnerable),
         p2_position_x=float(p2.position.x),
         p2_position_y=float(p2.position.y),
         p2_percent=p2.percent,
@@ -74,7 +75,7 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
         p2_invulnerability_left=p2.invulnerability_left,
         p2_hitlag_left=p2.hitlag_left,
         p2_hitstun_left=p2.hitstun_frames_left,
-        p2_on_ground=p2.on_ground,
+        p2_on_ground=int(p2.on_ground),
         p2_speed_air_x_self=p2.speed_air_x_self,
         p2_speed_y_self=p2.speed_y_self,
         p2_speed_x_attack=p2.speed_x_attack,
@@ -92,7 +93,7 @@ def extract_frame_data(gamestate: melee.GameState, replay_uuid: int) -> FrameDat
 
 
 def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
-    logger.debug(f"Processing replay {replay_path}")
+    logger.trace(f"Processing replay {replay_path}")
     try:
         console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
         console.connect()
@@ -118,15 +119,15 @@ def process_replay(replay_path: str) -> Tuple[FrameData, ...]:
 
 
 def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, batch_size: int) -> None:
-    logger.info(f"Processing {len(replay_paths)} replays and writing to {output_path}")
+    logger.info(f"Processing {len(replay_paths)} replays and writing to {Path(output_path).resolve()}")
     batch = []
     frames_processed = 0
 
-    # try:
-    with mp.Pool(4) as pool:
+    with mp.Pool() as pool:
         data_generator = pool.imap(process_replay, replay_paths)
         with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
-            for replay_data in tqdm(data_generator, total=len(replay_paths), desc="Processing replays"):
+            pbar = tqdm(data_generator, total=len(replay_paths), desc="Processing replays")
+            for replay_data in pbar:
                 batch.extend(replay_data)
                 frames_processed += len(replay_data)
 
@@ -134,13 +135,11 @@ def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str,
                     table = pa.Table.from_pylist(batch, schema=SCHEMA)
                     writer.write_table(table)
                     batch = []
-                    logger.info(f"Processed {frames_processed} frames")
+                    pbar.set_description(f"Processed {frames_processed} frames")
 
             if batch:
                 table = pa.Table.from_pylist([attr.asdict(frame) for frame in batch], schema=SCHEMA)
                 writer.write_table(table)
-    # except Exception as e:
-    #     logger.error(f"Error writing dataset: {e}")
 
     logger.info(f"Finished processing. Total frames: {frames_processed}")
 
@@ -187,8 +186,13 @@ if __name__ == "__main__":
     parser.add_argument("--replay_dir", required=True, help="Input directory containing .slp replay files")
     parser.add_argument("--output_dir", required=True, help="Output directory for processed data")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--batch", type=int, default=4, help="Number of replay files to process in each batch")
+    parser.add_argument("--batch", type=int, default=100, help="Number of replay files to process in each batch")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
+
+    if args.debug:
+        logger.remove()
+        logger.add(sys.stderr, level="TRACE")
 
     validate_input(replay_dir=args.replay_dir, batch_size=args.batch)
     process_replays(replay_dir=args.replay_dir, output_dir=args.output_dir, seed=args.seed, batch_size=args.batch)
