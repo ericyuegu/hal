@@ -1,10 +1,10 @@
 # Generated data
 /data/
-/Data/
 /runs/
 /logs/
 /Logs/
 /wandb/
+**/*.parquet
 
 # Secrets
 /secrets/
