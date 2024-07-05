@@ -1,12 +1,14 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Sequence
 from typing import Tuple
+from typing import Type
 from typing import Union
 
 import attr
@@ -110,16 +112,14 @@ class WandbConfig:
 
 
 class DummyWriter:
-    def __init__(self, wandb_config: WandbConfig):
+    def __init__(self, wandb_config: WandbConfig) -> None:
         pass
 
-    def watch(self, model: torch.nn.Module, **kwargs):
+    def watch(self, model: torch.nn.Module, **kwargs) -> None:
         """Hooks into torch model to collect gradients and the topology."""
-        pass
 
-    def log(self, summary_dict: Dict[str, Any], step: int, commit: bool = True):
+    def log(self, summary_dict: Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
-        pass
 
     def plot_confusion_matrix(
         self,
@@ -131,18 +131,23 @@ class DummyWriter:
     ) -> wandb.viz.CustomChart:
         pass
 
-    def close(self):
+    def close(self) -> None:
         pass
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         self.close()
 
 
 class Writer:
-    def __init__(self, wandb_config: WandbConfig):
+    def __init__(self, wandb_config: WandbConfig) -> None:
         self.wandb_config = wandb_config
         if is_master():
             wandb.init(
@@ -153,7 +158,7 @@ class Writer:
             )
             wandb.watch(wandb_config.model, log="all")
 
-    def log(self, summary_dict: Dict[str, Any], step: int, commit: bool = True):
+    def log(self, summary_dict: Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
         wandb.log(summary_dict, step=step, commit=commit)
 
@@ -169,13 +174,18 @@ class Writer:
             probs=probs, y_true=y_true, preds=preds, class_names=class_names, title=title
         )
 
-    def close(self):
+    def close(self) -> None:
         wandb.finish()
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         self.close()
 
     @classmethod

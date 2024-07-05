@@ -1,11 +1,12 @@
-from typing import Sequence, Union, Tuple, Protocol
+from typing import Protocol
+from typing import Sequence
+from typing import Union
 
 import attr
 import numpy as np
 import torch
 
-from schedule.stage import LRStage
-
+from hal.training.schedule.stage import LRStage
 
 DEFAULT_LR_STAGES: Sequence[LRStage] = (
     LRStage(end=0.0625, scalar=1),
@@ -23,6 +24,7 @@ class Schedule(Protocol):
 @attr.s(auto_attribs=True, frozen=True)
 class SchedulePieceWiseCos(Schedule):
     """A cosine annealing curve schedule."""
+
     stages: Sequence[LRStage] = DEFAULT_LR_STAGES
     initial: float = 1.0
 
@@ -44,17 +46,19 @@ class SchedulePieceWiseCos(Schedule):
 @attr.s(auto_attribs=True, frozen=True)
 class SchedulePieceWiseCosWarmup(SchedulePieceWiseCos):
     """A cosine annealing curve schedule with warmup."""
+
     initial: float = 0.0
 
 
 @attr.s(auto_attribs=True, frozen=True)
 class LearningRateChanger:
     """Base class for learning rate schedulers / changers."""
+
     opt: torch.optim.Optimizer
 
     def set_opt_lr(self, lr: Union[float, torch.Tensor]) -> float:
         for params in self.opt.param_groups:
-            params['lr'] = lr
+            params["lr"] = lr
         return lr
 
 

@@ -2,7 +2,9 @@ import builtins
 import functools
 import os
 import time
-from typing import Callable, Optional, Union
+from typing import Callable
+from typing import Optional
+from typing import Union
 
 import torch
 import torch.distributed
@@ -18,11 +20,11 @@ def barrier() -> None:
 
 
 def get_device() -> str:
-    device = 'cpu'
+    device = "cpu"
     if torch.cuda.is_available():
-        device = f'cuda:{get_device_id()}'
+        device = f"cuda:{get_device_id()}"
     elif torch.backends.mps.is_available():
-        device = 'mps'
+        device = "mps"
     return device
 
 
@@ -45,7 +47,7 @@ def trange(*args, **kwargs) -> Union[range, tqdm[int]]:
 def cuda_setup() -> None:
     torch.backends.cudnn.benchmark = True
     try:
-        torch.multiprocessing.set_start_method('spawn')
+        torch.multiprocessing.set_start_method("spawn")
     except RuntimeError:
         pass
 
@@ -69,13 +71,14 @@ def maybe_wrap_model_distributed(m: torch.nn.Module) -> Union[torch.Module, torc
 
 def auto_distribute(f: Callable) -> Callable:
     """Automatically initialize process group for training loop."""
+
     @functools.wraps(f)
     def dist_wrapped(rank: Optional[int], world_size: Optional[int], *args):
         if rank is None:
             return f(*args)
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
-        torch.distributed.init_process_group('nccl', rank=rank, world_size=world_size)
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
+        torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
         time.sleep(1)
         try:
             return f(*args)
@@ -89,6 +92,7 @@ def wrap_multiprocessing(main_fn: Callable, config: TrainerConfig) -> Callable:
     """
     Initialize torch multiprocessing for training.
     """
+
     @functools.wraps(main_fn)
     def multiprocessing_wrapped():
         cuda_setup()
@@ -97,14 +101,14 @@ def wrap_multiprocessing(main_fn: Callable, config: TrainerConfig) -> Callable:
         assert n_gpus <= device_count, f"n_gpus={n_gpus}, only {device_count} gpus available!"
         if n_gpus == 1:
             return main_fn(None, None, config)
-        torch.multiprocessing.spawn(main_fn, args=(n_gpus, config), nprocs=n_gpus, join=True, start_method='spawn')
+        torch.multiprocessing.spawn(main_fn, args=(n_gpus, config), nprocs=n_gpus, join=True, start_method="spawn")
 
     @functools.wraps(main_fn)
     def dummy_wrapped():
         return main_fn(None, None, config)
 
     device = get_device()
-    if device.startswith('cuda') and not config.debug:
+    if device.startswith("cuda") and not config.debug:
         return multiprocessing_wrapped
     else:
         return dummy_wrapped
