@@ -45,7 +45,7 @@ BUTTON_BY_IDX: dict[int, str] = {i: button.name for button, i in IDX_BY_BUTTON.i
 # Embeddings      #
 ###################
 
-MAIN_STICK_XY_CLUSTER_CENTERS_V0: np.ndarray = np.array(
+STICK_XY_CLUSTER_CENTERS_V0: np.ndarray = np.array(
     [
         [0.5, 0.5],
         [1.0, 0.5],

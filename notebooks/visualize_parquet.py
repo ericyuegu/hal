@@ -10,7 +10,7 @@ from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
 from hal.data.constants import ACTION_BY_IDX
-from hal.data.constants import MAIN_STICK_XY_CLUSTER_CENTERS_V0
+from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 
 np.set_printoptions(threshold=np.inf)
 
@@ -180,9 +180,9 @@ plt.show()
 print(cluster_centers)
 
 # %%
-MAIN_STICK_XY_CLUSTER_CENTERS_V0
+STICK_XY_CLUSTER_CENTERS_V0
 plt.figure(figsize=(8, 6))
-plt.scatter(MAIN_STICK_XY_CLUSTER_CENTERS_V0[:, 0], MAIN_STICK_XY_CLUSTER_CENTERS_V0[:, 1], cmap="viridis", s=50)
+plt.scatter(STICK_XY_CLUSTER_CENTERS_V0[:, 0], STICK_XY_CLUSTER_CENTERS_V0[:, 1], cmap="viridis", s=50)
 plt.xlabel("p1_main_stick_x")
 plt.ylabel("p1_main_stick_y")
 plt.title("Cluster Locations")
@@ -209,6 +209,31 @@ for analog in analogs:
     plt.xlabel("Frame")
     plt.ylabel(f"{analog} Value")
     plt.title(f"{analog} Values Over Time")
+    plt.legend()
+    plt.show()
+
+# %%
+# Visualize gamestate values
+gamestates = [
+    "position_x",
+    "position_y",
+    "percent",
+    "shield_strength",
+    "action_frame",
+    "hitlag_left",
+    "hitstun_left",
+    "speed_air_x_self",
+    "speed_y_self",
+    "speed_x_attack",
+    "speed_y_attack",
+    "speed_ground_x_self",
+]
+for gamestate in gamestates:
+    plt.figure(figsize=(8, 6))
+    plt.plot(replay[f"p1_{gamestate}"].to_numpy(), label=gamestate)
+    plt.xlabel("Frame")
+    plt.ylabel(f"{gamestate} Value")
+    plt.title(f"{gamestate} Values Over Time")
     plt.legend()
     plt.show()
 

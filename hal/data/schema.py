@@ -1,4 +1,3 @@
-import attr
 import pyarrow as pa
 
 SCHEMA: pa.Schema = pa.schema(
@@ -100,70 +99,3 @@ SCHEMA: pa.Schema = pa.schema(
         ("p2_r_shoulder", pa.float32()),
     ]
 )
-
-
-@attr.s(auto_attribs=True, frozen=True)
-class FrameData:
-    replay_uuid: int
-    frame: int
-    stage: int
-
-    p1_port: int
-    p1_character: int
-    p1_position_x: float
-    p1_position_y: float
-    p1_percent: float
-    p1_shield_strength: float
-    p1_stock: int
-    p1_facing: bool
-    p1_action: int
-    p1_action_frame: int
-    p1_invulnerable: bool
-    p1_invulnerability_left: int
-    p1_hitlag_left: int
-    p1_hitstun_left: int
-    p1_jumps_left: int
-    p1_on_ground: bool
-    p1_speed_air_x_self: float
-    p1_speed_y_self: float
-    p1_speed_x_attack: float
-    p1_speed_y_attack: float
-    p1_speed_ground_x_self: float
-    p1_ecb_bottom_x: float
-    p1_ecb_bottom_y: float
-    p1_ecb_top_x: float
-    p1_ecb_top_y: float
-    p1_ecb_left_x: float
-    p1_ecb_left_y: float
-    p1_ecb_right_x: float
-    p1_ecb_right_y: float
-
-    p2_port: int
-    p2_character: int
-    p2_position_x: float
-    p2_position_y: float
-    p2_percent: float
-    p2_shield_strength: float
-    p2_stock: int
-    p2_facing: bool
-    p2_action: int
-    p2_action_frame: int
-    p2_invulnerable: bool
-    p2_invulnerability_left: int
-    p2_hitlag_left: int
-    p2_hitstun_left: int
-    p2_jumps_left: int
-    p2_on_ground: bool
-    p2_speed_air_x_self: float
-    p2_speed_y_self: float
-    p2_speed_x_attack: float
-    p2_speed_y_attack: float
-    p2_speed_ground_x_self: float
-    p2_ecb_bottom_x: float
-    p2_ecb_bottom_y: float
-    p2_ecb_top_x: float
-    p2_ecb_top_y: float
-    p2_ecb_left_x: float
-    p2_ecb_left_y: float
-    p2_ecb_right_x: float
-    p2_ecb_right_y: float
