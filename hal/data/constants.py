@@ -4,6 +4,10 @@ from melee import Button
 from melee import Character
 from melee import Stage
 
+###################
+# Gamestate      #
+###################
+
 EXCLUDED_STAGES: tuple[str, ...] = ("NO_STAGE", "RANDOM_STAGE")
 IDX_BY_STAGE: dict[Stage, int] = {
     stage: i for i, stage in enumerate(stage for stage in Stage if stage.name not in EXCLUDED_STAGES)
@@ -35,6 +39,11 @@ IDX_BY_BUTTON: dict[Button, int] = {
     button: i for i, button in enumerate(button for button in Button if button.name not in EXCLUDED_BUTTONS)
 }
 BUTTON_BY_IDX: dict[int, str] = {i: button.name for button, i in IDX_BY_BUTTON.items()}
+
+
+###################
+# Embeddings      #
+###################
 
 MAIN_STICK_XY_CLUSTER_CENTERS_V0: np.ndarray = np.array(
     [
