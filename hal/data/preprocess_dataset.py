@@ -19,7 +19,7 @@ from tqdm import tqdm
 from hal.data.constants import IDX_BY_ACTION
 from hal.data.constants import IDX_BY_CHARACTER
 from hal.data.constants import IDX_BY_STAGE
-from hal.data.primitives import SCHEMA
+from hal.data.schema import SCHEMA
 
 FrameData = Dict[str, Any]
 ControllerData = Dict[str, Any]
@@ -99,12 +99,13 @@ def extract_single_frame(gamestate: melee.GameState, replay_uuid: int) -> Tuple[
 
 
 def process_replay(replay_path: str, min_frames: int = 1500) -> Tuple[FrameData, ...]:
+    """Processes a single .slp file and returns the frame data."""
     logger.trace(f"Processing replay {replay_path}")
     try:
         console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
         console.connect()
     except Exception as e:
-        logger.error(f"Error connecting to console for {replay_path}: {e}")
+        logger.debug(f"Error connecting to console for {replay_path}: {e}")
         return tuple()
 
     frame_data = []
@@ -138,6 +139,7 @@ def process_replay(replay_path: str, min_frames: int = 1500) -> Tuple[FrameData,
 
 
 def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, batch_size: int) -> None:
+    """Processes a list of replay files and writes the extracted frames to rows in a Parquet file."""
     logger.info(f"Processing {len(replay_paths)} replays and writing to {Path(output_path).resolve()}")
     frames_processed = 0
 
@@ -145,7 +147,7 @@ def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str,
         data_generator = pool.imap(process_replay, replay_paths)
         with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
             for batch in tqdm(
-                chunked(data_generator, batch_size), total=len(replay_paths) // batch_size, desc="Processing replays"
+                chunked(data_generator, batch_size), total=len(replay_paths) // batch_size, desc="batches processed"
             ):
                 frames = list(itertools.chain.from_iterable(batch))
                 if frames:

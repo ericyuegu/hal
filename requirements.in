@@ -30,3 +30,4 @@ loguru==0.7.2
 tqdm==4.66.4
 matplotlib==3.9.1
 seaborn==0.13.2
+more_itertools==10.3.0
