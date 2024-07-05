@@ -219,9 +219,15 @@ gamestates = [
     "position_y",
     "percent",
     "shield_strength",
+    "stock",
+    "facing",
     "action_frame",
+    "invulnerable",
+    "invulnerability_left",
     "hitlag_left",
     "hitstun_left",
+    "jumps_left",
+    "on_ground",
     "speed_air_x_self",
     "speed_y_self",
     "speed_x_attack",
@@ -247,4 +253,7 @@ for uuid in np.unique(table["replay_uuid"].to_numpy()):
     print(len(replay))
     # print(uuid, replay["p1_button_a"].to_numpy())
 
+# %%
+action_frames = replay["p1_action_frame"].to_numpy()
+action_frames = [ACTION_BY_IDX[action] for action in action_frames]
 # %%

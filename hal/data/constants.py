@@ -31,6 +31,7 @@ IDX_BY_ACTION: dict[Action, int] = {action: i for i, action in enumerate(Action)
 ACTION_BY_IDX: dict[int, str] = {i: action.name for action, i in IDX_BY_ACTION.items()}
 
 EXCLUDED_BUTTONS: tuple[str, ...] = (
+    "START",
     "BUTTON_D_DOWN",
     "BUTTON_D_LEFT",
     "BUTTON_D_RIGHT",

@@ -1,4 +1,5 @@
 import json
+from typing import Dict
 
 import attr
 
@@ -14,16 +15,9 @@ class FeatureStats:
     median: float
 
 
-@attr.s(auto_attribs=True, frozen=True)
-class DatasetStats:
-    """Contains the statistics for each feature in the dataset."""
-
-    features: dict[str, FeatureStats]
-
-
-def load_dataset_stats(path: str) -> DatasetStats:
+def load_dataset_stats(path: str) -> Dict[str, FeatureStats]:
     """Load the dataset statistics from a JSON file."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    features = {k: FeatureStats(**v) for k, v in data.items()}
-    return DatasetStats(features=features)
+    dataset_stats = {k: FeatureStats(**v) for k, v in data.items()}
+    return dataset_stats
