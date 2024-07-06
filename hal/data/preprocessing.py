@@ -3,6 +3,7 @@ from typing import Dict
 
 import numpy as np
 import pyarrow as pa
+from data.constants import ACTION_BY_IDX
 from pyarrow import parquet as pq
 
 from hal.data.stats import FeatureStats
@@ -54,7 +55,7 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     return array_1 | array_2
 
 
-def one_hot(arr):
+def vectorized_custom_one_hot(arr):
     rows, cols = arr.shape
 
     # Create a matrix of column indices
@@ -74,7 +75,9 @@ def one_hot(arr):
     cummax_rightmost = np.maximum.accumulate(rightmost_valid)
 
     # Create the final selection mask
-    selection_mask = (col_indices == cummax_rightmost.reshape(-1, 1)) & valid_mask
+    valid_and_in_range = (col_indices <= cummax_rightmost.reshape(-1, 1)) & valid_mask
+    rightmost_valid_in_range = np.where(valid_and_in_range, col_indices, -1).max(axis=1)
+    selection_mask = col_indices == rightmost_valid_in_range.reshape(-1, 1)
 
     # Convert the mask to the final result
     result = selection_mask.astype(int)
@@ -104,7 +107,7 @@ def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, Featu
         no_button = np.zeros_like(sample[f"{player}_button_a"])
 
         stacked_buttons = np.stack((button_a, button_b, button_z, jump, shoulder, no_button), axis=1)
-        preprocessed[f"{player}_buttons"] = one_hot(stacked_buttons)
+        preprocessed[f"{player}_buttons"] = vectorized_custom_one_hot(stacked_buttons)
 
     # for feature_list, preprocessing_func in feature_processors.items():
     #     for feature in feature_list:
@@ -130,7 +133,40 @@ shield[:10000]
 table_slice = table
 preprocessed = preprocess_features_v0(pyarrow_table_to_np_dict(table_slice), stats)
 # %%
-preprocessed
+print(preprocessed["p1_buttons"][886:900])
+
+# %%
+# find rows where multiple buttons are pressed
+buttons = np.stack(
+    [
+        table["p1_button_a"].to_numpy(),
+        table["p1_button_b"].to_numpy(),
+        table["p1_button_x"].to_numpy(),
+        table["p1_button_y"].to_numpy(),
+        table["p1_button_z"].to_numpy(),
+        table["p1_button_l"].to_numpy(),
+        table["p1_button_r"].to_numpy(),
+    ],
+    axis=1,
+)
+
+multiple_buttons_pressed = np.sum(buttons, axis=1) >= 2
+indices = np.where(multiple_buttons_pressed)[0]
+for index in indices:
+    print(f"Index: {index}, Buttons: {buttons[index]}")
+
+# %%
+[ACTION_BY_IDX[i] for i in table[886:900]["p1_action"].to_pylist()]
+
+# %%
+buttons[886:900]
+# %%
+
+# print(table[multiple_buttons_pressed])
+# start, end = 205, 215
+# for button in ("a", "b", "z", "x", "y", "l", "r"):
+#     print(table_slice[f"p1_button_{button}"].to_numpy()[start:end])
+
 # %%
 a = preprocessed["p1_buttons"]
 b = table_slice["p1_button_x"].to_numpy() | table_slice["p1_button_y"].to_numpy()
