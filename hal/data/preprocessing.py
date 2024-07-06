@@ -1,5 +1,4 @@
 # %%
-from typing import Callable
 from typing import Dict
 
 import numpy as np
@@ -27,6 +26,11 @@ INPUT_FEATURES_TO_STANDARDIZE = (
 TARGET_FEATURES_TO_ONE_HOT_ENCODE = ("button_a", "button_b", "button_x", "button_z", "button_l")
 
 
+def convert_pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
+    """Convert pyarrow table to dictionary of numpy arrays."""
+    return {k: np.array(v) for k, v in table.to_pydict().items()}
+
+
 def normalize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
     """Normalize feature [0, 1]."""
     return (array - stats.min) / (stats.max - stats.min)
@@ -47,7 +51,7 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     return array_1 | array_2
 
 
-def convert_stacked_array_to_one_hot(array: np.ndarray) -> np.ndarray:
+def encode_stacked_array_to_one_hot(array: np.ndarray) -> np.ndarray:
     """Convert stacked features to one hot encoding."""
     # Argmax tiebreaks by returning the first element
     first_one_indices = np.argmax(array, axis=1)
@@ -65,27 +69,31 @@ feature_processors = {
 }
 
 
-def process_feature(feature: str, preprocessing_func: Callable) -> None:
-    for player in ["p1", "p2"]:
-        key = f"{player}_{feature}"
-        preprocessed[key] = preprocessing_func(sample[key], stats[key])
-
-
 def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, FeatureStats]) -> Dict[str, np.ndarray]:
     """Preprocess features."""
-
     preprocessed = {}
 
-    for feature_list, preprocessing_func in feature_processors.items():
-        for feature in feature_list:
-            process_feature(feature, preprocessing_func)
+    # Stack buttons and encode one_hot
+    for player in ("p1", "p2"):
+        button_a = (sample[f"{player}_button_a"]).astype(np.bool_)
+        button_b = (sample[f"{player}_button_b"]).astype(np.bool_)
+        jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
+        button_z = sample[f"{player}_button_z"]
+        shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
+
+        stacked_buttons = np.stack((button_a, button_b, button_z, jump, shoulder), axis=1)
+        preprocessed[f"{player}_buttons"] = encode_stacked_array_to_one_hot(stacked_buttons)
+
+    # for feature_list, preprocessing_func in feature_processors.items():
+    #     for feature in feature_list:
+    #         process_feature(feature, preprocessing_func)
 
     return preprocessed
 
 
 # %%
 # load dataset, load stats and apply them to the dataset
-input_path = "/opt/projects/hal2/data/dev/train.parquet"
+input_path = "/opt/projects/hal2/data/dev/val.parquet"
 stats_path = "/opt/projects/hal2/data/dev/stats.json"
 
 table: pa.Table = pq.read_table(input_path)
@@ -97,4 +105,5 @@ shield = invert_and_normalize(shield, stats["p1_shield_strength"])
 shield[:10000]
 
 # %%
-shield.max()
+preprocess_features_v0(convert_pyarrow_table_to_np_dict(table), stats)
+# %%
