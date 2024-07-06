@@ -57,7 +57,36 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
 
 def convert_target_button_to_one_hot(array: np.ndarray) -> np.ndarray:
     """
-    Vectorized version to clean up overlapping button presses by keeping the latest one.
+    Clean up overlapping button presses by keeping the latest one.
+    """
+    B, T, D = array.shape
+    one_hot = np.zeros((B, T, D + 1))
+    held_buttons_set = set()
+    for t in range(T):
+        curr_buttons = np.where(array[:, t] == 1)[0].flatten()
+        curr_buttons_set = set(curr_buttons)
+
+        if not curr_buttons_set:
+            one_hot[:, t, -1] = 1
+        else:
+            if len(curr_buttons) == 1:
+                one_hot[:, t, curr_buttons[0]] = 1
+            else:
+                new_button = curr_buttons_set - held_buttons_set
+                # If more than one new button is pressed while holding others, keep the first one
+                one_hot[:, t, new_button.pop()] = 1
+    return one_hot
+
+
+def convert_target_to_one_hot(array: np.ndarray) -> np.ndarray:
+    """
+    Convert array to one-hot, cleaning up overlapping button presses by keeping the latest one and adding a column for "no press."
+
+    Args:
+        array: (T, D) array of button presses, where D = (# number of buttons).
+
+    Returns:
+        One hot encoded array: (T, D + 1).
     """
     T, D = array.shape
     one_hot = np.zeros((T, D + 1))
@@ -99,6 +128,55 @@ def convert_target_button_to_one_hot(array: np.ndarray) -> np.ndarray:
     return one_hot
 
 
+def convert_target_to_one_hot_3d(array: np.ndarray) -> np.ndarray:
+    """
+    Convert 3D array to one-hot, cleaning up overlapping button presses by keeping the latest one and adding a column for "no press."
+
+    Args:
+        array: (B, T, D) array of button presses, where D = (# number of buttons).
+
+    Returns:
+        One hot encoded array: (B, T, D + 1).
+    """
+    B, T, D = array.shape
+    one_hot = np.zeros((B, T, D + 1))
+
+    # Step 1: Identify positions where button presses occur
+    button_presses = np.argwhere(array == 1)
+
+    # Step 2: Identify unique (batch, time) combinations and their indices
+    unique_times, inverse_indices = np.unique(button_presses[..., 0], axis=0, return_inverse=True)
+
+    # Step 3: Count button presses for each (batch, time) combination
+    press_counts = np.bincount(inverse_indices)
+
+    # Step 4: Create a mask for no press cases
+    no_press_mask = np.ones((B, T), dtype=bool)
+    no_press_mask[unique_times[:, 0], unique_times[:, 1]] = False
+    one_hot[no_press_mask, -1] = 1
+
+    # Step 5: Handle single button presses
+    single_press_mask = press_counts == 1
+    single_press_times = unique_times[single_press_mask]
+    single_press_indices = button_presses[np.isin(inverse_indices, np.where(single_press_mask)[0])]
+    one_hot[single_press_times[:, 0], single_press_times[:, 1], single_press_indices[:, 2]] = 1
+
+    # Step 6: Handle multiple button presses
+    multi_press_mask = press_counts > 1
+    multi_press_times = unique_times[multi_press_mask]
+    if len(multi_press_times) > 0:
+        held_buttons = np.zeros((B, D), dtype=bool)
+        for (b, t), buttons in zip(
+            multi_press_times, [button_presses[inverse_indices == idx][:, 2] for idx in np.where(multi_press_mask)[0]]
+        ):
+            new_buttons = buttons[~held_buttons[b, buttons]]
+            if len(new_buttons) > 0:
+                one_hot[b, t, new_buttons[0]] = 1
+            held_buttons[b, buttons] = True
+
+    return one_hot
+
+
 def sparse_one_hot(array: np.ndarray) -> np.ndarray:
     """One hot encode array, but only return first frame for each button press.
 
@@ -128,7 +206,7 @@ feature_processors = {
 }
 
 
-START, END = 2000, 2100
+START, END = 880, 900
 
 
 def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, FeatureStats]) -> Dict[str, np.ndarray]:
@@ -143,10 +221,10 @@ def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, Featu
         jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
         shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
 
-        stacked_buttons = np.stack((button_a, button_b, button_z, jump, shoulder), axis=1)
+        stacked_buttons = np.stack((button_a, button_b, button_z, jump, shoulder), axis=1)[np.newaxis, ...]
         if player == "p1":
-            print(stacked_buttons[START:END])
-        preprocessed[f"{player}_buttons"] = vectorized_convert_target_button_to_one_hot(stacked_buttons)
+            print(stacked_buttons[0, START:END])
+        preprocessed[f"{player}_buttons"] = convert_target_button_to_one_hot(stacked_buttons)
 
     # for feature_list, preprocessing_func in feature_processors.items():
     #     for feature in feature_list:
@@ -155,16 +233,16 @@ def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, Featu
     return preprocessed
 
 
-input_path = "/opt/projects/hal2/data/dev/val.parquet"
-stats_path = "/opt/projects/hal2/data/dev/stats.json"
+# input_path = "/opt/projects/hal2/data/dev/val.parquet"
+# stats_path = "/opt/projects/hal2/data/dev/stats.json"
 
-table: pa.Table = pq.read_table(input_path, memory_map=True)
-stats = load_dataset_stats(stats_path)
+# table: pa.Table = pq.read_table(input_path, memory_map=True)
+# stats = load_dataset_stats(stats_path)
 
-table_slice = table
+# table_slice = table
 
-t0 = time.perf_counter()
-preprocessed = preprocess_features_v0(pyarrow_table_to_np_dict(table_slice), stats)
-t1 = time.perf_counter()
-print(f"Time to preprocess features: {t1 - t0} seconds")
-preprocessed["p1_buttons"][START:END]
+# t0 = time.perf_counter()
+# preprocessed = preprocess_features_v0(pyarrow_table_to_np_dict(table_slice), stats)
+# t1 = time.perf_counter()
+# print(f"Time to preprocess features: {t1 - t0} seconds")
+# preprocessed["p1_buttons"][0, START:END]
