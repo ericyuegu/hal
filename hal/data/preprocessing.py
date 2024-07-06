@@ -27,7 +27,7 @@ TARGET_FEATURES_TO_ONE_HOT_ENCODE = ("button_a", "button_b", "button_x", "button
 
 
 def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
-    """Zero-copy pyarrow table to dictionary of numpy arrays."""
+    """Convert pyarrow table to dictionary of numpy arrays."""
     return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
 
 
