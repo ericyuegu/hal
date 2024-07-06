@@ -26,9 +26,9 @@ INPUT_FEATURES_TO_STANDARDIZE = (
 TARGET_FEATURES_TO_ONE_HOT_ENCODE = ("button_a", "button_b", "button_x", "button_z", "button_l")
 
 
-def convert_pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
-    """Convert pyarrow table to dictionary of numpy arrays."""
-    return {k: np.array(v) for k, v in table.to_pydict().items()}
+def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
+    """Zero-copy pyarrow table to dictionary of numpy arrays."""
+    return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
 
 
 def normalize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
@@ -96,7 +96,7 @@ def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, Featu
 input_path = "/opt/projects/hal2/data/dev/val.parquet"
 stats_path = "/opt/projects/hal2/data/dev/stats.json"
 
-table: pa.Table = pq.read_table(input_path)
+table: pa.Table = pq.read_table(input_path, memory_map=True)
 stats = load_dataset_stats(stats_path)
 
 # %%
@@ -105,5 +105,6 @@ shield = invert_and_normalize(shield, stats["p1_shield_strength"])
 shield[:10000]
 
 # %%
-preprocess_features_v0(convert_pyarrow_table_to_np_dict(table), stats)
+table_slice = table[900:1000]
+preprocess_features_v0(pyarrow_table_to_np_dict(table_slice), stats)
 # %%
