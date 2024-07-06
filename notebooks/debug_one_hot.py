@@ -177,16 +177,16 @@ streak_starts = np.diff(np.vstack([np.zeros(cols), arr]), axis=0) == 1
 def f(arr):
     # Create a boolean mask for non-zero elements
     mask = arr != 0
-
+    
     # Use cumsum to count consecutive non-zero elements
     cumsum = mask.cumsum(axis=0)
-
+    
     # Create a mask that resets to True after each zero
     reset_mask = np.maximum.accumulate((~mask).cumsum(axis=0), axis=0)
-
+    
     # Apply the reset mask to the cumsum
     streaks = cumsum * (reset_mask == reset_mask.min(axis=0))
-
+    
     # Multiply by the original mask to keep zeros in place
     return streaks * mask
 
