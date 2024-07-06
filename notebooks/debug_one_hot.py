@@ -54,68 +54,164 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     """Perform logical OR of two features."""
     return array_1 | array_2
 
+def convert_target_button_to_one_hot(array: np.ndarray) -> np.ndarray:
+    """
+    Clean up overlapping button presses by keeping the latest one.
+    """
+    B, T, D = array.shape
+    one_hot = np.zeros((B, T, D + 1))
+    held_buttons_set = set()
+    for t in range(T):
+        curr_buttons = np.where(array[:, t] == 1)[0].flatten()
+        curr_buttons_set = set(curr_buttons)
 
-# def one_hot(arr):
-#     rows, cols = arr.shape
-
-#     # Create a matrix of column indices
-#     col_indices = np.arange(cols).reshape(1, -1).repeat(rows, axis=0)
-
-#     # Create a mask for valid positions (where arr == 1)
-#     valid_mask = arr == 1
-
-#     # Handle rows with no 1s
-#     rows_without_ones = ~np.any(valid_mask, axis=1)
-#     valid_mask[rows_without_ones, -1] = True
-
-#     # Find the rightmost valid position for each row
-#     rightmost_valid = np.where(valid_mask, col_indices, -1).max(axis=1)
-
-#     # Create a matrix of cumulative max of rightmost valid positions
-#     cummax_rightmost = np.maximum.accumulate(rightmost_valid)
-
-#     # Create the final selection mask
-#     valid_and_in_range = (col_indices <= cummax_rightmost.reshape(-1, 1)) & valid_mask
-#     rightmost_valid_in_range = np.where(valid_and_in_range, col_indices, -1).max(axis=1)
-#     selection_mask = col_indices == rightmost_valid_in_range.reshape(-1, 1)
-
-#     # Convert the mask to the final result
-#     result = selection_mask.astype(int)
-
-#     return result
+        if not curr_buttons_set:
+            one_hot[:, t, -1] = 1
+        else:
+            if len(curr_buttons) == 1:
+                one_hot[:, t, curr_buttons[0]] = 1
+            else:
+                new_button = curr_buttons_set - held_buttons_set
+                # If more than one new button is pressed while holding others, keep the first one
+                one_hot[:, t, new_button.pop()] = 1
+    return one_hot
 
 
-def one_hot(arr):
-    rows, cols = arr.shape
+def convert_target_to_one_hot(array: np.ndarray) -> np.ndarray:
+    """
+    Convert array to one-hot, cleaning up overlapping button presses by keeping the latest one and adding a column for "no press."
 
-    # Find the start of each streak
-    streak_starts = np.diff(np.vstack([np.zeros(cols), arr]), axis=0) == 1
+    Args:
+        array: (T, D) array of button presses, where D = (# number of buttons).
 
-    # Assign a unique ID to each streak, with more recent streaks having higher IDs
-    streak_ids = np.cumsum(streak_starts, axis=0)
+    Returns:
+        One hot encoded array: (T, D + 1).
+    """
+    T, D = array.shape
+    one_hot = np.zeros((T, D + 1))
 
-    # For each row, find the column with the highest streak ID
-    max_streak_ids = np.max(streak_ids, axis=1, keepdims=True)
+    # Find all button presses
+    button_presses = np.argwhere(array == 1)
 
-    # Create a mask for the columns with the highest streak ID in each row
-    highest_streak_mask = (streak_ids == max_streak_ids) & (streak_ids > 0)
+    # Group button presses by time step
+    unique_times, inverse_indices = np.unique(button_presses[:, 0], return_inverse=True)
 
-    # For tie-breaks, choose the left-most column
-    one_hot_cols = np.argmax(highest_streak_mask, axis=1)
+    # Count number of button presses at each time step
+    press_counts = np.bincount(inverse_indices)
 
-    # Create the one-hot encoded array
-    result = np.zeros((rows, cols), dtype=int)
-    result[np.arange(rows), one_hot_cols] = 1
+    # Handle cases with no button presses
+    no_press_mask = np.ones(T, dtype=bool)
+    no_press_mask[unique_times] = False
+    one_hot[no_press_mask, -1] = 1
 
-    # Add back the last column (all zeros)
-    result = np.hstack([result, np.zeros((rows, 1), dtype=int)])
+    # Handle cases with single button press
+    single_press_mask = press_counts == 1
+    single_press_times = unique_times[single_press_mask]
+    single_press_buttons = button_presses[np.isin(button_presses[:, 0], single_press_times), 1]
+    one_hot[single_press_times, single_press_buttons] = 1
 
-    import pdb
+    # Handle cases with multiple button presses
+    multi_press_mask = press_counts > 1
+    multi_press_times = unique_times[multi_press_mask]
 
-    pdb.set_trace()
+    if len(multi_press_times) > 0:
+        # Find the first new button press for each multi-press time step
+        multi_press_buttons = [button_presses[button_presses[:, 0] == t, 1] for t in multi_press_times]
+        held_buttons = np.zeros(D, dtype=bool)
+        for t, buttons in zip(multi_press_times, multi_press_buttons):
+            new_buttons = buttons[~held_buttons[buttons]]
+            if len(new_buttons) > 0:
+                one_hot[t, new_buttons[0]] = 1
+            held_buttons[buttons] = True
 
-    return result
+    return one_hot
 
+
+def convert_target_to_one_hot_3d(array: np.ndarray) -> np.ndarray:
+    """
+    Convert 3D array to one-hot, cleaning up overlapping button presses by keeping the latest one and adding a column for "no press."
+
+    Args:
+        array: (N, T, D) array of button presses, where N is the batch size, T is the time steps, and D is the number of buttons.
+
+    Returns:
+        One hot encoded array: (N, T, D + 1).
+    """
+    N, T, D = array.shape
+    one_hot = np.zeros((N, T, D + 1))
+
+    # Find all button presses
+    button_presses = np.argwhere(array == 1)
+
+    # Create a unique identifier for each batch and time step
+    batch_time_id = button_presses[:, 0] * T + button_presses[:, 1]
+
+    # Group button presses by batch and time step
+    unique_batch_times, inverse_indices, press_counts = np.unique(
+        batch_time_id, return_inverse=True, return_counts=True
+    )
+
+    # Handle cases with no button presses
+    all_batch_times = np.arange(N * T)
+    no_press_mask = ~np.isin(all_batch_times, unique_batch_times)
+    one_hot.reshape(N * T, -1)[no_press_mask, -1] = 1
+
+    # Handle cases with single button press
+    single_press_mask = press_counts == 1
+    single_press_batch_times = unique_batch_times[single_press_mask]
+    single_press_buttons = button_presses[np.isin(batch_time_id, single_press_batch_times), 2]
+    one_hot.reshape(N * T, -1)[single_press_batch_times, single_press_buttons] = 1
+
+    # Handle cases with multiple button presses
+    multi_press_mask = press_counts > 1
+    if np.any(multi_press_mask):
+        multi_press_batch_times = unique_batch_times[multi_press_mask]
+        multi_press_indices = np.where(np.isin(batch_time_id, multi_press_batch_times))[0]
+        multi_press_buttons = button_presses[multi_press_indices, 2]
+
+        # Reshape to (num_multi_presses, max_buttons_per_press)
+        max_buttons = press_counts[multi_press_mask].max()
+        button_matrix = np.full((len(multi_press_batch_times), max_buttons), -1)
+        np.put(
+            button_matrix,
+            np.arange(len(multi_press_buttons))
+            + np.repeat(np.arange(len(multi_press_batch_times)), press_counts[multi_press_mask]) * max_buttons,
+            multi_press_buttons,
+        )
+
+        # Find the first new button press for each multi-press time step
+        cumulative_mask = np.zeros((len(multi_press_batch_times), D), dtype=bool)
+        for i in range(max_buttons):
+            valid_buttons = (button_matrix[:, i] != -1) & ~cumulative_mask[
+                np.arange(len(multi_press_batch_times)), button_matrix[:, i]
+            ]
+            if np.any(valid_buttons):
+                one_hot.reshape(N * T, -1)[multi_press_batch_times[valid_buttons], button_matrix[valid_buttons, i]] = 1
+                break
+            cumulative_mask[np.arange(len(multi_press_batch_times)), button_matrix[:, i]] = True
+
+    return one_hot
+
+
+def sparse_one_hot(array: np.ndarray) -> np.ndarray:
+    """One hot encode array, but only return first frame for each button press.
+
+    Args:
+        array: (T, D) array of button presses, where D = (# number of buttons + 1).
+
+    Returns:
+        One hot encoded array.
+    """
+    # Use cumsum to count consecutive non-zero elements
+    rows, cols = array.shape
+    streak_starts = np.diff(np.vstack([np.zeros(cols), array]), axis=0) == 1
+
+    # Default to last column if no 1s
+    rows_without_ones = ~np.any(streak_starts, axis=1)
+    streak_starts[rows_without_ones, -1] = 1
+
+    # Multiply by the original mask to keep zeros in place
+    return array * streak_starts
 
 feature_processors = {
     INPUT_FEATURES_TO_EMBED: lambda x: x,
