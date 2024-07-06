@@ -1,4 +1,5 @@
 # %%
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow as pa
@@ -257,4 +258,15 @@ for uuid in np.unique(table["replay_uuid"].to_numpy()):
 action_frames = table["p1_action"].to_numpy()
 action_frames = [ACTION_BY_IDX[action] for action in action_frames]
 # %%
-action_frames
+expression = pc.field("p1_button_l") != pc.field("p1_l_shoulder")
+mismatch = table.filter(expression)
+mismatch
+# %%
+digital = mismatch["p1_button_l"].to_pylist()
+analog = mismatch["p1_l_shoulder"].to_pylist()
+
+for i, (d, a) in enumerate(zip(digital, analog)):
+    if a > 0 and d == 0:
+        print(f"{i=}, {d=}, {a=}")
+
+# %%
