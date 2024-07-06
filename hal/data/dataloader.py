@@ -39,14 +39,7 @@ class MmappedParquetDataset(Dataset):
         self.trajectory_len = input_len + target_len
         self.mask_multi_uuid = mask_multi_uuid
 
-        self._parquet_table: Optional[pa.Table] = None
-
-    @property
-    def parquet_table(self) -> pa.Table:
-        """Lazy-load the parquet table."""
-        if self._parquet_table is None:
-            self._parquet_table = pq.read_table(self.input_path, schema=SCHEMA, memory_map=True)
-        return self._parquet_table
+        self.parquet_table = pq.read_table(self.input_path, schema=SCHEMA, memory_map=True)
 
     def __len__(self) -> int:
         return len(self.parquet_table) - self.trajectory_len
