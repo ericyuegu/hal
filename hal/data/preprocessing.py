@@ -77,11 +77,12 @@ def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, Featu
     for player in ("p1", "p2"):
         button_a = (sample[f"{player}_button_a"]).astype(np.bool_)
         button_b = (sample[f"{player}_button_b"]).astype(np.bool_)
-        jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
         button_z = sample[f"{player}_button_z"]
+        jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
         shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
+        no_button = np.ones_like(sample[f"{player}_button_a"])
 
-        stacked_buttons = np.stack((button_a, button_b, button_z, jump, shoulder), axis=1)
+        stacked_buttons = np.stack((button_a, button_b, button_z, jump, shoulder, no_button), axis=1)
         preprocessed[f"{player}_buttons"] = encode_stacked_array_to_one_hot(stacked_buttons)
 
     # for feature_list, preprocessing_func in feature_processors.items():
@@ -105,6 +106,6 @@ shield = invert_and_normalize(shield, stats["p1_shield_strength"])
 shield[:10000]
 
 # %%
-table_slice = table[900:1000]
+table_slice = table[500:1000]
 preprocess_features_v0(pyarrow_table_to_np_dict(table_slice), stats)
 # %%
