@@ -67,21 +67,49 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
 #     return result
 
 
+# def one_hot_3d(arr):
+#     B, T, D = arr.shape
+
+#     # Step 1: Identify the newest streak
+#     diff = np.diff(arr, axis=-2, prepend=0)
+#     newest_streak = diff == 1
+
+#     # Step 2: Create a mask for the newest streak in each row
+#     row_has_newest = newest_streak.any(axis=-1)
+#     newest_index = np.where(row_has_newest, newest_streak.argmax(axis=2), -1)
+#     mask = np.zeros_like(arr, dtype=bool)
+#     mask[np.arange(B)[:, None], np.arange(T), newest_index] = True
+
+#     # Step 3: Apply the mask to keep only the newest streak
+#     result = np.where(mask, arr, 0)
+
+#     # Step 4: Zero mask, set last column to 1
+#     result[..., -1] = ~np.any(arr, axis=-1)
+
+#     return result
+
+
 def one_hot_3d(arr):
     B, T, D = arr.shape
 
     # Step 1: Identify the newest streak
     diff = np.diff(arr, axis=-2, prepend=0)
     newest_streak = diff == 1
+    print(f"{newest_streak=}")
 
-    # Step 2: Create a mask for the newest streak in each row
-    row_has_newest = newest_streak.any(axis=-1)
-    newest_index = np.where(row_has_newest, newest_streak.argmax(axis=2), -1)
-    mask = np.zeros_like(arr, dtype=bool)
-    mask[np.arange(B)[:, None], np.arange(T), newest_index] = True
+    # Step 2: Create a cumulative sum to propagate the newest streak
+    cumsum = np.cumsum(newest_streak, axis=-2)
+    print(f"{cumsum=}")
 
-    # Step 3: Apply the mask to keep only the newest streak
+    # Step 3: Create a mask for the newest streak in each row
+    row_max = np.maximum.accumulate(cumsum, axis=-1)
+    print(f"{row_max=}")
+    mask = (cumsum == row_max) & (arr == 1)
+    print(f"{mask=}")
+
+    # Step 4: Apply the mask to keep only the newest streak
     result = np.where(mask, arr, 0)
+    print(f"{result=}")
 
     return result
 
