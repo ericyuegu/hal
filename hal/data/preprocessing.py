@@ -1,7 +1,9 @@
+# %%
 from typing import Dict
 
 import numpy as np
 import pyarrow as pa
+from data.constants import STICK_XY_CLUSTER_CENTERS_V0
 
 from hal.data.stats import FeatureStats
 
@@ -80,6 +82,25 @@ feature_processors = {
 }
 
 
+def get_closest_stick_xy_cluster_v0(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Calculate the closest point in STICK_XY_CLUSTER_CENTERS_V0 for given x and y values.
+
+    Args:
+        x (np.ndarray): (B, T) X-coordinates in range [0, 1]
+        y (np.ndarray): (B, T) Y-coordinates in range [0, 1]
+
+    Returns:
+        np.ndarray: (B, T) Indices of the closest cluster centers
+    """
+    point = np.stack((x, y), axis=-1)  # Shape: (B, T, 2)
+    distances = np.sum(
+        (STICK_XY_CLUSTER_CENTERS_V0[np.newaxis, np.newaxis, :, :] - point[:, :, np.newaxis, :]) ** 2, axis=-1
+    )
+    print(f"{distances.shape=}")
+    return np.argmin(distances, axis=-1)
+
+
 def preprocess_target_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
     """Return one-hot encoded buttons and analog stick values for given player."""
     target = {}
@@ -87,12 +108,34 @@ def preprocess_target_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str
     # TODO analog sticks
 
     # Stack buttons and encode one_hot
-    button_a = (sample[f"{player}_button_a"]).astype(np.bool_)
-    button_b = (sample[f"{player}_button_b"]).astype(np.bool_)
+    button_a = sample[f"{player}_button_a"]
+    button_b = sample[f"{player}_button_b"]
     jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
     button_z = sample[f"{player}_button_z"]
     shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
     stacked_buttons = np.stack((button_a, button_b, jump, button_z, shoulder), axis=1)[np.newaxis, ...]
-    target[f"buttons"] = one_hot_3d_fast_bugged(stacked_buttons)
+    target["buttons"] = one_hot_3d_fast_bugged(stacked_buttons)
 
     return target
+
+
+# %%
+import pyarrow as pa
+from pyarrow import parquet as pq
+
+input_path = "/opt/projects/hal2/data/dev/val.parquet"
+stats_path = "/opt/projects/hal2/data/dev/stats.json"
+
+table: pa.Table = pq.read_table(input_path, memory_map=True)
+
+replay = table[:1000]
+player = "p1"
+sample = pyarrow_table_to_np_dict(replay)
+batch_size = 4
+x_batches = np.stack(np.array_split(sample["p1_main_stick_x"], batch_size, axis=0))
+y_batches = np.stack(np.array_split(sample["p1_main_stick_y"], batch_size, axis=0))
+clusters = get_closest_stick_xy_cluster_v0(x_batches, y_batches)
+# %%
+x_batches[0]
+# %%
+clusters[0]
