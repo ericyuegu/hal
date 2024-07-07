@@ -1,5 +1,7 @@
 # %%
 from typing import Dict
+from typing import Final
+from typing import Tuple
 
 import numpy as np
 import pyarrow as pa
@@ -11,10 +13,19 @@ from hal.data.stats import FeatureStats
 # Normalization   #
 ###################
 
-INPUT_FEATURES_TO_EMBED = ("stage", "character", "action")
-INPUT_FEATURES_TO_NORMALIZE = ("percent", "stock", "facing", "action_frame", "invulnerable", "jumps_left", "on_ground")
-INPUT_FEATURES_TO_INVERT_AND_NORMALIZE = ("shield_strength",)
-INPUT_FEATURES_TO_STANDARDIZE = (
+
+INPUT_FEATURES_TO_EMBED: Tuple[str, ...] = ("stage", "character", "action")
+INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
+    "percent",
+    "stock",
+    "facing",
+    "action_frame",
+    "invulnerable",
+    "jumps_left",
+    "on_ground",
+)
+INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: Tuple[str, ...] = ("shield_strength",)
+INPUT_FEATURES_TO_STANDARDIZE: Tuple[str, ...] = (
     "position_x",
     "position_y",
     "hitlag_left",
@@ -26,7 +37,13 @@ INPUT_FEATURES_TO_STANDARDIZE = (
     "speed_ground_x_self",
 )
 
-TARGET_FEATURES_TO_ONE_HOT_ENCODE = ("button_a", "button_b", "button_x", "button_z", "button_l")
+TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
+    "button_a",
+    "button_b",
+    "button_x",
+    "button_z",
+    "button_l",
+)
 
 
 def normalize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
@@ -153,8 +170,26 @@ def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
     return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
 
 
-def preprocess_target_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
-    """Return one-hot encoded buttons and analog stick values for given player."""
+###################
+# PREPROCESSING   #
+###################
+
+
+VALID_PLAYERS: Final[Tuple[str, ...]] = ("p1", "p2")
+
+
+def preprocess_inputs_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
+    """Return ."""
+    inputs = {}
+
+    # Main stick and c-stick classification
+    main_stick_x = sample[f"{player}_main_stick_x"]
+    main_stick_y = sample[f"{player}_main_stick_y"]
+
+
+def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
+    """One-hot encode buttons and discretize analog stick x, y values for a given player."""
+    assert player in VALID_PLAYERS
     target = {}
 
     # Main stick and c-stick classification
