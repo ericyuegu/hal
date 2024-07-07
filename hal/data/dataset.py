@@ -1,13 +1,26 @@
 from pathlib import Path
 from typing import Dict
+from typing import Optional
 
+import attr
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from torch.utils.data import Dataset
 
+from hal.data.preprocessing import preprocess_inputs_v0
+from hal.data.preprocessing import preprocess_targets_v0
 from hal.data.preprocessing import pyarrow_table_to_np_dict
 from hal.data.schema import SCHEMA
+
+
+@attr.s(auto_attribs=True, frozen=True)
+class ReplayFilter:
+    """Filter for replay."""
+
+    replay_uuid: Optional[str] = None
+    stage: Optional[str] = None
+    character: Optional[str] = None
 
 
 class MmappedParquetDataset(Dataset):
@@ -56,4 +69,6 @@ class MmappedParquetDataset(Dataset):
             chunked_table = chunked_table.filter(mask)
 
         feature_array_by_name = pyarrow_table_to_np_dict(chunked_table)
-        return feature_array_by_name
+        inputs = preprocess_inputs_v0(feature_array_by_name)
+        targets = preprocess_targets_v0(feature_array_by_name)
+        return inputs, targets
