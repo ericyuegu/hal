@@ -67,10 +67,18 @@ def one_hot_3d_fast_bugged(arr: np.ndarray) -> np.ndarray:
     One-hot encode 3d array of raw button presses.
 
     Vectorized but slightly wrong; this takes the left-most 1 in each row instead of the newest button press, so buttons have a cardinal order of priority.
+
+    Sets the last button to 1 if there are no 1s in the array.
+
+    Args:
+        arr (np.ndarray): Input array of shape (B, T, D) where B is the batch size,
+                          T is the number of time steps, and D is the number of buttons + 1.
+
+    Returns:
+        np.ndarray: One-hot encoded array of the same shape (B, T, D).
     """
     # Find where 1s start in each row
     start_mask = np.concatenate([arr[:, :, 0:1], arr[:, :, 1:] > arr[:, :, :-1]], axis=2)
-    print(f"{start_mask=}")
     # Compute cumulative sum to identify streaks
     cumsum = np.cumsum(start_mask, axis=2)
     streak_ids = cumsum * arr
@@ -91,6 +99,8 @@ def one_hot_2d_fast(arr: np.ndarray) -> np.ndarray:
     One-hot encode 2D array of raw button presses.
 
     Vectorized but slightly wrong; this takes the left-most 1 in each row instead of the newest button press, so buttons have a cardinal order of priority.
+
+    Sets the last button to 1 if there are no 1s in the array.
 
     Args:
         arr (np.ndarray): Input array of shape (T, D) where T is the number of time steps
