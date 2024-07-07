@@ -65,7 +65,7 @@ class MmappedParquetDataset(Dataset):
         self.input_len = input_len
         self.target_len = target_len
         self.trajectory_len = input_len + target_len
-        self.mask_multi_uuid = truncate_replay_end
+        self.truncate_replay_end = truncate_replay_end
         self.include_both_players = include_both_players
         self.player_perspectives = ["p1", "p2"] if include_both_players else ["p1"]
 
@@ -112,18 +112,19 @@ class MmappedParquetDataset(Dataset):
     def __getitem__(self, index: int) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
         player_index = index % len(self.player_perspectives)
         actual_index = self.filtered_indices[index // len(self.player_perspectives)]
-        start_index = actual_index
-        end_index = actual_index + self.trajectory_len
-        chunked_table = self.parquet_table[start_index:end_index]
+        input_table_chunk = self.parquet_table[actual_index : actual_index + self.input_len]
+        target_table_chunk = self.parquet_table[actual_index + self.input_len : actual_index + self.trajectory_len]
 
         # Truncate to the first replay
-        if self.mask_multi_uuid:
-            first_uuid = chunked_table["replay_uuid"][0].as_py()
-            mask = pa.compute.equal(chunked_table["replay_uuid"], first_uuid)
-            chunked_table = chunked_table.filter(mask)
+        if self.truncate_replay_end:
+            first_uuid = input_table_chunk["replay_uuid"][0].as_py()
+            mask = pa.compute.equal(input_table_chunk["replay_uuid"], first_uuid)
+            input_table_chunk = input_table_chunk.filter(mask)
+            target_table_chunk = target_table_chunk.filter(mask)
 
-        feature_array_by_name = pyarrow_table_to_np_dict(chunked_table)
+        input_features_by_name = pyarrow_table_to_np_dict(input_table_chunk)
+        target_features_by_name = pyarrow_table_to_np_dict(target_table_chunk)
         player = self.player_perspectives[player_index]
-        inputs = preprocess_inputs_v0(feature_array_by_name, player=player)
-        targets = preprocess_targets_v0(feature_array_by_name, player=player)
+        inputs = preprocess_inputs_v0(input_features_by_name, player=player)
+        targets = preprocess_targets_v0(target_features_by_name, player=player)
         return inputs, targets
