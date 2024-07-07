@@ -1,6 +1,6 @@
+# %%
 from pathlib import Path
 from typing import Dict
-from typing import Optional
 
 import numpy as np
 import pyarrow as pa
@@ -12,9 +12,12 @@ from hal.data.schema import SCHEMA
 
 
 class MmappedParquetDataset(Dataset):
-    """Memory mapped parquet dataset for DDP training."""
+    """Memory mapped parquet dataset for DDP training.
 
-    def __init__(self, input_path: str, input_len: int, target_len: int, mask_multi_uuid: bool = True) -> None:
+    If sequence spans multiple replays, `truncate_replay_end` will truncate to the first replay.
+    """
+
+    def __init__(self, input_path: str, input_len: int, target_len: int, truncate_replay_end: bool = False) -> None:
         """
         Initialize the dataset.
 
@@ -37,7 +40,7 @@ class MmappedParquetDataset(Dataset):
         self.input_len = input_len
         self.target_len = target_len
         self.trajectory_len = input_len + target_len
-        self.mask_multi_uuid = mask_multi_uuid
+        self.mask_multi_uuid = truncate_replay_end
 
         self.parquet_table = pq.read_table(self.input_path, schema=SCHEMA, memory_map=True)
 
@@ -46,13 +49,33 @@ class MmappedParquetDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
         chunked_table = self.parquet_table[index : index + self.trajectory_len]
-        feature_array_by_name = pyarrow_table_to_np_dict(chunked_table)
 
-        # Truncate to the first uuid
+        # Truncate to the first replay
         if self.mask_multi_uuid:
-            first_uuid = feature_array_by_name["replay_uuid"][0]
-            mask = feature_array_by_name["replay_uuid"] == first_uuid
-            for key in feature_array_by_name:
-                feature_array_by_name[key] = feature_array_by_name[key][mask]
+            first_uuid = chunked_table["replay_uuid"][0].as_py()
+            mask = pa.compute.equal(chunked_table["replay_uuid"], first_uuid)
+            chunked_table = chunked_table.filter(mask)
 
+        feature_array_by_name = pyarrow_table_to_np_dict(chunked_table)
         return feature_array_by_name
+
+
+# %%
+dataset = MmappedParquetDataset("/opt/projects/hal2/data/dev/val.parquet", 20, 5)
+# %%
+dataset[9990]
+# %%
+
+# %%
+
+from pyarrow import parquet as pq
+
+input_path = "/opt/projects/hal2/data/dev/val.parquet"
+stats_path = "/opt/projects/hal2/data/dev/stats.json"
+
+table: pa.Table = pq.read_table(input_path, memory_map=True)
+
+replay = table[9990:10000]
+player = "p1"
+sample = pyarrow_table_to_np_dict(replay)
+sample
