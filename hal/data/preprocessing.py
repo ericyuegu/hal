@@ -1,4 +1,5 @@
 # %%
+from typing import Callable
 from typing import Dict
 from typing import Final
 from typing import Tuple
@@ -14,8 +15,9 @@ from hal.data.stats import FeatureStats
 ###################
 
 
-INPUT_FEATURES_TO_EMBED: Tuple[str, ...] = ("stage", "character", "action")
-INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
+INPUT_FEATURES_TO_EMBED: Tuple[str, ...] = ("stage",)
+PLAYER_INPUT_FEATURES_TO_EMBED: Tuple[str, ...] = ("character", "action")
+PLAYER_INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
     "percent",
     "stock",
     "facing",
@@ -24,19 +26,34 @@ INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
     "jumps_left",
     "on_ground",
 )
-INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: Tuple[str, ...] = ("shield_strength",)
-INPUT_FEATURES_TO_STANDARDIZE: Tuple[str, ...] = (
+PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: Tuple[str, ...] = ("shield_strength",)
+PLAYER_POSITION: Tuple[str, ...] = (
     "position_x",
     "position_y",
+)
+# Optional input features
+PLAYER_HITLAG_FEATURES: Tuple[str, ...] = (
     "hitlag_left",
     "hitstun_left",
+)
+PLAYER_SPEED_FEATURES: Tuple[str, ...] = (
     "speed_air_x_self",
     "speed_y_self",
     "speed_x_attack",
     "speed_y_attack",
     "speed_ground_x_self",
 )
-
+PLAYER_ECB_FEATURES: Tuple[str, ...] = (
+    "ecb_bottom_x",
+    "ecb_bottom_y",
+    "ecb_top_x",
+    "ecb_top_y",
+    "ecb_left_x",
+    "ecb_left_y",
+    "ecb_right_x",
+    "ecb_right_y",
+)
+# Target features
 TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
     "button_a",
     "button_b",
@@ -66,11 +83,15 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     return array_1 | array_2
 
 
-PREPROCESS_FN_BY_FEATURE = {
+PREPROCESS_FN_BY_FEATURE: Dict[str, Callable] = {
     **dict.fromkeys(INPUT_FEATURES_TO_EMBED, lambda x: x),
-    **dict.fromkeys(INPUT_FEATURES_TO_NORMALIZE, normalize),
-    **dict.fromkeys(INPUT_FEATURES_TO_INVERT_AND_NORMALIZE, invert_and_normalize),
-    **dict.fromkeys(INPUT_FEATURES_TO_STANDARDIZE, standardize),
+    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_EMBED, lambda x: x),
+    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_NORMALIZE, normalize),
+    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE, invert_and_normalize),
+    **dict.fromkeys(PLAYER_POSITION, standardize),
+    **dict.fromkeys(PLAYER_HITLAG_FEATURES, normalize),
+    **dict.fromkeys(PLAYER_SPEED_FEATURES, standardize),
+    **dict.fromkeys(PLAYER_ECB_FEATURES, standardize),
 }
 
 
@@ -179,12 +200,16 @@ VALID_PLAYERS: Final[Tuple[str, ...]] = ("p1", "p2")
 
 
 def preprocess_inputs_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
-    """Return ."""
-    inputs = {}
-
-    # Main stick and c-stick classification
-    main_stick_x = sample[f"{player}_main_stick_x"]
-    main_stick_y = sample[f"{player}_main_stick_y"]
+    """Preprocess basic player state."""
+    assert player in VALID_PLAYERS
+    player_features = (
+        PLAYER_INPUT_FEATURES_TO_EMBED
+        + PLAYER_INPUT_FEATURES_TO_NORMALIZE
+        + PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE
+        + PLAYER_POSITION
+    )
+    inputs = {feature: PREPROCESS_FN_BY_FEATURE[feature](sample[f"{player}_{feature}"]) for feature in player_features}
+    return inputs
 
 
 def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
