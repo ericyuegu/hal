@@ -7,6 +7,10 @@ from data.constants import STICK_XY_CLUSTER_CENTERS_V0
 
 from hal.data.stats import FeatureStats
 
+###################
+# Normalization   #
+###################
+
 INPUT_FEATURES_TO_EMBED = ("stage", "character", "action")
 INPUT_FEATURES_TO_NORMALIZE = ("percent", "stock", "facing", "action_frame", "invulnerable", "jumps_left", "on_ground")
 INPUT_FEATURES_TO_INVERT_AND_NORMALIZE = ("shield_strength",)
@@ -23,11 +27,6 @@ INPUT_FEATURES_TO_STANDARDIZE = (
 )
 
 TARGET_FEATURES_TO_ONE_HOT_ENCODE = ("button_a", "button_b", "button_x", "button_z", "button_l")
-
-
-def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
-    """Convert pyarrow table to dictionary of numpy arrays."""
-    return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
 
 
 def normalize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
@@ -48,6 +47,19 @@ def standardize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
 def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     """Perform logical OR of two features."""
     return array_1 | array_2
+
+
+PREPROCESS_FN_BY_FEATURE = {
+    **dict.fromkeys(INPUT_FEATURES_TO_EMBED, lambda x: x),
+    **dict.fromkeys(INPUT_FEATURES_TO_NORMALIZE, normalize),
+    **dict.fromkeys(INPUT_FEATURES_TO_INVERT_AND_NORMALIZE, invert_and_normalize),
+    **dict.fromkeys(INPUT_FEATURES_TO_STANDARDIZE, standardize),
+}
+
+
+###################
+# Encoding        #
+###################
 
 
 def one_hot_3d_fast_bugged(arr: np.ndarray) -> np.ndarray:
@@ -74,14 +86,6 @@ def one_hot_3d_fast_bugged(arr: np.ndarray) -> np.ndarray:
     return processed
 
 
-feature_processors = {
-    INPUT_FEATURES_TO_EMBED: lambda x: x,
-    INPUT_FEATURES_TO_NORMALIZE: normalize,
-    INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: invert_and_normalize,
-    INPUT_FEATURES_TO_STANDARDIZE: standardize,
-}
-
-
 def get_closest_stick_xy_cluster_v0(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
     Calculate the closest point in STICK_XY_CLUSTER_CENTERS_V0 for given x and y values.
@@ -101,11 +105,29 @@ def get_closest_stick_xy_cluster_v0(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.argmin(distances, axis=-1)
 
 
+###################
+# Reshaping       #
+###################
+
+
+def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
+    """Convert pyarrow table to dictionary of numpy arrays."""
+    return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
+
+
 def preprocess_target_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
     """Return one-hot encoded buttons and analog stick values for given player."""
     target = {}
 
-    # TODO analog sticks
+    # Main stick and c-stick classification
+    main_stick_x = sample[f"{player}_main_stick_x"]
+    main_stick_y = sample[f"{player}_main_stick_y"]
+    c_stick_x = sample[f"{player}_c_stick_x"]
+    c_stick_y = sample[f"{player}_c_stick_y"]
+    main_stick_clusters = get_closest_stick_xy_cluster_v0(main_stick_x, main_stick_y)
+    c_stick_clusters = get_closest_stick_xy_cluster_v0(c_stick_x, c_stick_y)
+    target["main_stick"] = main_stick_clusters
+    target["c_stick"] = c_stick_clusters
 
     # Stack buttons and encode one_hot
     button_a = sample[f"{player}_button_a"]
