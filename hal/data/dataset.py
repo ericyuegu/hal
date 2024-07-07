@@ -5,9 +5,8 @@ from typing import Tuple
 
 import attr
 import numpy as np
-import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from data.stats import load_dataset_stats
 from torch.utils.data import Dataset
 
 from hal.data.constants import IDX_BY_CHARACTER_STR
@@ -16,6 +15,7 @@ from hal.data.preprocessing import preprocess_inputs_v0
 from hal.data.preprocessing import preprocess_targets_v0
 from hal.data.preprocessing import pyarrow_table_to_np_dict
 from hal.data.schema import SCHEMA
+from hal.data.stats import load_dataset_stats
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -84,25 +84,23 @@ class MmappedParquetDataset(Dataset):
         filter_conditions = []
 
         if self.replay_filter.replay_uuid is not None:
-            filter_conditions.append(
-                pa.compute.equal(self.parquet_table["replay_uuid"], self.replay_filter.replay_uuid)
-            )
+            filter_conditions.append(pc.equal(self.parquet_table["replay_uuid"], self.replay_filter.replay_uuid))
 
         if self.replay_filter.stage is not None:
             stage_idx = IDX_BY_STAGE_STR[self.replay_filter.stage]
-            filter_conditions.append(pa.compute.equal(self.parquet_table["stage"], stage_idx))
+            filter_conditions.append(pc.equal(self.parquet_table["stage"], stage_idx))
 
         if self.replay_filter.character is not None:
             character_idx = IDX_BY_CHARACTER_STR[self.replay_filter.character]
             filter_conditions.append(
-                pa.compute.or_(
-                    pa.compute.equal(self.parquet_table["p1_character"], character_idx),
-                    pa.compute.equal(self.parquet_table["p2_character"], character_idx),
+                pc.or_(
+                    pc.equal(self.parquet_table["p1_character"], character_idx),
+                    pc.equal(self.parquet_table["p2_character"], character_idx),
                 )
             )
 
         if filter_conditions:
-            combined_filter = pa.compute.and_(*filter_conditions)
+            combined_filter = pc.and_(*filter_conditions)
             filtered_indices = np.where(combined_filter.to_numpy())[0]
             valid_indices = filtered_indices[filtered_indices < len(self.parquet_table) - self.trajectory_len]
             return valid_indices
@@ -121,7 +119,7 @@ class MmappedParquetDataset(Dataset):
         # Truncate to the first replay
         if self.truncate_replay_end:
             first_uuid = input_table_chunk["replay_uuid"][0].as_py()
-            mask = pa.compute.equal(input_table_chunk["replay_uuid"], first_uuid)
+            mask = pc.equal(input_table_chunk["replay_uuid"], first_uuid)
             input_table_chunk = input_table_chunk.filter(mask)
             target_table_chunk = target_table_chunk.filter(mask)
 
