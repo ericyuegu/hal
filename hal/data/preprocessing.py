@@ -86,22 +86,50 @@ def one_hot_3d_fast_bugged(arr: np.ndarray) -> np.ndarray:
     return processed
 
 
+def one_hot_2d_fast(arr: np.ndarray) -> np.ndarray:
+    """
+    One-hot encode 2D array of raw button presses.
+
+    Vectorized but slightly wrong; this takes the left-most 1 in each row instead of the newest button press, so buttons have a cardinal order of priority.
+
+    Args:
+        arr (np.ndarray): Input array of shape (T, D) where T is the number of time steps
+                          and D is the number of buttons.
+
+    Returns:
+        np.ndarray: One-hot encoded array of the same shape (T, D).
+    """
+    # Find where 1s start in each row
+    start_mask = np.concatenate([arr[:, 0:1], arr[:, 1:] > arr[:, :-1]], axis=-1)
+    # Compute cumulative sum to identify streaks
+    cumsum = np.cumsum(start_mask, axis=-1)
+    streak_ids = cumsum * arr
+    # Find the maximum streak ID for each row
+    max_streak_ids = np.max(streak_ids, axis=-1, keepdims=True)
+    # Create a mask for the old streak in each row
+    old_streak_mask = (streak_ids == max_streak_ids) & (streak_ids > 1) & (arr == 1)
+    # Process the array
+    processed = arr * ~old_streak_mask
+    # Handle rows with no 1s
+    no_ones_mask = ~np.any(arr, axis=-1)
+    processed[no_ones_mask, -1] = 1
+
+    return processed
+
+
 def get_closest_stick_xy_cluster_v0(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
     Calculate the closest point in STICK_XY_CLUSTER_CENTERS_V0 for given x and y values.
 
     Args:
-        x (np.ndarray): (B, T) X-coordinates in range [0, 1]
-        y (np.ndarray): (B, T) Y-coordinates in range [0, 1]
+        x (np.ndarray): (T,) X-coordinates in range [0, 1]
+        y (np.ndarray): (T,) Y-coordinates in range [0, 1]
 
     Returns:
-        np.ndarray: (B, T) Indices of the closest cluster centers
+        np.ndarray: (T,) Indices of the closest cluster centers
     """
-    point = np.stack((x, y), axis=-1)  # Shape: (B, T, 2)
-    distances = np.sum(
-        (STICK_XY_CLUSTER_CENTERS_V0[np.newaxis, np.newaxis, :, :] - point[:, :, np.newaxis, :]) ** 2, axis=-1
-    )
-    print(f"{distances.shape=}")
+    point = np.stack((x, y), axis=-1)  # Shape: (T, 2)
+    distances = np.sum((STICK_XY_CLUSTER_CENTERS_V0 - point[:, np.newaxis, :]) ** 2, axis=-1)
     return np.argmin(distances, axis=-1)
 
 
@@ -153,11 +181,13 @@ table: pa.Table = pq.read_table(input_path, memory_map=True)
 replay = table[:1000]
 player = "p1"
 sample = pyarrow_table_to_np_dict(replay)
-batch_size = 4
-x_batches = np.stack(np.array_split(sample["p1_main_stick_x"], batch_size, axis=0))
-y_batches = np.stack(np.array_split(sample["p1_main_stick_y"], batch_size, axis=0))
-clusters = get_closest_stick_xy_cluster_v0(x_batches, y_batches)
+# batch_size = 4
+# x_batches = np.stack(np.array_split(sample["p1_main_stick_x"], batch_size, axis=0))
+# y_batches = np.stack(np.array_split(sample["p1_main_stick_y"], batch_size, axis=0))
+x = sample["p1_main_stick_x"]
+y = sample["p1_main_stick_y"]
+clusters = get_closest_stick_xy_cluster_v0(x, y)
 # %%
-x_batches[0]
+x, y
 # %%
-clusters[0]
+clusters
