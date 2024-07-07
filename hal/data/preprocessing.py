@@ -1,7 +1,7 @@
 # %%
-from typing import Callable
 from typing import Dict
 from typing import Final
+from typing import Protocol
 from typing import Tuple
 
 import numpy as np
@@ -63,6 +63,16 @@ TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
 )
 
 
+class PreprocessFn(Protocol):
+    def __call__(self, array: np.ndarray, stats: FeatureStats) -> np.ndarray:
+        ...
+
+
+def identity(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
+    """Identity function."""
+    return array
+
+
 def normalize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
     """Normalize feature [0, 1]."""
     return (array - stats.min) / (stats.max - stats.min)
@@ -83,9 +93,9 @@ def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     return array_1 | array_2
 
 
-PREPROCESS_FN_BY_FEATURE: Dict[str, Callable] = {
-    **dict.fromkeys(INPUT_FEATURES_TO_EMBED, lambda x: x),
-    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_EMBED, lambda x: x),
+PREPROCESS_FN_BY_FEATURE: Dict[str, PreprocessFn] = {
+    **dict.fromkeys(INPUT_FEATURES_TO_EMBED, identity),
+    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_EMBED, identity),
     **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_NORMALIZE, normalize),
     **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE, invert_and_normalize),
     **dict.fromkeys(PLAYER_POSITION, standardize),
@@ -199,17 +209,28 @@ def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
 VALID_PLAYERS: Final[Tuple[str, ...]] = ("p1", "p2")
 
 
-def preprocess_inputs_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
+def preprocess_inputs_v0(
+    sample: Dict[str, np.ndarray], player: str, stats: Dict[str, FeatureStats]
+) -> Dict[str, np.ndarray]:
     """Preprocess basic player state."""
     assert player in VALID_PLAYERS
+    other_player = "p2" if player == "p1" else "p1"
     player_features = (
         PLAYER_INPUT_FEATURES_TO_EMBED
         + PLAYER_INPUT_FEATURES_TO_NORMALIZE
         + PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE
         + PLAYER_POSITION
     )
-    inputs = {feature: PREPROCESS_FN_BY_FEATURE[feature](sample[f"{player}_{feature}"]) for feature in player_features}
-    return inputs
+    inputs = []
+    for feature in player_features:
+        preprocess_fn = PREPROCESS_FN_BY_FEATURE[feature]
+        feature_name = f"{player}_{feature}"
+        feature_stats = stats[feature_name]
+        inputs.append(preprocess_fn(sample[feature_name], feature_stats))
+        other_feature_name = f"{other_player}_{feature}"
+        other_feature_stats = stats[other_feature_name]
+        inputs.append(preprocess_fn(sample[other_feature_name], other_feature_stats))
+    return {"inputs": np.stack(inputs, axis=-1)}
 
 
 def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
