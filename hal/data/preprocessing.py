@@ -1,4 +1,3 @@
-# %%
 from typing import Dict
 
 import numpy as np
@@ -81,22 +80,19 @@ feature_processors = {
 }
 
 
-START, END = 885, 900
+def preprocess_target_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
+    """Return one-hot encoded buttons and analog stick values for given player."""
+    target = {}
 
-
-def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, FeatureStats]) -> Dict[str, np.ndarray]:
-    """Preprocess features."""
-    preprocessed = {}
+    # TODO analog sticks
 
     # Stack buttons and encode one_hot
-    for player in ("p1", "p2"):
-        button_a = (sample[f"{player}_button_a"]).astype(np.bool_)
-        button_b = (sample[f"{player}_button_b"]).astype(np.bool_)
-        jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
-        button_z = sample[f"{player}_button_z"]
-        shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
+    button_a = (sample[f"{player}_button_a"]).astype(np.bool_)
+    button_b = (sample[f"{player}_button_b"]).astype(np.bool_)
+    jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
+    button_z = sample[f"{player}_button_z"]
+    shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
+    stacked_buttons = np.stack((button_a, button_b, jump, button_z, shoulder), axis=1)[np.newaxis, ...]
+    target[f"buttons"] = one_hot_3d_fast_bugged(stacked_buttons)
 
-        stacked_buttons = np.stack((button_a, button_b, jump, button_z, shoulder), axis=1)[np.newaxis, ...]
-        preprocessed[f"{player}_buttons"] = one_hot_3d_fast_bugged(stacked_buttons)
-
-    return preprocessed
+    return target
