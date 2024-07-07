@@ -58,24 +58,3 @@ class MmappedParquetDataset(Dataset):
 
         feature_array_by_name = pyarrow_table_to_np_dict(chunked_table)
         return feature_array_by_name
-
-
-# %%
-dataset = MmappedParquetDataset("/opt/projects/hal2/data/dev/val.parquet", 20, 5)
-# %%
-dataset[9990]
-# %%
-
-# %%
-
-from pyarrow import parquet as pq
-
-input_path = "/opt/projects/hal2/data/dev/val.parquet"
-stats_path = "/opt/projects/hal2/data/dev/stats.json"
-
-table: pa.Table = pq.read_table(input_path, memory_map=True)
-
-replay = table[9990:10000]
-player = "p1"
-sample = pyarrow_table_to_np_dict(replay)
-sample
