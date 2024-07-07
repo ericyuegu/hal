@@ -7,6 +7,8 @@ import attr
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from data.constants import IDX_BY_CHARACTER_STR
+from data.constants import IDX_BY_STAGE_STR
 from torch.utils.data import Dataset
 
 from hal.data.preprocessing import preprocess_inputs_v0
@@ -82,13 +84,15 @@ class MmappedParquetDataset(Dataset):
             )
 
         if self.replay_filter.stage is not None:
-            filter_conditions.append(pa.compute.equal(self.parquet_table["stage"], self.replay_filter.stage))
+            stage_idx = IDX_BY_STAGE_STR[self.replay_filter.stage]
+            filter_conditions.append(pa.compute.equal(self.parquet_table["stage"], stage_idx))
 
         if self.replay_filter.character is not None:
+            character_idx = IDX_BY_CHARACTER_STR[self.replay_filter.character]
             filter_conditions.append(
                 pa.compute.or_(
-                    pa.compute.equal(self.parquet_table["p1_character"], self.replay_filter.character),
-                    pa.compute.equal(self.parquet_table["p2_character"], self.replay_filter.character),
+                    pa.compute.equal(self.parquet_table["p1_character"], character_idx),
+                    pa.compute.equal(self.parquet_table["p2_character"], character_idx),
                 )
             )
 

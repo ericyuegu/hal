@@ -12,6 +12,7 @@ EXCLUDED_STAGES: tuple[str, ...] = ("NO_STAGE", "RANDOM_STAGE")
 IDX_BY_STAGE: dict[Stage, int] = {
     stage: i for i, stage in enumerate(stage for stage in Stage if stage.name not in EXCLUDED_STAGES)
 }
+IDX_BY_STAGE_STR: dict[str, int] = {stage.name: i for stage, i in IDX_BY_STAGE.items()}
 STAGE_BY_IDX: dict[int, str] = {i: stage.name for stage, i in IDX_BY_STAGE.items()}
 
 EXCLUDED_CHARACTERS: tuple[str, ...] = (
@@ -25,6 +26,7 @@ EXCLUDED_CHARACTERS: tuple[str, ...] = (
 IDX_BY_CHARACTER: dict[Character, int] = {
     char: i for i, char in enumerate(char for char in Character if char.name not in EXCLUDED_CHARACTERS)
 }
+IDX_BY_CHARACTER_STR: dict[str, int] = {char.name: i for char, i in IDX_BY_CHARACTER.items()}
 CHARACTER_BY_IDX: dict[int, str] = {i: char.name for char, i in IDX_BY_CHARACTER.items()}
 
 IDX_BY_ACTION: dict[Action, int] = {action: i for i, action in enumerate(Action)}
