@@ -11,11 +11,11 @@ from torch.utils.data import Dataset
 
 from hal.data.constants import IDX_BY_CHARACTER_STR
 from hal.data.constants import IDX_BY_STAGE_STR
-from hal.data.preprocessing import preprocess_inputs_v0
-from hal.data.preprocessing import preprocess_targets_v0
 from hal.data.preprocessing import pyarrow_table_to_np_dict
 from hal.data.schema import SCHEMA
 from hal.data.stats import load_dataset_stats
+from hal.zoo.embed.preprocess_inputs_v0 import preprocess_inputs_v0
+from hal.zoo.embed.preprocess_targets_v0 import preprocess_targets_v0
 
 
 @attr.s(auto_attribs=True, frozen=True)

@@ -1,4 +1,3 @@
-# %%
 from typing import Dict
 from typing import Final
 from typing import Protocol
@@ -9,6 +8,9 @@ import pyarrow as pa
 
 from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.data.stats import FeatureStats
+
+VALID_PLAYERS: Final[Tuple[str, ...]] = ("p1", "p2")
+
 
 ###################
 # Normalization   #
@@ -199,81 +201,3 @@ def get_closest_stick_xy_cluster_v0(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
     """Convert pyarrow table to dictionary of numpy arrays."""
     return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
-
-
-###################
-# PREPROCESSING   #
-###################
-
-
-VALID_PLAYERS: Final[Tuple[str, ...]] = ("p1", "p2")
-
-
-def preprocess_inputs_v0(
-    sample: Dict[str, np.ndarray], player: str, stats: Dict[str, FeatureStats]
-) -> Dict[str, np.ndarray]:
-    """Preprocess basic player state."""
-    assert player in VALID_PLAYERS
-    other_player = "p2" if player == "p1" else "p1"
-    inputs = {"stage": sample["stage"]}
-
-    inputs.update(_preprocess_categorical_features(sample, player, other_player, stats))
-    inputs["gamestate"] = _preprocess_numeric_features(sample, player, other_player, stats)
-
-    return inputs
-
-
-def _preprocess_categorical_features(
-    sample: Dict[str, np.ndarray], player: str, other_player: str, stats: Dict[str, FeatureStats]
-) -> Dict[str, np.ndarray]:
-    """Preprocess categorical features for both players."""
-    processed_features = {}
-    for feature in PLAYER_INPUT_FEATURES_TO_EMBED:
-        preprocess_fn = PREPROCESS_FN_BY_FEATURE[feature]
-        for p, suffix in [(player, "ego"), (other_player, "other")]:
-            feature_name = f"{p}_{feature}"
-            processed_features[f"{feature}_{suffix}"] = preprocess_fn(sample[feature_name], stats[feature_name])
-    return processed_features
-
-
-def _preprocess_numeric_features(
-    sample: Dict[str, np.ndarray], player: str, other_player: str, stats: Dict[str, FeatureStats]
-) -> np.ndarray:
-    """Preprocess numeric features for both players."""
-    numeric_features = (
-        PLAYER_INPUT_FEATURES_TO_NORMALIZE + PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE + PLAYER_POSITION
-    )
-    numeric_inputs = []
-    for feature in numeric_features:
-        preprocess_fn = PREPROCESS_FN_BY_FEATURE[feature]
-        for p in [player, other_player]:
-            feature_name = f"{p}_{feature}"
-            numeric_inputs.append(preprocess_fn(sample[feature_name], stats[feature_name]))
-    return np.stack(numeric_inputs, axis=-1)
-
-
-def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: str) -> Dict[str, np.ndarray]:
-    """One-hot encode buttons and discretize analog stick x, y values for a given player."""
-    assert player in VALID_PLAYERS
-    target = {}
-
-    # Main stick and c-stick classification
-    main_stick_x = sample[f"{player}_main_stick_x"]
-    main_stick_y = sample[f"{player}_main_stick_y"]
-    c_stick_x = sample[f"{player}_c_stick_x"]
-    c_stick_y = sample[f"{player}_c_stick_y"]
-    main_stick_clusters = get_closest_stick_xy_cluster_v0(main_stick_x, main_stick_y)
-    c_stick_clusters = get_closest_stick_xy_cluster_v0(c_stick_x, c_stick_y)
-    target["main_stick"] = main_stick_clusters
-    target["c_stick"] = c_stick_clusters
-
-    # Stack buttons and encode one_hot
-    button_a = sample[f"{player}_button_a"]
-    button_b = sample[f"{player}_button_b"]
-    jump = union(sample[f"{player}_button_x"], sample[f"{player}_button_y"])
-    button_z = sample[f"{player}_button_z"]
-    shoulder = union(sample[f"{player}_button_l"], sample[f"{player}_button_r"])
-    stacked_buttons = np.stack((button_a, button_b, jump, button_z, shoulder), axis=1)[np.newaxis, ...]
-    target["buttons"] = one_hot_3d_fast_bugged(stacked_buttons)
-
-    return target
