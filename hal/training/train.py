@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
+from hal.training.dataloader import create_dataloaders
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
 from hal.training.distributed import get_world_size
@@ -265,6 +266,8 @@ def main(config: TrainConfig, in_memory_datasets: list[Tensor], seed: int = 8947
         np.random.seed(seed)
         torch.manual_seed(seed)
 
+    dataloaders = create_dataloaders(train_config)
+
     train_ds, val_ds = get_dataset(in_memory_datasets, input_len=config.input_len, target_len=config.target_len)
     preprocessing_fn = partial(
         get_preprocessing_fn(config.preprocessing_fn),
@@ -296,8 +299,5 @@ def parse_cli() -> TrainConfig:
 
 if __name__ == "__main__":
     train_config = parse_cli()
-    datasets = load_datasets_to_memory(exp_config.dataset_path)
-    # download_dataset(exp_config.dataset)
-    # automatically distribute on CUDA if available
     # pass positional args and call wrapped fn; (kwargs not accepted)
-    wrap_multiprocessing(main, exp_config, datasets)()
+    wrap_multiprocessing(main, train_config)()

@@ -31,9 +31,13 @@ class DataworkerConfig:
 
 
 @attr.s(auto_attribs=True, frozen=True)
-class TrainConfig:
+class BaseConfig:
     n_gpus: int
+    debug: bool = False
 
+
+@attr.s(auto_attribs=True, frozen=True)
+class TrainConfig(BaseConfig):
     # Model
     arch: str = attr.ib(validator=attr.validators.in_(Arch.ARCH.keys()))
 
@@ -52,7 +56,6 @@ class TrainConfig:
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     wd: float = 1e-2
-    debug: bool = False
 
 
 def create_parser_for_attrs_class(

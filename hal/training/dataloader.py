@@ -1,17 +1,24 @@
 from pathlib import Path
+from typing import Tuple
 
-import pyarrow.dataset as ds
-import torch
+from data.dataset import MmappedParquetDataset
+from torch.utils.data import DataLoader
 
-
-def get_parquet_dataset(dataset_path: Path) -> ds.Dataset:
-    dataset = ds.dataset(source=dataset_path, format="parquet")
-    return dataset
+from hal.training.config import TrainConfig
 
 
-class DistributedParquetDataset(torch.data.Dataset):
-    def __init__(self, dataset_path: Path) -> None:
-        self.dataset = get_parquet_dataset(dataset_path)
-
-    def __len__(self) -> int:
-        return len(self.dataset)
+def create_dataloaders(dataset_dir: Path, train_config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
+    stats_path = dataset_dir / "stats.json"
+    for split in ("train", "val"):
+        dataset = MmappedParquetDataset(
+            str(dataset_dir / f"{split}.parquet"),
+            str(stats_path),
+            train_config.dataset.input_len,
+            train_config.target_len,
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_size=train_config.local_batch_size,
+            num_workers=train_config.data_workers_per_gpu,
+            prefetch_factor=train_config.prefetch_factor,
+        )

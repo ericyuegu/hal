@@ -10,7 +10,8 @@ import torch
 import torch.distributed
 import tqdm as tqdm_module
 from tqdm import tqdm
-from training.config import TrainerConfig
+
+from hal.training.config import BaseConfig
 
 
 def barrier() -> None:
@@ -87,7 +88,7 @@ def auto_distribute(f: Callable) -> Callable:
     return dist_wrapped
 
 
-def wrap_multiprocessing(main_fn: Callable, config: TrainerConfig) -> Callable:
+def wrap_multiprocessing(main_fn: Callable, config: BaseConfig) -> Callable:
     """
     Initialize torch multiprocessing for training.
     """
@@ -100,7 +101,7 @@ def wrap_multiprocessing(main_fn: Callable, config: TrainerConfig) -> Callable:
         assert n_gpus <= device_count, f"n_gpus={n_gpus}, only {device_count} gpus available!"
         if n_gpus == 1:
             return main_fn(None, None, config)
-        torch.multiprocessing.spawn(main_fn, args=(n_gpus, config), nprocs=n_gpus, join=True, start_method="spawn")
+        torch.multiprocessing.spawn(main_fn, args=(n_gpus, config), nprocs=n_gpus, join=True, start_method="spawn")  # type: ignore
 
     @functools.wraps(main_fn)
     def dummy_wrapped():
