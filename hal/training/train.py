@@ -11,11 +11,13 @@ from typing import Dict
 from typing import Iterable
 
 import torch
-from config import TrainConfig
 from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
+from hal.training.config import TrainConfig
+from hal.training.config import create_parser_for_attrs_class
+from hal.training.config import parse_args_to_attrs_instance
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
 from hal.training.distributed import get_world_size
@@ -287,14 +289,13 @@ def main(config: TrainConfig, in_memory_datasets: list[Tensor], seed: int = 8947
 
 def parse_cli() -> TrainConfig:
     parser = argparse.ArgumentParser()
-    for field, typ in TrainConfig.__dataclass_fields__.items():
-        parser.add_argument(f"--{field}", type=typ.type, default=typ.default, required=False)
-    config = TrainConfig(**vars(parser.parse_args()))
-    return config
+    parser = create_parser_for_attrs_class(TrainConfig, parser)
+    args = parser.parse_args()
+    return parse_args_to_attrs_instance(TrainConfig, args)
 
 
 if __name__ == "__main__":
-    exp_config = parse_cli()
+    train_config = parse_cli()
     datasets = load_datasets_to_memory(exp_config.dataset_path)
     # download_dataset(exp_config.dataset)
     # automatically distribute on CUDA if available

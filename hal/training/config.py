@@ -1,4 +1,3 @@
-# %%
 import argparse
 from typing import Any
 from typing import Dict
@@ -16,7 +15,6 @@ class DatasetConfig:
     """Training & eval dataset metadata."""
 
     data_dir: str
-    stats_path: Optional[str]
     input_preprocessing_fn: str
     target_preprocessing_fn: str
     # Number of input and target frames in example/rollout
@@ -32,20 +30,6 @@ class DataworkerConfig:
     collate_fn: Optional[str] = None
 
 
-# @attr.s(auto_attribs=True, frozen=True)
-# class ClosedLoopEvalConfig:
-#     data_config: DatasetConfig
-#     model_arch: torch.Module
-#     model_path: Path
-#     opponent: EVAL_MODE = "cpu"
-#     opponent_model_arch: Optional[torch.Module] = None
-#     opponent_model_path: Optional[Path] = None
-#     # Which device to load model(s) for inference
-#     device: DEVICES = "cpu"
-#     # Comma-separated lists of stages, or "all"
-#     stage: EVAL_STAGES = "all"
-
-
 @attr.s(auto_attribs=True, frozen=True)
 class TrainConfig:
     n_gpus: int
@@ -54,8 +38,8 @@ class TrainConfig:
     arch: str = attr.ib(validator=attr.validators.in_(Arch.ARCH.keys()))
 
     # Data
-    dataset_config: DatasetConfig
-    dataloader_config: DataworkerConfig
+    dataset: DatasetConfig
+    dataworker: DataworkerConfig
 
     # Hyperparams
     loss_fn: str = "ce"
@@ -78,7 +62,7 @@ def create_parser_for_attrs_class(
         parser = argparse.ArgumentParser()
 
     for field in attr.fields(cls):
-        arg_name = f"--{prefix}{field.name}".replace("_", "-")
+        arg_name = f"--{prefix}{field.name}"
 
         if attr.has(field.type):
             # If the field is another attrs class, recurse
@@ -114,9 +98,15 @@ def parse_args_to_attrs_instance(cls: Type[Any], args: argparse.Namespace, prefi
     return cls(**kwargs)
 
 
-# %%
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    create_parser_for_attrs_class(TrainConfig, parser)
-    args = parser.parse_args()
-    print(args)
+# @attr.s(auto_attribs=True, frozen=True)
+# class ClosedLoopEvalConfig:
+#     data_config: DatasetConfig
+#     model_arch: torch.Module
+#     model_path: Path
+#     opponent: EVAL_MODE = "cpu"
+#     opponent_model_arch: Optional[torch.Module] = None
+#     opponent_model_path: Optional[Path] = None
+#     # Which device to load model(s) for inference
+#     device: DEVICES = "cpu"
+#     # Comma-separated lists of stages, or "all"
+#     stage: EVAL_STAGES = "all"
