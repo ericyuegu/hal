@@ -63,7 +63,9 @@ def get_world_size() -> int:
     return torch.distributed.get_world_size()
 
 
-def maybe_wrap_model_distributed(m: torch.nn.Module) -> Union[torch.Module, torch.nn.parallel.DistributedDataParallel]:
+def maybe_wrap_model_distributed(
+    m: torch.nn.Module,
+) -> Union[torch.nn.Module, torch.nn.parallel.DistributedDataParallel]:
     if not torch.distributed.is_initialized():
         return m.to(get_device())
     return torch.nn.parallel.DistributedDataParallel(m.to(get_device_id()), device_ids=[get_device_id()])

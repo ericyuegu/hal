@@ -59,7 +59,7 @@ class LearningRateChanger:
     def set_opt_lr(self, lr: Union[float, torch.Tensor]) -> float:
         for params in self.opt.param_groups:
             params["lr"] = lr
-        return lr
+        return float(lr)
 
 
 @attr.s(auto_attribs=True, frozen=True)
