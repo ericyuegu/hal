@@ -134,7 +134,7 @@ class WandbConfig:
 
 
 class DummyWriter:
-    def __init__(self, wandb_config: WandbConfig) -> None:
+    def __init__(self, wandb_config: Optional[WandbConfig]) -> None:
         pass
 
     def watch(self, model: torch.nn.Module, **kwargs) -> None:
@@ -212,7 +212,7 @@ class Writer:
 
     @classmethod
     def create(cls, wandb_config: Optional["WandbConfig"] = None) -> Union[DummyWriter, "Writer"]:
-        if is_master() and not wandb_config.config.get("debug", False):
+        if is_master() and wandb_config is not None:
             return cls(wandb_config)
         else:
             return DummyWriter(wandb_config)
