@@ -56,6 +56,7 @@ class Trainer(torch.nn.Module):
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
+        self.samples = 0
 
         model = Arch.get(self.config.arch)  # TODO input shapes
         self.model = maybe_wrap_model_distributed(model)  # Needed for .backward and to wrap into a module for saving
@@ -159,6 +160,7 @@ class Trainer(torch.nn.Module):
         ckpt.save_file(self.model, "model.ckpt")
 
     def val_step(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        self.eval()
         with torch.no_grad():
             pred, _ = self.model(inputs)
             loss = self.loss_fn(pred, targets)
@@ -176,7 +178,6 @@ class Trainer(torch.nn.Module):
     def validate(self, val_loader: Iterable, batch_size: int, n_val_samples: int, writer: Writer, step: int) -> None:
         val_iter = iter(val_loader)
         device = self.device
-        n_val_samples = min(len(val_loader), n_val_samples)
         range_iter = trange(
             0,
             n_val_samples,
@@ -191,7 +192,7 @@ class Trainer(torch.nn.Module):
         for i in range_iter:
             batch = next(val_iter)
             batch = move_tensors_to_device(batch, device)
-            if i == 0:
+            if i == 0 and self.config.debug:
                 self.save_batch_to_disk(batch, step=step)
             metrics_dict = self.val_step(*batch)
             metrics_dict = move_tensors_to_device(metrics_dict, "cpu", non_blocking=False)
@@ -199,26 +200,27 @@ class Trainer(torch.nn.Module):
                 concat_metrics[k].append(v)
 
         loss_dict = {f"val/{k}": sum(v) / len(v) for k, v in concat_metrics.items() if "loss" in k}
-        loss_total = sum(v for k, v in loss_dict.items() if "loss" in k) / len(loss_dict)
-        loss_dict[f"val/{LOSS_KEY}"] = loss_total
+        loss_total = sum(v for k, v in loss_dict.items() if "loss" in k)
+        loss_dict["val/loss_total"] = loss_total
         writer.log(loss_dict, step=step, commit=False)
 
-        conf_matrix_dict = {}
-        for k, list_tuple_pred_target in concat_metrics.items():
-            if "confusion_matrix" in k:
-                pred_action_ids, target_action_ids = zip(*list_tuple_pred_target)
-                pred_action_ids = torch.cat(pred_action_ids, dim=-1).tolist()
-                target_action_ids = torch.cat(target_action_ids, dim=-1).tolist()
-                if "button" in k:
-                    class_names = list(MAP_IDX_TO_BUTTON.values())
-                else:
-                    class_names = get_discretized_analog_axis_values(
-                        self.config.num_analog_discretized_values
-                    ).tolist()
-                conf_matrix_dict[f"val/{k}"] = writer.plot_confusion_matrix(
-                    preds=pred_action_ids, y_true=target_action_ids, class_names=class_names, title=k
-                )
-        writer.log(conf_matrix_dict, step=step, commit=False)
+        # TODO confusion matrix debugging
+        # conf_matrix_dict = {}
+        # for k, list_tuple_pred_target in concat_metrics.items():
+        #     if "confusion_matrix" in k:
+        #         pred_action_ids, target_action_ids = zip(*list_tuple_pred_target)
+        #         pred_action_ids = torch.cat(pred_action_ids, dim=-1).tolist()
+        #         target_action_ids = torch.cat(target_action_ids, dim=-1).tolist()
+        #         if "button" in k:
+        #             class_names = list(MAP_IDX_TO_BUTTON.values())
+        #         else:
+        #             class_names = get_discretized_analog_axis_values(
+        #                 self.config.num_analog_discretized_values
+        #             ).tolist()
+        #         conf_matrix_dict[f"val/{k}"] = writer.plot_confusion_matrix(
+        #             preds=pred_action_ids, y_true=target_action_ids, class_names=class_names, title=k
+        #         )
+        # writer.log(conf_matrix_dict, step=step, commit=False)
 
 
 class RecurrentTrainer(Trainer):
@@ -241,25 +243,23 @@ class RecurrentTrainer(Trainer):
 def main(
     rank: Optional[int],
     world_size: Optional[int],
-    config: TrainConfig,
-    in_memory_datasets: list[Tensor],
-    seed: int = 894756923,
+    train_config: TrainConfig,
 ) -> None:
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    seed = train_config.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     train_loader, val_loader = create_dataloaders(train_config, rank=rank, world_size=world_size)
-    trainer = Trainer(config=config, train_loader=train_loader, val_loader=val_loader)
+    trainer = Trainer(config=train_config, train_loader=train_loader, val_loader=val_loader)
     trainer.train_loop(
         train_loader,
         val_loader,
-        local_batch_size=config.local_batch_size,
-        n_samples=config.n_samples,
-        n_val_samples=config.n_val_samples,
-        report_len=config.report_len,
-        keep_ckpts=config.keep_ckpts,
+        local_batch_size=train_config.local_batch_size,
+        n_samples=train_config.n_samples,
+        n_val_samples=train_config.n_val_samples,
+        report_len=train_config.report_len,
+        keep_ckpts=train_config.keep_ckpts,
     )
 
 

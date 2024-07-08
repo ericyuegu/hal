@@ -20,7 +20,6 @@ class DataConfig:
     # Number of input and target frames in example/rollout
     input_len: int = 60
     target_len: int = 5
-    seed: int = 42
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -44,6 +43,7 @@ class TrainConfig(BaseConfig):
     # Data
     data: DataConfig
     dataworker: DataworkerConfig
+    seed: int = 42
 
     # Hyperparams
     loss_fn: str = "ce"
