@@ -35,8 +35,8 @@ class MmappedParquetDataset(Dataset):
 
     def __init__(
         self,
-        input_path: str,
-        stats_path: str,
+        input_path: Path,
+        stats_path: Path,
         input_len: int,
         target_len: int,
         truncate_replay_end: bool = False,

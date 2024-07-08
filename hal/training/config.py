@@ -11,8 +11,8 @@ from hal.zoo.models.registry import Arch
 
 
 @attr.s(auto_attribs=True, frozen=True)
-class DatasetConfig:
-    """Training & eval dataset metadata."""
+class DataConfig:
+    """Training & eval dataset & preprocessing."""
 
     data_dir: str
     input_preprocessing_fn: str
@@ -26,14 +26,14 @@ class DatasetConfig:
 @attr.s(auto_attribs=True, frozen=True)
 class DataworkerConfig:
     data_workers_per_gpu: int = 4
-    prefetch_factor: float = 2
+    prefetch_factor: int = 2
     collate_fn: Optional[str] = None
 
 
 @attr.s(auto_attribs=True, frozen=True)
 class BaseConfig:
     n_gpus: int
-    debug: bool = False
+    debug: bool
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -42,7 +42,7 @@ class TrainConfig(BaseConfig):
     arch: str = attr.ib(validator=attr.validators.in_(Arch.ARCH.keys()))
 
     # Data
-    dataset: DatasetConfig
+    data: DataConfig
     dataworker: DataworkerConfig
 
     # Hyperparams

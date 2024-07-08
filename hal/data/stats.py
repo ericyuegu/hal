@@ -1,5 +1,7 @@
 import json
+from pathlib import Path
 from typing import Dict
+from typing import Union
 
 import attr
 
@@ -15,7 +17,7 @@ class FeatureStats:
     median: float
 
 
-def load_dataset_stats(path: str) -> Dict[str, FeatureStats]:
+def load_dataset_stats(path: Union[str, Path]) -> Dict[str, FeatureStats]:
     """Load the dataset statistics from a JSON file."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
