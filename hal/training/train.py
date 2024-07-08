@@ -1,9 +1,9 @@
 import argparse
 import pickle
 import random
+import time
 from collections import defaultdict
 from pathlib import Path
-from time import time
 from typing import Iterable
 from typing import Optional
 from typing import Union
@@ -121,30 +121,39 @@ class Trainer(torch.nn.Module):
             for i in range(resume_idx, n_samples, report_len):
                 self.train()
                 range_iter = trange(
-                    i,
-                    i + report_len,
-                    batch_size,
+                    start=i,
+                    stop=i + report_len,
+                    step=batch_size,
                     leave=False,
                     unit="samples",
                     unit_scale=batch_size,
                     desc=f"Training stage {i / report_len}/{n_samples / report_len}",
                 )
-                t0 = time()
+                t0 = time.perf_counter()
                 for samples in range_iter:
                     self.train_step(next(train_loader), writer=writer, step=samples)
-
-                t1 = time()
-                writer.log({"throughput/samples_per_sec_train": report_len / (t1 - t0)}, step=samples, commit=False)
-                self.validate(
-                    val_loader, batch_size=local_batch_size, n_val_samples=n_val_samples, writer=writer, step=samples
+                    self.samples = samples
+                t1 = time.perf_counter()
+                writer.log(
+                    {"throughput/samples_per_sec_train": report_len / (t1 - t0)}, step=self.samples, commit=False
                 )
-                t2 = time()
-                writer.log({"throughput/samples_per_sec_val": n_val_samples / (t2 - t1)}, step=samples, commit=True)
-                ckpt.save(samples)
 
-                print(
-                    f"{samples / (1 << 20):.2f}M/{n_samples / (1 << 20):.2f}M samples, "
-                    f"time left {time_format((t2 - t0) * (n_samples - samples) / report_len)}"
+                self.validate(
+                    val_loader,
+                    batch_size=local_batch_size,
+                    n_val_samples=n_val_samples,
+                    writer=writer,
+                    step=self.samples,
+                )
+                t2 = time.perf_counter()
+                writer.log(
+                    {"throughput/samples_per_sec_val": n_val_samples / (t2 - t1)}, step=self.samples, commit=True
+                )
+                ckpt.save(self.samples)
+
+                logger.info(
+                    f"{self.samples / (1 << 20):.2f}M/{n_samples / (1 << 20):.2f}M samples, "
+                    f"time left {time_format((t2 - t0) * (n_samples - self.samples) / report_len)}"
                 )
 
         ckpt.save_file(self.model, "model.ckpt")

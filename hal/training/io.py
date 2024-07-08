@@ -9,7 +9,6 @@ from typing import Optional
 from typing import Sequence
 from typing import Tuple
 from typing import Type
-from typing import Union
 
 import attr
 import torch
@@ -212,8 +211,8 @@ class Writer:
         self.close()
 
     @classmethod
-    def create(cls, wandb_config: Optional["WandbConfig"] = None) -> Union[DummyWriter, "Writer"]:
+    def create(cls, wandb_config: Optional["WandbConfig"] = None) -> "Writer":
         if is_master() and wandb_config is not None:
             return cls(wandb_config)
         else:
-            return DummyWriter(wandb_config)
+            return DummyWriter(wandb_config)  # type: ignore

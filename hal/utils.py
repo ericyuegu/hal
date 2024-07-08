@@ -2,6 +2,7 @@ import functools
 import subprocess
 from pathlib import Path
 from typing import Iterable
+from typing import Iterator
 from typing import TypeVar
 
 import numpy as np
@@ -36,7 +37,7 @@ def report_module_weights(m: torch.nn.Module):
     return "\n".join(f"{k:<{width}} {np.prod(s):>10} {str(s):>16}" for k, s in weights)
 
 
-def repeater(it: Iterable[T]) -> Iterable[T]:
+def repeater(it: Iterable[T]) -> Iterator[T]:
     """Helper function to repeat an iterator in a memory efficient way."""
     while True:
         for x in it:
