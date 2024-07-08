@@ -9,6 +9,7 @@ from time import time
 from typing import Callable
 from typing import Dict
 from typing import Iterable
+from typing import Optional
 
 import torch
 from torch import Tensor
@@ -260,13 +261,19 @@ def make_data_loaders(
 
 
 @auto_distribute
-def main(config: TrainConfig, in_memory_datasets: list[Tensor], seed: int = 894756923) -> None:
+def main(
+    rank: Optional[int],
+    world_size: Optional[int],
+    config: TrainConfig,
+    in_memory_datasets: list[Tensor],
+    seed: int = 894756923,
+) -> None:
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-    dataloaders = create_dataloaders(train_config)
+    train_dataloader, val_dataloader = create_dataloaders(train_config, rank=rank, world_size=world_size)
 
     train_ds, val_ds = get_dataset(in_memory_datasets, input_len=config.input_len, target_len=config.target_len)
     preprocessing_fn = partial(

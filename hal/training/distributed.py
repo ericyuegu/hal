@@ -74,14 +74,14 @@ def auto_distribute(f: Callable) -> Callable:
 
     @functools.wraps(f)
     def dist_wrapped(rank: Optional[int], world_size: Optional[int], *args):
-        if rank is None:
-            return f(*args)
+        if rank is None or world_size is None:
+            return f(rank, world_size, *args)
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = "12355"
         torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
         time.sleep(1)
         try:
-            return f(*args)
+            return f(rank, world_size, *args)
         finally:
             torch.distributed.destroy_process_group()
 

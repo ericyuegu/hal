@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List
+from typing import Optional
 from typing import Tuple
 
 from torch.utils.data import DataLoader
@@ -9,7 +10,9 @@ from hal.data.dataset import MmappedParquetDataset
 from hal.training.config import TrainConfig
 
 
-def create_dataloaders(train_config: TrainConfig, rank: int, world: int) -> Tuple[DataLoader, DataLoader]:
+def create_dataloaders(
+    train_config: TrainConfig, rank: Optional[int], world_size: Optional[int]
+) -> Tuple[DataLoader, DataLoader]:
     data_dir = Path(train_config.data.data_dir)
     stats_path = data_dir / "stats.json"
 
@@ -21,7 +24,7 @@ def create_dataloaders(train_config: TrainConfig, rank: int, world: int) -> Tupl
             input_len=train_config.data.input_len,
             target_len=train_config.data.target_len,
         )
-        sampler = DistributedSampler(dataset, num_replicas=world, rank=rank)
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
         dataloader: DataLoader[MmappedParquetDataset] = DataLoader(
             dataset,
             batch_size=train_config.local_batch_size,
