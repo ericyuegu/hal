@@ -9,10 +9,9 @@ from time import time
 from typing import Callable
 from typing import Dict
 from typing import Iterable
-from typing import Tuple
 
-import attr
 import torch
+from config import TrainConfig
 from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -33,28 +32,7 @@ from hal.utils import move_tensors_to_device
 from hal.utils import repeater
 from hal.utils import report_module_weights
 from hal.utils import time_format
-
-
-@attr.s(auto_attrib=True, frozen=True)
-class Config:
-    arch: str = "lstm-v0-256-2"
-    dataset_path: str = "/opt/projects/hal2/data/full"
-    input_preprocessing_fn: str = ""
-    target_preprocessing_fn: str = ""
-    input_len: int = 60
-    target_len: int = 5
-    loss_fn: str = "ce"
-    local_batch_size: int = 1024
-    num_data_workers: int = 4  # per gpu
-    lr: float = 3e-4
-    n_samples: int = 2**27
-    n_val_samples: int = 2**17
-    keep_ckpts: int = 8
-    report_len: int = 2**24
-    betas: Tuple[float, float] = (0.9, 0.999)
-    eps: float = 1e-8
-    wd: float = 1e-2
-    debug: bool = False
+from hal.zoo.models.registry import Arch
 
 
 class Trainer(torch.nn.Module):
@@ -71,12 +49,12 @@ class Trainer(torch.nn.Module):
         params = get_exp_name(self.config)
         return get_artifact_dir(params)
 
-    def __init__(self, arch: str, config: Config) -> None:
+    def __init__(self, config: TrainConfig) -> None:
         super().__init__()
         self.config = config
 
         model = Arch.get(
-            arch, input_size=get_num_input_floats(), num_analog_values=config.num_analog_discretized_values
+            config.arch, input_size=get_num_input_floats(), num_analog_values=config.num_analog_discretized_values
         )
         self.model = wrap_model(model)  # Needed for .backward and to wrap into a module for saving
         self.opt = torch.optim.AdamW(
@@ -279,7 +257,7 @@ def make_data_loaders(
 
 
 @auto_distribute
-def main(config: Config, in_memory_datasets: list[Tensor], seed: int = 894756923) -> None:
+def main(config: TrainConfig, in_memory_datasets: list[Tensor], seed: int = 894756923) -> None:
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -307,11 +285,11 @@ def main(config: Config, in_memory_datasets: list[Tensor], seed: int = 894756923
     )
 
 
-def parse_cli() -> Config:
+def parse_cli() -> TrainConfig:
     parser = argparse.ArgumentParser()
-    for field, typ in Config.__dataclass_fields__.items():
+    for field, typ in TrainConfig.__dataclass_fields__.items():
         parser.add_argument(f"--{field}", type=typ.type, default=typ.default, required=False)
-    config = Config(**vars(parser.parse_args()))
+    config = TrainConfig(**vars(parser.parse_args()))
     return config
 
 

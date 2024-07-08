@@ -1,6 +1,10 @@
+import argparse
 from pathlib import Path
+from typing import Any
+from typing import Dict
 from typing import Optional
 from typing import Tuple
+from typing import Type
 
 import attr
 import torch
@@ -15,26 +19,13 @@ class DatasetConfig:
     """Training & eval dataset metadata."""
 
     data_dir: str
-    meta_path: Optional[str] = None
-    test_ratio: float = 0.1
-    # comma-separated lists of characters, or "all"
-    allowed_characters: str = "all"
-    allowed_opponents: str = "all"
-    seed: int = 0
-
-
-@attr.s(auto_attribs=True, frozen=True)
-class RolloutConfig:
-    """Number of gamestate frames for each training example ('rollout')."""
-
-    input_frame_count: int = 64
-    target_frame_count: int = 16
-
-
-@attr.s(auto_attribs=True, frozen=True)
-class EmbeddingConfig:
-    normalization_fn: str
-    analog_discretization_fn: str
+    stats_path: Optional[str]
+    input_preprocessing_fn: str
+    target_preprocessing_fn: str
+    # Number of input and target frames in example/rollout
+    input_len: int
+    target_len: int
+    seed: int = 42
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -58,7 +49,7 @@ class DataConfig:
 
 
 @attr.s(auto_attribs=True, frozen=True)
-class TrainerConfig:
+class TempConfig:
     # Used for launching DDP training
     n_gpus: int
 
@@ -91,3 +82,66 @@ class ClosedLoopEvalConfig:
     device: DEVICES = "cpu"
     # Comma-separated lists of stages, or "all"
     stage: EVAL_STAGES = "all"
+
+
+@attr.s(auto_attribs=True, frozen=True)
+class TrainConfig:
+    n_gpus: int
+
+    arch: str = "lstm-v0-256-2"
+
+    loss_fn: str = "ce"
+    local_batch_size: int = 1024
+    num_data_workers: int = 4  # per gpu
+    lr: float = 3e-4
+    n_samples: int = 2**27
+    n_val_samples: int = 2**17
+    keep_ckpts: int = 8
+    report_len: int = 2**24
+    betas: Tuple[float, float] = (0.9, 0.999)
+    eps: float = 1e-8
+    wd: float = 1e-2
+    debug: bool = False
+
+
+def create_parser_for_attrs_class(
+    cls: Type[Any], parser: argparse.ArgumentParser, prefix: str = ""
+) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser()
+
+    for field in attr.fields(cls):
+        arg_name = f"--{prefix}{field.name}".replace("_", "-")
+
+        if attr.has(field.type):
+            # If the field is another attrs class, recurse
+            create_parser_for_attrs_class(field.type, parser, f"{prefix}{field.name}.")
+        else:
+            # Otherwise, add it as a regular argument
+            parser.add_argument(
+                arg_name,
+                type=field.type,
+                help=field.metadata.get("help", ""),
+                default=field.default if field.default is not attr.NOTHING else None,
+                required=field.default is attr.NOTHING,
+            )
+
+    return parser
+
+
+def parse_args_to_attrs_instance(cls: Type[Any], args: argparse.Namespace, prefix: str = "") -> Any:
+    kwargs: Dict[str, Any] = {}
+
+    for field in attr.fields(cls):
+        arg_name = f"{prefix}{field.name}"
+
+        if attr.has(field.type):
+            # If the field is another attrs class, recurse
+            kwargs[field.name] = parse_args_to_attrs_instance(field.type, args, f"{arg_name}.")
+        else:
+            # Otherwise, get the value from args
+            value = getattr(args, arg_name.replace(".", "_"))
+            if value is not None:
+                kwargs[field.name] = value
+
+    return cls(**kwargs)
