@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 from typing import Optional
+from typing import Tuple
 from typing import Union
 
 import numpy as np
@@ -32,11 +33,13 @@ from hal.training.io import WandbConfig
 from hal.training.io import Writer
 from hal.training.io import get_artifact_dir
 from hal.training.io import get_exp_name
+from hal.training.zoo.embed.registry import ModelInputs
+from hal.training.zoo.embed.registry import ModelOutputs
+from hal.training.zoo.models.registry import Arch
 from hal.utils import move_tensors_to_device
 from hal.utils import repeater
 from hal.utils import report_module_weights
 from hal.utils import time_format
-from hal.training.zoo.models.registry import Arch
 
 
 class Trainer(torch.nn.Module):
@@ -82,13 +85,13 @@ class Trainer(torch.nn.Module):
             )
         )
 
-    def loss_fn(self, pred: dict[str, Tensor], target: dict[str, Tensor]) -> dict[str, Tensor]:
+    def loss_fn(self, pred: ModelOutputs, target: ModelOutputs) -> dict[str, Tensor]:
         raise NotImplementedError()
 
-    def train_op(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+    def train_op(self, inputs: ModelInputs, targets: ModelOutputs) -> dict[str, Tensor]:
         raise NotImplementedError()
 
-    def train_step(self, batch: tuple[dict[str, Tensor], dict[str, Tensor]], writer: Writer, step: int) -> None:
+    def train_step(self, batch: Tuple[ModelInputs, ModelOutputs], writer: Writer, step: int) -> None:
         batch = move_tensors_to_device(batch, self.device)
         inputs, targets = batch
         metrics = self.train_op(inputs, targets)
@@ -96,8 +99,8 @@ class Trainer(torch.nn.Module):
 
     def train_loop(
         self,
-        train_loader: Iterable,
-        val_loader: Iterable,
+        train_loader: Iterable[Tuple[ModelInputs, ModelOutputs]],
+        val_loader: Iterable[Tuple[ModelInputs, ModelOutputs]],
         local_batch_size: int,
         n_samples: int,
         n_val_samples: int,
@@ -224,10 +227,10 @@ class Trainer(torch.nn.Module):
 
 
 class RecurrentTrainer(Trainer):
-    def train_op(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Number]:
+    def train_op(self, inputs: ModelInputs, targets: ModelOutputs) -> dict[str, Number]:
         self.opt.zero_grad(set_to_none=True)
-        inputs, _ = self.model(inputs)
-        loss_by_head = self.loss_fn(inputs, targets)
+        pred = self.model(inputs)
+        loss_by_head = self.loss_fn(pred, targets)
         loss_total: Tensor = sum(loss_by_head.values())
         loss_total.backward()
         self.opt.step()

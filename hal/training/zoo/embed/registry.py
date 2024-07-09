@@ -21,7 +21,7 @@ class ModelInputs:
 
 
 @attr.s(auto_attribs=True, frozen=True)
-class ModelTargets:
+class ModelOutputs:
     # v0
     main_stick: npt.NDArray[np.int_]
     c_stick: npt.NDArray[np.int_]
@@ -29,7 +29,7 @@ class ModelTargets:
 
 
 InputPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelInputs]
-TargetPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelTargets]
+TargetPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelOutputs]
 
 
 class InputPreprocessRegistry:

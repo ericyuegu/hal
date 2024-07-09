@@ -14,7 +14,7 @@ from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
 from hal.training.zoo.embed.registry import InputPreprocessRegistry
 from hal.training.zoo.embed.registry import ModelInputs
-from hal.training.zoo.embed.registry import ModelTargets
+from hal.training.zoo.embed.registry import ModelOutputs
 from hal.training.zoo.embed.registry import TargetPreprocessRegistry
 
 
@@ -97,7 +97,7 @@ class MmappedParquetDataset(Dataset):
     def __len__(self) -> int:
         return len(self.filtered_indices) * len(self.player_perspectives)
 
-    def __getitem__(self, index: int) -> Tuple[ModelInputs, ModelTargets]:
+    def __getitem__(self, index: int) -> Tuple[ModelInputs, ModelOutputs]:
         player_index = index % len(self.player_perspectives)
         actual_index = self.filtered_indices[index // len(self.player_perspectives)]
         table_chunk = self.parquet_table[actual_index : actual_index + self.trajectory_len]
