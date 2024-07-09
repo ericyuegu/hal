@@ -100,21 +100,16 @@ class MmappedParquetDataset(Dataset):
     def __getitem__(self, index: int) -> Tuple[ModelInputs, ModelTargets]:
         player_index = index % len(self.player_perspectives)
         actual_index = self.filtered_indices[index // len(self.player_perspectives)]
-        input_table_chunk = self.parquet_table[actual_index : actual_index + self.input_len]
-        target_table_chunk = self.parquet_table[actual_index + self.input_len : actual_index + self.trajectory_len]
+        table_chunk = self.parquet_table[actual_index : actual_index + self.trajectory_len]
 
         # Truncate to the first replay
         if self.truncate_replay_end:
-            first_uuid = input_table_chunk["replay_uuid"][0].as_py()
-            mask = pc.equal(input_table_chunk["replay_uuid"], first_uuid)
-            input_table_chunk = input_table_chunk.filter(mask)
-            target_table_chunk = target_table_chunk.filter(mask)
+            first_uuid = table_chunk["replay_uuid"][0].as_py()
+            mask = pc.equal(table_chunk["replay_uuid"], first_uuid)
+            table_chunk = table_chunk.filter(mask)
 
-        input_features_by_name = pyarrow_table_to_np_dict(input_table_chunk)
-        target_features_by_name = pyarrow_table_to_np_dict(target_table_chunk)
+        features_by_name = pyarrow_table_to_np_dict(table_chunk)
         player = self.player_perspectives[player_index]
-        inputs = self.input_preprocessing_fn(input_features_by_name, player=player, stats=self.stats_by_feature_name)
-        targets = self.target_preprocessing_fn(
-            target_features_by_name, player=player, stats=self.stats_by_feature_name
-        )
+        inputs = self.input_preprocessing_fn(features_by_name, self.config, player, self.stats_by_feature_name)
+        targets = self.target_preprocessing_fn(features_by_name, self.config, player, self.stats_by_feature_name)
         return inputs, targets

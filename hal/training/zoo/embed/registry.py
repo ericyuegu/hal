@@ -5,9 +5,13 @@ import attr
 import numpy as np
 import numpy.typing as npt
 
+from hal.data.stats import FeatureStats
+from hal.training.config import DataConfig
+
 
 @attr.s(auto_attribs=True, frozen=True)
 class ModelInputs:
+    # v0
     stage: npt.NDArray[np.int_]
     ego_character: npt.NDArray[np.int_]
     ego_action: npt.NDArray[np.int_]
@@ -18,13 +22,14 @@ class ModelInputs:
 
 @attr.s(auto_attribs=True, frozen=True)
 class ModelTargets:
+    # v0
     main_stick: npt.NDArray[np.int_]
     c_stick: npt.NDArray[np.int_]
     buttons: npt.NDArray[np.int_]
 
 
-InputPreprocessFn = Callable[..., ModelInputs]
-TargetPreprocessFn = Callable[..., ModelTargets]
+InputPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelInputs]
+TargetPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelTargets]
 
 
 class InputPreprocessRegistry:

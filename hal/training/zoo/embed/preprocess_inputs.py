@@ -10,6 +10,7 @@ from hal.data.preprocessing import PLAYER_INPUT_FEATURES_TO_NORMALIZE
 from hal.data.preprocessing import PLAYER_POSITION
 from hal.data.preprocessing import VALID_PLAYERS
 from hal.data.stats import FeatureStats
+from hal.training.config import DataConfig
 from hal.training.zoo.embed.registry import InputPreprocessRegistry
 from hal.training.zoo.embed.registry import ModelInputs
 
@@ -46,11 +47,17 @@ def _preprocess_categorical_features(
 
 
 @InputPreprocessRegistry.register("inputs_v0")
-def preprocess_inputs_v0(sample: Dict[str, np.ndarray], player: str, stats: Dict[str, FeatureStats]) -> ModelInputs:
-    """Preprocess basic player state."""
+def preprocess_inputs_v0(
+    sample: Dict[str, np.ndarray], config: DataConfig, player: str, stats: Dict[str, FeatureStats]
+) -> ModelInputs:
+    """Slice input sample to the input length."""
     assert player in VALID_PLAYERS
     opponent = "p2" if player == "p1" else "p1"
-    stage = sample["stage"]
-    categorical_features = _preprocess_categorical_features(sample, player, opponent, stats)
-    gamestate = _preprocess_numeric_features(sample, player, opponent, stats)
+
+    input_sample = {k: v[: config.input_len] for k, v in sample.items()}
+
+    stage = input_sample["stage"]
+    categorical_features = _preprocess_categorical_features(input_sample, player, opponent, stats)
+    gamestate = _preprocess_numeric_features(input_sample, player, opponent, stats)
+
     return ModelInputs(stage=stage, gamestate=gamestate, **categorical_features)
