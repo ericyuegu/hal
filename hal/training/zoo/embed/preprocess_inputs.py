@@ -10,7 +10,7 @@ from hal.data.preprocessing import PLAYER_INPUT_FEATURES_TO_NORMALIZE
 from hal.data.preprocessing import PLAYER_POSITION
 from hal.data.preprocessing import VALID_PLAYERS
 from hal.data.stats import FeatureStats
-from hal.training.zoo.embed.registry import Embed
+from hal.training.zoo.embed.registry import InputPreprocessRegistry
 from hal.training.zoo.embed.registry import ModelInputs
 
 
@@ -45,7 +45,7 @@ def _preprocess_categorical_features(
     return processed_features
 
 
-@Embed.register("inputs_v0")
+@InputPreprocessRegistry.register("inputs_v0")
 def preprocess_inputs_v0(sample: Dict[str, np.ndarray], player: str, stats: Dict[str, FeatureStats]) -> ModelInputs:
     """Preprocess basic player state."""
     assert player in VALID_PLAYERS

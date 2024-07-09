@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Dict
 from typing import Tuple
 
 import numpy as np
@@ -13,7 +12,10 @@ from hal.data.preprocessing import pyarrow_table_to_np_dict
 from hal.data.schema import SCHEMA
 from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
-from hal.training.zoo.embed.registry import Embed
+from hal.training.zoo.embed.registry import InputPreprocessRegistry
+from hal.training.zoo.embed.registry import ModelInputs
+from hal.training.zoo.embed.registry import ModelTargets
+from hal.training.zoo.embed.registry import TargetPreprocessRegistry
 
 
 class MmappedParquetDataset(Dataset):
@@ -56,8 +58,8 @@ class MmappedParquetDataset(Dataset):
         self.player_perspectives = ["p1", "p2"] if self.include_both_players else ["p1"]
         self.replay_filter = self.config.replay_filter
 
-        self.input_preprocessing_fn = Embed.get(self.config.input_preprocessing_fn)
-        self.target_preprocessing_fn = Embed.get(self.config.target_preprocessing_fn)
+        self.input_preprocessing_fn = InputPreprocessRegistry.get(self.config.input_preprocessing_fn)
+        self.target_preprocessing_fn = TargetPreprocessRegistry.get(self.config.target_preprocessing_fn)
 
         self.parquet_table = pq.read_table(self.input_path, schema=SCHEMA, memory_map=True)
         self.filtered_indices = self._apply_filter()
@@ -95,7 +97,7 @@ class MmappedParquetDataset(Dataset):
     def __len__(self) -> int:
         return len(self.filtered_indices) * len(self.player_perspectives)
 
-    def __getitem__(self, index: int) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    def __getitem__(self, index: int) -> Tuple[ModelInputs, ModelTargets]:
         player_index = index % len(self.player_perspectives)
         actual_index = self.filtered_indices[index // len(self.player_perspectives)]
         input_table_chunk = self.parquet_table[actual_index : actual_index + self.input_len]
