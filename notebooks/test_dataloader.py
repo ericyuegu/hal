@@ -19,6 +19,11 @@ train_config = TrainConfig(
 train_loader, val_loader = create_dataloaders(train_config, rank=None, world_size=None)
 
 # %%
-x = next(iter(train_loader))
-x
+x, y = next(iter(train_loader))
 # %%
+x["gamestate"][0].shape
+
+# %%
+y["buttons"].shape
+# %%
+y["buttons"].squeeze()[0]

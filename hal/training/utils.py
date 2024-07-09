@@ -66,5 +66,9 @@ def move_tensors_to_device(inputs: T, device: str, non_blocking=True) -> T:
 
 
 def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
-    """Convert pyarrow table to dictionary of numpy arrays."""
-    return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
+    """
+    Convert pyarrow table to dictionary of numpy arrays.
+
+    Use copy=True to ensure that the numpy arrays are not views of the original data for safe downstream processing.
+    """
+    return {name: np.array(col.to_numpy(), copy=True) for name, col in zip(table.column_names, table.columns)}
