@@ -17,11 +17,14 @@ def one_hot_2d(arr: np.ndarray) -> np.ndarray:
     Returns:
         np.ndarray: One-hot encoded array of the same shape (T, D).
     """
+    assert arr.ndim == 2, "Input array must be 2D"
     T, D = arr.shape
     row_sums = arr.sum(axis=1)
     multi_pressed = np.argwhere(row_sums > 1).flatten()
-    first_multi_pressed = multi_pressed[0]
-    prev_buttons = set(np.where(arr[first_multi_pressed - 1] == 1)[0]) if first_multi_pressed > 0 else set()
+    prev_buttons = set()
+    if len(multi_pressed) > 0:
+        first_multi_pressed = multi_pressed[0]
+        prev_buttons = set(np.where(arr[first_multi_pressed - 1] == 1)[0]) if first_multi_pressed > 0 else set()
 
     for i in multi_pressed:
         curr_press = arr[i]
