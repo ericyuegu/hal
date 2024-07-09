@@ -35,3 +35,12 @@ x["gamestate"][0].shape
 y["buttons"].shape
 # %%
 y["buttons"].squeeze()[0]
+
+# %%
+x.keys()
+# %%
+x["ego_character"].shape
+# %%
+for k, v in x.items():
+    print(k, v.shape)
+# %%
