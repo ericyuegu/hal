@@ -5,7 +5,6 @@ import numpy as np
 from hal.data.normalize import VALID_PLAYERS
 from hal.data.normalize import union
 from hal.data.stats import FeatureStats
-from hal.training.config import DataConfig
 from hal.training.types import ModelOutputs
 from hal.training.zoo.preprocess.encoding import get_closest_stick_xy_cluster_v0
 from hal.training.zoo.preprocess.encoding import one_hot_3d_fast_bugged
@@ -14,7 +13,7 @@ from hal.training.zoo.preprocess.registry import TargetPreprocessRegistry
 
 @TargetPreprocessRegistry.register("targets_v0")
 def preprocess_targets_v0(
-    sample: Dict[str, np.ndarray], config: DataConfig, player: str, stats: Dict[str, FeatureStats]
+    sample: Dict[str, np.ndarray], input_len: int, player: str, stats: Dict[str, FeatureStats]
 ) -> ModelOutputs:
     """
     Return only target features after the input trajectory length.
@@ -23,7 +22,7 @@ def preprocess_targets_v0(
     """
     assert player in VALID_PLAYERS
 
-    target_sample = {k: v[config.input_len :] for k, v in sample.items()}
+    target_sample = {k: v[input_len:] for k, v in sample.items()}
 
     # Main stick and c-stick classification
     main_stick_x = target_sample[f"{player}_main_stick_x"]

@@ -110,6 +110,10 @@ class MmappedParquetDataset(Dataset):
 
         features_by_name = pyarrow_table_to_np_dict(table_chunk)
         player = self.player_perspectives[player_index]
-        inputs = self.input_preprocessing_fn(features_by_name, self.config, player, self.stats_by_feature_name)
-        targets = self.target_preprocessing_fn(features_by_name, self.config, player, self.stats_by_feature_name)
+        inputs = self.input_preprocessing_fn(
+            features_by_name, self.config.input_len, player, self.stats_by_feature_name
+        )
+        targets = self.target_preprocessing_fn(
+            features_by_name, self.config.input_len, player, self.stats_by_feature_name
+        )
         return inputs, targets

@@ -12,8 +12,6 @@ import numpy as np
 from hal.data.stats import FeatureStats
 from hal.training.types import ModelInputs
 from hal.training.types import ModelOutputs
-from hal.training.zoo.models.registry import Arch
-from hal.training.zoo.preprocess.registry import InputPreprocessRegistry
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -30,8 +28,8 @@ class DataConfig:
     """Training & eval dataset & preprocessing."""
 
     data_dir: str
-    input_preprocessing_fn: str = attr.ib(validator=attr.validators.in_(InputPreprocessRegistry.EMBED.keys()))
-    target_preprocessing_fn: str = attr.ib(validator=attr.validators.in_(InputPreprocessRegistry.EMBED.keys()))
+    input_preprocessing_fn: str
+    target_preprocessing_fn: str
     # Number of input and target frames in example/rollout
     input_len: int = 60
     target_len: int = 5
@@ -56,7 +54,7 @@ class BaseConfig:
 @attr.s(auto_attribs=True, frozen=True)
 class TrainConfig(BaseConfig):
     # Model
-    arch: str = attr.ib(validator=attr.validators.in_(Arch.ARCH.keys()))
+    arch: str
 
     # Data
     data: DataConfig
@@ -119,8 +117,8 @@ def parse_args_to_attrs_instance(cls: Type[Any], args: argparse.Namespace, prefi
     return cls(**kwargs)
 
 
-TargetPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelOutputs]
-InputPreprocessFn = Callable[[Dict[str, np.ndarray], DataConfig, str, Dict[str, FeatureStats]], ModelInputs]
+TargetPreprocessFn = Callable[[Dict[str, np.ndarray], int, str, Dict[str, FeatureStats]], ModelOutputs]
+InputPreprocessFn = Callable[[Dict[str, np.ndarray], int, str, Dict[str, FeatureStats]], ModelInputs]
 
 # @attr.s(auto_attribs=True, frozen=True)
 # class ClosedLoopEvalConfig:

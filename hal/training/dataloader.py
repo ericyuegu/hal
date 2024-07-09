@@ -16,6 +16,7 @@ def create_dataloaders(
 ) -> Tuple[DataLoader, DataLoader]:
     data_dir = Path(train_config.data.data_dir)
     stats_path = data_dir / "stats.json"
+    is_distributed = rank is not None and world_size is not None and world_size > 1
 
     dataloaders: List[DataLoader] = []
     for split in ("train", "val"):
@@ -25,13 +26,15 @@ def create_dataloaders(
             stats_path=stats_path,
             data_config=train_config.data,
         )
-        sampler = DistributedSampler(
-            dataset, num_replicas=world_size, rank=rank, seed=train_config.seed, drop_last=is_train
+        sampler = (
+            DistributedSampler(dataset, num_replicas=world_size, rank=rank, seed=train_config.seed, drop_last=is_train)
+            if is_distributed
+            else None
         )
         dataloader: DataLoader[MmappedParquetDataset] = DataLoader(
             dataset,
             batch_size=train_config.local_batch_size,
-            shuffle=is_train,
+            shuffle=is_train and not is_distributed,
             sampler=sampler,
             num_workers=train_config.dataworker.data_workers_per_gpu,
             pin_memory=torch.cuda.is_available(),

@@ -10,7 +10,6 @@ from hal.data.normalize import PLAYER_INPUT_FEATURES_TO_NORMALIZE
 from hal.data.normalize import PLAYER_POSITION
 from hal.data.normalize import VALID_PLAYERS
 from hal.data.stats import FeatureStats
-from hal.training.config import DataConfig
 from hal.training.types import ModelInputs
 from hal.training.zoo.preprocess.registry import InputPreprocessRegistry
 
@@ -48,13 +47,13 @@ def _preprocess_categorical_features(
 
 @InputPreprocessRegistry.register("inputs_v0")
 def preprocess_inputs_v0(
-    sample: Dict[str, np.ndarray], config: DataConfig, player: str, stats: Dict[str, FeatureStats]
+    sample: Dict[str, np.ndarray], input_len: int, player: str, stats: Dict[str, FeatureStats]
 ) -> ModelInputs:
     """Slice input sample to the input length."""
     assert player in VALID_PLAYERS
     opponent = "p2" if player == "p1" else "p1"
 
-    input_sample = {k: v[: config.input_len] for k, v in sample.items()}
+    input_sample = {k: v[:input_len] for k, v in sample.items()}
 
     stage = input_sample["stage"]
     categorical_features = _preprocess_categorical_features(input_sample, player, opponent, stats)
