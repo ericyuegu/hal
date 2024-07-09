@@ -53,7 +53,7 @@ class MmappedParquetDataset(Dataset):
         self.input_len = self.config.input_len
         self.target_len = self.config.target_len
         self.trajectory_len = self.config.input_len + self.config.target_len
-        self.truncate_replay_end = self.config.truncate_replay_end
+        self.truncate_rollouts_to_replay_end = self.config.truncate_rollouts_to_replay_end
         self.include_both_players = self.config.include_both_players
         self.player_perspectives = ["p1", "p2"] if self.include_both_players else ["p1"]
         self.replay_filter = self.config.replay_filter
@@ -103,7 +103,7 @@ class MmappedParquetDataset(Dataset):
         table_chunk = self.parquet_table[actual_index : actual_index + self.trajectory_len]
 
         # Truncate to the first replay
-        if self.truncate_replay_end:
+        if self.truncate_rollouts_to_replay_end:
             first_uuid = table_chunk["replay_uuid"][0].as_py()
             mask = pc.equal(table_chunk["replay_uuid"], first_uuid)
             table_chunk = table_chunk.filter(mask)
