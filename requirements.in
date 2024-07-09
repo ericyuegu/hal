@@ -33,3 +33,4 @@ seaborn==0.13.2
 more_itertools==10.3.0
 scikit-learn==1.5.1
 pytest==8.2.2
+wandb==0.17.4
