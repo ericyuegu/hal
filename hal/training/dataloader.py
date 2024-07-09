@@ -23,8 +23,7 @@ def create_dataloaders(
         dataset = MmappedParquetDataset(
             input_path=data_dir / f"{split}.parquet",
             stats_path=stats_path,
-            input_len=train_config.data.input_len,
-            target_len=train_config.data.target_len,
+            data_config=train_config.data,
         )
         sampler = DistributedSampler(
             dataset, num_replicas=world_size, rank=rank, seed=train_config.seed, drop_last=is_train

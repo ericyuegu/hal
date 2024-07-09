@@ -1,9 +1,7 @@
 from pathlib import Path
 from typing import Dict
-from typing import Optional
 from typing import Tuple
 
-import attr
 import numpy as np
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -14,17 +12,9 @@ from hal.data.constants import IDX_BY_STAGE_STR
 from hal.data.preprocessing import pyarrow_table_to_np_dict
 from hal.data.schema import SCHEMA
 from hal.data.stats import load_dataset_stats
+from hal.training.config import DataConfig
 from hal.training.zoo.embed.preprocess_inputs import preprocess_inputs_v0
 from hal.training.zoo.embed.preprocess_targets import preprocess_targets_v0
-
-
-@attr.s(auto_attribs=True, frozen=True)
-class ReplayFilter:
-    """Filter for replay."""
-
-    replay_uuid: Optional[str] = None
-    stage: Optional[str] = None
-    character: Optional[str] = None
 
 
 class MmappedParquetDataset(Dataset):
@@ -37,44 +27,38 @@ class MmappedParquetDataset(Dataset):
         self,
         input_path: Path,
         stats_path: Path,
-        input_len: int,
-        target_len: int,
-        truncate_replay_end: bool = False,
-        replay_filter: Optional[ReplayFilter] = None,
-        include_both_players: bool = True,  # New parameter
+        data_config: DataConfig,
     ) -> None:
         """
         Initialize the dataset.
 
         Args:
-            input_path (str): Path to the parquet file.
-            input_len (int): Length of the input sequence.
-            target_len (int): Length of the target sequence.
-            truncate_replay_end (bool): Whether to truncate sequences at replay boundaries.
-            replay_filter (Optional[ReplayFilter]): Filter for replays.
-            include_both_players (bool): Whether to include both player 1 and player 2 perspectives.
+            input_path (Path): Path to the parquet file.
+            stats_path (Path): Path to the stats file.
+            data_config (DataConfig): Configuration for the dataset.
 
         Raises:
-            ValueError: If input parameters are invalid.
+            ValueError: If input_len or target_len are not positive integers.
             FileNotFoundError: If the input file doesn't exist.
         """
-        if input_len <= 0 or target_len <= 0:
+        self.config = data_config
+        if self.config.input_len <= 0 or self.config.target_len <= 0:
             raise ValueError("input_len and target_len must be positive integers")
         if not Path(input_path).exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
 
         self.input_path = input_path
         self.stats_by_feature_name = load_dataset_stats(stats_path)
-        self.input_len = input_len
-        self.target_len = target_len
-        self.trajectory_len = input_len + target_len
-        self.truncate_replay_end = truncate_replay_end
-        self.include_both_players = include_both_players
-        self.player_perspectives = ["p1", "p2"] if include_both_players else ["p1"]
+        self.input_len = self.config.input_len
+        self.target_len = self.config.target_len
+        self.trajectory_len = self.config.input_len + self.config.target_len
+        self.truncate_replay_end = self.config.truncate_replay_end
+        self.include_both_players = self.config.include_both_players
+        self.player_perspectives = ["p1", "p2"] if self.include_both_players else ["p1"]
 
         self.parquet_table = pq.read_table(self.input_path, schema=SCHEMA, memory_map=True)
 
-        self.replay_filter = replay_filter
+        self.replay_filter = self.config.replay_filter
         self.filtered_indices = self._apply_filter()
 
     def _apply_filter(self) -> np.ndarray:

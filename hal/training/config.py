@@ -11,6 +11,15 @@ from hal.training.zoo.models.registry import Arch
 
 
 @attr.s(auto_attribs=True, frozen=True)
+class ReplayFilter:
+    """Filter for replay."""
+
+    replay_uuid: Optional[str] = None
+    stage: Optional[str] = None
+    character: Optional[str] = None
+
+
+@attr.s(auto_attribs=True, frozen=True)
 class DataConfig:
     """Training & eval dataset & preprocessing."""
 
@@ -20,6 +29,9 @@ class DataConfig:
     # Number of input and target frames in example/rollout
     input_len: int = 60
     target_len: int = 5
+    replay_filter: ReplayFilter = ReplayFilter()
+    include_both_players: bool = False
+    truncate_replay_end: bool = True
 
 
 @attr.s(auto_attribs=True, frozen=True)
