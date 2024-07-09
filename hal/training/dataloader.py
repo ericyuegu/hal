@@ -19,17 +19,20 @@ def create_dataloaders(
 
     dataloaders: List[DataLoader] = []
     for split in ("train", "val"):
+        is_train = split == "train"
         dataset = MmappedParquetDataset(
             input_path=data_dir / f"{split}.parquet",
             stats_path=stats_path,
             input_len=train_config.data.input_len,
             target_len=train_config.data.target_len,
         )
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+        sampler = DistributedSampler(
+            dataset, num_replicas=world_size, rank=rank, seed=train_config.seed, drop_last=is_train
+        )
         dataloader: DataLoader[MmappedParquetDataset] = DataLoader(
             dataset,
             batch_size=train_config.local_batch_size,
-            shuffle=True if split == "train" else False,
+            shuffle=is_train,
             sampler=sampler,
             num_workers=train_config.dataworker.data_workers_per_gpu,
             pin_memory=torch.cuda.is_available(),
