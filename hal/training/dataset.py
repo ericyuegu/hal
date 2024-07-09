@@ -13,8 +13,7 @@ from hal.data.preprocessing import pyarrow_table_to_np_dict
 from hal.data.schema import SCHEMA
 from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
-from hal.training.zoo.embed.preprocess_inputs import preprocess_inputs_v0
-from hal.training.zoo.embed.preprocess_targets import preprocess_targets_v0
+from hal.training.zoo.embed.registry import Embed
 
 
 class MmappedParquetDataset(Dataset):
@@ -55,10 +54,12 @@ class MmappedParquetDataset(Dataset):
         self.truncate_replay_end = self.config.truncate_replay_end
         self.include_both_players = self.config.include_both_players
         self.player_perspectives = ["p1", "p2"] if self.include_both_players else ["p1"]
+        self.replay_filter = self.config.replay_filter
+
+        self.input_preprocessing_fn = Embed.get(self.config.input_preprocessing_fn)
+        self.target_preprocessing_fn = Embed.get(self.config.target_preprocessing_fn)
 
         self.parquet_table = pq.read_table(self.input_path, schema=SCHEMA, memory_map=True)
-
-        self.replay_filter = self.config.replay_filter
         self.filtered_indices = self._apply_filter()
 
     def _apply_filter(self) -> np.ndarray:
@@ -110,6 +111,8 @@ class MmappedParquetDataset(Dataset):
         input_features_by_name = pyarrow_table_to_np_dict(input_table_chunk)
         target_features_by_name = pyarrow_table_to_np_dict(target_table_chunk)
         player = self.player_perspectives[player_index]
-        inputs = preprocess_inputs_v0(input_features_by_name, player=player, stats=self.stats_by_feature_name)
-        targets = preprocess_targets_v0(target_features_by_name, player=player)
+        inputs = self.input_preprocessing_fn(input_features_by_name, player=player, stats=self.stats_by_feature_name)
+        targets = self.target_preprocessing_fn(
+            target_features_by_name, player=player, stats=self.stats_by_feature_name
+        )
         return inputs, targets

@@ -7,6 +7,7 @@ from typing import Type
 
 import attr
 
+from hal.training.zoo.embed.registry import Embed
 from hal.training.zoo.models.registry import Arch
 
 
@@ -24,8 +25,8 @@ class DataConfig:
     """Training & eval dataset & preprocessing."""
 
     data_dir: str
-    input_preprocessing_fn: str
-    target_preprocessing_fn: str
+    input_preprocessing_fn: str = attr.ib(validator=attr.validators.in_(Embed.EMBED.keys()))
+    target_preprocessing_fn: str = attr.ib(validator=attr.validators.in_(Embed.EMBED.keys()))
     # Number of input and target frames in example/rollout
     input_len: int = 60
     target_len: int = 5
