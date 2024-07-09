@@ -9,7 +9,7 @@ import pyarrow as pa
 from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.data.stats import FeatureStats
 
-VALID_PLAYERS: Final[Tuple[str, ...]] = ("p1", "p2")
+VALID_PLAYERS: Final[Tuple[str, str]] = ("p1", "p2")
 
 
 ###################
