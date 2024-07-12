@@ -169,7 +169,7 @@ class Trainer(torch.nn.Module, abc.ABC):
 
         ckpt.save_file(self.model, "model.ckpt")
 
-    def val_step(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, float]:
+    def val_op(self, inputs: Dict[str, Tensor], targets: Dict[str, Tensor]) -> Dict[str, float]:
         self.eval()
         with torch.no_grad():
             pred, _ = self.model(inputs)
@@ -179,7 +179,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         metrics_dict = {k: v.item() for k, v in loss.items()}
         return metrics_dict
 
-    def save_batch_to_disk(self, batch: tuple[dict[str, Tensor], ...], step: int) -> None:
+    def save_batch_to_disk(self, batch: tuple[Dict[str, Tensor], ...], step: int) -> None:
         save_batch_path = self.artifact_dir / "training_samples" / f"{step}.pkl"
         Path.mkdir(save_batch_path.parent, exist_ok=True, parents=True)
         with open(save_batch_path, "wb") as f:
@@ -205,7 +205,7 @@ class Trainer(torch.nn.Module, abc.ABC):
             batch = move_tensors_to_device(batch, device)
             if i == 0 and self.config.debug:
                 self.save_batch_to_disk(batch, step=step)
-            metrics_dict = self.val_step(*batch)
+            metrics_dict = self.val_op(*batch)
             metrics_dict = move_tensors_to_device(metrics_dict, "cpu", non_blocking=False)
             for k, v in metrics_dict.items():
                 concat_metrics[k].append(v)
