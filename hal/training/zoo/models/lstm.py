@@ -20,37 +20,28 @@ class LSTM(nn.Module):
         self.stage_embed = nn.Embedding(len(STAGE_BY_IDX), 4)
         self.character_embed = nn.Embedding(len(CHARACTER_BY_IDX), 6)
         self.action_embed = nn.Embedding(len(ACTION_BY_IDX), 20)
-        self.core = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
 
         self.button_head = nn.Linear(hidden_size, len(BUTTON_BY_IDX))
         self.main_stick_head = nn.Linear(hidden_size, len(STICK_XY_CLUSTER_CENTERS_V0))
         self.c_stick_head = nn.Linear(hidden_size, len(STICK_XY_CLUSTER_CENTERS_V0))
 
     def forward(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        stage_embed = self.stage_embed(inputs["stage"])
-        ego_character_embed = self.character_embed(inputs["ego_character"])
-        opponent_character_embed = self.character_embed(inputs["opponent_character"])
-        ego_action_embed = self.action_embed(inputs["ego_action"])
-        opponent_action_embed = self.action_embed(inputs["opponent_action"])
+        stage_embed = self.stage_embed(inputs["stage"]).squeeze(-2)
+        ego_character_embed = self.character_embed(inputs["ego_character"]).squeeze(-2)
+        opponent_character_embed = self.character_embed(inputs["opponent_character"]).squeeze(-2)
+        ego_action_embed = self.action_embed(inputs["ego_action"]).squeeze(-2)
+        opponent_action_embed = self.action_embed(inputs["opponent_action"]).squeeze(-2)
         gamestate = inputs["gamestate"]
 
+        batch_size = stage_embed.shape[0]
+
+        device = next(self.lstm.parameters()).device
         hidden, cell = (
-            torch.zeros(self.num_layers, 1, self.hidden_size),
-            torch.zeros(self.num_layers, 1, self.hidden_size),
+            torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device),
+            torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device),
         )
 
-        for tensor in (
-            stage_embed,
-            ego_character_embed,
-            opponent_character_embed,
-            ego_action_embed,
-            opponent_action_embed,
-            gamestate,
-        ):
-            print(tensor.shape)
-        import pdb
-
-        pdb.set_trace()
         x = torch.cat(
             [
                 stage_embed,
@@ -62,20 +53,16 @@ class LSTM(nn.Module):
             ],
             dim=-1,
         )
-        x, (hidden, cell) = self.core(x, (hidden, cell))
+        x, (hidden, cell) = self.lstm(x, (hidden, cell))
 
         button_logits = self.button_head(hidden)
         main_stick_logits = self.main_stick_head(hidden)
         c_stick_logits = self.c_stick_head(hidden)
 
-        button_pred = torch.argmax(button_logits, dim=2)
-        main_stick_pred = torch.argmax(main_stick_logits, dim=2)
-        c_stick_pred = torch.argmax(c_stick_logits, dim=2)
-
         return {
-            "buttons": button_pred,
-            "main_stick": main_stick_pred,
-            "c_stick": c_stick_pred,
+            "buttons": button_logits,
+            "main_stick": main_stick_logits,
+            "c_stick": c_stick_logits,
         }
 
 

@@ -101,9 +101,6 @@ class Trainer(torch.nn.Module, abc.ABC):
     def train_step(self, batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]], writer: Writer, step: int) -> None:
         batch = move_tensors_to_device(batch, self.device)
         inputs, targets = batch
-        import pdb
-
-        pdb.set_trace()
         metrics = self.train_op(inputs, targets)
         writer.log(metrics, step=step, commit=False)
 

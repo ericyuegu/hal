@@ -22,6 +22,7 @@ class RecurrentTrainer(Trainer):
     def train_op(self, inputs: Dict[str, Tensor], targets: Dict[str, Tensor]) -> Dict[str, Number]:
         self.opt.zero_grad(set_to_none=True)
         pred = self.model(inputs)
+        # unroll over target len
         loss_by_head = self.loss_fn(pred, targets)
         loss_total = sum(loss_by_head.values())
         loss_total.backward()
