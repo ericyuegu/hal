@@ -1,3 +1,4 @@
+import abc
 import argparse
 import pickle
 import random
@@ -13,9 +14,9 @@ from typing import Union
 import numpy as np
 import torch
 from loguru import logger
+from torch import Number
 from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.types import Number
 from torch.utils.data import DataLoader
 
 from hal.training.config import TrainConfig
@@ -41,7 +42,7 @@ from hal.training.utils import time_format
 from hal.training.zoo.models.registry import Arch
 
 
-class Trainer(torch.nn.Module):
+class Trainer(torch.nn.Module, abc.ABC):
     model: Union[torch.nn.Module, torch.nn.parallel.DistributedDataParallel]
 
     @property
@@ -84,11 +85,13 @@ class Trainer(torch.nn.Module):
             )
         )
 
+    @abc.abstractmethod
     def loss_fn(self, pred: Dict[str, Tensor], target: Dict[str, Tensor]) -> dict[str, Tensor]:
-        raise NotImplementedError()
+        ...
 
+    @abc.abstractmethod
     def train_op(self, inputs: Dict[str, Tensor], targets: Dict[str, Tensor]) -> dict[str, Tensor]:
-        raise NotImplementedError()
+        ...
 
     def train_step(self, batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]], writer: Writer, step: int) -> None:
         batch = move_tensors_to_device(batch, self.device)
@@ -161,13 +164,14 @@ class Trainer(torch.nn.Module):
 
         ckpt.save_file(self.model, "model.ckpt")
 
-    def val_step(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+    def val_step(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Number]:
         self.eval()
         with torch.no_grad():
             pred, _ = self.model(inputs)
             loss = self.loss_fn(pred, targets)
-            conf_matrix = self.calculate_confusion_matrix(pred, targets)
-        metrics_dict = {k: v.item() for k, v in loss.items()} | conf_matrix
+            # conf_matrix = self.calculate_confusion_matrix(pred, targets)
+        # metrics_dict = {k: v.item() for k, v in loss.items()} | conf_matrix
+        metrics_dict = {k: v.item() for k, v in loss.items()}
         return metrics_dict
 
     def save_batch_to_disk(self, batch: tuple[dict[str, Tensor], ...], step: int) -> None:
@@ -223,22 +227,6 @@ class Trainer(torch.nn.Module):
         #             preds=pred_action_ids, y_true=target_action_ids, class_names=class_names, title=k
         #         )
         # writer.log(conf_matrix_dict, step=step, commit=False)
-
-
-class RecurrentTrainer(Trainer):
-    def train_op(self, inputs: Dict[str, Tensor], targets: Dict[str, Tensor]) -> dict[str, Number]:
-        self.opt.zero_grad(set_to_none=True)
-        pred = self.model(inputs)
-        loss_by_head = self.loss_fn(pred, targets)
-        loss_total: Tensor = sum(loss_by_head.values())
-        loss_total.backward()
-        self.opt.step()
-        self.scheduler.step()
-
-        loss_by_head["train/loss_total"] = loss_total
-        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.items()}
-        metrics_dict["lr"] = self.scheduler.get_lr()
-        return metrics_dict
 
 
 @auto_distribute
