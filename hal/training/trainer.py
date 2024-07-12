@@ -34,6 +34,7 @@ from hal.training.io import WandbConfig
 from hal.training.io import Writer
 from hal.training.io import get_artifact_dir
 from hal.training.io import get_exp_name
+from hal.training.io import get_log_dir
 from hal.training.utils import move_tensors_to_device
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
@@ -52,6 +53,11 @@ class Trainer(torch.nn.Module, abc.ABC):
     def artifact_dir(self) -> Path:
         params = get_exp_name(self.config)
         return get_artifact_dir(params)
+
+    @property
+    def log_dir(self) -> Path:
+        params = get_exp_name(self.config)
+        return get_log_dir(params)
 
     def __init__(self, config: TrainConfig, train_loader: DataLoader, val_loader: DataLoader) -> None:
         super().__init__()

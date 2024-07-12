@@ -15,6 +15,7 @@ import torch
 import torch.nn
 import wandb
 from loguru import logger
+from training.config import TrainConfig
 from training.utils import get_git_repo_root
 
 from hal.training.distributed import is_master
@@ -119,16 +120,22 @@ class WandbConfig:
     model: torch.nn.Module
 
     @classmethod
-    def create(cls, model: torch.nn.Module, exp_config) -> Optional["WandbConfig"]:
+    def create(cls, model: torch.nn.Module, exp_config: TrainConfig) -> Optional["WandbConfig"]:
         if not os.getenv("WANDB_API_KEY"):
             print("W&B run not initiated because WANDB_API_KEY not set.")
             return None
 
         config = {"model_name": model.__class__.__name__, **vars(exp_config)}
-        tags = [exp_config.dataset, model.__class__.__name__]
+        tags = [
+            exp_config.data.input_preprocessing_fn,
+            exp_config.data.target_preprocessing_fn,
+            exp_config.data.input_len,
+            exp_config.data.target_len,
+            model.__class__.__name__,
+        ]
 
-        name_path = model.log_dir
-        name = "/".join(name_path.parts[-4:])
+        name_path: Path = model.log_dir
+        name = name_path.stem
 
         return cls(project="hal", config=config, tags=tags, name=name, model=model)
 
