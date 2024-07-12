@@ -6,7 +6,7 @@ from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 
 def one_hot_2d(arr: np.ndarray) -> np.ndarray:
     """
-    One-hot encode 2D array of raw button presses.
+    One-hot encode 2D array of multiple button presses per time step.
 
     Keeps temporally newest button press, and tie-breaks by choosing left-most button (i.e. priority is given in order of `melee.enums.Button`).
 
@@ -65,3 +65,10 @@ def get_closest_stick_xy_cluster_v0(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     point = np.stack((x, y), axis=-1)  # Shape: (T, 2)
     distances = np.sum((STICK_XY_CLUSTER_CENTERS_V0 - point[:, np.newaxis, :]) ** 2, axis=-1)
     return np.argmin(distances, axis=-1)
+
+
+def one_hot_from_int(arr: np.ndarray, num_values: int) -> np.ndarray:
+    """
+    One-hot encode array of integers.
+    """
+    return np.eye(num_values)[arr]
