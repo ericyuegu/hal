@@ -5,9 +5,9 @@ from typing import Union
 import torch
 import torch.nn as nn
 
-from hal.data.constants import ACTION_BY_IDX, INCLUDED_BUTTONS
-from hal.data.constants import BUTTON_BY_IDX
+from hal.data.constants import ACTION_BY_IDX
 from hal.data.constants import CHARACTER_BY_IDX
+from hal.data.constants import INCLUDED_BUTTONS
 from hal.data.constants import STAGE_BY_IDX
 from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.training.zoo.models.registry import Arch
