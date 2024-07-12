@@ -14,7 +14,6 @@ from typing import Union
 import numpy as np
 import torch
 from loguru import logger
-from torch import Number
 from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -164,7 +163,7 @@ class Trainer(torch.nn.Module, abc.ABC):
 
         ckpt.save_file(self.model, "model.ckpt")
 
-    def val_step(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Number]:
+    def val_step(self, inputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, float]:
         self.eval()
         with torch.no_grad():
             pred, _ = self.model(inputs)

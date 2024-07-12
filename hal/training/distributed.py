@@ -38,7 +38,7 @@ def is_master() -> bool:
     return get_device_id() == 0
 
 
-def trange(*args, **kwargs) -> Union[range, tqdm[int]]:
+def trange(*args, **kwargs) -> Union[range, tqdm]:
     if not is_master():
         return range(*args)
     return tqdm_module.trange(*args, **kwargs)
