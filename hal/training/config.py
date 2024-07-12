@@ -22,8 +22,8 @@ class DataConfig:
     """Training & eval dataset & preprocessing."""
 
     data_dir: str
-    input_preprocessing_fn: str
-    target_preprocessing_fn: str
+    input_preprocessing_fn: str = "inputs_v0"
+    target_preprocessing_fn: str = "targets_v0"
     # Number of input and target frames in example/rollout
     input_len: int = 60
     target_len: int = 5
@@ -42,6 +42,7 @@ class DataworkerConfig:
 @attr.s(auto_attribs=True, frozen=True)
 class BaseConfig:
     n_gpus: int
+    # TODO(eric): store true by default
     debug: bool
 
 
@@ -88,6 +89,7 @@ def create_parser_for_attrs_class(
                 help=field.metadata.get("help", ""),
                 default=field.default if field.default is not attr.NOTHING else None,
                 required=field.default is attr.NOTHING,
+                # action="store_true" if field.type == bool else "store",
             )
 
     return parser
@@ -104,7 +106,7 @@ def parse_args_to_attrs_instance(cls: Type[Any], args: argparse.Namespace, prefi
             kwargs[field.name] = parse_args_to_attrs_instance(field.type, args, f"{arg_name}.")
         else:
             # Otherwise, get the value from args
-            value = getattr(args, arg_name.replace(".", "_"))
+            value = getattr(args, arg_name)
             if value is not None:
                 kwargs[field.name] = value
 
