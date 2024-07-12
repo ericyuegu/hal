@@ -13,12 +13,12 @@ from typing import Type
 import attr
 import torch
 import torch.nn
-import wandb
 from loguru import logger
-from training.config import TrainConfig
-from training.utils import get_git_repo_root
 
+import wandb
+from hal.training.config import TrainConfig
 from hal.training.distributed import is_master
+from hal.training.utils import get_git_repo_root
 
 
 def get_path_friendly_datetime() -> str:
@@ -122,17 +122,15 @@ class WandbConfig:
     @classmethod
     def create(cls, model: torch.nn.Module, exp_config: TrainConfig) -> Optional["WandbConfig"]:
         if not os.getenv("WANDB_API_KEY"):
-            print("W&B run not initiated because WANDB_API_KEY not set.")
+            logger.info("W&B run not initiated because WANDB_API_KEY not set.")
+            return None
+        if exp_config.debug:
+            logger.info("Debug mode, skipping W&B.")
             return None
 
-        config = {"model_name": model.__class__.__name__, **vars(exp_config)}
-        tags = [
-            exp_config.data.input_preprocessing_fn,
-            exp_config.data.target_preprocessing_fn,
-            exp_config.data.input_len,
-            exp_config.data.target_len,
-            model.__class__.__name__,
-        ]
+        model_name = model.model.__class__.__name__
+        config = {"model_name": model_name, **vars(exp_config)}
+        tags = [model_name]
 
         name_path: Path = model.log_dir
         name = name_path.stem
