@@ -126,9 +126,9 @@ class Trainer(torch.nn.Module, abc.ABC):
             for i in range(resume_idx, n_samples, report_len):
                 self.train()
                 range_iter = trange(
-                    start=i,
-                    stop=i + report_len,
-                    step=batch_size,
+                    i,
+                    i + report_len,
+                    batch_size,
                     leave=False,
                     unit="samples",
                     unit_scale=batch_size,
