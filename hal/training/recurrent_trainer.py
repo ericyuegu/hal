@@ -31,10 +31,29 @@ def stack_tensor_dict(tensor_dicts: List[Dict[str, Tensor]]) -> Dict[str, Tensor
 
 class RecurrentTrainer(Trainer):
     def loss_fn(self, pred: Dict[str, Tensor], target: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        button_loss = F.cross_entropy(pred["buttons"], target["buttons"])
-        main_stick_loss = F.cross_entropy(pred["main_stick"], target["main_stick"])
-        c_stick_loss = F.cross_entropy(pred["c_stick"], target["c_stick"])
-        return {"button_loss": button_loss, "main_stick_loss": main_stick_loss, "c_stick_loss": c_stick_loss}
+        loss_dict: Dict[str, Tensor] = {}
+
+        # Calculate per-frame losses
+        button_loss = F.cross_entropy(pred["buttons"], target["buttons"], reduction="none")
+        main_stick_loss = F.cross_entropy(pred["main_stick"], target["main_stick"], reduction="none")
+        c_stick_loss = F.cross_entropy(pred["c_stick"], target["c_stick"], reduction="none")
+
+        # Log per-frame losses
+        for t in range(button_loss.shape[1]):
+            loss_dict[f"_button_loss_frame_{t}"] = button_loss[:, t].mean()
+            loss_dict[f"_main_stick_loss_frame_{t}"] = main_stick_loss[:, t].mean()
+            loss_dict[f"_c_stick_loss_frame_{t}"] = c_stick_loss[:, t].mean()
+
+        # Calculate mean losses across all frames
+        mean_button_loss = button_loss.mean()
+        mean_main_stick_loss = main_stick_loss.mean()
+        mean_c_stick_loss = c_stick_loss.mean()
+
+        loss_dict["loss_button"] = mean_button_loss
+        loss_dict["loss_main_stick"] = mean_main_stick_loss
+        loss_dict["loss_c_stick"] = mean_c_stick_loss
+
+        return loss_dict
 
     def train_op(self, inputs: Dict[str, Tensor], targets: Dict[str, Tensor]) -> Dict[str, Number]:
         self.opt.zero_grad(set_to_none=True)
@@ -57,7 +76,7 @@ class RecurrentTrainer(Trainer):
         targets = slice_tensor_dict(targets, warmup_len, warmup_len + target_len)
 
         loss_by_head = self.loss_fn(preds, targets)
-        loss_total = sum(loss_by_head.values())
+        loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
         loss_total.backward()
         self.opt.step()
         self.scheduler.step()
@@ -88,7 +107,7 @@ class RecurrentTrainer(Trainer):
             targets = slice_tensor_dict(targets, warmup_len, warmup_len + target_len)
 
             loss_by_head = self.loss_fn(preds, targets)
-            loss_total = sum(loss_by_head.values())
+            loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
 
         loss_by_head["val/loss_total"] = loss_total
         metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
