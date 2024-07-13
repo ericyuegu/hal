@@ -41,8 +41,7 @@ class DataworkerConfig:
 
 @attr.s(auto_attribs=True, frozen=True)
 class BaseConfig:
-    n_gpus: int
-    # TODO(eric): store true by default
+    n_gpus: int = 1
     debug: bool = False
 
 
