@@ -1,5 +1,6 @@
 from typing import Dict
 from typing import Optional
+from typing import Tuple
 from typing import Union
 
 import torch
@@ -11,6 +12,28 @@ from hal.data.constants import INCLUDED_BUTTONS
 from hal.data.constants import STAGE_BY_IDX
 from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.training.zoo.models.registry import Arch
+
+
+class ResBlockLSTM(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int) -> None:
+        super(ResBlockLSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.input_proj = nn.Linear(input_size, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
+        self.layernorm = nn.LayerNorm(hidden_size)
+        self.res_head = nn.Linear(hidden_size, hidden_size)
+
+    def forward(
+        self, inputs: torch.Tensor, hidden: torch.Tensor, cell: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = self.input_proj(inputs)
+        x, (hidden, cell) = self.lstm(residual, (hidden, cell))
+        x = self.layernorm(x)
+        x = self.res_head(x)
+        x = x + residual
+        return x, hidden, cell
 
 
 class LSTM(nn.Module):
