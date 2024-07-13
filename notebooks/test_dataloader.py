@@ -17,11 +17,11 @@ train_config = TrainConfig(
     debug=True,
     arch="",
     data=DataConfig(
-        data_dir="/opt/projects/hal2/data/dev",
+        data_dir="/opt/projects/hal2/data/partial",
         input_preprocessing_fn="inputs_v0",
         target_preprocessing_fn="targets_v0",
-        input_len=10,
-        target_len=100,
+        input_len=60,
+        target_len=5,
     ),
     dataworker=DataworkerConfig(),
 )
@@ -50,10 +50,13 @@ for k, v in x.items():
     print(k, v.shape)
 # %%
 dataset = MmappedParquetDataset(
-    input_path=Path("/opt/projects/hal2/data/dev/train.parquet"),
-    stats_path=Path("/opt/projects/hal2/data/dev/stats.json"),
+    input_path=Path("/opt/projects/hal2/data/partial/train.parquet"),
+    stats_path=Path("/opt/projects/hal2/data/partial/stats.json"),
     data_config=train_config.data,
 )
 # %%
 len(dataset)
 # %%
+x, y = dataset[0]
+# %%
+x["gamestate"][0]
