@@ -81,7 +81,7 @@ class RecurrentTrainer(Trainer):
         self.opt.step()
         self.scheduler.step()
 
-        loss_by_head["train/loss_total"] = loss_total
+        loss_by_head["loss_total"] = loss_total
         metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.items()}
         metrics_dict["lr"] = self.scheduler.get_lr()
         return metrics_dict
@@ -109,8 +109,8 @@ class RecurrentTrainer(Trainer):
             loss_by_head = self.loss_fn(preds, targets)
             loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
 
-        loss_by_head["val/loss_total"] = loss_total
-        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
+        loss_by_head["loss_total"] = loss_total
+        metrics_dict = {k: v.item() for k, v in loss_by_head.items()}
         return metrics_dict
 
 
