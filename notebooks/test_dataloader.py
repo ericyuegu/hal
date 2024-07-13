@@ -1,11 +1,15 @@
 # %%
+from pathlib import Path
+
 import numpy as np
 from training.config import DataConfig
 from training.config import DataworkerConfig
 from training.config import TrainConfig
+from training.dataset import MmappedParquetDataset
 
 from hal.training.dataloader import create_dataloaders
 
+# %%
 np.set_printoptions(threshold=np.inf)
 
 train_config = TrainConfig(
@@ -21,6 +25,7 @@ train_config = TrainConfig(
     ),
     dataworker=DataworkerConfig(),
 )
+# %%
 train_loader, val_loader = create_dataloaders(train_config, rank=None, world_size=None)
 train_iter = iter(train_loader)
 # %%
@@ -43,4 +48,12 @@ x["ego_character"].shape
 # %%
 for k, v in x.items():
     print(k, v.shape)
+# %%
+dataset = MmappedParquetDataset(
+    input_path=Path("/opt/projects/hal2/data/dev/train.parquet"),
+    stats_path=Path("/opt/projects/hal2/data/dev/stats.json"),
+    data_config=train_config.data,
+)
+# %%
+len(dataset)
 # %%

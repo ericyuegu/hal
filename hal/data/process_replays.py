@@ -176,9 +176,9 @@ def split_train_val_test(
     train_end = int(n * train_split)
     val_end = train_end + int(n * val_split)
     return {
-        "train": tuple(input_paths[:train_end]),
         "val": tuple(input_paths[train_end:val_end]),
         "test": tuple(input_paths[val_end:]),
+        "train": tuple(input_paths[:train_end]),
     }
 
 
