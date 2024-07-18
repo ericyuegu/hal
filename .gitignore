@@ -6,6 +6,8 @@
 /wandb/
 **/*.parquet
 
+/emulator/squashfs-root/
+
 # Secrets
 /secrets/
 token.pickle
