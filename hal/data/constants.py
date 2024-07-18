@@ -1,4 +1,5 @@
 from typing import Dict
+from typing import Final
 from typing import Tuple
 
 import numpy as np
@@ -47,6 +48,55 @@ INCLUDED_BUTTONS: Tuple[str, ...] = (
 ###################
 # Embeddings      #
 ###################
+
+VALID_PLAYERS: Final[Tuple[str, str]] = ("p1", "p2")
+
+STAGE: Tuple[str, ...] = ("stage",)
+PLAYER_INPUT_FEATURES_TO_EMBED: Tuple[str, ...] = ("character", "action")
+PLAYER_INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
+    "percent",
+    "stock",
+    "facing",
+    "invulnerable",
+    "jumps_left",
+    "on_ground",
+)
+PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: Tuple[str, ...] = ("shield_strength",)
+PLAYER_POSITION: Tuple[str, ...] = (
+    "position_x",
+    "position_y",
+)
+# Optional input features
+PLAYER_ACTION_FRAME_FEATURES: Tuple[str, ...] = (
+    "action_frame",
+    "hitlag_left",
+    "hitstun_left",
+)
+PLAYER_SPEED_FEATURES: Tuple[str, ...] = (
+    "speed_air_x_self",
+    "speed_y_self",
+    "speed_x_attack",
+    "speed_y_attack",
+    "speed_ground_x_self",
+)
+PLAYER_ECB_FEATURES: Tuple[str, ...] = (
+    "ecb_bottom_x",
+    "ecb_bottom_y",
+    "ecb_top_x",
+    "ecb_top_y",
+    "ecb_left_x",
+    "ecb_left_y",
+    "ecb_right_x",
+    "ecb_right_y",
+)
+# Target features
+TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
+    "button_a",
+    "button_b",
+    "button_x",
+    "button_z",
+    "button_l",
+)
 
 STICK_XY_CLUSTER_CENTERS_V0: np.ndarray = np.array(
     [
