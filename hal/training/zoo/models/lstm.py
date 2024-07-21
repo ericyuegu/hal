@@ -14,6 +14,7 @@ from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.training.zoo.models.registry import Arch
 
 
+# TODO: programmatically pass input size
 class ResBlockLSTM(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int) -> None:
         super(ResBlockLSTM, self).__init__()
@@ -101,4 +102,4 @@ class LSTM(nn.Module):
         }
 
 
-Arch.register("lstm", make_net=LSTM, input_size=76, hidden_size=256, num_layers=2)
+Arch.register("lstm", make_net=LSTM, input_size=74, hidden_size=256, num_layers=2)
