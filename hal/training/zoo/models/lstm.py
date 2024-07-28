@@ -1,5 +1,6 @@
 from typing import Iterable
 from typing import Optional
+from typing import Sequence
 from typing import Tuple
 
 import attr
@@ -101,23 +102,34 @@ class LSTMv1(nn.Module):
         )
 
     def forward(
-        self, inputs: TensorDict, hidden_in: Iterable[Tuple[torch.Tensor, torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        self, inputs: TensorDict, hidden_in: Optional[Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = None
+    ) -> Tuple[torch.Tensor, Optional[Sequence[Tuple[torch.Tensor, torch.Tensor]]]]:
+        batch, seq_len = inputs.shape
+        assert seq_len > 0
+
         stage_emb = self.lstm.stage(inputs["stage"])
         ego_character_emb = self.lstm.character(inputs["ego_character"])
         opponent_character_emb = self.lstm.character(inputs["opponent_character"])
         ego_action_emb = self.lstm.action(inputs["ego_action"])
         opponent_action_emb = self.lstm.action(inputs["opponent_action"])
         gamestate = inputs["gamestate"]
-        x = torch.cat(
+        concat_inputs = torch.cat(
             [stage_emb, ego_character_emb, opponent_character_emb, ego_action_emb, opponent_action_emb, gamestate],
-            dim=1,
+            dim=-1,
         )
 
         if hidden_in is None:
             hidden_in = [None] * len(self.lstm.h)
 
         new_hidden_in = []
-        for block, hidden in zip(self.lstm.h, hidden_in):
-            x, new_hidden = block(x, hidden)
-            new_hidden_in.append(new_hidden)
+        for i in range(seq_len):
+            x = concat_inputs[:, i].unsqueeze(1)
+            for block, hidden in zip(self.lstm.h, hidden_in):
+                x, new_hidden = block(x, hidden)
+                new_hidden_in.append(new_hidden)
+
+            hidden_in = new_hidden_in
+            new_hidden_in = []
+
+        # TODO fix typing
+        return x, hidden_in
