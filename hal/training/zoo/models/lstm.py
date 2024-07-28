@@ -37,6 +37,47 @@ class ResBlockLSTM(nn.Module):
         return x, hidden, cell
 
 
+class MLP(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, dropout: float = 0.1) -> None:
+        super(MLP, self).__init__()
+        self.c_fc = nn.Linear(input_size, 4 * hidden_size)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4 * hidden_size, hidden_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+
+class ResidualRecurrentBlock(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(input_dim)
+        # TODO move lstm out into its own module w dropout
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.ln_2 = nn.LayerNorm(hidden_dim)
+        self.mlp = MLP(hidden_dim, hidden_dim)
+
+    def forward(
+        self, x: torch.Tensor, hidden_in: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        residual = x
+        x = self.ln_1(x)
+        lstm_out, hidden_out = self.lstm(x, hidden_in)
+        x = residual + self.dropout(lstm_out)
+
+        residual = x
+        x = self.ln_2(x)
+        x = self.mlp(x)
+        x = residual + self.dropout(x)
+
+        return x, hidden_out
+
+
 class LSTM(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int) -> None:
         super(LSTM, self).__init__()
