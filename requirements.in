@@ -35,3 +35,4 @@ scikit-learn==1.5.1
 pytest==8.2.2
 wandb==0.17.4
 scalene==1.5.42.2
+tensordict==0.4.0
