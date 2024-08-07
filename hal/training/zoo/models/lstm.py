@@ -12,26 +12,19 @@ from data.constants import STAGE_BY_IDX
 from tensordict import TensorDict
 
 
-class LSTMDropout(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.1) -> None:
-        super().__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self, x: torch.Tensor, hidden_in: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        x, hidden_out = self.lstm(x, hidden_in)
-        return self.dropout(x), hidden_out
+@attr.s(auto_attribs=True, frozen=True)
+class MLPConfig:
+    n_embd: int
+    dropout: float
 
 
 class MLP(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, dropout: float = 0.1) -> None:
+    def __init__(self, config: MLPConfig) -> None:
         super(MLP, self).__init__()
-        self.c_fc = nn.Linear(input_size, 4 * hidden_size)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(4 * hidden_size, hidden_size)
-        self.dropout = nn.Dropout(dropout)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)
@@ -41,20 +34,41 @@ class MLP(nn.Module):
         return x
 
 
+@attr.s(auto_attribs=True, frozen=True)
+class LSTMConfig:
+    n_embd: int
+    dropout: float
+
+
+class LSTM(nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.lstm = nn.LSTM(config.n_embd, config.n_embd, batch_first=True)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(
+        self, x: torch.Tensor, hidden_in: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        x, hidden_out = self.lstm(x, hidden_in)
+        return self.dropout(x), hidden_out
+
+
 class RecurrentResidualBlock(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.ln_1 = nn.LayerNorm(input_dim)
-        self.lstm = LSTMDropout(input_dim, hidden_dim)
+        self.lstm = LSTM(input_dim, hidden_dim)
         self.ln_2 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP(hidden_dim, hidden_dim)
 
     def forward(
         self, x: torch.Tensor, hidden_in: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        x, hidden_out = self.lstm(self.ln_1(x), hidden_in)
-        x = x + self.mlp(self.ln_2(x))
-        return x, hidden_out
+        y, hidden_out = self.lstm(self.ln_1(x), hidden_in)
+        # Residual
+        y = x + y
+        z = y + self.mlp(self.ln_2(y))
+        return z, hidden_out
 
 
 @attr.s(auto_attribs=True, frozen=True)
