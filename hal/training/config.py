@@ -7,6 +7,10 @@ from typing import Type
 
 import attr
 
+from hal.data.constants import IDX_BY_ACTION
+from hal.data.constants import IDX_BY_CHARACTER
+from hal.data.constants import IDX_BY_STAGE
+
 
 @attr.s(auto_attribs=True, frozen=True)
 class ReplayFilter:
@@ -22,8 +26,7 @@ class DataConfig:
     """Training & eval dataset & preprocessing."""
 
     data_dir: str = "data/dev"
-    input_preprocessing_fn: str = "inputs_v0"
-    target_preprocessing_fn: str = "targets_v0"
+
     # Number of input and target frames in example/rollout
     input_len: int = 60
     target_len: int = 5
@@ -41,18 +44,35 @@ class DataworkerConfig:
 
 
 @attr.s(auto_attribs=True, frozen=True)
+class EmbeddingConfig:
+    # Implicitly controls # numeric features
+    input_preprocessing_fn: str = "inputs_v0"
+    # Implicitly determines # categorical target features
+    target_preprocessing_fn: str = "targets_v0"
+
+    stage_embedding_dim: int = 4
+    character_embedding_dim: int = 12
+    action_embedding_dim: int = 256
+
+    num_stages: int = len(IDX_BY_STAGE)
+    num_characters: int = len(IDX_BY_CHARACTER)
+    num_actions: int = len(IDX_BY_ACTION)
+
+
+@attr.s(auto_attribs=True, frozen=True)
 class BaseConfig:
-    n_gpus: int = 1
-    debug: bool = False
+    n_gpus: int
+    debug: bool
 
 
 @attr.s(auto_attribs=True, frozen=True)
 class TrainConfig(BaseConfig):
     # Model
-    arch: str = "lstm"
+    arch: str
 
     # Data
     data: DataConfig = DataConfig()
+    embedding: EmbeddingConfig = EmbeddingConfig()
     dataworker: DataworkerConfig = DataworkerConfig()
     seed: int = 42
 

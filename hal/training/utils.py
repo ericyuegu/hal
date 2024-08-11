@@ -10,6 +10,8 @@ import numpy as np
 import pyarrow as pa
 import torch
 
+from hal.training.zoo.preprocess.registry import InputPreprocessRegistry
+
 T = TypeVar("T")
 
 
@@ -72,3 +74,13 @@ def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
     Use copy=True to ensure that the numpy arrays are not views of the original data for safe downstream processing.
     """
     return {name: np.array(col.to_numpy(), copy=True) for name, col in zip(table.column_names, table.columns)}
+
+
+def get_nembd_from_config(config: EmbeddingConfig) -> int:
+    """Get the size of the materialized embedding dimension from the embedding config."""
+    numeric_feature_count = InputPreprocessRegistry.get_num_features(config.input_preprocessing_fn)
+    return (
+        numeric_feature_count
+        + config.stage_embedding_dim
+        + 2 * (config.character_embedding_dim + config.action_embedding_dim)
+    )

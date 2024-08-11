@@ -13,6 +13,7 @@ InputPreprocessFn = Callable[[Dict[str, np.ndarray], int, Player, Dict[str, Feat
 
 class InputPreprocessRegistry:
     EMBED: Dict[str, InputPreprocessFn] = {}
+    NUM_FEATURES: Dict[str, int] = {}
 
     @classmethod
     def get(cls, name: str) -> InputPreprocessFn:
@@ -21,12 +22,19 @@ class InputPreprocessRegistry:
         raise NotImplementedError(f"Embedding fn {name} not found." f"Valid functions: {sorted(cls.EMBED.keys())}.")
 
     @classmethod
-    def register(cls, name: str):
+    def register(cls, name: str, num_features: int):
         def decorator(embed_fn: InputPreprocessFn):
             cls.EMBED[name] = embed_fn
+            cls.NUM_FEATURES[name] = num_features
             return embed_fn
 
         return decorator
+
+    @classmethod
+    def get_num_features(cls, name: str) -> int:
+        if name in cls.NUM_FEATURES:
+            return cls.NUM_FEATURES[name]
+        raise NotImplementedError(f"Embedding fn {name} not found." f"Valid functions: {sorted(cls.EMBED.keys())}.")
 
 
 class TargetPreprocessRegistry:

@@ -1,16 +1,7 @@
 from typing import Callable
-from typing import Dict
 
 import numpy as np
 
-from hal.data.constants import PLAYER_ACTION_FRAME_FEATURES
-from hal.data.constants import PLAYER_ECB_FEATURES
-from hal.data.constants import PLAYER_INPUT_FEATURES_TO_EMBED
-from hal.data.constants import PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE
-from hal.data.constants import PLAYER_INPUT_FEATURES_TO_NORMALIZE
-from hal.data.constants import PLAYER_POSITION
-from hal.data.constants import PLAYER_SPEED_FEATURES
-from hal.data.constants import STAGE
 from hal.data.stats import FeatureStats
 
 NormalizationFn = Callable[[np.ndarray, FeatureStats], np.ndarray]
@@ -39,15 +30,3 @@ def standardize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
 def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     """Perform logical OR of two features."""
     return array_1 | array_2
-
-
-NORMALIZATION_FN_BY_FEATURE: Dict[str, NormalizationFn] = {
-    **dict.fromkeys(STAGE, cast_int32),
-    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_EMBED, cast_int32),
-    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_NORMALIZE, normalize),
-    **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE, invert_and_normalize),
-    **dict.fromkeys(PLAYER_POSITION, standardize),
-    **dict.fromkeys(PLAYER_ACTION_FRAME_FEATURES, normalize),
-    **dict.fromkeys(PLAYER_SPEED_FEATURES, standardize),
-    **dict.fromkeys(PLAYER_ECB_FEATURES, standardize),
-}
