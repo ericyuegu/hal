@@ -60,6 +60,9 @@ class RecurrentResidualBlock(nn.Module):
 class LSTMv1(nn.Module):
     def __init__(self, embed_config: EmbeddingConfig, n_blocks: int = 4, dropout: float = 0.1) -> None:
         super().__init__()
+        assert embed_config.num_buttons is not None
+        assert embed_config.num_main_stick_clusters is not None
+        assert embed_config.num_c_stick_clusters is not None
         self.embed_config = embed_config
         self.n_embd = get_nembd_from_config(embed_config)
 
@@ -111,9 +114,9 @@ class LSTMv1(nn.Module):
             hidden_in = new_hidden_in
             new_hidden_in = []
 
-        button_output = self.button_head(x)
-        main_stick_output = self.main_stick_head(x)
-        c_stick_output = self.c_stick_head(x)
+        button_output = self.button_head(x).squeeze(-2)
+        main_stick_output = self.main_stick_head(x).squeeze(-2)
+        c_stick_output = self.c_stick_head(x).squeeze(-2)
 
         return {"buttons": button_output, "main_stick": main_stick_output, "c_stick": c_stick_output}, hidden_in
 

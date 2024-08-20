@@ -42,9 +42,9 @@ def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: Player) -> Dict
     one_hot_buttons = one_hot_2d(stacked_buttons)
 
     return {
-        "main_stick": one_hot_main_stick.astype(np.int64),
-        "c_stick": one_hot_c_stick.astype(np.int64),
-        "buttons": one_hot_buttons.astype(np.int64),
+        "main_stick": one_hot_main_stick.astype(np.float32),
+        "c_stick": one_hot_c_stick.astype(np.float32),
+        "buttons": one_hot_buttons.astype(np.float32),
     }
 
 
