@@ -88,19 +88,17 @@ class RecurrentTrainer(Trainer):
     def val_op(self, inputs: Dict[str, Tensor], targets: Dict[str, Tensor]) -> Dict[str, float]:
         self.eval()
         with torch.no_grad():
-            # Warmup trajectory
+            # Warmup trajectory without calculating loss
             warmup_len = self.config.data.input_len
             target_len = self.config.data.target_len
             warmup_inputs = slice_tensor_dict(inputs, 0, warmup_len)
-            warmup_pred_dict = self.model(warmup_inputs)
+            _, hidden = self.model(warmup_inputs)
 
             # Teacher forcing
-            hidden, cell = warmup_pred_dict["hidden"], warmup_pred_dict["cell"]
             preds = []
-            for i in range(target_len):
-                pred_dict = self.model(slice_tensor_dict(inputs, warmup_len + i, warmup_len + i + 1), hidden, cell)
-                hidden, cell = pred_dict["hidden"], pred_dict["cell"]
-                preds.append(pred_dict)
+            for i in range(self.config.data.target_len):
+                pred, hidden = self.model(slice_tensor_dict(inputs, warmup_len + i, warmup_len + i + 1), hidden)
+                preds.append(pred)
 
             preds = stack_tensor_dict(preds)
             targets = slice_tensor_dict(targets, warmup_len, warmup_len + target_len)
@@ -109,7 +107,7 @@ class RecurrentTrainer(Trainer):
             loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
 
         loss_by_head["loss_total"] = loss_total
-        metrics_dict = {k: v.item() for k, v in loss_by_head.items()}
+        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
         return metrics_dict
 
 
