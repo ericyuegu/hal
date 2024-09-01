@@ -11,23 +11,50 @@ from melee import Stage
 # Gamestate      #
 ###################
 
-EXCLUDED_STAGES: Tuple[str, ...] = ("NO_STAGE", "RANDOM_STAGE")
+INCLUDED_STAGES: Tuple[str, ...] = (
+    "FINAL_DESTINATION",
+    "BATTLEFIELD",
+    "POKEMON_STADIUM",
+    "DREAMLAND",
+    "FOUNTAIN_OF_DREAMS",
+    "YOSHIS_STORY",
+)
 IDX_BY_STAGE: Dict[Stage, int] = {
-    stage: i for i, stage in enumerate(stage for stage in Stage if stage.name not in EXCLUDED_STAGES)
+    stage: i for i, stage in enumerate(stage for stage in Stage if stage.name in INCLUDED_STAGES)
 }
 IDX_BY_STAGE_STR: Dict[str, int] = {stage.name: i for stage, i in IDX_BY_STAGE.items()}
 STAGE_BY_IDX: Dict[int, str] = {i: stage.name for stage, i in IDX_BY_STAGE.items()}
 
-EXCLUDED_CHARACTERS: Tuple[str, ...] = (
-    "NANA",
-    "WIREFRAME_MALE",
-    "WIREFRAME_FEMALE",
-    "GIGA_BOWSER",
-    "SANDBAG",
-    "UNKNOWN_CHARACTER",
+INCLUDED_CHARACTERS: Tuple[str, ...] = (
+    "MARIO",
+    "FOX",
+    "CPTFALCON",
+    "DK",
+    "KIRBY",
+    "BOWSER",
+    "LINK",
+    "SHEIK",
+    "NESS",
+    "PEACH",
+    "POPO",
+    "PIKACHU",
+    "SAMUS",
+    "YOSHI",
+    "JIGGLYPUFF",
+    "MEWTWO",
+    "LUIGI",
+    "MARTH",
+    "ZELDA",
+    "YLINK",
+    "DOC",
+    "FALCO",
+    "PICHU",
+    "GAMEANDWATCH",
+    "GANONDORF",
+    "ROY",
 )
 IDX_BY_CHARACTER: Dict[Character, int] = {
-    char: i for i, char in enumerate(char for char in Character if char.name not in EXCLUDED_CHARACTERS)
+    char: i for i, char in enumerate(char for char in Character if char.name in INCLUDED_CHARACTERS)
 }
 IDX_BY_CHARACTER_STR: Dict[str, int] = {char.name: i for char, i in IDX_BY_CHARACTER.items()}
 CHARACTER_BY_IDX: Dict[int, str] = {i: char.name for char, i in IDX_BY_CHARACTER.items()}
