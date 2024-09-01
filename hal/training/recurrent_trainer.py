@@ -117,7 +117,8 @@ def main(
     world_size: Optional[int],
     train_config: TrainConfig,
 ) -> None:
-    seed = train_config.seed
+    rank = rank or 0
+    seed = train_config.seed + rank
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
