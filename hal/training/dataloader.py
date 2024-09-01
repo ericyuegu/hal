@@ -14,6 +14,8 @@ from hal.training.dataset import SizedDataset
 
 
 class RepeatFirstBatchSampler(Sampler):
+    """For debugging"""
+
     def __init__(self, dataset: SizedDataset, batch: int, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.batch_indices = torch.randint(0, len(dataset), (batch,)).tolist()
