@@ -1,114 +1,25 @@
+# %%
 """
-Using TensorDict for datasets
+Using DDP with TensorDict
 =============================
 """
 
-##############################################################################
-# In this tutorial we demonstrate how ``TensorDict`` can be used to
-# efficiently and transparently load and manage data inside a training
-# pipeline. The tutorial is based heavily on the `PyTorch Quickstart
-# Tutorial <https://pytorch.org/tutorials/beginner/basics/quickstart_tutorial.html>`__,
-# but modified to demonstrate use of ``TensorDict``.
-
-
 import torch
+import torch.multiprocessing as mp
 import torch.nn as nn
 from tensordict import MemoryMappedTensor
 from tensordict import TensorDict
+from torch.distributed import destroy_process_group
+from torch.distributed import init_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
 
-
-###############################################################################
-# The ``torchvision.datasets`` module contains a number of convenient pre-prepared
-# datasets. In this tutorial we'll use the relatively simple FashionMNIST dataset. Each
-# image is an item of clothing, the objective is to classify the type of clothing in
-# the image (e.g. "Bag", "Sneaker" etc.).
-
-training_data = datasets.FashionMNIST(
-    root="data",
-    train=True,
-    download=True,
-    transform=ToTensor(),
-)
-test_data = datasets.FashionMNIST(
-    root="data",
-    train=False,
-    download=True,
-    transform=ToTensor(),
-)
-
-###############################################################################
-# We will create two tensordicts, one each for the training and test data. We create
-# memory-mapped tensors to hold the data. This will allow us to efficiently load
-# batches of transformed data from disk rather than repeatedly load and transform
-# individual images.
-#
-# First we create the :class:`~tensordict.MemoryMappedTensor` containers.
-
-
-training_data_td = TensorDict(
-    {
-        "images": MemoryMappedTensor.empty(
-            (len(training_data), *training_data[0][0].squeeze().shape),
-            dtype=torch.float32,
-        ),
-        "targets": MemoryMappedTensor.empty((len(training_data),), dtype=torch.int64),
-    },
-    batch_size=[len(training_data)],
-    device=device,
-)
-test_data_td = TensorDict(
-    {
-        "images": MemoryMappedTensor.empty((len(test_data), *test_data[0][0].squeeze().shape), dtype=torch.float32),
-        "targets": MemoryMappedTensor.empty((len(test_data),), dtype=torch.int64),
-    },
-    batch_size=[len(test_data)],
-    device=device,
-)
-
-###############################################################################
-# Then we can iterate over the data to populate the memory-mapped tensors. This takes a
-# bit of time, but performing the transforms up-front will save repeated effort during
-# training later.
-
-for i, (img, label) in enumerate(training_data):
-    training_data_td[i] = TensorDict({"images": img, "targets": label}, [])
-
-for i, (img, label) in enumerate(test_data):
-    test_data_td[i] = TensorDict({"images": img, "targets": label}, [])
-
-###############################################################################
-# DataLoaders
-# ----------------
-#
-# We'll create DataLoaders from the ``torchvision``-provided Datasets, as well as from
-# our memory-mapped TensorDicts.
-#
-# Since ``TensorDict`` implements ``__len__`` and ``__getitem__`` (and also
-# ``__getitems__``) we can use it like a map-style Dataset and create a ``DataLoader``
-# directly from it. Note that because ``TensorDict`` can already handle batched indices,
-# there is no need for collation, so we pass the identity function as ``collate_fn``.
-
-batch_size = 64
-
-train_dataloader = DataLoader(training_data, batch_size=batch_size)  # noqa: TOR401
-test_dataloader = DataLoader(test_data, batch_size=batch_size)  # noqa: TOR401
-
-train_dataloader_td = DataLoader(training_data_td, batch_size=batch_size, collate_fn=lambda x: x)  # noqa: TOR401
-test_dataloader_td = DataLoader(test_data_td, batch_size=batch_size, collate_fn=lambda x: x)  # noqa: TOR401
-
-###############################################################################
-# Model
-# -------
-#
-# We use the same model from the
-# `Quickstart Tutorial <https://pytorch.org/tutorials/beginner/basics/quickstart_tutorial.html>`__.
-#
+def get_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class Net(nn.Module):
@@ -129,125 +40,99 @@ class Net(nn.Module):
         return logits
 
 
-model = Net().to(device)
-model_td = Net().to(device)
-model, model_td
-
-###############################################################################
-# Optimizing the parameters
-# ---------------------------------
-#
-# We'll optimise the parameters of the model using stochastic gradient descent and
-# cross-entropy loss.
-#
-
-loss_fn = nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
-optimizer_td = torch.optim.SGD(model_td.parameters(), lr=1e-3)
+def setup(rank, world_size) -> None:
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
-def train(dataloader, model, loss_fn, optimizer) -> None:
-    size = len(dataloader.dataset)
-    model.train()
-
-    for batch, (X, y) in enumerate(dataloader):
-        X, y = X.to(device), y.to(device)
-
-        pred = model(X)
-        loss = loss_fn(pred, y)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        if batch % 100 == 0:
-            loss, current = loss.item(), batch * len(X)
-            print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")
+def cleanup() -> None:
+    destroy_process_group()
 
 
-###############################################################################
-# The training loop for our ``TensorDict``-based DataLoader is very similar, we just
-# adjust how we unpack the data to the more explicit key-based retrieval offered by
-# ``TensorDict``. The ``.contiguous()`` method loads the data stored in the memmap tensor.
+def load_data() -> tuple[TensorDict, TensorDict]:
+    training_data = datasets.FashionMNIST(
+        root="data",
+        train=True,
+        download=True,
+        transform=ToTensor(),
+    )
+    test_data = datasets.FashionMNIST(
+        root="data",
+        train=False,
+        download=True,
+        transform=ToTensor(),
+    )
+    training_data_td = TensorDict(
+        {
+            "images": MemoryMappedTensor.empty(
+                (len(training_data), *training_data[0][0].squeeze().shape),
+                dtype=torch.float32,
+            ),
+            "targets": MemoryMappedTensor.empty((len(training_data),), dtype=torch.int64),
+        },
+        batch_size=[len(training_data)],
+        device=get_device(),
+    )
+    test_data_td = TensorDict(
+        {
+            "images": MemoryMappedTensor.empty(
+                (len(test_data), *test_data[0][0].squeeze().shape), dtype=torch.float32
+            ),
+            "targets": MemoryMappedTensor.empty((len(test_data),), dtype=torch.int64),
+        },
+        batch_size=[len(test_data)],
+        device=get_device(),
+    )
+
+    for i, (img, label) in enumerate(training_data):
+        training_data_td[i] = TensorDict({"images": img, "targets": label}, [])
+
+    for i, (img, label) in enumerate(test_data):
+        test_data_td[i] = TensorDict({"images": img, "targets": label}, [])
+
+    return training_data_td, test_data_td
 
 
-def train_td(dataloader, model, loss_fn, optimizer) -> None:
-    size = len(dataloader.dataset)
-    model.train()
+def train_ddp(rank, world_size, training_data_td: TensorDict, test_data_td: TensorDict) -> None:
+    setup(rank, world_size)
+    device = get_device()
+    print(f"Using device: {device}")
 
-    for batch, data in enumerate(dataloader):
-        X, y = data["images"].contiguous(), data["targets"].contiguous()
+    model = Net().to(device)
+    model = DDP(model, device_ids=[rank])
 
-        pred = model(X)
-        loss = loss_fn(pred, y)
+    loss_fn = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    train_sampler = DistributedSampler(training_data_td, num_replicas=world_size, rank=rank)
+    train_dataloader = DataLoader(training_data_td, batch_size=64, sampler=train_sampler, collate_fn=lambda x: x)
+    size = len(train_dataloader)
 
-        if batch % 100 == 0:
-            loss, current = loss.item(), batch * len(X)
-            print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")
-
-
-def test(dataloader, model, loss_fn) -> None:
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
-    model.eval()
-    test_loss, correct = 0, 0
-    with torch.no_grad():
-        for X, y in dataloader:
+    # Training loop
+    epochs = 5
+    for epoch in range(epochs):
+        model.train()
+        for batch, data in enumerate(train_dataloader):
+            X, y = data["images"].contiguous(), data["targets"].contiguous()
             X, y = X.to(device), y.to(device)
 
             pred = model(X)
+            loss = loss_fn(pred, y)
 
-            test_loss += loss_fn(pred, y).item()
-            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-    test_loss /= num_batches
-    correct /= size
+            current = batch * len(X)
+            print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")
 
-    print(f"Test Error: \n Accuracy: {(100 * correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
-
-
-def test_td(dataloader, model, loss_fn) -> None:
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
-    model.eval()
-    test_loss, correct = 0, 0
-    with torch.no_grad():
-        for batch in dataloader:
-            X, y = batch["images"].contiguous(), batch["targets"].contiguous()
-
-            pred = model(X)
-
-            test_loss += loss_fn(pred, y).item()
-            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
-
-    test_loss /= num_batches
-    correct /= size
-
-    print(f"Test Error: \n Accuracy: {(100 * correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
+    cleanup()
 
 
-for d in train_dataloader_td:
-    print(d)
-    break
+if __name__ == "__main__":
+    world_size = torch.cuda.device_count()
 
-import time
+    # Load data into shared memory
+    training_data_td, test_data_td = load_data()
 
-t0 = time.time()
-epochs = 5
-for t in range(epochs):
-    print(f"Epoch {t + 1}\n-------------------------")
-    train_td(train_dataloader_td, model_td, loss_fn, optimizer_td)
-    test_td(test_dataloader_td, model_td, loss_fn)
-print(f"TensorDict training done! time: {time.time() - t0: 4.4f} s")
-
-t0 = time.time()
-epochs = 5
-for t in range(epochs):
-    print(f"Epoch {t + 1}\n-------------------------")
-    train(train_dataloader, model, loss_fn, optimizer)
-    test(test_dataloader, model, loss_fn)
-print(f"Training done! time: {time.time() - t0: 4.4f} s")
+    # Use mp.spawn to launch the training process on each GPU
+    mp.spawn(train_ddp, args=(world_size, training_data_td, test_data_td), nprocs=world_size, join=True)
