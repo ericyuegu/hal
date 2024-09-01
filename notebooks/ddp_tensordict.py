@@ -1,8 +1,6 @@
 # %%
-"""
-Using DDP with TensorDict
-=============================
-"""
+"""Using DDP with TensorDict"""
+import os
 
 import torch
 import torch.multiprocessing as mp
@@ -41,6 +39,8 @@ class Net(nn.Module):
 
 
 def setup(rank, world_size) -> None:
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
@@ -70,7 +70,7 @@ def load_data() -> tuple[TensorDict, TensorDict]:
             "targets": MemoryMappedTensor.empty((len(training_data),), dtype=torch.int64),
         },
         batch_size=[len(training_data)],
-        device=get_device(),
+        device="cpu",  # pin to shared memory
     )
     test_data_td = TensorDict(
         {
@@ -80,7 +80,7 @@ def load_data() -> tuple[TensorDict, TensorDict]:
             "targets": MemoryMappedTensor.empty((len(test_data),), dtype=torch.int64),
         },
         batch_size=[len(test_data)],
-        device=get_device(),
+        device="cpu",
     )
 
     for i, (img, label) in enumerate(training_data):
@@ -95,10 +95,13 @@ def load_data() -> tuple[TensorDict, TensorDict]:
 def train_ddp(rank, world_size, training_data_td: TensorDict, test_data_td: TensorDict) -> None:
     setup(rank, world_size)
     device = get_device()
-    print(f"Using device: {device}")
+    print(f"{rank=}, Mem address of training_data_td: {hex(id(training_data_td))}")
+    for k, v in training_data_td.items():
+        print(f"{rank=}, Mem address of {k}: {hex(id(v))}")
 
     model = Net().to(device)
     model = DDP(model, device_ids=[rank])
+    print(f"{rank=} Initialized model")
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
@@ -106,6 +109,7 @@ def train_ddp(rank, world_size, training_data_td: TensorDict, test_data_td: Tens
     train_sampler = DistributedSampler(training_data_td, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(training_data_td, batch_size=64, sampler=train_sampler, collate_fn=lambda x: x)
     size = len(train_dataloader)
+    print(f"{rank=} Initialized dataloader")
 
     # Training loop
     epochs = 5
