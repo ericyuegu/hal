@@ -1,7 +1,9 @@
 # %%
 """Using DDP with TensorDict"""
 import os
+import sys
 
+import psutil
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
@@ -16,6 +18,12 @@ from torchvision import datasets
 from torchvision.transforms import ToTensor
 
 from hal.training.distributed import is_master
+
+
+def get_memory_usage(obj):
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    return {"object_size": sys.getsizeof(obj), "rss": memory_info.rss, "vms": memory_info.vms}
 
 
 def get_device() -> str:
@@ -102,6 +110,7 @@ def load_data() -> tuple[TensorDict, TensorDict]:
     training_data_td["targets"].share_memory_()
     test_data_td["images"].share_memory_()
     test_data_td["targets"].share_memory_()
+    print(f"Memory usage: {get_memory_usage(training_data_td)}")
 
     return training_data_td, test_data_td
 
@@ -109,13 +118,13 @@ def load_data() -> tuple[TensorDict, TensorDict]:
 def train_ddp(rank, world_size, training_data_td: TensorDict, test_data_td: TensorDict) -> None:
     setup(rank, world_size)
     device = torch.device(f"cuda:{rank}")  # Use the GPU corresponding to the rank
-    print(f"{rank=}, Mem address of training_data_td: {hex(id(training_data_td))}")
-    for k, v in training_data_td.items():
-        # print(f"{rank=}, Mem address of {k}: {hex(id(v))}")
-        # Increment last slice by rank and save it back
-        last_slice = v[-1].clone()
-        v[-1] = last_slice + rank
-        print(f"{rank=}, Incremented last slice of {k}: {last_slice} -> {v[-1]}")
+    print(f"{rank=}, Mem usage of training_data_td: {get_memory_usage(training_data_td)}")
+    # for k, v in training_data_td.items():
+    #     # print(f"{rank=}, Mem address of {k}: {hex(id(v))}")
+    #     # Increment last slice by rank and save it back
+    #     last_slice = v[-1].clone()
+    #     v[-1] = last_slice + rank
+    #     print(f"{rank=}, Incremented last slice of {k}: {last_slice} -> {v[-1]}")
 
     model = Net().to(device)
     model = DDP(model, device_ids=[rank])
