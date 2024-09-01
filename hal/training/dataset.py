@@ -5,8 +5,8 @@ from typing import List
 from typing import Tuple
 
 import numpy as np
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
+import torch
 from torch.utils.data import Dataset
 
 from hal.data.constants import IDX_BY_CHARACTER_STR
@@ -19,6 +19,45 @@ from hal.training.utils import pyarrow_table_to_np_dict
 from hal.training.zoo.preprocess.registry import InputPreprocessRegistry
 from hal.training.zoo.preprocess.registry import Player
 from hal.training.zoo.preprocess.registry import TargetPreprocessRegistry
+
+
+class InMemoryDataset(Dataset):
+    def __init__(
+        self,
+        input_path: Path,
+        stats_path: Path,
+        data_config: DataConfig,
+        embed_config: EmbeddingConfig,
+    ) -> None:
+        self.table = torch.from_numpy(pq.read_table(input_path, schema=SCHEMA).to_pandas().to_numpy())
+        assert self.table.dim() == 2, "Parquet table must be 2D"
+        self.stats_by_feature_name = load_dataset_stats(stats_path)
+        self.data_config = data_config
+        self.embed_config = embed_config
+
+        self.input_len = data_config.input_len
+        self.target_len = data_config.target_len
+        self.trajectory_len = self.input_len + self.target_len
+        self.include_both_players = data_config.include_both_players
+        self.player_perspectives: List[Player] = ["p1", "p2"] if self.include_both_players else ["p1"]
+
+        self.input_preprocessing_fn = InputPreprocessRegistry.get(self.embed_config.input_preprocessing_fn)
+        self.target_preprocessing_fn = TargetPreprocessRegistry.get(self.embed_config.target_preprocessing_fn)
+
+    def __len__(self) -> int:
+        if self.include_both_players:
+            return 2 * len(self.table) - self.trajectory_len
+        return len(self.table) - self.trajectory_len
+
+    def __getitem__(self, idx):
+        assert isinstance(idx, int), "Index must be an integer."
+        assert 0 <= idx < len(self), "Index out of bounds."
+
+        sample = self.table[idx : idx + self.trajectory_len]
+        player = self.player_perspectives[player_index]
+        inputs = self.input_preprocessing_fn(features_by_name, self.trajectory_len, player, self.stats_by_feature_name)
+        targets = self.target_preprocessing_fn(features_by_name, player)
+        return inputs, targets
 
 
 class SizedDataset(Dataset, abc.ABC):
@@ -83,23 +122,23 @@ class MmappedParquetDataset(SizedDataset):
         filter_conditions = []
 
         if self.replay_filter.replay_uuid is not None:
-            filter_conditions.append(pc.equal(self.parquet_table["replay_uuid"], self.replay_filter.replay_uuid))
+            filter_conditions.append(self.parquet_table["replay_uuid"] == self.replay_filter.replay_uuid)
 
         if self.replay_filter.stage is not None:
             stage_idx = IDX_BY_STAGE_STR[self.replay_filter.stage]
-            filter_conditions.append(pc.equal(self.parquet_table["stage"], stage_idx))
+            filter_conditions.append(self.parquet_table["stage"] == stage_idx)
 
         if self.replay_filter.character is not None:
             character_idx = IDX_BY_CHARACTER_STR[self.replay_filter.character]
             filter_conditions.append(
-                pc.or_(
-                    pc.equal(self.parquet_table["p1_character"], character_idx),
-                    pc.equal(self.parquet_table["p2_character"], character_idx),
-                )
+                (self.parquet_table["p1_character"] == character_idx)
+                | (self.parquet_table["p2_character"] == character_idx)
             )
 
         if filter_conditions:
-            combined_filter = pc.and_(*filter_conditions)
+            combined_filter = filter_conditions[0]
+            for condition in filter_conditions[1:]:
+                combined_filter = combined_filter & condition
             filtered_indices = np.where(combined_filter.to_numpy())[0]
             valid_indices = filtered_indices[filtered_indices < len(self.parquet_table) - self.trajectory_len]
             return valid_indices
