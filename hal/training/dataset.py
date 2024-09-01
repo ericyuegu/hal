@@ -1,5 +1,6 @@
 import abc
 from pathlib import Path
+from typing import Any
 from typing import Dict
 from typing import List
 from typing import Tuple
@@ -21,6 +22,24 @@ from hal.training.zoo.preprocess.registry import Player
 from hal.training.zoo.preprocess.registry import TargetPreprocessRegistry
 
 
+def _create_filters_from_replay_filter(data_config: DataConfig) -> List[Tuple[Any]]:
+    filter_config = data_config.replay_filter
+    filters = []
+    if filter_config.replay_uuid is not None:
+        filters.append(("replay_uuid", "=", filter_config.replay_uuid))
+    if filter_config.stage is not None:
+        stage_idx = IDX_BY_STAGE_STR[filter_config.stage]
+        filters.append(("stage", "=", stage_idx))
+    if filter_config.ego_character is not None:
+        character_idx = IDX_BY_CHARACTER_STR[filter_config.ego_character]
+        filters.append([("p1_character", "=", character_idx), ("p2_character", "=", character_idx)])
+    if filter_config.opponent_character is not None:
+        character_idx = IDX_BY_CHARACTER_STR[filter_config.opponent_character]
+        filters.append([("p1_character", "=", character_idx), ("p2_character", "=", character_idx)])
+
+    return filters
+
+
 class InMemoryDataset(Dataset):
     def __init__(
         self,
@@ -29,8 +48,10 @@ class InMemoryDataset(Dataset):
         data_config: DataConfig,
         embed_config: EmbeddingConfig,
     ) -> None:
-        self.table = torch.from_numpy(pq.read_table(input_path, schema=SCHEMA).to_pandas().to_numpy())
-        assert self.table.dim() == 2, "Parquet table must be 2D"
+        filters = _create_filters_from_replay_filter(data_config) if data_config.replay_filter else []
+        table = pq.read_table(input_path, schema=SCHEMA, filters=filters)
+        self.table = torch.from_numpy(table.to_pandas().to_numpy())
+        assert self.table.dim() == 2, f"Expected parquet table dim==2, got {self.table.dim()}"
         self.stats_by_feature_name = load_dataset_stats(stats_path)
         self.data_config = data_config
         self.embed_config = embed_config
