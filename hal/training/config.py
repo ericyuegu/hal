@@ -42,6 +42,8 @@ class DataConfig:
     replay_filter: ReplayFilter = ReplayFilter()
     include_both_players: bool = False
     truncate_rollouts_to_replay_end: bool = False
+
+    # Debugging
     debug_repeat_batch: bool = False
 
 

@@ -4,19 +4,22 @@ from typing import Optional
 from typing import Tuple
 
 import torch
+from tensordict import TensorDict
 from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
 from torch.utils.data import DistributedSampler
 from torch.utils.data import Sampler
 
+from hal.training.config import DataConfig
 from hal.training.config import TrainConfig
-from hal.training.dataset import MmappedParquetDataset
-from hal.training.dataset import SizedDataset
+from hal.training.dataset import InMemoryDataset
+from hal.training.dataset import load_filtered_parquet_as_tensordict
 
 
 class RepeatFirstBatchSampler(Sampler):
     """For debugging"""
 
-    def __init__(self, dataset: SizedDataset, batch: int, *args, **kwargs) -> None:
+    def __init__(self, dataset: Dataset, batch: int, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.batch_indices = torch.randint(0, len(dataset), (batch,)).tolist()
 
@@ -25,8 +28,17 @@ class RepeatFirstBatchSampler(Sampler):
             yield from iter(self.batch_indices)
 
 
+def create_tensordicts(data_config: DataConfig) -> Tuple[TensorDict, TensorDict]:
+    data_dir = Path(data_config.data_dir)
+    tds: List[TensorDict] = []
+    for split in ("train", "val"):
+        input_path = data_dir / f"{split}.parquet"
+        tds.append(load_filtered_parquet_as_tensordict(input_path, data_config))
+    return tds[0], tds[1]
+
+
 def create_dataloaders(
-    train_config: TrainConfig, rank: Optional[int], world_size: Optional[int]
+    train_td: TensorDict, val_td: TensorDict, train_config: TrainConfig, rank: Optional[int], world_size: Optional[int]
 ) -> Tuple[DataLoader, DataLoader]:
     data_dir = Path(train_config.data.data_dir)
     stats_path = data_dir / "stats.json"
@@ -36,8 +48,8 @@ def create_dataloaders(
     for split in ("train", "val"):
         is_train = split == "train"
         # Dataset
-        dataset = MmappedParquetDataset(
-            input_path=data_dir / f"{split}.parquet",
+        dataset = InMemoryDataset(
+            tensordict=train_td if is_train else val_td,
             stats_path=stats_path,
             data_config=train_config.data,
             embed_config=train_config.embedding,
@@ -56,7 +68,7 @@ def create_dataloaders(
                 else None
             )
         # Dataloader
-        dataloader: DataLoader[MmappedParquetDataset] = DataLoader(
+        dataloader = DataLoader(
             dataset,
             batch_size=train_config.local_batch_size,
             shuffle=shuffle,

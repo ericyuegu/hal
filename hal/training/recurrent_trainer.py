@@ -6,6 +6,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from tensordict import TensorDict
 from torch import Tensor
 from torch.nn import functional as F
 from torch.types import Number
@@ -15,6 +16,7 @@ from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
 from hal.training.dataloader import create_dataloaders
+from hal.training.dataloader import create_tensordicts
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import wrap_multiprocessing
 
@@ -115,6 +117,8 @@ class RecurrentTrainer(Trainer):
 def main(
     rank: Optional[int],
     world_size: Optional[int],
+    train_td: TensorDict,
+    val_td: TensorDict,
     train_config: TrainConfig,
 ) -> None:
     rank = rank or 0
@@ -123,7 +127,7 @@ def main(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    train_loader, val_loader = create_dataloaders(train_config, rank=rank, world_size=world_size)
+    train_loader, val_loader = create_dataloaders(train_td, val_td, train_config, rank=rank, world_size=world_size)
     trainer = RecurrentTrainer(config=train_config, train_loader=train_loader, val_loader=val_loader)
     trainer.train_loop(
         train_loader,
@@ -145,5 +149,6 @@ def parse_cli() -> TrainConfig:
 
 if __name__ == "__main__":
     train_config = parse_cli()
+    train_td, val_td = create_tensordicts(train_config.data)
     # pass positional args and call wrapped fn; (kwargs not accepted)
-    wrap_multiprocessing(main, train_config)()
+    wrap_multiprocessing(main, train_config, train_td, val_td)

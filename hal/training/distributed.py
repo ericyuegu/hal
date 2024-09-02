@@ -2,6 +2,7 @@ import builtins
 import functools
 import os
 import time
+from typing import Any
 from typing import Callable
 from typing import Optional
 from typing import Union
@@ -90,7 +91,7 @@ def auto_distribute(f: Callable) -> Callable:
     return dist_wrapped
 
 
-def wrap_multiprocessing(main_fn: Callable, config: BaseConfig) -> Callable:
+def wrap_multiprocessing(main_fn: Callable, config: BaseConfig, *args: Any) -> Callable:
     """
     Initialize torch multiprocessing for training.
     """
@@ -102,12 +103,12 @@ def wrap_multiprocessing(main_fn: Callable, config: BaseConfig) -> Callable:
         n_gpus = config.n_gpus
         assert n_gpus <= device_count, f"n_gpus={n_gpus}, only {device_count} gpus available!"
         if n_gpus == 1:
-            return main_fn(None, None, config)
-        torch.multiprocessing.spawn(main_fn, args=(n_gpus, config), nprocs=n_gpus, join=True, start_method="spawn")  # type: ignore
+            return main_fn(None, None, config, *args)
+        torch.multiprocessing.spawn(main_fn, args=(n_gpus, config, *args), nprocs=n_gpus, join=True, start_method="spawn")  # type: ignore
 
     @functools.wraps(main_fn)
     def dummy_wrapped():
-        return main_fn(None, None, config)
+        return main_fn(None, None, config, *args)
 
     device = get_device()
     if device.startswith("cuda") and not config.debug:
