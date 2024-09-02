@@ -14,6 +14,7 @@ import attr
 import torch
 import torch.nn
 from loguru import logger
+from tensordict import TensorDict
 
 import wandb
 from hal.training.config import TrainConfig
@@ -145,7 +146,7 @@ class DummyWriter:
     def watch(self, model: torch.nn.Module, **kwargs) -> None:
         """Hooks into torch model to collect gradients and the topology."""
 
-    def log(self, summary_dict: Dict[str, Any], step: int, commit: bool = True) -> None:
+    def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
 
     def plot_confusion_matrix(
@@ -185,7 +186,7 @@ class Writer:
             )
             wandb.watch(wandb_config.model, log="all")
 
-    def log(self, summary_dict: Dict[str, Any], step: int, commit: bool = True) -> None:
+    def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
         wandb.log(summary_dict, step=step, commit=commit)
 

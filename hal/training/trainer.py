@@ -24,7 +24,6 @@ from hal.training.io import Writer
 from hal.training.io import get_artifact_dir
 from hal.training.io import get_exp_name
 from hal.training.io import get_log_dir
-from hal.training.utils import move_tensors_to_device
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
 from hal.training.utils import time_format
@@ -86,15 +85,15 @@ class Trainer(torch.nn.Module, abc.ABC):
         ...
 
     @abc.abstractmethod
-    def train_op(self, batch: TensorDict) -> MetricsDict:
+    def train_op(self, batch: TensorDict) -> TensorDict:
         ...
 
     @abc.abstractmethod
-    def val_op(self, batch: TensorDict) -> MetricsDict:
+    def val_op(self, batch: TensorDict) -> TensorDict:
         ...
 
     def train_step(self, batch: TensorDict, writer: Writer, step: int) -> None:
-        batch.to(self.device)
+        batch = batch.to(self.device)
         metrics = self.train_op(batch)
         writer.log(metrics, step=step, commit=False)
 
@@ -192,11 +191,11 @@ class Trainer(torch.nn.Module, abc.ABC):
 
         for i in range_iter:
             batch = next(val_loader)
-            batch.to(device)
+            batch = batch.to(device, non_blocking_pin=True)
             if i == 0 and self.config.debug:
                 self.save_batch_to_disk(batch, step=step)
             metrics_dict = self.val_op(batch)
-            metrics_dict = move_tensors_to_device(metrics_dict, "cpu", non_blocking=False)
+            metrics_dict = metrics_dict.to("cpu")
             for k, v in metrics_dict.items():
                 concat_metrics[k].append(v)
 

@@ -8,7 +8,6 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 from torch.nn import functional as F
-from training.trainer import MetricsDict
 from training.trainer import Trainer
 
 from hal.training.config import TrainConfig
@@ -69,7 +68,7 @@ class RecurrentTrainer(Trainer):
 
         return loss_by_head
 
-    def train_op(self, batch: TensorDict) -> MetricsDict:
+    def train_op(self, batch: TensorDict) -> TensorDict:
         self.opt.zero_grad(set_to_none=True)
         loss_by_head = self._teacher_forcing_loop(batch)
         loss_total = torch.tensor(sum(v for k, v in loss_by_head.items() if k.startswith("loss")))
@@ -78,18 +77,18 @@ class RecurrentTrainer(Trainer):
         self.scheduler.step()
 
         loss_by_head["loss_total"] = loss_total
-        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.items()}
+        metrics_dict = TensorDict({f"train/{k}": v.item() for k, v in loss_by_head.items()}, device="cpu")  # type: ignore
         metrics_dict["lr"] = self.scheduler.get_lr()
         return metrics_dict
 
-    def val_op(self, batch: TensorDict) -> MetricsDict:
+    def val_op(self, batch: TensorDict) -> TensorDict:
         self.eval()
         with torch.no_grad():
             loss_by_head = self._teacher_forcing_loop(batch)
             loss_total = torch.tensor(sum(v for k, v in loss_by_head.items() if k.startswith("loss")))
 
         loss_by_head["loss_total"] = loss_total
-        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
+        metrics_dict = TensorDict({f"val/{k}": v.item() for k, v in loss_by_head.items()}, device="cpu")  # type: ignore
         return metrics_dict
 
 
