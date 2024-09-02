@@ -115,8 +115,6 @@ class TrainConfig(BaseConfig):
 def create_parser_for_attrs_class(
     cls: Type[Any], parser: argparse.ArgumentParser, prefix: str = ""
 ) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-
     for field in attr.fields(cls):
         arg_name = f"--{prefix}{field.name}"
 
