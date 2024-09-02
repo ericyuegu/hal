@@ -1,8 +1,8 @@
-from typing import Dict
-
 import numpy as np
-from data.constants import STICK_XY_CLUSTER_CENTERS_V0
+import torch
+from tensordict import TensorDict
 
+from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.data.constants import VALID_PLAYERS
 from hal.data.normalize import union
 from hal.training.zoo.preprocess.encoding import get_closest_stick_xy_cluster_v0
@@ -13,7 +13,7 @@ from hal.training.zoo.preprocess.registry import TargetPreprocessRegistry
 
 
 @TargetPreprocessRegistry.register("targets_v0")
-def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: Player) -> Dict[str, np.ndarray]:
+def preprocess_targets_v0(sample: TensorDict, player: Player) -> TensorDict:
     """
     Return only target features after the input trajectory length.
 
@@ -41,11 +41,13 @@ def preprocess_targets_v0(sample: Dict[str, np.ndarray], player: Player) -> Dict
     stacked_buttons = np.stack((button_a, button_b, jump, button_z, shoulder, no_button), axis=1)
     one_hot_buttons = one_hot_2d(stacked_buttons)
 
-    return {
-        "main_stick": one_hot_main_stick.astype(np.float32),
-        "c_stick": one_hot_c_stick.astype(np.float32),
-        "buttons": one_hot_buttons.astype(np.float32),
-    }
+    return TensorDict(
+        {
+            "main_stick": torch.tensor(one_hot_main_stick, dtype=torch.float32),
+            "c_stick": torch.tensor(one_hot_c_stick, dtype=torch.float32),
+            "buttons": torch.tensor(one_hot_buttons, dtype=torch.float32),
+        }
+    )
 
 
 TARGETS_EMBEDDING_SIZES = {

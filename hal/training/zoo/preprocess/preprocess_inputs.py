@@ -47,14 +47,17 @@ def _preprocess_numeric_features(
     ego: Player,
     stats: Dict[str, FeatureStats],
 ) -> torch.Tensor:
-    """Preprocess numeric features for both players."""
+    """Preprocess numeric (gamestate) features for both players."""
     opponent = _get_opponent(ego)
+
     numeric_inputs = []
     for feature in features_to_process:
         preprocess_fn: NormalizationFn = NORMALIZATION_FN_BY_FEATURE_V0[feature]
+        logger.debug(f"Preprocess fn for {feature}: {preprocess_fn.__name__}")
         for player in [ego, opponent]:
             feature_name = f"{player}_{feature}"
-            numeric_inputs.append(preprocess_fn(sample[feature_name], stats[feature_name]))  # pylint: disable=E1102
+            numeric_inputs.append(preprocess_fn(sample[feature_name], stats[feature_name]))
+
     return torch.stack(numeric_inputs, dim=-1)
 
 
@@ -64,8 +67,6 @@ def _preprocess_categorical_features(sample: TensorDict, ego: Player, stats: Dic
 
     def process_feature(feature_name: str, column_name: str) -> np.ndarray:
         preprocess_fn: NormalizationFn = NORMALIZATION_FN_BY_FEATURE_V0[feature_name]
-        # TODO remove
-        logger.info(f"Preprocess fn for {feature_name}: {preprocess_fn}")
         return preprocess_fn(sample[column_name], stats[column_name])[..., np.newaxis]
 
     processed_features = {}
