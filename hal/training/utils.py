@@ -79,7 +79,10 @@ def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
 
 
 def pyarrow_table_to_tensordict(table: pa.Table) -> TensorDict:
-    return TensorDict({name: torch.from_numpy(col.to_numpy()) for name, col in zip(table.column_names, table.columns)})
+    return TensorDict(
+        {name: torch.from_numpy(col.to_numpy()) for name, col in zip(table.column_names, table.columns)},
+        batch_size=len(table),
+    )
 
 
 def get_nembd_from_config(config: EmbeddingConfig) -> int:

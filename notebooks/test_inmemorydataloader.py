@@ -8,3 +8,4 @@ td = load_filtered_parquet_as_tensordict("/opt/projects/hal2/data/dev/train.parq
 
 # %%
 td
+# %%

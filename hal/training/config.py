@@ -40,7 +40,7 @@ class DataConfig:
     input_len: int = 60
     target_len: int = 5
     replay_filter: ReplayFilter = ReplayFilter()
-    include_both_players: bool = True
+    include_both_players: bool = False
     truncate_rollouts_to_replay_end: bool = False
     debug_repeat_batch: bool = False
 

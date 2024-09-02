@@ -69,7 +69,8 @@ def load_filtered_parquet_as_tensordict(
     filters = _create_filters_from_replay_filter(data_config) or None
     logger.info(f"{filters=}")
     table = pq.read_table(input_path, schema=SCHEMA, filters=filters)
-    return pyarrow_table_to_tensordict(table)
+    tensordict = pyarrow_table_to_tensordict(table)
+    return tensordict
 
 
 class InMemoryDataset(Dataset):
@@ -80,6 +81,7 @@ class InMemoryDataset(Dataset):
         data_config: DataConfig,
         embed_config: EmbeddingConfig,
     ) -> None:
+        self.tensordict = tensordict
         self.stats_by_feature_name = load_dataset_stats(stats_path)
         self.data_config = data_config
         self.embed_config = embed_config
@@ -88,15 +90,14 @@ class InMemoryDataset(Dataset):
         self.target_len = data_config.target_len
         self.trajectory_len = self.input_len + self.target_len
         self.include_both_players = data_config.include_both_players
-        self.player_perspectives: List[Player] = ["p1", "p2"] if self.include_both_players else ["p1"]
 
         self.input_preprocessing_fn = InputPreprocessRegistry.get(self.embed_config.input_preprocessing_fn)
         self.target_preprocessing_fn = TargetPreprocessRegistry.get(self.embed_config.target_preprocessing_fn)
 
     def __len__(self) -> int:
         if self.include_both_players:
-            return 2 * len(self.table) - self.trajectory_len
-        return len(self.table) - self.trajectory_len
+            return 2 * len(self.tensordict) - self.trajectory_len
+        return len(self.tensordict) - self.trajectory_len
 
     def __getitem__(self, idx):
         assert isinstance(idx, int), "Index must be an integer."
