@@ -103,10 +103,11 @@ class InMemoryDataset(Dataset):
         assert isinstance(idx, int), "Index must be an integer."
         assert 0 <= idx < len(self), "Index out of bounds."
 
-        sample = self.table[idx : idx + self.trajectory_len]
-        player = self.player_perspectives[player_index]
-        inputs = self.input_preprocessing_fn(features_by_name, self.trajectory_len, player, self.stats_by_feature_name)
-        targets = self.target_preprocessing_fn(features_by_name, player)
+        sample = self.tensordict[idx : idx + self.trajectory_len]
+        # TODO eric: dynamically determine player perspective
+        player = "p1"
+        inputs = self.input_preprocessing_fn(sample, self.trajectory_len, player, self.stats_by_feature_name)
+        targets = self.target_preprocessing_fn(sample, player)
         return inputs, targets
 
 
