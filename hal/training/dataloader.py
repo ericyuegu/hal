@@ -74,6 +74,7 @@ def create_dataloaders(
             shuffle=shuffle,
             sampler=sampler,
             num_workers=train_config.dataworker.data_workers_per_gpu,
+            collate_fn=torch.stack,
             pin_memory=torch.cuda.is_available(),
             prefetch_factor=train_config.dataworker.prefetch_factor,
             persistent_workers=True,
