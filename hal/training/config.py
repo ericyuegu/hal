@@ -128,8 +128,8 @@ def create_parser_for_attrs_class(
                     arg_name,
                     action="store_true",
                     help=field.metadata.get("help", ""),
-                    default=field.default if field.default is not attr.NOTHING else None,
-                    required=field.default is attr.NOTHING,
+                    default=field.default if field.default is not attr.NOTHING else False,
+                    required=field.default is attr.NOTHING and arg_name != "--debug",
                 )
             else:
                 parser.add_argument(
