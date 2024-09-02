@@ -69,13 +69,15 @@ def create_dataloaders(
                 if is_distributed
                 else None
             )
+        num_workers = 1 if train_config.debug else train_config.dataworker.data_workers_per_gpu
+
         # Dataloader
         dataloader = DataLoader(
             dataset,
             batch_size=train_config.local_batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=train_config.dataworker.data_workers_per_gpu,
+            num_workers=num_workers,
             collate_fn=torch.stack,
             pin_memory=torch.cuda.is_available(),
             prefetch_factor=train_config.dataworker.prefetch_factor,

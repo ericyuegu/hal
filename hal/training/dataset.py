@@ -101,12 +101,15 @@ class InMemoryDataset(Dataset):
         # TODO eric: dynamically determine player perspective
         player = "p1"
 
-        sample = self.tensordict[idx : idx + self.trajectory_len]
+        sample: TensorDict = self.tensordict[idx : idx + self.trajectory_len]
         inputs = self.input_preprocessing_fn(sample, self.data_config, player, self.stats_by_feature_name)
         targets = self.target_preprocessing_fn(sample, player)
+
         return TensorDict(
             {
                 "inputs": inputs,
                 "targets": targets,
             }  # type: ignore
         )
+
+    # TODO implement __getitems__ for batched sampling
