@@ -118,11 +118,12 @@ PLAYER_ECB_FEATURES: Tuple[str, ...] = (
 )
 # Target features
 TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
-    "button_a",
-    "button_b",
-    "button_x",
-    "button_z",
-    "button_l",
+    "a",
+    "b",
+    "x",
+    "z",
+    "l",
+    "no_button",
 )
 
 STICK_XY_CLUSTER_CENTERS_V0: np.ndarray = np.array(
