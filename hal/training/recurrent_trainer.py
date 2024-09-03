@@ -88,10 +88,10 @@ class RecurrentTrainer(Trainer):
         self.eval()
         with torch.no_grad():
             loss_by_head = self._teacher_forcing_loop(batch)
-            loss_total = torch.tensor(sum(v for k, v in loss_by_head.items() if k.startswith("loss")))
+            loss_total = sum(v.detach() for k, v in loss_by_head.items() if k.startswith("loss"))
 
-        loss_by_head["loss_total"] = loss_total
-        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}  # type: ignore
+        loss_by_head["loss_total"] = loss_total  # type: ignore
+        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
         return metrics_dict
 
 
