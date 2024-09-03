@@ -115,28 +115,28 @@ class Checkpoint:
 @attr.s(auto_attribs=True, frozen=True)
 class WandbConfig:
     project: str
-    config: Dict[str, Any]
+    train_config: Dict[str, Any]
     tags: List[str]
     name: str
     model: torch.nn.Module
 
     @classmethod
-    def create(cls, model: torch.nn.Module, exp_config: TrainConfig) -> Optional["WandbConfig"]:
+    def create(cls, model: torch.nn.Module, train_config: TrainConfig) -> Optional["WandbConfig"]:
         if not os.getenv("WANDB_API_KEY"):
             logger.info("W&B run not initiated because WANDB_API_KEY not set.")
             return None
-        if exp_config.debug:
+        if train_config.debug:
             logger.info("Debug mode, skipping W&B.")
             return None
 
         model_name = model.model.__class__.__name__
-        config = {"model_name": model_name, **vars(exp_config)}
+        config = {"model_name": model_name, **vars(train_config)}
         tags = [model_name]
 
         name_path: Path = model.log_dir
         name = name_path.stem
 
-        return cls(project="hal", config=config, tags=tags, name=name, model=model)
+        return cls(project="hal", train_config=config, tags=tags, name=name, model=model)
 
 
 class DummyWriter:
@@ -180,11 +180,13 @@ class Writer:
         if is_master():
             wandb.init(
                 project=wandb_config.project,
-                config=wandb_config.config,
+                config=wandb_config.train_config,
                 tags=wandb_config.tags,
                 name=wandb_config.name,
             )
-            wandb.watch(wandb_config.model, log="all")
+            train_config = wandb_config.train_config
+            log_freq = train_config["report_len"] // (train_config["local_batch_size"] * train_config["n_gpus"])
+            wandb.watch(wandb_config.model, log="all", log_freq=log_freq)
 
     def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""

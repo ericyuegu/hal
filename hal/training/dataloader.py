@@ -21,7 +21,7 @@ class RepeatFirstBatchSampler(Sampler):
 
     def __init__(self, dataset: Dataset, batch: int, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.batch_indices = torch.randint(0, len(dataset), (batch,)).tolist()
+        self.batch_indices = torch.randint(low=0, high=len(dataset), size=(batch,)).tolist()  # type: ignore
 
     def __iter__(self):
         while True:
