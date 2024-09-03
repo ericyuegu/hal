@@ -9,6 +9,7 @@ import torch
 from tensordict import TensorDict
 from torch.nn import functional as F
 
+from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.data.constants import TARGET_FEATURES_TO_ONE_HOT_ENCODE
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
@@ -38,10 +39,11 @@ class RecurrentTrainer(Trainer):
             frame_losses = loss_fn(pred[control], target[control], reduction="none")
 
             # Loss for each class
-            if control == "buttons":
-                for t in range(frame_losses.shape[1]):
+            for t in range(frame_losses.shape[1]):
+                if control == "buttons":
                     loss_dict[f"_{control}_loss_{TARGET_FEATURES_TO_ONE_HOT_ENCODE[t]}"] = frame_losses[:, t].mean()
-
+                else:
+                    loss_dict[f"_{control}_loss_{STICK_XY_CLUSTER_CENTERS_V0[t]}"] = frame_losses[:, t].mean()
             mean_loss = frame_losses.mean()
             loss_dict[f"loss_{control}"] = mean_loss
 

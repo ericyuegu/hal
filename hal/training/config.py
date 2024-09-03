@@ -37,7 +37,7 @@ class DataConfig:
     data_dir: str = "data/dev"
 
     # Number of input and target frames in example/rollout
-    input_len: int = 60
+    input_len: int = 120
     target_len: int = 5
     replay_filter: ReplayFilter = ReplayFilter()
     include_both_players: bool = False
