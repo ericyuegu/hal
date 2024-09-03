@@ -8,7 +8,6 @@ from typing import Iterator
 from typing import Union
 
 import torch
-from loguru import logger
 from tensordict import TensorDict
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -24,6 +23,7 @@ from hal.training.io import Writer
 from hal.training.io import get_artifact_dir
 from hal.training.io import get_exp_name
 from hal.training.io import get_log_dir
+from hal.training.io import log_if_master
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
 from hal.training.utils import time_format
@@ -107,8 +107,8 @@ class Trainer(torch.nn.Module, abc.ABC):
         report_len: int,
         keep_ckpts: int,
     ) -> None:
-        logger.info(self)
-        logger.info(f"{self.artifact_dir=}")
+        log_if_master(self)
+        log_if_master(f"{self.artifact_dir=}")
         assert report_len % local_batch_size == 0
         assert n_samples % report_len == 0
 
@@ -120,7 +120,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         ckpt = Checkpoint(model=self, logdir=self.artifact_dir, keep_ckpts=keep_ckpts)
         resume_idx = ckpt.restore()[0]
         if resume_idx:
-            logger.info(f"Resuming training at {resume_idx} ({resume_idx / (1 << 20):.2f}M samples)")
+            log_if_master(f"Resuming training at {resume_idx} ({resume_idx / (1 << 20):.2f}M samples)")
 
         with Writer.create(wandb_config) as writer:
             for i in range(resume_idx, n_samples, report_len):
@@ -156,7 +156,7 @@ class Trainer(torch.nn.Module, abc.ABC):
                 )
                 ckpt.save(self.samples)
 
-                logger.info(
+                log_if_master(
                     f"{self.samples / (1 << 20):.2f}M/{n_samples / (1 << 20):.2f}M samples, "
                     f"time left {time_format((t2 - t0) * (n_samples - self.samples) / report_len)}"
                 )
@@ -167,7 +167,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         save_batch_dir = self.artifact_dir / "training_samples" / f"{step}"
         Path.mkdir(save_batch_dir, exist_ok=True, parents=True)
         batch.save(str(save_batch_dir))
-        logger.info(f"Saved example to {save_batch_dir}")
+        log_if_master(f"Saved example to {save_batch_dir}")
 
     def validate(
         self,
