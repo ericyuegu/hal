@@ -41,8 +41,7 @@ class MLPBC(nn.Module):
         self.main_stick_head = nn.Linear(hidden_size, embed_config.num_main_stick_clusters)
         self.c_stick_head = nn.Linear(hidden_size, embed_config.num_c_stick_clusters)
 
-    def forward(self, batch: TensorDict) -> TensorDict:
-        inputs: TensorDict = batch["inputs"]
+    def forward(self, inputs: TensorDict) -> TensorDict:
         B, T, D = inputs["gamestate"].shape
         assert T > 0
 

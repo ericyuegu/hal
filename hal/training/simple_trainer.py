@@ -46,9 +46,28 @@ class SimpleTrainer(Trainer):
 
         return loss_dict
 
+    def _forward_loop(self, batch: TensorDict) -> TensorDict:
+        inputs: TensorDict = batch["inputs"]
+        targets: TensorDict = batch["targets"]
+
+        input_len = self.config.data.input_len
+        target_len = self.config.data.target_len
+
+        preds = []
+        for i in range(target_len):
+            pred = self.model(inputs[:, i : i + input_len])
+            preds.append(pred)
+
+        preds_td: TensorDict = torch.stack(preds, dim=1)  # type: ignore
+        targets_td = targets[:, input_len : input_len + target_len]
+
+        loss_by_head = self.loss(preds_td, targets_td)
+
+        return loss_by_head
+
     def train_op(self, batch: TensorDict) -> MetricsDict:
         self.opt.zero_grad(set_to_none=True)
-        loss_by_head = self.model(batch)
+        loss_by_head = self._forward_loop(batch)
 
         loss_weights = self.config.loss_weights
         weighted_losses = {
