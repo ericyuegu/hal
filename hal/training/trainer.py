@@ -54,6 +54,8 @@ class Trainer(torch.nn.Module, abc.ABC):
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
+        assert self.config.report_len % self.config.local_batch_size == 0
+        assert self.config.n_samples % self.config.report_len == 0
         self.samples = 0
 
         model = Arch.get(self.config.arch, config=self.config)
@@ -67,6 +69,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         )
         batch_size = get_world_size() * self.config.local_batch_size
         self.scheduler = CosineAnnealingLR(self.opt, T_max=int(config.n_samples / batch_size), eta_min=1e-6)
+        self.ckpt = Checkpoint(model=self, logdir=self.artifact_dir, keep_ckpts=self.config.keep_ckpts)
 
     def __str__(self) -> str:
         return "\n".join(
@@ -79,6 +82,12 @@ class Trainer(torch.nn.Module, abc.ABC):
                 "\n".join(f"{k:20s}: {v}" for k, v in vars(self.config).items()),
             )
         )
+
+    def restore_checkpoint(self) -> int:
+        resume_idx, _ = self.ckpt.restore()
+        if resume_idx > 0:
+            log_if_master(f"Resuming training at {resume_idx} ({resume_idx / (1 << 20):.2f}M samples)")
+        return resume_idx
 
     @abc.abstractmethod
     def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict:
@@ -97,71 +106,55 @@ class Trainer(torch.nn.Module, abc.ABC):
         metrics = self.train_op(batch)
         writer.log(metrics, step=step, commit=False)
 
-    def train_loop(
-        self,
-        train_loader: Iterable[TensorDict],
-        val_loader: Iterable[TensorDict],
-        local_batch_size: int,
-        n_samples: int,
-        n_val_samples: int,
-        report_len: int,
-        keep_ckpts: int,
-    ) -> None:
+    def train_loop(self, train_loader: Iterable[TensorDict], val_loader: Iterable[TensorDict]) -> None:
         log_if_master(self)
         log_if_master(f"{self.artifact_dir=}")
-        assert report_len % local_batch_size == 0
-        assert n_samples % report_len == 0
 
         wandb_config = WandbConfig.create(self, self.config) if is_master() else None
-        batch_size = get_world_size() * local_batch_size
+        batch_size = get_world_size() * self.config.local_batch_size
         train_loader = repeater(train_loader)
         val_loader = repeater(val_loader)
-
-        ckpt = Checkpoint(model=self, logdir=self.artifact_dir, keep_ckpts=keep_ckpts)
-        resume_idx = ckpt.restore()[0]
-        if resume_idx:
-            log_if_master(f"Resuming training at {resume_idx} ({resume_idx / (1 << 20):.2f}M samples)")
+        resume_idx = self.restore_checkpoint()
 
         with Writer.create(wandb_config) as writer:
-            for i in range(resume_idx, n_samples, report_len):
+            for i in range(resume_idx, self.config.n_samples, self.config.report_len):
                 self.train()
                 range_iter = trange(
                     i,
-                    i + report_len,
+                    i + self.config.report_len,
                     batch_size,
                     leave=False,
                     unit="samples",
                     unit_scale=batch_size,
-                    desc=f"Training stage {i / report_len}/{n_samples / report_len}",
+                    desc=f"Training stage {i / self.config.report_len}/{self.config.n_samples / self.config.report_len}",
                 )
                 t0 = time.perf_counter()
+
                 for samples in range_iter:
                     self.train_step(next(train_loader), writer=writer, step=samples)
                     self.samples = samples
                 t1 = time.perf_counter()
                 writer.log(
-                    {"throughput/samples_per_sec_train": report_len / (t1 - t0)}, step=self.samples, commit=False
+                    {"throughput/samples_per_sec_train": self.config.report_len / (t1 - t0)},
+                    step=self.samples,
+                    commit=False,
                 )
 
-                self.validate(
-                    val_loader,
-                    batch_size=local_batch_size,
-                    n_val_samples=n_val_samples,
-                    writer=writer,
-                    step=self.samples,
-                )
+                self.validate(val_loader, writer=writer, step=self.samples)
                 t2 = time.perf_counter()
                 writer.log(
-                    {"throughput/samples_per_sec_val": n_val_samples / (t2 - t1)}, step=self.samples, commit=True
+                    {"throughput/samples_per_sec_val": self.config.n_val_samples / (t2 - t1)},
+                    step=self.samples,
+                    commit=True,
                 )
-                ckpt.save(self.samples)
+                self.ckpt.save(self.samples)
 
                 log_if_master(
-                    f"{self.samples / (1 << 20):.2f}M/{n_samples / (1 << 20):.2f}M samples, "
-                    f"time left {time_format((t2 - t0) * (n_samples - self.samples) / report_len)}"
+                    f"{self.samples / (1 << 20):.2f}M/{self.config.n_samples / (1 << 20):.2f}M samples, "
+                    f"time left {time_format((t2 - t0) * (self.config.n_samples - self.samples) / self.config.report_len)}"
                 )
 
-        ckpt.save_file(self.model, "model.ckpt")
+        self.ckpt.save_file(self.model, "model.ckpt")
 
     def save_batch_to_disk(self, batch: TensorDict, step: int) -> None:
         save_batch_dir = self.artifact_dir / "training_samples" / f"{step}"
@@ -172,19 +165,18 @@ class Trainer(torch.nn.Module, abc.ABC):
     def validate(
         self,
         val_loader: Iterator[TensorDict],
-        batch_size: int,
-        n_val_samples: int,
         writer: Writer,
         step: int,
     ) -> None:
+        self.eval()
         device = self.device
         range_iter = trange(
             0,
-            n_val_samples,
-            batch_size,
+            self.config.n_val_samples,
+            self.config.local_batch_size,
             leave=False,
             unit="samples",
-            unit_scale=batch_size,
+            unit_scale=self.config.local_batch_size,
             desc=f"Validating at {step / (1 << 20):.2f}M samples",
         )
         concat_metrics = defaultdict(list)

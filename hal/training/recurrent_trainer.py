@@ -97,7 +97,6 @@ class RecurrentTrainer(Trainer):
         return metrics_dict
 
     def val_op(self, batch: TensorDict) -> MetricsDict:
-        self.eval()
         with torch.no_grad():
             loss_by_head = self._teacher_forcing_loop(batch)
             loss_total = sum(v.detach() for k, v in loss_by_head.items() if k.startswith("loss"))
@@ -123,15 +122,7 @@ def main(
         train_td, val_td, train_config, rank=rank, world_size=get_world_size()
     )
     trainer = RecurrentTrainer(config=train_config, train_loader=train_loader, val_loader=val_loader)
-    trainer.train_loop(
-        train_loader,
-        val_loader,
-        local_batch_size=train_config.local_batch_size,
-        n_samples=train_config.n_samples,
-        n_val_samples=train_config.n_val_samples,
-        report_len=train_config.report_len,
-        keep_ckpts=train_config.keep_ckpts,
-    )
+    trainer.train_loop(train_loader, val_loader)
 
 
 def parse_cli() -> TrainConfig:
