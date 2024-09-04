@@ -28,8 +28,8 @@ class MLPBC(nn.Module):
                 character=nn.Embedding(embed_config.num_characters, embed_config.character_embedding_dim),
                 action=nn.Embedding(embed_config.num_actions, embed_config.action_embedding_dim),
                 proj_in=nn.Linear(self.max_length * self.n_embd, hidden_size),
-                mlp=nn.ModuleList(
-                    [
+                mlp=nn.Sequential(
+                    *[
                         layer
                         for _ in range(n_layer - 1)
                         for layer in [nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden_size, hidden_size)]
