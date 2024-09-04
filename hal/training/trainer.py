@@ -56,8 +56,8 @@ class Trainer(torch.nn.Module, abc.ABC):
         self.val_loader = val_loader
         self.samples = 0
 
-        model = Arch.get(self.config.arch)  # TODO input shapes
-        self.model = maybe_wrap_model_distributed(model)  # Needed for .backward and to wrap into a module for saving
+        model = Arch.get(self.config.arch, config=self.config)
+        self.model = maybe_wrap_model_distributed(model)
         self.opt = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config.lr,

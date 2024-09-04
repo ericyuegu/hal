@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from hal.training.config import EmbeddingConfig
+from hal.training.config import TrainConfig
 from hal.training.utils import get_nembd_from_config
 from hal.training.zoo.models.registry import Arch
 
@@ -58,12 +58,12 @@ class RecurrentResidualBlock(nn.Module):
 
 
 class LSTMv1(nn.Module):
-    def __init__(self, embed_config: EmbeddingConfig, n_blocks: int = 4, dropout: float = 0.1) -> None:
+    def __init__(self, config: TrainConfig, n_blocks: int = 4, dropout: float = 0.1) -> None:
         super().__init__()
+        embed_config = config.embedding
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.embed_config = embed_config
         self.n_embd = get_nembd_from_config(embed_config)
 
         self.modules_by_name = nn.ModuleDict(
@@ -126,8 +126,8 @@ class LSTMv1(nn.Module):
         )
 
 
-Arch.register("LSTMv1-2-nodropout", make_net=LSTMv1, embed_config=EmbeddingConfig(), n_blocks=2, dropout=0.0)
-Arch.register("LSTMv1-2", make_net=LSTMv1, embed_config=EmbeddingConfig(), n_blocks=2)
-Arch.register("LSTMv1-4", make_net=LSTMv1, embed_config=EmbeddingConfig(), n_blocks=4)
-Arch.register("LSTMv1-8", make_net=LSTMv1, embed_config=EmbeddingConfig(), n_blocks=8)
-Arch.register("LSTMv1-16", make_net=LSTMv1, embed_config=EmbeddingConfig(), n_blocks=16)
+Arch.register("LSTMv1-2-nodropout", make_net=LSTMv1, n_blocks=2, dropout=0.0)
+Arch.register("LSTMv1-2", make_net=LSTMv1, n_blocks=2)
+Arch.register("LSTMv1-4", make_net=LSTMv1, n_blocks=4)
+Arch.register("LSTMv1-8", make_net=LSTMv1, n_blocks=8)
+Arch.register("LSTMv1-16", make_net=LSTMv1, n_blocks=16)
