@@ -48,29 +48,31 @@ class MLPBC(nn.Module):
         self,
         inputs: TensorDict,
         hidden_in: Optional[Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = None,
-    ) -> Tuple[TensorDict, Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
+    ) -> TensorDict:
         B, T, D = inputs["gamestate"].shape
         assert T > 0
 
-        states = inputs[:, -self.max_length :].reshape(B, -1)  # concat states
-        actions = self.model(states).reshape(states.shape[0], 1, self.act_dim)
+        stage_emb = self.modules_by_name.stage(inputs["stage"]).squeeze(-2)
+        ego_character_emb = self.modules_by_name.character(inputs["ego_character"]).squeeze(-2)
+        opponent_character_emb = self.modules_by_name.character(inputs["opponent_character"]).squeeze(-2)
+        ego_action_emb = self.modules_by_name.action(inputs["ego_action"]).squeeze(-2)
+        opponent_action_emb = self.modules_by_name.action(inputs["opponent_action"]).squeeze(-2)
+        gamestate = inputs["gamestate"]
 
-        return None, actions, None
+        concat_inputs = torch.cat(
+            [stage_emb, ego_character_emb, opponent_character_emb, ego_action_emb, opponent_action_emb, gamestate],
+            dim=-1,
+        )
+        x = concat_inputs.view(B, -1)
 
-    def get_action(self, states, actions, rewards, **kwargs):
-        states = states.reshape(1, -1, self.state_dim)
-        if states.shape[1] < self.max_length:
-            states = torch.cat(
-                [
-                    torch.zeros(
-                        (1, self.max_length - states.shape[1], self.state_dim),
-                        dtype=torch.float32,
-                        device=states.device,
-                    ),
-                    states,
-                ],
-                dim=1,
-            )
-        states = states.to(dtype=torch.float32)
-        _, actions, _ = self.forward(states, None, None, **kwargs)
-        return actions[0, -1]
+        x = self.modules_by_name.proj_in(x)
+        x = self.modules_by_name.mlp(x)
+
+        button_output = self.button_head(x)
+        main_stick_output = self.main_stick_head(x)
+        c_stick_output = self.c_stick_head(x)
+
+        TensorDict(
+            {"buttons": button_output, "main_stick": main_stick_output, "c_stick": c_stick_output},
+            batch_size=(B,),
+        )
