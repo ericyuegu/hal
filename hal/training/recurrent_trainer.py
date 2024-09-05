@@ -7,10 +7,7 @@ from typing import Tuple
 import numpy as np
 import torch
 from tensordict import TensorDict
-from torch.nn import functional as F
 
-from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
-from hal.data.constants import TARGET_FEATURES_TO_ONE_HOT_ENCODE
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
@@ -20,36 +17,15 @@ from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
 from hal.training.distributed import get_world_size
 from hal.training.distributed import wrap_multiprocessing
-from hal.training.trainer import MetricsDict
-from hal.training.trainer import Trainer
+from hal.training.trainer import CategoricalBCTrainer
 
 
-class RecurrentTrainer(Trainer):
+class RecurrentTrainer(CategoricalBCTrainer):
     """
     Trainer for deep models with recurrent blocks.
     """
 
-    def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict:
-        loss_dict: TensorDict = TensorDict({})
-        loss_fns = {"buttons": F.cross_entropy, "main_stick": F.cross_entropy, "c_stick": F.cross_entropy}
-
-        # Calculate and log losses for each controller input
-        for control, loss_fn in loss_fns.items():
-            # Calculate per-frame losses
-            frame_losses = loss_fn(pred[control], target[control], reduction="none")
-
-            # Loss for each class
-            for t in range(frame_losses.shape[1]):
-                if control == "buttons":
-                    loss_dict[f"_{control}_loss_{TARGET_FEATURES_TO_ONE_HOT_ENCODE[t]}"] = frame_losses[:, t].mean()
-                else:
-                    loss_dict[f"_{control}_loss_{STICK_XY_CLUSTER_CENTERS_V0[t]}"] = frame_losses[:, t].mean()
-            mean_loss = frame_losses.mean()
-            loss_dict[f"loss_{control}"] = mean_loss
-
-        return loss_dict
-
-    def _teacher_forcing_loop(self, batch: TensorDict) -> TensorDict:
+    def _forward_loop(self, batch: TensorDict) -> TensorDict:
         inputs: TensorDict = batch["inputs"]
         targets: TensorDict = batch["targets"]
 
@@ -75,29 +51,6 @@ class RecurrentTrainer(Trainer):
         loss_by_head = self.loss(preds_td, targets_td)
 
         return loss_by_head
-
-    def train_op(self, batch: TensorDict) -> MetricsDict:
-        self.opt.zero_grad(set_to_none=True)
-        loss_by_head = self._teacher_forcing_loop(batch)
-
-        loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
-        loss_total.backward()  # type: ignore
-        self.opt.step()
-        self.scheduler.step()
-
-        loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.items()}
-        metrics_dict["lr"] = self.scheduler.get_lr()  # type: ignore
-        return metrics_dict
-
-    def val_op(self, batch: TensorDict) -> MetricsDict:
-        with torch.no_grad():
-            loss_by_head = self._teacher_forcing_loop(batch)
-            loss_total = sum(v.detach() for k, v in loss_by_head.items() if k.startswith("loss"))
-
-        loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
-        return metrics_dict
 
 
 @auto_distribute
