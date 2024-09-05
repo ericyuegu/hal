@@ -147,6 +147,7 @@ def process_replay(replay_path: str, min_frames: int = 1500) -> FrameData:
     return frame_data
 
 
+@logger.catch
 def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str) -> None:
     logger.info(f"Processing {len(replay_paths)} replays and writing to {Path(output_path).resolve()}")
     frames_processed = 0
@@ -210,6 +211,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_replays", type=int, default=-1, help="Maximum number of replays to process")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
+
+    logger.add(f"{Path(args.output_dir) / 'process_replays.log'}")
 
     if args.debug:
         logger.remove()
