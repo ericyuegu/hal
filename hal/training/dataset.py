@@ -62,8 +62,9 @@ def load_filtered_parquet_as_tensordict(
     data_config: DataConfig,
 ) -> TensorDict:
     filters = _create_filters_from_replay_filter(data_config) or None
-    logger.info(f"{filters=}")
     table = pq.read_table(input_path, schema=SCHEMA, filters=filters)
+    num_unique_replays = len(table["replay_uuid"].unique())
+    logger.info(f"Loaded {num_unique_replays} replays from {input_path}")
     tensordict = pyarrow_table_to_tensordict(table)
     return tensordict
 

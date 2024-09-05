@@ -51,9 +51,9 @@ def _preprocess_numeric_features(
     opponent = _get_opponent(ego)
 
     numeric_inputs = []
-    for feature in features_to_process:
-        preprocess_fn: NormalizationFn = NORMALIZATION_FN_BY_FEATURE_V0[feature]
-        for player in [ego, opponent]:
+    for player in [ego, opponent]:
+        for feature in features_to_process:
+            preprocess_fn: NormalizationFn = NORMALIZATION_FN_BY_FEATURE_V0[feature]
             feature_name = f"{player}_{feature}"
             numeric_inputs.append(preprocess_fn(sample[feature_name], stats[feature_name]))
 
