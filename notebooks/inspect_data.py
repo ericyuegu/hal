@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pandas as pd
+import torch
 from tensordict import TensorDict
 
 from hal.data.stats import load_dataset_stats
@@ -28,7 +29,7 @@ dataset = InMemoryDataset(train_td, stats_path, data_config, embed_config)
 stats_by_feature_name = load_dataset_stats(stats_path)
 
 # %%
-raw_td = dataset.tensordict[:35]
+raw_td = dataset.tensordict[24654:24689]
 raw_df = pd.DataFrame({key: value.numpy() for key, value in raw_td.items() if key in cols})
 raw_df = raw_df.reindex(sorted(raw_df.columns), axis=1)
 raw_df
@@ -38,6 +39,17 @@ processed_td = preprocess_inputs_v0(raw_td, data_config, "p1", stats_by_feature_
 processed_df = pd.DataFrame(processed_td["gamestate"].numpy(), columns=cols)
 processed_df = processed_df.reindex(sorted(processed_df.columns), axis=1)
 processed_df
+
+# %%
+action_df = pd.DataFrame(processed_td["ego_action"].numpy())
+action_df
+
+# %%
+dataset[34578]["inputs"]["ego_action"]
+
+# %%
+targets = dataset[34578]["targets"]
+pd.DataFrame(torch.concat(list(targets.values()), -1).numpy())
 
 # %%
 
