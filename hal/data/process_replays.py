@@ -4,8 +4,10 @@ import random
 import sys
 import time
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import DefaultDict
 from typing import List
 from typing import Optional
@@ -25,6 +27,11 @@ from hal.data.schema import SCHEMA
 FrameData = DefaultDict[str, List[Any]]
 
 
+def setup_logger(output_dir: str | Path) -> None:
+    logger.add(Path(output_dir) / "process_replays.log", enqueue=True)
+
+
+@logger.catch
 def extract_and_append_single_frame_inplace(
     frame_data: FrameData, prev_gamestate: Optional[melee.GameState], gamestate: melee.GameState, replay_uuid: int
 ) -> FrameData:
@@ -103,6 +110,7 @@ def extract_and_append_single_frame_inplace(
     return frame_data
 
 
+@logger.catch
 def process_replay(replay_path: str, min_frames: int = 1500) -> FrameData:
     """Processes a single .slp file and returns the frame data."""
     logger.trace(f"Processing replay {replay_path}")
@@ -148,12 +156,12 @@ def process_replay(replay_path: str, min_frames: int = 1500) -> FrameData:
 
 
 @logger.catch
-def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str) -> None:
+def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, worker_init_fn: Callable) -> None:
     logger.info(f"Processing {len(replay_paths)} replays and writing to {Path(output_path).resolve()}")
     frames_processed = 0
 
     t0 = time.perf_counter()
-    with mp.Pool() as pool:
+    with mp.Pool(initializer=worker_init_fn) as pool:
         data_generator = pool.imap(process_replay, replay_paths)
         pbar = tqdm(data_generator, total=len(replay_paths))
         with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
@@ -162,10 +170,9 @@ def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str)
                     table = pa.Table.from_pydict(frame_data, schema=SCHEMA)
                     writer.write_table(table)
                     frames_processed += len(next(iter(frame_data.values())))
-                    pbar.set_description(f"Frames processed: {frames_processed}")
+                    pbar.set_description(f"Replays processed: {pbar.n}/{len(replay_paths)}")
 
     t1 = time.perf_counter()
-
     logger.info(f"Finished processing {len(replay_paths)} replays in {t1 - t0:.2f} seconds.")
 
 
@@ -195,7 +202,10 @@ def process_replays(replay_dir: str, output_dir: str, seed: int, max_replays: in
 
     for split, split_replay_paths in splits.items():
         split_output_path = Path(output_dir) / f"{split}.parquet"
-        write_dataset_incrementally(replay_paths=split_replay_paths, output_path=str(split_output_path))
+        worker_init_fn = partial(setup_logger, output_dir=output_dir)
+        write_dataset_incrementally(
+            replay_paths=split_replay_paths, output_path=str(split_output_path), worker_init_fn=worker_init_fn
+        )
 
 
 def validate_input(replay_dir: str) -> None:
@@ -212,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
 
-    logger.add(f"{Path(args.output_dir) / 'process_replays.log'}")
+    setup_logger(output_dir=args.output_dir)
 
     if args.debug:
         logger.remove()
