@@ -67,29 +67,23 @@ def self_play_menu_helper(
         MenuHelper.skip_postgame(controller=controller_1)
 
 
-def run_episode() -> None:
-    parser = argparse.ArgumentParser(description="Run Melee in emulator")
-    parser.add_argument("--local", action="store_true", help="Run in local mode")
-    parser.add_argument("--no-gui", action="store_true", help="Run without GUI")
-    parser.add_argument("--debug", action="store_true", help="Run with debug mode")
-    args = parser.parse_args()
-
+def run_episode(local: bool, no_gui: bool, debug: bool) -> None:
     headless_console_kwargs = {
         "gfx_backend": "Null",
         "disable_audio": True,
         "use_exi_inputs": True,
-        "enable_ffw": False,  # TODO(eric): causes incorrect memory reads, ask Fizzi about it
+        "enable_ffw": False,
     }
-    if args.local:
+    if local:
         dolphin_home_path = LOCAL_DOLPHIN_HOME_PATH
-        if args.no_gui:
+        if no_gui:
             emulator_path = LOCAL_HEADLESS_EMULATOR_PATH
         else:
             emulator_path = LOCAL_GUI_EMULATOR_PATH
             headless_console_kwargs = {}
     else:
         dolphin_home_path = REMOTE_DOLPHIN_HOME_PATH
-        if not args.no_gui:
+        if not no_gui:
             print("Remote mode only supports headless operation. Forcing --no-gui.")
         emulator_path = REMOTE_EMULATOR_PATH
 
@@ -197,4 +191,9 @@ def run_episode() -> None:
 
 
 if __name__ == "__main__":
-    run_episode()
+    parser = argparse.ArgumentParser(description="Run Melee in emulator")
+    parser.add_argument("--local", action="store_true", help="Run in local mode")
+    parser.add_argument("--no-gui", action="store_true", help="Run without GUI")
+    parser.add_argument("--debug", action="store_true", help="Run with debug mode")
+    args = parser.parse_args()
+    run_episode(local=args.local, no_gui=args.no_gui, debug=args.debug)
