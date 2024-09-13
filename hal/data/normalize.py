@@ -13,13 +13,13 @@ def cast_int32(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
 
 
 def normalize(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
-    """Normalize feature [0, 1]."""
-    return ((array - stats.min) / (stats.max - stats.min)).to(torch.float32)
+    """Normalize feature [-1, 1]."""
+    return (2 * (array - stats.min) / (stats.max - stats.min) - 1).to(torch.float32)
 
 
 def invert_and_normalize(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
-    """Invert and normalize feature to [0, 1]."""
-    return ((stats.max - array) / (stats.max - stats.min)).to(torch.float32)
+    """Invert and normalize feature to [-1, 1]."""
+    return (2 * (stats.max - array) / (stats.max - stats.min) - 1).to(torch.float32)
 
 
 def standardize(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
