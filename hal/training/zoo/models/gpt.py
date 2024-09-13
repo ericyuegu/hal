@@ -14,8 +14,8 @@ from hal.training.zoo.models.registry import Arch
 
 @attr.s(auto_attribs=True, frozen=True)
 class GPTConfig:
-    n_layer: int = 12
-    n_head: int = 4
+    n_layer: int
+    n_head: int
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -117,7 +117,7 @@ class Block(nn.Module):
         return x
 
 
-class GPT(nn.Module):
+class GPTv1(nn.Module):
     def __init__(self, train_config: TrainConfig, gpt_config: GPTConfig):
         super().__init__()
         embed_config = train_config.embedding
@@ -285,3 +285,8 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+
+Arch.register("GPTv1-4-4", GPTv1, gpt_config=GPTConfig(n_layer=4, n_head=4))
+Arch.register("GPTv1-8-4", GPTv1, gpt_config=GPTConfig(n_layer=8, n_head=4))
+Arch.register("GPTv1-12-4", GPTv1, gpt_config=GPTConfig(n_layer=12, n_head=4))
