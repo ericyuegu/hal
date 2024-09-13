@@ -2,10 +2,13 @@ import argparse
 import signal
 import sys
 from pathlib import Path
+from typing import Any
+from typing import Dict
 
 import melee
 from melee import enums
 from melee.menuhelper import MenuHelper
+from training.io import load_model_from_artifact_dir
 
 from hal.eval.emulator_paths import LOCAL_CISO_PATH
 from hal.eval.emulator_paths import LOCAL_DOLPHIN_HOME_PATH
@@ -67,7 +70,7 @@ def self_play_menu_helper(
         MenuHelper.skip_postgame(controller=controller_1)
 
 
-def run_episode(local: bool, no_gui: bool, debug: bool) -> None:
+def get_console_kwargs(local: bool, no_gui: bool, debug: bool) -> Dict[str, Any]:
     headless_console_kwargs = {
         "gfx_backend": "Null",
         "disable_audio": True,
@@ -96,10 +99,16 @@ def run_episode(local: bool, no_gui: bool, debug: bool) -> None:
         "blocking_input": False,  # TODO(eric): investigate why this is stopping menuhelper
         **headless_console_kwargs,
     }
+    return console_kwargs
 
+
+def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
+    console_kwargs = get_console_kwargs(local=local, no_gui=no_gui, debug=debug)
     console = melee.Console(**console_kwargs)
-
     log = melee.Logger()
+
+    model = load_model_from_artifact_dir(Path(model_dir))
+    model.eval()
 
     # Create our Controller object
     #   The controller is the second primary object your bot will interact with
@@ -195,5 +204,6 @@ if __name__ == "__main__":
     parser.add_argument("--local", action="store_true", help="Run in local mode")
     parser.add_argument("--no-gui", action="store_true", help="Run without GUI")
     parser.add_argument("--debug", action="store_true", help="Run with debug mode")
+    parser.add_argument("--model_dir", type=str, help="Path to model directory")
     args = parser.parse_args()
-    run_episode(local=args.local, no_gui=args.no_gui, debug=args.debug)
+    run_episode(local=args.local, no_gui=args.no_gui, debug=args.debug, model_dir=args.model_dir)
