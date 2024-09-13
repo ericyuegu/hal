@@ -58,3 +58,11 @@ def union(array_1: ArrayLike, array_2: ArrayLike):
         return array_1 | array_2
     else:
         raise TypeError("Inputs should be both numpy arrays or both torch tensors")
+
+
+def normalize_and_embed_fourier(array: ArrayLike, stats: FeatureStats, dim: int = 8):
+    """Normalize then embed values at various frequencies."""
+    normalized = normalize(array, stats)
+    frequencies = 1024 * torch.linspace(0, -torch.tensor(10000.).log(), dim // 2).exp()
+    emb = normalized.view(-1, 1) * frequencies
+    return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)

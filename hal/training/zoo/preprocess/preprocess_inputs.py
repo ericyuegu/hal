@@ -57,6 +57,7 @@ def _preprocess_numeric_features(
             feature_name = f"{player}_{feature}"
             numeric_inputs.append(preprocess_fn(sample[feature_name], stats[feature_name]))
 
+    # TODO nit: cast as torch float tensor before stacking
     return torch.stack(numeric_inputs, dim=-1)
 
 
