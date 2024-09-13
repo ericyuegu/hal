@@ -179,6 +179,7 @@ class GPTv1(nn.Module):
         pos = torch.arange(0, T, dtype=torch.long, device=next(self.parameters()).device)  # shape (t)
 
         # Embeddings
+        # TODO inference-time optimization: parallelize this somehow?
         stage_emb = self.transformer.stage(inputs["stage"]).squeeze(-2)
         ego_character_emb = self.transformer.character(inputs["ego_character"]).squeeze(-2)
         opponent_character_emb = self.transformer.character(inputs["opponent_character"]).squeeze(-2)
@@ -285,6 +286,89 @@ class GPTv1(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+
+@attr.s(auto_attribs=True, frozen=True)
+class MultiTokenGPTConfig(GPTConfig):
+    n_lookahead: int = 4
+
+
+class MultiTokenGPT(GPTv1):
+    """Predict `n_lookahead` tokens from input sequence."""
+    def __init__(self, train_config: TrainConfig, gpt_config: MultiTokenGPTConfig):
+        super().__init__()
+        embed_config = train_config.embedding
+        assert embed_config.num_buttons is not None
+        assert embed_config.num_main_stick_clusters is not None
+        assert embed_config.num_c_stick_clusters is not None
+        self.n_embd = get_nembd_from_config(embed_config)
+        self.context_length = train_config.data.input_len
+
+        self.train_config = train_config
+        self.gpt_config = gpt_config
+
+        self.transformer = nn.ModuleDict(dict(
+            stage=nn.Embedding(embed_config.num_stages, embed_config.stage_embedding_dim),
+            character=nn.Embedding(embed_config.num_characters, embed_config.character_embedding_dim),
+            action=nn.Embedding(embed_config.num_actions, embed_config.action_embedding_dim),
+            wpe = nn.Embedding(self.context_length, self.n_embd),
+            drop = nn.Dropout(gpt_config.dropout),
+            h = nn.ModuleList([Block(n_embd=self.n_embd, n_head=gpt_config.n_head, context_length=self.context_length, dropout=gpt_config.dropout, bias=gpt_config.bias) for _ in range(gpt_config.n_layer)]),
+            ln_f = LayerNorm(self.n_embd, bias=gpt_config.bias),
+        ))
+        self.out_heads = nn.ModuleDict({
+            i: dict(
+                button_head = nn.Linear(self.n_embd, embed_config.num_buttons, bias=False),
+                main_stick_head = nn.Linear(self.n_embd, embed_config.num_main_stick_clusters, bias=False),
+                c_stick_head = nn.Linear(self.n_embd, embed_config.num_c_stick_clusters, bias=False),
+            ) for i in range(self.gpt_config.n_lookahead)
+        })
+
+        # TODO investigate weight tying
+        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * gpt_config.n_layer))
+
+    def forward(self, inputs: TensorDict):
+        B, T, D = inputs["gamestate"].shape
+        assert T <= self.context_length, f"Cannot forward sequence of length {T}, block size is only {self.context_length}"
+        pos = torch.arange(0, T, dtype=torch.long, device=next(self.parameters()).device)  # shape (t)
+
+        # Embeddings
+        stage_emb = self.transformer.stage(inputs["stage"]).squeeze(-2)
+        ego_character_emb = self.transformer.character(inputs["ego_character"]).squeeze(-2)
+        opponent_character_emb = self.transformer.character(inputs["opponent_character"]).squeeze(-2)
+        ego_action_emb = self.transformer.action(inputs["ego_action"]).squeeze(-2)
+        opponent_action_emb = self.transformer.action(inputs["opponent_action"]).squeeze(-2)
+        gamestate = inputs["gamestate"]
+        combined_inputs = torch.cat(
+            [stage_emb, ego_character_emb, opponent_character_emb, ego_action_emb, opponent_action_emb, gamestate],
+            dim=-1,
+        )
+
+        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
+        x = self.transformer.drop(combined_inputs + pos_emb)
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+
+        multi_logit_dict = {}
+        for i in range(self.gpt_config.n_lookahead):
+            multi_logit_dict[i] = dict(
+                button_logits = self.out_heads.get(i).button_head(x).squeeze(-2),
+                main_stick_logits = self.out_heads.get(i).main_stick_head(x).squeeze(-2),
+                c_stick_logits = self.out_heads.get(i).c_stick_head(x).squeeze(-2),
+            )
+
+        # TODO inference-time mini-optimization: only forward output heads on the very last position
+        # logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+
+        return TensorDict(multi_logit_dict, batch_size=(B, T))
 
 
 Arch.register("GPTv1-4-4", GPTv1, gpt_config=GPTConfig(n_layer=4, n_head=4))
