@@ -2,13 +2,14 @@ from typing import Callable
 from typing import Dict
 from typing import Literal
 
+from numpy.typing import ArrayLike
 from tensordict import TensorDict
 
 from hal.data.stats import FeatureStats
 from hal.training.config import DataConfig
 
 Player = Literal["p1", "p2"]
-TargetPreprocessFn = Callable[[TensorDict, Player], TensorDict]
+
 InputPreprocessFn = Callable[[TensorDict, DataConfig, Player, Dict[str, FeatureStats]], TensorDict]
 
 
@@ -38,6 +39,9 @@ class InputPreprocessRegistry:
         raise NotImplementedError(f"Embedding fn {name} not found." f"Valid functions: {sorted(cls.EMBED.keys())}.")
 
 
+TargetPreprocessFn = Callable[[TensorDict, Player], TensorDict]
+
+
 class TargetPreprocessRegistry:
     EMBED: Dict[str, TargetPreprocessFn] = {}
 
@@ -50,6 +54,27 @@ class TargetPreprocessRegistry:
     @classmethod
     def register(cls, name: str):
         def decorator(embed_fn: TargetPreprocessFn):
+            cls.EMBED[name] = embed_fn
+            return embed_fn
+
+        return decorator
+
+
+OutputPreprocessFn = Callable[[TensorDict], Dict[str, ArrayLike]]
+
+
+class OutputProcessingRegistry:
+    EMBED: Dict[str, OutputPreprocessFn] = {}
+
+    @classmethod
+    def get(cls, name: str) -> OutputPreprocessFn:
+        if name in cls.EMBED:
+            return cls.EMBED[name]
+        raise NotImplementedError(f"Embedding fn {name} not found." f"Valid functions: {sorted(cls.EMBED.keys())}.")
+
+    @classmethod
+    def register(cls, name: str):
+        def decorator(embed_fn: OutputPreprocessFn):
             cls.EMBED[name] = embed_fn
             return embed_fn
 
