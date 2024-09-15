@@ -33,7 +33,7 @@ def _preprocess_numeric_features(
     features_to_process: Tuple[str, ...],
     ego: Player,
     stats: Dict[str, FeatureStats],
-    normalization_fn_by_feature_name: Dict[str, NormalizationFn]
+    normalization_fn_by_feature_name: Dict[str, NormalizationFn],
 ) -> torch.Tensor:
     """Preprocess numeric (gamestate) features for both players."""
     opponent = _get_opponent(ego)
@@ -43,13 +43,17 @@ def _preprocess_numeric_features(
         for feature in features_to_process:
             preprocess_fn: NormalizationFn = normalization_fn_by_feature_name[feature]
             feature_name = f"{player}_{feature}"
-            numeric_inputs.append(preprocess_fn(sample[feature_name], stats[feature_name]))
+            processed_feature = preprocess_fn(sample[feature_name], stats[feature_name])
+            if processed_feature.ndim == 1:
+                processed_feature = processed_feature.unsqueeze(-1)
+            numeric_inputs.append(processed_feature)
 
-    return torch.stack(numeric_inputs, dim=-1)
+    return torch.cat(numeric_inputs, dim=-1)
 
 
 def _preprocess_categorical_features(
-    sample: TensorDict, ego: Player,
+    sample: TensorDict,
+    ego: Player,
     stats: Dict[str, FeatureStats],
     normalization_fn_by_feature_name: Dict[str, NormalizationFn],
 ) -> Dict[str, torch.Tensor]:
@@ -86,6 +90,7 @@ NUMERIC_FEATURES_V0 = tuple(
     PLAYER_INPUT_FEATURES_TO_NORMALIZE + PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE + PLAYER_POSITION
 )
 
+
 @InputPreprocessRegistry.register("inputs_v0", num_features=2 * len(NUMERIC_FEATURES_V0))
 def preprocess_inputs_v0(
     sample: TensorDict, data_config: DataConfig, ego: Player, stats: Dict[str, FeatureStats]
@@ -95,17 +100,14 @@ def preprocess_inputs_v0(
     trajectory_len = data_config.input_len + data_config.target_len
 
     categorical_features = _preprocess_categorical_features(
-        sample[:trajectory_len],
-        ego=ego,
-        stats=stats,
-        normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V0
+        sample[:trajectory_len], ego=ego, stats=stats, normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V0
     )
     gamestate = _preprocess_numeric_features(
         sample=sample[:trajectory_len],
         features_to_process=NUMERIC_FEATURES_V0,
         ego=ego,
         stats=stats,
-        normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V0
+        normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V0,
     )
 
     categorical_features["gamestate"] = gamestate
@@ -124,6 +126,7 @@ NUMERIC_FEATURES_V1 = tuple(
     PLAYER_INPUT_FEATURES_TO_NORMALIZE + PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE + PLAYER_POSITION
 )
 
+
 # extra input dimensions from Fourier embedding
 @InputPreprocessRegistry.register("inputs_v1", num_features=2 * (len(NUMERIC_FEATURES_V1) + 7 * len(PLAYER_POSITION)))
 def preprocess_inputs_v1(
@@ -134,17 +137,14 @@ def preprocess_inputs_v1(
     trajectory_len = data_config.input_len + data_config.target_len
 
     categorical_features = _preprocess_categorical_features(
-        sample[:trajectory_len],
-        ego=ego,
-        stats=stats,
-        normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V1
+        sample[:trajectory_len], ego=ego, stats=stats, normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V1
     )
     gamestate = _preprocess_numeric_features(
         sample=sample[:trajectory_len],
         features_to_process=NUMERIC_FEATURES_V1,
         ego=ego,
         stats=stats,
-        normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V1
+        normalization_fn_by_feature_name=NORMALIZATION_FN_BY_FEATURE_V1,
     )
 
     categorical_features["gamestate"] = gamestate
