@@ -11,6 +11,7 @@ from typing import Dict
 import melee
 import torch
 from data.stats import load_dataset_stats
+from loguru import logger
 from melee import enums
 from melee.menuhelper import MenuHelper
 from tensordict import TensorDict
@@ -115,7 +116,7 @@ def self_play_menu_helper(
                 character=character_2,
                 gamestate=gamestate,
                 controller=controller_2,
-                cpu_level=0,
+                cpu_level=9,
                 costume=1,
                 swag=False,
                 start=True,
@@ -199,30 +200,6 @@ def convert_frame_data_to_tensor_dict(frame_data: DefaultDict[str, deque]) -> Te
     return TensorDict({k: torch.tensor(v) for k, v in frame_data.items()})
 
 
-def connect_to_console(console: melee.Console, controller_1: melee.Controller, controller_2: melee.Controller) -> None:
-    # Connect to the console
-    print("Connecting to console...")
-    if not console.connect():
-        print("ERROR: Failed to connect to the console.")
-        sys.exit(-1)
-    print("Console connected")
-
-    # Plug our controller in
-    #   Due to how named pipes work, this has to come AFTER running dolphin
-    #   NOTE: If you're loading a movie file, don't connect the controller,
-    #   dolphin will hang waiting for input and never receive it
-    print("Connecting controller 1 to console...")
-    if not controller_1.connect():
-        print("ERROR: Failed to connect the controller.")
-        sys.exit(-1)
-    print("Controller 1 connected")
-    print("Connecting controller 2 to console...")
-    if not controller_2.connect():
-        print("ERROR: Failed to connect the controller.")
-        sys.exit(-1)
-    print("Controller 2 connected")
-
-
 def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
     console_kwargs = get_console_kwargs(local=local, no_gui=no_gui, debug=debug)
     console = melee.Console(**console_kwargs)
@@ -248,7 +225,27 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
 
     # Run the console
     console.run(iso_path=get_ciso_path(local), dolphin_user_path=get_dolphin_home_path(local))
-    connect_to_console(console=console, controller_1=controller_1, controller_2=controller_2)
+    # Connect to the console
+    logger.info("Connecting to console...")
+    if not console.connect():
+        logger.info("ERROR: Failed to connect to the console.")
+        sys.exit(-1)
+    logger.info("Console connected")
+
+    # Plug our controller in
+    #   Due to how named pipes work, this has to come AFTER running dolphin
+    #   NOTE: If you're loading a movie file, don't connect the controller,
+    #   dolphin will hang waiting for input and never receive it
+    logger.info("Connecting controller 1 to console...")
+    if not controller_1.connect():
+        logger.info("ERROR: Failed to connect the controller.")
+        sys.exit(-1)
+    logger.info("Controller 1 connected")
+    logger.info("Connecting controller 2 to console...")
+    if not controller_2.connect():
+        logger.info("ERROR: Failed to connect the controller.")
+        sys.exit(-1)
+    logger.info("Controller 2 connected")
 
     model, train_config = load_model_from_artifact_dir(Path(model_dir))
     model.eval()
@@ -301,7 +298,7 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
                 controller_2=controller_2,
                 character_1=melee.Character.FOX,
                 character_2=melee.Character.FOX,
-                stage_selected=melee.Stage.YOSHIS_STORY,
+                stage_selected=melee.Stage.BATTLEFIELD,
             )
 
             # If we're not in game, don't log the frame
