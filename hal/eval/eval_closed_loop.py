@@ -77,7 +77,7 @@ def get_console_kwargs(local: bool, no_gui: bool, debug: bool) -> Dict[str, Any]
         "is_dolphin": True,
         "dolphin_home_path": dolphin_home_path,
         "tmp_home_directory": False,
-        "blocking_input": False,  # TODO(eric): investigate why this is stopping menuhelper
+        "blocking_input": True,
         **headless_console_kwargs,
     }
     return console_kwargs
@@ -100,8 +100,8 @@ def self_play_menu_helper(
         player_2 = gamestate.players[controller_2.port]
         player_2_character_selected = player_2.character == character_2
 
-        print(f"{player_1_character_selected=}")
-        print(f"{player_2_character_selected=}")
+        logger.info(f"{player_1_character_selected=}")
+        logger.info(f"{player_2_character_selected=}")
         if not player_1_character_selected:
             MenuHelper.choose_character(
                 character=character_1,
@@ -255,9 +255,9 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
     def signal_handler(sig, frame) -> None:
         console.stop()
         log.writelog()
-        print("")  # because the ^C will be on the terminal
-        print("Log file created: " + log.filename)
-        print("Shutting down cleanly...")
+        logger.info("")  # because the ^C will be on the terminal
+        logger.info("Log file created: " + log.filename)
+        logger.info("Shutting down cleanly...")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -307,13 +307,13 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
             # The console object keeps track of how long your bot is taking to process frames
             #   And can warn you if it's taking too long
             if console.processingtime * 1000 > 12:
-                print("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
+                logger.info("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
-            print(f"frame {i}: {gamestate.menu_state=} {gamestate.submenu=}")
+            logger.info(f"frame {i}: {gamestate.menu_state=} {gamestate.submenu=}")
             active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
-            print(f"Controller 1: {active_buttons=}")
+            logger.info(f"Controller 1: {active_buttons=}")
             active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
-            print(f"Controller 2: {active_buttons=}")
+            logger.info(f"Controller 2: {active_buttons=}")
 
             # What menu are we in?
             if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
