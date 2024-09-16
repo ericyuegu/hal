@@ -3,6 +3,7 @@ import signal
 import sys
 from collections import defaultdict
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import DefaultDict
@@ -239,28 +240,34 @@ def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, torch
             break
 
 
+@contextmanager
+def console_manager(console: melee.Console, log: melee.Logger):
+    def signal_handler(sig, frame):
+        raise KeyboardInterrupt
+
+    original_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        yield
+    except KeyboardInterrupt:
+        logger.info("Received interrupt, shutting down...")
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+        console.stop()
+        log.writelog()
+        logger.info(f"\nLog file created: {log.filename}")
+        logger.info("Shutting down cleanly...")
+
+
+@torch.no_grad()
 def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
     console_kwargs = get_console_kwargs(local=local, no_gui=no_gui, debug=debug)
     console = melee.Console(**console_kwargs)
     log = melee.Logger()
 
-    # Create our Controller object
-    #   The controller is the second primary object your bot will interact with
-    #   Your controller is your way of sending button presses to the game, whether
-    #   virtual or physical.
     controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
     controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
-
-    # This isn't necessary, but makes it so that Dolphin will get killed when you ^C
-    def signal_handler(sig, frame) -> None:
-        console.stop()
-        log.writelog()
-        logger.info("")  # because the ^C will be on the terminal
-        logger.info("Log file created: " + log.filename)
-        logger.info("Shutting down cleanly...")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
 
     # Run the console
     console.run(iso_path=get_ciso_path(local), dolphin_user_path=get_dolphin_home_path(local))
@@ -296,8 +303,8 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
     frame_data: DefaultDict[str, deque] = defaultdict(lambda: deque(maxlen=train_config.data.input_len))
 
     # Main loop
-    i = 0
-    with torch.no_grad():
+    with console_manager(console, log):
+        i = 0
         while i < 10000:
             # "step" to the next frame
             gamestate = console.step()
@@ -309,11 +316,13 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
             if console.processingtime * 1000 > 12:
                 logger.info("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
-            logger.info(f"frame {i}: {gamestate.menu_state=} {gamestate.submenu=}")
-            active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
-            logger.info(f"Controller 1: {active_buttons=}")
-            active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
-            logger.info(f"Controller 2: {active_buttons=}")
+            logger.info(f"frame {gamestate.frame}")
+            p1_active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
+            if p1_active_buttons:
+                logger.info(f"Controller 1: {p1_active_buttons=}")
+            p2_active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
+            if p2_active_buttons:
+                logger.info(f"Controller 2: {p2_active_buttons=}")
 
             # What menu are we in?
             if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
