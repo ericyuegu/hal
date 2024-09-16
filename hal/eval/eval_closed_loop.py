@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from typing import DefaultDict
 from typing import Dict
+from typing import Optional
 
 import melee
 import torch
@@ -261,7 +262,7 @@ def console_manager(console: melee.Console, log: melee.Logger):
 
 
 @torch.no_grad()
-def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
+def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str, idx: Optional[int] = None) -> None:
     console_kwargs = get_console_kwargs(local=local, no_gui=no_gui, debug=debug)
     console = melee.Console(**console_kwargs)
     log = melee.Logger()
@@ -293,7 +294,7 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str) -> None:
         sys.exit(-1)
     logger.info("Controller 2 connected")
 
-    model, train_config = load_model_from_artifact_dir(Path(model_dir))
+    model, train_config = load_model_from_artifact_dir(Path(model_dir), idx=idx)
     model.eval()
     preprocess_inputs = InputPreprocessRegistry.get(train_config.embedding.input_preprocessing_fn)
     stats_by_feature_name = load_dataset_stats(train_config.data.stats_path)

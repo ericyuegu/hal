@@ -83,11 +83,11 @@ FILE_FORMAT: str = "%012d.pth"
 CONFIG_FILENAME: str = "config.json"
 
 
-def load_model_from_artifact_dir(artifact_dir: Path) -> Tuple[torch.nn.Module, TrainConfig]:
+def load_model_from_artifact_dir(artifact_dir: Path, idx: Optional[int] = None) -> Tuple[torch.nn.Module, TrainConfig]:
     with open(artifact_dir / "config.json", "r", encoding="utf-8") as f:
         config: TrainConfig = deserialize(json.load(f))  # type: ignore
     model = Arch.get(config.arch, config=config)
-    idx = Checkpoint.find_latest_idx(Path(artifact_dir))
+    idx = Checkpoint.find_latest_idx(Path(artifact_dir)) if idx is None else idx
     ckpt_path = artifact_dir / (FILE_FORMAT % idx)
     ckpt = torch.load(ckpt_path)
     model.load_state_dict(ckpt)
