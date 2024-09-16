@@ -73,16 +73,16 @@ def model_predictions_to_controller_inputs_v0(pred: TensorDict) -> Dict[str, tor
     button_a, button_b, jump, button_z, shoulder, no_button = torch.split(one_hot_buttons, 1, dim=-1)
 
     return {
-        "main_stick_x": main_stick_x.squeeze(),
-        "main_stick_y": main_stick_y.squeeze(),
-        "c_stick_x": c_stick_x.squeeze(),
-        "c_stick_y": c_stick_y.squeeze(),
-        "button_a": button_a.squeeze(),
-        "button_b": button_b.squeeze(),
-        "button_x": jump.squeeze(),
-        "button_z": button_z.squeeze(),
-        "button_l": shoulder.squeeze(),
-        "button_none": no_button.squeeze(),
+        "main_stick_x": main_stick_x,
+        "main_stick_y": main_stick_y,
+        "c_stick_x": c_stick_x,
+        "c_stick_y": c_stick_y,
+        "button_a": button_a,
+        "button_b": button_b,
+        "button_x": jump,
+        "button_z": button_z,
+        "button_l": shoulder,
+        "button_none": no_button,
     }
 
 
