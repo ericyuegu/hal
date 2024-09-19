@@ -85,8 +85,8 @@ def pyarrow_table_to_tensordict(table: pa.Table) -> TensorDict:
     )
 
 
-def get_nembd_from_config(config: EmbeddingConfig) -> int:
-    """Get the size of the materialized embedding dimension from the embedding config."""
+def get_input_size_from_config(config: EmbeddingConfig) -> int:
+    """Get the size of the materialized input dimensions from the embedding config."""
     numeric_feature_count = InputPreprocessRegistry.get_num_features(config.input_preprocessing_fn)
     return (
         numeric_feature_count

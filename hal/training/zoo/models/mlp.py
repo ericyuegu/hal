@@ -3,7 +3,7 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from hal.training.config import TrainConfig
-from hal.training.utils import get_nembd_from_config
+from hal.training.utils import get_input_size_from_config
 from hal.training.zoo.models.registry import Arch
 
 
@@ -19,7 +19,7 @@ class MLPBC(nn.Module):
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.n_embd = get_nembd_from_config(embed_config)
+        self.n_embd = get_input_size_from_config(embed_config)
         self.max_length = data_config.input_len
 
         self.modules_by_name = nn.ModuleDict(
@@ -85,7 +85,7 @@ class MLPDebug(nn.Module):
         assert embed_config.num_c_stick_clusters is not None
 
         frame_emb_dim = 200
-        self.n_embd = get_nembd_from_config(embed_config) + frame_emb_dim
+        self.n_embd = get_input_size_from_config(embed_config) + frame_emb_dim
         self.max_length = data_config.input_len
 
         self.modules_by_name = nn.ModuleDict(

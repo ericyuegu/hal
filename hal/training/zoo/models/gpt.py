@@ -8,7 +8,7 @@ from tensordict import TensorDict
 from torch.nn import functional as F
 
 from hal.training.config import TrainConfig
-from hal.training.utils import get_nembd_from_config
+from hal.training.utils import get_input_size_from_config
 from hal.training.zoo.models.registry import Arch
 
 
@@ -128,7 +128,7 @@ class GPTv1(nn.Module):
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.n_embd = get_nembd_from_config(embed_config)
+        self.n_embd = get_input_size_from_config(embed_config)
         self.context_length = train_config.data.input_len
 
         self.train_config = train_config
@@ -326,7 +326,7 @@ class MultiTokenGPT(GPTv1):
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.n_embd = get_nembd_from_config(embed_config)
+        self.n_embd = get_input_size_from_config(embed_config)
         self.context_length = train_config.data.input_len
 
         self.train_config = train_config
