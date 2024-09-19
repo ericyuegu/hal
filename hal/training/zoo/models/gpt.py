@@ -14,6 +14,7 @@ from hal.training.zoo.models.registry import Arch
 
 @attr.s(auto_attribs=True, frozen=True)
 class GPTConfig:
+    n_embd: int
     n_layer: int
     n_head: int
     dropout: float = 0.0
@@ -128,8 +129,9 @@ class GPTv1(nn.Module):
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.n_embd = get_input_size_from_config(embed_config)
         self.context_length = train_config.data.input_len
+        self.input_size = get_input_size_from_config(embed_config)
+        self.n_embd = gpt_config.n_embd
 
         self.train_config = train_config
         self.gpt_config = gpt_config
@@ -139,12 +141,13 @@ class GPTv1(nn.Module):
                 stage=nn.Embedding(embed_config.num_stages, embed_config.stage_embedding_dim),
                 character=nn.Embedding(embed_config.num_characters, embed_config.character_embedding_dim),
                 action=nn.Embedding(embed_config.num_actions, embed_config.action_embedding_dim),
-                wpe=nn.Embedding(self.context_length, self.n_embd),
                 drop=nn.Dropout(gpt_config.dropout),
+                proj_down=nn.Linear(self.input_size, gpt_config.n_embd),
+                wpe=nn.Embedding(self.context_length, gpt_config.n_embd),
                 h=nn.ModuleList(
                     [
                         Block(
-                            n_embd=self.n_embd,
+                            n_embd=gpt_config.n_embd,
                             n_head=gpt_config.n_head,
                             context_length=self.context_length,
                             dropout=gpt_config.dropout,
@@ -209,9 +212,10 @@ class GPTv1(nn.Module):
             [stage_emb, ego_character_emb, opponent_character_emb, ego_action_emb, opponent_action_emb, gamestate],
             dim=-1,
         )
+        proj_inputs = self.transformer.proj_down(combined_inputs)
 
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(combined_inputs + pos_emb)
+        x = self.transformer.drop(proj_inputs + pos_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -414,6 +418,6 @@ class MultiTokenGPT(GPTv1):
         return TensorDict(multi_logit_dict, batch_size=(B, T))
 
 
-Arch.register("GPTv1-4-4", GPTv1, gpt_config=GPTConfig(n_layer=4, n_head=4))
-Arch.register("GPTv1-8-4", GPTv1, gpt_config=GPTConfig(n_layer=8, n_head=4))
-Arch.register("GPTv1-12-4", GPTv1, gpt_config=GPTConfig(n_layer=12, n_head=4))
+Arch.register("GPTv1-4-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=4, n_head=4))
+Arch.register("GPTv1-8-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=8, n_head=4))
+Arch.register("GPTv1-12-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=12, n_head=4))
