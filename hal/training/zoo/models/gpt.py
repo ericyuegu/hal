@@ -123,17 +123,17 @@ class Block(nn.Module):
 
 
 class GPTv1(nn.Module):
-    def __init__(self, train_config: TrainConfig, gpt_config: GPTConfig) -> None:
+    def __init__(self, config: TrainConfig, gpt_config: GPTConfig) -> None:
         super().__init__()
-        embed_config = train_config.embedding
+        embed_config = config.embedding
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.context_length = train_config.data.input_len
+        self.context_length = config.data.input_len
         self.input_size = get_input_size_from_config(embed_config)
         self.n_embd = gpt_config.n_embd
 
-        self.train_config = train_config
+        self.train_config = config
         self.gpt_config = gpt_config
 
         self.transformer = nn.ModuleDict(
