@@ -13,6 +13,7 @@ def calculate_statistics_for_features(input_path: str, output_path: str) -> None
     statistics = {}
 
     for field in table.schema:
+        logger.info(f"Calculating statistics for {field.name}")
         column = table[field.name]
         numpy_array = column.to_numpy()
 
