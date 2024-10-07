@@ -3,6 +3,7 @@ import multiprocessing as mp
 import random
 import sys
 import time
+import uuid
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
@@ -23,6 +24,7 @@ from hal.data.constants import IDX_BY_ACTION
 from hal.data.constants import IDX_BY_CHARACTER
 from hal.data.constants import IDX_BY_STAGE
 from hal.data.schema import SCHEMA
+from hal.iter_utils import generate_chunks
 
 FrameData = DefaultDict[str, List[Any]]
 
@@ -31,7 +33,6 @@ def setup_logger(output_dir: str | Path) -> None:
     logger.add(Path(output_dir) / "process_replays.log", enqueue=True)
 
 
-@logger.catch
 def extract_and_append_single_frame_inplace(
     frame_data: FrameData, prev_gamestate: Optional[melee.GameState], gamestate: melee.GameState, replay_uuid: int
 ) -> FrameData:
@@ -110,70 +111,94 @@ def extract_and_append_single_frame_inplace(
     return frame_data
 
 
-@logger.catch
-def process_replay(replay_path: str, min_frames: int = 1500) -> FrameData:
-    """Processes a single .slp file and returns the frame data."""
-    logger.trace(f"Processing replay {replay_path}")
+def process_replay_batch(replay_paths: Tuple[str, ...], output_dir: str, min_frames: int = 1500) -> None:
+    """Processes a batch of .slp files and saves the frame data to a parquet file."""
+    logger.trace(f"Processing replays {replay_paths}")
+    batch_id = uuid.uuid4()
 
-    frame_data: FrameData = defaultdict(list)
-    try:
-        console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
-        console.connect()
-    except Exception as e:
-        logger.debug(f"Error connecting to console for {replay_path}: {e}")
-        return frame_data
+    replay_data = []
+    for replay_path in replay_paths:
+        frame_data: FrameData = defaultdict(list)
+        try:
+            console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
+            console.connect()
+        except Exception as e:
+            logger.debug(f"Error connecting to console for {replay_path}: {e}")
+            continue
 
-    replay_uuid = hash(replay_path)
-    prev_gamestate: Optional[melee.GameState] = None
+        replay_uuid = hash(replay_path)
+        prev_gamestate: Optional[melee.GameState] = None
 
-    try:
-        while True:
-            gamestate = console.step()
-            if gamestate is None:
-                break
-            frame_data = extract_and_append_single_frame_inplace(
-                frame_data=frame_data, prev_gamestate=prev_gamestate, gamestate=gamestate, replay_uuid=replay_uuid
-            )
-            prev_gamestate = gamestate
-    except Exception as e:
-        logger.debug(f"Error processing replay {replay_path}: {e}")
-    finally:
-        console.stop()
+        try:
+            while True:
+                gamestate = console.step()
+                if gamestate is None:
+                    break
+                frame_data = extract_and_append_single_frame_inplace(
+                    frame_data=frame_data, prev_gamestate=prev_gamestate, gamestate=gamestate, replay_uuid=replay_uuid
+                )
+                prev_gamestate = gamestate
+        except Exception as e:
+            logger.debug(f"Error processing replay {replay_path}: {e}")
+        finally:
+            console.stop()
 
-    # Assert lists aren't empty
-    for key, value in frame_data.items():
-        assert len(value) > 0, f"List for key {key} is empty"
-    # Skip replays with less than `min_frames` frames because they are likely incomplete/low-quality
-    if any(len(v) < min_frames for v in frame_data.values()):
-        logger.trace(f"Replay {replay_path} was less than {min_frames} frames, skipping.")
-        return defaultdict(list)
-    # Check for damage
-    if all(x == 0 for x in frame_data["p1_percent"]) or all(x == 0 for x in frame_data["p2_percent"]):
-        logger.trace(f"Replay {replay_path} had no damage, skipping.")
-        return defaultdict(list)
+        for key, value in frame_data.items():
+            if not len(value) > 0:
+                logger.debug(f"No data for key {key} in replay {replay_path}, skipping.")
+                continue
+        # Skip replays with less than `min_frames` frames because they are likely incomplete/low-quality
+        if any(len(v) < min_frames for v in frame_data.values()):
+            logger.trace(f"Replay {replay_path} was less than {min_frames} frames, skipping.")
+            continue
+        # Check for damage
+        if all(x == 0 for x in frame_data["p1_percent"]) or all(x == 0 for x in frame_data["p2_percent"]):
+            logger.trace(f"Replay {replay_path} had no damage, skipping.")
+            continue
 
-    return frame_data
+        replay_data.append(frame_data)
+
+    output_file = Path(output_dir) / f"{batch_id}.parquet"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    for frame_data in replay_data:
+        table = pa.Table.from_pydict(frame_data, schema=SCHEMA)
+        pq.write_table(table, output_file)
 
 
-@logger.catch
-def write_dataset_incrementally(replay_paths: Tuple[str, ...], output_path: str, worker_init_fn: Callable) -> None:
-    logger.info(f"Processing {len(replay_paths)} replays and writing to {Path(output_path).resolve()}")
-    frames_processed = 0
+def write_dataset_incrementally(
+    replay_paths: Tuple[str, ...], split_output_dir: str, worker_init_fn: Callable, batch_size: int = 50
+) -> None:
+    logger.info(f"Processing {len(replay_paths)} replays and writing to {Path(split_output_dir).resolve()}")
 
     t0 = time.perf_counter()
     with mp.Pool(initializer=worker_init_fn) as pool:
-        data_generator = pool.imap(process_replay, replay_paths)
-        pbar = tqdm(data_generator, total=len(replay_paths))
-        with pq.ParquetWriter(output_path, schema=SCHEMA) as writer:
-            for frame_data in pbar:
-                if frame_data:
-                    table = pa.Table.from_pydict(frame_data, schema=SCHEMA)
-                    writer.write_table(table)
-                    frames_processed += len(next(iter(frame_data.values())))
-                    pbar.set_description(f"Replays processed: {pbar.n}/{len(replay_paths)}")
+        replay_batches = tuple(generate_chunks(replay_paths, chunk_size=batch_size))
+        partial_process_replay_batch = partial(process_replay_batch, output_dir=split_output_dir)
+        data_generator = pool.imap(partial_process_replay_batch, replay_batches)
+        pbar = tqdm(data_generator, total=len(replay_batches))
+        for _ in pbar:
+            pbar.set_description(f"Replays processed: {pbar.n}/{len(replay_batches)}")
 
     t1 = time.perf_counter()
     logger.info(f"Finished processing {len(replay_paths)} replays in {t1 - t0:.2f} seconds.")
+
+
+def merge_parquet_files(input_dir: str, output_file: str) -> None:
+    input_files = list(Path(input_dir).glob("*.parquet"))
+
+    if not input_files:
+        raise ValueError("No Parquet files found in the input directory.")
+
+    first_file = str(input_files[0])
+    first_table = pq.read_table(first_file)
+    schema = first_table.schema
+
+    with pq.ParquetWriter(output_file, schema) as writer:
+        for file in tqdm(input_files, desc="Merging Parquet files"):
+            table = pq.read_table(str(file))
+            if table.schema != schema:
+                raise ValueError(f"Schema of file {file} does not match the schema of the first file.")
+            writer.write_table(table)
 
 
 def split_train_val_test(
@@ -201,11 +226,12 @@ def process_replays(replay_dir: str, output_dir: str, seed: int, max_replays: in
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     for split, split_replay_paths in splits.items():
-        split_output_path = Path(output_dir) / f"{split}.parquet"
+        split_output_dir = Path(output_dir) / f"{split}"
         worker_init_fn = partial(setup_logger, output_dir=output_dir)
         write_dataset_incrementally(
-            replay_paths=split_replay_paths, output_path=str(split_output_path), worker_init_fn=worker_init_fn
+            replay_paths=split_replay_paths, split_output_dir=str(split_output_dir), worker_init_fn=worker_init_fn
         )
+        merge_parquet_files(input_dir=str(split_output_dir), output_file=str(Path(output_dir) / f"{split}.parquet"))
 
 
 def validate_input(replay_dir: str) -> None:
