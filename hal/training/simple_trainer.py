@@ -4,12 +4,11 @@ import random
 import numpy as np
 import torch
 from tensordict import TensorDict
+from training.tensordict_dataloader import create_tensordict_dataloaders
 
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
-from hal.training.dataloader import create_tensordict_dataloaders
-from hal.training.dataloader import create_tensordicts
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
 from hal.training.distributed import get_world_size
@@ -62,7 +61,6 @@ def parse_cli() -> TrainConfig:
 
 if __name__ == "__main__":
     config = parse_cli()
-    train_data, val_data = create_tensordicts(config.data)
     # pass positional args and call wrapped fn; (kwargs not accepted)
-    wrapped_train = wrap_multiprocessing(main, config, train_data, val_data)
+    wrapped_train = wrap_multiprocessing(main, config)
     wrapped_train()

@@ -11,12 +11,12 @@ from tensordict import TensorDict
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
-from hal.training.dataloader import create_tensordict_dataloaders
-from hal.training.dataloader import create_tensordicts
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
 from hal.training.distributed import get_world_size
 from hal.training.distributed import wrap_multiprocessing
+from hal.training.tensordict_dataloader import create_tensordict_dataloaders
+from hal.training.tensordict_dataloader import create_tensordicts
 from hal.training.trainer import CategoricalBCTrainer
 
 
