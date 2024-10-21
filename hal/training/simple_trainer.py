@@ -4,14 +4,13 @@ import random
 import numpy as np
 import torch
 from tensordict import TensorDict
-from training.tensordict_dataloader import create_tensordict_dataloaders
+from training.streaming_dataloader import get_dataloaders
 
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
-from hal.training.distributed import get_world_size
 from hal.training.distributed import wrap_multiprocessing
 from hal.training.trainer import CategoricalBCTrainer
 
@@ -41,9 +40,7 @@ def main(train_config: TrainConfig) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    train_loader, val_loader = create_tensordict_dataloaders(
-        train_td, val_td, train_config, rank=rank, world_size=get_world_size()
-    )
+    train_loader, val_loader = get_dataloaders(train_config)
     trainer = SimpleTrainer(config=train_config, train_loader=train_loader, val_loader=val_loader)
     trainer.train_loop(train_loader, val_loader)
 
