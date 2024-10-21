@@ -69,7 +69,7 @@ class EmbeddingConfig:
 
     stage_embedding_dim: int = 4
     character_embedding_dim: int = 12
-    action_embedding_dim: int = 128
+    action_embedding_dim: int = 32
 
     num_stages: int = len(IDX_BY_STAGE)
     num_characters: int = len(IDX_BY_CHARACTER)
@@ -107,12 +107,12 @@ class TrainConfig(BaseConfig):
 
     # Hyperparams
     loss_fn: str = "ce"
-    local_batch_size: int = 256
+    local_batch_size: int = 64
     lr: float = 3e-4
-    n_samples: int = 2**26
+    n_samples: int = 2**24
     n_val_samples: int = 2**19
     keep_ckpts: int = 2**4
-    report_len: int = 2**19
+    report_len: int = 2**18
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     wd: float = 1e-2
