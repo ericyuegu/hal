@@ -36,10 +36,8 @@ class HALStreamingDataset(StreamingDataset):
     def get_td_from_sample(self, sample: dict) -> TensorDict:
         episode_len = len(sample["frame"])
         random_start_idx = random.randint(0, episode_len - self.trajectory_len)
-        return TensorDict(
-            {key: value[random_start_idx : random_start_idx + self.trajectory_len] for key, value in sample.items()},
-            batch_size=(self.trajectory_len,),
-        )
+        td = TensorDict(sample, batch_size=(episode_len,))[random_start_idx : random_start_idx + self.trajectory_len]
+        return td
 
     def __getitem__(self, idx: int) -> TensorDict:
         sample = super().__getitem__(idx)
