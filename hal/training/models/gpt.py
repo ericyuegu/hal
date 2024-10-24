@@ -423,3 +423,4 @@ Arch.register("GPTv1-8-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=8, n_
 Arch.register("GPTv1-8-4-dropout", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=8, n_head=4, dropout=0.1))
 Arch.register("GPTv1-12-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=12, n_head=4))
 Arch.register("GPTv1-12-4-dropout", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=12, n_head=4, dropout=0.1))
+Arch.register("GPTv1-12-512-4-dropout", GPTv1, gpt_config=GPTConfig(n_embd=512, n_layer=12, n_head=4, dropout=0.1))
