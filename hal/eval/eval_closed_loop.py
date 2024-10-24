@@ -66,7 +66,7 @@ def get_console_kwargs(local: bool, no_gui: bool, debug: bool) -> Dict[str, Any]
             "gfx_backend": "Null",
             "disable_audio": True,
             "use_exi_inputs": True,
-            "enable_ffw": False,
+            "enable_ffw": True,
         }
         if no_gui
         else {}

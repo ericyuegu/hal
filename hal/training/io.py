@@ -14,12 +14,12 @@ from typing import Type
 import attr
 import torch
 import torch.nn
-import wandb
 from loguru import logger
 from tensordict import TensorDict
 from yasoo import deserialize
 from yasoo import serialize
 
+import wandb
 from hal.training.config import BaseConfig
 from hal.training.config import TrainConfig
 from hal.training.distributed import is_master
@@ -83,15 +83,15 @@ FILE_FORMAT: str = "%012d.pth"
 CONFIG_FILENAME: str = "config.json"
 
 
-def load_model_from_artifact_dir(artifact_dir: Path, idx: Optional[int] = None) -> Tuple[torch.nn.Module, TrainConfig]:
+def load_model_from_artifact_dir(
+    artifact_dir: Path, idx: Optional[int] = None, device: str = "cpu"
+) -> Tuple[torch.nn.Module, TrainConfig]:
     with open(artifact_dir / "config.json", "r", encoding="utf-8") as f:
         config: TrainConfig = deserialize(json.load(f))  # type: ignore
     model = Arch.get(config.arch, config=config)
-    idx = Checkpoint.find_latest_idx(Path(artifact_dir)) if idx is None else idx
-    ckpt_path = artifact_dir / (FILE_FORMAT % idx)
-    ckpt = torch.load(ckpt_path)
-    model.load_state_dict(ckpt)
-    return model, config
+    ckpt = Checkpoint(model, config, artifact_dir, keep_ckpts=config.keep_ckpts)
+    ckpt.restore(idx=idx, device=device)
+    return ckpt.model, config
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -119,7 +119,10 @@ class Checkpoint:
         ckpt = self.artifact_dir / (FILE_FORMAT % idx)
         logger.info(f"Resuming checkpoint from: {ckpt}")
         with ckpt.open("rb") as f:
-            self.model.load_state_dict(torch.load(f, map_location=device))
+            state_dict = torch.load(f, map_location=device)
+            # Remove 'module.' prefix if it exists
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+            self.model.load_state_dict(state_dict)
         return idx, ckpt
 
     def save(self, idx: int) -> None:
