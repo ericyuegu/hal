@@ -292,10 +292,11 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str, idx: Opt
     frame_data: DefaultDict[str, deque] = defaultdict(lambda: deque(maxlen=train_config.data.input_len))
 
     # Main loop
+    i = 0
     match_started = False
     with console_manager(console):
         logger.info("Starting episode")
-        i = 0
+
         while i < 10000:
             gamestate = console.step()
             if gamestate is None:
@@ -310,7 +311,7 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str, idx: Opt
             # What menu are we in?
             if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
                 if match_started:
-                    return
+                    break
 
                 self_play_menu_helper(
                     gamestate=gamestate,
@@ -323,8 +324,7 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str, idx: Opt
             else:
                 if not match_started:
                     match_started = True
-                if gamestate.frame % 60 == 0:
-                    logger.info(f"frame {gamestate.frame}")
+
                 extract_and_append_gamestate(gamestate=gamestate, frame_data=frame_data)
                 frame_data_td = convert_frame_data_to_tensor_dict(frame_data)
                 model_inputs = pad_tensors(frame_data_td, train_config.data.input_len)
