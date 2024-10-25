@@ -9,6 +9,7 @@ from typing import Any
 from typing import DefaultDict
 from typing import Dict
 from typing import Optional
+from typing import Sequence
 
 import melee
 import torch
@@ -21,6 +22,7 @@ from tensordict import TensorDict
 from hal.data.constants import IDX_BY_ACTION
 from hal.data.constants import IDX_BY_CHARACTER
 from hal.data.constants import IDX_BY_STAGE
+from hal.data.schema import PYARROW_DTYPE_BY_COLUMN
 from hal.eval.emulator_paths import REMOTE_CISO_PATH
 from hal.eval.emulator_paths import REMOTE_DOLPHIN_HOME_PATH
 from hal.eval.emulator_paths import REMOTE_EMULATOR_PATH
@@ -76,10 +78,7 @@ def self_play_menu_helper(
         player_1 = gamestate.players[controller_1.port]
         player_1_character_selected = player_1.character == character_1
         player_2 = gamestate.players[controller_2.port]
-        player_2_character_selected = player_2.character == character_2
 
-        logger.info(f"{player_1_character_selected=}")
-        logger.info(f"{player_2_character_selected=}")
         if not player_1_character_selected:
             MenuHelper.choose_character(
                 character=character_1,
@@ -175,7 +174,12 @@ def extract_and_append_gamestate(gamestate: melee.GameState, frame_data: Default
         frame_data[f"{prefix}_r_shoulder"].append(float(controller.r_shoulder))
 
 
-def convert_frame_data_to_tensor_dict(frame_data: DefaultDict[str, deque]) -> TensorDict:
+def get_mock_framedata(seq_len: int) -> TensorDict:
+    """Mock frame data for warming up compiled model."""
+    return TensorDict({k: torch.zeros(seq_len) for k in PYARROW_DTYPE_BY_COLUMN}, batch_size=(seq_len,))
+
+
+def convert_frame_data_to_tensor_dict(frame_data: DefaultDict[str, Sequence]) -> TensorDict:
     return TensorDict({k: torch.tensor(v) for k, v in frame_data.items()}, batch_size=(len(frame_data["frame"])))
 
 
@@ -215,6 +219,7 @@ def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, torch
         if button.startswith("button") and button != "button_none" and state[idx].item() == 1:
             controller.press_button(getattr(melee.Button, button.upper()))
             break
+    controller.flush()
 
 
 @contextmanager
@@ -271,11 +276,21 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str, idx: Opt
 
     model, train_config = load_model_from_artifact_dir(Path(model_dir), idx=idx)
     model.eval()
-    model = model.to("cuda")
-    model = torch.compile(model, mode="default")
+
     preprocess_inputs = InputPreprocessRegistry.get(train_config.embedding.input_preprocessing_fn)
     stats_by_feature_name = load_dataset_stats(train_config.data.stats_path)
     postprocess_outputs = OutputProcessingRegistry.get(train_config.embedding.target_preprocessing_fn)
+
+    # TODO(eric): move to separate process w/ api
+    logger.info("Compiling model...")
+    model = model.to("cuda")
+    model = torch.compile(model, mode="default")
+    mock_tensordict = get_mock_framedata(train_config.data.input_len)
+    mock_inputs = (
+        preprocess_inputs(mock_tensordict, train_config.data, "p1", stats_by_feature_name).unsqueeze(0).to("cuda")
+    )
+    with torch.no_grad():
+        model(mock_inputs)[:, -1]
 
     # Container for sliding window of model inputs
     frame_data: DefaultDict[str, deque] = defaultdict(lambda: deque(maxlen=train_config.data.input_len))
@@ -295,13 +310,13 @@ def run_episode(local: bool, no_gui: bool, debug: bool, model_dir: str, idx: Opt
             if console.processingtime * 1000 > 12:
                 logger.info("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
-            logger.info(f"frame {gamestate.frame}")
-            p1_active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
-            if p1_active_buttons:
-                logger.info(f"Controller 1: {p1_active_buttons=}")
-            p2_active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
-            if p2_active_buttons:
-                logger.info(f"Controller 2: {p2_active_buttons=}")
+            # logger.info(f"frame {gamestate.frame}")
+            # p1_active_buttons = tuple(button for button, state in controller_1.current.button.items() if state == True)
+            # if p1_active_buttons:
+            #     logger.info(f"Controller 1: {p1_active_buttons=}")
+            # p2_active_buttons = tuple(button for button, state in controller_2.current.button.items() if state == True)
+            # if p2_active_buttons:
+            #     logger.info(f"Controller 2: {p2_active_buttons=}")
 
             # What menu are we in?
             if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
