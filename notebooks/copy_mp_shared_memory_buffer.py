@@ -30,13 +30,17 @@ def get_frame_data_from_gamestate(gamestate: melee.GameState | None = None, rank
     )
 
 
-def get_model_output() -> TensorDict:
+def get_model_output(device: torch.device | str) -> TensorDict:
+    num_workers: int = 4
     output_dim: int = 10  # Size of the output dimension
-    device = "cpu"
-    time.sleep(0.007)
     return TensorDict(
-        {output_field: torch.zeros(output_dim, device=device) for output_field in ("button", "main_stick", "c_stick")},
-        batch_size=[],
+        {
+            output_field: torch.randn(num_workers, output_dim, device=device)
+            for output_field in ("button", "main_stick", "c_stick")
+        },
+        batch_size=[
+            num_workers,
+        ],
         device=device,
     )
 
@@ -73,15 +77,15 @@ def cpu_worker(
 
         # Read the output from shared_output
         output: torch.Tensor = shared_output[rank].clone()
-        print(f"CPU Worker {rank} received output: {output}")
+        print(f"CPU Worker {rank} received output: {output['button']}")
 
         # Clear the output ready flag for the next iteration
         output_ready_flags[rank].clear()
 
 
 def gpu_worker(
-    shared_input: torch.Tensor,
-    shared_output: torch.Tensor,
+    shared_input: TensorDict,
+    shared_output: TensorDict,
     data_ready_flags: List[mp.Event],
     output_ready_flags: List[mp.Event],
     context_window_size: int,
@@ -89,7 +93,7 @@ def gpu_worker(
     stop_event: mp.Event,
     hidden_dim: int,
     output_dim: int,
-    device: torch.device,
+    device: torch.device | str,
 ) -> None:
     """
     GPU worker that batches data from shared memory, updates the context window,
@@ -103,7 +107,6 @@ def gpu_worker(
         ],
         dim=0,
     )
-    print(f"gamestate: {context_window['gamestate']}")
 
     # Initialize the dummy model
     model: DummyModel = DummyModel(hidden_dim, context_window_size, output_dim)
@@ -122,6 +125,7 @@ def gpu_worker(
         t0 = time.perf_counter()
         # Read data from shared_tensor
         batch_data: torch.Tensor = shared_input.clone().to(device)  # Shape: [num_workers, hidden_dim]
+        print(f"batch gamestate: {batch_data['gamestate']}")
 
         # Update the context window by rolling and adding new data
         context_window[:, :-1] = context_window[:, 1:].clone()
@@ -130,9 +134,9 @@ def gpu_worker(
 
         # Perform forward operation with the dummy model
         # output: torch.Tensor = model(context_window)
-        output = get_model_output()
+        output = get_model_output(device)
         # Write the output to shared_output
-        shared_output.copy_(output.cpu())
+        shared_output.copy_(output)
 
         t1 = time.perf_counter()
         print(f"GPU Worker time: {t1 - t0}")
@@ -147,7 +151,7 @@ def gpu_worker(
 
         iteration += 1
         # For demonstration purposes, stop after a certain number of iterations
-        if iteration >= 5:
+        if iteration >= 20:
             stop_event.set()
             break
 
