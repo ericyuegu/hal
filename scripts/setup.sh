@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
 Yellow='\033[0;33m'
@@ -9,11 +9,11 @@ sudo apt-get install p7zip-full libasound2 libegl1 libgl1 libusb-1.0-0 libglib2.
 PROJECT_DIR="/opt/projects/hal2"
 EMULATOR_FILE_PATH="$PROJECT_DIR/emulator/Slippi_Online-Ubuntu20.04-Exi-x86_64.AppImage"
 cd $PROJECT_DIR
-pushd "emulator"
+cd "emulator"
 chmod +x $EMULATOR_FILE_PATH
 $EMULATOR_FILE_PATH --appimage-extract
 echo "${Yellow}Extracted emulator"
-popd
+cd ..
 
 if [ ! -d ".venv" ]; then
   python -m venv .venv
