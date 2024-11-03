@@ -75,12 +75,24 @@ def extract_and_append_gamestate_inplace(
         for player_state_field, value in player_data.items():
             frame_data_by_field[f"{player_name}_{player_state_field}"].append(value)
 
-        # Skip controller data if next gamestate is None
-        if next_gamestate is None:
-            continue
+    if next_gamestate is not None:
+        extract_controller_inputs_inplace(frame_data_by_field=frame_data_by_field, gamestate=next_gamestate)
 
-        # Controller data (from next gamestate)
-        controller = next_gamestate.players[port].controller_state
+    return frame_data_by_field
+
+
+def extract_controller_inputs_inplace(
+    frame_data_by_field: FrameData,
+    gamestate: melee.GameState,
+) -> FrameData:
+    """Extract controller inputs from gamestate and store in-place in `frame_data`."""
+    players = sorted(gamestate.players.items())
+    assert len(players) == 2, f"Expected 2 players, got {len(players)}"
+
+    for i, (_, player_state) in enumerate(players, start=1):
+        player_name = f"p{i}"
+
+        controller = player_state.controller_state
         buttons = ["A", "B", "X", "Y", "Z", "START", "L", "R", "D_UP"]
         for button in buttons:
             frame_data_by_field[f"{player_name}_button_{button.lower()}"].append(

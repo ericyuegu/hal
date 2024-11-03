@@ -3,7 +3,7 @@ import sys
 from collections import defaultdict
 from collections import deque
 from pathlib import Path
-from typing import DefaultDict
+from typing import Mapping
 from typing import Optional
 from typing import Sequence
 
@@ -20,8 +20,9 @@ from hal.eval.emulator_helper import get_console_kwargs
 from hal.eval.emulator_helper import self_play_menu_helper
 from hal.eval.emulator_paths import REMOTE_CISO_PATH
 from hal.eval.emulator_paths import REMOTE_DOLPHIN_HOME_PATH
-from hal.eval.eval_helper import extract_and_append_gamestate
 from hal.eval.eval_helper import send_controller_inputs
+from hal.gamestate_utils import FrameData
+from hal.gamestate_utils import extract_and_append_gamestate_inplace
 from hal.training.io import load_model_from_artifact_dir
 from hal.training.preprocess.registry import InputPreprocessRegistry
 from hal.training.preprocess.registry import OutputProcessingRegistry
@@ -37,7 +38,7 @@ def get_mock_framedata(seq_len: int) -> TensorDict:
     return TensorDict({k: torch.zeros(seq_len) for k in PYARROW_DTYPE_BY_COLUMN}, batch_size=(seq_len,))
 
 
-def convert_frame_data_to_tensor_dict(frame_data: DefaultDict[str, Sequence]) -> TensorDict:
+def convert_frame_data_to_tensor_dict(frame_data: Mapping[str, Sequence]) -> TensorDict:
     return TensorDict({k: torch.tensor(v) for k, v in frame_data.items()}, batch_size=(len(frame_data["frame"])))
 
 
@@ -75,14 +76,14 @@ def model_server(
     with torch.no_grad():
         model(mock_inputs)[:, -1]
 
-    frame_data: DefaultDict[str, deque] = defaultdict(lambda: deque(maxlen=train_config.data.input_len))
+    frame_data: FrameData = defaultdict(lambda: deque(maxlen=train_config.data.input_len))
 
     while True:
         gamestate = input_queue.get()
         if gamestate is None:  # Sentinel value to stop the worker
             break
 
-        extract_and_append_gamestate(gamestate=gamestate, frame_data=frame_data)
+        extract_and_append_gamestate_inplace(frame_data_by_field=frame_data, curr_gamestate=gamestate)
         frame_data_td = convert_frame_data_to_tensor_dict(frame_data)
         model_inputs = pad_tensors(frame_data_td, train_config.data.input_len)
         model_inputs = preprocess_inputs(model_inputs, train_config.data, "p1", stats_by_feature_name)
