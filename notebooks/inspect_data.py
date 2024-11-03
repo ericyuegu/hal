@@ -10,13 +10,13 @@ from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig
 from hal.training.deprecated.dataset import InMemoryTensordictDataset
 from hal.training.deprecated.tensordict_dataloader import create_tensordicts
-from hal.training.preprocess.preprocess_inputs import NUMERIC_FEATURES_V0
+from hal.training.preprocess.preprocess_inputs import PLAYER_NUMERIC_FEATURES_V0
 from hal.training.preprocess.preprocess_inputs import preprocess_inputs_v0
 
 players = ["p1", "p2"]
 cols = []
 for player in players:
-    for feature in NUMERIC_FEATURES_V0:
+    for feature in PLAYER_NUMERIC_FEATURES_V0:
         cols.append(f"{player}_{feature}")
 # %%
 data_config = DataConfig(data_dir="/opt/projects/hal2/data/dev", input_len=30, target_len=5)
