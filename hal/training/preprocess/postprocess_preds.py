@@ -1,5 +1,3 @@
-from typing import Dict
-
 import torch
 from data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from tensordict import TensorDict
@@ -8,7 +6,7 @@ from hal.training.preprocess.registry import OutputProcessingRegistry
 
 
 @OutputProcessingRegistry.register("targets_v0")
-def model_predictions_to_controller_inputs_v0(pred: TensorDict) -> Dict[str, torch.Tensor]:
+def model_predictions_to_controller_inputs_v0(pred: TensorDict) -> TensorDict:
     """
     Reverse the one-hot encoding of buttons and analog stick x, y values for a given player.
     """
@@ -25,15 +23,17 @@ def model_predictions_to_controller_inputs_v0(pred: TensorDict) -> Dict[str, tor
     one_hot_buttons = pred["buttons"]
     button_a, button_b, jump, button_z, shoulder, no_button = torch.split(one_hot_buttons, 1, dim=-1)
 
-    return {
-        "main_stick_x": main_stick_x,
-        "main_stick_y": main_stick_y,
-        "c_stick_x": c_stick_x,
-        "c_stick_y": c_stick_y,
-        "button_a": button_a,
-        "button_b": button_b,
-        "button_x": jump,
-        "button_z": button_z,
-        "button_l": shoulder,
-        "button_none": no_button,
-    }
+    return TensorDict(
+        {
+            "main_stick_x": main_stick_x,
+            "main_stick_y": main_stick_y,
+            "c_stick_x": c_stick_x,
+            "c_stick_y": c_stick_y,
+            "button_a": button_a,
+            "button_b": button_b,
+            "button_x": jump,
+            "button_z": button_z,
+            "button_l": shoulder,
+            "button_none": no_button,
+        }
+    )

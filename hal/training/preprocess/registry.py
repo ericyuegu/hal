@@ -60,7 +60,7 @@ class TargetPreprocessRegistry:
         return decorator
 
 
-OutputPreprocessFn = Callable[[TensorDict], Dict[str, ArrayLike]]
+OutputPreprocessFn = Callable[[TensorDict], TensorDict]
 
 
 class OutputProcessingRegistry:
