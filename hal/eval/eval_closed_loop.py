@@ -128,35 +128,49 @@ def cpu_worker(
     CPU worker that preprocesses data, writes it into shared memory,
     and reads the result after GPU processing.
     """
-    emulator_generator = run_episode()
-    for gamestate in emulator_generator:
-        if gamestate is None:
-            break
+    logger.info(f"CPU worker {rank} starting. Input buffer shape: {shared_batched_model_input.shape}")
 
-        gamestate_td = extract_gamestate_as_tensordict(gamestate)
-        # Preprocess single frame
-        data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
-        model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
-        sharded_model_input: TensorDict = shared_batched_model_input[rank]
-        sharded_model_input.update_(model_inputs, non_blocking=True)
-        model_input_ready_flag.set()
+    try:
+        emulator_generator = run_episode()
+        for gamestate in emulator_generator:
+            if gamestate is None:
+                break
 
-        # Wait for the output to be ready
-        while not model_output_ready_flag.is_set() and not stop_event.is_set():
-            time.sleep(0.0001)  # Sleep briefly to avoid busy waiting
+            preprocess_start = time.perf_counter()
+            gamestate_td = extract_gamestate_as_tensordict(gamestate)
+            # Preprocess single frame
+            data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
+            model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
+            preprocess_time = time.perf_counter() - preprocess_start
 
-        if stop_event.is_set():
-            break
+            transfer_start = time.perf_counter()
+            sharded_model_input: TensorDict = shared_batched_model_input[rank]
+            sharded_model_input.update_(model_inputs, non_blocking=True)
+            transfer_time = time.perf_counter() - transfer_start
 
-        # Read the output from shared_batched_model_output
-        output = shared_batched_model_output[rank].clone()
-        controller_inputs = postprocess_outputs(output)
-        emulator_generator.send(controller_inputs)
+            logger.debug(
+                f"Worker {rank}: Preprocess: {preprocess_time*1000:.2f}ms, " f"Transfer: {transfer_time*1000:.2f}ms"
+            )
 
-        # Clear the output ready flag for the next iteration
-        model_output_ready_flag.clear()
+            model_input_ready_flag.set()
 
-    stop_event.set()
+            # Wait for the output to be ready
+            while not model_output_ready_flag.is_set() and not stop_event.is_set():
+                time.sleep(0.0001)  # Sleep briefly to avoid busy waiting
+
+            if stop_event.is_set():
+                break
+
+            # Read the output from shared_batched_model_output
+            output = shared_batched_model_output[rank].clone()
+            controller_inputs = postprocess_outputs(output)
+            emulator_generator.send(controller_inputs)
+
+            # Clear the output ready flag for the next iteration
+            model_output_ready_flag.clear()
+    finally:
+        logger.info(f"CPU worker {rank} stopping")
+        stop_event.set()
 
 
 def gpu_worker(
@@ -174,6 +188,8 @@ def gpu_worker(
     GPU worker that batches data from shared memory, updates the context window,
     performs inference with model, and writes output back to shared memory.
     """
+    logger.info(f"GPU worker starting. Input buffer shape: {shared_batched_model_input.shape}, " f"device: {device}")
+
     model, _ = load_model_from_artifact_dir(Path(model_dir), idx=idx)
     model.eval()
     model.to(device)
@@ -181,6 +197,7 @@ def gpu_worker(
     # Stack along time dimension
     # shape: (n_workers, seq_len)
     context_window: TensorDict = torch.stack([shared_batched_model_input for _ in range(seq_len)], dim=-1).to(device)  # type: ignore
+    logger.info(f"Context window shape: {context_window.shape}, device: {context_window.device}")
 
     # Warmup CUDA graphs with dummy inputs
     logger.info("Compiling model...")
@@ -188,7 +205,10 @@ def gpu_worker(
     with torch.no_grad():
         model(context_window)
 
+    iteration = 0
     while not all(event.is_set() for event in stop_events):
+        iteration_start = time.perf_counter()
+
         # Wait for all CPU workers to signal that data is ready
         for flag in model_input_ready_flags:
             while not flag.is_set() and not all(event.is_set() for event in stop_events):
@@ -198,12 +218,35 @@ def gpu_worker(
             break
 
         # Update the context window by rolling and adding new data
+        transfer_start = time.perf_counter()
         context_window[:, :-1] = context_window[:, 1:]
         context_window[:, -1].copy_(shared_batched_model_input, non_blocking=True)
+        torch.cuda.synchronize()  # Ensure transfer is complete before timing
+        transfer_time = time.perf_counter() - transfer_start
+
+        inference_start = time.perf_counter()
         with torch.no_grad():
             outputs: TensorDict = model(context_window)[:, -1]  # (n_workers,)
+        torch.cuda.synchronize()  # Ensure inference is complete before timing
+        inference_time = time.perf_counter() - inference_start
+
+        writeback_start = time.perf_counter()
         # Write the output to shared_batched_model_output
         shared_batched_model_output.copy_(outputs)
+        torch.cuda.synchronize()
+        writeback_time = time.perf_counter() - writeback_start
+
+        total_time = time.perf_counter() - iteration_start
+
+        if iteration % 60 == 0:  # Log every 60 frames (roughly 1 second)
+            logger.info(
+                f"Iteration {iteration}: Total: {total_time*1000:.2f}ms "
+                f"(Transfer: {transfer_time*1000:.2f}ms, "
+                f"Inference: {inference_time*1000:.2f}ms, "
+                f"Writeback: {writeback_time*1000:.2f}ms)"
+            )
+
+        iteration += 1
 
         # Signal to CPU workers that output is ready
         for flag in model_output_ready_flags:
@@ -215,8 +258,6 @@ def gpu_worker(
 
 
 def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
-    mp.set_start_method("spawn")
-
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_config: TrainConfig = load_config_from_artifact_dir(Path(model_dir))
     seq_len = train_config.data.input_len
