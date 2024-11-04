@@ -11,9 +11,6 @@ import pyarrow as pa
 import torch
 from tensordict import TensorDict
 
-from hal.training.config import EmbeddingConfig
-from hal.training.preprocess.registry import InputPreprocessRegistry
-
 T = TypeVar("T")
 
 
@@ -82,14 +79,4 @@ def pyarrow_table_to_tensordict(table: pa.Table) -> TensorDict:
     return TensorDict(
         {name: torch.from_numpy(col.to_numpy()) for name, col in zip(table.column_names, table.columns)},
         batch_size=len(table),
-    )
-
-
-def get_input_size_from_config(config: EmbeddingConfig) -> int:
-    """Get the size of the materialized input dimensions from the embedding config."""
-    numeric_feature_count = InputPreprocessRegistry.get_num_features(config.input_preprocessing_fn)
-    return (
-        numeric_feature_count
-        + config.stage_embedding_dim
-        + 2 * (config.character_embedding_dim + config.action_embedding_dim)
     )

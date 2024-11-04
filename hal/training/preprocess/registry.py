@@ -2,11 +2,11 @@ from typing import Callable
 from typing import Dict
 from typing import Literal
 
-from numpy.typing import ArrayLike
 from tensordict import TensorDict
 
 from hal.data.stats import FeatureStats
 from hal.training.config import DataConfig
+from hal.training.config import EmbeddingConfig
 
 Player = Literal["p1", "p2"]
 
@@ -79,3 +79,13 @@ class PredPostprocessingRegistry:
             return embed_fn
 
         return decorator
+
+
+def get_input_size_from_config(config: EmbeddingConfig) -> int:
+    """Get the size of the materialized input dimensions from the embedding config."""
+    numeric_feature_count = InputPreprocessRegistry.get_num_features(config.input_preprocessing_fn)
+    return (
+        numeric_feature_count
+        + config.stage_embedding_dim
+        + 2 * (config.character_embedding_dim + config.action_embedding_dim)
+    )
