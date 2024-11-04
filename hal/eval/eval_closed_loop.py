@@ -103,7 +103,6 @@ def run_episode(rank: int, max_steps: int = 8 * 60 * 60) -> Generator[Optional[m
 
                     # Yield gamestate and receive controller inputs
                     controller_inputs = yield gamestate
-                    logger.info(f"Sending controller inputs: {controller_inputs}")
                     send_controller_inputs(controller_1, controller_inputs)
 
                     i += 1
@@ -128,8 +127,8 @@ def cpu_worker(
     CPU worker that preprocesses data, writes it into shared memory,
     and reads the result after GPU processing.
     """
-    logger.info(f"CPU worker {rank} starting. Input buffer: {shared_batched_model_input}")
-    logger.info(f"CPU worker {rank} starting. Output buffer: {shared_batched_model_output}")
+    # logger.info(f"CPU worker {rank} starting. Input buffer: {shared_batched_model_input}")
+    # logger.info(f"CPU worker {rank} starting. Output buffer: {shared_batched_model_output}")
 
     try:
         emulator_generator = run_episode(rank=rank)
@@ -167,7 +166,6 @@ def cpu_worker(
 
             # Read the output from shared_batched_model_output
             model_output = shared_batched_model_output[rank].clone()
-            logger.info(f"Worker {rank}: {model_output=}")
             controller_inputs = postprocess_outputs(model_output)
             emulator_generator.send(controller_inputs)
 
