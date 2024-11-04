@@ -80,13 +80,11 @@ def run_episode(rank: int, max_steps: int = 8 * 60 * 60) -> Generator[Optional[m
                 if gamestate is None:
                     logger.info("Gamestate is None")
                     break
-                logger.info(f"Iteration {i}: Menu state: {gamestate.menu_state}")
 
                 if console.processingtime * 1000 > 12:
                     logger.info("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
                 if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-                    logger.info("Menu helper")
                     if match_started:
                         break
 
@@ -130,7 +128,8 @@ def cpu_worker(
     CPU worker that preprocesses data, writes it into shared memory,
     and reads the result after GPU processing.
     """
-    logger.info(f"CPU worker {rank} starting. Input buffer shape: {shared_batched_model_input.shape}")
+    logger.info(f"CPU worker {rank} starting. Input buffer: {shared_batched_model_input}")
+    logger.info(f"CPU worker {rank} starting. Output buffer: {shared_batched_model_output}")
 
     try:
         emulator_generator = run_episode(rank=rank)
@@ -140,16 +139,17 @@ def cpu_worker(
                 break
 
             preprocess_start = time.perf_counter()
+            # Returns a TensorDict with shape (1,) for single frame
             gamestate_td = extract_gamestate_as_tensordict(gamestate)
             # Preprocess single frame
             data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
             model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
-            logger.info(f"Worker {rank}: {model_inputs=}")
             preprocess_time = time.perf_counter() - preprocess_start
 
             transfer_start = time.perf_counter()
             sharded_model_input: TensorDict = shared_batched_model_input[rank]
-            sharded_model_input.update_(model_inputs, non_blocking=True)
+            # Update our rank of the shared buffer with the last frame
+            sharded_model_input.update_(model_inputs[-1], non_blocking=True)
             transfer_time = time.perf_counter() - transfer_start
 
             logger.debug(
@@ -173,6 +173,8 @@ def cpu_worker(
 
             # Clear the output ready flag for the next iteration
             model_output_ready_flag.clear()
+    except Exception as e:
+        logger.error(f"CPU worker {rank} encountered an error: {e}")
     finally:
         logger.info(f"CPU worker {rank} stopping")
         model_input_ready_flag.set()
@@ -194,8 +196,6 @@ def gpu_worker(
     GPU worker that batches data from shared memory, updates the context window,
     performs inference with model, and writes output back to shared memory.
     """
-    logger.info(f"GPU worker starting. Input buffer shape: {shared_batched_model_input.shape}, " f"device: {device}")
-
     model, _ = load_model_from_artifact_dir(Path(model_dir), idx=idx)
     model.eval()
     model.to(device)
@@ -228,7 +228,7 @@ def gpu_worker(
 
         # Update the context window by rolling and adding new data
         transfer_start = time.perf_counter()
-        context_window[:, :-1] = context_window[:, 1:]
+        context_window[:, :-1].copy_(context_window[:, 1:].clone())
         context_window[:, -1].copy_(shared_batched_model_input, non_blocking=True)
         torch.cuda.synchronize()  # Ensure transfer is complete before timing
         transfer_time = time.perf_counter() - transfer_start

@@ -11,17 +11,15 @@ from tensordict import TensorDict
 from hal.data.constants import IDX_BY_ACTION
 from hal.data.constants import IDX_BY_CHARACTER
 from hal.data.constants import IDX_BY_STAGE
-from hal.data.schema import PYARROW_DTYPE_BY_COLUMN
 
 FrameData = DefaultDict[str, MutableSequence[Any]]
-
 
 
 def extract_gamestate_as_tensordict(gamestate: melee.GameState) -> TensorDict:
     # TODO: make this faster / more direct
     frame_data: FrameData = defaultdict(list)
     extract_and_append_gamestate_inplace(frame_data, gamestate)
-    return TensorDict({k: torch.tensor(v).squeeze() for k, v in frame_data.items()})
+    return TensorDict({k: torch.tensor(v) for k, v in frame_data.items()}, batch_size=(1,))
 
 
 def extract_and_append_gamestate_inplace(
