@@ -104,6 +104,7 @@ def run_episode(max_steps: int = 8 * 60 * 60) -> Generator[Optional[melee.GameSt
 
                     # Yield gamestate and receive controller inputs
                     controller_inputs = yield gamestate
+                    logger.info(f"Sending controller inputs: {controller_inputs}")
                     send_controller_inputs(controller_1, controller_inputs)
 
                     i += 1
@@ -141,6 +142,7 @@ def cpu_worker(
             # Preprocess single frame
             data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
             model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
+            logger.info(f"Worker {rank}: {model_inputs=}")
             preprocess_time = time.perf_counter() - preprocess_start
 
             transfer_start = time.perf_counter()
@@ -162,8 +164,9 @@ def cpu_worker(
                 break
 
             # Read the output from shared_batched_model_output
-            output = shared_batched_model_output[rank].clone()
-            controller_inputs = postprocess_outputs(output)
+            model_output = shared_batched_model_output[rank].clone()
+            logger.info(f"Worker {rank}: {model_output=}")
+            controller_inputs = postprocess_outputs(model_output)
             emulator_generator.send(controller_inputs)
 
             # Clear the output ready flag for the next iteration
@@ -204,6 +207,7 @@ def gpu_worker(
     model = torch.compile(model, mode="reduce-overhead")
     with torch.no_grad():
         model(context_window)
+    logger.info("Warmup step finished")
 
     iteration = 0
     while not all(event.is_set() for event in stop_events):
@@ -213,6 +217,8 @@ def gpu_worker(
         for flag in model_input_ready_flags:
             while not flag.is_set() and not all(event.is_set() for event in stop_events):
                 time.sleep(0.0001)  # Sleep briefly to avoid busy waiting
+
+        logger.info(f"Iteration {iteration}: All CPU workers ready")
 
         if all(event.is_set() for event in stop_events):
             break
@@ -238,13 +244,12 @@ def gpu_worker(
 
         total_time = time.perf_counter() - iteration_start
 
-        if iteration % 60 == 0:  # Log every 60 frames (roughly 1 second)
-            logger.info(
-                f"Iteration {iteration}: Total: {total_time*1000:.2f}ms "
-                f"(Transfer: {transfer_time*1000:.2f}ms, "
-                f"Inference: {inference_time*1000:.2f}ms, "
-                f"Writeback: {writeback_time*1000:.2f}ms)"
-            )
+        logger.info(
+            f"Iteration {iteration}: Total: {total_time*1000:.2f}ms "
+            f"(Transfer: {transfer_time*1000:.2f}ms, "
+            f"Inference: {inference_time*1000:.2f}ms, "
+            f"Writeback: {writeback_time*1000:.2f}ms)"
+        )
 
         iteration += 1
 
@@ -272,10 +277,14 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
     stop_events: List[EventType] = [mp.Event() for _ in range(n_workers)]
 
     # Share and pin buffers in CPU memory for transferring model inputs and outputs
+    mock_framedata = mock_framedata_as_tensordict(seq_len)
+    # Store only a single time step to minimize memory transfer
+    mock_model_inputs = preprocess_inputs(mock_framedata, train_config.data, "p1", stats_by_feature_name)[-1]
     shared_batched_model_input: TensorDict = torch.stack(
-        [mock_framedata_as_tensordict(seq_len) for _ in range(n_workers)], dim=0  # type: ignore
+        [mock_model_inputs for _ in range(n_workers)], dim=0  # type: ignore
     )
     shared_batched_model_input = share_and_pin_memory(shared_batched_model_input)
+    logger.info(f"{shared_batched_model_input=}")
     shared_batched_model_output: TensorDict = torch.stack(
         [mock_preds_as_tensordict(train_config.embedding) for _ in range(n_workers)], dim=0  # type: ignore
     )
