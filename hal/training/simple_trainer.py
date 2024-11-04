@@ -4,7 +4,6 @@ import random
 import numpy as np
 import torch
 from tensordict import TensorDict
-from training.streaming_dataloader import get_dataloaders
 
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
@@ -12,6 +11,7 @@ from hal.training.config import parse_args_to_attrs_instance
 from hal.training.distributed import auto_distribute
 from hal.training.distributed import get_device_id
 from hal.training.distributed import wrap_multiprocessing
+from hal.training.streaming_dataloader import get_dataloaders
 from hal.training.trainer import CategoricalBCTrainer
 
 

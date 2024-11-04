@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 from hal.training.config import TrainConfig
 from hal.training.models.registry import Arch
-from hal.training.utils import get_input_size_from_config
+from hal.training.preprocess.registry import get_input_size_from_config
 
 
 @attr.s(auto_attribs=True, frozen=True)
