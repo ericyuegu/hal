@@ -18,6 +18,7 @@ from tensordict import TensorDict
 from hal.data.stats import FeatureStats
 from hal.data.stats import load_dataset_stats
 from hal.eval.emulator_helper import console_manager
+from hal.eval.emulator_helper import find_open_udp_ports
 from hal.eval.emulator_helper import get_console_kwargs
 from hal.eval.emulator_helper import self_play_menu_helper
 from hal.eval.emulator_paths import REMOTE_CISO_PATH
@@ -38,10 +39,22 @@ PLAYER_1_PORT = 1
 PLAYER_2_PORT = 2
 
 
+def setup_cpu_logger() -> None:
+    logger.remove()
+    logger_format = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+        "rank={extra[rank]} - <level>{message}</level>"
+    )
+    logger.configure(extra={"rank": ""})  # Default values
+    logger.add(sys.stderr, format=logger_format)
+
+
 def run_episode(
-    rank: int, max_steps: int = 8 * 60 * 60, latency_warning_threshold: float = 14.0
+    rank: int, port: int, max_steps: int = 8 * 60 * 60, latency_warning_threshold: float = 14.0
 ) -> Generator[Optional[melee.GameState], TensorDict, None]:
-    console_kwargs = get_console_kwargs(rank=rank)
+    console_kwargs = get_console_kwargs(rank=rank, port=port)
     console = melee.Console(**console_kwargs)
 
     controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
@@ -119,6 +132,7 @@ def cpu_worker(
     shared_batched_model_input: TensorDict,
     shared_batched_model_output: TensorDict,
     rank: int,
+    port: int,
     preprocess_inputs: InputPreprocessFn,
     postprocess_outputs: PredPostprocessFn,
     model_input_ready_flag: EventType,
@@ -126,66 +140,65 @@ def cpu_worker(
     stop_event: EventType,
     train_config: TrainConfig,
     stats_by_feature_name: Dict[str, FeatureStats],
+    debug: bool = False,
 ) -> None:
     """
     CPU worker that preprocesses data, writes it into shared memory,
     and reads the result after GPU processing.
     """
-    # logger.info(f"CPU worker {rank} starting. Input buffer: {shared_batched_model_input}")
-    # logger.info(f"CPU worker {rank} starting. Output buffer: {shared_batched_model_output}")
+    setup_cpu_logger()
 
-    try:
-        emulator_generator = run_episode(rank=rank)
-        for i, gamestate in enumerate(emulator_generator):
-            if gamestate is None:
-                # First gamestate after match start is None for some reason
-                if i > 1:
+    with logger.contextualize(rank=rank):
+        try:
+            emulator_generator = run_episode(rank=rank, port=port)
+            for i, gamestate in enumerate(emulator_generator):
+                if gamestate is None:
+                    # First gamestate after match start is None for some reason
+                    if i > 1:
+                        break
+                    continue
+
+                preprocess_start = time.perf_counter()
+                # Returns a TensorDict with shape (1,) for single frame
+                gamestate_td = extract_gamestate_as_tensordict(gamestate)
+                # Preprocess single frame
+                data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
+                model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
+                preprocess_time = time.perf_counter() - preprocess_start
+
+                transfer_start = time.perf_counter()
+                sharded_model_input: TensorDict = shared_batched_model_input[rank]
+                # Update our rank of the shared buffer with the last frame
+                sharded_model_input.update_(model_inputs[-1], non_blocking=True)
+                transfer_time = time.perf_counter() - transfer_start
+
+                if debug and i % 60 == 0:
+                    logger.debug(f"Preprocess: {preprocess_time*1000:.2f}ms, Transfer: {transfer_time*1000:.2f}ms")
+
+                model_input_ready_flag.set()
+
+                # Wait for the output to be ready
+                while not (model_output_ready_flag.is_set() or stop_event.is_set()):
+                    time.sleep(0.0001)  # Sleep briefly to avoid busy waiting
+
+                if stop_event.is_set():
                     break
-                continue
 
-            preprocess_start = time.perf_counter()
-            # Returns a TensorDict with shape (1,) for single frame
-            gamestate_td = extract_gamestate_as_tensordict(gamestate)
-            # Preprocess single frame
-            data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
-            model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
-            preprocess_time = time.perf_counter() - preprocess_start
+                # Read the output from shared_batched_model_output
+                model_output = shared_batched_model_output[rank].clone()
+                controller_inputs = postprocess_outputs(model_output)
+                emulator_generator.send(controller_inputs)
 
-            transfer_start = time.perf_counter()
-            sharded_model_input: TensorDict = shared_batched_model_input[rank]
-            # Update our rank of the shared buffer with the last frame
-            sharded_model_input.update_(model_inputs[-1], non_blocking=True)
-            transfer_time = time.perf_counter() - transfer_start
+                # Clear the output ready flag for the next iteration
+                model_output_ready_flag.clear()
 
-            if i % 60 == 0:
-                logger.debug(
-                    f"Worker {rank}: Preprocess: {preprocess_time*1000:.2f}ms, Transfer: {transfer_time*1000:.2f}ms"
-                )
-
+            logger.success(f"CPU worker {rank} complete.")
+        except Exception as e:
+            logger.error(f"CPU worker {rank} encountered an error: {e}")
+        finally:
             model_input_ready_flag.set()
-
-            # Wait for the output to be ready
-            while not (model_output_ready_flag.is_set() or stop_event.is_set()):
-                time.sleep(0.0001)  # Sleep briefly to avoid busy waiting
-
-            if stop_event.is_set():
-                break
-
-            # Read the output from shared_batched_model_output
-            model_output = shared_batched_model_output[rank].clone()
-            controller_inputs = postprocess_outputs(model_output)
-            emulator_generator.send(controller_inputs)
-
-            # Clear the output ready flag for the next iteration
-            model_output_ready_flag.clear()
-
-        logger.success(f"CPU worker {rank} complete.")
-    except Exception as e:
-        logger.error(f"CPU worker {rank} encountered an error: {e}")
-    finally:
-        model_input_ready_flag.set()
-        stop_event.set()
-        logger.info(f"CPU worker {rank} stopped")
+            stop_event.set()
+            logger.info(f"CPU worker {rank} stopped")
 
 
 def gpu_worker(
@@ -314,6 +327,7 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
     gpu_process.start()
 
     cpu_processes: List[mp.Process] = []
+    ports = find_open_udp_ports(n_workers)
     for i in range(n_workers):
         p: mp.Process = mp.Process(
             target=cpu_worker,
@@ -321,6 +335,7 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
                 "shared_batched_model_input": shared_batched_model_input,
                 "shared_batched_model_output": shared_batched_model_output,
                 "rank": i,
+                "port": ports[i],
                 "preprocess_inputs": preprocess_inputs,
                 "postprocess_outputs": postprocess_outputs,
                 "model_input_ready_flag": model_input_ready_flags[i],
