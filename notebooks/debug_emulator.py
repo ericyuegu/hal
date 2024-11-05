@@ -1,9 +1,11 @@
+import platform
+import random
+import subprocess
 import sys
 from typing import Generator
 from typing import Optional
 
 import melee
-import torch.multiprocessing as mp
 from loguru import logger
 from tensordict import TensorDict
 
@@ -17,10 +19,51 @@ PLAYER_1_PORT = 1
 PLAYER_2_PORT = 2
 
 
-def run_episode(rank: int, max_steps: int = 8 * 60 * 60) -> Generator[Optional[melee.GameState], TensorDict, None]:
+def find_open_udp_ports(num: int):
+    min_port = 10_000
+    max_port = 2**16
+
+    system = platform.system()
+    if system == "Linux":
+        netstat_command = ["netstat", "-an", "--udp"]
+        port_delimiter = ":"
+    elif system == "Darwin":
+        netstat_command = ["netstat", "-an", "-p", "udp"]
+        port_delimiter = "."
+    else:
+        raise NotImplementedError(f'Unsupported system "{system}"')
+
+    netstat = subprocess.check_output(netstat_command)
+    lines = netstat.decode().split("\n")[2:]
+
+    used_ports = set()
+    for line in lines:
+        words = line.split()
+        if not words:
+            continue
+
+        address, port = words[3].rsplit(port_delimiter, maxsplit=1)
+        if port == "*":
+            # TODO: what does this mean? Seems to only happen on Darwin.
+            continue
+
+        if address in ("::", "localhost", "0.0.0.0", "*"):
+            used_ports.add(int(port))
+
+    available_ports = set(range(min_port, max_port)) - used_ports
+
+    if len(available_ports) < num:
+        raise RuntimeError("Not enough available ports.")
+
+    return random.sample(list(available_ports), num)
+
+
+def run_episode(
+    rank: int, port: int, max_steps: int = 8 * 60 * 60
+) -> Generator[Optional[melee.GameState], TensorDict, None]:
     console_kwargs = get_console_kwargs()
-    console = melee.Console(**console_kwargs, slippi_port=51441 + rank)
-    logger.info(f"Worker {rank}: slippi port {console.slippi_port}")
+    console = melee.Console(**console_kwargs, slippi_port=port)
+    logger.info(f"Worker {rank}: slippi address {console.slippi_address}, port {console.slippi_port}")
 
     controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
     controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
@@ -90,20 +133,26 @@ def run_episode(rank: int, max_steps: int = 8 * 60 * 60) -> Generator[Optional[m
             yield None
 
 
-def run_episode_wrapper(rank: int) -> None:
-    for _ in run_episode(rank=rank):
+def run_episode_wrapper(rank: int, port: int) -> None:
+    for _ in run_episode(rank=rank, port=port):
         pass
 
 
-if __name__ == "__main__":
-    cpu_processes = []
-    for i in range(2):
-        p: mp.Process = mp.Process(
-            target=run_episode_wrapper,
-            kwargs=dict(rank=i),
-        )
-        p.start()
-        cpu_processes.append(p)
+# if __name__ == "__main__":
+#     cpu_processes = []
+#     ports = find_open_udp_ports(2)
+#     for i, port in enumerate(ports):
+#         p: mp.Process = mp.Process(
+#             target=run_episode_wrapper,
+#             kwargs=dict(rank=i, port=port),
+#         )
+#         p.start()
+#         cpu_processes.append(p)
 
-    for p in cpu_processes:
-        p.join()
+#     for p in cpu_processes:
+#         p.join()
+
+if __name__ == "__main__":
+    for i, gamestate in enumerate(run_episode(rank=0, port=51441)):
+        if i % 60 == 0:
+            print(f"Iteration {i}: {gamestate}")
