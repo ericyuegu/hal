@@ -10,8 +10,8 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
-from hal.data.constants import ACTION_BY_IDX
-from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
+from hal.constants import ACTION_BY_IDX
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 
 np.set_printoptions(threshold=np.inf)
 

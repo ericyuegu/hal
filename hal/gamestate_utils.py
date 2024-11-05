@@ -8,9 +8,9 @@ import melee
 import torch
 from tensordict import TensorDict
 
-from hal.data.constants import IDX_BY_ACTION
-from hal.data.constants import IDX_BY_CHARACTER
-from hal.data.constants import IDX_BY_STAGE
+from hal.constants import IDX_BY_ACTION
+from hal.constants import IDX_BY_CHARACTER
+from hal.constants import IDX_BY_STAGE
 
 FrameData = DefaultDict[str, MutableSequence[Any]]
 

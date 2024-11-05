@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
-from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
-from hal.data.constants import VALID_PLAYERS
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
+from hal.constants import VALID_PLAYERS
 from hal.data.normalize import union
 from hal.training.preprocess.encoding import get_closest_stick_xy_cluster_v0
 from hal.training.preprocess.encoding import one_hot_2d

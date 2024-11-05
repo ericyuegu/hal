@@ -1,7 +1,7 @@
 import torch
-from data.constants import STICK_XY_CLUSTER_CENTERS_V0
 from tensordict import TensorDict
 
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.training.preprocess.registry import PredPostprocessingRegistry
 
 

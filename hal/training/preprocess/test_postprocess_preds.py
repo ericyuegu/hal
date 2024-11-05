@@ -2,7 +2,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.training.preprocess.postprocess_preds import model_predictions_to_controller_inputs_v0
 
 

@@ -5,12 +5,12 @@ from typing import Tuple
 import torch
 from tensordict import TensorDict
 
-from hal.data.constants import PLAYER_INPUT_FEATURES_TO_EMBED
-from hal.data.constants import PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE
-from hal.data.constants import PLAYER_INPUT_FEATURES_TO_NORMALIZE
-from hal.data.constants import PLAYER_POSITION
-from hal.data.constants import STAGE
-from hal.data.constants import VALID_PLAYERS
+from hal.constants import PLAYER_INPUT_FEATURES_TO_EMBED
+from hal.constants import PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE
+from hal.constants import PLAYER_INPUT_FEATURES_TO_NORMALIZE
+from hal.constants import PLAYER_POSITION
+from hal.constants import STAGE
+from hal.constants import VALID_PLAYERS
 from hal.data.normalize import NormalizationFn
 from hal.data.normalize import cast_int32
 from hal.data.normalize import invert_and_normalize

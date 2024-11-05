@@ -20,9 +20,9 @@ import pyarrow.parquet as pq
 from loguru import logger
 from tqdm import tqdm
 
-from hal.data.constants import IDX_BY_ACTION
-from hal.data.constants import IDX_BY_CHARACTER
-from hal.data.constants import IDX_BY_STAGE
+from hal.constants import IDX_BY_ACTION
+from hal.constants import IDX_BY_CHARACTER
+from hal.constants import IDX_BY_STAGE
 from hal.data.schema import PYARROW_SCHEMA
 from hal.iter_utils import generate_chunks
 

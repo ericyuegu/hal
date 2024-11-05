@@ -5,7 +5,7 @@ from typing import Optional
 from streaming import StreamingDataset
 from tensordict import TensorDict
 
-from hal.data.constants import VALID_PLAYERS
+from hal.constants import VALID_PLAYERS
 from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig

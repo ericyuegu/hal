@@ -3,9 +3,9 @@ from typing import Dict
 
 import numpy as np
 import pyarrow as pa
-from data.constants import ACTION_BY_IDX
 from pyarrow import parquet as pq
 
+from hal.constants import ACTION_BY_IDX
 from hal.data.stats import FeatureStats
 from hal.data.stats import load_dataset_stats
 
@@ -53,6 +53,7 @@ def standardize(array: np.ndarray, stats: FeatureStats) -> np.ndarray:
 def union(array_1: np.ndarray, array_2: np.ndarray) -> np.ndarray:
     """Perform logical OR of two features."""
     return array_1 | array_2
+
 
 def convert_target_button_to_one_hot(array: np.ndarray) -> np.ndarray:
     """
@@ -212,6 +213,7 @@ def sparse_one_hot(array: np.ndarray) -> np.ndarray:
 
     # Multiply by the original mask to keep zeros in place
     return array * streak_starts
+
 
 feature_processors = {
     INPUT_FEATURES_TO_EMBED: lambda x: x,

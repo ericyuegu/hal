@@ -9,15 +9,15 @@ from loguru import logger
 from tensordict import TensorDict
 from torch.utils.data import Dataset
 
-from hal.data.constants import IDX_BY_CHARACTER_STR
-from hal.data.constants import IDX_BY_STAGE_STR
+from hal.constants import IDX_BY_CHARACTER_STR
+from hal.constants import IDX_BY_STAGE_STR
 from hal.data.schema import PYARROW_SCHEMA
 from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig
-from hal.training.utils import pyarrow_table_to_tensordict
 from hal.training.preprocess.registry import InputPreprocessRegistry
 from hal.training.preprocess.registry import TargetPreprocessRegistry
+from hal.training.utils import pyarrow_table_to_tensordict
 
 
 def _create_filters_from_replay_filter(data_config: DataConfig) -> Optional[List[List[Tuple[str, str, Any]]]]:

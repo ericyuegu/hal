@@ -1,7 +1,7 @@
 # %%
 import numpy as np
 
-from hal.data.constants import STICK_XY_CLUSTER_CENTERS_V0
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 
 
 def one_hot_2d(arr: np.ndarray) -> np.ndarray:
