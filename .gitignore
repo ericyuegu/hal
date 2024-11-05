@@ -7,7 +7,7 @@
 **/*.parquet
 
 /emulator/squashfs-root/
-/eval_replays/
+/replays/
 
 # Secrets
 /secrets/

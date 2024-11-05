@@ -1,8 +1,12 @@
+import platform
+import random
 import signal
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Dict
+from typing import List
 
 import melee
 from loguru import logger
@@ -14,7 +18,46 @@ from hal.eval.emulator_paths import REMOTE_EMULATOR_PATH
 from hal.eval.emulator_paths import REMOTE_EVAL_REPLAY_DIR
 
 
-def get_console_kwargs(no_gui: bool = True) -> Dict[str, Any]:
+def find_open_udp_ports(num: int) -> List[int]:
+    min_port = 10_000
+    max_port = 2**16
+
+    system = platform.system()
+    if system == "Linux":
+        netstat_command = ["netstat", "-an", "--udp"]
+        port_delimiter = ":"
+    elif system == "Darwin":
+        netstat_command = ["netstat", "-an", "-p", "udp"]
+        port_delimiter = "."
+    else:
+        raise NotImplementedError(f'Unsupported system "{system}"')
+
+    netstat = subprocess.check_output(netstat_command)
+    lines = netstat.decode().split("\n")[2:]
+
+    used_ports = set()
+    for line in lines:
+        words = line.split()
+        if not words:
+            continue
+
+        address, port = words[3].rsplit(port_delimiter, maxsplit=1)
+        if port == "*":
+            # TODO: what does this mean? Seems to only happen on Darwin.
+            continue
+
+        if address in ("::", "localhost", "0.0.0.0", "*"):
+            used_ports.add(int(port))
+
+    available_ports = set(range(min_port, max_port)) - used_ports
+
+    if len(available_ports) < num:
+        raise RuntimeError("Not enough available ports.")
+
+    return random.sample(list(available_ports), num)
+
+
+def get_console_kwargs(rank: int, port: int, no_gui: bool = True) -> Dict[str, Any]:
     headless_console_kwargs = (
         {
             "gfx_backend": "Null",
@@ -26,17 +69,18 @@ def get_console_kwargs(no_gui: bool = True) -> Dict[str, Any]:
         else {}
     )
     emulator_path = REMOTE_EMULATOR_PATH
-    dolphin_home_path = REMOTE_DOLPHIN_HOME_PATH
-    Path(dolphin_home_path).mkdir(exist_ok=True, parents=True)
-    replay_dir = REMOTE_EVAL_REPLAY_DIR
+    # dolphin_home_path = Path(REMOTE_DOLPHIN_HOME_PATH) / f"worker_{rank}"
+    # Path(dolphin_home_path).mkdir(exist_ok=True, parents=True)
+    replay_dir = Path(REMOTE_EVAL_REPLAY_DIR) / f"worker_{rank}"
     Path(replay_dir).mkdir(exist_ok=True, parents=True)
     console_kwargs = {
         "path": emulator_path,
         "is_dolphin": True,
-        "dolphin_home_path": dolphin_home_path,
-        "tmp_home_directory": False,
-        "replay_dir": replay_dir,
+        "tmp_home_directory": True,
+        "copy_home_directory": False,
+        "replay_dir": str(replay_dir),
         "blocking_input": True,
+        "slippi_port": port,
         **headless_console_kwargs,
     }
     return console_kwargs

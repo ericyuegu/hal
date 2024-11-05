@@ -42,8 +42,8 @@ PLAYER_2_PORT = 2
 def run_episode(
     rank: int, max_steps: int = 8 * 60 * 60, latency_warning_threshold: float = 14.0
 ) -> Generator[Optional[melee.GameState], TensorDict, None]:
-    console_kwargs = get_console_kwargs()
-    console = melee.Console(**console_kwargs, slippi_port=51441 + rank)
+    console_kwargs = get_console_kwargs(rank=rank)
+    console = melee.Console(**console_kwargs)
 
     controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
     controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
