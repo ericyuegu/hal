@@ -13,6 +13,11 @@ Player = Literal["p1", "p2"]
 PLAYER_1_PORT: Final[int] = 1
 PLAYER_2_PORT: Final[int] = 2
 
+
+def get_opponent(player: Player) -> Player:
+    return "p2" if player == "p1" else "p1"
+
+
 ###################
 # Gamestate      #
 ###################

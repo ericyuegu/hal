@@ -17,6 +17,8 @@ from tensordict import TensorDict
 
 from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
+from hal.constants import Player
+from hal.constants import get_opponent
 from hal.data.stats import FeatureStats
 from hal.data.stats import load_dataset_stats
 from hal.eval.emulator_helper import console_manager
@@ -55,6 +57,7 @@ def setup_cpu_logger(debug: bool = False) -> None:
 class EmulatorManager:
     rank: int
     port: int
+    player: Player
     episode_stats: EpisodeStats = EpisodeStats()
     max_steps: int = 8 * 60 * 60
     latency_warning_threshold: float = 14.0
@@ -71,8 +74,15 @@ class EmulatorManager:
         console_kwargs = get_console_kwargs(rank=self.rank, port=self.port)
         console = melee.Console(**console_kwargs)
 
-        controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
-        controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
+        def _get_port(player: Player) -> int:
+            return PLAYER_1_PORT if player == "p1" else PLAYER_2_PORT
+
+        ego_controller = melee.Controller(
+            console=console, port=_get_port(self.player), type=melee.ControllerType.STANDARD
+        )
+        opponent_controller = melee.Controller(
+            console=console, port=_get_port(get_opponent(self.player)), type=melee.ControllerType.STANDARD
+        )
 
         # Run the console
         console.run(iso_path=REMOTE_CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
@@ -88,12 +98,12 @@ class EmulatorManager:
         #   NOTE: If you're loading a movie file, don't connect the controller,
         #   dolphin will hang waiting for input and never receive it
         logger.debug("Connecting controller 1 to console...")
-        if not controller_1.connect():
+        if not ego_controller.connect():
             logger.debug("ERROR: Failed to connect the controller.")
             sys.exit(-1)
         logger.debug("Controller 1 connected")
         logger.debug("Connecting controller 2 to console...")
-        if not controller_2.connect():
+        if not opponent_controller.connect():
             logger.debug("ERROR: Failed to connect the controller.")
             sys.exit(-1)
         logger.debug("Controller 2 connected")
@@ -118,8 +128,9 @@ class EmulatorManager:
 
                         self_play_menu_helper(
                             gamestate=gamestate,
-                            controller_1=controller_1,
-                            controller_2=controller_2,
+                            controller_1=ego_controller,
+                            controller_2=opponent_controller,
+                            # TODO: select characters programmatically
                             character_1=melee.Character.FOX,
                             character_2=melee.Character.FOX,
                             stage_selected=melee.Stage.BATTLEFIELD,
@@ -132,7 +143,7 @@ class EmulatorManager:
                         # Yield gamestate and receive controller inputs
                         controller_inputs = yield gamestate
                         if controller_inputs is not None:
-                            send_controller_inputs(controller_1, controller_inputs)
+                            send_controller_inputs(ego_controller, controller_inputs)
 
                         self.episode_stats.update(gamestate)
                         i += 1
@@ -148,6 +159,7 @@ def cpu_worker(
     shared_batched_model_output: TensorDict,
     rank: int,
     port: int,
+    player: Player,
     preprocess_inputs: InputPreprocessFn,
     postprocess_outputs: PredPostprocessFn,
     model_input_ready_flag: EventType,
@@ -166,7 +178,7 @@ def cpu_worker(
 
     with logger.contextualize(rank=rank):
         try:
-            emulator_manager = EmulatorManager(rank=rank, port=port)
+            emulator_manager = EmulatorManager(rank=rank, port=port, player=player)
             gamestate_generator = emulator_manager.gamestate_generator()
             for i, gamestate in enumerate(gamestate_generator):
                 if gamestate is None:
@@ -180,7 +192,7 @@ def cpu_worker(
                 gamestate_td = extract_gamestate_as_tensordict(gamestate)
                 # Preprocess single frame
                 data_config = attr.evolve(train_config.data, input_len=1, target_len=0)
-                model_inputs = preprocess_inputs(gamestate_td, data_config, "p1", stats_by_feature_name)
+                model_inputs = preprocess_inputs(gamestate_td, data_config, player, stats_by_feature_name)
                 preprocess_time = time.perf_counter() - preprocess_start
 
                 transfer_start = time.perf_counter()
@@ -229,14 +241,14 @@ def gpu_worker(
     stop_events: List[EventType],
     model_dir: str,
     device: torch.device | str,
-    idx: Optional[int] = None,
+    checkpoint_idx: Optional[int] = None,
     cpu_flag_timeout: float = 10.0,
 ) -> None:
     """
     GPU worker that batches data from shared memory, updates the context window,
     performs inference with model, and writes output back to shared memory.
     """
-    model, _ = load_model_from_artifact_dir(Path(model_dir), idx=idx)
+    model, _ = load_model_from_artifact_dir(Path(model_dir), idx=checkpoint_idx)
     model.eval()
     model.to(device)
 
@@ -306,7 +318,9 @@ def gpu_worker(
             flag.clear()
 
 
-def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
+def run_closed_loop_evaluation(
+    model_dir: str, n_workers: int, checkpoint_idx: Optional[int] = None, player: Player = "p1"
+) -> Dict[str, float]:
     mp.set_start_method("spawn")
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_config: TrainConfig = load_config_from_artifact_dir(Path(model_dir))
@@ -324,7 +338,7 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
     # Share and pin buffers in CPU memory for transferring model inputs and outputs
     mock_framedata = mock_framedata_as_tensordict(seq_len)
     # Store only a single time step to minimize memory transfer
-    mock_model_inputs = preprocess_inputs(mock_framedata, train_config.data, "p1", stats_by_feature_name)[-1]
+    mock_model_inputs = preprocess_inputs(mock_framedata, train_config.data, player, stats_by_feature_name)[-1]
     shared_batched_model_input: TensorDict = torch.stack(
         [mock_model_inputs for _ in range(n_workers)], dim=0  # type: ignore
     )
@@ -346,7 +360,7 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
             "stop_events": stop_events,
             "model_dir": model_dir,
             "device": device,
-            "idx": idx,
+            "checkpoint_idx": checkpoint_idx,
         },
     )
     gpu_process.start()
@@ -362,6 +376,7 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
                 "shared_batched_model_output": shared_batched_model_output,
                 "rank": i,
                 "port": ports[i],
+                "player": player,
                 "preprocess_inputs": preprocess_inputs,
                 "postprocess_outputs": postprocess_outputs,
                 "model_input_ready_flag": model_input_ready_flags[i],
@@ -384,9 +399,9 @@ def main(model_dir: str, n_workers: int, idx: Optional[int] = None) -> None:
     while not episode_stats_queue.empty():
         episode_stats.append(episode_stats_queue.get())
     total_stats = sum(episode_stats, EpisodeStats(episodes=0))
-    logger.info(f"Total eval stats: {total_stats}")
+    logger.info("Closed loop evaluation complete")
 
-    logger.info("Processing complete.")
+    return total_stats.to_wandb_dict(player=player)
 
 
 if __name__ == "__main__":
@@ -394,4 +409,5 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", type=str, help="Path to model directory")
     parser.add_argument("--n_workers", type=int, help="Number of CPU workers")
     args = parser.parse_args()
-    main(model_dir=args.model_dir, n_workers=args.n_workers)
+    eval_stats = run_closed_loop_evaluation(model_dir=args.model_dir, n_workers=args.n_workers)
+    logger.info(f"Closed loop evaluation stats: {eval_stats}")

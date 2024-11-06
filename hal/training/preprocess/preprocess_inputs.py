@@ -12,6 +12,7 @@ from hal.constants import PLAYER_POSITION
 from hal.constants import Player
 from hal.constants import STAGE
 from hal.constants import VALID_PLAYERS
+from hal.constants import get_opponent
 from hal.data.normalize import NormalizationFn
 from hal.data.normalize import cast_int32
 from hal.data.normalize import invert_and_normalize
@@ -23,10 +24,6 @@ from hal.training.config import DataConfig
 from hal.training.preprocess.registry import InputPreprocessRegistry
 
 
-def _get_opponent(player: Player) -> Player:
-    return "p2" if player == "p1" else "p1"
-
-
 def _preprocess_numeric_features(
     sample: TensorDict,
     player_numeric_features_to_process: Tuple[str, ...],
@@ -35,7 +32,7 @@ def _preprocess_numeric_features(
     normalization_fn_by_feature_name: Dict[str, NormalizationFn],
 ) -> torch.Tensor:
     """Preprocess numeric (gamestate) features for both players."""
-    opponent = _get_opponent(ego)
+    opponent = get_opponent(ego)
 
     numeric_inputs = []
     for player in [ego, opponent]:
@@ -57,7 +54,7 @@ def _preprocess_categorical_features(
     normalization_fn_by_feature_name: Dict[str, NormalizationFn],
 ) -> Dict[str, torch.Tensor]:
     """Preprocess categorical features for both players."""
-    opponent = _get_opponent(ego)
+    opponent = get_opponent(ego)
 
     def process_feature(feature_name: str, column_name: str) -> torch.Tensor:
         preprocess_fn: NormalizationFn = normalization_fn_by_feature_name[feature_name]
