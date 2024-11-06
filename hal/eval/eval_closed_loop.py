@@ -24,6 +24,7 @@ from hal.eval.emulator_helper import find_open_udp_ports
 from hal.eval.emulator_helper import get_console_kwargs
 from hal.eval.emulator_helper import self_play_menu_helper
 from hal.eval.emulator_paths import REMOTE_CISO_PATH
+from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import mock_preds_as_tensordict
 from hal.eval.eval_helper import send_controller_inputs
@@ -38,7 +39,7 @@ from hal.training.preprocess.registry import PredPostprocessFn
 from hal.training.preprocess.registry import PredPostprocessingRegistry
 
 
-def setup_cpu_logger() -> None:
+def setup_cpu_logger(debug: bool = False) -> None:
     logger.remove()
     logger_format = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
@@ -47,81 +48,96 @@ def setup_cpu_logger() -> None:
         "rank={extra[rank]} - <level>{message}</level>"
     )
     logger.configure(extra={"rank": ""})  # Default values
-    logger.add(sys.stderr, format=logger_format)
+    logger.add(sys.stderr, format=logger_format, level="DEBUG" if debug else "INFO")
 
 
-def run_episode(
-    rank: int, port: int, max_steps: int = 8 * 60 * 60, latency_warning_threshold: float = 14.0
-) -> Generator[Optional[melee.GameState], TensorDict, None]:
-    console_kwargs = get_console_kwargs(rank=rank, port=port)
-    console = melee.Console(**console_kwargs)
+@attr.s(auto_attribs=True)
+class EmulatorManager:
+    rank: int
+    port: int
+    episode_stats: EpisodeStats = EpisodeStats()
+    max_steps: int = 8 * 60 * 60
+    latency_warning_threshold: float = 14.0
 
-    controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
-    controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
+    def gamestate_generator(self) -> Generator[Optional[melee.GameState], TensorDict, None]:
+        """Generator that yields gamestates and receives controller inputs.
 
-    # Run the console
-    console.run(iso_path=REMOTE_CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
-    # Connect to the console
-    logger.info("Connecting to console...")
-    if not console.connect():
-        logger.info("ERROR: Failed to connect to the console.")
-        sys.exit(-1)
-    logger.info("Console connected")
+        Yields:
+            Optional[melee.GameState]: The current game state, or None if the episode is over
 
-    # Plug our controller in
-    #   Due to how named pipes work, this has to come AFTER running dolphin
-    #   NOTE: If you're loading a movie file, don't connect the controller,
-    #   dolphin will hang waiting for input and never receive it
-    logger.info("Connecting controller 1 to console...")
-    if not controller_1.connect():
-        logger.info("ERROR: Failed to connect the controller.")
-        sys.exit(-1)
-    logger.info("Controller 1 connected")
-    logger.info("Connecting controller 2 to console...")
-    if not controller_2.connect():
-        logger.info("ERROR: Failed to connect the controller.")
-        sys.exit(-1)
-    logger.info("Controller 2 connected")
+        Sends:
+            TensorDict: Controller inputs to be applied to the game
+        """
+        console_kwargs = get_console_kwargs(rank=self.rank, port=self.port)
+        console = melee.Console(**console_kwargs)
 
-    i = 0
-    match_started = False
-    with console_manager(console):
-        logger.info("Starting episode")
+        controller_1 = melee.Controller(console=console, port=PLAYER_1_PORT, type=melee.ControllerType.STANDARD)
+        controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
+
+        # Run the console
+        console.run(iso_path=REMOTE_CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
+        # Connect to the console
+        logger.debug("Connecting to console...")
+        if not console.connect():
+            logger.debug("ERROR: Failed to connect to the console.")
+            sys.exit(-1)
+        logger.debug("Console connected")
+
+        # Plug our controller in
+        #   Due to how named pipes work, this has to come AFTER running dolphin
+        #   NOTE: If you're loading a movie file, don't connect the controller,
+        #   dolphin will hang waiting for input and never receive it
+        logger.debug("Connecting controller 1 to console...")
+        if not controller_1.connect():
+            logger.debug("ERROR: Failed to connect the controller.")
+            sys.exit(-1)
+        logger.debug("Controller 1 connected")
+        logger.debug("Connecting controller 2 to console...")
+        if not controller_2.connect():
+            logger.debug("ERROR: Failed to connect the controller.")
+            sys.exit(-1)
+        logger.debug("Controller 2 connected")
+
+        i = 0
+        match_started = False
         try:
-            while i < max_steps:
-                gamestate = console.step()
-                if gamestate is None:
-                    logger.info("Gamestate is None")
-                    break
-
-                if console.processingtime * 1000 > latency_warning_threshold:
-                    logger.debug("Last frame took " + str(console.processingtime * 1000) + "ms to process.")
-
-                if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-                    if match_started:
+            with console_manager(console):
+                logger.debug("Starting episode")
+                while i < self.max_steps:
+                    gamestate = console.step()
+                    if gamestate is None:
+                        logger.debug("Gamestate is None")
                         break
 
-                    self_play_menu_helper(
-                        gamestate=gamestate,
-                        controller_1=controller_1,
-                        controller_2=controller_2,
-                        character_1=melee.Character.FOX,
-                        character_2=melee.Character.FOX,
-                        stage_selected=melee.Stage.BATTLEFIELD,
-                    )
-                else:
-                    if not match_started:
-                        match_started = True
-                        logger.info("Match started")
+                    if console.processingtime * 1000 > self.latency_warning_threshold:
+                        logger.debug("Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
-                    # Yield gamestate and receive controller inputs
-                    controller_inputs = yield gamestate
-                    if controller_inputs is not None:
-                        send_controller_inputs(controller_1, controller_inputs)
+                    if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
+                        if match_started:
+                            break
 
-                    i += 1
+                        self_play_menu_helper(
+                            gamestate=gamestate,
+                            controller_1=controller_1,
+                            controller_2=controller_2,
+                            character_1=melee.Character.FOX,
+                            character_2=melee.Character.FOX,
+                            stage_selected=melee.Stage.BATTLEFIELD,
+                        )
+                    else:
+                        if not match_started:
+                            match_started = True
+                            logger.debug("Match started")
+
+                        # Yield gamestate and receive controller inputs
+                        controller_inputs = yield gamestate
+                        if controller_inputs is not None:
+                            send_controller_inputs(controller_1, controller_inputs)
+
+                        self.episode_stats.update(gamestate)
+                        i += 1
         except Exception as e:
-            logger.error(f"Episode {rank} encountered an error: {e}")
+            logger.error(f"Episode {self.rank} encountered an error: {e}")
         finally:
             # Signal end of episode
             yield None
@@ -139,18 +155,19 @@ def cpu_worker(
     stop_event: EventType,
     train_config: TrainConfig,
     stats_by_feature_name: Dict[str, FeatureStats],
-    debug: bool = False,
+    debug: bool = True,
 ) -> None:
     """
     CPU worker that preprocesses data, writes it into shared memory,
     and reads the result after GPU processing.
     """
-    setup_cpu_logger()
+    setup_cpu_logger(debug=debug)
 
     with logger.contextualize(rank=rank):
         try:
-            emulator_generator = run_episode(rank=rank, port=port)
-            for i, gamestate in enumerate(emulator_generator):
+            emulator_manager = EmulatorManager(rank=rank, port=port)
+            gamestate_generator = emulator_manager.gamestate_generator()
+            for i, gamestate in enumerate(gamestate_generator):
                 if gamestate is None:
                     # First gamestate after match start is None for some reason
                     if i > 1:
@@ -186,7 +203,7 @@ def cpu_worker(
                 # Read the output from shared_batched_model_output
                 model_output = shared_batched_model_output[rank].clone()
                 controller_inputs = postprocess_outputs(model_output)
-                emulator_generator.send(controller_inputs)
+                gamestate_generator.send(controller_inputs)
 
                 # Clear the output ready flag for the next iteration
                 model_output_ready_flag.clear()

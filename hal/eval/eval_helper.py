@@ -35,6 +35,9 @@ class EpisodeStats:
         )
 
     def update(self, gamestate: melee.GameState) -> None:
+        if gamestate.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
+            return
+
         p1, p2 = gamestate.players[PLAYER_1_PORT], gamestate.players[PLAYER_2_PORT]
         p1_percent, p2_percent = p1.percent, p2.percent
 
