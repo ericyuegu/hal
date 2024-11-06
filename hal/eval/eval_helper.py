@@ -6,6 +6,7 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 
+from hal.constants import INCLUDED_BUTTONS
 from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
 from hal.constants import Player
@@ -95,11 +96,13 @@ def send_controller_inputs(controller: melee.Controller, inputs: TensorDict, idx
         inputs["c_stick_x"][idx].item(),
         inputs["c_stick_y"][idx].item(),
     )
-    for button, state in inputs.items():
-        if button.startswith("button") and button != "button_none" and state[idx].item() == 1:
-            controller.press_button(getattr(melee.Button, button.upper()))
-            logger.info(f"Pressed {button}")
-            break
+
+    button_idx = inputs["button"][idx].item()
+    button_name = INCLUDED_BUTTONS[button_idx]
+    if button_name != "NO_BUTTON":
+        button = getattr(melee.Button, button_name.upper())
+        controller.press_button(button)
+        logger.info(f"Pressed {button_name}")
     controller.flush()
 
 

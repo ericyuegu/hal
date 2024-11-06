@@ -66,6 +66,7 @@ class EmbeddingConfig:
     input_preprocessing_fn: str = "inputs_v0"
     # Implicitly determines # categorical target features
     target_preprocessing_fn: str = "targets_v0"
+    # pred_postprocessing_fn: str = "preds_v0"
 
     stage_embedding_dim: int = 4
     character_embedding_dim: int = 12

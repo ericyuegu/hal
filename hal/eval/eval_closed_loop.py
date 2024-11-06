@@ -335,7 +335,8 @@ def run_closed_loop_evaluation(
     seq_len = train_config.data.input_len
     preprocess_inputs = InputPreprocessRegistry.get(train_config.embedding.input_preprocessing_fn)
     stats_by_feature_name = load_dataset_stats(train_config.data.stats_path)
-    postprocess_outputs = PredPostprocessingRegistry.get(train_config.embedding.target_preprocessing_fn)
+    postprocess_fn_name = getattr(train_config.embedding, "pred_postprocessing_fn", None) or train_config.embedding.target_preprocessing_fn  # backwards compatibility
+    postprocess_outputs = PredPostprocessingRegistry.get(postprocess_fn_name)
 
     # Create events to signal when cpu and gpu workers are ready
     model_input_ready_flags: List[EventType] = [mp.Event() for _ in range(n_workers)]
