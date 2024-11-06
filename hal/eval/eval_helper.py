@@ -1,10 +1,61 @@
+from typing import Dict
+
+import attr
 import melee
 import torch
 from loguru import logger
 from tensordict import TensorDict
 
+from hal.constants import PLAYER_1_PORT
+from hal.constants import PLAYER_2_PORT
+from hal.constants import Player
 from hal.data.schema import PYARROW_DTYPE_BY_COLUMN
 from hal.training.config import EmbeddingConfig
+
+
+@attr.s(auto_attribs=True, slots=True)
+class EpisodeStats:
+    p1_damage: float = 0.0
+    p2_damage: float = 0.0
+    p1_stocks_lost: int = 0
+    p2_stocks_lost: int = 0
+    frames: int = 0
+    _prev_p1_stock: int = 0
+    _prev_p2_stock: int = 0
+    _prev_p1_percent: float = 0.0
+    _prev_p2_percent: float = 0.0
+
+    def __add__(self, other: "EpisodeStats") -> "EpisodeStats":
+        return EpisodeStats(
+            p1_damage=self.p1_damage + other.p1_damage,
+            p2_damage=self.p2_damage + other.p2_damage,
+            p1_stocks_lost=self.p1_stocks_lost + other.p1_stocks_lost,
+            p2_stocks_lost=self.p2_stocks_lost + other.p2_stocks_lost,
+            frames=self.frames + other.frames,
+        )
+
+    def update(self, gamestate: melee.GameState) -> None:
+        p1, p2 = gamestate.players[PLAYER_1_PORT], gamestate.players[PLAYER_2_PORT]
+        p1_percent, p2_percent = p1.percent, p2.percent
+
+        self.p1_damage += max(0, p1_percent - self._prev_p1_percent)
+        self.p2_damage += max(0, p2_percent - self._prev_p2_percent)
+        self.p1_stocks_lost += p1.stock < 4 and p1.stock < self._prev_p1_stock
+        self.p2_stocks_lost += p2.stock < 4 and p2.stock < self._prev_p2_stock
+
+        self._prev_p1_percent = p1_percent
+        self._prev_p2_percent = p2_percent
+        self._prev_p1_stock = p1.stock
+        self._prev_p2_stock = p2.stock
+        self.frames += 1
+
+    def to_wandb_dict(self, player: Player) -> Dict[str, float]:
+        return {
+            "damage_inflicted": self.p2_damage if player == "p1" else self.p1_damage,
+            "damage_received": self.p1_damage if player == "p1" else self.p2_damage,
+            "stocks_taken": self.p2_stocks_lost if player == "p1" else self.p1_stocks_lost,
+            "stocks_lost": self.p1_stocks_lost if player == "p1" else self.p2_stocks_lost,
+        }
 
 
 def send_controller_inputs(controller: melee.Controller, inputs: TensorDict, idx: int = -1) -> None:
