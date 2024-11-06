@@ -112,48 +112,45 @@ class EmulatorManager:
 
         i = 0
         match_started = False
-        try:
-            with console_manager(console):
-                logger.debug("Starting episode")
-                while i < self.max_steps:
-                    gamestate = console.step()
-                    if gamestate is None:
-                        logger.debug("Gamestate is None")
+
+        with console_manager(console):
+            logger.debug("Starting episode")
+            while i < self.max_steps:
+                gamestate = console.step()
+                if gamestate is None:
+                    logger.debug("Gamestate is None")
+                    break
+
+                if console.processingtime * 1000 > self.latency_warning_threshold:
+                    logger.debug("Last frame took " + str(console.processingtime * 1000) + "ms to process.")
+
+                if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
+                    if match_started:
                         break
 
-                    if console.processingtime * 1000 > self.latency_warning_threshold:
-                        logger.debug("Last frame took " + str(console.processingtime * 1000) + "ms to process.")
+                    self_play_menu_helper(
+                        gamestate=gamestate,
+                        controller_1=ego_controller,
+                        controller_2=opponent_controller,
+                        # TODO: select characters programmatically
+                        character_1=melee.Character.FOX,
+                        character_2=melee.Character.FOX,
+                        stage_selected=melee.Stage.BATTLEFIELD,
+                    )
+                else:
+                    if not match_started:
+                        match_started = True
+                        logger.debug("Match started")
 
-                    if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-                        if match_started:
-                            break
+                    # Yield gamestate and receive controller inputs
+                    controller_inputs = yield gamestate
+                    if controller_inputs is not None:
+                        send_controller_inputs(ego_controller, controller_inputs)
 
-                        self_play_menu_helper(
-                            gamestate=gamestate,
-                            controller_1=ego_controller,
-                            controller_2=opponent_controller,
-                            # TODO: select characters programmatically
-                            character_1=melee.Character.FOX,
-                            character_2=melee.Character.FOX,
-                            stage_selected=melee.Stage.BATTLEFIELD,
-                        )
-                    else:
-                        if not match_started:
-                            match_started = True
-                            logger.debug("Match started")
+                    self.episode_stats.update(gamestate)
+                    i += 1
 
-                        # Yield gamestate and receive controller inputs
-                        controller_inputs = yield gamestate
-                        if controller_inputs is not None:
-                            send_controller_inputs(ego_controller, controller_inputs)
-
-                        self.episode_stats.update(gamestate)
-                        i += 1
-        except Exception as e:
-            logger.error(f"Episode {self.rank} encountered an error: {e}")
-        finally:
-            # Signal end of episode
-            yield None
+        yield None
 
 
 def cpu_worker(
