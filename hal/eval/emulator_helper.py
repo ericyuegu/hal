@@ -2,6 +2,7 @@ import platform
 import random
 import signal
 import subprocess
+from concurrent.futures import TimeoutError
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -139,7 +140,7 @@ def self_play_menu_helper(
 
 
 @contextmanager
-def console_manager(console: melee.Console):
+def console_manager(console: melee.Console, shutdown_timeout: float = 5.0):
     def signal_handler(sig, frame):
         raise KeyboardInterrupt
 
@@ -150,6 +151,10 @@ def console_manager(console: melee.Console):
         yield
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
+    except TimeoutError:
+        logger.error("console.step() timed out")
+    except Exception as e:
+        logger.error(f"Stopping console due to exception: {e}")
     finally:
         signal.signal(signal.SIGINT, original_handler)
         console.stop()

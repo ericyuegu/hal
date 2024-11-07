@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import sys
 import time
 from multiprocessing.synchronize import Event as EventType
@@ -113,12 +114,18 @@ class EmulatorManager:
         i = 0
         match_started = False
 
-        with console_manager(console):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console):
             logger.debug("Starting episode")
             while i < self.max_steps:
-                gamestate = console.step()
+                # Wrap `console.step()` in a thread with timeout
+                future = executor.submit(console.step)
+                try:
+                    gamestate = future.result(timeout=5.0)
+                except concurrent.futures.TimeoutError:
+                    raise
+
                 if gamestate is None:
-                    logger.debug("Gamestate is None")
+                    logger.info("Gamestate is None")
                     break
 
                 if console.processingtime * 1000 > self.latency_warning_threshold:
@@ -182,10 +189,8 @@ def cpu_worker(
             gamestate_generator = emulator_manager.gamestate_generator()
             for i, gamestate in enumerate(gamestate_generator):
                 if gamestate is None:
-                    # First gamestate after match start is None for some reason
-                    if i > 1:
-                        break
-                    continue
+                    stop_event.set()
+                    break
 
                 preprocess_start = time.perf_counter()
                 # Returns a TensorDict with shape (1,) for single frame
@@ -242,7 +247,7 @@ def gpu_worker(
     artifact_dir: Path,
     device: torch.device | str,
     checkpoint_idx: Optional[int] = None,
-    cpu_flag_timeout: float = 10.0,
+    cpu_flag_timeout: float = 5.0,
 ) -> None:
     """
     GPU worker that batches data from shared memory, updates the context window,
@@ -271,11 +276,11 @@ def gpu_worker(
 
         # Wait for all CPU workers to signal that data is ready
         flag_wait_start = time.perf_counter()
-        for i, (flag, stop_event) in enumerate(zip(model_input_ready_flags, stop_events)):
-            while not flag.is_set() and not stop_event.is_set():
-                if not flag.is_set() and time.perf_counter() - flag_wait_start > cpu_flag_timeout:
+        for i, (input_flag, stop_event) in enumerate(zip(model_input_ready_flags, stop_events)):
+            while not input_flag.is_set() and not stop_event.is_set():
+                if not input_flag.is_set() and time.perf_counter() - flag_wait_start > cpu_flag_timeout:
                     logger.warning(f"CPU worker {i} input flag wait took too long, stopping episode")
-                    flag.set()
+                    input_flag.set()
                     stop_event.set()
                 time.sleep(0.0001)  # Sleep briefly to avoid busy waiting
 
@@ -311,12 +316,12 @@ def gpu_worker(
         iteration += 1
 
         # Signal to CPU workers that output is ready
-        for flag in model_output_ready_flags:
-            flag.set()
+        for output_flag in model_output_ready_flags:
+            output_flag.set()
 
         # Clear model_input_ready_flags for the next iteration
-        for flag in model_input_ready_flags:
-            flag.clear()
+        for input_flag in model_input_ready_flags:
+            input_flag.clear()
 
 
 def run_closed_loop_evaluation(
@@ -379,6 +384,7 @@ def run_closed_loop_evaluation(
     cpu_processes: List[mp.Process] = []
     ports = find_open_udp_ports(n_workers)
     episode_stats_queue: mp.Queue = mp.Queue()
+    # TODO set checkpoint_idx
     replay_dir = get_replay_dir(artifact_dir)
     logger.info(f"Replays will be saved to {replay_dir}")
     for i in range(n_workers):
