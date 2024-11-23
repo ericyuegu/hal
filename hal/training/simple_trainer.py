@@ -26,8 +26,8 @@ class SimpleTrainer(CategoricalBCTrainer):
 
         # No warm-up inputs, just next-token prediction for the entire sequence
         pred = self.model(inputs)
-        B, T, *_ = pred.shape
-        loss_by_head = self.loss(pred.reshape(B * T, -1).squeeze(), targets.reshape(B * T, -1).squeeze())
+        B, L, *_ = pred.shape
+        loss_by_head = self.loss(pred.reshape(B * L, -1).squeeze(), targets.reshape(B * L, -1).squeeze())
 
         return loss_by_head
 

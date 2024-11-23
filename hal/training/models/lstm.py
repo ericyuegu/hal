@@ -85,7 +85,7 @@ class LSTMv1(nn.Module):
         inputs: TensorDict,
         hidden_in: Optional[Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = None,
     ) -> Tuple[TensorDict, Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
-        B, T, D = inputs["gamestate"].shape
+        B, L, D = inputs["gamestate"].shape
         assert T > 0
 
         stage_emb = self.modules_by_name.stage(inputs["stage"]).squeeze(-2)

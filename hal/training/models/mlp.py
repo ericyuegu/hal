@@ -42,7 +42,7 @@ class MLPBC(nn.Module):
         self.c_stick_head = nn.Linear(hidden_size, embed_config.num_c_stick_clusters)
 
     def forward(self, inputs: TensorDict) -> TensorDict:
-        B, T, D = inputs["gamestate"].shape
+        B, L, D = inputs["gamestate"].shape
         assert T > 0
 
         stage_emb = self.modules_by_name.stage(inputs["stage"]).squeeze(-2)
@@ -109,7 +109,7 @@ class MLPDebug(nn.Module):
         self.c_stick_head = nn.Linear(hidden_size, embed_config.num_c_stick_clusters)
 
     def forward(self, inputs: TensorDict) -> TensorDict:
-        B, T, D = inputs["gamestate"].shape
+        B, L, D = inputs["gamestate"].shape
         assert T > 0
 
         frame_emb = self.modules_by_name.frame(inputs["frame"]).squeeze(-2)

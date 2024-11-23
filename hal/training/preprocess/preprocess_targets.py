@@ -6,7 +6,7 @@ from hal.constants import Player
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import VALID_PLAYERS
 from hal.training.preprocess.encoding import get_closest_stick_xy_cluster_v0
-from hal.training.preprocess.encoding import one_hot_2d
+from hal.training.preprocess.encoding import encode_buttons_one_hot
 from hal.training.preprocess.encoding import one_hot_from_int
 from hal.training.preprocess.registry import TargetPreprocessRegistry
 
@@ -44,7 +44,7 @@ def preprocess_targets_v0(sample: TensorDict, player: Player) -> TensorDict:
     no_button = ~(button_a | button_b | jump | button_z | shoulder)
 
     stacked_buttons = torch.stack((button_a, button_b, jump, button_z, shoulder, no_button), dim=-1)
-    one_hot_buttons = one_hot_2d(stacked_buttons.numpy())
+    one_hot_buttons = encode_buttons_one_hot(stacked_buttons.numpy())
 
     return TensorDict(
         {
