@@ -65,6 +65,7 @@ class EmulatorManager:
     max_steps: int = 8 * 60 * 60
     latency_warning_threshold: float = 14.0
     console_timeout: float = 5.0
+    enable_ffw: bool = True
 
     def gamestate_generator(self) -> Generator[Optional[melee.GameState], TensorDict, None]:
         """Generator that yields gamestates and receives controller inputs.
@@ -75,7 +76,7 @@ class EmulatorManager:
         Sends:
             TensorDict: Controller inputs to be applied to the game
         """
-        console_kwargs = get_console_kwargs(port=self.port, replay_dir=self.replay_dir)
+        console_kwargs = get_console_kwargs(port=self.port, enable_ffw=self.enable_ffw, replay_dir=self.replay_dir)
         console = melee.Console(**console_kwargs)
 
         def _get_port(player: Player) -> int:
@@ -178,6 +179,7 @@ def cpu_worker(
     train_config: TrainConfig,
     stats_by_feature_name: Dict[str, FeatureStats],
     episode_stats_queue: mp.Queue,
+    enable_ffw: bool = True,
     debug: bool = False,
 ) -> None:
     """
@@ -188,7 +190,9 @@ def cpu_worker(
 
     with logger.contextualize(rank=rank):
         try:
-            emulator_manager = EmulatorManager(rank=rank, port=port, player=player, replay_dir=replay_dir)
+            emulator_manager = EmulatorManager(
+                rank=rank, port=port, player=player, replay_dir=replay_dir, enable_ffw=enable_ffw
+            )
             gamestate_generator = emulator_manager.gamestate_generator()
             last_controller_inputs = None  # Store previous inputs
 
@@ -422,6 +426,7 @@ def run_closed_loop_evaluation(
                 "train_config": train_config,
                 "stats_by_feature_name": stats_by_feature_name,
                 "episode_stats_queue": episode_stats_queue,
+                "enable_ffw": False,  # disable for evaluation stability
             },
         )
         cpu_processes.append(p)

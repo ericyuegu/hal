@@ -70,17 +70,13 @@ def get_replay_dir(artifact_dir: Path | None = None, step: int | None = None) ->
     return replay_dir
 
 
-def get_console_kwargs(port: int, no_gui: bool = True, replay_dir: Path | None = None) -> Dict[str, Any]:
-    headless_console_kwargs = (
-        {
-            "gfx_backend": "Null",
-            "disable_audio": True,
-            "use_exi_inputs": True,
-            "enable_ffw": True,
-        }
-        if no_gui
-        else {}
-    )
+def get_console_kwargs(port: int, enable_ffw: bool = True, replay_dir: Path | None = None) -> Dict[str, Any]:
+    headless_console_kwargs = {
+        "gfx_backend": "Null",
+        "disable_audio": True,
+        "use_exi_inputs": enable_ffw,
+        "enable_ffw": enable_ffw,
+    }
     emulator_path = REMOTE_EMULATOR_PATH
     if replay_dir is None:
         replay_dir = get_replay_dir()
