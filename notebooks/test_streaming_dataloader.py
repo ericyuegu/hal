@@ -14,7 +14,7 @@ ds = HALStreamingDataset(
     batch_size=4,
     shuffle=False,
     data_config=DataConfig(),
-    embed_config=EmbeddingConfig(),
+    embedding_config=EmbeddingConfig(),
     stats_path=Path("/opt/projects/hal2/data/mang0/stats.json"),
 )
 

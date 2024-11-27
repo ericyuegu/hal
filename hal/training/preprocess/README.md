@@ -3,3 +3,4 @@ Dimension key:
 - L: sequence length
 - D: model dimension (sometimes called d_model or embedding_dim)
 - G: preprocessed gamestate or input size, analogous to vocabulary size
+- C: controller input size or target size, number of classes

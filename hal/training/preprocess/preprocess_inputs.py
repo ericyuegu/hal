@@ -1,3 +1,4 @@
+import random
 from functools import partial
 from typing import Dict
 from typing import Tuple
@@ -20,9 +21,13 @@ from hal.data.normalize import normalize
 from hal.data.normalize import normalize_and_embed_fourier
 from hal.data.normalize import standardize
 from hal.data.stats import FeatureStats
+from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
+from hal.training.config import EmbeddingConfig
 from hal.training.preprocess.preprocess_targets import preprocess_targets_v0
 from hal.training.preprocess.registry import InputPreprocessRegistry
+from hal.training.preprocess.registry import PredPostprocessingRegistry
+from hal.training.preprocess.registry import TargetPreprocessRegistry
 
 
 def _preprocess_numeric_features(
@@ -204,3 +209,99 @@ def preprocess_inputs_v2(
         )
 
     return preprocessed_inputs
+
+
+"""
+TODO:
+
+Create preprocessor class and preprocessing fn registry
+- class holds on to data config and knows: 
+    - how long example seq len should be
+    - how to slice full episodes into appropriate input/target lens for dataset `__getitem__()`
+        - e.g. single frame ahead, warmup frames, prev frame for controller inputs
+    - numeric input shape
+    - categorical input keys & shapes
+- single preprocessor fn registry
+    - allows distributed registering from multiple files to single registry
+- interface:
+    - preprocess_inputs
+    - preprocess_targets
+    - postprocess_preds
+    - numeric_input_shape
+    - categorical_input_shapes
+"""
+
+
+class Preprocessor:
+    def __init__(self, data_config: DataConfig, embedding_config: EmbeddingConfig) -> None:
+        self.data_config = data_config
+        self.embedding_config = embedding_config
+        self.stats = load_dataset_stats(data_config.stats_path)
+        self.normalization_fn_by_feature_name: Dict[str, NormalizationFn] = {}
+
+        self.input_len = data_config.input_len
+        self.target_len = data_config.target_len
+
+        self.preprocess_inputs_fn = InputPreprocessRegistry.get(embedding_config.input_preprocessing_fn)
+        self.preprocess_targets_fn = TargetPreprocessRegistry.get(embedding_config.target_preprocessing_fn)
+        self.postprocess_preds_fn = PredPostprocessingRegistry.get(embedding_config.pred_postprocessing_fn)
+
+    @property
+    def numeric_input_shape(self) -> int:
+        """Get the size of the materialized input dimensions from the embedding config."""
+        return InputPreprocessRegistry.get_num_features(self.embedding_config.input_preprocessing_fn)
+
+    @property
+    def categorical_input_shapes(self) -> Dict[str, int]:
+        return {
+            "stage": self.embedding_config.stage_embedding_dim,
+            "ego_character": self.embedding_config.character_embedding_dim,
+            "opponent_character": self.embedding_config.character_embedding_dim,
+            "ego_action": self.embedding_config.action_embedding_dim,
+            "opponent_action": self.embedding_config.action_embedding_dim,
+        }
+
+    @property
+    def trajectory_sampling_len(self) -> int:
+        """Get the number of frames needed from a full episode to preprocess a supervised training example."""
+        trajectory_len = self.input_len + self.target_len
+
+        # Handle preprocessing fns that require +1 prev frame for controller inputs
+        if self.preprocess_inputs_fn in (preprocess_inputs_v2,):
+            trajectory_len += 1
+        # Other conditions here
+
+        return trajectory_len
+
+    @property
+    def seq_len(self) -> int:
+        """Get the final length of a preprocessed supervised training example / sequence."""
+        return self.input_len + self.target_len
+
+    def sample_supervised_example_from_episode(self, episode_L: TensorDict) -> TensorDict:
+        """Randomly slice full .slp episode tensordict into appropriate input/target lengths for supervised training.
+
+        Args:
+            episode_L: TensorDict of shape (episode_len,) containing full episode data
+
+        Returns:
+            TensorDict of shape (sequence_len,) containing sliced data
+        """
+        if len(episode_L.shape) != 1:
+            raise ValueError(f"Expected episode tensordict with 1 dimension, got shape {episode_L.shape}")
+
+        if self.seq_len > episode_L.shape[0]:
+            raise ValueError(f"Episode length {episode_L.shape[0]} is shorter than required length {self.seq_len}")
+
+        start_idx = random.randint(0, episode_L.shape[0] - self.seq_len)
+
+        return episode_L[start_idx : start_idx + self.seq_len]
+
+    def preprocess_inputs(self, sample_L: TensorDict, ego: Player) -> TensorDict:
+        return self.preprocess_inputs_fn(sample_L, self.data_config, ego, self.stats)
+
+    def preprocess_targets(self, sample_L: TensorDict, ego: Player) -> TensorDict:
+        return self.preprocess_targets_fn(sample_L, ego)
+
+    def postprocess_preds(self, preds_C: TensorDict) -> TensorDict:
+        return self.postprocess_preds_fn(preds_C)

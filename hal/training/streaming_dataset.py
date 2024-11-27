@@ -7,14 +7,13 @@ import numpy as np
 import torch
 from streaming import StreamingDataset
 from tensordict import TensorDict
+from training.preprocess.preprocess_inputs import Preprocessor
 
 from hal.constants import Player
 from hal.constants import VALID_PLAYERS
 from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig
-from hal.training.preprocess.registry import InputPreprocessRegistry
-from hal.training.preprocess.registry import TargetPreprocessRegistry
 
 
 class HALStreamingDataset(StreamingDataset):
@@ -25,44 +24,51 @@ class HALStreamingDataset(StreamingDataset):
         batch_size: int,
         shuffle: bool,
         data_config: DataConfig,
-        embed_config: EmbeddingConfig,
+        embedding_config: EmbeddingConfig,
         stats_path: Path,
     ) -> None:
         super().__init__(local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
+        self.preprocessor = Preprocessor(data_config=data_config, embedding_config=embedding_config)
         self.stats_by_feature_name = load_dataset_stats(stats_path)
         self.data_config = data_config
-        self.embed_config = embed_config
-        self.input_len = data_config.input_len
-        self.trajectory_len = data_config.input_len + data_config.target_len
+        self.embedding_config = embedding_config
 
-        self.input_preprocessing_fn = InputPreprocessRegistry.get(self.embed_config.input_preprocessing_fn)
-        self.target_preprocessing_fn = TargetPreprocessRegistry.get(self.embed_config.target_preprocessing_fn)
+        self.traj_sampling_len = self.preprocessor.trajectory_sampling_len
+        self.seq_len = self.preprocessor.seq_len
 
-    def get_td_from_sample(self, sample: dict[str, np.ndarray]) -> TensorDict:
-        episode_len = len(sample["frame"])
-        random_start_idx = random.randint(0, episode_len - self.trajectory_len)
-        sample_slice = {
-            k: torch.from_numpy(v[random_start_idx : random_start_idx + self.trajectory_len].copy())
-            for k, v in sample.items()
+    def sample_from_episode(self, ndarrays_by_feature: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
+        """Randomly slice episode features into input/target sequences for supervised training.
+
+        Args:
+            ndarrays_by_feature: dict of shape (episode_len,) containing full episode data
+
+        Returns:
+            dict of shape (sequence_len,) containing sliced data
+        """
+        frames = ndarrays_by_feature["frame"]
+        assert all(len(ndarray) == len(frames) for ndarray in ndarrays_by_feature.values())
+        episode_len = len(frames)
+        sample_index = random.randint(0, episode_len - self.traj_sampling_len)
+        tensor_slice_by_feature_name = {
+            feature_name: torch.from_numpy(feature_L[sample_index : sample_index + self.traj_sampling_len].copy())
+            for feature_name, feature_L in ndarrays_by_feature.items()
         }
-        return TensorDict(sample_slice, batch_size=(self.trajectory_len,))
+        return tensor_slice_by_feature_name
 
     def __getitem__(self, idx: int | slice | list[int] | np.ndarray) -> TensorDict:
-        sample = super().__getitem__(idx)
-        sample_td = self.get_td_from_sample(sample)
+        episode_features_by_name = super().__getitem__(idx)
+        sample_td = TensorDict(
+            self.sample_from_episode(episode_features_by_name), batch_size=(self.traj_sampling_len,)
+        )
 
         player_perspective = cast(Player, random.choice(VALID_PLAYERS))
-        inputs = self.input_preprocessing_fn(
-            sample_td, self.data_config, player_perspective, self.stats_by_feature_name
-        )
-        # TODO refactor this to be less confusing / hacky
-        targets = self.target_preprocessing_fn(sample_td[1:], player_perspective)
+        inputs = self.preprocessor.preprocess_inputs(sample_td, player_perspective)
+        targets = self.preprocessor.preprocess_targets(sample_td, player_perspective)
 
         return TensorDict(
             {
                 "inputs": inputs,
-                "targets": targets,
+                "targets": targets,  # type: ignore
             },
-            # TODO refactor this to be less confusing / footgun-y
-            batch_size=(self.input_len,),
+            batch_size=(self.seq_len,),
         )
