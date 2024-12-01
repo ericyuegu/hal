@@ -1,10 +1,7 @@
-import random
 from functools import partial
 from typing import Dict
-from typing import Optional
 from typing import Tuple
 
-import numpy as np
 import torch
 from tensordict import TensorDict
 
@@ -14,6 +11,8 @@ from hal.constants import PLAYER_INPUT_FEATURES_TO_NORMALIZE
 from hal.constants import PLAYER_POSITION
 from hal.constants import Player
 from hal.constants import STAGE
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
+from hal.constants import TARGET_FEATURES_TO_ONE_HOT_ENCODE
 from hal.constants import VALID_PLAYERS
 from hal.constants import get_opponent
 from hal.data.normalize import NormalizationFn
@@ -23,13 +22,9 @@ from hal.data.normalize import normalize
 from hal.data.normalize import normalize_and_embed_fourier
 from hal.data.normalize import standardize
 from hal.data.stats import FeatureStats
-from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
 from hal.training.preprocess.preprocess_targets import preprocess_targets_v0
 from hal.training.preprocess.registry import InputPreprocessRegistry
-from hal.training.preprocess.registry import PredPostprocessingRegistry
-from hal.training.preprocess.registry import TargetPreprocessRegistry
 
 
 def _preprocess_numeric_features(
@@ -150,10 +145,14 @@ NUMERIC_FEATURES_V1 = tuple(
 
 # extra input dimensions from Fourier embedding
 @InputPreprocessRegistry.register("inputs_v1", num_features=2 * (len(NUMERIC_FEATURES_V1) + 7 * len(PLAYER_POSITION)))
-def preprocess_inputs_v1(sample: TensorDict, ego: Player, stats: Dict[str, FeatureStats]) -> TensorDict:
+def preprocess_inputs_v1(
+    sample: TensorDict, data_config: DataConfig, ego: Player, stats: Dict[str, FeatureStats]
+) -> TensorDict:
     """Slice input sample to the input length."""
+    trajectory_len = data_config.input_len + data_config.target_len
+
     numeric_features = NUMERIC_FEATURES_V1
-    normalization_fn_by_feature_name = {
+    normalization_fn_by_feature_name: Dict[str, NormalizationFn] = {
         **dict.fromkeys(STAGE, cast_int32),
         **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_EMBED, cast_int32),
         **dict.fromkeys(PLAYER_INPUT_FEATURES_TO_NORMALIZE, normalize),
@@ -171,7 +170,11 @@ def preprocess_inputs_v1(sample: TensorDict, ego: Player, stats: Dict[str, Featu
     )
 
 
-@InputPreprocessRegistry.register("inputs_v2", num_features=2 * len(PLAYER_NUMERIC_FEATURES_V0) + 48)
+@InputPreprocessRegistry.register(
+    "inputs_v2",
+    num_features=2 * (len(PLAYER_NUMERIC_FEATURES_V0) + len(STICK_XY_CLUSTER_CENTERS_V0))
+    + len(TARGET_FEATURES_TO_ONE_HOT_ENCODE),
+)
 def preprocess_inputs_v2(
     sample: TensorDict, data_config: DataConfig, ego: Player, stats: Dict[str, FeatureStats]
 ) -> TensorDict:
@@ -207,104 +210,3 @@ def preprocess_inputs_v2(
         )
 
     return preprocessed_inputs
-
-
-"""
-TODO:
-
-Create preprocessor class and preprocessing fn registry
-- class holds on to data config and knows: 
-    - how long training example seq len should be
-    - how to slice full episodes into appropriate input/target lens for dataset `__getitem__()`
-        - e.g. single frame ahead, warmup frames, prev frame for controller inputs
-    - numeric input shape
-    - categorical input keys & shapes
-- single preprocessor fn registry
-    - allows distributed registering from multiple files to single registry
-- interface:
-    - preprocess_inputs
-    - preprocess_targets
-    - postprocess_preds
-    - numeric_input_shape
-    - categorical_input_shapes
-"""
-
-
-class Preprocessor:
-    def __init__(self, data_config: DataConfig, embedding_config: EmbeddingConfig) -> None:
-        self.data_config = data_config
-        self.embedding_config = embedding_config
-        self.stats = load_dataset_stats(data_config.stats_path)
-        self.normalization_fn_by_feature_name: Dict[str, NormalizationFn] = {}
-
-        self.input_len = data_config.input_len
-        self.target_len = data_config.target_len
-
-        self.preprocess_inputs_fn = InputPreprocessRegistry.get(self.embedding_config.input_preprocessing_fn)
-        self.preprocess_targets_fn = TargetPreprocessRegistry.get(self.embedding_config.target_preprocessing_fn)
-        self.postprocess_preds_fn = PredPostprocessingRegistry.get(self.embedding_config.pred_postprocessing_fn)
-
-        # Closed loop eval
-        self.last_controller_inputs: Optional[Dict[str, torch.Tensor]] = None
-
-    @property
-    def numeric_input_shape(self) -> int:
-        """Get the size of the materialized input dimensions from the embedding config."""
-        return InputPreprocessRegistry.get_num_features(self.embedding_config.input_preprocessing_fn)
-
-    @property
-    def categorical_input_shapes(self) -> dict[str, int]:
-        return {
-            "stage": self.embedding_config.stage_embedding_dim,
-            "ego_character": self.embedding_config.character_embedding_dim,
-            "opponent_character": self.embedding_config.character_embedding_dim,
-            "ego_action": self.embedding_config.action_embedding_dim,
-            "opponent_action": self.embedding_config.action_embedding_dim,
-        }
-
-    @property
-    def trajectory_sampling_len(self) -> int:
-        """Get the number of frames needed from a full episode to preprocess a supervised training example."""
-        trajectory_len = self.input_len + self.target_len
-
-        # Handle preprocessing fns that require +1 prev frame for controller inputs
-        if self.preprocess_inputs_fn in (preprocess_inputs_v2,):
-            trajectory_len += 1
-        # Other conditions here
-
-        return trajectory_len
-
-    @property
-    def seq_len(self) -> int:
-        """Get the final length of a preprocessed supervised training example / sequence."""
-        return self.input_len + self.target_len
-
-    def sample_from_episode(self, ndarrays_by_feature: dict[str, np.ndarray]) -> TensorDict:
-        """Randomly slice episode features into input/target sequences for supervised training.
-
-        Args:
-            ndarrays_by_feature: dict of shape (episode_len,) containing full episode data
-
-        Returns:
-            dict of shape (sequence_len,) containing sliced data
-        """
-        frames = ndarrays_by_feature["frame"]
-        assert all(len(ndarray) == len(frames) for ndarray in ndarrays_by_feature.values())
-        episode_len = len(frames)
-        sample_index = random.randint(0, episode_len - self.trajectory_sampling_len)
-        tensor_slice_by_feature_name = {
-            feature_name: torch.from_numpy(
-                feature_L[sample_index : sample_index + self.trajectory_sampling_len].copy()
-            )
-            for feature_name, feature_L in ndarrays_by_feature.items()
-        }
-        return TensorDict(tensor_slice_by_feature_name, batch_size=(self.trajectory_sampling_len,))
-
-    def preprocess_inputs(self, sample_L: TensorDict, ego: Player) -> TensorDict:
-        return self.preprocess_inputs_fn(sample_L, self.data_config, ego, self.stats)
-
-    def preprocess_targets(self, sample_L: TensorDict, ego: Player) -> TensorDict:
-        return self.preprocess_targets_fn(sample_L, ego)
-
-    def postprocess_preds(self, preds_C: TensorDict) -> TensorDict:
-        return self.postprocess_preds_fn(preds_C)

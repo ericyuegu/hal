@@ -14,6 +14,7 @@ import torch
 import torch.multiprocessing as mp
 from loguru import logger
 from tensordict import TensorDict
+from training.preprocess.preprocessor import Preprocessor
 
 from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
@@ -34,7 +35,6 @@ from hal.gamestate_utils import extract_gamestate_as_tensordict
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
-from hal.training.preprocess.preprocess_inputs import Preprocessor
 
 
 def setup_cpu_logger(debug: bool = False) -> None:

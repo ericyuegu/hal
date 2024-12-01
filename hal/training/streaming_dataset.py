@@ -6,7 +6,7 @@ from typing import cast
 import numpy as np
 from streaming import StreamingDataset
 from tensordict import TensorDict
-from training.preprocess.preprocess_inputs import Preprocessor
+from training.preprocess.preprocessor import Preprocessor
 
 from hal.constants import Player
 from hal.constants import VALID_PLAYERS
@@ -36,6 +36,7 @@ class HALStreamingDataset(StreamingDataset):
         self.seq_len = self.preprocessor.seq_len
 
     def __getitem__(self, idx: int | slice | list[int] | np.ndarray) -> TensorDict:
+        """Expects episode features to match data/schema.py."""
         episode_features_by_name = super().__getitem__(idx)
         sample_td = self.preprocessor.sample_from_episode(episode_features_by_name)
 
