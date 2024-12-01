@@ -1,40 +1,48 @@
 from typing import Callable
 from typing import Dict
+from typing import Tuple
 
 from tensordict import TensorDict
 
 from hal.constants import Player
 from hal.data.stats import FeatureStats
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
+from hal.training.preprocess.config import InputPreprocessConfig
 
 InputPreprocessFn = Callable[[TensorDict, DataConfig, Player, Dict[str, FeatureStats]], TensorDict]
 
 
 class InputPreprocessRegistry:
     EMBED: Dict[str, InputPreprocessFn] = {}
-    NUM_FEATURES: Dict[str, int] = {}
+    CONFIGS: Dict[str, InputPreprocessConfig] = {}
 
     @classmethod
     def get(cls, name: str) -> InputPreprocessFn:
         if name in cls.EMBED:
             return cls.EMBED[name]
-        raise NotImplementedError(f"Embedding fn {name} not found." f"Valid functions: {sorted(cls.EMBED.keys())}.")
+        raise NotImplementedError(f"Preprocessing fn {name} not found. Valid functions: {sorted(cls.EMBED.keys())}.")
 
     @classmethod
-    def register(cls, name: str, num_features: int):
-        def decorator(embed_fn: InputPreprocessFn):
-            cls.EMBED[name] = embed_fn
-            cls.NUM_FEATURES[name] = num_features
-            return embed_fn
+    def get_config(cls, name: str) -> InputPreprocessConfig:
+        """Get the config class associated with a preprocessing function."""
+        return cls.CONFIGS[name]
+
+    @classmethod
+    def register(cls, name: str, config: InputPreprocessConfig):
+        """Register a preprocessing function with an optional config class."""
+
+        def decorator(preprocess_fn: InputPreprocessFn):
+            cls.EMBED[name] = preprocess_fn
+            cls.CONFIGS[name] = config
+            return preprocess_fn
 
         return decorator
 
     @classmethod
-    def get_num_features(cls, name: str) -> int:
-        if name in cls.NUM_FEATURES:
-            return cls.NUM_FEATURES[name]
-        raise NotImplementedError(f"Embedding fn {name} not found." f"Valid functions: {sorted(cls.EMBED.keys())}.")
+    def get_input_sizes(cls, name: str) -> Dict[str, Tuple[int, ...]]:
+        """Get input sizes for all heads from a registered config."""
+        config_cls = cls.get_config(name)
+        return config_cls.input_shapes_by_head
 
 
 TargetPreprocessFn = Callable[[TensorDict, Player], TensorDict]
@@ -77,13 +85,3 @@ class PredPostprocessingRegistry:
             return embed_fn
 
         return decorator
-
-
-def get_input_size_from_config(config: EmbeddingConfig) -> int:
-    """Get the size of the materialized input dimensions from the embedding config."""
-    numeric_feature_count = InputPreprocessRegistry.get_num_features(config.input_preprocessing_fn)
-    return (
-        numeric_feature_count
-        + config.stage_embedding_dim
-        + 2 * (config.character_embedding_dim + config.action_embedding_dim)
-    )
