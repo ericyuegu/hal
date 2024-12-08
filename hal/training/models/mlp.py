@@ -20,7 +20,7 @@ class MLPBC(nn.Module):
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
         self.n_embd = get_input_size_from_config(embed_config)
-        self.context_len = data_config.context_len
+        self.context_len = data_config.seq_len
 
         self.modules_by_name = nn.ModuleDict(
             dict(

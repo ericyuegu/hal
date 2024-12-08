@@ -38,7 +38,7 @@ class DataConfig:
     data_dir: str = "data/dev"
 
     # Number of input and target frames in example
-    context_len: int = 256
+    seq_len: int = 256
     replay_filter: ReplayFilter = ReplayFilter()
 
     # Debugging

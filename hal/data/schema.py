@@ -103,3 +103,36 @@ NP_DTYPE_STR_BY_COLUMN = {
 }
 
 PYARROW_SCHEMA: pa.Schema = pa.schema([(name, dtype) for name, dtype in PYARROW_DTYPE_BY_COLUMN.items()])
+
+CONTROLLER_INPUT_FEATURES: tuple[str, ...] = (
+    "p1_button_a",
+    "p1_button_b",
+    "p1_button_x",
+    "p1_button_y",
+    "p1_button_z",
+    "p1_button_start",
+    "p1_button_d_up",
+    "p1_button_l",
+    "p1_button_r",
+    "p1_main_stick_x",
+    "p1_main_stick_y",
+    "p1_c_stick_x",
+    "p1_c_stick_y",
+    "p1_l_shoulder",
+    "p1_r_shoulder",
+    "p2_button_a",
+    "p2_button_b",
+    "p2_button_x",
+    "p2_button_y",
+    "p2_button_z",
+    "p2_button_start",
+    "p2_button_d_up",
+    "p2_button_l",
+    "p2_button_r",
+    "p2_main_stick_x",
+    "p2_main_stick_y",
+    "p2_c_stick_x",
+    "p2_c_stick_y",
+    "p2_l_shoulder",
+    "p2_r_shoulder",
+)

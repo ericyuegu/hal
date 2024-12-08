@@ -241,7 +241,7 @@ class GPTv1(BaseGPT):
         assert embed_config.num_buttons is not None
         assert embed_config.num_main_stick_clusters is not None
         assert embed_config.num_c_stick_clusters is not None
-        self.context_len = train_config.data.context_len
+        self.context_len = train_config.data.seq_len
         self.n_embd = gpt_config.n_embd
 
         self.transformer = nn.ModuleDict(
@@ -284,9 +284,7 @@ class GPTv1(BaseGPT):
 
     def forward(self, inputs: TensorDict):
         B, T, D = inputs["gamestate"].shape
-        assert (
-            T <= self.context_len
-        ), f"Cannot forward sequence of length {T}, block size is only {self.context_len}"
+        assert T <= self.context_len, f"Cannot forward sequence of length {T}, block size is only {self.context_len}"
         pos = torch.arange(0, T, dtype=torch.long, device=next(self.parameters()).device)  # shape (t)
 
         combined_inputs = torch.cat(
@@ -322,9 +320,7 @@ class GPTv2(GPTv1):
     # TODO refactor
     def forward(self, inputs: TensorDict):
         B, T, D = inputs["gamestate"].shape
-        assert (
-            T <= self.context_len
-        ), f"Cannot forward sequence of length {T}, block size is only {self.context_len}"
+        assert T <= self.context_len, f"Cannot forward sequence of length {T}, block size is only {self.context_len}"
         pos = torch.arange(0, T, dtype=torch.long, device=next(self.parameters()).device)  # shape (t)
 
         combined_inputs = torch.cat(

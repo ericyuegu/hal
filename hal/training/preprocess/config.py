@@ -1,6 +1,4 @@
-from typing import Callable
 from typing import Dict
-from typing import Self
 from typing import Tuple
 
 import attr
@@ -38,7 +36,11 @@ class InputPreprocessConfig:
     player_features: Tuple[str, ...]
 
     # Mapping from feature name to normalization function
-    normalization_mapping: Dict[str, NormalizationFn]
+    normalization_fn_by_feature_name: Dict[str, NormalizationFn]
+
+    # Mapping from feature name to frame offset relative to sampled index
+    # e.g. to include controller inputs from prev frame with current frame gamestate, set p1_button_a = -1, etc.
+    offsets_by_feature: Dict[str, int]
 
     # Mapping from head name to features to be fed to that head
     # All unlisted features are fed to the default "gamestate" head
@@ -47,9 +49,6 @@ class InputPreprocessConfig:
     # Input dimensions (D,) of concatenated features after preprocessing
     # TensorDict does not support differentiated sizes across keys for the same dimension
     input_shapes_by_head: Dict[str, Tuple[int, ...]]
-
-    # Update input shapes by head based on the embedding config at runtime
-    update_input_shapes_by_head: Callable[[Self, EmbeddingConfig], None]
 
     @classmethod
     def v0(cls):
@@ -84,6 +83,7 @@ class InputPreprocessConfig:
                 "position_x": standardize,
                 "position_y": standardize,
             },
+            offsets_by_feature={},
             separate_feature_names_by_head={
                 "stage": ("stage",),
                 "ego_character": ("ego_character",),
@@ -94,5 +94,4 @@ class InputPreprocessConfig:
             input_shapes_by_head={
                 "gamestate": (2 * len(player_features),),  # 2x for ego and opponent
             },
-            update_input_shapes_by_head=update_input_shapes_with_embedding_config,
         )
