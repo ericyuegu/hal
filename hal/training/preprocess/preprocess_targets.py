@@ -4,10 +4,10 @@ from tensordict import TensorDict
 from hal.constants import Player
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import VALID_PLAYERS
-from hal.training.preprocess.encoding import encode_buttons_one_hot
-from hal.training.preprocess.encoding import get_closest_stick_xy_cluster_v0
-from hal.training.preprocess.encoding import one_hot_from_int
 from hal.training.preprocess.registry import TargetPreprocessRegistry
+from hal.training.preprocess.transform import encode_buttons_one_hot
+from hal.training.preprocess.transform import get_closest_stick_xy_cluster_v0
+from hal.training.preprocess.transform import one_hot_from_int
 
 
 @TargetPreprocessRegistry.register("targets_v0")

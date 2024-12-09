@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_array_equal
 
-from hal.training.preprocess.encoding import encode_buttons_one_hot
+from hal.training.preprocess.transform import encode_buttons_one_hot
 
 
 @pytest.mark.parametrize(

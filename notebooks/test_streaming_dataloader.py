@@ -1,4 +1,6 @@
 # %%
+import torch
+import pandas as pd
 from pathlib import Path
 
 from hal.training.config import DataConfig
@@ -6,6 +8,8 @@ from hal.training.config import EmbeddingConfig
 from hal.training.config import TrainConfig
 from hal.training.streaming_dataloader import get_dataloaders
 from hal.training.streaming_dataset import HALStreamingDataset
+
+torch.set_printoptions(precision=4, sci_mode=False, linewidth=120)
 
 # %%
 ds = HALStreamingDataset(
@@ -22,7 +26,11 @@ x = super(HALStreamingDataset, ds).__getitem__(0)
 x
 
 # %%
-ds[0]
+x = ds[3]["inputs"]["gamestate"]
+x
+
+# %%
+pd.DataFrame(x.numpy()).describe()
 # %%
 for value in x.values():
     print(f"{type(value)} {value.shape}")

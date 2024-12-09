@@ -25,10 +25,6 @@ class HALStreamingDataset(StreamingDataset):
     ) -> None:
         super().__init__(local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
         self.preprocessor = Preprocessor(data_config=data_config, embedding_config=embedding_config)
-        self.data_config = data_config
-        self.embedding_config = embedding_config
-
-        self.traj_sampling_len = self.preprocessor.trajectory_sampling_len
         self.seq_len = self.preprocessor.seq_len
 
     def __getitem__(self, idx: int | slice | list[int] | np.ndarray) -> TensorDict:
@@ -38,12 +34,12 @@ class HALStreamingDataset(StreamingDataset):
 
         player_perspective = cast(Player, random.choice(VALID_PLAYERS))
         inputs = self.preprocessor.preprocess_inputs(sample_td, player_perspective)
-        targets = self.preprocessor.preprocess_targets(sample_td, player_perspective)
+        # targets = self.preprocessor.preprocess_targets(sample_td, player_perspective)
 
         return TensorDict(
             {
                 "inputs": inputs,
-                "targets": targets,  # type: ignore
+                # "targets": targets,  # type: ignore
             },
             batch_size=(self.seq_len,),
         )
