@@ -106,11 +106,10 @@ class TrainConfig(BaseConfig):
     local_batch_size: int = 256
     lr: float = 3e-4
     # TODO rename vars to be more descriptive
-    n_samples: int = 2**24
-    n_val_samples: int = 2**18
-    keep_ckpts: int = 2**4
-    report_len: int = 2**17
-    # TODO use in trainer
+    n_samples: int = 2**20
+    n_val_samples: int = 2**17
+    keep_ckpts: int = 2**3
+    report_len: int = 2**16
     closed_loop_eval_every_n: int = 2**18
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8

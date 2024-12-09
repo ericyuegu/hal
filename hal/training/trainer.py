@@ -183,19 +183,21 @@ class Trainer(torch.nn.Module, abc.ABC):
     ) -> None:
         self.eval()
 
-        logger.debug("Starting closed loop evaluation")
-        eval_stats_queue: mp.Queue = mp.Queue()
-        eval_process = mp.Process(
-            target=run_closed_loop_evaluation,
-            kwargs=dict(
-                artifact_dir=self.artifact_dir,
-                n_workers=16,
-                checkpoint_idx=step,
-                eval_stats_queue=eval_stats_queue,
-                player="p1",
-            ),
-        )
-        eval_process.start()
+        should_closed_loop_eval = step % self.config.closed_loop_eval_every_n == 0
+        if should_closed_loop_eval:
+            logger.debug("Starting closed loop evaluation")
+            eval_stats_queue: mp.Queue = mp.Queue()
+            eval_process = mp.Process(
+                target=run_closed_loop_evaluation,
+                kwargs=dict(
+                    artifact_dir=self.artifact_dir,
+                    n_workers=16,
+                    checkpoint_idx=step,
+                    eval_stats_queue=eval_stats_queue,
+                    player="p1",
+                ),
+            )
+            eval_process.start()
 
         range_iter = trange(
             0,
@@ -219,12 +221,13 @@ class Trainer(torch.nn.Module, abc.ABC):
         loss_total = sum(v for k, v in loss_dict.items() if "loss" in k)
         loss_dict["val/loss_total"] = loss_total
 
-        try:
-            logger.debug("Waiting for closed loop evaluation")
-            closed_loop_eval_stats: EpisodeStats = eval_stats_queue.get(block=True, timeout=60 * 4)
-            loss_dict.update(closed_loop_eval_stats.to_wandb_dict(prefix="closed_loop_eval", player="p1"))
-        except Empty:
-            logger.warning("Closed loop evaluation stats not available")
+        if should_closed_loop_eval:
+            try:
+                logger.debug("Waiting for closed loop evaluation")
+                closed_loop_eval_stats: EpisodeStats = eval_stats_queue.get(block=True, timeout=60 * 4)
+                loss_dict.update(closed_loop_eval_stats.to_wandb_dict(prefix="closed_loop_eval", player="p1"))
+            except Empty:
+                logger.warning("Closed loop evaluation stats not available")
 
         writer.log(loss_dict, step=step, commit=False)
 
