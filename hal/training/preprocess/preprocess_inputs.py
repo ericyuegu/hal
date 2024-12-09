@@ -118,6 +118,6 @@ def preprocess_input_features(
     for feature_name, feature_tensor in processed_features.items():
         if feature_name not in seen_feature_names:
             unseen_feature_tensors.append(feature_tensor)
-    concatenated_features_by_head_name[DEFAULT_HEAD_NAME] = torch.cat(unseen_feature_tensors, dim=-1)
+    concatenated_features_by_head_name[DEFAULT_HEAD_NAME] = torch.stack(unseen_feature_tensors, dim=-1)
 
     return TensorDict(concatenated_features_by_head_name, batch_size=sample.batch_size)
