@@ -5,7 +5,7 @@ from typing import Tuple
 from tensordict import TensorDict
 
 from hal.constants import Player
-from hal.training.preprocess.preprocess_inputs import InputPreprocessConfig
+from hal.training.preprocess.config import InputPreprocessConfig
 
 
 class InputPreprocessRegistry:

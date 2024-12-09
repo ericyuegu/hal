@@ -9,18 +9,20 @@ from hal.training.streaming_dataset import HALStreamingDataset
 
 # %%
 ds = HALStreamingDataset(
-    local="/opt/projects/hal2/data/mang0/train",
+    local="/opt/projects/hal2/data/mang0/val",
     remote=None,
     batch_size=4,
     shuffle=False,
-    data_config=DataConfig(),
-    embedding_config=EmbeddingConfig(),
-    stats_path=Path("/opt/projects/hal2/data/mang0/stats.json"),
+    data_config=DataConfig(data_dir="/opt/projects/hal2/data/mang0"),
+    embedding_config=EmbeddingConfig(input_preprocessing_fn="inputs_v0"),
 )
 
 # %%
 x = super(HALStreamingDataset, ds).__getitem__(0)
 x
+
+# %%
+ds[0]
 # %%
 for value in x.values():
     print(f"{type(value)} {value.shape}")

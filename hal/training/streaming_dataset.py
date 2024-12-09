@@ -9,7 +9,6 @@ from tensordict import TensorDict
 
 from hal.constants import Player
 from hal.constants import VALID_PLAYERS
-from hal.data.stats import load_dataset_stats
 from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig
 from hal.training.preprocess.preprocessor import Preprocessor
@@ -24,11 +23,9 @@ class HALStreamingDataset(StreamingDataset):
         shuffle: bool,
         data_config: DataConfig,
         embedding_config: EmbeddingConfig,
-        stats_path: Path,
     ) -> None:
         super().__init__(local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
         self.preprocessor = Preprocessor(data_config=data_config, embedding_config=embedding_config)
-        self.stats_by_feature_name = load_dataset_stats(stats_path)
         self.data_config = data_config
         self.embedding_config = embedding_config
 
