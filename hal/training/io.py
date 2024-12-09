@@ -14,16 +14,17 @@ from typing import Type
 import attr
 import torch
 import torch.nn
+import wandb
 from loguru import logger
 from tensordict import TensorDict
 from yasoo import deserialize
 from yasoo import serialize
 
-import wandb
 from hal.training.config import BaseConfig
 from hal.training.config import TrainConfig
 from hal.training.distributed import is_master
 from hal.training.models.registry import Arch
+from hal.training.preprocess.preprocessor import Preprocessor
 from hal.training.utils import get_git_repo_root
 
 ARTIFACT_DIR_ROOT = "runs"
@@ -95,7 +96,8 @@ def load_model_from_artifact_dir(
     artifact_dir: Path, idx: Optional[int] = None, device: str = "cpu"
 ) -> Tuple[torch.nn.Module, TrainConfig]:
     config = load_config_from_artifact_dir(artifact_dir)
-    model = Arch.get(config.arch, config=config)
+    preprocessor = Preprocessor(data_config=config.data, embedding_config=config.embedding)
+    model = Arch.get(config.arch, preprocessor=preprocessor)
     ckpt = Checkpoint(model, config, artifact_dir, keep_ckpts=config.keep_ckpts)
     ckpt.restore(idx=idx, device=device)
     return ckpt.model, config
