@@ -217,7 +217,7 @@ class Trainer(torch.nn.Module, abc.ABC):
             for k, v in metrics_dict.items():
                 concat_metrics[k].append(v)
 
-        loss_dict = {f"val/{k}": sum(v) / len(v) for k, v in concat_metrics.items() if "loss" in k}
+        loss_dict = {k: sum(v) / len(v) for k, v in concat_metrics.items() if "loss" in k}
         loss_total = sum(v for k, v in loss_dict.items() if "loss" in k)
         loss_dict["val/loss_total"] = loss_total
 
