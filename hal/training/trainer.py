@@ -184,7 +184,6 @@ class Trainer(torch.nn.Module, abc.ABC):
         self.eval()
 
         should_closed_loop_eval = step % self.config.closed_loop_eval_every_n == 0
-        logger.debug(f"{step=} Should closed loop eval: {should_closed_loop_eval}")
         if should_closed_loop_eval:
             logger.debug("Starting closed loop evaluation")
             eval_stats_queue: mp.Queue = mp.Queue()
