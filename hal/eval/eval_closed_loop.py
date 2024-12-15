@@ -316,7 +316,7 @@ def gpu_worker(
         inference_time = time.perf_counter() - inference_start
 
         writeback_start = time.perf_counter()
-        # Write the output to shared_batched_model_output
+        # Write last frame of model preds to shared buffer
         shared_batched_model_output_B.copy_(outputs_B)
         writeback_time = time.perf_counter() - writeback_start
 
