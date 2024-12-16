@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 import argparse
+import concurrent.futures
 import random
 import signal
 import sys
 
 import melee
 
+from hal.eval.emulator_helper import console_manager
 from hal.eval.emulator_helper import get_console_kwargs
 from hal.eval.emulator_helper import self_play_menu_helper
 from hal.eval.emulator_paths import REMOTE_CISO_PATH
@@ -86,11 +88,16 @@ print("Console connected")
 #   Due to how named pipes work, this has to come AFTER running dolphin
 #   NOTE: If you're loading a movie file, don't connect the controller,
 #   dolphin will hang waiting for input and never receive it
-print("Connecting controller to console...")
+print("Connecting controller 1 to console...")
 if not controller.connect():
     print("ERROR: Failed to connect the controller.")
     sys.exit(-1)
-print("Controller connected")
+print("Controller 1 connected")
+print("Connecting controller 2 to console...")
+if not controller_opponent.connect():
+    print("ERROR: Failed to connect the controller.")
+    sys.exit(-1)
+print("Controller 2 connected")
 
 costume = 0
 framedata = melee.framedata.FrameData()
@@ -98,61 +105,68 @@ framedata = melee.framedata.FrameData()
 # Main loop
 i = 0
 match_started = False
-while True:
-    # "step" to the next frame
-    gamestate = console.step()
-    if gamestate is None:
-        print("Gamestate is None")
-        continue
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console):
+    while True:
+        # Wrap `console.step()` in a thread with timeout
+        future = executor.submit(console.step)
+        try:
+            gamestate = future.result(timeout=2.0)
+        except concurrent.futures.TimeoutError:
+            print("console.step() timed out")
+            raise
+        if gamestate is None:
+            print("Gamestate is None")
+            continue
 
-    print(f"{gamestate.menu_state=}")
+        # print(f"{gamestate.menu_state=}")
 
-    # The console object keeps track of how long your bot is taking to process frames
-    #   And can warn you if it's taking too long
-    if console.processingtime * 1000 > 12:
-        print("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
+        # The console object keeps track of how long your bot is taking to process frames
+        #   And can warn you if it's taking too long
+        if console.processingtime * 1000 > 12:
+            print("WARNING: Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
-    # What menu are we in?
-    if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-        if not match_started:
-            print("Match started")
-            match_started = True
-        # Slippi Online matches assign you a random port once you're in game that's different
-        #   than the one you're physically plugged into. This helper will autodiscover what
-        #   port we actually are.
-        discovered_port = args.port
-        if args.connect_code != "":
-            discovered_port = melee.gamestate.port_detector(gamestate, melee.Character.FOX, costume)
-        if discovered_port > 0:
-            # NOTE: This is where your AI does all of its stuff!
-            # This line will get hit once per frame, so here is where you read
-            #   in the gamestate and decide what buttons to push on the controller
-            melee.techskill.multishine(ai_state=gamestate.players[discovered_port], controller=controller)
+        # What menu are we in?
+        if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
+            if not match_started:
+                print("Match started")
+                match_started = True
+            # Slippi Online matches assign you a random port once you're in game that's different
+            #   than the one you're physically plugged into. This helper will autodiscover what
+            #   port we actually are.
+            discovered_port = args.port
+            if args.connect_code != "":
+                discovered_port = melee.gamestate.port_detector(gamestate, melee.Character.FOX, costume)
+            if discovered_port > 0:
+                # NOTE: This is where your AI does all of its stuff!
+                # This line will get hit once per frame, so here is where you read
+                #   in the gamestate and decide what buttons to push on the controller
+                melee.techskill.multishine(ai_state=gamestate.players[discovered_port], controller=controller)
+            else:
+                # If the discovered port was unsure, reroll our costume for next time
+                costume = random.randint(0, 4)
+
+            # Log this frame's detailed info if we're in game
+            if log:
+                log.logframe(gamestate)
+                log.writeframe()
+
+            i += 1
+            if i % 60 == 0:
+                print(f"Frame {i}")
+            if i > 1800:
+                break
+
         else:
-            # If the discovered port was unsure, reroll our costume for next time
-            costume = random.randint(0, 4)
+            self_play_menu_helper(
+                gamestate,
+                controller,
+                controller_opponent,
+                melee.Character.FOX,
+                melee.Character.FOX,
+                melee.Stage.BATTLEFIELD,
+                opponent_cpu_level=0,
+            )
 
-        # Log this frame's detailed info if we're in game
-        if log:
-            log.logframe(gamestate)
-            log.writeframe()
-
-        i += 1
-        if i % 60 == 0:
-            print(f"Frame {i}")
-        if i > 3600:
-            break
-
-    else:
-        self_play_menu_helper(
-            gamestate,
-            controller,
-            controller_opponent,
-            melee.Character.FOX,
-            melee.Character.FOX,
-            melee.Stage.BATTLEFIELD,
-        )
-
-        # If we're not in game, don't log the frame
-        if log:
-            log.skipframe()
+            # If we're not in game, don't log the frame
+            if log:
+                log.skipframe()

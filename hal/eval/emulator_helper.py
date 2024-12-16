@@ -110,6 +110,7 @@ def self_play_menu_helper(
     character_1: melee.Character,
     character_2: melee.Character,
     stage_selected: melee.Stage,
+    opponent_cpu_level: int = 9,
 ) -> None:
     if gamestate.menu_state == enums.Menu.MAIN_MENU:
         MenuHelper.choose_versus_mode(gamestate=gamestate, controller=controller_1)
@@ -133,7 +134,7 @@ def self_play_menu_helper(
                 character=character_2,
                 gamestate=gamestate,
                 controller=controller_2,
-                cpu_level=9,
+                cpu_level=opponent_cpu_level,
                 costume=1,
                 swag=False,
                 start=True,
