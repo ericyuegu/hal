@@ -26,7 +26,7 @@ def setup_logger(output_dir: str | Path) -> None:
     logger.add(Path(output_dir) / "process_replays.log", enqueue=True)
 
 
-def process_replay(replay_path: str) -> Optional[Dict[str, Any]]:
+def process_replay(replay_path: str, check_damage: bool = True) -> Optional[Dict[str, Any]]:
     frame_data: FrameData = defaultdict(list)
     try:
         console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
@@ -67,10 +67,11 @@ def process_replay(replay_path: str) -> Optional[Dict[str, Any]]:
     if any(len(v) < min_frames for v in frame_data.values()):
         logger.trace(f"Replay {replay_path} was less than {min_frames} frames, skipping.")
         return None
-    # Check for damage
-    if all(x == 0 for x in frame_data["p1_percent"]) or all(x == 0 for x in frame_data["p2_percent"]):
-        logger.trace(f"Replay {replay_path} had no damage, skipping.")
-        return None
+    if check_damage:
+        # Check for damage
+        if all(x == 0 for x in frame_data["p1_percent"]) or all(x == 0 for x in frame_data["p2_percent"]):
+            logger.trace(f"Replay {replay_path} had no damage, skipping.")
+            return None
 
     sample = {
         key: np.array(frame_data[key], dtype=dtype.to_pandas_dtype())
