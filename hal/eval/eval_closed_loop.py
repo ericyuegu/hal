@@ -119,7 +119,9 @@ class EmulatorManager:
 
         # Wrap console manager inside a thread for timeouts
         # Important that console manager context goes second to gracefully handle keyboard interrupts, timeouts, and all other exceptions
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console=console, console_logger=console_logger):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(
+            console=console, console_logger=console_logger
+        ):
             logger.debug("Starting episode")
             while i < self.max_steps:
                 # Wrap `console.step()` in a thread with timeout
@@ -190,7 +192,12 @@ def cpu_worker(
     with logger.contextualize(rank=rank):
         try:
             emulator_manager = EmulatorManager(
-                rank=rank, udp_port=port, player=player, replay_dir=replay_dir, enable_ffw=enable_ffw
+                rank=rank,
+                udp_port=port,
+                player=player,
+                replay_dir=replay_dir,
+                enable_ffw=enable_ffw,
+                debug=debug,
             )
             gamestate_generator = emulator_manager.gamestate_generator()
             last_controller_inputs = None  # Store previous inputs
@@ -347,6 +354,8 @@ def run_closed_loop_evaluation(
     checkpoint_idx: Optional[int] = None,
     eval_stats_queue: Optional[mp.Queue] = None,
     player: Player = "p1",
+    enable_ffw: bool = False,  # disable by default for emulator stability, TODO debug EXI inputs
+    debug: bool = False,
 ) -> None:
     try:
         mp.set_start_method("spawn")
@@ -413,7 +422,8 @@ def run_closed_loop_evaluation(
                 "model_output_ready_flag": model_output_ready_flags[i],
                 "stop_event": stop_events[i],
                 "episode_stats_queue": episode_stats_queue,
-                "enable_ffw": False,  # disable for evaluation stability
+                "enable_ffw": enable_ffw,
+                "debug": debug,
             },
         )
         cpu_processes.append(p)
@@ -439,5 +449,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Melee in emulator")
     parser.add_argument("--model_dir", type=str, help="Path to model directory")
     parser.add_argument("--n_workers", type=int, help="Number of CPU workers")
+    parser.add_argument("--enable_ffw", action="store_true", help="Enable fast forward mode")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
-    run_closed_loop_evaluation(artifact_dir=Path(args.model_dir), n_workers=args.n_workers)
+    run_closed_loop_evaluation(
+        artifact_dir=Path(args.model_dir),
+        n_workers=args.n_workers,
+        enable_ffw=args.enable_ffw,
+        debug=args.debug,
+    )
