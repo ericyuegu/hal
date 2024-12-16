@@ -163,6 +163,8 @@ class EmulatorManager:
                         send_controller_inputs(ego_controller, controller_inputs)
 
                     self.episode_stats.update(gamestate)
+                    if console_logger is not None:
+                        console_logger.writeframe()
                     i += 1
 
         yield None

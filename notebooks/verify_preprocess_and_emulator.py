@@ -40,7 +40,11 @@ for i in range(len(episode_td) - traj_len):
     inputs = preprocessor.preprocess_inputs(offset_td, "p1")
     inputs = inputs.unsqueeze(0)
     preds = model(inputs)
-    print(preds)
+    postprocessed_preds = preprocessor.postprocess_preds(preds[0, -1])
+    print(postprocessed_preds)
     break
+
+# %%
+
 
 # %%
