@@ -64,7 +64,7 @@ controller_opponent = melee.Controller(console=console, port=args.opponent, type
 # This isn't necessary, but makes it so that Dolphin will get killed when you ^C
 def signal_handler(sig, frame) -> None:
     console.stop()
-    if args.debug:
+    if log:
         log.writelog()
         print("")  # because the ^C will be on the terminal
         print("Log file created: " + log.filename)
@@ -105,7 +105,7 @@ framedata = melee.framedata.FrameData()
 # Main loop
 i = 0
 match_started = False
-with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console):
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console, log):
     while True:
         # Wrap `console.step()` in a thread with timeout
         future = executor.submit(console.step)

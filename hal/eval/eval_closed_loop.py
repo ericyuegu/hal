@@ -119,7 +119,7 @@ class EmulatorManager:
 
         # Wrap console manager inside a thread for timeouts
         # Important that console manager context goes second to gracefully handle keyboard interrupts, timeouts, and all other exceptions
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(console=console, console_logger=console_logger):
             logger.debug("Starting episode")
             while i < self.max_steps:
                 # Wrap `console.step()` in a thread with timeout

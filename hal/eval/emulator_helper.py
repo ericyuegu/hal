@@ -150,7 +150,7 @@ def self_play_menu_helper(
 
 
 @contextmanager
-def console_manager(console: melee.Console, shutdown_timeout: float = 5.0):
+def console_manager(console: melee.Console, console_logger: melee.Logger | None = None):
     def signal_handler(sig, frame):
         raise KeyboardInterrupt
 
@@ -166,6 +166,9 @@ def console_manager(console: melee.Console, shutdown_timeout: float = 5.0):
     except Exception as e:
         logger.error(f"Stopping console due to exception: {e}")
     finally:
+        if console_logger is not None:
+            console_logger.writelog()
+            logger.info("Log file created: " + console_logger.filename)
         signal.signal(signal.SIGINT, original_handler)
         console.stop()
         logger.info("Shutting down cleanly...")
