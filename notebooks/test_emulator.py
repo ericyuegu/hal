@@ -72,7 +72,7 @@ emulator_manager = EmulatorManager(
     max_steps=30000,
     enable_ffw=False,
     debug=True,
-    opponent_cpu_level=0,
+    opponent_cpu_level=9,
 )
 ego_controller = emulator_manager.ego_controller
 gamestate_generator = emulator_manager.gamestate_generator()
@@ -82,6 +82,7 @@ i = 0
 while gamestate is not None:
     # td = extract_gamestate_as_tensordict(gamestate)
     controller_inputs = multishine(ai_state=gamestate.players[1])
+    # logger.debug(f"Player action {gamestate.players[1].action}")
     if i % 60 == 0:
         logger.debug(f"Outer loop {i}")
     # if controller_inputs is None:
