@@ -3,10 +3,10 @@ import sys
 import melee
 from loguru import logger
 
-from hal.eval.emulator_helper import console_manager
-from hal.eval.emulator_helper import get_console_kwargs
-from hal.eval.emulator_helper import self_play_menu_helper
-from hal.eval.emulator_paths import REMOTE_CISO_PATH
+from hal.emulator_helper import console_manager
+from hal.emulator_helper import get_console_kwargs
+from hal.emulator_helper import self_play_menu_helper
+from hal.emulator_paths import REMOTE_CISO_PATH
 
 PLAYER_1_PORT = 1
 PLAYER_2_PORT = 2

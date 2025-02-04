@@ -1,34 +1,23 @@
 import argparse
-import concurrent.futures
 import sys
 import time
 from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
-from typing import Generator
 from typing import List
 from typing import Optional
 
-import attr
-import melee
 import torch
 import torch.multiprocessing as mp
 from loguru import logger
 from tensordict import TensorDict
 
-from hal.constants import PLAYER_1_PORT
-from hal.constants import PLAYER_2_PORT
 from hal.constants import Player
-from hal.constants import get_opponent
-from hal.eval.emulator_helper import console_manager
-from hal.eval.emulator_helper import find_open_udp_ports
-from hal.eval.emulator_helper import get_console_kwargs
-from hal.eval.emulator_helper import get_replay_dir
-from hal.eval.emulator_helper import self_play_menu_helper
-from hal.eval.emulator_paths import REMOTE_CISO_PATH
+from hal.emulator_helper import EmulatorManager
+from hal.emulator_helper import find_open_udp_ports
+from hal.emulator_helper import get_replay_dir
 from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import mock_preds_as_tensordict
-from hal.eval.eval_helper import send_controller_inputs
 from hal.eval.eval_helper import share_and_pin_memory
 from hal.gamestate_utils import extract_gamestate_as_tensordict
 from hal.training.config import TrainConfig
@@ -47,135 +36,6 @@ def setup_cpu_logger(debug: bool = False) -> None:
     )
     logger.configure(extra={"rank": ""})  # Default values
     logger.add(sys.stderr, format=logger_format, level="DEBUG" if debug else "INFO")
-
-
-def _get_port(player: Player) -> int:
-    return PLAYER_1_PORT if player == "p1" else PLAYER_2_PORT
-
-
-@attr.s(auto_attribs=True)
-class EmulatorManager:
-    udp_port: int
-    player: Player
-    opponent_cpu_level: int = 9
-    replay_dir: Path | None = None
-    episode_stats: EpisodeStats = EpisodeStats()
-    max_steps: int = 8 * 60 * 60
-    latency_warning_threshold: float = 14.0
-    console_timeout: float = 2.0
-    enable_ffw: bool = True
-    debug: bool = False
-
-    def __attrs_post_init__(self) -> None:
-        self.console_logger = melee.Logger() if self.debug else None
-        console_kwargs = get_console_kwargs(
-            enable_ffw=self.enable_ffw,
-            udp_port=self.udp_port,
-            replay_dir=self.replay_dir,
-            console_logger=self.console_logger,
-        )
-        self.console = melee.Console(**console_kwargs)
-        self.ego_controller = melee.Controller(
-            console=self.console, port=_get_port(self.player), type=melee.ControllerType.STANDARD
-        )
-        self.opponent_controller = melee.Controller(
-            console=self.console, port=_get_port(get_opponent(self.player)), type=melee.ControllerType.STANDARD
-        )
-        logger.info(f"Emu manager initialized for {attr.asdict(self)}")
-
-    def gamestate_generator(self) -> Generator[melee.GameState, TensorDict, None]:
-        """Generator that yields gamestates and receives controller inputs.
-
-        Yields:
-            Optional[melee.GameState]: The current game state, or None if the episode is over
-
-        Sends:
-            TensorDict: Controller inputs to be applied to the game
-        """
-        # Run the console
-        self.console.run(iso_path=REMOTE_CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
-        # Connect to the console
-        logger.debug("Connecting to console...")
-        if not self.console.connect():
-            logger.debug("ERROR: Failed to connect to the console.")
-            sys.exit(-1)
-        logger.debug("Console connected")
-
-        # Plug our controller in
-        #   Due to how named pipes work, this has to come AFTER running dolphin
-        #   NOTE: If you're loading a movie file, don't connect the controller,
-        #   dolphin will hang waiting for input and never receive it
-        logger.debug("Connecting controller 1 to console...")
-        if not self.ego_controller.connect():
-            logger.debug("ERROR: Failed to connect the controller.")
-            sys.exit(-1)
-        logger.debug("Controller 1 connected")
-        logger.debug("Connecting controller 2 to console...")
-        if not self.opponent_controller.connect():
-            logger.debug("ERROR: Failed to connect the controller.")
-            sys.exit(-1)
-        logger.debug("Controller 2 connected")
-
-        i = 0
-        match_started = False
-
-        # Wrap console manager inside a thread for timeouts
-        # Important that console manager context goes second to gracefully handle keyboard interrupts, timeouts, and all other exceptions
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(
-            console=self.console, console_logger=self.console_logger
-        ):
-            logger.debug("Starting episode")
-            while i < self.max_steps:
-                # Wrap `console.step()` in a thread with timeout
-                future = executor.submit(self.console.step)
-                try:
-                    gamestate = future.result(timeout=self.console_timeout)
-                except concurrent.futures.TimeoutError:
-                    logger.error("console.step() timed out")
-                    raise
-
-                if gamestate is None:
-                    logger.info("Gamestate is None")
-                    break
-
-                if self.console.processingtime * 1000 > self.latency_warning_threshold:
-                    logger.debug("Last frame took " + str(self.console.processingtime * 1000) + "ms to process.")
-                # logger.debug(f"Got gamestate for frame {gamestate.frame if gamestate else 'None'}")
-
-                if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-                    if match_started:
-                        logger.debug("Match ended")
-                        break
-
-                    self_play_menu_helper(
-                        gamestate=gamestate,
-                        controller_1=self.ego_controller,
-                        controller_2=self.opponent_controller,
-                        # TODO: select characters programmatically
-                        character_1=melee.Character.FOX,
-                        character_2=melee.Character.FOX,
-                        stage_selected=melee.Stage.BATTLEFIELD,
-                        opponent_cpu_level=self.opponent_cpu_level,
-                    )
-                else:
-                    if not match_started:
-                        match_started = True
-                        logger.debug("Match started")
-
-                    # Yield gamestate and receive controller inputs
-                    # logger.debug(f"Yielding gamestate {i}")
-                    controller_inputs = yield gamestate
-                    # logger.debug(f"Controller inputs: {controller_inputs}")
-                    if controller_inputs is None:
-                        logger.error("Controller inputs are None")
-                    else:
-                        # logger.debug("Sending controller inputs")
-                        send_controller_inputs(self.ego_controller, controller_inputs)
-
-                    self.episode_stats.update(gamestate)
-                    if self.console_logger is not None:
-                        self.console_logger.writeframe()
-                    i += 1
 
 
 def cpu_worker(
@@ -202,21 +62,19 @@ def cpu_worker(
     with logger.contextualize(rank=rank):
         try:
             emulator_manager = EmulatorManager(
-                rank=rank,
                 udp_port=port,
                 player=player,
                 replay_dir=replay_dir,
                 enable_ffw=enable_ffw,
                 debug=debug,
             )
-            gamestate_generator = emulator_manager.gamestate_generator()
+            gamestate_generator = emulator_manager.run_game()
+            gamestate = next(gamestate_generator)
+
             last_controller_inputs = None  # Store previous inputs
+            i = 0
 
-            for i, gamestate in enumerate(gamestate_generator):
-                if gamestate is None:
-                    stop_event.set()
-                    break
-
+            while gamestate is not None:
                 preprocess_start = time.perf_counter()
                 gamestate_td = extract_gamestate_as_tensordict(gamestate)
                 model_inputs = preprocessor.preprocess_inputs(gamestate_td, player)
@@ -259,8 +117,8 @@ def cpu_worker(
 
                 # Clear the output ready flag for the next iteration
                 model_output_ready_flag.clear()
-
-            logger.success(f"CPU worker {rank} complete.")
+        except StopIteration:
+            logger.success(f"CPU worker {rank} episode complete.")
         except Exception as e:
             logger.error(f"CPU worker {rank} encountered an error: {e}")
         finally:

@@ -8,8 +8,8 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 
-from hal.eval.emulator_helper import find_open_udp_ports
-from hal.eval.eval_closed_loop import EmulatorManager
+from hal.emulator_helper import EmulatorManager
+from hal.emulator_helper import find_open_udp_ports
 from hal.gamestate_utils import extract_and_append_gamestate_inplace
 
 
@@ -65,7 +65,6 @@ def multishine(ai_state: melee.PlayerState) -> TensorDict:
 # %%
 port = find_open_udp_ports(1)
 emulator_manager = EmulatorManager(
-    rank=0,
     udp_port=port[0],
     player="p1",
     replay_dir=Path("/tmp/slippi_replays"),
@@ -75,8 +74,7 @@ emulator_manager = EmulatorManager(
     opponent_cpu_level=9,
 )
 ego_controller = emulator_manager.ego_controller
-gamestate_generator = emulator_manager.gamestate_generator()
-gamestate = next(gamestate_generator)
+gamestate_generator = emulator_manager.run_game()
 gamestate = next(gamestate_generator)
 i = 0
 while gamestate is not None:
@@ -87,7 +85,10 @@ while gamestate is not None:
         logger.debug(f"Outer loop {i}")
     # if controller_inputs is None:
     #     logger.error("multishine returned None")
-    gamestate = gamestate_generator.send(controller_inputs)
+    try:
+        gamestate = gamestate_generator.send(controller_inputs)
+    except StopIteration:
+        break
     i += 1
 
 # %%
