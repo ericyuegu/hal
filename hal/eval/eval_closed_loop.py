@@ -118,6 +118,7 @@ def cpu_worker(
 
                 # Clear the output ready flag for the next iteration
                 model_output_ready_flag.clear()
+                i += 1
         except StopIteration:
             logger.success(f"CPU worker {rank} episode complete.")
         except Exception as e:
@@ -182,15 +183,21 @@ def gpu_worker(
         if all(event.is_set() for event in stop_events):
             break
 
-        # Update the context window by rolling and adding new data
         transfer_start = time.perf_counter()
-        context_window_BL[:, :-1].copy_(context_window_BL[:, 1:].clone())
-        context_window_BL[:, -1].copy_(shared_batched_model_input_B, non_blocking=True)
+        if iteration < seq_len:
+            # While context window is not full, fill in from the left
+            context_window_BL[:, iteration].copy_(shared_batched_model_input_B, non_blocking=True)
+        else:
+            # Update the context window by rolling frame data left and adding new data on the right
+            context_window_BL[:, :-1].copy_(context_window_BL[:, 1:].clone())
+            context_window_BL[:, -1].copy_(shared_batched_model_input_B, non_blocking=True)
         transfer_time = time.perf_counter() - transfer_start
 
         inference_start = time.perf_counter()
         with torch.no_grad():
-            outputs_B: TensorDict = model(context_window_BL)[:, -1]  # (n_workers,)
+            outputs_BL: TensorDict = model(context_window_BL)
+        seq_idx = min(seq_len - 1, iteration)
+        outputs_B: TensorDict = outputs_BL[:, seq_idx]
         inference_time = time.perf_counter() - inference_start
 
         writeback_start = time.perf_counter()
