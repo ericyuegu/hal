@@ -11,14 +11,17 @@ from hal.training.preprocess.transform import Transformation
 class InputPreprocessConfig:
     """Configuration for preprocessing functions."""
 
-    # Features to preprocess twice, once for each player
+    # Features to preprocess twice, specific to player state
     player_features: Tuple[str, ...]
 
     # Mapping from feature name to normalization function
+    # Must include embedded features such as stage, character, action, but embedding happens at model arch
     normalization_fn_by_feature_name: Dict[str, Transformation]
 
     # Mapping from feature name to frame offset relative to sampled index
     # e.g. to include controller inputs from prev frame with current frame gamestate, set p1_button_a = -1, etc.
+    # +1 HAS ALREADY BEEN APPLIED TO CONTROLLER INPUTS AT DATASET CREATION,
+    # meaning next frame's controller ("targets") are matched with current frame's gamestate ("inputs")
     frame_offsets_by_feature: Dict[str, int]
 
     # Mapping from head name to features to be fed to that head

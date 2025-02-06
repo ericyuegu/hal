@@ -42,10 +42,11 @@ def inputs_v0() -> InputPreprocessConfig:
     return InputPreprocessConfig(
         player_features=player_features,
         normalization_fn_by_feature_name={
-            "frame": cast_int32,
+            # Shared/embedded features are passed unchanged, to be embedded by model
             "stage": cast_int32,
             "character": cast_int32,
             "action": cast_int32,
+            # Normalized player features
             "percent": normalize,
             "stock": normalize,
             "facing": normalize,
@@ -65,7 +66,7 @@ def inputs_v0() -> InputPreprocessConfig:
             "opponent_action": ("opponent_action",),
         },
         input_shapes_by_head={
-            "gamestate": (2 * 9 + 1,),  # 2x for ego and opponent
+            "gamestate": (2 * 9,),  # 2x for ego and opponent
         },
     )
 
