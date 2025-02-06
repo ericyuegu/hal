@@ -4,7 +4,7 @@ from typing import Dict
 from tensordict import TensorDict
 
 from hal.constants import Player
-from hal.training.preprocess.config import InputPreprocessConfig
+from hal.training.preprocess.input_preprocess_config import InputPreprocessConfig
 
 
 class InputPreprocessRegistry:
