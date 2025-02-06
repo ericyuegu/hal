@@ -2,11 +2,13 @@ from typing import Callable
 
 import numpy as np
 import torch
+from tensordict import TensorDict
 
+from hal.constants import Player
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.data.stats import FeatureStats
 
-Transformation = Callable[[torch.Tensor, FeatureStats], torch.Tensor]
+Transformation = Callable[..., torch.Tensor]
 
 
 def cast_int32(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
@@ -118,3 +120,50 @@ def one_hot_from_int(arr: np.ndarray, num_values: int) -> np.ndarray:
     One-hot encode array of integers.
     """
     return np.eye(num_values)[arr]
+
+
+def preprocess_controller_inputs(sample: TensorDict, player: str) -> dict:
+    """
+    Preprocess controller inputs for the given player.
+    Computes discretized analog stick one-hot encodings and one-hot-encodes buttons.
+
+    Returns:
+        A dict with keys "main_stick", "c_stick", "buttons".
+    """
+    # --- Process analog stick inputs ---
+    main_stick_x = sample[f"{player}_main_stick_x"]
+    main_stick_y = sample[f"{player}_main_stick_y"]
+    c_stick_x = sample[f"{player}_c_stick_x"]
+    c_stick_y = sample[f"{player}_c_stick_y"]
+
+    main_stick_clusters = get_closest_stick_xy_cluster_v0(main_stick_x, main_stick_y)
+    one_hot_main_stick = one_hot_from_int(main_stick_clusters, len(STICK_XY_CLUSTER_CENTERS_V0))
+    c_stick_clusters = get_closest_stick_xy_cluster_v0(c_stick_x, c_stick_y)
+    one_hot_c_stick = one_hot_from_int(c_stick_clusters, len(STICK_XY_CLUSTER_CENTERS_V0))
+
+    # --- Process controller buttons ---
+    button_a = sample[f"{player}_button_a"].bool()
+    button_b = sample[f"{player}_button_b"].bool()
+    button_x = sample[f"{player}_button_x"].bool()
+    button_y = sample[f"{player}_button_y"].bool()
+    button_z = sample[f"{player}_button_z"].bool()
+    button_l = sample[f"{player}_button_l"].bool()
+    button_r = sample[f"{player}_button_r"].bool()
+
+    jump = button_x | button_y
+    shoulder = button_l | button_r
+    no_button = ~(button_a | button_b | jump | button_z | shoulder)
+
+    stacked_buttons = torch.stack((button_a, button_b, jump, button_z, shoulder, no_button), dim=-1)
+    one_hot_buttons = encode_buttons_one_hot(stacked_buttons.numpy())
+
+    return {
+        "main_stick": torch.tensor(one_hot_main_stick, dtype=torch.float32),
+        "c_stick": torch.tensor(one_hot_c_stick, dtype=torch.float32),
+        "buttons": torch.tensor(one_hot_buttons, dtype=torch.float32),
+    }
+
+
+def preprocess_controller_inputs_concat(sample: TensorDict, player: Player) -> torch.Tensor:
+    controller_feats = preprocess_controller_inputs(sample, player)
+    return torch.cat(list(controller_feats.values()), dim=-1)
