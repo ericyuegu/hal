@@ -28,9 +28,7 @@ from hal.emulator_paths import REMOTE_EMULATOR_PATH
 from hal.emulator_paths import REMOTE_EVAL_REPLAY_DIR
 from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import send_controller_inputs
-from hal.training.io import ARTIFACT_DIR_ROOT
 from hal.training.io import get_path_friendly_datetime
-from hal.training.utils import get_git_repo_root
 
 
 def _get_console_port(player: Player) -> int:
@@ -80,7 +78,7 @@ def get_replay_dir(artifact_dir: Path | None = None, step: int | None = None) ->
     if artifact_dir is None:
         replay_dir = Path(REMOTE_EVAL_REPLAY_DIR) / get_path_friendly_datetime()
     else:
-        replay_dir = Path(REMOTE_EVAL_REPLAY_DIR) / artifact_dir.relative_to(get_git_repo_root() / ARTIFACT_DIR_ROOT)
+        replay_dir = artifact_dir / "replays"
     if step is not None:
         replay_dir = replay_dir / f"{step:012d}"
     return replay_dir

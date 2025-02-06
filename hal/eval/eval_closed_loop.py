@@ -68,6 +68,7 @@ def cpu_worker(
                 replay_dir=replay_dir,
                 enable_ffw=enable_ffw,
                 debug=debug,
+                opponent_cpu_level=9,
             )
             gamestate_generator = emulator_manager.run_game()
             gamestate = next(gamestate_generator)
@@ -114,7 +115,7 @@ def cpu_worker(
                 model_output = shared_batched_model_output[rank].clone()
                 # TODO refactor this into some eval helper class
                 last_controller_inputs = preprocessor.postprocess_preds(model_output)
-                gamestate_generator.send(last_controller_inputs)
+                gamestate = gamestate_generator.send(last_controller_inputs)
 
                 # Clear the output ready flag for the next iteration
                 model_output_ready_flag.clear()
