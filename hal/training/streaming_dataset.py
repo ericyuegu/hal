@@ -22,17 +22,19 @@ class HALStreamingDataset(StreamingDataset):
         shuffle: bool,
         data_config: DataConfig,
         embedding_config: EmbeddingConfig,
+        debug: bool = False,
     ) -> None:
         super().__init__(local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
         self.preprocessor = Preprocessor(data_config=data_config, embedding_config=embedding_config)
         self.seq_len = self.preprocessor.seq_len
+        self.debug = debug
 
     def __getitem__(self, idx: int | slice | list[int] | np.ndarray) -> TensorDict:
         """Expects episode features to match data/schema.py."""
         episode_features_by_name = super().__getitem__(idx)
-        sample_T = self.preprocessor.sample_from_episode(episode_features_by_name)
+        sample_T = self.preprocessor.sample_from_episode(episode_features_by_name, debug=self.debug)
 
-        player_perspective = cast(Player, random.choice(VALID_PLAYERS))
+        player_perspective = "p1" if self.debug else cast(Player, random.choice(VALID_PLAYERS))
         inputs_T = self.preprocessor.preprocess_inputs(sample_T, player_perspective)
         targets_T = self.preprocessor.preprocess_targets(sample_T, player_perspective)
 

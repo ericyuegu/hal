@@ -59,7 +59,7 @@ class Preprocessor:
     def input_size(self) -> int:
         return sum(shape[0] for shape in self.input_shapes_by_head.values())
 
-    def sample_from_episode(self, ndarrays_by_feature: dict[str, np.ndarray]) -> TensorDict:
+    def sample_from_episode(self, ndarrays_by_feature: dict[str, np.ndarray], debug: bool = False) -> TensorDict:
         """Randomly slice input/target features into trajectory_sampling_len sequences for supervised training.
 
         Can be substituted with feature buffer at eval / runtime.
@@ -73,7 +73,7 @@ class Preprocessor:
         frames = ndarrays_by_feature["frame"]
         assert all(len(ndarray) == len(frames) for ndarray in ndarrays_by_feature.values())
         episode_len = len(frames)
-        sample_index = random.randint(0, episode_len - self.trajectory_sampling_len)
+        sample_index = 0 if debug else random.randint(0, episode_len - self.trajectory_sampling_len)
         tensor_slice_by_feature_name = {
             feature_name: torch.from_numpy(
                 feature_L[sample_index : sample_index + self.trajectory_sampling_len].copy()

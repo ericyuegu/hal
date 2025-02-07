@@ -177,7 +177,7 @@ def inputs_v1() -> InputPreprocessConfig:
             "controller": preprocess_controller_inputs_concat,
         },
         frame_offsets_by_feature={
-            "controller": -1,
+            "controller": 0,  # Do not offset, already offset in data preprocessing
         },
         grouped_feature_names_by_head={
             "stage": ("stage",),

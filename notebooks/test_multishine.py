@@ -33,6 +33,7 @@ train_dataset = HALStreamingDataset(
     shuffle=False,
     data_config=data_config,
     embedding_config=config.embedding,
+    debug=True,
 )
 # %%
 x_train = train_dataset[0]["inputs"].unsqueeze(0)
@@ -49,10 +50,49 @@ y_hat["buttons"][0].argmax(dim=-1) == y_train["buttons"][0].argmax(dim=-1)
 y_hat["main_stick"][0].argmax(dim=-1) == y_train["main_stick"][0].argmax(dim=-1)
 # %%
 x_test = TensorDict.load("/tmp/multishine_debugging/model_inputs_000255/")
+y_test = TensorDict.load("/tmp/multishine_debugging/model_outputs_000255/")
+# %%
+for i in torch.argwhere(x_train["ego_action"][0, :105] != x_test["ego_action"][0, :105]):
+    print(f"Frame {i[0]}: train={x_train['ego_action'][0, i[0]].item()} test={x_test['ego_action'][0, i[0]].item()}")
+# %%
+y_train["buttons"][0, 102]
+# %%
+for k, v in (x_train == x_test).items():
+    print(k, v[0, :103])
+
+# %%
+x_train["gamestate"][0, 102, 18:]
+# %%
+x_test["gamestate"][0, 102, 18:]
+# %%
+y_test["buttons"][0, :103]
 # %%
 x_test["ego_action"][0, :103]
 # %%
-x_train["ego_action"][0, :103]
+torch.all(x_train["ego_action"][0, :103] == x_test["ego_action"][0, :103])
+# %%
+x_train["gamestate"][0, 102, 18:] == x_test["gamestate"][0, 102, 18:]
+# %%
+x_train["gamestate"][0, 102, 18:]
+# %%
+x_test["gamestate"][0, 102, 18:]
+# %%
+for k, v in (x_train == x_test).items():
+    print(k, v[0, :103])
+# %%
+model(x_test)[0, 102]["buttons"]
+# %%
+model(x_train)[0, 102]["buttons"]
+# %%
+diff = x_train[0, 102] != x_test[0, 102]
+for k, v in diff.items():
+    print(k, v)
+# %%
+y_train[0, 102]["buttons"]
+# %%
+# for each frame that's different, print frame number and the columns that are different
+for i in torch.argwhere(x_train["gamestate"][0, :103] != x_test["gamestate"][0, :103]):
+    print(f"Frame {i[0]:03d}: {i}")
 # %%
 x_test["gamestate"][0, :, :103]
 # %%

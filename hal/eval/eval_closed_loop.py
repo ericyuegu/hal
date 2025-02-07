@@ -191,6 +191,7 @@ def gpu_worker(
         inference_start = time.perf_counter()
         with torch.no_grad():
             outputs_BL: TensorDict = model(context_window_BL)
+        # outputs_BL.save(f"/tmp/multishine_debugging/model_outputs_{iteration:06d}")
         seq_idx = min(seq_len - 1, iteration)
         outputs_B: TensorDict = outputs_BL[:, seq_idx]
         inference_time = time.perf_counter() - inference_start
