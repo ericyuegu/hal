@@ -481,7 +481,8 @@ class CausalSelfAttentionRelativePosition(nn.Module):
         v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)  # (B, nh, L, hs)
 
         # relative positional embeddings
-        Er_t = self.Er.T  # (hs, L)
+        start = self.block_size - L
+        Er_t = self.Er[start:, :].transpose(0, 1)  # (hs, L)
         QEr = q @ Er_t  # (B, nh, L, hs) x (hs, L) -> (B, nh, L, L)
         Srel = skew(QEr)  # (B, nh, L, L)
 
