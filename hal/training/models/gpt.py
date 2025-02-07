@@ -323,7 +323,7 @@ class GPTv1(BaseGPT):
 
 class GPTv2(GPTv1):
     """
-    Include previous controller inputs.
+    Include previous controller inputs as model input.
 
     Autoregressively condition output heads on each other.
     """
@@ -331,7 +331,7 @@ class GPTv2(GPTv1):
     def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
         super().__init__(preprocessor, gpt_config)
 
-        # Repeat assertions because PyLance is dumb
+        # repeat assertions because mypy/PyLance is dumb
         self.emb_config = self.preprocessor.embedding_config
         assert self.emb_config.num_buttons is not None
         assert self.emb_config.num_main_stick_clusters is not None
@@ -442,38 +442,37 @@ def skew(QEr: torch.Tensor) -> torch.Tensor:
 
 
 class CausalSelfAttentionRelativePosition(nn.Module):
-    def __init__(self, n_embd: int, n_head: int, block_size: int, dropout: float, bias: bool) -> None:
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        assert n_embd % n_head == 0
-        self.n_head = n_head
-        self.n_embd = n_embd
-        self.hs = n_embd // n_head  # head size
-        self.block_size = block_size
+        assert config.n_embd % config.n_head == 0
+        self.config = config
+        self.block_size = config.block_size
+        self.n_embd = config.n_embd
+        self.n_head = config.n_head
+        self.hs = config.n_embd // config.n_head
+        self.dropout = config.dropout
 
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
-
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=config.bias)
         # relative positional embedding table of shape (L, hs)
-        self.Er = nn.Parameter(torch.randn(block_size, self.hs))
-
+        self.Er = nn.Parameter(torch.randn(self.block_size, self.hs))
         # regularization
-        self.attn_dropout = nn.Dropout(dropout)
-        self.resid_dropout = nn.Dropout(dropout)
+        self.attn_dropout = nn.Dropout(self.dropout)
+        self.resid_dropout = nn.Dropout(self.dropout)
 
-        print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
         # causal mask to ensure that attention is only applied to the left in the input sequence
         self.register_buffer(
             "bias",
-            torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size),
+            torch.tril(torch.ones(self.block_size, self.block_size)).view(1, 1, self.block_size, self.block_size),
         )
         # disable flash attention,
         self.flash = False
 
     def forward(self, x: torch.Tensor):
-        B, L, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-        assert L <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
+        B, L, D = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -494,17 +493,107 @@ class CausalSelfAttentionRelativePosition(nn.Module):
         att = F.softmax(att, dim=-1)
         att = self.attn_dropout(att)
         y = att @ v  # (B, nh, L, L) x (B, nh, L, hs) -> (B, nh, L, hs)
-        y = y.transpose(1, 2).contiguous().view(B, L, C)  # re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, L, D)  # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
 
 
+class BlockRelativePosition(nn.Module):
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttentionRelativePosition(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+
 class GPTv3(BaseGPT):
+    """
+    Decoder-only transformer with learned input embeddings for characters, stages, and actions.
+
+    Uses relative instead of absolute position embeddings.
+
+    Outputs independent categorical predictions for buttons, main stick, and c-stick.
+    """
+
     def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
         super().__init__(preprocessor, gpt_config)
-        ...
+        # Numeric + embedded feature sizes defined programmatically in InputPreprocessConfig
+        self.input_size = self.preprocessor.input_size  # G
+        self.n_embd = gpt_config.n_embd  # D
+
+        self.emb_config = self.preprocessor.embedding_config
+        assert self.emb_config.num_buttons is not None
+        assert self.emb_config.num_main_stick_clusters is not None
+        assert self.emb_config.num_c_stick_clusters is not None
+
+        # categorical input embeddings
+        self.stage_emb = nn.Embedding(self.emb_config.num_stages, self.emb_config.stage_embedding_dim)
+        self.character_emb = nn.Embedding(self.emb_config.num_characters, self.emb_config.character_embedding_dim)
+        self.action_emb = nn.Embedding(self.emb_config.num_actions, self.emb_config.action_embedding_dim)
+
+        self.transformer = nn.ModuleDict(
+            dict(
+                proj_down=nn.Linear(self.input_size, gpt_config.n_embd),  # G -> D
+                drop=nn.Dropout(gpt_config.dropout),
+                h=nn.ModuleList([BlockRelativePosition(gpt_config) for _ in range(gpt_config.n_layer)]),
+                ln_f=LayerNorm(self.n_embd, bias=gpt_config.bias),
+            )
+        )
+
+        # output heads
+        self.button_head = nn.Linear(self.n_embd, self.emb_config.num_buttons, bias=False)
+        self.main_stick_head = nn.Linear(self.n_embd, self.emb_config.num_main_stick_clusters, bias=False)
+        self.c_stick_head = nn.Linear(self.n_embd, self.emb_config.num_c_stick_clusters, bias=False)
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * gpt_config.n_layer))
+
+    def _embed_inputs(self, inputs: TensorDict) -> torch.Tensor:
+        return torch.cat(
+            [
+                self.stage_emb(inputs["stage"]).squeeze(-2),
+                self.character_emb(inputs["ego_character"]).squeeze(-2),
+                self.character_emb(inputs["opponent_character"]).squeeze(-2),
+                self.action_emb(inputs["ego_action"]).squeeze(-2),
+                self.action_emb(inputs["opponent_action"]).squeeze(-2),
+                inputs["gamestate"],
+            ],
+            dim=-1,
+        )
+
+    def forward(self, inputs: TensorDict):
+        B, L, _ = inputs["gamestate"].shape
+        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+
+        # concatenate embeddings and numerical inputs -> project down
+        combined_inputs_BLG = self._embed_inputs(inputs)
+        proj_inputs_BLD = self.transformer.proj_down(combined_inputs_BLG)
+
+        x_BLD = self.transformer.drop(proj_inputs_BLD)
+        for block in self.transformer.h:
+            x_BLD = block(x_BLD)
+        x_BLD = self.transformer.ln_f(x_BLD)
+
+        return TensorDict(
+            {
+                "buttons": self.button_head(x_BLD).squeeze(-2),
+                "main_stick": self.main_stick_head(x_BLD).squeeze(-2),
+                "c_stick": self.c_stick_head(x_BLD).squeeze(-2),
+            },
+            batch_size=(B, L),
+        )
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -607,12 +696,28 @@ class MultiTokenGPT(GPTv1):
         return TensorDict(multi_logit_dict, batch_size=(B, L))
 
 
-Arch.register("GPTv1-4-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=4, n_head=4))
-Arch.register("GPTv1-8-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=8, n_head=4))
-Arch.register("GPTv1-8-4-dropout", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=8, n_head=4, dropout=0.1))
-Arch.register("GPTv1-12-4", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=12, n_head=4))
-Arch.register("GPTv1-12-4-dropout", GPTv1, gpt_config=GPTConfig(n_embd=256, n_layer=12, n_head=4, dropout=0.1))
-Arch.register("GPTv1-12-512-4-dropout", GPTv1, gpt_config=GPTConfig(n_embd=512, n_layer=12, n_head=4, dropout=0.1))
+Arch.register("GPTv1-256-4-4", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
+Arch.register("GPTv1-256-8-4", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4))
+Arch.register(
+    "GPTv1-256-8-4-dropout", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4, dropout=0.1)
+)
+Arch.register("GPTv1-256-12-4", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4))
+Arch.register(
+    "GPTv1-256-12-4-dropout",
+    GPTv1,
+    gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4, dropout=0.1),
+)
+Arch.register(
+    "GPTv1-512-12-4-dropout",
+    GPTv1,
+    gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=12, n_head=4, dropout=0.1),
+)
 
-Arch.register("GPTv2-4-4", GPTv2, gpt_config=GPTConfig(n_embd=256, n_layer=4, n_head=4))
-Arch.register("GPTv2-12-4-dropout", GPTv2, gpt_config=GPTConfig(n_embd=256, n_layer=12, n_head=4, dropout=0.1))
+Arch.register("GPTv2-256-4-4", GPTv2, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
+Arch.register(
+    "GPTv2-256-12-4-dropout",
+    GPTv2,
+    gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4, dropout=0.1),
+)
+
+Arch.register("GPTv3-256-4-4", GPTv3, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
