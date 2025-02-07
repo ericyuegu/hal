@@ -411,7 +411,116 @@ class GPTv2(BaseGPT):
         )
 
 
-class GPTv2_ResHead(GPTv2):
+class RelativePosition(nn.Module):
+    """
+    Relative Position Embeddings from Shaw et al. (2018)
+    https://arxiv.org/abs/1803.02155
+
+    Slow and memory-inefficient, materializes O(T^2) matrix.
+    """
+
+    def __init__(self, head_dim: int, max_relative_position: int) -> None:
+        super().__init__()
+        self.head_dim = head_dim
+        self.max_relative_position = max_relative_position
+        self.embeddings_table = nn.Parameter(torch.Tensor(max_relative_position * 2 + 1, head_dim))
+        nn.init.xavier_uniform_(self.embeddings_table)
+
+    def forward(self, length_q: int, length_k: int) -> torch.Tensor:
+        """Returns a tensor of shape (T, T, head_dim)"""
+        # Wrap indexing in torch.no_grad() to avoid unnecessary gradient computation
+        with torch.no_grad():
+            range_vec_q = torch.arange(length_q)
+            range_vec_k = torch.arange(length_k)
+            distance_mat = range_vec_k[None, :] - range_vec_q[:, None]
+            distance_mat_clipped = torch.clamp(distance_mat, -self.max_relative_position, self.max_relative_position)
+            final_mat = (distance_mat_clipped + self.max_relative_position).long()
+        embeddings = self.embeddings_table[final_mat]
+
+        return embeddings
+
+
+def skew(QEr: torch.Tensor) -> torch.Tensor:
+    """
+    Memory-efficient "skewing" trick to avoid materializing O(T^2) `R` matrix.
+
+    Music Transformer, Huang et al. (2018) https://arxiv.org/abs/1809.04281
+    Implementation by: https://jaketae.github.io/study/relative-positional-encoding/
+    """
+    # QEr.shape = (batch_size, num_heads, seq_len, seq_len)
+    padded = F.pad(QEr, (1, 0))
+    # padded.shape = (batch_size, num_heads, seq_len, 1 + seq_len)
+    batch_size, num_heads, num_rows, num_cols = padded.shape
+    reshaped = padded.reshape(batch_size, num_heads, num_cols, num_rows)
+    # reshaped.size = (batch_size, num_heads, 1 + seq_len, seq_len)
+    Srel = reshaped[:, :, 1:, :]
+    # Srel.shape = (batch_size, num_heads, seq_len, seq_len)
+    return Srel
+
+
+class CausalSelfAttentionRelativePosition(nn.Module):
+    def __init__(self, n_embd: int, n_head: int, context_length: int, dropout: float, bias: bool) -> None:
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.hs = n_embd // n_head  # head size
+        self.context_length = context_length
+
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        # output projection
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
+
+        # relative positional embedding table of shape (T, hs)
+        self.Er = nn.Parameter(torch.randn(context_length, self.hs))
+
+        # regularization
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+
+        print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+        # causal mask to ensure that attention is only applied to the left in the input sequence
+        self.register_buffer(
+            "bias",
+            torch.tril(torch.ones(context_length, context_length)).view(1, 1, context_length, context_length),
+        )
+        # disable flash attention,
+        self.flash = False
+
+    def forward(self, x: torch.Tensor):
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        assert (
+            T <= self.context_length
+        ), f"Cannot forward sequence of length {T}, block size is only {self.context_length}"
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, self.hs).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, self.hs).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, self.hs).transpose(1, 2)  # (B, nh, T, hs)
+
+        # relative positional embeddings
+        Er_t = self.Er.T  # (hs, T)
+        QEr = q @ Er_t  # (B, nh, T, hs) x (hs, T) -> (B, nh, T, T)
+        Srel = skew(QEr)  # (B, nh, T, T)
+
+        # causal self-attention
+        QK_t = q @ k.transpose(-2, -1)  # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        scale = 1.0 / math.sqrt(k.size(-1))
+        att = (QK_t + Srel) * scale
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
+
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
+
+class GPTv3(BaseGPT):
     def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
         super().__init__(preprocessor, gpt_config)
         ...
