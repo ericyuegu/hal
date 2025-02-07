@@ -4,7 +4,9 @@ from typing import Set
 import torch
 from tensordict import TensorDict
 
+from hal.constants import INCLUDED_BUTTONS
 from hal.constants import Player
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import get_opponent
 from hal.data.stats import FeatureStats
 from hal.training.preprocess.input_preprocess_config import InputPreprocessConfig
@@ -186,7 +188,7 @@ def inputs_v1() -> InputPreprocessConfig:
             "controller": ("controller",),
         },
         input_shapes_by_head={
-            "gamestate": (2 * 9,),
+            "gamestate": (2 * 9 + 2 * len(STICK_XY_CLUSTER_CENTERS_V0) + len(INCLUDED_BUTTONS),),
         },
     )
 
