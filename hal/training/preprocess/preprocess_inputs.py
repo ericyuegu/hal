@@ -193,5 +193,125 @@ def inputs_v1() -> InputPreprocessConfig:
     )
 
 
+def inputs_v2() -> InputPreprocessConfig:
+    """
+    Baseline input features + action frame.
+
+    Separate embedding heads for stage, character, & action.
+    No controller, no platforms, no projectiles.
+    """
+
+    player_features = (
+        "character",
+        "action",
+        "percent",
+        "stock",
+        "facing",
+        "invulnerable",
+        "jumps_left",
+        "on_ground",
+        "shield_strength",
+        "position_x",
+        "position_y",
+        "action_frame",
+    )
+
+    return InputPreprocessConfig(
+        player_features=player_features,
+        normalization_fn_by_feature_name={
+            # Shared/embedded features are passed unchanged, to be embedded by model
+            "frame": cast_int32,
+            "stage": cast_int32,
+            "character": cast_int32,
+            "action": cast_int32,
+            # Normalized player features
+            "percent": normalize,
+            "stock": normalize,
+            "facing": normalize,
+            "invulnerable": normalize,
+            "jumps_left": normalize,
+            "on_ground": normalize,
+            "shield_strength": invert_and_normalize,
+            "position_x": standardize,
+            "position_y": standardize,
+            "action_frame": normalize,
+        },
+        frame_offsets_by_feature={},
+        grouped_feature_names_by_head={
+            "stage": ("stage",),
+            "ego_character": ("ego_character",),
+            "opponent_character": ("opponent_character",),
+            "ego_action": ("ego_action",),
+            "opponent_action": ("opponent_action",),
+        },
+        input_shapes_by_head={
+            "gamestate": (2 * 10 + 1,),  # 2x for ego and opponent + 1 for frame
+        },
+    )
+
+
+def inputs_v3() -> InputPreprocessConfig:
+    """
+    Baseline input features + action frame + controller inputs concatenated to gamestate.
+
+    Separate embedding heads for stage, character, & action.
+    No platforms, no projectiles.
+    """
+
+    player_features = (
+        "character",
+        "action",
+        "percent",
+        "stock",
+        "facing",
+        "invulnerable",
+        "jumps_left",
+        "on_ground",
+        "shield_strength",
+        "position_x",
+        "position_y",
+        "action_frame",
+    )
+
+    return InputPreprocessConfig(
+        player_features=player_features,
+        normalization_fn_by_feature_name={
+            # Shared/embedded features are passed unchanged, to be embedded by model
+            "stage": cast_int32,
+            "character": cast_int32,
+            "action": cast_int32,
+            # Normalized player features
+            "percent": normalize,
+            "stock": normalize,
+            "facing": normalize,
+            "invulnerable": normalize,
+            "jumps_left": normalize,
+            "on_ground": normalize,
+            "shield_strength": invert_and_normalize,
+            "position_x": standardize,
+            "position_y": standardize,
+            "action_frame": normalize,
+            # Ego controller inputs
+            "controller": preprocess_controller_inputs_concat,
+        },
+        frame_offsets_by_feature={
+            "controller": -1,
+        },
+        grouped_feature_names_by_head={
+            "stage": ("stage",),
+            "ego_character": ("ego_character",),
+            "opponent_character": ("opponent_character",),
+            "ego_action": ("ego_action",),
+            "opponent_action": ("opponent_action",),
+            "controller": ("controller",),
+        },
+        input_shapes_by_head={
+            "gamestate": (2 * 10 + 2 * len(STICK_XY_CLUSTER_CENTERS_V0) + len(INCLUDED_BUTTONS),),
+        },
+    )
+
+
 InputPreprocessRegistry.register("inputs_v0", inputs_v0())
 InputPreprocessRegistry.register("inputs_v1", inputs_v1())
+InputPreprocessRegistry.register("inputs_v2", inputs_v2())
+InputPreprocessRegistry.register("inputs_v3", inputs_v3())
