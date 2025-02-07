@@ -44,6 +44,8 @@ train_dataset = HALStreamingDataset(
 
 # %%
 x_train = train_dataset[0]["inputs"].unsqueeze(0)
+# %%
+x_train["ego_action"]
 # x_train["ego_action"]
 # %%
 y_train = train_dataset[0]["targets"].unsqueeze(0)

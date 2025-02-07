@@ -223,8 +223,10 @@ class Trainer(torch.nn.Module, abc.ABC):
 
         if should_closed_loop_eval:
             try:
+                # We wait so wandb can commit the metrics
                 logger.debug("Waiting for closed loop evaluation")
-                closed_loop_eval_stats: EpisodeStats = eval_stats_queue.get(block=True, timeout=60 * 4)
+                # Standard match time limit is 8 minutes, plus buffer for setup/teardown
+                closed_loop_eval_stats: EpisodeStats = eval_stats_queue.get(block=True, timeout=60 * 8 + 30)
                 loss_dict.update(closed_loop_eval_stats.to_wandb_dict(prefix="closed_loop_eval", player="p1"))
             except Empty:
                 logger.warning("Closed loop evaluation stats not available")

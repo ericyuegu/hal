@@ -26,6 +26,9 @@ class EpisodeStats:
     _prev_p1_percent: float = 0.0
     _prev_p2_percent: float = 0.0
 
+    # Debugging / character-specific
+    num_shines: int = 0
+
     def __add__(self, other: "EpisodeStats") -> "EpisodeStats":
         return EpisodeStats(
             p1_damage=self.p1_damage + other.p1_damage,
@@ -62,6 +65,13 @@ class EpisodeStats:
         self._prev_p2_stock = p2.stock
         self.frames += 1
 
+        if (
+            p1.character == melee.Character.FOX
+            and p1.action == melee.Action.DOWN_B_GROUND_START
+            and p1.action_frame == 1
+        ):
+            self.num_shines += 1
+
     def to_wandb_dict(self, player: Player, prefix: str = "val/closed_loop") -> Dict[str, float]:
         return {
             f"{prefix}/episodes": self.episodes,
@@ -70,6 +80,7 @@ class EpisodeStats:
             f"{prefix}/stocks_taken": self.p2_stocks_lost if player == "p1" else self.p1_stocks_lost,
             f"{prefix}/stocks_lost": self.p1_stocks_lost if player == "p1" else self.p2_stocks_lost,
             f"{prefix}/frames": self.frames,
+            f"{prefix}/num_shines": self.num_shines,
         }
 
 

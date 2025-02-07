@@ -597,6 +597,22 @@ class GPTv3(BaseGPT):
         )
 
 
+class GPTv3Controller(GPTv3):
+    def _embed_inputs(self, inputs: TensorDict) -> torch.Tensor:
+        return torch.cat(
+            [
+                self.stage_emb(inputs["stage"]).squeeze(-2),
+                self.character_emb(inputs["ego_character"]).squeeze(-2),
+                self.character_emb(inputs["opponent_character"]).squeeze(-2),
+                self.action_emb(inputs["ego_action"]).squeeze(-2),
+                self.action_emb(inputs["opponent_action"]).squeeze(-2),
+                inputs["gamestate"],
+                inputs["controller"],
+            ],
+            dim=-1,
+        )
+
+
 @attr.s(auto_attribs=True, frozen=True)
 class MultiTokenGPTConfig(GPTConfig):
     n_lookahead: int = 4
@@ -722,3 +738,6 @@ Arch.register(
 )
 
 Arch.register("GPTv3-256-4-4", GPTv3, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
+Arch.register(
+    "GPTv3Controller-256-4-4", GPTv3Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
+)
