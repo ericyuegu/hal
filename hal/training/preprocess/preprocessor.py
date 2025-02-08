@@ -18,7 +18,10 @@ from hal.training.preprocess.transform import Transformation
 
 class Preprocessor:
     """
-    Container object that converts ndarray dicts of gamestate features into supervised training examples.
+    Converts ndarray dicts of gamestate features into training examples.
+
+    We support frame offsets for features during supervised training,
+    e.g. grouping controller inputs from a previous frame with the current frame's gamestate.
 
     Class holds on to data config and knows:
     - how to slice full episodes into appropriate input/target shapes
@@ -45,12 +48,16 @@ class Preprocessor:
         self.max_abs_offset = max((abs(offset) for offset in self.frame_offsets_by_feature.values()), default=0)
         self.min_offset = min((offset for offset in self.frame_offsets_by_feature.values()), default=0)
 
-        # Closed loop eval
-        # self.last_controller_inputs: Optional[Dict[str, torch.Tensor]] = None
+    @property
+    def eval_warmup_frames(self) -> int:
+        """If min_offset is negative, we need to skip min_offset frames at eval time to match training distribution."""
+        if self.min_offset < 0:
+            return abs(self.min_offset)
+        return 0
 
     @property
     def trajectory_sampling_len(self) -> int:
-        """Get the number of frames needed from a full episode to preprocess a supervised training example."""
+        """Calculates number of frames needed from a full episode to preprocess a supervised training example."""
         trajectory_len = self.seq_len
         trajectory_len += self.max_abs_offset
         return trajectory_len

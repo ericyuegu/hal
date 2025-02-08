@@ -68,13 +68,13 @@ def cpu_worker(
                 replay_dir=replay_dir,
                 enable_ffw=enable_ffw,
                 debug=debug,
-                opponent_cpu_level=0,  # debugging multishine; TODO remove
+                opponent_cpu_level=9,
             )
             gamestate_generator = emulator_manager.run_game()
             gamestate = next(gamestate_generator)
             # Skip first N frames to match starting frame offset from training sequence sampling
-            logger.debug(f"Skipping {abs(preprocessor.min_offset)} starting frames to match training distribution")
-            for _ in range(abs(preprocessor.min_offset)):
+            logger.debug(f"Skipping {preprocessor.eval_warmup_frames} starting frames to match training distribution")
+            for _ in range(preprocessor.eval_warmup_frames):
                 gamestate = next(gamestate_generator)
 
             i = 0
@@ -102,13 +102,12 @@ def cpu_worker(
                 if stop_event.is_set():
                     break
 
-                # Read the output and store one-hot encodings for next iteration
+                # Read model output and postprocess
                 model_output = shared_batched_model_output[rank].clone()
-                # TODO refactor this into some eval helper class
-                last_controller_inputs = preprocessor.postprocess_preds(model_output)
+                controller_inputs = preprocessor.postprocess_preds(model_output)
 
                 # Send controller inputs to emulator, update gamestate
-                gamestate = gamestate_generator.send(last_controller_inputs)
+                gamestate = gamestate_generator.send(controller_inputs)
 
                 # Clear the output ready flag for the next iteration
                 model_output_ready_flag.clear()
