@@ -41,6 +41,11 @@ def is_master() -> bool:
     return get_device_id() == 0
 
 
+def log_if_master(message: Any) -> None:
+    if is_master():
+        logger.info(message)
+
+
 def trange(*args, **kwargs) -> Union[range, tqdm]:
     if not is_master():
         return range(*args)

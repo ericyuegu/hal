@@ -6,10 +6,10 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 from torch.nn import functional as F
-from training.preprocess.preprocessor import Preprocessor
 
 from hal.training.config import TrainConfig
 from hal.training.models.registry import Arch
+from hal.training.preprocess.preprocessor import Preprocessor
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -20,18 +20,6 @@ class GPTConfig:
     n_head: int
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-
-
-class LayerNorm(nn.Module):
-    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False."""
-
-    def __init__(self, ndim: int, bias: bool) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
-
-    def forward(self, inputs: torch.Tensor):
-        return F.layer_norm(inputs, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
 class CausalSelfAttention(nn.Module):
@@ -111,9 +99,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -161,32 +149,6 @@ class BaseGPT(nn.Module):
         for block in self.transformer.h:
             if hasattr(block.attn, "bias"):
                 block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
-
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
-
-        return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter: int, dt: float):
         """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS."""
@@ -267,7 +229,7 @@ class GPTv1(BaseGPT):
                 wpe=nn.Embedding(self.block_size, gpt_config.n_embd),
                 drop=nn.Dropout(gpt_config.dropout),
                 h=nn.ModuleList([Block(gpt_config) for _ in range(gpt_config.n_layer)]),
-                ln_f=LayerNorm(self.n_embd, bias=gpt_config.bias),
+                ln_f=nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
             )
         )
 
@@ -518,9 +480,9 @@ class CausalSelfAttentionRelativePosition(nn.Module):
 class BlockRelativePosition(nn.Module):
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttentionRelativePosition(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -555,7 +517,7 @@ class GPTv3(BaseGPT):
                 proj_down=nn.Linear(self.input_size, gpt_config.n_embd),  # G -> D
                 drop=nn.Dropout(gpt_config.dropout),
                 h=nn.ModuleList([BlockRelativePosition(gpt_config) for _ in range(gpt_config.n_layer)]),
-                ln_f=LayerNorm(self.n_embd, bias=gpt_config.bias),
+                ln_f=nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
             )
         )
 
@@ -647,7 +609,7 @@ class GPTv4Controller(BaseGPT):
                 proj_down=nn.Linear(self.input_size, gpt_config.n_embd),  # G -> D
                 drop=nn.Dropout(gpt_config.dropout),
                 h=nn.ModuleList([BlockRelativePosition(gpt_config) for _ in range(gpt_config.n_layer)]),
-                ln_f=LayerNorm(self.n_embd, bias=gpt_config.bias),
+                ln_f=nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
             )
         )
 
@@ -658,7 +620,7 @@ class GPTv4Controller(BaseGPT):
 
         # Put c-stick first because it overrides button inputs, other heads can choose to fire if c-stick is inactive
         self.c_stick_head = nn.Sequential(
-            LayerNorm(self.n_embd, bias=gpt_config.bias),
+            nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
             nn.Linear(self.n_embd, self.n_embd // 2),
             nn.GELU(),
             nn.Linear(self.n_embd // 2, c_stick_size),
@@ -666,7 +628,7 @@ class GPTv4Controller(BaseGPT):
 
         main_stick_input_size = self.n_embd + c_stick_size
         self.main_stick_head = nn.Sequential(
-            LayerNorm(main_stick_input_size, bias=gpt_config.bias),
+            nn.LayerNorm(main_stick_input_size, bias=gpt_config.bias),
             nn.Linear(main_stick_input_size, main_stick_input_size // 2),
             nn.GELU(),
             nn.Linear(main_stick_input_size // 2, main_stick_size),
@@ -674,7 +636,7 @@ class GPTv4Controller(BaseGPT):
 
         button_input_size = self.n_embd + main_stick_size + c_stick_size
         self.button_head = nn.Sequential(
-            LayerNorm(button_input_size, bias=gpt_config.bias),
+            nn.LayerNorm(button_input_size, bias=gpt_config.bias),
             nn.Linear(button_input_size, button_input_size // 2),
             nn.GELU(),
             nn.Linear(button_input_size // 2, button_size),
@@ -767,7 +729,7 @@ class MultiTokenGPT(GPTv1):
                         for _ in range(gpt_config.n_layer)
                     ]
                 ),
-                ln_f=LayerNorm(self.n_embd, bias=gpt_config.bias),
+                ln_f=nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
             )
         )
         self.out_heads = nn.ModuleDict(
@@ -865,4 +827,7 @@ Arch.register(
 
 Arch.register(
     "GPTv4Controller-256-4-4", GPTv4Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
+)
+Arch.register(
+    "GPTv4Controller-256-8-4", GPTv4Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4)
 )

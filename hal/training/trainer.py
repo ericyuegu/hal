@@ -15,6 +15,7 @@ from tensordict import TensorDict
 from torch.nn import functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
+from training.distributed import log_if_master
 
 from hal.eval.eval_closed_loop import run_closed_loop_evaluation
 from hal.eval.eval_helper import EpisodeStats
@@ -29,8 +30,8 @@ from hal.training.io import Writer
 from hal.training.io import get_artifact_dir
 from hal.training.io import get_exp_name
 from hal.training.io import get_log_dir
-from hal.training.io import log_if_master
 from hal.training.models.registry import Arch
+from hal.training.optim import create_optimizer
 from hal.training.preprocess.preprocessor import Preprocessor
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
@@ -66,13 +67,14 @@ class Trainer(torch.nn.Module, abc.ABC):
         logger.info(f"Initializing model {self.config.arch}")
         model = Arch.get(self.config.arch, preprocessor=self.preprocessor)
         self.model = maybe_wrap_model_distributed(model)
-        self.opt = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.lr,
-            betas=self.config.betas,
-            eps=self.config.eps,
+        self.opt = create_optimizer(
+            self.model,
             weight_decay=self.config.wd,
+            learning_rate=self.config.lr,
+            betas=self.config.betas,
+            device_type=self.device,
         )
+
         batch_size = get_world_size() * self.config.local_batch_size
         self.scheduler = CosineAnnealingLR(self.opt, T_max=int(config.n_samples / batch_size), eta_min=1e-6)
         self.ckpt = Checkpoint(

@@ -76,11 +76,6 @@ def get_default_melee_iso_path() -> str:
     return melee_path
 
 
-def log_if_master(message: Any) -> None:
-    if is_master():
-        logger.info(message)
-
-
 FILE_MATCH: str = "*.pth"
 FILE_FORMAT: str = "%012d.pth"
 CONFIG_FILENAME: str = "config.json"
