@@ -134,7 +134,7 @@ def inputs_v0() -> InputPreprocessConfig:
     )
 
 
-def inputs_v1() -> InputPreprocessConfig:
+def inputs_v0_controller() -> InputPreprocessConfig:
     """
     Baseline input features + controller inputs concatenated to gamestate.
 
@@ -193,7 +193,7 @@ def inputs_v1() -> InputPreprocessConfig:
     )
 
 
-def inputs_v2() -> InputPreprocessConfig:
+def inputs_v1() -> InputPreprocessConfig:
     """
     Baseline input features + action frame.
 
@@ -250,7 +250,7 @@ def inputs_v2() -> InputPreprocessConfig:
     )
 
 
-def inputs_v3() -> InputPreprocessConfig:
+def inputs_v1_controller() -> InputPreprocessConfig:
     """
     Baseline input features + action frame + controller inputs concatenated to gamestate.
 
@@ -312,6 +312,6 @@ def inputs_v3() -> InputPreprocessConfig:
 
 
 InputPreprocessRegistry.register("inputs_v0", inputs_v0())
+InputPreprocessRegistry.register("inputs_v0_controller", inputs_v0_controller())
 InputPreprocessRegistry.register("inputs_v1", inputs_v1())
-InputPreprocessRegistry.register("inputs_v2", inputs_v2())
-InputPreprocessRegistry.register("inputs_v3", inputs_v3())
+InputPreprocessRegistry.register("inputs_v1_controller", inputs_v1_controller())

@@ -321,7 +321,23 @@ class GPTv1(BaseGPT):
         )
 
 
-class GPTv2(GPTv1):
+class GPTv1Controller(GPTv1):
+    def _embed_inputs(self, inputs: TensorDict) -> torch.Tensor:
+        return torch.cat(
+            [
+                self.stage_emb(inputs["stage"]).squeeze(-2),
+                self.character_emb(inputs["ego_character"]).squeeze(-2),
+                self.character_emb(inputs["opponent_character"]).squeeze(-2),
+                self.action_emb(inputs["ego_action"]).squeeze(-2),
+                self.action_emb(inputs["opponent_action"]).squeeze(-2),
+                inputs["gamestate"],
+                inputs["controller"],
+            ],
+            dim=-1,
+        )
+
+
+class GPTv2Controller(GPTv1):
     """
     Include previous controller inputs as model input.
 
@@ -730,10 +746,10 @@ Arch.register(
     gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=12, n_head=4, dropout=0.1),
 )
 
-Arch.register("GPTv2-256-4-4", GPTv2, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
+Arch.register("GPTv2-256-4-4", GPTv2Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
 Arch.register(
     "GPTv2-256-12-4-dropout",
-    GPTv2,
+    GPTv2Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4, dropout=0.1),
 )
 
