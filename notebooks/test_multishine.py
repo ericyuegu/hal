@@ -14,14 +14,29 @@ from hal.training.streaming_dataset import HALStreamingDataset
 torch.set_printoptions(threshold=torch.inf)
 # %%
 ACTION_BY_IDX
-
-
 # %%
-# Feb 6, inputs_v1
-# artifact_dir = Path("/opt/projects/hal2/runs/2025-02-06_17-33-37/arch@GPTv1-4-4_local_batch_size@32_n_samples@262144/")
-artifact_dir = Path("/opt/projects/hal2/runs/2025-02-06_21-28-14/arch@GPTv2-4-4_local_batch_size@32_n_samples@131072/")
+gamestate_fields = (
+    "percent",
+    "stock",
+    "facing",
+    "invulnerable",
+    "jumps_left",
+    "on_ground",
+    "shield_strength",
+    "position_x",
+    "position_y",
+)
+# %%
+# Feb 7, inputs_v2
+artifact_dir = Path(
+    "/opt/projects/hal2/runs/2025-02-07_16-34-24/arch@GPTv3Controller-256-4-4_local_batch_size@32_n_samples@131072/"
+)
 model, config = load_model_from_artifact_dir(artifact_dir)
-
+# %%
+x_test = TensorDict.load("/tmp/multishine_debugging/model_inputs_000255/")
+y_test = TensorDict.load("/tmp/multishine_debugging/model_outputs_000255/")
+# %%
+x_test[0, :103]["ego_action"]
 # %%
 mds_dir = Path("/opt/projects/hal2/data/multishine/train")
 data_config = DataConfig(
@@ -29,7 +44,7 @@ data_config = DataConfig(
     seq_len=256,
 )
 embedding_config = EmbeddingConfig(
-    input_preprocessing_fn="inputs_v1",
+    input_preprocessing_fn="inputs_v0_controller",
 )
 train_dataset = HALStreamingDataset(
     local=str(mds_dir),
@@ -40,10 +55,113 @@ train_dataset = HALStreamingDataset(
     embedding_config=embedding_config,
     debug=True,
 )
+x_train = train_dataset[0]["inputs"].unsqueeze(0)
+y_train = train_dataset[0]["targets"].unsqueeze(0)
+# %%
+x_train[0, :103]["ego_action"]
+# %%
+print("Input Differences:")
+for key in x_train.keys():
+    diff_mask = x_train[0, :105][key] != x_test[0, :105][key]
+    if torch.any(diff_mask):
+        print(f"\n*{key}*")
+        if key == "gamestate":
+            # For gamestate, show which features are different
+            diff_indices = torch.nonzero(diff_mask)
+            for idx in diff_indices:
+                t, feature_idx = idx.tolist()
+                feature = gamestate_fields[feature_idx % len(gamestate_fields)]
+                print(
+                    f"  Frame {t:03d}: {feature:<15} train={x_train[0,t]['gamestate'][feature_idx].item()} test={x_test[0,t]['gamestate'][feature_idx].item()}"
+                )
+        elif key == "controller":
+            # For controller tensor, show which frames are different
+            diff_frames = torch.any(diff_mask, dim=-1)
+            for t in torch.nonzero(diff_frames, as_tuple=True)[0]:
+                print(f"  Frame {t:03d}:")
+                print(f"    train: {x_train[0,t][key].tolist()}")
+                print(f"    test:  {x_test[0,t][key].tolist()}")
+        else:
+            # For other tensors, show the different values
+            diff_indices = torch.nonzero(diff_mask, as_tuple=True)[0]
+            for t in diff_indices:
+                print(f"  Frame {t:03d}: train={x_train[0,t][key].item()} test={x_test[0,t][key].item()}")
+
+print("\nModel Prediction Differences from Ground Truth:")
+y_hat_train = model(x_train)
+y_hat_test = model(x_test)
+
+# Track frames where predictions differ from ground truth
+prediction_differences = set()
+
+# Check button predictions
+buttons_diff_train = y_hat_train["buttons"][0, :105].argmax(dim=-1) != y_train["buttons"][0, :105].argmax(dim=-1)
+buttons_diff_test = y_hat_test["buttons"][0, :105].argmax(dim=-1) != y_test["buttons"][0, :105].argmax(dim=-1)
+prediction_differences.update(torch.nonzero(buttons_diff_train, as_tuple=True)[0].tolist())
+prediction_differences.update(torch.nonzero(buttons_diff_test, as_tuple=True)[0].tolist())
+
+# Check main stick predictions
+stick_diff_train = y_hat_train["main_stick"][0, :105].argmax(dim=-1) != y_train["main_stick"][0, :105].argmax(dim=-1)
+stick_diff_test = y_hat_test["main_stick"][0, :105].argmax(dim=-1) != y_test["main_stick"][0, :105].argmax(dim=-1)
+prediction_differences.update(torch.nonzero(stick_diff_train, as_tuple=True)[0].tolist())
+prediction_differences.update(torch.nonzero(stick_diff_test, as_tuple=True)[0].tolist())
+
+for t in sorted(prediction_differences):
+    print(f"\nFrame {t:03d}:")
+    print("Buttons:")
+    print(f"  Train prediction: {y_hat_train['buttons'][0,t].argmax().item():>3d}")
+    print(f"  Train actual:     {y_train['buttons'][0,t].argmax().item():>3d}")
+    print(f"  Test prediction:  {y_hat_test['buttons'][0,t].argmax().item():>3d}")
+    print(f"  Test actual:      {y_test['buttons'][0,t].argmax().item():>3d}")
+
+    print("\nMain Stick:")
+    print(f"  Train prediction: {y_hat_train['main_stick'][0,t].argmax().item():>3d}")
+    print(f"  Train actual:     {y_train['main_stick'][0,t].argmax().item():>3d}")
+    print(f"  Test prediction:  {y_hat_test['main_stick'][0,t].argmax().item():>3d}")
+    print(f"  Test actual:      {y_test['main_stick'][0,t].argmax().item():>3d}")
+
+    # Show input differences at frames where predictions diverge
+    print("\nInput state at this frame:")
+    for key in x_train.keys():
+        if torch.any(x_train[0, t][key] != x_test[0, t][key]):
+            print(f"  {key}:")
+            print(f"    train: {x_train[0,t][key].tolist()}")
+            print(f"    test:  {x_test[0,t][key].tolist()}")
+
+# %%
+torch.all(x_train[0, :103]["gamestate"] == x_test[0, :103]["gamestate"], dim=-1)
+# %%
+for k in x_train.keys():
+    print(k, torch.all(x_train[0, :104][k] == x_test[0, :104][k], dim=-1))
 # %%
 
 # %%
-x_train = train_dataset[0]["inputs"].unsqueeze(0)
+y_hat_train = model(x_train)
+# %%
+y_hat_train["buttons"][0, :104]
+# %%
+y_hat_test = model(x_test)
+# %%
+y_hat_train["buttons"][0, 100:103].argmax(dim=-1)
+# %%
+y_hat_test["buttons"][0, 100:103].argmax(dim=-1)
+# %%
+y_train = train_dataset[0]["targets"].unsqueeze(0)
+y_train["buttons"][0, 100:103].argmax(dim=-1)
+# %%
+y_test["buttons"][0, 100:103].argmax(dim=-1)
+# %%
+x_train[0, 100:104]["controller"]
+
+
+# %%
+# %%
+# Feb 6, inputs_v1
+# artifact_dir = Path("/opt/projects/hal2/runs/2025-02-06_17-33-37/arch@GPTv1-4-4_local_batch_size@32_n_samples@262144/")
+artifact_dir = Path("/opt/projects/hal2/runs/2025-02-06_21-28-14/arch@GPTv2-4-4_local_batch_size@32_n_samples@131072/")
+model, config = load_model_from_artifact_dir(artifact_dir)
+
+
 # %%
 x_train["ego_action"]
 # x_train["ego_action"]
