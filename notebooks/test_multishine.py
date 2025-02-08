@@ -44,7 +44,7 @@ data_config = DataConfig(
     seq_len=256,
 )
 embedding_config = EmbeddingConfig(
-    input_preprocessing_fn="inputs_v0_controller",
+    input_preprocessing_fn="inputs_v1_controller",
 )
 train_dataset = HALStreamingDataset(
     local=str(mds_dir),
@@ -58,7 +58,7 @@ train_dataset = HALStreamingDataset(
 x_train = train_dataset[0]["inputs"].unsqueeze(0)
 y_train = train_dataset[0]["targets"].unsqueeze(0)
 # %%
-x_train[0, :103]["ego_action"]
+x_train[0, :103]["gamestate"]
 # %%
 print("Input Differences:")
 for key in x_train.keys():
