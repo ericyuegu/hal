@@ -221,6 +221,29 @@ def gpu_worker(
             input_flag.clear()
 
 
+def flatten_replay_dir(replay_dir: Path) -> None:
+    # Copy all files to base replay dir and clean up subdirs
+    for file in replay_dir.glob("**/*.slp"):
+        target_path = replay_dir / file.name
+        counter = 1
+        while target_path.exists():
+            stem = file.stem
+            target_path = replay_dir / f"{stem}_{counter}{file.suffix}"
+            counter += 1
+
+        try:
+            file.replace(target_path)
+        except OSError as e:
+            logger.warning(f"Failed to move replay file {file}: {e}")
+
+    for directory in sorted(replay_dir.glob("**/"), key=lambda x: len(str(x)), reverse=True):
+        if directory != replay_dir:
+            try:
+                directory.rmdir()
+            except OSError as e:
+                logger.warning(f"Failed to remove directory {directory}: {e}")
+
+
 def run_closed_loop_evaluation(
     artifact_dir: Path,
     n_workers: int,
@@ -245,7 +268,6 @@ def run_closed_loop_evaluation(
     stop_events: List[EventType] = [mp.Event() for _ in range(n_workers)]
 
     # Share and pin buffers in CPU memory for transferring model inputs and outputs
-    # TODO: figure out padding for start of episode
     mock_framedata_L = mock_framedata_as_tensordict(preprocessor.trajectory_sampling_len)
     # Store only a single time step to minimize copying
     mock_model_inputs_ = preprocessor.preprocess_inputs(mock_framedata_L, player)[-1]
@@ -278,9 +300,11 @@ def run_closed_loop_evaluation(
     cpu_processes: List[mp.Process] = []
     ports = find_open_udp_ports(n_workers)
     episode_stats_queue: mp.Queue = mp.Queue()
-    replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx)
-    logger.info(f"Replays will be saved to {replay_dir}")
+    base_replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx)
+    logger.info(f"Replays will be saved to {base_replay_dir}")
     for i in range(n_workers):
+        replay_dir = base_replay_dir / f"{i:03d}"
+        replay_dir.mkdir(exist_ok=True, parents=True)
         p: mp.Process = mp.Process(
             target=cpu_worker,
             kwargs={
@@ -307,6 +331,10 @@ def run_closed_loop_evaluation(
     for p in cpu_processes:
         p.join()
 
+    # Clean up replay dir
+    flatten_replay_dir(base_replay_dir)
+
+    # Aggregate episode stats and return if requested
     episode_stats: List[EpisodeStats] = []
     while not episode_stats_queue.empty():
         episode_stats.append(episode_stats_queue.get())
