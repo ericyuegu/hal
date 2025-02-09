@@ -29,6 +29,7 @@ from hal.emulator_paths import REMOTE_EMULATOR_PATH
 from hal.emulator_paths import REMOTE_EVAL_REPLAY_DIR
 from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import send_controller_inputs
+from hal.training.io import find_latest_idx
 from hal.training.io import get_path_friendly_datetime
 
 
@@ -80,6 +81,7 @@ def get_replay_dir(artifact_dir: Path | None = None, step: int | None = None) ->
         replay_dir = Path(REMOTE_EVAL_REPLAY_DIR) / get_path_friendly_datetime()
     else:
         replay_dir = artifact_dir / "replays"
+        step = step or find_latest_idx(artifact_dir)
     if step is not None:
         replay_dir = replay_dir / f"{step:012d}"
     return replay_dir
@@ -261,7 +263,6 @@ class EmulatorManager:
         self.opponent_controller = melee.Controller(
             console=self.console, port=_get_console_port(get_opponent(self.player)), type=melee.ControllerType.STANDARD
         )
-        logger.info(f"Emu manager initialized for {attr.asdict(self)}")
 
     def run_game(self) -> Generator[melee.GameState, TensorDict, None]:
         """Generator that yields gamestates and receives controller inputs.
