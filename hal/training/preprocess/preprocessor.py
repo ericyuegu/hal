@@ -124,3 +124,17 @@ class Preprocessor:
 
     def postprocess_preds(self, preds_C: TensorDict) -> TensorDict:
         return self.postprocess_preds_fn(preds_C)
+
+    def mock_preds_as_tensordict(self) -> TensorDict:
+        """Mock a single model prediction."""
+        out = {
+            name: torch.zeros(num_clusters)
+            for name, num_clusters in {
+                "buttons": self.embedding_config.num_buttons,
+                "main_stick": self.embedding_config.num_main_stick_clusters,
+                "c_stick": self.embedding_config.num_c_stick_clusters,
+                "shoulder": self.embedding_config.num_shoulder_clusters,
+            }.items()
+            if num_clusters is not None
+        }
+        return TensorDict(out, batch_size=())

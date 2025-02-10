@@ -10,7 +10,6 @@ from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
 from hal.constants import Player
 from hal.data.schema import PYARROW_DTYPE_BY_COLUMN
-from hal.training.config import EmbeddingConfig
 
 
 @attr.s(auto_attribs=True, slots=True)
@@ -128,21 +127,6 @@ def send_controller_inputs(controller: melee.Controller, inputs: TensorDict, idx
 def mock_framedata_as_tensordict(seq_len: int) -> TensorDict:
     """Mock `seq_len` frames of gamestate data."""
     return TensorDict({k: torch.zeros(seq_len) for k in PYARROW_DTYPE_BY_COLUMN}, batch_size=(seq_len,))
-
-
-def mock_preds_as_tensordict(embed_config: EmbeddingConfig) -> TensorDict:
-    """Mock a single model prediction."""
-    out = {}
-    if embed_config.num_buttons is not None:
-        out["buttons"] = torch.zeros(embed_config.num_buttons)
-    if embed_config.num_main_stick_clusters is not None:
-        out["main_stick"] = torch.zeros(embed_config.num_main_stick_clusters)
-    if embed_config.num_c_stick_clusters is not None:
-        out["c_stick"] = torch.zeros(embed_config.num_c_stick_clusters)
-    if embed_config.num_shoulder_clusters is not None:
-        out["shoulder"] = torch.zeros(embed_config.num_shoulder_clusters)
-
-    return TensorDict(out, batch_size=())
 
 
 def share_and_pin_memory(tensordict: TensorDict) -> TensorDict:

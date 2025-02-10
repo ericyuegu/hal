@@ -21,7 +21,6 @@ from hal.emulator_helper import find_open_udp_ports
 from hal.emulator_helper import get_replay_dir
 from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import mock_framedata_as_tensordict
-from hal.eval.eval_helper import mock_preds_as_tensordict
 from hal.eval.eval_helper import share_and_pin_memory
 from hal.gamestate_utils import extract_gamestate_as_tensordict
 from hal.training.config import TrainConfig
@@ -280,7 +279,7 @@ def run_closed_loop_evaluation(
     )
     shared_batched_model_input_B = share_and_pin_memory(shared_batched_model_input_B)
     shared_batched_model_output_B: TensorDict = torch.stack(
-        [mock_preds_as_tensordict(train_config.embedding) for _ in range(n_workers)], dim=0  # type: ignore
+        [preprocessor.mock_preds_as_tensordict() for _ in range(n_workers)], dim=0  # type: ignore
     )
     shared_batched_model_output_B = share_and_pin_memory(shared_batched_model_output_B)
 
