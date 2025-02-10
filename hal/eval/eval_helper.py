@@ -132,19 +132,17 @@ def mock_framedata_as_tensordict(seq_len: int) -> TensorDict:
 
 def mock_preds_as_tensordict(embed_config: EmbeddingConfig) -> TensorDict:
     """Mock a single model prediction."""
-    assert embed_config.num_buttons is not None
-    assert embed_config.num_main_stick_clusters is not None
-    assert embed_config.num_c_stick_clusters is not None
-    assert embed_config.num_shoulder_clusters is not None
-    return TensorDict(
-        {
-            "buttons": torch.zeros(embed_config.num_buttons),
-            "main_stick": torch.zeros(embed_config.num_main_stick_clusters),
-            "c_stick": torch.zeros(embed_config.num_c_stick_clusters),
-            "shoulder": torch.zeros(embed_config.num_shoulder_clusters),
-        },
-        batch_size=(),
-    )
+    out = {}
+    if embed_config.num_buttons is not None:
+        out["buttons"] = torch.zeros(embed_config.num_buttons)
+    if embed_config.num_main_stick_clusters is not None:
+        out["main_stick"] = torch.zeros(embed_config.num_main_stick_clusters)
+    if embed_config.num_c_stick_clusters is not None:
+        out["c_stick"] = torch.zeros(embed_config.num_c_stick_clusters)
+    if embed_config.num_shoulder_clusters is not None:
+        out["shoulder"] = torch.zeros(embed_config.num_shoulder_clusters)
+
+    return TensorDict(out, batch_size=())
 
 
 def share_and_pin_memory(tensordict: TensorDict) -> TensorDict:

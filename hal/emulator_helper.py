@@ -4,6 +4,7 @@ import random
 import signal
 import subprocess
 import sys
+import traceback
 from concurrent.futures import TimeoutError
 from contextlib import contextmanager
 from pathlib import Path
@@ -225,7 +226,9 @@ def console_manager(console: melee.Console, console_logger: melee.Logger | None 
     except TimeoutError:
         pass
     except Exception as e:
-        logger.error(f"Stopping console due to exception: {e}")
+        logger.error(
+            f"Stopping console due to exception: {e}\nTraceback:\n{''.join(traceback.format_tb(e.__traceback__))}"
+        )
     finally:
         if console_logger is not None:
             console_logger.writelog()

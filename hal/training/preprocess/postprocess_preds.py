@@ -90,7 +90,7 @@ def model_predictions_to_controller_inputs_v1(pred_C: TensorDict, temperature: f
     # Decode shoulder
     shoulder_probs = torch.softmax(pred_C["shoulder"] / temperature, dim=-1)
     shoulder_idx = torch.multinomial(shoulder_probs, num_samples=1)
-    shoulder_x = torch.tensor(SHOULDER_CLUSTER_CENTERS_V0[shoulder_idx])
+    shoulder_x = torch.tensor(SHOULDER_CLUSTER_CENTERS_V0[shoulder_idx]).unsqueeze(-1)
 
     return TensorDict(
         {
