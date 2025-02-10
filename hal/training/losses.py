@@ -4,7 +4,12 @@ import torch.nn.functional as F
 import torch.special
 
 
-class HLGaussLoss(nn.Module):
+class GaussianHistogramLoss(nn.Module):
+    """
+    Stop Regressing: Training Value Functions via Classification for Scalable Deep RL, (Farebrother et al. 2024)
+    https://arxiv.org/abs/2403.03950v1
+    """
+
     def __init__(self, min_value: float, max_value: float, num_bins: int, sigma: float) -> None:
         super().__init__()
         self.min_value = min_value
