@@ -1,5 +1,6 @@
 # %%
 import numpy as np
+import seaborn as sns
 from matplotlib import pyplot as plt
 from streaming import StreamingDataset
 
@@ -74,7 +75,53 @@ def update_centroids(data: np.ndarray, labels: np.ndarray, k: int) -> np.ndarray
     return new_centroids
 
 
-def k_means(data: np.ndarray, k: int, max_iterations: int = 100, chunk_size: int = 100_000) -> np.ndarray:
+def k_means_plus_plus_init(data: np.ndarray, k: int, chunk_size: int = 100_000) -> np.ndarray:
+    """
+    Initialize cluster centers using k-means++ algorithm.
+
+    Parameters:
+      data: (n_points, n_dim) array
+      k: number of clusters
+      chunk_size: size of chunks for distance computations
+
+    Returns:
+      centroids: (k, n_dim) array of initial centroids
+    """
+    n_samples = data.shape[0]
+    centroids = np.empty((k, data.shape[1]), dtype=data.dtype)
+
+    # Choose first centroid randomly
+    first_centroid = data[np.random.choice(n_samples)]
+    centroids[0] = first_centroid
+
+    # Initialize distances array
+    distances = np.full(n_samples, np.inf)
+
+    # Select remaining k-1 centroids
+    for c in range(1, k):
+        # Process in chunks to save memory
+        for start in range(0, n_samples, chunk_size):
+            end = min(start + chunk_size, n_samples)
+            chunk = data[start:end]
+
+            # Compute distances to closest centroid for all points in chunk
+            chunk_distances = np.sum((chunk[:, np.newaxis] - centroids[:c]) ** 2, axis=2)
+            min_distances = np.min(chunk_distances, axis=1)
+
+            # Update distances if smaller
+            distances[start:end] = np.minimum(distances[start:end], min_distances)
+
+        # Choose next centroid with probability proportional to D(x)^2
+        probabilities = distances / distances.sum()
+        next_centroid_idx = np.random.choice(n_samples, p=probabilities)
+        centroids[c] = data[next_centroid_idx]
+
+    return centroids
+
+
+def k_means(
+    data: np.ndarray, k: int, max_iterations: int = 100, chunk_size: int = 100_000, init: str = "k-means++"
+) -> np.ndarray:
     """
     An optimized k-means implementation.
 
@@ -87,9 +134,13 @@ def k_means(data: np.ndarray, k: int, max_iterations: int = 100, chunk_size: int
     Returns:
       centroids: (k, n_dim) array of centroids.
     """
-    # Randomly initialize centroids from the data points
-    indices = np.random.choice(len(data), size=k, replace=False)
-    centroids = data[indices]
+    if init == "k-means++":
+        centroids = k_means_plus_plus_init(data, k, chunk_size)
+    elif init == "random":
+        indices = np.random.choice(len(data), size=k, replace=False)
+        centroids = data[indices]
+    else:
+        raise ValueError(f"Invalid initialization method: {init}")
 
     for iteration in range(max_iterations):
         print(f"k={k}, iteration {iteration}")
@@ -110,15 +161,14 @@ def k_means(data: np.ndarray, k: int, max_iterations: int = 100, chunk_size: int
 
 
 # %%
-# %%
-mds_path = "/opt/projects/hal2/data/mang0/train"
-mang0_ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
-len(mang0_ds)
-
-# %%
-x = mang0_ds[0]
-for k in x.keys():
-    print(k)
+# # %%
+# mds_path = "/opt/projects/hal2/data/mang0/train"
+# mang0_ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
+# len(mang0_ds)
+# # %%
+# x = mang0_ds[0]
+# for k in x.keys():
+#     print(k)
 # %%
 mds_path = "/opt/projects/hal2/data/ranked/train"
 ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
@@ -144,8 +194,8 @@ for i, sample in enumerate(ds):
         c_stick_x_tensors.append(sample[f"{player}_c_stick_x"])
         c_stick_y_tensors.append(sample[f"{player}_c_stick_y"])
 
-# %%
-len(main_stick_x_tensors)
+# # %%
+# len(main_stick_x_tensors)
 # %%
 main_stick_x = np.concatenate(main_stick_x_tensors)
 main_stick_y = np.concatenate(main_stick_y_tensors)
@@ -161,6 +211,16 @@ c_stick = np.stack((c_stick_x, c_stick_y), axis=-1)
 main_stick = main_stick[np.random.choice(len(main_stick), size=1000000, replace=False)]
 # %%
 c_stick = c_stick[np.random.choice(len(c_stick), size=1000000, replace=False)]
+
+# %%
+main_stick_10k = main_stick[np.random.choice(len(main_stick), size=10000, replace=False)]
+# %%
+# smooth heatmap of main stick using KDE
+# WARNING: SLOW
+sns.kdeplot(x=main_stick_10k[:, 0], y=main_stick_10k[:, 1], cmap="YlOrRd", fill=True, cbar=True)
+plt.title("Main Stick Heatmap")
+plt.show()
+
 # %%
 c_stick.shape
 # %%
@@ -169,29 +229,18 @@ main_stick_centroids = k_means(main_stick, k=21, max_iterations=10)
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
 
 # %%
-main_stick_centroids = k_means(main_stick, k=64, max_iterations=10)
+main_stick_centroids = k_means(main_stick, k=32, max_iterations=100)
 
 # %%
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
-
 # %%
-main_stick_centroids = k_means(main_stick, k=128, max_iterations=10)
 main_stick_centroids
-# %%
-plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
-
-# %%
-main_stick_centroids = k_means(main_stick, k=256, max_iterations=10)
-
-# %%
-plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
-
 # %%
 pts = main_stick_centroids
 # Define the center (about which symmetry is desired)
 center = np.array([0.5, 0.5])
 
-# A tolerance for “matching” points (you can adjust this)
+# A tolerance for "matching" points (you can adjust this)
 tol = 0.05
 
 N = len(pts)
@@ -203,6 +252,7 @@ N = len(pts)
 # We loop over points and try to pair those that nearly satisfy this relation.
 used = np.zeros(N, dtype=bool)
 new_pts_y = pts.copy()  # will hold the adjusted points
+additional_mirrors = []  # will store new mirror points
 
 for i in range(N):
     if used[i]:
@@ -211,20 +261,26 @@ for i in range(N):
     if np.abs(pts[i, 0] - 0.5) < 1e-6:
         used[i] = True
         continue
-    # Define the “ideal mirror” of pts[i]
+    # Define the "ideal mirror" of pts[i]
     target = np.array([1 - pts[i, 0], pts[i, 1]])
+
+    # Skip if point is already very close to its mirror position
+    if np.linalg.norm(pts[i] - target) < tol:
+        used[i] = True
+        continue
+
     # Look for an unpaired candidate that is close to the target.
     candidates = [j for j in range(N) if (not used[j]) and (j != i)]
     if len(candidates) == 0:
+        # Create mirror point
+        additional_mirrors.append(target)
+        used[i] = True
         continue
     dists = np.array([np.linalg.norm(pts[j] - target) for j in candidates])
     j_min = candidates[np.argmin(dists)]
     if dists[np.argmin(dists)] < tol:
-        # We found a matching pair.
-        # Average the y–coordinates and compute an average x–offset.
+        # We found a matching pair - handle as before
         avg_y = (pts[i, 1] + pts[j_min, 1]) / 2.0
-        # For perfect symmetry across x=0.5, we require:
-        #   x1 = 0.5 + d    and    x2 = 0.5 - d.
         d1 = pts[i, 0] - 0.5
         d2 = 0.5 - pts[j_min, 0]
         avg_d = (d1 + d2) / 2.0
@@ -233,10 +289,13 @@ for i in range(N):
         used[i] = True
         used[j_min] = True
     else:
-        # If no partner is found within tolerance, you might decide to
-        # simply “reflect” the point. Here we average it with its own mirror.
-        new_pts_y[i] = (pts[i] + np.array([1 - pts[i, 0], pts[i, 1]])) / 2.0
+        # If no partner found, create a mirror point
+        additional_mirrors.append(target)
         used[i] = True
+
+# Add the additional mirror points to new_pts_y
+if additional_mirrors:
+    new_pts_y = np.vstack([new_pts_y, additional_mirrors])
 
 # ======================================================
 # 3. Force 4–way symmetry (add horizontal mirror symmetry)
@@ -394,10 +453,22 @@ ax1.set_yscale("log")
 ax1.set_title("Analog L shoulder presses")
 
 ax2.hist(r_shoulder, bins=100)
-ax2.set_yscale("log") 
+ax2.set_yscale("log")
 ax2.set_title("Analog R shoulder presses")
 
 plt.tight_layout()
 plt.show()
 # %%
+import importlib
 
+import hal.constants
+
+importlib.reload(hal.constants)
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
+
+# plt.scatter(STICK_XY_CLUSTER_CENTERS_V0[:, 0], STICK_XY_CLUSTER_CENTERS_V0[:, 1], color="red")
+plt.scatter(STICK_XY_CLUSTER_CENTERS_V1[:, 0], STICK_XY_CLUSTER_CENTERS_V1[:, 1], color="blue")
+plt.axis("equal")
+plt.show()
+# %%
+len(STICK_XY_CLUSTER_CENTERS_V1)
