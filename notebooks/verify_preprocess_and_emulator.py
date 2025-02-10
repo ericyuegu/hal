@@ -4,7 +4,7 @@ from pathlib import Path
 import attr
 from tensordict import TensorDict
 
-from hal.data.preprocess_replays import process_replay
+from hal.data.process_replays import process_replay
 from hal.training.config import DataConfig
 from hal.training.io import Checkpoint
 from hal.training.io import load_config_from_artifact_dir
