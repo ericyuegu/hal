@@ -72,6 +72,7 @@ class DataConfig:
     num_c_stick_clusters: Optional[int] = None
     num_shoulder_clusters: Optional[int] = None
 
+    # TODO delete and replace all uses with targetconfig
     def __attrs_post_init__(self) -> None:
         from hal.preprocess.target_embedding_sizes import TARGETS_EMBEDDING_SIZES
 

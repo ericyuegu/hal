@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 
 from streaming import StreamingDataset
-from hal.preprocess.preprocess_targets import preprocess_targets_v1
+from hal.preprocess.target_configs import preprocess_targets_v1
 from hal.training.config import DataConfig
 from hal.training.config import DataConfig
 from hal.training.config import TrainConfig

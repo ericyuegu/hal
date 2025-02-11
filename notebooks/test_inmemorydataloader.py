@@ -3,7 +3,7 @@ from pathlib import Path
 
 from hal.data.stats import load_dataset_stats
 from hal.preprocess.input_configs import preprocess_inputs_v0
-from hal.preprocess.preprocess_targets import preprocess_targets_v0
+from hal.preprocess.target_configs import preprocess_targets_v0
 from hal.training.config import DataConfig
 from hal.training.config import ReplayFilter
 from hal.training.deprecated.dataset import InMemoryTensordictDataset

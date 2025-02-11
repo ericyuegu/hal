@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_array_equal
 
-from hal.preprocess.transformations import encode_buttons_one_hot
+from hal.preprocess.transformations import convert_multi_hot_to_one_hot
 
 
 @pytest.mark.parametrize(
@@ -200,5 +200,5 @@ from hal.preprocess.transformations import encode_buttons_one_hot
     ],
 )
 def test_convert_target_to_one_hot_2d(in_buttons_LD, out_buttons_LD) -> None:
-    result = encode_buttons_one_hot(in_buttons_LD)
+    result = convert_multi_hot_to_one_hot(in_buttons_LD)
     assert_array_equal(result, out_buttons_LD, err_msg=f"{result}\n{out_buttons_LD}")
