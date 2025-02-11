@@ -14,7 +14,6 @@ from loguru import logger
 from tqdm import tqdm
 
 from hal.training.config import BaseConfig
-from hal.training.mem_utils import MemoryMonitor
 
 
 def barrier() -> None:
@@ -112,23 +111,9 @@ def wrap_multiprocessing(main_fn: Callable, config: BaseConfig, *args: Any) -> C
         assert n_gpus <= device_count, f"n_gpus={n_gpus}, only {device_count} gpus available!"
         if n_gpus == 1:
             return main_fn(None, None, config, *args)
-        logger.info(f"Spawning {n_gpus} processes")
-        is_debug = config.debug
-        if is_debug:
-            process_ctx: torch.multiprocessing.ProcessContext = torch.multiprocessing.spawn(
-                main_fn, args=(n_gpus, config, *args), nprocs=n_gpus, join=False, start_method="spawn"
-            )
-            pids = process_ctx.pids()
-            monitor = MemoryMonitor(pids)
-            print(monitor.table())
-            while True:
-                if process_ctx.join(timeout=1):
-                    break
-                print(monitor.table())
-        else:
-            torch.multiprocessing.spawn(
-                main_fn, args=(n_gpus, config, *args), nprocs=n_gpus, join=False, start_method="spawn"
-            )
+        torch.multiprocessing.spawn(
+            main_fn, args=(n_gpus, config, *args), nprocs=n_gpus, join=False, start_method="spawn"
+        )
 
     @functools.wraps(main_fn)
     def dummy_wrapped():
