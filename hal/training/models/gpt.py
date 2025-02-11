@@ -23,12 +23,12 @@ class GPTConfig:
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: GPTConfig, input_size: int | None = None) -> None:
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.config = config
         self.n_head = config.n_head
-        self.n_embd = input_size or config.n_embd
+        self.n_embd = config.n_embd
         self.dropout = config.dropout
 
         # key, query, value projections for all heads, but in a batch
