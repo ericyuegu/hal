@@ -1,7 +1,9 @@
 from typing import Callable
+from typing import Dict
 
 import numpy as np
 import torch
+from preprocess.target_config import TargetConfig
 from tensordict import TensorDict
 
 from hal.constants import Player
@@ -52,6 +54,15 @@ def offset(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
 
 
 ### CONTROLLER / TARGETS
+
+
+def preprocess_target_features(sample_T: TensorDict, ego: Player, config: TargetConfig) -> TensorDict:
+    processed_features: Dict[str, torch.Tensor] = {}
+
+    for feature_name, transformation in config.transformation_by_feature.items():
+        processed_features[feature_name] = transformation(sample_T[feature_name], ego)
+
+    return TensorDict(processed_features, batch_size=sample_T.batch_size)
 
 
 def convert_multi_hot_to_one_hot(buttons_LD: np.ndarray) -> np.ndarray:
@@ -200,17 +211,6 @@ def encode_shoulder_one_hot_coarse(sample: TensorDict, player: str) -> torch.Ten
     return torch.tensor(one_hot_shoulder, dtype=torch.float32)
 
 
-# TODO refactor
-def concat_controller_inputs_coarse(sample: TensorDict, player: Player) -> torch.Tensor:
-    controller_feats = preprocess_controller_inputs_coarse(sample, player)
-    return torch.cat(list(controller_feats.values()), dim=-1)
-
-
-def concat_controller_inputs_fine_shoulder(sample: TensorDict, player: Player) -> torch.Tensor:
-    controller_feats = preprocess_controller_inputs_fine_shoulder(sample, player)
-    return torch.cat(list(controller_feats.values()), dim=-1)
-
-
-def concat_controller_inputs_fine(sample: TensorDict, player: Player) -> torch.Tensor:
-    controller_feats = preprocess_controller_inputs_fine(sample, player)
+def concat_controller_inputs(sample_T: TensorDict, ego: Player, target_config: TargetConfig) -> torch.Tensor:
+    controller_feats = preprocess_target_features(sample_T, ego, target_config)
     return torch.cat(list(controller_feats.values()), dim=-1)

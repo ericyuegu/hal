@@ -1,10 +1,12 @@
 import random
+from functools import partial
 from typing import Dict
 from typing import Set
 
 import attr
 import numpy as np
 import torch
+from preprocess.target_config import TargetConfig
 from tensordict import TensorDict
 
 from hal.constants import Player
@@ -16,8 +18,9 @@ from hal.preprocess.input_configs import DEFAULT_HEAD_NAME
 from hal.preprocess.registry import InputConfigRegistry
 from hal.preprocess.registry import PredPostprocessingRegistry
 from hal.preprocess.registry import TargetConfigRegistry
-from hal.preprocess.target_config import TargetConfig
 from hal.preprocess.transformations import Transformation
+from hal.preprocess.transformations import concat_controller_inputs
+from hal.preprocess.transformations import preprocess_target_features
 from hal.training.config import DataConfig
 
 
@@ -41,11 +44,13 @@ class Preprocessor:
         self.normalization_fn_by_feature_name: Dict[str, Transformation] = {}
         self.seq_len = data_config.seq_len
 
-        self.input_config = InputConfigRegistry.get(self.data_config.input_preprocessing_fn)
-        # Dynamically update registered config with user-specified embedding shapes
-        self.input_config = update_input_shapes_with_data_config(self.input_config, data_config)
         self.target_config = TargetConfigRegistry.get(self.data_config.target_preprocessing_fn)
-        self.preprocess_targets_fn = TargetConfigRegistry.get(self.data_config.target_preprocessing_fn)
+        self.input_config = InputConfigRegistry.get(self.data_config.input_preprocessing_fn)
+        # Dynamically update input config with user-specified embedding shapes and target features
+        self.input_config = update_input_shapes_with_data_config(self.input_config, data_config)
+        self.input_config = maybe_add_target_features_to_input_config(self.input_config, self.target_config)
+
+        # TODO refactor
         self.postprocess_preds_fn = PredPostprocessingRegistry.get(self.data_config.pred_postprocessing_fn)
 
         self.frame_offsets_by_input = self.input_config.frame_offsets_by_input
@@ -69,7 +74,11 @@ class Preprocessor:
 
     @property
     def input_size(self) -> int:
-        return sum(shape[0] for shape in self.input_shapes_by_head.values())
+        return self.input_config.input_size
+
+    @property
+    def target_size(self) -> int:
+        return self.target_config.target_size
 
     def sample_td_from_episode(self, ndarrays_by_feature: dict[str, np.ndarray], debug: bool = False) -> TensorDict:
         """Randomly slice input/target features into trajectory_sampling_len sequences for supervised training.
@@ -183,6 +192,44 @@ class Preprocessor:
         return TensorDict(out, batch_size=())
 
 
+def update_input_shapes_with_data_config(input_config: InputConfig, data_config: DataConfig) -> InputConfig:
+    return attr.evolve(
+        input_config,
+        input_shapes_by_head={
+            **input_config.input_shapes_by_head,
+            "stage": (data_config.stage_embedding_dim,),
+            "ego_character": (data_config.character_embedding_dim,),
+            "opponent_character": (data_config.character_embedding_dim,),
+            "ego_action": (data_config.action_embedding_dim,),
+            "opponent_action": (data_config.action_embedding_dim,),
+        },
+    )
+
+
+def maybe_add_target_features_to_input_config(input_config: InputConfig, target_config: TargetConfig) -> InputConfig:
+    if input_config.include_target_features:
+        return attr.evolve(
+            input_config,
+            transformation_by_feature_name={
+                **input_config.transformation_by_feature_name,
+                "controller": partial(concat_controller_inputs, target_config=target_config),
+            },
+            frame_offsets_by_input={
+                **input_config.frame_offsets_by_input,
+                "controller": -1,
+            },
+            grouped_feature_names_by_head={
+                **input_config.grouped_feature_names_by_head,
+                "controller": ("controller",),
+            },
+            input_shapes_by_head={
+                **input_config.input_shapes_by_head,
+                "controller": (target_config.target_size,),
+            },
+        )
+    return input_config
+
+
 def preprocess_input_features(
     sample_T: TensorDict,
     ego: Player,
@@ -241,26 +288,3 @@ def preprocess_input_features(
     concatenated_features_by_head_name[DEFAULT_HEAD_NAME] = torch.cat(unseen_feature_tensors, dim=-1)
 
     return TensorDict(concatenated_features_by_head_name, batch_size=sample_T.batch_size)
-
-
-def update_input_shapes_with_data_config(input_config: InputConfig, data_config: DataConfig) -> InputConfig:
-    return attr.evolve(
-        input_config,
-        input_shapes_by_head={
-            **input_config.input_shapes_by_head,
-            "stage": (data_config.stage_embedding_dim,),
-            "ego_character": (data_config.character_embedding_dim,),
-            "opponent_character": (data_config.character_embedding_dim,),
-            "ego_action": (data_config.action_embedding_dim,),
-            "opponent_action": (data_config.action_embedding_dim,),
-        },
-    )
-
-
-def preprocess_target_features(sample_T: TensorDict, ego: Player, config: TargetConfig) -> TensorDict:
-    processed_features: Dict[str, torch.Tensor] = {}
-
-    for feature_name, transformation in config.transformation_by_feature.items():
-        processed_features[feature_name] = transformation(sample_T[feature_name], ego)
-
-    return TensorDict(processed_features, batch_size=sample_T.batch_size)

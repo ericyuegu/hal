@@ -19,7 +19,7 @@ def targets_baseline() -> TargetConfig:
             "c_stick": encode_c_stick_one_hot_coarse,
             "buttons": encode_buttons_one_hot,
         },
-        frame_offsets_by_feature={
+        frame_offsets_by_target={
             "main_stick": 0,
             "c_stick": 0,
             "buttons": 0,
@@ -40,7 +40,7 @@ def targets_shoulder() -> TargetConfig:
             "shoulder": encode_shoulder_one_hot_coarse,
             "buttons": encode_buttons_one_hot,
         },
-        frame_offsets_by_feature={
+        frame_offsets_by_target={
             "main_stick": 0,
             "c_stick": 0,
             "shoulder": 0,
@@ -62,7 +62,7 @@ def targets_fine() -> TargetConfig:
             "c_stick": encode_c_stick_one_hot_fine,
             "buttons": encode_buttons_one_hot,
         },
-        frame_offsets_by_feature={
+        frame_offsets_by_target={
             "main_stick": 0,
             "c_stick": 0,
             "buttons": 0,
