@@ -39,7 +39,7 @@ def inputs_v0() -> InputConfig:
 
     return InputConfig(
         player_features=player_features,
-        normalization_fn_by_feature_name={
+        transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
             "frame": cast_int32,
             "stage": cast_int32,
@@ -94,7 +94,7 @@ def inputs_v0_controller() -> InputConfig:
 
     return InputConfig(
         player_features=player_features,
-        normalization_fn_by_feature_name={
+        transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
             "stage": cast_int32,
             "character": cast_int32,
@@ -154,7 +154,7 @@ def inputs_v1() -> InputConfig:
 
     return InputConfig(
         player_features=player_features,
-        normalization_fn_by_feature_name={
+        transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
             "frame": cast_int32,
             "stage": cast_int32,
@@ -211,7 +211,7 @@ def inputs_v1_controller() -> InputConfig:
 
     return InputConfig(
         player_features=player_features,
-        normalization_fn_by_feature_name={
+        transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
             "stage": cast_int32,
             "character": cast_int32,
@@ -271,7 +271,7 @@ def inputs_v2_controller() -> InputConfig:
 
     return InputConfig(
         player_features=player_features,
-        normalization_fn_by_feature_name={
+        transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
             "stage": cast_int32,
             "character": cast_int32,
@@ -332,7 +332,7 @@ def inputs_v3_controller() -> InputConfig:
 
     return InputConfig(
         player_features=player_features,
-        normalization_fn_by_feature_name={
+        transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
             "stage": cast_int32,
             "character": cast_int32,

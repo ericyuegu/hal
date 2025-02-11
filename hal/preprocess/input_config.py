@@ -13,9 +13,10 @@ class InputConfig:
     # Features to preprocess twice, specific to player state
     player_features: Tuple[str, ...]
 
-    # Mapping from feature name to normalization function
+    # Mapping from feature name to transformation function
     # Must include embedded features such as stage, character, action, but embedding happens at model arch
-    normalization_fn_by_feature_name: Dict[str, Transformation]
+    # Feature names that do not exist in raw sample are assumed to preprocess using multiple features
+    transformation_by_feature_name: Dict[str, Transformation]
 
     # Mapping from feature name to frame offset relative to sampled index
     # e.g. to include controller inputs from prev frame with current frame gamestate, set p1_button_a = -1, etc.

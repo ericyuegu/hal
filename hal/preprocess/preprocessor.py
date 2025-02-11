@@ -153,34 +153,35 @@ def preprocess_input_features(
     Does not slice or shift any features.
     """
     opponent = get_opponent(ego)
-    normalization_fn_by_feature_name = config.normalization_fn_by_feature_name
+    transformation_by_feature_name = config.transformation_by_feature_name
     processed_features: Dict[str, torch.Tensor] = {}
 
     # Process player features
     for player in (ego, opponent):
         perspective = "ego" if player == ego else "opponent"
         for feature_name in config.player_features:
-            # Convert feature name from "p1" to "ego"/"opponent"
-            perspective_feature_name = f"{perspective}_{feature_name}"
-            player_feature_name = f"{player}_{feature_name}"
-            preprocess_fn = normalization_fn_by_feature_name[feature_name]
-            processed_features[perspective_feature_name] = preprocess_fn(
+            # Convert feature name from p1/p2 to either ego/opponent
+            perspective_feature_name = f"{perspective}_{feature_name}"  # e.g. "p1_action"
+            player_feature_name = f"{player}_{feature_name}"  # e.g. "ego_action"
+            transform = transformation_by_feature_name[feature_name]
+            processed_features[perspective_feature_name] = transform(
                 sample[player_feature_name], stats[player_feature_name]
             )
 
     # Process non-player features
     non_player_features = [
-        feature_name for feature_name in normalization_fn_by_feature_name if feature_name not in config.player_features
+        feature_name for feature_name in transformation_by_feature_name if feature_name not in config.player_features
     ]
     for feature_name in non_player_features:
-        preprocess_fn = normalization_fn_by_feature_name[feature_name]
+        transform = transformation_by_feature_name[feature_name]
         if feature_name in sample:
             # Single feature transformation
-            processed_features[feature_name] = preprocess_fn(sample[feature_name], stats[feature_name])
+            processed_features[feature_name] = transform(sample[feature_name], stats[feature_name])
         else:
             # Multi-feature transformation (e.g. controller inputs)
             # Pass entire dict and player perspective
-            processed_features[feature_name] = preprocess_fn(sample, ego)
+            processed_features[feature_name] = transform(sample, ego)
+
     # Concatenate processed features by head
     concatenated_features_by_head_name: Dict[str, torch.Tensor] = {}
     seen_feature_names: Set[str] = set()
@@ -189,7 +190,7 @@ def preprocess_input_features(
         concatenated_features_by_head_name[head_name] = torch.cat(features_to_concatenate, dim=-1)
         seen_feature_names.update(feature_names)
 
-    # Add features that are not associated with any head to default `gamestate` head
+    # Add features that are not associated with any head to default head (e.g. 'gamestate')
     unseen_feature_tensors = []
     for feature_name, feature_tensor in processed_features.items():
         if feature_name not in seen_feature_names:
