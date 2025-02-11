@@ -11,7 +11,7 @@ class TargetConfig:
     """Configuration for how we structure input features, offsets, and grouping into heads."""
 
     # Controller inputs
-    transformation_by_feature: Dict[str, Transformation]
+    transformation_by_target: Dict[str, Transformation]
 
     # Mapping from feature name to frame offset relative to sampled index
     # e.g. to predict controller inputs from 5 frames in the future, set buttons_5 = 5, etc.

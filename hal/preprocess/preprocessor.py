@@ -6,7 +6,7 @@ from typing import Set
 import attr
 import numpy as np
 import torch
-from preprocess.target_config import TargetConfig
+from loguru import logger
 from tensordict import TensorDict
 
 from hal.constants import Player
@@ -18,6 +18,7 @@ from hal.preprocess.input_configs import DEFAULT_HEAD_NAME
 from hal.preprocess.registry import InputConfigRegistry
 from hal.preprocess.registry import PredPostprocessingRegistry
 from hal.preprocess.registry import TargetConfigRegistry
+from hal.preprocess.target_config import TargetConfig
 from hal.preprocess.transformations import Transformation
 from hal.preprocess.transformations import concat_controller_inputs
 from hal.preprocess.transformations import preprocess_target_features
@@ -49,6 +50,8 @@ class Preprocessor:
         # Dynamically update input config with user-specified embedding shapes and target features
         self.input_config = update_input_shapes_with_data_config(self.input_config, data_config)
         self.input_config = maybe_add_target_features_to_input_config(self.input_config, self.target_config)
+        logger.info(f"Input config: {self.input_config}")
+        logger.info(f"Target config: {self.target_config}")
 
         # TODO refactor
         self.postprocess_preds_fn = PredPostprocessingRegistry.get(self.data_config.pred_postprocessing_fn)

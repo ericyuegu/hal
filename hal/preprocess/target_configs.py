@@ -12,9 +12,9 @@ from hal.preprocess.transformations import encode_main_stick_one_hot_fine
 from hal.preprocess.transformations import encode_shoulder_one_hot_coarse
 
 
-def targets_baseline() -> TargetConfig:
+def baseline_coarse() -> TargetConfig:
     return TargetConfig(
-        transformation_by_feature={
+        transformation_by_target={
             "main_stick": encode_main_stick_one_hot_coarse,
             "c_stick": encode_c_stick_one_hot_coarse,
             "buttons": encode_buttons_one_hot,
@@ -32,9 +32,9 @@ def targets_baseline() -> TargetConfig:
     )
 
 
-def targets_shoulder() -> TargetConfig:
+def coarse_shoulder() -> TargetConfig:
     return TargetConfig(
-        transformation_by_feature={
+        transformation_by_target={
             "main_stick": encode_main_stick_one_hot_coarse,
             "c_stick": encode_c_stick_one_hot_coarse,
             "shoulder": encode_shoulder_one_hot_coarse,
@@ -55,9 +55,9 @@ def targets_shoulder() -> TargetConfig:
     )
 
 
-def targets_fine() -> TargetConfig:
+def baseline_fine() -> TargetConfig:
     return TargetConfig(
-        transformation_by_feature={
+        transformation_by_target={
             "main_stick": encode_main_stick_one_hot_fine,
             "c_stick": encode_c_stick_one_hot_fine,
             "buttons": encode_buttons_one_hot,
@@ -75,6 +75,6 @@ def targets_fine() -> TargetConfig:
     )
 
 
-TargetConfigRegistry.register("baseline", targets_baseline())
-TargetConfigRegistry.register("shoulder", targets_shoulder())
-TargetConfigRegistry.register("fine", targets_fine())
+TargetConfigRegistry.register("baseline_coarse", baseline_coarse())
+TargetConfigRegistry.register("coarse_shoulder", coarse_shoulder())
+TargetConfigRegistry.register("baseline_fine", baseline_fine())

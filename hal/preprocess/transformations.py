@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from typing import Callable
 from typing import Dict
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -10,7 +13,9 @@ from hal.constants import SHOULDER_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
 from hal.data.stats import FeatureStats
-from hal.preprocess.target_config import TargetConfig
+
+if TYPE_CHECKING:
+    from hal.preprocess.target_config import TargetConfig
 
 Transformation = Callable[..., torch.Tensor]
 
@@ -59,8 +64,8 @@ def offset(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
 def preprocess_target_features(sample_T: TensorDict, ego: Player, config: TargetConfig) -> TensorDict:
     processed_features: Dict[str, torch.Tensor] = {}
 
-    for feature_name, transformation in config.transformation_by_feature.items():
-        processed_features[feature_name] = transformation(sample_T[feature_name], ego)
+    for feature_name, transformation in config.transformation_by_target.items():
+        processed_features[feature_name] = transformation(sample_T, ego)
 
     return TensorDict(processed_features, batch_size=sample_T.batch_size)
 
