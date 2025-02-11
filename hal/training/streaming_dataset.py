@@ -8,9 +8,9 @@ from tensordict import TensorDict
 
 from hal.constants import Player
 from hal.constants import VALID_PLAYERS
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig
-from hal.training.preprocess.preprocessor import Preprocessor
 
 
 class HALStreamingDataset(StreamingDataset):

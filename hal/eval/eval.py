@@ -23,10 +23,10 @@ from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import share_and_pin_memory
 from hal.gamestate_utils import extract_gamestate_as_tensordict
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
-from hal.training.preprocess.preprocessor import Preprocessor
 
 
 def setup_cpu_logger(debug: bool = False) -> None:

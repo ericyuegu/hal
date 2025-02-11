@@ -20,11 +20,11 @@ from yasoo import deserialize
 from yasoo import serialize
 
 import wandb
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import BaseConfig
 from hal.training.config import TrainConfig
 from hal.training.distributed import is_master
 from hal.training.models.registry import Arch
-from hal.training.preprocess.preprocessor import Preprocessor
 from hal.training.utils import get_git_repo_root
 
 ARTIFACT_DIR_ROOT = "runs"

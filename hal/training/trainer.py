@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from hal.eval.eval import run_closed_loop_evaluation
 from hal.eval.eval_helper import EpisodeStats
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.distributed import get_world_size
 from hal.training.distributed import is_master
@@ -31,7 +32,6 @@ from hal.training.io import get_exp_name
 from hal.training.io import get_log_dir
 from hal.training.models.registry import Arch
 from hal.training.optim import create_optimizer
-from hal.training.preprocess.preprocessor import Preprocessor
 from hal.training.schedule.schedule import LearningRatePieceWiseCos
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights

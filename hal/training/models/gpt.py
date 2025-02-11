@@ -7,9 +7,9 @@ import torch.nn as nn
 from tensordict import TensorDict
 from torch.nn import functional as F
 
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.models.registry import Arch
-from hal.training.preprocess.preprocessor import Preprocessor
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -962,4 +962,3 @@ Arch.register(
     GPTv5Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4, dropout=0.2),
 )
-
