@@ -10,7 +10,7 @@ from hal.training.config import DataConfig
 from hal.training.config import EmbeddingConfig
 from hal.training.config import TrainConfig
 from hal.training.streaming_dataloader import get_dataloaders
-from hal.training.preprocess.transform import preprocess_controller_inputs_v1
+from hal.training.preprocess.transform import preprocess_controller_inputs_fine_shoulder
 from hal.training.streaming_dataset import HALStreamingDataset
 
 torch.set_printoptions(precision=4, sci_mode=False, linewidth=120, threshold=torch.inf)
@@ -23,7 +23,7 @@ ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
 x = ds[346]
 td = TensorDict(x, batch_size=(len(x["frame"]),))
 # %%
-y = preprocess_controller_inputs_v1(td, "p1")
+y = preprocess_controller_inputs_fine_shoulder(td, "p1")
 # %%
 y["shoulder"].sum(dim=0)
 

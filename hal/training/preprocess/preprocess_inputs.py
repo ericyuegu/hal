@@ -14,10 +14,11 @@ from hal.data.stats import FeatureStats
 from hal.training.preprocess.input_preprocess_config import InputPreprocessConfig
 from hal.training.preprocess.registry import InputPreprocessRegistry
 from hal.training.preprocess.transform import cast_int32
+from hal.training.preprocess.transform import concat_controller_inputs_coarse
+from hal.training.preprocess.transform import concat_controller_inputs_fine
+from hal.training.preprocess.transform import concat_controller_inputs_fine_shoulder
 from hal.training.preprocess.transform import invert_and_normalize
 from hal.training.preprocess.transform import normalize
-from hal.training.preprocess.transform import preprocess_controller_inputs_v0_concat
-from hal.training.preprocess.transform import preprocess_controller_inputs_v1_concat
 from hal.training.preprocess.transform import standardize
 
 DEFAULT_HEAD_NAME = "gamestate"
@@ -177,7 +178,7 @@ def inputs_v0_controller() -> InputPreprocessConfig:
             "position_x": standardize,
             "position_y": standardize,
             # Ego controller inputs
-            "controller": preprocess_controller_inputs_v0_concat,
+            "controller": concat_controller_inputs_coarse,
         },
         frame_offsets_by_feature={
             "controller": -1,
@@ -295,7 +296,7 @@ def inputs_v1_controller() -> InputPreprocessConfig:
             "position_y": standardize,
             "action_frame": normalize,
             # Ego controller inputs
-            "controller": preprocess_controller_inputs_v0_concat,
+            "controller": concat_controller_inputs_coarse,
         },
         frame_offsets_by_feature={
             "controller": -1,
@@ -316,7 +317,66 @@ def inputs_v1_controller() -> InputPreprocessConfig:
 
 def inputs_v2_controller() -> InputPreprocessConfig:
     """
-    Baseline input features, controller inputs.
+    Baseline input features, finer-grained clusters for controller inputs.
+
+    Separate embedding heads for stage, character, & action.
+    No platforms, no projectiles.
+    """
+
+    player_features = (
+        "character",
+        "action",
+        "percent",
+        "stock",
+        "facing",
+        "invulnerable",
+        "jumps_left",
+        "on_ground",
+        "shield_strength",
+        "position_x",
+        "position_y",
+    )
+
+    return InputPreprocessConfig(
+        player_features=player_features,
+        normalization_fn_by_feature_name={
+            # Shared/embedded features are passed unchanged, to be embedded by model
+            "stage": cast_int32,
+            "character": cast_int32,
+            "action": cast_int32,
+            # Normalized player features
+            "percent": normalize,
+            "stock": normalize,
+            "facing": normalize,
+            "invulnerable": normalize,
+            "jumps_left": normalize,
+            "on_ground": normalize,
+            "shield_strength": invert_and_normalize,
+            "position_x": standardize,
+            "position_y": standardize,
+            # Ego controller inputs
+            "controller": concat_controller_inputs_fine,
+        },
+        frame_offsets_by_feature={
+            "controller": -1,
+        },
+        grouped_feature_names_by_head={
+            "stage": ("stage",),
+            "ego_character": ("ego_character",),
+            "opponent_character": ("opponent_character",),
+            "ego_action": ("ego_action",),
+            "opponent_action": ("opponent_action",),
+            "controller": ("controller",),
+        },
+        input_shapes_by_head={
+            "gamestate": (2 * 9 + 2 * len(STICK_XY_CLUSTER_CENTERS_V1) + len(INCLUDED_BUTTONS),),
+        },
+    )
+
+
+def inputs_v3_controller() -> InputPreprocessConfig:
+    """
+    Baseline input features, finer-grained clusters for controller inputs.
 
     Predicting analog shoulder presses.
 
@@ -356,7 +416,7 @@ def inputs_v2_controller() -> InputPreprocessConfig:
             "position_x": standardize,
             "position_y": standardize,
             # Ego controller inputs
-            "controller": preprocess_controller_inputs_v1_concat,
+            "controller": concat_controller_inputs_fine_shoulder,
         },
         frame_offsets_by_feature={
             "controller": -1,
@@ -385,3 +445,4 @@ InputPreprocessRegistry.register("inputs_v0_controller", inputs_v0_controller())
 InputPreprocessRegistry.register("inputs_v1", inputs_v1())
 InputPreprocessRegistry.register("inputs_v1_controller", inputs_v1_controller())
 InputPreprocessRegistry.register("inputs_v2_controller", inputs_v2_controller())
+InputPreprocessRegistry.register("inputs_v3_controller", inputs_v3_controller())
