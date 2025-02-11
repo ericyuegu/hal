@@ -1,8 +1,8 @@
 import random
 from typing import Dict
 from typing import Set
-from typing import Tuple
 
+import attr
 import numpy as np
 import torch
 from tensordict import TensorDict
@@ -42,9 +42,7 @@ class Preprocessor:
 
         self.input_config = InputConfigRegistry.get(self.data_config.input_preprocessing_fn)
         # Dynamically update registered config with user-specified embedding shapes
-        self.input_shapes_by_head = update_input_shapes_with_data_config(
-            self.input_config.input_shapes_by_head, data_config
-        )
+        self.input_config = update_input_shapes_with_data_config(self.input_config, data_config)
         self.preprocess_targets_fn = TargetPreprocessRegistry.get(self.data_config.target_preprocessing_fn)
         self.postprocess_preds_fn = PredPostprocessingRegistry.get(self.data_config.pred_postprocessing_fn)
 
@@ -203,17 +201,15 @@ def preprocess_input_features(
     return TensorDict(concatenated_features_by_head_name, batch_size=sample.batch_size)
 
 
-def update_input_shapes_with_data_config(
-    input_shapes_by_head: Dict[str, Tuple[int, ...]], data_config: DataConfig
-) -> Dict[str, Tuple[int, ...]]:
-    new_input_shapes_by_head = input_shapes_by_head.copy()
-    new_input_shapes_by_head.update(
-        {
+def update_input_shapes_with_data_config(input_config: InputConfig, data_config: DataConfig) -> InputConfig:
+    return attr.evolve(
+        input_config,
+        input_shapes_by_head={
+            **input_config.input_shapes_by_head,
             "stage": (data_config.stage_embedding_dim,),
             "ego_character": (data_config.character_embedding_dim,),
             "opponent_character": (data_config.character_embedding_dim,),
             "ego_action": (data_config.action_embedding_dim,),
             "opponent_action": (data_config.action_embedding_dim,),
-        }
+        },
     )
-    return new_input_shapes_by_head
