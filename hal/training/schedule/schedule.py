@@ -9,7 +9,7 @@ import torch
 from hal.training.schedule.stage import LRStage
 
 DEFAULT_LR_STAGES: Sequence[LRStage] = (
-    LRStage(end=0.0625, scalar=1),
+    LRStage(end=0.015625, scalar=1),
     LRStage(end=0.75, scalar=1),
     LRStage(end=0.875, scalar=0.1),
     LRStage(end=0.9375, scalar=0.01),
