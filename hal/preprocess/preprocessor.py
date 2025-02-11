@@ -181,12 +181,7 @@ class Preprocessor:
         """Mock a single model prediction."""
         out = {
             name: torch.zeros(num_clusters)
-            for name, num_clusters in {
-                "buttons": self.data_config.num_buttons,
-                "main_stick": self.data_config.num_main_stick_clusters,
-                "c_stick": self.data_config.num_c_stick_clusters,
-                "shoulder": self.data_config.num_shoulder_clusters,
-            }.items()
+            for name, num_clusters in self.target_config.target_shapes_by_head.items()
             if num_clusters is not None
         }
         return TensorDict(out, batch_size=())

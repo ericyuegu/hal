@@ -213,12 +213,8 @@ class GPTv1(BaseGPT):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.data_config
-        assert self.emb_config.num_buttons is not None
-        assert self.emb_config.num_main_stick_clusters is not None
-        assert self.emb_config.num_c_stick_clusters is not None
-
         # categorical input embeddings
+        self.emb_config = self.preprocessor.data_config
         self.stage_emb = nn.Embedding(self.emb_config.num_stages, self.emb_config.stage_embedding_dim)
         self.character_emb = nn.Embedding(self.emb_config.num_characters, self.emb_config.character_embedding_dim)
         self.action_emb = nn.Embedding(self.emb_config.num_actions, self.emb_config.action_embedding_dim)
@@ -234,9 +230,10 @@ class GPTv1(BaseGPT):
         )
 
         # output heads
-        self.button_head = nn.Linear(self.n_embd, self.emb_config.num_buttons, bias=False)
-        self.main_stick_head = nn.Linear(self.n_embd, self.emb_config.num_main_stick_clusters, bias=False)
-        self.c_stick_head = nn.Linear(self.n_embd, self.emb_config.num_c_stick_clusters, bias=False)
+        self.target_shapes_by_head = self.preprocessor.target_config.target_shapes_by_head
+        self.button_head = nn.Linear(self.n_embd, self.target_shapes_by_head["buttons"][0], bias=False)
+        self.main_stick_head = nn.Linear(self.n_embd, self.target_shapes_by_head["main_stick"][0], bias=False)
+        self.c_stick_head = nn.Linear(self.n_embd, self.target_shapes_by_head["c_stick"][0], bias=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -307,15 +304,9 @@ class GPTv2Controller(GPTv1):
     def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
         super().__init__(preprocessor, gpt_config)
 
-        # repeat assertions because mypy/PyLance is dumb
-        self.emb_config = self.preprocessor.data_config
-        assert self.emb_config.num_buttons is not None
-        assert self.emb_config.num_main_stick_clusters is not None
-        assert self.emb_config.num_c_stick_clusters is not None
-
-        main_stick_size = self.emb_config.num_main_stick_clusters
-        button_size = self.emb_config.num_buttons
-        c_stick_size = self.emb_config.num_c_stick_clusters
+        main_stick_size = self.target_shapes_by_head["main_stick"][0]
+        button_size = self.target_shapes_by_head["buttons"][0]
+        c_stick_size = self.target_shapes_by_head["c_stick"][0]
 
         # re-define and re-initialize just the new output heads
         self.main_stick_head = nn.Linear(self.n_embd, main_stick_size, bias=False)
@@ -502,12 +493,8 @@ class GPTv3(BaseGPT):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.data_config
-        assert self.emb_config.num_buttons is not None
-        assert self.emb_config.num_main_stick_clusters is not None
-        assert self.emb_config.num_c_stick_clusters is not None
-
         # categorical input embeddings
+        self.emb_config = self.preprocessor.data_config
         self.stage_emb = nn.Embedding(self.emb_config.num_stages, self.emb_config.stage_embedding_dim)
         self.character_emb = nn.Embedding(self.emb_config.num_characters, self.emb_config.character_embedding_dim)
         self.action_emb = nn.Embedding(self.emb_config.num_actions, self.emb_config.action_embedding_dim)
@@ -522,9 +509,10 @@ class GPTv3(BaseGPT):
         )
 
         # output heads
-        self.button_head = nn.Linear(self.n_embd, self.emb_config.num_buttons, bias=False)
-        self.main_stick_head = nn.Linear(self.n_embd, self.emb_config.num_main_stick_clusters, bias=False)
-        self.c_stick_head = nn.Linear(self.n_embd, self.emb_config.num_c_stick_clusters, bias=False)
+        self.target_shapes_by_head = self.preprocessor.target_config.target_shapes_by_head
+        self.button_head = nn.Linear(self.n_embd, self.target_shapes_by_head["buttons"][0], bias=False)
+        self.main_stick_head = nn.Linear(self.n_embd, self.target_shapes_by_head["main_stick"][0], bias=False)
+        self.c_stick_head = nn.Linear(self.n_embd, self.target_shapes_by_head["c_stick"][0], bias=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -594,12 +582,8 @@ class GPTv4Controller(BaseGPT):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.data_config
-        assert self.emb_config.num_buttons is not None
-        assert self.emb_config.num_main_stick_clusters is not None
-        assert self.emb_config.num_c_stick_clusters is not None
-
         # Categorical input embeddings
+        self.emb_config = self.preprocessor.data_config
         self.stage_emb = nn.Embedding(self.emb_config.num_stages, self.emb_config.stage_embedding_dim)
         self.character_emb = nn.Embedding(self.emb_config.num_characters, self.emb_config.character_embedding_dim)
         self.action_emb = nn.Embedding(self.emb_config.num_actions, self.emb_config.action_embedding_dim)
@@ -614,9 +598,10 @@ class GPTv4Controller(BaseGPT):
         )
 
         # Output heads
-        main_stick_size = self.emb_config.num_main_stick_clusters
-        button_size = self.emb_config.num_buttons
-        c_stick_size = self.emb_config.num_c_stick_clusters
+        self.target_shapes_by_head = self.preprocessor.target_config.target_shapes_by_head
+        main_stick_size = self.target_shapes_by_head["main_stick"][0]
+        button_size = self.target_shapes_by_head["buttons"][0]
+        c_stick_size = self.target_shapes_by_head["c_stick"][0]
 
         # Put c-stick first because it overrides button inputs, other heads can choose to fire if c-stick is inactive
         self.c_stick_head = nn.Sequential(
@@ -698,13 +683,8 @@ class GPTv5Controller(GPTv4Controller):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.data_config
-        assert self.emb_config.num_buttons is not None
-        assert self.emb_config.num_main_stick_clusters is not None
-        assert self.emb_config.num_c_stick_clusters is not None
-        assert self.emb_config.num_shoulder_clusters is not None
-
         # Categorical input embeddings
+        self.emb_config = self.preprocessor.data_config
         self.stage_emb = nn.Embedding(self.emb_config.num_stages, self.emb_config.stage_embedding_dim)
         self.character_emb = nn.Embedding(self.emb_config.num_characters, self.emb_config.character_embedding_dim)
         self.action_emb = nn.Embedding(self.emb_config.num_actions, self.emb_config.action_embedding_dim)
@@ -719,16 +699,17 @@ class GPTv5Controller(GPTv4Controller):
         )
 
         # Output heads
-        shoulder_output_size = self.emb_config.num_shoulder_clusters
+        self.target_shapes_by_head = self.preprocessor.target_config.target_shapes_by_head
+        shoulder_output_size = self.target_shapes_by_head["shoulder"][0]
 
         c_stick_input_size = self.n_embd + shoulder_output_size
-        c_stick_output_size = self.emb_config.num_c_stick_clusters
+        c_stick_output_size = self.target_shapes_by_head["c_stick"][0]
 
         main_stick_input_size = self.n_embd + shoulder_output_size + c_stick_output_size
-        main_stick_output_size = self.emb_config.num_main_stick_clusters
+        main_stick_output_size = self.target_shapes_by_head["main_stick"][0]
 
         button_input_size = self.n_embd + shoulder_output_size + c_stick_output_size + main_stick_output_size
-        button_output_size = self.emb_config.num_buttons
+        button_output_size = self.target_shapes_by_head["buttons"][0]
 
         # Put shoulder and c-stick first because they are less complex and they modify/override other inputs
         self.shoulder_head = nn.Sequential(
@@ -810,94 +791,10 @@ class MultiTokenGPT(GPTv1):
 
     def __init__(self, train_config: TrainConfig, gpt_config: MultiTokenGPTConfig) -> None:
         super().__init__()
-        embed_config = train_config.embedding
-        assert embed_config.num_buttons is not None
-        assert embed_config.num_main_stick_clusters is not None
-        assert embed_config.num_c_stick_clusters is not None
-        self.n_embd = get_input_size_from_config(embed_config)
-        self.block_size = train_config.data.input_len
-
-        self.train_config = train_config
-        self.gpt_config = gpt_config
-
-        self.transformer = nn.ModuleDict(
-            dict(
-                stage=nn.Embedding(embed_config.num_stages, embed_config.stage_embedding_dim),
-                character=nn.Embedding(embed_config.num_characters, embed_config.character_embedding_dim),
-                action=nn.Embedding(embed_config.num_actions, embed_config.action_embedding_dim),
-                wpe=nn.Embedding(self.block_size, self.n_embd),
-                drop=nn.Dropout(gpt_config.dropout),
-                h=nn.ModuleList(
-                    [
-                        Block(
-                            n_embd=self.n_embd,
-                            n_head=gpt_config.n_head,
-                            block_size=self.block_size,
-                            dropout=gpt_config.dropout,
-                            bias=gpt_config.bias,
-                        )
-                        for _ in range(gpt_config.n_layer)
-                    ]
-                ),
-                ln_f=nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
-            )
-        )
-        self.out_heads = nn.ModuleDict(
-            {
-                i: dict(
-                    button_head=nn.Linear(self.n_embd, embed_config.num_buttons, bias=False),
-                    main_stick_head=nn.Linear(self.n_embd, embed_config.num_main_stick_clusters, bias=False),
-                    c_stick_head=nn.Linear(self.n_embd, embed_config.num_c_stick_clusters, bias=False),
-                )
-                for i in range(self.gpt_config.n_lookahead)
-            }
-        )
-
-        # TODO investigate weight tying
-        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
-
-        # init all weights
-        self.apply(self._init_weights)
-        # apply special scaled init to the residual projections, per GPT-2 paper
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * gpt_config.n_layer))
+        ...
 
     def forward(self, inputs: TensorDict):
-        B, L, D = inputs["gamestate"].shape
-        assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
-        pos = torch.arange(0, L, dtype=torch.long, device=next(self.parameters()).device)  # shape (t)
-
-        # Embeddings
-        stage_emb = self.transformer.stage(inputs["stage"]).squeeze(-2)
-        ego_character_emb = self.transformer.character(inputs["ego_character"]).squeeze(-2)
-        opponent_character_emb = self.transformer.character(inputs["opponent_character"]).squeeze(-2)
-        ego_action_emb = self.transformer.action(inputs["ego_action"]).squeeze(-2)
-        opponent_action_emb = self.transformer.action(inputs["opponent_action"]).squeeze(-2)
-        gamestate = inputs["gamestate"]
-        combined_inputs = torch.cat(
-            [stage_emb, ego_character_emb, opponent_character_emb, ego_action_emb, opponent_action_emb, gamestate],
-            dim=-1,
-        )
-
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(combined_inputs + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
-
-        multi_logit_dict = {}
-        for i in range(self.gpt_config.n_lookahead):
-            multi_logit_dict[i] = dict(
-                button_logits=self.out_heads.get(i).button_head(x).squeeze(-2),
-                main_stick_logits=self.out_heads.get(i).main_stick_head(x).squeeze(-2),
-                c_stick_logits=self.out_heads.get(i).c_stick_head(x).squeeze(-2),
-            )
-
-        # TODO inference-time mini-optimization: only forward output heads on the very last position
-        # logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-
-        return TensorDict(multi_logit_dict, batch_size=(B, L))
+        ...
 
 
 Arch.register("GPTv1-256-4-4", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))

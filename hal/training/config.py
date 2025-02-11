@@ -66,22 +66,6 @@ class DataConfig:
     character_embedding_dim: int = 12
     action_embedding_dim: int = 32
 
-    # Target classification sizes
-    num_buttons: Optional[int] = None
-    num_main_stick_clusters: Optional[int] = None
-    num_c_stick_clusters: Optional[int] = None
-    num_shoulder_clusters: Optional[int] = None
-
-    # TODO delete and replace all uses with targetconfig
-    def __attrs_post_init__(self) -> None:
-        from hal.preprocess.target_embedding_sizes import TARGETS_EMBEDDING_SIZES
-
-        target_sizes = TARGETS_EMBEDDING_SIZES[self.target_preprocessing_fn]
-        object.__setattr__(self, "num_buttons", target_sizes.get("buttons", None))
-        object.__setattr__(self, "num_main_stick_clusters", target_sizes.get("main_stick", None))
-        object.__setattr__(self, "num_c_stick_clusters", target_sizes.get("c_stick", None))
-        object.__setattr__(self, "num_shoulder_clusters", target_sizes.get("shoulder", None))
-
     @property
     def stats_path(self) -> Path:
         return Path(self.data_dir) / "stats.json"
