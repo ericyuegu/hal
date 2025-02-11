@@ -5,12 +5,12 @@ import pandas as pd
 from pathlib import Path
 
 from streaming import StreamingDataset
-from hal.training.preprocess.preprocess_targets import preprocess_targets_v1
+from hal.preprocess.preprocess_targets import preprocess_targets_v1
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
+from hal.training.config import DataConfig
 from hal.training.config import TrainConfig
 from hal.training.streaming_dataloader import get_dataloaders
-from hal.training.preprocess.transform import preprocess_controller_inputs_fine_shoulder
+from hal.preprocess.transform import preprocess_controller_inputs_fine_shoulder
 from hal.training.streaming_dataset import HALStreamingDataset
 
 torch.set_printoptions(precision=4, sci_mode=False, linewidth=120, threshold=torch.inf)
@@ -34,7 +34,7 @@ ds = HALStreamingDataset(
     batch_size=4,
     shuffle=False,
     data_config=DataConfig(data_dir="/opt/projects/hal2/data/mang0"),
-    embedding_config=EmbeddingConfig(input_preprocessing_fn="inputs_v0"),
+    embedding_config=DataConfig(input_preprocessing_fn="inputs_v0"),
 )
 
 # %%

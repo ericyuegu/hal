@@ -213,7 +213,7 @@ class GPTv1(BaseGPT):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.embedding_config
+        self.emb_config = self.preprocessor.data_config
         assert self.emb_config.num_buttons is not None
         assert self.emb_config.num_main_stick_clusters is not None
         assert self.emb_config.num_c_stick_clusters is not None
@@ -308,7 +308,7 @@ class GPTv2Controller(GPTv1):
         super().__init__(preprocessor, gpt_config)
 
         # repeat assertions because mypy/PyLance is dumb
-        self.emb_config = self.preprocessor.embedding_config
+        self.emb_config = self.preprocessor.data_config
         assert self.emb_config.num_buttons is not None
         assert self.emb_config.num_main_stick_clusters is not None
         assert self.emb_config.num_c_stick_clusters is not None
@@ -502,7 +502,7 @@ class GPTv3(BaseGPT):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.embedding_config
+        self.emb_config = self.preprocessor.data_config
         assert self.emb_config.num_buttons is not None
         assert self.emb_config.num_main_stick_clusters is not None
         assert self.emb_config.num_c_stick_clusters is not None
@@ -594,7 +594,7 @@ class GPTv4Controller(BaseGPT):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.embedding_config
+        self.emb_config = self.preprocessor.data_config
         assert self.emb_config.num_buttons is not None
         assert self.emb_config.num_main_stick_clusters is not None
         assert self.emb_config.num_c_stick_clusters is not None
@@ -698,7 +698,7 @@ class GPTv5Controller(GPTv4Controller):
         self.input_size = self.preprocessor.input_size  # G
         self.n_embd = gpt_config.n_embd  # D
 
-        self.emb_config = self.preprocessor.embedding_config
+        self.emb_config = self.preprocessor.data_config
         assert self.emb_config.num_buttons is not None
         assert self.emb_config.num_main_stick_clusters is not None
         assert self.emb_config.num_c_stick_clusters is not None

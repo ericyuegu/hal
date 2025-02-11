@@ -2,13 +2,12 @@
 from pathlib import Path
 
 from hal.data.stats import load_dataset_stats
+from hal.preprocess.preprocess_inputs import preprocess_inputs_v0
+from hal.preprocess.preprocess_targets import preprocess_targets_v0
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
 from hal.training.config import ReplayFilter
 from hal.training.deprecated.dataset import InMemoryTensordictDataset
 from hal.training.deprecated.dataset import load_filtered_parquet_as_tensordict
-from hal.training.preprocess.preprocess_inputs import preprocess_inputs_v0
-from hal.training.preprocess.preprocess_targets import preprocess_targets_v0
 
 data_config = DataConfig(replay_filter=ReplayFilter(stage="BATTLEFIELD", ego_character="FOX"))
 td = load_filtered_parquet_as_tensordict("/opt/projects/hal2/data/dev/train.parquet", data_config)
@@ -25,7 +24,7 @@ preprocess_inputs_v0(td[:70], 60, "p1", stats)
 preprocess_targets_v0(td[:70], "p1")
 
 # %%
-dataset = InMemoryTensordictDataset(td, stats_path, data_config, EmbeddingConfig())
+dataset = InMemoryTensordictDataset(td, stats_path, data_config, DataConfig())
 
 # %%
 dataset[0]

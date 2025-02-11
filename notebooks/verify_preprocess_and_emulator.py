@@ -5,11 +5,11 @@ import attr
 from tensordict import TensorDict
 
 from hal.data.process_replays import process_replay
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import DataConfig
 from hal.training.io import Checkpoint
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.models.registry import Arch
-from hal.training.preprocess.preprocessor import Preprocessor
 
 # %%
 # We want to load a .slp file from closed loop eval and run it back through data preprocessing pipeline & model forward pass to verify that the stack is working correctly

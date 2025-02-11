@@ -60,7 +60,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         assert self.config.report_len % self.config.local_batch_size == 0
         assert self.config.n_samples % self.config.report_len == 0
 
-        self.preprocessor = Preprocessor(data_config=config.data, embedding_config=config.embedding)
+        self.preprocessor = Preprocessor(data_config=config.data)
         self.samples = 0
         self.artifact_dir = get_artifact_dir(get_exp_name(self.config))
 

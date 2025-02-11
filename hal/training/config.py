@@ -32,11 +32,18 @@ class ReplayFilter:
 
 
 @attr.s(auto_attribs=True, frozen=True)
+class DataworkerConfig:
+    data_workers_per_gpu: int = 8
+    prefetch_factor: int = 2
+    collate_fn: Optional[str] = None
+
+
+@attr.s(auto_attribs=True, frozen=True)
 class DataConfig:
     """Training & eval dataset & preprocessing."""
 
+    # Dataset & filtering
     data_dir: str = "/opt/projects/hal2/data/dev"
-
     # Number of input and target frames in example
     seq_len: int = 256
     replay_filter: ReplayFilter = ReplayFilter()
@@ -45,32 +52,21 @@ class DataConfig:
     debug_repeat_batch: bool = False
     debug_save_batch: bool = False
 
-    @property
-    def stats_path(self) -> Path:
-        return Path(self.data_dir) / "stats.json"
-
-
-@attr.s(auto_attribs=True, frozen=True)
-class DataworkerConfig:
-    data_workers_per_gpu: int = 8
-    prefetch_factor: int = 2
-    collate_fn: Optional[str] = None
-
-
-@attr.s(auto_attribs=True, frozen=True)
-class EmbeddingConfig:
+    # Preprocessing / postprocessing functions
     input_preprocessing_fn: str = "inputs_v0"
     target_preprocessing_fn: str = "targets_v0"
     pred_postprocessing_fn: str = "preds_v0"
 
+    # --- Below determines model input/output head shape ---
+    # Categorical input embedding sizes
+    num_stages: int = len(IDX_BY_STAGE)
+    num_characters: int = len(IDX_BY_CHARACTER)
+    num_actions: int = len(IDX_BY_ACTION)
     stage_embedding_dim: int = 4
     character_embedding_dim: int = 12
     action_embedding_dim: int = 32
 
-    num_stages: int = len(IDX_BY_STAGE)
-    num_characters: int = len(IDX_BY_CHARACTER)
-    num_actions: int = len(IDX_BY_ACTION)
-
+    # Target classification sizes
     num_buttons: Optional[int] = None
     num_main_stick_clusters: Optional[int] = None
     num_c_stick_clusters: Optional[int] = None
@@ -84,6 +80,10 @@ class EmbeddingConfig:
         object.__setattr__(self, "num_main_stick_clusters", target_sizes.get("main_stick", None))
         object.__setattr__(self, "num_c_stick_clusters", target_sizes.get("c_stick", None))
         object.__setattr__(self, "num_shoulder_clusters", target_sizes.get("shoulder", None))
+
+    @property
+    def stats_path(self) -> Path:
+        return Path(self.data_dir) / "stats.json"
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -105,7 +105,7 @@ class TrainConfig(BaseConfig):
 
     # Data
     data: DataConfig = DataConfig()
-    embedding: EmbeddingConfig = EmbeddingConfig()
+    embedding: DataConfig = DataConfig()
     dataworker: DataworkerConfig = DataworkerConfig()
     seed: int = 42
 

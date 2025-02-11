@@ -3,8 +3,8 @@ from typing import Tuple
 
 import attr
 
-from hal.training.config import EmbeddingConfig
-from hal.training.preprocess.transform import Transformation
+from hal.preprocess.transform import Transformation
+from hal.training.config import DataConfig
 
 
 @attr.s(auto_attribs=True)
@@ -34,17 +34,15 @@ class InputPreprocessConfig:
     input_shapes_by_head: Dict[str, Tuple[int, ...]]
 
     # TODO what if we want to add or remove heads?
-    def update_input_shapes_with_embedding_config(
-        self, embedding_config: EmbeddingConfig
-    ) -> Dict[str, Tuple[int, ...]]:
+    def update_input_shapes_with_data_config(self, data_config: DataConfig) -> Dict[str, Tuple[int, ...]]:
         new_input_shapes_by_head = self.input_shapes_by_head.copy()
         new_input_shapes_by_head.update(
             {
-                "stage": (embedding_config.stage_embedding_dim,),
-                "ego_character": (embedding_config.character_embedding_dim,),
-                "opponent_character": (embedding_config.character_embedding_dim,),
-                "ego_action": (embedding_config.action_embedding_dim,),
-                "opponent_action": (embedding_config.action_embedding_dim,),
+                "stage": (data_config.stage_embedding_dim,),
+                "ego_character": (data_config.character_embedding_dim,),
+                "opponent_character": (data_config.character_embedding_dim,),
+                "ego_action": (data_config.action_embedding_dim,),
+                "opponent_action": (data_config.action_embedding_dim,),
             }
         )
         self.input_shapes_by_head = new_input_shapes_by_head

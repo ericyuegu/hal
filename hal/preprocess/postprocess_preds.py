@@ -4,7 +4,7 @@ from tensordict import TensorDict
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
-from hal.training.preprocess.registry import PredPostprocessingRegistry
+from hal.preprocess.registry import PredPostprocessingRegistry
 
 
 @PredPostprocessingRegistry.register("preds_v0")

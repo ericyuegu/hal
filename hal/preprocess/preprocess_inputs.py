@@ -11,15 +11,15 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
 from hal.constants import get_opponent
 from hal.data.stats import FeatureStats
-from hal.training.preprocess.input_preprocess_config import InputPreprocessConfig
-from hal.training.preprocess.registry import InputPreprocessRegistry
-from hal.training.preprocess.transform import cast_int32
-from hal.training.preprocess.transform import concat_controller_inputs_coarse
-from hal.training.preprocess.transform import concat_controller_inputs_fine
-from hal.training.preprocess.transform import concat_controller_inputs_fine_shoulder
-from hal.training.preprocess.transform import invert_and_normalize
-from hal.training.preprocess.transform import normalize
-from hal.training.preprocess.transform import standardize
+from hal.preprocess.input_preprocess_config import InputPreprocessConfig
+from hal.preprocess.registry import InputPreprocessRegistry
+from hal.preprocess.transform import cast_int32
+from hal.preprocess.transform import concat_controller_inputs_coarse
+from hal.preprocess.transform import concat_controller_inputs_fine
+from hal.preprocess.transform import concat_controller_inputs_fine_shoulder
+from hal.preprocess.transform import invert_and_normalize
+from hal.preprocess.transform import normalize
+from hal.preprocess.transform import standardize
 
 DEFAULT_HEAD_NAME = "gamestate"
 

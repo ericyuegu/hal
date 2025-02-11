@@ -10,7 +10,6 @@ from hal.constants import Player
 from hal.constants import VALID_PLAYERS
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
 
 
 class HALStreamingDataset(StreamingDataset):
@@ -21,11 +20,10 @@ class HALStreamingDataset(StreamingDataset):
         batch_size: int,
         shuffle: bool,
         data_config: DataConfig,
-        embedding_config: EmbeddingConfig,
         debug: bool = False,
     ) -> None:
         super().__init__(local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
-        self.preprocessor = Preprocessor(data_config=data_config, embedding_config=embedding_config)
+        self.preprocessor = Preprocessor(data_config=data_config)
         self.seq_len = self.preprocessor.seq_len
         self.debug = debug
 

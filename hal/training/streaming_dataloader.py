@@ -26,7 +26,6 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         batch_size=batch_size,
         shuffle=True,
         data_config=config.data,
-        embedding_config=config.embedding,
     )
     val_dataset = HALStreamingDataset(
         local=str(val_dir),
@@ -34,7 +33,6 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         batch_size=batch_size,
         shuffle=False,
         data_config=config.data,
-        embedding_config=config.embedding,
     )
 
     train_loader = DataLoader(

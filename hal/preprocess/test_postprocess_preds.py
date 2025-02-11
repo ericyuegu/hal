@@ -3,7 +3,7 @@ import torch
 from tensordict import TensorDict
 
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
-from hal.training.preprocess.postprocess_preds import model_predictions_to_controller_inputs_v0_temp
+from hal.preprocess.postprocess_preds import model_predictions_to_controller_inputs_v0_temp
 
 
 @pytest.fixture

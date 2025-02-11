@@ -7,7 +7,6 @@ from tensordict import TensorDict
 
 from hal.constants import ACTION_BY_IDX
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
 from hal.training.io import load_model_from_artifact_dir
 from hal.training.streaming_dataset import HALStreamingDataset
 
@@ -43,7 +42,7 @@ data_config = DataConfig(
     data_dir="/opt/projects/hal2/data/multishine",
     seq_len=256,
 )
-embedding_config = EmbeddingConfig(
+embedding_config = DataConfig(
     input_preprocessing_fn="inputs_v1_controller",
 )
 train_dataset = HALStreamingDataset(
@@ -410,7 +409,7 @@ data_config = DataConfig(
     data_dir="/opt/projects/hal2/data/multishine",
     seq_len=256,
 )
-embedding_config = EmbeddingConfig(
+embedding_config = DataConfig(
     input_preprocessing_fn="inputs_v1",
 )
 train_dataset = HALStreamingDataset(

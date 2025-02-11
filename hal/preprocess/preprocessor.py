@@ -7,13 +7,12 @@ from tensordict import TensorDict
 
 from hal.constants import Player
 from hal.data.stats import load_dataset_stats
+from hal.preprocess.preprocess_inputs import preprocess_input_features
+from hal.preprocess.registry import InputPreprocessRegistry
+from hal.preprocess.registry import PredPostprocessingRegistry
+from hal.preprocess.registry import TargetPreprocessRegistry
+from hal.preprocess.transform import Transformation
 from hal.training.config import DataConfig
-from hal.training.config import EmbeddingConfig
-from hal.training.preprocess.preprocess_inputs import preprocess_input_features
-from hal.training.preprocess.registry import InputPreprocessRegistry
-from hal.training.preprocess.registry import PredPostprocessingRegistry
-from hal.training.preprocess.registry import TargetPreprocessRegistry
-from hal.training.preprocess.transform import Transformation
 
 
 class Preprocessor:
@@ -30,19 +29,16 @@ class Preprocessor:
     - hidden dim sizes by input embedding head at runtime
     """
 
-    def __init__(self, data_config: DataConfig, embedding_config: EmbeddingConfig) -> None:
+    def __init__(self, data_config: DataConfig) -> None:
         self.data_config = data_config
-        self.embedding_config = embedding_config
         self.stats = load_dataset_stats(data_config.stats_path)
         self.normalization_fn_by_feature_name: Dict[str, Transformation] = {}
         self.seq_len = data_config.seq_len
 
-        self.input_preprocess_config = InputPreprocessRegistry.get(self.embedding_config.input_preprocessing_fn)
-        self.input_shapes_by_head = self.input_preprocess_config.update_input_shapes_with_embedding_config(
-            self.embedding_config
-        )
-        self.preprocess_targets_fn = TargetPreprocessRegistry.get(self.embedding_config.target_preprocessing_fn)
-        self.postprocess_preds_fn = PredPostprocessingRegistry.get(self.embedding_config.pred_postprocessing_fn)
+        self.input_preprocess_config = InputPreprocessRegistry.get(self.data_config.input_preprocessing_fn)
+        self.input_shapes_by_head = self.input_preprocess_config.update_input_shapes_with_data_config(self.data_config)
+        self.preprocess_targets_fn = TargetPreprocessRegistry.get(self.data_config.target_preprocessing_fn)
+        self.postprocess_preds_fn = PredPostprocessingRegistry.get(self.data_config.pred_postprocessing_fn)
 
         self.frame_offsets_by_feature = self.input_preprocess_config.frame_offsets_by_feature
         self.max_abs_offset = max((abs(offset) for offset in self.frame_offsets_by_feature.values()), default=0)
@@ -130,10 +126,10 @@ class Preprocessor:
         out = {
             name: torch.zeros(num_clusters)
             for name, num_clusters in {
-                "buttons": self.embedding_config.num_buttons,
-                "main_stick": self.embedding_config.num_main_stick_clusters,
-                "c_stick": self.embedding_config.num_c_stick_clusters,
-                "shoulder": self.embedding_config.num_shoulder_clusters,
+                "buttons": self.data_config.num_buttons,
+                "main_stick": self.data_config.num_main_stick_clusters,
+                "c_stick": self.data_config.num_c_stick_clusters,
+                "shoulder": self.data_config.num_shoulder_clusters,
             }.items()
             if num_clusters is not None
         }

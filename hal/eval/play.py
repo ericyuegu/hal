@@ -14,10 +14,10 @@ from hal.emulator_helper import get_gui_console_kwargs
 from hal.emulator_helper import self_play_menu_helper
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import send_controller_inputs
+from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
-from hal.training.preprocess.preprocessor import Preprocessor
 
 EMULATOR_PATH = "/Users/ericgu/Library/Application Support/Slippi Launcher/netplay"
 CISO_PATH = "/Users/ericgu/data/ssbm/ssbm.ciso"
@@ -37,7 +37,7 @@ def play(artifact_dir: str):
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     train_config: TrainConfig = load_config_from_artifact_dir(Path(artifact_dir))
-    preprocessor = Preprocessor(data_config=train_config.data, embedding_config=train_config.embedding)
+    preprocessor = Preprocessor(data_config=train_config.data)
     seq_len = preprocessor.seq_len
 
     model = load_model(artifact_dir, device)

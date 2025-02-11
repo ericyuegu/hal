@@ -261,7 +261,7 @@ def run_closed_loop_evaluation(
         pass
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_config: TrainConfig = load_config_from_artifact_dir(artifact_dir)
-    preprocessor = Preprocessor(data_config=train_config.data, embedding_config=train_config.embedding)
+    preprocessor = Preprocessor(data_config=train_config.data)
 
     # Create events to signal when cpu and gpu workers are ready
     model_input_ready_flags: List[EventType] = [mp.Event() for _ in range(n_workers)]

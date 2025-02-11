@@ -91,7 +91,7 @@ def load_model_from_artifact_dir(
     artifact_dir: Path, idx: Optional[int] = None, device: str | torch.device = "cpu"
 ) -> Tuple[torch.nn.Module, TrainConfig]:
     config = load_config_from_artifact_dir(artifact_dir)
-    preprocessor = Preprocessor(data_config=config.data, embedding_config=config.embedding)
+    preprocessor = Preprocessor(data_config=config.data)
     model = Arch.get(config.arch, preprocessor=preprocessor)
     ckpt = Checkpoint(model, config, artifact_dir, keep_ckpts=config.keep_ckpts)
     ckpt.restore(idx=idx, device=device)
