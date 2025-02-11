@@ -276,7 +276,7 @@ class CategoricalBCTrainer(Trainer, abc.ABC):
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
         metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
-        metrics_dict["lr"] = self.scheduler.get_lr()  # type: ignore
+        metrics_dict["lr/lr"] = self.scheduler.get_last_lr()
         return metrics_dict
 
     def val_op(self, batch: TensorDict) -> MetricsDict:
