@@ -13,15 +13,14 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 from torch.nn import functional as F
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
-from training.distributed import log_if_master
 
 from hal.eval.eval import run_closed_loop_evaluation
 from hal.eval.eval_helper import EpisodeStats
 from hal.training.config import TrainConfig
 from hal.training.distributed import get_world_size
 from hal.training.distributed import is_master
+from hal.training.distributed import log_if_master
 from hal.training.distributed import maybe_wrap_model_distributed
 from hal.training.distributed import trange
 from hal.training.io import Checkpoint
@@ -33,6 +32,7 @@ from hal.training.io import get_log_dir
 from hal.training.models.registry import Arch
 from hal.training.optim import create_optimizer
 from hal.training.preprocess.preprocessor import Preprocessor
+from hal.training.schedule.schedule import LearningRatePieceWiseCos
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
 from hal.training.utils import time_format
@@ -75,8 +75,7 @@ class Trainer(torch.nn.Module, abc.ABC):
             device_type=self.device,
         )
 
-        batch_size = get_world_size() * self.config.local_batch_size
-        self.scheduler = CosineAnnealingLR(self.opt, T_max=int(config.n_samples / batch_size), eta_min=1e-6)
+        self.scheduler = LearningRatePieceWiseCos(opt=self.opt, base_lr=self.config.lr)
         self.ckpt = Checkpoint(
             model=self.model, config=self.config, artifact_dir=self.artifact_dir, keep_ckpts=self.config.keep_ckpts
         )
@@ -272,11 +271,10 @@ class CategoricalBCTrainer(Trainer, abc.ABC):
         loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
         loss_total.backward()  # type: ignore
         self.opt.step()
-        self.scheduler.step()
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
         metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
-        metrics_dict["lr/lr"] = self.scheduler.get_last_lr()
+        metrics_dict["lr/lr"] = self.scheduler(self.samples / self.config.n_samples)
         return metrics_dict
 
     def val_op(self, batch: TensorDict) -> MetricsDict:
