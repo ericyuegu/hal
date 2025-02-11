@@ -116,6 +116,8 @@ def cpu_worker(
                 i += 1
         except StopIteration:
             logger.success(f"CPU worker {rank} episode complete.")
+            logger.info(f"CPU worker {rank} episode stats: {emulator_manager.episode_stats}")
+            episode_stats_queue.put(emulator_manager.episode_stats)
         except Exception as e:
             logger.error(
                 f"CPU worker {rank} encountered an error: {e}\nTraceback:\n{''.join(traceback.format_tb(e.__traceback__))}"
@@ -123,8 +125,6 @@ def cpu_worker(
         finally:
             model_input_ready_flag.set()
             stop_event.set()
-            logger.debug(f"CPU worker {rank} episode stats: {emulator_manager.episode_stats}")
-            episode_stats_queue.put(emulator_manager.episode_stats)
             logger.info(f"CPU worker {rank} stopped")
 
 

@@ -676,6 +676,7 @@ class GPTv4Controller(BaseGPT):
             x_BLD = block(x_BLD)
         x_BLD = self.transformer.ln_f(x_BLD)
 
+        # TODO detach
         c_stick = self.c_stick_head(x_BLD)
         main_stick = self.main_stick_head(torch.cat((x_BLD, c_stick), dim=-1))
         button = self.button_head(torch.cat((x_BLD, c_stick, main_stick), dim=-1))
