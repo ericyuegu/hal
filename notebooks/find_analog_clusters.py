@@ -472,3 +472,16 @@ plt.axis("equal")
 plt.show()
 # %%
 len(STICK_XY_CLUSTER_CENTERS_V1)
+# %%
+import importlib
+
+import hal.constants
+
+importlib.reload(hal.constants)
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
+
+# plt.scatter(STICK_XY_CLUSTER_CENTERS_V0[:, 0], STICK_XY_CLUSTER_CENTERS_V0[:, 1], color="red")
+plt.scatter(STICK_XY_CLUSTER_CENTERS_V0[:, 0], STICK_XY_CLUSTER_CENTERS_V0[:, 1], color="blue")
+plt.axis("equal")
+plt.show()
+# %%
