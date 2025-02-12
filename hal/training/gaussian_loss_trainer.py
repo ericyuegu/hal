@@ -30,7 +30,7 @@ class GaussianLossTrainer(Trainer):
         self.gaussian_loss = Gaussian2DPointsLoss(
             torch.tensor(target_config.reference_points),
             sigma=target_config.sigma,
-        )
+        ).to(self.device)
 
     def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict:
         loss_dict: TensorDict = TensorDict({})
