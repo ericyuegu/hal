@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from hal.training.config import BaseConfig
 
-# Disable Infiniband and P2P to ensure that NCCL does not try to use
+# Disable Infiniband and P2P to ensure that NCCL does not try to use within single-node distributed training
 os.environ["NCCL_IB_DISABLE"] = "1"
 os.environ["NCCL_P2P_DISABLE"] = "1"
 
