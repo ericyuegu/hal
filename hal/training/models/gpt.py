@@ -781,11 +781,6 @@ Arch.register(
     GPTv1,
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4, dropout=0.1),
 )
-Arch.register(
-    "GPTv1-384-12-8-dropout",
-    GPTv1,
-    gpt_config=GPTConfig(block_size=1024, n_embd=384, n_layer=12, n_head=8, dropout=0.1),
-)
 
 Arch.register(
     "GPTv1Controller-256-4-4", GPTv1Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
@@ -811,7 +806,7 @@ Arch.register(
 Arch.register(
     "GPTv4Controller-256-4-4-dropout",
     GPTv4Controller,
-    gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4, dropout=0.1),
+    gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4, dropout=0.2),
 )
 Arch.register(
     "GPTv4Controller-256-8-4", GPTv4Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4)
@@ -821,6 +816,12 @@ Arch.register(
     GPTv4Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4, dropout=0.2),
 )
+Arch.register(
+    "GPTv4Controller-384-6-8-dropout",
+    GPTv4Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=384, n_layer=6, n_head=8, dropout=0.2),
+)
+# This OOMs with batch 256 on 24GB GPU
 Arch.register(
     "GPTv4Controller-512-8-8-dropout",
     GPTv4Controller,

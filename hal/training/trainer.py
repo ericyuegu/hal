@@ -125,10 +125,10 @@ class Trainer(torch.nn.Module, abc.ABC):
     def val_op(self, batch: TensorDict) -> MetricsDict:
         with torch.no_grad():
             loss_by_head = self.forward_loop(batch)
-            loss_total = sum(v.detach() for k, v in loss_by_head.items() if k.startswith("loss"))
+            loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
+        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
         return metrics_dict
 
     def train_step(self, batch: TensorDict, writer: Writer, step: int) -> None:
