@@ -5,6 +5,7 @@ import attr
 from hal.preprocess.input_config import InputConfig
 from hal.preprocess.registry import InputConfigRegistry
 from hal.preprocess.target_configs import baseline_coarse
+from hal.preprocess.target_configs import baseline_fine
 from hal.preprocess.transformations import cast_int32
 from hal.preprocess.transformations import concat_controller_inputs
 from hal.preprocess.transformations import invert_and_normalize
@@ -70,7 +71,7 @@ def baseline() -> InputConfig:
 
 def baseline_controller() -> InputConfig:
     """
-    Baseline input features, controller inputs.
+    Baseline input features, coarse controller inputs.
 
     Separate embedding heads for stage, character, & action.
     No platforms, no projectiles.
@@ -94,6 +95,37 @@ def baseline_controller() -> InputConfig:
         input_shapes_by_head={
             **base_config.input_shapes_by_head,
             "controller": (baseline_coarse().target_size,),
+        },
+    )
+    return config
+
+
+def baseline_controller_fine() -> InputConfig:
+    """
+    Baseline input features, fine-grained controller inputs.
+
+    Separate embedding heads for stage, character, & action.
+    No platforms, no projectiles.
+    """
+
+    base_config = baseline()
+    config = attr.evolve(
+        base_config,
+        transformation_by_feature_name={
+            **base_config.transformation_by_feature_name,
+            "controller": partial(concat_controller_inputs, target_config=baseline_fine()),
+        },
+        frame_offsets_by_input={
+            **base_config.frame_offsets_by_input,
+            "controller": -1,
+        },
+        grouped_feature_names_by_head={
+            **base_config.grouped_feature_names_by_head,
+            "controller": ("controller",),
+        },
+        input_shapes_by_head={
+            **base_config.input_shapes_by_head,
+            "controller": (baseline_fine().target_size,),
         },
     )
     return config
@@ -168,5 +200,6 @@ def baseline_action_frame_controller() -> InputConfig:
 
 InputConfigRegistry.register("baseline", baseline())
 InputConfigRegistry.register("baseline_controller", baseline_controller())
+InputConfigRegistry.register("baseline_controller_fine", baseline_controller_fine())
 InputConfigRegistry.register("baseline_action_frame", baseline_action_frame())
 InputConfigRegistry.register("baseline_action_frame_controller", baseline_action_frame_controller())
