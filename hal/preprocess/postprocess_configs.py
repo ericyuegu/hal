@@ -13,7 +13,7 @@ def baseline_coarse() -> PostprocessConfig:
         transformation_by_controller_input={
             "main_stick": sample_main_stick_coarse,
             "c_stick": sample_c_stick_coarse,
-            "button": sample_buttons,
+            "buttons": sample_buttons,
         }
     )
 
@@ -23,7 +23,7 @@ def baseline_fine() -> PostprocessConfig:
         transformation_by_controller_input={
             "main_stick": sample_main_stick_fine,
             "c_stick": sample_c_stick_fine,
-            "button": sample_buttons,
+            "buttons": sample_buttons,
         }
     )
 
@@ -33,7 +33,7 @@ def baseline_coarse_shoulder() -> PostprocessConfig:
         transformation_by_controller_input={
             "main_stick": sample_main_stick_coarse,
             "c_stick": sample_c_stick_coarse,
-            "button": sample_buttons,
+            "buttons": sample_buttons,
             "shoulder": sample_shoulder,
         }
     )

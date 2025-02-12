@@ -105,12 +105,31 @@ class Trainer(torch.nn.Module, abc.ABC):
         ...
 
     @abc.abstractmethod
-    def train_op(self, batch: TensorDict) -> MetricsDict:
+    def forward_loop(self, batch: TensorDict) -> TensorDict:
         ...
 
-    @abc.abstractmethod
+    def train_op(self, batch: TensorDict) -> MetricsDict:
+        self.opt.zero_grad(set_to_none=True)
+        loss_by_head = self.forward_loop(batch)
+
+        loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
+        loss_total.backward()  # type: ignore
+        self.opt.step()
+        self.scheduler.step()
+
+        loss_by_head["loss_total"] = loss_total  # type: ignore
+        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
+        metrics_dict["lr/lr"] = self.scheduler.get_last_lr()[0]
+        return metrics_dict
+
     def val_op(self, batch: TensorDict) -> MetricsDict:
-        ...
+        with torch.no_grad():
+            loss_by_head = self.forward_loop(batch)
+            loss_total = sum(v.detach() for k, v in loss_by_head.items() if k.startswith("loss"))
+
+        loss_by_head["loss_total"] = loss_total  # type: ignore
+        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
+        return metrics_dict
 
     def train_step(self, batch: TensorDict, writer: Writer, step: int) -> None:
         if self.samples == 0 and self.config.data.debug_save_batch:
@@ -238,52 +257,3 @@ class Trainer(torch.nn.Module, abc.ABC):
                     eval_process.kill()
 
         writer.log(loss_dict, step=step, commit=False)
-
-
-class CategoricalBCTrainer(Trainer, abc.ABC):
-    """
-    Trains behavior cloning with cross-entropy loss for all controller inputs.
-    """
-
-    def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict:
-        loss_dict: TensorDict = TensorDict({})
-        loss_fns = {
-            "buttons": F.cross_entropy,
-            "main_stick": F.cross_entropy,
-            "c_stick": F.cross_entropy,
-            "shoulder": F.cross_entropy,
-        }
-
-        for target_feature, loss_fn in loss_fns.items():
-            if target_feature in pred and target_feature in target:
-                frame_losses = loss_fn(pred[target_feature], target[target_feature])
-                loss_dict[f"loss_{target_feature}"] = frame_losses
-
-        return loss_dict
-
-    @abc.abstractmethod
-    def _forward_loop(self, batch: TensorDict) -> TensorDict:
-        ...
-
-    def train_op(self, batch: TensorDict) -> MetricsDict:
-        self.opt.zero_grad(set_to_none=True)
-        loss_by_head = self._forward_loop(batch)
-
-        loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
-        loss_total.backward()  # type: ignore
-        self.opt.step()
-        self.scheduler.step()
-
-        loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
-        metrics_dict["lr/lr"] = self.scheduler.get_last_lr()[0]
-        return metrics_dict
-
-    def val_op(self, batch: TensorDict) -> MetricsDict:
-        with torch.no_grad():
-            loss_by_head = self._forward_loop(batch)
-            loss_total = sum(v.detach() for k, v in loss_by_head.items() if k.startswith("loss"))
-
-        loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"val/{k}": v.item() for k, v in loss_by_head.items()}
-        return metrics_dict
