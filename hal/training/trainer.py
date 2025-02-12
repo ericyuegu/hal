@@ -272,10 +272,11 @@ class CategoricalBCTrainer(Trainer, abc.ABC):
         loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
         loss_total.backward()  # type: ignore
         self.opt.step()
+        self.scheduler.step()
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
         metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
-        metrics_dict["lr/lr"] = self.scheduler(self.samples / self.config.n_samples)
+        metrics_dict["lr/lr"] = self.scheduler.get_last_lr()[0]
         return metrics_dict
 
     def val_op(self, batch: TensorDict) -> MetricsDict:
