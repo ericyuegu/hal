@@ -4,6 +4,7 @@ import random
 import signal
 import subprocess
 import sys
+import time
 import traceback
 from concurrent.futures import TimeoutError
 from contextlib import contextmanager
@@ -313,7 +314,9 @@ class EmulatorManager:
                 # Wrap `console.step()` in a thread with timeout
                 future = executor.submit(self.console.step)
                 try:
+                    step_start = time.perf_counter()
                     gamestate = future.result(timeout=self.console_timeout)
+                    step_time = time.perf_counter() - step_start
                 except concurrent.futures.TimeoutError:
                     logger.error("console.step() timed out")
                     raise
@@ -353,7 +356,14 @@ class EmulatorManager:
                         logger.error("Controller inputs are None")
                     else:
                         # logger.debug("Sending controller inputs")
+                        send_start = time.perf_counter()
                         send_controller_inputs(self.ego_controller, controller_inputs)
+                        send_time = time.perf_counter() - send_start
+
+                        if i % 60 == 0:
+                            logger.debug(
+                                f"Console.step() time: {step_time*1000:.2f}ms, controller send time: {send_time*1000:.2f}ms"
+                            )
 
                     self.episode_stats.update(gamestate)
                     if self.console_logger is not None:

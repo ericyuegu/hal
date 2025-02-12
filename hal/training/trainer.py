@@ -13,6 +13,7 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 from torch.nn import functional as F
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from hal.eval.eval import run_closed_loop_evaluation
@@ -32,7 +33,6 @@ from hal.training.io import get_exp_name
 from hal.training.io import get_log_dir
 from hal.training.models.registry import Arch
 from hal.training.optim import create_optimizer
-from hal.training.schedule.schedule import LearningRatePieceWiseCos
 from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
 from hal.training.utils import time_format
@@ -75,7 +75,8 @@ class Trainer(torch.nn.Module, abc.ABC):
             device_type=self.device,
         )
 
-        self.scheduler = LearningRatePieceWiseCos(opt=self.opt, base_lr=self.config.lr)
+        batch_size = get_world_size() * self.config.local_batch_size
+        self.scheduler = CosineAnnealingLR(self.opt, T_max=int(config.n_samples / batch_size), eta_min=1e-6)
         self.ckpt = Checkpoint(
             model=self.model, config=self.config, artifact_dir=self.artifact_dir, keep_ckpts=self.config.keep_ckpts
         )

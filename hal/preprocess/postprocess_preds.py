@@ -102,3 +102,34 @@ def model_predictions_to_controller_inputs_v1(pred_C: TensorDict, temperature: f
             "shoulder": shoulder_x,
         }
     )
+
+
+@PredPostprocessingRegistry.register("preds_v2")
+def model_predictions_to_controller_inputs_v2(pred_C: TensorDict, temperature: float = 1.0) -> TensorDict:
+    """
+    Analog shoulder presses.
+    """
+    # Decode x, y from joint categorical distribution
+    main_stick_probs = torch.softmax(pred_C["main_stick"] / temperature, dim=-1)
+    main_stick_cluster_idx = torch.multinomial(main_stick_probs, num_samples=1)
+    main_stick_x, main_stick_y = torch.split(
+        torch.tensor(STICK_XY_CLUSTER_CENTERS_V1[main_stick_cluster_idx]), 1, dim=-1
+    )
+
+    c_stick_probs = torch.softmax(pred_C["c_stick"] / temperature, dim=-1)
+    c_stick_cluster_idx = torch.multinomial(c_stick_probs, num_samples=1)
+    c_stick_x, c_stick_y = torch.split(torch.tensor(STICK_XY_CLUSTER_CENTERS_V1[c_stick_cluster_idx]), 1, dim=-1)
+
+    # Decode buttons
+    button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
+    button_idx = torch.multinomial(button_probs, num_samples=1)
+
+    return TensorDict(
+        {
+            "main_stick_x": main_stick_x,
+            "main_stick_y": main_stick_y,
+            "c_stick_x": c_stick_x,
+            "c_stick_y": c_stick_y,
+            "button": button_idx,
+        }
+    )

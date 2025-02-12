@@ -92,9 +92,6 @@ def cpu_worker(
                 sharded_model_input.update_(model_inputs[-1], non_blocking=True)
                 transfer_time = time.perf_counter() - transfer_start
 
-                if debug and i % 60 == 0:
-                    logger.debug(f"Preprocess: {preprocess_time*1000:.2f}ms, Transfer: {transfer_time*1000:.2f}ms")
-
                 model_input_ready_flag.set()
 
                 # Wait for the output to be ready
@@ -106,7 +103,14 @@ def cpu_worker(
 
                 # Read model output and postprocess
                 model_output = shared_batched_model_output[rank].clone()
+                postprocess_start = time.perf_counter()
                 controller_inputs = preprocessor.postprocess_preds(model_output)
+                postprocess_time = time.perf_counter() - postprocess_start
+
+                if debug and i % 60 == 0:
+                    logger.debug(
+                        f"Preprocess: {preprocess_time*1000:.2f}ms, Transfer: {transfer_time*1000:.2f}ms, Postprocess: {postprocess_time*1000:.2f}ms"
+                    )
 
                 # Send controller inputs to emulator, update gamestate
                 gamestate = gamestate_generator.send(controller_inputs)
@@ -139,6 +143,7 @@ def gpu_worker(
     device: torch.device | str,
     checkpoint_idx: Optional[int] = None,
     cpu_flag_timeout: float = 5.0,
+    debug: bool = False,
 ) -> None:
     """
     GPU worker that batches data from shared memory, updates the context window,
@@ -205,12 +210,10 @@ def gpu_worker(
         total_time = time.perf_counter() - iteration_start
 
         if iteration % 60 == 0:
-            logger.debug(
-                f"Iteration {iteration}: Total: {total_time*1000:.2f}ms "
-                f"(Transfer: {transfer_time*1000:.2f}ms, "
-                f"Inference: {inference_time*1000:.2f}ms, "
-                f"Writeback: {writeback_time*1000:.2f}ms)"
-            )
+            msg = f"Iteration {iteration}: Total: {total_time*1000:.2f}ms "
+            if debug:
+                msg += f"(Update context: {transfer_time*1000:.2f}ms, Inference: {inference_time*1000:.2f}ms, Writeback: {writeback_time*1000:.2f}ms)"
+            logger.debug(msg)
 
         iteration += 1
 
@@ -295,6 +298,7 @@ def run_closed_loop_evaluation(
             "artifact_dir": artifact_dir,
             "device": device,
             "checkpoint_idx": checkpoint_idx,
+            "debug": debug,
         },
     )
     gpu_process.start()
