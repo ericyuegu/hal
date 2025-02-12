@@ -766,7 +766,7 @@ class MultiTokenGPT(GPTv1):
         super().__init__()
         ...
 
-    def forward(self, inputs: TensorDict):
+    def forward(self, inputs: TensorDict) -> None:
         ...
 
 
@@ -809,12 +809,22 @@ Arch.register(
     "GPTv4Controller-256-4-4", GPTv4Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
 )
 Arch.register(
+    "GPTv4Controller-256-4-4-dropout",
+    GPTv4Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4, dropout=0.1),
+)
+Arch.register(
     "GPTv4Controller-256-8-4", GPTv4Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4)
 )
 Arch.register(
     "GPTv4Controller-256-8-4-dropout",
     GPTv4Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4, dropout=0.2),
+)
+Arch.register(
+    "GPTv4Controller-512-8-8-dropout",
+    GPTv4Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=8, n_head=8, dropout=0.2),
 )
 
 Arch.register(
