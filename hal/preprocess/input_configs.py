@@ -8,7 +8,7 @@ from hal.preprocess.transformations import standardize
 DEFAULT_HEAD_NAME = "gamestate"
 
 
-def inputs_v0() -> InputConfig:
+def baseline() -> InputConfig:
     """
     Baseline input features.
 
@@ -63,7 +63,7 @@ def inputs_v0() -> InputConfig:
     )
 
 
-def inputs_v0_controller() -> InputConfig:
+def baseline_controller() -> InputConfig:
     """
     Baseline input features, controller inputs.
 
@@ -71,12 +71,12 @@ def inputs_v0_controller() -> InputConfig:
     No platforms, no projectiles.
     """
 
-    base_config = inputs_v0()
+    base_config = baseline()
     base_config.include_target_features = True
     return base_config
 
 
-def inputs_v1() -> InputConfig:
+def baseline_action_frame() -> InputConfig:
     """
     Baseline input features + action frame.
 
@@ -103,7 +103,6 @@ def inputs_v1() -> InputConfig:
         player_features=player_features,
         transformation_by_feature_name={
             # Shared/embedded features are passed unchanged, to be embedded by model
-            "frame": cast_int32,
             "stage": cast_int32,
             "character": cast_int32,
             "action": cast_int32,
@@ -128,12 +127,12 @@ def inputs_v1() -> InputConfig:
             "opponent_action": ("opponent_action",),
         },
         input_shapes_by_head={
-            DEFAULT_HEAD_NAME: (2 * 10 + 1,),  # 2x for ego and opponent + 1 for frame
+            DEFAULT_HEAD_NAME: (2 * 10,),  # 2x for ego and opponent
         },
     )
 
 
-def inputs_v1_controller() -> InputConfig:
+def baseline_action_frame_controller() -> InputConfig:
     """
     Baseline input features + action frame, controller inputs.
 
@@ -141,12 +140,12 @@ def inputs_v1_controller() -> InputConfig:
     No platforms, no projectiles.
     """
 
-    base_config = inputs_v1()
+    base_config = baseline_action_frame()
     base_config.include_target_features = True
     return base_config
 
 
-InputConfigRegistry.register("inputs_v0", inputs_v0())
-InputConfigRegistry.register("inputs_v0_controller", inputs_v0_controller())
-InputConfigRegistry.register("inputs_v1", inputs_v1())
-InputConfigRegistry.register("inputs_v1_controller", inputs_v1_controller())
+InputConfigRegistry.register("baseline", baseline())
+InputConfigRegistry.register("baseline_controller", baseline_controller())
+InputConfigRegistry.register("baseline_action_frame", baseline_action_frame())
+InputConfigRegistry.register("baseline_action_frame_controller", baseline_action_frame_controller())
