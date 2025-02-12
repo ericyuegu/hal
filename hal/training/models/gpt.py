@@ -782,9 +782,9 @@ Arch.register(
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4, dropout=0.1),
 )
 Arch.register(
-    "GPTv1-512-12-4-dropout",
+    "GPTv1-384-12-8-dropout",
     GPTv1,
-    gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=12, n_head=4, dropout=0.1),
+    gpt_config=GPTConfig(block_size=1024, n_embd=384, n_layer=12, n_head=8, dropout=0.1),
 )
 
 Arch.register(
