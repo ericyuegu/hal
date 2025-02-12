@@ -1,7 +1,9 @@
 from typing import Dict
+from typing import Optional
 from typing import Tuple
 
 import attr
+import numpy as np
 
 from hal.preprocess.transformations import Transformation
 
@@ -22,6 +24,10 @@ class TargetConfig:
     # Input dimensions (D,) of concatenated features after preprocessing
     # TensorDict does not support differentiated sizes across keys for the same dimension
     target_shapes_by_head: Dict[str, Tuple[int, ...]]
+
+    # Parameters for Gaussian loss
+    reference_points: Optional[np.ndarray] = None
+    sigma: float = 0.08
 
     @property
     def target_size(self) -> int:

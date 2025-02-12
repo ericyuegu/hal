@@ -158,6 +158,11 @@ def one_hot_from_int(arr: np.ndarray, num_values: int) -> np.ndarray:
     return np.eye(num_values)[arr]
 
 
+def pass_through(array: torch.Tensor) -> torch.Tensor:
+    """Identity function."""
+    return array
+
+
 def encode_main_stick_one_hot_coarse(sample: TensorDict, player: str) -> torch.Tensor:
     main_stick_x = sample[f"{player}_main_stick_x"]
     main_stick_y = sample[f"{player}_main_stick_y"]

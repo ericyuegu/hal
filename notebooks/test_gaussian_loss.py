@@ -33,6 +33,8 @@ probs = loss_fn.transform_to_probs(actual_points)
 plot_probs(actual_points, probs, STICK_XY_CLUSTER_CENTERS_V0)
 
 probs
+# %%
+probs.max(dim=1)
 
 # %%
 loss_fn = Gaussian2DPointsLoss(torch.tensor(STICK_XY_CLUSTER_CENTERS_V1), sigma=0.05)

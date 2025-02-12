@@ -7,6 +7,7 @@ from tensordict import TensorDict
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
+from hal.preprocess.registry import TargetConfigRegistry
 from hal.training.config import TrainConfig
 from hal.training.config import create_parser_for_attrs_class
 from hal.training.config import parse_args_to_attrs_instance
@@ -25,7 +26,11 @@ class GaussianLossTrainer(Trainer):
 
     def __init__(self, config: TrainConfig, train_loader: DataLoader, val_loader: DataLoader) -> None:
         super().__init__(config, train_loader, val_loader)
-        self.gaussian_loss = Gaussian2DPointsLoss(..., sigma=0.1)
+        target_config = TargetConfigRegistry.get(self.data_config.target_preprocessing_fn)
+        self.gaussian_loss = Gaussian2DPointsLoss(
+            torch.tensor(target_config.reference_points),
+            sigma=target_config.sigma,
+        )
 
     def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict:
         loss_dict: TensorDict = TensorDict({})
@@ -33,7 +38,6 @@ class GaussianLossTrainer(Trainer):
             "buttons": F.cross_entropy,
             "main_stick": self.gaussian_loss,
             "c_stick": self.gaussian_loss,
-            "shoulder": F.cross_entropy,
         }
 
         for target_feature, loss_fn in loss_fns.items():
