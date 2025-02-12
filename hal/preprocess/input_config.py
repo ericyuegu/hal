@@ -34,9 +34,6 @@ class InputConfig:
     # *May be dynamically updated with data config*
     input_shapes_by_head: Dict[str, Tuple[int, ...]]
 
-    # Whether to include target features in input config
-    include_target_features: bool = False
-
     @property
     def input_size(self) -> int:
         """Total dimension of input features."""

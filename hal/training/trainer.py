@@ -12,7 +12,6 @@ from typing import Union
 import torch
 from loguru import logger
 from tensordict import TensorDict
-from torch.nn import functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
@@ -61,6 +60,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         assert self.config.n_samples % self.config.report_len == 0
 
         self.preprocessor = Preprocessor(data_config=config.data)
+
         self.samples = 0
         self.artifact_dir = get_artifact_dir(get_exp_name(self.config))
 

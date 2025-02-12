@@ -1,5 +1,4 @@
 import random
-from functools import partial
 from typing import Any
 from typing import Dict
 from typing import Set
@@ -19,9 +18,7 @@ from hal.preprocess.postprocess_config import PostprocessConfig
 from hal.preprocess.registry import InputConfigRegistry
 from hal.preprocess.registry import PostprocessConfigRegistry
 from hal.preprocess.registry import TargetConfigRegistry
-from hal.preprocess.target_config import TargetConfig
 from hal.preprocess.transformations import Transformation
-from hal.preprocess.transformations import concat_controller_inputs
 from hal.preprocess.transformations import preprocess_target_features
 from hal.training.config import DataConfig
 
@@ -50,7 +47,6 @@ class Preprocessor:
         self.input_config = InputConfigRegistry.get(self.data_config.input_preprocessing_fn)
         # Dynamically update input config with user-specified embedding shapes and target features
         self.input_config = update_input_shapes_with_data_config(self.input_config, data_config)
-        self.input_config = maybe_add_target_features_to_input_config(self.input_config, self.target_config)
         self.postprocess_preds_fn = PostprocessConfigRegistry.get(self.data_config.pred_postprocessing_fn)
 
         self.frame_offsets_by_input = self.input_config.frame_offsets_by_input
@@ -161,30 +157,6 @@ def update_input_shapes_with_data_config(input_config: InputConfig, data_config:
             "opponent_action": (data_config.action_embedding_dim,),
         },
     )
-
-
-def maybe_add_target_features_to_input_config(input_config: InputConfig, target_config: TargetConfig) -> InputConfig:
-    if input_config.include_target_features:
-        return attr.evolve(
-            input_config,
-            transformation_by_feature_name={
-                **input_config.transformation_by_feature_name,
-                "controller": partial(concat_controller_inputs, target_config=target_config),
-            },
-            frame_offsets_by_input={
-                **input_config.frame_offsets_by_input,
-                "controller": -1,
-            },
-            grouped_feature_names_by_head={
-                **input_config.grouped_feature_names_by_head,
-                "controller": ("controller",),
-            },
-            input_shapes_by_head={
-                **input_config.input_shapes_by_head,
-                "controller": (target_config.target_size,),
-            },
-        )
-    return input_config
 
 
 def preprocess_input_features(

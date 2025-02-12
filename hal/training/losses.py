@@ -57,13 +57,13 @@ class Gaussian2DPointsLoss(nn.Module):
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            logits: (B, N) raw output from the model (one logit per reference point).
-            target: (B, 2) ground-truth 2D points in the same space as self.cluster_centers.
+            logits: (B, L, N) raw output from the model (one logit per reference point).
+            target: (B, L, 2) ground-truth 2D points in the same space as self.cluster_centers.
         Returns:
             A scalar cross-entropy loss between the model's logits and the distance-based distribution.
         """
         # Transform targets to distributions over cluster centers
-        target_distributions = self.transform_to_probs(target)  # (B, N)
+        target_distributions = self.transform_to_probs(target)  # (B, L, N)
         # Use cross_entropy in a 'soft' way (i.e. the target is already a distribution)
         # F.cross_entropy expects integer class labels, so we do a manual cross-entropy
         log_probs = F.log_softmax(logits, dim=-1)

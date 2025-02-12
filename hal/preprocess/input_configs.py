@@ -1,6 +1,12 @@
+from functools import partial
+
+import attr
+
 from hal.preprocess.input_config import InputConfig
 from hal.preprocess.registry import InputConfigRegistry
+from hal.preprocess.target_configs import baseline_coarse
 from hal.preprocess.transformations import cast_int32
+from hal.preprocess.transformations import concat_controller_inputs
 from hal.preprocess.transformations import invert_and_normalize
 from hal.preprocess.transformations import normalize
 from hal.preprocess.transformations import standardize
@@ -59,7 +65,6 @@ def baseline() -> InputConfig:
         input_shapes_by_head={
             DEFAULT_HEAD_NAME: (2 * 9,),  # 2x for ego and opponent
         },
-        include_target_features=False,
     )
 
 
@@ -72,8 +77,26 @@ def baseline_controller() -> InputConfig:
     """
 
     base_config = baseline()
-    base_config.include_target_features = True
-    return base_config
+    config = attr.evolve(
+        base_config,
+        transformation_by_feature_name={
+            **base_config.transformation_by_feature_name,
+            "controller": partial(concat_controller_inputs, target_config=baseline_coarse()),
+        },
+        frame_offsets_by_input={
+            **base_config.frame_offsets_by_input,
+            "controller": -1,
+        },
+        grouped_feature_names_by_head={
+            **base_config.grouped_feature_names_by_head,
+            "controller": ("controller",),
+        },
+        input_shapes_by_head={
+            **base_config.input_shapes_by_head,
+            "controller": (baseline_coarse().target_size,),
+        },
+    )
+    return config
 
 
 def baseline_action_frame() -> InputConfig:
@@ -139,10 +162,8 @@ def baseline_action_frame_controller() -> InputConfig:
     Separate embedding heads for stage, character, & action.
     No platforms, no projectiles.
     """
-
-    base_config = baseline_action_frame()
-    base_config.include_target_features = True
-    return base_config
+    # TODO
+    ...
 
 
 InputConfigRegistry.register("baseline", baseline())

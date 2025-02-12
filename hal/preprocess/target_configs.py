@@ -4,13 +4,13 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
 from hal.preprocess.registry import TargetConfig
 from hal.preprocess.registry import TargetConfigRegistry
+from hal.preprocess.transformations import concatenate_main_stick
 from hal.preprocess.transformations import encode_buttons_one_hot
 from hal.preprocess.transformations import encode_c_stick_one_hot_coarse
 from hal.preprocess.transformations import encode_c_stick_one_hot_fine
 from hal.preprocess.transformations import encode_main_stick_one_hot_coarse
 from hal.preprocess.transformations import encode_main_stick_one_hot_fine
 from hal.preprocess.transformations import encode_shoulder_one_hot_coarse
-from hal.preprocess.transformations import pass_through
 
 
 def baseline_coarse() -> TargetConfig:
@@ -79,8 +79,8 @@ def baseline_fine() -> TargetConfig:
 def gaussian_coarse() -> TargetConfig:
     return TargetConfig(
         transformation_by_target={
-            "main_stick": pass_through,
-            "c_stick": pass_through,
+            "main_stick": concatenate_main_stick,
+            "c_stick": concatenate_main_stick,
             "buttons": encode_buttons_one_hot,
         },
         frame_offsets_by_target={
@@ -101,8 +101,8 @@ def gaussian_coarse() -> TargetConfig:
 def gaussian_fine() -> TargetConfig:
     return TargetConfig(
         transformation_by_target={
-            "main_stick": pass_through,
-            "c_stick": pass_through,
+            "main_stick": concatenate_main_stick,
+            "c_stick": concatenate_main_stick,
             "buttons": encode_buttons_one_hot,
         },
         frame_offsets_by_target={
