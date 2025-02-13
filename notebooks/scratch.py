@@ -98,6 +98,7 @@ import numpy.ma as ma
 
 # x = np.array([1.0, 2.0, 3.0], dtype=np.float32)
 x = ma.array([1.0, 2.0, 3.0], mask=[0, 1, 0], dtype=np.float32)
+x
 # %%
 x.dtype
 # %%
@@ -109,8 +110,15 @@ from streaming import MDSWriter
 
 with MDSWriter(
     out="/tmp/test/",
-    columns={"x": "float32"},
+    columns={"x": "ndarray:float32"},
     exist_ok=True,
 ) as writer:
-    writer.write({"x": np.array([1.0, 2.0, 3.0], dtype=np.float32)})
+    writer.write({"x": x})
+# %%
+from streaming import StreamingDataset
+
+ds = StreamingDataset(local="/tmp/test/")
+# %%
+y = ma.masked_values(ds[0]["x"], 1e20)
+y
 # %%
