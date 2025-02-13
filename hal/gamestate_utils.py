@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import Any
 from typing import DefaultDict
+from typing import Dict
 from typing import MutableSequence
 from typing import Optional
 
@@ -19,6 +20,32 @@ def extract_gamestate_as_tensordict(gamestate: melee.GameState) -> TensorDict:
     frame_data: FrameData = defaultdict(list)
     extract_and_append_gamestate_inplace(frame_data, gamestate)
     return TensorDict({k: torch.tensor(v) for k, v in frame_data.items()}, batch_size=(1,))
+
+
+def extract_player_state(player_state: melee.PlayerState) -> Dict[str, Any]:
+    player_data = {
+        "character": IDX_BY_CHARACTER[player_state.character],
+        "stock": player_state.stock,
+        "facing": int(player_state.facing),
+        "invulnerable": int(player_state.invulnerable),
+        "position_x": float(player_state.position.x),
+        "position_y": float(player_state.position.y),
+        "percent": player_state.percent,
+        "shield_strength": player_state.shield_strength,
+        "jumps_left": player_state.jumps_left,
+        "action": IDX_BY_ACTION[player_state.action],
+        "action_frame": player_state.action_frame,
+        "invulnerability_left": player_state.invulnerability_left,
+        "hitlag_left": player_state.hitlag_left,
+        "hitstun_left": player_state.hitstun_frames_left,
+        "on_ground": int(player_state.on_ground),
+        "speed_air_x_self": player_state.speed_air_x_self,
+        "speed_y_self": player_state.speed_y_self,
+        "speed_x_attack": player_state.speed_x_attack,
+        "speed_y_attack": player_state.speed_y_attack,
+        "speed_ground_x_self": player_state.speed_ground_x_self,
+    }
+    return player_data
 
 
 def extract_and_append_gamestate_inplace(
@@ -55,29 +82,11 @@ def extract_and_append_gamestate_inplace(
         player_name = f"p{i}"
 
         # Player / gamestate data
-        player_data = {
-            "port": port,
-            "character": IDX_BY_CHARACTER[player_state.character],
-            "stock": player_state.stock,
-            "facing": int(player_state.facing),
-            "invulnerable": int(player_state.invulnerable),
-            "position_x": float(player_state.position.x),
-            "position_y": float(player_state.position.y),
-            "percent": player_state.percent,
-            "shield_strength": player_state.shield_strength,
-            "jumps_left": player_state.jumps_left,
-            "action": IDX_BY_ACTION[player_state.action],
-            "action_frame": player_state.action_frame,
-            "invulnerability_left": player_state.invulnerability_left,
-            "hitlag_left": player_state.hitlag_left,
-            "hitstun_left": player_state.hitstun_frames_left,
-            "on_ground": int(player_state.on_ground),
-            "speed_air_x_self": player_state.speed_air_x_self,
-            "speed_y_self": player_state.speed_y_self,
-            "speed_x_attack": player_state.speed_x_attack,
-            "speed_y_attack": player_state.speed_y_attack,
-            "speed_ground_x_self": player_state.speed_ground_x_self,
-        }
+        player_data = extract_player_state(player_state)
+        player_data["port"] = port
+        # TODO: Ice climbers' Nana data
+        # nana_data = extract_player_state(player_state.nana) if player_state.nana is not None else {}
+        # player_data.update({f"nana_{k}": v for k, v in nana_data.items()})
 
         for ecb in ["bottom", "top", "left", "right"]:
             player_data[f"ecb_{ecb}_x"] = getattr(player_state, f"ecb_{ecb}")[0]

@@ -28,10 +28,10 @@ def setup_logger(output_dir: str | Path) -> None:
     logger.add(Path(output_dir) / "process_replays.log", enqueue=True)
 
 
-def process_replay(replay_path: str, check_damage: bool = True) -> Optional[Dict[str, Any]]:
+def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dict[str, Any]]:
     frame_data: FrameData = defaultdict(list)
     try:
-        console = melee.Console(path=replay_path, is_dolphin=False, allow_old_version=True)
+        console = melee.Console(path=str(replay_path), is_dolphin=False, allow_old_version=True)
         console.connect()
     except Exception as e:
         logger.debug(f"Error connecting to console for {replay_path}: {e}")
@@ -100,7 +100,7 @@ def process_replays(
         replay_paths = replay_paths[:max_replays]
     random.seed(seed)
     random.shuffle(replay_paths)
-    splits = split_train_val_test(input_paths=tuple(map(str, replay_paths)))
+    splits = split_train_val_test(input_paths=tuple(replay_paths))
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -123,8 +123,8 @@ def process_replays(
 
 
 def split_train_val_test(
-    input_paths: Tuple[str, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
-) -> dict[str, Tuple[str, ...]]:
+    input_paths: Tuple[Path, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
+) -> dict[str, Tuple[Path, ...]]:
     assert train_split + val_split + test_split == 1.0
     n = len(input_paths)
     train_end = int(n * train_split)
