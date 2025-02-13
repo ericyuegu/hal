@@ -1,7 +1,6 @@
 import argparse
 import multiprocessing as mp
 import random
-import shutil
 import sys
 from collections import defaultdict
 from functools import partial
@@ -17,7 +16,6 @@ from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
 
-from hal.data.calculate_stats import calculate_statistics_for_mds
 from hal.data.schema import NP_DTYPE_STR_BY_COLUMN
 from hal.data.schema import PYARROW_DTYPE_BY_COLUMN
 from hal.gamestate_utils import FrameData
@@ -25,7 +23,7 @@ from hal.gamestate_utils import extract_and_append_gamestate_inplace
 
 
 def setup_logger(output_dir: str | Path) -> None:
-    logger.add(Path(output_dir) / "process_replays.log", enqueue=True)
+    logger.add(Path(output_dir) / "process_replays.log", level="TRACE", enqueue=True)
 
 
 def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dict[str, Any]]:
@@ -55,6 +53,9 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
                 replay_uuid=replay_uuid,
             )
 
+    except AssertionError as e:
+        logger.trace(f"Skipping replay {replay_path}: {e}")
+        return None
     except Exception as e:
         logger.debug(f"Error processing replay {replay_path}: {e}")
         return None
@@ -91,39 +92,41 @@ def process_replays(
     output_dir: str,
     seed: int,
     max_replays: int = -1,
-    max_parallelism: int = 32,
-    overwrite_existing: bool = True,
+    max_parallelism: int | None = None,
     check_damage: bool = True,
 ) -> None:
     replay_paths = list(Path(replay_dir).rglob("*.slp"))
+    logger.info(f"Found {len(replay_paths)} replays in {replay_dir}")
     if max_replays > 0:
         replay_paths = replay_paths[:max_replays]
+        logger.info(f"Processing {len(replay_paths)} replays")
     random.seed(seed)
     random.shuffle(replay_paths)
     splits = split_train_val_test(input_paths=tuple(replay_paths))
-
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     process_replay_partial = partial(process_replay, check_damage=check_damage)
 
     for split, split_replay_paths in splits.items():
         split_output_dir = Path(output_dir) / f"{split}"
-        if overwrite_existing and split_output_dir.exists():
-            shutil.rmtree(split_output_dir)
-        split_output_dir.mkdir(parents=True, exist_ok=True)
+        num_replays = len(split_replay_paths)
+        logger.info(f"Writing {num_replays} replays to {split_output_dir}")
         # Write larger shards to disk, data is repetitive so compression helps a lot
         with MDSWriter(
-            out=str(split_output_dir), columns=NP_DTYPE_STR_BY_COLUMN, compression="zstd", size_limit=1 << 30
+            out=str(split_output_dir),
+            columns=NP_DTYPE_STR_BY_COLUMN,
+            compression="zstd",
+            size_limit=1 << 30,
+            exist_ok=True,
         ) as out:
             with mp.Pool(max_parallelism) as pool:
                 samples = pool.imap_unordered(process_replay_partial, split_replay_paths)
-                for sample in tqdm(samples, total=len(split_replay_paths), desc=f"Processing {split} split"):
+                for sample in tqdm(samples, total=num_replays, desc=f"Processing {split} split"):
                     if sample is not None:
                         out.write(sample)
 
 
 def split_train_val_test(
-    input_paths: Tuple[Path, ...], train_split: float = 0.9, val_split: float = 0.05, test_split: float = 0.05
+    input_paths: Tuple[Path, ...], train_split: float = 0.95, val_split: float = 0.025, test_split: float = 0.025
 ) -> dict[str, Tuple[Path, ...]]:
     assert train_split + val_split + test_split == 1.0
     n = len(input_paths)
@@ -144,17 +147,17 @@ def validate_input(replay_dir: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process Melee replay files and store frame data in MDS format.")
     parser.add_argument("--replay_dir", required=True, help="Input directory containing .slp replay files")
-    parser.add_argument("--output_dir", required=True, help="Output directory for processed data")
+    parser.add_argument("--output_dir", required=True, help="Local or remote output directory for processed data")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--max_replays", type=int, default=-1, help="Maximum number of replays to process")
     parser.add_argument(
-        "--max_parallelism", type=int, default=32, help="Maximum number of workers to process replays in parallel"
+        "--max_parallelism", type=int, default=None, help="Maximum number of workers to process replays in parallel"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--disable_check_damage", action="store_true", help="Disable damage check in replays")
     args = parser.parse_args()
 
-    setup_logger(output_dir=args.output_dir)
+    setup_logger(output_dir=f"logs")
 
     if args.debug:
         logger.remove()
@@ -170,6 +173,6 @@ if __name__ == "__main__":
         check_damage=not args.disable_check_damage,
     )
 
-    # Calculate stats
-    stats_path = Path(args.output_dir) / "stats.json"
-    calculate_statistics_for_mds(args.output_dir, str(stats_path))
+    # # Calculate stats
+    # stats_path = Path(args.output_dir) / "stats.json"
+    # calculate_statistics_for_mds(args.output_dir, str(stats_path))

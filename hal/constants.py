@@ -48,6 +48,7 @@ INCLUDED_CHARACTERS: Tuple[str, ...] = (
     "NESS",
     "PEACH",
     "POPO",
+    "NANA",
     "PIKACHU",
     "SAMUS",
     "YOSHI",

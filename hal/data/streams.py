@@ -76,7 +76,7 @@ class CodyStream(Stream):
 class FranzStream(Stream):
     remote = f"s3://{AWS_BUCKET}/hal/top_players/Franz"
     local = "/tmp/hal/franz"
-    proportion = 1.0
+    proportion = 0.5
 
 
 class FrenzyStream(Stream):
