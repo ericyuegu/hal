@@ -72,7 +72,7 @@ def extract_and_append_gamestate_inplace(
     """
     players = sorted(curr_gamestate.players.items())
     assert len(players) == 2, f"Expected 2 players, got {len(players)}"
-    assert curr_gamestate.stage in INCLUDED_STAGES, f"Stage {curr_gamestate.stage} not valid"
+    assert curr_gamestate.stage.name in INCLUDED_STAGES, f"Stage {curr_gamestate.stage} not valid"
 
     if replay_uuid is not None:
         # Duplicate replay_uuid across frames for preprocessing simplicity
@@ -83,7 +83,7 @@ def extract_and_append_gamestate_inplace(
 
     for i, (port, player_state) in enumerate(players, start=1):
         player_name = f"p{i}"
-        assert player_state.character in INCLUDED_CHARACTERS, f"Character {player_state.character} not valid"
+        assert player_state.character.name in INCLUDED_CHARACTERS, f"Character {player_state.character} not valid"
 
         # Player / gamestate data
         player_data = extract_player_state(player_state)

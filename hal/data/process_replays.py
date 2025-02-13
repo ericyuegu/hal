@@ -38,8 +38,8 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
     replay_uuid = hash(replay_path)
 
     # Skip first frame since we need both current and next states
-    next_gamestate = console.step()
     try:
+        next_gamestate = console.step()
         while next_gamestate is not None:
             curr_gamestate = next_gamestate
             next_gamestate = console.step()
@@ -52,7 +52,6 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
                 next_gamestate=next_gamestate,
                 replay_uuid=replay_uuid,
             )
-
     except AssertionError as e:
         logger.trace(f"Skipping replay {replay_path}: {e}")
         return None
@@ -64,7 +63,7 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
 
     # Check if frame_data is valid
     if not frame_data:
-        logger.debug(f"No data extracted from replay {replay_path}")
+        logger.trace(f"No data extracted from replay {replay_path}")
         return None
 
     # Skip replays with less than `min_frames` frames because they are likely incomplete/low-quality
@@ -111,6 +110,7 @@ def process_replays(
         num_replays = len(split_replay_paths)
         logger.info(f"Writing {num_replays} replays to {split_output_dir}")
         # Write larger shards to disk, data is repetitive so compression helps a lot
+        actual = 0
         with MDSWriter(
             out=str(split_output_dir),
             columns=NP_DTYPE_STR_BY_COLUMN,
@@ -123,6 +123,8 @@ def process_replays(
                 for sample in tqdm(samples, total=num_replays, desc=f"Processing {split} split"):
                     if sample is not None:
                         out.write(sample)
+                        actual += 1
+        logger.info(f"Wrote {actual} replays ({actual / num_replays:.2%}) to {split_output_dir}")
 
 
 def split_train_val_test(
