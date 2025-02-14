@@ -47,6 +47,10 @@ def extract_player_state(player_state: melee.PlayerState) -> Dict[str, Any]:
         "speed_y_attack": player_state.speed_y_attack,
         "speed_ground_x_self": player_state.speed_ground_x_self,
     }
+
+    for ecb in ["bottom", "top", "left", "right"]:
+        player_data[f"ecb_{ecb}_x"] = getattr(player_state, f"ecb_{ecb}")[0]
+        player_data[f"ecb_{ecb}_y"] = getattr(player_state, f"ecb_{ecb}")[1]
     return player_data
 
 
@@ -96,10 +100,6 @@ def extract_and_append_gamestate_inplace(
         else:
             nana_data = {k: None for k in player_data.keys()}
         player_data.update({f"nana_{k}": v for k, v in nana_data.items()})
-
-        for ecb in ["bottom", "top", "left", "right"]:
-            player_data[f"ecb_{ecb}_x"] = getattr(player_state, f"ecb_{ecb}")[0]
-            player_data[f"ecb_{ecb}_y"] = getattr(player_state, f"ecb_{ecb}")[1]
 
         for player_state_field, value in player_data.items():
             frame_data_by_field[f"{player_name}_{player_state_field}"].append(value)

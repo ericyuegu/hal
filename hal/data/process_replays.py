@@ -19,7 +19,7 @@ from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
 
-from hal.data.schema import NP_DTYPE_STR_BY_COLUMN
+from hal.data.schema import MDS_DTYPE_STR_BY_COLUMN
 from hal.data.schema import NP_TYPE_BY_COLUMN
 from hal.gamestate_utils import FrameData
 from hal.gamestate_utils import extract_and_append_gamestate_inplace
@@ -126,7 +126,7 @@ def process_replays(
         actual = 0
         with MDSWriter(
             out=str(split_output_dir),
-            columns=NP_DTYPE_STR_BY_COLUMN,
+            columns=MDS_DTYPE_STR_BY_COLUMN,
             compression="zstd",
             size_limit=1 << 30,  # Write 1GB shards, data is repetitive so compression is ~10x
             exist_ok=True,
