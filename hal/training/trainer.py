@@ -114,12 +114,25 @@ class Trainer(torch.nn.Module, abc.ABC):
 
         loss_total = sum(v for k, v in loss_by_head.items() if k.startswith("loss"))
         loss_total.backward()  # type: ignore
+
+        grad_norm_total = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+
         self.opt.step()
         self.scheduler.step()
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
         metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
+
+        # Log learning rate & grad norm by layer
         metrics_dict["lr/lr"] = self.scheduler.get_last_lr()[0]
+        metrics_dict["grad_norm/total"] = grad_norm_total.item()
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                # Detach and compute norm safely
+                grad_norm = param.grad.detach().norm()
+                if not torch.isfinite(grad_norm):  # Skip logging if NaN or Inf
+                    logger.warning(f"Gradient norm for layer {name} is NaN or Inf")
+                metrics_dict[f"grad_norm/layer/{name}"] = grad_norm.item()
         return metrics_dict
 
     def val_op(self, batch: TensorDict) -> MetricsDict:

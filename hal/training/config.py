@@ -107,6 +107,7 @@ class TrainConfig(BaseConfig):
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     wd: float = 1e-2
+    grad_clip_norm: float = 1.0
 
 
 def create_parser_for_attrs_class(
