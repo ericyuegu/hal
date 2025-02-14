@@ -2,8 +2,11 @@ import argparse
 import json
 
 import numpy as np
+import numpy.ma as ma
 from loguru import logger
 from streaming import StreamingDataset
+
+from hal.constants import NP_MASK_VALUE
 
 
 def calculate_statistics_for_mds(input_path: str, output_path: str) -> None:
@@ -23,10 +26,7 @@ def calculate_statistics_for_mds(input_path: str, output_path: str) -> None:
                     "skipped": 0,
                 }
 
-            if isinstance(field_data, np.ndarray):
-                numpy_array = field_data
-            else:
-                numpy_array = np.array(field_data)
+            numpy_array = ma.masked_equal(field_data, NP_MASK_VALUE)
 
             if numpy_array.dtype == object or not np.issubdtype(numpy_array.dtype, np.number):
                 statistics[field_name]["skipped"] += numpy_array.size

@@ -1,6 +1,8 @@
 import argparse
+import hashlib
 import multiprocessing as mp
 import random
+import struct
 import sys
 from collections import defaultdict
 from functools import partial
@@ -12,6 +14,7 @@ from typing import Tuple
 
 import melee
 import numpy as np
+from constants import NP_MASK_VALUE
 from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
@@ -26,6 +29,12 @@ def setup_logger(output_dir: str | Path) -> None:
     logger.add(Path(output_dir) / "process_replays.log", level="TRACE", enqueue=True)
 
 
+def hash_to_int32(data: str) -> int:
+    hash_bytes = hashlib.md5(data.encode()).digest()  # Get 16-byte hash
+    int32_value = struct.unpack("i", hash_bytes[:4])[0]  # Convert first 4 bytes to int32
+    return int32_value
+
+
 def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dict[str, Any]]:
     frame_data: FrameData = defaultdict(list)
     try:
@@ -35,7 +44,7 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
         logger.debug(f"Error connecting to console for {replay_path}: {e}")
         return None
 
-    replay_uuid = hash(replay_path)
+    replay_uuid = hash_to_int32(str(replay_path))
 
     try:
         # Double step on first frame to match next controller state to current gamestate
@@ -76,10 +85,13 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
             logger.trace(f"Replay {replay_path} had no damage, skipping.")
             return None
 
-    sample = {
-        key: np.array(frame_data[key], dtype=dtype) for key, dtype in NP_TYPE_BY_COLUMN.items() if key in frame_data
-    }
-    sample["replay_uuid"] = np.array([replay_uuid] * len(frame_data["frame"]), dtype=np.int64)
+    sample = {}
+    for key, dtype in NP_TYPE_BY_COLUMN.items():
+        if key in frame_data:
+            array = [x if x is not None else NP_MASK_VALUE for x in frame_data[key]]
+            sample[key] = np.array(array, dtype=dtype)
+
+    sample["replay_uuid"] = np.array([replay_uuid] * len(frame_data["frame"]), dtype=np.int32)
     return sample
 
 

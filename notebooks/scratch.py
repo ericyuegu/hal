@@ -3,8 +3,11 @@ import random
 from pathlib import Path
 
 import melee
+import numpy as np
 from data.process_replays import process_replay
 from streaming import StreamingDataset
+
+np.set_printoptions(threshold=np.inf)
 
 # %%
 mds_path = "/opt/projects/hal2/data/mang0/train"
@@ -90,14 +93,23 @@ replay_path = Path(
 )
 np_dict = process_replay(replay_path)
 # %%
+np_dict
+# %%
+for k, v in np_dict.items():
+    if "nana" in k:
+        print(k, v)
+# %%
 for k in np_dict.keys():
     print(k)
 # %%
 import numpy as np
 import numpy.ma as ma
 
+# %%
+ma.MaskedArray([1.0, 2.0, None])
+# %%
 # x = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-x = ma.array([1.0, 2.0, 3.0], mask=[0, 1, 0], dtype=np.float32)
+x = ma.array([1.0, 2.0, 3.0], mask=[0, 1, 0], dtype=np.int32, fill_value=1 << 31)
 x
 # %%
 x.dtype
@@ -110,7 +122,7 @@ from streaming import MDSWriter
 
 with MDSWriter(
     out="/tmp/test/",
-    columns={"x": "ndarray:float32"},
+    columns={"x": "ndarray:int32"},
     exist_ok=True,
 ) as writer:
     writer.write({"x": x})
