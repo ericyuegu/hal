@@ -8,7 +8,7 @@ from melee import Action
 from melee import Character
 from melee import Stage
 
-NP_MASK_VALUE: Final[int] = 1 << 31
+NP_MASK_VALUE: Final[int] = (1 << 31) - 1
 
 VALID_PLAYERS: Final[Tuple[str, str]] = ("p1", "p2")
 Player = Literal["p1", "p2"]
