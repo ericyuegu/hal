@@ -95,6 +95,29 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
     return sample
 
 
+def split_by_ranks(replay_paths: tuple[Path, ...]) -> Dict[str, list[Path]]:
+    RANKS = ["master", "diamond", "platinum", "unranked"]
+    rank_paths: Dict[str, list[Path]] = defaultdict(list)
+
+    for path in replay_paths:
+        filename = path.name.lower()
+        found_rank = None
+        for rank in RANKS:
+            if rank in filename:
+                found_rank = rank
+                break
+
+        if found_rank:
+            rank_paths[found_rank].append(path)
+        else:
+            rank_paths["unranked"].append(path)
+
+    # report lenths
+    for rank, paths in rank_paths.items():
+        logger.debug(f"Found {len(paths)} replays for rank {rank}")
+    return rank_paths
+
+
 def process_replays(
     replay_dir: str,
     output_dir: str,
@@ -103,45 +126,50 @@ def process_replays(
     max_parallelism: int | None = None,
     check_damage: bool = True,
 ) -> None:
-    replay_paths = list(Path(replay_dir).rglob("*.slp"))
-    logger.info(f"Found {len(replay_paths)} replays in {replay_dir}")
-    if max_replays > 0:
-        replay_paths = replay_paths[:max_replays]
-        logger.info(f"Processing {len(replay_paths)} replays")
     random.seed(seed)
-    random.shuffle(replay_paths)
-    splits = split_train_val_test(input_paths=tuple(replay_paths))
+    full_replay_paths = list(Path(replay_dir).rglob("*.slp"))
+    logger.info(f"Found {len(full_replay_paths)} replays in {replay_dir}")
+    if max_replays > 0:
+        full_replay_paths = full_replay_paths[:max_replays]
+        logger.info(f"Processing {len(full_replay_paths)} replays")
 
+    paths_by_rank = split_by_ranks(tuple(full_replay_paths))
     process_replay_partial = partial(process_replay, check_damage=check_damage)
 
-    for split, split_replay_paths in splits.items():
-        split_output_dir = Path(output_dir) / f"{split}"
+    for rank, replay_paths in paths_by_rank.items():
+        logger.debug(f"Processing {len(replay_paths)} replays for rank {rank}")
+        random.shuffle(replay_paths)
 
-        num_replays = len(split_replay_paths)
-        if num_replays == 0:
-            logger.info(f"No replays found for {split} split")
-            continue
+        splits = split_train_val_test(input_paths=tuple(replay_paths))
+        for split, split_replay_paths in splits.items():
+            split_output_dir = Path(output_dir) / rank / split
+            split_output_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Writing {num_replays} replays to {split_output_dir}")
-        actual = 0
-        with MDSWriter(
-            out=str(split_output_dir),
-            columns=MDS_DTYPE_STR_BY_COLUMN,
-            compression="zstd",
-            size_limit=1 << 30,  # Write 1GB shards, data is repetitive so compression is ~10x
-            exist_ok=True,
-        ) as out:
-            with mp.Pool(max_parallelism) as pool:
-                samples = pool.imap_unordered(process_replay_partial, split_replay_paths)
-                for sample in tqdm(samples, total=num_replays, desc=f"Processing {split} split"):
-                    if sample is not None:
-                        out.write(sample)
-                        actual += 1
-        logger.info(f"Wrote {actual} replays ({actual / num_replays:.2%}) to {split_output_dir}")
+            num_replays = len(split_replay_paths)
+            if num_replays == 0:
+                logger.info(f"No replays found for {split} split")
+                continue
+
+            logger.info(f"Writing {num_replays} replays to {split_output_dir}")
+            actual = 0
+            with MDSWriter(
+                out=str(split_output_dir),
+                columns=MDS_DTYPE_STR_BY_COLUMN,
+                compression="zstd",
+                size_limit=1 << 31,  # Write 2GB shards, data is repetitive so compression is 10-20x
+                exist_ok=True,
+            ) as out:
+                with mp.Pool(max_parallelism) as pool:
+                    samples = pool.imap_unordered(process_replay_partial, split_replay_paths)
+                    for sample in tqdm(samples, total=num_replays, desc=f"Processing {split} split"):
+                        if sample is not None:
+                            out.write(sample)
+                            actual += 1
+            logger.info(f"Wrote {actual} replays ({actual / num_replays:.2%}) to {split_output_dir}")
 
 
 def split_train_val_test(
-    input_paths: Tuple[Path, ...], train_split: float = 0.95, val_split: float = 0.025, test_split: float = 0.025
+    input_paths: Tuple[Path, ...], train_split: float = 0.98, val_split: float = 0.01, test_split: float = 0.01
 ) -> dict[str, Tuple[Path, ...]]:
     assert train_split + val_split + test_split == 1.0
     n = len(input_paths)

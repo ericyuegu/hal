@@ -8,7 +8,7 @@ from data.process_replays import process_replay
 from data.schema import MDS_DTYPE_STR_BY_COLUMN
 from streaming import StreamingDataset
 
-np.set_printoptions(threshold=np.inf)
+# np.set_printoptions(threshold=np.inf)
 
 # %%
 replay_path = Path(
@@ -34,7 +34,9 @@ with MDSWriter(
 # %%
 ds = StreamingDataset(local="/tmp/test/")
 ds[0]
-
+# %%
+ds = StreamingDataset(local="/opt/projects/hal2/data/ranked-3/test")
+ds[10]
 # %%
 mds_path = "/opt/projects/hal2/data/mang0/train"
 ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
