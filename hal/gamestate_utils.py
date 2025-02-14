@@ -86,23 +86,23 @@ def extract_and_append_gamestate_inplace(
     frame_data_by_field["stage"].append(IDX_BY_STAGE[curr_gamestate.stage])
 
     for i, (port, player_state) in enumerate(players, start=1):
-        player_name = f"p{i}"
+        player_relative = f"p{i}"
         assert player_state.character.name in INCLUDED_CHARACTERS, f"Character {player_state.character} not valid"
 
         # Player / gamestate data
         player_data = extract_player_state(player_state)
-        player_data["port"] = port
 
-        # Handle Ice Climbers' Nana data
-        # Empirically appears in about 5% of games
+        # Handle Ice Climbers' Nana data (empirically appears in about 5% of games)
         if player_state.nana is not None:
             nana_data = extract_player_state(player_state.nana)
         else:
+            # WARNING: duplicates all keys for player state, place unique items after
             nana_data = {k: None for k in player_data.keys()}
         player_data.update({f"nana_{k}": v for k, v in nana_data.items()})
 
-        for player_state_field, value in player_data.items():
-            frame_data_by_field[f"{player_name}_{player_state_field}"].append(value)
+        player_data["port"] = port
+        for feature_name, value in player_data.items():
+            frame_data_by_field[f"{player_relative}_{feature_name}"].append(value)
 
     if next_gamestate is None:
         extract_controller_inputs_inplace(frame_data_by_field=frame_data_by_field, gamestate=curr_gamestate)

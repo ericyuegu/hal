@@ -11,14 +11,18 @@ from streaming import StreamingDataset
 # np.set_printoptions(threshold=np.inf)
 
 # %%
-replay_path = Path(
-    "/opt/slippi/data/ranked-anonymized-2-151807/ranked-anonymized/master-platinum-f9770bb9a470e511f7f7c541.slp"
-)
+# replay_path = Path(
+#     "/opt/slippi/data/ranked-anonymized-2-151807/ranked-anonymized/master-platinum-f9770bb9a470e511f7f7c541.slp"
+# )
+replay_path = Path("/opt/slippi/data/ranked/ranked-anonymized-6-171694/master-master-b07692aa6f672cfaaf0b05bd.slp")
 np_dict = process_replay(replay_path)
 
 # %%
-for k in np_dict.keys():
-    print(k)
+for k, v in np_dict.items():
+    print(k, len(v))
+
+# %%
+np_dict["p1_nana_port"]
 
 # %%
 from streaming import MDSWriter

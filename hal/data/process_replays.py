@@ -24,6 +24,8 @@ from hal.data.schema import NP_TYPE_BY_COLUMN
 from hal.gamestate_utils import FrameData
 from hal.gamestate_utils import extract_and_append_gamestate_inplace
 
+MIN_FRAMES = 1500  # 25 sec
+
 
 def setup_logger(output_dir: str | Path) -> None:
     logger.add(Path(output_dir) / "process_replays.log", level="TRACE", enqueue=True)
@@ -75,9 +77,8 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
         return None
 
     # Skip replays with less than `min_frames` frames because they are likely incomplete/low-quality
-    min_frames = 1500
-    if any(len(v) < min_frames for v in frame_data.values()):
-        logger.trace(f"Replay {replay_path} was less than {min_frames} frames, skipping.")
+    if all(len(v) < MIN_FRAMES for v in frame_data.values()):
+        logger.trace(f"Replay {replay_path} was less than {MIN_FRAMES} frames, skipping.")
         return None
     if check_damage:
         # Check for damage
@@ -96,7 +97,8 @@ def process_replay(replay_path: Path, check_damage: bool = True) -> Optional[Dic
 
 
 def split_by_ranks(replay_paths: tuple[Path, ...]) -> Dict[str, list[Path]]:
-    RANKS = ["master", "diamond", "platinum", "unranked"]
+    """Return replays grouped by lowest rank in filename."""
+    RANKS = ["platinum", "diamond", "master", "unranked"]
     rank_paths: Dict[str, list[Path]] = defaultdict(list)
 
     for path in replay_paths:
