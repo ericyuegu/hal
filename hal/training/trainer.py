@@ -223,7 +223,7 @@ class Trainer(torch.nn.Module, abc.ABC):
                 target=run_closed_loop_evaluation,
                 kwargs=dict(
                     artifact_dir=self.artifact_dir,
-                    n_workers=self.config.eval.n_workers,
+                    eval_config=self.config.eval,
                     checkpoint_idx=step,
                     eval_stats_queue=eval_stats_queue,
                     player="p1",

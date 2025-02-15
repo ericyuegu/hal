@@ -37,7 +37,9 @@ def hash_to_int32(data: str) -> int:
     return int32_value
 
 
-def process_replay(replay_path: Path, check_damage: bool = True, check_complete: bool = True) -> Optional[Dict[str, Any]]:
+def process_replay(
+    replay_path: Path, check_damage: bool = True, check_complete: bool = True
+) -> Optional[Dict[str, Any]]:
     frame_data: FrameData = defaultdict(list)
     try:
         console = melee.Console(path=str(replay_path), is_dolphin=False, allow_old_version=True)
@@ -102,7 +104,7 @@ def process_replay(replay_path: Path, check_damage: bool = True, check_complete:
 
 def split_by_ranks(replay_paths: tuple[Path, ...]) -> Dict[str, list[Path]]:
     """Return replays grouped by lowest rank in filename."""
-    RANKS = ["platinum", "diamond", "master", "unranked"]
+    RANKS = ["platinum", "diamond", "master"]
     rank_paths: Dict[str, list[Path]] = defaultdict(list)
 
     for path in replay_paths:
@@ -145,11 +147,12 @@ def process_replays(
     for rank, replay_paths in paths_by_rank.items():
         logger.debug(f"Processing {len(replay_paths)} replays for rank {rank}")
         random.shuffle(replay_paths)
+        rank_path_dir = "" if rank == "unranked" else rank
 
         splits = split_train_val_test(input_paths=tuple(replay_paths))
         for split, split_replay_paths in splits.items():
-            split_output_dir = Path(output_dir) / rank / split
-            split_output_dir.mkdir(parents=True, exist_ok=True)
+            # Let MDSWriter create the directory if it doesn't exist, otherwise warn us if it does
+            split_output_dir = Path(output_dir) / rank_path_dir / split
 
             num_replays = len(split_replay_paths)
             if num_replays == 0:

@@ -7,9 +7,26 @@ import numpy as np
 from data.process_replays import process_replay
 from data.schema import MDS_DTYPE_STR_BY_COLUMN
 from streaming import StreamingDataset
+from training.config import DataConfig
 
 # np.set_printoptions(threshold=np.inf)
 
+# %%
+ds = StreamingDataset(local="/opt/projects/hal2/data/ranked/diamond/val")
+ds[0]
+# %%
+from hal.training.streaming_dataset import HALStreamingDataset
+
+data_dir = "/opt/projects/hal2/data/ranked/diamond/val"
+ds = HALStreamingDataset(
+    local=data_dir,
+    remote=None,
+    batch_size=1,
+    shuffle=True,
+    data_config=DataConfig(data_dir=data_dir),
+)
+# %%
+ds[0]
 # %%
 # replay_path = Path(
 #     "/opt/slippi/data/ranked-anonymized-2-151807/ranked-anonymized/master-platinum-f9770bb9a470e511f7f7c541.slp"

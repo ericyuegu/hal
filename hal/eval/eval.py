@@ -26,6 +26,7 @@ from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import share_and_pin_memory
 from hal.gamestate_utils import extract_gamestate_as_tensordict
 from hal.preprocess.preprocessor import Preprocessor
+from hal.training.config import EvalConfig
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
@@ -255,7 +256,7 @@ def flatten_replay_dir(replay_dir: Path) -> None:
 
 def run_closed_loop_evaluation(
     artifact_dir: Path,
-    n_workers: int,
+    eval_config: EvalConfig,
     checkpoint_idx: Optional[int] = None,
     eval_stats_queue: Optional[mp.Queue] = None,
     player: Player = "p1",
@@ -269,6 +270,7 @@ def run_closed_loop_evaluation(
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_config: TrainConfig = load_config_from_artifact_dir(artifact_dir)
     preprocessor = Preprocessor(data_config=train_config.data)
+    n_workers = eval_config.n_workers
 
     # Create events to signal when cpu and gpu workers are ready
     model_input_ready_flags: List[EventType] = [mp.Event() for _ in range(n_workers)]

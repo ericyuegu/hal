@@ -7,52 +7,33 @@ AWS_BUCKET = os.getenv("AWS_BUCKET")
 assert AWS_BUCKET is not None, "AWS_BUCKET environment variable is not set"
 
 
-# Ranked
-class Ranked1Stream(Stream):
-    remote = f"s3://{AWS_BUCKET}/hal/ranked-1"
-    local = "/tmp/hal/ranked-1"
+### Ranked
+
+
+class RankedPlatinumStream(Stream):
+    remote = f"s3://{AWS_BUCKET}/hal/ranked/platinum"
+    local = "/tmp/hal/ranked/platinum"
     proportion = 1.0
 
 
-class Ranked2Stream(Stream):
-    remote = f"s3://{AWS_BUCKET}/hal/ranked-2"
-    local = "/tmp/hal/ranked-2"
+class RankedDiamondStream(Stream):
+    remote = f"s3://{AWS_BUCKET}/hal/ranked/diamond"
+    local = "/tmp/hal/ranked/diamond"
     proportion = 1.0
 
 
-class Ranked3Stream(Stream):
-    remote = f"s3://{AWS_BUCKET}/hal/ranked-3"
-    local = "/tmp/hal/ranked-3"
+class RankedMasterStream(Stream):
+    remote = f"s3://{AWS_BUCKET}/hal/ranked/master"
+    local = "/tmp/hal/ranked/master"
     proportion = 1.0
 
 
-class Ranked4Stream(Stream):
-    remote = f"s3://{AWS_BUCKET}/hal/ranked-4"
-    local = "/tmp/hal/ranked-4"
-    proportion = 1.0
+streams_registry.register("ranked-platinum", func=RankedPlatinumStream)
+streams_registry.register("ranked-diamond", func=RankedDiamondStream)
+streams_registry.register("ranked-master", func=RankedMasterStream)
 
 
-class Ranked5Stream(Stream):
-    remote = f"s3://{AWS_BUCKET}/hal/ranked-5"
-    local = "/tmp/hal/ranked-5"
-    proportion = 1.0
-
-
-class Ranked6Stream(Stream):
-    remote = f"s3://{AWS_BUCKET}/hal/ranked-6"
-    local = "/tmp/hal/ranked-6"
-    proportion = 1.0
-
-
-streams_registry.register("ranked-1", func=Ranked1Stream)
-streams_registry.register("ranked-2", func=Ranked2Stream)
-streams_registry.register("ranked-3", func=Ranked3Stream)
-streams_registry.register("ranked-4", func=Ranked4Stream)
-streams_registry.register("ranked-5", func=Ranked5Stream)
-streams_registry.register("ranked-6", func=Ranked6Stream)
-
-
-# Top players
+### Top players
 
 
 class AkloStream(Stream):

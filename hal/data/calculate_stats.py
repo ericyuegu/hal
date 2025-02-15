@@ -1,5 +1,6 @@
 import argparse
 import json
+from typing import Optional
 
 import numpy as np
 import numpy.ma as ma
@@ -9,12 +10,15 @@ from streaming import StreamingDataset
 from hal.constants import NP_MASK_VALUE
 
 
-def calculate_statistics_for_mds(input_path: str, output_path: str) -> None:
+def calculate_statistics_for_mds(input_path: str, output_path: str, max_examples: Optional[int] = 100_000) -> None:
     """Calculate and save statistics for each feature to a JSON."""
     dataset = StreamingDataset(local=input_path, remote=None, batch_size=1, shuffle=False)
     statistics = {}
 
     for i, example in enumerate(dataset):
+        if max_examples is not None and i >= max_examples:
+            break
+
         for field_name, field_data in example.items():
             if field_name not in statistics:
                 statistics[field_name] = {
