@@ -30,6 +30,7 @@ from hal.emulator_paths import REMOTE_CISO_PATH
 from hal.emulator_paths import REMOTE_EMULATOR_PATH
 from hal.emulator_paths import REMOTE_EVAL_REPLAY_DIR
 from hal.eval.eval_helper import EpisodeStats
+from hal.eval.eval_helper import Matchup
 from hal.training.io import find_latest_idx
 from hal.training.io import get_path_friendly_datetime
 
@@ -278,8 +279,9 @@ def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, Any])
 class EmulatorManager:
     udp_port: int
     player: Player
-    opponent_cpu_level: int = 9
     replay_dir: Path | None = None
+    opponent_cpu_level: int = 9
+    matchup: Matchup = Matchup(stage="BATTLEFIELD", ego_character="FOX", opponent_character="FOX")
     episode_stats: EpisodeStats = EpisodeStats()
     max_steps: int = 99999
     latency_warning_threshold: float = 14.0
@@ -372,10 +374,9 @@ class EmulatorManager:
                         gamestate=gamestate,
                         controller_1=self.ego_controller,
                         controller_2=self.opponent_controller,
-                        # TODO: select characters programmatically
-                        character_1=melee.Character.FOX,
-                        character_2=melee.Character.FOX,
-                        stage_selected=melee.Stage.BATTLEFIELD,
+                        character_1=melee.Character[self.matchup.ego_character],
+                        character_2=melee.Character[self.matchup.opponent_character],
+                        stage_selected=melee.Stage[self.matchup.stage],
                         opponent_cpu_level=self.opponent_cpu_level,
                     )
                 else:

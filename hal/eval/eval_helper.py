@@ -1,9 +1,9 @@
-import random
 from typing import Dict
 from typing import List
 
 import attr
 import melee
+import numpy as np
 import torch
 from tensordict import TensorDict
 
@@ -59,14 +59,15 @@ class Matchup:
     opponent_character: str
 
 
-def deterministically_generate_random_matchup(n: int, seed: int) -> List[Matchup]:
-    random.seed(seed)
-    stage = random.choices(list(PRIOR_STAGE_LIKELIHOODS.keys()), weights=list(PRIOR_STAGE_LIKELIHOODS.values()), k=n)
-    ego_character = random.choices(
-        list(PRIOR_CHARACTER_LIKELIHOODS.keys()), weights=list(PRIOR_CHARACTER_LIKELIHOODS.values()), k=n
+def deterministically_generate_random_matchups(n: int, seed: int = 42) -> List[Matchup]:
+    """Deterministically generate `n` random matchups."""
+    rng = np.random.default_rng(seed)
+    stage = rng.choice(list(PRIOR_STAGE_LIKELIHOODS.keys()), size=n, p=list(PRIOR_STAGE_LIKELIHOODS.values()))
+    ego_character = rng.choice(
+        list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
     )
-    opponent_character = random.choices(
-        list(PRIOR_CHARACTER_LIKELIHOODS.keys()), weights=list(PRIOR_CHARACTER_LIKELIHOODS.values()), k=n
+    opponent_character = rng.choice(
+        list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
     )
     matchups = []
     for stage, ego_character, opponent_character in zip(stage, ego_character, opponent_character):

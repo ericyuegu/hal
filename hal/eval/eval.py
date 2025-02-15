@@ -20,6 +20,8 @@ from hal.emulator_helper import EmulatorManager
 from hal.emulator_helper import find_open_udp_ports
 from hal.emulator_helper import get_replay_dir
 from hal.eval.eval_helper import EpisodeStats
+from hal.eval.eval_helper import Matchup
+from hal.eval.eval_helper import deterministically_generate_random_matchups
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import share_and_pin_memory
 from hal.gamestate_utils import extract_gamestate_as_tensordict
@@ -47,6 +49,7 @@ def cpu_worker(
     rank: int,
     port: int,
     player: Player,
+    matchup: Matchup,
     replay_dir: Path,
     preprocessor: Preprocessor,
     model_input_ready_flag: EventType,
@@ -68,9 +71,10 @@ def cpu_worker(
                 udp_port=port,
                 player=player,
                 replay_dir=replay_dir,
+                opponent_cpu_level=9,
+                matchup=matchup,
                 enable_ffw=enable_ffw,
                 debug=debug,
-                opponent_cpu_level=9,
             )
             gamestate_generator = emulator_manager.run_game()
             gamestate = next(gamestate_generator)
@@ -305,10 +309,11 @@ def run_closed_loop_evaluation(
 
     cpu_processes: List[mp.Process] = []
     ports = find_open_udp_ports(n_workers)
+    matchups = deterministically_generate_random_matchups(n=n_workers)
     episode_stats_queue: mp.Queue = mp.Queue()
     base_replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx)
     logger.info(f"Replays will be saved to {base_replay_dir}")
-    for i in range(n_workers):
+    for i, matchup in enumerate(matchups):
         replay_dir = base_replay_dir / f"{i:03d}"
         replay_dir.mkdir(exist_ok=True, parents=True)
         p: mp.Process = mp.Process(
@@ -319,6 +324,7 @@ def run_closed_loop_evaluation(
                 "rank": i,
                 "port": ports[i],
                 "player": player,
+                "matchup": matchup,
                 "replay_dir": replay_dir,
                 "preprocessor": preprocessor,
                 "model_input_ready_flag": model_input_ready_flags[i],
