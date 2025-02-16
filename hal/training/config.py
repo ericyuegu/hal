@@ -73,7 +73,7 @@ class DataConfig:
 
 @attr.s(auto_attribs=True, frozen=True)
 class EvalConfig:
-    n_workers: int = 16
+    n_workers: int = 48
     closed_loop_eval_every_n: int = 2**21
 
 
