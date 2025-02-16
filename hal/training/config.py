@@ -73,8 +73,8 @@ class DataConfig:
 
 @attr.s(auto_attribs=True, frozen=True)
 class EvalConfig:
-    n_workers: int = 48
-    closed_loop_eval_every_n: int = 2**21
+    n_workers: int = 1
+    closed_loop_eval_every_n: int = 2**10
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -101,9 +101,9 @@ class TrainConfig(BaseConfig):
     local_batch_size: int = 256
     lr: float = 3e-4
     n_samples: int = 2**24
-    n_val_samples: int = 2**14
+    n_val_samples: int = 2**10
     keep_ckpts: int = 2**4
-    report_len: int = 2**18
+    report_len: int = 2**10
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     wd: float = 1e-2

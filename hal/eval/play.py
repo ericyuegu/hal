@@ -5,7 +5,7 @@ from pathlib import Path
 
 import melee
 import torch
-from gamestate_utils import extract_gamestate_as_tensordict
+from gamestate_utils import extract_eval_gamestate_as_tensordict
 from loguru import logger
 from tensordict import TensorDict
 
@@ -127,7 +127,7 @@ def play(artifact_dir: str):
 
                 # Yield gamestate and receive controller inputs
                 # logger.debug(f"Yielding gamestate {i}")
-                gamestate_td = extract_gamestate_as_tensordict(gamestate)
+                gamestate_td = extract_eval_gamestate_as_tensordict(gamestate)
                 model_inputs = preprocessor.preprocess_inputs(gamestate_td, BOT_PLAYER)
 
                 if i < seq_len:

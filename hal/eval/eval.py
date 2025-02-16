@@ -24,7 +24,7 @@ from hal.eval.eval_helper import Matchup
 from hal.eval.eval_helper import deterministically_generate_random_matchups
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import share_and_pin_memory
-from hal.gamestate_utils import extract_gamestate_as_tensordict
+from hal.gamestate_utils import extract_eval_gamestate_as_tensordict
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
@@ -86,7 +86,7 @@ def cpu_worker(
             i = 0
             while gamestate is not None:
                 preprocess_start = time.perf_counter()
-                gamestate_td = extract_gamestate_as_tensordict(gamestate)
+                gamestate_td = extract_eval_gamestate_as_tensordict(gamestate)
                 model_inputs = preprocessor.preprocess_inputs(gamestate_td, player)
                 preprocess_time = time.perf_counter() - preprocess_start
 

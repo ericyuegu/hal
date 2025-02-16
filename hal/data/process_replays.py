@@ -60,6 +60,7 @@ def process_replay(
                 curr_gamestate=curr_gamestate,
                 next_gamestate=next_gamestate,
                 replay_uuid=replay_uuid,
+                include_nana=True,
             )
             curr_gamestate = next_gamestate
             if curr_gamestate is None:

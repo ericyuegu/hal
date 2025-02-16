@@ -18,10 +18,14 @@ from hal.constants import INCLUDED_STAGES
 FrameData = DefaultDict[str, MutableSequence[Any]]
 
 
-def extract_gamestate_as_tensordict(gamestate: melee.GameState) -> TensorDict:
+def extract_eval_gamestate_as_tensordict(gamestate: melee.GameState) -> TensorDict:
     frame_data: FrameData = defaultdict(list)
-    extract_and_append_gamestate_inplace(frame_data, gamestate)
-    return TensorDict({k: torch.tensor(v) for k, v in frame_data.items()}, batch_size=(1,))
+    extract_and_append_gamestate_inplace(frame_data, gamestate, include_nana=False)
+    # Filter out None values within lists and convert to tensors
+    return TensorDict(
+        {k: torch.tensor(v) for k, v in frame_data.items()},
+        batch_size=(1,),
+    )
 
 
 def extract_player_state(player_state: melee.PlayerState) -> Dict[str, Any]:
@@ -59,6 +63,7 @@ def extract_and_append_gamestate_inplace(
     curr_gamestate: melee.GameState,
     next_gamestate: Optional[melee.GameState] = None,
     replay_uuid: Optional[int] = None,
+    include_nana: bool = False,
 ) -> FrameData:
     """
     Extract gamestate and controller inputs and store in-place in `frame_data`.
@@ -93,12 +98,13 @@ def extract_and_append_gamestate_inplace(
         player_data = extract_player_state(player_state)
 
         # Handle Ice Climbers' Nana data (empirically appears in about 5% of games)
-        if player_state.nana is not None:
-            nana_data = extract_player_state(player_state.nana)
-        else:
-            # WARNING: duplicates all keys for player state, place unique items after
-            nana_data = {k: None for k in player_data.keys()}
-        player_data.update({f"nana_{k}": v for k, v in nana_data.items()})
+        if include_nana:
+            if player_state.nana is not None:
+                nana_data = extract_player_state(player_state.nana)
+            else:
+                # WARNING: duplicates all keys for player state, place unique items after
+                nana_data = {k: None for k in player_data.keys()}
+            player_data.update({f"nana_{k}": v for k, v in nana_data.items()})
 
         player_data["port"] = port
         for feature_name, value in player_data.items():

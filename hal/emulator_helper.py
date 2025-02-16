@@ -169,7 +169,7 @@ class MatchupMenuHelper:
 
     def select_character_and_stage(self, gamestate: melee.GameState) -> None:
         """
-        Helper function to handle menu state logic.
+        Call this helper function every frame to handle menu state logic.
 
         If character_2 or stage_selected is None, the function will wait for human user.
         """
@@ -204,7 +204,6 @@ class MatchupMenuHelper:
             melee.menuhelper.MenuHelper.choose_stage(
                 stage=self.stage, gamestate=gamestate, controller=self.controller_1, character=self.character_1
             )
-            logger.debug("Selecting stage")
         # If we're at the postgame scores screen, spam START
         elif gamestate.menu_state == enums.Menu.POSTGAME_SCORES:
             melee.menuhelper.MenuHelper.skip_postgame(controller=self.controller_1)
