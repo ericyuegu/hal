@@ -185,3 +185,19 @@ ds = StreamingDataset(local="/tmp/test/")
 y = ma.masked_values(ds[0]["x"], 1e20)
 y
 # %%
+import json
+
+with open("/opt/projects/hal2/data/ranked/master/train/stats.json") as f:
+    ranked_stats = json.load(f)
+
+with open("/opt/projects/hal2/data/mang0/stats.json") as f:
+    mang0_stats = json.load(f)
+# %%
+for feature in ranked_stats.keys():
+    if feature in mang0_stats:
+        mang0_feature = mang0_stats[feature]
+        ranked_feature = ranked_stats[feature]
+        for stat in mang0_feature.keys():
+            if stat in ranked_feature:
+                print(f"{feature=}, {stat=}, mang0={mang0_feature[stat]}, ranked={ranked_feature[stat]}")
+# %%

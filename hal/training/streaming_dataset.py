@@ -1,8 +1,10 @@
 import random
 from typing import Optional
+from typing import Sequence
 from typing import cast
 
 import numpy as np
+from streaming import Stream
 from streaming import StreamingDataset
 from tensordict import TensorDict
 
@@ -15,6 +17,7 @@ from hal.training.config import DataConfig
 class HALStreamingDataset(StreamingDataset):
     def __init__(
         self,
+        streams: Optional[Sequence[Stream]],
         local: Optional[str],
         remote: Optional[str],
         batch_size: int,
@@ -22,7 +25,7 @@ class HALStreamingDataset(StreamingDataset):
         data_config: DataConfig,
         debug: bool = False,
     ) -> None:
-        super().__init__(local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
+        super().__init__(streams=streams, local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
         self.preprocessor = Preprocessor(data_config=data_config)
         self.seq_len = self.preprocessor.seq_len
         self.debug = debug

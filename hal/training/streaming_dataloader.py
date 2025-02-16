@@ -21,6 +21,7 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
     train_dir = Path(config.data.data_dir) / "train"
     val_dir = Path(config.data.data_dir) / "val"
     train_dataset = HALStreamingDataset(
+        streams=None,
         local=str(train_dir),
         remote=None,
         batch_size=batch_size,
@@ -28,6 +29,7 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         data_config=config.data,
     )
     val_dataset = HALStreamingDataset(
+        streams=None,
         local=str(val_dir),
         remote=None,
         batch_size=batch_size,
