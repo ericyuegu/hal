@@ -4,10 +4,12 @@ from pathlib import Path
 
 import melee
 import numpy as np
-from data.process_replays import process_replay
-from data.schema import MDS_DTYPE_STR_BY_COLUMN
 from streaming import StreamingDataset
-from training.config import DataConfig
+
+from hal.data.process_replays import process_replay
+from hal.data.schema import MDS_DTYPE_STR_BY_COLUMN
+from hal.eval.eval_helper import mock_framedata_as_tensordict
+from hal.training.config import DataConfig
 
 # np.set_printoptions(threshold=np.inf)
 
@@ -27,6 +29,18 @@ ds = HALStreamingDataset(
 )
 # %%
 ds[0]
+# %%
+ds.preprocessor.trajectory_sampling_len
+# %%
+mock_framedata_L = mock_framedata_as_tensordict(ds.preprocessor.trajectory_sampling_len)
+mock_framedata_L
+# %%
+# Store only a single time step to minimize copying
+mock_model_inputs_ = ds.preprocessor.preprocess_inputs(mock_framedata_L, "p1")
+mock_model_inputs_
+# %%
+for k, v in mock_model_inputs_.items():
+    print(k, v)
 # %%
 # replay_path = Path(
 #     "/opt/slippi/data/ranked-anonymized-2-151807/ranked-anonymized/master-platinum-f9770bb9a470e511f7f7c541.slp"
