@@ -828,6 +828,11 @@ Arch.register(
     GPTv4Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=6, n_head=8, dropout=0.2),
 )
+Arch.register(
+    "GPTv4Controller-512-8-8-dropout",
+    GPTv4Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=8, n_head=8, dropout=0.2),
+)
 
 Arch.register(
     "GPTv5Controller-256-4-4-dropout",
