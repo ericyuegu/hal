@@ -73,8 +73,8 @@ class DataConfig:
 
 @attr.s(auto_attribs=True, frozen=True)
 class EvalConfig:
-    n_workers: int = 1
-    closed_loop_eval_every_n: int = 2**10
+    n_workers: int = 48
+    closed_loop_eval_every_n: int = 2**20
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -98,12 +98,12 @@ class TrainConfig(BaseConfig):
 
     # Hyperparams
     loss_fn: str = "ce"  # TODO decide whether to keep this
-    local_batch_size: int = 256
+    local_batch_size: int = 512
     lr: float = 3e-4
-    n_samples: int = 2**24
-    n_val_samples: int = 2**10
+    n_samples: int = 2**23
+    n_val_samples: int = 2**14
     keep_ckpts: int = 2**4
-    report_len: int = 2**10
+    report_len: int = 2**17
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     wd: float = 1e-2
