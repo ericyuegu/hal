@@ -8,6 +8,7 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 
+from hal.constants import INCLUDED_STAGES
 from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
 from hal.constants import Player
@@ -59,21 +60,36 @@ class Matchup:
     ego_character: str
     opponent_character: str
 
+    @classmethod
+    def spacies(cls, n: int) -> List["Matchup"]:
+        """Generate `n` spacies matchups"""
+        matchups: List[Matchup] = []
+        stages = INCLUDED_STAGES
+        characters = ["FOX", "FALCO"]
+        i = 0
+        while len(matchups) < n:
+            stage = stages[i % len(stages)]
+            ego_char = characters[(i // len(stages)) % len(characters)]
+            opp_char = characters[(i // len(stages) // len(characters)) % len(characters)]
+            matchups.append(cls(stage=stage, ego_character=ego_char, opponent_character=opp_char))
+            i += 1
+        return matchups
 
-def deterministically_generate_random_matchups(n: int, seed: int = 42) -> List[Matchup]:
-    """Deterministically generate `n` random matchups."""
-    rng = np.random.default_rng(seed)
-    stage = rng.choice(list(PRIOR_STAGE_LIKELIHOODS.keys()), size=n, p=list(PRIOR_STAGE_LIKELIHOODS.values()))
-    ego_character = rng.choice(
-        list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
-    )
-    opponent_character = rng.choice(
-        list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
-    )
-    matchups = []
-    for stage, ego_character, opponent_character in zip(stage, ego_character, opponent_character):
-        matchups.append(Matchup(stage=stage, ego_character=ego_character, opponent_character=opponent_character))
-    return matchups
+    @classmethod
+    def deterministically_generate_random_matchups(cls, n: int, seed: int = 42) -> List["Matchup"]:
+        """Deterministically generate `n` random matchups."""
+        rng = np.random.default_rng(seed)
+        stage = rng.choice(list(PRIOR_STAGE_LIKELIHOODS.keys()), size=n, p=list(PRIOR_STAGE_LIKELIHOODS.values()))
+        ego_character = rng.choice(
+            list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
+        )
+        opponent_character = rng.choice(
+            list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
+        )
+        matchups = []
+        for stage, ego_character, opponent_character in zip(stage, ego_character, opponent_character):
+            matchups.append(Matchup(stage=stage, ego_character=ego_character, opponent_character=opponent_character))
+        return matchups
 
 
 @attr.s(auto_attribs=True, slots=True)

@@ -21,11 +21,11 @@ from hal.emulator_helper import find_open_udp_ports
 from hal.emulator_helper import get_replay_dir
 from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import Matchup
-from hal.eval.eval_helper import deterministically_generate_random_matchups
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.eval.eval_helper import share_and_pin_memory
 from hal.gamestate_utils import extract_eval_gamestate_as_tensordict
 from hal.preprocess.preprocessor import Preprocessor
+from hal.training.config import EvalConfig
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
@@ -255,7 +255,7 @@ def flatten_replay_dir(replay_dir: Path) -> None:
 
 def run_closed_loop_evaluation(
     artifact_dir: Path,
-    n_workers: int,
+    eval_config: EvalConfig,
     checkpoint_idx: Optional[int] = None,
     eval_stats_queue: Optional[mp.Queue] = None,
     player: Player = "p1",
@@ -269,6 +269,7 @@ def run_closed_loop_evaluation(
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_config: TrainConfig = load_config_from_artifact_dir(artifact_dir)
     preprocessor = Preprocessor(data_config=train_config.data)
+    n_workers = eval_config.n_workers
 
     # Create events to signal when cpu and gpu workers are ready
     model_input_ready_flags: List[EventType] = [mp.Event() for _ in range(n_workers)]
@@ -309,7 +310,7 @@ def run_closed_loop_evaluation(
 
     cpu_processes: List[mp.Process] = []
     ports = find_open_udp_ports(n_workers)
-    matchups = deterministically_generate_random_matchups(n=n_workers)
+    matchups = getattr(Matchup, eval_config.matchups_distribution)(n_workers)
     episode_stats_queue: mp.Queue = mp.Queue()
     base_replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx)
     logger.info(f"Replays will be saved to {base_replay_dir}")
@@ -364,10 +365,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_workers", type=int, help="Number of CPU workers")
     parser.add_argument("--enable_ffw", action="store_true", help="Enable fast forward mode")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--matchups_distribution", type=str, default="spacies", help="Matchup distribution")
     args = parser.parse_args()
     run_closed_loop_evaluation(
         artifact_dir=Path(args.model_dir),
-        n_workers=args.n_workers,
+        eval_config=EvalConfig(n_workers=args.n_workers, matchups_distribution=args.matchups_distribution),
         enable_ffw=args.enable_ffw,
         debug=args.debug,
     )

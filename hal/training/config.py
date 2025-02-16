@@ -75,6 +75,7 @@ class DataConfig:
 class EvalConfig:
     n_workers: int = 48
     closed_loop_eval_every_n: int = 2**20
+    matchups_distribution: str = "spacies"
 
 
 @attr.s(auto_attribs=True, frozen=True)
