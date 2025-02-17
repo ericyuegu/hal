@@ -365,11 +365,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_workers", type=int, help="Number of CPU workers")
     parser.add_argument("--enable_ffw", action="store_true", help="Enable fast forward mode")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--matchups_distribution", type=str, default="spacies", help="Matchup distribution")
+    parser.add_argument("--matchups", type=str, default="spacies", help="Matchup distribution")
     args = parser.parse_args()
     run_closed_loop_evaluation(
         artifact_dir=Path(args.model_dir),
-        eval_config=EvalConfig(n_workers=args.n_workers, matchups_distribution=args.matchups_distribution),
+        eval_config=EvalConfig(n_workers=args.n_workers, matchups_distribution=args.matchups),
         enable_ffw=args.enable_ffw,
         debug=args.debug,
     )
