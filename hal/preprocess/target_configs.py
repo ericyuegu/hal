@@ -1,11 +1,14 @@
 from hal.constants import INCLUDED_BUTTONS
+from hal.constants import INCLUDED_BUTTONS_NO_SHOULDER
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 from hal.preprocess.registry import TargetConfig
 from hal.preprocess.registry import TargetConfigRegistry
 from hal.preprocess.transformations import concatenate_main_stick
 from hal.preprocess.transformations import encode_buttons_one_hot
+from hal.preprocess.transformations import encode_buttons_one_hot_no_shoulder
 from hal.preprocess.transformations import encode_c_stick_one_hot_coarse
 from hal.preprocess.transformations import encode_c_stick_one_hot_fine
 from hal.preprocess.transformations import encode_main_stick_one_hot_coarse
@@ -120,8 +123,32 @@ def gaussian_fine() -> TargetConfig:
     )
 
 
+def fine_main_analog_shoulder() -> TargetConfig:
+    return TargetConfig(
+        transformation_by_target={
+            "main_stick": encode_main_stick_one_hot_fine,
+            "c_stick": encode_c_stick_one_hot_coarse,
+            "buttons": encode_buttons_one_hot_no_shoulder,
+            "shoulder": encode_shoulder_one_hot_coarse,
+        },
+        frame_offsets_by_target={
+            "main_stick": 0,
+            "c_stick": 0,
+            "buttons": 0,
+            "shoulder": 0,
+        },
+        target_shapes_by_head={
+            "main_stick": (len(STICK_XY_CLUSTER_CENTERS_V2),),
+            "c_stick": (len(STICK_XY_CLUSTER_CENTERS_V0),),
+            "buttons": (len(INCLUDED_BUTTONS_NO_SHOULDER),),
+            "shoulder": (len(SHOULDER_CLUSTER_CENTERS_V0),),
+        },
+    )
+
+
 TargetConfigRegistry.register("baseline_coarse", baseline_coarse())
 TargetConfigRegistry.register("coarse_shoulder", coarse_shoulder())
 TargetConfigRegistry.register("baseline_fine", baseline_fine())
 TargetConfigRegistry.register("gaussian_coarse", gaussian_coarse())
 TargetConfigRegistry.register("gaussian_fine", gaussian_fine())
+TargetConfigRegistry.register("fine_main_analog_shoulder", fine_main_analog_shoulder())

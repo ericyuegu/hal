@@ -264,7 +264,7 @@ def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, Any])
         if button_str == "NO_BUTTON":
             continue
         button = getattr(melee.Button, button_str.upper())
-        if inputs["buttons"] == button_str:
+        if inputs.get("buttons", None) == button_str:
             controller.press_button(button)
         else:
             controller.release_button(button)

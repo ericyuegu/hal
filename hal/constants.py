@@ -85,6 +85,14 @@ INCLUDED_BUTTONS: Tuple[str, ...] = (
     "NO_BUTTON",
 )
 
+INCLUDED_BUTTONS_NO_SHOULDER: Tuple[str, ...] = (
+    "BUTTON_A",
+    "BUTTON_B",
+    "BUTTON_X",
+    "BUTTON_Z",
+    "NO_BUTTON",
+)
+
 
 ###################
 # Embeddings      #
@@ -140,7 +148,7 @@ TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
     "no_button",
 )
 
-SHOULDER_CLUSTER_CENTERS_V0: np.ndarray = np.array([0.0, 0.5, 1.0])
+SHOULDER_CLUSTER_CENTERS_V0: np.ndarray = np.array([0.0, 0.4, 1.0])
 SHOULDER_CLUSTER_CENTERS_V0.flags.writeable = False
 
 STICK_XY_CLUSTER_CENTERS_V0: np.ndarray = np.array(
@@ -221,3 +229,61 @@ STICK_XY_CLUSTER_CENTERS_V1: np.ndarray = np.array(
     dtype=np.float32,
 )
 STICK_XY_CLUSTER_CENTERS_V1.flags.writeable = False
+
+
+STICK_XY_CLUSTER_CENTERS_V2 = (
+    np.array(
+        [  # neutral
+            [0.0, 0.0],
+            # partial tilt
+            [0.35, 0.0],
+            [-0.35, 0.0],
+            [0.0, 0.35],
+            [0.0, -0.35],
+            # tilt
+            [0.675, 0.0],
+            [-0.675, 0.0],
+            [0.0, 0.675],
+            [0.0, -0.675],
+            # full press (dash / smash attack)
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+            # 17º / perfect wave/ledgedash
+            [0.95, -0.3],
+            [-0.95, -0.3],
+            # 17º
+            [0.95, 0.3],
+            [-0.95, 0.3],
+            # 30º / downward/up-angled f-smash
+            [0.85, -0.5],
+            [0.85, 0.5],
+            [-0.85, -0.5],
+            [-0.85, 0.5],
+            # 45º + shield drops
+            [0.675, -0.675],
+            [-0.675, -0.675],
+            [0.675, 0.675],
+            [-0.675, 0.675],
+            # up-/down-angled f-tilts
+            [0.5, 0.5],
+            [-0.5, 0.5],
+            [0.5, -0.5],
+            [-0.5, -0.5],
+            # 60º
+            [0.5, 0.85],
+            [-0.5, 0.85],
+            [0.5, -0.85],
+            [-0.5, -0.85],
+            # 72.5º
+            [0.3, -0.95],
+            [0.3, 0.95],
+            [-0.3, -0.95],
+            [-0.3, 0.95],
+        ]
+    )
+    / 2
+    + 0.5
+)
+STICK_XY_CLUSTER_CENTERS_V2.flags.writeable = False

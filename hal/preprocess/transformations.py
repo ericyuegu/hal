@@ -9,10 +9,12 @@ import torch
 from tensordict import TensorDict
 
 from hal.constants import INCLUDED_BUTTONS
+from hal.constants import INCLUDED_BUTTONS_NO_SHOULDER
 from hal.constants import Player
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 from hal.data.stats import FeatureStats
 
 if TYPE_CHECKING:
@@ -176,8 +178,8 @@ def encode_main_stick_one_hot_coarse(sample: TensorDict, player: str) -> torch.T
 def encode_main_stick_one_hot_fine(sample: TensorDict, player: str) -> torch.Tensor:
     main_stick_x = sample[f"{player}_main_stick_x"]
     main_stick_y = sample[f"{player}_main_stick_y"]
-    main_stick_clusters = get_closest_2D_cluster(main_stick_x, main_stick_y, STICK_XY_CLUSTER_CENTERS_V1)
-    one_hot_main_stick = one_hot_from_int(main_stick_clusters, len(STICK_XY_CLUSTER_CENTERS_V1))
+    main_stick_clusters = get_closest_2D_cluster(main_stick_x, main_stick_y, STICK_XY_CLUSTER_CENTERS_V2)
+    one_hot_main_stick = one_hot_from_int(main_stick_clusters, len(STICK_XY_CLUSTER_CENTERS_V2))
     return torch.tensor(one_hot_main_stick, dtype=torch.float32)
 
 
@@ -211,6 +213,21 @@ def encode_buttons_one_hot(sample: TensorDict, player: str) -> torch.Tensor:
     no_button = ~(button_a | button_b | jump | button_z | shoulder)
 
     stacked_buttons = torch.stack((button_a, button_b, jump, button_z, shoulder, no_button), dim=-1)
+    one_hot_buttons = convert_multi_hot_to_one_hot(stacked_buttons.numpy())
+    return torch.tensor(one_hot_buttons, dtype=torch.float32)
+
+
+def encode_buttons_one_hot_no_shoulder(sample: TensorDict, player: str) -> torch.Tensor:
+    button_a = sample[f"{player}_button_a"].bool()
+    button_b = sample[f"{player}_button_b"].bool()
+    button_x = sample[f"{player}_button_x"].bool()
+    button_y = sample[f"{player}_button_y"].bool()
+    button_z = sample[f"{player}_button_z"].bool()
+
+    jump = button_x | button_y
+    no_button = ~(button_a | button_b | jump | button_z)
+
+    stacked_buttons = torch.stack((button_a, button_b, jump, button_z, no_button), dim=-1)
     one_hot_buttons = convert_multi_hot_to_one_hot(stacked_buttons.numpy())
     return torch.tensor(one_hot_buttons, dtype=torch.float32)
 
@@ -254,7 +271,7 @@ def sample_main_stick_fine(pred_C: TensorDict, temperature: float = 1.0) -> tupl
     main_stick_probs = torch.softmax(pred_C["main_stick"] / temperature, dim=-1)
     main_stick_cluster_idx = torch.multinomial(main_stick_probs, num_samples=1)
     main_stick_x, main_stick_y = torch.split(
-        torch.tensor(STICK_XY_CLUSTER_CENTERS_V1[main_stick_cluster_idx]), 1, dim=-1
+        torch.tensor(STICK_XY_CLUSTER_CENTERS_V2[main_stick_cluster_idx]), 1, dim=-1
     )
 
     return main_stick_x.item(), main_stick_y.item()
@@ -272,6 +289,13 @@ def sample_buttons(pred_C: TensorDict, temperature: float = 1.0) -> str:
     button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
     button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
     button = INCLUDED_BUTTONS[button_idx]
+    return button
+
+
+def sample_buttons_no_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> str:
+    button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
+    button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
+    button = INCLUDED_BUTTONS_NO_SHOULDER[button_idx]
     return button
 
 

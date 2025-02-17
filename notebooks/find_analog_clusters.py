@@ -2,6 +2,7 @@
 import numpy as np
 import seaborn as sns
 from matplotlib import pyplot as plt
+from matplotlib.colors import LogNorm
 from streaming import StreamingDataset
 
 
@@ -170,7 +171,8 @@ def k_means(
 # for k in x.keys():
 #     print(k)
 # %%
-mds_path = "/opt/projects/hal2/data/mang0/train"
+# mds_path = "/opt/projects/hal2/data/mang0/train"
+mds_path = "/opt/projects/hal2/data/ranked/diamond/train"
 ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
 
 # %%
@@ -203,17 +205,43 @@ c_stick_x = np.concatenate(c_stick_x_tensors)
 c_stick_y = np.concatenate(c_stick_y_tensors)
 
 # %%
-main_stick = np.stack((main_stick_x, main_stick_y), axis=-1)
-c_stick = np.stack((c_stick_x, c_stick_y), axis=-1)
+full_main_stick = np.stack((main_stick_x, main_stick_y), axis=-1)
+full_c_stick = np.stack((c_stick_x, c_stick_y), axis=-1)
 
 # %%
 # randomly sample 1000000 points
-main_stick = main_stick[np.random.choice(len(main_stick), size=100000, replace=False)]
+main_stick = full_main_stick[np.random.choice(len(full_main_stick), size=10000, replace=False)]
 # %%
-c_stick = c_stick[np.random.choice(len(c_stick), size=1000000, replace=False)]
+plt.scatter(main_stick[:, 0], main_stick[:, 1], color="blue")
+# %%
+c_stick = full_c_stick[np.random.choice(len(full_c_stick), size=10000, replace=False)]
 
 # %%
 main_stick_1k = main_stick[np.random.choice(len(main_stick), size=1000, replace=False)]
+# %%
+# Create a 2D histogram heatmap of main stick positions with log scale
+# normalize to -1, 1
+main_stick_normalized = (main_stick - 0.5) * 2
+plt.figure(figsize=(10, 10))
+h = plt.hist2d(main_stick_normalized[:, 0], main_stick_normalized[:, 1], bins=50, cmap="YlOrRd", norm=LogNorm())
+plt.colorbar(h[3])
+plt.title("Main Stick Position Heatmap (Log Scale)")
+plt.xlabel("X Position")
+plt.ylabel("Y Position")
+plt.axis("equal")
+plt.show()
+
+# %%
+c_stick_normalized = (c_stick - 0.5) * 2
+plt.figure(figsize=(10, 10))
+h = plt.hist2d(c_stick_normalized[:, 0], c_stick_normalized[:, 1], bins=50, cmap="YlOrRd", norm=LogNorm())
+plt.colorbar(h[3])
+plt.title("C Stick Position Heatmap (Log Scale)")
+plt.xlabel("X Position")
+plt.ylabel("Y Position")
+plt.axis("equal")
+plt.show()
+
 # %%
 # smooth heatmap of main stick using KDE
 # WARNING: SLOW
@@ -229,9 +257,25 @@ main_stick_centroids = k_means(main_stick, k=21, max_iterations=10)
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
 
 # %%
-main_stick_centroids = k_means(main_stick, k=35, max_iterations=100)
+main_stick_centroids = k_means(main_stick, k=25, max_iterations=100)
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
 plt.axis("equal")
+# %%
+np.set_printoptions(suppress=True)
+# Convert to actual x,y coordinates and plot
+actual_coords = (main_stick_centroids - 0.5) * 2
+plt.figure(figsize=(10, 10))
+plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
+for i, (orig_point, actual_point) in enumerate(zip(main_stick_centroids, actual_coords)):
+    plt.annotate(
+        f"({actual_point[0]:.2f}, {actual_point[1]:.2f})",
+        xy=(orig_point[0], orig_point[1]),
+        xytext=(10, 10),
+        textcoords="offset points",
+    )
+plt.axis("equal")
+plt.title("Stick Positions with Actual X,Y Coordinates")
+plt.show()
 # %%
 main_stick_centroids = k_means(main_stick, k=32, max_iterations=100)
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
@@ -437,7 +481,7 @@ l_shoulder_tensors = []
 r_shoulder_tensors = []
 
 for i, sample in enumerate(ds):
-    if i > 10000:
+    if i > 5000:
         break
     if i % 100 == 0:
         print(f"Processing sample {i}")
@@ -452,16 +496,15 @@ l_shoulder = l_shoulder[np.random.choice(len(l_shoulder), size=10000, replace=Fa
 r_shoulder = r_shoulder[np.random.choice(len(r_shoulder), size=10000, replace=False)]
 # %%
 # %%
+shoulder = np.max(np.stack([l_shoulder, r_shoulder], axis=-1), axis=-1)
+shoulder
+# %%
 # histogram
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+fig, ax1 = plt.subplots(1, 1, figsize=(12, 4))
 
-ax1.hist(l_shoulder, bins=100)
+ax1.hist(shoulder, bins=11)
 ax1.set_yscale("log")
-ax1.set_title("Analog L shoulder presses")
-
-ax2.hist(r_shoulder, bins=100)
-ax2.set_yscale("log")
-ax2.set_title("Analog R shoulder presses")
+ax1.set_title("Analog shoulder presses")
 
 plt.tight_layout()
 plt.show()
@@ -492,3 +535,91 @@ plt.scatter(STICK_XY_CLUSTER_CENTERS_V0[:, 0], STICK_XY_CLUSTER_CENTERS_V0[:, 1]
 plt.axis("equal")
 plt.show()
 # %%
+STICK_XY_CLUSTER_CENTERS_V0
+
+# %%
+STICK_XY_CLUSTER_CENTERS_V2 = np.array(
+    [  # neutral
+        [0.0, 0.0],
+        # partial tilt
+        [0.35, 0.0],
+        [-0.35, 0.0],
+        [0.0, 0.35],
+        [0.0, -0.35],
+        # tilt
+        [0.675, 0.0],
+        [-0.675, 0.0],
+        [0.0, 0.675],
+        [0.0, -0.675],
+        # full press (dash / smash attack)
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [-1.0, 0.0],
+        [0.0, -1.0],
+        # 17º / perfect wave/ledgedash
+        [0.95, -0.3],
+        [-0.95, -0.3],
+        # 17º
+        [0.95, 0.3],
+        [-0.95, 0.3],
+        # 30º / downward/up-angled f-smash
+        [0.85, -0.5],
+        [0.85, 0.5],
+        [-0.85, -0.5],
+        [-0.85, 0.5],
+        # 45º + shield drops
+        [0.675, -0.675],
+        [-0.675, -0.675],
+        [0.675, 0.675],
+        [-0.675, 0.675],
+        # up-/down-angled f-tilts
+        [0.5, 0.5],
+        [-0.5, 0.5],
+        [0.5, -0.5],
+        [-0.5, -0.5],
+        # 60º
+        [0.5, 0.85],
+        [-0.5, 0.85],
+        [0.5, -0.85],
+        [-0.5, -0.85],
+        # 72.5º
+        [0.3, -0.95],
+        [0.3, 0.95],
+        [-0.3, -0.95],
+        [-0.3, 0.95],
+    ]
+)
+plt.scatter(STICK_XY_CLUSTER_CENTERS_V2[:, 0], STICK_XY_CLUSTER_CENTERS_V2[:, 1], color="blue")
+plt.axis("equal")
+plt.show()
+# %%
+import importlib
+
+importlib.reload(hal.constants)
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
+
+plt.scatter(STICK_XY_CLUSTER_CENTERS_V2[:, 0], STICK_XY_CLUSTER_CENTERS_V2[:, 1], color="blue")
+plt.axis("equal")
+plt.show()
+
+
+# %%
+main_stick_x_tensors = []
+main_stick_y_tensors = []
+c_stick_x_tensors = []
+c_stick_y_tensors = []
+
+# %%
+len(ds)
+
+# %%
+for i, sample in enumerate(ds):
+    if i > 5000:
+        break
+    if i % 100 == 0:
+        print(f"Processing sample {i}")
+    for player in ["p1", "p2"]:
+        main_stick_x_tensors.append(sample[f"{player}_main_stick_x"])
+        main_stick_y_tensors.append(sample[f"{player}_main_stick_y"])
+        c_stick_x_tensors.append(sample[f"{player}_c_stick_x"])
+        c_stick_y_tensors.append(sample[f"{player}_c_stick_y"])
