@@ -15,6 +15,7 @@ import attr
 import torch
 import torch.nn
 from loguru import logger
+from streaming import StreamingDataLoader
 from tensordict import TensorDict
 from yasoo import deserialize
 from yasoo import serialize
@@ -25,6 +26,8 @@ from hal.training.config import BaseConfig
 from hal.training.config import TrainConfig
 from hal.training.distributed import is_master
 from hal.training.models.registry import Arch
+from hal.training.streaming_dataloader import load_dataloader_state
+from hal.training.streaming_dataloader import save_dataloader_state
 from hal.training.utils import get_git_repo_root
 
 ARTIFACT_DIR_ROOT = "runs"
@@ -78,6 +81,8 @@ def get_default_melee_iso_path() -> str:
 
 FILE_MATCH: str = "*.pth"
 FILE_FORMAT: str = "%012d.pth"
+TRAIN_LOADER_STATE_FILENAME: str = "train_loader_state_%012d.pth"
+VAL_LOADER_STATE_FILENAME: str = "val_loader_state_%012d.pth"
 CONFIG_FILENAME: str = "config.json"
 
 
@@ -115,7 +120,13 @@ class Checkpoint:
     artifact_dir: Path
     keep_ckpts: int
 
-    def restore(self, idx: Optional[int] = None, device: str | torch.device = "cpu") -> Tuple[int, Optional[Path]]:
+    def restore(
+        self,
+        idx: Optional[int] = None,
+        device: str | torch.device = "cpu",
+        train_loader: Optional[StreamingDataLoader] = None,
+        val_loader: Optional[StreamingDataLoader] = None,
+    ) -> Tuple[int, Optional[Path]]:
         if idx is None:
             idx = find_latest_idx(self.artifact_dir)
             if idx == 0:
@@ -127,9 +138,25 @@ class Checkpoint:
             # Remove 'module.' prefix if it exists
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
             self.model.load_state_dict(state_dict)
+
+        train_state_file = self.artifact_dir / (TRAIN_LOADER_STATE_FILENAME % idx)
+        if train_loader is not None and train_state_file.exists():
+            load_dataloader_state(train_loader, train_state_file)
+            logger.info(f"Loaded train loader state from {train_state_file}")
+
+        val_state_file = self.artifact_dir / (VAL_LOADER_STATE_FILENAME % idx)
+        if val_loader is not None and val_state_file.exists():
+            load_dataloader_state(val_loader, val_state_file)
+            logger.info(f"Loaded val loader state from {val_state_file}")
+
         return idx, ckpt
 
-    def save(self, idx: int) -> None:
+    def save(
+        self,
+        idx: int,
+        train_loader: StreamingDataLoader,
+        val_loader: StreamingDataLoader,
+    ) -> None:
         if not is_master():  # only save master's state
             return
         self.artifact_dir.mkdir(exist_ok=True, parents=True)
@@ -139,9 +166,13 @@ class Checkpoint:
         ckpt = self.artifact_dir / (FILE_FORMAT % idx)
         with ckpt.open("wb") as f:
             torch.save(self.model.state_dict(), f)
+
+        save_dataloader_state(train_loader, self.artifact_dir / (TRAIN_LOADER_STATE_FILENAME % idx))
+        save_dataloader_state(val_loader, self.artifact_dir / (VAL_LOADER_STATE_FILENAME % idx))
+
         old_ckpts = sorted(self.artifact_dir.glob(FILE_MATCH), key=str)
-        for ckpt in old_ckpts[: -self.keep_ckpts]:
-            ckpt.unlink()
+        for ckpt_file in old_ckpts[: -self.keep_ckpts]:
+            ckpt_file.unlink()
 
     def save_file(self, model: torch.nn.Module, filename: str) -> None:
         if not is_master():  # only save master's state

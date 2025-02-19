@@ -3,8 +3,8 @@ from typing import Sequence
 from typing import Tuple
 
 import torch
+from streaming import StreamingDataLoader
 from tensordict import TensorDict
-from torch.utils.data import DataLoader
 
 from hal.training.config import TrainConfig
 from hal.training.streaming_dataset import HALStreamingDataset
@@ -16,7 +16,7 @@ def collate_tensordicts(batch: Sequence[TensorDict]) -> TensorDict:
     return torch.stack(batch)  # type: ignore
 
 
-def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
+def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, StreamingDataLoader]:
     batch_size = config.local_batch_size
     train_dir = Path(config.data.data_dir) / "train"
     val_dir = Path(config.data.data_dir) / "val"
@@ -27,6 +27,7 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         batch_size=batch_size,
         shuffle=True,
         data_config=config.data,
+        num_canonical_nodes=1,  # fix to single node training
     )
     val_dataset = HALStreamingDataset(
         streams=None,
@@ -35,9 +36,10 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         batch_size=batch_size,
         shuffle=False,
         data_config=config.data,
+        num_canonical_nodes=1,
     )
 
-    train_loader = DataLoader(
+    train_loader = StreamingDataLoader(
         train_dataset,
         batch_size=batch_size,
         collate_fn=collate_tensordicts,
@@ -46,7 +48,7 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         persistent_workers=True,
         prefetch_factor=config.dataworker.prefetch_factor,
     )
-    val_loader = DataLoader(
+    val_loader = StreamingDataLoader(
         val_dataset,
         batch_size=batch_size,
         collate_fn=collate_tensordicts,
@@ -57,3 +59,16 @@ def get_dataloaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader]:
     )
 
     return train_loader, val_loader
+
+
+def save_dataloader_state(loader: StreamingDataLoader, path: Path) -> None:
+    """Checkpoint the dataloader state to disk."""
+    state = loader.state_dict()
+    with path.open("wb") as f:
+        torch.save(state, f)
+
+
+def load_dataloader_state(loader: StreamingDataLoader, path: Path) -> None:
+    """Load checkpointed dataloader state from disk."""
+    state = torch.load(path)
+    loader.load_state_dict(state)

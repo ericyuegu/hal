@@ -11,9 +11,9 @@ from typing import Union
 
 import torch
 from loguru import logger
+from streaming import StreamingDataLoader
 from tensordict import TensorDict
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
 
 from hal.eval.eval import run_closed_loop_evaluation
 from hal.eval.eval_helper import EpisodeStats
@@ -51,7 +51,9 @@ class Trainer(torch.nn.Module, abc.ABC):
         params = get_exp_name(self.config)
         return get_log_dir(params)
 
-    def __init__(self, config: TrainConfig, train_loader: DataLoader, val_loader: DataLoader) -> None:
+    def __init__(
+        self, config: TrainConfig, train_loader: StreamingDataLoader, val_loader: StreamingDataLoader
+    ) -> None:
         super().__init__()
         self.config = config
         self.train_loader = train_loader
@@ -98,7 +100,9 @@ class Trainer(torch.nn.Module, abc.ABC):
         )
 
     def _restore_checkpoint(self) -> int:
-        resume_idx, _ = self.ckpt.restore(idx=self.config.resume_idx, device=self.device)
+        resume_idx, _ = self.ckpt.restore(
+            idx=self.config.resume_idx, device=self.device, train_loader=self.train_loader, val_loader=self.val_loader
+        )
         if resume_idx > 0:
             log_if_master(f"Resuming training at {resume_idx} ({resume_idx / (1 << 20):.2f}M samples)")
         return resume_idx
@@ -187,7 +191,7 @@ class Trainer(torch.nn.Module, abc.ABC):
                 )
 
                 # Save checkpoint & configs before validation & closed loop eval
-                self.ckpt.save(self.samples)
+                self.ckpt.save(self.samples, train_loader=self.train_loader, val_loader=self.val_loader)
 
                 self.validate(val_loader, writer=writer, step=self.samples)
                 t2 = time.perf_counter()
@@ -218,7 +222,8 @@ class Trainer(torch.nn.Module, abc.ABC):
     ) -> None:
         self.eval()
 
-        should_closed_loop_eval = step % self.config.eval.closed_loop_eval_every_n == 0
+        eval_config = self.config.eval
+        should_closed_loop_eval = eval_config.n_workers > 0 and step % eval_config.closed_loop_eval_every_n == 0
         if should_closed_loop_eval:
             logger.debug("Starting closed loop evaluation")
             eval_stats_queue: mp.Queue = mp.Queue()
@@ -226,7 +231,7 @@ class Trainer(torch.nn.Module, abc.ABC):
                 target=run_closed_loop_evaluation,
                 kwargs=dict(
                     artifact_dir=self.artifact_dir,
-                    eval_config=self.config.eval,
+                    eval_config=eval_config,
                     checkpoint_idx=step,
                     eval_stats_queue=eval_stats_queue,
                     player="p1",

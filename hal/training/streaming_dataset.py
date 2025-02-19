@@ -24,8 +24,9 @@ class HALStreamingDataset(StreamingDataset):
         shuffle: bool,
         data_config: DataConfig,
         debug: bool = False,
+        **kwargs,
     ) -> None:
-        super().__init__(streams=streams, local=local, remote=remote, batch_size=batch_size, shuffle=shuffle)
+        super().__init__(streams=streams, local=local, remote=remote, batch_size=batch_size, shuffle=shuffle, **kwargs)
         self.preprocessor = Preprocessor(data_config=data_config)
         self.seq_len = self.preprocessor.seq_len
         self.debug = debug
