@@ -74,7 +74,7 @@ class DataConfig:
 @attr.s(auto_attribs=True, frozen=True)
 class EvalConfig:
     n_workers: int = 48
-    closed_loop_eval_every_n: int = 2**21
+    closed_loop_eval_every_n: int = 2**22
     matchups_distribution: str = "spacies"
 
 
@@ -101,8 +101,8 @@ class TrainConfig(BaseConfig):
     loss_fn: str = "ce"  # TODO decide whether to keep this
     local_batch_size: int = 256
     lr: float = 3e-4
-    n_samples: int = 2**24
-    n_val_samples: int = 2**14
+    n_samples: int = 2**23
+    n_val_samples: int = 2**15
     keep_ckpts: int = 2**4
     report_len: int = 2**18
     betas: Tuple[float, float] = (0.9, 0.999)

@@ -175,7 +175,7 @@ class GPTv1(BaseGPT):
     """
     Decoder-only transformer with learned input embeddings for characters, stages, and actions.
 
-    Absolute position embeddings.
+    Shallow output heads, absolute position embeddings.
 
     Outputs independent categorical predictions for buttons, main stick, and c-stick.
     """
@@ -273,7 +273,7 @@ class GPTv1Controller(GPTv1):
 
 
 class GPTv2Controller(GPTv1):
-    """Autoregressive output heads."""
+    """Autoregressive shallow output heads, absolute position embeddings."""
 
     def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
         super().__init__(preprocessor, gpt_config)
@@ -283,9 +283,9 @@ class GPTv2Controller(GPTv1):
         c_stick_size = self.target_shapes_by_head["c_stick"][0]
 
         # re-define and re-initialize just the new output heads
-        self.main_stick_head = nn.Linear(self.n_embd, main_stick_size, bias=False)
-        self.button_head = nn.Linear(self.n_embd + main_stick_size, button_size, bias=False)
-        self.c_stick_head = nn.Linear(self.n_embd + main_stick_size + button_size, c_stick_size, bias=False)
+        self.c_stick_head = nn.Linear(self.n_embd, c_stick_size, bias=False)
+        self.main_stick_head = nn.Linear(self.n_embd + c_stick_size, main_stick_size, bias=False)
+        self.button_head = nn.Linear(self.n_embd + main_stick_size + c_stick_size, button_size, bias=False)
 
         for module in [self.main_stick_head, self.button_head, self.c_stick_head]:
             self._init_weights(module)
@@ -321,9 +321,116 @@ class GPTv2Controller(GPTv1):
             x_BLD = block(x_BLD)
         x_BLD = self.transformer.ln_f(x_BLD)
 
-        main_stick = self.main_stick_head(x_BLD)
-        button = self.button_head(torch.cat((x_BLD, main_stick), dim=-1))
-        c_stick = self.c_stick_head(torch.cat((x_BLD, main_stick, button), dim=-1))
+        c_stick = self.c_stick_head(x_BLD)
+        main_stick = self.main_stick_head(torch.cat((x_BLD, c_stick.detach()), dim=-1))
+        button = self.button_head(torch.cat((x_BLD, c_stick.detach(), main_stick.detach()), dim=-1))
+
+        return TensorDict(
+            {
+                "buttons": button,
+                "main_stick": main_stick,
+                "c_stick": c_stick,
+            },
+            batch_size=(B, L),
+        )
+
+
+class GPTv2_1Controller(BaseGPT):
+    """Autoregressive MLP output heads, absolute position embeddings."""
+
+    def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
+        super().__init__(preprocessor, gpt_config)
+        # Numeric + embedded feature sizes defined programmatically in InputPreprocessConfig
+        self.input_size = self.preprocessor.input_size  # G
+        self.n_embd = gpt_config.n_embd  # D
+
+        # categorical input embeddings
+        self.emb_config = self.preprocessor.data_config
+        self.stage_emb = nn.Embedding(self.emb_config.num_stages, self.emb_config.stage_embedding_dim)
+        self.character_emb = nn.Embedding(self.emb_config.num_characters, self.emb_config.character_embedding_dim)
+        self.action_emb = nn.Embedding(self.emb_config.num_actions, self.emb_config.action_embedding_dim)
+
+        self.transformer = nn.ModuleDict(
+            dict(
+                proj_down=nn.Linear(self.input_size, gpt_config.n_embd),  # G -> D
+                wpe=nn.Embedding(self.block_size, gpt_config.n_embd),
+                drop=nn.Dropout(gpt_config.dropout),
+                h=nn.ModuleList([Block(gpt_config) for _ in range(gpt_config.n_layer)]),
+                ln_f=nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
+            )
+        )
+
+        # output heads
+        self.target_shapes_by_head = self.preprocessor.target_config.target_shapes_by_head
+        main_stick_size = self.target_shapes_by_head["main_stick"][0]
+        button_size = self.target_shapes_by_head["buttons"][0]
+        c_stick_size = self.target_shapes_by_head["c_stick"][0]
+
+        # Put c-stick first because it overrides button inputs, other heads can choose to fire if c-stick is inactive
+        self.c_stick_head = nn.Sequential(
+            nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
+            nn.Linear(self.n_embd, self.n_embd // 2),
+            nn.GELU(),
+            nn.Linear(self.n_embd // 2, c_stick_size),
+        )
+
+        main_stick_input_size = self.n_embd + c_stick_size
+        self.main_stick_head = nn.Sequential(
+            nn.LayerNorm(main_stick_input_size, bias=gpt_config.bias),
+            nn.Linear(main_stick_input_size, main_stick_input_size // 2),
+            nn.GELU(),
+            nn.Linear(main_stick_input_size // 2, main_stick_size),
+        )
+
+        button_input_size = self.n_embd + main_stick_size + c_stick_size
+        self.button_head = nn.Sequential(
+            nn.LayerNorm(button_input_size, bias=gpt_config.bias),
+            nn.Linear(button_input_size, button_input_size // 2),
+            nn.GELU(),
+            nn.Linear(button_input_size // 2, button_size),
+        )
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * gpt_config.n_layer))
+
+    def _embed_inputs(self, inputs: TensorDict) -> torch.Tensor:
+        return torch.cat(
+            [
+                self.stage_emb(inputs["stage"]).squeeze(-2),
+                self.character_emb(inputs["ego_character"]).squeeze(-2),
+                self.character_emb(inputs["opponent_character"]).squeeze(-2),
+                self.action_emb(inputs["ego_action"]).squeeze(-2),
+                self.action_emb(inputs["opponent_action"]).squeeze(-2),
+                inputs["gamestate"],
+                inputs["controller"],
+            ],
+            dim=-1,
+        )
+
+    def forward(self, inputs: TensorDict):
+        B, L, _ = inputs["gamestate"].shape
+        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+
+        # concatenate embeddings and numerical inputs -> project down
+        combined_inputs_BLG = self._embed_inputs(inputs)
+        proj_inputs_BLD = self.transformer.proj_down(combined_inputs_BLG)
+
+        # position embeddings
+        pos_L = torch.arange(0, L, dtype=torch.long, device=next(self.parameters()).device)
+        pos_emb_LD = self.transformer.wpe(pos_L)
+
+        x_BLD = self.transformer.drop(proj_inputs_BLD + pos_emb_LD)
+        for block in self.transformer.h:
+            x_BLD = block(x_BLD)
+        x_BLD = self.transformer.ln_f(x_BLD)
+
+        c_stick = self.c_stick_head(x_BLD)
+        main_stick = self.main_stick_head(torch.cat((x_BLD, c_stick.detach()), dim=-1))
+        button = self.button_head(torch.cat((x_BLD, c_stick.detach(), main_stick.detach()), dim=-1))
 
         return TensorDict(
             {
@@ -548,7 +655,7 @@ class GPTv3Controller(GPTv3):
 
 
 class GPTv4Controller(BaseGPT):
-    """Positional embeddings, autoregressive MLP output heads."""
+    """Relative positional embeddings, autoregressive MLP output heads."""
 
     def __init__(self, preprocessor: Preprocessor, gpt_config: GPTConfig) -> None:
         super().__init__(preprocessor, gpt_config)
@@ -770,6 +877,7 @@ class MultiTokenGPT(GPTv1):
         ...
 
 
+# Shallow output heads, absolute position embeddings
 Arch.register("GPTv1-256-4-4", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
 Arch.register("GPTv1-256-8-4", GPTv1, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=8, n_head=4))
 Arch.register(
@@ -786,6 +894,7 @@ Arch.register(
     "GPTv1Controller-256-4-4", GPTv1Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
 )
 
+# AR shallow output heads, absolute position embeddings
 Arch.register(
     "GPTv2Controller-256-4-4", GPTv2Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
 )
@@ -794,12 +903,25 @@ Arch.register(
     GPTv2Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=12, n_head=4, dropout=0.1),
 )
+Arch.register(
+    "GPTv2Controller-512-6-8-dropout",
+    GPTv2Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=6, n_head=8, dropout=0.2),
+)
+
+# AR MLP output heads, absolute position embeddings
+Arch.register(
+    "GPTv2_1Controller-512-6-8-dropout",
+    GPTv2_1Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=6, n_head=8, dropout=0.2),
+)
 
 Arch.register("GPTv3-256-4-4", GPTv3, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4))
 Arch.register(
     "GPTv3Controller-256-4-4", GPTv3Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
 )
 
+# AR MLP output heads, relative positional embeddings
 Arch.register(
     "GPTv4Controller-256-4-4", GPTv4Controller, gpt_config=GPTConfig(block_size=1024, n_embd=256, n_layer=4, n_head=4)
 )
@@ -833,6 +955,7 @@ Arch.register(
     gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=8, n_head=8, dropout=0.2),
 )
 
+# AR MLP output heads + analog shoulder, relative positional embeddings
 Arch.register(
     "GPTv5Controller-256-4-4-dropout",
     GPTv5Controller,
