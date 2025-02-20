@@ -18,11 +18,20 @@ def collate_tensordicts(batch: Sequence[TensorDict]) -> TensorDict:
 
 def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, StreamingDataLoader]:
     batch_size = config.local_batch_size
-    train_dir = Path(config.data.data_dir) / "train"
-    val_dir = Path(config.data.data_dir) / "val"
+
+    train_dir = None
+    val_dir = None
+    train_streams = None
+    val_streams = None
+    if config.data.streams:
+        train_streams, val_streams = config.data.get_streams()
+    else:
+        train_dir = str(Path(config.data.data_dir) / "train")
+        val_dir = str(Path(config.data.data_dir) / "val")
+
     train_dataset = HALStreamingDataset(
-        streams=None,
-        local=str(train_dir),
+        streams=train_streams,
+        local=train_dir,
         remote=None,
         batch_size=batch_size,
         shuffle=True,
@@ -30,8 +39,8 @@ def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, Streaming
         num_canonical_nodes=1,  # fix to single node training
     )
     val_dataset = HALStreamingDataset(
-        streams=None,
-        local=str(val_dir),
+        streams=val_streams,
+        local=val_dir,
         remote=None,
         batch_size=batch_size,
         shuffle=False,

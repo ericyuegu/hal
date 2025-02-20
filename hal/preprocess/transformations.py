@@ -16,6 +16,7 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0_1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V3
 from hal.data.stats import FeatureStats
 
 if TYPE_CHECKING:
@@ -184,6 +185,14 @@ def encode_main_stick_one_hot_fine(sample: TensorDict, player: str) -> torch.Ten
     return torch.tensor(one_hot_main_stick, dtype=torch.float32)
 
 
+def encode_main_stick_one_hot_finer(sample: TensorDict, player: str) -> torch.Tensor:
+    main_stick_x = sample[f"{player}_main_stick_x"]
+    main_stick_y = sample[f"{player}_main_stick_y"]
+    main_stick_clusters = get_closest_2D_cluster(main_stick_x, main_stick_y, STICK_XY_CLUSTER_CENTERS_V3)
+    one_hot_main_stick = one_hot_from_int(main_stick_clusters, len(STICK_XY_CLUSTER_CENTERS_V3))
+    return torch.tensor(one_hot_main_stick, dtype=torch.float32)
+
+
 def encode_c_stick_one_hot_coarse(sample: TensorDict, player: str) -> torch.Tensor:
     c_stick_x = sample[f"{player}_c_stick_x"]
     c_stick_y = sample[f"{player}_c_stick_y"]
@@ -289,6 +298,16 @@ def sample_main_stick_fine(pred_C: TensorDict, temperature: float = 1.0) -> tupl
     main_stick_cluster_idx = torch.multinomial(main_stick_probs, num_samples=1)
     main_stick_x, main_stick_y = torch.split(
         torch.tensor(STICK_XY_CLUSTER_CENTERS_V2[main_stick_cluster_idx]), 1, dim=-1
+    )
+
+    return main_stick_x.item(), main_stick_y.item()
+
+
+def sample_main_stick_finer(pred_C: TensorDict, temperature: float = 1.0) -> tuple[float, float]:
+    main_stick_probs = torch.softmax(pred_C["main_stick"] / temperature, dim=-1)
+    main_stick_cluster_idx = torch.multinomial(main_stick_probs, num_samples=1)
+    main_stick_x, main_stick_y = torch.split(
+        torch.tensor(STICK_XY_CLUSTER_CENTERS_V3[main_stick_cluster_idx]), 1, dim=-1
     )
 
     return main_stick_x.item(), main_stick_y.item()

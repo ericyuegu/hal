@@ -3,10 +3,13 @@ from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import Optional
+from typing import Sequence
 from typing import Tuple
 from typing import Type
 
 import attr
+from data.streams import StreamRegistry
+from streaming import Stream
 
 from hal.constants import IDX_BY_ACTION
 from hal.constants import IDX_BY_CHARACTER
@@ -44,6 +47,9 @@ class DataConfig:
 
     # Dataset & filtering
     data_dir: str = "/opt/projects/hal2/data/dev"
+
+    streams: str = ""
+    stream_stats: str = ""  # TODO
     # Number of input and target frames in example
     seq_len: int = 256
     replay_filter: ReplayFilter = ReplayFilter()
@@ -68,7 +74,14 @@ class DataConfig:
 
     @property
     def stats_path(self) -> Path:
+        # TODO figure out more elegant way to get stats
+        # This currently still must be set for streams to work
         return Path(self.data_dir) / "stats.json"
+
+    def get_streams(self) -> Tuple[Sequence[Stream], Sequence[Stream]]:
+        assert self.streams is not None
+        train, val = self.streams.split(",")
+        return StreamRegistry.get(train), StreamRegistry.get(val)
 
 
 @attr.s(auto_attribs=True, frozen=True)

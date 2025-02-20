@@ -954,6 +954,11 @@ Arch.register(
     GPTv4Controller,
     gpt_config=GPTConfig(block_size=1024, n_embd=512, n_layer=8, n_head=8, dropout=0.2),
 )
+Arch.register(
+    "GPTv4Controller-768-6-12-dropout",
+    GPTv4Controller,
+    gpt_config=GPTConfig(block_size=1024, n_embd=768, n_layer=6, n_head=12, dropout=0.2),
+)
 
 # AR MLP output heads + analog shoulder, relative positional embeddings
 Arch.register(

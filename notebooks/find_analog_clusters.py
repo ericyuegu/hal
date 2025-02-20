@@ -171,8 +171,8 @@ def k_means(
 # for k in x.keys():
 #     print(k)
 # %%
-# mds_path = "/opt/projects/hal2/data/mang0/train"
-mds_path = "/opt/projects/hal2/data/ranked/diamond/train"
+mds_path = "/opt/projects/hal2/data/mang0/train"
+# mds_path = "/opt/projects/hal2/data/ranked/diamond/train"
 ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
 
 # %%
@@ -186,7 +186,7 @@ len(ds)
 
 # %%
 for i, sample in enumerate(ds):
-    if i > 5000:
+    if i > 10000:
         break
     if i % 100 == 0:
         print(f"Processing sample {i}")
@@ -209,8 +209,10 @@ full_main_stick = np.stack((main_stick_x, main_stick_y), axis=-1)
 full_c_stick = np.stack((c_stick_x, c_stick_y), axis=-1)
 
 # %%
+len(full_main_stick)
+# %%
 # randomly sample 1000000 points
-main_stick = full_main_stick[np.random.choice(len(full_main_stick), size=10000, replace=False)]
+main_stick = full_main_stick[np.random.choice(len(full_main_stick), size=200000, replace=False)]
 # %%
 plt.scatter(main_stick[:, 0], main_stick[:, 1], color="blue")
 # %%
@@ -223,7 +225,7 @@ main_stick_1k = main_stick[np.random.choice(len(main_stick), size=1000, replace=
 # normalize to -1, 1
 main_stick_normalized = (main_stick - 0.5) * 2
 plt.figure(figsize=(10, 10))
-h = plt.hist2d(main_stick_normalized[:, 0], main_stick_normalized[:, 1], bins=50, cmap="YlOrRd", norm=LogNorm())
+h = plt.hist2d(main_stick_normalized[:, 0], main_stick_normalized[:, 1], bins=200, cmap="YlOrRd", norm=LogNorm())
 plt.colorbar(h[3])
 plt.title("Main Stick Position Heatmap (Log Scale)")
 plt.xlabel("X Position")
@@ -281,11 +283,20 @@ main_stick_centroids = k_means(main_stick, k=32, max_iterations=100)
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
 plt.axis("equal")
 # %%
-main_stick_centroids = k_means(main_stick, k=29, max_iterations=100)
+main_stick_centroids = k_means(main_stick, k=75, max_iterations=100, init="random")
 plt.scatter(main_stick_centroids[:, 0], main_stick_centroids[:, 1], color="red")
 plt.axis("equal")
 # %%
+# Find point nearest to [0.32, 0.18]
+target = np.array([0.32, 0.18])
+distances = np.sqrt(np.sum((main_stick_centroids - target) ** 2, axis=1))
+nearest_idx = np.argmin(distances)
+nearest_point = main_stick_centroids[nearest_idx]
+print(f"Nearest point to {target}: {nearest_point}")
+(nearest_point - 0.5) * 2
+# %%
 main_stick_centroids
+
 # %%
 pts = main_stick_centroids
 # Define the center (about which symmetry is desired)
@@ -593,9 +604,6 @@ plt.scatter(STICK_XY_CLUSTER_CENTERS_V2[:, 0], STICK_XY_CLUSTER_CENTERS_V2[:, 1]
 plt.axis("equal")
 plt.show()
 # %%
-import importlib
-
-importlib.reload(hal.constants)
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 
 plt.scatter(STICK_XY_CLUSTER_CENTERS_V2[:, 0], STICK_XY_CLUSTER_CENTERS_V2[:, 1], color="blue")
@@ -609,4 +617,19 @@ plt.scatter(STICK_XY_CLUSTER_CENTERS_V0_1[:, 0], STICK_XY_CLUSTER_CENTERS_V0_1[:
 plt.axis("equal")
 plt.title("C-Stick Clusters (Coarser)")
 plt.show()
+# %%
+deduped_new_pts_y
+
+# %%
+from hal.constants import STICK_XY_CLUSTER_CENTERS_V3
+
+plt.scatter(STICK_XY_CLUSTER_CENTERS_V3[:, 0], STICK_XY_CLUSTER_CENTERS_V3[:, 1], color="blue")
+plt.axis("equal")
+plt.show()
+# %%
+for x, y in STICK_XY_CLUSTER_CENTERS_V3:
+    dist = x**2 + y**2
+    if 1 - dist < 0.05:
+        scale = 1 / dist
+        print(f"[{scale * x}, {scale * y}],")
 # %%
