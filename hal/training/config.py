@@ -2,8 +2,8 @@ import argparse
 from pathlib import Path
 from typing import Any
 from typing import Dict
+from typing import List
 from typing import Optional
-from typing import Sequence
 from typing import Tuple
 from typing import Type
 
@@ -82,10 +82,10 @@ class DataConfig:
             return Path(self.stream_stats)
         return Path(self.data_dir) / "stats.json"
 
-    def get_streams(self) -> Tuple[Sequence[Stream], Sequence[Stream]]:
+    def get_streams(self) -> List[Stream]:
         assert self.streams is not None
-        train, val = self.streams.split(",")
-        return StreamRegistry.get(train), StreamRegistry.get(val)
+        stream_names = self.streams.split(",")
+        return [StreamRegistry.get(name) for name in stream_names]
 
 
 @attr.s(auto_attribs=True, frozen=True)

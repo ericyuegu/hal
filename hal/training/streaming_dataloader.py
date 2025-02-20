@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from typing import Sequence
 from typing import Tuple
@@ -19,32 +20,34 @@ def collate_tensordicts(batch: Sequence[TensorDict]) -> TensorDict:
 def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, StreamingDataLoader]:
     batch_size = config.local_batch_size
 
-    train_dir = None
-    val_dir = None
     train_streams = None
     val_streams = None
+    local_dir = None
     if config.data.streams:
-        train_streams, val_streams = config.data.get_streams()
+        train_streams = config.data.get_streams()
+        val_streams = deepcopy(train_streams)  # StreamingDataset mutates streams passed in
     else:
-        train_dir = str(Path(config.data.data_dir) / "train")
-        val_dir = str(Path(config.data.data_dir) / "val")
+        local_dir = config.data.data_dir
 
     train_dataset = HALStreamingDataset(
         streams=train_streams,
-        local=train_dir,
+        local=local_dir,
         remote=None,
         batch_size=batch_size,
         shuffle=True,
         data_config=config.data,
+        split="train",
         num_canonical_nodes=1,  # fix to single node training
     )
+
     val_dataset = HALStreamingDataset(
         streams=val_streams,
-        local=val_dir,
+        local=local_dir,
         remote=None,
         batch_size=batch_size,
         shuffle=False,
         data_config=config.data,
+        split="val",
         num_canonical_nodes=1,
     )
 
