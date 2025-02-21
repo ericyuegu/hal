@@ -179,17 +179,3 @@ def parse_args_to_attrs_instance(cls: Type[Any], args: argparse.Namespace, prefi
                 kwargs[field.name] = value
 
     return cls(**kwargs)
-
-
-# @attr.s(auto_attribs=True, frozen=True)
-# class ClosedLoopEvalConfig:
-#     data_config: DatasetConfig
-#     model_arch: torch.Module
-#     model_path: Path
-#     opponent: EVAL_MODE = "cpu"
-#     opponent_model_arch: Optional[torch.Module] = None
-#     opponent_model_path: Optional[Path] = None
-#     # Which device to load model(s) for inference
-#     device: DEVICES = "cpu"
-#     # Comma-separated lists of stages, or "all"
-#     stage: EVAL_STAGES = "all"

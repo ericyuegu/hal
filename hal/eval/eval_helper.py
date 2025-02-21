@@ -80,7 +80,7 @@ class Matchup:
         return matchups
 
     @classmethod
-    def deterministically_generate_random_matchups(cls, n: int, seed: int = 42) -> List["Matchup"]:
+    def rainbow(cls, n: int, seed: int = 42) -> List["Matchup"]:
         """Deterministically generate `n` random matchups."""
         rng = np.random.default_rng(seed)
         stage = rng.choice(list(PRIOR_STAGE_LIKELIHOODS.keys()), size=n, p=list(PRIOR_STAGE_LIKELIHOODS.values()))
