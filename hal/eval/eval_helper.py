@@ -83,13 +83,26 @@ class Matchup:
     def rainbow(cls, n: int, seed: int = 42) -> List["Matchup"]:
         """Deterministically generate `n` random matchups."""
         rng = np.random.default_rng(seed)
-        stage = rng.choice(list(PRIOR_STAGE_LIKELIHOODS.keys()), size=n, p=list(PRIOR_STAGE_LIKELIHOODS.values()))
+        stage = rng.choice(
+            list(PRIOR_STAGE_LIKELIHOODS.keys()),
+            size=n,
+            replace=True,
+            p=list(PRIOR_STAGE_LIKELIHOODS.values()),
+        )
         ego_character = rng.choice(
-            list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
+            list(PRIOR_CHARACTER_LIKELIHOODS.keys()),
+            size=n,
+            replace=True,
+            p=list(PRIOR_CHARACTER_LIKELIHOODS.values()),
         )
         opponent_character = rng.choice(
-            list(PRIOR_CHARACTER_LIKELIHOODS.keys()), size=n, p=list(PRIOR_CHARACTER_LIKELIHOODS.values())
+            list(PRIOR_CHARACTER_LIKELIHOODS.keys()),
+            size=n,
+            replace=True,
+            p=list(PRIOR_CHARACTER_LIKELIHOODS.values()),
         )
+        # We can't force CPU to pick Sheik, so we replace all Sheik with Zelda
+        opponent_character = ["ZELDA" if c == "SHEIK" else c for c in opponent_character]
         matchups = []
         for stage, ego_character, opponent_character in zip(stage, ego_character, opponent_character):
             matchups.append(Matchup(stage=stage, ego_character=ego_character, opponent_character=opponent_character))

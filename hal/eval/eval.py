@@ -362,6 +362,7 @@ def run_closed_loop_evaluation(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Melee in emulator")
     parser.add_argument("--model_dir", type=str, help="Path to model directory")
+    parser.add_argument("--checkpoint_idx", type=int, help="Checkpoint index")
     parser.add_argument("--n_workers", type=int, help="Number of CPU workers")
     parser.add_argument("--enable_ffw", action="store_true", help="Enable fast forward mode")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
@@ -369,6 +370,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     run_closed_loop_evaluation(
         artifact_dir=Path(args.model_dir),
+        checkpoint_idx=args.checkpoint_idx,
         eval_config=EvalConfig(n_workers=args.n_workers, matchups_distribution=args.matchups),
         enable_ffw=args.enable_ffw,
         debug=args.debug,
