@@ -65,6 +65,10 @@ class Matchup:
         return [Matchup(stage="BATTLEFIELD", ego_character="FOX", opponent_character="FOX")] * n
 
     @classmethod
+    def fox_yoshis(cls, n: int) -> List["Matchup"]:
+        return [Matchup(stage="YOSHIS_STORY", ego_character="FOX", opponent_character="FOX")] * n
+
+    @classmethod
     def spacies(cls, n: int) -> List["Matchup"]:
         """Generate `n` spacies matchups"""
         matchups: List[Matchup] = []
