@@ -236,6 +236,17 @@ def encode_buttons_one_hot(sample: TensorDict, player: str) -> torch.Tensor:
     return torch.tensor(one_hot_buttons, dtype=torch.float32)
 
 
+def encode_buttons_multi_hot(sample: TensorDict, player: str) -> torch.Tensor:
+    button_a = sample[f"{player}_button_a"].bool()
+    button_b = sample[f"{player}_button_b"].bool()
+    button_x = sample[f"{player}_button_x"].bool()
+    button_y = sample[f"{player}_button_y"].bool()
+    button_z = sample[f"{player}_button_z"].bool()
+    button_l = sample[f"{player}_button_l"].bool()
+    button_r = sample[f"{player}_button_r"].bool()
+    return torch.stack((button_a, button_b, button_x, button_y, button_z, button_l, button_r), dim=-1)
+
+
 def encode_buttons_one_hot_no_shoulder(sample: TensorDict, player: str) -> torch.Tensor:
     button_a = sample[f"{player}_button_a"].bool()
     button_b = sample[f"{player}_button_b"].bool()

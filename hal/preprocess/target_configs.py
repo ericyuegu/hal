@@ -190,24 +190,24 @@ def fine_main_coarser_cstick() -> TargetConfig:
     )
 
 
-def fine_orig_buttons() -> TargetConfig:
-    return TargetConfig(
-        transformation_by_target={
-            "main_stick": encode_main_stick_one_hot_fine,
-            "c_stick": encode_c_stick_one_hot_coarse,
-            "buttons": encode_buttons_one_hot,
-        },
-        frame_offsets_by_target={
-            "main_stick": 0,
-            "c_stick": 0,
-            "buttons": 0,
-        },
-        target_shapes_by_head={
-            "main_stick": (len(STICK_XY_CLUSTER_CENTERS_V0),),
-            "c_stick": (len(STICK_XY_CLUSTER_CENTERS_V0),),
-            "buttons": (len(INCLUDED_BUTTONS),),
-        },
-    )
+# def fine_orig_buttons() -> TargetConfig:
+#     return TargetConfig(
+#         transformation_by_target={
+#             "main_stick": encode_main_stick_one_hot_fine,
+#             "c_stick": encode_c_stick_one_hot_coarse,
+#             "buttons": encode_buttons_one_hot,
+#         },
+#         frame_offsets_by_target={
+#             "main_stick": 0,
+#             "c_stick": 0,
+#             "buttons": 0,
+#         },
+#         target_shapes_by_head={
+#             "main_stick": (len(STICK_XY_CLUSTER_CENTERS_V0),),
+#             "c_stick": (len(STICK_XY_CLUSTER_CENTERS_V0),),
+#             "buttons": (len(INCLUDED_BUTTONS),),
+#         },
+#     )
 
 
 TargetConfigRegistry.register("baseline_coarse", baseline_coarse())
@@ -217,3 +217,4 @@ TargetConfigRegistry.register("gaussian_coarse", gaussian_coarse())
 TargetConfigRegistry.register("gaussian_fine", gaussian_fine())
 TargetConfigRegistry.register("fine_main_analog_shoulder", fine_main_analog_shoulder())
 TargetConfigRegistry.register("baseline_finer", baseline_finer())
+TargetConfigRegistry.register("fine_main_coarser_cstick", fine_main_coarser_cstick())
