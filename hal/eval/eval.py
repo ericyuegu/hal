@@ -309,12 +309,14 @@ def run_closed_loop_evaluation(
     )
     gpu_process.start()
 
+    matchups_distribution = eval_config.matchups_distribution
+    matchups = getattr(Matchup, matchups_distribution)(n_workers)
+    base_replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx) / matchups_distribution
+    logger.info(f"Replays will be saved to {base_replay_dir}")
+
     cpu_processes: List[mp.Process] = []
     ports = find_open_udp_ports(n_workers)
-    matchups = getattr(Matchup, eval_config.matchups_distribution)(n_workers)
     episode_stats_queue: mp.Queue = mp.Queue()
-    base_replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx)
-    logger.info(f"Replays will be saved to {base_replay_dir}")
     for i, matchup in enumerate(matchups):
         replay_dir = base_replay_dir / f"{i:03d}"
         replay_dir.mkdir(exist_ok=True, parents=True)

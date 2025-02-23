@@ -1,73 +1,23 @@
 # %%
-from pathlib import Path
+import numpy as np
+from streaming import StreamingDataset
 
-import pandas as pd
-import torch
-from tensordict import TensorDict
-
-from hal.data.stats import load_dataset_stats
-from hal.preprocess.input_configs import PLAYER_NUMERIC_FEATURES_V0
-from hal.preprocess.input_configs import preprocess_inputs_v0
-from hal.training.config import DataConfig
-from hal.training.deprecated.dataset import InMemoryTensordictDataset
-from hal.training.deprecated.tensordict_dataloader import create_tensordicts
-
-players = ["p1", "p2"]
-cols = []
-for player in players:
-    for feature in PLAYER_NUMERIC_FEATURES_V0:
-        cols.append(f"{player}_{feature}")
-# %%
-data_config = DataConfig(data_dir="/opt/projects/hal2/data/dev", input_len=30, target_len=5)
-embed_config = DataConfig()
-data_dir = Path(data_config.data_dir)
-stats_path = data_dir / "stats.json"
-
-train_td, val_td = create_tensordicts(data_config)
-dataset = InMemoryTensordictDataset(train_td, stats_path, data_config, embed_config)
-stats_by_feature_name = load_dataset_stats(stats_path)
+np.set_printoptions(threshold=np.inf)
 
 # %%
-raw_td = dataset.tensordict[24654:24689]
-raw_df = pd.DataFrame({key: value.numpy() for key, value in raw_td.items() if key in cols})
-raw_df = raw_df.reindex(sorted(raw_df.columns), axis=1)
-raw_df
+mds_path = "/opt/projects/hal2/data/ranked/diamond/train"
+ds = StreamingDataset(local=mds_path, batch_size=1, shuffle=True)
 
 # %%
-processed_td = preprocess_inputs_v0(raw_td, data_config, "p1", stats_by_feature_name)
-processed_df = pd.DataFrame(processed_td["gamestate"].numpy(), columns=cols)
-processed_df = processed_df.reindex(sorted(processed_df.columns), axis=1)
-processed_df
+x = ds[0]
 
 # %%
-action_df = pd.DataFrame(processed_td["ego_action"].numpy())
-action_df
+for k in x.keys():
+    print(k)
 
 # %%
-dataset[34578]["inputs"]["ego_action"]
-
+x["p1_button_x"]
 # %%
-targets = dataset[34578]["targets"]
-pd.DataFrame(torch.concat(list(targets.values()), -1).numpy())
-
+x["p1_position_y"]
 # %%
-
-# %%
-
-# %%
-# %%
-td = TensorDict.load(
-    "/opt/projects/hal2/runs/2024-09-04_22-17-22/arch@MLPv1_local_batch_size@256_n_samples@1048576/training_samples/256"
-)
-
-# %%
-td.get("inputs")
-
-# %%
-td["inputs"]["ego_action"][0, :10]
-
-# %%
-pd.DataFrame(td["inputs"]["gamestate"][0].numpy(), columns=cols)
-
-# %%
-pd.DataFrame(dataset[1]["inputs"]["gamestate"].numpy(), columns=cols)
+x["p1_position_x"]
