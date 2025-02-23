@@ -353,8 +353,10 @@ def threshold_independent_buttons(pred_C: TensorDict, threshold: float = 0.5) ->
     button_logits = pred_C["buttons"]
     button_probs = torch.sigmoid(button_logits)
     button_thresholds = torch.threshold(button_probs, threshold, 0)
-    button_indices = torch.nonzero(button_thresholds, as_tuple=True)
-    buttons = [INCLUDED_BUTTONS[i] for i in button_indices]
+    button_indices = torch.nonzero(button_thresholds)
+    if len(button_indices) == 0:
+        return []
+    buttons = [INCLUDED_BUTTONS[i.item()] for i in button_indices]  # type: ignore
     return buttons
 
 
