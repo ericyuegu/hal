@@ -76,6 +76,15 @@ CHARACTER_BY_IDX: Dict[int, str] = {i: char.name for char, i in IDX_BY_CHARACTER
 IDX_BY_ACTION: Dict[Action, int] = {action: i for i, action in enumerate(Action)}
 ACTION_BY_IDX: Dict[int, str] = {i: action.name for action, i in IDX_BY_ACTION.items()}
 
+ORIGINAL_BUTTONS: Tuple[str, ...] = (
+    "BUTTON_A",
+    "BUTTON_B",
+    "BUTTON_X",
+    "BUTTON_Y",
+    "BUTTON_Z",
+    "BUTTON_L",
+    "BUTTON_R",
+)
 INCLUDED_BUTTONS: Tuple[str, ...] = (
     "BUTTON_A",
     "BUTTON_B",

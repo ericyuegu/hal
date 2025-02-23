@@ -236,7 +236,7 @@ def encode_buttons_one_hot(sample: TensorDict, player: str) -> torch.Tensor:
     return torch.tensor(one_hot_buttons, dtype=torch.float32)
 
 
-def encode_buttons_multi_hot(sample: TensorDict, player: str) -> torch.Tensor:
+def encode_original_buttons_multi_hot(sample: TensorDict, player: str) -> torch.Tensor:
     button_a = sample[f"{player}_button_a"].bool()
     button_b = sample[f"{player}_button_b"].bool()
     button_x = sample[f"{player}_button_x"].bool()
