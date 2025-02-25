@@ -123,6 +123,54 @@ def convert_multi_hot_to_one_hot(buttons_LD: np.ndarray) -> np.ndarray:
     return buttons_LD
 
 
+def convert_multi_hot_to_one_hot_early_release(buttons_LD: np.ndarray) -> np.ndarray:
+    """
+    One-hot encode 2D array of multiple button presses per time step.
+
+    Keeps temporally newest button press and releases all older button presses.
+
+    Args:
+        buttons_LD (np.ndarray): Input array of shape (L, D) where L is the sequence length
+                                 and D is the embedding dimension (number of buttons + 1).
+
+    Returns:
+        np.ndarray: One-hot encoded array of the same shape (L, D).
+    """
+    assert buttons_LD.ndim == 2, "Input array must be 2D"
+    _, D = buttons_LD.shape
+    row_sums = buttons_LD.sum(axis=1)
+    multi_pressed = np.argwhere(row_sums > 1).flatten()
+
+    for i in multi_pressed:
+        if i - 1 not in multi_pressed:
+            prev_press = buttons_LD[i - 1] if i > 0 else np.zeros(D)
+            prev_buttons = set(np.where(prev_press == 1)[0])
+
+        curr_press = buttons_LD[i]
+        curr_buttons = set(np.where(curr_press == 1)[0])
+
+        print(f"{i}: {prev_buttons=} {curr_buttons=}")
+
+        if curr_buttons == prev_buttons:
+            # copy over previous one-hot
+            buttons_LD[i] = buttons_LD[i - 1]
+            continue
+        else:
+            new_buttons = curr_buttons - prev_buttons
+            new_button_idx = min(new_buttons) if new_buttons else -1
+            buttons_LD[i] = np.zeros(D)
+            buttons_LD[i, new_button_idx] = 1
+            prev_buttons = curr_buttons
+
+        print(f"Set {i} to {buttons_LD[i]}")
+
+    # Handle rows with no presses
+    no_press = np.argwhere(row_sums == 0).flatten()
+    buttons_LD[no_press, -1] = 1
+
+    return buttons_LD
+
+
 def get_closest_1D_cluster(x: np.ndarray, cluster_centers: np.ndarray) -> np.ndarray:
     """
     Calculate the closest point in cluster_centers for given x values.

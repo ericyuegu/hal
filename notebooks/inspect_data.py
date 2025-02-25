@@ -21,3 +21,9 @@ x["p1_button_x"]
 x["p1_position_y"]
 # %%
 x["p1_position_x"]
+# %%
+x["p2_action"]
+# %%
+from melee.enums import Action
+
+Action(69)

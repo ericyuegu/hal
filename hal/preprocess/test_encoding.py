@@ -3,6 +3,7 @@ import pytest
 from numpy.testing import assert_array_equal
 
 from hal.preprocess.transformations import convert_multi_hot_to_one_hot
+from hal.preprocess.transformations import convert_multi_hot_to_one_hot_early_release
 
 
 @pytest.mark.parametrize(
@@ -201,4 +202,79 @@ from hal.preprocess.transformations import convert_multi_hot_to_one_hot
 )
 def test_convert_target_to_one_hot_2d(in_buttons_LD, out_buttons_LD) -> None:
     result = convert_multi_hot_to_one_hot(in_buttons_LD)
+    assert_array_equal(result, out_buttons_LD, err_msg=f"{result}\n{out_buttons_LD}")
+
+
+@pytest.mark.parametrize(
+    "in_buttons_LD, out_buttons_LD",
+    [
+        (
+            np.array(
+                [
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 1, 0, 0],
+                    [0, 0, 1, 1, 0, 0],
+                    [0, 0, 1, 1, 1, 0],
+                    [0, 0, 1, 1, 1, 0],
+                    [0, 0, 1, 1, 1, 0],
+                    [0, 0, 1, 1, 1, 0],
+                    [0, 0, 1, 1, 0, 0],
+                    [0, 0, 1, 1, 0, 0],
+                    [0, 0, 1, 1, 0, 0],
+                    [0, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0],
+                ],
+                dtype=np.int8,
+            ),
+            np.array(
+                [
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0],
+                    [0, 0, 0, 1, 0, 0],
+                    [0, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 0, 0, 1],
+                ],
+                dtype=np.int8,
+            ),
+        ),
+        # Test case 4
+        (
+            np.array(
+                [
+                    [1, 0, 0, 0, 0, 0],
+                    [1, 1, 0, 0, 0, 0],
+                    [1, 1, 0, 0, 0, 0],
+                    [1, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0],
+                ]
+            ),
+            np.array(
+                [
+                    [1, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 0, 0, 1],
+                    [0, 0, 0, 1, 0, 0],
+                ]
+            ),
+        ),
+    ],
+)
+def test_convert_target_to_one_hot_early_release_2d(in_buttons_LD, out_buttons_LD) -> None:
+    result = convert_multi_hot_to_one_hot_early_release(in_buttons_LD)
     assert_array_equal(result, out_buttons_LD, err_msg=f"{result}\n{out_buttons_LD}")
