@@ -28,7 +28,7 @@ You can obtain raw `.slp` files from the [Slippi Discord](https://discord.gg/qaH
 
 # HOW-TO
 
-I recommend modifying the constants in `hal/emulator_paths.py` to point to your local directories for the repo, Dolphin, and the Melee ISO.
+I recommend modifying the constants in `hal/local_paths.py` to point to your local directories for the repo, Dolphin, and the Melee ISO.
 
 ## Processing replays to MDS format
 

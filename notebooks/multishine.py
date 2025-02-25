@@ -10,7 +10,7 @@ import melee
 from hal.emulator_helper import console_manager
 from hal.emulator_helper import get_headless_console_kwargs
 from hal.emulator_helper import self_play_menu_helper
-from hal.emulator_paths import REMOTE_CISO_PATH
+from hal.local_paths import ISO_PATH
 
 # This example program demonstrates how to use the Melee API to run a console,
 #   setup controllers, and send button presses over to a console
@@ -75,7 +75,7 @@ def signal_handler(sig, frame) -> None:
 signal.signal(signal.SIGINT, signal_handler)
 
 # Run the console
-console.run(iso_path=REMOTE_CISO_PATH)
+console.run(iso_path=ISO_PATH)
 
 # Connect to the console
 print("Connecting to console...")

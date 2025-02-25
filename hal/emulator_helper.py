@@ -25,11 +25,11 @@ from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
 from hal.constants import Player
 from hal.constants import get_opponent
-from hal.emulator_paths import REMOTE_CISO_PATH
-from hal.emulator_paths import REMOTE_EMULATOR_PATH
-from hal.emulator_paths import REMOTE_EVAL_REPLAY_DIR
 from hal.eval.eval_helper import EpisodeStats
 from hal.eval.eval_helper import Matchup
+from hal.local_paths import EMULATOR_PATH
+from hal.local_paths import EVAL_REPLAY_DIR
+from hal.local_paths import ISO_PATH
 from hal.training.io import find_latest_idx
 from hal.training.io import get_path_friendly_datetime
 
@@ -79,7 +79,7 @@ def find_open_udp_ports(num: int) -> List[int]:
 
 def get_replay_dir(artifact_dir: Path | None = None, step: int | None = None) -> Path:
     if artifact_dir is None:
-        replay_dir = Path(REMOTE_EVAL_REPLAY_DIR) / get_path_friendly_datetime()
+        replay_dir = Path(EVAL_REPLAY_DIR) / get_path_friendly_datetime()
     else:
         replay_dir = artifact_dir / "replays"
         step = step or find_latest_idx(artifact_dir)
@@ -100,7 +100,7 @@ def get_headless_console_kwargs(
         "use_exi_inputs": enable_ffw,
         "enable_ffw": enable_ffw,
     }
-    emulator_path = REMOTE_EMULATOR_PATH
+    emulator_path = EMULATOR_PATH
     if replay_dir is None:
         replay_dir = get_replay_dir()
     replay_dir.mkdir(exist_ok=True, parents=True)
@@ -319,7 +319,7 @@ class EmulatorManager:
             TensorDict: Controller inputs to be applied to the game
         """
         # Run the console
-        self.console.run(iso_path=REMOTE_CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
+        self.console.run(iso_path=ISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
         # Connect to the console
         logger.debug("Connecting to console...")
         if not self.console.connect():

@@ -6,7 +6,7 @@ from loguru import logger
 from hal.emulator_helper import console_manager
 from hal.emulator_helper import get_headless_console_kwargs
 from hal.emulator_helper import self_play_menu_helper
-from hal.emulator_paths import REMOTE_CISO_PATH
+from hal.local_paths import ISO_PATH
 
 PLAYER_1_PORT = 1
 PLAYER_2_PORT = 2
@@ -21,7 +21,7 @@ def run_episode(rank: int, port: int, max_steps: int = 8 * 60 * 60) -> None:
     controller_2 = melee.Controller(console=console, port=PLAYER_2_PORT, type=melee.ControllerType.STANDARD)
 
     # Run the console
-    console.run(iso_path=REMOTE_CISO_PATH)
+    console.run(iso_path=ISO_PATH)
     # Connect to the console
     logger.info("Connecting to console...")
     if not console.connect():
