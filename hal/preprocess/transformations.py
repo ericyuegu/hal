@@ -15,6 +15,7 @@ from hal.constants import ORIGINAL_BUTTONS_NO_SHOULDER
 from hal.constants import Player
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V0
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V1
+from hal.constants import SHOULDER_CLUSTER_CENTERS_V2
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V0_1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
@@ -360,6 +361,20 @@ def encode_shoulder_original_coarse(sample: TensorDict, player: str) -> torch.Te
     return torch.tensor(one_hot_shoulder, dtype=torch.float32)
 
 
+def encode_shoulder_l_one_hot_fine(sample: TensorDict, player: str) -> torch.Tensor:
+    shoulder_l = sample[f"{player}_l_shoulder"]
+    shoulder_clusters = get_closest_1D_cluster(shoulder_l, SHOULDER_CLUSTER_CENTERS_V2)
+    one_hot_shoulder = one_hot_from_int(shoulder_clusters, len(SHOULDER_CLUSTER_CENTERS_V2))
+    return torch.tensor(one_hot_shoulder, dtype=torch.float32)
+
+
+def encode_shoulder_r_one_hot_fine(sample: TensorDict, player: str) -> torch.Tensor:
+    shoulder_r = sample[f"{player}_r_shoulder"]
+    shoulder_clusters = get_closest_1D_cluster(shoulder_r, SHOULDER_CLUSTER_CENTERS_V2)
+    one_hot_shoulder = one_hot_from_int(shoulder_clusters, len(SHOULDER_CLUSTER_CENTERS_V2))
+    return torch.tensor(one_hot_shoulder, dtype=torch.float32)
+
+
 def concat_controller_inputs(sample_T: TensorDict, ego: Player, target_config: TargetConfig) -> torch.Tensor:
     controller_feats = preprocess_target_features(sample_T, ego, target_config)
     return torch.cat(list(controller_feats.values()), dim=-1)
@@ -459,4 +474,18 @@ def sample_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> float:
     shoulder_probs = torch.softmax(pred_C["shoulder"] / temperature, dim=-1)
     shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
     shoulder = SHOULDER_CLUSTER_CENTERS_V0[shoulder_idx]
+    return shoulder
+
+
+def sample_shoulder_l_one_hot_fine(pred_C: TensorDict, temperature: float = 1.0) -> float:
+    shoulder_probs = torch.softmax(pred_C["shoulder_l"] / temperature, dim=-1)
+    shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
+    shoulder = SHOULDER_CLUSTER_CENTERS_V2[shoulder_idx]
+    return shoulder
+
+
+def sample_shoulder_r_one_hot_fine(pred_C: TensorDict, temperature: float = 1.0) -> float:
+    shoulder_probs = torch.softmax(pred_C["shoulder_r"] / temperature, dim=-1)
+    shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
+    shoulder = SHOULDER_CLUSTER_CENTERS_V2[shoulder_idx]
     return shoulder
