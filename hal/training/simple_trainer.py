@@ -28,6 +28,9 @@ class SimpleTrainer(Trainer):
             "main_stick": F.cross_entropy,
             "c_stick": F.cross_entropy,
             "shoulder": F.cross_entropy,
+            "analog_shoulder": F.cross_entropy,
+            "shoulder_l": F.binary_cross_entropy_with_logits,
+            "shoulder_r": F.binary_cross_entropy_with_logits,
         }
 
         for target_feature, loss_fn in loss_fns.items():

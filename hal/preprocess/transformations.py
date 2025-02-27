@@ -343,6 +343,14 @@ def encode_buttons_one_hot_no_shoulder(sample: TensorDict, player: str) -> torch
     return torch.tensor(one_hot_buttons, dtype=torch.float32)
 
 
+def get_button_shoulder_l(sample: TensorDict, player: str) -> torch.Tensor:
+    return sample[f"{player}_button_l"].unsqueeze(-1).to(torch.float32)
+
+
+def get_button_shoulder_r(sample: TensorDict, player: str) -> torch.Tensor:
+    return sample[f"{player}_button_r"].unsqueeze(-1).to(torch.float32)
+
+
 def encode_shoulder_one_hot_coarse(sample: TensorDict, player: str) -> torch.Tensor:
     shoulder_l = sample[f"{player}_l_shoulder"]
     shoulder_r = sample[f"{player}_r_shoulder"]
@@ -466,6 +474,19 @@ def sample_original_single_button_no_shoulder(pred_C: TensorDict, temperature: f
     button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
     button = ORIGINAL_BUTTONS_NO_SHOULDER[button_idx]
     return [button]
+
+
+def sample_buttons_with_separate_shoulders(pred_C: TensorDict, temperature: float = 1.0) -> List[str]:
+    button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
+    button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
+    buttons = [ORIGINAL_BUTTONS_NO_SHOULDER[button_idx]]
+    shoulder_l_prob = torch.sigmoid(pred_C["shoulder_l"])
+    shoulder_r_prob = torch.sigmoid(pred_C["shoulder_r"])
+    if shoulder_l_prob.item() > 0.5:
+        buttons.append("BUTTON_L")
+    if shoulder_r_prob.item() > 0.5:
+        buttons.append("BUTTON_R")
+    return buttons
 
 
 def threshold_independent_buttons(pred_C: TensorDict, threshold: float = 0.5) -> List[str]:

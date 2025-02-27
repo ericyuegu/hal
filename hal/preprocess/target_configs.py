@@ -11,7 +11,6 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V3
 from hal.preprocess.registry import TargetConfig
 from hal.preprocess.registry import TargetConfigRegistry
-from hal.preprocess.transformations import cast_int32
 from hal.preprocess.transformations import concatenate_main_stick
 from hal.preprocess.transformations import encode_buttons_one_hot
 from hal.preprocess.transformations import encode_buttons_one_hot_no_shoulder
@@ -25,6 +24,8 @@ from hal.preprocess.transformations import encode_original_buttons_multi_hot
 from hal.preprocess.transformations import encode_original_buttons_one_hot_no_shoulder
 from hal.preprocess.transformations import encode_shoulder_one_hot
 from hal.preprocess.transformations import encode_shoulder_one_hot_coarse
+from hal.preprocess.transformations import get_button_shoulder_l
+from hal.preprocess.transformations import get_button_shoulder_r
 
 
 def baseline_coarse() -> TargetConfig:
@@ -247,8 +248,8 @@ def separate_digital_shoulders_analog_shoulder_one_hot() -> TargetConfig:
             "c_stick": encode_c_stick_one_hot_coarser,
             "buttons": encode_buttons_one_hot_no_shoulder,
             "analog_shoulder": encode_shoulder_one_hot,
-            "shoulder_l": cast_int32,
-            "shoulder_r": cast_int32,
+            "shoulder_l": get_button_shoulder_l,
+            "shoulder_r": get_button_shoulder_r,
         },
         frame_offsets_by_target={
             "main_stick": 0,

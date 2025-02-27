@@ -254,11 +254,12 @@ def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, Any])
         inputs["c_stick"][0],
         inputs["c_stick"][1],
     )
-    if "shoulder" in inputs:
-        controller.press_shoulder(
-            melee.Button.BUTTON_L,
-            inputs["shoulder"],
-        )
+    # Handle shoulder input from either format
+    shoulder_value = inputs.get("shoulder", inputs.get("analog_shoulder", 0))
+    controller.press_shoulder(
+        melee.Button.BUTTON_L,
+        shoulder_value,
+    )
 
     buttons_to_press: List[str] = inputs.get("buttons", [])
     for button_str in ORIGINAL_BUTTONS:

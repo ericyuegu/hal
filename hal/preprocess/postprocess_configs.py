@@ -2,6 +2,7 @@ from hal.preprocess.postprocess_config import PostprocessConfig
 from hal.preprocess.registry import PostprocessConfigRegistry
 from hal.preprocess.transformations import sample_analog_shoulder
 from hal.preprocess.transformations import sample_analog_shoulder_coarse
+from hal.preprocess.transformations import sample_buttons_with_separate_shoulders
 from hal.preprocess.transformations import sample_c_stick_coarse
 from hal.preprocess.transformations import sample_c_stick_coarser
 from hal.preprocess.transformations import sample_c_stick_fine
@@ -105,10 +106,8 @@ def separate_digital_shoulders_analog_shoulder_one_hot() -> PostprocessConfig:
         transformation_by_controller_input={
             "main_stick": sample_main_stick_fine,
             "c_stick": sample_c_stick_coarser,
-            "buttons": sample_original_single_button_no_shoulder,
+            "buttons": sample_buttons_with_separate_shoulders,
             "analog_shoulder": sample_analog_shoulder,
-            "shoulder_l": sample_digital_shoulder_l,
-            "shoulder_r": sample_digital_shoulder_r,
         }
     )
 
