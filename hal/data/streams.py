@@ -73,6 +73,7 @@ CodyStream = Stream(
     remote=f"s3://{AWS_BUCKET}/hal/top_players/Cody",
     local=f"{REPO_DIR}/data/top_players/Cody",
     proportion=1.0,
+    keep_zip=True,
 )
 
 FranzStream = Stream(
