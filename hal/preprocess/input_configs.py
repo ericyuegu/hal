@@ -11,7 +11,7 @@ from hal.preprocess.target_configs import fine_main_analog_shoulder
 from hal.preprocess.target_configs import fine_main_coarser_cstick
 from hal.preprocess.target_configs import fine_orig_buttons
 from hal.preprocess.target_configs import fine_orig_buttons_one_hot_shoulder_one_hot
-from hal.preprocess.target_configs import separate_analog_shoulders_one_hot
+from hal.preprocess.target_configs import separate_digital_shoulders_analog_shoulder_one_hot
 from hal.preprocess.transformations import cast_int32
 from hal.preprocess.transformations import concat_controller_inputs
 from hal.preprocess.transformations import invert_and_normalize
@@ -424,7 +424,7 @@ def baseline_fine_orig_buttons_one_hot_no_shoulder() -> InputConfig:
     return config
 
 
-def baseline_separate_analog_shoulders_one_hot() -> InputConfig:
+def baseline_separate_digital_shoulders_analog_shoulder_one_hot() -> InputConfig:
     """
     Baseline input features, fine-grained controller inputs, original buttons.
 
@@ -437,7 +437,9 @@ def baseline_separate_analog_shoulders_one_hot() -> InputConfig:
         base_config,
         transformation_by_feature_name={
             **base_config.transformation_by_feature_name,
-            "controller": partial(concat_controller_inputs, target_config=separate_analog_shoulders_one_hot()),
+            "controller": partial(
+                concat_controller_inputs, target_config=separate_digital_shoulders_analog_shoulder_one_hot()
+            ),
         },
         frame_offsets_by_input={
             **base_config.frame_offsets_by_input,
@@ -449,7 +451,7 @@ def baseline_separate_analog_shoulders_one_hot() -> InputConfig:
         },
         input_shapes_by_head={
             **base_config.input_shapes_by_head,
-            "controller": (separate_analog_shoulders_one_hot().target_size,),
+            "controller": (separate_digital_shoulders_analog_shoulder_one_hot().target_size,),
         },
     )
     return config
@@ -471,5 +473,5 @@ InputConfigRegistry.register(
     "baseline_fine_orig_buttons_one_hot_no_shoulder", baseline_fine_orig_buttons_one_hot_no_shoulder()
 )
 InputConfigRegistry.register(
-    "baseline_separate_analog_shoulders_one_hot", baseline_separate_analog_shoulders_one_hot()
+    "separate_digital_shoulders_analog_shoulder_one_hot", baseline_separate_digital_shoulders_analog_shoulder_one_hot()
 )

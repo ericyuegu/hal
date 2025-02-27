@@ -336,10 +336,10 @@ import torch
 from tensordict import TensorDict
 
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V1
-from hal.preprocess.transformations import get_closest_1D_clusters
+from hal.preprocess.transformations import get_closest_1D_cluster_multiclass
 
 x = np.array([[0.0, 0.2], [0.34, 0.7], [0.55, 0.9]])
-get_closest_1D_clusters(x, SHOULDER_CLUSTER_CENTERS_V1)
+get_closest_1D_cluster_multiclass(x, SHOULDER_CLUSTER_CENTERS_V1)
 # %%
 
 from hal.preprocess.transformations import encode_original_shoulder_one_hot_finer

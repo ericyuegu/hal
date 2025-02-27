@@ -183,7 +183,7 @@ def get_closest_1D_cluster(x: np.ndarray, cluster_centers: np.ndarray) -> np.nda
     return np.argmin(distances, axis=1)  # Shape: (L,)
 
 
-def get_closest_1D_clusters(x: np.ndarray, cluster_centers: np.ndarray) -> np.ndarray:
+def get_closest_1D_cluster_multiclass(x: np.ndarray, cluster_centers: np.ndarray) -> np.ndarray:
     """
     Calculate the closest point in cluster_centers for given x values.
 
@@ -352,23 +352,33 @@ def encode_shoulder_one_hot_coarse(sample: TensorDict, player: str) -> torch.Ten
     return torch.tensor(one_hot_shoulder, dtype=torch.float32)
 
 
-def encode_shoulder_original_coarse(sample: TensorDict, player: str) -> torch.Tensor:
+def encode_original_shoulder_one_hot_finer(sample: TensorDict, player: str) -> torch.Tensor:
     shoulder_l = sample[f"{player}_l_shoulder"]
     shoulder_r = sample[f"{player}_r_shoulder"]
     shoulder = np.stack([shoulder_l, shoulder_r], axis=-1)
-    shoulder_clusters = get_closest_1D_clusters(shoulder, SHOULDER_CLUSTER_CENTERS_V1)
+    shoulder_clusters = get_closest_1D_cluster_multiclass(shoulder, SHOULDER_CLUSTER_CENTERS_V1)
     one_hot_shoulder = one_hot_from_int(shoulder_clusters, len(SHOULDER_CLUSTER_CENTERS_V1))
     return torch.tensor(one_hot_shoulder, dtype=torch.float32)
 
 
-def encode_shoulder_l_one_hot_fine(sample: TensorDict, player: str) -> torch.Tensor:
+def encode_shoulder_one_hot(sample: TensorDict, player: str) -> torch.Tensor:
+    # Analog shoulders are locked to same value
+    shoulder_l = sample[f"{player}_l_shoulder"]
+    shoulder_r = sample[f"{player}_r_shoulder"]
+    shoulder = np.max(np.stack([shoulder_l, shoulder_r], axis=-1), axis=-1)
+    shoulder_clusters = get_closest_1D_cluster(shoulder, SHOULDER_CLUSTER_CENTERS_V2)
+    one_hot_shoulder = one_hot_from_int(shoulder_clusters, len(SHOULDER_CLUSTER_CENTERS_V2))
+    return torch.tensor(one_hot_shoulder, dtype=torch.float32)
+
+
+def encode_shoulder_l_one_hot(sample: TensorDict, player: str) -> torch.Tensor:
     shoulder_l = sample[f"{player}_l_shoulder"]
     shoulder_clusters = get_closest_1D_cluster(shoulder_l, SHOULDER_CLUSTER_CENTERS_V2)
     one_hot_shoulder = one_hot_from_int(shoulder_clusters, len(SHOULDER_CLUSTER_CENTERS_V2))
     return torch.tensor(one_hot_shoulder, dtype=torch.float32)
 
 
-def encode_shoulder_r_one_hot_fine(sample: TensorDict, player: str) -> torch.Tensor:
+def encode_shoulder_r_one_hot(sample: TensorDict, player: str) -> torch.Tensor:
     shoulder_r = sample[f"{player}_r_shoulder"]
     shoulder_clusters = get_closest_1D_cluster(shoulder_r, SHOULDER_CLUSTER_CENTERS_V2)
     one_hot_shoulder = one_hot_from_int(shoulder_clusters, len(SHOULDER_CLUSTER_CENTERS_V2))
@@ -470,22 +480,27 @@ def threshold_independent_buttons(pred_C: TensorDict, threshold: float = 0.5) ->
     return buttons
 
 
-def sample_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> float:
+def sample_analog_shoulder_coarse(pred_C: TensorDict, temperature: float = 1.0) -> float:
     shoulder_probs = torch.softmax(pred_C["shoulder"] / temperature, dim=-1)
     shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
     shoulder = SHOULDER_CLUSTER_CENTERS_V0[shoulder_idx]
     return shoulder
 
 
-def sample_shoulder_l_one_hot_fine(pred_C: TensorDict, temperature: float = 1.0) -> float:
-    shoulder_probs = torch.softmax(pred_C["shoulder_l"] / temperature, dim=-1)
+def sample_analog_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> float:
+    shoulder_probs = torch.softmax(pred_C["analog_shoulder"] / temperature, dim=-1)
     shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
     shoulder = SHOULDER_CLUSTER_CENTERS_V2[shoulder_idx]
     return shoulder
 
 
-def sample_shoulder_r_one_hot_fine(pred_C: TensorDict, temperature: float = 1.0) -> float:
-    shoulder_probs = torch.softmax(pred_C["shoulder_r"] / temperature, dim=-1)
-    shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
-    shoulder = SHOULDER_CLUSTER_CENTERS_V2[shoulder_idx]
-    return shoulder
+def sample_digital_shoulder_l(pred_C: TensorDict, threshold: float = 0.5) -> float:
+    shoulder_prob = torch.sigmoid(pred_C["shoulder_l"])
+    shoulder_pressed = int(shoulder_prob.item() > threshold)
+    return float(shoulder_pressed)
+
+
+def sample_digital_shoulder_r(pred_C: TensorDict, threshold: float = 0.5) -> float:
+    shoulder_prob = torch.sigmoid(pred_C["shoulder_r"])
+    shoulder_pressed = int(shoulder_prob.item() > threshold)
+    return float(shoulder_pressed)

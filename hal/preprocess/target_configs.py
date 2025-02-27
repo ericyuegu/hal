@@ -11,6 +11,7 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V3
 from hal.preprocess.registry import TargetConfig
 from hal.preprocess.registry import TargetConfigRegistry
+from hal.preprocess.transformations import cast_int32
 from hal.preprocess.transformations import concatenate_main_stick
 from hal.preprocess.transformations import encode_buttons_one_hot
 from hal.preprocess.transformations import encode_buttons_one_hot_no_shoulder
@@ -22,9 +23,8 @@ from hal.preprocess.transformations import encode_main_stick_one_hot_fine
 from hal.preprocess.transformations import encode_main_stick_one_hot_finer
 from hal.preprocess.transformations import encode_original_buttons_multi_hot
 from hal.preprocess.transformations import encode_original_buttons_one_hot_no_shoulder
-from hal.preprocess.transformations import encode_shoulder_l_one_hot_fine
+from hal.preprocess.transformations import encode_shoulder_one_hot
 from hal.preprocess.transformations import encode_shoulder_one_hot_coarse
-from hal.preprocess.transformations import encode_shoulder_r_one_hot_fine
 
 
 def baseline_coarse() -> TargetConfig:
@@ -240,19 +240,21 @@ def fine_orig_buttons_one_hot_shoulder_one_hot() -> TargetConfig:
     )
 
 
-def separate_analog_shoulders_one_hot() -> TargetConfig:
+def separate_digital_shoulders_analog_shoulder_one_hot() -> TargetConfig:
     return TargetConfig(
         transformation_by_target={
             "main_stick": encode_main_stick_one_hot_fine,
             "c_stick": encode_c_stick_one_hot_coarser,
             "buttons": encode_buttons_one_hot_no_shoulder,
-            "shoulder_l": encode_shoulder_l_one_hot_fine,
-            "shoulder_r": encode_shoulder_r_one_hot_fine,
+            "analog_shoulder": encode_shoulder_one_hot,
+            "shoulder_l": cast_int32,
+            "shoulder_r": cast_int32,
         },
         frame_offsets_by_target={
             "main_stick": 0,
             "c_stick": 0,
             "buttons": 0,
+            "analog_shoulder": 0,
             "shoulder_l": 0,
             "shoulder_r": 0,
         },
@@ -260,8 +262,9 @@ def separate_analog_shoulders_one_hot() -> TargetConfig:
             "main_stick": (len(STICK_XY_CLUSTER_CENTERS_V2),),
             "c_stick": (len(STICK_XY_CLUSTER_CENTERS_V0_1),),
             "buttons": (len(INCLUDED_BUTTONS_NO_SHOULDER),),
-            "shoulder_l": (len(SHOULDER_CLUSTER_CENTERS_V2),),
-            "shoulder_r": (len(SHOULDER_CLUSTER_CENTERS_V2),),
+            "analog_shoulder": (len(SHOULDER_CLUSTER_CENTERS_V2),),
+            "shoulder_l": (1,),
+            "shoulder_r": (1,),
         },
     )
 
@@ -278,4 +281,6 @@ TargetConfigRegistry.register("fine_orig_buttons", fine_orig_buttons())
 TargetConfigRegistry.register(
     "fine_orig_buttons_one_hot_shoulder_one_hot", fine_orig_buttons_one_hot_shoulder_one_hot()
 )
-TargetConfigRegistry.register("separate_analog_shoulders_one_hot", separate_analog_shoulders_one_hot())
+TargetConfigRegistry.register(
+    "separate_digital_shoulders_analog_shoulder_one_hot", separate_digital_shoulders_analog_shoulder_one_hot()
+)
