@@ -32,6 +32,9 @@ def pre_download_streams(config: TrainConfig) -> None:
         for stream in original_streams:
             if stream.remote is not None:
                 for split in ["train", "val"]:
+                    if Path(stream.local).exists():
+                        log_if_master(f"Rank {rank}: {split} split already exists in {stream.local}, skipping")
+                        continue
                     log_if_master(f"Rank {rank}: Pre-downloading {split} split from {stream.remote}...")
                     temp_stream = Stream(
                         remote=stream.remote,
