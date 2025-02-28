@@ -2,6 +2,7 @@ import builtins
 import functools
 import os
 import time
+import traceback
 from typing import Any
 from typing import Callable
 from typing import Optional
@@ -18,6 +19,12 @@ from hal.training.config import BaseConfig
 # Disable Infiniband and P2P to ensure that NCCL does not try to use within single-node distributed training
 os.environ["NCCL_IB_DISABLE"] = "1"
 os.environ["NCCL_P2P_DISABLE"] = "1"
+# os.environ["NCCL_DEBUG"] = "INFO"
+# os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
+# # Try adding explicit timeout configuration
+# os.environ["NCCL_BLOCKING_WAIT"] = "1"
+# os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+# os.environ["TORCH_DISTRIBUTED_DETAIL"] = "DEBUG"  # For more verbose logs
 
 
 def barrier() -> None:
@@ -95,6 +102,8 @@ def auto_distribute(f: Callable) -> Callable:
         time.sleep(1)
         try:
             return f(*args)
+        except Exception as e:
+            logger.error(f"Error in distributed training: {e}\n{traceback.format_exc()}")
         finally:
             logger.info("destroy_process_group")
             torch.distributed.destroy_process_group()

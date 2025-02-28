@@ -19,6 +19,7 @@ from hal.eval.eval import run_closed_loop_evaluation
 from hal.eval.eval_helper import EpisodeStats
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
+from hal.training.distributed import get_device_id
 from hal.training.distributed import get_world_size
 from hal.training.distributed import is_master
 from hal.training.distributed import log_if_master
@@ -69,7 +70,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         else:
             self.artifact_dir = get_artifact_dir(get_exp_name(self.config))
 
-        logger.info(f"Initializing model {self.config.arch}")
+        logger.info(f"Initializing model {self.config.arch} on rank {get_device_id()}")
         model = Arch.get(self.config.arch, preprocessor=self.preprocessor)
         self.model = maybe_wrap_model_distributed(model)
         self.opt = create_optimizer(
