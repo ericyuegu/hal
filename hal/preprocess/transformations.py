@@ -482,9 +482,9 @@ def sample_buttons_with_separate_shoulders(pred_C: TensorDict, temperature: floa
     buttons = [INCLUDED_BUTTONS_NO_SHOULDER[button_idx]]
     shoulder_l_prob = torch.sigmoid(pred_C["shoulder_l"])
     shoulder_r_prob = torch.sigmoid(pred_C["shoulder_r"])
-    if shoulder_l_prob.item() > 0.5:
+    if shoulder_l_prob.item() > 0.8:
         buttons.append("BUTTON_L")
-    if shoulder_r_prob.item() > 0.5:
+    if shoulder_r_prob.item() > 0.8:
         buttons.append("BUTTON_R")
     return buttons
 
