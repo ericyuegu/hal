@@ -545,7 +545,8 @@ def sample_analog_shoulder_coarse(pred_C: TensorDict, temperature: float = 1.0) 
 
 
 def sample_analog_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> float:
-    shoulder_probs = torch.softmax(pred_C["analog_shoulder"] / temperature, dim=-1)
+    shoulder_input = pred_C.get("analog_shoulder", pred_C["shoulder"])
+    shoulder_probs = torch.softmax(shoulder_input / temperature, dim=-1)
     shoulder_idx = int(torch.multinomial(shoulder_probs, num_samples=1).item())
     shoulder = SHOULDER_CLUSTER_CENTERS_V2[shoulder_idx]
     return shoulder
