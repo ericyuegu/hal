@@ -13,6 +13,7 @@ from hal.preprocess.registry import TargetConfig
 from hal.preprocess.registry import TargetConfigRegistry
 from hal.preprocess.transformations import concatenate_main_stick
 from hal.preprocess.transformations import encode_buttons_one_hot
+from hal.preprocess.transformations import encode_buttons_one_hot_early_release
 from hal.preprocess.transformations import encode_buttons_one_hot_no_shoulder
 from hal.preprocess.transformations import encode_buttons_one_hot_no_shoulder_early_release
 from hal.preprocess.transformations import encode_c_stick_one_hot_coarse
@@ -160,6 +161,7 @@ def fine_main_analog_shoulder() -> TargetConfig:
 
 
 def fine_main_analog_shoulder_early_release() -> TargetConfig:
+    """Combined X/Y button, no L/R button, coarse analog shoulder"""
     return TargetConfig(
         transformation_by_target={
             "main_stick": encode_main_stick_one_hot_fine,
@@ -294,6 +296,30 @@ def separate_digital_shoulders_analog_shoulder_one_hot() -> TargetConfig:
     )
 
 
+def button_fine_main_coarser_cstick_medium_analog_shoulder() -> TargetConfig:
+    """Include collapsed X/Y and L/R digital buttons, early release; plus analog shoulder."""
+    return TargetConfig(
+        transformation_by_target={
+            "main_stick": encode_main_stick_one_hot_fine,
+            "c_stick": encode_c_stick_one_hot_coarser,
+            "buttons": encode_buttons_one_hot_early_release,
+            "shoulder": encode_shoulder_one_hot,
+        },
+        frame_offsets_by_target={
+            "main_stick": 0,
+            "c_stick": 0,
+            "buttons": 0,
+            "shoulder": 0,
+        },
+        target_shapes_by_head={
+            "main_stick": (len(STICK_XY_CLUSTER_CENTERS_V2),),
+            "c_stick": (len(STICK_XY_CLUSTER_CENTERS_V0_1),),
+            "buttons": (len(INCLUDED_BUTTONS),),
+            "shoulder": (len(SHOULDER_CLUSTER_CENTERS_V2),),
+        },
+    )
+
+
 TargetConfigRegistry.register("baseline_coarse", baseline_coarse())
 TargetConfigRegistry.register("coarse_shoulder", coarse_shoulder())
 TargetConfigRegistry.register("baseline_fine", baseline_fine())
@@ -309,4 +335,8 @@ TargetConfigRegistry.register(
 )
 TargetConfigRegistry.register(
     "separate_digital_shoulders_analog_shoulder_one_hot", separate_digital_shoulders_analog_shoulder_one_hot()
+)
+TargetConfigRegistry.register(
+    "button_fine_main_coarser_cstick_medium_analog_shoulder",
+    button_fine_main_coarser_cstick_medium_analog_shoulder(),
 )

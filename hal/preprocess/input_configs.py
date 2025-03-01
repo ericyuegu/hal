@@ -7,6 +7,7 @@ from hal.preprocess.registry import InputConfigRegistry
 from hal.preprocess.target_configs import baseline_coarse
 from hal.preprocess.target_configs import baseline_fine
 from hal.preprocess.target_configs import baseline_finer
+from hal.preprocess.target_configs import button_fine_main_coarser_cstick_medium_analog_shoulder
 from hal.preprocess.target_configs import fine_main_analog_shoulder
 from hal.preprocess.target_configs import fine_main_analog_shoulder_early_release
 from hal.preprocess.target_configs import fine_main_coarser_cstick
@@ -489,6 +490,37 @@ def baseline_separate_digital_shoulders_analog_shoulder_one_hot() -> InputConfig
     return config
 
 
+def baseline_button_fine_main_coarser_cstick_medium_analog_shoulder() -> InputConfig:
+    """
+    Combined X/Y and L/R digital buttons, early release preprocessing. Med analog shoulder (5 values).
+    """
+
+    base_config = baseline()
+    config = attr.evolve(
+        base_config,
+        transformation_by_feature_name={
+            **base_config.transformation_by_feature_name,
+            "controller": partial(
+                concat_controller_inputs,
+                target_config=button_fine_main_coarser_cstick_medium_analog_shoulder(),
+            ),
+        },
+        frame_offsets_by_input={
+            **base_config.frame_offsets_by_input,
+            "controller": -1,
+        },
+        grouped_feature_names_by_head={
+            **base_config.grouped_feature_names_by_head,
+            "controller": ("controller",),
+        },
+        input_shapes_by_head={
+            **base_config.input_shapes_by_head,
+            "controller": (button_fine_main_coarser_cstick_medium_analog_shoulder().target_size,),
+        },
+    )
+    return config
+
+
 InputConfigRegistry.register("baseline", baseline())
 InputConfigRegistry.register("baseline_controller", baseline_controller())
 InputConfigRegistry.register("baseline_controller_fine", baseline_controller_fine())
@@ -510,4 +542,8 @@ InputConfigRegistry.register(
 )
 InputConfigRegistry.register(
     "separate_digital_shoulders_analog_shoulder_one_hot", baseline_separate_digital_shoulders_analog_shoulder_one_hot()
+)
+InputConfigRegistry.register(
+    "baseline_button_fine_main_coarser_cstick_medium_analog_shoulder",
+    baseline_button_fine_main_coarser_cstick_medium_analog_shoulder(),
 )

@@ -110,6 +110,17 @@ def separate_digital_shoulders_analog_shoulder_one_hot() -> PostprocessConfig:
     )
 
 
+def button_fine_main_coarser_cstick_medium_analog_shoulder() -> PostprocessConfig:
+    return PostprocessConfig(
+        transformation_by_controller_input={
+            "main_stick": sample_main_stick_fine,
+            "c_stick": sample_c_stick_coarser,
+            "buttons": sample_single_button,
+            "shoulder": sample_analog_shoulder,
+        }
+    )
+
+
 PostprocessConfigRegistry.register("baseline_coarse", baseline_coarse())
 PostprocessConfigRegistry.register("baseline_fine", baseline_fine())
 PostprocessConfigRegistry.register("baseline_coarse_shoulder", baseline_coarse_shoulder())
@@ -122,4 +133,8 @@ PostprocessConfigRegistry.register(
 )
 PostprocessConfigRegistry.register(
     "separate_digital_shoulders_analog_shoulder_one_hot", separate_digital_shoulders_analog_shoulder_one_hot()
+)
+PostprocessConfigRegistry.register(
+    "button_fine_main_coarser_cstick_medium_analog_shoulder",
+    button_fine_main_coarser_cstick_medium_analog_shoulder(),
 )
