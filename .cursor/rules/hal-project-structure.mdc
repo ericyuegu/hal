@@ -1,0 +1,29 @@
+---
+description: 
+globs: 
+---
+
+# About the project
+
+- We are training a decoder-only Transformer on Super Smash Bros. Melee using imitation learning & offline RL
+- We have preprocessed human replays using libmelee and stored them as MDS shards following the schema in schema.py
+- We sample trajectories from the dataset by choosing a random episode, random starting frame, and preprocessing seq_len subsequent frames to predict controller inputs as next-token prediction
+- Preprocessing and target feature discretization are defined as functions in configs: input_configs.py, target_configs.py, postprocess_configs.py
+    - Currently, the best working configs are `fine_main_analog_shoulder`, which discretizes the analog main stick into 37 joint x, y positions, predicts analog shoulder presses (no digital button L/R), all as single-label classification problems
+- Model definitions are under models/gpt.py. Ignore lstm.py and mlp.py, they are deprecated
+- We have a closed loop eval harness that runs dolphin emulator and batches inputs on GPU in eval/eval.py. This is a very precise script that writes directly to shared memory buffers, do not touch it. 
+
+# Making changes
+
+- Never edit existing configs or model definitions to maintain backwards compatability & experiment reproducibility. To add a new class definition, append towards the bottom of the files (e.g. gpt.py or input_configs.py) and register a configuration with a sensible name at the bottom
+    - I generally don't prioritize DRY across input/target configs or model versions
+- Please feel free to test code by creating new scratch files in notebooks/ at the root of the repo
+- Please help me keep the code readable, composable, and modular without sacrificing reproducibility and experimental isolation
+
+# Running experiments
+
+- A training command looks like so (never run this without permission): `CUDA_VISIBLE_DEVICES=0 python hal/training/simple_trainer.py --n_gpus 1 --data.streams cody --data.stream_stats data/top_players/Cody/stats.json --arch GPTv5Controller-512-6-8-dropout --data.input_preprocessing_fn baseline_controller_fine_main_analog_shoulder_early_release --data.target_preprocessing_fn fine_main_analog_shoulder_early_release --data.pred_postprocessing_fn fine_main_analog_shoulder`
+
+# Future directions
+
+- I want to train multi-token prediction and an off-policy value model using offline RL, and eventually self-play RL
