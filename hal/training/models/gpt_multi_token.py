@@ -47,46 +47,49 @@ class GPTMultiToken(BaseGPT):
 
         # Output heads
         self.target_shapes_by_head = self.preprocessor.target_config.target_shapes_by_head
-        self.shoulder_output_size = self.target_shapes_by_head["shoulder_1"][0]
-        self.c_stick_output_size = self.target_shapes_by_head["c_stick_1"][0]
-        self.main_stick_output_size = self.target_shapes_by_head["main_stick_1"][0]
-        self.button_output_size = self.target_shapes_by_head["buttons_1"][0]
+        self.shoulder_output_dim = self.target_shapes_by_head["shoulder_1"][0]
+        self.c_stick_output_dim = self.target_shapes_by_head["c_stick_1"][0]
+        self.main_stick_output_dim = self.target_shapes_by_head["main_stick_1"][0]
+        self.button_output_dim = self.target_shapes_by_head["buttons_1"][0]
+
+        shoulder_output_size = self.shoulder_output_dim * self.num_multi_token_output_heads
+        c_stick_output_size = self.c_stick_output_dim * self.num_multi_token_output_heads
+        main_stick_output_size = self.main_stick_output_dim * self.num_multi_token_output_heads
+        button_output_size = self.button_output_dim * self.num_multi_token_output_heads
 
         # Input sizes for each head
         shoulder_input_size = self.n_embd
-        c_stick_input_size = self.n_embd + self.shoulder_output_size
-        main_stick_input_size = self.n_embd + self.shoulder_output_size + self.c_stick_output_size
-        button_input_size = (
-            self.n_embd + self.shoulder_output_size + self.c_stick_output_size + self.main_stick_output_size
-        )
+        c_stick_input_size = self.n_embd + shoulder_output_size
+        main_stick_input_size = self.n_embd + shoulder_output_size + c_stick_output_size
+        button_input_size = self.n_embd + shoulder_output_size + c_stick_output_size + main_stick_output_size
 
         # Put shoulder and c-stick first because they are less complex and they modify/override other inputs
         self.shoulder_head = nn.Sequential(
             nn.LayerNorm(shoulder_input_size, bias=gpt_config.bias),
             nn.Linear(shoulder_input_size, shoulder_input_size // 2),
             nn.GELU(),
-            nn.Linear(shoulder_input_size // 2, self.shoulder_output_size * self.num_multi_token_output_heads),
+            nn.Linear(shoulder_input_size // 2, shoulder_output_size),
         )
 
         self.c_stick_head = nn.Sequential(
             nn.LayerNorm(c_stick_input_size, bias=gpt_config.bias),
             nn.Linear(c_stick_input_size, c_stick_input_size // 2),
             nn.GELU(),
-            nn.Linear(c_stick_input_size // 2, self.c_stick_output_size * self.num_multi_token_output_heads),
+            nn.Linear(c_stick_input_size // 2, c_stick_output_size),
         )
 
         self.main_stick_head = nn.Sequential(
             nn.LayerNorm(main_stick_input_size, bias=gpt_config.bias),
             nn.Linear(main_stick_input_size, main_stick_input_size // 2),
             nn.GELU(),
-            nn.Linear(main_stick_input_size // 2, self.main_stick_output_size * self.num_multi_token_output_heads),
+            nn.Linear(main_stick_input_size // 2, main_stick_output_size),
         )
 
         self.button_head = nn.Sequential(
             nn.LayerNorm(button_input_size, bias=gpt_config.bias),
             nn.Linear(button_input_size, button_input_size // 2),
             nn.GELU(),
-            nn.Linear(button_input_size // 2, self.button_output_size * self.num_multi_token_output_heads),
+            nn.Linear(button_input_size // 2, button_output_size),
         )
 
         # init all weights
@@ -123,25 +126,21 @@ class GPTMultiToken(BaseGPT):
             x_BLD = block(x_BLD)
         x_BLD = self.transformer.ln_f(x_BLD)
 
-        x_BLND = x_BLD.unsqueeze(-2)
-        # (B,L,1,D) -> (B,L,N,C)
-        shoulder: torch.Tensor = self.shoulder_head(x_BLND)
-        shoulder = shoulder.view(B, L, self.num_multi_token_output_heads, self.shoulder_output_size)
-
-        c_stick: torch.Tensor = self.c_stick_head(
-            torch.cat((x_BLND, shoulder.detach()), dim=-1),
-        )
-        c_stick = c_stick.view(B, L, self.num_multi_token_output_heads, self.c_stick_output_size)
-
+        # Process all time steps at once for each output mode, autoregressively decode next head
+        # (B,L,D) -> (B,L,N*C)
+        shoulder: torch.Tensor = self.shoulder_head(x_BLD)
+        c_stick: torch.Tensor = self.c_stick_head(torch.cat((x_BLD, shoulder.detach()), dim=-1))
         main_stick: torch.Tensor = self.main_stick_head(
-            torch.cat((x_BLND, shoulder.detach(), c_stick.detach()), dim=-1)
+            torch.cat((x_BLD, shoulder.detach(), c_stick.detach()), dim=-1)
         )
-        main_stick = main_stick.view(B, L, self.num_multi_token_output_heads, self.main_stick_output_size)
-
         button: torch.Tensor = self.button_head(
-            torch.cat((x_BLND, shoulder.detach(), c_stick.detach(), main_stick.detach()), dim=-1)
+            torch.cat((x_BLD, shoulder.detach(), c_stick.detach(), main_stick.detach()), dim=-1)
         )
-        button = button.view(B, L, self.num_multi_token_output_heads, self.button_output_size)
+
+        shoulder = shoulder.view(B, L, self.num_multi_token_output_heads, self.shoulder_output_dim)
+        c_stick = c_stick.view(B, L, self.num_multi_token_output_heads, self.c_stick_output_dim)
+        main_stick = main_stick.view(B, L, self.num_multi_token_output_heads, self.main_stick_output_dim)
+        button = button.view(B, L, self.num_multi_token_output_heads, self.button_output_dim)
 
         result = {}
         for i, offset in enumerate(self.multi_token_heads):
@@ -149,9 +148,6 @@ class GPTMultiToken(BaseGPT):
             result[f"c_stick_{offset}"] = c_stick[:, :, i, :]
             result[f"main_stick_{offset}"] = main_stick[:, :, i, :]
             result[f"buttons_{offset}"] = button[:, :, i, :]
-
-        for k, v in result.items():
-            print(k, v.shape)
 
         return TensorDict(result, batch_size=(B, L))
 
