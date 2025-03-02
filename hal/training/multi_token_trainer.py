@@ -59,11 +59,10 @@ class MultiTokenTrainer(Trainer):
         inputs: TensorDict = batch["inputs"]
         targets: TensorDict = batch["targets"]
 
-        # No warm-up inputs, just next-token prediction for the entire sequence
-        pred = self.model(inputs)
+        pred: TensorDict = self.model(inputs)
         B, L, *_ = pred.shape
         # Important! Reshape the batch to 2D for proper CE loss calculation
-        loss_by_head = self.loss(pred.reshape(B * L, -1).squeeze(), targets.reshape(B * L, -1).squeeze())
+        loss_by_head = self.loss(pred.view(B * L, -1).squeeze(), targets.view(B * L, -1).squeeze())
 
         return loss_by_head
 

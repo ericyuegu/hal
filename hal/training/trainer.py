@@ -129,7 +129,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         self.scheduler.step()
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().to("cpu").items()}
+        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().items()}
 
         # Log learning rate & grad norm by layer
         metrics_dict["lr/lr"] = self.scheduler.get_last_lr()[0]

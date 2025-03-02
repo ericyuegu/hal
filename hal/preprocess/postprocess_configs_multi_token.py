@@ -52,21 +52,14 @@ BASELINE_TRANSFORMATION_BY_CONTROLLER_INPUT = {
 }
 
 
-def frame_1() -> PostprocessConfig:
+def predict_with_delay(frame: int) -> PostprocessConfig:
     return PostprocessConfig(
         transformation_by_controller_input={
-            k: partial(v, frame=1) for k, v in BASELINE_TRANSFORMATION_BY_CONTROLLER_INPUT.items()
+            k: partial(v, frame=frame) for k, v in BASELINE_TRANSFORMATION_BY_CONTROLLER_INPUT.items()
         }
     )
 
 
-def frame_12() -> PostprocessConfig:
-    return PostprocessConfig(
-        transformation_by_controller_input={
-            k: partial(v, frame=12) for k, v in BASELINE_TRANSFORMATION_BY_CONTROLLER_INPUT.items()
-        }
-    )
-
-
-PostprocessConfigRegistry.register("frame_1", frame_1())
-PostprocessConfigRegistry.register("frame_12", frame_12())
+PostprocessConfigRegistry.register("frame_1", predict_with_delay(frame=1))
+PostprocessConfigRegistry.register("frame_12", predict_with_delay(frame=12))
+PostprocessConfigRegistry.register("frame_18", predict_with_delay(frame=18))

@@ -10,9 +10,7 @@ from hal.preprocess.transformations import encode_main_stick_one_hot_fine
 from hal.preprocess.transformations import encode_shoulder_one_hot
 
 
-def frame_1_and_12() -> TargetConfig:
-    frames = (1, 12)
-
+def multi_token(frames: tuple[int, ...]) -> TargetConfig:
     transformation_by_target = {
         "main_stick": encode_main_stick_one_hot_fine,
         "c_stick": encode_c_stick_one_hot_coarser,
@@ -38,4 +36,5 @@ def frame_1_and_12() -> TargetConfig:
     )
 
 
-TargetConfigRegistry.register("frame_1_and_12", frame_1_and_12())
+TargetConfigRegistry.register("frame_1_and_12", multi_token((1, 12)))
+TargetConfigRegistry.register("frame_1_12_18", multi_token((1, 12, 18)))
