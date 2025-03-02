@@ -15,7 +15,6 @@ import torch.multiprocessing as mp
 from loguru import logger
 from tensordict import TensorDict
 
-from hal.constants import Player
 from hal.emulator_helper import EmulatorManager
 from hal.emulator_helper import find_open_udp_ports
 from hal.emulator_helper import get_replay_dir
@@ -44,11 +43,10 @@ def setup_cpu_logger(debug: bool = False) -> None:
 
 
 def cpu_worker(
-    shared_batched_model_input: TensorDict,
-    shared_batched_model_output: TensorDict,
+    shared_batched_model_input_BP: TensorDict,
+    shared_batched_model_output_BP: TensorDict,
     rank: int,
     port: int,
-    player: Player,
     matchup: Matchup,
     replay_dir: Path,
     preprocessor: Preprocessor,
@@ -69,9 +67,9 @@ def cpu_worker(
         try:
             emulator_manager = EmulatorManager(
                 udp_port=port,
-                player=player,
+                player="p1",
                 replay_dir=replay_dir,
-                opponent_cpu_level=9,
+                opponent_cpu_level=0,
                 matchup=matchup,
                 enable_ffw=enable_ffw,
                 debug=debug,
@@ -87,13 +85,15 @@ def cpu_worker(
             while gamestate is not None:
                 preprocess_start = time.perf_counter()
                 gamestate_td = extract_eval_gamestate_as_tensordict(gamestate)
-                model_inputs = preprocessor.preprocess_inputs(gamestate_td, player)
+                model_inputs_1 = preprocessor.preprocess_inputs(gamestate_td, "p1")
+                model_inputs_2 = preprocessor.preprocess_inputs(gamestate_td, "p2")
+                model_inputs_P: TensorDict = torch.stack([model_inputs_1, model_inputs_2], dim=-1)  # (1, players)
                 preprocess_time = time.perf_counter() - preprocess_start
 
                 transfer_start = time.perf_counter()
-                sharded_model_input: TensorDict = shared_batched_model_input[rank]
+                sharded_model_input_P: TensorDict = shared_batched_model_input_BP[rank]
                 # Update our rank of the shared buffer with the last frame
-                sharded_model_input.update_(model_inputs[-1], non_blocking=True)
+                sharded_model_input_P.update_(model_inputs_P[-1], non_blocking=True)
                 transfer_time = time.perf_counter() - transfer_start
 
                 model_input_ready_flag.set()
@@ -106,9 +106,11 @@ def cpu_worker(
                     break
 
                 # Read model output and postprocess
-                model_output = shared_batched_model_output[rank].clone()
+                model_output_1 = shared_batched_model_output_BP[rank, 0].clone()
+                model_output_2 = shared_batched_model_output_BP[rank, 1].clone()
                 postprocess_start = time.perf_counter()
-                controller_inputs = preprocessor.postprocess_preds(model_output)
+                controller_inputs_1 = preprocessor.postprocess_preds(model_output_1)
+                controller_inputs_2 = preprocessor.postprocess_preds(model_output_2)
                 postprocess_time = time.perf_counter() - postprocess_start
 
                 if debug and i % 60 == 0:
@@ -117,7 +119,7 @@ def cpu_worker(
                     )
 
                 # Send controller inputs to emulator, update gamestate
-                gamestate = gamestate_generator.send((controller_inputs, None))
+                gamestate = gamestate_generator.send((controller_inputs_1, controller_inputs_2))
 
                 # Clear the output ready flag for the next iteration
                 model_output_ready_flag.clear()
@@ -137,8 +139,8 @@ def cpu_worker(
 
 
 def gpu_worker(
-    shared_batched_model_input_B: TensorDict,  # (n_workers,)
-    shared_batched_model_output_B: TensorDict,  # (n_workers,)
+    shared_batched_model_input_BP: TensorDict,  # (n_workers, players)
+    shared_batched_model_output_BP: TensorDict,  # (n_workers, players)
     model_input_ready_flags: List[EventType],
     model_output_ready_flags: List[EventType],
     seq_len: int,
@@ -159,15 +161,16 @@ def gpu_worker(
     model.to(device)
 
     # Stack along time dimension
-    # shape: (n_workers, seq_len)
-    context_window_BL: TensorDict = torch.stack([shared_batched_model_input_B for _ in range(seq_len)], dim=-1).to(device)  # type: ignore
-    logger.info(f"Context window shape: {context_window_BL.shape}, device: {context_window_BL.device}")
+    # shape: (n_workers, players, seq_len)
+    context_window_BPL: TensorDict = torch.stack([shared_batched_model_input_BP for _ in range(seq_len)], dim=-1).to(device)  # type: ignore
+    B, P, L = context_window_BPL.shape
+    logger.info(f"Context window shape: {context_window_BPL.shape}, device: {context_window_BPL.device}")
 
     # Warmup CUDA graphs with dummy inputs
     logger.info("Compiling model...")
     model = torch.compile(model, mode="default")
     with torch.no_grad():
-        model(context_window_BL)
+        model(context_window_BPL[:, 0, :])
     logger.info("Warmup step finished")
 
     def wait_for_cpu_workers(timeout: float = 5.0) -> None:
@@ -196,26 +199,27 @@ def gpu_worker(
         transfer_start = time.perf_counter()
         if iteration < seq_len:
             # While context window is not full, fill in from the left
-            context_window_BL[:, iteration].copy_(shared_batched_model_input_B, non_blocking=True)
+            context_window_BPL[..., iteration].copy_(shared_batched_model_input_BP, non_blocking=True)
         else:
             # Update the context window by rolling frame data left and adding new data on the right
             # TODO move this to line 178 to overlap with waiting on CPU workers
-            context_window_BL[:, :-1].copy_(context_window_BL[:, 1:].clone())
-            context_window_BL[:, -1].copy_(shared_batched_model_input_B, non_blocking=True)
+            context_window_BPL[..., :-1].copy_(context_window_BPL[..., 1:].clone())
+            context_window_BPL[..., -1].copy_(shared_batched_model_input_BP, non_blocking=True)
         # context_window_BL.save(f"/tmp/multishine_debugging/model_inputs_{iteration:06d}")
         transfer_time = time.perf_counter() - transfer_start
 
         inference_start = time.perf_counter()
         with torch.no_grad():
-            outputs_BL: TensorDict = model(context_window_BL)
+            outputs_BL: TensorDict = model(context_window_BPL.view(B * P, L))
+            outputs_BPL = outputs_BL.view(B, P, L)
         # outputs_BL.save(f"/tmp/multishine_debugging/model_outputs_{iteration:06d}")
         seq_idx = min(seq_len - 1, iteration)
-        outputs_B: TensorDict = outputs_BL[:, seq_idx]
+        outputs_BP: TensorDict = outputs_BPL[..., seq_idx]
         inference_time = time.perf_counter() - inference_start
 
         writeback_start = time.perf_counter()
         # Write last frame of model preds to shared buffer
-        shared_batched_model_output_B.copy_(outputs_B)
+        shared_batched_model_output_BP.copy_(outputs_BP)
         writeback_time = time.perf_counter() - writeback_start
 
         total_time = time.perf_counter() - iteration_start
@@ -265,7 +269,6 @@ def run_closed_loop_evaluation(
     eval_config: EvalConfig,
     checkpoint_idx: Optional[int] = None,
     eval_stats_queue: Optional[mp.Queue] = None,
-    player: Player = "p1",
     enable_ffw: bool = False,  # disable by default for emulator stability, TODO debug EXI inputs
     debug: bool = False,
 ) -> None:
@@ -286,23 +289,24 @@ def run_closed_loop_evaluation(
 
     # Share and pin buffers in CPU memory for transferring model inputs and outputs
     mock_framedata_L = mock_framedata_as_tensordict(preprocessor.trajectory_sampling_len)
-    # Store only a single time step to minimize copying
-    mock_model_inputs_ = preprocessor.preprocess_inputs(mock_framedata_L, player)[-1]
+    # Store one time step for each player
+    mock_model_inputs_P = preprocessor.preprocess_inputs(mock_framedata_L, "p1")[-2:]
     # batch_size == n_workers
-    shared_batched_model_input_B: TensorDict = torch.stack(
-        [mock_model_inputs_ for _ in range(n_workers)], dim=0  # type: ignore
+    shared_batched_model_input_BP: TensorDict = torch.stack(
+        [mock_model_inputs_P for _ in range(n_workers)], dim=0  # type: ignore
     )
-    shared_batched_model_input_B = share_and_pin_memory(shared_batched_model_input_B)
-    shared_batched_model_output_B: TensorDict = torch.stack(
-        [preprocessor.mock_preds_as_tensordict() for _ in range(n_workers)], dim=0  # type: ignore
-    )
-    shared_batched_model_output_B = share_and_pin_memory(shared_batched_model_output_B)
+    shared_batched_model_input_BP = share_and_pin_memory(shared_batched_model_input_BP)
+
+    shared_batched_model_output_BP: TensorDict = torch.stack(
+        [preprocessor.mock_preds_as_tensordict() for _ in range(n_workers * 2)], dim=0  # type: ignore
+    ).view(n_workers, 2)
+    shared_batched_model_output_BP = share_and_pin_memory(shared_batched_model_output_BP)
 
     gpu_process: mp.Process = mp.Process(
         target=gpu_worker,
         kwargs={
-            "shared_batched_model_input_B": shared_batched_model_input_B,
-            "shared_batched_model_output_B": shared_batched_model_output_B,
+            "shared_batched_model_input_BP": shared_batched_model_input_BP,
+            "shared_batched_model_output_BP": shared_batched_model_output_BP,
             "model_input_ready_flags": model_input_ready_flags,
             "model_output_ready_flags": model_output_ready_flags,
             "seq_len": preprocessor.seq_len,
@@ -329,11 +333,10 @@ def run_closed_loop_evaluation(
         p: mp.Process = mp.Process(
             target=cpu_worker,
             kwargs={
-                "shared_batched_model_input": shared_batched_model_input_B,
-                "shared_batched_model_output": shared_batched_model_output_B,
+                "shared_batched_model_input_BP": shared_batched_model_input_BP,
+                "shared_batched_model_output_BP": shared_batched_model_output_BP,
                 "rank": i,
                 "port": ports[i],
-                "player": player,
                 "matchup": matchup,
                 "replay_dir": replay_dir,
                 "preprocessor": preprocessor,

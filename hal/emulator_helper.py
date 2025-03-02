@@ -14,6 +14,7 @@ from typing import Dict
 from typing import Generator
 from typing import List
 from typing import Optional
+from typing import Tuple
 
 import attr
 import melee
@@ -311,7 +312,7 @@ class EmulatorManager:
             opponent_cpu_level=self.opponent_cpu_level,
         )
 
-    def run_game(self) -> Generator[melee.GameState, Dict[str, Any], None]:
+    def run_game(self) -> Generator[melee.GameState, Tuple[Dict[str, Any], Dict[str, Any] | None], None]:
         """Generator that yields gamestates and receives controller inputs.
 
         Yields:
@@ -388,9 +389,11 @@ class EmulatorManager:
                     if controller_inputs is None:
                         logger.error("Controller inputs are None")
                     else:
-                        # logger.debug("Sending controller inputs")
+                        ego_controller_inputs, opponent_controller_inputs = controller_inputs
                         send_start = time.perf_counter()
-                        send_controller_inputs(self.ego_controller, controller_inputs)
+                        send_controller_inputs(self.ego_controller, ego_controller_inputs)
+                        if opponent_controller_inputs is not None:
+                            send_controller_inputs(self.opponent_controller, opponent_controller_inputs)
                         send_time = time.perf_counter() - send_start
 
                         if i % 60 == 0:
