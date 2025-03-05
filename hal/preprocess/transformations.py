@@ -21,6 +21,7 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V0_1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V3
+from hal.constants import get_opponent
 from hal.data.stats import FeatureStats
 
 if TYPE_CHECKING:
@@ -562,3 +563,31 @@ def sample_digital_shoulder_r(pred_C: TensorDict, threshold: float = 0.5) -> flo
     shoulder_prob = torch.sigmoid(pred_C["shoulder_r"])
     shoulder_pressed = int(shoulder_prob.item() > threshold)
     return float(shoulder_pressed)
+
+
+def add_reward_to_episode(ndarrays_by_feature: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """
+    Add basic stock-based reward to the episode.
+
+    Reward is:
+    +1 when opponent stock decreases (player takes a stock)
+    -1 when player stock decreases (player loses a stock)
+    0 otherwise
+    """
+    for player in ("p1", "p2"):
+        opponent = get_opponent(player)
+        opponent_stock = ndarrays_by_feature[f"{opponent}_stock"]
+        player_stock = ndarrays_by_feature[f"{player}_stock"]
+
+        opponent_stock_diff = np.diff(opponent_stock, prepend=opponent_stock[0])
+        stock_taken = np.zeros_like(opponent_stock, dtype=np.float32)
+        stock_taken[opponent_stock_diff < 0] = 1.0
+
+        player_stock_diff = np.diff(player_stock, prepend=player_stock[0])
+        stock_lost = np.zeros_like(player_stock, dtype=np.float32)
+        stock_lost[player_stock_diff < 0] = 1.0
+
+        # Set reward: +1 for taking stock, -1 for losing stock, 0 otherwise
+        reward = stock_taken - stock_lost
+        ndarrays_by_feature[f"{player}_reward"] = reward
+    return ndarrays_by_feature
