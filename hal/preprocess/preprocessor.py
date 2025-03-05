@@ -81,7 +81,7 @@ class Preprocessor:
     def target_size(self) -> int:
         return self.target_config.target_size
 
-    def sample_td_from_episode(self, ndarrays_by_feature: dict[str, np.ndarray], debug: bool = False) -> TensorDict:
+    def sample_from_episode(self, td: TensorDict, debug: bool = False) -> TensorDict:
         """Randomly slice input/target features into trajectory_sampling_len sequences for supervised training.
 
         Can be substituted with feature buffer at eval / runtime.
@@ -92,17 +92,9 @@ class Preprocessor:
         Returns:
             TensorDict of shape (trajectory_sampling_len,)
         """
-        frames = ndarrays_by_feature["frame"]
-        assert all(len(ndarray) == len(frames) for ndarray in ndarrays_by_feature.values())
-        episode_len = len(frames)
+        episode_len = td.shape[0]
         sample_index = 0 if debug else random.randint(0, episode_len - self.trajectory_sampling_len)
-        tensor_slice_by_feature_name = {
-            feature_name: torch.from_numpy(
-                feature_L[sample_index : sample_index + self.trajectory_sampling_len].copy()
-            )
-            for feature_name, feature_L in ndarrays_by_feature.items()
-        }
-        return TensorDict(tensor_slice_by_feature_name, batch_size=(self.trajectory_sampling_len,))
+        return td[sample_index : sample_index + self.trajectory_sampling_len]
 
     def preprocess_inputs(self, sample_T: TensorDict, ego: Player) -> TensorDict:
         return preprocess_input_features(
@@ -148,6 +140,31 @@ class Preprocessor:
             if num_clusters is not None
         }
         return TensorDict(out, batch_size=())
+
+    def compute_returns(self, td: TensorDict, ego: Player) -> TensorDict:
+        """Calculate the return for a given episode."""
+        gamma = self.data_config.gamma
+        rewards = td[f"{ego}_reward"]
+        returns = torch.zeros_like(rewards, dtype=torch.float32)
+        running_return = 0
+
+        # Work backwards through the trajectory
+        for t in reversed(range(len(rewards))):
+            running_return = rewards[t] + gamma * running_return
+            returns[t] = running_return
+
+        td["returns"] = returns
+        return td
+
+
+def convert_ndarray_to_tensordict(ndarrays_by_feature: dict[str, np.ndarray]) -> TensorDict:
+    """Convert a dict of ndarrays to a TensorDict."""
+    frames = ndarrays_by_feature["frame"]
+    assert all(len(ndarray) == len(frames) for ndarray in ndarrays_by_feature.values())
+    tensor_slice_by_feature_name = {
+        feature_name: torch.from_numpy(feature_L.copy()) for feature_name, feature_L in ndarrays_by_feature.items()
+    }
+    return TensorDict(tensor_slice_by_feature_name, batch_size=(len(frames),))
 
 
 def update_input_shapes_with_data_config(input_config: InputConfig, data_config: DataConfig) -> InputConfig:

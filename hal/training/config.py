@@ -72,6 +72,9 @@ class DataConfig:
     character_embedding_dim: int = 12
     action_embedding_dim: int = 32
 
+    # Discount factor for offline RL returns
+    gamma: float = 0.999
+
     def __attrs_post_init__(self) -> None:
         if self.streams and self.data_dir:
             raise ValueError("Cannot specify both streams and data_dir")

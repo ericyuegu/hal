@@ -11,6 +11,8 @@ from tensordict import TensorDict
 from hal.constants import Player
 from hal.constants import VALID_PLAYERS
 from hal.preprocess.preprocessor import Preprocessor
+from hal.preprocess.preprocessor import convert_ndarray_to_tensordict
+from hal.preprocess.transformations import add_reward_to_episode
 from hal.training.config import DataConfig
 
 
@@ -34,7 +36,11 @@ class HALStreamingDataset(StreamingDataset):
     def __getitem__(self, idx: int | slice | list[int] | np.ndarray) -> TensorDict:
         """Expects episode features to match data/schema.py."""
         episode_features_by_name = super().__getitem__(idx)
-        sample_T = self.preprocessor.sample_td_from_episode(episode_features_by_name, debug=self.debug)
+        episode_features_by_name = add_reward_to_episode(episode_features_by_name)
+        episode_td = convert_ndarray_to_tensordict(episode_features_by_name)
+
+        episode_td = self.preprocessor.compute_returns(episode_td, "p1")
+        sample_T = self.preprocessor.sample_from_episode(episode_td, debug=self.debug)
 
         player_perspective = "p1" if self.debug else cast(Player, random.choice(VALID_PLAYERS))
         inputs_T = self.preprocessor.preprocess_inputs(sample_T, player_perspective)
