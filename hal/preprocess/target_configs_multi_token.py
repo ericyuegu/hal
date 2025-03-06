@@ -43,26 +43,31 @@ def multi_token_value(frames: tuple[int, ...]) -> TargetConfig:
         "c_stick": encode_c_stick_one_hot_coarser,
         "buttons": encode_buttons_one_hot_early_release,
         "shoulder": encode_shoulder_one_hot,
-        "returns": get_returns,
     }
+    transformation_by_target = {
+        f"{k}_{frame}": transformation_by_target[k] for k in transformation_by_target for frame in frames
+    }
+    transformation_by_target["returns"] = get_returns
+
+    modalities = ("main_stick", "c_stick", "buttons", "shoulder")
+    frame_offsets_by_target = {f"{k}_{frame}": frame - 1 for k in modalities for frame in frames}
+    frame_offsets_by_target["returns"] = 1
+
     target_shapes_by_head = {
         "main_stick": (len(STICK_XY_CLUSTER_CENTERS_V2),),
         "c_stick": (len(STICK_XY_CLUSTER_CENTERS_V0_1),),
         "buttons": (len(INCLUDED_BUTTONS),),
         "shoulder": (len(SHOULDER_CLUSTER_CENTERS_V2),),
-        "returns": (1,),
     }
+    target_shapes_by_head = {
+        f"{k}_{frame}": target_shapes_by_head[k] for k in target_shapes_by_head for frame in frames
+    }
+    target_shapes_by_head["returns"] = (1,)
 
     return TargetConfig(
-        transformation_by_target={
-            f"{k}_{frame}": transformation_by_target[k] for k in transformation_by_target for frame in frames
-        },
-        frame_offsets_by_target={
-            f"{k}_{frame}": frame - 1 for k in transformation_by_target for frame in frames if k != "returns"
-        },
-        target_shapes_by_head={
-            f"{k}_{frame}": target_shapes_by_head[k] for k in target_shapes_by_head for frame in frames
-        },
+        transformation_by_target=transformation_by_target,
+        frame_offsets_by_target=frame_offsets_by_target,
+        target_shapes_by_head=target_shapes_by_head,
         multi_token_heads=frames,
     )
 

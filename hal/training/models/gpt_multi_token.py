@@ -152,6 +152,57 @@ class GPTMultiToken(BaseGPT):
         return TensorDict(result, batch_size=(B, L))
 
 
+class GPTMultiTokenValue(GPTMultiToken):
+    def __init__(self, preprocessor: Preprocessor, gpt_config: MultiTokenGPTConfig) -> None:
+        super().__init__(preprocessor, gpt_config)
+        self.value_head = nn.Sequential(
+            nn.LayerNorm(self.n_embd, bias=gpt_config.bias),
+            nn.Linear(self.n_embd, self.n_embd // 2),
+            nn.GELU(),
+            nn.Linear(self.n_embd // 2, 1),
+        )
+
+    def forward(self, inputs: TensorDict) -> TensorDict:
+        B, L, _ = inputs["gamestate"].shape
+        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+
+        # Concatenate embeddings and numerical inputs -> project down
+        combined_inputs_BLG = self._embed_inputs(inputs)
+        proj_inputs_BLD = self.transformer.proj_down(combined_inputs_BLG)
+
+        x_BLD = self.transformer.drop(proj_inputs_BLD)
+        for block in self.transformer.h:
+            x_BLD = block(x_BLD)
+        x_BLD = self.transformer.ln_f(x_BLD)
+
+        value = self.value_head(x_BLD)
+
+        # Process all time steps at once for each output mode, autoregressively decode next head
+        # (B,L,D) -> (B,L,N*C)
+        shoulder: torch.Tensor = self.shoulder_head(x_BLD)
+        c_stick: torch.Tensor = self.c_stick_head(torch.cat((x_BLD, shoulder.detach()), dim=-1))
+        main_stick: torch.Tensor = self.main_stick_head(
+            torch.cat((x_BLD, shoulder.detach(), c_stick.detach()), dim=-1)
+        )
+        button: torch.Tensor = self.button_head(
+            torch.cat((x_BLD, shoulder.detach(), c_stick.detach(), main_stick.detach()), dim=-1)
+        )
+
+        shoulder = shoulder.view(B, L, self.num_multi_token_output_heads, self.shoulder_output_dim)
+        c_stick = c_stick.view(B, L, self.num_multi_token_output_heads, self.c_stick_output_dim)
+        main_stick = main_stick.view(B, L, self.num_multi_token_output_heads, self.main_stick_output_dim)
+        button = button.view(B, L, self.num_multi_token_output_heads, self.button_output_dim)
+
+        result = {}
+        for i, offset in enumerate(self.multi_token_heads):
+            result[f"shoulder_{offset}"] = shoulder[:, :, i, :]
+            result[f"c_stick_{offset}"] = c_stick[:, :, i, :]
+            result[f"main_stick_{offset}"] = main_stick[:, :, i, :]
+            result[f"buttons_{offset}"] = button[:, :, i, :]
+        result["value"] = value
+        return TensorDict(result, batch_size=(B, L))
+
+
 Arch.register(
     "MultiToken-512-6-8_1-12",
     GPTMultiToken,

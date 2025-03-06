@@ -435,9 +435,9 @@ def concat_controller_inputs(sample_T: TensorDict, ego: Player, target_config: T
     return torch.cat(list(controller_feats.values()), dim=-1)
 
 
-def get_returns(sample_T: TensorDict, ego: Player) -> torch.Tensor:
+def get_returns(sample: TensorDict, player: str) -> torch.Tensor:
     # Already calculated from full episode in preprocessor
-    return sample_T["returns"]
+    return sample["returns"]
 
 
 ### POSTPROCESSING MODEL PREDICTIONS

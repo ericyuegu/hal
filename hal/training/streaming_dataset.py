@@ -39,10 +39,10 @@ class HALStreamingDataset(StreamingDataset):
         episode_features_by_name = add_reward_to_episode(episode_features_by_name)
         episode_td = convert_ndarray_to_tensordict(episode_features_by_name)
 
-        episode_td = self.preprocessor.compute_returns(episode_td, "p1")
+        player_perspective = "p1" if self.debug else cast(Player, random.choice(VALID_PLAYERS))
+        episode_td = self.preprocessor.compute_returns(episode_td, player_perspective)
         sample_T = self.preprocessor.sample_from_episode(episode_td, debug=self.debug)
 
-        player_perspective = "p1" if self.debug else cast(Player, random.choice(VALID_PLAYERS))
         inputs_T = self.preprocessor.preprocess_inputs(sample_T, player_perspective)
         targets_T = self.preprocessor.preprocess_targets(sample_T, player_perspective)
 
