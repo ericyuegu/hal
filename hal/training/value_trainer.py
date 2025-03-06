@@ -1,6 +1,7 @@
 import argparse
 import random
 
+import attr
 import numpy as np
 import torch
 from streaming import StreamingDataLoader
@@ -17,15 +18,22 @@ from hal.training.streaming_dataloader import get_dataloaders
 from hal.training.trainer import Trainer
 
 
+@attr.s(auto_attribs=True, frozen=True)
+class ValueTrainerConfig(TrainConfig):
+    value_fn_loss_weight: float = 0.5
+    advantage_weighted_loss: bool = False
+
+
 class ValueTrainer(Trainer):
     """
     Trains behavior cloning using cross-entropy loss on next-/multi-token prediction and value function loss.
     """
 
     def __init__(
-        self, config: TrainConfig, train_loader: StreamingDataLoader, val_loader: StreamingDataLoader
+        self, config: ValueTrainerConfig, train_loader: StreamingDataLoader, val_loader: StreamingDataLoader
     ) -> None:
         super().__init__(config, train_loader, val_loader)
+        self.config = config
         assert self.preprocessor.target_config.multi_token_heads is not None
         self.multi_token_heads = self.preprocessor.target_config.multi_token_heads
 
@@ -60,13 +68,16 @@ class ValueTrainer(Trainer):
         return loss_dict
 
     def sum_losses(self, loss_by_head: TensorDict) -> torch.Tensor:
-        # TODO add weights as CLI arg
-        loss_total = sum(0.5 * v if k == "loss_value" else v for k, v in loss_by_head.items() if k.startswith("loss"))
+        loss_total = sum(
+            self.config.value_fn_loss_weight * v if k == "loss_value" else v
+            for k, v in loss_by_head.items()
+            if k.startswith("loss")
+        )
         return loss_total
 
 
 @auto_distribute
-def main(train_config: TrainConfig) -> None:
+def main(train_config: ValueTrainerConfig) -> None:
     rank = get_device_id()
     seed = train_config.seed + rank
     random.seed(seed)
@@ -80,9 +91,9 @@ def main(train_config: TrainConfig) -> None:
 
 def parse_cli() -> TrainConfig:
     parser = argparse.ArgumentParser()
-    parser = create_parser_for_attrs_class(TrainConfig, parser)
+    parser = create_parser_for_attrs_class(ValueTrainerConfig, parser)
     args = parser.parse_args()
-    return parse_args_to_attrs_instance(TrainConfig, args)
+    return parse_args_to_attrs_instance(ValueTrainerConfig, args)
 
 
 if __name__ == "__main__":
