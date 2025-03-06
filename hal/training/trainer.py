@@ -140,18 +140,31 @@ class Trainer(torch.nn.Module, abc.ABC):
         self.scheduler.step()
 
         loss_by_head["loss_total"] = loss_total  # type: ignore
-        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head.detach().items()}
+        loss_by_head_cpu = loss_by_head.detach().to("cpu")
+        metrics_dict = {f"train/{k}": v.item() for k, v in loss_by_head_cpu.items()}
 
         # Log learning rate & grad norm by layer
         metrics_dict["lr/lr"] = self.scheduler.get_last_lr()[0]
         metrics_dict["grad_norm/total"] = grad_norm_total.item()
-        for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                # Detach and compute norm safely
-                grad_norm = param.grad.detach().norm()
-                if not torch.isfinite(grad_norm):  # Skip logging if NaN or Inf
-                    logger.warning(f"Gradient norm for layer {name} is NaN or Inf")
-                metrics_dict[f"grad_norm/layer/{name}"] = grad_norm.item()
+
+        if self.samples % self.config.report_len == 0:
+            grad_norms = []
+            grad_names = []
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    # Detach and compute norm safely
+                    grad_norm = param.grad.detach().norm()
+                    if not torch.isfinite(grad_norm):  # Skip logging if NaN or Inf
+                        logger.warning(f"Gradient norm for layer {name} is NaN or Inf")
+                    else:
+                        grad_norms.append(grad_norm)
+                        grad_names.append(name)
+
+            if grad_norms:
+                # Stack all norms and move to CPU at once to reduce blocking CUDA ops
+                stacked_norms = torch.stack(grad_norms).to("cpu")
+                for name, norm in zip(grad_names, stacked_norms):
+                    metrics_dict[f"grad_norm/layer/{name}"] = norm.item()
         return metrics_dict
 
     def val_op(self, batch: TensorDict) -> MetricsDict:
