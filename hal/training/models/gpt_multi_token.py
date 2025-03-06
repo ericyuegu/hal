@@ -219,3 +219,19 @@ Arch.register(
         block_size=1024, n_embd=512, n_layer=6, n_head=8, dropout=0.2, multi_token_heads=(1, 12, 18)
     ),
 )
+
+Arch.register(
+    "MultiTokenValue-512-6-8_1-12",
+    GPTMultiTokenValue,
+    gpt_config=MultiTokenGPTConfig(
+        block_size=1024,
+        n_embd=512,
+        n_layer=6,
+        n_head=8,
+        dropout=0.2,
+        multi_token_heads=(
+            1,
+            12,
+        ),
+    ),
+)
