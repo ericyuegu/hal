@@ -142,16 +142,35 @@ class Preprocessor:
         return TensorDict(out, batch_size=())
 
     def compute_returns(self, td: TensorDict, ego: Player) -> TensorDict:
-        """Calculate the return for a given episode."""
+        """
+        Vectorized version of discounted returns.
+        Exactly matches the per-step logic:
+            R[t] = r[t] + gamma * r[t+1] + gamma^2 * r[t+2] + ...
+        """
         gamma = self.data_config.gamma
-        rewards = td[f"{ego}_reward"]
-        returns = torch.zeros_like(rewards, dtype=torch.float32)
-        running_return = 0
+        rewards = td[f"{ego}_reward"]  # shape: [T] (or possibly more dims)
+        T = rewards.shape[0]
+        device = rewards.device
+        dtype = rewards.dtype
 
-        # Work backwards through the trajectory
-        for t in reversed(range(len(rewards))):
-            running_return = rewards[t] + gamma * running_return
-            returns[t] = running_return
+        # 1) Multiply each reward by gamma^t
+        #    w[k] = gamma^k * r[k]
+        t_range = torch.arange(T, device=device, dtype=dtype)
+        w = (gamma**t_range) * rewards
+
+        # 2) Take a cumulative sum of w:
+        #    z[k] = sum_{i=0..k} w[i]
+        z = torch.cumsum(w, dim=0)
+
+        # 3) Convert z back to standard returns:
+        #    R[0] = z[T-1]
+        #    R[t] = gamma^{-t} * (z[T-1] - z[t-1])   for t > 0
+        returns = torch.empty_like(rewards)
+        returns[0] = z[-1]  # R[0]
+        if T > 1:
+            # For t in [1..T-1]
+            t_idx = torch.arange(1, T, device=device)
+            returns[1:] = (z[-1] - z[t_idx - 1]) * (gamma ** (-t_idx))
 
         td["returns"] = returns
         return td
