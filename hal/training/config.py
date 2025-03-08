@@ -36,7 +36,7 @@ class ReplayFilter:
 
 @attr.s(auto_attribs=True, frozen=True)
 class DataworkerConfig:
-    data_workers_per_gpu: int = 8
+    data_workers_per_gpu: int = 12
     prefetch_factor: int = 2
     collate_fn: Optional[str] = None
 
@@ -123,7 +123,7 @@ class TrainConfig(BaseConfig):
     lr: float = 3e-4
     n_samples: int = 2**24
     n_val_samples: int = 2**15
-    keep_ckpts: int = 2**4
+    keep_ckpts: int = 2**5
     report_len: int = 2**19
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8

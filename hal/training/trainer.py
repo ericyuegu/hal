@@ -260,6 +260,7 @@ class Trainer(torch.nn.Module, abc.ABC):
                     checkpoint_idx=step,
                     eval_stats_queue=eval_stats_queue,
                     player="p1",
+                    enable_ffw=True,
                 ),
             )
             eval_process.start()
