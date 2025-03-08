@@ -7,7 +7,6 @@ from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
-from typing import Sequence
 from typing import Tuple
 from typing import Type
 
@@ -220,16 +219,6 @@ class DummyWriter:
     def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
 
-    def plot_confusion_matrix(
-        self,
-        probs: Optional[Sequence[Sequence]] = None,
-        y_true: Optional[Sequence] = None,
-        preds: Optional[Sequence] = None,
-        class_names: Optional[Sequence[str]] = None,
-        title: Optional[str] = None,
-    ) -> wandb.viz.CustomChart:
-        pass
-
     def close(self) -> None:
         pass
 
@@ -262,18 +251,6 @@ class Writer:
     def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
         wandb.log(summary_dict, step=step, commit=commit)
-
-    def plot_confusion_matrix(
-        self,
-        probs: Optional[Sequence[Sequence]] = None,
-        y_true: Optional[Sequence] = None,
-        preds: Optional[Sequence] = None,
-        class_names: Optional[Sequence[str]] = None,
-        title: Optional[str] = None,
-    ) -> wandb.viz.CustomChart:
-        return wandb.plot.confusion_matrix(
-            probs=probs, y_true=y_true, preds=preds, class_names=class_names, title=title
-        )
 
     def close(self) -> None:
         wandb.finish()
