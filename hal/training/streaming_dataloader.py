@@ -125,7 +125,7 @@ def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, Streaming
         collate_fn=collate_tensordicts,
         num_workers=config.dataworker.data_workers_per_gpu,
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=False,
         prefetch_factor=config.dataworker.prefetch_factor,
     )
     val_loader = StreamingDataLoader(
@@ -134,7 +134,7 @@ def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, Streaming
         collate_fn=collate_tensordicts,
         num_workers=config.dataworker.data_workers_per_gpu,
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=False,
         prefetch_factor=config.dataworker.prefetch_factor,
     )
 
