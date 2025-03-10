@@ -5,7 +5,6 @@ from pathlib import Path
 
 import melee
 import torch
-from gamestate_utils import extract_eval_gamestate_as_tensordict
 from loguru import logger
 from tensordict import TensorDict
 
@@ -14,6 +13,7 @@ from hal.emulator_helper import console_manager
 from hal.emulator_helper import get_gui_console_kwargs
 from hal.emulator_helper import send_controller_inputs
 from hal.eval.eval_helper import mock_framedata_as_tensordict
+from hal.gamestate_utils import extract_eval_gamestate_as_tensordict
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.io import load_config_from_artifact_dir
@@ -131,7 +131,6 @@ def play(artifact_dir: str):
                 if controller_inputs is None:
                     logger.error("Controller inputs are None")
                 else:
-                    # logger.debug("Sending controller inputs")
                     send_controller_inputs(ego_controller, controller_inputs)
 
                 i += 1
