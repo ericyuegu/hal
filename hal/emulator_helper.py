@@ -123,26 +123,23 @@ def get_headless_console_kwargs(
 
 
 def get_gui_console_kwargs(
-    emulator_path: str,
-    enable_ffw: bool = False,
+    emulator_path: Path,
+    replay_dir: Path,
     udp_port: int | None = None,
-    replay_dir: Path | None = None,
     console_logger: melee.Logger | None = None,
 ) -> Dict[str, Any]:
     """Get console kwargs for GUI-enabled emulator."""
     gui_console_kwargs = {
         "gfx_backend": "",
         "disable_audio": False,
-        "use_exi_inputs": enable_ffw,
-        "enable_ffw": enable_ffw,
+        "use_exi_inputs": False,
+        "enable_ffw": False,
     }
-    if replay_dir is None:
-        replay_dir = get_replay_dir()
     replay_dir.mkdir(exist_ok=True, parents=True)
     if udp_port is None:
         udp_port = find_open_udp_ports(1)[0]
     console_kwargs = {
-        "path": emulator_path,
+        "path": str(emulator_path),
         "is_dolphin": True,
         "tmp_home_directory": True,
         "copy_home_directory": False,

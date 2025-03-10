@@ -26,7 +26,7 @@ from hal.training.utils import get_git_repo_root
 # torch._dynamo.config.suppress_errors = True
 
 REPO_ROOT = get_git_repo_root()
-EMULATOR_PATH = "/Users/ericgu/Library/Application Support/Slippi Launcher/netplay"
+EMULATOR_PATH = "/Users/ericgu/Library/Application Support/Slippi Launcher/netplay/Slippi Dolphin.app"
 CISO_PATH = "/Users/ericgu/data/ssbm/ssbm.ciso"
 STATS_PATH = REPO_ROOT / "hal/data/stats.json"
 REPLAY_DIR = "/Users/ericgu/data/ssbm/replays"
@@ -66,7 +66,7 @@ def play(artifact_dir: str):
         model(context_window_BL)
     logger.info("Warmup step finished")
 
-    console_kwargs = get_gui_console_kwargs(EMULATOR_PATH, replay_dir=Path(REPLAY_DIR))
+    console_kwargs = get_gui_console_kwargs(Path(EMULATOR_PATH), Path(REPLAY_DIR))
     console = melee.Console(**console_kwargs)
     ego_controller = melee.Controller(console=console, port=1, type=melee.ControllerType.STANDARD)
     opponent_controller = melee.Controller(console=console, port=2, type=melee.ControllerType.STANDARD)
