@@ -7,6 +7,7 @@ from typing import Union
 import melee
 import torch
 from loguru import logger
+from melee.enums import Character
 from tensordict import TensorDict
 
 from hal.emulator_helper import MatchupMenuHelper
@@ -41,7 +42,7 @@ def load_model(artifact_dir: str, device: torch.device) -> torch.nn.Module:
     return model
 
 
-def play(artifact_dir: str):
+def play(artifact_dir: str, character: str):
     device: torch.device = torch.device(
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
@@ -53,6 +54,9 @@ def play(artifact_dir: str):
     model = load_model(artifact_dir, device)
     logger.info(model)
     logger.info(f"Model loaded on device: {device}")
+
+    ego_character_enum = Character[character]
+    logger.info(f"Character: {ego_character_enum}")
 
     mock_framedata_L: TensorDict = mock_framedata_as_tensordict(preprocessor.trajectory_sampling_len)
     context_window_BL = preprocessor.preprocess_inputs(mock_framedata_L, BOT_PLAYER)
@@ -68,9 +72,10 @@ def play(artifact_dir: str):
     logger.info("Warmup step finished")
 
     console_kwargs = get_gui_console_kwargs(Path(EMULATOR_PATH), Path(REPLAY_DIR))
+    logger.info(f"Console kwargs: {console_kwargs}")
     console = melee.Console(**console_kwargs)
     ego_controller = melee.Controller(console=console, port=1, type=melee.ControllerType.STANDARD)
-    opponent_controller = melee.Controller(console=console, port=2, type=melee.ControllerType.STANDARD)
+    opponent_controller = melee.Controller(console=console, port=2, type=melee.ControllerType.GCN_ADAPTER)
     console.run(iso_path=CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
     # Connect to the console
     logger.debug("Connecting to console...")
@@ -97,7 +102,7 @@ def play(artifact_dir: str):
     menu_helper = MatchupMenuHelper(
         controller_1=ego_controller,
         controller_2=opponent_controller,
-        character_1=melee.Character.FOX,
+        character_1=ego_character_enum,
         character_2=None,
         stage=None,
         opponent_cpu_level=0,
@@ -153,5 +158,6 @@ def play(artifact_dir: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact_dir", type=str, required=True)
+    parser.add_argument("--character", type=str, required=True)
     args = parser.parse_args()
-    play(args.artifact_dir)
+    play(args.artifact_dir, args.character)
