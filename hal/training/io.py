@@ -9,6 +9,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 from typing import Type
+from typing import Union
 
 import attr
 import torch
@@ -23,6 +24,7 @@ import wandb
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import BaseConfig
 from hal.training.config import TrainConfig
+from hal.training.config import ValueTrainerConfig
 from hal.training.distributed import is_master
 from hal.training.models.registry import Arch
 from hal.training.streaming_dataloader import load_dataloader_state
@@ -87,7 +89,7 @@ CONFIG_FILENAME: str = "config.json"
 
 def load_config_from_artifact_dir(artifact_dir: Path) -> TrainConfig:
     with open(artifact_dir / "config.json", "r", encoding="utf-8") as f:
-        config: TrainConfig = deserialize(json.load(f))  # type: ignore
+        config: Union[TrainConfig, ValueTrainerConfig] = deserialize(json.load(f))  # type: ignore
     return config
 
 

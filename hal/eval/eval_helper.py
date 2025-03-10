@@ -234,7 +234,7 @@ class EpisodeStats:
 
 def mock_framedata_as_tensordict(seq_len: int) -> TensorDict:
     """Mock `seq_len` frames of gamestate data."""
-    return TensorDict({k: torch.zeros(seq_len) for k in NP_TYPE_BY_COLUMN}, batch_size=(seq_len,))
+    return TensorDict({k: torch.ones(seq_len) for k in NP_TYPE_BY_COLUMN}, batch_size=(seq_len,))
 
 
 def share_and_pin_memory(tensordict: TensorDict) -> TensorDict:
