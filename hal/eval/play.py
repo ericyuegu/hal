@@ -20,15 +20,19 @@ from hal.training.config import TrainConfig
 from hal.training.config import ValueTrainerConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
+from hal.training.io import override_stats_path
+from hal.training.utils import get_git_repo_root
 
+REPO_ROOT = get_git_repo_root()
 EMULATOR_PATH = "/Users/ericgu/Library/Application Support/Slippi Launcher/netplay"
 CISO_PATH = "/Users/ericgu/data/ssbm/ssbm.ciso"
+STATS_PATH = REPO_ROOT / "hal/data/stats.json"
 BOT_PLAYER = "p1"
 
 
 def load_model(artifact_dir: str, device: torch.device) -> torch.nn.Module:
     torch.set_float32_matmul_precision("high")
-    model, _ = load_model_from_artifact_dir(Path(artifact_dir), device=device)
+    model, _ = load_model_from_artifact_dir(Path(artifact_dir), device=device, stats_path_override=STATS_PATH)
     model.eval()
     model.to(device)
     return model
@@ -39,6 +43,7 @@ def play(artifact_dir: str):
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     train_config: Union[TrainConfig, ValueTrainerConfig] = load_config_from_artifact_dir(Path(artifact_dir))
+    train_config = override_stats_path(train_config, STATS_PATH)
     preprocessor = Preprocessor(data_config=train_config.data)
     seq_len = preprocessor.seq_len
 

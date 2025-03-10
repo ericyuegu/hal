@@ -93,10 +93,22 @@ def load_config_from_artifact_dir(artifact_dir: Path) -> TrainConfig:
     return config
 
 
+def override_stats_path(config: TrainConfig, stats_path: Path) -> TrainConfig:
+    return attr.evolve(
+        config,
+        data=attr.evolve(config.data, stats_path=str(stats_path.absolute())),
+    )
+
+
 def load_model_from_artifact_dir(
-    artifact_dir: Path, idx: Optional[int] = None, device: str | torch.device = "cpu"
+    artifact_dir: Path,
+    idx: Optional[int] = None,
+    device: str | torch.device = "cpu",
+    stats_path_override: Optional[Path] = None,
 ) -> Tuple[torch.nn.Module, TrainConfig]:
     config = load_config_from_artifact_dir(artifact_dir)
+    if stats_path_override is not None:
+        config = override_stats_path(config, stats_path_override)
     preprocessor = Preprocessor(data_config=config.data)
     model = Arch.get(config.arch, preprocessor=preprocessor)
     ckpt = Checkpoint(model, config, artifact_dir, keep_ckpts=config.keep_ckpts)
