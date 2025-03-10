@@ -55,8 +55,8 @@ def play(artifact_dir: str):
     logger.info(f"Model loaded on device: {device}")
 
     mock_framedata_L: TensorDict = mock_framedata_as_tensordict(preprocessor.trajectory_sampling_len)
-    context_window_BL = preprocessor.preprocess_inputs(mock_framedata_L, BOT_PLAYER).unsqueeze(0)
-    context_window_BL = preprocessor.offset_inputs(mock_framedata_L)
+    context_window_BL = preprocessor.preprocess_inputs(mock_framedata_L, BOT_PLAYER)
+    context_window_BL = preprocessor.offset_inputs(context_window_BL).unsqueeze(0)
     context_window_BL = context_window_BL.to(device)
     logger.info(f"Context window shape: {context_window_BL.shape}, device: {context_window_BL.device}")
 
