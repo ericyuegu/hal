@@ -16,6 +16,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+For macOS, `libmelee` requires a system installation of enet. 
+```bash
+brew install enet
+CFLAGS="-I/opt/homebrew/Cellar/enet/1.3.18/include" LDFLAGS="-L/opt/homebrew/Cellar/enet/1.3.18/lib -lenet" pip install melee --no-cache-dir
+pip install -r requirements_macos.txt
+```
+
 ## Building Dolphin emulator
 
 An AppImage is provided in the `emulator` directory and can be called directly from `libmelee`. 
