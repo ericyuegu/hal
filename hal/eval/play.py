@@ -55,7 +55,7 @@ def play(artifact_dir: str, character: str):
     logger.info(model)
     logger.info(f"Model loaded on device: {device}")
 
-    ego_character_enum = Character[character]
+    ego_character_enum = Character[character.upper()]
     logger.info(f"Character: {ego_character_enum}")
 
     mock_framedata_L: TensorDict = mock_framedata_as_tensordict(preprocessor.trajectory_sampling_len)
@@ -130,6 +130,7 @@ def play(artifact_dir: str, character: str):
                 logger.debug("Last frame took " + str(console.processingtime * 1000) + "ms to process.")
 
             if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
+                logger.debug(f"{gamestate.menu_state=}")
                 menu_helper.select_character_and_stage(gamestate)
                 i = 0
             else:

@@ -143,6 +143,7 @@ def get_gui_console_kwargs(
         "online_delay": 0,  # 0 frame delay for local evaluation
         "logger": console_logger,
         "setup_gecko_codes": True,
+        "fullscreen": False,
         "gfx_backend": "",
         "disable_audio": False,
         "use_exi_inputs": False,
