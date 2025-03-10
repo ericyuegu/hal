@@ -129,12 +129,6 @@ def get_gui_console_kwargs(
     console_logger: melee.Logger | None = None,
 ) -> Dict[str, Any]:
     """Get console kwargs for GUI-enabled emulator."""
-    gui_console_kwargs = {
-        "gfx_backend": "",
-        "disable_audio": False,
-        "use_exi_inputs": False,
-        "enable_ffw": False,
-    }
     replay_dir.mkdir(exist_ok=True, parents=True)
     if udp_port is None:
         udp_port = find_open_udp_ports(1)[0]
@@ -148,7 +142,11 @@ def get_gui_console_kwargs(
         "slippi_port": udp_port,
         "online_delay": 0,  # 0 frame delay for local evaluation
         "logger": console_logger,
-        **gui_console_kwargs,
+        "setup_gecko_codes": True,
+        "gfx_backend": "",
+        "disable_audio": False,
+        "use_exi_inputs": False,
+        "enable_ffw": False,
     }
     return console_kwargs
 
