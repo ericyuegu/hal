@@ -2,6 +2,7 @@ import argparse
 import concurrent.futures
 import sys
 from pathlib import Path
+from typing import Union
 
 import melee
 import torch
@@ -16,6 +17,7 @@ from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.gamestate_utils import extract_eval_gamestate_as_tensordict
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
+from hal.training.config import ValueTrainerConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
 
@@ -36,7 +38,7 @@ def play(artifact_dir: str):
     device: torch.device = torch.device(
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
-    train_config: TrainConfig = load_config_from_artifact_dir(Path(artifact_dir))
+    train_config: Union[TrainConfig, ValueTrainerConfig] = load_config_from_artifact_dir(Path(artifact_dir))
     preprocessor = Preprocessor(data_config=train_config.data)
     seq_len = preprocessor.seq_len
 
