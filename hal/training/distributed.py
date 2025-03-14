@@ -96,6 +96,9 @@ def auto_distribute(f: Callable) -> Callable:
     def dist_wrapped(rank: Optional[int], world_size: Optional[int], *args):
         if rank is None or world_size is None:
             return f(*args)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        os.environ["LOCAL_WORLD_SIZE"] = str(world_size)
+        os.environ["RANK"] = str(rank)
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = "12355"
         torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)

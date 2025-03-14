@@ -26,8 +26,11 @@ from hal.gamestate_utils import extract_eval_gamestate_as_tensordict
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import EvalConfig
 from hal.training.config import TrainConfig
+from hal.training.config import ValueTrainerConfig
 from hal.training.io import load_config_from_artifact_dir
 from hal.training.io import load_model_from_artifact_dir
+
+ValueTrainerConfig = ValueTrainerConfig
 
 
 def setup_cpu_logger(debug: bool = False) -> None:

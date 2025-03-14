@@ -10,7 +10,6 @@ from streaming.base.util import clean_stale_shared_memory
 from tensordict import TensorDict
 
 from hal.training.config import TrainConfig
-from hal.training.distributed import barrier
 from hal.training.distributed import get_device_id
 from hal.training.distributed import is_master
 from hal.training.distributed import log_if_master
@@ -63,7 +62,6 @@ def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, Streaming
     if is_master():
         logger.info("Cleaning stale shared memory for StreamingDataset")
         clean_stale_shared_memory()
-    barrier()
 
     train_streams = None
     val_streams = None
@@ -74,20 +72,19 @@ def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, Streaming
         # To avoid this but also avoid downloading duplicate data, we pre-download the data on rank 0 if it does not exist, then set remote=None for all streams
         # Streams are also modified in-place after passing to StreamingDataset, so we create deep copies
         pre_download_streams(config)
-        barrier()
 
         original_streams = config.data.get_streams()
         train_streams = []
         val_streams = []
         for stream in original_streams:
             train_stream = Stream(
-                remote=None,  # Important: set remote to None
+                # remote=stream.remote,  # Important: set remote to None
                 local=stream.local,
                 proportion=stream.proportion,
                 keep_zip=stream.keep_zip,
             )
             val_stream = Stream(
-                remote=None,  # Important: set remote to None
+                # remote=stream.remote,  # Important: set remote to None
                 local=stream.local,
                 proportion=stream.proportion,
                 keep_zip=stream.keep_zip,
@@ -96,6 +93,9 @@ def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, Streaming
             val_streams.append(val_stream)
     else:
         local_dir = config.data.data_dir
+
+    logger.info(f"rank {get_device_id()}: {tuple(train_stream.local for train_stream in train_streams)}")
+    logger.info(f"rank {get_device_id()}: {tuple(val_stream.local for val_stream in val_streams)}")
 
     train_dataset = HALStreamingDataset(
         streams=train_streams,
