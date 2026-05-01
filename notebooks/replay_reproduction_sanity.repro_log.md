@@ -1,5 +1,61 @@
 # Replay reproduction — investigation log
 
+## 2026-05-01 update #4 — byte-level diff explained: source has wider effective stick range
+
+Diagnosed by re-running with `save_replays=True` and parsing the live
+emulator's slp byte stream directly (the file was unfinalized so libmelee
+itself couldn't read it; manual UBJSON-skip + 0x37 walk works).
+
+Around the f=42 hit moment (port 2 = Marth, port 1 = Falco):
+
+```
+       source slp 0x19 (jx)  source 0x3B (raw)   live 0x19 (jx)  live 0x3B (raw)
+f=41    -0.7875               -84                 -0.7875          -63
+f=42    -0.8875               -94                 -0.8875          -71
+f=43    -0.9875               -100                -0.9875          -79
+f=46    -0.9875               -98                 -0.9875          -79
+```
+
+`processed` matches frame-by-frame, but the recorded `raw` byte is
+*much wider* in source than in live (e.g. -84 vs -63 at the same
+processed value). For source's pairs the relationship is roughly
+`processed = (raw + 22) / 80`, NOT `raw / 80`. Equivalently, `processed
+= raw / max_raw` where source's effective max ≈ 106 (from
+`0.7875·X = 84` and `0.8875·X = 94`).
+
+This is **per-controller stick calibration** — real GC pads have
+magnitude up to ~105 raw bytes, and the game (or UCF Pad Buffer + 1.0
+Cardinals) calibrates the divisor accordingly. Our pipe injection
+goes through Dolphin's GCPadEmu (`MAIN_STICK_RADIUS = 0x7F = 127`,
+fix_analog_stick capped at ±80), so live's recorded raw bytes top out
+at ±80 while source's are ±105.
+
+This byte-level discrepancy probably feeds the hitlag_left drift: at
+hit moments the game inspects stick byte / facing / DI to decide
+attack attributes. With identical processed but different bytes, a
+sub-hitbox or shield-vs-body decision could flip, changing hitlag
+duration by a few frames (electric vs non-electric: +4; shield: +0
+or different).
+
+Fixing the byte-level match without breaking processed agreement is
+non-trivial. Options:
+
+1. Extend `fix_analog_stick` to push pipe values that put padBuf in
+   ±100 range, and reconfigure live's `Main Stick/Radius` so the
+   game-side divisor scales correspondingly. Risk: live's stick
+   processor doesn't have UCF-Pad-Buffer-style calibration in the
+   default flow, so wide bytes saturate to ±1.0.
+2. Use the `use_raw_main_stick=True` flag to feed source's slp 0x3B
+   byte directly. Already plumbed. Earlier attempt regressed because
+   live's stick processor naively clamped/80 for byte=-98 → -1.0
+   (vs source's -0.9875). Combining this with reconfigured radius or
+   per-port calibration could close the gap.
+3. Accept the residual hitlag drift (4-7 frames at hit moments) as
+   "good enough" given that all other comparison fields match.
+
+For now, leaving option 3 as the documented status. Going to chase
+option 1 next when there's bandwidth.
+
 ## 2026-05-01 update #3 — trigger fix landed; residual is hitlag-only
 
 After mode-aware trigger inverse:
