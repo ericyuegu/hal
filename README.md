@@ -40,7 +40,7 @@ You can obtain raw `.slp` files from the [Slippi Discord](https://discord.gg/qaH
 
 # HOW-TO
 
-I recommend modifying the constants in `hal/local_paths.py` to point to your local directories for the repo, Dolphin, and the Melee ISO.
+Paths to the repo, Dolphin, ISO, and replay directory are resolved by `hal/local_paths.py` from environment variables, with defaults that match the layout above (`~/data/ssbm/...`). To override, copy `.env.example` to `.env` and edit, or `export` the variables in your shell profile.
 
 ## Processing replays to MDS format
 

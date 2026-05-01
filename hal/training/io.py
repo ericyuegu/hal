@@ -4,23 +4,18 @@ from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import Optional
-from typing import Tuple
-from typing import Type
-from typing import Union
 
 import attr
 import torch
 import torch.nn
+import wandb
 from loguru import logger
 from streaming import StreamingDataLoader
 from tensordict import TensorDict
 from yasoo import deserialize
 from yasoo import serialize
 
-import wandb
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import BaseConfig
 from hal.training.config import TrainConfig
@@ -68,18 +63,6 @@ def get_log_dir(*args) -> Path:
     return log_dir
 
 
-def get_default_dolphin_path() -> str:
-    dolphin_path = os.environ.get("DEFAULT_DOLPHIN_PATH", None)
-    assert dolphin_path is not None, "DEFAULT_DOLPHIN_PATH environment variable must be set"
-    return dolphin_path
-
-
-def get_default_melee_iso_path() -> str:
-    melee_path = os.environ.get("DEFAULT_MELEE_ISO_PATH", None)
-    assert melee_path is not None, "DEFAULT_MELEE_ISO_PATH environment variable must be set"
-    return melee_path
-
-
 MODEL_FILE_MATCH: str = "*.pt"
 MODEL_FILE_FORMAT: str = "%012d.pt"
 TRAIN_LOADER_STATE_FILENAME: str = "train_loader_state_%012d.pth"
@@ -88,8 +71,8 @@ CONFIG_FILENAME: str = "config.json"
 
 
 def load_config_from_artifact_dir(artifact_dir: Path) -> TrainConfig:
-    with open(artifact_dir / "config.json", "r", encoding="utf-8") as f:
-        config: Union[TrainConfig, ValueTrainerConfig] = deserialize(json.load(f))  # type: ignore
+    with open(artifact_dir / "config.json", encoding="utf-8") as f:
+        config: TrainConfig | ValueTrainerConfig = deserialize(json.load(f))  # type: ignore
     return config
 
 
@@ -102,10 +85,10 @@ def override_stats_path(config: TrainConfig, stats_path: Path) -> TrainConfig:
 
 def load_model_from_artifact_dir(
     artifact_dir: Path,
-    idx: Optional[int] = None,
+    idx: int | None = None,
     device: str | torch.device = "cpu",
-    stats_path_override: Optional[Path] = None,
-) -> Tuple[torch.nn.Module, TrainConfig]:
+    stats_path_override: Path | None = None,
+) -> tuple[torch.nn.Module, TrainConfig]:
     config = load_config_from_artifact_dir(artifact_dir)
     if stats_path_override is not None:
         config = override_stats_path(config, stats_path_override)
@@ -135,11 +118,11 @@ class Checkpoint:
 
     def restore(
         self,
-        idx: Optional[int] = None,
+        idx: int | None = None,
         device: str | torch.device = "cpu",
-        train_loader: Optional[StreamingDataLoader] = None,
-        val_loader: Optional[StreamingDataLoader] = None,
-    ) -> Tuple[int, Optional[Path]]:
+        train_loader: StreamingDataLoader | None = None,
+        val_loader: StreamingDataLoader | None = None,
+    ) -> tuple[int, Path | None]:
         if idx is None:
             idx = find_latest_idx(self.artifact_dir)
             if idx == 0:
@@ -199,8 +182,8 @@ class Checkpoint:
 @attr.s(auto_attribs=True, frozen=True)
 class WandbConfig:
     project: str
-    train_config: Dict[str, Any]
-    tags: List[str]
+    train_config: dict[str, Any]
+    tags: list[str]
     name: str
     model: torch.nn.Module
 
@@ -224,13 +207,13 @@ class WandbConfig:
 
 
 class DummyWriter:
-    def __init__(self, wandb_config: Optional[WandbConfig]) -> None:
+    def __init__(self, wandb_config: WandbConfig | None) -> None:
         pass
 
     def watch(self, model: torch.nn.Module, **kwargs) -> None:
         """Hooks into torch model to collect gradients and the topology."""
 
-    def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
+    def log(self, summary_dict: TensorDict | dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
 
     def close(self) -> None:
@@ -241,9 +224,9 @@ class DummyWriter:
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self.close()
 
@@ -262,7 +245,7 @@ class Writer:
             log_freq = train_config["report_len"] // (train_config["local_batch_size"] * train_config["n_gpus"])
             wandb.watch(wandb_config.model, log="all", log_freq=log_freq)
 
-    def log(self, summary_dict: TensorDict | Dict[str, Any], step: int, commit: bool = True) -> None:
+    def log(self, summary_dict: TensorDict | dict[str, Any], step: int, commit: bool = True) -> None:
         """Add on event to the event file."""
         wandb.log(summary_dict, step=step, commit=commit)
 
@@ -274,9 +257,9 @@ class Writer:
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self.close()
 

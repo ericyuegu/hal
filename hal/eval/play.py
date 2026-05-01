@@ -2,7 +2,6 @@ import argparse
 import concurrent.futures
 import sys
 from pathlib import Path
-from typing import Union
 
 import melee
 import torch
@@ -16,9 +15,9 @@ from hal.emulator_helper import get_gui_console_kwargs
 from hal.emulator_helper import send_controller_inputs
 from hal.eval.eval_helper import mock_framedata_as_tensordict
 from hal.gamestate_utils import extract_eval_gamestate_as_tensordict
-from hal.local_paths import MAC_CISO_PATH
-from hal.local_paths import MAC_EMULATOR_PATH
-from hal.local_paths import MAC_REPLAY_DIR
+from hal.local_paths import EMULATOR_PATH
+from hal.local_paths import EVAL_REPLAY_DIR
+from hal.local_paths import ISO_PATH
 from hal.preprocess.preprocessor import Preprocessor
 from hal.training.config import TrainConfig
 from hal.training.config import ValueTrainerConfig
@@ -44,7 +43,7 @@ def play(artifact_dir: str, character: str):
     device: torch.device = torch.device(
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
-    train_config: Union[TrainConfig, ValueTrainerConfig] = load_config_from_artifact_dir(Path(artifact_dir))
+    train_config: TrainConfig | ValueTrainerConfig = load_config_from_artifact_dir(Path(artifact_dir))
     train_config = override_stats_path(train_config, STATS_PATH)
     preprocessor = Preprocessor(data_config=train_config.data)
     seq_len = preprocessor.seq_len
@@ -69,13 +68,13 @@ def play(artifact_dir: str, character: str):
         model(context_window_BL)
     logger.info("Warmup step finished")
 
-    console_kwargs = get_gui_console_kwargs(Path(MAC_EMULATOR_PATH), Path(MAC_REPLAY_DIR))
+    console_kwargs = get_gui_console_kwargs(Path(EMULATOR_PATH), Path(EVAL_REPLAY_DIR))
     logger.info(f"Console kwargs: {console_kwargs}")
     console = melee.Console(**console_kwargs)
     ego_controller = melee.Controller(console=console, port=1, type=melee.ControllerType.STANDARD)
     # opponent_controller = melee.Controller(console=console, port=2, type=melee.ControllerType.GCN_ADAPTER)
     opponent_controller = melee.Controller(console=console, port=2, type=melee.ControllerType.STANDARD)
-    console.run(iso_path=MAC_CISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
+    console.run(iso_path=ISO_PATH)  # Do not pass dolphin_user_path to avoid overwriting init kwargs
     # Connect to the console
     logger.debug("Connecting to console...")
     if not console.connect():

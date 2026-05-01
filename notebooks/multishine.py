@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """This example program demonstrates how to use the Melee API to run a console,
 setup controllers, and send button presses over to a console."""
+
 import argparse
 import concurrent.futures
 import random
@@ -15,24 +16,14 @@ from hal.emulator_helper import MatchupMenuHelper
 from hal.emulator_helper import console_manager
 from hal.emulator_helper import get_gui_console_kwargs
 from hal.local_paths import EMULATOR_PATH
+from hal.local_paths import EVAL_REPLAY_DIR
 from hal.local_paths import ISO_PATH
-from hal.local_paths import MAC_CISO_PATH
-from hal.local_paths import MAC_EMULATOR_PATH
-from hal.local_paths import MAC_REPLAY_DIR
-
-is_darwin = sys.platform == "darwin"
-iso_path = MAC_CISO_PATH if is_darwin else ISO_PATH
-emulator_path = MAC_EMULATOR_PATH if is_darwin else EMULATOR_PATH
 
 
 def check_port(value):
     ivalue = int(value)
     if ivalue < 1 or ivalue > 4:
-        raise argparse.ArgumentTypeError(
-            "%s is an invalid controller port. \
-                                         Must be 1, 2, 3, or 4."
-            % value
-        )
+        raise argparse.ArgumentTypeError(f"{value} is an invalid controller port. Must be 1, 2, 3, or 4.")
     return ivalue
 
 
@@ -60,7 +51,7 @@ def main():
     #   The Console represents the virtual or hardware system Melee is playing on.
     #   Through this object, we can get "GameState" objects per-frame so that your
     #       bot can actually "see" what's happening in the game
-    console_kwargs = get_gui_console_kwargs(emulator_path=emulator_path, replay_dir=Path(MAC_REPLAY_DIR))
+    console_kwargs = get_gui_console_kwargs(emulator_path=Path(EMULATOR_PATH), replay_dir=Path(EVAL_REPLAY_DIR))
     logger.info(f"Console kwargs: {console_kwargs}")
     console = melee.Console(**console_kwargs)
     logger.debug(f"Saving replay to {console_kwargs['replay_dir']}")
@@ -86,7 +77,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     # Run the console
-    console.run(iso_path=iso_path)
+    console.run(iso_path=ISO_PATH)
 
     # Connect to the console
     logger.debug("Connecting to console...")
@@ -111,7 +102,6 @@ def main():
     logger.debug("Controller 2 connected")
 
     costume = 0
-    framedata = melee.framedata.FrameData()
 
     menu_helper = MatchupMenuHelper(
         controller_1=controller,
