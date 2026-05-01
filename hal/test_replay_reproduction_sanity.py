@@ -13,6 +13,7 @@ from notebooks.replay_reproduction_sanity import DIGITAL_BUTTONS
 from notebooks.replay_reproduction_sanity import ReplayControllerSender
 from notebooks.replay_reproduction_sanity import TimeoutConfig
 from notebooks.replay_reproduction_sanity import pipe_value_for_axis_raw
+from notebooks.replay_reproduction_sanity import pipe_value_for_trigger_amount_via_axis
 from notebooks.replay_reproduction_sanity import pipe_value_for_trigger_raw
 from notebooks.replay_reproduction_sanity import run_reproduction
 from notebooks.replay_reproduction_sanity import trigger_raw_from_processed
@@ -66,8 +67,9 @@ def assert_pipe_call(controller: FakeController, op: str, button: melee.Button, 
         assert abs(got - want) < 1e-6, f"{op}({button}) got {last[2:]} want {args}"
 
 
-def test_sender_emits_button_transitions_analogs_and_one_flush_per_frame() -> None:
+def test_sender_normal_mode_uses_axis_pipe_for_triggers() -> None:
     controller = FakeController()
+    # default: use_exi_inputs=False (normal mode)
     sender = ReplayControllerSender({1: controller})  # type: ignore[arg-type]
 
     sender.send_frame(
@@ -98,6 +100,28 @@ def test_sender_emits_button_transitions_analogs_and_one_flush_per_frame() -> No
         fix_analog_stick(0.1),
         fix_analog_stick(0.9),
     )
+    # Normal mode uses the via-axis inverse so Triggers/L-Analog reads the right amount.
+    assert_pipe_call(
+        controller,
+        "press_shoulder",
+        melee.Button.BUTTON_L,
+        pipe_value_for_trigger_amount_via_axis(0.4),
+    )
+    assert_pipe_call(
+        controller,
+        "press_shoulder",
+        melee.Button.BUTTON_R,
+        pipe_value_for_trigger_amount_via_axis(0.8),
+    )
+    assert controller.calls.count(("flush",)) == 1
+
+
+def test_sender_exi_mode_uses_padbuf_pipe_for_triggers() -> None:
+    controller = FakeController()
+    sender = ReplayControllerSender({1: controller}, use_exi_inputs=True)  # type: ignore[arg-type]
+
+    sender.send_frame({1: controller_state(left=0.4, r=0.8)})
+
     assert_pipe_call(
         controller,
         "press_shoulder",
@@ -110,7 +134,75 @@ def test_sender_emits_button_transitions_analogs_and_one_flush_per_frame() -> No
         melee.Button.BUTTON_R,
         pipe_value_for_trigger_raw(trigger_raw_from_processed(0.8)),
     )
-    assert controller.calls.count(("flush",)) == 1
+
+
+def test_pipe_value_for_trigger_amount_via_axis_round_trips_through_dolphin() -> None:
+    """Pipe value should produce target pad.triggerLeft after Dolphin's two-stage path."""
+    for amount in (0.0, 0.05, 0.1, 0.25, 0.4, 0.5, 0.75, 1.0):
+        v = pipe_value_for_trigger_amount_via_axis(amount)
+        assert 0.0 <= v <= 1.0
+        # Pipes::SetAxis: hi = max(0, v-0.5)*2; "Axis L +" = hi.
+        # MixedTriggers (Buttons/L digital not pressed): triggers[0] = hi.
+        # GCPadEmu: pad.triggerLeft = u8(triggers[0] * 0xFF).
+        hi = max(0.0, v - 0.5) * 2
+        pad_trigger = int(hi * 0xFF)
+        # slp 0x29 logs pad_trigger / 0x8C; we want it ≈ amount.
+        recovered = pad_trigger / 0x8C
+        assert abs(recovered - amount) < 1.0 / 0x8C, f"amount={amount} recovered={recovered}"
+
+
+def test_sender_raw_main_stick_opt_in() -> None:
+    """With use_raw_main_stick=True and slp >= 3.15.0, both axes go raw."""
+    controller = FakeController()
+    sender = ReplayControllerSender(
+        {1: controller},  # type: ignore[arg-type]
+        slp_version=(3, 16, 0),
+        use_raw_main_stick=True,
+    )
+
+    sender.send_frame(
+        {
+            1: controller_state(
+                main=(0.00625, 0.6875),
+                raw_main=(-98, 30),
+            )
+        }
+    )
+
+    assert_pipe_call(
+        controller,
+        "tilt_analog",
+        melee.Button.BUTTON_MAIN,
+        pipe_value_for_axis_raw(-98),
+        pipe_value_for_axis_raw(30),
+    )
+
+
+def test_sender_raw_main_stick_pre_3_15_x_only() -> None:
+    """slp 1.2.0..3.14.x: X from raw byte, Y from processed."""
+    controller = FakeController()
+    sender = ReplayControllerSender(
+        {1: controller},  # type: ignore[arg-type]
+        slp_version=(3, 7, 0),
+        use_raw_main_stick=True,
+    )
+
+    sender.send_frame(
+        {
+            1: controller_state(
+                main=(0.5, 0.018750012),
+                raw_main=(-28, 0),
+            )
+        }
+    )
+
+    assert_pipe_call(
+        controller,
+        "tilt_analog",
+        melee.Button.BUTTON_MAIN,
+        pipe_value_for_axis_raw(-28),
+        fix_analog_stick(0.018750012),
+    )
 
 
 def test_sender_holds_buttons_without_duplicate_press_and_releases_changes() -> None:

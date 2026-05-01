@@ -14,8 +14,10 @@ processor turns back into the slp's recorded values. Naive values cause
 double-quantization and divergence — see the README's "Why" sections for
 concrete numeric traces.
 
-Status (2026-05-01): frames -123..47 of the dev replay reproduce exactly;
-frame 48+ drift is suspected UCF; see the README's "Open" section.
+Status (2026-05-01): in `normal` mode, `start_frame=0 prefix=300` of the
+dev replay reproduces with 21 hitlag_left mismatches at hit moments —
+all other fields bit-exact. `ffw` mode has separate staleness issues
+(EXI override race). See the README + `replay_reproduction_sanity.repro_log.md`.
 """
 
 from __future__ import annotations
@@ -38,6 +40,10 @@ from melee.controller import fix_analog_stick
 
 from hal.local_paths import EMULATOR_PATH
 from hal.local_paths import ISO_PATH
+
+SLP_RAW_MAIN_X_VERSION: tuple[int, int, int] = (1, 2, 0)
+SLP_RAW_MAIN_Y_VERSION: tuple[int, int, int] = (3, 15, 0)
+SLP_RAW_C_STICK_VERSION: tuple[int, int, int] = (3, 17, 0)
 
 TRIGGER_DEADZONE_RAW: int = 0x2A
 TRIGGER_MAX_RAW: int = 0x8C
@@ -149,6 +155,7 @@ class ReplayMetadata:
     costumes: dict[int, int]
     first_frame: int
     last_frame: int
+    slp_version: tuple[int, int, int] = (0, 0, 0)
 
 
 @dataclass(frozen=True)
@@ -177,30 +184,45 @@ class CostumeCorrectionState:
 class ReplayControllerSender:
     """Submit slp-recorded controller states through libmelee/Dolphin's pipe.
 
-    The slp records post-game-process stick floats (mapped to [0, 1] by
-    libmelee) and a `raw / 0x8C`-scale combined trigger float. To reproduce
-    them bit-exactly we pre-quantize the pipe value so that, after
-    Dolphin's `floor((v-0.5)*254)` (sticks) or `u8(v*255)` (triggers)
-    pass, the resulting padBuf byte is what the live game's stick
-    processor will turn back into the same recorded value.
+    Default mapping (works on every slp >= 0.1.0 since it only relies on the
+    `processed` floats at slp 0x19/0x1D/0x21/0x25/0x29):
+        Main stick X/Y, c-stick X/Y: pipe = fix_analog_stick(processed).
+            Exact inverse of `processed = clamp(raw, -80, 80) / 80` inside
+            the unit circle, naturally saturating outside.
+        Triggers (L + R analog): raw = round(processed * 0x8C);
+            pipe = (raw + 0.5) / 255. slp 0x29 records `raw / 0x8C`.
+        Buttons: physical-bit transitions → press_button / release_button.
 
-    Per-channel inverses (see `notebooks/replay_reproduction_sanity.README.md`):
-        Sticks (main + c-stick): `pipe = fix_analog_stick(libmelee_processed)`
-            — exact inverse of `processed = clamp(raw, -80, 80) / 80` inside
-            the unit circle, saturating at the boundary.
-        Triggers (L + R analog): `raw = round(processed * 0x8C);
-            pipe = (raw + 0.5) / 255` — slp 0x29 stores `raw/0x8C`, no
-            deadzone applied to the recorded value.
-        Buttons: physical-bit transitions mapped to `press_button` /
-            `release_button`.
+    Optional opt-in: `use_raw_main_stick=True` injects the slp's raw stick
+    bytes (0x3B / 0x40) directly into Dolphin's padBuf via
+    `pipe_value_for_axis_raw`. **This does not currently reproduce
+    bit-exactly on real online replays** because the slp's recorded
+    `processed` (0x19) is not a naive `clamp(raw, -80, 80) / 80` of the
+    recorded `raw` (0x3B) — see the empirical table in the README. Kept
+    here as plumbing for future investigations (UCF + per-stick deadzone
+    calibration). When `use_raw_main_stick` is True, falls back to the
+    default for any axis whose raw byte isn't actually in the source slp
+    (slp_version < 1.2.0 for X, < 3.15.0 for Y).
 
     Construct the underlying `melee.Controller` with
     `fix_analog_inputs=False` so libmelee passes the pre-quantized pipe
     value through verbatim.
     """
 
-    def __init__(self, controllers: dict[int, melee.Controller]) -> None:
+    def __init__(
+        self,
+        controllers: dict[int, melee.Controller],
+        slp_version: tuple[int, int, int] = (0, 0, 0),
+        *,
+        use_raw_main_stick: bool = False,
+        use_exi_inputs: bool = False,
+    ) -> None:
         self.controllers = controllers
+        self.slp_version = slp_version
+        self.use_raw_main_stick = use_raw_main_stick
+        self.use_exi_inputs = use_exi_inputs
+        self.has_raw_main_x = use_raw_main_stick and slp_version >= SLP_RAW_MAIN_X_VERSION
+        self.has_raw_main_y = use_raw_main_stick and slp_version >= SLP_RAW_MAIN_Y_VERSION
         self.previous_buttons: dict[int, dict[melee.Button, bool]] = {
             port: {button: False for button in DIGITAL_BUTTONS} for port in controllers
         }
@@ -225,8 +247,15 @@ class ReplayControllerSender:
 
             main_x = float(controller_state.main_stick[0])
             main_y = float(controller_state.main_stick[1])
-            main_pipe_x = fix_analog_stick(main_x)
-            main_pipe_y = fix_analog_stick(main_y)
+            raw_x_src, raw_y_src = controller_state.raw_main_stick
+            if self.has_raw_main_x:
+                main_pipe_x = pipe_value_for_axis_raw(int(raw_x_src))
+            else:
+                main_pipe_x = fix_analog_stick(main_x)
+            if self.has_raw_main_y:
+                main_pipe_y = pipe_value_for_axis_raw(int(raw_y_src))
+            else:
+                main_pipe_y = fix_analog_stick(main_y)
 
             c_x = float(controller_state.c_stick[0])
             c_y = float(controller_state.c_stick[1])
@@ -237,8 +266,12 @@ class ReplayControllerSender:
             r_processed = float(controller_state.r_shoulder)
             l_raw = trigger_raw_from_processed(l_processed)
             r_raw = trigger_raw_from_processed(r_processed)
-            l_pipe = pipe_value_for_trigger_raw(l_raw)
-            r_pipe = pipe_value_for_trigger_raw(r_raw)
+            if self.use_exi_inputs:
+                l_pipe = pipe_value_for_trigger_raw(l_raw)
+                r_pipe = pipe_value_for_trigger_raw(r_raw)
+            else:
+                l_pipe = pipe_value_for_trigger_amount_via_axis(l_processed)
+                r_pipe = pipe_value_for_trigger_amount_via_axis(r_processed)
 
             controller.tilt_analog(melee.Button.BUTTON_MAIN, main_pipe_x, main_pipe_y)
             controller.tilt_analog(melee.Button.BUTTON_C, c_pipe_x, c_pipe_y)
@@ -249,6 +282,9 @@ class ReplayControllerSender:
             commands[port] = {
                 "digital": {button_name(button): previous[button] for button in DIGITAL_BUTTONS},
                 "main_stick_processed": [main_x, main_y],
+                "main_stick_raw_src": [int(raw_x_src), int(raw_y_src)],
+                "main_stick_raw_used_x": self.has_raw_main_x,
+                "main_stick_raw_used_y": self.has_raw_main_y,
                 "main_stick_pipe": [main_pipe_x, main_pipe_y],
                 "c_stick_processed": [c_x, c_y],
                 "c_stick_pipe": [c_pipe_x, c_pipe_y],
@@ -307,9 +343,38 @@ def pipe_value_for_axis_raw(raw: int) -> float:
 
 
 def pipe_value_for_trigger_raw(raw: int) -> float:
-    """Pipe float v that yields Dolphin padBuf = raw via u8(v*255)."""
+    """Pipe float v that yields Dolphin padBuf = raw via u8(v*255).
+
+    Use with FFW / EXI mode where the "Allow Bot Input Overrides" gecko
+    code reads `padBuf[6/7]` directly via `prepareOverwriteInputs`.
+    """
     raw_clamped = max(0, min(255, int(raw)))
     return min(1.0, max(0.0, (raw_clamped + 0.5) / 255.0))
+
+
+def pipe_value_for_trigger_amount_via_axis(amount: float) -> float:
+    """Pipe float v for normal mode (no EXI override).
+
+    GCPadEmu's `pad.triggerLeft = u8(triggers[0] * 0xFF)`, where triggers[0]
+    comes from `MixedTriggers::GetState` which reads the analog "Axis L +"
+    state. `Pipes::SetAxis("L", v)` sets `Axis L + = max(0, v-0.5)*2`.
+    To make `pad.triggerLeft = round(amount*0x8C)` (so slp 0x29 logs
+    `amount`), we need `Axis L + = round(amount*0x8C) / 0xFF`, i.e.,
+    pipe `v = (Axis L +)/2 + 0.5`.
+
+    The previous trigger mapping (`pipe_value_for_trigger_raw`) put the raw
+    byte into `padBuf[6]`, but normal mode doesn't read padBuf — it routes
+    through ControllerInterface bindings. With pipe < 0.5 the +/- split
+    leaves `Axis L + = 0`, so the trigger reads 0. That's the source of
+    the L_shoulder=0 mismatch starting at frame -4 in the dev replay.
+    """
+    if amount <= 0:
+        return 0.5
+    raw_target = max(0, min(255, round(amount * TRIGGER_MAX_RAW)))
+    # Pick the bin midpoint so that u8(axis_state * 0xFF) == raw_target despite
+    # C++ truncation in `pad.triggerLeft = u8(triggers[0] * 0xFF)`.
+    axis_state = (raw_target + 0.5) / 255.0
+    return min(1.0, max(0.0, axis_state / 2 + 0.5))
 
 
 def axis_raw_from_processed(processed_libmelee: float) -> int:
@@ -449,6 +514,7 @@ def read_source_replay(replay_path: Path) -> tuple[ReplayMetadata, dict[int, Fra
                     costumes={port: int(state.players[port].costume) for port in ports},
                     first_frame=int(state.frame),
                     last_frame=int(state.frame),
+                    slp_version=tuple(console.slp_version_tuple or (0, 0, 0)),  # type: ignore[arg-type]
                 )
     finally:
         console.stop()
@@ -734,6 +800,7 @@ def run_mode(
     stop_on_mismatch: bool,
     debug_dir: Path | None,
     timeouts: TimeoutConfig,
+    use_raw_main_stick: bool = False,
 ) -> ReproductionResult:
     run_start = time.monotonic()
     replay_dir = (debug_dir or Path("/tmp/replay_reproduction_sanity")) / mode / "replays"
@@ -744,7 +811,12 @@ def run_mode(
         port: melee.Controller(console=console, port=port, type=melee.ControllerType.STANDARD, fix_analog_inputs=False)
         for port in metadata.ports
     }
-    sender = ReplayControllerSender(controllers)
+    sender = ReplayControllerSender(
+        controllers,
+        slp_version=metadata.slp_version,
+        use_raw_main_stick=use_raw_main_stick,
+        use_exi_inputs=(mode == "ffw"),
+    )
     debug = JsonlDebugWriter(debug_dir, mode)
     result = ReproductionResult(mode=mode)
     history: deque[dict[str, Any]] = deque(maxlen=12)
@@ -880,6 +952,7 @@ def run_reproduction(
     stop_on_mismatch: bool = True,
     debug_dir: Path | None = None,
     timeouts: TimeoutConfig | None = None,
+    use_raw_main_stick: bool = False,
 ) -> list[ReproductionResult]:
     if timeouts is None:
         timeouts = TimeoutConfig()
@@ -913,6 +986,7 @@ def run_reproduction(
             stop_on_mismatch=stop_on_mismatch,
             debug_dir=debug_dir,
             timeouts=timeouts,
+            use_raw_main_stick=use_raw_main_stick,
         )
         for mode in modes
     ]
@@ -929,6 +1003,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--debug-dir", type=Path, default=None)
     parser.add_argument("--stop-on-mismatch", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--continue-on-mismatch", dest="stop_on_mismatch", action="store_false")
+    parser.add_argument(
+        "--use-raw-main-stick",
+        action="store_true",
+        help="Inject slp 0x3B/0x40 directly (experimental; see README).",
+    )
     return parser.parse_args(argv)
 
 
@@ -946,6 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
         start_frame=args.start_frame,
         stop_on_mismatch=args.stop_on_mismatch,
         debug_dir=args.debug_dir,
+        use_raw_main_stick=args.use_raw_main_stick,
     )
     return 1 if any(result.mismatches for result in results) else 0
 

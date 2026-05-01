@@ -20,13 +20,73 @@ uv run python notebooks/replay_reproduction_sanity.py \
 
 ## Status (2026-05-01)
 
-- Frames **−123 through 47** of `Game_20201215T165952.slp` reproduce
-  bit-exactly under all comparison fields (171 consecutive frames). This
-  covers the first significant divergence point (`source frame −4`) that
-  the original handoff flagged.
-- A secondary divergence begins at frame **48**: port 2 enters hitstun one
-  frame earlier in live than in source. Hypothesized to be UCF
-  re-mutating injected raw bytes — see "Open: frame-48 drift" below.
+`normal` mode — `Game_20201215T165952.slp`, `start_frame=0 prefix=300`:
+21 mismatches across 300 frames, all `hitlag_left` drifts (4-7 frames
+extra hitlag) at hit moments (frames 42-45 and 149-155). Action and
+position match exactly. The remaining drift looks like an attribute
+mismatch on hit (electric vs non-electric, or shield vs body). All
+other comparison fields are bit-exact.
+
+`ffw` mode is broken differently: `controller.main_stick.0` diverges
+from frame ~−117 onward. EXI input override appears to be using stale
+padBuf bytes between our pipe writes — separate timing issue. See the
+investigation log.
+
+The previous handoff's "171 frames bit-exact" claim was incorrect: the
+prior debug data (`/tmp/repro_debug_neg123_v2/`) actually shows
+`controller.l_shoulder` divergence from frame **−4** because of a
+trigger inverse bug that was fixed in this revision (see "Fix #1:
+mode-aware trigger inverse" below).
+
+## Fix #1: mode-aware trigger inverse (2026-05-01)
+
+Slippi-Ishiiruka's `Pipes::SetAxis("L", v)` sets BOTH
+`padBuf[6] = u8(v*255)` AND ControllerInterface's
+`Axis L + = max(0, v - 0.5) * 2`. libmelee's GCPadNew.ini binds
+`Triggers/L-Analog = Axis L +`, so:
+
+- **Normal mode** (no EXI override) reads triggers via
+  ControllerInterface → GCPadEmu → `pad.triggerLeft = u8(triggers[0]*0xFF)`
+  where `triggers[0] = Axis L +`. Pipe values < 0.5 land `Axis L + = 0`,
+  so triggers register as 0. The previous trigger inverse
+  `pipe_value_for_trigger_raw(raw) = (raw + 0.5)/255 = 0.22` for raw=56
+  (amount=0.4) — that's < 0.5 so live read trigger = 0. Bug.
+- **FFW mode** (EXI override via `Allow Bot Input Overrides` gecko)
+  reads `padBuf[6]` directly via `prepareOverwriteInputs`. So the
+  raw-byte pipe value that places `padBuf[6] = round(amount*0x8C)`
+  works correctly there.
+
+Two-mode trigger inverse:
+
+- `pipe_value_for_trigger_raw(raw) = (raw + 0.5)/255` — for FFW.
+  Sets `padBuf[6] = raw`.
+- `pipe_value_for_trigger_amount_via_axis(amount) =
+   (round(amount*0x8C) + 0.5)/510 + 0.5` — for normal.
+  Sets `Axis L + ≈ round(amount*0x8C)/0xFF` so
+  `pad.triggerLeft = round(amount*0x8C)`, slp 0x29 logs `amount`.
+
+`ReplayControllerSender(use_exi_inputs=True/False)` switches.
+
+## Open: hitlag_left drift on hit moments
+
+Source has hitlag_left = 0 by frame 42 (post-hitlag); live has 4 (still
+in hitlag). Identical action and position. At frame 41-42 in source,
+port 2 (Marth) was attacking with FAIR and got hit by port 1 (Falco)'s
+laser. Hit-detection landed in both source and live (action transitions
+match), but live's hitlag duration was 4 frames longer.
+
+slp 0x3B (raw byte) trace for the relevant frames shows source's bytes
+are larger-magnitude than ours (raw=-84 vs our injected -63 for the
+same processed=-0.7875). The processed value matches because UCF's
+"Pad Buffer + 1.0 Cardinals" or the game's clamp-to-80 logic produces
+the same float for both. But the BYTE difference may flip a hit
+attribute selection (e.g., which sub-hitbox of the laser). Worth
+investigating but not fundamentally blocking.
+
+## Investigation log
+
+See `notebooks/replay_reproduction_sanity.repro_log.md` for the running
+notebook of hypotheses, evidence, and dead ends.
 
 ## The pipe → game → slp chain (verified from source)
 
@@ -104,14 +164,14 @@ applied during recording.
 
 In `notebooks/replay_reproduction_sanity.py::ReplayControllerSender.send_frame`:
 
-| Channel       | Source (slp/libmelee) | Pipe value to submit                                                |
-|---            |---                    |---                                                                  |
-| Main stick X  | `main_stick[0]` ∈ [0,1] | `fix_analog_stick(main_stick[0])`                                 |
-| Main stick Y  | `main_stick[1]`       | `fix_analog_stick(main_stick[1])`                                   |
-| C-stick X/Y   | `c_stick[i]`          | `fix_analog_stick(c_stick[i])`                                      |
-| L analog      | `l_shoulder` ∈ [0,1]  | `(round(l_shoulder · 0x8C) + 0.5) / 255`                            |
-| R analog      | `r_shoulder`          | `(round(r_shoulder · 0x8C) + 0.5) / 255`                            |
-| Buttons       | physical bits         | `press_button` / `release_button` on transitions                    |
+| Channel       | Source (slp/libmelee) | Pipe value (normal mode)                                            | Pipe value (FFW / EXI mode)                                         |
+|---            |---                    |---                                                                  |---                                                                  |
+| Main stick X  | `main_stick[0]` ∈ [0,1] | `fix_analog_stick(main_stick[0])`                                 | same                                                                |
+| Main stick Y  | `main_stick[1]`       | `fix_analog_stick(main_stick[1])`                                   | same                                                                |
+| C-stick X/Y   | `c_stick[i]`          | `fix_analog_stick(c_stick[i])`                                      | same                                                                |
+| L analog      | `l_shoulder` ∈ [0,1]  | `pipe_value_for_trigger_amount_via_axis(l_shoulder)` — see Fix #1 | `(round(l_shoulder · 0x8C) + 0.5) / 255`                            |
+| R analog      | `r_shoulder`          | same shape                                                          | `(round(r_shoulder · 0x8C) + 0.5) / 255`                            |
+| Buttons       | physical bits         | `press_button` / `release_button` on transitions                    | same                                                                |
 
 `Controller(fix_analog_inputs=False)` so libmelee passes the
 pre-quantized pipe value through verbatim.
@@ -173,7 +233,23 @@ Once UCF behavior is pinned down (next section), feeding raws may become
 the cleanest path — but only with UCF disabled on the live emulator and a
 verified raw-byte semantic.
 
-## Open: frame-48 drift (UCF hypothesis, next agent please finish)
+## (Resolved) frame-48 drift was the trigger bug
+
+The previous handoff attributed frame-48 drift to UCF and `0x3B`
+re-mutation. After fixing the trigger inverse (Fix #1), the original
+"frame-48" symptoms went away — port 2's hitstun timing now matches
+through frame 47 and beyond. UCF is in fact loaded in our live runs
+(the global `[Gecko_Enabled]` `$Required: General Codes` block
+embeds UCF 0.84), so the source/live UCF state was equal all along;
+the divergence was caused by the trigger `Axis L +` mismatch
+masquerading as a downstream physics issue.
+
+The remaining (much smaller) divergence is the hitlag_left drift
+described above.
+
+## (Historical) frame-48 drift hypothesis text
+
+
 
 After the fix above, frames `−123..47` reproduce exactly. At frame 48 the
 state diverges: port 2's `action_frame` is off by 1, `hitstun_frames_left`
