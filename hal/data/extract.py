@@ -45,6 +45,7 @@ def extract_archive(filepath, dry_run=False, remove=False) -> bool:
             bufsize=1,
         ) as proc:
             # Stream output line by line.
+            assert proc.stdout is not None
             for line in proc.stdout:
                 print(line, end="")  # Already contains a newline.
             proc.wait()

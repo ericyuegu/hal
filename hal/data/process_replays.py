@@ -11,12 +11,12 @@ from typing import Any
 
 import melee
 import numpy as np
-from constants import NP_MASK_VALUE
-from data.calculate_stats import calculate_statistics_for_mds
 from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
 
+from hal.constants import NP_MASK_VALUE
+from hal.data.calculate_stats import calculate_statistics_for_mds
 from hal.data.schema import MDS_DTYPE_STR_BY_COLUMN
 from hal.data.schema import NP_TYPE_BY_COLUMN
 from hal.gamestate_utils import FrameData

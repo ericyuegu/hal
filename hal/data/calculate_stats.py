@@ -3,9 +3,10 @@ import json
 
 import numpy as np
 import numpy.ma as ma
-from constants import NP_MASK_VALUE
 from loguru import logger
 from streaming import StreamingDataset
+
+from hal.constants import NP_MASK_VALUE
 
 
 def calculate_statistics_for_mds(input_path: str, output_path: str, max_examples: int | None) -> None:
