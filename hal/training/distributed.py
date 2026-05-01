@@ -1,12 +1,11 @@
 import builtins
+import contextlib
 import functools
 import os
 import time
 import traceback
+from collections.abc import Callable
 from typing import Any
-from typing import Callable
-from typing import Optional
-from typing import Union
 
 import torch
 import torch.distributed
@@ -56,7 +55,7 @@ def log_if_master(message: Any) -> None:
         logger.info(message)
 
 
-def trange(*args, **kwargs) -> Union[range, tqdm]:
+def trange(*args, **kwargs) -> range | tqdm:
     if not is_master():
         return range(*args)
     return tqdm_module.trange(*args, **kwargs)
@@ -64,10 +63,8 @@ def trange(*args, **kwargs) -> Union[range, tqdm]:
 
 def cuda_setup() -> None:
     torch.backends.cudnn.benchmark = True
-    try:
+    with contextlib.suppress(RuntimeError):
         torch.multiprocessing.set_start_method("spawn")
-    except RuntimeError:
-        pass
 
 
 def print(*args, **kwargs) -> None:
@@ -83,7 +80,7 @@ def get_world_size() -> int:
 
 def maybe_wrap_model_distributed(
     m: torch.nn.Module,
-) -> Union[torch.nn.Module, torch.nn.parallel.DistributedDataParallel]:
+) -> torch.nn.Module | torch.nn.parallel.DistributedDataParallel:
     if not torch.distributed.is_initialized():
         return m.to(get_device())
     return torch.nn.parallel.DistributedDataParallel(m.to(get_device_id()), device_ids=[get_device_id()])
@@ -93,7 +90,7 @@ def auto_distribute(f: Callable) -> Callable:
     """Automatically initialize process group for training loop."""
 
     @functools.wraps(f)
-    def dist_wrapped(rank: Optional[int], world_size: Optional[int], *args):
+    def dist_wrapped(rank: int | None, world_size: int | None, *args):
         if rank is None or world_size is None:
             return f(*args)
         os.environ["WORLD_SIZE"] = str(world_size)

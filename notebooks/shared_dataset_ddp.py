@@ -23,12 +23,12 @@ class NumpySerializedList:
             buffer = pickle.dumps(data, protocol=-1)
             return np.frombuffer(buffer, dtype=np.uint8)
 
-        print("Serializing {} elements to byte tensors and concatenating them all ...".format(len(lst)))
+        print(f"Serializing {len(lst)} elements to byte tensors and concatenating them all ...")
         self._lst = [_serialize(x) for x in lst]
         self._addr = np.asarray([len(x) for x in self._lst], dtype=np.int64)
         self._addr = np.cumsum(self._addr)
         self._lst = np.concatenate(self._lst)
-        print("Serialized dataset takes {:.2f} MiB".format(len(self._lst) / 1024**2))
+        print(f"Serialized dataset takes {len(self._lst) / 1024**2:.2f} MiB")
 
     def __len__(self) -> int:
         return len(self._addr)

@@ -71,20 +71,20 @@ for key in x_train.keys():
                 t, feature_idx = idx.tolist()
                 feature = gamestate_fields[feature_idx % len(gamestate_fields)]
                 print(
-                    f"  Frame {t:03d}: {feature:<15} train={x_train[0,t]['gamestate'][feature_idx].item()} test={x_test[0,t]['gamestate'][feature_idx].item()}"
+                    f"  Frame {t:03d}: {feature:<15} train={x_train[0, t]['gamestate'][feature_idx].item()} test={x_test[0, t]['gamestate'][feature_idx].item()}"
                 )
         elif key == "controller":
             # For controller tensor, show which frames are different
             diff_frames = torch.any(diff_mask, dim=-1)
             for t in torch.nonzero(diff_frames, as_tuple=True)[0]:
                 print(f"  Frame {t:03d}:")
-                print(f"    train: {x_train[0,t][key].tolist()}")
-                print(f"    test:  {x_test[0,t][key].tolist()}")
+                print(f"    train: {x_train[0, t][key].tolist()}")
+                print(f"    test:  {x_test[0, t][key].tolist()}")
         else:
             # For other tensors, show the different values
             diff_indices = torch.nonzero(diff_mask, as_tuple=True)[0]
             for t in diff_indices:
-                print(f"  Frame {t:03d}: train={x_train[0,t][key].item()} test={x_test[0,t][key].item()}")
+                print(f"  Frame {t:03d}: train={x_train[0, t][key].item()} test={x_test[0, t][key].item()}")
 
 print("\nModel Prediction Differences from Ground Truth:")
 y_hat_train = model(x_train)
@@ -108,24 +108,24 @@ prediction_differences.update(torch.nonzero(stick_diff_test, as_tuple=True)[0].t
 for t in sorted(prediction_differences):
     print(f"\nFrame {t:03d}:")
     print("Buttons:")
-    print(f"  Train prediction: {y_hat_train['buttons'][0,t].argmax().item():>3d}")
-    print(f"  Train actual:     {y_train['buttons'][0,t].argmax().item():>3d}")
-    print(f"  Test prediction:  {y_hat_test['buttons'][0,t].argmax().item():>3d}")
-    print(f"  Test actual:      {y_test['buttons'][0,t].argmax().item():>3d}")
+    print(f"  Train prediction: {y_hat_train['buttons'][0, t].argmax().item():>3d}")
+    print(f"  Train actual:     {y_train['buttons'][0, t].argmax().item():>3d}")
+    print(f"  Test prediction:  {y_hat_test['buttons'][0, t].argmax().item():>3d}")
+    print(f"  Test actual:      {y_test['buttons'][0, t].argmax().item():>3d}")
 
     print("\nMain Stick:")
-    print(f"  Train prediction: {y_hat_train['main_stick'][0,t].argmax().item():>3d}")
-    print(f"  Train actual:     {y_train['main_stick'][0,t].argmax().item():>3d}")
-    print(f"  Test prediction:  {y_hat_test['main_stick'][0,t].argmax().item():>3d}")
-    print(f"  Test actual:      {y_test['main_stick'][0,t].argmax().item():>3d}")
+    print(f"  Train prediction: {y_hat_train['main_stick'][0, t].argmax().item():>3d}")
+    print(f"  Train actual:     {y_train['main_stick'][0, t].argmax().item():>3d}")
+    print(f"  Test prediction:  {y_hat_test['main_stick'][0, t].argmax().item():>3d}")
+    print(f"  Test actual:      {y_test['main_stick'][0, t].argmax().item():>3d}")
 
     # Show input differences at frames where predictions diverge
     print("\nInput state at this frame:")
     for key in x_train.keys():
         if torch.any(x_train[0, t][key] != x_test[0, t][key]):
             print(f"  {key}:")
-            print(f"    train: {x_train[0,t][key].tolist()}")
-            print(f"    test:  {x_test[0,t][key].tolist()}")
+            print(f"    train: {x_train[0, t][key].tolist()}")
+            print(f"    test:  {x_test[0, t][key].tolist()}")
 
 # %%
 torch.all(x_train[0, :103]["gamestate"] == x_test[0, :103]["gamestate"], dim=-1)

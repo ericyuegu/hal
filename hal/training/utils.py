@@ -1,18 +1,15 @@
 import functools
 import subprocess
+from collections.abc import Iterable
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterable
-from typing import Iterator
-from typing import TypeVar
 
 import numpy as np
 import torch
 
-T = TypeVar("T")
-
 
 def get_git_repo_root() -> Path:
-    cmd = subprocess.check_output("git rev-parse --show-toplevel".split(" "))
+    cmd = subprocess.check_output(["git", "rev-parse", "--show-toplevel"])
     root_dir = Path(cmd.decode("utf-8").strip(" \n"))
     assert root_dir.is_dir()
     return root_dir
@@ -37,11 +34,10 @@ def report_module_weights(m: torch.nn.Module):
     return "\n".join(f"{k:<{width}} {np.prod(s):>10} {str(s):>16}" for k, s in weights)
 
 
-def repeater(it: Iterable[T]) -> Iterator[T]:
+def repeater[T](it: Iterable[T]) -> Iterator[T]:
     """Helper function to repeat an iterator in a memory efficient way."""
     while True:
-        for x in it:
-            yield x
+        yield from it
 
 
 def time_format(t: float) -> str:
@@ -52,7 +48,7 @@ def time_format(t: float) -> str:
     return f"{hours:02d}:{mins:02d}:{secs:02d}"
 
 
-def move_tensors_to_device(inputs: T, device: str, non_blocking=True) -> T:
+def move_tensors_to_device[T](inputs: T, device: str, non_blocking=True) -> T:
     if isinstance(inputs, dict):
         return {k: move_tensors_to_device(v, device) for k, v in inputs.items()}
     elif isinstance(inputs, (list, tuple)):

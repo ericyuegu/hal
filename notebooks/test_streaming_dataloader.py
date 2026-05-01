@@ -1,16 +1,14 @@
 # %%
-from tensordict import TensorDict
-import torch
-import pandas as pd
-from pathlib import Path
 
+import pandas as pd
+import torch
 from streaming import StreamingDataset
-from hal.preprocess.target_configs import preprocess_targets_v1
-from hal.training.config import DataConfig
+from tensordict import TensorDict
+
+from hal.preprocess.transformations import preprocess_controller_inputs_fine_shoulder
 from hal.training.config import DataConfig
 from hal.training.config import TrainConfig
 from hal.training.streaming_dataloader import get_dataloaders
-from hal.preprocess.transformations import preprocess_controller_inputs_fine_shoulder
 from hal.training.streaming_dataset import HALStreamingDataset
 
 torch.set_printoptions(precision=4, sci_mode=False, linewidth=120, threshold=torch.inf)
@@ -60,7 +58,7 @@ ds[0]
 # %%
 import torch
 
-torch.stack([ds[0]["inputs"], ds, dim=0)
+torch.stack(ds[0]["inputs"], ds, dim=0)
 # %%
 import os
 
@@ -83,7 +81,7 @@ for batch in train_loader:
     i += 1
     if i > 10:
         break
-    
+
 
 # %%
 config

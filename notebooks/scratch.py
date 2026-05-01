@@ -83,15 +83,13 @@ print(x["p1_percent"])
 print(x["p2_stock"])
 print(x["p2_percent"])
 
-import random
-
 
 # %%
 def has_iceclimbers(replay_path: Path):
     try:
         console = melee.Console(path=str(replay_path), is_dolphin=False, allow_old_version=True)
         console.connect()
-    except Exception as e:
+    except Exception:
         return None
 
     try:
@@ -161,7 +159,6 @@ for k, v in np_dict.items():
 for k in np_dict.keys():
     print(k)
 # %%
-import numpy as np
 import numpy.ma as ma
 
 # %%

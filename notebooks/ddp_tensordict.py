@@ -1,5 +1,6 @@
 # %%
 """Using DDP with TensorDict"""
+
 import os
 import sys
 
@@ -164,9 +165,9 @@ if __name__ == "__main__":
     world_size = torch.cuda.device_count()
 
     # Load data into shared memory
-    print(f"Loading data")
+    print("Loading data")
     training_data_td, test_data_td = load_data()
 
     # Use mp.spawn to launch the training process on each GPU
-    print(f"Spawning workers")
+    print("Spawning workers")
     mp.spawn(train_ddp, args=(world_size, training_data_td, test_data_td), nprocs=world_size, join=True)

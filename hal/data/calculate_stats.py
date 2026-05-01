@@ -1,6 +1,5 @@
 import argparse
 import json
-from typing import Optional
 
 import numpy as np
 import numpy.ma as ma
@@ -9,7 +8,7 @@ from loguru import logger
 from streaming import StreamingDataset
 
 
-def calculate_statistics_for_mds(input_path: str, output_path: str, max_examples: Optional[int]) -> None:
+def calculate_statistics_for_mds(input_path: str, output_path: str, max_examples: int | None) -> None:
     """Calculate and save statistics for each feature to a JSON."""
     dataset = StreamingDataset(local=input_path, remote=None, batch_size=1, shuffle=False)
     statistics = {}
@@ -71,7 +70,7 @@ def calculate_statistics_for_mds(input_path: str, output_path: str, max_examples
         logger.info(f"Saving statistics to {output_path}")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(statistics, f)
-    except IOError as e:
+    except OSError as e:
         logger.error(f"Error saving statistics: {e}")
 
     logger.info("Statistics calculation completed")

@@ -1,6 +1,5 @@
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
-from typing import Tuple
 
 import torch
 from loguru import logger
@@ -56,7 +55,7 @@ def pre_download_streams(config: TrainConfig) -> None:
                             break
 
 
-def get_dataloaders(config: TrainConfig) -> Tuple[StreamingDataLoader, StreamingDataLoader]:
+def get_dataloaders(config: TrainConfig) -> tuple[StreamingDataLoader, StreamingDataLoader]:
     batch_size = config.local_batch_size
 
     if is_master():

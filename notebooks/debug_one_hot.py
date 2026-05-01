@@ -1,5 +1,4 @@
 # %%
-from typing import Dict
 
 import numpy as np
 import pyarrow as pa
@@ -30,7 +29,7 @@ INPUT_FEATURES_TO_STANDARDIZE = (
 TARGET_FEATURES_TO_ONE_HOT_ENCODE = ("button_a", "button_b", "button_x", "button_z", "button_l")
 
 
-def pyarrow_table_to_np_dict(table: pa.Table) -> Dict[str, np.ndarray]:
+def pyarrow_table_to_np_dict(table: pa.Table) -> dict[str, np.ndarray]:
     """Convert pyarrow table to dictionary of numpy arrays."""
     return {name: col.to_numpy() for name, col in zip(table.column_names, table.columns)}
 
@@ -223,7 +222,7 @@ feature_processors = {
 }
 
 
-def preprocess_features_v0(sample: Dict[str, np.ndarray], stats: Dict[str, FeatureStats]) -> Dict[str, np.ndarray]:
+def preprocess_features_v0(sample: dict[str, np.ndarray], stats: dict[str, FeatureStats]) -> dict[str, np.ndarray]:
     """Preprocess features."""
     preprocessed = {}
 

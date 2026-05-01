@@ -1,4 +1,5 @@
 """Adapted from Karpathy's nanoGPT: https://github.com/karpathy/nanoGPT."""
+
 import math
 
 import attr
@@ -229,7 +230,7 @@ class GPTv1(BaseGPT):
 
     def forward(self, inputs: TensorDict):
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # concatenate embeddings and numerical inputs -> project down
         # TODO handle Nana, call embed twice and add down proj
@@ -305,7 +306,7 @@ class GPTv2Controller(GPTv1):
 
     def forward(self, inputs: TensorDict):
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -412,7 +413,7 @@ class GPTv2_1Controller(BaseGPT):
 
     def forward(self, inputs: TensorDict):
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -519,7 +520,7 @@ class CausalSelfAttentionRelativePosition(nn.Module):
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -616,7 +617,7 @@ class GPTv3(BaseGPT):
 
     def forward(self, inputs: TensorDict):
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -730,7 +731,7 @@ class GPTv4Controller(BaseGPT):
 
     def forward(self, inputs: TensorDict):
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -828,7 +829,7 @@ class GPTv5Controller(GPTv4Controller):
 
     def forward(self, inputs: TensorDict) -> TensorDict:
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -935,7 +936,7 @@ class GPTv5_1Controller(GPTv4Controller):
 
     def forward(self, inputs: TensorDict) -> TensorDict:
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -1102,7 +1103,7 @@ class GPTv6Controller(GPTv4Controller):
 
     def forward(self, inputs: TensorDict) -> TensorDict:
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -1192,10 +1193,10 @@ def sinusoidal_positional_encoding_1d(seq_len: int, d_model: int, device: torch.
     :return: seq_len*d_model position matrix
     """
     if d_model % 2 != 0:
-        raise ValueError("Cannot use sin/cos positional encoding with " "odd dim (got dim={:d})".format(d_model))
+        raise ValueError(f"Cannot use sin/cos positional encoding with odd dim (got dim={d_model:d})")
     pe = torch.zeros(seq_len, d_model, device=device)
     position = torch.arange(0, seq_len).unsqueeze(1)
-    div_term = torch.exp((torch.arange(0, d_model, 2, dtype=torch.float) * -(torch.tensor(10000.0).log() / d_model)))
+    div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * -(torch.tensor(10000.0).log() / d_model))
     pe[:, 0::2] = torch.sin(position.float() * div_term)
     pe[:, 1::2] = torch.cos(position.float() * div_term)
     return pe
@@ -1275,7 +1276,7 @@ class GPTv7(GPTv4Controller):
 
     def forward(self, inputs: TensorDict) -> TensorDict:
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)

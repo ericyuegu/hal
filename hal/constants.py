@@ -1,7 +1,5 @@
-from typing import Dict
 from typing import Final
 from typing import Literal
-from typing import Tuple
 
 import numpy as np
 from melee import Action
@@ -10,7 +8,7 @@ from melee import Stage
 
 NP_MASK_VALUE: Final[int] = (1 << 31) - 1
 
-VALID_PLAYERS: Final[Tuple[str, str]] = ("p1", "p2")
+VALID_PLAYERS: Final[tuple[str, str]] = ("p1", "p2")
 Player = Literal["p1", "p2"]
 PLAYER_1_PORT: Final[int] = 1
 PLAYER_2_PORT: Final[int] = 2
@@ -24,7 +22,7 @@ def get_opponent(player: Player) -> Player:
 # Gamestate      #
 ###################
 
-INCLUDED_STAGES: Tuple[str, ...] = (
+INCLUDED_STAGES: tuple[str, ...] = (
     "FINAL_DESTINATION",
     "BATTLEFIELD",
     "POKEMON_STADIUM",
@@ -32,13 +30,13 @@ INCLUDED_STAGES: Tuple[str, ...] = (
     "FOUNTAIN_OF_DREAMS",
     "YOSHIS_STORY",
 )
-IDX_BY_STAGE: Dict[Stage, int] = {
+IDX_BY_STAGE: dict[Stage, int] = {
     stage: i for i, stage in enumerate(stage for stage in Stage if stage.name in INCLUDED_STAGES)
 }
-IDX_BY_STAGE_STR: Dict[str, int] = {stage.name: i for stage, i in IDX_BY_STAGE.items()}
-STAGE_BY_IDX: Dict[int, str] = {i: stage.name for stage, i in IDX_BY_STAGE.items()}
+IDX_BY_STAGE_STR: dict[str, int] = {stage.name: i for stage, i in IDX_BY_STAGE.items()}
+STAGE_BY_IDX: dict[int, str] = {i: stage.name for stage, i in IDX_BY_STAGE.items()}
 
-INCLUDED_CHARACTERS: Tuple[str, ...] = (
+INCLUDED_CHARACTERS: tuple[str, ...] = (
     "MARIO",
     "FOX",
     "CPTFALCON",
@@ -67,16 +65,16 @@ INCLUDED_CHARACTERS: Tuple[str, ...] = (
     "GANONDORF",
     "ROY",
 )
-IDX_BY_CHARACTER: Dict[Character, int] = {
+IDX_BY_CHARACTER: dict[Character, int] = {
     char: i for i, char in enumerate(char for char in Character if char.name in INCLUDED_CHARACTERS)
 }
-IDX_BY_CHARACTER_STR: Dict[str, int] = {char.name: i for char, i in IDX_BY_CHARACTER.items()}
-CHARACTER_BY_IDX: Dict[int, str] = {i: char.name for char, i in IDX_BY_CHARACTER.items()}
+IDX_BY_CHARACTER_STR: dict[str, int] = {char.name: i for char, i in IDX_BY_CHARACTER.items()}
+CHARACTER_BY_IDX: dict[int, str] = {i: char.name for char, i in IDX_BY_CHARACTER.items()}
 
-IDX_BY_ACTION: Dict[Action, int] = {action: i for i, action in enumerate(Action)}
-ACTION_BY_IDX: Dict[int, str] = {i: action.name for action, i in IDX_BY_ACTION.items()}
+IDX_BY_ACTION: dict[Action, int] = {action: i for i, action in enumerate(Action)}
+ACTION_BY_IDX: dict[int, str] = {i: action.name for action, i in IDX_BY_ACTION.items()}
 
-ORIGINAL_BUTTONS: Tuple[str, ...] = (
+ORIGINAL_BUTTONS: tuple[str, ...] = (
     "BUTTON_A",
     "BUTTON_B",
     "BUTTON_X",
@@ -85,7 +83,7 @@ ORIGINAL_BUTTONS: Tuple[str, ...] = (
     "BUTTON_L",
     "BUTTON_R",
 )
-ORIGINAL_BUTTONS_NO_SHOULDER: Tuple[str, ...] = (
+ORIGINAL_BUTTONS_NO_SHOULDER: tuple[str, ...] = (
     "BUTTON_A",
     "BUTTON_B",
     "BUTTON_X",
@@ -93,7 +91,7 @@ ORIGINAL_BUTTONS_NO_SHOULDER: Tuple[str, ...] = (
     "BUTTON_Z",
     "NO_BUTTON",
 )
-INCLUDED_BUTTONS: Tuple[str, ...] = (
+INCLUDED_BUTTONS: tuple[str, ...] = (
     "BUTTON_A",
     "BUTTON_B",
     "BUTTON_X",
@@ -101,7 +99,7 @@ INCLUDED_BUTTONS: Tuple[str, ...] = (
     "BUTTON_L",
     "NO_BUTTON",
 )
-INCLUDED_BUTTONS_NO_SHOULDER: Tuple[str, ...] = (
+INCLUDED_BUTTONS_NO_SHOULDER: tuple[str, ...] = (
     "BUTTON_A",
     "BUTTON_B",
     "BUTTON_X",
@@ -114,11 +112,11 @@ INCLUDED_BUTTONS_NO_SHOULDER: Tuple[str, ...] = (
 # Embeddings      #
 ###################
 
-REPLAY_UUID: Tuple[str] = ("replay_uuid",)
-FRAME: Tuple[str] = ("frame",)
-STAGE: Tuple[str, ...] = ("stage",)
-PLAYER_INPUT_FEATURES_TO_EMBED: Tuple[str, ...] = ("character", "action")
-PLAYER_INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
+REPLAY_UUID: tuple[str] = ("replay_uuid",)
+FRAME: tuple[str] = ("frame",)
+STAGE: tuple[str, ...] = ("stage",)
+PLAYER_INPUT_FEATURES_TO_EMBED: tuple[str, ...] = ("character", "action")
+PLAYER_INPUT_FEATURES_TO_NORMALIZE: tuple[str, ...] = (
     "percent",
     "stock",
     "facing",
@@ -126,25 +124,25 @@ PLAYER_INPUT_FEATURES_TO_NORMALIZE: Tuple[str, ...] = (
     "jumps_left",
     "on_ground",
 )
-PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: Tuple[str, ...] = ("shield_strength",)
-PLAYER_POSITION: Tuple[str, ...] = (
+PLAYER_INPUT_FEATURES_TO_INVERT_AND_NORMALIZE: tuple[str, ...] = ("shield_strength",)
+PLAYER_POSITION: tuple[str, ...] = (
     "position_x",
     "position_y",
 )
 # Optional input features
-PLAYER_ACTION_FRAME_FEATURES: Tuple[str, ...] = (
+PLAYER_ACTION_FRAME_FEATURES: tuple[str, ...] = (
     "action_frame",
     "hitlag_left",
     "hitstun_left",
 )
-PLAYER_SPEED_FEATURES: Tuple[str, ...] = (
+PLAYER_SPEED_FEATURES: tuple[str, ...] = (
     "speed_air_x_self",
     "speed_y_self",
     "speed_x_attack",
     "speed_y_attack",
     "speed_ground_x_self",
 )
-PLAYER_ECB_FEATURES: Tuple[str, ...] = (
+PLAYER_ECB_FEATURES: tuple[str, ...] = (
     "ecb_bottom_x",
     "ecb_bottom_y",
     "ecb_top_x",
@@ -155,7 +153,7 @@ PLAYER_ECB_FEATURES: Tuple[str, ...] = (
     "ecb_right_y",
 )
 # Target features
-TARGET_FEATURES_TO_ONE_HOT_ENCODE: Tuple[str, ...] = (
+TARGET_FEATURES_TO_ONE_HOT_ENCODE: tuple[str, ...] = (
     "a",
     "b",
     "x",

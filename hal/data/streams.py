@@ -1,5 +1,4 @@
 import os
-from typing import Dict
 
 from streaming.base.stream import Stream
 
@@ -10,7 +9,7 @@ assert AWS_BUCKET is not None, "AWS_BUCKET environment variable is not set"
 
 
 class StreamRegistry:
-    STREAMS: Dict[str, Stream] = {}
+    STREAMS: dict[str, Stream] = {}
 
     @classmethod
     def register(cls, name: str, streams: Stream) -> None:

@@ -3,11 +3,9 @@ from __future__ import annotations
 import json
 import os
 import pickle
-import sys
 import time
 from collections import defaultdict
 from typing import Any
-from typing import Optional
 
 import psutil
 import torch
@@ -27,7 +25,7 @@ def get_mem_info(pid: int) -> dict[str, int]:
 
 
 class MemoryMonitor:
-    def __init__(self, pids: Optional[list[int]] = None) -> None:
+    def __init__(self, pids: list[int] | None = None) -> None:
         if pids is None:
             pids = [os.getpid()]
         self.pids = pids
@@ -63,11 +61,11 @@ class MemoryMonitor:
 
     @staticmethod
     def format(size: int) -> str:
-        for unit in ("", "K", "M", "G"):
+        for unit in ("", "K", "M", "G"):  # noqa: B007 — `unit` is read after the loop
             if size < 1024:
                 break
             size /= 1024.0
-        return "%.1f%s" % (size, unit)
+        return f"{size:.1f}{unit}"
 
 
 def create_coco() -> list[Any]:
@@ -80,14 +78,7 @@ def create_coco() -> list[Any]:
 def read_sample(x):
     # A function that is supposed to read object x, incrementing its refcount.
     # This mimics what a real dataloader would do.
-    if sys.version_info >= (3, 10, 6):
-        # Before this version, pickle does not increment refcount. This is a bug that's
-        # fixed in https://github.com/python/cpython/pull/92931.
-        return pickle.dumps(x)
-    else:
-        import msgpack
-
-        return msgpack.dumps(x)
+    return pickle.dumps(x)
 
 
 class DatasetFromList(torch.utils.data.Dataset):

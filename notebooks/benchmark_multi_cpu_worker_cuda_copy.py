@@ -1,5 +1,4 @@
 import time
-from typing import List
 
 import torch
 import torch.multiprocessing as mp
@@ -90,7 +89,7 @@ def benchmark_patterns(num_workers: int = 4, batch_size: int = 1024, feature_dim
     def run_pattern(in_cuda: bool):
         # Setup workers
         gpu_worker = GPUWorker(model, batch_size, feature_dim)
-        cpu_workers: List[Process] = []
+        cpu_workers: list[Process] = []
 
         # Setup shared output
         output_td = gpu_worker.setup_shared_output(in_cuda=in_cuda)
@@ -126,13 +125,13 @@ def benchmark_patterns(num_workers: int = 4, batch_size: int = 1024, feature_dim
     # Compare patterns
     print("\nPattern 1: CUDA shared memory")
     gpu_time1, cpu_time1, _ = run_pattern(in_cuda=True)
-    print(f"GPU time: {gpu_time1*1000:.2f}ms")
-    print(f"CPU workers time: {cpu_time1*1000:.2f}ms")
+    print(f"GPU time: {gpu_time1 * 1000:.2f}ms")
+    print(f"CPU workers time: {cpu_time1 * 1000:.2f}ms")
 
     print("\nPattern 2: CPU shared memory")
     gpu_time2, cpu_time2, _ = run_pattern(in_cuda=False)
-    print(f"GPU time: {gpu_time2*1000:.2f}ms")
-    print(f"CPU workers time: {cpu_time2*1000:.2f}ms")
+    print(f"GPU time: {gpu_time2 * 1000:.2f}ms")
+    print(f"CPU workers time: {cpu_time2 * 1000:.2f}ms")
 
 
 if __name__ == "__main__":

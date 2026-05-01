@@ -1,14 +1,14 @@
 """
 Run closed loop evaluation of a model in the emulator.
 """
+
 import argparse
+import contextlib
 import sys
 import time
 import traceback
 from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
-from typing import List
-from typing import Optional
 
 import torch
 import torch.multiprocessing as mp
@@ -118,7 +118,7 @@ def cpu_worker(
 
                 if debug and i % 60 == 0:
                     logger.debug(
-                        f"Preprocess: {preprocess_time*1000:.2f}ms, Transfer: {transfer_time*1000:.2f}ms, Postprocess: {postprocess_time*1000:.2f}ms"
+                        f"Preprocess: {preprocess_time * 1000:.2f}ms, Transfer: {transfer_time * 1000:.2f}ms, Postprocess: {postprocess_time * 1000:.2f}ms"
                     )
 
                 # Send controller inputs to emulator, update gamestate
@@ -144,13 +144,13 @@ def cpu_worker(
 def gpu_worker(
     shared_batched_model_input_BP: TensorDict,  # (n_workers, players)
     shared_batched_model_output_BP: TensorDict,  # (n_workers, players)
-    model_input_ready_flags: List[EventType],
-    model_output_ready_flags: List[EventType],
+    model_input_ready_flags: list[EventType],
+    model_output_ready_flags: list[EventType],
     seq_len: int,
-    stop_events: List[EventType],
+    stop_events: list[EventType],
     artifact_dir: Path,
     device: torch.device | str,
-    checkpoint_idx: Optional[int] = None,
+    checkpoint_idx: int | None = None,
     cpu_flag_timeout: float = 5.0,
     debug: bool = False,
 ) -> None:
@@ -165,7 +165,9 @@ def gpu_worker(
 
     # Stack along time dimension
     # shape: (n_workers, players, seq_len)
-    context_window_BPL: TensorDict = torch.stack([shared_batched_model_input_BP for _ in range(seq_len)], dim=-1).to(device)  # type: ignore
+    context_window_BPL: TensorDict = torch.stack([shared_batched_model_input_BP for _ in range(seq_len)], dim=-1).to(
+        device
+    )  # type: ignore
     B, P, L = context_window_BPL.shape
     logger.info(f"Context window shape: {context_window_BPL.shape}, device: {context_window_BPL.device}")
 
@@ -179,7 +181,7 @@ def gpu_worker(
     def wait_for_cpu_workers(timeout: float = 5.0) -> None:
         # Wait for all CPU workers to signal that data is ready
         flag_wait_start = time.perf_counter()
-        for i, (input_flag, stop_event) in enumerate(zip(model_input_ready_flags, stop_events)):
+        for i, (input_flag, stop_event) in enumerate(zip(model_input_ready_flags, stop_events, strict=True)):
             while not input_flag.is_set() and not stop_event.is_set():
                 if not input_flag.is_set() and time.perf_counter() - flag_wait_start > timeout:
                     logger.warning(f"CPU worker {i} input flag wait took too long, stopping episode")
@@ -228,9 +230,9 @@ def gpu_worker(
         total_time = time.perf_counter() - iteration_start
 
         if iteration % 60 == 0:
-            msg = f"Iteration {iteration}: Total: {total_time*1000:.2f}ms "
+            msg = f"Iteration {iteration}: Total: {total_time * 1000:.2f}ms "
             if debug:
-                msg += f"(Update context: {transfer_time*1000:.2f}ms, Inference: {inference_time*1000:.2f}ms, Writeback: {writeback_time*1000:.2f}ms)"
+                msg += f"(Update context: {transfer_time * 1000:.2f}ms, Inference: {inference_time * 1000:.2f}ms, Writeback: {writeback_time * 1000:.2f}ms)"
             logger.debug(msg)
 
         iteration += 1
@@ -270,25 +272,23 @@ def flatten_replay_dir(replay_dir: Path) -> None:
 def run_closed_loop_evaluation(
     artifact_dir: Path,
     eval_config: EvalConfig,
-    checkpoint_idx: Optional[int] = None,
-    eval_stats_queue: Optional[mp.Queue] = None,
+    checkpoint_idx: int | None = None,
+    eval_stats_queue: mp.Queue | None = None,
     enable_ffw: bool = False,  # disable by default for emulator stability, TODO debug EXI inputs
     debug: bool = False,
 ) -> None:
-    try:
+    with contextlib.suppress(RuntimeError):
         mp.set_start_method("spawn")
-    except RuntimeError:
-        pass
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_config: TrainConfig = load_config_from_artifact_dir(artifact_dir)
     preprocessor = Preprocessor(data_config=train_config.data)
     n_workers = eval_config.n_workers
 
     # Create events to signal when cpu and gpu workers are ready
-    model_input_ready_flags: List[EventType] = [mp.Event() for _ in range(n_workers)]
-    model_output_ready_flags: List[EventType] = [mp.Event() for _ in range(n_workers)]
+    model_input_ready_flags: list[EventType] = [mp.Event() for _ in range(n_workers)]
+    model_output_ready_flags: list[EventType] = [mp.Event() for _ in range(n_workers)]
     # Create events to signal when emulator episodes end
-    stop_events: List[EventType] = [mp.Event() for _ in range(n_workers)]
+    stop_events: list[EventType] = [mp.Event() for _ in range(n_workers)]
 
     # Share and pin buffers in CPU memory for transferring model inputs and outputs
     mock_framedata_L = mock_framedata_as_tensordict(preprocessor.trajectory_sampling_len)
@@ -296,12 +296,14 @@ def run_closed_loop_evaluation(
     mock_model_inputs_P = preprocessor.preprocess_inputs(mock_framedata_L, "p1")[-2:]
     # batch_size == n_workers
     shared_batched_model_input_BP: TensorDict = torch.stack(
-        [mock_model_inputs_P for _ in range(n_workers)], dim=0  # type: ignore
+        [mock_model_inputs_P for _ in range(n_workers)],
+        dim=0,  # type: ignore
     )
     shared_batched_model_input_BP = share_and_pin_memory(shared_batched_model_input_BP)
 
     shared_batched_model_output_BP: TensorDict = torch.stack(
-        [preprocessor.mock_preds_as_tensordict() for _ in range(n_workers * 2)], dim=0  # type: ignore
+        [preprocessor.mock_preds_as_tensordict() for _ in range(n_workers * 2)],
+        dim=0,  # type: ignore
     ).view(n_workers, 2)
     shared_batched_model_output_BP = share_and_pin_memory(shared_batched_model_output_BP)
 
@@ -327,7 +329,7 @@ def run_closed_loop_evaluation(
     base_replay_dir = get_replay_dir(artifact_dir, step=checkpoint_idx) / matchups_distribution
     logger.info(f"Replays will be saved to {base_replay_dir}")
 
-    cpu_processes: List[mp.Process] = []
+    cpu_processes: list[mp.Process] = []
     ports = find_open_udp_ports(n_workers)
     episode_stats_queue: mp.Queue = mp.Queue()
     for i, matchup in enumerate(matchups):
@@ -363,7 +365,7 @@ def run_closed_loop_evaluation(
     flatten_replay_dir(base_replay_dir)
 
     # Aggregate episode stats and return if requested
-    episode_stats: List[EpisodeStats] = []
+    episode_stats: list[EpisodeStats] = []
     while not episode_stats_queue.empty():
         episode_stats.append(episode_stats_queue.get())
     total_stats = sum(episode_stats, EpisodeStats(episodes=0))

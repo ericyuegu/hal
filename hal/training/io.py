@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from typing import Optional
 
 import attr
 import torch
@@ -188,7 +187,7 @@ class WandbConfig:
     model: torch.nn.Module
 
     @classmethod
-    def create(cls, model: torch.nn.Module, train_config: BaseConfig) -> Optional["WandbConfig"]:
+    def create(cls, model: torch.nn.Module, train_config: BaseConfig) -> WandbConfig | None:
         if not os.getenv("WANDB_API_KEY"):
             logger.info("W&B run not initiated because WANDB_API_KEY not set.")
             return None
@@ -264,7 +263,7 @@ class Writer:
         self.close()
 
     @classmethod
-    def create(cls, wandb_config: Optional["WandbConfig"] = None) -> "Writer":
+    def create(cls, wandb_config: WandbConfig | None = None) -> Writer:
         if is_master() and wandb_config is not None:
             return cls(wandb_config)
         else:

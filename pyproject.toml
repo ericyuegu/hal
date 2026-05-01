@@ -36,7 +36,6 @@ dependencies = [
 dev = [
     "autoflake",
     "autotyping",
-    "isort",
     "pre-commit",
     "pytest",
     "ruff",
@@ -52,12 +51,27 @@ melee = { git = "https://github.com/vladfi1/libmelee" }
 [tool.setuptools.packages.find]
 include = ["hal*"]
 
-[tool.isort]
-profile = "black"
-line_length = 119
-known_first_party = ["hal"]
-known_third_party = ["docker", "libmelee", "slippi-Ishiiruka"]
-indent = '    '
-force_single_line = true
-case_sensitive = true
-order_by_type = false
+[tool.ruff]
+line-length = 119
+target-version = "py314"
+extend-exclude = [
+    ".venv",
+    "build",
+    "venv",
+    "emulator",
+    "hal/training/models/lstm.py",
+    "hal/training/models/mlp.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hal"]
+known-third-party = ["docker", "libmelee", "slippi-Ishiiruka"]
+force-single-line = true

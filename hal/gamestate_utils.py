@@ -1,9 +1,6 @@
 from collections import defaultdict
+from collections.abc import MutableSequence
 from typing import Any
-from typing import DefaultDict
-from typing import Dict
-from typing import MutableSequence
-from typing import Optional
 
 import melee
 import torch
@@ -15,7 +12,7 @@ from hal.constants import IDX_BY_STAGE
 from hal.constants import INCLUDED_CHARACTERS
 from hal.constants import INCLUDED_STAGES
 
-FrameData = DefaultDict[str, MutableSequence[Any]]
+FrameData = defaultdict[str, MutableSequence[Any]]
 
 
 def extract_eval_gamestate_as_tensordict(gamestate: melee.GameState) -> TensorDict:
@@ -28,7 +25,7 @@ def extract_eval_gamestate_as_tensordict(gamestate: melee.GameState) -> TensorDi
     )
 
 
-def extract_player_state(player_state: melee.PlayerState) -> Dict[str, Any]:
+def extract_player_state(player_state: melee.PlayerState) -> dict[str, Any]:
     player_data = {
         "character": IDX_BY_CHARACTER[player_state.character],
         "stock": player_state.stock,
@@ -61,8 +58,8 @@ def extract_player_state(player_state: melee.PlayerState) -> Dict[str, Any]:
 def extract_and_append_gamestate_inplace(
     frame_data_by_field: FrameData,
     curr_gamestate: melee.GameState,
-    next_gamestate: Optional[melee.GameState] = None,
-    replay_uuid: Optional[int] = None,
+    next_gamestate: melee.GameState | None = None,
+    replay_uuid: int | None = None,
     include_nana: bool = False,
 ) -> FrameData:
     """
@@ -103,7 +100,7 @@ def extract_and_append_gamestate_inplace(
                 nana_data = extract_player_state(player_state.nana)
             else:
                 # WARNING: duplicates all keys for player state, place unique items after
-                nana_data = {k: None for k in player_data.keys()}
+                nana_data = {k: None for k in player_data}
             player_data.update({f"nana_{k}": v for k, v in nana_data.items()})
 
         player_data["port"] = port

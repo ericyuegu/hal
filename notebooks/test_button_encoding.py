@@ -182,8 +182,8 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
 fig.suptitle("Main Stick Positions and Button Presses for Frames 400-500")
 
 # Get main stick positions for the frame range
-main_x = [x[f"p2_main_stick_x"][frame] for frame in frame_range]
-main_y = [x[f"p2_main_stick_y"][frame] for frame in frame_range]
+main_x = [x["p2_main_stick_x"][frame] for frame in frame_range]
+main_y = [x["p2_main_stick_y"][frame] for frame in frame_range]
 
 # Create a colormap to show frame progression
 colors = np.linspace(0, 1, len(frame_range))
@@ -271,7 +271,7 @@ print("-" * 50)
 for frame in frame_range:
     # Check for any non-zero button values
     button_presses = []
-    for key in button_names_by_key.keys():
+    for key in button_names_by_key:
         field_name = f"p2_{key}"
         value = x[field_name][frame]
         if (isinstance(value, float) and value > 0.1) or (isinstance(value, (int, np.integer)) and value > 0):
@@ -442,12 +442,12 @@ def animate(i):
     frame = frame_range[i]
 
     # Update stick position
-    main_x = x[f"p2_main_stick_x"][frame]
-    main_y = x[f"p2_main_stick_y"][frame]
+    main_x = x["p2_main_stick_x"][frame]
+    main_y = x["p2_main_stick_y"][frame]
     stick_point.set_offsets([[main_x, main_y]])
 
     # Update frame text
-    frame_text.set_text(f'Frame: {x["frame"][frame]}')
+    frame_text.set_text(f"Frame: {x['frame'][frame]}")
 
     # Update button states - only digital buttons
     for j, key in enumerate(button_keys):

@@ -1,6 +1,5 @@
+from collections.abc import Sequence
 from typing import Protocol
-from typing import Sequence
-from typing import Union
 
 import attr
 import numpy as np
@@ -56,7 +55,7 @@ class LearningRateChanger:
 
     opt: torch.optim.Optimizer
 
-    def set_opt_lr(self, lr: Union[float, torch.Tensor]) -> float:
+    def set_opt_lr(self, lr: float | torch.Tensor) -> float:
         for params in self.opt.param_groups:
             params["lr"] = lr
         return float(lr)

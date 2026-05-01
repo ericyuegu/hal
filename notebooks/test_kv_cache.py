@@ -1,8 +1,7 @@
 """Test KV cache implementation for transformer models."""
+
 import argparse
 import time
-from typing import List
-from typing import Tuple
 
 import torch
 from loguru import logger
@@ -61,7 +60,7 @@ class KVCacheManager:
         self.kv_cache[layer_idx, 0, :, :, self.cache_pos : self.cache_pos + 1] = k
         self.kv_cache[layer_idx, 1, :, :, self.cache_pos : self.cache_pos + 1] = v
 
-    def update_all(self, kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def update_all(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
         """Update KV cache for all layers at once.
 
         Args:
@@ -71,7 +70,7 @@ class KVCacheManager:
             self.kv_cache[layer_idx, 0, :, :, self.cache_pos : self.cache_pos + 1] = k
             self.kv_cache[layer_idx, 1, :, :, self.cache_pos : self.cache_pos + 1] = v
 
-    def get_kv(self, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_kv(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Get cached KV tensors for a specific layer up to current position.
 
         Args:
@@ -194,7 +193,7 @@ def test_kv_cache_correctness(n_trials: int = 100) -> None:
             _ = base_model(inputs)
     torch.cuda.synchronize()
     no_cache_time = (time.perf_counter() - start_time) / n_trials
-    logger.info(f"Non-cached forward pass: {no_cache_time*1000:.2f}ms per sequence")
+    logger.info(f"Non-cached forward pass: {no_cache_time * 1000:.2f}ms per sequence")
 
     logger.info(f"Benchmarking cached forward pass with {n_trials} forward passes...")
     torch.cuda.synchronize()
@@ -212,8 +211,8 @@ def test_kv_cache_correctness(n_trials: int = 100) -> None:
             kv_cache_manager.roll_cache()
     torch.cuda.synchronize()
     cache_time = (time.perf_counter() - start_time) / n_trials
-    logger.info(f"Cached forward pass: {cache_time*1000:.2f}ms per sequence")
-    logger.info(f"Speedup: {no_cache_time/cache_time:.2f}x")
+    logger.info(f"Cached forward pass: {cache_time * 1000:.2f}ms per sequence")
+    logger.info(f"Speedup: {no_cache_time / cache_time:.2f}x")
 
 
 if __name__ == "__main__":

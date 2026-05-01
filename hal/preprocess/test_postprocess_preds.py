@@ -46,7 +46,7 @@ def test_model_predictions_to_controller_inputs(mock_predictions) -> None:
 
     # Check shapes
     seq_len = mock_predictions["main_stick"].shape[0]
-    for key, value in result.items():
+    for value in result.values():
         assert value.shape == (seq_len,)
 
     # Check if stick values are within the valid range [-1, 1]

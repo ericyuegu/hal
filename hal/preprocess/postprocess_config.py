@@ -1,6 +1,5 @@
+from collections.abc import Callable
 from typing import Any
-from typing import Callable
-from typing import Dict
 
 import attr
 from tensordict import TensorDict
@@ -10,4 +9,4 @@ from tensordict import TensorDict
 class PostprocessConfig:
     """Configuration for how we convert model predictions to controller inputs."""
 
-    transformation_by_controller_input: Dict[str, Callable[[TensorDict], Any]]
+    transformation_by_controller_input: dict[str, Callable[[TensorDict], Any]]

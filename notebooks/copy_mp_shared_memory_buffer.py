@@ -1,5 +1,4 @@
 import time
-from typing import List
 
 import melee
 import torch
@@ -9,7 +8,7 @@ from tensordict import TensorDict
 
 class DummyModel(torch.nn.Module):
     def __init__(self, hidden_dim: int, time_steps: int, output_dim: int) -> None:
-        super(DummyModel, self).__init__()
+        super().__init__()
         self.fc = torch.nn.Linear(hidden_dim * time_steps, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -49,8 +48,8 @@ def cpu_worker(
     shared_input: TensorDict,
     shared_output: TensorDict,
     rank: int,
-    data_ready_flags: List[mp.Event],
-    output_ready_flags: List[mp.Event],
+    data_ready_flags: list[mp.Event],
+    output_ready_flags: list[mp.Event],
     stop_event: mp.Event,
     hidden_dim: int,
 ) -> None:
@@ -86,8 +85,8 @@ def cpu_worker(
 def gpu_worker(
     shared_input: TensorDict,
     shared_output: TensorDict,
-    data_ready_flags: List[mp.Event],
-    output_ready_flags: List[mp.Event],
+    data_ready_flags: list[mp.Event],
+    output_ready_flags: list[mp.Event],
     context_window_size: int,
     num_workers: int,
     stop_event: mp.Event,
@@ -183,8 +182,8 @@ def main() -> None:
     shared_output.share_memory_()
 
     # Create events to signal when data is ready and when output is ready
-    data_ready_flags: List[mp.Event] = [mp.Event() for _ in range(num_workers)]
-    output_ready_flags: List[mp.Event] = [mp.Event() for _ in range(num_workers)]
+    data_ready_flags: list[mp.Event] = [mp.Event() for _ in range(num_workers)]
+    output_ready_flags: list[mp.Event] = [mp.Event() for _ in range(num_workers)]
 
     # Create an event to signal when to stop processing
     stop_event: mp.Event = mp.Event()
@@ -208,7 +207,7 @@ def main() -> None:
     gpu_process.start()
 
     # Start CPU worker processes
-    cpu_processes: List[mp.Process] = []
+    cpu_processes: list[mp.Process] = []
     for i in range(num_workers):
         p: mp.Process = mp.Process(
             target=cpu_worker,

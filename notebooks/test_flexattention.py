@@ -174,8 +174,6 @@ class VanillaCausalSelfAttention(nn.Module):
         return self.proj_out(attn_out)
 
 
-import torch
-
 torch.manual_seed(42)
 
 # Define dimensions for test

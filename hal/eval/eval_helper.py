@@ -1,6 +1,3 @@
-from typing import Dict
-from typing import List
-
 import attr
 import melee
 import numpy as np
@@ -61,15 +58,15 @@ class Matchup:
     opponent_character: str
 
     @classmethod
-    def fox_bf(cls, n: int) -> List["Matchup"]:
+    def fox_bf(cls, n: int) -> list[Matchup]:
         return [Matchup(stage="BATTLEFIELD", ego_character="FOX", opponent_character="FOX")] * n
 
     @classmethod
-    def fox_yoshis(cls, n: int) -> List["Matchup"]:
+    def fox_yoshis(cls, n: int) -> list[Matchup]:
         return [Matchup(stage="YOSHIS_STORY", ego_character="FOX", opponent_character="FOX")] * n
 
     @classmethod
-    def fox_dittos(cls, n: int, seed: int = 42) -> List["Matchup"]:
+    def fox_dittos(cls, n: int, seed: int = 42) -> list[Matchup]:
         rng = np.random.default_rng(seed)
         stages = rng.choice(
             list(PRIOR_STAGE_LIKELIHOODS.keys()),
@@ -83,9 +80,9 @@ class Matchup:
         return matchups
 
     @classmethod
-    def spacies(cls, n: int) -> List["Matchup"]:
+    def spacies(cls, n: int) -> list[Matchup]:
         """Generate `n` spacies matchups"""
-        matchups: List[Matchup] = []
+        matchups: list[Matchup] = []
         stages = INCLUDED_STAGES
         characters = ["FOX", "FALCO"]
         i = 0
@@ -98,7 +95,7 @@ class Matchup:
         return matchups
 
     @classmethod
-    def fox_rainbow(cls, n: int, seed: int = 42) -> List["Matchup"]:
+    def fox_rainbow(cls, n: int, seed: int = 42) -> list[Matchup]:
         rng = np.random.default_rng(seed)
         stages = rng.choice(
             list(PRIOR_STAGE_LIKELIHOODS.keys()),
@@ -115,12 +112,12 @@ class Matchup:
         # We can't force CPU to pick Sheik, so we replace all Sheik with Zelda
         opponent_characters = ["ZELDA" if c == "SHEIK" else c for c in opponent_characters]
         matchups = []
-        for stage, opponent_character in zip(stages, opponent_characters):
+        for stage, opponent_character in zip(stages, opponent_characters, strict=True):
             matchups.append(Matchup(stage=stage, ego_character="FOX", opponent_character=opponent_character))
         return matchups
 
     @classmethod
-    def rainbow(cls, n: int, seed: int = 42) -> List["Matchup"]:
+    def rainbow(cls, n: int, seed: int = 42) -> list[Matchup]:
         """Deterministically generate `n` random matchups."""
         rng = np.random.default_rng(seed)
         stages = rng.choice(
@@ -144,10 +141,8 @@ class Matchup:
         # We can't force CPU to pick Sheik, so we replace all Sheik with Zelda
         opponent_characters = ["ZELDA" if c == "SHEIK" else c for c in opponent_characters]
         matchups = []
-        for stages, ego_characters, opponent_characters in zip(stages, ego_characters, opponent_characters):
-            matchups.append(
-                Matchup(stage=stages, ego_character=ego_characters, opponent_character=opponent_characters)
-            )
+        for stage, ego_character, opponent_character in zip(stages, ego_characters, opponent_characters, strict=True):
+            matchups.append(Matchup(stage=stage, ego_character=ego_character, opponent_character=opponent_character))
         return matchups
 
 
@@ -164,7 +159,7 @@ class EpisodeStats:
     _prev_p1_percent: float = 0.0
     _prev_p2_percent: float = 0.0
 
-    def __add__(self, other: "EpisodeStats") -> "EpisodeStats":
+    def __add__(self, other: EpisodeStats) -> EpisodeStats:
         return EpisodeStats(
             p1_damage=self.p1_damage + other.p1_damage,
             p2_damage=self.p2_damage + other.p2_damage,
@@ -174,7 +169,7 @@ class EpisodeStats:
             episodes=self.episodes + other.episodes,
         )
 
-    def __radd__(self, other: "EpisodeStats") -> "EpisodeStats":
+    def __radd__(self, other: EpisodeStats) -> EpisodeStats:
         if other == 0:
             return self
         return self.__add__(other)
@@ -200,7 +195,7 @@ class EpisodeStats:
         self._prev_p2_stock = p2.stock
         self.frames += 1
 
-    def to_wandb_dict(self, player: Player, prefix: str = "closed_loop_eval") -> Dict[str, float]:
+    def to_wandb_dict(self, player: Player, prefix: str = "closed_loop_eval") -> dict[str, float]:
         if self.episodes == 0:
             logger.warning("No closed loop episode stats recorded")
             return {}

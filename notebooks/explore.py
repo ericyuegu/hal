@@ -3,8 +3,6 @@ import time
 import uuid
 from collections import defaultdict
 from typing import Any
-from typing import Dict
-from typing import List
 
 import melee
 import numpy as np
@@ -16,7 +14,7 @@ from hal.constants import CHARACTERS
 from hal.constants import STAGES
 
 
-def stack_playerstate(states: List[melee.PlayerState]) -> Dict[str, Any]:
+def stack_playerstate(states: list[melee.PlayerState]) -> dict[str, Any]:
     stacked_states = defaultdict(list)
     for state in states:
         for field in state.__slots__:
@@ -34,7 +32,7 @@ def main() -> None:
 
     gamestate: melee.GameState = console.step()
 
-    player_states: Dict[int, List[melee.PlayerState]] = defaultdict(list)
+    player_states: dict[int, list[melee.PlayerState]] = defaultdict(list)
     while gamestate is not None:
         for player_name, state in gamestate.players.items():
             player_states[player_name].append(state)

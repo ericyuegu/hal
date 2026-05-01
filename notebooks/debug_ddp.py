@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 
 """
 A torchrun-compatible script for distributed training with PyTorch.
@@ -12,7 +11,6 @@ Usage:
 import argparse
 import os
 from pathlib import Path
-from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -92,7 +90,7 @@ def log_if_master(message: str) -> None:
 
 def wrap_model_distributed(
     model: torch.nn.Module,
-) -> Union[torch.nn.Module, torch.nn.parallel.DistributedDataParallel]:
+) -> torch.nn.Module | torch.nn.parallel.DistributedDataParallel:
     """
     Wrap the model with DistributedDataParallel if distributed training is enabled.
     """

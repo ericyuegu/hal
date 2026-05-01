@@ -8,9 +8,6 @@ from collections import defaultdict
 from functools import partial
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import Optional
-from typing import Tuple
 
 import melee
 import numpy as np
@@ -38,9 +35,7 @@ def hash_to_int32(data: str) -> int:
     return int32_value
 
 
-def process_replay(
-    replay_path: Path, check_damage: bool = True, check_complete: bool = True
-) -> Optional[Dict[str, Any]]:
+def process_replay(replay_path: Path, check_damage: bool = True, check_complete: bool = True) -> dict[str, Any] | None:
     frame_data: FrameData = defaultdict(list)
     try:
         console = melee.Console(path=str(replay_path), is_dolphin=False, allow_old_version=True)
@@ -84,15 +79,14 @@ def process_replay(
     if all(len(v) < MIN_FRAMES for v in frame_data.values()):
         logger.trace(f"Replay {replay_path} was less than {MIN_FRAMES} frames, skipping.")
         return None
-    if check_damage:
-        # Check for damage
-        if all(x == 0 for x in frame_data["p1_percent"]) or all(x == 0 for x in frame_data["p2_percent"]):
-            logger.trace(f"Replay {replay_path} had no damage, skipping.")
-            return None
-    if check_complete:
-        if not (frame_data["p1_stock"][-1] == 0 or frame_data["p2_stock"][-1] == 0):
-            logger.trace(f"Replay {replay_path} was not completed, skipping.")
-            return None
+    if check_damage and (
+        all(x == 0 for x in frame_data["p1_percent"]) or all(x == 0 for x in frame_data["p2_percent"])
+    ):
+        logger.trace(f"Replay {replay_path} had no damage, skipping.")
+        return None
+    if check_complete and not (frame_data["p1_stock"][-1] == 0 or frame_data["p2_stock"][-1] == 0):
+        logger.trace(f"Replay {replay_path} was not completed, skipping.")
+        return None
 
     sample = {}
     for key, dtype in NP_TYPE_BY_COLUMN.items():
@@ -104,10 +98,10 @@ def process_replay(
     return sample
 
 
-def split_by_ranks(replay_paths: tuple[Path, ...]) -> Dict[str, list[Path]]:
+def split_by_ranks(replay_paths: tuple[Path, ...]) -> dict[str, list[Path]]:
     """Return replays grouped by lowest rank in filename."""
     RANKS = ["platinum", "diamond", "master"]
-    rank_paths: Dict[str, list[Path]] = defaultdict(list)
+    rank_paths: dict[str, list[Path]] = defaultdict(list)
 
     for path in replay_paths:
         filename = path.name.lower()
@@ -163,25 +157,27 @@ def process_replays(
 
             logger.info(f"Writing {num_replays} replays to {split_output_dir}")
             actual = 0
-            with MDSWriter(
-                out=str(split_output_dir),
-                columns=MDS_DTYPE_STR_BY_COLUMN,
-                compression="zstd",
-                size_limit=1 << 31,  # Write 2GB shards, data is repetitive so compression is 10-20x
-                exist_ok=True,
-            ) as out:
-                with mp.Pool(max_parallelism) as pool:
-                    samples = pool.imap_unordered(process_replay_partial, split_replay_paths)
-                    for sample in tqdm(samples, total=num_replays, desc=f"Processing {split} split"):
-                        if sample is not None:
-                            out.write(sample)
-                            actual += 1
+            with (
+                MDSWriter(
+                    out=str(split_output_dir),
+                    columns=MDS_DTYPE_STR_BY_COLUMN,
+                    compression="zstd",
+                    size_limit=1 << 31,  # Write 2GB shards, data is repetitive so compression is 10-20x
+                    exist_ok=True,
+                ) as out,
+                mp.Pool(max_parallelism) as pool,
+            ):
+                samples = pool.imap_unordered(process_replay_partial, split_replay_paths)
+                for sample in tqdm(samples, total=num_replays, desc=f"Processing {split} split"):
+                    if sample is not None:
+                        out.write(sample)
+                        actual += 1
             logger.info(f"Wrote {actual} replays ({actual / num_replays:.2%}) to {split_output_dir}")
 
 
 def split_train_val_test(
-    input_paths: Tuple[Path, ...], train_split: float = 0.98, val_split: float = 0.01, test_split: float = 0.01
-) -> dict[str, Tuple[Path, ...]]:
+    input_paths: tuple[Path, ...], train_split: float = 0.98, val_split: float = 0.01, test_split: float = 0.01
+) -> dict[str, tuple[Path, ...]]:
     assert train_split + val_split + test_split == 1.0
     n = len(input_paths)
     train_end = int(n * train_split)
@@ -211,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable_check_damage", action="store_true", help="Disable damage check in replays")
     args = parser.parse_args()
 
-    setup_logger(output_dir=f"logs")
+    setup_logger(output_dir="logs")
 
     if args.debug:
         logger.remove()

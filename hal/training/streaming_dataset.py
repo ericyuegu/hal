@@ -1,6 +1,5 @@
 import random
-from typing import Optional
-from typing import Sequence
+from collections.abc import Sequence
 from typing import cast
 
 import numpy as np
@@ -8,8 +7,8 @@ from streaming import Stream
 from streaming import StreamingDataset
 from tensordict import TensorDict
 
-from hal.constants import Player
 from hal.constants import VALID_PLAYERS
+from hal.constants import Player
 from hal.preprocess.preprocessor import Preprocessor
 from hal.preprocess.preprocessor import convert_ndarray_to_tensordict
 from hal.preprocess.transformations import add_reward_to_episode
@@ -19,9 +18,9 @@ from hal.training.config import DataConfig
 class HALStreamingDataset(StreamingDataset):
     def __init__(
         self,
-        streams: Optional[Sequence[Stream]],
-        local: Optional[str],
-        remote: Optional[str],
+        streams: Sequence[Stream] | None,
+        local: str | None,
+        remote: str | None,
         batch_size: int,
         shuffle: bool,
         data_config: DataConfig,

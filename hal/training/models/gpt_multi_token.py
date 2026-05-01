@@ -1,4 +1,5 @@
 """Adapted from Karpathy's nanoGPT: https://github.com/karpathy/nanoGPT."""
+
 import math
 
 import attr
@@ -115,7 +116,7 @@ class GPTMultiToken(BaseGPT):
 
     def forward(self, inputs: TensorDict) -> TensorDict:
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)
@@ -164,7 +165,7 @@ class GPTMultiTokenValue(GPTMultiToken):
 
     def forward(self, inputs: TensorDict) -> TensorDict:
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)

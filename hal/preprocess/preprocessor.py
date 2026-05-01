@@ -1,7 +1,5 @@
 import random
 from typing import Any
-from typing import Dict
-from typing import Set
 
 import attr
 import numpy as np
@@ -40,7 +38,7 @@ class Preprocessor:
     def __init__(self, data_config: DataConfig) -> None:
         self.data_config = data_config
         self.stats = load_dataset_stats(data_config.stats_path)
-        self.normalization_fn_by_feature_name: Dict[str, Transformation] = {}
+        self.normalization_fn_by_feature_name: dict[str, Transformation] = {}
         self.seq_len = data_config.seq_len
 
         self.target_config = TargetConfigRegistry.get(self.data_config.target_preprocessing_fn)
@@ -129,7 +127,7 @@ class Preprocessor:
             seq_len=self.seq_len,
         )
 
-    def postprocess_preds(self, preds_C: TensorDict) -> Dict[str, Any]:
+    def postprocess_preds(self, preds_C: TensorDict) -> dict[str, Any]:
         return postprocess_predictions(preds_C, self.postprocess_preds_fn)
 
     def mock_preds_as_tensordict(self) -> TensorDict:
@@ -204,7 +202,7 @@ def preprocess_input_features(
     sample_T: TensorDict,
     ego: Player,
     config: InputConfig,
-    stats: Dict[str, FeatureStats],
+    stats: dict[str, FeatureStats],
 ) -> TensorDict:
     """Applies preprocessing functions to player and non-player input features for a given sample.
 
@@ -212,7 +210,7 @@ def preprocess_input_features(
     """
     opponent = get_opponent(ego)
     transformation_by_feature_name = config.transformation_by_feature_name
-    processed_features: Dict[str, torch.Tensor] = {}
+    processed_features: dict[str, torch.Tensor] = {}
 
     # Process player features
     for player in (ego, opponent):
@@ -242,8 +240,8 @@ def preprocess_input_features(
             processed_features[feature_name] = transform(sample_T, ego)
 
     # Concatenate processed features by head
-    concatenated_features_by_head_name: Dict[str, torch.Tensor] = {}
-    seen_feature_names: Set[str] = set()
+    concatenated_features_by_head_name: dict[str, torch.Tensor] = {}
+    seen_feature_names: set[str] = set()
     for head_name, feature_names in config.grouped_feature_names_by_head.items():
         features_to_concatenate = [processed_features[feature_name] for feature_name in feature_names]
         concatenated_features_by_head_name[head_name] = torch.cat(features_to_concatenate, dim=-1)
@@ -279,9 +277,9 @@ def _offset_features(
     """
     available_features: set[str] = set(tensor_dict.keys())  # type: ignore
     offset_keys = set(frame_offsets.keys())
-    assert all(
-        feature in available_features for feature in offset_keys
-    ), f"Features with offsets must exist in sample. Missing: {offset_keys - available_features}\nAvailable: {available_features}"
+    assert all(feature in available_features for feature in offset_keys), (
+        f"Features with offsets must exist in sample. Missing: {offset_keys - available_features}\nAvailable: {available_features}"
+    )
 
     # What frame the training sequence starts on
     reference_frame_idx = abs(min(0, min_offset))
@@ -297,8 +295,8 @@ def _offset_features(
     return TensorDict(offset_features, batch_size=(seq_len,))
 
 
-def postprocess_predictions(pred_C: TensorDict, postprocess_config: PostprocessConfig) -> Dict[str, Any]:
-    processed_features: Dict[str, Any] = {}
+def postprocess_predictions(pred_C: TensorDict, postprocess_config: PostprocessConfig) -> dict[str, Any]:
+    processed_features: dict[str, Any] = {}
 
     for feature_name, transformation in postprocess_config.transformation_by_controller_input.items():
         processed_features[feature_name] = transformation(pred_C)

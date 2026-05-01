@@ -1,12 +1,10 @@
-from typing import Dict
-
 from hal.preprocess.input_config import InputConfig
 from hal.preprocess.postprocess_config import PostprocessConfig
 from hal.preprocess.target_config import TargetConfig
 
 
 class InputConfigRegistry:
-    CONFIGS: Dict[str, InputConfig] = {}
+    CONFIGS: dict[str, InputConfig] = {}
 
     @classmethod
     def get(cls, name: str) -> InputConfig:
@@ -20,7 +18,7 @@ class InputConfigRegistry:
 
 
 class TargetConfigRegistry:
-    CONFIGS: Dict[str, TargetConfig] = {}
+    CONFIGS: dict[str, TargetConfig] = {}
 
     @classmethod
     def get(cls, name: str) -> TargetConfig:
@@ -34,7 +32,7 @@ class TargetConfigRegistry:
 
 
 class PostprocessConfigRegistry:
-    CONFIGS: Dict[str, PostprocessConfig] = {}
+    CONFIGS: dict[str, PostprocessConfig] = {}
 
     @classmethod
     def get(cls, name: str) -> PostprocessConfig:

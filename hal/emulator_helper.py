@@ -6,15 +6,11 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Generator
 from concurrent.futures import TimeoutError
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import Generator
-from typing import List
-from typing import Optional
-from typing import Tuple
 
 import attr
 import melee
@@ -39,7 +35,7 @@ def _get_console_port(player: Player) -> int:
     return PLAYER_1_PORT if player == "p1" else PLAYER_2_PORT
 
 
-def find_open_udp_ports(num: int) -> List[int]:
+def find_open_udp_ports(num: int) -> list[int]:
     min_port = 10_000
     max_port = 2**16
 
@@ -95,7 +91,7 @@ def get_headless_console_kwargs(
     udp_port: int | None = None,
     replay_dir: Path | None = None,
     console_logger: melee.Logger | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     headless_console_kwargs = {
         "gfx_backend": "Null",
         "disable_audio": True,
@@ -126,7 +122,7 @@ def get_gui_console_kwargs(
     emulator_path: Path,
     replay_dir: Path,
     console_logger: melee.Logger | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get console kwargs for GUI-enabled emulator."""
     replay_dir.mkdir(exist_ok=True, parents=True)
     console_kwargs = {
@@ -154,8 +150,8 @@ class MatchupMenuHelper:
     controller_1: melee.Controller
     controller_2: melee.Controller
     character_1: melee.Character
-    character_2: Optional[melee.Character]
-    stage: Optional[melee.Stage]
+    character_2: melee.Character | None
+    stage: melee.Stage | None
     opponent_cpu_level: int = 9
 
     # Internal use
@@ -231,7 +227,7 @@ def console_manager(console: melee.Console, console_logger: melee.Logger | None 
         logger.info("Shutting down cleanly...")
 
 
-def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, Any]) -> None:
+def send_controller_inputs(controller: melee.Controller, inputs: dict[str, Any]) -> None:
     """
     Press buttons and tilt analog sticks given a dictionary of array-like values (length T for T future time steps).
 
@@ -256,7 +252,7 @@ def send_controller_inputs(controller: melee.Controller, inputs: Dict[str, Any])
         shoulder_value,
     )
 
-    buttons_to_press: List[str] = inputs.get("buttons", [])
+    buttons_to_press: list[str] = inputs.get("buttons", [])
     for button_str in ORIGINAL_BUTTONS:
         button = getattr(melee.Button, button_str.upper())
         if button_str in buttons_to_press:
@@ -305,7 +301,7 @@ class EmulatorManager:
             opponent_cpu_level=self.opponent_cpu_level,
         )
 
-    def run_game(self) -> Generator[melee.GameState, Tuple[Dict[str, Any], Dict[str, Any] | None], None]:
+    def run_game(self) -> Generator[melee.GameState, tuple[dict[str, Any], dict[str, Any] | None]]:
         """Generator that yields gamestates and receives controller inputs.
 
         Yields:
@@ -343,8 +339,9 @@ class EmulatorManager:
 
         # Wrap console manager inside a thread for timeouts
         # Important that console manager context goes second to gracefully handle keyboard interrupts, timeouts, and all other exceptions
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, console_manager(
-            console=self.console, console_logger=self.console_logger
+        with (
+            concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor,
+            console_manager(console=self.console, console_logger=self.console_logger),
         ):
             logger.debug(
                 f"Starting episode on {self.matchup.stage}: {self.matchup.ego_character} vs. {self.matchup.opponent_character}"
@@ -391,7 +388,7 @@ class EmulatorManager:
 
                         if i % 60 == 0:
                             logger.debug(
-                                f"Console.step() time: {step_time*1000:.2f}ms, controller send time: {send_time*1000:.2f}ms"
+                                f"Console.step() time: {step_time * 1000:.2f}ms, controller send time: {send_time * 1000:.2f}ms"
                             )
 
                     self.episode_stats.update(gamestate)

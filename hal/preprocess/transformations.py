@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable
-from typing import Dict
-from typing import List
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,7 +10,6 @@ from tensordict import TensorDict
 from hal.constants import INCLUDED_BUTTONS
 from hal.constants import INCLUDED_BUTTONS_NO_SHOULDER
 from hal.constants import ORIGINAL_BUTTONS_NO_SHOULDER
-from hal.constants import Player
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V0
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V1
 from hal.constants import SHOULDER_CLUSTER_CENTERS_V2
@@ -21,6 +18,7 @@ from hal.constants import STICK_XY_CLUSTER_CENTERS_V0_1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V1
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V2
 from hal.constants import STICK_XY_CLUSTER_CENTERS_V3
+from hal.constants import Player
 from hal.constants import get_opponent
 from hal.data.stats import FeatureStats
 
@@ -72,7 +70,7 @@ def offset(array: torch.Tensor, stats: FeatureStats) -> torch.Tensor:
 
 
 def preprocess_target_features(sample_T: TensorDict, ego: Player, target_config: TargetConfig) -> TensorDict:
-    processed_features: Dict[str, torch.Tensor] = {}
+    processed_features: dict[str, torch.Tensor] = {}
 
     for feature_name, transformation in target_config.transformation_by_target.items():
         processed_features[feature_name] = transformation(sample_T, ego)
@@ -497,28 +495,28 @@ def sample_c_stick_fine(pred_C: TensorDict, temperature: float = 1.0) -> tuple[f
     return c_stick_x.item(), c_stick_y.item()
 
 
-def sample_single_button(pred_C: TensorDict, temperature: float = 1.0) -> List[str]:
+def sample_single_button(pred_C: TensorDict, temperature: float = 1.0) -> list[str]:
     button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
     button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
     button = INCLUDED_BUTTONS[button_idx]
     return [button]
 
 
-def sample_single_button_no_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> List[str]:
+def sample_single_button_no_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> list[str]:
     button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
     button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
     button = INCLUDED_BUTTONS_NO_SHOULDER[button_idx]
     return [button]
 
 
-def sample_original_single_button_no_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> List[str]:
+def sample_original_single_button_no_shoulder(pred_C: TensorDict, temperature: float = 1.0) -> list[str]:
     button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
     button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
     button = ORIGINAL_BUTTONS_NO_SHOULDER[button_idx]
     return [button]
 
 
-def sample_buttons_with_separate_shoulders(pred_C: TensorDict, temperature: float = 1.0) -> List[str]:
+def sample_buttons_with_separate_shoulders(pred_C: TensorDict, temperature: float = 1.0) -> list[str]:
     button_probs = torch.softmax(pred_C["buttons"] / temperature, dim=-1)
     button_idx = int(torch.multinomial(button_probs, num_samples=1).item())
     buttons = [INCLUDED_BUTTONS_NO_SHOULDER[button_idx]]
@@ -531,7 +529,7 @@ def sample_buttons_with_separate_shoulders(pred_C: TensorDict, temperature: floa
     return buttons
 
 
-def threshold_independent_buttons(pred_C: TensorDict, threshold: float = 0.5) -> List[str]:
+def threshold_independent_buttons(pred_C: TensorDict, threshold: float = 0.5) -> list[str]:
     """Take the logits of the buttons and threshold them independently."""
     button_logits = pred_C["buttons"]
     button_probs = torch.sigmoid(button_logits)

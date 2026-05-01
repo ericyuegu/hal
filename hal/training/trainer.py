@@ -2,12 +2,10 @@ import abc
 import multiprocessing as mp
 import time
 from collections import defaultdict
+from collections.abc import Iterable
+from collections.abc import Iterator
 from pathlib import Path
 from queue import Empty
-from typing import Dict
-from typing import Iterable
-from typing import Iterator
-from typing import Union
 
 import torch
 from loguru import logger
@@ -37,11 +35,11 @@ from hal.training.utils import repeater
 from hal.training.utils import report_module_weights
 from hal.training.utils import time_format
 
-MetricsDict = Dict[str, float]
+MetricsDict = dict[str, float]
 
 
 class Trainer(torch.nn.Module, abc.ABC):
-    model: Union[torch.nn.Module, torch.nn.parallel.DistributedDataParallel]
+    model: torch.nn.Module | torch.nn.parallel.DistributedDataParallel
 
     @property
     def device(self) -> str:
@@ -91,11 +89,11 @@ class Trainer(torch.nn.Module, abc.ABC):
         return "\n".join(
             (
                 "\n",
-                f'{" Model ":-^80}',
+                f"{' Model ':-^80}",
                 str(self.model),
-                f'{" Parameters ":-^80}',
+                f"{' Parameters ':-^80}",
                 report_module_weights(self.model),
-                f'{" Config ":-^80}',
+                f"{' Config ':-^80}",
                 "\n".join(f"{k:20s}: {v}" for k, v in vars(self.config).items()),
             )
         )
@@ -109,8 +107,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         return resume_idx
 
     @abc.abstractmethod
-    def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict:
-        ...
+    def loss(self, pred: TensorDict, target: TensorDict) -> TensorDict: ...
 
     def forward_loop(self, batch: TensorDict) -> TensorDict:
         inputs: TensorDict = batch["inputs"]
@@ -124,8 +121,7 @@ class Trainer(torch.nn.Module, abc.ABC):
         return loss_by_head
 
     @abc.abstractmethod
-    def sum_losses(self, loss_by_head: TensorDict) -> TensorDict:
-        ...
+    def sum_losses(self, loss_by_head: TensorDict) -> TensorDict: ...
 
     def train_op(self, batch: TensorDict) -> MetricsDict:
         self.opt.zero_grad(set_to_none=True)
@@ -163,7 +159,7 @@ class Trainer(torch.nn.Module, abc.ABC):
             if grad_norms:
                 # Stack all norms and move to CPU at once to reduce blocking CUDA ops
                 stacked_norms = torch.stack(grad_norms).to("cpu")
-                for name, norm in zip(grad_names, stacked_norms):
+                for name, norm in zip(grad_names, stacked_norms, strict=True):
                     metrics_dict[f"grad_norm/layer/{name}"] = norm.item()
         return metrics_dict
 

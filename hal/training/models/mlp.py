@@ -1,10 +1,22 @@
 """Deprecated"""
+
+from typing import Any
+
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
 from hal.training.config import TrainConfig
 from hal.training.models.registry import Arch
+
+
+def get_input_size_from_config(config: Any) -> int:
+    return (
+        config.stage_embedding_dim
+        + 2 * config.character_embedding_dim
+        + 2 * config.action_embedding_dim
+        + config.input_shapes_by_head["gamestate"][0]
+    )
 
 
 class MLPBC(nn.Module):
@@ -43,7 +55,7 @@ class MLPBC(nn.Module):
         self.c_stick_head = nn.Linear(hidden_size, embed_config.num_c_stick_clusters)
 
     def forward(self, inputs: TensorDict) -> TensorDict:
-        B, L, D = inputs["gamestate"].shape
+        B, T, D = inputs["gamestate"].shape
         assert T > 0
 
         stage_emb = self.modules_by_name.stage(inputs["stage"]).squeeze(-2)
@@ -110,7 +122,7 @@ class MLPDebug(nn.Module):
         self.c_stick_head = nn.Linear(hidden_size, embed_config.num_c_stick_clusters)
 
     def forward(self, inputs: TensorDict) -> TensorDict:
-        B, L, D = inputs["gamestate"].shape
+        B, T, D = inputs["gamestate"].shape
         assert T > 0
 
         frame_emb = self.modules_by_name.frame(inputs["frame"]).squeeze(-2)

@@ -1,7 +1,5 @@
 import json
 from pathlib import Path
-from typing import Dict
-from typing import Union
 
 import attr
 
@@ -19,12 +17,12 @@ class FeatureStats:
     # median: float
 
 
-def load_dataset_stats(path: Union[str, Path]) -> Dict[str, FeatureStats]:
+def load_dataset_stats(path: str | Path) -> dict[str, FeatureStats]:
     """Load the dataset statistics from a JSON file."""
     if not Path(path).is_absolute():
         # Support relative paths in config when reloading from arbitrary dir / jupyter notebook
         path = Path(REPO_DIR) / path
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     dataset_stats = {}
     for k, v in data.items():

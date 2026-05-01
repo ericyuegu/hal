@@ -1,12 +1,6 @@
 import argparse
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Type
-from typing import Union
 
 import attr
 from streaming import Stream
@@ -23,14 +17,12 @@ from hal.data.streams import StreamRegistry
 class ReplayFilter:
     """Filter for replay."""
 
-    replay_uuid: Optional[str] = None
-    stage: Optional[str] = attr.ib(
-        default=None, validator=attr.validators.optional(attr.validators.in_(INCLUDED_STAGES))
-    )
-    ego_character: Optional[str] = attr.ib(
+    replay_uuid: str | None = None
+    stage: str | None = attr.ib(default=None, validator=attr.validators.optional(attr.validators.in_(INCLUDED_STAGES)))
+    ego_character: str | None = attr.ib(
         default=None, validator=attr.validators.optional(attr.validators.in_(INCLUDED_CHARACTERS))
     )
-    opponent_character: Optional[str] = attr.ib(
+    opponent_character: str | None = attr.ib(
         default=None, validator=attr.validators.optional(attr.validators.in_(INCLUDED_CHARACTERS))
     )
 
@@ -39,7 +31,7 @@ class ReplayFilter:
 class DataworkerConfig:
     data_workers_per_gpu: int = 12
     prefetch_factor: int = 2
-    collate_fn: Optional[str] = None
+    collate_fn: str | None = None
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -86,7 +78,7 @@ class DataConfig:
             return Path(self.stream_stats)
         return Path(self.data_dir) / "stats.json"
 
-    def get_streams(self) -> List[Stream]:
+    def get_streams(self) -> list[Stream]:
         assert self.streams is not None
         stream_names = self.streams.split(",")
         return [StreamRegistry.get(name) for name in stream_names]
@@ -126,14 +118,14 @@ class TrainConfig(BaseConfig):
     n_val_samples: int = 2**15
     keep_ckpts: int = 2**5
     report_len: int = 2**19
-    betas: Tuple[float, float] = (0.9, 0.999)
+    betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     wd: float = 1e-2
     grad_clip_norm: float = 1.0
 
     # Path to resume directory
-    resume_dir: Optional[str] = None
-    resume_idx: Optional[int] = None
+    resume_dir: str | None = None
+    resume_idx: int | None = None
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -145,11 +137,11 @@ class ValueTrainerConfig(TrainConfig):
     weight_clip: float = 20.0
 
 
-TrainerConfigT = Union[TrainConfig, ValueTrainerConfig]
+TrainerConfigT = TrainConfig | ValueTrainerConfig
 
 
 def create_parser_for_attrs_class(
-    cls: Type[Any], parser: argparse.ArgumentParser, prefix: str = ""
+    cls: type[Any], parser: argparse.ArgumentParser, prefix: str = ""
 ) -> argparse.ArgumentParser:
     for field in attr.fields(cls):
         arg_name = f"--{prefix}{field.name}"
@@ -159,7 +151,7 @@ def create_parser_for_attrs_class(
             create_parser_for_attrs_class(field.type, parser, f"{prefix}{field.name}.")
         else:
             # Otherwise, add it as a regular argument
-            if field.type == bool:
+            if field.type is bool:
                 parser.add_argument(
                     arg_name,
                     action="store_true",
@@ -179,8 +171,8 @@ def create_parser_for_attrs_class(
     return parser
 
 
-def parse_args_to_attrs_instance(cls: Type[Any], args: argparse.Namespace, prefix: str = "") -> Any:
-    kwargs: Dict[str, Any] = {}
+def parse_args_to_attrs_instance(cls: type[Any], args: argparse.Namespace, prefix: str = "") -> Any:
+    kwargs: dict[str, Any] = {}
 
     for field in attr.fields(cls):
         arg_name = f"{prefix}{field.name}"

@@ -1,16 +1,13 @@
 import math
-from typing import List
-from typing import Optional
-from typing import Tuple
 
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
 from hal.preprocess.preprocessor import Preprocessor
+from hal.training.models.gpt import MLP
 from hal.training.models.gpt import CausalSelfAttentionRelativePosition
 from hal.training.models.gpt import GPTConfig
-from hal.training.models.gpt import MLP
 from hal.training.models.gpt import skew
 from hal.training.models.gpt_multi_token import GPTMultiToken
 from hal.training.models.gpt_multi_token import MultiTokenGPTConfig
@@ -21,11 +18,11 @@ class CausalSelfAttentionRelativePositionWithCache(CausalSelfAttentionRelativePo
     def forward(
         self,
         x: torch.Tensor,
-        layer_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        layer_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
         return_kv: bool = False,
-    ) -> torch.Tensor | Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         B, L, D = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -75,9 +72,9 @@ class BlockWithCache(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        layer_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        layer_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
         return_kv: bool = False,
-    ) -> torch.Tensor | Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if return_kv:
             a, kv = self.attn(self.ln_1(x), layer_cache=layer_cache, return_kv=True)
             x = x + a
@@ -112,8 +109,8 @@ class KVCache:
             device=self.device,
             dtype=torch.float32,
         )
-    
-    def update()
+
+    # def update()
 
 
 class GPTMultiTokenValueWithCache(GPTMultiToken):
@@ -140,9 +137,9 @@ class GPTMultiTokenValueWithCache(GPTMultiToken):
     def forward_with_kv_cache(
         self,
         inputs: TensorDict,
-        kv_caches: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
         return_kv: bool = False,
-    ) -> TensorDict | Tuple[TensorDict, List[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> TensorDict | tuple[TensorDict, list[tuple[torch.Tensor, torch.Tensor]]]:
         """Forward pass with optional KV caching.
 
         Args:
@@ -154,7 +151,7 @@ class GPTMultiTokenValueWithCache(GPTMultiToken):
             TensorDict of model outputs, and optionally updated KV caches
         """
         B, L, _ = inputs["gamestate"].shape
-        assert L <= self.block_size, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
+        assert self.block_size >= L, f"Cannot forward sequence of length {L}, block size is only {self.block_size}"
 
         # Concatenate embeddings and numerical inputs -> project down
         combined_inputs_BLG = self._embed_inputs(inputs)

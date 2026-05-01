@@ -1,7 +1,7 @@
 """Deprecated"""
-from typing import Iterable
-from typing import Optional
-from typing import Tuple
+
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -11,9 +11,18 @@ from hal.training.config import TrainConfig
 from hal.training.models.registry import Arch
 
 
+def get_input_size_from_config(config: Any) -> int:
+    return (
+        config.stage_embedding_dim
+        + 2 * config.character_embedding_dim
+        + 2 * config.action_embedding_dim
+        + config.input_shapes_by_head["gamestate"][0]
+    )
+
+
 class MLP(nn.Module):
     def __init__(self, n_embd: int, dropout: float) -> None:
-        super(MLP, self).__init__()
+        super().__init__()
         self.c_fc = nn.Linear(n_embd, 4 * n_embd)
         self.gelu = nn.GELU()
         self.c_proj = nn.Linear(4 * n_embd, n_embd)
@@ -34,8 +43,8 @@ class LSTM(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(
-        self, x: torch.Tensor, hidden_in: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        self, x: torch.Tensor, hidden_in: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         x, hidden_out = self.lstm(x, hidden_in)
         return self.dropout(x), hidden_out
 
@@ -49,8 +58,8 @@ class RecurrentResidualBlock(nn.Module):
         self.mlp = MLP(n_embd, dropout)
 
     def forward(
-        self, x: torch.Tensor, hidden_in: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        self, x: torch.Tensor, hidden_in: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         y, hidden_out = self.lstm(self.ln_1(x), hidden_in)
         y = x + y
         z = y + self.mlp(self.ln_2(y))
@@ -84,9 +93,9 @@ class LSTMv1(nn.Module):
     def forward(
         self,
         inputs: TensorDict,
-        hidden_in: Optional[Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = None,
-    ) -> Tuple[TensorDict, Iterable[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
-        B, L, D = inputs["gamestate"].shape
+        hidden_in: Iterable[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+    ) -> tuple[TensorDict, Iterable[tuple[torch.Tensor, torch.Tensor] | None]]:
+        B, T, D = inputs["gamestate"].shape
         assert T > 0
 
         stage_emb = self.modules_by_name.stage(inputs["stage"]).squeeze(-2)
@@ -107,7 +116,7 @@ class LSTMv1(nn.Module):
         new_hidden_in = []
         for i in range(T):
             x = concat_inputs[:, i].unsqueeze(1)
-            for block, hidden in zip(self.modules_by_name.h, hidden_in):
+            for block, hidden in zip(self.modules_by_name.h, hidden_in, strict=True):
                 x, new_hidden = block(x, hidden)
                 new_hidden_in.append(new_hidden)
 
