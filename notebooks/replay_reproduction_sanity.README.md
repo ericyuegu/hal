@@ -27,10 +27,10 @@ position match exactly. The remaining drift looks like an attribute
 mismatch on hit (electric vs non-electric, or shield vs body). All
 other comparison fields are bit-exact.
 
-`ffw` mode is broken differently: `controller.main_stick.0` diverges
-from frame ~−117 onward. EXI input override appears to be using stale
-padBuf bytes between our pipe writes — separate timing issue. See the
-investigation log.
+`ffw` mode now matches normal mode after enabling `blocking_input=True`
+in the libmelee `Console` constructor (pulled from libmelee's own
+`test_live.py` canonical config). Same 4 hitlag-only mismatches over
+`start_frame=-123 prefix=200`.
 
 The previous handoff's "171 frames bit-exact" claim was incorrect: the
 prior debug data (`/tmp/repro_debug_neg123_v2/`) actually shows

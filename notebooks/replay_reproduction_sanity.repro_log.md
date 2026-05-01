@@ -1,5 +1,34 @@
 # Replay reproduction — investigation log
 
+## 2026-05-01 update #6 — per-port UCF matches; build-version drift is the leading suspect
+
+Parsed GameStart event in both source slp and a saved live slp:
+
+```
+              source slp                      live slp
+slp version    3.7.0                          3.19.0
+port 1   dashback=UCF shielddrop=UCF    dashback=UCF shielddrop=UCF
+port 2   dashback=UCF shielddrop=UCF    dashback=UCF shielddrop=UCF
+port 3   dashback=UCF shielddrop=UCF    dashback=UCF shielddrop=UCF
+port 4   dashback=UCF shielddrop=UCF    dashback=UCF shielddrop=UCF
+```
+
+Per-port controller-fix settings are identical, so UCF DB / UCF SD
+will fire equivalently in source and live.
+
+The biggest remaining unaccounted-for difference is the Slippi-Ishiiruka
+**build version**: source was recorded under slp 3.7.0
+(Slippi-Ishiiruka v2.x era) while our live emulator is the v3.19.0
+build. `$Required: General Codes` is a single named gecko block that
+the build ships with — its contents change between Slippi-Ishiiruka
+releases. If any patch landed between 3.7 and 3.19 that affected hit
+attribute resolution or hitlag computation, our 4-7 frame drift on
+hit moments is plausibly that.
+
+Verifying this directly would require running the harness under a
+slippi-Ishiiruka build closer to the source's vintage (e.g. v2.4.x).
+Out of scope for this round; documented as the next path.
+
 ## 2026-05-01 update #5 — `blocking_input=True` is the libmelee escape hatch for FFW
 
 Found by reading `~/src/libmelee/test_live.py` (libmelee's own canonical
