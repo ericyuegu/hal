@@ -15,11 +15,11 @@ $EMULATOR_FILE_PATH --appimage-extract
 echo "${Yellow}Extracted emulator"
 cd ..
 
-if [ ! -d ".venv" ]; then
-  python -m venv .venv
-  source .venv/bin/activate
-  pip install -r requirements.txt
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
 fi
+uv sync
 echo "${Yellow}Installed venv"
 
 DATA_DIR="/opt/slippi"

@@ -8,19 +8,19 @@ Blog post: https://ericyuegu.com/melee-pt1
 
 # Setup
 
-This project has been tested for Python 3.11 on Ubuntu 20.04 LTS. 
+This project targets Python ≥ 3.11 on Ubuntu 20.04+. Dependencies are managed by [uv](https://docs.astral.sh/uv/).
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh   # if you don't have uv
+uv sync
 ```
 
-For macOS, `libmelee` requires a system installation of enet. 
+For macOS, `libmelee` requires a system installation of enet:
 ```bash
 brew install enet
-CFLAGS="-I/opt/homebrew/Cellar/enet/1.3.18/include" LDFLAGS="-L/opt/homebrew/Cellar/enet/1.3.18/lib -lenet" pip install melee --no-cache-dir
-pip install -r requirements_macos.txt
+CFLAGS="-I$(brew --prefix enet)/include" \
+LDFLAGS="-L$(brew --prefix enet)/lib -lenet" \
+uv sync
 ```
 
 ## Building Dolphin emulator
@@ -40,17 +40,17 @@ I recommend modifying the constants in `hal/local_paths.py` to point to your loc
 ## Processing replays to MDS format
 
 ```bash
-python hal/data/process_replays.py --replay_dir /path/to/replays --output_dir /path/to/mds
+uv run python hal/data/process_replays.py --replay_dir /path/to/replays --output_dir /path/to/mds
 ```
 
 ## Training
 
 ```bash
-python hal/training/simple_trainer.py --n_gpus 1 --data.data_dir /path/to/mds --arch GPTv5Controller-512-6-8-dropout
+uv run python hal/training/simple_trainer.py --n_gpus 1 --data.data_dir /path/to/mds --arch GPTv5Controller-512-6-8-dropout
 ```
 
 ## Evaluation
 
 ```bash
-python hal/eval/eval.py --model_dir /path/to/model_dir --n_workers 1
+uv run python hal/eval/eval.py --model_dir /path/to/model_dir --n_workers 1
 ```

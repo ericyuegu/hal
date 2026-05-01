@@ -20,7 +20,7 @@
 
 # Running experiments
 
-- A training command looks like so (never run this without permission): `CUDA_VISIBLE_DEVICES=0 python hal/training/simple_trainer.py --n_gpus 1 --data.streams cody --data.stream_stats data/top_players/Cody/stats.json --arch GPTv5Controller-512-6-8-dropout --data.input_preprocessing_fn baseline_controller_fine_main_analog_shoulder_early_release --data.target_preprocessing_fn fine_main_analog_shoulder_early_release --data.pred_postprocessing_fn fine_main_analog_shoulder`
+- A training command looks like so (never run this without permission): `CUDA_VISIBLE_DEVICES=0 uv run python hal/training/simple_trainer.py --n_gpus 1 --data.streams cody --data.stream_stats data/top_players/Cody/stats.json --arch GPTv5Controller-512-6-8-dropout --data.input_preprocessing_fn baseline_controller_fine_main_analog_shoulder_early_release --data.target_preprocessing_fn fine_main_analog_shoulder_early_release --data.pred_postprocessing_fn fine_main_analog_shoulder`
 
 # Future directions
 
