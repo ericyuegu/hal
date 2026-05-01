@@ -36,10 +36,11 @@ dependencies = [
 dev = [
     "autoflake",
     "autotyping",
-    "black",
     "isort",
+    "pre-commit",
     "pytest",
     "ruff",
+    "ty",
 ]
 
 [tool.uv]
@@ -60,33 +61,3 @@ indent = '    '
 force_single_line = true
 case_sensitive = true
 order_by_type = false
-
-[tool.black]
-line_length = 119
-target_version = ['py311']
-exclude = '''
-(
-    /(
-        \.git
-    |   \.mypy_cache
-    |   \.tox
-    |   \.venv
-    |   build
-    |   venv
-  )
-)
-'''
-
-[tool.ruff]
-line-length = 119
-target-version = "py311"
-extend-exclude = [".venv", "build", "venv", "emulator"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
-
-[tool.ruff.lint.isort]
-known-first-party = ["hal"]
-known-third-party = ["docker", "libmelee", "slippi-Ishiiruka"]
-force-single-line = true
