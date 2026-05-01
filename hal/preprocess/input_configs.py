@@ -235,8 +235,26 @@ def baseline_action_frame_controller() -> InputConfig:
     Separate embedding heads for stage, character, & action.
     No platforms, no projectiles.
     """
-    # TODO
-    ...
+    base_config = baseline_action_frame()
+    return attr.evolve(
+        base_config,
+        transformation_by_feature_name={
+            **base_config.transformation_by_feature_name,
+            "controller": partial(concat_controller_inputs, target_config=baseline_coarse()),
+        },
+        frame_offsets_by_input={
+            **base_config.frame_offsets_by_input,
+            "controller": -1,
+        },
+        grouped_feature_names_by_head={
+            **base_config.grouped_feature_names_by_head,
+            "controller": ("controller",),
+        },
+        input_shapes_by_head={
+            **base_config.input_shapes_by_head,
+            "controller": (baseline_coarse().target_size,),
+        },
+    )
 
 
 def fourier_xy() -> InputConfig:
@@ -525,7 +543,6 @@ InputConfigRegistry.register("baseline", baseline())
 InputConfigRegistry.register("baseline_controller", baseline_controller())
 InputConfigRegistry.register("baseline_controller_fine", baseline_controller_fine())
 InputConfigRegistry.register("baseline_action_frame", baseline_action_frame())
-InputConfigRegistry.register("baseline_action_frame_controller", baseline_action_frame_controller())
 InputConfigRegistry.register("fourier_xy", fourier_xy())
 InputConfigRegistry.register(
     "baseline_controller_fine_main_analog_shoulder", baseline_controller_fine_main_analog_shoulder()

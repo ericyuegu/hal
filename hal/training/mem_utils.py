@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import pickle
@@ -38,7 +39,7 @@ class MemoryMonitor:
         self.data = {pid: get_mem_info(pid) for pid in self.pids}
         return self.data
 
-    def table(self) -> str:
+    def table(self) -> builtins.str:
         self._refresh()
         table = []
         keys = list(list(self.data.values())[0].keys())
@@ -47,7 +48,7 @@ class MemoryMonitor:
             table.append((now, str(pid)) + tuple(self.format(data[k]) for k in keys))
         return tabulate(table, headers=["time", "PID"] + keys)
 
-    def str(self):
+    def str(self) -> builtins.str:
         self._refresh()
         keys = list(list(self.data.values())[0].keys())
         res = []
@@ -60,12 +61,13 @@ class MemoryMonitor:
         return "\n".join(res)
 
     @staticmethod
-    def format(size: int) -> str:
+    def format(size: int) -> builtins.str:
+        display_size = float(size)
         for unit in ("", "K", "M", "G"):  # noqa: B007 — `unit` is read after the loop
-            if size < 1024:
+            if display_size < 1024:
                 break
-            size /= 1024.0
-        return f"{size:.1f}{unit}"
+            display_size /= 1024.0
+        return f"{display_size:.1f}{unit}"
 
 
 def create_coco() -> list[Any]:
@@ -90,19 +92,3 @@ class DatasetFromList(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         return self.lst[idx]
-
-
-if __name__ == "__main__":
-    from serialize import NumpySerializedList
-
-    monitor = MemoryMonitor()
-    print("Initial", monitor.str())
-    lst = create_coco()
-    print("JSON", monitor.str())
-    lst = NumpySerializedList(lst)
-    print("Serialized", monitor.str())
-    del lst
-    import gc
-
-    gc.collect()
-    print("End", monitor.str())

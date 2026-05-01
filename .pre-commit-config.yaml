@@ -17,7 +17,8 @@ repos:
 
       - id: ty
         name: ty check
-        entry: uv run --quiet ty check
+        entry: uv run --quiet ty check --python-version 3.14 hal
         language: system
         types_or: [python, pyi]
+        pass_filenames: false
         require_serial: true

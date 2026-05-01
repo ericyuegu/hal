@@ -7,7 +7,8 @@ name = "hal"
 version = "0.1.0"
 description = "Decoder-only Transformer trained on Super Smash Bros. Melee replays"
 readme = "README.md"
-requires-python = ">=3.11"
+# The codebase uses current Python syntax and toolchain support.
+requires-python = ">=3.14"
 dependencies = [
     "attrs",
     "click",
@@ -24,6 +25,7 @@ dependencies = [
     "pyarrow",
     "scikit-learn",
     "seaborn",
+    "tabulate",
     "tensordict",
     "torch",
     "torchvision",
@@ -75,3 +77,26 @@ ignore = ["E501"]
 known-first-party = ["hal"]
 known-third-party = ["docker", "libmelee", "slippi-Ishiiruka"]
 force-single-line = true
+
+[tool.ty.environment]
+root = ["."]
+
+[tool.ty.src]
+exclude = [
+    "hal/training/archive/**",
+    "hal/training/models/lstm.py",
+    "hal/training/models/mlp.py",
+]
+
+[tool.ty.rules]
+call-non-callable = "warn"
+invalid-argument-type = "warn"
+invalid-assignment = "warn"
+invalid-method-override = "warn"
+invalid-return-type = "warn"
+missing-argument = "warn"
+no-matching-overload = "warn"
+not-iterable = "warn"
+not-subscriptable = "warn"
+unresolved-attribute = "warn"
+unsupported-operator = "warn"
