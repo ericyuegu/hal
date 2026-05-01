@@ -73,6 +73,11 @@ ignore = ["E501"]
 "notebooks/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
 "**/__init__.py" = ["F401"]
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that launch external services or emulators",
+]
+
 [tool.ruff.lint.isort]
 known-first-party = ["hal"]
 known-third-party = ["docker", "libmelee", "slippi-Ishiiruka"]
