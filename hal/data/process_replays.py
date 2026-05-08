@@ -34,7 +34,6 @@ from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
 
-from hal.data.calculate_stats import calculate_statistics_for_mds
 from hal.data.extract import extract_replay
 from hal.data.manifest import ReplayIndexEntry
 from hal.data.manifest import Stage3Annotation
@@ -102,7 +101,6 @@ def process_replays(
     train_split: float = 0.98,
     val_split: float = 0.01,
     workers: int = max(1, (mp.cpu_count() or 2) - 1),
-    compute_stats: bool = True,
 ) -> None:
     test_split = 1.0 - train_split - val_split
     if not (0.0 <= test_split <= 1.0):
@@ -185,15 +183,6 @@ def process_replays(
         f=failed,
         m=manifest_path,
     )
-
-    if compute_stats:
-        for split in splits:
-            split_dir = output / split
-            if rows_written[split] == 0:
-                continue
-            stats_path = output / f"stats_{split}.json"
-            calculate_statistics_for_mds(str(split_dir), str(stats_path), max_examples=100_000)
-            logger.info(f"stats -> {stats_path}")
 
 
 if __name__ == "__main__":
