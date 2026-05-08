@@ -4,35 +4,31 @@ Pure function on the index — no slp opens. All predicates run in-memory and
 compose with AND. Output is a deterministically-sorted newline-delimited list
 of absolute slp paths, one per line, ready to feed into `process_replays.py`.
 
-Usage:
-    python -m hal.data.filter_replays \\
-        --index /path/to/index.jsonl \\
-        --output /path/to/paths.txt \\
-        [--min-frames 1500] [--max-frames N] \\
-        [--completed-only] \\
-        [--stages BATTLEFIELD,FINAL_DESTINATION,...] \\
-        [--characters FOX,MARTH] \\
-        [--rank master,diamond] \\
-        [--player-codes-include CODES] [--player-codes-exclude CODES] \\
-        [--slp-version-min 3.7.0]
+CLI defaults bake in the "sensible" filter for tournament-style training:
+  - completed games only (no NO_CONTEST / unresolved)
+  - min 1500 frames (~25 sec, drops insta-quits and CSS-only replays)
+  - tournament-legal six stages
 
-`--stages` and `--characters` accept names (case-insensitive) from the tables
-below, OR slp-native integer ids. `--player-codes-*` accept either a
-comma-separated list inline (`ZAIN#0,IBDW#1`) or `@path/to/codes.txt`
-(one per line).
+Override or disable any of these via flags. Pass `--stages` an empty list
+(or a different list) to drop the stage filter; `--no-completed-only` to
+include unfinished games; `--min-frames 0` to keep everything.
+
+Stages and characters accept names (case-insensitive) from the tables below,
+OR slp-native integer ids (e.g. `--stages 31 32` or `--stages BATTLEFIELD
+FINAL_DESTINATION`). Player-code filters accept inline names or
+`@path/to/file.txt` for one-per-line lists.
 
 `--require-damage` is intentionally absent: the index doesn't store damage
-because Stage 1 reads start/end blocks only (peppi `skip_frames=True`). If
-a damage filter becomes necessary, add a peek-the-last-frame pass to
-`build_index.py`, write `had_damage` to the manifest, and re-expose it
-here.
+because Stage 1 reads start/end blocks only (peppi `skip_frames=True`).
 """
 
-import argparse
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
+import tyro
 from loguru import logger
 
 from hal.data.manifest import ReplayIndexEntry
@@ -221,49 +217,74 @@ def filter_index(
     return len(paths)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--index", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--min-frames", type=int, default=None)
-    parser.add_argument("--max-frames", type=int, default=None)
-    parser.add_argument("--completed-only", action="store_true")
-    parser.add_argument(
-        "--stages",
-        type=str,
-        default=None,
-        help=f"comma list of stage names or slp-native ints; names: {sorted(LEGAL_STAGES_BY_NAME)}",
-    )
-    parser.add_argument(
-        "--characters",
-        type=str,
-        default=None,
-        help=f"comma list of character names or slp-native ints; names: {sorted(CHARACTERS_BY_NAME)}",
-    )
-    parser.add_argument("--rank", type=str, default=None, help="comma list, e.g. master,diamond,platinum")
-    parser.add_argument(
-        "--player-codes-include",
-        type=str,
-        default=None,
-        help="comma list (ZAIN#0,IBDW#1) or @path/to/file.txt",
-    )
-    parser.add_argument("--player-codes-exclude", type=str, default=None, help="same syntax as --player-codes-include")
-    parser.add_argument("--slp-version-min", type=str, default=None, help="MAJOR.MINOR.PATCH (e.g. 3.7.0)")
-    args = parser.parse_args()
+@dataclass
+class FilterConfig:
+    """Filter `index.jsonl` to a `paths.txt` for Stage 3.
 
-    stages = _resolve_ids(args.stages.split(","), LEGAL_STAGES_BY_NAME, "stage") if args.stages else None
-    chars = _resolve_ids(args.characters.split(","), CHARACTERS_BY_NAME, "character") if args.characters else None
-    ranks = {r.strip().lower() for r in args.rank.split(",")} if args.rank else None
-    codes_in = _parse_codes(args.player_codes_include) if args.player_codes_include else None
-    codes_ex = _parse_codes(args.player_codes_exclude) if args.player_codes_exclude else None
-    version_min = _parse_version(args.slp_version_min) if args.slp_version_min else None
+    Defaults bake in completed-only, 1500-frame minimum, and the six
+    tournament-legal stages. Override or disable any of these via flags.
+    """
 
-    filter_index(
-        index=args.index,
-        output=args.output,
-        min_frames=args.min_frames,
-        max_frames=args.max_frames,
-        completed_only=args.completed_only,
+    index: Path
+    """Path to index.jsonl from build_index."""
+
+    output: Path
+    """Destination paths.txt."""
+
+    min_frames: int = 1500
+    """Drop replays shorter than this. Set to 0 to disable."""
+
+    max_frames: int | None = None
+    """Drop replays longer than this. None = unbounded."""
+
+    completed_only: bool = True
+    """Keep only replays that ended via stocks / time / sudden-death.
+    Pass --no-completed-only to include NO_CONTEST and unresolved games."""
+
+    stages: list[str] = field(
+        default_factory=lambda: [
+            "BATTLEFIELD",
+            "FINAL_DESTINATION",
+            "FOUNTAIN_OF_DREAMS",
+            "POKEMON_STADIUM",
+            "DREAMLAND",
+            "YOSHIS_STORY",
+        ]
+    )
+    """Stage names (or slp-native ints). Pass --stages with no values to
+    disable, e.g. via `--stages` (no items) — keeps every stage."""
+
+    characters: list[str] = field(default_factory=list)
+    """Character names (or slp-native ints). Empty = no character filter."""
+
+    rank: list[str] = field(default_factory=list)
+    """Rank substrings to keep, e.g. master,diamond,platinum. Empty = no
+    rank filter."""
+
+    player_codes_include: str | None = None
+    """Inline codes (ZAIN#0,IBDW#1) or `@path/to/file.txt`."""
+
+    player_codes_exclude: str | None = None
+    """Same syntax as --player-codes-include."""
+
+    slp_version_min: str | None = None
+    """Minimum slp version, e.g. 3.7.0. None = no version filter."""
+
+
+def run(cfg: FilterConfig) -> int:
+    stages = _resolve_ids(cfg.stages, LEGAL_STAGES_BY_NAME, "stage") if cfg.stages else None
+    chars = _resolve_ids(cfg.characters, CHARACTERS_BY_NAME, "character") if cfg.characters else None
+    ranks = {r.strip().lower() for r in cfg.rank} if cfg.rank else None
+    codes_in = _parse_codes(cfg.player_codes_include) if cfg.player_codes_include else None
+    codes_ex = _parse_codes(cfg.player_codes_exclude) if cfg.player_codes_exclude else None
+    version_min = _parse_version(cfg.slp_version_min) if cfg.slp_version_min else None
+
+    return filter_index(
+        index=cfg.index,
+        output=cfg.output,
+        min_frames=cfg.min_frames if cfg.min_frames > 0 else None,
+        max_frames=cfg.max_frames,
+        completed_only=cfg.completed_only,
         stages=stages,
         characters=chars,
         ranks=ranks,
@@ -271,8 +292,8 @@ def main() -> int:
         codes_exclude=codes_ex,
         slp_version_min=version_min,
     )
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run(tyro.cli(FilterConfig))
+    sys.exit(0)

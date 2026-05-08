@@ -7,18 +7,18 @@ Usage:
     python -m hal.data.build_index \\
         --root /path/to/replays \\
         --output /path/to/index.jsonl \\
-        [--incremental] [--no-sha1] [--workers N]
+        [--incremental] [--no-compute-sha1] [--workers N]
 
 Incremental mode reads the existing `index.jsonl`, collects every path already
 recorded, and only indexes new files. Failed parses are logged and counted but
 never halt the run.
 """
 
-import argparse
 import multiprocessing as mp
 import sys
 from pathlib import Path
 
+import tyro
 from loguru import logger
 from tqdm import tqdm
 
@@ -100,29 +100,6 @@ def build_index(
     logger.info(f"wrote {written} entries to {output}; {failed} failures ({failed / max(1, len(work)) * 100:.2f}%)")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", type=Path, required=True, help="replay directory to walk recursively")
-    parser.add_argument("--output", type=Path, required=True, help="destination index.jsonl")
-    parser.add_argument("--incremental", action="store_true", help="append new rows; skip paths already indexed")
-    parser.add_argument("--no-sha1", action="store_true", help="skip per-replay sha1_partial (faster; loses dedupe)")
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=max(1, (mp.cpu_count() or 2) - 1),
-        help="mp.Pool worker count (default: ncpu-1)",
-    )
-    args = parser.parse_args()
-
-    build_index(
-        root=args.root,
-        output=args.output,
-        incremental=args.incremental,
-        compute_sha1=not args.no_sha1,
-        workers=args.workers,
-    )
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    tyro.cli(build_index)
+    sys.exit(0)

@@ -9,7 +9,65 @@ from hal.constants import INCLUDED_STAGES
 from hal.constants import PLAYER_1_PORT
 from hal.constants import PLAYER_2_PORT
 from hal.constants import Player
-from hal.data.schema import NP_TYPE_BY_COLUMN
+
+# Eval mock-input columns — must match what `extract_eval_gamestate_as_tensordict`
+# in `hal.gamestate_utils` produces, since the closed-loop preprocessor consumes
+# both interchangeably. This is independent of the MDS per-frame schema in
+# `hal.data.schema`, which is the new peppi-py-based training schema.
+_EVAL_MOCK_COLUMNS: tuple[str, ...] = (
+    "frame",
+    "stage",
+    *(
+        f"p{p}_{f}"
+        for p in (1, 2)
+        for f in (
+            "port",
+            "character",
+            "stock",
+            "facing",
+            "invulnerable",
+            "position_x",
+            "position_y",
+            "percent",
+            "shield_strength",
+            "jumps_left",
+            "action",
+            "action_frame",
+            "invulnerability_left",
+            "hitlag_left",
+            "hitstun_left",
+            "on_ground",
+            "speed_air_x_self",
+            "speed_y_self",
+            "speed_x_attack",
+            "speed_y_attack",
+            "speed_ground_x_self",
+            "ecb_bottom_x",
+            "ecb_bottom_y",
+            "ecb_top_x",
+            "ecb_top_y",
+            "ecb_left_x",
+            "ecb_left_y",
+            "ecb_right_x",
+            "ecb_right_y",
+            "button_a",
+            "button_b",
+            "button_x",
+            "button_y",
+            "button_z",
+            "button_start",
+            "button_d_up",
+            "button_l",
+            "button_r",
+            "main_stick_x",
+            "main_stick_y",
+            "c_stick_x",
+            "c_stick_y",
+            "l_shoulder",
+            "r_shoulder",
+        )
+    ),
+)
 
 PRIOR_STAGE_LIKELIHOODS = {
     "BATTLEFIELD": 0.3358,
@@ -229,7 +287,7 @@ class EpisodeStats:
 
 def mock_framedata_as_tensordict(seq_len: int) -> TensorDict:
     """Mock `seq_len` frames of gamestate data."""
-    return TensorDict({k: torch.ones(seq_len) for k in NP_TYPE_BY_COLUMN}, batch_size=(seq_len,))
+    return TensorDict({k: torch.ones(seq_len) for k in _EVAL_MOCK_COLUMNS}, batch_size=(seq_len,))
 
 
 def share_and_pin_memory(tensordict: TensorDict) -> TensorDict:

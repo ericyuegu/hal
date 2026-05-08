@@ -32,6 +32,7 @@ dependencies = [
     "torch",
     "torchvision",
     "tqdm",
+    "tyro",
     "wandb",
     "yasoo",
 ]
