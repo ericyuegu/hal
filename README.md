@@ -50,8 +50,52 @@ Paths to the repo, Dolphin, ISO, and replay directory are resolved by `hal/local
 
 ## Processing replays to MDS format
 
+The data pipeline runs in three stages:
+
+1. **`build_index`** walks loose `.slp` files (or streams from a `.7z` archive) and writes `index.jsonl` — one row of metadata per replay.
+2. **`filter_replays`** is a pure-function pass over `index.jsonl` that emits a `paths.txt` for the next stage based on rank / character / version / frame-count predicates.
+3. **`process_replays`** consumes `paths.txt` + `index.jsonl`, parses every kept replay's frames, and writes MDS shards (`train`/`val`/`test`) plus a `manifest.jsonl` sidecar.
+
+`paths.txt` is self-describing — each line is either a filesystem path or `archive://<abs-archive>!<member>`. A single `paths.txt` may mix loose files with members from one or more archives, and Stage 3 will bucket and stream them appropriately.
+
 ```bash
-uv run python hal/data/process_replays.py --replay_dir /path/to/replays --output_dir /path/to/mds
+# Stage 1 — index loose .slp files on disk
+uv run python -m hal.data.build_index \
+    --root ~/data/ssbm/dev \
+    --output ~/data/hal/index.jsonl
+
+# Stage 1 — index .slp members directly from a .7z (no extraction; tmpfs-backed)
+uv run python -m hal.data.build_index \
+    --archive ~/data/ssbm/melee_public_slp_dataset_v2.7z \
+    --output ~/data/hal/index.jsonl
+
+# Stage 1 — fold another archive into the same index
+uv run python -m hal.data.build_index \
+    --archive ~/data/ssbm/ranked-anonymized-2-151807.7z \
+    --output ~/data/hal/index.jsonl \
+    --incremental
+
+# Stage 2 — filter to a paths.txt (no .slp opens; runs in seconds)
+uv run python -m hal.data.filter_replays \
+    --index ~/data/hal/index.jsonl \
+    --output ~/data/hal/paths.txt \
+    --min-frames 1500 \
+    --rank master diamond platinum
+
+# Stage 3 — paths.txt + index.jsonl → MDS shards + manifest.jsonl
+# (Archive entries in paths.txt are streamed automatically; no --archive flag.)
+uv run python -m hal.data.process_replays \
+    --paths-file ~/data/hal/paths.txt \
+    --index ~/data/hal/index.jsonl \
+    --output ~/data/hal/mds
+```
+
+In archive mode `build_index` and `process_replays` materialize each member to a bounded tmpfs ring (default `/dev/shm/...`, ~64 files in flight) just long enough for `peppi-py` to parse it, then unlink — the archive itself is never extracted to persistent storage.
+
+End-to-end smoke tests live in `tests/test_archive_streaming.py` and skip automatically when the `~/data/ssbm/dev.7z` fixture isn't present:
+
+```bash
+uv run pytest tests/test_archive_streaming.py -v
 ```
 
 ## Training

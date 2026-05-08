@@ -24,6 +24,7 @@ dependencies = [
     "pandas",
     "peppi-py",
     "polars",
+    "py7zr>=1.1.0",
     "pyarrow>=22",
     "scikit-learn",
     "seaborn",
