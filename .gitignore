@@ -9,6 +9,9 @@
 /emulator/squashfs-root/
 /replays/
 
+# Local agent/tool state
+/.claude/
+
 # Secrets
 /secrets/
 token.pickle

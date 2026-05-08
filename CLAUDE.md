@@ -29,6 +29,8 @@ Going forward, I would like to:
 # Principles
 
 - Existing code is not precious. Code is tech debt. Delete liberally. The marginal cost of rewriting code rounds to zero, but the benefit of cleaner, better abstractions is high.
+- Don't make references to "existing convention" from other parts of the repo in your comments unless asked.
+- Invalid states should be impossible to represent.
 
 ## Code Style
 - **Formatting**: Black with line_length=119, isort with black profile
@@ -39,12 +41,15 @@ Going forward, I would like to:
     - Never swallow exceptions (i.e. just `pass`), never use bare `except`
     - Don't catch exceptions just to log and rethrow—only wrap an exception if that part of the stack can add helpful context for debugging
     - Always name the exceptions being caught, ideally with extremely specific clauses; do not write `except Exception` unless it is a crucial runtime code path that must never crash—these cases are uncommon but readily apparent
+- **Type Annotations**: All functions, classes, and variables must specify explicit type annotations. Always include return types for functions. This ensures complete static type safety and clarity throughout the codebase.
+    - We are on py314, don't use `from __future__ import annotations`
 
 ### Suggested Libraries
 - Use `loguru` for logging
 - Use MosaicML Streaming `streaming` and MDS format for datasets: https://docs.mosaicml.com/projects/streaming/en/stable/index.html
 - Use `libmelee` for interacting with the Melee emulator (Dolphin)
-- Prefer pathlib for manipulating file paths
+- Use `tyro` for CLIs
+- Prefer pathlib for file paths
 
 ## Project Structure
 This codebase is a machine learning project for Super Smash Bros Melee AI, with model training, 
