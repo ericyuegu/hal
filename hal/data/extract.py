@@ -232,17 +232,20 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         return None
 
     port_idx_by_libmelee = _peppi_port_index(g)
+    # Map p1/p2 to the two lowest occupied ports (in port-ascending order).
+    # Replays on ports (3, 4) — common in tournament setups — would otherwise
+    # be silently dropped. We still require exactly two players (1v1).
+    occupied_ports = sorted(port_idx_by_libmelee)
+    if len(occupied_ports) != len(PLAYER_PREFIXES):
+        logger.debug(f"{replay_path}: {len(occupied_ports)} players; expected {len(PLAYER_PREFIXES)} (1v1)")
+        return None
+
     sample: dict[str, np.ndarray] = {
         "frame": np.array(ids[start_idx:], dtype=np.int32),
     }
 
-    for prefix in PLAYER_PREFIXES:
-        port = int(prefix.removeprefix("p"))
-        peppi_idx = port_idx_by_libmelee.get(port)
-        if peppi_idx is None:
-            logger.debug(f"{replay_path}: no port {port} player; expected p1+p2")
-            return None
-
+    for prefix, port in zip(PLAYER_PREFIXES, occupied_ports):
+        peppi_idx = port_idx_by_libmelee[port]
         port_data = g.frames.ports[peppi_idx]
         sample.update(_extract_player(port_data.leader, prefix, frame_slice, raw_length))
         sample.update(_extract_nana(port_data.follower, prefix, frame_slice, raw_length, out_length))
