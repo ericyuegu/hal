@@ -22,7 +22,9 @@ dependencies = [
     "numpy",
     "nvitop",
     "pandas",
-    "pyarrow",
+    "peppi-py",
+    "polars",
+    "pyarrow>=22",
     "scikit-learn",
     "seaborn",
     "tabulate",
@@ -49,6 +51,7 @@ python-preference = "only-managed"
 
 [tool.uv.sources]
 melee = { git = "https://github.com/vladfi1/libmelee" }
+peppi-py = { git = "https://github.com/ericyuegu/peppi-py.git" }
 
 [tool.setuptools.packages.find]
 include = ["hal*"]

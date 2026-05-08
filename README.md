@@ -8,12 +8,18 @@ Blog post: https://ericyuegu.com/melee-pt1
 
 # Setup
 
-This project targets Python ≥ 3.11 on Ubuntu 20.04+. Dependencies are managed by [uv](https://docs.astral.sh/uv/).
+This project targets Python ≥ 3.14 on Ubuntu 20.04+. Dependencies are managed by [uv](https://docs.astral.sh/uv/).
+
+`peppi-py` (the slp parser used by the data pipeline) is pulled from a fork and built from source via `maturin`, so a Rust toolchain is required:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # if you don't have uv
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+. "$HOME/.cargo/env"
 uv sync
 ```
+
+The first `uv sync` will compile `peppi-py` (~35s); subsequent syncs reuse the cached build.
 
 For macOS, `libmelee` requires a system installation of enet:
 ```bash
