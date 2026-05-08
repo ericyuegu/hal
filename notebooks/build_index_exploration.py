@@ -5,10 +5,6 @@ runnable cell. Cells share kernel state, so [0] (env + imports) must run first.
 """
 
 # %% [0] env + imports
-import os
-
-os.environ.setdefault("AWS_BUCKET", "dummy")
-
 import json
 import shutil
 import subprocess

@@ -5,11 +5,6 @@ Each `# %%` block is a runnable cell.
 """
 
 # %%
-# AWS_BUCKET assert in hal.data.streams.py runs at import time; set a dummy.
-import os
-
-os.environ.setdefault("AWS_BUCKET", "dummy")
-
 import json
 import time
 from collections import Counter
