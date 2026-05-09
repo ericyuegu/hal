@@ -29,8 +29,8 @@ Usage:
         [--workers N] [--train-split 0.98] [--val-split 0.01]
 """
 
+import dataclasses
 import multiprocessing as mp
-import sys
 from collections.abc import Iterable
 from collections.abc import Iterator
 from pathlib import Path
@@ -55,13 +55,27 @@ SHARD_SIZE_LIMIT: int = 1 << 31  # 2 GiB; data is repetitive, compression is 10-
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_process_replays")
 
 
+_INT32_SIGN_MASK: int = 0x7FFFFFFF
+_INT32_RANGE: int = 1 << 31
+
+
+def bucket_fraction(replay_uuid: int) -> float:
+    """Map a signed int32 replay_uuid to a stable fraction in [0, 1).
+
+    Folds the sign bit (top half of the int32 space) onto the bottom half.
+    Used by ``_split_for``; readers reconstructing the split from a uuid
+    must use this same function (a plain ``uuid % N`` will not agree).
+    """
+    return (replay_uuid & _INT32_SIGN_MASK) / _INT32_RANGE
+
+
 def _split_for(replay_uuid: int, train: float, val: float) -> str:
     """Deterministic bucket from a signed int32 replay_uuid.
 
     Same path always lands in the same split; resilient to reordering of
     paths.txt and to incremental adds.
     """
-    frac = (replay_uuid & 0x7FFFFFFF) / 0x80000000
+    frac = bucket_fraction(replay_uuid)
     if frac < train:
         return "train"
     if frac < train + val:
@@ -115,6 +129,11 @@ def _open_writers(output: Path, splits: Iterable[str]) -> dict[str, MDSWriter]:
 def _bucket_paths(paths: list[str]) -> tuple[list[str], dict[Path, list[str]]]:
     """Split paths.txt into filesystem paths and per-archive member lists.
 
+    Filesystem paths are resolved here so they match the form written into
+    ``ReplayIndexEntry.path`` by ``extract_index_entry`` (which uses
+    ``Path.resolve()``). A user-edited paths.txt with symlinks or ``..``
+    segments would otherwise silently miss the index.
+
     Archive ordering is first-appearance in paths.txt; member ordering within
     an archive is preserved (currently unused — iter_archive_members yields
     in decompression order — but kept stable for reproducibility).
@@ -124,7 +143,7 @@ def _bucket_paths(paths: list[str]) -> tuple[list[str], dict[Path, list[str]]]:
     for p in paths:
         parsed = parse_archive_member_path(p)
         if parsed is None:
-            fs_paths.append(p)
+            fs_paths.append(str(Path(p).resolve()))
             continue
         archive, member = parsed
         archive = archive.resolve()
@@ -175,8 +194,11 @@ def process_replays(
         raise FileNotFoundError(f"--paths {paths_file} not found")
     if not index.exists():
         raise FileNotFoundError(f"--index {index} not found")
-    if output.exists() and any(output.iterdir()):
-        raise FileExistsError(f"--output {output} is non-empty; choose a fresh directory")
+    # Per-split MDSWriter raises with exist_ok=False if its output dir already
+    # exists; check the manifest sidecar here so we fail before opening writers.
+    manifest_path = output / "manifest.jsonl"
+    if manifest_path.exists():
+        raise FileExistsError(f"{manifest_path} already exists; choose a fresh --output")
 
     paths = _read_paths(paths_file)
     fs_paths, members_by_archive = _bucket_paths(paths)
@@ -230,21 +252,12 @@ def process_replays(
                 writer = writers[split]
                 # MDSWriter assigns sample_idx in write order; capture it before writing.
                 row_idx = rows_written[split]
-                writer.write({k: v for k, v in sample.items()})
+                writer.write(sample)
                 rows_written[split] += 1
 
                 annotated.append(
-                    ReplayIndexEntry(
-                        path=entry.path,
-                        slp_version=entry.slp_version,
-                        stage=entry.stage,
-                        players=entry.players,
-                        frame_count=entry.frame_count,
-                        timestamp=entry.timestamp,
-                        played_on=entry.played_on,
-                        outcome=entry.outcome,
-                        rank_filename=entry.rank_filename,
-                        sha1_partial=entry.sha1_partial,
+                    dataclasses.replace(
+                        entry,
                         annotation=Stage3Annotation(
                             replay_uuid=replay_uuid,
                             split=split,
@@ -257,7 +270,6 @@ def process_replays(
         for w in writers.values():
             w.finish()
 
-    manifest_path = output / "manifest.jsonl"
     write_jsonl(manifest_path, annotated)
     logger.info(
         "wrote {tr} train, {v} val, {te} test ({f} failures); manifest -> {m}",
@@ -271,4 +283,3 @@ def process_replays(
 
 if __name__ == "__main__":
     tyro.cli(process_replays)
-    sys.exit(0)

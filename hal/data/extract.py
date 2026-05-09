@@ -27,38 +27,26 @@ from loguru import logger
 from numpy.typing import DTypeLike
 
 from hal.constants import NP_MASK_VALUE
+from hal.data.schema import BUTTON_BITS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import PLAYER_PREFIXES
 
 # slp Slippi-standard "first in-game frame" id (post-2-second countdown).
 GAME_START_FRAME: int = -123
 
-# peppi pre.buttons_physical bitmask per slp spec.
-BUTTON_BITS: dict[str, int] = {
-    "a": 0x0100,
-    "b": 0x0200,
-    "x": 0x0400,
-    "y": 0x0800,
-    "z": 0x0010,
-    "r": 0x0020,
-    "l": 0x0040,
-    "start": 0x1000,
-    "d_up": 0x0008,
-}
-
 # peppi-py character id for Nana (the follower); slp-native.
 NANA_CHARACTER_ID: int = 11
 
-# Game post-frame fields we read off `port.leader.post`.
-_GAMESTATE_PEPPI_FIELDS: tuple[tuple[str, str | None], ...] = (
+# Game post-frame fields we read off `port.leader.post`. The "action" column
+# is sourced from `post.state` and is fetched alongside action_frame from a
+# single materialization in `_gamestate_arrays`, not via `_resolve`.
+_GAMESTATE_PEPPI_FIELDS: tuple[tuple[str, str], ...] = (
     ("position_x", "position.x"),
     ("position_y", "position.y"),
     ("percent", "percent"),
     ("shield", "shield"),
     ("stock", "stocks"),
     ("direction", "direction"),
-    ("action", "state"),
-    # action_frame derived
     ("hitlag_left", "hitlag"),
     ("jumps_used", "jumps"),
     ("airborne", "airborne"),
@@ -94,8 +82,14 @@ def _arr_to_np(arr: object, dtype: DTypeLike, length: int) -> np.ndarray:
     mask = _mask_value(dtype)
     if arr is None:
         return np.full(length, mask, dtype=dtype)
-    raw = arr.to_pylist()
-    return np.array([v if v is not None else mask for v in raw], dtype=dtype)
+    return _list_to_np(arr.to_pylist(), dtype, length)
+
+
+def _list_to_np(values: list[object] | None, dtype: DTypeLike, length: int) -> np.ndarray:
+    mask = _mask_value(dtype)
+    if values is None:
+        return np.full(length, mask, dtype=dtype)
+    return np.array([v if v is not None else mask for v in values], dtype=dtype)
 
 
 def _resolve(obj: object, dotted: str) -> object:
@@ -107,11 +101,14 @@ def _resolve(obj: object, dotted: str) -> object:
     return cur
 
 
-def _action_frame_from_state(state_arr: object) -> np.ndarray:
-    """1-indexed run-length on post.state — matches libmelee's action_frame."""
-    if state_arr is None:
+def _action_frame_from_states(states: list[int] | None) -> np.ndarray:
+    """1-indexed run-length on post.state — matches libmelee's action_frame.
+
+    Returns an empty array when ``states`` is None; the caller's per-column
+    length sanity check then drops the replay.
+    """
+    if states is None:
         return np.array([], dtype=np.int32)
-    states = state_arr.to_pylist()
     out = np.empty(len(states), dtype=np.int32)
     prev: int | None = None
     counter = 0
@@ -125,6 +122,30 @@ def _action_frame_from_state(state_arr: object) -> np.ndarray:
     return out
 
 
+def _gamestate_arrays(post: object, key_prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+    """Pull every gamestate column for one post block under ``key_prefix``.
+
+    Used for both the leader (``p1``/``p2``) and follower (``p1_nana``/
+    ``p2_nana``); the only difference between the two is the prefix, so they
+    share this helper.
+
+    ``post.state`` is materialized once and reused for the ``action`` column
+    and the ``action_frame`` derivation.
+    """
+    out: dict[str, np.ndarray] = {}
+    for col_suffix, peppi_path in _GAMESTATE_PEPPI_FIELDS:
+        col = f"{key_prefix}_{col_suffix}"
+        dtype = MDS_PER_FRAME_DTYPES[col]
+        out[col] = _arr_to_np(_resolve(post, peppi_path), dtype, length)[frame_slice]
+
+    state_arr = post.state
+    states: list[int] | None = state_arr.to_pylist() if state_arr is not None else None
+    action_col = f"{key_prefix}_action"
+    out[action_col] = _list_to_np(states, MDS_PER_FRAME_DTYPES[action_col], length)[frame_slice]
+    out[f"{key_prefix}_action_frame"] = _action_frame_from_states(states)[frame_slice]
+    return out
+
+
 def _unpack_buttons(physical: object, length: int) -> dict[str, np.ndarray]:
     if physical is None:
         return {b: np.zeros(length, dtype=np.int32) for b in BUTTON_BITS}
@@ -132,8 +153,8 @@ def _unpack_buttons(physical: object, length: int) -> dict[str, np.ndarray]:
     return {b: ((bits & mask) != 0).astype(np.int32) for b, mask in BUTTON_BITS.items()}
 
 
-def _peppi_port_index(g: object) -> dict[int, int]:
-    """libmelee-style port (1..4) -> peppi port array index (0..3)."""
+def _peppi_idx_by_libmelee_port(g: object) -> dict[int, int]:
+    """Map libmelee port (1..4) to peppi's port-array index (0..3)."""
     out: dict[int, int] = {}
     for i, pl in enumerate(g.start.players):
         port_value = int(getattr(pl.port, "value", pl.port))
@@ -143,17 +164,8 @@ def _peppi_port_index(g: object) -> dict[int, int]:
 
 def _extract_player(leader: object, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
     """Pull the gamestate + controller columns for one port's leader (main char)."""
-    out: dict[str, np.ndarray] = {}
     pre = leader.pre
-    post = leader.post
-
-    # Gamestate from post-frame block
-    for col_suffix, peppi_path in _GAMESTATE_PEPPI_FIELDS:
-        arr = _resolve(post, peppi_path) if peppi_path else None
-        dtype = MDS_PER_FRAME_DTYPES[f"{prefix}_{col_suffix}"]
-        out[f"{prefix}_{col_suffix}"] = _arr_to_np(arr, dtype, length)[frame_slice]
-
-    out[f"{prefix}_action_frame"] = _action_frame_from_state(post.state)[frame_slice]
+    out = _gamestate_arrays(leader.post, prefix, frame_slice, length)
 
     # Buttons
     for b, arr in _unpack_buttons(pre.buttons_physical, length).items():
@@ -178,26 +190,17 @@ def _extract_player(leader: object, prefix: str, frame_slice: slice, length: int
     return out
 
 
-def _extract_nana(
-    follower: object | None, prefix: str, frame_slice: slice, length: int, frame_count: int
-) -> dict[str, np.ndarray]:
+def _extract_nana(follower: object | None, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
     """Nana columns: gamestate only (no controller). Mask if no follower."""
-    nana_cols: dict[str, np.ndarray] = {}
+    nana_prefix = f"{prefix}_nana"
     if follower is None:
-        for col, dtype in MDS_PER_FRAME_DTYPES.items():
-            if not col.startswith(f"{prefix}_nana_"):
-                continue
-            nana_cols[col] = np.full(frame_count, _mask_value(dtype), dtype=dtype)
-        return nana_cols
-
-    post = follower.post
-    for col_suffix, peppi_path in _GAMESTATE_PEPPI_FIELDS:
-        arr = _resolve(post, peppi_path) if peppi_path else None
-        dtype = MDS_PER_FRAME_DTYPES[f"{prefix}_nana_{col_suffix}"]
-        nana_cols[f"{prefix}_nana_{col_suffix}"] = _arr_to_np(arr, dtype, length)[frame_slice]
-
-    nana_cols[f"{prefix}_nana_action_frame"] = _action_frame_from_state(post.state)[frame_slice]
-    return nana_cols
+        out_length = frame_slice.stop - frame_slice.start
+        return {
+            col: np.full(out_length, _mask_value(dtype), dtype=dtype)
+            for col, dtype in MDS_PER_FRAME_DTYPES.items()
+            if col.startswith(f"{nana_prefix}_")
+        }
+    return _gamestate_arrays(follower.post, nana_prefix, frame_slice, length)
 
 
 def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
@@ -218,12 +221,7 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
 
     ids = g.frames.id.to_pylist()
     raw_length = len(ids)
-    # Trim to the first in-game frame onward.
-    start_idx = 0
-    for i, fid in enumerate(ids):
-        if fid >= GAME_START_FRAME:
-            start_idx = i
-            break
+    start_idx = next((i for i, fid in enumerate(ids) if fid >= GAME_START_FRAME), raw_length)
     frame_slice = slice(start_idx, raw_length)
     out_length = raw_length - start_idx
 
@@ -231,11 +229,11 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         logger.debug(f"no in-game frames for {replay_path}")
         return None
 
-    port_idx_by_libmelee = _peppi_port_index(g)
+    peppi_idx_by_libmelee_port = _peppi_idx_by_libmelee_port(g)
     # Map p1/p2 to the two lowest occupied ports (in port-ascending order).
     # Replays on ports (3, 4) — common in tournament setups — would otherwise
     # be silently dropped. We still require exactly two players (1v1).
-    occupied_ports = sorted(port_idx_by_libmelee)
+    occupied_ports = sorted(peppi_idx_by_libmelee_port)
     if len(occupied_ports) != len(PLAYER_PREFIXES):
         logger.debug(f"{replay_path}: {len(occupied_ports)} players; expected {len(PLAYER_PREFIXES)} (1v1)")
         return None
@@ -244,11 +242,11 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         "frame": np.array(ids[start_idx:], dtype=np.int32),
     }
 
-    for prefix, port in zip(PLAYER_PREFIXES, occupied_ports):
-        peppi_idx = port_idx_by_libmelee[port]
+    for prefix, port in zip(PLAYER_PREFIXES, occupied_ports, strict=True):
+        peppi_idx = peppi_idx_by_libmelee_port[port]
         port_data = g.frames.ports[peppi_idx]
         sample.update(_extract_player(port_data.leader, prefix, frame_slice, raw_length))
-        sample.update(_extract_nana(port_data.follower, prefix, frame_slice, raw_length, out_length))
+        sample.update(_extract_nana(port_data.follower, prefix, frame_slice, raw_length))
 
     # Sanity: every column has the expected length.
     bad = [(k, v.shape[0]) for k, v in sample.items() if v.shape[0] != out_length]

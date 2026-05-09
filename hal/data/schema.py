@@ -36,7 +36,19 @@ from numpy.typing import DTypeLike
 
 PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
 
-_BUTTONS: tuple[str, ...] = ("a", "b", "x", "y", "z", "start", "d_up", "l", "r")
+# peppi pre.buttons_physical bitmask per slp spec. Single source of truth for
+# the set of buttons exposed as MDS columns and the bitmask used to decode them.
+BUTTON_BITS: dict[str, int] = {
+    "a": 0x0100,
+    "b": 0x0200,
+    "x": 0x0400,
+    "y": 0x0800,
+    "z": 0x0010,
+    "r": 0x0020,
+    "l": 0x0040,
+    "start": 0x1000,
+    "d_up": 0x0008,
+}
 
 
 def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
@@ -59,7 +71,7 @@ def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
 
 def _controller_columns(prefix: str) -> dict[str, DTypeLike]:
     """Pre-frame block fields. Action[t] -> state[t+1] alignment."""
-    cols: dict[str, DTypeLike] = {f"{prefix}_button_{b}": np.int32 for b in _BUTTONS}
+    cols: dict[str, DTypeLike] = {f"{prefix}_button_{b}": np.int32 for b in BUTTON_BITS}
     cols.update(
         {
             f"{prefix}_main_stick_x": np.float32,

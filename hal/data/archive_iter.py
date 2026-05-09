@@ -23,9 +23,9 @@ works around:
    returns to flush the last writer per thread.
 
 2. Backpressure has to happen *before* a tmpfs file is opened, not after,
-   or a slow consumer lets the producer fill /dev/shm. We acquire a bounded
-   semaphore in ``TmpfsWriter.__init__`` and release it on the consumer
-   side after the consumer is done with the path.
+   or a slow consumer lets the producer fill /dev/shm. The factory acquires
+   a bounded semaphore *before* constructing each per-file writer, and the
+   consumer releases the slot after it's done with the path.
 """
 
 import os
@@ -66,15 +66,10 @@ def parse_archive_member_path(path: str) -> tuple[Path, str] | None:
 class _TmpfsWriter(Py7zIO):
     """Writes one decompressed member to a unique tmpfs file."""
 
-    def __init__(self, member: str, tmpfs_root: Path, out_q: queue.Queue, sem: threading.Semaphore) -> None:
-        # Acquire BEFORE opening the file: bounds /dev/shm usage to queue_size
-        # files even if the consumer is much slower than the producer.
-        sem.acquire()
+    def __init__(self, member: str, path: Path, out_q: queue.Queue) -> None:
         self.member: str = member
         self._out_q: queue.Queue = out_q
-        # Filename uniqueness: pid+tid+monotonic ns. Multiple producer threads
-        # (one per solid block) write concurrently; basenames must not collide.
-        self.path: Path = tmpfs_root / f"{os.getpid()}_{threading.get_ident()}_{os.urandom(4).hex()}.slp"
+        self.path: Path = path
         self._fp = self.path.open("wb")
         self._size: int = 0
         self._finalized: bool = False
@@ -106,7 +101,13 @@ class _TmpfsWriter(Py7zIO):
 
 
 class _StreamFactory(WriterFactory):
-    """Per-extract factory that serializes finalize calls within each thread."""
+    """Per-extract factory that serializes finalize calls within each thread.
+
+    Acquires a slot on the bounded semaphore *before* opening each per-file
+    writer so backpressure happens before /dev/shm fills. The slot is
+    released by the consumer after iteration (success or failure), or by
+    this factory if writer construction fails.
+    """
 
     def __init__(
         self,
@@ -121,18 +122,45 @@ class _StreamFactory(WriterFactory):
         self._filter_paths: set[str] | None = filter_paths
         self._open_per_thread: dict[int, Py7zIO] = {}
         self._lock: threading.Lock = threading.Lock()
+        self._stopped: bool = False
+        # Monotonic per-process counter, incremented under _lock so the
+        # filename suffix is unique across producer threads regardless of
+        # whether the GIL is enabled (py3.14 free-threading safe).
+        self._counter: int = 0
+
+    def request_stop(self) -> None:
+        """Tell create() to refuse all further real writers (NullIO instead).
+
+        Used when the consumer aborts early: still drain the producer thread
+        cleanly, but don't materialize any more files.
+        """
+        with self._lock:
+            self._stopped = True
+
+    def _next_path(self) -> Path:
+        with self._lock:
+            seq = self._counter
+            self._counter += 1
+        return self._tmpfs_root / f"{os.getpid()}_{threading.get_ident()}_{seq}.slp"
 
     def create(self, filename: str) -> Py7zIO:
         tid = threading.get_ident()
         with self._lock:
             prev = self._open_per_thread.get(tid)
+            stopped = self._stopped
         if isinstance(prev, _TmpfsWriter):
             prev.finalize()
 
-        if self._filter_paths is not None and filename not in self._filter_paths:
+        skip = stopped or (self._filter_paths is not None and filename not in self._filter_paths)
+        if skip:
             new: Py7zIO = NullIO()
         else:
-            new = _TmpfsWriter(filename, self._tmpfs_root, self._out_q, self._sem)
+            self._sem.acquire()
+            try:
+                new = _TmpfsWriter(filename, self._next_path(), self._out_q)
+            except BaseException:
+                self._sem.release()
+                raise
 
         with self._lock:
             self._open_per_thread[tid] = new
@@ -170,6 +198,10 @@ def iter_archive_members(
     Iteration order is "as files complete decompression"; for a solid archive
     that's roughly archive order interleaved across blocks. Do not rely on
     a strict order.
+
+    Early consumer abort (``break``, ``GeneratorExit``, exception) drains
+    the producer cleanly: the factory stops materializing new files, the
+    queue is flushed, and any already-yielded tmpfs files are unlinked.
     """
     if not archive.exists():
         raise FileNotFoundError(f"archive not found: {archive}")
@@ -194,10 +226,12 @@ def iter_archive_members(
     producer = threading.Thread(target=_producer, name=f"py7zr-producer-{archive.name}", daemon=True)
     producer.start()
 
+    drained = False
     try:
         while True:
             item = out_q.get()
             if item is _SENTINEL:
+                drained = True
                 break
             member, tmpfs_path = item
             synthetic = archive_member_path(archive, member)
@@ -208,6 +242,19 @@ def iter_archive_members(
                 # Caller is responsible for unlinking tmpfs_path.
                 sem.release()
     finally:
+        # If we didn't reach the sentinel, the consumer aborted early and the
+        # producer is still extracting (potentially blocked on sem.acquire()).
+        # Tell it to NullIO the rest, drain the queue releasing slots, and
+        # unlink any leftover tmpfs files — otherwise producer.join() deadlocks.
+        if not drained:
+            factory.request_stop()
+            while True:
+                item = out_q.get()
+                if item is _SENTINEL:
+                    break
+                _, leftover = item
+                Path(leftover).unlink(missing_ok=True)
+                sem.release()
         producer.join()
 
     if producer_exc:

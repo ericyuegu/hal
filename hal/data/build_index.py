@@ -20,8 +20,8 @@ recorded, and only indexes new entries. Failed parses are logged and counted
 but never halt the run.
 """
 
+import dataclasses
 import multiprocessing as mp
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -58,7 +58,7 @@ def _index_one(args: tuple[Path, bool, str | None]) -> ReplayIndexEntry | None:
         if synthetic_path is not None:
             path.unlink(missing_ok=True)
     if entry is not None and synthetic_path is not None:
-        entry.path = synthetic_path
+        entry = dataclasses.replace(entry, path=synthetic_path)
     return entry
 
 
@@ -178,4 +178,3 @@ def build_index(
 
 if __name__ == "__main__":
     tyro.cli(build_index)
-    sys.exit(0)

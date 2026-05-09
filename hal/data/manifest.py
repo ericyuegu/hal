@@ -166,7 +166,7 @@ class Stage3Annotation:
         return cls(**data)
 
 
-@dataclass
+@dataclass(frozen=True)
 class PlayerEntry:
     port: int  # 1..4 (libmelee convention; slp/peppi use 0..3)
     character: int  # slp-native (in-game) character id
@@ -187,7 +187,7 @@ class PlayerEntry:
         return cls(**data)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReplayIndexEntry:
     path: str  # absolute path
     slp_version: tuple[int, int, int]
@@ -267,9 +267,22 @@ def _rank_from_filename(path: Path) -> str | None:
     return None
 
 
-def _player_type_name(t: Any) -> str:
+def _raw_player_type_name(t: Any) -> str:
     name = getattr(t, "name", None)
     return str(name) if name is not None else str(t)
+
+
+def _narrow_player_type(name: str) -> PlayerType:
+    """Narrow peppi's player-type name to the PlayerType Literal.
+
+    EMPTY is a peppi-internal placeholder for unused port slots and is
+    filtered out by callers before they reach this function. Any other
+    value outside the Literal is rejected — silently coercing would let an
+    out-of-spec ``end.method``-style failure mode through.
+    """
+    if name not in ("HUMAN", "CPU", "DEMO"):
+        raise ValueError(f"unknown player type: {name!r}")
+    return name  # type: ignore[return-value]
 
 
 def _peppi_port_to_libmelee(p: Any) -> int:
@@ -292,7 +305,8 @@ def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> Repl
 
     players: list[PlayerEntry] = []
     for sp in g.start.players:
-        if _player_type_name(sp.type).upper() == "EMPTY":
+        type_name = _raw_player_type_name(sp.type).upper()
+        if type_name == "EMPTY":
             continue
         port = _peppi_port_to_libmelee(sp.port)
         # metadata.players is keyed by 0-indexed port as a string
@@ -303,7 +317,7 @@ def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> Repl
                 port=port,
                 character=int(sp.character),
                 costume=int(sp.costume),
-                player_type=_player_type_name(sp.type),  # type: ignore[arg-type]
+                player_type=_narrow_player_type(type_name),
                 code=names.get("code") or None,
                 name=names.get("netplay") or None,
             )

@@ -22,7 +22,6 @@ FINAL_DESTINATION`). Player-code filters accept inline names or
 because Stage 1 reads start/end blocks only (peppi `skip_frames=True`).
 """
 
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
@@ -86,7 +85,7 @@ def _resolve_ids(values: list[str], table: dict[str, int], kind: str) -> set[int
         v = v.strip()
         if not v:
             continue
-        if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
+        if v.isdigit():
             out.add(int(v))
             continue
         key = v.upper()
@@ -192,14 +191,14 @@ def filter_index(
 
     paths: list[str] = []
     total = 0
-    drops_by_label: dict[str, int] = {label: 0 for label, _ in preds}
+    entries_failing_by_label: dict[str, int] = {label: 0 for label, _ in preds}
 
     for entry in read_jsonl(index):
         total += 1
         kept = True
         for label, pred in preds:
             if not pred(entry):
-                drops_by_label[label] += 1
+                entries_failing_by_label[label] += 1
                 kept = False
                 if not log_per_filter:
                     break
@@ -211,8 +210,10 @@ def filter_index(
     output.write_text("\n".join(paths) + ("\n" if paths else ""))
 
     logger.info(f"index: {total}  kept: {len(paths)}  dropped: {total - len(paths)}")
-    for label, n in drops_by_label.items():
-        logger.info(f"  drop[{label}]: {n}")
+    sum_caveat = " (sum > dropped when an entry fails multiple predicates)" if log_per_filter else ""
+    logger.info(f"entries failing each predicate{sum_caveat}:")
+    for label, n in entries_failing_by_label.items():
+        logger.info(f"  fail[{label}]: {n}")
     logger.info(f"wrote {len(paths)} paths -> {output}")
     return len(paths)
 
@@ -257,7 +258,7 @@ class FilterConfig:
     characters: list[str] = field(default_factory=list)
     """Character names (or slp-native ints). Empty = no character filter."""
 
-    rank: list[str] = field(default_factory=list)
+    ranks: list[str] = field(default_factory=list)
     """Rank substrings to keep, e.g. master,diamond,platinum. Empty = no
     rank filter."""
 
@@ -274,7 +275,7 @@ class FilterConfig:
 def run(cfg: FilterConfig) -> int:
     stages = _resolve_ids(cfg.stages, LEGAL_STAGES_BY_NAME, "stage") if cfg.stages else None
     chars = _resolve_ids(cfg.characters, CHARACTERS_BY_NAME, "character") if cfg.characters else None
-    ranks = {r.strip().lower() for r in cfg.rank} if cfg.rank else None
+    ranks = {r.strip().lower() for r in cfg.ranks} if cfg.ranks else None
     codes_in = _parse_codes(cfg.player_codes_include) if cfg.player_codes_include else None
     codes_ex = _parse_codes(cfg.player_codes_exclude) if cfg.player_codes_exclude else None
     version_min = _parse_version(cfg.slp_version_min) if cfg.slp_version_min else None
@@ -296,4 +297,3 @@ def run(cfg: FilterConfig) -> int:
 
 if __name__ == "__main__":
     run(tyro.cli(FilterConfig))
-    sys.exit(0)
