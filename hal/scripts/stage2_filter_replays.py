@@ -32,49 +32,8 @@ from loguru import logger
 
 from hal.data.manifest import ReplayIndexEntry
 from hal.data.manifest import read_jsonl
-
-# Tournament-legal stages, slp-native ids. Names are libmelee-style for ergonomics.
-LEGAL_STAGES_BY_NAME: dict[str, int] = {
-    "FOUNTAIN_OF_DREAMS": 2,
-    "POKEMON_STADIUM": 3,
-    "YOSHIS_STORY": 8,
-    "DREAMLAND": 28,
-    "BATTLEFIELD": 31,
-    "FINAL_DESTINATION": 32,
-}
-
-# Standard cast, slp-native ids. Values coincide with libmelee.Character enum
-# (verified in notebooks/peppi_vs_libmelee.py).
-CHARACTERS_BY_NAME: dict[str, int] = {
-    "MARIO": 0,
-    "FOX": 1,
-    "CPTFALCON": 2,
-    "DK": 3,
-    "KIRBY": 4,
-    "BOWSER": 5,
-    "LINK": 6,
-    "SHEIK": 7,
-    "NESS": 8,
-    "PEACH": 9,
-    "POPO": 10,
-    "NANA": 11,
-    "PIKACHU": 12,
-    "SAMUS": 13,
-    "YOSHI": 14,
-    "JIGGLYPUFF": 15,
-    "MEWTWO": 16,
-    "LUIGI": 17,
-    "MARTH": 18,
-    "ZELDA": 19,
-    "YLINK": 20,
-    "DOC": 21,
-    "FALCO": 22,
-    "PICHU": 23,
-    "GAMEANDWATCH": 24,
-    "GANONDORF": 25,
-    "ROY": 26,
-}
-
+from hal.wire import CHARACTERS_BY_NAME
+from hal.wire import LEGAL_STAGES_BY_NAME
 
 Predicate = Callable[[ReplayIndexEntry], bool]
 

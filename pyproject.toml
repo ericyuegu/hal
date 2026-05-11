@@ -10,7 +10,6 @@ readme = "README.md"
 # The codebase uses current Python syntax and toolchain support.
 requires-python = ">=3.14"
 dependencies = [
-    "attrs",
     "click",
     "libcst",
     "loguru",

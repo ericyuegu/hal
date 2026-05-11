@@ -116,15 +116,15 @@ def compare_replay(replay_path: Path) -> dict[str, FieldStat]:
     peppi_id = [int(x.as_py() if hasattr(x, "as_py") else x) for x in g.frames.id]
     peppi_id_to_idx = {fid: i for i, fid in enumerate(peppi_id)}
 
-    # Derive libmelee-style action_frame (1-indexed integer counter that resets when state changes)
-    # from peppi's post.state column per port.
+    # Derive libmelee-style action_frame (1-indexed integer counter that resets when action changes)
+    # from peppi's post.action column per port.
     derived_action_frame: dict[int, list[int]] = {}
     for ppi in range(len(g.frames.ports)):
-        states = [int(s.as_py()) for s in g.frames.ports[ppi].leader.post.state]
+        actions = [int(s.as_py()) for s in g.frames.ports[ppi].leader.post.action]
         af = []
         prev: int | None = None
         counter = 0
-        for s in states:
+        for s in actions:
             if s != prev:
                 counter = 1
                 prev = s
@@ -177,10 +177,10 @@ def compare_replay(replay_path: Path) -> dict[str, FieldStat]:
 
             # Post-frame state
             cmp("character", int(libmelee_player.character.value), peppi_scalar(post.character, pi))
-            cmp("action", int(libmelee_player.action.value), peppi_scalar(post.state, pi))
+            cmp("action", int(libmelee_player.action.value), peppi_scalar(post.action, pi))
             # Peppi `state_age` is fractional (sub-frame) and not directly comparable to
             # libmelee's integer `action_frame`. Instead, derive libmelee's convention
-            # from peppi's post.state column (count consecutive identical states).
+            # from peppi's post.action column (count consecutive identical actions).
             lib_action_frame = float(libmelee_player.action_frame)
             if lib_action_frame >= 1:  # libmelee reports -1 on first frame of an action transition
                 cmp("action_frame_derived", int(lib_action_frame), derived_action_frame[ppi][pi])
@@ -188,15 +188,15 @@ def compare_replay(replay_path: Path) -> dict[str, FieldStat]:
             cmp("position_y", float(libmelee_player.position.y), peppi_scalar(post.position.y, pi))
             cmp("percent", float(libmelee_player.percent), peppi_scalar(post.percent, pi))
             cmp("shield", float(libmelee_player.shield_strength), peppi_scalar(post.shield, pi))
-            cmp("stock", int(libmelee_player.stock), peppi_scalar(post.stocks, pi))
+            cmp("stock", int(libmelee_player.stock), peppi_scalar(post.stock, pi))
             # libmelee facing: True=right (1.0), False=left (-1.0). Peppi direction: signed float scalar.
             peppi_dir = peppi_scalar(post.direction, pi)
             lib_dir = 1.0 if libmelee_player.facing else -1.0
             cmp("facing", lib_dir, float(peppi_dir) if peppi_dir is not None else None)
             cmp("on_ground", bool(libmelee_player.on_ground), not bool(peppi_scalar(post.airborne, pi)))
-            cmp("jumps_used", int(libmelee_player.jumps_left), peppi_scalar(post.jumps, pi))
-            # peppi.post.hitlag is None for slp <~3.8 (peppi doesn't parse it). Skip when None.
-            peppi_hitlag = peppi_scalar(post.hitlag, pi) if post.hitlag is not None else None
+            cmp("jumps_used", int(libmelee_player.jumps_left), peppi_scalar(post.jumps_used, pi))
+            # peppi.post.hitlag_left is None for slp <~3.8 (peppi doesn't parse it). Skip when None.
+            peppi_hitlag = peppi_scalar(post.hitlag_left, pi) if post.hitlag_left is not None else None
             if peppi_hitlag is not None:
                 cmp("hitlag_left", float(libmelee_player.hitlag_left), peppi_hitlag)
 

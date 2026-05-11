@@ -121,8 +121,12 @@ def test_build_index_archive_matches_root(tmp_path: Path, tmpfs: Path) -> None:
 
     idx_arc = tmp_path / "idx_arc.jsonl"
     idx_disk = tmp_path / "idx_disk.jsonl"
-    _run_module("hal.data.build_index", "--archive", str(DEV_ARCHIVE), "--output", str(idx_arc), "--workers", "4")
-    _run_module("hal.data.build_index", "--root", str(extracted), "--output", str(idx_disk), "--workers", "4")
+    _run_module(
+        "hal.scripts.stage1_build_index", "--archive", str(DEV_ARCHIVE), "--output", str(idx_arc), "--workers", "4"
+    )
+    _run_module(
+        "hal.scripts.stage1_build_index", "--root", str(extracted), "--output", str(idx_disk), "--workers", "4"
+    )
 
     arc = _by_basename(idx_arc)
     disk = _by_basename(idx_disk)
@@ -154,13 +158,17 @@ def test_process_replays_archive_byte_equal(tmp_path: Path, tmpfs: Path) -> None
 
     idx_arc = tmp_path / "idx_arc.jsonl"
     idx_disk = tmp_path / "idx_disk.jsonl"
-    _run_module("hal.data.build_index", "--archive", str(DEV_ARCHIVE), "--output", str(idx_arc), "--workers", "4")
-    _run_module("hal.data.build_index", "--root", str(extracted), "--output", str(idx_disk), "--workers", "4")
+    _run_module(
+        "hal.scripts.stage1_build_index", "--archive", str(DEV_ARCHIVE), "--output", str(idx_arc), "--workers", "4"
+    )
+    _run_module(
+        "hal.scripts.stage1_build_index", "--root", str(extracted), "--output", str(idx_disk), "--workers", "4"
+    )
 
     paths_arc = tmp_path / "paths_arc.txt"
     paths_disk = tmp_path / "paths_disk.txt"
     _run_module(
-        "hal.data.filter_replays",
+        "hal.scripts.stage2_filter_replays",
         "--index",
         str(idx_arc),
         "--output",
@@ -171,7 +179,7 @@ def test_process_replays_archive_byte_equal(tmp_path: Path, tmpfs: Path) -> None
         "--stages",
     )
     _run_module(
-        "hal.data.filter_replays",
+        "hal.scripts.stage2_filter_replays",
         "--index",
         str(idx_disk),
         "--output",
@@ -185,7 +193,7 @@ def test_process_replays_archive_byte_equal(tmp_path: Path, tmpfs: Path) -> None
     mds_arc = tmp_path / "mds_arc"
     mds_disk = tmp_path / "mds_disk"
     _run_module(
-        "hal.data.process_replays",
+        "hal.scripts.stage3_process_replays",
         "--paths-file",
         str(paths_arc),
         "--index",
@@ -196,7 +204,7 @@ def test_process_replays_archive_byte_equal(tmp_path: Path, tmpfs: Path) -> None
         "4",
     )
     _run_module(
-        "hal.data.process_replays",
+        "hal.scripts.stage3_process_replays",
         "--paths-file",
         str(paths_disk),
         "--index",
@@ -246,7 +254,7 @@ def test_process_replays_fails_fast_on_missing_archive(tmp_path: Path) -> None:
             "run",
             "python",
             "-m",
-            "hal.data.process_replays",
+            "hal.scripts.stage3_process_replays",
             "--paths-file",
             str(paths),
             "--index",

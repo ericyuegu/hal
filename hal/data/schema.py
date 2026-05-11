@@ -1,66 +1,26 @@
 """Per-frame MDS schema.
 
-Per-replay scalars (slp_version, stage, character, etc.) live in
-`hal.data.manifest.ReplayIndexEntry`, NOT here. This module defines only the
-columns written into the MDS shards — one ndarray per column, length =
-replay frame count.
+Defines the columns written into MDS shards (one ndarray per column, length =
+replay frame count). Per-replay scalars (``slp_version``, ``stage``, etc.)
+live in ``hal.data.manifest.ReplayIndexEntry``. Slp-native vocabulary
+(button bits, mask sentinels, player prefixes) lives in ``hal.wire``.
 
-Conventions
------------
-
-- **Sticks (`*_stick_x/y`)**: peppi-native floats in `[-1, 1]` with neutral=0.
-  This is *different* from the old libmelee-style `[0, 1]` with neutral=0.5.
-  The data layer never mutates values, so feature encoders that previously
-  assumed `[0, 1]` need to update.
-- **Triggers (`trigger_*`)**: floats in `[0, 1]` (peppi and libmelee agree).
-- **Direction (`direction`)**: float, -1.0 (left) or 1.0 (right) — peppi's
-  signed scalar; supersedes the old boolean `facing`.
-- **Buttons (`button_*`)**: 0/1 ints, decoded from peppi's
-  `pre.buttons_physical` bitmask.
-- **Raw analog bytes (`*_raw_*`)**: int8 / uint8 from the slp pre-frame block,
-  for closed-loop bit-exact controller reproduction. Gated by slp version
-  (raw_x ≥ 1.2.0; raw_y ≥ 3.15.0); when unavailable the column is filled
-  with `NP_MASK_VALUE` and consumers must short-circuit via the manifest's
-  `slp_version`.
-
-Controller alignment: row `t` stores `(state[t], action[t])` where `action[t]`
-is the input recorded as producing frame `t+1`. With peppi this is the
-`pre_*` columns at frame `t` — no manual shift needed.
-
-Ego/opponent: never mutated here. Sampler picks `ego_port ∈ {1,2}` and feature
-encoders look up `p{ego_port}_*` / `p{3-ego_port}_*` directly.
+See ``ARCHITECTURE.md`` for naming, mask sentinels, and slp-version gating.
 """
 
 import numpy as np
 from numpy.typing import DTypeLike
 
+from hal.wire import BUTTON_BITS
+
 # Bump on any breaking change to MDS_PER_FRAME_DTYPES (column add/remove/dtype
-# change) or to the extraction semantics that produce them. Consumers of a
-# manifest verify the version matches before reading; mismatch is a hard error,
-# not a silent one. Two manifests built with different schema versions must be
-# reprocessed, not co-mingled.
+# change) or to the extraction semantics that produce them. Consumers verify
+# the version matches before reading; mismatch is a hard error.
 #
 # 2: add raw_analog_cstick_x/y columns (slp >= 3.17) for bit-exact c-stick
-#    replay; main stick raw bytes alone left the c-stick on a lossy logical
-#    round-trip that drifted physics during smashes.
+#    replay.
 # 1: initial introduction of the version field.
 SCHEMA_VERSION: int = 2
-
-PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
-
-# peppi pre.buttons_physical bitmask per slp spec. Single source of truth for
-# the set of buttons exposed as MDS columns and the bitmask used to decode them.
-BUTTON_BITS: dict[str, int] = {
-    "a": 0x0100,
-    "b": 0x0200,
-    "x": 0x0400,
-    "y": 0x0800,
-    "z": 0x0010,
-    "r": 0x0020,
-    "l": 0x0040,
-    "start": 0x1000,
-    "d_up": 0x0008,
-}
 
 
 def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
@@ -90,6 +50,9 @@ def _controller_columns(prefix: str) -> dict[str, DTypeLike]:
             f"{prefix}_main_stick_y": np.float32,
             f"{prefix}_c_stick_x": np.float32,
             f"{prefix}_c_stick_y": np.float32,
+            # `trigger_logical` is peppi's smoothed analog value (single channel,
+            # used by training as the analog-shoulder feature). `trigger_l/r_physical`
+            # are the slp-native per-shoulder bytes used by the emulator wire path.
             f"{prefix}_trigger_logical": np.float32,
             f"{prefix}_trigger_l_physical": np.float32,
             f"{prefix}_trigger_r_physical": np.float32,

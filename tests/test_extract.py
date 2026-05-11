@@ -5,15 +5,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hal.constants import NP_MASK_VALUE
 from hal.data.extract import _action_frame_from_states
 from hal.data.extract import _list_to_np
-from hal.data.extract import _mask_value
 from hal.data.extract import _unpack_buttons
 from hal.data.extract import extract_replay
-from hal.data.schema import BUTTON_BITS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.local_paths import DEV_ARCHIVE_PATH
+from hal.wire import BUTTON_BITS
+from hal.wire import MASK_INT32
+from hal.wire import mask_value as _mask_value
 
 
 class _ArrowLike:
@@ -37,7 +37,7 @@ def test_mask_value_signed_int_is_dtype_min_for_narrow() -> None:
 
 
 def test_mask_value_int32_is_np_mask_value() -> None:
-    assert _mask_value(np.int32) == NP_MASK_VALUE
+    assert _mask_value(np.int32) == MASK_INT32
     assert _mask_value(np.int32) == (1 << 31) - 1
 
 

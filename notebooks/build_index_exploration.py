@@ -12,8 +12,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from hal.data.build_index import build_index
 from hal.data.manifest import read_jsonl
+from hal.scripts.stage1_build_index import build_index
 
 REPLAY_DIR = Path("/home/ericgu/data/ssbm/mang0")
 WORK = Path("/tmp/build_index_play")

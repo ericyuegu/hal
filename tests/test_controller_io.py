@@ -3,11 +3,11 @@
 import melee
 import numpy as np
 
-from hal.emulator.controller_io import RAW_BYTE_MASK
 from hal.emulator.controller_io import ControllerInputsValue
 from hal.emulator.controller_io import MdsControllerView
-from hal.emulator.controller_io import _raw_byte_to_wire
 from hal.emulator.controller_io import _stick_axis_wire
+from hal.wire import MASK_INT8
+from hal.wire import raw_byte_to_wire
 
 
 def _minimal_columns(prefix: str, *, with_raw: bool) -> dict[str, np.ndarray]:
@@ -42,26 +42,26 @@ def test_view_returns_raw_bytes_when_present() -> None:
 def test_view_falls_back_to_mask_when_raw_columns_absent() -> None:
     cols = _minimal_columns("p1", with_raw=False)
     view = MdsControllerView(columns=cols, port_prefix="p1", frame_idx=0)
-    assert view.raw_main_x == RAW_BYTE_MASK
-    assert view.raw_main_y == RAW_BYTE_MASK
-    assert view.raw_c_x == RAW_BYTE_MASK
-    assert view.raw_c_y == RAW_BYTE_MASK
+    assert view.raw_main_x == MASK_INT8
+    assert view.raw_main_y == MASK_INT8
+    assert view.raw_c_x == MASK_INT8
+    assert view.raw_c_y == MASK_INT8
 
 
 def test_stick_axis_wire_uses_raw_when_present() -> None:
-    wire = _stick_axis_wire(raw_byte=42, logical=0.5)
-    assert wire == _raw_byte_to_wire(42)
+    w = _stick_axis_wire(raw_byte=42, logical=0.5)
+    assert w == raw_byte_to_wire(42)
 
 
 def test_stick_axis_wire_falls_back_to_logical_at_mask() -> None:
-    wire = _stick_axis_wire(raw_byte=RAW_BYTE_MASK, logical=0.5)
+    w = _stick_axis_wire(raw_byte=MASK_INT8, logical=0.5)
     # Shift peppi [-1, 1] → libmelee [0, 1].
-    assert wire == melee.controller.fix_analog_stick((0.5 + 1.0) / 2.0)
+    assert w == melee.controller.fix_analog_stick((0.5 + 1.0) / 2.0)
 
 
 def test_controller_inputs_value_defaults_raw_to_mask() -> None:
     v = ControllerInputsValue(main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0)
-    assert v.raw_main_x == RAW_BYTE_MASK
-    assert v.raw_main_y == RAW_BYTE_MASK
-    assert v.raw_c_x == RAW_BYTE_MASK
-    assert v.raw_c_y == RAW_BYTE_MASK
+    assert v.raw_main_x == MASK_INT8
+    assert v.raw_main_y == MASK_INT8
+    assert v.raw_c_x == MASK_INT8
+    assert v.raw_c_y == MASK_INT8

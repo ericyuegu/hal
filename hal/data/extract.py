@@ -1,29 +1,13 @@
 """peppi-py-based per-frame extractor.
 
-`extract_replay(path) -> dict[str, np.ndarray] | None` returns one ndarray per
-column in `MDS_PER_FRAME_DTYPES`, length=frame_count, ready to feed into
-`MDSWriter.write`. Returns None on any unrecoverable parse failure.
+``extract_replay(path) -> dict[str, np.ndarray] | None`` returns one ndarray
+per column in ``MDS_PER_FRAME_DTYPES`` ready to feed into ``MDSWriter.write``.
+Returns ``None`` on any unrecoverable parse failure.
 
-Key choices:
-
-- **No mutation.** Sticks stay peppi-native [-1, 1]. Direction stays
-  peppi-native -1.0/1.0. Ego/opponent perspective is a runtime concern.
-- **Buttons** are unpacked from `pre.buttons_physical` bitmask (slp spec).
-- **Raw analog bytes** (slp version-gated) are filled with the per-dtype mask
-  sentinel (``np.iinfo(int8).min = -128``) when peppi reports None.
-- **Sentinel detection**: float columns are masked with ``float("nan")``;
-  callers MUST use ``np.isnan(arr)`` to detect masked entries, not ``==``,
-  because ``nan != nan``. Int columns use ``np.iinfo(dtype).min`` for signed
-  (``np.iinfo(dtype).max`` for unsigned), which round-trips through ``==``
-  normally.
-- **action_frame** is derived as a 1-indexed run-length counter on
-  `post.state` — this matches libmelee's `action_frame` convention bit-for-bit
-  (verified in notebooks/peppi_vs_libmelee.py).
-- **Nana**: when a player isn't Ice Climbers, all `*_nana_*` columns are
-  filled with the mask sentinel.
-- **Frame range**: peppi's `frames.id` includes pre-game (negative) frames.
-  We trim to `id >= -123` (Slippi standard "start of game" frame) to match
-  libmelee's IN_GAME / SUDDEN_DEATH filter.
+See ``ARCHITECTURE.md`` for the conventions this module assumes:
+no value mutation (peppi-native ranges), bitmask button unpacking, dtype-
+specific mask sentinels for slp-version-unavailable fields, and the post-
+countdown frame-id trim at ``wire.GAME_START_FRAME``.
 """
 
 import numpy as np
@@ -31,55 +15,16 @@ import peppi_py
 from loguru import logger
 from numpy.typing import DTypeLike
 
-from hal.constants import NP_MASK_VALUE
-from hal.data.schema import BUTTON_BITS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
-from hal.data.schema import PLAYER_PREFIXES
+from hal.wire import BUTTON_BITS
+from hal.wire import CHARACTERS_BY_NAME
+from hal.wire import GAME_START_FRAME
+from hal.wire import PLAYER_PREFIXES
+from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import mask_value
+from hal.wire import peppi_port_to_libmelee
 
-# slp Slippi-standard "first in-game frame" id (post-2-second countdown).
-GAME_START_FRAME: int = -123
-
-# peppi-py character id for Nana (the follower); slp-native.
-NANA_CHARACTER_ID: int = 11
-
-# Game post-frame fields we read off `port.leader.post`. The "action" column
-# is sourced from `post.state` and is fetched alongside action_frame from a
-# single materialization in `_gamestate_arrays`, not via `_resolve`.
-_GAMESTATE_PEPPI_FIELDS: tuple[tuple[str, str], ...] = (
-    ("position_x", "position.x"),
-    ("position_y", "position.y"),
-    ("percent", "percent"),
-    ("shield", "shield"),
-    ("stock", "stocks"),
-    ("direction", "direction"),
-    ("hitlag_left", "hitlag"),
-    ("jumps_used", "jumps"),
-    ("airborne", "airborne"),
-    ("hurtbox_state", "hurtbox_state"),
-)
-
-
-def _mask_value(dtype: DTypeLike) -> float | int:
-    """Dtype-appropriate mask sentinel.
-
-    NP_MASK_VALUE (= INT32_MAX) doesn't fit in int8/uint8, so we pick a
-    per-dtype "out of normal range" value:
-      - floats: NaN  (DETECT WITH ``np.isnan(arr)`` — ``arr == nan`` is False!)
-      - signed int: dtype min  (e.g. -128 for int8, INT_MIN for int32)
-      - unsigned int: dtype max (e.g. 255 for uint8)
-
-    NaN is the correct float sentinel — it propagates through arithmetic and
-    is the numpy idiom — but every consumer that wants to detect masked
-    entries on float columns must use ``np.isnan`` and not ``==``. Int
-    sentinels round-trip through equality normally.
-    """
-    np_dtype = np.dtype(dtype)
-    if np.issubdtype(np_dtype, np.floating):
-        return float("nan")
-    info = np.iinfo(np_dtype)
-    if np_dtype.kind == "i":
-        return info.min if np_dtype.itemsize < 4 else NP_MASK_VALUE
-    return info.max  # unsigned
+NANA_CHARACTER_ID: int = CHARACTERS_BY_NAME["NANA"]
 
 
 def _arr_to_np(arr: object, dtype: DTypeLike, length: int) -> np.ndarray:
@@ -89,14 +34,14 @@ def _arr_to_np(arr: object, dtype: DTypeLike, length: int) -> np.ndarray:
     version — fill with the dtype's mask sentinel. None scalars within a
     column (e.g. peppi.hitlag for one frame) get the same treatment.
     """
-    mask = _mask_value(dtype)
+    mask = mask_value(dtype)
     if arr is None:
         return np.full(length, mask, dtype=dtype)
     return _list_to_np(arr.to_pylist(), dtype, length)
 
 
 def _list_to_np(values: list[object] | None, dtype: DTypeLike, length: int) -> np.ndarray:
-    mask = _mask_value(dtype)
+    mask = mask_value(dtype)
     if values is None:
         return np.full(length, mask, dtype=dtype)
     return np.array([v if v is not None else mask for v in values], dtype=dtype)
@@ -111,21 +56,21 @@ def _resolve(obj: object, dotted: str) -> object:
     return cur
 
 
-def _action_frame_from_states(states: list[int] | None) -> np.ndarray:
-    """1-indexed run-length on post.state — matches libmelee's action_frame.
+def _action_frame_from_states(actions: list[int] | None) -> np.ndarray:
+    """1-indexed run-length on post.action — matches libmelee's action_frame.
 
-    Returns an empty array when ``states`` is None; the caller's per-column
+    Returns an empty array when ``actions`` is None; the caller's per-column
     length sanity check then drops the replay.
     """
-    if states is None:
+    if actions is None:
         return np.array([], dtype=np.int32)
-    out = np.empty(len(states), dtype=np.int32)
+    out = np.empty(len(actions), dtype=np.int32)
     prev: int | None = None
     counter = 0
-    for i, s in enumerate(states):
-        if s != prev:
+    for i, a in enumerate(actions):
+        if a != prev:
             counter = 1
-            prev = s
+            prev = a
         else:
             counter += 1
         out[i] = counter
@@ -135,24 +80,28 @@ def _action_frame_from_states(states: list[int] | None) -> np.ndarray:
 def _gamestate_arrays(post: object, key_prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
     """Pull every gamestate column for one post block under ``key_prefix``.
 
-    Used for both the leader (``p1``/``p2``) and follower (``p1_nana``/
-    ``p2_nana``); the only difference between the two is the prefix, so they
-    share this helper.
-
-    ``post.state`` is materialized once and reused for the ``action`` column
-    and the ``action_frame`` derivation.
+    Shared by leader (``p1``/``p2``) and follower (``p1_nana``/``p2_nana``).
+    ``post.action`` is materialized once and reused for the ``action`` column
+    and ``action_frame`` derivation.
     """
     out: dict[str, np.ndarray] = {}
-    for col_suffix, peppi_path in _GAMESTATE_PEPPI_FIELDS:
-        col = f"{key_prefix}_{col_suffix}"
+    for suffix in POST_FIELD_SUFFIXES:
+        if suffix == "action":
+            continue  # paired with action_frame below
+        col = f"{key_prefix}_{suffix}"
         dtype = MDS_PER_FRAME_DTYPES[col]
-        out[col] = _arr_to_np(_resolve(post, peppi_path), dtype, length)[frame_slice]
+        if suffix in ("position_x", "position_y"):
+            # peppi nests these as post.position.x / post.position.y
+            value = _resolve(post, f"position.{suffix[-1]}")
+        else:
+            value = getattr(post, suffix)
+        out[col] = _arr_to_np(value, dtype, length)[frame_slice]
 
-    state_arr = post.state
-    states: list[int] | None = state_arr.to_pylist() if state_arr is not None else None
+    action_arr = post.action
+    actions: list[int] | None = action_arr.to_pylist() if action_arr is not None else None
     action_col = f"{key_prefix}_action"
-    out[action_col] = _list_to_np(states, MDS_PER_FRAME_DTYPES[action_col], length)[frame_slice]
-    out[f"{key_prefix}_action_frame"] = _action_frame_from_states(states)[frame_slice]
+    out[action_col] = _list_to_np(actions, MDS_PER_FRAME_DTYPES[action_col], length)[frame_slice]
+    out[f"{key_prefix}_action_frame"] = _action_frame_from_states(actions)[frame_slice]
     return out
 
 
@@ -165,11 +114,7 @@ def _unpack_buttons(physical: object, length: int) -> dict[str, np.ndarray]:
 
 def _peppi_idx_by_libmelee_port(g: object) -> dict[int, int]:
     """Map libmelee port (1..4) to peppi's port-array index (0..3)."""
-    out: dict[int, int] = {}
-    for i, pl in enumerate(g.start.players):
-        port_value = int(getattr(pl.port, "value", pl.port))
-        out[port_value + 1] = i
-    return out
+    return {peppi_port_to_libmelee(pl.port): i for i, pl in enumerate(g.start.players)}
 
 
 def _extract_player(leader: object, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
@@ -210,7 +155,7 @@ def _extract_nana(follower: object | None, prefix: str, frame_slice: slice, leng
     if follower is None:
         out_length = frame_slice.stop - frame_slice.start
         return {
-            col: np.full(out_length, _mask_value(dtype), dtype=dtype)
+            col: np.full(out_length, mask_value(dtype), dtype=dtype)
             for col, dtype in MDS_PER_FRAME_DTYPES.items()
             if col.startswith(f"{nana_prefix}_")
         }
@@ -244,19 +189,19 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         return None
 
     peppi_idx_by_libmelee_port = _peppi_idx_by_libmelee_port(g)
-    # Map p1/p2 to the two lowest occupied ports (in port-ascending order).
+    # Map p1/p2 to the two lowest occupied libmelee ports (in ascending order).
     # Replays on ports (3, 4) — common in tournament setups — would otherwise
     # be silently dropped. We still require exactly two players (1v1).
-    occupied_ports = sorted(peppi_idx_by_libmelee_port)
-    if len(occupied_ports) != len(PLAYER_PREFIXES):
-        logger.debug(f"{replay_path}: {len(occupied_ports)} players; expected {len(PLAYER_PREFIXES)} (1v1)")
+    occupied_libmelee_ports = sorted(peppi_idx_by_libmelee_port)
+    if len(occupied_libmelee_ports) != len(PLAYER_PREFIXES):
+        logger.debug(f"{replay_path}: {len(occupied_libmelee_ports)} players; expected {len(PLAYER_PREFIXES)} (1v1)")
         return None
 
     sample: dict[str, np.ndarray] = {
         "frame": np.array(ids[start_idx:], dtype=np.int32),
     }
 
-    for prefix, port in zip(PLAYER_PREFIXES, occupied_ports, strict=True):
+    for prefix, port in zip(PLAYER_PREFIXES, occupied_libmelee_ports, strict=True):
         peppi_idx = peppi_idx_by_libmelee_port[port]
         port_data = g.frames.ports[peppi_idx]
         sample.update(_extract_player(port_data.leader, prefix, frame_slice, raw_length))

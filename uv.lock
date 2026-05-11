@@ -746,7 +746,6 @@ name = "hal"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "attrs" },
     { name = "click" },
     { name = "libcst" },
     { name = "loguru" },
@@ -786,7 +785,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "attrs" },
     { name = "click" },
     { name = "libcst" },
     { name = "loguru" },

@@ -1,62 +1,31 @@
 """Columnar per-frame trajectory + constructors from .slp / MDS / live capture.
 
-A ``Trajectory`` is the comparison currency. ``diff`` consumes two of them
-without caring which side came from where.
+A ``Trajectory`` is the comparison currency: ``diff`` consumes two of them
+without caring which side came from where. We keep only post-frame data here
+— pre-frame controller features live in ``ControllerInputs`` /
+``MdsControllerSource`` and are not duplicated.
 
-Layout: ``post`` is a per-libmelee-port dict of column-name -> 1D ndarray.
-Field names mirror peppi's post-frame block (``position_x``, ``position_y``,
-``state``, ``percent``, ``shield``, ``stocks``, ``direction``, ``jumps``,
-``airborne``, ``hurtbox_state``, ``hitlag``). Per-frame ``random_seed`` is
-top-level for the seed tripwire.
-
-We keep only post-frame data here. Pre-frame controller features are owned
-by ``ControllerInputs`` / ``MdsControllerSource``; we don't duplicate.
+Layout: ``post[libmelee_port][field]`` is a 1D ndarray of length N. Field
+names are the MDS column suffixes from ``hal.wire.POST_FIELD_SUFFIXES``, which
+match peppi-py's (renamed) ``Post`` and libmelee's canonical ``Post`` 1:1, so
+no translation layer is needed between the three input paths.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
-import attrs
 import numpy as np
 import peppi_py
 
-# Post-frame fields compared by the round-trip diff. Names mirror MDS columns
-# in hal/data/schema._gamestate_columns AND peppi's post block, modulo two
-# renames ("stock" in MDS vs "stocks" in peppi; "action" in MDS vs "state" in
-# peppi). We canonicalize on peppi names here.
-POST_FIELDS: tuple[str, ...] = (
-    "position_x",
-    "position_y",
-    "percent",
-    "shield",
-    "stocks",
-    "direction",
-    "state",
-    "jumps",
-    "airborne",
-    "hurtbox_state",
-    "hitlag",
-)
+from hal.wire import POST_FIELD_SUFFIXES
 
-# Map MDS column suffix (under hal/data/schema._gamestate_columns) to the peppi
-# post-field name. The two disagree on "stock" (MDS) vs "stocks" (peppi),
-# "action" (MDS) vs "state" (peppi), and a couple of suffixes.
-_MDS_TO_PEPPI_POST: dict[str, str] = {
-    "position_x": "position_x",
-    "position_y": "position_y",
-    "percent": "percent",
-    "shield": "shield",
-    "stock": "stocks",
-    "direction": "direction",
-    "action": "state",
-    "jumps_used": "jumps",
-    "airborne": "airborne",
-    "hurtbox_state": "hurtbox_state",
-    "hitlag_left": "hitlag",
-}
+# Post-frame field names used by diff. Same vocabulary on .slp (peppi), MDS,
+# and live-capture sides.
+POST_FIELDS: tuple[str, ...] = POST_FIELD_SUFFIXES
 
 
-@attrs.frozen(slots=True)
+@dataclass(frozen=True, slots=True)
 class Trajectory:
     """Columnar per-frame data covering N frames.
 
@@ -86,14 +55,16 @@ class Trajectory:
 
         peppi compactly stores only occupied ports in ``frames.ports``; the
         libmelee port number for ``frames.ports[i]`` comes from
-        ``start.players[i].port`` (peppi's 0..3 + 1).
+        ``start.players[i].port``.
         """
+        from hal.wire import peppi_port_to_libmelee
+
         game = peppi_py.read_slippi(str(path), skip_frames=False)
         frames = game.frames
         n = len(frames.id)
         post: dict[int, dict[str, np.ndarray]] = {}
         for sp, port_data in zip(game.start.players, frames.ports, strict=True):
-            libmelee_port = int(getattr(sp.port, "value", sp.port)) + 1
+            libmelee_port = peppi_port_to_libmelee(sp.port)
             leader_post = port_data.leader.post
             cols = {field: _peppi_post_field(leader_post, field, n) for field in POST_FIELDS}
             post[libmelee_port] = cols
@@ -117,10 +88,7 @@ class Trajectory:
         """
         post: dict[int, dict[str, np.ndarray]] = {}
         for port, prefix in port_to_mds_prefix.items():
-            cols = {
-                peppi_name: columns[f"{prefix}_{mds_suffix}"] for mds_suffix, peppi_name in _MDS_TO_PEPPI_POST.items()
-            }
-            post[port] = cols
+            post[port] = {suffix: columns[f"{prefix}_{suffix}"] for suffix in POST_FIELD_SUFFIXES}
         n = len(columns["frame"])
         return cls(
             frame_id=columns["frame"],
@@ -158,13 +126,13 @@ class Trajectory:
                 cols["position_y"][i] = pos["y"]
                 cols["percent"][i] = pf["percent"]
                 cols["shield"][i] = pf["shield"]
-                cols["stocks"][i] = pf["stocks"]
+                cols["stock"][i] = pf["stock"]
                 cols["direction"][i] = pf["direction"]
-                cols["state"][i] = pf["state"]
-                cols["jumps"][i] = pf.get("jumps") or 0
+                cols["action"][i] = pf["action"]
+                cols["jumps_used"][i] = pf.get("jumps_used") or 0
                 cols["airborne"][i] = pf.get("airborne") or 0
                 cols["hurtbox_state"][i] = pf.get("hurtbox_state") or 0
-                cols["hitlag"][i] = pf.get("hitlag") or 0.0
+                cols["hitlag_left"][i] = pf.get("hitlag_left") or 0.0
         return cls(frame_id=frame_id, post=post, random_seed=seed)
 
 

@@ -6,7 +6,11 @@ from melee import Action
 from melee import Character
 from melee import Stage
 
-NP_MASK_VALUE: Final[int] = (1 << 31) - 1
+from hal.wire import MASK_INT32
+
+# Back-compat alias for older callers (notebooks, training). New code uses
+# hal.wire.MASK_INT32 directly.
+NP_MASK_VALUE: Final[int] = MASK_INT32
 
 VALID_PLAYERS: Final[tuple[str, str]] = ("p1", "p2")
 Player = Literal["p1", "p2"]

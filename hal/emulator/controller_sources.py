@@ -12,24 +12,28 @@ the protocol matters.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from dataclasses import field
 from typing import Literal
 from typing import Protocol
+from typing import runtime_checkable
 
-import attrs
 import numpy as np
 
 from hal.emulator.controller_io import ControllerInputs
 from hal.emulator.controller_io import ControllerInputsValue
 from hal.emulator.controller_io import MdsControllerView
+from hal.wire import BUTTON_BITS
 
 
+@runtime_checkable
 class ControllerSource(Protocol):
     """One frame of inputs for one port, or ``None`` if internally driven."""
 
     def __call__(self, frame_index: int, last_gamestate: dict | None) -> ControllerInputs | None: ...
 
 
-@attrs.frozen(slots=True)
+@dataclass(frozen=True, slots=True)
 class MdsControllerSource:
     """Replay an MDS-recorded port of inputs.
 
@@ -57,6 +61,7 @@ class MdsControllerSource:
         return MdsControllerView(columns=self.columns, port_prefix=self.port_prefix, frame_idx=next_idx)
 
 
+@dataclass(frozen=True, slots=True)
 class InternalControllerSource:
     """Sentinel: this port is driven inside Melee (CPU bot or physical human).
 
@@ -67,32 +72,23 @@ class InternalControllerSource:
         return None
 
 
-@attrs.define(slots=True)
+_NEUTRAL_INPUTS: ControllerInputs = ControllerInputsValue(
+    main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0
+)
+
+
+@dataclass(slots=True)
 class ScriptedControllerSource:
     """Fixed-sequence playback. After the sequence is exhausted, returns
     neutral resting state."""
 
     sequence: Sequence[ControllerInputs]
-    _neutral: ControllerInputs = attrs.field(init=False)
-
-    def __attrs_post_init__(self) -> None:
-        self._neutral = ControllerInputsValue(
-            main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0
-        )
+    _neutral: ControllerInputs = field(default=_NEUTRAL_INPUTS, init=False)
 
     def __call__(self, frame_index: int, last_gamestate: dict | None) -> ControllerInputs | None:
         if frame_index < len(self.sequence):
             return self.sequence[frame_index]
         return self._neutral
-
-
-# Button bitmasks (mirror BUTTON_BIT_TO_MELEE in controller_io). Kept local to
-# keep this module decoupled from melee imports.
-_BTN_A = 0x0100
-_BTN_B = 0x0200
-_BTN_X = 0x0400
-_BTN_Z = 0x0010
-_BTN_L = 0x0040
 
 
 def demo_sequence(n_frames: int, *, port: Literal["p1", "p2"]) -> list[ControllerInputs]:
@@ -126,7 +122,7 @@ def demo_sequence(n_frames: int, *, port: Literal["p1", "p2"]) -> list[Controlle
             # Staggered button stagger. Each press is 3 frames, 4-frame gap.
             phase = (t - 90) % 7
             if phase < 3:
-                buttons = (_BTN_A, _BTN_B, _BTN_X, _BTN_Z)[((t - 90) // 7) % 4]
+                buttons = (BUTTON_BITS["a"], BUTTON_BITS["b"], BUTTON_BITS["x"], BUTTON_BITS["z"])[((t - 90) // 7) % 4]
         elif 120 <= t < 150:
             # Trigger ramp 0 -> 1 -> 0 over 30 frames. trigger_l on p1, trigger_r on p2
             # so asymmetric per port.
@@ -138,7 +134,7 @@ def demo_sequence(n_frames: int, *, port: Literal["p1", "p2"]) -> list[Controlle
         elif 150 <= t < 180:
             # Z + L combo bursts of 5 frames every 10.
             if (t - 150) % 10 < 5:
-                buttons = _BTN_Z | _BTN_L
+                buttons = BUTTON_BITS["z"] | BUTTON_BITS["l"]
         out.append(
             ControllerInputsValue(
                 main_x=main_x,

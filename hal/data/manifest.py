@@ -1,62 +1,16 @@
-"""Per-replay metadata schema used by build_index → filter_replays → process_replays.
+"""Per-replay metadata: ``ReplayIndexEntry`` shared by all three pipeline stages.
 
-A `ReplayIndexEntry` describes everything we know about a single .slp file
-*without* iterating its frames: slp version, stage, players (port + character +
-costume + netplay code/name), match length, end outcome, timestamps. It is the
-load-bearing artifact for filtering datasets by rank/character/version/etc., and
-for closed-loop compatibility checks at training/eval time (slp_version drift
-matters for bit-exact reproduction).
+Stage 1 emits one entry per slp into ``index.jsonl`` (start/end/metadata
+blocks only, no frame iteration). Stage 3 writes the subset that landed in
+MDS into ``manifest.jsonl`` with ``Stage3Annotation`` populated.
 
-Three-stage pipeline
---------------------
+Integer ids are slp-native (peppi-py vocabulary) — see ARCHITECTURE.md
+"Conventions" and "Footguns" for the stage/character/port translation rules.
+LRAS = "L + R + A + Start" controller-combo forfeit; valid only when the slp
+ended via ``NO_CONTEST`` — ``GameOutcome`` enforces this at construction.
 
-The data pipeline separates *what slps exist*, *which slps to use for this
-dataset*, and *how to extract frames from them*:
-
-1. **`build_index.py`** — walks a replay tree once and emits `index.jsonl`,
-   one `ReplayIndexEntry` per slp. Reads only the start/end/metadata blocks
-   (no frame iteration), so it scales to 100k+ replays in minutes. Reusable
-   across arbitrarily many filtered datasets. `annotation` is None on every
-   row at this stage.
-2. **`filter_replays.py`** — pure function on `index.jsonl`. Composable
-   predicates (rank, characters, slp version, frame count, completion)
-   produce a `paths.txt` for Stage 3. No slp opens; cuts are seconds.
-3. **`process_replays.py`** — reads `paths.txt`, parses each slp's frame data
-   in parallel (peppi-py), writes MDS shards plus a `manifest.jsonl` sidecar.
-   Manifest rows are the index rows that actually landed in MDS, each with
-   `annotation` populated (split, mds_row_idx, frame_count_actual,
-   replay_uuid).
-
-So the same dataclass serves two artifacts:
-
-- `index.jsonl` — built once by Stage 1; `annotation` is None on each row.
-- `manifest.jsonl` — written by Stage 3 alongside MDS shards; rows are a
-  subset of the index, with `annotation` populated.
-
-LRAS = "L + R + A + Start", the GameCube controller combo a player holds to
-forfeit a Melee match. It is only meaningful when the slp ended via
-NO_CONTEST; that invariant is enforced by `GameOutcome`.
-
-Conventions
------------
-
-We default to **slp-native** integer ids (what peppi-py exposes, matching the
-bytes on disk) for: `stage`, `character`, `costume`, `slp_version`,
-`end_method`, `frame_count`. The one libmelee accommodation: **ports are
-stored 1..4** (libmelee convention) rather than peppi's 0..3.
-
-Footgun: `stage` is the slp-native id (e.g. Fountain of Dreams = 2). libmelee's
-`melee.Stage.FOUNTAIN_OF_DREAMS.value` is 8 — a different remapping. Comparing
-`entry.stage == melee.Stage.FOUNTAIN_OF_DREAMS.value` will silently misbehave.
-Use the slp-native id directly, or convert via a stage-id table at the
-consumption site. Character ids are also slp-native but happen to coincide with
-libmelee's enum values (verified against 56k+ frames in
-`notebooks/peppi_vs_libmelee.py`).
-
-Some slps are unparseable by peppi-rs but readable by libmelee — the most
-common cause is an out-of-spec `end.method` byte (e.g. value 9 in the wild,
-not in peppi's exhaustive enum {0,1,2,3,7}). `extract_index_entry` returns
-None for these; observed rate is ~0.5% on the mang0 corpus.
+``extract_index_entry`` returns ``None`` on peppi parse failure (~0.5% of the
+mang0 corpus — usually an out-of-spec ``end.method`` byte).
 """
 
 import dataclasses
@@ -73,6 +27,7 @@ from typing import Literal
 import peppi_py
 
 from hal.data.schema import SCHEMA_VERSION
+from hal.wire import peppi_port_to_libmelee as _peppi_port_to_libmelee
 
 
 class EndMethod(IntEnum):
@@ -303,11 +258,6 @@ def _narrow_player_type(name: str) -> PlayerType:
     if name not in ("HUMAN", "CPU", "DEMO"):
         raise ValueError(f"unknown player type: {name!r}")
     return name  # type: ignore[return-value]
-
-
-def _peppi_port_to_libmelee(p: Any) -> int:
-    """peppi Port enum is 0-indexed (P1=0); libmelee uses 1..4."""
-    return int(getattr(p, "value", p)) + 1
 
 
 def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> ReplayIndexEntry | None:

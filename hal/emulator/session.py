@@ -26,8 +26,8 @@ from loguru import logger
 from hal.data.manifest import ReplayIndexEntry
 from hal.emulator.controller_io import ControllerInputs
 from hal.emulator.controller_io import apply_inputs
-from hal.emulator.enums import slp_character_to_libmelee
-from hal.emulator.enums import slp_stage_to_libmelee
+from hal.wire import slp_character_to_libmelee
+from hal.wire import slp_stage_to_libmelee
 
 # Menu states that signal "match is live, drive() can take over."
 LIVE_MENU_STATES: frozenset[melee.Menu] = frozenset({melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH})

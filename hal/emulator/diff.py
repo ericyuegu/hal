@@ -9,15 +9,15 @@ yet.
 """
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
-import attrs
 import numpy as np
 
 from hal.emulator.trajectory import POST_FIELDS
 from hal.emulator.trajectory import Trajectory
 
 
-@attrs.frozen(slots=True)
+@dataclass(frozen=True, slots=True)
 class FieldDivergence:
     port: int
     field: str
@@ -26,7 +26,7 @@ class FieldDivergence:
     b_value: float
 
 
-@attrs.frozen(slots=True)
+@dataclass(frozen=True, slots=True)
 class DiffReport:
     passed: bool
     n_frames: int

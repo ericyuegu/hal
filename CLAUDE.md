@@ -55,5 +55,6 @@ Going forward, I would like to:
 - Use `tyro` for CLIs
 
 ## Project Structure
-This codebase is a machine learning project for Super Smash Bros Melee AI, with model training, 
-data processing, and emulator integration components. Use loguru for logging and attrs for config.
+This codebase is a machine learning project for Super Smash Bros Melee AI, with model training,
+data processing, and emulator integration components. Use loguru for logging and
+``@dataclass(frozen=True, slots=True)`` for value objects / config.
