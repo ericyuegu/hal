@@ -38,6 +38,7 @@ import melee
 from loguru import logger
 from melee.controller import fix_analog_stick
 
+from hal.emulator.controller_io import ControllerSink
 from hal.local_paths import EMULATOR_PATH
 from hal.local_paths import ISO_PATH
 
@@ -211,7 +212,7 @@ class ReplayControllerSender:
 
     def __init__(
         self,
-        controllers: dict[int, melee.Controller],
+        controllers: dict[int, ControllerSink],
         slp_version: tuple[int, int, int] = (0, 0, 0),
         *,
         use_raw_main_stick: bool = False,

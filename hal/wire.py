@@ -13,6 +13,7 @@ from typing import Final
 
 import melee
 import numpy as np
+import peppi_py.game
 from numpy.typing import DTypeLike
 
 # ---------------------------------------------------------------------------
@@ -23,7 +24,7 @@ from numpy.typing import DTypeLike
 PLAYER_PREFIXES: Final[tuple[str, str]] = ("p1", "p2")
 
 
-def peppi_port_to_libmelee(peppi_port: object) -> int:
+def peppi_port_to_libmelee(peppi_port: peppi_py.game.Port | int) -> int:
     """peppi Port enum (or 0..3 int) -> libmelee port (1..4)."""
     return int(getattr(peppi_port, "value", peppi_port)) + 1
 

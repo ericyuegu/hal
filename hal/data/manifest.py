@@ -23,6 +23,8 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 from typing import Literal
+from typing import cast
+from typing import get_args
 
 import peppi_py
 
@@ -255,9 +257,9 @@ def _narrow_player_type(name: str) -> PlayerType:
     value outside the Literal is rejected — silently coercing would let an
     out-of-spec ``end.method``-style failure mode through.
     """
-    if name not in ("HUMAN", "CPU", "DEMO"):
+    if name not in get_args(PlayerType):
         raise ValueError(f"unknown player type: {name!r}")
-    return name  # type: ignore[return-value]
+    return cast(PlayerType, name)
 
 
 def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> ReplayIndexEntry | None:

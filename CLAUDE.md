@@ -45,7 +45,7 @@ Going forward, I would like to:
     - Always name the exceptions being caught, ideally with extremely specific clauses; do not write `except Exception` unless it is a crucial runtime code path that must never crash—these cases are uncommon but readily apparent
     - Avoid fallback logic or fallback values that silently change behavior or configuration
 - **Type Annotations**: All functions, classes, and variables must specify explicit type annotations. Always include return types for functions. This ensures complete static type safety and clarity throughout the codebase.
-    - We are on py314, don't use `from __future__ import annotations`
+    - We are on py314, do not use `from __future__ import annotations`
 
 ### Suggested Libraries
 - Use `loguru` for logging

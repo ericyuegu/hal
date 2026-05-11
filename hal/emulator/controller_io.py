@@ -52,6 +52,18 @@ class ControllerInputs(Protocol):
     raw_c_y: int  # int8 from slp (>= 3.17.0), or wire.MASK_INT8 if unrecorded
 
 
+@runtime_checkable
+class ControllerSink(Protocol):
+    """Structural protocol for the subset of ``melee.Controller`` that
+    ``apply_inputs`` and ``ReplayControllerSender`` invoke. Lets test doubles
+    stand in without inheriting libmelee's Console-bound base class."""
+
+    def press_button(self, button: melee.enums.Button) -> None: ...
+    def release_button(self, button: melee.enums.Button) -> None: ...
+    def tilt_analog(self, button: melee.enums.Button, x: float, y: float) -> None: ...
+    def press_shoulder(self, button: melee.enums.Button, amount: float) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ControllerInputsValue:
     """Concrete value object satisfying ControllerInputs.

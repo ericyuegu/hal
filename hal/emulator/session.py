@@ -75,7 +75,10 @@ class ReplayMatchup(Matchup):
         sorted_entries = sorted(entry.players, key=lambda p: p.port)
         if len(sorted_entries) < 2:
             raise ValueError(f"replay {entry.path} has fewer than 2 players")
-        port_to_mds_prefix = {sorted_entries[0].port: "p1", sorted_entries[1].port: "p2"}
+        port_to_mds_prefix: dict[int, Literal["p1", "p2"]] = {
+            sorted_entries[0].port: "p1",
+            sorted_entries[1].port: "p2",
+        }
         players = tuple(
             PlayerSetup(
                 port=p.port,
@@ -279,9 +282,28 @@ class Session:
 
 
 @contextmanager
-def session(iso_path: str | Path, *, dolphin_path: str | Path, **kwargs: object) -> Iterator[Session]:
+def session(
+    iso_path: str | Path,
+    *,
+    dolphin_path: str | Path,
+    slippi_port: int = 51441,
+    step_timeout_seconds: float = 5.0,
+    setup_gecko_codes: bool = True,
+    frozen_stadium: bool = True,
+    tmp_home_directory: bool = True,
+    replay_dir: str | Path | None = None,
+) -> Iterator[Session]:
     """Convenience: ``with session(iso, dolphin_path=...) as s: ...``."""
-    s = Session(iso_path, dolphin_path=dolphin_path, **kwargs)
+    s = Session(
+        iso_path,
+        dolphin_path=dolphin_path,
+        slippi_port=slippi_port,
+        step_timeout_seconds=step_timeout_seconds,
+        setup_gecko_codes=setup_gecko_codes,
+        frozen_stadium=frozen_stadium,
+        tmp_home_directory=tmp_home_directory,
+        replay_dir=replay_dir,
+    )
     try:
         with s:
             yield s

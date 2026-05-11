@@ -11,6 +11,7 @@ fresh checkouts that don't have the fixture downloaded.
 import json
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def tmpfs() -> Path:
+def tmpfs() -> Iterator[Path]:
     """Per-test tmpfs scratch dir that's wiped before and after."""
     shutil.rmtree(TMPFS_ROOT, ignore_errors=True)
     TMPFS_ROOT.mkdir(parents=True)

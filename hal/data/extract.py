@@ -10,10 +10,16 @@ specific mask sentinels for slp-version-unavailable fields, and the post-
 countdown frame-id trim at ``wire.GAME_START_FRAME``.
 """
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 import peppi_py
 from loguru import logger
 from numpy.typing import DTypeLike
+from peppi_py.frame import Data
+from peppi_py.frame import Post
+from peppi_py.game import Game
 
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.wire import BUTTON_BITS
@@ -27,7 +33,7 @@ from hal.wire import peppi_port_to_libmelee
 NANA_CHARACTER_ID: int = CHARACTERS_BY_NAME["NANA"]
 
 
-def _arr_to_np(arr: object, dtype: DTypeLike, length: int) -> np.ndarray:
+def _arr_to_np(arr: Any, dtype: DTypeLike, length: int) -> np.ndarray:
     """Convert a pyarrow Array (or None) to numpy with mask substitution.
 
     None whole-column means peppi didn't parse this field for this slp
@@ -40,15 +46,15 @@ def _arr_to_np(arr: object, dtype: DTypeLike, length: int) -> np.ndarray:
     return _list_to_np(arr.to_pylist(), dtype, length)
 
 
-def _list_to_np(values: list[object] | None, dtype: DTypeLike, length: int) -> np.ndarray:
+def _list_to_np(values: Sequence[Any] | None, dtype: DTypeLike, length: int) -> np.ndarray:
     mask = mask_value(dtype)
     if values is None:
         return np.full(length, mask, dtype=dtype)
     return np.array([v if v is not None else mask for v in values], dtype=dtype)
 
 
-def _resolve(obj: object, dotted: str) -> object:
-    cur: object = obj
+def _resolve(obj: Any, dotted: str) -> Any:
+    cur: Any = obj
     for part in dotted.split("."):
         cur = getattr(cur, part)
         if cur is None:
@@ -77,7 +83,7 @@ def _action_frame_from_states(actions: list[int] | None) -> np.ndarray:
     return out
 
 
-def _gamestate_arrays(post: object, key_prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+def _gamestate_arrays(post: Post, key_prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
     """Pull every gamestate column for one post block under ``key_prefix``.
 
     Shared by leader (``p1``/``p2``) and follower (``p1_nana``/``p2_nana``).
@@ -105,19 +111,19 @@ def _gamestate_arrays(post: object, key_prefix: str, frame_slice: slice, length:
     return out
 
 
-def _unpack_buttons(physical: object, length: int) -> dict[str, np.ndarray]:
+def _unpack_buttons(physical: Any, length: int) -> dict[str, np.ndarray]:
     if physical is None:
         return {b: np.zeros(length, dtype=np.int32) for b in BUTTON_BITS}
     bits = np.array([v if v is not None else 0 for v in physical.to_pylist()], dtype=np.int32)
     return {b: ((bits & mask) != 0).astype(np.int32) for b, mask in BUTTON_BITS.items()}
 
 
-def _peppi_idx_by_libmelee_port(g: object) -> dict[int, int]:
+def _peppi_idx_by_libmelee_port(g: Game) -> dict[int, int]:
     """Map libmelee port (1..4) to peppi's port-array index (0..3)."""
     return {peppi_port_to_libmelee(pl.port): i for i, pl in enumerate(g.start.players)}
 
 
-def _extract_player(leader: object, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+def _extract_player(leader: Data, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
     """Pull the gamestate + controller columns for one port's leader (main char)."""
     pre = leader.pre
     out = _gamestate_arrays(leader.post, prefix, frame_slice, length)
@@ -149,7 +155,7 @@ def _extract_player(leader: object, prefix: str, frame_slice: slice, length: int
     return out
 
 
-def _extract_nana(follower: object | None, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+def _extract_nana(follower: Data | None, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
     """Nana columns: gamestate only (no controller). Mask if no follower."""
     nana_prefix = f"{prefix}_nana"
     if follower is None:

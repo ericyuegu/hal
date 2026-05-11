@@ -54,3 +54,20 @@ Per-frame columns no longer carry replay-level scalars. Look these up via
 `hal.data.manifest.ReplayIndexEntry` keyed by replay path / `replay_uuid`:
 `stage`, `slp_version`, per-player `character` / `port` / `code` / `name`, `outcome`,
 `rank_filename`, `frame_count`, etc.
+
+## Rewrite priority (snapshot 2026-05-11)
+
+The subtrees below are excluded from `[tool.ty.src]` in `pyproject.toml` and
+fail import at runtime. They need to be rewritten on top of the new MDS
+schema. Ordered by what blocks the rewrite first.
+
+| Subtree | Diag count | Dominant diagnostic | Notes |
+|---|---|---|---|
+| `hal/preprocess/` | 74 | `invalid-argument-type` (tensor / FeatureStats) | **First.** Every model and eval path imports a Preprocessor. Hard-blocked on the deleted `hal.data.stats` module; the rewrite owes a new stats-computation pass against the post-rename schema. |
+| `hal/training/` | 138 | `call-non-callable` on `Tensor` (54×) | **Second.** `models/gpt.py` alone is 71 diagnostics, almost all `nn.Module.__getattr__` returning `Tensor \| Module` rather than the concrete submodule type. Mostly cosmetic noise once the preprocess interface settles. |
+| `hal/eval/` | 28 | `invalid-argument-type` against the Preprocessor | **Last.** Blocked on the two above. Also pulls in `hal/emulator_helper.py` and `hal/gamestate_utils.py`. |
+| `hal/emulator_helper.py` | 5 | `MenuHelper.choose_*` called statically | Fold into the eval rewrite — these are real runtime bugs in dead code. |
+| `hal/gamestate_utils.py` | 2 | References removed `PlayerState.invulnerability_left` | Fold into the eval rewrite. |
+
+When each subtree is rewritten, drop its line from `[tool.ty.src].exclude`
+in the same PR.

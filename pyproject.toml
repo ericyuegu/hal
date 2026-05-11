@@ -91,10 +91,16 @@ force-single-line = true
 root = ["."]
 
 [tool.ty.src]
+# Pending rewrite — see TODO_MIGRATION.md. These subtrees still reference
+# the libmelee-era schema (deleted hal.data.stats, removed PlayerState
+# fields, etc.) and will be rewritten on top of the new MDS schema.
 exclude = [
-    "hal/training/archive/**",
-    "hal/training/models/lstm.py",
-    "hal/training/models/mlp.py",
+    "hal/training/**",
+    "hal/preprocess/**",
+    "hal/eval/**",
+    "hal/emulator_helper.py",
+    "hal/gamestate_utils.py",
+    "notebooks/**",
 ]
 
 [tool.ty.rules]

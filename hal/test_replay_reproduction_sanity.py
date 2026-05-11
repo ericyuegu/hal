@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
@@ -70,7 +68,7 @@ def assert_pipe_call(controller: FakeController, op: str, button: melee.Button, 
 def test_sender_normal_mode_uses_axis_pipe_for_triggers() -> None:
     controller = FakeController()
     # default: use_exi_inputs=False (normal mode)
-    sender = ReplayControllerSender({1: controller})  # type: ignore[arg-type]
+    sender = ReplayControllerSender({1: controller})
 
     sender.send_frame(
         {
@@ -118,7 +116,7 @@ def test_sender_normal_mode_uses_axis_pipe_for_triggers() -> None:
 
 def test_sender_exi_mode_uses_padbuf_pipe_for_triggers() -> None:
     controller = FakeController()
-    sender = ReplayControllerSender({1: controller}, use_exi_inputs=True)  # type: ignore[arg-type]
+    sender = ReplayControllerSender({1: controller}, use_exi_inputs=True)
 
     sender.send_frame({1: controller_state(left=0.4, r=0.8)})
 
@@ -155,7 +153,7 @@ def test_sender_raw_main_stick_opt_in() -> None:
     """With use_raw_main_stick=True and slp >= 3.15.0, both axes go raw."""
     controller = FakeController()
     sender = ReplayControllerSender(
-        {1: controller},  # type: ignore[arg-type]
+        {1: controller},
         slp_version=(3, 16, 0),
         use_raw_main_stick=True,
     )
@@ -182,7 +180,7 @@ def test_sender_raw_main_stick_pre_3_15_x_only() -> None:
     """slp 1.2.0..3.14.x: X from raw byte, Y from processed."""
     controller = FakeController()
     sender = ReplayControllerSender(
-        {1: controller},  # type: ignore[arg-type]
+        {1: controller},
         slp_version=(3, 7, 0),
         use_raw_main_stick=True,
     )
@@ -207,7 +205,7 @@ def test_sender_raw_main_stick_pre_3_15_x_only() -> None:
 
 def test_sender_holds_buttons_without_duplicate_press_and_releases_changes() -> None:
     controller = FakeController()
-    sender = ReplayControllerSender({1: controller})  # type: ignore[arg-type]
+    sender = ReplayControllerSender({1: controller})
 
     sender.send_frame({1: controller_state(buttons={melee.Button.BUTTON_A, melee.Button.BUTTON_B})})
     sender.send_frame({1: controller_state(buttons={melee.Button.BUTTON_A, melee.Button.BUTTON_Z})})

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import peppi_py
+from peppi_py.frame import Post
 
 from hal.wire import POST_FIELD_SUFFIXES
 
@@ -61,6 +62,8 @@ class Trajectory:
 
         game = peppi_py.read_slippi(str(path), skip_frames=False)
         frames = game.frames
+        if frames is None or frames.start is None:
+            raise ValueError(f"{path}: peppi returned no frame data")
         n = len(frames.id)
         post: dict[int, dict[str, np.ndarray]] = {}
         for sp, port_data in zip(game.start.players, frames.ports, strict=True):
@@ -136,7 +139,7 @@ class Trajectory:
         return cls(frame_id=frame_id, post=post, random_seed=seed)
 
 
-def _peppi_post_field(post: object, field: str, n: int) -> np.ndarray:
+def _peppi_post_field(post: Post, field: str, n: int) -> np.ndarray:
     """Pull one named post-field out of peppi's nested SoA.
 
     Position lives under ``post.position.{x,y}`` rather than as flat fields,

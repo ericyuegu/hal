@@ -45,6 +45,7 @@ from hal.data.archive_iter import iter_archive_members
 from hal.data.archive_iter import parse_archive_member_path
 from hal.data.extract import extract_replay
 from hal.data.manifest import ReplayIndexEntry
+from hal.data.manifest import Split
 from hal.data.manifest import Stage3Annotation
 from hal.data.manifest import read_jsonl
 from hal.data.manifest import replay_uuid_from_path
@@ -76,7 +77,7 @@ def bucket_fraction(replay_uuid: int) -> float:
     return (replay_uuid & _INT32_SIGN_MASK) / _INT32_RANGE
 
 
-def _split_for(replay_uuid: int, train: float, val: float) -> str:
+def _split_for(replay_uuid: int, train: float, val: float) -> Split:
     """Deterministic bucket from a signed int32 replay_uuid.
 
     Same path always lands in the same split; resilient to reordering of

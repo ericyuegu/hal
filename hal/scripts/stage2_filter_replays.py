@@ -93,21 +93,24 @@ def build_predicates(
     if stages:
         preds.append((f"stages={sorted(stages)}", lambda e: e.stage in stages))
     if characters:
-        preds.append((f"characters={sorted(characters)}", lambda e: any(p.character in characters for p in e.players)))
+        chars = characters
+        preds.append((f"characters={sorted(chars)}", lambda e, c=chars: any(p.character in c for p in e.players)))
     if ranks:
         preds.append((f"ranks={sorted(ranks)}", lambda e: e.rank_filename in ranks))
     if codes_include:
+        inc = codes_include
         preds.append(
             (
-                f"codes_include={sorted(codes_include)}",
-                lambda e: any(p.code in codes_include for p in e.players if p.code),
+                f"codes_include={sorted(inc)}",
+                lambda e, c=inc: any(p.code in c for p in e.players if p.code),
             )
         )
     if codes_exclude:
+        exc = codes_exclude
         preds.append(
             (
-                f"codes_exclude={sorted(codes_exclude)}",
-                lambda e: not any(p.code in codes_exclude for p in e.players if p.code),
+                f"codes_exclude={sorted(exc)}",
+                lambda e, c=exc: not any(p.code in c for p in e.players if p.code),
             )
         )
     if slp_version_min is not None:
