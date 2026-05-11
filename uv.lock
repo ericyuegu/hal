@@ -791,14 +791,14 @@ requires-dist = [
     { name = "libcst" },
     { name = "loguru" },
     { name = "matplotlib" },
-    { name = "melee", git = "https://github.com/vladfi1/libmelee" },
+    { name = "melee", git = "https://github.com/ericyuegu/libmelee?branch=canonical-schema" },
     { name = "more-itertools" },
     { name = "mosaicml-streaming", specifier = ">=0.11.0" },
     { name = "mypy-extensions" },
     { name = "numpy" },
     { name = "nvitop" },
     { name = "pandas" },
-    { name = "peppi-py", git = "https://github.com/ericyuegu/peppi-py.git" },
+    { name = "peppi-py", git = "https://github.com/ericyuegu/peppi-py?branch=libmelee-parity" },
     { name = "polars" },
     { name = "py7zr", specifier = ">=1.1.0" },
     { name = "pyarrow", specifier = ">=22" },
@@ -1126,7 +1126,7 @@ wheels = [
 [[package]]
 name = "melee"
 version = "0.47.0"
-source = { git = "https://github.com/vladfi1/libmelee#a6ad70f1024f698461ef0b91078fa3ca3ef5157f" }
+source = { git = "https://github.com/ericyuegu/libmelee?branch=canonical-schema#dc15ae376e2a3d49f1d4f9249db569f2b72149e0" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },
@@ -1493,8 +1493,8 @@ wheels = [
 
 [[package]]
 name = "peppi-py"
-version = "0.8.6"
-source = { git = "https://github.com/ericyuegu/peppi-py.git#b29892bebb915dfc0b377faf5b12cc55c0a60966" }
+version = "0.9.0"
+source = { git = "https://github.com/ericyuegu/peppi-py?branch=libmelee-parity#399529a3fc1ef72bab8425975b0d121140740de5" }
 dependencies = [
     { name = "inflection" },
     { name = "pyarrow" },

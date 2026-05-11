@@ -52,8 +52,8 @@ dev = [
 python-preference = "only-managed"
 
 [tool.uv.sources]
-melee = { git = "https://github.com/vladfi1/libmelee" }
-peppi-py = { git = "https://github.com/ericyuegu/peppi-py.git" }
+melee = { git = "https://github.com/ericyuegu/libmelee", branch = "canonical-schema" }
+peppi-py = { git = "https://github.com/ericyuegu/peppi-py", branch = "libmelee-parity" }
 
 [tool.setuptools.packages.find]
 include = ["hal*"]
