@@ -10,7 +10,9 @@
 /replays/
 
 # Local agent/tool state
-/.claude/
+/.claude/*.local.json
+/.claude/*.settings.json
+/.claude/*.lock
 
 # Secrets
 /secrets/

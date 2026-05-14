@@ -31,10 +31,10 @@ Going forward, I would like to:
 - Existing code is not precious. Code is tech debt. Delete liberally. The marginal cost of rewriting code rounds to zero, but the benefit of cleaner, better abstractions is high.
 - Don't make references to "existing convention" from other parts of the repo in your comments unless asked.
 - Invalid states should be impossible to represent.
-- Don't re-implement library helpers. If a dependency (libmelee, peppi-py, streaming, torch, ...) already exposes the function you need, call it directly even if a local re-implementation looks tidier. Local re-implementations drift away from upstream over time and turn library upgrades into silent behavioral changes. The exception is when the upstream function genuinely doesn't exist for your case — then write the smallest primitive that fills the gap and reuse the library for everything else.
+- Don't re-implement library helpers. If a dependency (libmelee, peppi-py, streaming, torch, ...) already exposes the function you need, call it directly. Local re-implementations drift away from upstream over time and turn library upgrades into silent behavioral changes. The exception is when the upstream function genuinely doesn't exist for your case — then write the smallest primitive that fills the gap and reuse the library for everything else.
 
 ## Code Style
-- **Formatting**: Black with line_length=119, isort with black profile
+- **Formatting**: ruff with line_length=119, isort
 - **Types**: Use type annotations everywhere. Return types required.
 - **Imports**: Group order: stdlib, third-party, first-party (hal). Single line imports.
 - **Naming**: snake_case for functions/variables, CamelCase for classes, UPPERCASE for constants
@@ -52,13 +52,11 @@ Going forward, I would like to:
 - Use `libmelee` to handle the Dolphin (emulator) lifecycle, Enet/spectator protocol, and blocking controller injection
 - Use `peppi-py` to batch read .slp files offline
 - Use `tyro` for CLIs
+- Use `@dataclass(frozen=True, slots=True)` for value objects, prefer functional programming patterns over in-place mutations
 
 ## Project Structure
-This codebase is a machine learning project for Super Smash Bros Melee AI, with model training,
-data processing, and emulator integration components. Use loguru for logging and
-``@dataclass(frozen=True, slots=True)`` for value objects / config.
 
-## Architecture
+### Architecture
 
 A working developer's reference for the data-and-emulator stack: how a `.slp`
 file becomes an MDS shard, becomes a per-frame controller view, becomes a
@@ -168,9 +166,15 @@ Tensor-shape vocabulary used in preprocess/training/models:
   `apply_inputs` time. The libmelee `Controller` is constructed with
   `fix_analog_inputs=False` so our composed wire float passes through
   unmodified.
-- **Triggers**: `_logical` is peppi's smoothed analog value, stored as the
-  training-side analog-shoulder feature. `_l_physical` / `_r_physical` are
-  the slp-native per-shoulder bytes used by the emulator wire path.
+- **Triggers**: `_logical` is peppi's smoothed/fused (across L+R) analog
+  value, stored as the training-side analog-shoulder feature.
+  `_l_physical` / `_r_physical` are the slp-native per-shoulder f32 values
+  used by the emulator wire path. Unlike sticks, the slp spec never stored
+  a raw int8 byte for triggers — `physical` *is* the lowest-level signal
+  available, and the emulator path goes logical-float → `fix_analog_trigger`
+  → wire. `apply_inputs` calls `fix_analog_trigger` explicitly because
+  `fix_analog_inputs=False` on the Controller (the flag is stick-driven —
+  see Footguns; triggers tag along).
 - **Frame range**: peppi's `frames.id` includes pre-game (negative) frames.
   Extract trims to `frame_id >= wire.GAME_START_FRAME = -123` (Slippi
   standard "first in-game frame"). That trims the 2-second countdown but
@@ -191,6 +195,15 @@ without a checklist.
   c-stick ≥ 3.17.0. Older replays fall back to `wire.MASK_INT8` (= -128);
   the emulator wire path then takes the lossy logical-float fallback, which
   drifts ~0.0025 stick-units per frame.
+- **Triggers have no raw-byte equivalent in any slp version.** The Slippi
+  spec encodes `triggers_physical.{l,r}` as f32 in every version — there
+  is no analog of `raw_analog_x/y` for shoulders to extend the emulator
+  path with. Don't go looking for one; the logical-float → `fix_analog_trigger`
+  → wire path *is* the bit-exact path. Also note `pre.triggers` (peppi's
+  logical scalar) is `max(physical_l, physical_r)` — it fuses both
+  shoulders, so it cannot distinguish "L only" from "L+R both pressed"
+  and is unsafe to feed back through the wire as a single value. Train
+  on physical, not logical, if per-shoulder semantics matter.
 - **Float mask is `NaN`** — detect with `np.isnan`, not `==`, because
   `nan != nan` is always true. Int masks (`wire.MASK_INT8`, `wire.MASK_INT32`,
   etc.) round-trip through equality normally.
