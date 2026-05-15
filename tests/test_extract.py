@@ -10,7 +10,7 @@ from hal.data.extract import _list_to_np
 from hal.data.extract import _unpack_buttons
 from hal.data.extract import extract_replay
 from hal.data.schema import MDS_PER_FRAME_DTYPES
-from hal.local_paths import DEV_ARCHIVE_PATH
+from hal.paths import DEV_ARCHIVE_PATH
 from hal.wire import BUTTON_BITS
 from hal.wire import MASK_INT32
 from hal.wire import mask_value as _mask_value

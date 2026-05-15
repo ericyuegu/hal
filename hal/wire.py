@@ -1,7 +1,7 @@
 """Cross-layer source of truth for slp-native wire conventions.
 
-Imported by both ``hal.data`` (extract / schema / manifest / filter scripts)
-and ``hal.emulator`` (controller_io, trajectory, session). Anything declared
+Imported by both ``hal.data`` (extract / schema / index / filter scripts)
+and ``hal.sim`` (inputs, trajectory, session). Anything declared
 here is the canonical encoding shared across offline-dataset and online-
 emulator code — no other module should re-state what's defined here.
 
@@ -147,17 +147,6 @@ def slp_character_to_libmelee(slp_character_id: int) -> melee.Character:
     """
     return melee.Character(slp_character_id)
 
-
-# Tournament-legal stages — slp-native ids. Used by 02_filter_replays for
-# name-based filter expressions (``--stages BATTLEFIELD ...``).
-LEGAL_STAGES_BY_NAME: Final[dict[str, int]] = {
-    "FOUNTAIN_OF_DREAMS": 2,
-    "POKEMON_STADIUM": 3,
-    "YOSHIS_STORY": 8,
-    "DREAMLAND": 28,
-    "BATTLEFIELD": 31,
-    "FINAL_DESTINATION": 32,
-}
 
 # Standard cast — slp-native ids. Values coincide with libmelee.Character.
 CHARACTERS_BY_NAME: Final[dict[str, int]] = {

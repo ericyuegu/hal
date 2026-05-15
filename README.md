@@ -65,37 +65,37 @@ You can obtain raw `.slp` files from the [Slippi Discord](https://discord.gg/qaH
 
 # HOW-TO
 
-Paths to the repo, Dolphin, ISO, and data directories are resolved by `hal/local_paths.py` from environment variables, with defaults rooted at `~/data/` (override via `HAL_DATA_HOME`). The layout below uses `~/data/raw/` for human-source `.7z` archives + extracted `.slp` trees, `~/data/processed/` for pipeline outputs (index, MDS shards, manifests), `~/data/scratch/` for throwaway recordings, and `~/data/runs/<run_id>/` for eval rollouts. To override individual paths, copy `.env.example` to `.env` and edit, or `export` the variables in your shell profile.
+Paths to the repo, Dolphin, ISO, and data directories are resolved by `hal/paths.py` from environment variables, with defaults rooted at `~/data/` (override via `HAL_DATA_HOME`). The layout below uses `~/data/raw/` for human-source `.7z` archives + extracted `.slp` trees, `~/data/processed/` for pipeline outputs (index, MDS shards, manifests), `~/data/scratch/` for throwaway recordings, and `~/data/runs/<run_id>/` for eval rollouts. To override individual paths, copy `.env.example` to `.env` and edit, or `export` the variables in your shell profile.
 
 ## Processing replays to MDS format
 
-The data pipeline lives in `hal/scripts/` and runs in three numbered stages:
+The data pipeline lives in `hal/scripts/` and runs in three stages:
 
-1. **`stage1_build_index`** walks loose `.slp` files (or streams from a `.7z` archive) and writes `index.jsonl` — one row of metadata per replay.
-2. **`stage2_filter_replays`** is a pure-function pass over `index.jsonl` that emits a `paths.txt` for the next stage based on rank / character / version / frame-count predicates.
-3. **`stage3_process_replays`** consumes `paths.txt` + `index.jsonl`, parses every kept replay's frames, and writes MDS shards (`train`/`val`/`test`) plus a `manifest.jsonl` sidecar.
+1. **`index`** walks loose `.slp` files (or streams from a `.7z` archive) and writes `index.jsonl` — one row of metadata per replay.
+2. **`filter`** is a pure-function pass over `index.jsonl` that emits a `paths.txt` for the next stage based on rank / character / version / frame-count predicates.
+3. **`materialize`** consumes `paths.txt` + `index.jsonl`, parses every kept replay's frames, and writes MDS shards (`train`/`val`/`test`) plus a `manifest.jsonl` sidecar.
 
-`paths.txt` is self-describing — each line is either a filesystem path or `archive://<abs-archive>!<member>`. A single `paths.txt` may mix loose files with members from one or more archives, and Stage 3 will bucket and stream them appropriately.
+`paths.txt` is self-describing — each line is either a filesystem path or `archive://<abs-archive>!<member>`. A single `paths.txt` may mix loose files with members from one or more archives, and the materialize stage will bucket and stream them appropriately.
 
 ```bash
 # Stage 1 — index loose .slp files on disk
-uv run python -m hal.scripts.stage1_build_index \
+uv run python -m hal.scripts.index \
     --root ~/data/raw/dev \
     --output ~/data/processed/index.jsonl
 
 # Stage 1 — index .slp members directly from a .7z (no extraction; tmpfs-backed)
-uv run python -m hal.scripts.stage1_build_index \
+uv run python -m hal.scripts.index \
     --archive ~/data/raw/melee_public_slp_dataset_v2.7z \
     --output ~/data/processed/index.jsonl
 
 # Stage 1 — fold another archive into the same index
-uv run python -m hal.scripts.stage1_build_index \
+uv run python -m hal.scripts.index \
     --archive ~/data/raw/ranked-anonymized-2-151807.7z \
     --output ~/data/processed/index.jsonl \
     --incremental
 
 # Stage 2 — filter to a paths.txt (no .slp opens; runs in seconds)
-uv run python -m hal.scripts.stage2_filter_replays \
+uv run python -m hal.scripts.filter \
     --index ~/data/processed/index.jsonl \
     --output ~/data/processed/paths.txt \
     --min-frames 1500 \
@@ -103,13 +103,13 @@ uv run python -m hal.scripts.stage2_filter_replays \
 
 # Stage 3 — paths.txt + index.jsonl → MDS shards + manifest.jsonl
 # (Archive entries in paths.txt are streamed automatically; no --archive flag.)
-uv run python -m hal.scripts.stage3_process_replays \
+uv run python -m hal.scripts.materialize \
     --paths-file ~/data/processed/paths.txt \
     --index ~/data/processed/index.jsonl \
     --output ~/data/processed/mds
 ```
 
-In archive mode `stage1_build_index` and `stage3_process_replays` materialize each member to a bounded tmpfs ring (default `/dev/shm/...`, ~64 files in flight) just long enough for `peppi-py` to parse it, then unlink — the archive itself is never extracted to persistent storage.
+In archive mode `index` and `materialize` materialize each member to a bounded tmpfs ring (default `/dev/shm/...`, ~64 files in flight) just long enough for `peppi-py` to parse it, then unlink — the archive itself is never extracted to persistent storage.
 
 End-to-end smoke tests live in `tests/test_archive_streaming.py` and skip automatically when the `~/data/raw/dev.7z` fixture isn't present:
 

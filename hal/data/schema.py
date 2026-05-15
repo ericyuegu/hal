@@ -2,7 +2,7 @@
 
 Defines the columns written into MDS shards (one ndarray per column, length =
 replay frame count). Per-replay scalars (``slp_version``, ``stage``, etc.)
-live in ``hal.data.manifest.ReplayIndexEntry``. Slp-native vocabulary
+live in ``hal.data.index.ReplayIndexEntry``. Slp-native vocabulary
 (button bits, mask sentinels, player prefixes) lives in ``hal.wire``.
 
 See CLAUDE.md (Architecture) for naming, mask sentinels, and slp-version gating.

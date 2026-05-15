@@ -1,4 +1,4 @@
-"""Wire-format and bit-exact round-trip tests for the hal/emulator stack.
+"""Wire-format and bit-exact round-trip tests for the hal/sim stack.
 
 Two integration tests, both launching a real Dolphin:
 
@@ -32,21 +32,21 @@ import pytest
 from streaming import StreamingDataset
 
 from hal.data.extract import extract_replay
-from hal.data.manifest import read_jsonl
-from hal.emulator.controller_sources import ControllerSource
-from hal.emulator.controller_sources import InternalControllerSource
-from hal.emulator.controller_sources import MdsControllerSource
-from hal.emulator.controller_sources import ScriptedControllerSource
-from hal.emulator.controller_sources import demo_sequence
-from hal.emulator.diff import diff
-from hal.emulator.drive import drive
-from hal.emulator.session import PlayerSetup
-from hal.emulator.session import ReplayMatchup
-from hal.emulator.session import Session
-from hal.emulator.trajectory import Trajectory
-from hal.local_paths import DEV_MDS_DIR as _DEV_MDS_DIR
-from hal.local_paths import EMULATOR_PATH
-from hal.local_paths import ISO_PATH as _ISO_PATH
+from hal.data.index import read_jsonl
+from hal.paths import DEV_MDS_DIR as _DEV_MDS_DIR
+from hal.paths import EMULATOR_PATH
+from hal.paths import ISO_PATH as _ISO_PATH
+from hal.sim.diff import diff
+from hal.sim.loop import drive
+from hal.sim.session import PlayerSetup
+from hal.sim.session import ReplayMatchup
+from hal.sim.session import Session
+from hal.sim.sources import ControllerSource
+from hal.sim.sources import InternalControllerSource
+from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import ScriptedControllerSource
+from hal.sim.sources import demo_sequence
+from hal.sim.trajectory import Trajectory
 
 ISO_PATH = Path(_ISO_PATH)
 DOLPHIN_PATH = Path(EMULATOR_PATH)

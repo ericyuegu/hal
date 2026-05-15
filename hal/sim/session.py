@@ -10,6 +10,7 @@ Teardown always kills the Dolphin process, even when the caller raises mid-
 match. Use as a context manager.
 """
 
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -23,9 +24,9 @@ from typing import Self
 import melee
 from loguru import logger
 
-from hal.data.manifest import ReplayIndexEntry
-from hal.emulator.controller_io import ControllerInputs
-from hal.emulator.controller_io import apply_inputs
+from hal.data.index import ReplayIndexEntry
+from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import apply_inputs
 from hal.wire import slp_character_to_libmelee
 from hal.wire import slp_stage_to_libmelee
 
@@ -174,11 +175,11 @@ class Session:
                 try:
                     proc.terminate()
                     proc.wait(timeout=3.0)
-                except Exception as e:  # noqa: BLE001 — teardown must not raise
+                except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
                     logger.warning(f"Console SIGTERM wait failed: {e}")
             try:
                 self._console.stop()
-            except Exception as e:  # noqa: BLE001 — teardown must not raise
+            except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
                 logger.warning(f"Console.stop() raised on teardown: {e}")
             self._console = None
         self._controllers.clear()
@@ -196,7 +197,7 @@ class Session:
         for player in matchup.players:
             # fix_analog_inputs=False so apply_inputs can write the wire
             # format that round-trips raw int8 directly. See
-            # hal/emulator/controller_io.py for the wire math.
+            # hal/sim/inputs.py for the wire math.
             controller = melee.Controller(
                 console=self._console,
                 port=player.port,

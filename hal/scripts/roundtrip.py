@@ -5,7 +5,7 @@ for one round-trip validation run. Truth is the original .slp re-read via
 peppi-py (``Trajectory.from_slp``); the live capture comes from libmelee.
 
 Run:
-    python -m hal.emulator.roundtrip \
+    python -m hal.scripts.roundtrip \
         --mds-dir /path/to/mds \
         --replay-uuid 12345678 \
         --iso /path/to/melee.iso \
@@ -19,16 +19,16 @@ import tyro
 from loguru import logger
 from streaming import StreamingDataset
 
-from hal.data.manifest import ReplayIndexEntry
-from hal.data.manifest import read_jsonl
-from hal.emulator.controller_sources import ControllerSource
-from hal.emulator.controller_sources import InternalControllerSource
-from hal.emulator.controller_sources import MdsControllerSource
-from hal.emulator.diff import diff
-from hal.emulator.drive import drive
-from hal.emulator.session import ReplayMatchup
-from hal.emulator.session import Session
-from hal.emulator.trajectory import Trajectory
+from hal.data.index import ReplayIndexEntry
+from hal.data.index import read_jsonl
+from hal.sim.diff import diff
+from hal.sim.loop import drive
+from hal.sim.session import ReplayMatchup
+from hal.sim.session import Session
+from hal.sim.sources import ControllerSource
+from hal.sim.sources import InternalControllerSource
+from hal.sim.sources import MdsControllerSource
+from hal.sim.trajectory import Trajectory
 
 
 def _load_manifest_entry(manifest_path: Path, replay_uuid: int | None) -> ReplayIndexEntry:
@@ -71,7 +71,7 @@ def roundtrip(
 
     Args:
         mds_dir: directory containing train/val/test/manifest.jsonl produced
-            by ``hal.data.process_replays``.
+            by ``hal.scripts.materialize``.
         iso: path to the Melee ISO.
         dolphin_path: path to the Dolphin executable / AppRun.
         manifest: override path to manifest.jsonl. Defaults to

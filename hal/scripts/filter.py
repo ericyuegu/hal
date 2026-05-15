@@ -27,15 +27,20 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
+import melee
 import tyro
 from loguru import logger
 
-from hal.data.manifest import ReplayIndexEntry
-from hal.data.manifest import read_jsonl
+from hal.data.index import ReplayIndexEntry
+from hal.data.index import read_jsonl
+from hal.policy import INCLUDED_STAGES
 from hal.wire import CHARACTERS_BY_NAME
-from hal.wire import LEGAL_STAGES_BY_NAME
+from hal.wire import slp_stage_to_libmelee
 
 Predicate = Callable[[ReplayIndexEntry], bool]
+
+# Project policy: tournament-legal stages, keyed by libmelee enum name.
+INCLUDED_STAGES_BY_NAME: dict[str, melee.Stage] = {stage.name: stage for stage in INCLUDED_STAGES}
 
 
 def _resolve_ids(values: list[str], table: dict[str, int], kind: str) -> set[int]:
@@ -51,6 +56,23 @@ def _resolve_ids(values: list[str], table: dict[str, int], kind: str) -> set[int
         if key not in table:
             raise ValueError(f"unknown {kind} {v!r}; known names: {sorted(table)}")
         out.add(table[key])
+    return out
+
+
+def _resolve_stages(values: list[str]) -> set[melee.Stage]:
+    """Resolve stage names or slp-native ints to libmelee ``Stage`` enums."""
+    out: set[melee.Stage] = set()
+    for v in values:
+        v = v.strip()
+        if not v:
+            continue
+        if v.isdigit():
+            out.add(slp_stage_to_libmelee(int(v)))
+            continue
+        key = v.upper()
+        if key not in INCLUDED_STAGES_BY_NAME:
+            raise ValueError(f"unknown stage {v!r}; known names: {sorted(INCLUDED_STAGES_BY_NAME)}")
+        out.add(INCLUDED_STAGES_BY_NAME[key])
     return out
 
 
@@ -74,7 +96,7 @@ def build_predicates(
     min_frames: int | None = None,
     max_frames: int | None = None,
     completed_only: bool = False,
-    stages: set[int] | None = None,
+    stages: set[melee.Stage] | None = None,
     characters: set[int] | None = None,
     ranks: set[str] | None = None,
     codes_include: set[str] | None = None,
@@ -91,7 +113,13 @@ def build_predicates(
     if completed_only:
         preds.append(("completed_only", lambda e: e.outcome is not None and e.outcome.completed))
     if stages:
-        preds.append((f"stages={sorted(stages)}", lambda e: e.stage in stages))
+        stages_set = stages
+        preds.append(
+            (
+                f"stages={sorted(s.name for s in stages_set)}",
+                lambda e, s=stages_set: slp_stage_to_libmelee(e.stage) in s,
+            )
+        )
     if characters:
         chars = characters
         preds.append((f"characters={sorted(chars)}", lambda e, c=chars: any(p.character in c for p in e.players)))
@@ -126,7 +154,7 @@ def filter_index(
     min_frames: int | None = None,
     max_frames: int | None = None,
     completed_only: bool = False,
-    stages: set[int] | None = None,
+    stages: set[melee.Stage] | None = None,
     characters: set[int] | None = None,
     ranks: set[str] | None = None,
     codes_include: set[str] | None = None,
@@ -235,7 +263,7 @@ class FilterConfig:
 
 
 def run(cfg: FilterConfig) -> int:
-    stages = _resolve_ids(cfg.stages, LEGAL_STAGES_BY_NAME, "stage") if cfg.stages else None
+    stages = _resolve_stages(cfg.stages) if cfg.stages else None
     chars = _resolve_ids(cfg.characters, CHARACTERS_BY_NAME, "character") if cfg.characters else None
     ranks = {r.strip().lower() for r in cfg.ranks} if cfg.ranks else None
     codes_in = _parse_codes(cfg.player_codes_include) if cfg.player_codes_include else None

@@ -22,7 +22,7 @@ entries are bucketed by archive and each archive is streamed once
 sequentially (one producer thread; consumers are the existing mp.Pool).
 
 Usage:
-    python -m hal.data.process_replays \\
+    python -m hal.scripts.materialize \\
         --paths-file /path/to/paths.txt \\
         --index /path/to/index.jsonl \\
         --output /path/to/mds \\
@@ -41,15 +41,15 @@ from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
 
-from hal.data.archive_iter import iter_archive_members
-from hal.data.archive_iter import parse_archive_member_path
+from hal.data.archive import iter_archive_members
+from hal.data.archive import parse_archive_member_path
 from hal.data.extract import extract_replay
-from hal.data.manifest import ReplayIndexEntry
-from hal.data.manifest import Split
-from hal.data.manifest import Stage3Annotation
-from hal.data.manifest import read_jsonl
-from hal.data.manifest import replay_uuid_from_path
-from hal.data.manifest import write_jsonl
+from hal.data.index import ReplayIndexEntry
+from hal.data.index import Split
+from hal.data.index import Stage3Annotation
+from hal.data.index import read_jsonl
+from hal.data.index import replay_uuid_from_path
+from hal.data.index import write_jsonl
 from hal.data.schema import MDS_DTYPE_STR_BY_COLUMN
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION

@@ -7,7 +7,7 @@ if the port is driven internally (CPU bot or physical hardware).
 ``last_gamestate`` is for closed-loop policies (a ``ModelControllerSource``
 needs to see the current observation). Replay-style sources ignore it.
 
-The drive loop in ``drive.py`` does not care which subclass it gets — only
+The drive loop in ``loop.py`` does not care which subclass it gets — only
 the protocol matters.
 """
 
@@ -20,9 +20,9 @@ from typing import runtime_checkable
 
 import numpy as np
 
-from hal.emulator.controller_io import ControllerInputs
-from hal.emulator.controller_io import ControllerInputsValue
-from hal.emulator.controller_io import MdsControllerView
+from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import ControllerInputsValue
+from hal.sim.inputs import MdsControllerView
 from hal.wire import BUTTON_BITS
 
 

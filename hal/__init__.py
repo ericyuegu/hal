@@ -1,0 +1,45 @@
+"""Public API. Notebooks and CLI scripts import from here, not deep paths."""
+
+from hal.data.extract import extract_replay
+from hal.data.index import ReplayIndexEntry
+from hal.data.index import read_jsonl
+from hal.data.index import write_jsonl
+from hal.sim.diff import DiffReport
+from hal.sim.diff import diff
+from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import ControllerInputsValue
+from hal.sim.inputs import apply_inputs
+from hal.sim.loop import drive
+from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
+from hal.sim.session import ReplayMatchup
+from hal.sim.session import Session
+from hal.sim.session import session
+from hal.sim.sources import ControllerSource
+from hal.sim.sources import InternalControllerSource
+from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import ScriptedControllerSource
+from hal.sim.trajectory import Trajectory
+
+__all__ = [
+    "ControllerInputs",
+    "ControllerInputsValue",
+    "ControllerSource",
+    "DiffReport",
+    "InternalControllerSource",
+    "Matchup",
+    "MdsControllerSource",
+    "PlayerSetup",
+    "ReplayIndexEntry",
+    "ReplayMatchup",
+    "ScriptedControllerSource",
+    "Session",
+    "Trajectory",
+    "apply_inputs",
+    "diff",
+    "drive",
+    "extract_replay",
+    "read_jsonl",
+    "session",
+    "write_jsonl",
+]

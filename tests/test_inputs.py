@@ -3,9 +3,9 @@
 import melee
 import numpy as np
 
-from hal.emulator.controller_io import ControllerInputsValue
-from hal.emulator.controller_io import MdsControllerView
-from hal.emulator.controller_io import _stick_axis_wire
+from hal.sim.inputs import ControllerInputsValue
+from hal.sim.inputs import MdsControllerView
+from hal.sim.inputs import _stick_axis_wire
 from hal.wire import MASK_INT8
 from hal.wire import raw_byte_to_wire
 

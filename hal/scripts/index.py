@@ -5,10 +5,10 @@ blocks (no frame iteration). Parallelized via `mp.Pool`.
 
 Usage:
     # Loose .slp files on disk
-    python -m hal.data.build_index --root /path/to/replays --output index.jsonl
+    python -m hal.scripts.index --root /path/to/replays --output index.jsonl
 
     # .slp members streamed directly from a solid .7z archive (no extraction)
-    python -m hal.data.build_index --archive /path/to/archive.7z --output index.jsonl
+    python -m hal.scripts.index --archive /path/to/archive.7z --output index.jsonl
 
 `--root` and `--archive` are mutually exclusive; exactly one is required.
 Archive mode materializes each member to a tmpfs file (default `/dev/shm`)
@@ -30,12 +30,12 @@ import tyro
 from loguru import logger
 from tqdm import tqdm
 
-from hal.data.archive_iter import archive_member_path
-from hal.data.archive_iter import iter_archive_members
-from hal.data.manifest import ReplayIndexEntry
-from hal.data.manifest import extract_index_entry
-from hal.data.manifest import read_jsonl
-from hal.data.manifest import write_jsonl
+from hal.data.archive import archive_member_path
+from hal.data.archive import iter_archive_members
+from hal.data.index import ReplayIndexEntry
+from hal.data.index import extract_index_entry
+from hal.data.index import read_jsonl
+from hal.data.index import write_jsonl
 
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_build_index")
 

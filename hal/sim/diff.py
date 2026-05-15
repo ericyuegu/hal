@@ -13,8 +13,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from hal.emulator.trajectory import POST_FIELDS
-from hal.emulator.trajectory import Trajectory
+from hal.sim.trajectory import Trajectory
+from hal.wire import POST_FIELD_SUFFIXES
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +35,7 @@ class DiffReport:
 
     def summary(self) -> str:
         if self.passed:
-            base = f"PASS ({self.n_frames} frames bit-exact across {len(POST_FIELDS)} post-fields × ports)"
+            base = f"PASS ({self.n_frames} frames bit-exact across {len(POST_FIELD_SUFFIXES)} post-fields × ports)"
         else:
             d0 = self.divergences[0]
             base = (
@@ -54,7 +54,7 @@ def diff(
     a: Trajectory,
     b: Trajectory,
     *,
-    fields: Iterable[str] = POST_FIELDS,
+    fields: Iterable[str] = POST_FIELD_SUFFIXES,
     max_frames: int | None = None,
 ) -> DiffReport:
     """Compare two trajectories field-by-field, port-by-port.

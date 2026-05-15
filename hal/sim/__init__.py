@@ -6,7 +6,7 @@ The package separates three orthogonal concerns:
   It takes a ``Matchup`` and exposes ``start_match`` / ``step`` — nothing about
   where inputs come from or what the gamestate is used for.
 
-- ``ControllerSource`` (``controller_sources.py``) is a per-port input producer.
+- ``ControllerSource`` (``sources.py``) is a per-port input producer.
   Implementations pull from MDS rows, .slp files, scripted sequences, models,
   or ``InternalControllerSource`` (CPU/human, driven inside Melee itself).
 
@@ -19,18 +19,18 @@ every composition: round-trip validation, online eval vs CPUs, self-play, RL
 rollouts, human exhibitions.
 """
 
-from hal.emulator.controller_io import ControllerInputs
-from hal.emulator.controller_io import ControllerInputsValue
-from hal.emulator.controller_io import MdsControllerView
-from hal.emulator.controller_io import apply_inputs
-from hal.emulator.controller_sources import ControllerSource
-from hal.emulator.controller_sources import InternalControllerSource
-from hal.emulator.controller_sources import MdsControllerSource
-from hal.emulator.controller_sources import ScriptedControllerSource
-from hal.emulator.diff import DiffReport
-from hal.emulator.diff import diff
-from hal.emulator.drive import drive
-from hal.emulator.session import Matchup
-from hal.emulator.session import PlayerSetup
-from hal.emulator.session import Session
-from hal.emulator.trajectory import Trajectory
+from hal.sim.diff import DiffReport
+from hal.sim.diff import diff
+from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import ControllerInputsValue
+from hal.sim.inputs import MdsControllerView
+from hal.sim.inputs import apply_inputs
+from hal.sim.loop import drive
+from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
+from hal.sim.session import Session
+from hal.sim.sources import ControllerSource
+from hal.sim.sources import InternalControllerSource
+from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import ScriptedControllerSource
+from hal.sim.trajectory import Trajectory

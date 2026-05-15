@@ -21,10 +21,6 @@ from peppi_py.frame import Post
 
 from hal.wire import POST_FIELD_SUFFIXES
 
-# Post-frame field names used by diff. Same vocabulary on .slp (peppi), MDS,
-# and live-capture sides.
-POST_FIELDS: tuple[str, ...] = POST_FIELD_SUFFIXES
-
 
 @dataclass(frozen=True, slots=True)
 class Trajectory:
@@ -69,7 +65,7 @@ class Trajectory:
         for sp, port_data in zip(game.start.players, frames.ports, strict=True):
             libmelee_port = peppi_port_to_libmelee(sp.port)
             leader_post = port_data.leader.post
-            cols = {field: _peppi_post_field(leader_post, field, n) for field in POST_FIELDS}
+            cols = {field: _peppi_post_field(leader_post, field, n) for field in POST_FIELD_SUFFIXES}
             post[libmelee_port] = cols
         return cls(
             frame_id=np.asarray(frames.id),
@@ -111,7 +107,7 @@ class Trajectory:
         frame_id = np.empty(n, dtype=np.int32)
         seed = np.empty(n, dtype=np.uint32)
         post: dict[int, dict[str, np.ndarray]] = {
-            p: {f: np.empty(n, dtype=np.float64) for f in POST_FIELDS} for p in ports
+            p: {f: np.empty(n, dtype=np.float64) for f in POST_FIELD_SUFFIXES} for p in ports
         }
 
         for i, frame in enumerate(frames):

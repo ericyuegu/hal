@@ -2,10 +2,10 @@
 
 from collections.abc import Mapping
 
-from hal.emulator.controller_sources import ControllerSource
-from hal.emulator.session import Matchup
-from hal.emulator.session import Session
-from hal.emulator.trajectory import Trajectory
+from hal.sim.session import Matchup
+from hal.sim.session import Session
+from hal.sim.sources import ControllerSource
+from hal.sim.trajectory import Trajectory
 
 
 def drive(
