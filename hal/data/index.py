@@ -337,12 +337,9 @@ def write_jsonl(path: Path, entries: list[ReplayIndexEntry], *, append: bool = F
 
 
 def resolve_replay_path(entry: ReplayIndexEntry, *, root: Path = Path(REPO_DIR)) -> str:
-    """Resolve a manifest entry's ``path`` to an absolute path string suitable
-    for ``Trajectory.from_slp`` / ``extract_replay``.
-
-    Joins a repo-relative archive or filesystem path with ``root`` (default
-    ``REPO_DIR``); already-absolute paths pass through unchanged. No fallback
-    — missing files surface as a loud ``FileNotFoundError`` downstream.
+    """Manifest path → absolute path for ``Trajectory.from_slp`` /
+    ``extract_replay``. Repo-relative paths (filesystem or ``archive://``
+    synthetic) are joined with ``root``; absolute paths pass through.
     """
     parsed = parse_archive_member_path(entry.path)
     if parsed is not None:

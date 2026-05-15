@@ -20,14 +20,9 @@ DEV_MDS_DIR: Final[str] = _env_path("HAL_DEV_MDS_DIR", _DATA_DIR / "processed" /
 
 
 def repo_relative(p: Path | str) -> Path:
-    """Return ``p`` relative to ``REPO_DIR`` when it lives under the repo;
-    otherwise return its absolute (normalized) path.
-
-    Normalization is done via ``os.path.abspath`` (resolves ``..`` / ``.``
-    and CWD-relative inputs) but does NOT follow symlinks. This keeps
-    symlinked-in-place fixtures — e.g. ``data/raw/ranked-1.7z`` pointing at
-    ``~/data/raw/ranked-1.7z`` — serialized as their in-repo path so shared
-    MDS bundles stay portable across collaborator machines.
+    """Repo-relative when under ``REPO_DIR``, else absolute. Uses
+    ``os.path.abspath`` (not ``resolve``) so symlinked-in-place fixtures
+    serialize as their in-repo path — keeps shared manifests portable.
     """
     abs_p = Path(os.path.abspath(p))
     try:

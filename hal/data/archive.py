@@ -40,11 +40,8 @@ _SENTINEL: object = object()
 
 def archive_member_path(archive: Path, member: str) -> str:
     """Synthetic path stored in ReplayIndexEntry.path for archive members.
-
-    The archive is normalized via ``repo_relative`` so in-repo archives
-    serialize as ``archive://data/raw/foo.7z!member`` — portable across
-    machines. Archives outside the repo serialize as absolute paths and
-    remain machine-tied. Round-trippable via ``parse_archive_member_path``.
+    Archive is repo-relative when in-repo (portable), else absolute.
+    Round-trips via ``parse_archive_member_path``.
     """
     return f"archive://{repo_relative(archive)}!{member}"
 

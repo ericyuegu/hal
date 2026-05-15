@@ -23,6 +23,7 @@ from peppi_py.frame import Post
 
 from hal.data.archive import parse_archive_member_path
 from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import peppi_port_to_libmelee
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,16 +52,11 @@ class Trajectory:
 
     @classmethod
     def from_slp(cls, path: str | Path) -> Trajectory:
-        """Read a .slp directly via peppi-py — aliases peppi's SoA arrays.
+        """Read a .slp via peppi-py, aliasing peppi's SoA arrays.
 
         Accepts a filesystem path or an ``archive://<archive>!<member>``
-        synthetic. Archive members are extracted to a temporary directory
-        (peppi only opens filesystem paths). No fallback: a missing archive
-        or member raises ``FileNotFoundError``.
-
-        peppi compactly stores only occupied ports in ``frames.ports``; the
-        libmelee port number for ``frames.ports[i]`` comes from
-        ``start.players[i].port``.
+        synthetic; peppi only opens filesystem paths, so archive members are
+        extracted to a temporary directory first.
         """
         parsed = parse_archive_member_path(str(path))
         if parsed is None:
@@ -78,8 +74,6 @@ class Trajectory:
 
     @classmethod
     def _read_slp_file(cls, path: Path) -> Trajectory:
-        from hal.wire import peppi_port_to_libmelee
-
         game = peppi_py.read_slippi(str(path), skip_frames=False)
         frames = game.frames
         if frames is None or frames.start is None:

@@ -97,23 +97,19 @@ def _split_for(replay_uuid: int, train: float, val: float) -> Split:
     return "test"
 
 
-def _process_one(args: tuple[str, str]) -> tuple[str, dict[str, np.ndarray] | None]:
+def _process_one(args: tuple[str, str, bool]) -> tuple[str, dict[str, np.ndarray] | None]:
     """Worker: parse one replay's per-frame ndarrays.
 
-    ``open_path`` is the file peppi-py opens (absolute, either an on-disk slp
-    or an archive-extracted tmpfs file). ``manifest_key`` is the form that
-    matches ``ReplayIndexEntry.path`` — repo-relative for in-repo files,
-    ``archive://...`` for archive members, absolute for outside-repo files.
-    Tmpfs files (archive members) are unlinked on the way out so archive
-    workers don't leak slots.
+    ``manifest_key`` is the form matching ``ReplayIndexEntry.path``.
+    ``unlink_after`` is set for tmpfs files owned by the archive producer.
     """
-    open_path, manifest_key = args
+    open_path, manifest_key, unlink_after = args
     try:
         sample = extract_replay(open_path)
     except Exception as e:
         logger.debug(f"extract_replay raised on {open_path}: {e}")
         sample = None
-    if manifest_key.startswith("archive://"):
+    if unlink_after:
         Path(open_path).unlink(missing_ok=True)
     return manifest_key, sample
 
@@ -143,17 +139,10 @@ def _open_writers(output: Path, splits: Iterable[str]) -> dict[str, MDSWriter]:
 
 
 def _bucket_paths(paths: list[str]) -> tuple[list[tuple[str, str]], dict[Path, list[str]]]:
-    """Split paths.txt into (open_path, manifest_key) pairs and per-archive member lists.
+    """Split paths.txt into (abs_open_path, manifest_key) pairs and per-archive member lists.
 
-    Filesystem paths are normalized via ``repo_relative`` so the manifest key
-    matches the form written into ``ReplayIndexEntry.path`` by
-    ``extract_index_entry``; peppi opens the absolute path. A user-edited
-    paths.txt with symlinks or ``..`` segments resolves transparently.
-
-    Archive ordering is first-appearance in paths.txt; member ordering within
-    an archive is preserved (currently unused — iter_archive_members yields
-    in decompression order — but kept stable for reproducibility).
-    Repo-relative archive paths in paths.txt are joined with ``REPO_DIR``.
+    Member ordering within an archive is preserved for reproducibility, even
+    though ``iter_archive_members`` currently yields in decompression order.
     """
     fs_pairs: list[tuple[str, str]] = []
     members_by_archive: dict[Path, list[str]] = {}
@@ -178,15 +167,14 @@ def _build_work(
     *,
     tmpfs_root: Path,
     queue_size: int,
-) -> Iterator[tuple[str, str]]:
-    """Yield (peppi_input_path, manifest_key) for every bucketed entry.
+) -> Iterator[tuple[str, str, bool]]:
+    """Yield (open_path, manifest_key, unlink_after) for every bucketed entry.
 
-    Filesystem entries pass their (abs_path, repo_relative_str) through.
-    Archive entries are grouped by archive and each archive is streamed once
-    (one producer thread per archive at a time; archives processed
-    sequentially).
+    Archives are processed sequentially; one producer thread per archive
+    streams members into tmpfs.
     """
-    yield from fs_pairs
+    for open_path, manifest_key in fs_pairs:
+        yield open_path, manifest_key, False
     for archive, members in members_by_archive.items():
         for synthetic, tmpfs_path in iter_archive_members(
             archive,
@@ -194,7 +182,7 @@ def _build_work(
             filter_paths=set(members),
             queue_size=queue_size,
         ):
-            yield str(tmpfs_path), synthetic
+            yield str(tmpfs_path), synthetic, True
 
 
 def process_replays(
