@@ -36,6 +36,7 @@ from hal.data.index import ReplayIndexEntry
 from hal.data.index import extract_index_entry
 from hal.data.index import read_jsonl
 from hal.data.index import write_jsonl
+from hal.paths import repo_relative
 
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_build_index")
 
@@ -70,7 +71,7 @@ def _existing_paths(index_path: Path) -> set[str]:
 
 def _filesystem_work(root: Path, seen: set[str]) -> tuple[list[tuple[Path, bool, None]], int]:
     all_paths = sorted(root.rglob("*.slp"))
-    new = [p for p in all_paths if str(p.resolve()) not in seen]
+    new = [p for p in all_paths if str(repo_relative(p)) not in seen]
     logger.info(f"found {len(all_paths)} slps under {root}; {len(new)} to index")
     return [(p, True, None) for p in new], len(new)
 

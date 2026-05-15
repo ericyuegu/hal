@@ -28,7 +28,10 @@ from typing import get_args
 
 import peppi_py
 
+from hal.data.archive import parse_archive_member_path
 from hal.data.schema import SCHEMA_VERSION
+from hal.paths import REPO_DIR
+from hal.paths import repo_relative
 from hal.wire import peppi_port_to_libmelee as _peppi_port_to_libmelee
 
 
@@ -159,7 +162,7 @@ class PlayerEntry:
 
 @dataclass(frozen=True)
 class ReplayIndexEntry:
-    path: str  # absolute path
+    path: str  # repo-relative when the file lives under <repo>/data/, else absolute
     slp_version: tuple[int, int, int]
     stage: int  # slp-native stage id
     players: list[PlayerEntry]
@@ -313,7 +316,7 @@ def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> Repl
     frame_count = int(last_frame) if last_frame is not None else 0
 
     return ReplayIndexEntry(
-        path=str(replay_path.resolve()),
+        path=str(repo_relative(replay_path)),
         slp_version=tuple(g.start.slippi.version),
         stage=int(g.start.stage),
         players=players,
@@ -331,6 +334,26 @@ def write_jsonl(path: Path, entries: list[ReplayIndexEntry], *, append: bool = F
     with path.open(mode) as f:
         for entry in entries:
             f.write(json.dumps(entry.to_dict()) + "\n")
+
+
+def resolve_replay_path(entry: ReplayIndexEntry, *, root: Path = Path(REPO_DIR)) -> str:
+    """Resolve a manifest entry's ``path`` to an absolute path string suitable
+    for ``Trajectory.from_slp`` / ``extract_replay``.
+
+    Joins a repo-relative archive or filesystem path with ``root`` (default
+    ``REPO_DIR``); already-absolute paths pass through unchanged. No fallback
+    — missing files surface as a loud ``FileNotFoundError`` downstream.
+    """
+    parsed = parse_archive_member_path(entry.path)
+    if parsed is not None:
+        archive, member = parsed
+        if not archive.is_absolute():
+            archive = root / archive
+        return f"archive://{archive}!{member}"
+    p = Path(entry.path)
+    if not p.is_absolute():
+        p = root / p
+    return str(p)
 
 
 def read_jsonl(path: Path, *, verify_schema_version: bool = True) -> Iterator[ReplayIndexEntry]:

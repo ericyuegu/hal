@@ -33,6 +33,7 @@ from streaming import StreamingDataset
 
 from hal.data.extract import extract_replay
 from hal.data.index import read_jsonl
+from hal.data.index import resolve_replay_path
 from hal.paths import DEV_MDS_DIR as _DEV_MDS_DIR
 from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH as _ISO_PATH
@@ -112,7 +113,7 @@ def test_controller_wire_format_faithful() -> None:
     with Session(iso_path=ISO_PATH, dolphin_path=DOLPHIN_PATH) as s:
         live = drive(s, matchup, sources, max_frames=5)
 
-    truth = Trajectory.from_slp(entry.path).take(5)
+    truth = Trajectory.from_slp(resolve_replay_path(entry)).take(5)
     report = diff(live, truth, max_frames=5)
     assert report.passed, f"wire-format divergence: {report.summary()}\n" + "\n".join(
         f"  {d}" for d in report.divergences[:5]

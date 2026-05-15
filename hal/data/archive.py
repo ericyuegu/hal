@@ -33,16 +33,20 @@ from py7zr.io import NullIO
 from py7zr.io import Py7zIO
 from py7zr.io import WriterFactory
 
+from hal.paths import repo_relative
+
 _SENTINEL: object = object()
 
 
 def archive_member_path(archive: Path, member: str) -> str:
     """Synthetic path stored in ReplayIndexEntry.path for archive members.
 
-    Resolves the archive to an absolute path so the index is portable across
-    runs that cd around. Round-trippable via ``parse_archive_member_path``.
+    The archive is normalized via ``repo_relative`` so in-repo archives
+    serialize as ``archive://data/raw/foo.7z!member`` — portable across
+    machines. Archives outside the repo serialize as absolute paths and
+    remain machine-tied. Round-trippable via ``parse_archive_member_path``.
     """
-    return f"archive://{archive.resolve()}!{member}"
+    return f"archive://{repo_relative(archive)}!{member}"
 
 
 def parse_archive_member_path(path: str) -> tuple[Path, str] | None:

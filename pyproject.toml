@@ -38,6 +38,9 @@ dependencies = [
     "yasoo",
 ]
 
+[project.scripts]
+fetch = "hal.scripts.fetch:main"
+
 [dependency-groups]
 dev = [
     "autoflake",

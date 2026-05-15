@@ -56,6 +56,8 @@ from hal.data.schema import SCHEMA_VERSION
 from hal.data.stats import StatsAccumulator
 from hal.data.stats import dump_sufficient_stats
 from hal.data.stats import float_feature_names
+from hal.paths import REPO_DIR
+from hal.paths import repo_relative
 
 SHARD_SIZE_LIMIT: int = 1 << 31  # 2 GiB; data is repetitive, compression is 10-20x
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_process_replays")
@@ -95,23 +97,25 @@ def _split_for(replay_uuid: int, train: float, val: float) -> Split:
     return "test"
 
 
-def _process_one(args: tuple[str, str | None]) -> tuple[str, dict[str, np.ndarray] | None]:
+def _process_one(args: tuple[str, str]) -> tuple[str, dict[str, np.ndarray] | None]:
     """Worker: parse one replay's per-frame ndarrays.
 
-    `path` is the file peppi-py opens; `synthetic_path`, when set, is the
-    archive synthetic path that gets returned to the main process for
-    manifest lookup. The on-disk `path` is unlinked on the way out so
-    archive workers don't leak tmpfs slots.
+    ``open_path`` is the file peppi-py opens (absolute, either an on-disk slp
+    or an archive-extracted tmpfs file). ``manifest_key`` is the form that
+    matches ``ReplayIndexEntry.path`` — repo-relative for in-repo files,
+    ``archive://...`` for archive members, absolute for outside-repo files.
+    Tmpfs files (archive members) are unlinked on the way out so archive
+    workers don't leak slots.
     """
-    path, synthetic_path = args
+    open_path, manifest_key = args
     try:
-        sample = extract_replay(path)
+        sample = extract_replay(open_path)
     except Exception as e:
-        logger.debug(f"extract_replay raised on {path}: {e}")
+        logger.debug(f"extract_replay raised on {open_path}: {e}")
         sample = None
-    if synthetic_path is not None:
-        Path(path).unlink(missing_ok=True)
-    return path if synthetic_path is None else synthetic_path, sample
+    if manifest_key.startswith("archive://"):
+        Path(open_path).unlink(missing_ok=True)
+    return manifest_key, sample
 
 
 def _index_by_path(index: Path) -> dict[str, ReplayIndexEntry]:
@@ -138,46 +142,51 @@ def _open_writers(output: Path, splits: Iterable[str]) -> dict[str, MDSWriter]:
     }
 
 
-def _bucket_paths(paths: list[str]) -> tuple[list[str], dict[Path, list[str]]]:
-    """Split paths.txt into filesystem paths and per-archive member lists.
+def _bucket_paths(paths: list[str]) -> tuple[list[tuple[str, str]], dict[Path, list[str]]]:
+    """Split paths.txt into (open_path, manifest_key) pairs and per-archive member lists.
 
-    Filesystem paths are resolved here so they match the form written into
-    ``ReplayIndexEntry.path`` by ``extract_index_entry`` (which uses
-    ``Path.resolve()``). A user-edited paths.txt with symlinks or ``..``
-    segments would otherwise silently miss the index.
+    Filesystem paths are normalized via ``repo_relative`` so the manifest key
+    matches the form written into ``ReplayIndexEntry.path`` by
+    ``extract_index_entry``; peppi opens the absolute path. A user-edited
+    paths.txt with symlinks or ``..`` segments resolves transparently.
 
     Archive ordering is first-appearance in paths.txt; member ordering within
     an archive is preserved (currently unused — iter_archive_members yields
     in decompression order — but kept stable for reproducibility).
+    Repo-relative archive paths in paths.txt are joined with ``REPO_DIR``.
     """
-    fs_paths: list[str] = []
+    fs_pairs: list[tuple[str, str]] = []
     members_by_archive: dict[Path, list[str]] = {}
     for p in paths:
         parsed = parse_archive_member_path(p)
         if parsed is None:
-            fs_paths.append(str(Path(p).resolve()))
+            abs_path = Path(p).resolve()
+            manifest_key = str(repo_relative(abs_path))
+            fs_pairs.append((str(abs_path), manifest_key))
             continue
         archive, member = parsed
+        if not archive.is_absolute():
+            archive = Path(REPO_DIR) / archive
         archive = archive.resolve()
         members_by_archive.setdefault(archive, []).append(member)
-    return fs_paths, members_by_archive
+    return fs_pairs, members_by_archive
 
 
 def _build_work(
     members_by_archive: dict[Path, list[str]],
-    fs_paths: list[str],
+    fs_pairs: list[tuple[str, str]],
     *,
     tmpfs_root: Path,
     queue_size: int,
-) -> Iterator[tuple[str, str | None]]:
-    """Yield (peppi_input_path, synthetic_path | None) for every bucketed entry.
+) -> Iterator[tuple[str, str]]:
+    """Yield (peppi_input_path, manifest_key) for every bucketed entry.
 
-    Filesystem entries pass through with synthetic=None. Archive entries are
-    grouped by archive and each archive is streamed once (one producer thread
-    per archive at a time; archives processed sequentially).
+    Filesystem entries pass their (abs_path, repo_relative_str) through.
+    Archive entries are grouped by archive and each archive is streamed once
+    (one producer thread per archive at a time; archives processed
+    sequentially).
     """
-    for p in fs_paths:
-        yield p, None
+    yield from fs_pairs
     for archive, members in members_by_archive.items():
         for synthetic, tmpfs_path in iter_archive_members(
             archive,
@@ -213,7 +222,7 @@ def process_replays(
         raise FileExistsError(f"{manifest_path} already exists; choose a fresh --output")
 
     paths = _read_paths(paths_file)
-    fs_paths, members_by_archive = _bucket_paths(paths)
+    fs_pairs, members_by_archive = _bucket_paths(paths)
 
     # Fail loud and early on missing archives — we'd otherwise crash partway
     # through Stage 3 with shards already written and unrecoverable.
@@ -225,12 +234,12 @@ def process_replays(
     by_path = _index_by_path(index)
     logger.info(
         f"index: {len(by_path)}  paths: {len(paths)} "
-        f"({len(fs_paths)} filesystem, {len(members_by_archive)} archive(s))  workers: {workers}"
+        f"({len(fs_pairs)} filesystem, {len(members_by_archive)} archive(s))  workers: {workers}"
     )
 
     work_iter = _build_work(
         members_by_archive,
-        fs_paths,
+        fs_pairs,
         tmpfs_root=tmpfs_root,
         queue_size=queue_size,
     )

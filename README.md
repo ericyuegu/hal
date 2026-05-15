@@ -14,19 +14,23 @@ cp .env.example .env && $EDITOR .env # fill in AWS_* creds — ask Eric
 source .env                          # or use direnv
 
 # download emulator & datasets
-uv run fetch                         # download ~2 GB into <repo>/fixtures/
+uv run fetch                         # download ~2 GB into <repo>/data/
 uv run pytest tests/                 # expect: 39 passed
 ```
 
-After fetch, `fixtures/` looks like:
+All HAL data lives under `<repo>/data/` (gitignored). After fetch:
 
 ```
-fixtures/
-  dev.7z                        # 37 MB — slp archive
-  dev/mds/                      # train/, val/, test/, manifest.jsonl, stats.json
-  ssbm.ciso
-  dolphin/exiai/squashfs-root/  # headless Dolphin
+data/
+  raw/        dev.7z                              # 37 MB slp archive (+ ranked-anonymized-*.7z if you have them)
+  processed/  dev/mds/                            # train/, val/, test/, manifest.jsonl, stats.json
+  emulator/   ssbm.ciso                           # ISO
+              exiai/squashfs-root/AppRun          # headless Dolphin
+  scratch/                                        # throwaway Dolphin recordings, debug dumps
+  runs/                                           # eval rollouts (per run_id)
 ```
+
+Real data on a different drive? Symlink: `ln -s /mnt/big/hal/data data` (or symlink individual files under `data/raw/`).
 
 `fetch` is idempotent (logs `skip <name> (sha match)`). Fetch a single fixture with `fetch --name {dev.7z | dev-mds | ssbm.ciso | dolphin-exiai}`. Override path defaults via `HAL_*` env vars — see `hal/paths.py`.
 
@@ -50,7 +54,7 @@ Three stages in `hal/scripts/` turn `.slp` files (loose or `.7z`-archived) into 
 ```bash
 # Stage 1 — index a .7z archive (no extraction; tmpfs-backed)
 uv run python -m hal.scripts.index \
-    --archive fixtures/dev.7z --output /tmp/index.jsonl
+    --archive data/raw/dev.7z --output /tmp/index.jsonl
 
 # Stage 2 — filter to a paths.txt (defaults: completed games, ≥1500 frames, six tournament stages)
 uv run python -m hal.scripts.filter \
@@ -71,7 +75,7 @@ The driver in `hal/sim/` plays an MDS row back through Dolphin and diffs against
 uv run python -m hal.scripts.roundtrip --max-frames 200
 ```
 
-Defaults read from `fixtures/`; override via flags. Training and evaluation drivers are being rewritten on top of `hal/sim/` and the new MDS schema; nothing here ships yet.
+Defaults read from `data/`; override via flags. Training and evaluation drivers are being rewritten on top of `hal/sim/` and the new MDS schema; nothing here ships yet.
 
 ## Adding a new fixture (maintainer)
 
@@ -84,7 +88,7 @@ rclone copy -P --stats-one-line <local-path> r2:hal/fixtures/<key>
 sha256sum <local-path>
 ```
 
-Then add a `Fixture(...)` entry with `r2_key="fixtures/<key>"`, the sha256, and a `dest=Path(...)` under `fixtures/`. If the artifact is a directory tree, tar it with `tar --use-compress-program='zstd -19 -T0'` and set `extract="tar_zst"` (the tarball must contain its files at the root, not under a wrapper dir).
+Then add a `Fixture(...)` entry with `r2_key="fixtures/<key>"`, the sha256, and a repo-relative `dest=Path("data/<subdir>/...")`. If the artifact is a directory tree, tar it with `tar --use-compress-program='zstd -19 -T0'` and set `extract="tar_zst"` (the tarball must contain its files at the root, not under a wrapper dir).
 
 **Upstream URLs (public binaries from GitHub Releases / CDNs):**
 

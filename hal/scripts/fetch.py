@@ -1,4 +1,4 @@
-"""CLI: download integration fixtures into `<repo>/fixtures/`.
+"""CLI: download integration fixtures into `<repo>/data/`.
 
 Idempotent: skips fixtures whose local sha256 already matches.
 
@@ -25,5 +25,9 @@ def fetch(name: str | None = None) -> None:
     ensure(BY_NAME[name])
 
 
-if __name__ == "__main__":
+def main() -> None:
     tyro.cli(fetch)
+
+
+if __name__ == "__main__":
+    main()

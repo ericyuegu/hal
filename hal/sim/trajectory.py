@@ -11,14 +11,17 @@ match peppi-py's (renamed) ``Post`` and libmelee's canonical ``Post`` 1:1, so
 no translation layer is needed between the three input paths.
 """
 
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import peppi_py
+import py7zr
 from peppi_py.frame import Post
 
+from hal.data.archive import parse_archive_member_path
 from hal.wire import POST_FIELD_SUFFIXES
 
 
@@ -50,10 +53,31 @@ class Trajectory:
     def from_slp(cls, path: str | Path) -> Trajectory:
         """Read a .slp directly via peppi-py — aliases peppi's SoA arrays.
 
+        Accepts a filesystem path or an ``archive://<archive>!<member>``
+        synthetic. Archive members are extracted to a temporary directory
+        (peppi only opens filesystem paths). No fallback: a missing archive
+        or member raises ``FileNotFoundError``.
+
         peppi compactly stores only occupied ports in ``frames.ports``; the
         libmelee port number for ``frames.ports[i]`` comes from
         ``start.players[i].port``.
         """
+        parsed = parse_archive_member_path(str(path))
+        if parsed is None:
+            return cls._read_slp_file(Path(path))
+        archive, member = parsed
+        if not archive.is_file():
+            raise FileNotFoundError(f"archive not found: {archive}")
+        with tempfile.TemporaryDirectory(prefix="hal_traj_") as tmpdir:
+            with py7zr.SevenZipFile(str(archive), "r") as z:
+                z.extract(path=tmpdir, targets=[member])
+            extracted = Path(tmpdir) / member
+            if not extracted.is_file():
+                raise FileNotFoundError(f"member {member!r} not in {archive}")
+            return cls._read_slp_file(extracted)
+
+    @classmethod
+    def _read_slp_file(cls, path: Path) -> Trajectory:
         from hal.wire import peppi_port_to_libmelee
 
         game = peppi_py.read_slippi(str(path), skip_frames=False)

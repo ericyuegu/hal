@@ -21,6 +21,7 @@ from streaming import StreamingDataset
 
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
+from hal.data.index import resolve_replay_path
 from hal.sim.diff import diff
 from hal.sim.loop import drive
 from hal.sim.session import ReplayMatchup
@@ -107,7 +108,7 @@ def roundtrip(
     with Session(iso_path=iso, dolphin_path=dolphin_path) as s:
         live = drive(s, matchup, sources, max_frames=max_frames)
 
-    truth = Trajectory.from_slp(entry.path).take(max_frames)
+    truth = Trajectory.from_slp(resolve_replay_path(entry)).take(max_frames)
     report = diff(live, truth, max_frames=max_frames)
     logger.info(report.summary())
     for d in report.divergences[:5]:

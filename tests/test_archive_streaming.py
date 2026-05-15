@@ -23,6 +23,7 @@ from hal.data.archive import archive_member_path
 from hal.data.archive import iter_archive_members
 from hal.data.archive import parse_archive_member_path
 from hal.paths import DEV_ARCHIVE_PATH
+from hal.paths import repo_relative
 
 DEV_ARCHIVE: Path = Path(DEV_ARCHIVE_PATH)
 TMPFS_ROOT: Path = Path("/dev/shm/hal_archive_streaming_test")
@@ -79,7 +80,7 @@ def _col_equal(x: object, y: object) -> bool:
 def test_synthetic_path_round_trip() -> None:
     member = "dev/Game_20230614T211840.slp"
     synthetic = archive_member_path(DEV_ARCHIVE, member)
-    assert parse_archive_member_path(synthetic) == (DEV_ARCHIVE.resolve(), member)
+    assert parse_archive_member_path(synthetic) == (repo_relative(DEV_ARCHIVE), member)
     assert parse_archive_member_path("/tmp/foo.slp") is None
     with pytest.raises(ValueError, match="malformed"):
         parse_archive_member_path("archive:///tmp/foo.7z")

@@ -1,8 +1,8 @@
 """Cloud-backed integration fixtures.
 
 Each fixture has a sha256 of the downloaded blob and a local destination
-under `<repo>/fixtures/`. `ensure(fix)` downloads on first use and verifies
-the sha256; subsequent calls no-op when the local file (or extracted tree)
+under `<repo>/data/`. `ensure(fix)` downloads on first use and verifies the
+sha256; subsequent calls no-op when the local file (or extracted tree)
 already matches.
 
 Two download backends, picked per-fixture:
@@ -35,8 +35,8 @@ from tqdm import tqdm
 
 from hal.paths import REPO_DIR
 
-FIXTURES_DIR: Final[Path] = Path(REPO_DIR) / "fixtures"
-_CACHE_DIR: Final[Path] = FIXTURES_DIR / ".cache"
+DATA_DIR: Final[Path] = Path(REPO_DIR) / "data"
+_CACHE_DIR: Final[Path] = DATA_DIR / ".cache"
 _SENTINEL: Final[str] = ".sha256"
 _TODO_SHA: Final[str] = "TODO_FILL_IN_SHA256"
 _CHUNK: Final[int] = 1 << 20  # 1 MiB
@@ -64,14 +64,14 @@ DEV_ARCHIVE: Final[Fixture] = Fixture(
     r2_key="fixtures/dev.7z",
     sha256="6c3a1815bc78f44786b91a366195b0b506e81105f998c15b47c48946488622eb",
     size_bytes=36_818_126,
-    dest=Path("dev.7z"),
+    dest=Path("data/raw/dev.7z"),
 )
 DEV_MDS: Final[Fixture] = Fixture(
     name="dev-mds",
     r2_key="fixtures/dev-mds.tar.zst",
-    sha256="eb5f037bbb0fcfdafec892bfa8cc2196707170b53fcb8b79c741f5462a2f82b1",
-    size_bytes=0,
-    dest=Path("dev/mds"),
+    sha256="18d7820c593efcd252cc2e6f2c34128fc6df22e50307706bd3b31cf0737909dc",
+    size_bytes=20_761_092,
+    dest=Path("data/processed/dev/mds"),
     extract="tar_zst",
 )
 ISO: Final[Fixture] = Fixture(
@@ -79,14 +79,14 @@ ISO: Final[Fixture] = Fixture(
     r2_key="fixtures/ssbm.ciso",
     sha256="b7de482eb955c8a96b6746dfa043b69ae7bf6c7c2a09ac382b9da126faa7055c",
     size_bytes=1_449_165_376,
-    dest=Path("ssbm.ciso"),
+    dest=Path("data/emulator/ssbm.ciso"),
 )
 DOLPHIN_EXIAI: Final[Fixture] = Fixture(
     name="dolphin-exiai",
     url="https://github.com/vladfi1/slippi-Ishiiruka/releases/download/exi-ai-0.2.0/Slippi_Online-x86_64-ExiAI.AppImage",
     sha256="87e9ef6d80ed03354a1647d0616016dbc91399aa9e86a69ae5a398edd0a0c2bd",
     size_bytes=0,
-    dest=Path("dolphin/exiai"),
+    dest=Path("data/emulator/exiai"),
     extract="appimage",
 )
 
@@ -213,17 +213,19 @@ def ensure(fix: Fixture) -> Path:
             "fill in `hal/fixtures.py` after uploading to R2 (see plan)."
         )
 
-    target = FIXTURES_DIR / fix.dest
+    target = Path(REPO_DIR) / fix.dest
     is_dir = fix.extract is not None
     existing = _written_sha(target, is_dir=is_dir)
     if existing == fix.sha256:
         logger.info(f"skip {fix.name} (sha match)")
         return target
 
-    cache_ext = (
-        {"tar_zst": ".tar.zst", "appimage": ".AppImage"}.get(fix.extract or "", ".bin") if is_dir else target.suffix
-    )
-    cache_path = _CACHE_DIR / f"{fix.name}{cache_ext}"
+    if fix.extract is None:
+        # `name` already carries its own extension (dev.7z, ssbm.ciso).
+        cache_path = _CACHE_DIR / fix.name
+    else:
+        ext = {"tar_zst": ".tar.zst", "appimage": ".AppImage"}[fix.extract]
+        cache_path = _CACHE_DIR / f"{fix.name}{ext}"
 
     cached_sha = _file_sha256(cache_path) if cache_path.is_file() else None
     if cached_sha != fix.sha256:
