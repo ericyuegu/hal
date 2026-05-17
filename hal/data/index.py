@@ -265,7 +265,9 @@ def _narrow_player_type(name: str) -> PlayerType:
     return cast(PlayerType, name)
 
 
-def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> ReplayIndexEntry | None:
+def extract_index_entry(
+    replay_path: Path, *, compute_sha1: bool = True, name_hint: str | None = None
+) -> ReplayIndexEntry | None:
     """Parse a .slp file's start/end/metadata blocks (no frame iteration) and
     return a `ReplayIndexEntry`. Returns None on parse failure (caller logs)."""
     # Indexing walks 100k+ files; one malformed slp shouldn't kill the job, so
@@ -287,14 +289,17 @@ def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> Repl
         # metadata.players is keyed by 0-indexed port as a string
         md_entry = md_players.get(str(port - 1)) or {}
         names = md_entry.get("names") or {}
+        # Anonymized .slps have empty metadata but still carry netplay.name
+        # (e.g. "Diamond Player") and netplay.code on the start block.
+        netplay = getattr(sp, "netplay", None)
         players.append(
             PlayerEntry(
                 port=port,
                 character=int(sp.character),
                 costume=int(sp.costume),
                 player_type=_narrow_player_type(type_name),
-                code=names.get("code") or None,
-                name=names.get("netplay") or None,
+                code=names.get("code") or (getattr(netplay, "code", "") or None),
+                name=names.get("netplay") or (getattr(netplay, "name", "") or None),
             )
         )
     players.sort(key=lambda p: p.port)
@@ -313,6 +318,15 @@ def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> Repl
             return None
 
     last_frame = md.get("lastFrame")
+    if last_frame is None:
+        # Anonymized .slp files ship with empty metadata. Re-read with frames
+        # loaded so we can recover frame count from the frame id array.
+        try:
+            g_full = peppi_py.read_slippi(str(replay_path), skip_frames=False)
+        except Exception:
+            return None
+        ids = g_full.frames.id
+        last_frame = int(ids[-1]) if len(ids) else None
     frame_count = int(last_frame) if last_frame is not None else 0
 
     return ReplayIndexEntry(
@@ -324,7 +338,7 @@ def extract_index_entry(replay_path: Path, *, compute_sha1: bool = True) -> Repl
         timestamp=md.get("startAt"),
         played_on=md.get("playedOn"),
         outcome=outcome,
-        rank_filename=_rank_from_filename(replay_path),
+        rank_filename=_rank_from_filename(Path(name_hint) if name_hint else replay_path),
         sha1=_sha1(replay_path) if compute_sha1 else None,
     )
 

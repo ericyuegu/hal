@@ -21,7 +21,9 @@ but never halt the run.
 """
 
 import dataclasses
+import faulthandler
 import multiprocessing as mp
+import signal
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -41,6 +43,16 @@ from hal.paths import repo_relative
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_build_index")
 
 
+def _worker_init() -> None:
+    # Ensures any genuine segfault in peppi-py prints a C-level traceback
+    # to stderr before the worker dies, instead of vanishing silently.
+    faulthandler.enable()
+    # Ignore SIGINT in workers: the parent handles ctrl-c by terminating
+    # the pool. Without this, every worker dumps its own KeyboardInterrupt
+    # traceback before dying.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def _index_one(args: tuple[Path, bool, str | None]) -> ReplayIndexEntry | None:
     """Worker: parse one .slp into a ReplayIndexEntry.
 
@@ -50,10 +62,17 @@ def _index_one(args: tuple[Path, bool, str | None]) -> ReplayIndexEntry | None:
     (success or failure) so workers don't leak ring-buffer slots.
     """
     path, compute_sha1, synthetic_path = args
+    label = synthetic_path or str(path)
     try:
-        entry = extract_index_entry(path, compute_sha1=compute_sha1)
-    except Exception as e:
-        logger.debug(f"unhandled error indexing {path}: {e}")
+        entry = extract_index_entry(path, compute_sha1=compute_sha1, name_hint=synthetic_path)
+    except KeyboardInterrupt, SystemExit:
+        raise
+    except BaseException as e:
+        # peppi-py is Rust/pyo3; panics surface as PanicException, which
+        # subclasses BaseException, not Exception. A bare `except Exception`
+        # lets one corrupt .slp kill the worker and trip BrokenProcessPool,
+        # which takes the whole job (and the parent shell) down.
+        logger.warning(f"unhandled error indexing {label}: {e!r}")
         entry = None
     finally:
         if synthetic_path is not None:
@@ -159,21 +178,41 @@ def build_index(
     # caller is a VSCode interactive cell or any script that runs work at
     # import time. Fork is safe here because workers run a pure function.
     ctx = mp.get_context("fork")
-    with ctx.Pool(workers) as pool:
+    interrupted = False
+    with ctx.Pool(workers, initializer=_worker_init) as pool:
         results = pool.imap_unordered(_index_one, work_iter, chunksize=8)
-        for entry in tqdm(results, total=total, desc="indexing", unit="slp"):
-            if entry is None:
-                failed += 1
-                continue
-            batch.append(entry)
-            if len(batch) >= BATCH:
+        try:
+            for entry in tqdm(results, total=total, desc="indexing", unit="slp"):
+                if entry is None:
+                    failed += 1
+                    continue
+                batch.append(entry)
+                if len(batch) >= BATCH:
+                    write_jsonl(output, batch, append=True)
+                    written += len(batch)
+                    batch.clear()
+        except KeyboardInterrupt:
+            # Stop the pool now so workers don't keep feeding the queue while
+            # we drain. Closing the result iterator triggers the work_iter
+            # generator's finally (which drains the archive producer thread).
+            interrupted = True
+            logger.warning("interrupted; terminating workers and draining producer")
+            pool.terminate()
+        finally:
+            if batch and not interrupted:
                 write_jsonl(output, batch, append=True)
                 written += len(batch)
-                batch.clear()
-        if batch:
-            write_jsonl(output, batch, append=True)
-            written += len(batch)
+            # Close the work iterator explicitly so generator finally-blocks
+            # (e.g. iter_archive_members draining its producer thread) run
+            # now rather than whenever GC happens to collect them.
+            close = getattr(work_iter, "close", None)
+            if close is not None:
+                close()
+            pool.join()
 
+    if interrupted:
+        logger.info(f"interrupted: wrote {written} entries to {output} before ctrl-c; {failed} failures so far")
+        raise SystemExit(130)
     logger.info(f"wrote {written} entries to {output}; {failed} failures ({failed / max(1, total) * 100:.2f}%)")
 
 

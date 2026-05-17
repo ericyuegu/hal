@@ -8,6 +8,9 @@
 
 /replays/
 
+# Per-notebook scratch (extracted slps, intermediate txt outputs)
+notebooks/.*/
+
 # Local agent/tool state
 /.claude/*.local.json
 /.claude/*.settings.json

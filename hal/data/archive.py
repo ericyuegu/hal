@@ -21,14 +21,20 @@ works around:
    consumer releases the slot after it's done with the path.
 """
 
+import concurrent.futures
+import contextlib
 import os
 import queue
 import threading
+import types
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import py7zr
 from loguru import logger
+from py7zr.exceptions import InternalError
 from py7zr.io import NullIO
 from py7zr.io import Py7zIO
 from py7zr.io import WriterFactory
@@ -169,6 +175,154 @@ class _StreamFactory(WriterFactory):
                 w.finalize()
 
 
+def _bounded_pool_extract(
+    self: Any,
+    fp: Any,
+    path: Any,
+    parallel: bool,  # noqa: ARG001 (kept for signature compatibility)
+    skip_notarget: bool = True,
+    q: queue.Queue | None = None,
+) -> None:
+    """Drop-in replacement for py7zr.Worker.extract with bounded concurrency.
+
+    The shipped implementation (py7zr 1.1.0, py7zr.py:1316-1342) spawns one
+    Thread per folder simultaneously, each calling open(filename, "rb").
+    For an archive with tens of thousands of folders this leaks fds linearly
+    (the per-thread fp is never closed) and exhausts RLIMIT_NOFILE.
+
+    Here we cap concurrency via a ThreadPoolExecutor and reuse one archive
+    fd per worker thread — total extra fds = max_workers, constant in member
+    count.
+    """
+    if not (hasattr(self.header, "main_streams") and self.header.main_streams is not None):
+        empty = [f for f in self.files if f.emptystream]
+        self.extract_single(fp, empty, path, 0, 0, q)
+        return
+
+    src_end = self.src_start + self.header.main_streams.packinfo.packpositions[-1]
+    numfolders = self.header.main_streams.unpackinfo.numfolders
+    if numfolders == 1:
+        self.extract_single(fp, self.files, path, self.src_start, src_end, q, skip_notarget=skip_notarget)
+        return
+
+    folders = self.header.main_streams.unpackinfo.folders
+    positions = self.header.main_streams.packinfo.packpositions
+    empty = [f for f in self.files if f.emptystream]
+    self.extract_single(fp, empty, path, 0, 0, q)
+
+    targeted = [
+        i
+        for i in range(numfolders)
+        if not skip_notarget or any(self.target_filepath.get(f.id, None) for f in folders[i].files)
+    ]
+    if not targeted:
+        return
+
+    filename = getattr(fp, "name", None)
+    if filename is None:
+        raise InternalError("bounded extract requires fp with a .name (path)")
+
+    max_workers = min(len(targeted), _BOUNDED_EXTRACT_THREADS)
+    if max_workers <= 1:
+        for i in targeted:
+            self.extract_single(
+                fp,
+                folders[i].files,
+                path,
+                self.src_start + positions[i],
+                self.src_start + positions[i + 1],
+                q,
+                skip_notarget=skip_notarget,
+            )
+        return
+
+    local = threading.local()
+    open_fps: list = []
+    open_fps_lock = threading.Lock()
+
+    def _worker_fp() -> Any:
+        wfp = getattr(local, "fp", None)
+        if wfp is None:
+            wfp = open(filename, "rb")  # noqa: SIM115 — fp is per-thread and reused across folders; closed in finally
+            local.fp = wfp
+            with open_fps_lock:
+                open_fps.append(wfp)
+        return wfp
+
+    def _do_folder(i: int) -> None:
+        self.extract_single(
+            _worker_fp(),
+            folders[i].files,
+            path,
+            self.src_start + positions[i],
+            self.src_start + positions[i + 1],
+            q,
+            skip_notarget=skip_notarget,
+        )
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_do_folder, i) for i in targeted]
+            for f in concurrent.futures.as_completed(futures):
+                f.result()
+    finally:
+        with open_fps_lock:
+            for wfp in open_fps:
+                with contextlib.suppress(OSError):
+                    wfp.close()
+
+
+_BOUNDED_EXTRACT_THREADS: int = max(2, min(8, (os.cpu_count() or 4)))
+
+
+def _maybe_start_fd_watcher() -> tuple[threading.Event | None, threading.Thread | None]:
+    """Start a per-2s fd-count logger when HAL_PROFILE_FDS=1, else no-op.
+
+    Diagnostic for fd leaks in archive extraction; left in tree because
+    py7zr's threading model is fragile and any future regression here
+    would otherwise be opaque.
+    """
+    if os.environ.get("HAL_PROFILE_FDS") != "1":
+        return None, None
+
+    stop = threading.Event()
+    fd_dir = Path(f"/proc/{os.getpid()}/fd")
+
+    def _run() -> None:
+        while not stop.wait(2.0):
+            try:
+                entries = list(fd_dir.iterdir())
+            except OSError as e:
+                logger.warning(f"fd watcher: cannot list {fd_dir}: {e!r}")
+                continue
+            buckets: Counter[str] = Counter()
+            for e in entries:
+                try:
+                    target = os.readlink(e)
+                except OSError:
+                    target = "<gone>"
+                if target.startswith("/dev/shm"):
+                    bucket = "/dev/shm/*"
+                elif target.startswith("/proc"):
+                    bucket = "/proc/*"
+                elif "pipe:" in target:
+                    bucket = "pipe:*"
+                elif "socket:" in target:
+                    bucket = "socket:*"
+                elif "anon_inode:" in target:
+                    bucket = f"anon_inode:{target.split(':', 1)[1].split('[')[0]}"
+                elif target.endswith(".7z"):
+                    bucket = "*.7z"
+                else:
+                    bucket = target
+                buckets[bucket] += 1
+            logger.debug(f"fd watcher pid={os.getpid()}: total={len(entries)} top={buckets.most_common(8)}")
+
+    t = threading.Thread(target=_run, name="fd-watcher", daemon=True)
+    t.start()
+    return stop, t
+
+
 def iter_archive_members(
     archive: Path,
     *,
@@ -209,6 +363,10 @@ def iter_archive_members(
     def _producer() -> None:
         try:
             with py7zr.SevenZipFile(str(archive), "r") as z:
+                # Replace py7zr's broken parallel extract (one Thread per
+                # folder, each opening a fresh fd that is never closed) with
+                # a bounded thread pool that reuses fds. See _bounded_pool_extract.
+                z.worker.extract = types.MethodType(_bounded_pool_extract, z.worker)
                 z.extract(factory=factory)
         except BaseException as e:
             logger.error(f"archive producer crashed on {archive}: {e!r}")
@@ -219,6 +377,8 @@ def iter_archive_members(
 
     producer = threading.Thread(target=_producer, name=f"py7zr-producer-{archive.name}", daemon=True)
     producer.start()
+
+    fd_watcher_stop, watcher = _maybe_start_fd_watcher()
 
     seen_members: set[str] = set()
     drained = False
@@ -252,6 +412,10 @@ def iter_archive_members(
                 Path(leftover).unlink(missing_ok=True)
                 sem.release()
         producer.join()
+        if watcher is not None:
+            assert fd_watcher_stop is not None
+            fd_watcher_stop.set()
+            watcher.join(timeout=3.0)
 
     if producer_exc:
         raise producer_exc[0]
