@@ -18,13 +18,16 @@ OR slp-native integer ids (e.g. `--stages 31 32` or `--stages BATTLEFIELD
 FINAL_DESTINATION`). Player-code filters accept inline names or
 `@path/to/file.txt` for one-per-line lists.
 
-`--require-damage` is intentionally absent: the index doesn't store damage
-because Stage 1 reads start/end blocks only (peppi `skip_frames=True`).
+Damage / stocks / inputs predicates require an index built with
+`python -m hal.scripts.index --with-stats`. If the index has no stats,
+`filter_index` raises rather than silently producing empty output.
 """
 
+import operator
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import fields
 from pathlib import Path
 
 import melee
@@ -41,6 +44,26 @@ Predicate = Callable[[ReplayIndexEntry], bool]
 
 # Project policy: tournament-legal stages, keyed by libmelee enum name.
 INCLUDED_STAGES_BY_NAME: dict[str, melee.Stage] = {stage.name: stage for stage in INCLUDED_STAGES}
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerStatsThresholds:
+    """Minimums for per-player stats. None = no filter on that field.
+
+    Field names mirror `PlayerStats` (minus `port`). Predicates use
+    "any player matches" semantics, consistent with `characters` /
+    `codes_include`. Requires an index built with `index --with-stats`.
+    """
+
+    damage_dealt: float | None = None
+    damage_taken: float | None = None
+    stocks_remaining: int | None = None
+    inputs: int | None = None
+    sds: int | None = None
+    early_sds: int | None = None
+
+    def any_set(self) -> bool:
+        return any(getattr(self, f.name) is not None for f in fields(self))
 
 
 def _resolve_ids(values: list[str], table: dict[str, int], kind: str) -> set[int]:
@@ -102,8 +125,16 @@ def build_predicates(
     codes_include: set[str] | None = None,
     codes_exclude: set[str] | None = None,
     slp_version_min: tuple[int, int, int] | None = None,
+    stats_thresholds: PlayerStatsThresholds | None = None,
 ) -> list[tuple[str, Predicate]]:
-    """Return (label, predicate) pairs. The label is used for diagnostics."""
+    """Return (label, predicate) pairs. The label is used for diagnostics.
+
+    Per-player conditions (`characters`, `codes_include`, stats) are
+    satisfied if ANY player matches. Stats predicates require entries with
+    `stats` populated — `filter_index` raises on `entry.stats is None`
+    before any stats predicate is evaluated, so predicate bodies here
+    assume `e.stats is not None`.
+    """
     preds: list[tuple[str, Predicate]] = []
 
     if min_frames is not None:
@@ -144,6 +175,19 @@ def build_predicates(
     if slp_version_min is not None:
         preds.append((f"slp_version>={slp_version_min}", lambda e: e.slp_version >= slp_version_min))
 
+    if stats_thresholds is not None:
+        for f in fields(stats_thresholds):
+            t = getattr(stats_thresholds, f.name)
+            if t is None:
+                continue
+            get = operator.attrgetter(f.name)
+            preds.append(
+                (
+                    f"min_{f.name}={t}",
+                    lambda e, t=t, g=get: any(g(p) >= t for p in e.stats.players),
+                )
+            )
+
     return preds
 
 
@@ -160,6 +204,7 @@ def filter_index(
     codes_include: set[str] | None = None,
     codes_exclude: set[str] | None = None,
     slp_version_min: tuple[int, int, int] | None = None,
+    stats_thresholds: PlayerStatsThresholds | None = None,
     log_per_filter: bool = True,
 ) -> int:
     if not index.exists():
@@ -177,7 +222,10 @@ def filter_index(
         codes_include=codes_include,
         codes_exclude=codes_exclude,
         slp_version_min=slp_version_min,
+        stats_thresholds=stats_thresholds,
     )
+
+    needs_stats = stats_thresholds is not None and stats_thresholds.any_set()
 
     paths: list[str] = []
     total = 0
@@ -185,6 +233,11 @@ def filter_index(
 
     for entry in read_jsonl(index):
         total += 1
+        if needs_stats and entry.stats is None:
+            raise ValueError(
+                f"entry {entry.path} has stats=None but stats predicates were requested. "
+                "Rebuild the index with: python -m hal.scripts.index --with-stats ..."
+            )
         kept = True
         for label, pred in preds:
             if not pred(entry):
@@ -261,6 +314,24 @@ class FilterConfig:
     slp_version_min: str | None = None
     """Minimum slp version, e.g. 3.7.0. None = no version filter."""
 
+    min_damage_dealt: float | None = None
+    """Keep if any player dealt >= this damage. Requires --with-stats index."""
+
+    min_damage_taken: float | None = None
+    """Keep if any player took >= this damage. Requires --with-stats index."""
+
+    min_stocks_remaining: int | None = None
+    """Keep if any player ended with >= this many stocks. Requires --with-stats."""
+
+    min_inputs: int | None = None
+    """Keep if any player had >= this many button presses. Requires --with-stats."""
+
+    min_sds: int | None = None
+    """Keep if any player had >= this many self-destructs. Requires --with-stats."""
+
+    min_early_sds: int | None = None
+    """Keep if any player had >= this many SDs within ~8s of spawning. Requires --with-stats."""
+
 
 def run(cfg: FilterConfig) -> int:
     stages = _resolve_stages(cfg.stages) if cfg.stages else None
@@ -269,6 +340,14 @@ def run(cfg: FilterConfig) -> int:
     codes_in = _parse_codes(cfg.player_codes_include) if cfg.player_codes_include else None
     codes_ex = _parse_codes(cfg.player_codes_exclude) if cfg.player_codes_exclude else None
     version_min = _parse_version(cfg.slp_version_min) if cfg.slp_version_min else None
+    thresholds = PlayerStatsThresholds(
+        damage_dealt=cfg.min_damage_dealt,
+        damage_taken=cfg.min_damage_taken,
+        stocks_remaining=cfg.min_stocks_remaining,
+        inputs=cfg.min_inputs,
+        sds=cfg.min_sds,
+        early_sds=cfg.min_early_sds,
+    )
 
     return filter_index(
         index=cfg.index,
@@ -282,6 +361,7 @@ def run(cfg: FilterConfig) -> int:
         codes_include=codes_in,
         codes_exclude=codes_ex,
         slp_version_min=version_min,
+        stats_thresholds=thresholds if thresholds.any_set() else None,
     )
 
 

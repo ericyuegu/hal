@@ -53,7 +53,7 @@ def _worker_init() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def _index_one(args: tuple[Path, bool, str | None]) -> ReplayIndexEntry | None:
+def _index_one(args: tuple[Path, bool, bool, str | None]) -> ReplayIndexEntry | None:
     """Worker: parse one .slp into a ReplayIndexEntry.
 
     `synthetic_path`, when set, replaces the on-disk path written into the
@@ -61,10 +61,10 @@ def _index_one(args: tuple[Path, bool, str | None]) -> ReplayIndexEntry | None:
     transient tmpfs path. The tmpfs file is unlinked on the way out
     (success or failure) so workers don't leak ring-buffer slots.
     """
-    path, compute_sha1, synthetic_path = args
+    path, compute_sha1, with_stats, synthetic_path = args
     label = synthetic_path or str(path)
     try:
-        entry = extract_index_entry(path, compute_sha1=compute_sha1, name_hint=synthetic_path)
+        entry = extract_index_entry(path, compute_sha1=compute_sha1, name_hint=synthetic_path, with_stats=with_stats)
     except KeyboardInterrupt, SystemExit:
         raise
     except BaseException as e:
@@ -88,11 +88,13 @@ def _existing_paths(index_path: Path) -> set[str]:
     return {entry.path for entry in read_jsonl(index_path)}
 
 
-def _filesystem_work(root: Path, seen: set[str]) -> tuple[list[tuple[Path, bool, None]], int]:
+def _filesystem_work(
+    root: Path, seen: set[str], *, compute_sha1: bool, with_stats: bool
+) -> tuple[list[tuple[Path, bool, bool, None]], int]:
     all_paths = sorted(root.rglob("*.slp"))
     new = [p for p in all_paths if str(repo_relative(p)) not in seen]
     logger.info(f"found {len(all_paths)} slps under {root}; {len(new)} to index")
-    return [(p, True, None) for p in new], len(new)
+    return [(p, compute_sha1, with_stats, None) for p in new], len(new)
 
 
 def _list_archive_slps(archive: Path) -> list[str]:
@@ -108,20 +110,21 @@ def _archive_work(
     tmpfs_root: Path,
     queue_size: int,
     compute_sha1: bool,
-) -> tuple[Iterator[tuple[Path, bool, str]], int]:
+    with_stats: bool,
+) -> tuple[Iterator[tuple[Path, bool, bool, str]], int]:
     members = _list_archive_slps(archive)
     new_members = [m for m in members if archive_member_path(archive, m) not in seen]
     logger.info(f"archive {archive.name}: {len(members)} slps, {len(new_members)} to index")
     new_set = set(new_members)
 
-    def _gen() -> Iterator[tuple[Path, bool, str]]:
+    def _gen() -> Iterator[tuple[Path, bool, bool, str]]:
         for synthetic, tmpfs_path in iter_archive_members(
             archive,
             tmpfs_root=tmpfs_root,
             filter_paths=new_set,
             queue_size=queue_size,
         ):
-            yield tmpfs_path, compute_sha1, synthetic
+            yield tmpfs_path, compute_sha1, with_stats, synthetic
 
     return _gen(), len(new_members)
 
@@ -133,10 +136,18 @@ def build_index(
     archive: Path | None = None,
     incremental: bool = False,
     compute_sha1: bool = True,
+    with_stats: bool = False,
     workers: int = max(1, (mp.cpu_count() or 2) - 1),
     tmpfs_root: Path = _DEFAULT_TMPFS,
     queue_size: int = 64,
 ) -> None:
+    """Walk replays into `index.jsonl`.
+
+    `with_stats=True` switches peppi to `skip_frames=False` and computes
+    per-replay aggregate stats (damage/stocks/inputs) per entry — see
+    `hal.data.replay_stats`. ~5-10x slower than the default metadata-only
+    pass; rebuild if you want stats on already-indexed entries.
+    """
     if (root is None) == (archive is None):
         raise ValueError("pass exactly one of --root or --archive")
     if root is not None and not root.is_dir():
@@ -159,10 +170,11 @@ def build_index(
             tmpfs_root=tmpfs_root,
             queue_size=queue_size,
             compute_sha1=compute_sha1,
+            with_stats=with_stats,
         )
     else:
         assert root is not None  # narrowed by the mutual-exclusion check above
-        work_list, total = _filesystem_work(root, seen)
+        work_list, total = _filesystem_work(root, seen, compute_sha1=compute_sha1, with_stats=with_stats)
         work_iter = iter(work_list)
 
     if total == 0:
@@ -208,12 +220,20 @@ def build_index(
             close = getattr(work_iter, "close", None)
             if close is not None:
                 close()
+            # On the happy path the pool is still accepting tasks; close() it
+            # so join() doesn't raise "Pool is still running". On the
+            # interrupted path terminate() was already called above.
+            if not interrupted:
+                pool.close()
             pool.join()
 
     if interrupted:
         logger.info(f"interrupted: wrote {written} entries to {output} before ctrl-c; {failed} failures so far")
         raise SystemExit(130)
-    logger.info(f"wrote {written} entries to {output}; {failed} failures ({failed / max(1, total) * 100:.2f}%)")
+    logger.info(
+        f"wrote {written} entries to {output}; {failed} failures "
+        f"({failed / max(1, total) * 100:.2f}%); with_stats={with_stats}"
+    )
 
 
 if __name__ == "__main__":

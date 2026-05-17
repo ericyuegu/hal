@@ -29,6 +29,8 @@ from typing import get_args
 import peppi_py
 
 from hal.data.archive import parse_archive_member_path
+from hal.data.replay_stats import ReplayStats
+from hal.data.replay_stats import compute_replay_stats
 from hal.data.schema import SCHEMA_VERSION
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
@@ -174,6 +176,7 @@ class ReplayIndexEntry:
     sha1: str | None  # sha1 hex digest of the whole file (None if compute_sha1=False)
 
     annotation: Stage3Annotation | None = None
+    stats: ReplayStats | None = None  # populated when build_index --with-stats
 
     def __post_init__(self) -> None:
         if len(self.slp_version) != 3:
@@ -198,12 +201,14 @@ class ReplayIndexEntry:
             "rank_filename": self.rank_filename,
             "sha1": self.sha1,
             "annotation": self.annotation.to_dict() if self.annotation is not None else None,
+            "stats": self.stats.to_dict() if self.stats is not None else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ReplayIndexEntry:
         outcome = data.get("outcome")
         annotation = data.get("annotation")
+        stats = data.get("stats")
         return cls(
             path=data["path"],
             slp_version=tuple(data["slp_version"]),
@@ -216,6 +221,7 @@ class ReplayIndexEntry:
             rank_filename=data.get("rank_filename"),
             sha1=data.get("sha1"),
             annotation=Stage3Annotation.from_dict(annotation) if annotation is not None else None,
+            stats=ReplayStats.from_dict(stats) if stats is not None else None,
         )
 
 
@@ -266,14 +272,27 @@ def _narrow_player_type(name: str) -> PlayerType:
 
 
 def extract_index_entry(
-    replay_path: Path, *, compute_sha1: bool = True, name_hint: str | None = None
+    replay_path: Path,
+    *,
+    compute_sha1: bool = True,
+    name_hint: str | None = None,
+    with_stats: bool = False,
 ) -> ReplayIndexEntry | None:
-    """Parse a .slp file's start/end/metadata blocks (no frame iteration) and
-    return a `ReplayIndexEntry`. Returns None on parse failure (caller logs)."""
+    """Parse a .slp file and return a `ReplayIndexEntry`.
+
+    Default (``with_stats=False``): parse start/end/metadata only (peppi
+    ``skip_frames=True``) — fast, no frame iteration.
+
+    ``with_stats=True``: parse with frames loaded (``skip_frames=False``) and
+    compute per-replay aggregates via :func:`compute_replay_stats`. ~5-10x
+    slower per file; collapses the anonymized-slp fallback re-read.
+
+    Returns None on parse failure (caller logs).
+    """
     # Indexing walks 100k+ files; one malformed slp shouldn't kill the job, so
     # we surface failures as None rather than propagating exceptions.
     try:
-        g = peppi_py.read_slippi(str(replay_path), skip_frames=True)
+        g = peppi_py.read_slippi(str(replay_path), skip_frames=not with_stats)
     except Exception:
         return None
 
@@ -319,15 +338,21 @@ def extract_index_entry(
 
     last_frame = md.get("lastFrame")
     if last_frame is None:
-        # Anonymized .slp files ship with empty metadata. Re-read with frames
-        # loaded so we can recover frame count from the frame id array.
-        try:
-            g_full = peppi_py.read_slippi(str(replay_path), skip_frames=False)
-        except Exception:
-            return None
+        # Anonymized .slp files ship with empty metadata. When with_stats=True
+        # we already loaded frames; otherwise re-read with frames so we can
+        # recover frame count from the frame id array.
+        if with_stats:
+            g_full = g
+        else:
+            try:
+                g_full = peppi_py.read_slippi(str(replay_path), skip_frames=False)
+            except Exception:
+                return None
         ids = g_full.frames.id
         last_frame = int(ids[-1]) if len(ids) else None
     frame_count = int(last_frame) if last_frame is not None else 0
+
+    stats = compute_replay_stats(g) if with_stats else None
 
     return ReplayIndexEntry(
         path=str(repo_relative(replay_path)),
@@ -340,6 +365,7 @@ def extract_index_entry(
         outcome=outcome,
         rank_filename=_rank_from_filename(Path(name_hint) if name_hint else replay_path),
         sha1=_sha1(replay_path) if compute_sha1 else None,
+        stats=stats,
     )
 
 
