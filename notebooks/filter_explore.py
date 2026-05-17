@@ -29,10 +29,10 @@ from loguru import logger
 from hal.data.archive import parse_archive_member_path
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
+from hal.data.replay_stats import PlayerStatsMaxes
+from hal.data.replay_stats import PlayerStatsMins
 from hal.paths import REPO_DIR
 from hal.policy import INCLUDED_STAGES
-from hal.scripts.filter import _parse_codes
-from hal.scripts.filter import _parse_version
 from hal.scripts.filter import _resolve_ids
 from hal.scripts.filter import _resolve_stages
 from hal.scripts.filter import build_predicates
@@ -92,13 +92,18 @@ class TuneCfg:
     stages: list[str] = field(default_factory=lambda: [s.name for s in INCLUDED_STAGES])
     characters: list[str] = field(default_factory=list)
     ranks: list[str] = field(default_factory=list)
-    player_codes_include: str | None = None
-    player_codes_exclude: str | None = None
-    slp_version_min: str | None = None
+
+    # Stats predicates (require --with-stats index).
+    min_damage_dealt: float | None = None
+    min_damage_taken: float | None = None
+    min_stocks_remaining: int | None = None
+    min_inputs: int | None = None
+    max_sds: int | None = None
+    max_early_sds: int | None = None
 
     # Slack windows defining "near" the boundary.
     frame_slack: int = 300
-    version_slack_minor: int = 1  # slp_version_min minus this many minor versions = "near"
+    sds_slack: int = 1
 
 
 cfg = TuneCfg()
@@ -122,9 +127,13 @@ def score(cfg: TuneCfg, entries: list[ReplayIndexEntry]):
     stages = _resolve_stages(cfg.stages) if cfg.stages else None
     chars = _resolve_ids(cfg.characters, CHARACTERS_BY_NAME, "character") if cfg.characters else None
     ranks = {r.strip().lower() for r in cfg.ranks} if cfg.ranks else None
-    codes_in = _parse_codes(cfg.player_codes_include) if cfg.player_codes_include else None
-    codes_ex = _parse_codes(cfg.player_codes_exclude) if cfg.player_codes_exclude else None
-    version_min = _parse_version(cfg.slp_version_min) if cfg.slp_version_min else None
+    mins = PlayerStatsMins(
+        damage_dealt=cfg.min_damage_dealt,
+        damage_taken=cfg.min_damage_taken,
+        stocks_remaining=cfg.min_stocks_remaining,
+        inputs=cfg.min_inputs,
+    )
+    maxes = PlayerStatsMaxes(sds=cfg.max_sds, early_sds=cfg.max_early_sds)
 
     preds = build_predicates(
         min_frames=cfg.min_frames if cfg.min_frames > 0 else None,
@@ -133,23 +142,22 @@ def score(cfg: TuneCfg, entries: list[ReplayIndexEntry]):
         stages=stages,
         characters=chars,
         ranks=ranks,
-        codes_include=codes_in,
-        codes_exclude=codes_ex,
-        slp_version_min=version_min,
+        mins=mins if mins.any_set() else None,
+        maxes=maxes if maxes.any_set() else None,
     )
 
     # "Soft" predicates are the ones with a continuous knob — fails within a
     # slack window count as near-rejects. Everything else (completed_only,
-    # codes_*, ranks, characters) is hard.
+    # ranks, characters, stages) is hard.
     def is_soft_near(entry: ReplayIndexEntry, label: str) -> bool:
         if label.startswith("min_frames="):
             return entry.frame_count >= cfg.min_frames - cfg.frame_slack
         if label.startswith("max_frames=") and cfg.max_frames is not None:
             return entry.frame_count <= cfg.max_frames + cfg.frame_slack
-        if label.startswith("slp_version>=") and version_min is not None:
-            major, minor, patch = entry.slp_version
-            vmajor, vminor, vpatch = version_min
-            return major == vmajor and minor >= vminor - cfg.version_slack_minor
+        if label.startswith("max_sds=") and cfg.max_sds is not None and entry.stats is not None:
+            return all(p.sds <= cfg.max_sds + cfg.sds_slack for p in entry.stats.players)
+        if label.startswith("max_early_sds=") and cfg.max_early_sds is not None and entry.stats is not None:
+            return all(p.early_sds <= cfg.max_early_sds + cfg.sds_slack for p in entry.stats.players)
         return False
 
     accepted: list[ReplayIndexEntry] = []
@@ -230,10 +238,10 @@ def _summary(entry: ReplayIndexEntry) -> str:
     except Exception:
         stage_name = f"stage={entry.stage}"
     chars = "/".join(str(p.character) for p in entry.players)
-    codes = "/".join(p.code or "?" for p in entry.players)
     completed = entry.outcome.completed if entry.outcome else None
+    sds = "/".join(str(p.sds) for p in entry.stats.players) if entry.stats else "?"
     return (
-        f"frames={entry.frame_count:5d} {stage_name:18s} chars={chars} codes={codes} "
+        f"frames={entry.frame_count:5d} {stage_name:18s} chars={chars} sds={sds} "
         f"rank={entry.rank_filename} v={'.'.join(map(str, entry.slp_version))} completed={completed}"
     )
 
@@ -273,6 +281,7 @@ show_bucket("reject_hard")
 # ```python
 cfg.min_frames = 1200
 cfg.frame_slack = 200
+cfg.max_sds = 3
 buckets = score(cfg, entries)
 show_bucket("reject_near")
 # ```
@@ -297,12 +306,18 @@ def emit_cli(cfg: TuneCfg) -> str:
         parts.append("--characters " + " ".join(cfg.characters))
     if cfg.ranks:
         parts.append("--ranks " + " ".join(cfg.ranks))
-    if cfg.player_codes_include:
-        parts.append(f"--player-codes-include {cfg.player_codes_include}")
-    if cfg.player_codes_exclude:
-        parts.append(f"--player-codes-exclude {cfg.player_codes_exclude}")
-    if cfg.slp_version_min:
-        parts.append(f"--slp-version-min {cfg.slp_version_min}")
+    if cfg.min_damage_dealt is not None:
+        parts.append(f"--min-damage-dealt {cfg.min_damage_dealt}")
+    if cfg.min_damage_taken is not None:
+        parts.append(f"--min-damage-taken {cfg.min_damage_taken}")
+    if cfg.min_stocks_remaining is not None:
+        parts.append(f"--min-stocks-remaining {cfg.min_stocks_remaining}")
+    if cfg.min_inputs is not None:
+        parts.append(f"--min-inputs {cfg.min_inputs}")
+    if cfg.max_sds is not None:
+        parts.append(f"--max-sds {cfg.max_sds}")
+    if cfg.max_early_sds is not None:
+        parts.append(f"--max-early-sds {cfg.max_early_sds}")
     return " \\\n  ".join(parts)
 
 
