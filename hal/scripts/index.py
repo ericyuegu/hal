@@ -25,6 +25,7 @@ import faulthandler
 import multiprocessing as mp
 import signal
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import py7zr
@@ -53,18 +54,31 @@ def _worker_init() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def _index_one(args: tuple[Path, bool, bool, str | None]) -> ReplayIndexEntry | None:
-    """Worker: parse one .slp into a ReplayIndexEntry.
+@dataclass(frozen=True, slots=True)
+class _WorkItem:
+    """One unit of work for `_index_one`.
 
     `synthetic_path`, when set, replaces the on-disk path written into the
     entry — used so the index records `archive://...!member` instead of the
     transient tmpfs path. The tmpfs file is unlinked on the way out
     (success or failure) so workers don't leak ring-buffer slots.
     """
-    path, compute_sha1, with_stats, synthetic_path = args
-    label = synthetic_path or str(path)
+
+    path: Path
+    compute_sha1: bool
+    with_stats: bool
+    synthetic_path: str | None
+
+
+def _index_one(item: _WorkItem) -> ReplayIndexEntry | None:
+    label = item.synthetic_path or str(item.path)
     try:
-        entry = extract_index_entry(path, compute_sha1=compute_sha1, name_hint=synthetic_path, with_stats=with_stats)
+        entry = extract_index_entry(
+            item.path,
+            compute_sha1=item.compute_sha1,
+            name_hint=item.synthetic_path,
+            with_stats=item.with_stats,
+        )
     except KeyboardInterrupt, SystemExit:
         raise
     except BaseException as e:
@@ -75,10 +89,10 @@ def _index_one(args: tuple[Path, bool, bool, str | None]) -> ReplayIndexEntry | 
         logger.warning(f"unhandled error indexing {label}: {e!r}")
         entry = None
     finally:
-        if synthetic_path is not None:
-            path.unlink(missing_ok=True)
-    if entry is not None and synthetic_path is not None:
-        entry = dataclasses.replace(entry, path=synthetic_path)
+        if item.synthetic_path is not None:
+            item.path.unlink(missing_ok=True)
+    if entry is not None and item.synthetic_path is not None:
+        entry = dataclasses.replace(entry, path=item.synthetic_path)
     return entry
 
 
@@ -90,11 +104,12 @@ def _existing_paths(index_path: Path) -> set[str]:
 
 def _filesystem_work(
     root: Path, seen: set[str], *, compute_sha1: bool, with_stats: bool
-) -> tuple[list[tuple[Path, bool, bool, None]], int]:
+) -> tuple[list[_WorkItem], int]:
     all_paths = sorted(root.rglob("*.slp"))
     new = [p for p in all_paths if str(repo_relative(p)) not in seen]
     logger.info(f"found {len(all_paths)} slps under {root}; {len(new)} to index")
-    return [(p, compute_sha1, with_stats, None) for p in new], len(new)
+    items = [_WorkItem(path=p, compute_sha1=compute_sha1, with_stats=with_stats, synthetic_path=None) for p in new]
+    return items, len(new)
 
 
 def _list_archive_slps(archive: Path) -> list[str]:
@@ -111,20 +126,25 @@ def _archive_work(
     queue_size: int,
     compute_sha1: bool,
     with_stats: bool,
-) -> tuple[Iterator[tuple[Path, bool, bool, str]], int]:
+) -> tuple[Iterator[_WorkItem], int]:
     members = _list_archive_slps(archive)
     new_members = [m for m in members if archive_member_path(archive, m) not in seen]
     logger.info(f"archive {archive.name}: {len(members)} slps, {len(new_members)} to index")
     new_set = set(new_members)
 
-    def _gen() -> Iterator[tuple[Path, bool, bool, str]]:
+    def _gen() -> Iterator[_WorkItem]:
         for synthetic, tmpfs_path in iter_archive_members(
             archive,
             tmpfs_root=tmpfs_root,
             filter_paths=new_set,
             queue_size=queue_size,
         ):
-            yield tmpfs_path, compute_sha1, with_stats, synthetic
+            yield _WorkItem(
+                path=tmpfs_path,
+                compute_sha1=compute_sha1,
+                with_stats=with_stats,
+                synthetic_path=synthetic,
+            )
 
     return _gen(), len(new_members)
 
