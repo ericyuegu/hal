@@ -11,7 +11,6 @@ from typing import Literal
 from melee import Character
 from melee import Stage
 
-VALID_PLAYERS: Final[tuple[str, str]] = ("p1", "p2")
 Player = Literal["p1", "p2"]
 PLAYER_1_PORT: Final[int] = 1
 PLAYER_2_PORT: Final[int] = 2

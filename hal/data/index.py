@@ -34,6 +34,7 @@ from hal.data.replay_stats import compute_replay_stats
 from hal.data.schema import SCHEMA_VERSION
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
+from hal.wire import VALID_LIBMELEE_PORTS
 from hal.wire import peppi_port_to_libmelee as _peppi_port_to_libmelee
 
 # slp Player.type values. EMPTY (unused port slot) is filtered out before
@@ -47,7 +48,6 @@ PlayedOn = Literal["dolphin", "console", "network"]
 
 Split = Literal["train", "val", "test"]
 
-_VALID_PORTS: tuple[int, ...] = (1, 2, 3, 4)
 _RANK_KEYWORDS: tuple[str, ...] = ("platinum", "diamond", "master")
 
 
@@ -72,8 +72,8 @@ class GameOutcome:
                 f"lras_initiator={self.lras_initiator} is only valid when "
                 f"end_method=NO_CONTEST; got {self.end_method.name}"
             )
-        if self.lras_initiator not in _VALID_PORTS:
-            raise ValueError(f"lras_initiator must be in {_VALID_PORTS} or None; got {self.lras_initiator}")
+        if self.lras_initiator not in VALID_LIBMELEE_PORTS:
+            raise ValueError(f"lras_initiator must be in {VALID_LIBMELEE_PORTS} or None; got {self.lras_initiator}")
 
     @property
     def completed(self) -> bool:
@@ -136,8 +136,8 @@ class PlayerEntry:
     name: str | None  # netplay display name
 
     def __post_init__(self) -> None:
-        if self.port not in _VALID_PORTS:
-            raise ValueError(f"port must be in {_VALID_PORTS}; got {self.port}")
+        if self.port not in VALID_LIBMELEE_PORTS:
+            raise ValueError(f"port must be in {VALID_LIBMELEE_PORTS}; got {self.port}")
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

@@ -23,14 +23,11 @@ from peppi_py.game import Game
 
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.wire import BUTTON_BITS
-from hal.wire import CHARACTERS_BY_NAME
 from hal.wire import GAME_START_FRAME
 from hal.wire import PLAYER_PREFIXES
 from hal.wire import POST_FIELD_SUFFIXES
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
-
-NANA_CHARACTER_ID: int = CHARACTERS_BY_NAME["NANA"]
 
 
 def _arr_to_np(arr: Any, dtype: DTypeLike, length: int) -> np.ndarray:

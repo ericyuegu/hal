@@ -16,6 +16,7 @@ import numpy as np
 from peppi_py.game import Game
 
 from hal.wire import BUTTON_BITS
+from hal.wire import VALID_LIBMELEE_PORTS
 from hal.wire import peppi_port_to_libmelee
 
 _ALL_BUTTON_BITS: int = 0
@@ -54,7 +55,18 @@ class PlayerStats:
 
 @dataclass(frozen=True, slots=True)
 class ReplayStats:
-    players: tuple[PlayerStats, ...]  # sorted by port
+    players: tuple[PlayerStats, ...]  # 1v1 only; sorted by ascending port
+
+    def __post_init__(self) -> None:
+        if len(self.players) != 2:
+            raise ValueError(f"ReplayStats requires exactly 2 players (1v1); got {len(self.players)}")
+        ports = [p.port for p in self.players]
+        if ports != sorted(ports):
+            raise ValueError(f"players must be sorted by port; got {ports}")
+        if len(set(ports)) != len(ports):
+            raise ValueError(f"duplicate ports: {ports}")
+        if any(p not in VALID_LIBMELEE_PORTS for p in ports):
+            raise ValueError(f"ports must be in {VALID_LIBMELEE_PORTS}; got {ports}")
 
     def to_dict(self) -> dict[str, Any]:
         return {"players": [p.to_dict() for p in self.players]}
