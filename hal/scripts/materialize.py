@@ -32,7 +32,7 @@ Usage:
 import dataclasses
 import multiprocessing as mp
 from collections.abc import Iterable
-from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +41,8 @@ from loguru import logger
 from streaming import MDSWriter
 from tqdm import tqdm
 
-from hal.data.archive import iter_archive_members
+from hal.data.archive import ReplayWork
+from hal.data.archive import iter_replay_work
 from hal.data.archive import parse_archive_member_path
 from hal.data.extract import extract_replay
 from hal.data.index import ReplayIndexEntry
@@ -65,6 +66,14 @@ _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_process_replays")
 
 _INT32_SIGN_MASK: int = 0x7FFFFFFF
 _INT32_RANGE: int = 1 << 31
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractResult:
+    """Typed return for `_process_one`; sample is None on parse failure."""
+
+    manifest_key: str
+    sample: dict[str, np.ndarray] | None
 
 
 def bucket_fraction(replay_uuid: int) -> float:
@@ -97,21 +106,21 @@ def _split_for(replay_uuid: int, train: float, val: float) -> Split:
     return "test"
 
 
-def _process_one(args: tuple[str, str, bool]) -> tuple[str, dict[str, np.ndarray] | None]:
-    """Worker: parse one replay's per-frame ndarrays.
-
-    ``manifest_key`` is the form matching ``ReplayIndexEntry.path``.
-    ``unlink_after`` is set for tmpfs files owned by the archive producer.
-    """
-    open_path, manifest_key, unlink_after = args
+def _process_one(item: ReplayWork) -> ExtractResult:
+    """Worker: parse one replay's per-frame ndarrays."""
     try:
-        sample = extract_replay(open_path)
-    except Exception as e:
-        logger.debug(f"extract_replay raised on {open_path}: {e}")
+        sample = extract_replay(str(item.open_path))
+    except KeyboardInterrupt, SystemExit:
+        raise
+    except BaseException as e:
+        # peppi-py is Rust/pyo3; panics surface as PanicException, which
+        # subclasses BaseException. A bare `except Exception` lets one corrupt
+        # .slp kill the worker and trip BrokenProcessPool.
+        logger.debug(f"extract_replay raised on {item.open_path}: {e!r}")
         sample = None
-    if unlink_after:
-        Path(open_path).unlink(missing_ok=True)
-    return manifest_key, sample
+    if item.unlink_after:
+        item.open_path.unlink(missing_ok=True)
+    return ExtractResult(manifest_key=item.manifest_key, sample=sample)
 
 
 def _index_by_path(index: Path) -> dict[str, ReplayIndexEntry]:
@@ -138,20 +147,20 @@ def _open_writers(output: Path, splits: Iterable[str]) -> dict[str, MDSWriter]:
     }
 
 
-def _bucket_paths(paths: list[str]) -> tuple[list[tuple[str, str]], dict[Path, list[str]]]:
-    """Split paths.txt into (abs_open_path, manifest_key) pairs and per-archive member lists.
+def _bucket_paths(paths: list[str]) -> tuple[list[tuple[Path, str]], dict[Path, list[str]]]:
+    """Split paths.txt into (open_path, manifest_key) pairs and per-archive member lists.
 
     Member ordering within an archive is preserved for reproducibility, even
     though ``iter_archive_members`` currently yields in decompression order.
     """
-    fs_pairs: list[tuple[str, str]] = []
+    fs_pairs: list[tuple[Path, str]] = []
     members_by_archive: dict[Path, list[str]] = {}
     for p in paths:
         parsed = parse_archive_member_path(p)
         if parsed is None:
             abs_path = Path(p).resolve()
             manifest_key = str(repo_relative(abs_path))
-            fs_pairs.append((str(abs_path), manifest_key))
+            fs_pairs.append((abs_path, manifest_key))
             continue
         archive, member = parsed
         if not archive.is_absolute():
@@ -159,30 +168,6 @@ def _bucket_paths(paths: list[str]) -> tuple[list[tuple[str, str]], dict[Path, l
         archive = archive.resolve()
         members_by_archive.setdefault(archive, []).append(member)
     return fs_pairs, members_by_archive
-
-
-def _build_work(
-    members_by_archive: dict[Path, list[str]],
-    fs_pairs: list[tuple[str, str]],
-    *,
-    tmpfs_root: Path,
-    queue_size: int,
-) -> Iterator[tuple[str, str, bool]]:
-    """Yield (open_path, manifest_key, unlink_after) for every bucketed entry.
-
-    Archives are processed sequentially; one producer thread per archive
-    streams members into tmpfs.
-    """
-    for open_path, manifest_key in fs_pairs:
-        yield open_path, manifest_key, False
-    for archive, members in members_by_archive.items():
-        for synthetic, tmpfs_path in iter_archive_members(
-            archive,
-            tmpfs_root=tmpfs_root,
-            filter_paths=set(members),
-            queue_size=queue_size,
-        ):
-            yield str(tmpfs_path), synthetic, True
 
 
 def process_replays(
@@ -225,9 +210,9 @@ def process_replays(
         f"({len(fs_pairs)} filesystem, {len(members_by_archive)} archive(s))  workers: {workers}"
     )
 
-    work_iter = _build_work(
-        members_by_archive,
-        fs_pairs,
+    work_iter = iter_replay_work(
+        fs_paths=fs_pairs,
+        archive_members=members_by_archive,
         tmpfs_root=tmpfs_root,
         queue_size=queue_size,
     )
@@ -247,32 +232,32 @@ def process_replays(
     ctx = mp.get_context("fork")
     try:
         with ctx.Pool(workers) as pool:
-            for path, sample in tqdm(
+            for result in tqdm(
                 pool.imap_unordered(_process_one, work_iter),
                 total=len(paths),
                 desc="processing",
                 unit="slp",
             ):
-                if sample is None:
+                if result.sample is None:
                     failed += 1
                     continue
-                entry = by_path.get(path)
+                entry = by_path.get(result.manifest_key)
                 if entry is None:
-                    logger.debug(f"path {path} not in index; skipping")
+                    logger.debug(f"path {result.manifest_key} not in index; skipping")
                     failed += 1
                     continue
 
-                replay_uuid = replay_uuid_from_path(path)
+                replay_uuid = replay_uuid_from_path(result.manifest_key)
                 split = _split_for(replay_uuid, train_split, val_split)
                 writer = writers[split]
                 # MDSWriter assigns sample_idx in write order; capture it before writing.
                 row_idx = rows_written[split]
-                writer.write(sample)
+                writer.write(result.sample)
                 rows_written[split] += 1
 
                 if split == "train":
                     for name in stat_features:
-                        stats.update(name, sample[name])
+                        stats.update(name, result.sample[name])
 
                 annotated.append(
                     dataclasses.replace(
@@ -281,7 +266,7 @@ def process_replays(
                             replay_uuid=replay_uuid,
                             split=split,
                             mds_row_idx=row_idx,
-                            frame_count_actual=int(sample["frame"].shape[0]),
+                            frame_count_actual=int(result.sample["frame"].shape[0]),
                             schema_version=SCHEMA_VERSION,
                         ),
                     )

@@ -24,10 +24,9 @@ but never halt the run.
 
 import dataclasses
 import faulthandler
+import functools
 import multiprocessing as mp
 import signal
-from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 
 import py7zr
@@ -35,8 +34,9 @@ import tyro
 from loguru import logger
 from tqdm import tqdm
 
+from hal.data.archive import ReplayWork
 from hal.data.archive import archive_member_path
-from hal.data.archive import iter_archive_members
+from hal.data.archive import iter_replay_work
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import extract_index_entry
 from hal.data.index import read_jsonl
@@ -56,30 +56,14 @@ def _worker_init() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-@dataclass(frozen=True, slots=True)
-class _WorkItem:
-    """One unit of work for `_index_one`.
-
-    `synthetic_path`, when set, replaces the on-disk path written into the
-    entry — used so the index records `archive://...!member` instead of the
-    transient tmpfs path. The tmpfs file is unlinked on the way out
-    (success or failure) so workers don't leak ring-buffer slots.
-    """
-
-    path: Path
-    compute_sha1: bool
-    with_stats: bool
-    synthetic_path: str | None
-
-
-def _index_one(item: _WorkItem) -> ReplayIndexEntry | None:
-    label = item.synthetic_path or str(item.path)
+def _index_one(item: ReplayWork, *, compute_sha1: bool, with_stats: bool) -> ReplayIndexEntry | None:
+    name_hint = item.manifest_key if item.unlink_after else None
     try:
         entry = extract_index_entry(
-            item.path,
-            compute_sha1=item.compute_sha1,
-            name_hint=item.synthetic_path,
-            with_stats=item.with_stats,
+            item.open_path,
+            compute_sha1=compute_sha1,
+            name_hint=name_hint,
+            with_stats=with_stats,
         )
     except KeyboardInterrupt, SystemExit:
         raise
@@ -88,13 +72,13 @@ def _index_one(item: _WorkItem) -> ReplayIndexEntry | None:
         # subclasses BaseException, not Exception. A bare `except Exception`
         # lets one corrupt .slp kill the worker and trip BrokenProcessPool,
         # which takes the whole job (and the parent shell) down.
-        logger.warning(f"unhandled error indexing {label}: {e!r}")
+        logger.warning(f"unhandled error indexing {item.manifest_key}: {e!r}")
         entry = None
     finally:
-        if item.synthetic_path is not None:
-            item.path.unlink(missing_ok=True)
-    if entry is not None and item.synthetic_path is not None:
-        entry = dataclasses.replace(entry, path=item.synthetic_path)
+        if item.unlink_after:
+            item.open_path.unlink(missing_ok=True)
+    if entry is not None:
+        entry = dataclasses.replace(entry, path=item.manifest_key)
     return entry
 
 
@@ -104,14 +88,12 @@ def _existing_paths(index_path: Path) -> set[str]:
     return {entry.path for entry in read_jsonl(index_path)}
 
 
-def _filesystem_work(
-    root: Path, seen: set[str], *, compute_sha1: bool, with_stats: bool
-) -> tuple[list[_WorkItem], int]:
+def _resolve_fs(root: Path, seen: set[str]) -> list[tuple[Path, str]]:
     all_paths = sorted(root.rglob("*.slp"))
-    new = [p for p in all_paths if str(repo_relative(p)) not in seen]
+    pairs = [(p, str(repo_relative(p))) for p in all_paths]
+    new = [(p, key) for p, key in pairs if key not in seen]
     logger.info(f"found {len(all_paths)} slps under {root}; {len(new)} to index")
-    items = [_WorkItem(path=p, compute_sha1=compute_sha1, with_stats=with_stats, synthetic_path=None) for p in new]
-    return items, len(new)
+    return new
 
 
 def _list_archive_slps(archive: Path) -> list[str]:
@@ -120,35 +102,11 @@ def _list_archive_slps(archive: Path) -> list[str]:
         return [name for name in z.getnames() if name.endswith(".slp")]
 
 
-def _archive_work(
-    archive: Path,
-    seen: set[str],
-    *,
-    tmpfs_root: Path,
-    queue_size: int,
-    compute_sha1: bool,
-    with_stats: bool,
-) -> tuple[Iterator[_WorkItem], int]:
+def _resolve_archive(archive: Path, seen: set[str]) -> list[str]:
     members = _list_archive_slps(archive)
     new_members = [m for m in members if archive_member_path(archive, m) not in seen]
     logger.info(f"archive {archive.name}: {len(members)} slps, {len(new_members)} to index")
-    new_set = set(new_members)
-
-    def _gen() -> Iterator[_WorkItem]:
-        for synthetic, tmpfs_path in iter_archive_members(
-            archive,
-            tmpfs_root=tmpfs_root,
-            filter_paths=new_set,
-            queue_size=queue_size,
-        ):
-            yield _WorkItem(
-                path=tmpfs_path,
-                compute_sha1=compute_sha1,
-                with_stats=with_stats,
-                synthetic_path=synthetic,
-            )
-
-    return _gen(), len(new_members)
+    return new_members
 
 
 def build_index(
@@ -185,22 +143,29 @@ def build_index(
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    fs_paths: list[tuple[Path, str]] = []
+    archive_members: dict[Path, list[str]] = {}
     if archive is not None:
-        work_iter, total = _archive_work(
-            archive,
-            seen,
-            tmpfs_root=tmpfs_root,
-            queue_size=queue_size,
-            compute_sha1=compute_sha1,
-            with_stats=with_stats,
-        )
+        new_members = _resolve_archive(archive, seen)
+        if new_members:
+            archive_members[archive] = new_members
+        total = len(new_members)
     else:
         assert root is not None  # narrowed by the mutual-exclusion check above
-        work_list, total = _filesystem_work(root, seen, compute_sha1=compute_sha1, with_stats=with_stats)
-        work_iter = iter(work_list)
+        fs_paths = _resolve_fs(root, seen)
+        total = len(fs_paths)
 
     if total == 0:
         return
+
+    work_iter = iter_replay_work(
+        fs_paths=fs_paths,
+        archive_members=archive_members,
+        tmpfs_root=tmpfs_root,
+        queue_size=queue_size,
+    )
+
+    worker = functools.partial(_index_one, compute_sha1=compute_sha1, with_stats=with_stats)
 
     written = 0
     failed = 0
@@ -214,7 +179,7 @@ def build_index(
     ctx = mp.get_context("fork")
     interrupted = False
     with ctx.Pool(workers, initializer=_worker_init) as pool:
-        results = pool.imap_unordered(_index_one, work_iter, chunksize=8)
+        results = pool.imap_unordered(worker, work_iter, chunksize=8)
         try:
             for entry in tqdm(results, total=total, desc="indexing", unit="slp"):
                 if entry is None:
@@ -239,9 +204,7 @@ def build_index(
             # Close the work iterator explicitly so generator finally-blocks
             # (e.g. iter_archive_members draining its producer thread) run
             # now rather than whenever GC happens to collect them.
-            close = getattr(work_iter, "close", None)
-            if close is not None:
-                close()
+            work_iter.close()
             # On the happy path the pool is still accepting tasks; close() it
             # so join() doesn't raise "Pool is still running". On the
             # interrupted path terminate() was already called above.

@@ -28,7 +28,11 @@ import queue
 import threading
 import types
 from collections import Counter
+from collections.abc import Generator
+from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +65,47 @@ def parse_archive_member_path(path: str) -> tuple[Path, str] | None:
     if not member:
         raise ValueError(f"malformed archive path (missing '!member'): {path!r}")
     return Path(archive_str), member
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayWork:
+    """One unit of replay-processing work shared across stage 1 and stage 3.
+
+    Workers must unlink ``open_path`` in a finally-block when ``unlink_after``
+    is True (the file is a tmpfs copy streamed from a .7z archive).
+    """
+
+    open_path: Path
+    manifest_key: str
+    unlink_after: bool
+
+
+def iter_replay_work(
+    *,
+    fs_paths: Iterable[tuple[Path, str]] = (),
+    archive_members: Mapping[Path, Iterable[str]] | None = None,
+    tmpfs_root: Path,
+    queue_size: int = 64,
+) -> Generator[ReplayWork]:
+    """Emit ``ReplayWork`` for every fs path then every archive member.
+
+    ``fs_paths`` is a list of ``(open_path, manifest_key)`` pairs; they yield
+    ``unlink_after=False``. ``archive_members`` maps each archive Path to the
+    set of member names to extract; those stream through ``iter_archive_members``
+    one archive at a time and yield ``unlink_after=True``.
+    """
+    for open_path, manifest_key in fs_paths:
+        yield ReplayWork(open_path=open_path, manifest_key=manifest_key, unlink_after=False)
+    if archive_members is None:
+        return
+    for archive, members in archive_members.items():
+        for synthetic, tmpfs_path in iter_archive_members(
+            archive,
+            tmpfs_root=tmpfs_root,
+            filter_paths=set(members),
+            queue_size=queue_size,
+        ):
+            yield ReplayWork(open_path=tmpfs_path, manifest_key=synthetic, unlink_after=True)
 
 
 class _TmpfsWriter(Py7zIO):
