@@ -1,7 +1,9 @@
 """Stage 1: walk a replay tree (or a .7z archive) and build `index.jsonl`.
 
-One `ReplayIndexEntry` per .slp, populated from peppi's start/end/metadata
-blocks (no frame iteration). Parallelized via `mp.Pool`.
+One `ReplayIndexEntry` per .slp. By default a single peppi pass extracts
+start/end/metadata AND per-replay aggregate stats (damage/stocks/inputs/SDs)
+— see `hal.data.replay_stats`. Pass `--no-with-stats` for the metadata-only
+fast path (~5-10x faster, no `entry.stats`).
 
 Usage:
     # Loose .slp files on disk
@@ -156,17 +158,17 @@ def build_index(
     archive: Path | None = None,
     incremental: bool = False,
     compute_sha1: bool = True,
-    with_stats: bool = False,
+    with_stats: bool = True,
     workers: int = max(1, (mp.cpu_count() or 2) - 1),
     tmpfs_root: Path = _DEFAULT_TMPFS,
     queue_size: int = 64,
 ) -> None:
     """Walk replays into `index.jsonl`.
 
-    `with_stats=True` switches peppi to `skip_frames=False` and computes
-    per-replay aggregate stats (damage/stocks/inputs) per entry — see
-    `hal.data.replay_stats`. ~5-10x slower than the default metadata-only
-    pass; rebuild if you want stats on already-indexed entries.
+    Default reads each .slp with `skip_frames=False` and computes per-replay
+    aggregate stats (damage/stocks/inputs/SDs) via `hal.data.replay_stats`.
+    Pass `--no-with-stats` for the metadata-only fast path (~5-10x faster,
+    no `entry.stats`); rebuild if you later want stats on existing entries.
     """
     if (root is None) == (archive is None):
         raise ValueError("pass exactly one of --root or --archive")

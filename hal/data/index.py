@@ -1,8 +1,8 @@
 """Per-replay metadata: ``ReplayIndexEntry`` shared by all three pipeline stages.
 
-Stage 1 emits one entry per slp into ``index.jsonl`` (start/end/metadata
-blocks only, no frame iteration). Stage 3 writes the subset that landed in
-MDS into ``manifest.jsonl`` with ``Stage3Annotation`` populated.
+Stage 1 emits one entry per slp into ``index.jsonl``. Stage 3 writes the
+subset that landed in MDS into ``manifest.jsonl`` with ``Stage3Annotation``
+populated.
 
 Integer ids are slp-native (peppi-py vocabulary) — see CLAUDE.md
 (Architecture → Conventions / Footguns) for the stage/character/port translation rules.
@@ -19,7 +19,6 @@ import json
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
-from enum import IntEnum
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -27,6 +26,7 @@ from typing import cast
 from typing import get_args
 
 import peppi_py
+from peppi_py.game import EndMethod
 
 from hal.data.archive import parse_archive_member_path
 from hal.data.replay_stats import ReplayStats
@@ -35,21 +35,6 @@ from hal.data.schema import SCHEMA_VERSION
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 from hal.wire import peppi_port_to_libmelee as _peppi_port_to_libmelee
-
-
-class EndMethod(IntEnum):
-    """slp end.method values per the Slippi spec.
-
-    Mirrors `peppi_py.game.EndMethod` exactly — adding new values here without
-    a peppi update would break parsing.
-    """
-
-    UNRESOLVED = 0
-    TIME = 1  # match timer expired
-    GAME = 2  # one player ran out of stocks
-    RESOLVED = 3  # sudden-death resolution
-    NO_CONTEST = 7  # someone LRAS'd or disconnected
-
 
 # slp Player.type values. EMPTY (unused port slot) is filtered out before
 # PlayerEntry is constructed, so it is not reachable here. Slip kept loose
@@ -276,16 +261,16 @@ def extract_index_entry(
     *,
     compute_sha1: bool = True,
     name_hint: str | None = None,
-    with_stats: bool = False,
+    with_stats: bool = True,
 ) -> ReplayIndexEntry | None:
     """Parse a .slp file and return a `ReplayIndexEntry`.
 
-    Default (``with_stats=False``): parse start/end/metadata only (peppi
-    ``skip_frames=True``) — fast, no frame iteration.
+    Default (``with_stats=True``): parse with frames loaded (peppi
+    ``skip_frames=False``) and compute per-replay aggregates via
+    :func:`compute_replay_stats`. Subsumes the anonymized-slp fallback re-read.
 
-    ``with_stats=True``: parse with frames loaded (``skip_frames=False``) and
-    compute per-replay aggregates via :func:`compute_replay_stats`. ~5-10x
-    slower per file; collapses the anonymized-slp fallback re-read.
+    ``with_stats=False``: parse start/end/metadata only — ~5-10x faster,
+    no ``entry.stats``.
 
     Returns None on parse failure (caller logs).
     """

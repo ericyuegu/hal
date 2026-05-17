@@ -31,7 +31,7 @@ Integration fixtures (dev archive, MDS bundle, ISO, Dolphin) are declared in `ha
 **Organization**
 - `hal/__init__.py` is a curated public API facade. Explicit re-exports with `__all__`; no side-effecting imports; no `import *`.
 - No utility grab-bags. `utils.py`, `helpers.py`, `common.py` are forbidden. Name files by what they own.
-- CLIs are ≤80 lines of `tyro` glue. The work is in importable functions in the library.
+- `hal/data/` owns single-replay primitives, value objects, pure transforms, and shared schema. `hal/scripts/` owns per-stage CLI entry points AND the cross-replay orchestration that drives the stage (incremental walks, pool plumbing, batched IO, archive dispatch). One module per stage; no cross-script helpers.
 
 ## Code Style
 
