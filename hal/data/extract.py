@@ -4,10 +4,13 @@
 per column in ``MDS_PER_FRAME_DTYPES`` ready to feed into ``MDSWriter.write``.
 Returns ``None`` on any unrecoverable parse failure.
 
+The output stream is rollback-deduplicated via ``wire.dedupe_keep_idx``: one
+row per ``frame_id``, keeping the engine's committed (last) value. Pre-
+countdown frames (``frame_id < wire.GAME_START_FRAME``) are dropped.
+
 See CLAUDE.md (Architecture → Conventions) for the rules this module assumes:
 no value mutation (peppi-native ranges), bitmask button unpacking, dtype-
-specific mask sentinels for slp-version-unavailable fields, and the post-
-countdown frame-id trim at ``wire.GAME_START_FRAME``.
+specific mask sentinels for slp-version-unavailable fields.
 """
 
 from collections.abc import Sequence
@@ -26,6 +29,7 @@ from hal.wire import BUTTON_BITS
 from hal.wire import GAME_START_FRAME
 from hal.wire import PLAYER_PREFIXES
 from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import dedupe_keep_idx
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
 
@@ -80,12 +84,13 @@ def _action_frame_from_states(actions: list[int] | None) -> np.ndarray:
     return out
 
 
-def _gamestate_arrays(post: Post, key_prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+def _gamestate_arrays(post: Post, key_prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
     """Pull every gamestate column for one post block under ``key_prefix``.
 
     Shared by leader (``p1``/``p2``) and follower (``p1_nana``/``p2_nana``).
-    ``post.action`` is materialized once and reused for the ``action`` column
-    and ``action_frame`` derivation.
+    ``post.action`` is materialized once: the ``action`` column is indexed
+    like every other field, while ``action_frame`` is run-length-derived
+    from the deduped action list so rollback repeats don't inflate runs.
     """
     out: dict[str, np.ndarray] = {}
     for suffix in POST_FIELD_SUFFIXES:
@@ -98,13 +103,14 @@ def _gamestate_arrays(post: Post, key_prefix: str, frame_slice: slice, length: i
             value = _resolve(post, f"position.{suffix[-1]}")
         else:
             value = getattr(post, suffix)
-        out[col] = _arr_to_np(value, dtype, length)[frame_slice]
+        out[col] = _arr_to_np(value, dtype, length)[keep_idx]
 
     action_arr = post.action
-    actions: list[int] | None = action_arr.to_pylist() if action_arr is not None else None
+    raw_actions: list[int] | None = action_arr.to_pylist() if action_arr is not None else None
     action_col = f"{key_prefix}_action"
-    out[action_col] = _list_to_np(actions, MDS_PER_FRAME_DTYPES[action_col], length)[frame_slice]
-    out[f"{key_prefix}_action_frame"] = _action_frame_from_states(actions)[frame_slice]
+    out[action_col] = _list_to_np(raw_actions, MDS_PER_FRAME_DTYPES[action_col], length)[keep_idx]
+    deduped_actions = [raw_actions[i] for i in keep_idx] if raw_actions is not None else None
+    out[f"{key_prefix}_action_frame"] = _action_frame_from_states(deduped_actions)
     return out
 
 
@@ -120,49 +126,49 @@ def _peppi_idx_by_libmelee_port(g: Game) -> dict[int, int]:
     return {peppi_port_to_libmelee(pl.port): i for i, pl in enumerate(g.start.players)}
 
 
-def _extract_player(leader: Data, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+def _extract_player(leader: Data, prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
     """Pull the gamestate + controller columns for one port's leader (main char)."""
     pre = leader.pre
-    out = _gamestate_arrays(leader.post, prefix, frame_slice, length)
+    out = _gamestate_arrays(leader.post, prefix, keep_idx, length)
 
     # Buttons
     for b, arr in _unpack_buttons(pre.buttons_physical, length).items():
-        out[f"{prefix}_button_{b}"] = arr[frame_slice]
+        out[f"{prefix}_button_{b}"] = arr[keep_idx]
 
     # Sticks (peppi-native [-1,1])
-    out[f"{prefix}_main_stick_x"] = _arr_to_np(pre.joystick.x, np.float32, length)[frame_slice]
-    out[f"{prefix}_main_stick_y"] = _arr_to_np(pre.joystick.y, np.float32, length)[frame_slice]
-    out[f"{prefix}_c_stick_x"] = _arr_to_np(pre.cstick.x, np.float32, length)[frame_slice]
-    out[f"{prefix}_c_stick_y"] = _arr_to_np(pre.cstick.y, np.float32, length)[frame_slice]
+    out[f"{prefix}_main_stick_x"] = _arr_to_np(pre.joystick.x, np.float32, length)[keep_idx]
+    out[f"{prefix}_main_stick_y"] = _arr_to_np(pre.joystick.y, np.float32, length)[keep_idx]
+    out[f"{prefix}_c_stick_x"] = _arr_to_np(pre.cstick.x, np.float32, length)[keep_idx]
+    out[f"{prefix}_c_stick_y"] = _arr_to_np(pre.cstick.y, np.float32, length)[keep_idx]
 
     # Triggers
-    out[f"{prefix}_trigger_logical"] = _arr_to_np(pre.triggers, np.float32, length)[frame_slice]
+    out[f"{prefix}_trigger_logical"] = _arr_to_np(pre.triggers, np.float32, length)[keep_idx]
     tp = pre.triggers_physical
-    out[f"{prefix}_trigger_l_physical"] = _arr_to_np(tp.l if tp is not None else None, np.float32, length)[frame_slice]
-    out[f"{prefix}_trigger_r_physical"] = _arr_to_np(tp.r if tp is not None else None, np.float32, length)[frame_slice]
+    out[f"{prefix}_trigger_l_physical"] = _arr_to_np(tp.l if tp is not None else None, np.float32, length)[keep_idx]
+    out[f"{prefix}_trigger_r_physical"] = _arr_to_np(tp.r if tp is not None else None, np.float32, length)[keep_idx]
 
     # Raw analog bytes (slp-version gated). Main stick: x >= 1.2.0, y >= 3.15.0.
     # C-stick: both axes >= 3.17.0. Older slps backfill with the int8 mask
     # sentinel so apply_inputs falls back to the lossy logical-to-wire path.
-    out[f"{prefix}_main_stick_raw_x"] = _arr_to_np(pre.raw_analog_x, np.int8, length)[frame_slice]
-    out[f"{prefix}_main_stick_raw_y"] = _arr_to_np(pre.raw_analog_y, np.int8, length)[frame_slice]
-    out[f"{prefix}_c_stick_raw_x"] = _arr_to_np(pre.raw_analog_cstick_x, np.int8, length)[frame_slice]
-    out[f"{prefix}_c_stick_raw_y"] = _arr_to_np(pre.raw_analog_cstick_y, np.int8, length)[frame_slice]
+    out[f"{prefix}_main_stick_raw_x"] = _arr_to_np(pre.raw_analog_x, np.int8, length)[keep_idx]
+    out[f"{prefix}_main_stick_raw_y"] = _arr_to_np(pre.raw_analog_y, np.int8, length)[keep_idx]
+    out[f"{prefix}_c_stick_raw_x"] = _arr_to_np(pre.raw_analog_cstick_x, np.int8, length)[keep_idx]
+    out[f"{prefix}_c_stick_raw_y"] = _arr_to_np(pre.raw_analog_cstick_y, np.int8, length)[keep_idx]
 
     return out
 
 
-def _extract_nana(follower: Data | None, prefix: str, frame_slice: slice, length: int) -> dict[str, np.ndarray]:
+def _extract_nana(follower: Data | None, prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
     """Nana columns: gamestate only (no controller). Mask if no follower."""
     nana_prefix = f"{prefix}_nana"
     if follower is None:
-        out_length = frame_slice.stop - frame_slice.start
+        out_length = int(keep_idx.size)
         return {
             col: np.full(out_length, mask_value(dtype), dtype=dtype)
             for col, dtype in MDS_PER_FRAME_DTYPES.items()
             if col.startswith(f"{nana_prefix}_")
         }
-    return _gamestate_arrays(follower.post, nana_prefix, frame_slice, length)
+    return _gamestate_arrays(follower.post, nana_prefix, keep_idx, length)
 
 
 def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
@@ -183,9 +189,14 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
 
     ids = g.frames.id.to_pylist()
     raw_length = len(ids)
-    start_idx = next((i for i, fid in enumerate(ids) if fid >= GAME_START_FRAME), raw_length)
-    frame_slice = slice(start_idx, raw_length)
-    out_length = raw_length - start_idx
+    # Rollback dedup (last occurrence per frame_id) AND drop pre-countdown
+    # frames. Each frame_id falls in exactly one bucket, so the two filters
+    # compose by intersection regardless of order.
+    keep_idx = dedupe_keep_idx(ids)
+    kept_frame_ids = np.fromiter((ids[i] for i in keep_idx), dtype=np.int32, count=len(keep_idx))
+    in_game = kept_frame_ids >= GAME_START_FRAME
+    keep_idx = keep_idx[in_game]
+    out_length = int(keep_idx.size)
 
     if out_length <= 0:
         logger.debug(f"no in-game frames for {replay_path}")
@@ -201,14 +212,14 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         return None
 
     sample: dict[str, np.ndarray] = {
-        "frame": np.array(ids[start_idx:], dtype=np.int32),
+        "frame": kept_frame_ids[in_game],
     }
 
     for prefix, port in zip(PLAYER_PREFIXES, occupied_libmelee_ports, strict=True):
         peppi_idx = peppi_idx_by_libmelee_port[port]
         port_data = g.frames.ports[peppi_idx]
-        sample.update(_extract_player(port_data.leader, prefix, frame_slice, raw_length))
-        sample.update(_extract_nana(port_data.follower, prefix, frame_slice, raw_length))
+        sample.update(_extract_player(port_data.leader, prefix, keep_idx, raw_length))
+        sample.update(_extract_nana(port_data.follower, prefix, keep_idx, raw_length))
 
     # Sanity: every column has the expected length.
     bad = [(k, v.shape[0]) for k, v in sample.items() if v.shape[0] != out_length]

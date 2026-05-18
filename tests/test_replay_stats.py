@@ -10,12 +10,12 @@ from hal.data.replay_stats import PlayerStats
 from hal.data.replay_stats import ReplayStats
 from hal.data.replay_stats import _count_input_edges
 from hal.data.replay_stats import _death_percents
-from hal.data.replay_stats import _dedupe_keep_idx
 from hal.data.replay_stats import _final_stocks
 from hal.data.replay_stats import _percent_gained
 from hal.data.replay_stats import compute_replay_stats
 from hal.paths import DEV_ARCHIVE_PATH
 from hal.wire import BUTTON_BITS
+from hal.wire import dedupe_keep_idx
 
 
 class _ArrowLike:
@@ -121,12 +121,12 @@ def test_dedupe_keep_idx_collapses_rollback_pattern() -> None:
     # Rollback emits each repeated frame_id with a later "correction"; keep the LAST.
     # ids: 2065, 2066, 2065, 2066, 2067, 2066, 2067
     # last-occurrence: 2065@2, 2066@5, 2067@6; sorted ascending -> [2, 5, 6]
-    keep = _dedupe_keep_idx([2065, 2066, 2065, 2066, 2067, 2066, 2067])
+    keep = dedupe_keep_idx([2065, 2066, 2065, 2066, 2067, 2066, 2067])
     assert list(keep) == [2, 5, 6]
 
 
 def test_dedupe_keep_idx_already_unique() -> None:
-    keep = _dedupe_keep_idx([-123, -122, -121, -120])
+    keep = dedupe_keep_idx([-123, -122, -121, -120])
     assert list(keep) == [0, 1, 2, 3]
 
 

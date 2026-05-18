@@ -9,6 +9,7 @@ See CLAUDE.md (Architecture) for terminology (raw / wire / logical / physical)
 and the data-flow diagram (peppi → MDS → controller view → libmelee → Dolphin).
 """
 
+from collections.abc import Sequence
 from typing import Final
 
 import melee
@@ -44,6 +45,26 @@ def libmelee_port_to_peppi(port: int) -> int:
 # Slippi-standard "first in-game frame" id (post-2-second countdown). This is
 # a frame_id (peppi's signed counter), not an array index.
 GAME_START_FRAME: Final[int] = -123
+
+
+def dedupe_keep_idx(frame_ids: Sequence[int]) -> np.ndarray:
+    """Indices keeping the LAST row per ``frame_id`` — rollback consolidation.
+
+    peppi-py emits one row per recorded slp state including rollback
+    corrections, so the same ``frame_id`` can repeat 2-3 times. The final
+    occurrence is the engine's committed value. Returned indices are
+    ascending so frame order is preserved.
+    """
+    seen: set[int] = set()
+    keep: list[int] = []
+    for i in range(len(frame_ids) - 1, -1, -1):
+        f = int(frame_ids[i])
+        if f in seen:
+            continue
+        seen.add(f)
+        keep.append(i)
+    keep.reverse()
+    return np.asarray(keep, dtype=np.int64)
 
 
 # ---------------------------------------------------------------------------

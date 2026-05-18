@@ -22,6 +22,7 @@ from peppi_py.game import Game
 
 from hal.wire import BUTTON_BITS
 from hal.wire import VALID_LIBMELEE_PORTS
+from hal.wire import dedupe_keep_idx
 from hal.wire import peppi_port_to_libmelee
 
 _ALL_BUTTON_BITS: int = 0
@@ -169,27 +170,6 @@ class _MaskedColumn:
         return list(self._values)
 
 
-def _dedupe_keep_idx(frame_ids: list[int]) -> np.ndarray:
-    """Indices of the LAST row per ``frame_id`` (rollback consolidation).
-
-    peppi-py emits one row per recorded slp frame state — including rollback
-    corrections — so the same ``frame_id`` can appear 2-3 times. The final
-    corrected value is the last occurrence. Returned indices are sorted
-    ascending (preserving frame order).
-    """
-    n = len(frame_ids)
-    seen: set[int] = set()
-    keep: list[int] = []
-    for i in range(n - 1, -1, -1):
-        f = int(frame_ids[i])
-        if f in seen:
-            continue
-        seen.add(f)
-        keep.append(i)
-    keep.reverse()
-    return np.asarray(keep, dtype=np.int64)
-
-
 def _mask(src: Any, keep_idx: np.ndarray) -> Any:
     return None if src is None else _MaskedColumn(src, keep_idx)
 
@@ -225,7 +205,7 @@ def compute_replay_stats(g: Game) -> ReplayStats | None:
     if len(g.start.players) != 2:
         return None
 
-    keep_idx = _dedupe_keep_idx(g.frames.id.to_pylist())
+    keep_idx = dedupe_keep_idx(g.frames.id.to_pylist())
 
     by_port: list[_PlayerColumns] = []
     for i, pl in enumerate(g.start.players):
