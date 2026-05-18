@@ -17,6 +17,7 @@ import dataclasses
 import hashlib
 import json
 import struct
+import urllib.parse
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Literal
 from typing import cast
 from typing import get_args
 
+import fsspec
 import peppi_py
 from peppi_py.game import EndMethod
 
@@ -352,9 +354,12 @@ def extract_index_entry(
     )
 
 
-def write_jsonl(path: Path, entries: list[ReplayIndexEntry], *, append: bool = False) -> None:
+def write_jsonl(path: str | Path, entries: list[ReplayIndexEntry], *, append: bool = False) -> None:
+    spath = str(path)
+    if append and urllib.parse.urlparse(spath).scheme not in ("", "file"):
+        raise ValueError(f"append=True is not supported for non-local paths: {spath}")
     mode = "a" if append else "w"
-    with path.open(mode) as f:
+    with fsspec.open(spath, mode) as f:
         for entry in entries:
             f.write(json.dumps(entry.to_dict()) + "\n")
 

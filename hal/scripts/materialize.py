@@ -32,6 +32,7 @@ Usage:
 import dataclasses
 import multiprocessing as mp
 import os
+import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,10 +136,37 @@ def _read_paths(paths_file: Path) -> list[str]:
     return [line.strip() for line in paths_file.read_text().splitlines() if line.strip()]
 
 
-def _open_writers(output: Path, splits: Iterable[str]) -> dict[str, MDSWriter]:
+def _is_remote(output: str) -> bool:
+    return urllib.parse.urlparse(output).scheme not in ("", "file")
+
+
+def _join(base: str, name: str) -> str | Path:
+    """Append ``name`` to ``base``. Returns a ``Path`` for local outputs and a
+    plain string for remote (``s3://``, ...) URIs so each downstream consumer
+    (``MDSWriter``, ``fsspec.open``) gets the form it expects."""
+    if _is_remote(base):
+        return f"{base.rstrip('/')}/{name}"
+    return Path(base) / name
+
+
+def _bridge_streaming_env() -> None:
+    """``mosaicml-streaming`` reads its own ``S3_ENDPOINT_URL`` instead of the
+    standard ``AWS_ENDPOINT_URL`` that botocore/s3fs use. Bridge so callers
+    only need to set the idiomatic one. Idempotent; an explicit
+    ``S3_ENDPOINT_URL`` wins."""
+    endpoint = os.environ.get("AWS_ENDPOINT_URL")
+    if not endpoint:
+        raise RuntimeError(
+            "remote --output requires AWS_ENDPOINT_URL to be set "
+            "(used by s3fs + bridged to S3_ENDPOINT_URL for mosaicml-streaming)"
+        )
+    os.environ.setdefault("S3_ENDPOINT_URL", endpoint)
+
+
+def _open_writers(output: str, splits: Iterable[str]) -> dict[str, MDSWriter]:
     return {
         split: MDSWriter(
-            out=str(output / split),
+            out=str(_join(output, split)),
             columns=MDS_DTYPE_STR_BY_COLUMN,
             compression="zstd",
             size_limit=SHARD_SIZE_LIMIT,
@@ -177,7 +205,7 @@ def _bucket_paths(paths: list[str]) -> tuple[list[tuple[Path, str]], dict[Path, 
 def process_replays(
     paths_file: Path,
     index: Path,
-    output: Path,
+    output: str,
     *,
     train_split: float = 0.98,
     val_split: float = 0.01,
@@ -192,10 +220,16 @@ def process_replays(
         raise FileNotFoundError(f"--paths {paths_file} not found")
     if not index.exists():
         raise FileNotFoundError(f"--index {index} not found")
+
+    remote = _is_remote(output)
+    if remote:
+        _bridge_streaming_env()
+    manifest_path = _join(output, "manifest.jsonl")
     # Per-split MDSWriter raises with exist_ok=False if its output dir already
     # exists; check the manifest sidecar here so we fail before opening writers.
-    manifest_path = output / "manifest.jsonl"
-    if manifest_path.exists():
+    # Skipped for remote: object stores have no cheap directory-exists check
+    # and the MDSWriter collision guard still fires per-split.
+    if not remote and isinstance(manifest_path, Path) and manifest_path.exists():
         raise FileExistsError(f"{manifest_path} already exists; choose a fresh --output")
 
     paths = _read_paths(paths_file)
@@ -207,7 +241,8 @@ def process_replays(
     if missing:
         raise FileNotFoundError(f"{len(missing)} archive(s) referenced by paths.txt not found on disk: {missing}")
 
-    output.mkdir(parents=True, exist_ok=True)
+    if not remote:
+        Path(output).mkdir(parents=True, exist_ok=True)
     by_path = _index_by_path(index)
     logger.info(
         f"index: {len(by_path)}  paths: {len(paths)} "
@@ -285,7 +320,7 @@ def process_replays(
 
     write_jsonl(manifest_path, annotated)
 
-    stats_path = output / "stats.json"
+    stats_path = _join(output, "stats.json")
     dump_sufficient_stats(
         stats_path,
         stats.to_sufficient(),
