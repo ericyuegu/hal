@@ -5,21 +5,25 @@ compose with AND. Output is a deterministically-sorted newline-delimited list
 of absolute slp paths, one per line, ready to feed into `process_replays.py`.
 
 CLI defaults bake in the "sensible" filter for tournament-style training:
-  - completed games only (no NO_CONTEST / unresolved)
   - min 1500 frames (~25 sec, drops insta-quits and CSS-only replays)
   - tournament-legal six stages
+  - min 100% damage dealt and taken by some player
+  - some player loses >= 3 stocks
+  - no player loses >= 2 stocks at <= 10% (cheap-death sniff for AFK / griefing)
 
 Override or disable any of these via flags. Pass `--stages` an empty list
 (or a different list) to drop the stage filter; `--no-completed-only` to
-include unfinished games; `--min-frames 0` to keep everything.
+include unfinished games; `--min-frames 0` to keep everything; set the stats
+knobs to None / 0 to disable individually.
 
 Stages and characters accept names (case-insensitive) from the tables below,
 OR slp-native integer ids (e.g. `--stages 31 32` or `--stages BATTLEFIELD
 FINAL_DESTINATION`).
 
-Damage / stocks / inputs predicates require an index built with
-`python -m hal.scripts.index --with-stats`. If the index has no stats,
-`filter_index` raises rather than silently producing empty output.
+Stats predicates (damage / stocks / inputs / death counts / cheap deaths)
+require an index built with `python -m hal.scripts.index --with-stats`. If
+the index has no stats, `filter_index` raises rather than silently producing
+empty output.
 """
 
 from collections.abc import Callable
@@ -87,13 +91,17 @@ def build_predicates(
     characters: set[int] | None = None,
     ranks: set[str] | None = None,
     mins: PlayerStatsMins | None = None,
+    min_death_count: int | None = None,
+    max_cheap_deaths: int | None = None,
+    cheap_death_pct: float = 10.0,
 ) -> list[tuple[str, Predicate]]:
     """Return (label, predicate) pairs. The label is used for diagnostics.
 
-    Per-player conditions (`characters`, stat mins) are satisfied if ANY
-    player matches. Stats predicates require entries with `stats` populated
-    — `filter_index` raises on `entry.stats is None` before any stats
-    predicate is evaluated, so predicate bodies here assume
+    Per-player floors (`characters`, `mins`, `min_death_count`) are satisfied
+    if ANY player matches. Per-player ceilings (`max_cheap_deaths`) require
+    EVERY player to stay under. Stats predicates require entries with `stats`
+    populated — `filter_index` raises on `entry.stats is None` before any
+    stats predicate is evaluated, so predicate bodies here assume
     `e.stats is not None`.
     """
     preds: list[tuple[str, Predicate]] = []
@@ -105,12 +113,14 @@ def build_predicates(
     if completed_only:
         preds.append(("completed_only", lambda e: e.outcome is not None and e.outcome.completed))
     if stages:
-        preds.append(
-            (
-                f"stages={sorted(s.name for s in stages)}",
-                lambda e, s=stages: slp_stage_to_libmelee(e.stage) in s,
-            )
-        )
+
+        def _stage_in_set(e: ReplayIndexEntry, s: set[melee.Stage] = stages) -> bool:
+            try:
+                return slp_stage_to_libmelee(e.stage) in s
+            except ValueError:
+                return False
+
+        preds.append((f"stages={sorted(s.name for s in stages)}", _stage_in_set))
     if characters:
         preds.append(
             (f"characters={sorted(characters)}", lambda e, c=characters: any(p.character in c for p in e.players))
@@ -130,6 +140,24 @@ def build_predicates(
                 )
             )
 
+    if min_death_count is not None:
+        preds.append(
+            (
+                f"min_death_count={min_death_count}",
+                lambda e, t=min_death_count: any(len(p.death_percents) >= t for p in e.stats.players),
+            )
+        )
+
+    if max_cheap_deaths is not None:
+        preds.append(
+            (
+                f"max_cheap_deaths<{max_cheap_deaths}@{cheap_death_pct}%",
+                lambda e, m=max_cheap_deaths, c=cheap_death_pct: all(
+                    sum(1 for dp in p.death_percents if dp <= c) < m for p in e.stats.players
+                ),
+            )
+        )
+
     return preds
 
 
@@ -144,6 +172,9 @@ def filter_index(
     characters: set[int] | None = None,
     ranks: set[str] | None = None,
     mins: PlayerStatsMins | None = None,
+    min_death_count: int | None = None,
+    max_cheap_deaths: int | None = None,
+    cheap_death_pct: float = 10.0,
     log_per_filter: bool = True,
 ) -> int:
     if not index.exists():
@@ -157,9 +188,12 @@ def filter_index(
         characters=characters,
         ranks=ranks,
         mins=mins,
+        min_death_count=min_death_count,
+        max_cheap_deaths=max_cheap_deaths,
+        cheap_death_pct=cheap_death_pct,
     )
 
-    needs_stats = mins is not None and mins.any_set()
+    needs_stats = (mins is not None and mins.any_set()) or min_death_count is not None or max_cheap_deaths is not None
 
     paths: list[str] = []
     total = 0
@@ -199,8 +233,10 @@ def filter_index(
 class FilterConfig:
     """Filter `index.jsonl` to a `paths.txt` for Stage 3.
 
-    Defaults bake in completed-only, 1500-frame minimum, max_early_sds=2,
-    and the six tournament-legal stages. Override or disable any of these via flags.
+    Defaults bake in a 1500-frame minimum, the six tournament-legal stages,
+    a 100% damage floor for both sides, a 3-stock-loss floor, and a
+    cheap-death sniff (no player loses >= 2 stocks at <= 10%). Override or
+    disable any of these via flags.
     """
 
     index: Path
@@ -215,7 +251,7 @@ class FilterConfig:
     max_frames: int | None = None
     """Drop replays longer than this. None = unbounded."""
 
-    completed_only: bool = True
+    completed_only: bool = False
     """Keep only replays that ended via stocks / time / sudden-death.
     Pass --no-completed-only to include NO_CONTEST and unresolved games."""
 
@@ -239,10 +275,10 @@ class FilterConfig:
     """Rank substrings to keep, e.g. master,diamond,platinum. Empty = no
     rank filter."""
 
-    min_damage_dealt: float | None = None
+    min_damage_dealt: float | None = 100.0
     """Keep if any player dealt >= this damage. Requires --with-stats index."""
 
-    min_damage_taken: float | None = None
+    min_damage_taken: float | None = 100.0
     """Keep if any player took >= this damage. Requires --with-stats index."""
 
     min_stocks_remaining: int | None = None
@@ -250,6 +286,17 @@ class FilterConfig:
 
     min_inputs: int | None = None
     """Keep if any player had >= this many button presses. Requires --with-stats."""
+
+    min_death_count: int | None = 3
+    """Keep if any player lost >= this many stocks. Requires --with-stats."""
+
+    max_cheap_deaths: int | None = 2
+    """Reject if any player lost >= this many stocks at <= `cheap_death_pct`.
+    Set to None to disable the cheap-death sniff entirely."""
+
+    cheap_death_pct: float = 10.0
+    """Percent threshold below which a stock loss counts as "cheap" for the
+    `max_cheap_deaths` predicate. Ignored if `max_cheap_deaths` is None."""
 
 
 def run(cfg: FilterConfig) -> int:
@@ -273,6 +320,9 @@ def run(cfg: FilterConfig) -> int:
         characters=chars,
         ranks=ranks,
         mins=mins if mins.any_set() else None,
+        min_death_count=cfg.min_death_count,
+        max_cheap_deaths=cfg.max_cheap_deaths,
+        cheap_death_pct=cfg.cheap_death_pct,
     )
 
 
