@@ -21,10 +21,12 @@ works around:
    consumer releases the slot after it's done with the path.
 """
 
+import atexit
 import concurrent.futures
 import contextlib
 import os
 import queue
+import shutil
 import threading
 import types
 from collections import Counter
@@ -270,15 +272,18 @@ def _bounded_pool_extract(
     max_workers = min(len(targeted), _BOUNDED_EXTRACT_THREADS)
     if max_workers <= 1:
         for i in targeted:
-            self.extract_single(
-                fp,
-                folders[i].files,
-                path,
-                self.src_start + positions[i],
-                self.src_start + positions[i + 1],
-                q,
-                skip_notarget=skip_notarget,
-            )
+            try:
+                self.extract_single(
+                    fp,
+                    folders[i].files,
+                    path,
+                    self.src_start + positions[i],
+                    self.src_start + positions[i + 1],
+                    q,
+                    skip_notarget=skip_notarget,
+                )
+            finally:
+                folders[i].decompressor = None
         return
 
     local = threading.local()
@@ -295,15 +300,24 @@ def _bounded_pool_extract(
         return wfp
 
     def _do_folder(i: int) -> None:
-        self.extract_single(
-            _worker_fp(),
-            folders[i].files,
-            path,
-            self.src_start + positions[i],
-            self.src_start + positions[i + 1],
-            q,
-            skip_notarget=skip_notarget,
-        )
+        # py7zr caches each folder's LZMA decompressor on the Folder object
+        # (archiveinfo.Folder.get_decompressor) and never frees it. Across
+        # 10k+ folders that's tens of GB of dict buffers — RSS climbs until
+        # the process swaps and throughput collapses. Drop the reference
+        # here so the decompressor is collectable as soon as the folder
+        # finishes.
+        try:
+            self.extract_single(
+                _worker_fp(),
+                folders[i].files,
+                path,
+                self.src_start + positions[i],
+                self.src_start + positions[i + 1],
+                q,
+                skip_notarget=skip_notarget,
+            )
+        finally:
+            folders[i].decompressor = None
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -368,6 +382,54 @@ def _maybe_start_fd_watcher() -> tuple[threading.Event | None, threading.Thread 
     return stop, t
 
 
+def _is_dead_pid(pid: int) -> bool:
+    """True iff the kernel has no process with this pid. EPERM (live, foreign user) is treated as alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _run_tmpfs_dir(tmpfs_root: Path) -> Path:
+    """Create and return ``tmpfs_root/<my-pid>/``, reaping dead-PID siblings first.
+
+    Three layers of defense against leaked tmpfs materializations:
+    workers ``unlink()`` files as peppi finishes with them; an ``atexit`` hook
+    removes our run_dir on normal shutdown (catches files held by SIGKILL'd
+    workers in the caller's Pool); and this startup sweep removes sibling
+    subdirs whose owning PID is gone (catches leaks from prior parent
+    SIGKILL/OOM — the only path that bypasses atexit).
+    """
+    tmpfs_root.mkdir(parents=True, exist_ok=True)
+    reaped = 0
+    reclaimed = 0
+    for entry in tmpfs_root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            owner_pid = int(entry.name)
+        except ValueError:
+            continue
+        if not _is_dead_pid(owner_pid):
+            continue
+        for f in entry.iterdir():
+            try:
+                reclaimed += f.stat().st_size
+            except OSError:
+                continue
+        shutil.rmtree(entry, ignore_errors=True)
+        reaped += 1
+    if reaped:
+        logger.info(f"swept {reaped} stranded tmpfs dir(s) under {tmpfs_root}, reclaimed {reclaimed / 1e9:.2f} GB")
+    run_dir = tmpfs_root / str(os.getpid())
+    run_dir.mkdir(exist_ok=True)
+    atexit.register(shutil.rmtree, run_dir, ignore_errors=True)
+    return run_dir
+
+
 def iter_archive_members(
     archive: Path,
     *,
@@ -398,11 +460,11 @@ def iter_archive_members(
     """
     if not archive.exists():
         raise FileNotFoundError(f"archive not found: {archive}")
-    tmpfs_root.mkdir(parents=True, exist_ok=True)
+    run_dir = _run_tmpfs_dir(tmpfs_root)
 
     out_q: queue.Queue = queue.Queue()
     sem = threading.Semaphore(queue_size)
-    factory = _StreamFactory(tmpfs_root, out_q, sem, filter_paths)
+    factory = _StreamFactory(run_dir, out_q, sem, filter_paths)
     producer_exc: list[BaseException] = []
 
     def _producer() -> None:
