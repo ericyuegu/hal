@@ -6,8 +6,12 @@
 /wandb/
 **/*.parquet
 
-/emulator/squashfs-root/
 /replays/
+
+# Local agent/tool state
+/.claude/*.local.json
+/.claude/*.settings.json
+/.claude/*.lock
 
 # Secrets
 /secrets/

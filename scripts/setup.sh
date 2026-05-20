@@ -6,11 +6,11 @@ Yellow='\033[0;33m'
 sudo apt-get update
 sudo apt-get install p7zip-full libasound2 libegl1 libgl1 libusb-1.0-0 libglib2.0-0 libgdk-pixbuf2.0-0 libpangocairo-1.0-0 libasound2-dev pkg-config libegl-dev libusb-1.0-0-dev -y
 
-DATA_DIR="$HOME/data/ssbm"
-EMULATOR_FILE_PATH="$DATA_DIR/Slippi_Online-x86_64-ExiAI.AppImage"
-mkdir -p "$DATA_DIR"
+DOLPHIN_DIR="$HOME/data/dolphin/exiai"
+EMULATOR_FILE_PATH="$DOLPHIN_DIR/Slippi_Online-x86_64-ExiAI.AppImage"
+mkdir -p "$DOLPHIN_DIR"
 chmod +x "$EMULATOR_FILE_PATH"
-( cd "$DATA_DIR" && "$EMULATOR_FILE_PATH" --appimage-extract )
+( cd "$DOLPHIN_DIR" && "$EMULATOR_FILE_PATH" --appimage-extract )
 echo "${Yellow}Extracted emulator"
 
 if ! command -v uv >/dev/null 2>&1; then
@@ -21,6 +21,6 @@ uv sync
 echo "${Yellow}Installed venv"
 
 # Download ISO from env var
-aws s3 cp "$SSBM_ISO_PATH" "$DATA_DIR/ssbm.ciso"
+aws s3 cp "$SSBM_ISO_PATH" "$HOME/data/dolphin/ssbm.ciso"
 
 echo "${Yellow}Downloaded ISO"

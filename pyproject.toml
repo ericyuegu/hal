@@ -10,7 +10,7 @@ readme = "README.md"
 # The codebase uses current Python syntax and toolchain support.
 requires-python = ">=3.14"
 dependencies = [
-    "attrs",
+    "boto3",
     "click",
     "libcst",
     "loguru",
@@ -22,7 +22,10 @@ dependencies = [
     "numpy",
     "nvitop",
     "pandas",
-    "pyarrow",
+    "peppi-py",
+    "polars",
+    "py7zr>=1.1.0",
+    "pyarrow>=22",
     "scikit-learn",
     "seaborn",
     "tabulate",
@@ -30,9 +33,13 @@ dependencies = [
     "torch",
     "torchvision",
     "tqdm",
+    "tyro",
     "wandb",
     "yasoo",
 ]
+
+[project.scripts]
+fetch = "hal.scripts.fetch:main"
 
 [dependency-groups]
 dev = [
@@ -48,7 +55,8 @@ dev = [
 python-preference = "only-managed"
 
 [tool.uv.sources]
-melee = { git = "https://github.com/vladfi1/libmelee" }
+melee = { git = "https://github.com/ericyuegu/libmelee", branch = "canonical-schema" }
+peppi-py = { git = "https://github.com/ericyuegu/peppi-py", branch = "libmelee-parity" }
 
 [tool.setuptools.packages.find]
 include = ["hal*"]
@@ -60,9 +68,6 @@ extend-exclude = [
     ".venv",
     "build",
     "venv",
-    "emulator",
-    "hal/training/models/lstm.py",
-    "hal/training/models/mlp.py",
 ]
 
 [tool.ruff.lint]
@@ -72,6 +77,11 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
 "**/__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that launch external services or emulators",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["hal"]
@@ -83,9 +93,7 @@ root = ["."]
 
 [tool.ty.src]
 exclude = [
-    "hal/training/archive/**",
-    "hal/training/models/lstm.py",
-    "hal/training/models/mlp.py",
+    "notebooks/**",
 ]
 
 [tool.ty.rules]
