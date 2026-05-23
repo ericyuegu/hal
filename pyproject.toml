@@ -10,8 +10,10 @@ readme = "README.md"
 # The codebase uses current Python syntax and toolchain support.
 requires-python = ">=3.14"
 dependencies = [
+    "beartype>=0.22.9",
     "boto3",
     "click",
+    "jaxtyping>=0.3.9",
     "libcst",
     "loguru",
     "matplotlib",
@@ -77,6 +79,9 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+# F722 ignored under experiments/ for jaxtyping annotations (e.g. `Float[Tensor, "B L_ctx d_model"]`);
+# ruff parses the string literal as a forward-ref type expression, but it's a jaxtyping dim spec.
+"experiments/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
 "**/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
