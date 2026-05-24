@@ -48,6 +48,7 @@ fetch = "hal.scripts.fetch:main"
 dev = [
     "autoflake",
     "autotyping",
+    "ipykernel",
     "pre-commit",
     "pytest",
     "ruff",

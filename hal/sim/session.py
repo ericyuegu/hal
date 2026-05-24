@@ -15,6 +15,7 @@ import ctypes
 import signal as _signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -47,30 +48,40 @@ def _set_pdeathsig_sigkill() -> None:
     libc.prctl(_PR_SET_PDEATHSIG, _signal.SIGKILL, 0, 0, 0)
 
 
+# The patch swaps a process-global (``subprocess.Popen``), so concurrent boots
+# (drive_vec starts N Sessions on a thread pool) must not interleave their
+# patch/restore — otherwise one thread's restore clobbers another's, leaking the
+# wrapper or dropping the pdeathsig. The window guarded is just ``Console.run``'s
+# launch, which only spawns (it doesn't wait), so serializing it is cheap.
+_POPEN_PATCH_LOCK = threading.Lock()
+
+
 @contextmanager
 def _popen_with_pdeathsig() -> Iterator[None]:
     """Monkeypatch ``subprocess.Popen`` to inject ``PR_SET_PDEATHSIG`` into any
     child spawned inside the block. Restores on exit. Used to wrap libmelee's
     ``Console.run`` (the actual ``Popen(...)`` call lives inside the library
-    and is otherwise out of our reach)."""
-    original = subprocess.Popen
+    and is otherwise out of our reach). Serialized across threads via
+    ``_POPEN_PATCH_LOCK`` since it mutates a process-global."""
+    with _POPEN_PATCH_LOCK:
+        original = subprocess.Popen
 
-    def _wrapped(*args, **kwargs):
-        user_pre = kwargs.pop("preexec_fn", None)
+        def _wrapped(*args, **kwargs):
+            user_pre = kwargs.pop("preexec_fn", None)
 
-        def _pre():
-            _set_pdeathsig_sigkill()
-            if user_pre is not None:
-                user_pre()
+            def _pre():
+                _set_pdeathsig_sigkill()
+                if user_pre is not None:
+                    user_pre()
 
-        kwargs["preexec_fn"] = _pre
-        return original(*args, **kwargs)
+            kwargs["preexec_fn"] = _pre
+            return original(*args, **kwargs)
 
-    subprocess.Popen = _wrapped  # type: ignore[misc]
-    try:
-        yield
-    finally:
-        subprocess.Popen = original  # type: ignore[misc]
+        subprocess.Popen = _wrapped  # type: ignore[misc]
+        try:
+            yield
+        finally:
+            subprocess.Popen = original  # type: ignore[misc]
 
 
 # Menu states that signal "match is live, drive() can take over."

@@ -53,14 +53,16 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
 from hal.data.stats import FeatureStats
-from hal.eval.cross_stage import sweep_stages_self_play
-from hal.eval.cross_stage import sweep_stages_vs_cpu
+from hal.eval.cross_stage import sweep_self_play
+from hal.eval.cross_stage import sweep_vs_cpu
 from hal.eval.harness import SessionConfig
 from hal.fixtures import DOLPHIN_EXIAI
 from hal.fixtures import ISO
 from hal.fixtures import ensure
 from hal.paths import EMULATOR_PATH
 from hal.sim.inputs import ControllerInputsValue
+from hal.sim.vec import BatchPolicy
+from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.dataloader import make_loader
 from hal.training.dataloader import relabel_ego
@@ -110,6 +112,10 @@ class TrainConfig:
     val_n_batches: int = 16
     eval_every: int = 2500
     eval_max_frames: int = 3600
+    # closed-loop eval parallelism: replicas per stage, run concurrently in
+    # waves of eval_max_parallel emulators (one batched forward across all live).
+    eval_replicas: int = 1
+    eval_max_parallel: int = 4
     # data
     data_root: str = "data/processed/ranked-anonymized-1/mds"
     num_workers: int = 8
@@ -540,17 +546,6 @@ def integrate_chunk_batched(
     return a.cpu().numpy()
 
 
-def integrate_chunk(
-    model: FlowMatchingPolicy,
-    batch: dict[str, Tensor],
-    n_steps: int,
-    device: str,
-    bridge: Tensor | None = None,
-) -> np.ndarray:
-    """Single-sample shim. Returns [L_chunk, d_action]."""
-    return integrate_chunk_batched(model, batch, n_steps, device, bridge=bridge)[0]
-
-
 # %%
 def _live_batch_from_rolling(
     flat_history: list[dict],
@@ -578,184 +573,127 @@ def _live_batch_from_rolling(
     return {k: v[None, ...] for k, v in relabeled.items()}
 
 
-@dataclass
-class ToyModelSource:
-    """ControllerSource for THIS experiment's flow-matching policy.
+_PORT_TO_PREFIX: dict[int, Literal["p1", "p2"]] = {1: "p1", 2: "p2"}
 
-    Owns its rolling history (gamestate + intended-ego-action) and the
-    receding-horizon replan state machine. ``n_lat=0`` → open-loop:
-    predict L_chunk frames, play them, replan after L_chunk frames.
-    ``n_lat>0`` → receding horizon: replan every n_lat frames; each chunk
-    predicts L_chunk frames starting n_lat ahead of the replan time (models
-    inference latency). Between replans, play the n_lat actions from the
-    previous chunk's first n_lat predictions (the "bridge"); at bootstrap,
-    bridge is zeros so the first n_lat frames are neutral.
+
+@dataclass
+class _SlotState:
+    """Per-slot rolling buffers + the slot's latest predicted chunk/bridge."""
+
+    flat_hist: list = field(default_factory=list)
+    ego_inputs_hist: list = field(default_factory=list)
+    pending: np.ndarray | None = None
+    current_bridge: np.ndarray | None = None
+
+
+@dataclass
+class ToyBatchPolicy:
+    """BatchPolicy for THIS experiment's flow-matching policy across N slots.
+
+    Owns per-slot rolling history (gamestate + intended-ego-action) and one
+    shared receding-horizon replan clock. Every slot appears at frame 0 and warms
+    up in lockstep, so all live slots replan on the same frames: at each boundary
+    their contexts are stacked into a single [n_live, L_ctx, ...] batch and run
+    through one ``integrate_chunk_batched`` forward. Slots only drop out (matches
+    end) — they never appear mid-rollout — so the batch shrinks monotonically.
+
+    Replan semantics: ``n_lat=0`` → open-loop (predict L_chunk, play them, replan
+    after L_chunk); ``n_lat>0`` → receding horizon (replan every n_lat; play the
+    bridge = previous chunk's first n_lat actions, zeros at bootstrap).
     """
 
     model: FlowMatchingPolicy
     stats: dict[str, FeatureStats]
-    ego_prefix: str
     L_ctx: int
     L_chunk: int
     n_lat: int
     n_flow_steps: int
     device: str = DEVICE
-    _flat_hist: list = field(default_factory=list)
-    _ego_inputs_hist: list = field(default_factory=list)
-    _pending: np.ndarray | None = None
-    _current_bridge: np.ndarray | None = None
+    _slots: dict[Slot, _SlotState] = field(default_factory=dict)
     _offset: int = 0
+    _bootstrapped: bool = False
 
-    def __call__(self, frame_index: int, last_gamestate: dict | None):
-        if last_gamestate is not None:
-            self._flat_hist.append(flatten_canonical_frame(last_gamestate))
-            if len(self._flat_hist) > self.L_ctx:
-                self._flat_hist.pop(0)
-        # Warm-up: not enough context yet → hold neutral.
-        if len(self._flat_hist) < self.L_ctx:
-            self._ego_inputs_hist.append(_NEUTRAL_ACTION.copy())
-            if len(self._ego_inputs_hist) > self.L_ctx:
-                self._ego_inputs_hist.pop(0)
-            return action_vec_to_controller(_NEUTRAL_ACTION)
-        # Transition: on the first inference call, _ego_inputs_hist is one
-        # short of _flat_hist. Pad so both rolling buffers have L_ctx entries.
-        if len(self._ego_inputs_hist) < self.L_ctx:
-            self._ego_inputs_hist.append(_NEUTRAL_ACTION.copy())
+    def __call__(self, frame_index: int, obs: dict[Slot, dict]) -> dict[Slot, ControllerInputsValue]:
+        live = list(obs)
+        for slot in live:
+            st = self._slots.setdefault(slot, _SlotState())
+            st.flat_hist.append(flatten_canonical_frame(obs[slot]))
+            if len(st.flat_hist) > self.L_ctx:
+                st.flat_hist.pop(0)
+        # Warm-up: slots warm up in lockstep, so hold neutral for all until full.
+        if any(len(self._slots[s].flat_hist) < self.L_ctx for s in live):
+            for s in live:
+                self._push_ego(s, _NEUTRAL_ACTION)
+            return {s: action_vec_to_controller(_NEUTRAL_ACTION) for s in live}
+        # Transition: on the first inference call ego_inputs_hist is one short.
+        for s in live:
+            st = self._slots[s]
+            if len(st.ego_inputs_hist) < self.L_ctx:
+                st.ego_inputs_hist.append(_NEUTRAL_ACTION.copy())
         replan_period = self.n_lat if self.n_lat > 0 else self.L_chunk
-        if self._pending is None or self._offset >= replan_period:
-            raw = _live_batch_from_rolling(self._flat_hist, self._ego_inputs_hist, self.ego_prefix)
-            batch = preprocess_inputs(raw, self.stats)
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            if self.n_lat > 0:
-                # Bootstrap: no prev chunk → zero bridge; bridge plays neutral
-                # for the next n_lat frames. Steady state: bridge = prev_chunk[:n_lat].
-                if self._pending is None:
-                    new_bridge = np.zeros((self.n_lat, A_DIM), dtype=np.float32)
-                else:
-                    new_bridge = self._pending[: self.n_lat].astype(np.float32)
-                bridge_t = torch.from_numpy(new_bridge).unsqueeze(0).to(self.device)
-                self._pending = integrate_chunk(self.model, batch, self.n_flow_steps, self.device, bridge=bridge_t)
-                self._current_bridge = new_bridge
-            else:
-                self._pending = integrate_chunk(self.model, batch, self.n_flow_steps, self.device)
+        if not self._bootstrapped or self._offset >= replan_period:
+            self._replan(live)
             self._offset = 0
-        # Played action: bridge if n_lat>0 (next n_lat to execute), else chunk directly.
+            self._bootstrapped = True
+        actions: dict[Slot, np.ndarray] = {}
+        for s in live:
+            st = self._slots[s]
+            a = st.current_bridge[self._offset] if self.n_lat > 0 else st.pending[self._offset]
+            actions[s] = a
+            self._push_ego(s, a)
+        self._offset += 1
+        return {s: action_vec_to_controller(a) for s, a in actions.items()}
+
+    def _push_ego(self, slot: Slot, a: np.ndarray) -> None:
+        st = self._slots[slot]
+        st.ego_inputs_hist.append(a.astype(np.float32))
+        if len(st.ego_inputs_hist) > self.L_ctx:
+            st.ego_inputs_hist.pop(0)
+
+    def _replan(self, live: list[Slot]) -> None:
+        """One batched forward over every live slot. ``live`` order is fixed by the
+        caller and reused to scatter the per-slot chunks back."""
+        stacked = self._build_stacked_batch(live)
+        batch = preprocess_inputs(stacked, self.stats)
+        batch = {k: v.to(self.device) for k, v in batch.items()}
         if self.n_lat > 0:
-            a = self._current_bridge[self._offset]
+            # Bootstrap: no prev chunk → zero bridges (neutral for n_lat frames).
+            # Steady state: each slot's bridge = its prev chunk's first n_lat.
+            if not self._bootstrapped:
+                bridges = [np.zeros((self.n_lat, A_DIM), dtype=np.float32) for _ in live]
+            else:
+                bridges = [self._slots[s].pending[: self.n_lat].astype(np.float32) for s in live]
+            bridge_t = torch.from_numpy(np.stack(bridges, axis=0)).to(self.device)
+            plans = integrate_chunk_batched(self.model, batch, self.n_flow_steps, self.device, bridge=bridge_t)
+            for i, s in enumerate(live):
+                self._slots[s].pending = plans[i]
+                self._slots[s].current_bridge = bridges[i]
         else:
-            a = self._pending[self._offset]
-        self._offset += 1
-        self._ego_inputs_hist.append(a.astype(np.float32))
-        if len(self._ego_inputs_hist) > self.L_ctx:
-            self._ego_inputs_hist.pop(0)
-        return action_vec_to_controller(a)
+            plans = integrate_chunk_batched(self.model, batch, self.n_flow_steps, self.device)
+            for i, s in enumerate(live):
+                self._slots[s].pending = plans[i]
+
+    def _build_stacked_batch(self, live: list[Slot]) -> dict[str, np.ndarray]:
+        per_slot = [
+            _live_batch_from_rolling(
+                self._slots[s].flat_hist, self._slots[s].ego_inputs_hist, ego_prefix=_PORT_TO_PREFIX[s.port]
+            )
+            for s in live
+        ]
+        return {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
 
 
-@dataclass
-class ToySelfPlayCoord:
-    """Drive both ports of a self-play match from one model with a single
-    batched forward pass per chunk boundary. ``view("p1")`` / ``view("p2")``
-    return ControllerSource adapters; calls per frame round-robin into a
-    shared ``_advance`` that runs one batched [2, L_ctx, ...] forward at
-    each replan boundary."""
-
-    model: FlowMatchingPolicy
-    stats: dict[str, FeatureStats]
-    L_ctx: int
-    L_chunk: int
-    n_lat: int
-    n_flow_steps: int
-    device: str = DEVICE
-    _ports: dict = field(
-        default_factory=lambda: {
-            "p1": {"flat_hist": [], "ego_inputs_hist": []},
-            "p2": {"flat_hist": [], "ego_inputs_hist": []},
-        }
+def make_policy(model: FlowMatchingPolicy, stats: dict[str, FeatureStats], cfg: TrainConfig) -> BatchPolicy:
+    """Fresh ToyBatchPolicy for one eval wave (rolling state must not leak)."""
+    return ToyBatchPolicy(
+        model=model,
+        stats=stats,
+        L_ctx=cfg.L_ctx,
+        L_chunk=cfg.L_chunk,
+        n_lat=cfg.latency_frames,
+        n_flow_steps=cfg.n_flow_steps,
+        device=DEVICE,
     )
-    _pending: dict = field(default_factory=lambda: {"p1": None, "p2": None})
-    _current_bridge: dict = field(default_factory=lambda: {"p1": None, "p2": None})
-    _offset: int = 0
-    _last_frame_done: int = -1
-    _last_actions: dict = field(default_factory=lambda: {"p1": _NEUTRAL_ACTION.copy(), "p2": _NEUTRAL_ACTION.copy()})
-
-    def view(self, ego_prefix: Literal["p1", "p2"]) -> _PortView:
-        return _PortView(coord=self, ego_prefix=ego_prefix)
-
-    def _tick(self, ego_prefix: Literal["p1", "p2"], frame_index: int, last_gamestate: dict | None) -> np.ndarray:
-        if frame_index != self._last_frame_done:
-            self._advance(last_gamestate)
-            self._last_frame_done = frame_index
-        return self._last_actions[ego_prefix]
-
-    def _advance(self, last_gamestate: dict | None) -> None:
-        for ego in ("p1", "p2"):
-            buf = self._ports[ego]
-            if last_gamestate is not None:
-                buf["flat_hist"].append(flatten_canonical_frame(last_gamestate))
-                if len(buf["flat_hist"]) > self.L_ctx:
-                    buf["flat_hist"].pop(0)
-        # Warm-up: hold neutral until both buffers are full.
-        if any(len(self._ports[e]["flat_hist"]) < self.L_ctx for e in ("p1", "p2")):
-            for ego in ("p1", "p2"):
-                buf = self._ports[ego]
-                buf["ego_inputs_hist"].append(_NEUTRAL_ACTION.copy())
-                if len(buf["ego_inputs_hist"]) > self.L_ctx:
-                    buf["ego_inputs_hist"].pop(0)
-            self._last_actions = {ego: _NEUTRAL_ACTION.copy() for ego in ("p1", "p2")}
-            return
-        for ego in ("p1", "p2"):
-            buf = self._ports[ego]
-            if len(buf["ego_inputs_hist"]) < self.L_ctx:
-                buf["ego_inputs_hist"].append(_NEUTRAL_ACTION.copy())
-        replan_period = self.n_lat if self.n_lat > 0 else self.L_chunk
-        if self._pending["p1"] is None or self._offset >= replan_period:
-            stacked = self._build_stacked_batch()
-            batch = preprocess_inputs(stacked, self.stats)
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            if self.n_lat > 0:
-                if self._pending["p1"] is None:
-                    new_bridges = {ego: np.zeros((self.n_lat, A_DIM), dtype=np.float32) for ego in ("p1", "p2")}
-                else:
-                    new_bridges = {ego: self._pending[ego][: self.n_lat].astype(np.float32) for ego in ("p1", "p2")}
-                bridge_stack = np.stack([new_bridges["p1"], new_bridges["p2"]], axis=0)
-                bridge_t = torch.from_numpy(bridge_stack).to(self.device)
-                plans = integrate_chunk_batched(self.model, batch, self.n_flow_steps, self.device, bridge=bridge_t)
-                self._pending = {"p1": plans[0], "p2": plans[1]}
-                self._current_bridge = new_bridges
-            else:
-                plans = integrate_chunk_batched(self.model, batch, self.n_flow_steps, self.device)
-                self._pending = {"p1": plans[0], "p2": plans[1]}
-            self._offset = 0
-        actions: dict[str, np.ndarray] = {}
-        for ego in ("p1", "p2"):
-            if self.n_lat > 0:
-                a = self._current_bridge[ego][self._offset]
-            else:
-                a = self._pending[ego][self._offset]
-            actions[ego] = a
-            buf = self._ports[ego]
-            buf["ego_inputs_hist"].append(a.astype(np.float32))
-            if len(buf["ego_inputs_hist"]) > self.L_ctx:
-                buf["ego_inputs_hist"].pop(0)
-        self._offset += 1
-        self._last_actions = actions
-
-    def _build_stacked_batch(self) -> dict[str, np.ndarray]:
-        per_ego: dict[str, dict[str, np.ndarray]] = {}
-        for ego in ("p1", "p2"):
-            buf = self._ports[ego]
-            per_ego[ego] = _live_batch_from_rolling(buf["flat_hist"], buf["ego_inputs_hist"], ego_prefix=ego)
-        return {k: np.concatenate([per_ego["p1"][k], per_ego["p2"][k]], axis=0) for k in per_ego["p1"]}
-
-
-@dataclass(frozen=True)
-class _PortView:
-    coord: ToySelfPlayCoord
-    ego_prefix: Literal["p1", "p2"]
-
-    def __call__(self, frame_index: int, last_gamestate: dict | None):
-        a = self.coord._tick(self.ego_prefix, frame_index, last_gamestate)
-        return action_vec_to_controller(a)
 
 
 # %%
@@ -786,41 +724,35 @@ def _vs_cpu_single_stage(
     max_frames: int,
     replay_dir: Path | None = None,
 ) -> dict:
-    """In-training eval: one match on FD vs lvl-9 CPU. Aggregates into a
-    flat metric dict for wandb. ``replay_dir`` (when not None) preserves the
-    match .slp; otherwise the file is destroyed with the Session tmp home."""
+    """In-training eval: ``cfg.eval_replicas`` matches on FD vs lvl-9 CPU run
+    concurrently, averaged into a flat metric dict for wandb. ``replay_dir``
+    (when not None) preserves the .slps; else they die with the Session tmp home."""
     import melee
 
     was_training = model.training
     model.eval()
     try:
-        results = sweep_stages_vs_cpu(
-            source_factory=lambda ego: ToyModelSource(
-                model=model,
-                stats=stats,
-                ego_prefix=ego,
-                L_ctx=cfg.L_ctx,
-                L_chunk=cfg.L_chunk,
-                n_lat=cfg.latency_frames,
-                n_flow_steps=cfg.n_flow_steps,
-                device=DEVICE,
-            ),
+        results = sweep_vs_cpu(
+            lambda: make_policy(model, stats, cfg),
             session_cfg=_default_session_cfg(replay_dir=replay_dir),
             stages=(melee.Stage.FINAL_DESTINATION,),
+            replicas=cfg.eval_replicas,
+            max_parallel=cfg.eval_max_parallel,
             max_frames=max_frames,
         )
     finally:
         if was_training:
             model.train()
-    _, summary = results[0]
-    if summary is None:
+    summaries = [s for _, _, s in results if s is not None]
+    if not summaries:
         return dict(crashed=1.0)
     return dict(
-        stocks_taken=4 - summary.p2_stocks_left,
-        stocks_lost=4 - summary.p1_stocks_left,
-        damage_dealt=summary.p2_max_pct,
-        damage_taken=summary.p1_max_pct,
-        frames=summary.frames,
+        stocks_taken=float(np.mean([4 - s.p2_stocks_left for s in summaries])),
+        stocks_lost=float(np.mean([4 - s.p1_stocks_left for s in summaries])),
+        damage_dealt=float(np.mean([s.p2_max_pct for s in summaries])),
+        damage_taken=float(np.mean([s.p1_max_pct for s in summaries])),
+        frames=float(np.mean([s.frames for s in summaries])),
+        crashed=(len(results) - len(summaries)) / len(results),
     )
 
 
@@ -973,39 +905,32 @@ def eval_ckpt(ckpt_path: str) -> None:
     session_cfg = _default_session_cfg(replay_dir=replay_dir)
     stages = tuple(s for s in INCLUDED_STAGES if s is not melee.Stage.FOUNTAIN_OF_DREAMS)
 
-    def src_factory(ego):
-        return ToyModelSource(
-            model=model,
-            stats=stats,
-            ego_prefix=ego,
-            L_ctx=cfg.L_ctx,
-            L_chunk=cfg.L_chunk,
-            n_lat=cfg.latency_frames,
-            n_flow_steps=cfg.n_flow_steps,
-            device=DEVICE,
-        )
-
-    def coord_factory():
-        coord = ToySelfPlayCoord(
-            model=model,
-            stats=stats,
-            L_ctx=cfg.L_ctx,
-            L_chunk=cfg.L_chunk,
-            n_lat=cfg.latency_frames,
-            n_flow_steps=cfg.n_flow_steps,
-            device=DEVICE,
-        )
-        return coord.view("p1"), coord.view("p2")
+    def policy_factory() -> BatchPolicy:
+        return make_policy(model, stats, cfg)
 
     print("\n[eval] ============== vs-cpu ==============", flush=True)
-    vs_cpu = sweep_stages_vs_cpu(src_factory, session_cfg=session_cfg, stages=stages, max_frames=15_000)
-    for stage, s in vs_cpu:
-        print(f"  {stage.name:18s} {s.as_dict() if s else 'CRASHED'}", flush=True)
+    vs_cpu = sweep_vs_cpu(
+        policy_factory,
+        session_cfg=session_cfg,
+        stages=stages,
+        replicas=cfg.eval_replicas,
+        max_parallel=cfg.eval_max_parallel,
+        max_frames=15_000,
+    )
+    for stage, r, s in vs_cpu:
+        print(f"  {stage.name:18s} r{r} {s.as_dict() if s else 'CRASHED'}", flush=True)
 
     print("\n[eval] ============== self-play ==============", flush=True)
-    sp = sweep_stages_self_play(coord_factory, session_cfg=session_cfg, stages=stages, max_frames=15_000)
-    for stage, s in sp:
-        print(f"  {stage.name:18s} {s.as_dict() if s else 'CRASHED'}", flush=True)
+    sp = sweep_self_play(
+        policy_factory,
+        session_cfg=session_cfg,
+        stages=stages,
+        replicas=cfg.eval_replicas,
+        max_parallel=cfg.eval_max_parallel,
+        max_frames=15_000,
+    )
+    for stage, r, s in sp:
+        print(f"  {stage.name:18s} r{r} {s.as_dict() if s else 'CRASHED'}", flush=True)
 
 
 # %%

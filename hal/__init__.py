@@ -23,8 +23,13 @@ from hal.sim.sources import InternalControllerSource
 from hal.sim.sources import MdsControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.trajectory import Trajectory
+from hal.sim.vec import BatchPolicy
+from hal.sim.vec import Slot
+from hal.sim.vec import VecMatch
+from hal.sim.vec import drive_vec
 
 __all__ = [
+    "BatchPolicy",
     "ControllerInputs",
     "ControllerInputsValue",
     "ControllerSource",
@@ -38,10 +43,13 @@ __all__ = [
     "ReplayMatchup",
     "ScriptedControllerSource",
     "Session",
+    "Slot",
     "Trajectory",
+    "VecMatch",
     "apply_inputs",
     "diff",
     "drive",
+    "drive_vec",
     "ensure",
     "ensure_all",
     "extract_replay",

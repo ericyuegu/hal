@@ -34,3 +34,7 @@ from hal.sim.sources import InternalControllerSource
 from hal.sim.sources import MdsControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.trajectory import Trajectory
+from hal.sim.vec import BatchPolicy
+from hal.sim.vec import Slot
+from hal.sim.vec import VecMatch
+from hal.sim.vec import drive_vec

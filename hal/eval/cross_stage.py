@@ -1,13 +1,16 @@
-"""Sweep an experiment's policy across stages.
+"""Sweep an experiment's policy across stages, in parallel.
 
-The experiment passes in a ``source_factory`` that builds a fresh
-``ControllerSource`` per match (rolling-buffer state must reset between
-matches). Two sweep flavors:
+Each sweep builds a grid of matches (``stages × replicas``) and runs them
+concurrently through ``run_matches_vec`` — every live model-driven port across
+all matches is fed to a single batched ``BatchPolicy`` call per frame. The
+experiment passes in a ``policy_factory`` that builds a fresh ``BatchPolicy``
+per wave (rolling-buffer state must reset between waves). Replicas of the same
+stage diverge naturally via the policy's own per-step sampling.
 
-- ``sweep_stages_vs_cpu`` — model on one port, in-game CPU on the other.
-- ``sweep_stages_self_play`` — both ports driven by sources from the same
-  factory pair (a coordinator that owns shared inference state, exposed
-  as two ``ControllerSource`` views).
+Two flavors:
+
+- ``sweep_vs_cpu`` — model on one port, in-game CPU on the other.
+- ``sweep_self_play`` — both ports driven by the same batched policy.
 """
 
 from collections.abc import Callable
@@ -17,69 +20,82 @@ from typing import Literal
 import melee
 
 from hal.eval.harness import SessionConfig
-from hal.eval.harness import run_match
+from hal.eval.harness import run_matches_vec
 from hal.eval.scoring import MatchSummary
 from hal.eval.scoring import summarize_trajectory
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
-from hal.sim.sources import ControllerSource
-from hal.sim.sources import InternalControllerSource
+from hal.sim.vec import BatchPolicy
+from hal.sim.vec import VecMatch
 
-EgoPrefix = Literal["p1", "p2"]
+# (stage, replica index, summary-or-None-if-crashed) per match in the grid.
+SweepResult = list[tuple[melee.Stage, int, MatchSummary | None]]
 
 
-def sweep_stages_vs_cpu(
-    source_factory: Callable[[EgoPrefix], ControllerSource],
+def sweep_vs_cpu(
+    policy_factory: Callable[[], BatchPolicy],
     *,
     session_cfg: SessionConfig,
     stages: Sequence[melee.Stage],
+    max_parallel: int,
+    replicas: int = 1,
     character: melee.Character = melee.Character.FOX,
     cpu_level: int = 9,
     ego_port: Literal[1, 2] = 1,
     max_frames: int = 15_000,
-) -> list[tuple[melee.Stage, MatchSummary | None]]:
-    """One match per stage. ``source_factory(ego_prefix)`` builds a fresh
-    Source for each match — the factory must NOT capture rolling state
-    across calls."""
+) -> SweepResult:
+    """``replicas`` matches per stage, model on ``ego_port`` vs a level
+    ``cpu_level`` CPU. All matches run concurrently in waves of ``max_parallel``."""
     cpu_port: Literal[1, 2] = 2 if ego_port == 1 else 1
-    ego_prefix: EgoPrefix = "p1" if ego_port == 1 else "p2"
-    out: list[tuple[melee.Stage, MatchSummary | None]] = []
-    for stage in stages:
-        matchup = Matchup(
-            stage=stage,
-            players=(
-                PlayerSetup(port=ego_port, character=character, cpu_level=0),
-                PlayerSetup(port=cpu_port, character=character, cpu_level=cpu_level),
+    grid = [(stage, r) for stage in stages for r in range(replicas)]
+    matches = [
+        VecMatch(
+            matchup=Matchup(
+                stage=stage,
+                players=(
+                    PlayerSetup(port=ego_port, character=character, cpu_level=0),
+                    PlayerSetup(port=cpu_port, character=character, cpu_level=cpu_level),
+                ),
             ),
+            model_ports=(ego_port,),
         )
-        sources = {ego_port: source_factory(ego_prefix), cpu_port: InternalControllerSource()}
-        traj = run_match(session_cfg, matchup, sources, max_frames=max_frames)
-        out.append((stage, summarize_trajectory(traj) if traj is not None else None))
-    return out
+        for stage, _ in grid
+    ]
+    trajs = run_matches_vec(session_cfg, matches, policy_factory, max_frames=max_frames, max_parallel=max_parallel)
+    return [
+        (stage, r, summarize_trajectory(t) if t is not None else None)
+        for (stage, r), t in zip(grid, trajs, strict=True)
+    ]
 
 
-def sweep_stages_self_play(
-    coord_factory: Callable[[], tuple[ControllerSource, ControllerSource]],
+def sweep_self_play(
+    policy_factory: Callable[[], BatchPolicy],
     *,
     session_cfg: SessionConfig,
     stages: Sequence[melee.Stage],
+    max_parallel: int,
+    replicas: int = 1,
     character: melee.Character = melee.Character.FOX,
     max_frames: int = 15_000,
-) -> list[tuple[melee.Stage, MatchSummary | None]]:
-    """One match per stage with both ports driven by paired sources.
-    ``coord_factory()`` returns ``(p1_source, p2_source)`` — typically two
-    views over a shared coordinator that owns batched inference state."""
-    out: list[tuple[melee.Stage, MatchSummary | None]] = []
-    for stage in stages:
-        matchup = Matchup(
-            stage=stage,
-            players=(
-                PlayerSetup(port=1, character=character, cpu_level=0),
-                PlayerSetup(port=2, character=character, cpu_level=0),
+) -> SweepResult:
+    """``replicas`` matches per stage with both ports driven by the batched
+    policy. All matches run concurrently in waves of ``max_parallel``."""
+    grid = [(stage, r) for stage in stages for r in range(replicas)]
+    matches = [
+        VecMatch(
+            matchup=Matchup(
+                stage=stage,
+                players=(
+                    PlayerSetup(port=1, character=character, cpu_level=0),
+                    PlayerSetup(port=2, character=character, cpu_level=0),
+                ),
             ),
+            model_ports=(1, 2),
         )
-        src1, src2 = coord_factory()
-        sources = {1: src1, 2: src2}
-        traj = run_match(session_cfg, matchup, sources, max_frames=max_frames)
-        out.append((stage, summarize_trajectory(traj) if traj is not None else None))
-    return out
+        for stage, _ in grid
+    ]
+    trajs = run_matches_vec(session_cfg, matches, policy_factory, max_frames=max_frames, max_parallel=max_parallel)
+    return [
+        (stage, r, summarize_trajectory(t) if t is not None else None)
+        for (stage, r), t in zip(grid, trajs, strict=True)
+    ]
