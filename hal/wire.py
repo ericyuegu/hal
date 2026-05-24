@@ -186,11 +186,9 @@ CHARACTERS_BY_NAME: Final[dict[str, int]] = {c.name: int(c.value) for c in melee
 # (renamed) ``Post`` dataclass and libmelee's canonical ``Post`` 1:1, so a
 # single suffix is all that's needed to address both.
 #
-# Special cases that consumers handle at call sites (not encoded in this list):
+# Special case that consumers handle at call sites (not encoded in this list):
 #   - ``position_x`` / ``position_y``: peppi nests them under
 #     ``post.position.{x,y}``.
-#   - ``action``: materialized once and reused to derive ``action_frame``
-#     (a 1-indexed run-length on ``action``).
 POST_FIELD_SUFFIXES: Final[tuple[str, ...]] = (
     "position_x",
     "position_y",
@@ -204,3 +202,20 @@ POST_FIELD_SUFFIXES: Final[tuple[str, ...]] = (
     "airborne",
     "hurtbox_state",
 )
+
+
+def canonical_post_field(post: dict, suffix: str) -> float:
+    """Read one ``POST_FIELD_SUFFIXES`` value from a libmelee canonical post dict
+    (the shape ``Session.step`` yields). ``position_{x,y}`` are nested under
+    ``post['position']``; a field absent on this slp/build comes back as
+    ``MASK_FLOAT`` (NaN), the same mask convention ``Trajectory.from_slp`` uses.
+
+    Shared by ``sim.trajectory.from_capture`` and
+    ``training.canonical.flatten_canonical_frame`` so the two never drift.
+    """
+    if suffix == "position_x":
+        return float(post["position"]["x"])
+    if suffix == "position_y":
+        return float(post["position"]["y"])
+    value = post.get(suffix)
+    return float(value) if value is not None else MASK_FLOAT

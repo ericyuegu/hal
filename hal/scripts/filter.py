@@ -21,7 +21,7 @@ OR slp-native integer ids (e.g. `--stages 31 32` or `--stages BATTLEFIELD
 FINAL_DESTINATION`).
 
 Stats predicates (damage / stocks / inputs / death counts / cheap deaths)
-require an index built with `python -m hal.scripts.index --with-stats`. If
+require an index built with `python -m hal.scripts.build_index --with-stats`. If
 the index has no stats, `filter_index` raises rather than silently producing
 empty output.
 """
@@ -204,7 +204,7 @@ def filter_index(
         if needs_stats and entry.stats is None:
             raise ValueError(
                 f"entry {entry.path} has stats=None but stats predicates were requested. "
-                "Rebuild the index with: python -m hal.scripts.index --with-stats ..."
+                "Rebuild the index with: python -m hal.scripts.build_index --with-stats ..."
             )
         kept = True
         for label, pred in preds:

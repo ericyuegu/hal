@@ -3,7 +3,7 @@
 Builds fixture archives inline (no on-disk dependency) so the suite runs on
 fresh checkouts. End-to-end coverage on real public-dump chunks (peppi parse,
 full index pipeline) is exercised manually via
-``python -m hal.scripts.index --archive ranked-anonymized-N-*.7z``.
+``python -m hal.scripts.build_index --archive ranked-anonymized-N-*.7z``.
 """
 
 import gzip

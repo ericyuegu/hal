@@ -6,30 +6,22 @@ canonical gamestate dict (from libmelee's post-frame). This helper bridges
 the two so a model's ``ControllerSource`` can stitch its rolling-history
 buffer using the same column schema it trained on.
 
-Mirrors the per-frame extraction in :func:`hal.sim.trajectory.from_capture`
-but emits one row's worth of fields rather than accumulating arrays.
+Mirrors the per-frame extraction in :func:`hal.sim.trajectory.from_capture`;
+both pull each field through ``wire.canonical_post_field`` over the shared
+``wire.POST_FIELD_SUFFIXES``, so the two can never drift apart.
 """
 
+from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import canonical_post_field
 
-def flatten_canonical_frame(frame: dict) -> dict[str, float | int]:
-    out: dict[str, float | int] = {}
+
+def flatten_canonical_frame(frame: dict) -> dict[str, float]:
+    out: dict[str, float] = {}
     for libmelee_port, prefix in ((1, "p1"), (2, "p2")):
         pd = frame["ports"].get(libmelee_port)
         if pd is None:
             continue
         post = pd["leader"]["post"]
-        pos = post["position"]
-        out[f"{prefix}_position_x"] = float(pos["x"])
-        out[f"{prefix}_position_y"] = float(pos["y"])
-        out[f"{prefix}_percent"] = float(post["percent"])
-        out[f"{prefix}_shield"] = float(post["shield"])
-        out[f"{prefix}_stock"] = int(post["stock"])
-        out[f"{prefix}_direction"] = float(post["direction"])
-        out[f"{prefix}_action"] = int(post["action"])
-        # libmelee names it state_age; MDS calls the same field action_frame.
-        out[f"{prefix}_action_frame"] = float(post.get("state_age") or 0.0)
-        out[f"{prefix}_hitlag_left"] = float(post.get("hitlag_left") or 0.0)
-        out[f"{prefix}_jumps_used"] = int(post.get("jumps_used") or 0)
-        out[f"{prefix}_airborne"] = int(post.get("airborne") or 0)
-        out[f"{prefix}_hurtbox_state"] = int(post.get("hurtbox_state") or 0)
+        for suffix in POST_FIELD_SUFFIXES:
+            out[f"{prefix}_{suffix}"] = canonical_post_field(post, suffix)
     return out

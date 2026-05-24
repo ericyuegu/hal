@@ -91,6 +91,9 @@ class TrainConfig:
     dim_feedforward: int = 1024
     dropout: float = 0.1
     time_emb_dim: int = 128
+    # Seeds model init, flow-matching t/z noise, and the dataloader's window +
+    # ego-port sampling — so a run is reproducible and val windows are fixed.
+    seed: int = 0
     # window / chunking
     L_ctx: int = 256
     L_chunk: int = 16
@@ -181,8 +184,6 @@ def _classify(name: str) -> str:
         return "drop"
     if any(p in name for p in _DROP_PATTERNS):
         return "drop"
-    if name.endswith("_action_frame"):
-        return "action_frame"
     if any(name.endswith(f"_{c}") for c in CAT_FEATURES):
         return "cat"
     if "_button_" in name:
@@ -236,9 +237,6 @@ def preprocess_inputs(
             x = np.where(mask, 0.0, arr).astype(np.float32)
         elif kind == "cat":
             x = np.where(mask, 0, arr).astype(np.int64)
-        elif kind == "action_frame":
-            # Vocab unbounded — treat as a float. /60 puts most values in [0, ~5].
-            x = np.where(mask, 0, arr).astype(np.float32) / 60.0
         elif kind == "float":
             s = feature_stats[consolidate_key(name)]
             x = _standardize(arr, s) if "position" in name else _normalize(arr, s)
@@ -315,9 +313,8 @@ class FlowMatchingPolicy(nn.Module):
 
         n_float = len(FLOAT_FEATURES)
         n_mask = len(FLOAT_FEATURES)
-        n_action_frame = 1
         n_cat = sum(dim for _, dim in CAT_FEATURES.values())
-        per_player_dim = n_float + n_mask + n_action_frame + n_cat
+        per_player_dim = n_float + n_mask + n_cat
         per_frame_in_dim = 2 * per_player_dim + A_DIM  # ego + opp + ego controller history
         self.per_frame_in_dim = per_frame_in_dim
 
@@ -367,7 +364,6 @@ class FlowMatchingPolicy(nn.Module):
                 parts.append(batch[mk][:, :L_ctx, None])
             else:
                 parts.append(torch.zeros(B, L_ctx, 1, device=device))
-        parts.append(batch[f"{prefix}_action_frame"][:, :L_ctx, None])
         for cat_name, (vocab, _) in CAT_FEATURES.items():
             ids = batch[f"{prefix}_{cat_name}"][:, :L_ctx].clamp(0, vocab - 1)
             parts.append(self.cat_embeds[cat_name](ids))
@@ -625,11 +621,16 @@ class FlowMatchingBatchPolicy:
             for s in live:
                 self._push_ego(s, _NEUTRAL_ACTION)
             return {s: action_vec_to_controller(_NEUTRAL_ACTION) for s in live}
-        # Transition: on the first inference call ego_inputs_hist is one short.
+        # Transition: ego_inputs_hist is one short on the first inference call
+        # (warm-up pushes one fewer action than there are gamestates). The
+        # missing entry is the OLDEST — the pre-policy input that produced the
+        # first observed frame, which is unknown — so pad at the FRONT. Padding
+        # at the back would misalign every (gamestate[i], ego_input[i]) pair the
+        # model was trained on for one full context window.
         for s in live:
             st = self._slots[s]
             if len(st.ego_inputs_hist) < self.L_ctx:
-                st.ego_inputs_hist.append(_NEUTRAL_ACTION.copy())
+                st.ego_inputs_hist.insert(0, _NEUTRAL_ACTION.copy())
         replan_period = self.n_lat if self.n_lat > 0 else self.L_chunk
         if not self._bootstrapped or self._offset >= replan_period:
             self._replan(live)
@@ -772,6 +773,7 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
     print(f"[ckpt] writing checkpoints to {ckpt_dir}", flush=True)
     print(f"[ckpt] writing eval replays to {replay_dir}", flush=True)
 
+    torch.manual_seed(cfg.seed)
     model = FlowMatchingPolicy(cfg).to(DEVICE)
     train_loader = make_loader(
         data_root=cfg.data_root,
@@ -780,6 +782,7 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
         L_chunk=cfg.L_chunk,
         n_lat=cfg.latency_frames,
         batch_size=cfg.batch_size,
+        seed=cfg.seed,
         num_workers=cfg.num_workers,
         prefetch_factor=cfg.prefetch_factor,
     )
@@ -790,6 +793,7 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
         L_chunk=cfg.L_chunk,
         n_lat=cfg.latency_frames,
         batch_size=cfg.batch_size,
+        seed=cfg.seed,
         num_workers=0,
     )
 

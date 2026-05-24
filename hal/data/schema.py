@@ -17,10 +17,14 @@ from hal.wire import BUTTON_BITS
 # change) or to the extraction semantics that produce them. Consumers verify
 # the version matches before reading; mismatch is a hard error.
 #
+# 3: drop the per-player action_frame column. It was a 1-indexed run-length on
+#    the action id, but the closed-loop policy feeds the engine's state_age
+#    (0-indexed, resets within a constant action) — the two never matched, so
+#    the column was a train/inference skew on a model input.
 # 2: add raw_analog_cstick_x/y columns (slp >= 3.17) for bit-exact c-stick
 #    replay.
 # 1: initial introduction of the version field.
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 
 def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
@@ -33,7 +37,6 @@ def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
         f"{prefix}_stock": np.int32,
         f"{prefix}_direction": np.float32,
         f"{prefix}_action": np.int32,
-        f"{prefix}_action_frame": np.int32,
         f"{prefix}_hitlag_left": np.float32,  # peppi reports None for slp < ~3.8.0; masked
         f"{prefix}_jumps_used": np.int32,
         f"{prefix}_airborne": np.int32,

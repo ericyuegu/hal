@@ -63,39 +63,13 @@ def _resolve(obj: Any, dotted: str) -> Any:
     return cur
 
 
-def _action_frame_from_states(actions: list[int] | None) -> np.ndarray:
-    """1-indexed run-length on post.action — matches libmelee's action_frame.
-
-    Returns an empty array when ``actions`` is None; the caller's per-column
-    length sanity check then drops the replay.
-    """
-    if actions is None:
-        return np.array([], dtype=np.int32)
-    out = np.empty(len(actions), dtype=np.int32)
-    prev: int | None = None
-    counter = 0
-    for i, a in enumerate(actions):
-        if a != prev:
-            counter = 1
-            prev = a
-        else:
-            counter += 1
-        out[i] = counter
-    return out
-
-
 def _gamestate_arrays(post: Post, key_prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
     """Pull every gamestate column for one post block under ``key_prefix``.
 
     Shared by leader (``p1``/``p2``) and follower (``p1_nana``/``p2_nana``).
-    ``post.action`` is materialized once: the ``action`` column is indexed
-    like every other field, while ``action_frame`` is run-length-derived
-    from the deduped action list so rollback repeats don't inflate runs.
     """
     out: dict[str, np.ndarray] = {}
     for suffix in POST_FIELD_SUFFIXES:
-        if suffix == "action":
-            continue  # paired with action_frame below
         col = f"{key_prefix}_{suffix}"
         dtype = MDS_PER_FRAME_DTYPES[col]
         if suffix in ("position_x", "position_y"):
@@ -104,13 +78,6 @@ def _gamestate_arrays(post: Post, key_prefix: str, keep_idx: np.ndarray, length:
         else:
             value = getattr(post, suffix)
         out[col] = _arr_to_np(value, dtype, length)[keep_idx]
-
-    action_arr = post.action
-    raw_actions: list[int] | None = action_arr.to_pylist() if action_arr is not None else None
-    action_col = f"{key_prefix}_action"
-    out[action_col] = _list_to_np(raw_actions, MDS_PER_FRAME_DTYPES[action_col], length)[keep_idx]
-    deduped_actions = [raw_actions[i] for i in keep_idx] if raw_actions is not None else None
-    out[f"{key_prefix}_action_frame"] = _action_frame_from_states(deduped_actions)
     return out
 
 

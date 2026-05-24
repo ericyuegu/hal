@@ -7,10 +7,10 @@ fast path (~5-10x faster, no `entry.stats`).
 
 Usage:
     # Loose .slp files on disk
-    python -m hal.scripts.index --root /path/to/replays --output index.jsonl
+    python -m hal.scripts.build_index --root /path/to/replays --output index.jsonl
 
     # .slp members streamed directly from a solid .7z archive (no extraction)
-    python -m hal.scripts.index --archive /path/to/archive.7z --output index.jsonl
+    python -m hal.scripts.build_index --archive /path/to/archive.7z --output index.jsonl
 
 `--root` and `--archive` are mutually exclusive; exactly one is required.
 Archive mode materializes each member to a tmpfs file (default `/dev/shm`)

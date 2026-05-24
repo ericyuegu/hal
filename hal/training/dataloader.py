@@ -6,12 +6,14 @@ without re-running experiment-level module code. Keeping this file
 side-effect-free is what makes that work.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 from streaming import StreamingDataLoader
 from streaming import StreamingDataset
 from torch.utils.data import IterableDataset
+from torch.utils.data import get_worker_info
 
 
 def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.ndarray]:
@@ -33,15 +35,24 @@ class WindowSampler(IterableDataset):
     sub-trajectory of length ``L_ctx + n_lat + L_chunk`` from each replay.
     Relabel p1/p2 → ego/opp before yielding."""
 
-    def __init__(self, mds: StreamingDataset, L_ctx: int, L_chunk: int, n_lat: int = 0):
+    def __init__(self, mds: StreamingDataset, L_ctx: int, L_chunk: int, *, seed: int, n_lat: int = 0) -> None:
         self._mds = mds
         self.L_ctx = L_ctx
         self.L_chunk = L_chunk
         self.n_lat = n_lat
         self._L = L_ctx + n_lat + L_chunk
+        self._seed = seed
+        self._epoch = 0
 
-    def __iter__(self):
-        rng = np.random.default_rng()
+    def __iter__(self) -> Iterator[dict[str, np.ndarray]]:
+        # Seed per (seed, worker, epoch): reproducible across runs (fixed seed),
+        # distinct per worker, and still varying each epoch so a fixed seed
+        # doesn't freeze train to one window per replay. Persistent workers keep
+        # _epoch advancing across epochs.
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        rng = np.random.default_rng((self._seed, worker_id, self._epoch))
+        self._epoch += 1
         for sample in self._mds:
             T = len(sample["frame"])
             if T < self._L:
@@ -64,13 +75,14 @@ def make_loader(
     L_ctx: int,
     L_chunk: int,
     batch_size: int,
+    seed: int,
     n_lat: int = 0,
     num_workers: int = 4,
     prefetch_factor: int = 4,
 ) -> StreamingDataLoader:
     """Build the (StreamingDataset → WindowSampler → DataLoader) chain."""
     mds = StreamingDataset(local=str(Path(data_root) / split), batch_size=1, shuffle=(split == "train"))
-    sampler = WindowSampler(mds, L_ctx, L_chunk, n_lat=n_lat)
+    sampler = WindowSampler(mds, L_ctx, L_chunk, seed=seed, n_lat=n_lat)
     return StreamingDataLoader(
         sampler,
         batch_size=batch_size,

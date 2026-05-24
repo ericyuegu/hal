@@ -59,3 +59,49 @@ def test_legal_stages_all_resolve() -> None:
 def test_unknown_stage_raises() -> None:
     with pytest.raises(ValueError, match="unknown slp stage id"):
         wire.slp_stage_to_libmelee(9999)
+
+
+# --- canonical_post_field: shared libmelee-post-dict → POST_FIELD_SUFFIXES value ---
+
+
+def _canonical_post(**overrides: object) -> dict:
+    post = {
+        "position": {"x": 1.5, "y": -2.5},
+        "percent": 12.0,
+        "shield": 60.0,
+        "stock": 4,
+        "direction": 1.0,
+        "action": 14,
+        "jumps_used": 0,
+        "airborne": 1,
+        "hurtbox_state": 0,
+        "hitlag_left": 0.0,
+    }
+    post.update(overrides)
+    return post
+
+
+def test_canonical_post_field_nests_position() -> None:
+    post = _canonical_post()
+    assert wire.canonical_post_field(post, "position_x") == 1.5
+    assert wire.canonical_post_field(post, "position_y") == -2.5
+
+
+def test_canonical_post_field_absent_optional_is_nan() -> None:
+    import numpy as np
+
+    post = _canonical_post()
+    del post["jumps_used"]
+    assert np.isnan(wire.canonical_post_field(post, "jumps_used"))
+
+
+def test_canonical_post_field_preserves_genuine_zero() -> None:
+    assert wire.canonical_post_field(_canonical_post(jumps_used=0), "jumps_used") == 0.0
+
+
+def test_canonical_post_field_covers_every_post_suffix() -> None:
+    """Every POST_FIELD_SUFFIXES entry is resolvable from a full canonical post —
+    so from_capture and flatten_canonical_frame can both just loop the tuple."""
+    post = _canonical_post()
+    for suffix in wire.POST_FIELD_SUFFIXES:
+        wire.canonical_post_field(post, suffix)  # must not raise

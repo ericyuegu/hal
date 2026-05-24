@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hal.data.extract import _action_frame_from_states
 from hal.data.extract import _list_to_np
 from hal.data.extract import _unpack_buttons
 from hal.data.extract import extract_replay
@@ -55,22 +54,28 @@ def test_mask_value_float_callers_must_use_isnan_not_eq() -> None:
     assert np.all(np.isnan(arr))  # the correct check
 
 
-def test_action_frame_from_states_run_length() -> None:
-    # state 1 for 3 frames, state 2 for 2 frames, state 3 for 1 frame, state 1 for 2.
-    states = [1, 1, 1, 2, 2, 3, 1, 1]
-    result = _action_frame_from_states(states)
-    assert list(result) == [1, 2, 3, 1, 2, 1, 1, 2]
-    assert result.dtype == np.int32
+def test_schema_has_no_action_frame_column() -> None:
+    """action_frame is dropped: training reconstructed it as a run-length while
+    inference reads the engine's state_age — they never matched (0/N frames).
+    The column is gone from the schema entirely."""
+    assert not any("action_frame" in col for col in MDS_PER_FRAME_DTYPES)
 
 
-def test_action_frame_from_states_empty_on_none() -> None:
-    result = _action_frame_from_states(None)
-    assert result.shape == (0,)
-    assert result.dtype == np.int32
+def test_schema_gamestate_fields_match_post_suffixes() -> None:
+    """With action_frame gone, every per-player gamestate column is exactly one
+    POST_FIELD_SUFFIXES entry — no schema field without a wire counterpart."""
+    from hal.wire import POST_FIELD_SUFFIXES
 
-
-def test_action_frame_from_states_single_frame() -> None:
-    assert list(_action_frame_from_states([7])) == [1]
+    p1_gamestate = {
+        col.removeprefix("p1_")
+        for col in MDS_PER_FRAME_DTYPES
+        if col.startswith("p1_")
+        and not col.startswith("p1_nana_")
+        and "_button_" not in col
+        and "stick" not in col
+        and not col.endswith(("_trigger_logical", "_trigger_l_physical", "_trigger_r_physical"))
+    }
+    assert p1_gamestate == set(POST_FIELD_SUFFIXES)
 
 
 def test_unpack_buttons_decodes_bitmask() -> None:

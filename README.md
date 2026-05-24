@@ -53,7 +53,7 @@ Three stages in `hal/scripts/` turn `.slp` files (loose or `.7z`-archived) into 
 
 ```bash
 # Stage 1 — index a .7z archive (no extraction; tmpfs-backed)
-uv run python -m hal.scripts.index \
+uv run python -m hal.scripts.build_index \
     --archive data/raw/dev.7z --output /tmp/index.jsonl
 
 # Stage 2 — filter to a paths.txt (defaults: completed games, ≥1500 frames, six tournament stages)
