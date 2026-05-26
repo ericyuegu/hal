@@ -77,6 +77,42 @@ uv run python -m hal.scripts.roundtrip --max-frames 200
 
 Defaults read from `data/`; override via flags. Training and evaluation drivers are being rewritten on top of `hal/sim/` and the new MDS schema; nothing here ships yet.
 
+## Cloud training (Docker)
+
+Training runs on rented GPUs (vast.ai) from a Docker image based on vast's CUDA
+base (`docker/Dockerfile`): repo apt deps + uv-managed Python 3.14 + `uv.lock`
+wheels (incl. the libmelee/peppi-py forks) + Xvfb for the closed-loop eval. The
+instance is **stateless** — nothing is baked or persisted on a volume: data is
+fetched from R2 at runtime, and checkpoints stream back to R2 in the background
+(`runs/<run_name>/latest.pt` every `ckpt_every` steps), so a preempted run
+picks up with `--resume <run_name>`.
+
+```bash
+# build + a tiny end-to-end run on the dev dataset (./data is a local fixture cache)
+docker compose -f docker/compose.yaml build
+docker compose -f docker/compose.yaml run --rm hal \
+    uv run python experiments/001_flow_matching_rtc_baseline.py \
+    --cfg.data-root data/processed/dev/mds --cfg.max-steps 20 --cfg.batch-size 8 \
+    --cfg.val-every 10 --cfg.val-n-batches 2 --cfg.eval-every 0 \
+    --cfg.ckpt-every 10 --cfg.num-workers 2 --cfg.eval-max-frames 600
+
+# resume that run from its latest R2 checkpoint (cfg is restored from the ckpt)
+docker compose -f docker/compose.yaml run --rm hal \
+    uv run python experiments/001_flow_matching_rtc_baseline.py --resume <run_name>
+```
+
+`compose.yaml` reserves the GPU, bumps `--shm-size` (StreamingDataset uses
+`/dev/shm`), reads R2 creds from `.env`, and sets `WANDB_MODE=offline`. Checkpoint
+upload/resume needs the same `AWS_*` creds (set `--cfg.push-to-r2 False` to train
+without R2). Needs Docker + the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+**On vast.ai:** push the image to a registry and reference it in a template.
+Use the *Docker ENTRYPOINT* launch mode (runs `docker/entrypoint.sh`), or
+SSH/Jupyter mode with `docker/on-start.sh` pasted into the On-start field (vast
+skips the image ENTRYPOINT there). Set env vars `AWS_ENDPOINT_URL`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET=hal`, `WANDB_API_KEY`;
+give the instance ≥30 GB disk (CUDA torch + the 1.4 GB ISO).
+
 ## Adding a new fixture (maintainer)
 
 The fixture registry is `hal/fixtures.py`. Two backends:

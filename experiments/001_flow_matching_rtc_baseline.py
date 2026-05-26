@@ -64,6 +64,8 @@ from hal.sim.inputs import ControllerInputsValue
 from hal.sim.vec import BatchPolicy
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
+from hal.training.checkpoints import BackgroundUploader
+from hal.training.checkpoints import download_latest
 from hal.training.dataloader import make_loader
 from hal.training.dataloader import relabel_ego
 from hal.training.stats import consolidate_key
@@ -119,8 +121,13 @@ class TrainConfig:
     # waves of eval_max_parallel emulators (one batched forward across all live).
     eval_replicas: int = 1
     eval_max_parallel: int = 4
+    # checkpointing: write + background-upload latest.pt every N steps (preemption resilience)
+    ckpt_every: int = 1000
+    # push checkpoints to R2 as we train (needs AWS_*); --resume pulls them back
+    push_to_r2: bool = True
     # data
     data_root: str = "data/processed/ranked-anonymized-1/mds"
+    val_split: str = "val"  # tiny datasets may have an empty val split; point this at "test"/"train"
     num_workers: int = 8
     prefetch_factor: int = 8
 
@@ -758,11 +765,21 @@ def _vs_cpu_single_stage(
 
 
 # %%
-def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -> None:
-    run_name = make_run_name(cfg, comment)
+def train(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    *,
+    comment: str = "",
+    resume_run: str | None = None,
+    resume_state: dict | None = None,
+) -> None:
+    run_name = resume_run or make_run_name(cfg, comment)
+    uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     wandb.init(
         project="hal",
         name=run_name,
+        id=resume_state["wandb_id"] if resume_state else None,
+        resume="allow" if resume_state else None,
         tags=["flow-matching", "rtc", f"d{cfg.d_model}", f"L{cfg.n_layers}"],
         config=asdict(cfg),
     )
@@ -788,7 +805,7 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
     )
     val_loader = make_loader(
         data_root=cfg.data_root,
-        split="val",
+        split=cfg.val_split,
         L_ctx=cfg.L_ctx,
         L_chunk=cfg.L_chunk,
         n_lat=cfg.latency_frames,
@@ -799,8 +816,20 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
 
     def _save_ckpt(name: str, step: int) -> None:
         path = ckpt_dir / name
-        torch.save({"step": step, "model": model.state_dict(), "cfg": asdict(cfg)}, path)
+        torch.save(
+            {
+                "step": step,
+                "model": model.state_dict(),
+                "opt": opt.state_dict(),
+                "sched": sched.state_dict(),
+                "cfg": asdict(cfg),
+                "wandb_id": wandb.run.id if wandb.run is not None else None,
+            },
+            path,
+        )
         print(f"[ckpt] saved {path}", flush=True)
+        if uploader is not None:
+            uploader.upload(path)
 
     print("[val] building cached val set…", flush=True)
     val_t0 = time.monotonic()
@@ -813,6 +842,13 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
 
     opt = AdamW(model.parameters(), lr=cfg.lr, betas=(0.9, 0.95), weight_decay=cfg.weight_decay)
     sched = LambdaLR(opt, lr_schedule(cfg))
+    start_step = 0
+    if resume_state is not None:
+        model.load_state_dict(resume_state["model"])
+        opt.load_state_dict(resume_state["opt"])
+        sched.load_state_dict(resume_state["sched"])
+        start_step = resume_state["step"] + 1
+        print(f"[resume] {run_name}: continuing from step {start_step}", flush=True)
     model.train()
     L_ctx, n_lat = cfg.L_ctx, cfg.latency_frames
 
@@ -826,7 +862,7 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
     have_first = True
     step_t0 = time.monotonic()
     run_t0 = time.monotonic()
-    for step in range(cfg.max_steps):
+    for step in range(start_step, cfg.max_steps):
         if not have_first:
             try:
                 raw = next(it)
@@ -870,6 +906,8 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
                 flush=True,
             )
         step_t0 = time.monotonic()
+        if cfg.ckpt_every > 0 and step > 0 and step % cfg.ckpt_every == 0:
+            _save_ckpt("latest.pt", step)
         if cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0:
             vl = val_loss(model, val_cache)
             wandb.log({"val/loss": vl}, step=step)
@@ -886,6 +924,8 @@ def train(cfg: TrainConfig, stats: dict[str, FeatureStats], comment: str = "") -
     wandb.log({f"eval/{k}": v for k, v in metrics_final.items()}, step=cfg.max_steps)
     print(f"[final] closed_loop {metrics_final}", flush=True)
     _save_ckpt("final.pt", cfg.max_steps)
+    if uploader is not None:
+        uploader.close()
 
 
 # %%
@@ -945,12 +985,24 @@ class Args:
 
     cfg: TrainConfig = field(default_factory=TrainConfig)
     eval: str | None = None  # ckpt path; if set, eval instead of train
+    resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
 
 
 def main(args: Args) -> None:
     if args.eval is not None:
         eval_ckpt(args.eval)
+        return
+    if args.resume is not None:
+        ckpt_dir = Path("runs") / args.resume
+        local_latest = ckpt_dir / "latest.pt"
+        latest = local_latest if local_latest.is_file() else download_latest(args.resume, ckpt_dir)
+        if latest is None:
+            raise SystemExit(f"no latest.pt for run {args.resume!r} (local or R2)")
+        state = torch.load(latest, map_location=DEVICE, weights_only=False)
+        cfg = TrainConfig(**state["cfg"])
+        stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
+        train(cfg, stats, resume_run=args.resume, resume_state=state)
         return
     cfg = args.cfg
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")

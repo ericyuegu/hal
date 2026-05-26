@@ -9,6 +9,7 @@ The closed-loop driver (Dolphin + libmelee) lives in `hal/sim/`: `Session` owns 
 Cross-layer wire conventions (button bits, mask sentinels, raw↔wire math, port and stage/character bridges, post-frame field naming) are the single source of truth in `hal/wire.py`.
 Project policy (included characters/stages, player port conventions) lives in `hal/policy.py`.
 Integration fixtures (dev archive, MDS bundle, ISO, Dolphin) are declared in `hal/fixtures.py` and fetched into `<repo>/fixtures/` via `python -m hal.scripts.fetch`; see `README.md`.
+Cloud GPU training runs in a Docker image (`docker/`, vast.ai CUDA base) carrying code+deps only; `docker compose -f docker/compose.yaml run --rm hal …` mounts `data/`, reserves the GPU, bumps `--shm-size` (StreamingDataset uses `/dev/shm`), and runs Xvfb so the closed-loop eval gets a GL context. The instance is stateless: datasets/emulator are fetched at runtime (never baked) and checkpoints stream to R2 in the background (`hal/training/checkpoints.py`), with `--resume <run>` pulling them back. R2 client/creds are shared via `hal/r2.py` (one source for both `fetch` downloads and checkpoint uploads); checkpoints deliberately bypass the immutable, sha-pinned `Fixture`/`fetch` path.
 
 ## Principles
 
