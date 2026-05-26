@@ -167,6 +167,7 @@ class Session:
         dolphin_path: str | Path,
         slippi_port: int = 51441,
         step_timeout_seconds: float = 5.0,
+        start_timeout_seconds: float = 120.0,
         setup_gecko_codes: bool = True,
         frozen_stadium: bool = True,
         tmp_home_directory: bool = True,
@@ -180,6 +181,12 @@ class Session:
         self.dolphin_path = str(dolphin_path)
         self.slippi_port = slippi_port
         self.step_timeout_seconds = step_timeout_seconds
+        # Wall-clock budget for driving the menus to the first in-game frame.
+        # Menu frames stream fast under FFW, so step_timeout_seconds (a per-poll
+        # budget) never catches a menu that simply never reaches IN_GAME — a
+        # degenerate match or a menu-nav edge case would otherwise spin at 100%
+        # CPU forever. This caps the whole navigation and raises instead.
+        self.start_timeout_seconds = start_timeout_seconds
         # Block console.step until the controller pipe has been read.
         # Required for closed-loop control where the input punched for frame N
         # must land before frame N+1 is advanced; without it, model inputs can
@@ -369,17 +376,31 @@ class Session:
                 raise RuntimeError(f"failed to connect controller on port {port}")
             self._menu_helpers[port] = melee.MenuHelper()
 
-        # Drive menus until match goes live.
+        return self._navigate_to_live()
+
+    def _navigate_to_live(self) -> dict:
+        """Drive the menus until the match goes live, returning the first
+        in-game canonical frame.
+
+        Raises ``TimeoutError`` if ``start_timeout_seconds`` elapses without
+        reaching IN_GAME / SUDDEN_DEATH. Menu frames stream fast under FFW, so
+        the per-poll ``step_timeout_seconds`` can't catch a menu that never
+        goes live (each ``_step_blocking`` returns promptly); this wall-clock
+        cap turns that logical loop into a loud, clean failure that callers
+        (``drive_vec`` / ``run_match``) already log-and-continue on.
+        """
+        deadline = time.monotonic() + self.start_timeout_seconds
         nav_steps = 0
         while True:
             gamestate = self._step_blocking()
             if gamestate.menu_state in LIVE_MENU_STATES:
                 return gamestate.to_canonical_dict()
-            nav_steps += 1
-            if nav_steps % 2000 == 0:
-                logger.warning(
-                    f"start_match: {nav_steps} menu steps without entering LIVE (still on {gamestate.menu_state})"
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"start_match: did not reach IN_GAME within {self.start_timeout_seconds:.0f}s "
+                    f"(stuck on {gamestate.menu_state} after {nav_steps} menu steps)"
                 )
+            nav_steps += 1
             self._drive_menus(gamestate)
 
     def step(self, inputs: dict[int, ControllerInputs]) -> tuple[dict, bool]:

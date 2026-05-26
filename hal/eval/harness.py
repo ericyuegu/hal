@@ -41,6 +41,7 @@ class SessionConfig:
     blocking_input: bool = True
     replay_dir: str | Path | None = None
     step_timeout_seconds: float = 30.0
+    start_timeout_seconds: float = 120.0
     tmp_home_directory: bool = True
 
 
@@ -56,6 +57,7 @@ def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: 
         tmp_home_directory=session_cfg.tmp_home_directory,
         replay_dir=replay_dir,
         step_timeout_seconds=session_cfg.step_timeout_seconds,
+        start_timeout_seconds=session_cfg.start_timeout_seconds,
         use_exi_inputs=session_cfg.use_exi_inputs,
         enable_ffw=session_cfg.enable_ffw,
         emulation_speed=session_cfg.emulation_speed,
