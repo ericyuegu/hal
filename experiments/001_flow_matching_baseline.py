@@ -339,7 +339,7 @@ def val_loss(model: FlowMatchingPolicy, val_cache: list[TrainBatch]) -> float:
     each call). Toggles model.eval/train."""
     was_training = model.training
     model.eval()
-    gen = torch.Generator().manual_seed(0)
+    gen = torch.Generator(device=DEVICE).manual_seed(0)
     total = 0.0
     count = 0
     for batch in val_cache:

@@ -176,6 +176,7 @@ class Session:
         emulation_speed: float = 1.0,
         use_exi_inputs: bool = False,
         enable_ffw: bool = False,
+        polling_mode: bool = False,
     ) -> None:
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
@@ -217,6 +218,13 @@ class Session:
         self.emulation_speed = emulation_speed
         self.use_exi_inputs = use_exi_inputs
         self.enable_ffw = enable_ffw
+        # Non-blocking slippstream reads, so ``_step_blocking`` polls and its
+        # ``step_timeout_seconds`` deadline can actually fire. With the default
+        # (False) libmelee blocks in ``recv`` forever if Dolphin stops streaming
+        # frames (e.g. an agent that pauses the match), which would hang an
+        # unattended eval. Replay-style consumers (round-trip, MDS playback) keep
+        # False so frame delivery stays bit-for-bit and pays no poll spin.
+        self.polling_mode = polling_mode
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._menu_helpers: dict[int, melee.MenuHelper] = {}
@@ -237,7 +245,7 @@ class Session:
             path=self.dolphin_path,
             slippi_port=self.slippi_port,
             blocking_input=self.blocking_input,
-            polling_mode=False,
+            polling_mode=self.polling_mode,
             setup_gecko_codes=self.setup_gecko_codes,
             tmp_home_directory=self.tmp_home_directory,
             replay_dir=self.replay_dir,

@@ -47,6 +47,9 @@ class SessionConfig:
     step_timeout_seconds: float = 30.0
     start_timeout_seconds: float = 120.0
     tmp_home_directory: bool = True
+    # Eval sessions poll slippstream so a hung/paused match trips
+    # step_timeout_seconds instead of blocking forever (see Session.polling_mode).
+    polling_mode: bool = True
 
 
 def default_session_cfg(replay_dir: Path | None = None) -> SessionConfig:
@@ -83,6 +86,7 @@ def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: 
         use_exi_inputs=session_cfg.use_exi_inputs,
         enable_ffw=session_cfg.enable_ffw,
         emulation_speed=session_cfg.emulation_speed,
+        polling_mode=session_cfg.polling_mode,
     )
 
 
