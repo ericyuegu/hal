@@ -32,6 +32,28 @@ from hal.sim.vec import VecMatch
 SweepResult = list[tuple[melee.Stage, int, MatchSummary | None]]
 
 
+def vs_cpu_metrics(result: SweepResult) -> dict[str, float]:
+    """Reduce a ``sweep_vs_cpu`` grid to a flat metric dict for logging.
+
+    Assumes the ego model is on port 1 vs a CPU on port 2 (the ``sweep_vs_cpu``
+    default), and averages over every non-crashed match. ``crashed`` is the
+    fraction of matches whose Session failed; an all-crashed sweep reports only
+    ``{"crashed": 1.0}``.
+    """
+    summaries = [s for _, _, s in result if s is not None]
+    if not summaries:
+        return {"crashed": 1.0}
+    mean = lambda xs: sum(xs) / len(xs)  # noqa: E731
+    return {
+        "stocks_taken": mean([4 - s.p2_stocks_left for s in summaries]),
+        "stocks_lost": mean([4 - s.p1_stocks_left for s in summaries]),
+        "damage_dealt": mean([s.p2_max_pct for s in summaries]),
+        "damage_taken": mean([s.p1_max_pct for s in summaries]),
+        "frames": mean([s.frames for s in summaries]),
+        "crashed": (len(result) - len(summaries)) / len(result),
+    }
+
+
 def sweep_vs_cpu(
     policy_factory: Callable[[], BatchPolicy],
     *,

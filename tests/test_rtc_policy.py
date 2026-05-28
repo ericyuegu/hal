@@ -1,11 +1,12 @@
-"""Regression guard for the RTC policy's rolling-buffer alignment.
+"""Regression guard for the closed-loop policy's rolling-buffer alignment.
 
-experiments/001 builds its model context by pairing, at each position, a past
-gamestate with the ego action that *produced* it. If the rolling buffers ever
-drift out of lockstep, the model would see a frame-shifted observation at
+``RecedingHorizon`` builds its model context by pairing, at each position, a
+past gamestate with the ego action that *produced* it. If the rolling buffers
+ever drift out of lockstep, the model would see a frame-shifted observation at
 inference that it never saw in training. This pins the invariant.
 
-The experiment filename starts with a digit, so it's loaded by path.
+The policy lives in ``hal.training.closed_loop``; the experiment (loaded by path,
+since its filename starts with a digit) wires a model into it via ``make_policy``.
 """
 
 import importlib.util
@@ -76,7 +77,6 @@ def _build_policy():
         dim_feedforward=16,
         time_emb_dim=8,
         dropout=0.0,
-        ego_history_dropout_prob=0.0,
         L_ctx=4,
         L_chunk=4,
         latency_frames=0,
@@ -85,15 +85,7 @@ def _build_policy():
     torch.manual_seed(0)
     model = exp.FlowMatchingPolicy(cfg)
     model.eval()
-    policy = exp.FlowMatchingBatchPolicy(
-        model=model,
-        stats=_stats(),
-        L_ctx=cfg.L_ctx,
-        L_chunk=cfg.L_chunk,
-        n_lat=cfg.latency_frames,
-        n_flow_steps=cfg.n_flow_steps,
-        device="cpu",
-    )
+    policy = exp.make_policy(model, _stats(), cfg, device="cpu")
     return cfg, policy
 
 

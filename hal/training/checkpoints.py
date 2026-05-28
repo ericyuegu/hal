@@ -14,8 +14,10 @@ Checkpoints are mutable run *outputs* — unlike the immutable, sha-pinned
 import queue
 import threading
 from pathlib import Path
+from typing import Any
 from typing import Final
 
+import torch
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
@@ -70,6 +72,46 @@ class BackgroundUploader:
         self._thread.join()
         if self._failures:
             logger.warning(f"[ckpt] {self._failures} checkpoint upload(s) failed this run")
+
+
+def save_checkpoint(
+    path: Path,
+    *,
+    step: int,
+    model: torch.nn.Module,
+    opt: torch.optim.Optimizer,
+    sched: torch.optim.lr_scheduler.LRScheduler,
+    cfg: dict,
+    wandb_id: str | None,
+    uploader: BackgroundUploader | None = None,
+) -> None:
+    """Write a resumable checkpoint (model + optimizer + scheduler + config +
+    wandb id) and, if an uploader is given, enqueue it for R2 sync."""
+    torch.save(
+        {
+            "step": step,
+            "model": model.state_dict(),
+            "opt": opt.state_dict(),
+            "sched": sched.state_dict(),
+            "cfg": cfg,
+            "wandb_id": wandb_id,
+        },
+        path,
+    )
+    print(f"[ckpt] saved {path}", flush=True)
+    if uploader is not None:
+        uploader.upload(path)
+
+
+def load_for_resume(run_name: str, ckpt_dir: Path, *, device: str, name: str = "latest.pt") -> dict[str, Any] | None:
+    """Load the resume checkpoint for ``run_name``: prefer the local copy, else
+    pull it from R2. Returns the deserialized state dict, or ``None`` if no
+    checkpoint exists in either place (fresh run)."""
+    local = ckpt_dir / name
+    path = local if local.is_file() else download_latest(run_name, ckpt_dir, name=name)
+    if path is None:
+        return None
+    return torch.load(path, map_location=device, weights_only=False)
 
 
 def download_latest(run_name: str, dest_dir: Path, *, name: str = "latest.pt", prefix: str = "runs") -> Path | None:

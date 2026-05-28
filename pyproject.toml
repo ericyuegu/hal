@@ -22,6 +22,7 @@ dependencies = [
     "mosaicml-streaming>=0.11.0",
     "mypy-extensions",
     "numpy",
+    "nvidia-ml-py>=13.590.48",
     "nvitop",
     "pandas",
     "peppi-py",

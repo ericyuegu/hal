@@ -1,19 +1,29 @@
 """MDS dataloader primitives shared across experiments.
 
 Lives outside the experiment file so that forked / forkserver-spawned
-DataLoader workers can re-import ``WindowSampler`` and ``collate_windows``
+DataLoader workers can re-import ``WindowSampler`` and the collate path
 without re-running experiment-level module code. Keeping this file
-side-effect-free is what makes that work.
+side-effect-free is what makes that work — and is also why the per-feature
+``preprocess`` runs here in the worker (emitting a ready-to-use ``TrainBatch``)
+rather than on the training hot path.
 """
 
+import functools
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
+import torch
 from streaming import StreamingDataLoader
 from streaming import StreamingDataset
 from torch.utils.data import IterableDataset
 from torch.utils.data import get_worker_info
+
+from hal.data.stats import FeatureStats
+from hal.training.features import Context
+from hal.training.features import TrainBatch
+from hal.training.features import preprocess
+from hal.training.features import stack_actions
 
 
 def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.ndarray]:
@@ -97,14 +107,36 @@ class WindowSampler(IterableDataset):
 
 
 def collate_windows(batch: list[dict]) -> dict[str, np.ndarray]:
+    """Stack a list of ``[seq]`` per-sample windows into ``[B, seq]`` columns."""
     keys = batch[0].keys()
     return {k: np.stack([s[k] for s in batch]) for k in keys}
+
+
+def collate_train_batch(batch: list[dict], *, stats: dict[str, FeatureStats], L_ctx: int, n_lat: int) -> TrainBatch:
+    """Worker-side collate: stack → ``preprocess`` → split ``[ctx | bridge | chunk]``.
+
+    The window the sampler yields is laid out ``[ctx | bridge | chunk]`` over
+    ``seq = L_ctx + n_lat + L_chunk`` frames. Context features are the first
+    ``L_ctx`` frames; the bridge and target action chunks are sliced off the
+    stacked ego-action channels at ``[L_ctx : L_ctx+n_lat]`` and ``[L_ctx+n_lat :]``.
+    Returns a fully-tensorized ``TrainBatch`` so the training loop does no
+    reshaping — just ``.to(device)``.
+    """
+    stacked = collate_windows(batch)
+    ctx_pad = torch.from_numpy(stacked["ctx_pad"].astype(np.int64))
+    feats = preprocess(stacked, stats)
+    actions = stack_actions(feats)
+    context_features = {k: v[:, :L_ctx] for k, v in feats.items()}
+    bridge = actions[:, L_ctx : L_ctx + n_lat] if n_lat > 0 else None
+    target = actions[:, L_ctx + n_lat :]
+    return TrainBatch(Context(features=context_features, bridge=bridge, ctx_pad=ctx_pad), target=target)
 
 
 def make_loader(
     data_root: str,
     split: str,
     *,
+    stats: dict[str, FeatureStats],
     L_ctx: int,
     L_chunk: int,
     batch_size: int,
@@ -113,14 +145,16 @@ def make_loader(
     num_workers: int = 4,
     prefetch_factor: int = 4,
 ) -> StreamingDataLoader:
-    """Build the (StreamingDataset → WindowSampler → DataLoader) chain."""
+    """Build the (StreamingDataset → WindowSampler → DataLoader) chain. The
+    DataLoader yields ``TrainBatch`` (preprocessing runs in the workers)."""
     mds = StreamingDataset(local=str(Path(data_root) / split), batch_size=1, shuffle=(split == "train"))
     sampler = WindowSampler(mds, L_ctx, L_chunk, seed=seed, n_lat=n_lat)
+    collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx, n_lat=n_lat)
     return StreamingDataLoader(
         sampler,
         batch_size=batch_size,
         num_workers=num_workers,
-        collate_fn=collate_windows,
+        collate_fn=collate,
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
     )

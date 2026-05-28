@@ -19,6 +19,10 @@ from pathlib import Path
 
 from loguru import logger
 
+from hal.fixtures import DOLPHIN_EXIAI
+from hal.fixtures import ISO
+from hal.fixtures import ensure
+from hal.paths import EMULATOR_PATH
 from hal.sim.loop import drive
 from hal.sim.session import Matchup
 from hal.sim.session import Session
@@ -43,6 +47,24 @@ class SessionConfig:
     step_timeout_seconds: float = 30.0
     start_timeout_seconds: float = 120.0
     tmp_home_directory: bool = True
+
+
+def default_session_cfg(replay_dir: Path | None = None) -> SessionConfig:
+    """The standard headless eval Session: exi-ai Dolphin + fixture ISO, fast-
+    forward, blocking input, throwaway tmp home. ``replay_dir`` (when not None)
+    preserves the match .slps; else they die with the Session's tmp home."""
+    ensure(DOLPHIN_EXIAI)
+    return SessionConfig(
+        iso_path=ensure(ISO),
+        dolphin_path=EMULATOR_PATH,
+        use_exi_inputs=True,
+        enable_ffw=True,
+        emulation_speed=0.0,
+        blocking_input=True,
+        step_timeout_seconds=30.0,
+        tmp_home_directory=True,
+        replay_dir=str(replay_dir) if replay_dir is not None else None,
+    )
 
 
 def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None) -> Session:
