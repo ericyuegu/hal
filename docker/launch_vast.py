@@ -10,9 +10,9 @@ R2, logs in W&B), stop on failure (for inspection). See docker/on-start.sh.
     python docker/launch_vast.py --dry-run -- uv run experiments/001_flow_matching_baseline.py
     python docker/launch_vast.py --max-price 0.80 -- uv run experiments/001_flow_matching_baseline.py --cfg.max-steps 100000
 
-Requires host env: AWS_* (+ AWS_BUCKET=hal), WANDB_API_KEY, and GITHUB_TOKEN
-(scopes: repo + read:packages — used to pull the private ghcr image and clone
-the private repo on the box).
+Requires host env: AWS_* (+ AWS_BUCKET=hal) and WANDB_API_KEY. GITHUB_TOKEN is
+optional — only needed if the ghcr image is private (read:packages to pull it);
+the repo is public, so the box clones it anonymously.
 """
 
 import base64
@@ -47,8 +47,8 @@ FILTERS = (
 )
 ORDER = "dlperf_usd-"  # sort by DLPerf/$/hr, descending
 
-# R2 + W&B creds forwarded to the box. GITHUB_TOKEN is handled separately (it also
-# logs in to ghcr) and the per-run vars (SHA, command) are added at create time.
+# R2 + W&B creds forwarded to the box. The optional GITHUB_TOKEN (ghcr login) and
+# the per-run vars (SHA, command) are added at create time.
 CRED_VARS = ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET", "WANDB_API_KEY")
 
 
@@ -80,11 +80,12 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def preflight() -> tuple[str, str, dict[str, str]]:
+def preflight() -> tuple[str, str | None, dict[str, str]]:
     """Ensure the run is reproducible and credentialed before spending money.
 
-    Returns (sha, github_token, cred_env). Exits with a clear message on a dirty
-    tree, an unpushed SHA we can't push, or any missing credential.
+    Returns (sha, github_token_or_none, cred_env). Exits with a clear message on a
+    dirty tree, an unpushed SHA we can't push, or a missing R2/W&B credential. The
+    GitHub token is optional (only used to pull a private ghcr image).
     """
     if _git("status", "--porcelain"):
         raise SystemExit("working tree is dirty — commit before launching (the box runs the pushed SHA).")
@@ -94,12 +95,10 @@ def preflight() -> tuple[str, str, dict[str, str]]:
         logger.info(f"{sha[:10]} not on origin; pushing {branch}")
         subprocess.run(["git", "push", "origin", branch], check=True)
 
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     missing = [v for v in CRED_VARS if not os.environ.get(v)]
-    if not token:
-        missing.append("GITHUB_TOKEN (or GH_TOKEN)")
     if missing:
         raise SystemExit(f"missing required host env vars: {missing}")
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     return sha, token, {v: os.environ[v] for v in CRED_VARS}
 
 
@@ -113,13 +112,15 @@ def queue(vast: VastAI, *, max_price: float, limit: int, poll_interval_s: int) -
         time.sleep(poll_interval_s)
 
 
-def _instance_env(creds: dict[str, str], *, token: str, sha: str, train_cmd: str) -> dict[str, str]:
-    return {
+def _instance_env(creds: dict[str, str], *, token: str | None, sha: str, train_cmd: str) -> dict[str, str]:
+    env = {
         **creds,
-        "GITHUB_TOKEN": token,
         "HAL_GIT_SHA": sha,
         "HAL_TRAIN_CMD_B64": base64.b64encode(train_cmd.encode()).decode(),
     }
+    if token:  # only for a private ghcr image / private repo; public repo clones anonymously
+        env["GITHUB_TOKEN"] = token
+    return env
 
 
 def launch(
@@ -129,18 +130,19 @@ def launch(
     image: str,
     disk: int,
     env: dict[str, str],
-    token: str,
+    token: str | None,
     timeout_s: int,
 ) -> int:
     """Rent the offer, poll to `running`, destroy on any failure-to-launch."""
+    login = {"login": f"-u {GHCR_USER} -p {token} ghcr.io"} if token else {}  # ghcr auth only if image is private
     inst = vast.create_instance(
         id=offer["id"],
         image=image,
         disk=disk,
         env=env,
-        login=f"-u {GHCR_USER} -p {token} ghcr.io",  # pull the private ghcr image
         onstart_cmd="bash /usr/local/bin/on-start.sh",
         runtype="ssh_proxy",  # proxy SSH; avoids needing direct_port_count in the bar
+        **login,
     )
     iid = inst["new_contract"]
     logger.info(f"created instance {iid} on offer {offer['id']} ({offer['gpu_name']}); polling to running")
@@ -199,9 +201,8 @@ def main(args: Args) -> None:
         safe_env = {
             k: (v if k in {"HAL_GIT_SHA", "AWS_BUCKET", "AWS_ENDPOINT_URL"} else "***") for k, v in env.items()
         }
-        logger.info(
-            f"[dry-run] image={args.image} disk={args.disk}GB runtype=ssh_proxy login='-u {GHCR_USER} -p *** ghcr.io'"
-        )
+        login = f"'-u {GHCR_USER} -p *** ghcr.io'" if token else "none (public image)"
+        logger.info(f"[dry-run] image={args.image} disk={args.disk}GB runtype=ssh_proxy login={login}")
         logger.info(f"[dry-run] env={safe_env}")
         logger.info("[dry-run] onstart='bash /usr/local/bin/on-start.sh'")
         logger.info(f"[dry-run] HAL_GIT_SHA={sha}")

@@ -9,8 +9,8 @@
 # Driven entirely by env injected at create time:
 #   HAL_GIT_SHA          commit to check out
 #   HAL_TRAIN_CMD_B64    base64 of the training command (base64 survives the env string)
-#   GITHUB_TOKEN         clones the private repo (also used as the ghcr image login)
 #   AWS_*, WANDB_API_KEY  R2 + W&B credentials
+#   GITHUB_TOKEN         optional; only set when the repo/image is private
 # vast injects CONTAINER_ID + CONTAINER_API_KEY (a per-instance key) so the box
 # can stop/destroy itself.
 set -euo pipefail
@@ -30,7 +30,9 @@ env | grep -E '^(AWS_|WANDB_|GITHUB_TOKEN)=' >> /etc/environment
 # empty /opt/hal; uv sync then installs the pure-Python hal into the prebuilt venv
 # (fast, no compiler — a uv.lock mismatch would fail loud here and trip the trap).
 log "cloning hal @ ${HAL_GIT_SHA}"
-git clone --quiet "https://${GITHUB_TOKEN}@github.com/ericyuegu/hal.git" /opt/hal
+# Public repo clones anonymously; the ${GITHUB_TOKEN:+…@} prefix injects auth only
+# if a token was set (private repo/image). Safe under `set -u`.
+git clone --quiet "https://${GITHUB_TOKEN:+${GITHUB_TOKEN}@}github.com/ericyuegu/hal.git" /opt/hal
 cd /opt/hal
 git checkout --quiet "$HAL_GIT_SHA"
 uv sync --locked
