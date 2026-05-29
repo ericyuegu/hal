@@ -2,9 +2,10 @@
 # reservation, /dev/shm bump (StreamingDataset uses it), and R2 creds so
 # `docker compose -f docker/compose.yaml run --rm hal <cmd>` mirrors vast.ai.
 # Like vast, the container is stateless: data is fetched from R2 and checkpoints
-# are pushed back to R2. The one bind mount is a local cache of the already-
-# fetched fixtures so our dev box doesn't re-download the 1.4 GB ISO — it's a
-# convenience, not a persistence strategy.
+# are pushed back to R2. The image carries no code, so the repo is bind-mounted
+# at /opt/hal — local runs exercise the live working tree (the first `uv run`
+# installs `hal` into the baked /opt/venv). The host's data/ rides in at
+# /opt/hal/data, acting as a fixture cache so we don't re-fetch the 1.4 GB ISO.
 services:
   hal:
     build:
@@ -24,7 +25,7 @@ services:
       - WANDB_API_KEY
       - WANDB_MODE=offline            # smoke tests log offline
     volumes:
-      - ../data:/opt/hal/data         # local fixture cache (avoids re-fetching the 1.4 GB ISO)
+      - ..:/opt/hal                   # live working tree (image ships no code); data/ rides in as the fixture cache
     deploy:
       resources:
         reservations:
