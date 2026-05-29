@@ -409,14 +409,31 @@ class Session:
         """
         deadline = time.monotonic() + self.start_timeout_seconds
         nav_steps = 0
+        # DEBUG: track the autostart port's stage-select cursor range to tell an
+        # overshoot/oscillation stall apart from an unreachable-target stall.
+        autostart_port = min(p.port for p in self._matchup.players)
+        sss_x: list[float] = []
+        sss_y: list[float] = []
         while True:
             gamestate = self._step_blocking()
             if gamestate.menu_state in LIVE_MENU_STATES:
                 return gamestate.to_canonical_dict()
+            if gamestate.menu_state == melee.Menu.STAGE_SELECT:
+                cur = getattr(gamestate.players.get(autostart_port), "cursor", None)
+                if cur is not None:
+                    sss_x.append(cur.x)
+                    sss_y.append(cur.y)
             if time.monotonic() > deadline:
+                rng = (
+                    f"; SSS cursor x∈[{min(sss_x):.1f},{max(sss_x):.1f}] "
+                    f"y∈[{min(sss_y):.1f},{max(sss_y):.1f}] over {len(sss_x)} frames"
+                    if sss_x
+                    else ""
+                )
                 raise TimeoutError(
                     f"start_match: did not reach IN_GAME within {self.start_timeout_seconds:.0f}s "
-                    f"(stuck on {gamestate.menu_state} after {nav_steps} menu steps)"
+                    f"(stuck on {gamestate.menu_state} after {nav_steps} menu steps; "
+                    f"stage={self._matchup.stage.name}{rng})"
                 )
             nav_steps += 1
             self._drive_menus(gamestate)

@@ -235,7 +235,7 @@ def build_dataset(n_copies: int = 64) -> Path:
     # predicates), materialize everything into the train split so stats.json
     # (computed over train only) is populated.
     #
-    # WindowSampler yields ONE random window per replay per epoch, so a single
+    # WindowDataset yields ONE random window per replay per epoch, so a single
     # replay starves batches down to ~num_workers samples. We replicate the one
     # finalized clip into n_copies distinct-named files: replay_uuid hashes the
     # PATH (not content), so each copy is its own train row, and the loader can

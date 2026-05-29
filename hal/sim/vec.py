@@ -17,6 +17,7 @@ Torch-free, like the rest of ``hal/sim``: the model lives behind ``BatchPolicy``
 in the experiment.
 """
 
+import time
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +72,7 @@ def drive_vec(
     policy: BatchPolicy,
     *,
     max_frames: int,
+    progress_every: int = 600,
 ) -> list[Trajectory | None]:
     """Drive ``matches`` concurrently to completion; ``sessions[i]`` runs
     ``matches[i]``.
@@ -79,6 +81,9 @@ def drive_vec(
     ``None`` if that Session failed to start or crashed mid-rollout — a single
     bad emulator never aborts the others (matching ``run_match``'s
     log-and-continue contract).
+
+    ``progress_every`` logs a heartbeat (frame / live count / steps-per-s) every
+    that-many frames so a long stepping loop shows liveness; 0 disables it.
     """
     if len(sessions) != len(matches):
         raise ValueError(f"got {len(sessions)} sessions for {len(matches)} matches")
@@ -109,10 +114,16 @@ def drive_vec(
                 crashed[i] = True
 
         done = [not started[i] for i in range(n)]
+        n_live0 = n - sum(done)
+        logger.info(f"drive_vec: stepping {n_live0}/{n} matches up to {max_frames} frames")
+        t0 = time.monotonic()
         for t in range(max_frames - 1):
             live = [i for i in range(n) if not done[i]]
             if not live:
                 break
+            if progress_every and t > 0 and t % progress_every == 0:
+                elapsed = time.monotonic() - t0
+                logger.info(f"drive_vec: frame {t}/{max_frames} | live {len(live)}/{n} | {t / elapsed:.0f} steps/s")
             obs = {Slot(i, p): captured[i][-1] for i in live for p in matches[i].model_ports}
             inputs = policy(t, obs)
             step_futs = {
@@ -129,6 +140,7 @@ def drive_vec(
                 captured[i].append(frame)
                 if not in_game:
                     done[i] = True
+                    logger.info(f"drive_vec: match {i} finished in-game at frame {t}")
 
     trajectories: list[Trajectory | None] = []
     for i, m in enumerate(matches):

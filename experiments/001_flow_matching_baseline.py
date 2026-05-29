@@ -63,6 +63,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
+from hal import streams
 from hal.data.stats import FeatureStats
 from hal.eval.cross_stage import sweep_self_play
 from hal.eval.cross_stage import sweep_vs_cpu
@@ -104,7 +105,7 @@ class TrainConfig:
     L_ctx: int = 256
     L_chunk: int = 16
     # inference
-    n_flow_steps: int = 8
+    n_flow_steps: int = 40
     # optimization
     batch_size: int = 32  # micro-batch run on the GPU per forward
     grad_accum_steps: int = 1  # optimizer step sees batch_size * grad_accum_steps samples
@@ -286,26 +287,50 @@ def flow_loss(model: FlowMatchingPolicy, batch: TrainBatch, *, gen: torch.Genera
     return F.mse_loss(model(batch.context, a_t, t), v_target)
 
 
+@torch.no_grad()
+def integrate_chunk(
+    model: FlowMatchingPolicy,
+    ctx: Context,
+    *,
+    n_steps: int,
+    gen: torch.Generator | None = None,
+    device: str = DEVICE,
+) -> Float[Tensor, "B L_chunk d_action"]:
+    """Euler-integrate one action chunk from z ~ N(0, I) for ``n_steps``.
+
+    The single inference integrator: closed-loop play, the val reconstruction
+    metric, and ``--diag`` all call this so there is one integration path. The
+    context is encoded once; only the chunk path re-runs each step. Pass ``gen``
+    for reproducible noise (fixed val metric / histograms); leave ``None`` for an
+    independent draw (closed-loop, cross-sample spread)."""
+    prefix, key_padding_mask = model.encode_context(ctx)
+    a = torch.randn(ctx.batch, model.L_chunk, A_DIM, device=device, generator=gen)
+    dt = 1.0 / n_steps
+    for k in range(n_steps):
+        t = torch.full((ctx.batch,), k * dt, device=device)
+        a = a + dt * model.velocity(prefix, key_padding_mask, a, t)
+    return a
+
+
 def make_policy(
-    model: FlowMatchingPolicy, stats: dict[str, FeatureStats], cfg: TrainConfig, *, device: str = DEVICE
+    model: FlowMatchingPolicy,
+    stats: dict[str, FeatureStats],
+    cfg: TrainConfig,
+    *,
+    device: str = DEVICE,
+    n_flow_steps: int | None = None,
 ) -> RecedingHorizon:
     """Fresh closed-loop policy for one eval wave (rolling state must not leak).
 
-    ``predict_chunk`` is the inference integrator — Euler from z ~ N(0, I) for
-    ``n_flow_steps`` steps. Open-loop (no committed prefix): the driver replans
-    every ``L_chunk``. The context is encoded once per replan; only the chunk path
-    re-runs each step. This is the seam to swap for adjustable test-time compute."""
+    Open-loop (no committed prefix): the driver replans every ``L_chunk``. Pass
+    ``n_flow_steps`` to override ``cfg.n_flow_steps`` at eval time (test-time
+    compute sweep) without editing the config or retraining."""
+    n_steps = n_flow_steps if n_flow_steps is not None else cfg.n_flow_steps
 
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         assert committed is None, "open-loop baseline does not condition on a committed prefix"
-        prefix, key_padding_mask = model.encode_context(ctx)
-        a = torch.randn(ctx.batch, cfg.L_chunk, A_DIM, device=device)
-        dt = 1.0 / cfg.n_flow_steps
-        for k in range(cfg.n_flow_steps):
-            t = torch.full((ctx.batch,), k * dt, device=device)
-            a = a + dt * model.velocity(prefix, key_padding_mask, a, t)
-        return a.cpu().numpy()
+        return integrate_chunk(model, ctx, n_steps=n_steps, device=device).cpu().numpy()
 
     return RecedingHorizon(
         predict_chunk=predict_chunk,
@@ -350,6 +375,47 @@ def val_loss(model: FlowMatchingPolicy, val_cache: list[TrainBatch]) -> float:
     if was_training:
         model.train()
     return total / count
+
+
+# Channel split inside the 15-vec: [0:6] sticks+triggers (continuous), [6:15] buttons {0,1}.
+_N_CONT = 6
+
+
+@torch.no_grad()
+def recon_metrics(model: FlowMatchingPolicy, val_cache: list[TrainBatch], *, n_steps: int) -> dict[str, float]:
+    """Sample-space reconstruction on cached val batches: integrate a chunk from
+    noise (FIXED seed) and score it against the ground-truth chunk. Velocity MSE
+    (``val_loss``) is a weak proxy for sample quality — this tracks what the
+    closed-loop driver actually executes. Buttons → accuracy + F1 at the 0.5
+    decode threshold; sticks/triggers → MAE."""
+    was_training = model.training
+    model.eval()
+    gen = torch.Generator(device=DEVICE).manual_seed(0)
+    tp = fp = fn = btn_correct = btn_total = 0
+    cont_abs_err = 0.0
+    cont_count = 0
+    for batch in val_cache:
+        pred = integrate_chunk(model, batch.context, n_steps=n_steps, gen=gen)
+        tgt = batch.target
+        pb = pred[..., _N_CONT:] > 0.5
+        tb = tgt[..., _N_CONT:] > 0.5
+        tp += int((pb & tb).sum())
+        fp += int((pb & ~tb).sum())
+        fn += int((~pb & tb).sum())
+        btn_correct += int((pb == tb).sum())
+        btn_total += pb.numel()
+        cont_abs_err += float((pred[..., :_N_CONT] - tgt[..., :_N_CONT]).abs().sum())
+        cont_count += tgt[..., :_N_CONT].numel()
+    if was_training:
+        model.train()
+    prec = tp / (tp + fp) if tp + fp else 0.0
+    rec = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
+    return {
+        "recon_button_acc": btn_correct / btn_total,
+        "recon_button_f1": f1,
+        "recon_cont_mae": cont_abs_err / cont_count,
+    }
 
 
 def eval_vs_cpu(
@@ -403,6 +469,7 @@ def train(
     model = FlowMatchingPolicy(cfg).to(DEVICE)
     loader_kwargs = dict(
         data_root=cfg.data_root,
+        remote=streams.remote_for_local(cfg.data_root),
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=cfg.L_chunk,
@@ -485,8 +552,13 @@ def train(
             )
         if cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0:
             vl = val_loss(model, val_cache)
-            wandb.log({"val/loss": vl}, step=step)
-            print(f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: val_loss {vl:.4f}", flush=True)
+            rm = recon_metrics(model, val_cache, n_steps=cfg.n_flow_steps)
+            wandb.log({"val/loss": vl, **{f"val/{k}": v for k, v in rm.items()}}, step=step)
+            print(
+                f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: val_loss {vl:.4f} "
+                f"recon_btn_f1 {rm['recon_button_f1']:.3f} recon_cont_mae {rm['recon_cont_mae']:.4f}",
+                flush=True,
+            )
         if cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0:
             save_checkpoint(
                 ckpt_dir / f"step_{step:06d}.pt",
@@ -503,8 +575,9 @@ def train(
             print(f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: closed_loop {metrics}", flush=True)
 
     vl_final = val_loss(model, val_cache)
-    wandb.log({"val/loss": vl_final}, step=cfg.max_steps)
-    print(f"[final] val_loss {vl_final:.4f}", flush=True)
+    rm_final = recon_metrics(model, val_cache, n_steps=cfg.n_flow_steps)
+    wandb.log({"val/loss": vl_final, **{f"val/{k}": v for k, v in rm_final.items()}}, step=cfg.max_steps)
+    print(f"[final] val_loss {vl_final:.4f} recon {rm_final}", flush=True)
     metrics_final = eval_vs_cpu(model, stats, cfg, max_frames=cfg.eval_max_frames, replay_dir=replay_dir)
     wandb.log({f"eval/{k}": v for k, v in metrics_final.items()}, step=cfg.max_steps)
     print(f"[final] closed_loop {metrics_final}", flush=True)
@@ -523,28 +596,109 @@ def train(
 
 
 # %%
-def eval_ckpt(ckpt_path: str) -> None:
-    """Load a checkpoint, sweep stages vs CPU + self-play, print summaries."""
-    import melee
-
-    from hal.policy import INCLUDED_STAGES
-
+def _load_ckpt(ckpt_path: str) -> tuple[FlowMatchingPolicy, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     cfg = TrainConfig(**state["cfg"])
     model = FlowMatchingPolicy(cfg).to(DEVICE)
     model.load_state_dict(state["model"])
     model.eval()
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
+    return model, cfg, stats, state
+
+
+def diagnose(ckpt_path: str, *, n_batches: int = 16, k_samples: int = 8) -> None:
+    """Offline (no Dolphin) flow diagnostics for an erratic/low-quality policy.
+
+    Three probes, all on held-out val chunks:
+      1. reconstruction sweep — ``recon_metrics`` over ``n_flow_steps ∈ {8,32,64}``
+         (does more integration crisp up the decoded actions?);
+      2. raw-output histograms — pre-threshold 15-dim outputs vs ground truth,
+         saved as a PNG next to the checkpoint (are buttons piled at ~0.5?);
+      3. cross-sample spread — per-channel std across ``k_samples`` independent
+         integrations of the SAME contexts (sampling variance vs multimodality)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    model, cfg, stats, state = _load_ckpt(ckpt_path)
+    print(f"[diag] loaded {ckpt_path}  step={state['step']}  device={DEVICE}", flush=True)
+    loader = make_loader(
+        split=cfg.val_split,
+        num_workers=0,
+        data_root=cfg.data_root,
+        stats=stats,
+        L_ctx=cfg.L_ctx,
+        L_chunk=cfg.L_chunk,
+        batch_size=cfg.batch_size,
+        seed=cfg.seed,
+    )
+    val_cache = [b.to(DEVICE) for b in itertools.islice(loader, n_batches)]
+    if not val_cache:
+        raise RuntimeError("val loader yielded zero batches")
+    out_dir = Path(ckpt_path).resolve().parent
+
+    print("\n[diag] reconstruction sweep over n_flow_steps", flush=True)
+    print(f"  {'steps':>6} {'btn_acc':>8} {'btn_f1':>8} {'cont_mae':>9}", flush=True)
+    for n in (8, 32, 64):
+        m = recon_metrics(model, val_cache, n_steps=n)
+        print(
+            f"  {n:>6} {m['recon_button_acc']:>8.3f} {m['recon_button_f1']:>8.3f} {m['recon_cont_mae']:>9.4f}",
+            flush=True,
+        )
+
+    gen = torch.Generator(device=DEVICE).manual_seed(0)
+    pred = torch.cat(
+        [
+            integrate_chunk(model, b.context, n_steps=cfg.n_flow_steps, gen=gen).reshape(-1, A_DIM).cpu()
+            for b in val_cache
+        ]
+    ).numpy()
+    tgt = torch.cat([b.target.reshape(-1, A_DIM).cpu() for b in val_cache]).numpy()
+    fig, axes = plt.subplots(3, 5, figsize=(20, 10))
+    for i, (ax, ch) in enumerate(zip(axes.ravel(), ACTION_CHANNELS)):
+        ax.hist(tgt[:, i], bins=60, alpha=0.5, density=True, label="gt")
+        ax.hist(pred[:, i], bins=60, alpha=0.5, density=True, label="pred")
+        if ch.startswith("button_") or "trigger" in ch:
+            ax.axvline(0.5, color="k", lw=0.6)
+        ax.set_title(ch, fontsize=9)
+        ax.legend(fontsize=7)
+    fig.suptitle(f"{Path(ckpt_path).name}  step={state['step']}  n_flow_steps={cfg.n_flow_steps}")
+    fig.tight_layout()
+    hist_path = out_dir / "diag_action_hist.png"
+    fig.savefig(hist_path, dpi=100)
+    plt.close(fig)
+    print(f"\n[diag] wrote raw-output histograms → {hist_path}", flush=True)
+
+    ctx0 = val_cache[0].context
+    samples = torch.stack([integrate_chunk(model, ctx0, n_steps=cfg.n_flow_steps) for _ in range(k_samples)])
+    spread = samples.std(dim=0).mean(dim=(0, 1)).cpu().numpy()  # [A_DIM]
+    print(f"\n[diag] cross-sample std (K={k_samples}, n_steps={cfg.n_flow_steps}):", flush=True)
+    for ch, s in zip(ACTION_CHANNELS, spread):
+        print(f"  {ch:24s} {s:.4f}", flush=True)
+
+
+# %%
+def eval_ckpt(ckpt_path: str, *, n_flow_steps: int | None = None) -> None:
+    """Load a checkpoint, sweep stages vs CPU + self-play, print summaries.
+
+    ``n_flow_steps`` overrides the trained ``cfg.n_flow_steps`` for this eval only
+    (test-time compute sweep)."""
+    import melee
+
+    from hal.policy import INCLUDED_STAGES
+
+    model, cfg, stats, state = _load_ckpt(ckpt_path)
     print(f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}", flush=True)
 
     replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
     replay_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[eval] writing replays to {replay_dir}", flush=True)
+    print(f"[eval] writing replays to {replay_dir}  (n_flow_steps={n_flow_steps or cfg.n_flow_steps})", flush=True)
     session_cfg = default_session_cfg(replay_dir)
     stages = tuple(s for s in INCLUDED_STAGES if s is not melee.Stage.FOUNTAIN_OF_DREAMS)
 
     def policy_factory() -> RecedingHorizon:
-        return make_policy(model, stats, cfg)
+        return make_policy(model, stats, cfg, n_flow_steps=n_flow_steps)
 
     print("\n[eval] ============== vs-cpu ==============", flush=True)
     vs_cpu = sweep_vs_cpu(
@@ -578,14 +732,19 @@ class Args:
     e.g. ``--cfg.batch-size 128 --cfg.max-steps 100000``."""
 
     cfg: TrainConfig = field(default_factory=TrainConfig)
-    eval: str | None = None  # ckpt path; if set, eval instead of train
+    eval: str | None = None  # ckpt path; if set, closed-loop eval instead of train
+    diag: str | None = None  # ckpt path; offline flow diagnostics (no Dolphin), then exit
+    eval_flow_steps: int | None = None  # override cfg.n_flow_steps for --eval (test-time compute sweep)
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
 
 
 def main(args: Args) -> None:
+    if args.diag is not None:
+        diagnose(args.diag)
+        return
     if args.eval is not None:
-        eval_ckpt(args.eval)
+        eval_ckpt(args.eval, n_flow_steps=args.eval_flow_steps)
         return
     if args.resume is not None:
         state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)

@@ -1,7 +1,7 @@
 """MDS dataloader primitives shared across experiments.
 
 Lives outside the experiment file so that forked / forkserver-spawned
-DataLoader workers can re-import ``WindowSampler`` and the collate path
+DataLoader workers can re-import ``WindowDataset`` and the collate path
 without re-running experiment-level module code. Keeping this file
 side-effect-free is what makes that work — and is also why the per-feature
 ``preprocess`` runs here in the worker (emitting a ready-to-use ``TrainBatch``)
@@ -40,7 +40,7 @@ def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.
     return rel
 
 
-class WindowSampler(IterableDataset):
+class WindowDataset(IterableDataset):
     """Wrap a StreamingDataset: pick a random ego port and a length
     ``L_ctx + L_chunk`` window from each replay, laid out as ``[ctx | chunk]``.
     Relabel p1/p2 → ego/opp before yielding.
@@ -142,20 +142,30 @@ def make_loader(
     L_chunk: int,
     batch_size: int,
     seed: int,
+    remote: str | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 4,
 ) -> DataLoader:
-    """Build the (StreamingDataset → WindowSampler → DataLoader) chain. The
+    """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` (preprocessing runs in the workers).
+
+    ``remote`` is the dataset's R2 root URI; when set, StreamingDataset pulls the
+    split's shards on demand into the ``data_root`` cache (cloud training). When
+    None, ``data_root`` must already hold the shards (local dev/overfit).
 
     A plain ``DataLoader`` rather than ``StreamingDataLoader``: the latter's
     mid-epoch resumption only engages when its dataset *is* a StreamingDataset,
-    but here that dataset is wrapped by ``WindowSampler``, so the wrapper's only
+    but here that dataset is wrapped by ``WindowDataset``, so the wrapper's only
     live behavior would be a per-batch ``len(batch[0])`` sample count — which a
     ``TrainBatch`` (not dict/Tensor) can't satisfy. StreamingDataset still owns
     sharding/shuffle; it's iterated inside the sampler."""
-    mds = StreamingDataset(local=str(Path(data_root) / split), batch_size=1, shuffle=(split == "train"))
-    sampler = WindowSampler(mds, L_ctx, L_chunk, seed=seed)
+    mds = StreamingDataset(
+        remote=f"{remote}/{split}" if remote else None,
+        local=str(Path(data_root) / split),
+        batch_size=1,
+        shuffle=(split == "train"),
+    )
+    sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed)
     collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
     return DataLoader(
         sampler,
