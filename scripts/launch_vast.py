@@ -69,12 +69,12 @@ REQUIRED_ACCOUNT_VARS = (
 )
 
 
-def build_query(max_price: float) -> str:
-    return " ".join((*FILTERS, f"dph_total<{max_price}"))
+def build_query(max_price: float, disk: int) -> str:
+    return " ".join((*FILTERS, f"disk_space>={disk}", f"dph_total<{max_price}"))
 
 
-def search(vast: VastAI, *, max_price: float, limit: int) -> list[dict]:
-    return vast.search_offers(query=build_query(max_price), order=ORDER, limit=limit)
+def search(vast: VastAI, *, max_price: float, limit: int, disk: int) -> list[dict]:
+    return vast.search_offers(query=build_query(max_price, disk), order=ORDER, limit=limit)
 
 
 def print_offers(offers: list[dict]) -> None:
@@ -137,10 +137,10 @@ def preflight(vast: VastAI) -> tuple[str, str | None]:
     return sha, token
 
 
-def queue(vast: VastAI, *, max_price: float, limit: int, poll_interval_s: int) -> list[dict]:
+def queue(vast: VastAI, *, max_price: float, limit: int, disk: int, poll_interval_s: int) -> list[dict]:
     """Poll the market until at least one offer clears the bar; return them ranked."""
     while True:
-        offers = search(vast, max_price=max_price, limit=limit)
+        offers = search(vast, max_price=max_price, limit=limit, disk=disk)
         if offers:
             return offers
         logger.info(f"no offer <= ${max_price:.2f}/hr clears the bar; retrying in {poll_interval_s}s")
@@ -220,8 +220,10 @@ class Args:
     """Hard $/hr ceiling — the impatience knob. Lower waits longer for a cheaper box."""
     image: str = "ghcr.io/ericyuegu/hal:cuda13"
     """Image vast pulls (public ghcr; GITHUB_TOKEN only if you make it private)."""
-    disk: int = 60
-    """Container disk in GB (fixed at create; dies with the instance). ~18 GB image + ISO + cache."""
+    disk: int = 200
+    """Container disk in GB (fixed at create; dies with the instance). Sized for the image
+    + ISO + the streamed shard cache: StreamingDataset keeps every downloaded shard (no
+    cache_limit), and the prod MDS is ~20 GB. Offers are filtered to disk_space >= this."""
     limit: int = 10
     """How many offers to fetch/print."""
     poll_interval_s: int = 30
@@ -238,7 +240,7 @@ def main(args: Args) -> None:
     vast = VastAI()
 
     if not args.cmd:
-        print_offers(search(vast, max_price=args.max_price, limit=args.limit))
+        print_offers(search(vast, max_price=args.max_price, limit=args.limit, disk=args.disk))
         logger.info("search-only (pass a training command after `--` to launch). Nothing rented.")
         return
 
@@ -249,7 +251,7 @@ def main(args: Args) -> None:
         env["HAL_KEEP_ALIVE"] = "1"
 
     if args.dry_run:
-        offers = search(vast, max_price=args.max_price, limit=args.limit)
+        offers = search(vast, max_price=args.max_price, limit=args.limit, disk=args.disk)
         print_offers(offers)
         login = f"'-u {GHCR_USER} -p *** ghcr.io'" if token else "none (public image)"
         logger.info(f"[dry-run] image={args.image} disk={args.disk}GB runtype=ssh_proxy login={login}")
@@ -259,7 +261,9 @@ def main(args: Args) -> None:
         logger.info(f"[dry-run] train cmd: {train_cmd}")
         return
 
-    offers = queue(vast, max_price=args.max_price, limit=args.limit, poll_interval_s=args.poll_interval_s)
+    offers = queue(
+        vast, max_price=args.max_price, limit=args.limit, disk=args.disk, poll_interval_s=args.poll_interval_s
+    )
     print_offers(offers)
     offer = offers[0]
     iid = launch(
