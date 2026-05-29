@@ -67,6 +67,10 @@ env | grep -E '^(AWS_|WANDB_|GITHUB_TOKEN)=' >> /etc/environment || true
 # sync then installs the pure-Python hal into the prebuilt venv (fast, no compiler —
 # a uv.lock mismatch would fail loud here and trip the trap).
 log "cloning hal @ ${HAL_GIT_SHA}"
+# Step out of /opt/hal before deleting it: the onstart shell can inherit /opt/hal as
+# its cwd, and `rm -rf` on the cwd makes the next git command die with "Unable to read
+# current working directory". Don't rely on the image WORKDIR being a safe value.
+cd /
 rm -rf /opt/hal
 # Public repo clones anonymously; the ${GITHUB_TOKEN:+…@} prefix injects auth only
 # if a token was set (private repo/image). Safe under `set -u`.

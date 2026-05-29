@@ -67,8 +67,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libglib2.0-0t64 libgdk-pixbuf-2.0-0 libpangocairo-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# /opt/hal is left empty: code is cloned (vast) or bind-mounted (compose) at runtime.
-WORKDIR /opt/hal
+# Code lands at /opt/hal at runtime (vast clones it; compose bind-mounts it), so the
+# image neither ships it nor WORKDIRs into it: on-start.sh rm+clones /opt/hal, and a
+# cwd of /opt/hal would be the dir it deletes (compose sets its own working_dir).
+WORKDIR /
 
 # The venv references the managed interpreter by absolute path, so copy both. No
 # code copied — only the environment.
