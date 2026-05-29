@@ -25,7 +25,7 @@ Tensor-dim names (jaxtyping annotations + docstrings):
     L_chunk     = predicted chunk length     (cfg.L_chunk)
     P           = context prefix length       (= L_ctx)
     d_model     = hidden dim                 (cfg.d_model)
-    d_action    = action vec dim (15)        (A_DIM)
+    d_action    = action vec dim (14)        (A_DIM)
     d_time      = time-embedding dim         (cfg.time_emb_dim)
 
 Run:

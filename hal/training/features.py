@@ -33,7 +33,7 @@ from hal.training.stats import consolidate_key
 from hal.wire import BUTTON_BITS
 from hal.wire import mask_value
 
-A_DIM = 15  # 4 sticks + 2 triggers + 9 buttons
+A_DIM = 14  # 4 sticks + 2 triggers + 8 buttons (START excluded — see ACTION_CHANNELS)
 
 # Continuous gamestate features (normalized via FeatureStats). Sticks, triggers,
 # buttons and categoricals are routed separately below.
@@ -56,10 +56,14 @@ CAT_FEATURES: dict[str, tuple[int, int]] = {
     "airborne": (2, 4),
 }
 
-# Canonical ordering of the 15-channel ego action vector. Matches
+# Canonical ordering of the 14-channel ego action vector. Matches
 # ControllerInputsValue field order for sticks/triggers and BUTTON_BITS for
 # buttons. Used as model target and to construct ControllerInputsValue at
-# inference — must stay in lockstep with action_vec_to_controller.
+# inference — must stay in lockstep with _BUTTON_ORDER / action_vec_to_controller.
+# START is deliberately absent: pressing it opens Melee's pause menu, which drops
+# the match out of IN_GAME and ends the rollout, so the policy can never emit it.
+# Excluding it from the action space spares the model a target dim it can't use;
+# round-trip replay of recorded inputs uses a different path and keeps START.
 ACTION_CHANNELS: tuple[str, ...] = (
     "main_stick_x",
     "main_stick_y",
@@ -74,17 +78,11 @@ ACTION_CHANNELS: tuple[str, ...] = (
     "button_z",
     "button_r",
     "button_l",
-    "button_start",
     "button_d_up",
 )
 assert len(ACTION_CHANNELS) == A_DIM
 
-_BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "start", "d_up")
-# Buttons a closed-loop policy must never emit: START opens Melee's pause menu,
-# which drops the match out of IN_GAME and ends the rollout. Masked in
-# action_vec_to_controller (the model→controller decode); round-trip replay of
-# recorded inputs uses a different path and is unaffected.
-_POLICY_MASKED_BUTTONS = frozenset({"start"})
+_BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "d_up")
 # raw_* dropped (we use logical sticks); nana_* skipped for now; trigger_logical
 # redundant with the physical l/r channels already consumed.
 _DROP_PATTERNS = ("_raw_", "_nana_", "_trigger_logical")
@@ -220,13 +218,12 @@ def stack_actions(batch: dict[str, Tensor]) -> Tensor:
 
 
 def action_vec_to_controller(a: np.ndarray) -> ControllerInputsValue:
-    """One 15-vector → one ControllerInputsValue. Buttons threshold at 0.5;
-    buttons in ``_POLICY_MASKED_BUTTONS`` (START) are never emitted."""
+    """One A_DIM-vector → one ControllerInputsValue. Buttons threshold at 0.5.
+    START is not in the action space (see ACTION_CHANNELS), so the policy can
+    never press it."""
     a = np.asarray(a).reshape(-1)
     buttons = 0
     for i, name in enumerate(_BUTTON_ORDER):
-        if name in _POLICY_MASKED_BUTTONS:
-            continue
         if a[6 + i] > 0.5:
             buttons |= BUTTON_BITS[name]
     return ControllerInputsValue(
