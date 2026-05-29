@@ -80,6 +80,11 @@ ACTION_CHANNELS: tuple[str, ...] = (
 assert len(ACTION_CHANNELS) == A_DIM
 
 _BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "start", "d_up")
+# Buttons a closed-loop policy must never emit: START opens Melee's pause menu,
+# which drops the match out of IN_GAME and ends the rollout. Masked in
+# action_vec_to_controller (the model→controller decode); round-trip replay of
+# recorded inputs uses a different path and is unaffected.
+_POLICY_MASKED_BUTTONS = frozenset({"start"})
 # raw_* dropped (we use logical sticks); nana_* skipped for now; trigger_logical
 # redundant with the physical l/r channels already consumed.
 _DROP_PATTERNS = ("_raw_", "_nana_", "_trigger_logical")
@@ -215,10 +220,13 @@ def stack_actions(batch: dict[str, Tensor]) -> Tensor:
 
 
 def action_vec_to_controller(a: np.ndarray) -> ControllerInputsValue:
-    """One 15-vector → one ControllerInputsValue. Buttons threshold at 0.5."""
+    """One 15-vector → one ControllerInputsValue. Buttons threshold at 0.5;
+    buttons in ``_POLICY_MASKED_BUTTONS`` (START) are never emitted."""
     a = np.asarray(a).reshape(-1)
     buttons = 0
     for i, name in enumerate(_BUTTON_ORDER):
+        if name in _POLICY_MASKED_BUTTONS:
+            continue
         if a[6 + i] > 0.5:
             buttons |= BUTTON_BITS[name]
     return ControllerInputsValue(
