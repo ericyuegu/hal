@@ -133,6 +133,10 @@ class TrainConfig:
     # eviction churn, but below container disk so it evicts before Errno 28. Ignored for
     # local datasets (remote=None).
     cache_limit_gb: int = 440
+    # py1e shuffle unit (samples). The streaming default (~4M) exceeds the 112k-sample
+    # dataset, so the loader buffers ~everything (~380 GB) before the first batch and
+    # stalls. ~3 shards' worth starts after pulling ~17 GB while still mixing shard order.
+    shuffle_block_size: int = 2000
     val_split: str = "val"  # tiny datasets may have an empty val split; point this at "test"/"train"
     num_workers: int = 8
     prefetch_factor: int = 8
@@ -476,6 +480,7 @@ def train(
         data_root=cfg.data_root,
         remote=streams.remote_for_local(cfg.data_root),
         cache_limit=f"{cfg.cache_limit_gb}gb",
+        shuffle_block_size=cfg.shuffle_block_size,
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=cfg.L_chunk,

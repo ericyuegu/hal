@@ -85,6 +85,12 @@ log "fetching fixtures + dataset stats"
 uv run fetch
 uv run python -c "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"
 
+# StreamingDataset + the PyTorch DataLoader coordinate workers through /dev/shm; vast's
+# default 64MB is far too small (StreamingDataset shm arrays + batched-tensor IPC need a
+# few hundred MB) and silently stalls the loader before the first batch. compose sets
+# shm_size: 16gb for the same reason. Remount larger; tolerate a host that forbids it.
+mount -o remount,size=4g /dev/shm 2>/dev/null && log "/dev/shm -> 4g" || log "WARN: could not enlarge /dev/shm"
+
 # Headless GL context for the closed-loop Dolphin eval.
 pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &)
 export DISPLAY=:99

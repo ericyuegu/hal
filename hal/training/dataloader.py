@@ -144,6 +144,7 @@ def make_loader(
     seed: int,
     remote: str | None = None,
     cache_limit: str | int | None = None,
+    shuffle_block_size: int | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 4,
 ) -> DataLoader:
@@ -160,6 +161,13 @@ def make_loader(
     a local-only dataset has nowhere to re-download an evicted shard from, so it's
     ignored when ``remote`` is None.
 
+    ``shuffle_block_size`` is the py1e shuffle unit (samples mixed together). It
+    governs *startup* download: py1e must buffer a block before yielding, so the
+    default (``max(4e6 // num_canonical_nodes, 2**18)`` ≈ 4M samples) buffers the
+    whole dataset when it has fewer samples than that — downloading everything
+    before the first batch. Set it to a few shards' worth of samples to start fast;
+    smaller trades global-shuffle quality for a lighter startup.
+
     A plain ``DataLoader`` rather than ``StreamingDataLoader``: the latter's
     mid-epoch resumption only engages when its dataset *is* a StreamingDataset,
     but here that dataset is wrapped by ``WindowDataset``, so the wrapper's only
@@ -172,6 +180,7 @@ def make_loader(
         batch_size=1,
         shuffle=(split == "train"),
         cache_limit=cache_limit if remote else None,
+        shuffle_block_size=shuffle_block_size,
     )
     sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed)
     collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
