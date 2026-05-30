@@ -1596,7 +1596,7 @@ wheels = [
 [[package]]
 name = "melee"
 version = "0.47.0"
-source = { git = "https://github.com/ericyuegu/libmelee?branch=canonical-schema#6523c2d07c9c0dfcf3cb797cc60f1ac03b29d2fe" }
+source = { git = "https://github.com/ericyuegu/libmelee?branch=canonical-schema#2f02b288e0626b74d71cb23250743e083abcb805" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },
