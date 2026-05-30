@@ -143,6 +143,7 @@ def make_loader(
     batch_size: int,
     seed: int,
     remote: str | None = None,
+    cache_limit: str | int | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 4,
 ) -> DataLoader:
@@ -152,6 +153,12 @@ def make_loader(
     ``remote`` is the dataset's R2 root URI; when set, StreamingDataset pulls the
     split's shards on demand into the ``data_root`` cache (cloud training). When
     None, ``data_root`` must already hold the shards (local dev/overfit).
+
+    ``cache_limit`` bounds that local shard cache (e.g. ``"100gb"``) so a dataset
+    far larger than disk streams without filling it — StreamingDataset evicts
+    least-recently-used shards past the limit. Only meaningful with ``remote`` set:
+    a local-only dataset has nowhere to re-download an evicted shard from, so it's
+    ignored when ``remote`` is None.
 
     A plain ``DataLoader`` rather than ``StreamingDataLoader``: the latter's
     mid-epoch resumption only engages when its dataset *is* a StreamingDataset,
@@ -164,6 +171,7 @@ def make_loader(
         local=str(Path(data_root) / split),
         batch_size=1,
         shuffle=(split == "train"),
+        cache_limit=cache_limit if remote else None,
     )
     sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed)
     collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
