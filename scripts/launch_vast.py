@@ -203,12 +203,25 @@ def launch(
         return None
 
     deadline = time.time() + timeout_s
+    terminal_reads = 0  # consecutive polls showing a terminal status
     while True:
-        status = vast.show_instance(id=iid).get("actual_status")
+        try:
+            status = vast.show_instance(id=iid).get("actual_status")
+        except Exception as e:  # a transient API blip must not crash the poll
+            logger.warning(f"poll: show_instance({iid}) failed ({e!r}); retrying")
+            status = None
         if status == "running":
             return iid
+        # Never tear down on a *single* bad read: vast reports "unknown" transiently
+        # during state transitions, and an API hiccup yields None — either alone would
+        # otherwise destroy a box that's merely still loading. Require a terminal status
+        # to persist across two polls (a real host death holds; a blip clears).
         if status in {"exited", "offline", "unknown"}:
-            return give_up(f"instance {iid} died before running ({status})")
+            terminal_reads += 1
+            if terminal_reads >= 2:
+                return give_up(f"instance {iid} died before running ({status})")
+        else:
+            terminal_reads = 0
         if time.time() > deadline:
             return give_up(f"instance {iid} stuck in {status!r} after {timeout_s}s")
         time.sleep(10)
