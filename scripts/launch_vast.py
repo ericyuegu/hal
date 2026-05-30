@@ -172,11 +172,13 @@ def launch(
     token: str | None,
     timeout_s: int,
     keep_alive: bool,
-) -> int:
-    """Rent the offer and poll to `running`. On failure-to-launch (stuck/dead before
-    `running`), destroy to avoid a leaked billing instance — unless ``keep_alive``,
-    in which case leave it (booting or for inspection) and return its id. The ~9 GB
-    image can take a while to pull+extract on a slow box, hence a generous timeout."""
+) -> int | None:
+    """Rent the offer and poll to `running`, returning its id. On failure-to-launch
+    (stuck/dead before `running`), destroy to avoid a leaked billing instance and
+    return ``None`` so the caller can fail over to the next offer — unless
+    ``keep_alive``, in which case leave the box up (booting or for inspection) and
+    return its id. The ~9 GB image can take a while to pull+extract on a slow box,
+    hence a generous timeout."""
     login = {"login": f"-u {GHCR_USER} -p {token} ghcr.io"} if token else {}  # ghcr auth only if image is private
     inst = vast.create_instance(
         id=offer["id"],
@@ -190,15 +192,15 @@ def launch(
     iid = inst["new_contract"]
     logger.info(f"created instance {iid} on offer {offer['id']} ({offer['gpu_name']}); polling to running")
 
-    def give_up(why: str) -> int:
+    def give_up(why: str) -> int | None:
         if keep_alive:
             logger.warning(
                 f"{why}; left up (--keep-alive). Monitor: vastai logs {iid} ; destroy: vastai destroy instance {iid}"
             )
             return iid
-        logger.error(f"{why}; tearing down instance {iid}")
+        logger.error(f"{why}; tearing down instance {iid}, failing over to next offer")
         vast.destroy_instance(id=iid)
-        raise SystemExit(f"launch failed: {why}")
+        return None
 
     deadline = time.time() + timeout_s
     while True:
@@ -265,17 +267,23 @@ def main(args: Args) -> None:
         vast, max_price=args.max_price, limit=args.limit, disk=args.disk, poll_interval_s=args.poll_interval_s
     )
     print_offers(offers)
-    offer = offers[0]
-    iid = launch(
-        vast,
-        offer,
-        image=args.image,
-        disk=args.disk,
-        env=env,
-        token=token,
-        timeout_s=args.timeout_s,
-        keep_alive=args.keep_alive,
-    )
+    # Try offers best-first; a stuck/dead box (e.g. a host that can't provision the
+    # disk or pull the image in time) fails over to the next rather than killing the run.
+    for offer in offers:
+        iid = launch(
+            vast,
+            offer,
+            image=args.image,
+            disk=args.disk,
+            env=env,
+            token=token,
+            timeout_s=args.timeout_s,
+            keep_alive=args.keep_alive,
+        )
+        if iid is not None:
+            break
+    else:
+        raise SystemExit("every ranked offer failed to launch — rerun (the market may have healthier hosts).")
 
     logger.success(f"instance {iid} ({offer['gpu_name']}, ${offer['dph_total']:.3f}/hr) on SHA {sha[:10]}")
     logger.info(f"booting: clone -> uv sync -> fetch -> train. Watch W&B + `vastai logs {iid}` for progress.")
