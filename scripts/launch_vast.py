@@ -222,10 +222,11 @@ class Args:
     """Hard $/hr ceiling — the impatience knob. Lower waits longer for a cheaper box."""
     image: str = "ghcr.io/ericyuegu/hal:cuda13"
     """Image vast pulls (public ghcr; GITHUB_TOKEN only if you make it private)."""
-    disk: int = 200
-    """Container disk in GB (fixed at create; dies with the instance). Sized for the image
-    + ISO + the streamed shard cache: StreamingDataset keeps every downloaded shard (no
-    cache_limit), and the prod MDS is ~20 GB. Offers are filtered to disk_space >= this."""
+    disk: int = 500
+    """Container disk in GB (fixed at create; dies with the instance). Sized to hold the
+    whole prod MDS on disk (~380 GB decompressed) plus the image + ISO, so shards cache
+    once with no eviction/re-download churn across epochs; cache_limit (cfg) caps just
+    under as a disk-full guard. Offers are filtered to disk_space >= this."""
     limit: int = 10
     """How many offers to fetch/print."""
     poll_interval_s: int = 30

@@ -128,10 +128,11 @@ class TrainConfig:
     push_to_r2: bool = True
     # data
     data_root: str = "data/processed/ranked-anonymized-1/mds"
-    # bound the local shard cache when streaming from R2: the prod MDS is ~380 GB
-    # decompressed (20 GB zstd on R2), so StreamingDataset must evict rather than
-    # hoard the full set on disk. Ignored for local datasets (remote=None).
-    cache_limit_gb: int = 100
+    # cap the local shard cache (StreamingDataset evicts past this) as a disk-full guard.
+    # Set above the ~380 GB decompressed prod MDS so the whole set caches once with no
+    # eviction churn, but below container disk so it evicts before Errno 28. Ignored for
+    # local datasets (remote=None).
+    cache_limit_gb: int = 440
     val_split: str = "val"  # tiny datasets may have an empty val split; point this at "test"/"train"
     num_workers: int = 8
     prefetch_factor: int = 8
