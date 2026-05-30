@@ -45,7 +45,11 @@ teardown() {
     return
   fi
   log "$2 — ${1}ing instance"
-  VAST_API_KEY="$CONTAINER_API_KEY" vastai "$1" instance "$CONTAINER_ID" || true
+  # `destroy` prompts for confirmation; onstart has no TTY, so without -y it aborts and
+  # leaves the box billing after a successful run. `stop` has no prompt (and no -y flag).
+  yes_flag=""
+  [ "$1" = destroy ] && yes_flag="-y"
+  VAST_API_KEY="$CONTAINER_API_KEY" vastai "$1" instance "$CONTAINER_ID" $yes_flag || true
 }
 
 # Any failure during boot (clone, sync, fetch) stops the box (or keeps it under
