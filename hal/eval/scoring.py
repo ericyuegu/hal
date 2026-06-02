@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from hal.data.replay_stats import cumulative_damage
 from hal.sim.trajectory import Trajectory
 
 
@@ -21,8 +22,8 @@ class MatchSummary:
     frames: int
     p1_stocks_left: int
     p2_stocks_left: int
-    p1_max_pct: float
-    p2_max_pct: float
+    p1_damage_taken: float  # cumulative % p1 received
+    p2_damage_taken: float  # cumulative % p2 received
 
     def as_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -33,6 +34,6 @@ def summarize_trajectory(traj: Trajectory) -> MatchSummary:
         frames=len(traj),
         p1_stocks_left=last_finite_stock(traj.post[1]["stock"]),
         p2_stocks_left=last_finite_stock(traj.post[2]["stock"]),
-        p1_max_pct=float(np.nanmax(traj.post[1]["percent"])),
-        p2_max_pct=float(np.nanmax(traj.post[2]["percent"])),
+        p1_damage_taken=cumulative_damage(traj.post[1]["percent"], traj.post[1]["stock"]),
+        p2_damage_taken=cumulative_damage(traj.post[2]["percent"], traj.post[2]["stock"]),
     )
