@@ -22,6 +22,7 @@ dependencies = [
     "mosaicml-streaming>=0.11.0",
     "mypy-extensions",
     "numpy",
+    "nvidia-ml-py>=13.590.48",
     "nvitop",
     "pandas",
     "peppi-py",
@@ -37,12 +38,14 @@ dependencies = [
     "torchvision",
     "tqdm",
     "tyro",
+    "vastai>=1.0.13",
     "wandb",
     "yasoo",
 ]
 
 [project.scripts]
 fetch = "hal.scripts.fetch:main"
+slp-link = "hal.scripts.slp_link:main"
 
 [dependency-groups]
 dev = [

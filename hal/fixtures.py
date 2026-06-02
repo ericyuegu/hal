@@ -18,7 +18,6 @@ Two download backends, picked per-fixture:
 """
 
 import hashlib
-import os
 import shutil
 import subprocess
 import tarfile
@@ -29,10 +28,10 @@ from typing import IO
 from typing import Final
 from typing import Literal
 
-import boto3
 from loguru import logger
 from tqdm import tqdm
 
+from hal import r2
 from hal.paths import REPO_DIR
 
 DATA_DIR: Final[Path] = Path(REPO_DIR) / "data"
@@ -98,19 +97,6 @@ class FixtureError(RuntimeError):
     pass
 
 
-def _r2_client():  # type: ignore[no-untyped-def]
-    """Lazy boto3 S3 client against R2's S3-compatible endpoint."""
-    missing = [v for v in ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY") if not os.environ.get(v)]
-    if missing:
-        raise FixtureError(f"missing env vars for R2 fetch: {missing}. See .env.example.")
-    return boto3.client(
-        "s3",
-        endpoint_url=os.environ["AWS_ENDPOINT_URL"],
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    )
-
-
 def _stream(fout: IO[bytes], reader, total: int, label: str) -> str:  # type: ignore[no-untyped-def]
     """Pipe `reader.read()` chunks into `fout`, return hex sha256.
 
@@ -144,11 +130,7 @@ def _download(fix: Fixture, cache_path: Path) -> str:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(cache_path.suffix + ".partial")
     if fix.r2_key is not None:
-        client = _r2_client()
-        bucket = os.environ.get("AWS_BUCKET")
-        if not bucket:
-            raise FixtureError("AWS_BUCKET env var not set")
-        obj = client.get_object(Bucket=bucket, Key=fix.r2_key)
+        obj = r2.client().get_object(Bucket=r2.bucket(), Key=fix.r2_key)
         with tmp.open("wb") as f:
             digest = _stream(f, obj["Body"], obj.get("ContentLength", fix.size_bytes), fix.name)
     else:

@@ -30,6 +30,7 @@ import melee
 from loguru import logger
 
 from hal.data.index import ReplayIndexEntry
+from hal.data.slp_finalize import finalize_replay_dir
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
 from hal.wire import slp_character_to_libmelee
@@ -167,6 +168,7 @@ class Session:
         dolphin_path: str | Path,
         slippi_port: int = 51441,
         step_timeout_seconds: float = 5.0,
+        start_timeout_seconds: float = 120.0,
         setup_gecko_codes: bool = True,
         frozen_stadium: bool = True,
         tmp_home_directory: bool = True,
@@ -175,11 +177,18 @@ class Session:
         emulation_speed: float = 1.0,
         use_exi_inputs: bool = False,
         enable_ffw: bool = False,
+        polling_mode: bool = False,
     ) -> None:
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
         self.slippi_port = slippi_port
         self.step_timeout_seconds = step_timeout_seconds
+        # Wall-clock budget for driving the menus to the first in-game frame.
+        # Menu frames stream fast under FFW, so step_timeout_seconds (a per-poll
+        # budget) never catches a menu that simply never reaches IN_GAME — a
+        # degenerate match or a menu-nav edge case would otherwise spin at 100%
+        # CPU forever. This caps the whole navigation and raises instead.
+        self.start_timeout_seconds = start_timeout_seconds
         # Block console.step until the controller pipe has been read.
         # Required for closed-loop control where the input punched for frame N
         # must land before frame N+1 is advanced; without it, model inputs can
@@ -210,6 +219,13 @@ class Session:
         self.emulation_speed = emulation_speed
         self.use_exi_inputs = use_exi_inputs
         self.enable_ffw = enable_ffw
+        # Non-blocking slippstream reads, so ``_step_blocking`` polls and its
+        # ``step_timeout_seconds`` deadline can actually fire. With the default
+        # (False) libmelee blocks in ``recv`` forever if Dolphin stops streaming
+        # frames (e.g. an agent that pauses the match), which would hang an
+        # unattended eval. Replay-style consumers (round-trip, MDS playback) keep
+        # False so frame delivery stays bit-for-bit and pays no poll spin.
+        self.polling_mode = polling_mode
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._menu_helpers: dict[int, melee.MenuHelper] = {}
@@ -230,7 +246,7 @@ class Session:
             path=self.dolphin_path,
             slippi_port=self.slippi_port,
             blocking_input=self.blocking_input,
-            polling_mode=False,
+            polling_mode=self.polling_mode,
             setup_gecko_codes=self.setup_gecko_codes,
             tmp_home_directory=self.tmp_home_directory,
             replay_dir=self.replay_dir,
@@ -312,10 +328,11 @@ class Session:
             self._menu_helpers.clear()
             return
         proc = getattr(self._console, "_process", None)
-        # 1. Graceful SIGTERM so Slippi's writer thread finalizes the .slp
-        #    footer; otherwise peppi can't parse the resulting file. Empirically
-        #    Slippi-Ishiiruka needs ~5-8s to flush a multi-thousand-frame
-        #    match.
+        # 1. Graceful SIGTERM so Slippi can finish flushing its current frame and
+        #    cleanly close a match that reached GAME_END (which finalizes the
+        #    .slp with full metadata). A match abandoned mid-game — stopped at
+        #    max_frames while still IN_GAME — never gets GAME_END, so SIGTERM
+        #    can't finalize it; step 4 repairs those.
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
@@ -334,6 +351,14 @@ class Session:
             self._console.stop()
         except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as e:
             logger.warning(f"Console.stop() raised on teardown: {e}")
+        # 4. Finalize any .slp Slippi left unclosed (rawLength == 0): a match
+        #    that hit max_frames mid-game is otherwise unparseable by peppi /
+        #    slippilab even though the frame data is intact. No-op for matches
+        #    that ended cleanly (already finalized by Dolphin at GAME_END).
+        if self.replay_dir is not None:
+            repaired = finalize_replay_dir(self.replay_dir)
+            if repaired:
+                logger.info(f"finalized {len(repaired)} unclosed .slp in {self.replay_dir}")
         self._console = None
         self._controllers.clear()
         self._menu_helpers.clear()
@@ -369,17 +394,55 @@ class Session:
                 raise RuntimeError(f"failed to connect controller on port {port}")
             self._menu_helpers[port] = melee.MenuHelper()
 
-        # Drive menus until match goes live.
+        return self._navigate_to_live()
+
+    def _navigate_to_live(self) -> dict:
+        """Drive the menus until the match goes live, returning the first
+        in-game canonical frame.
+
+        Raises ``TimeoutError`` if ``start_timeout_seconds`` elapses without
+        reaching IN_GAME / SUDDEN_DEATH. Menu frames stream fast under FFW, so
+        the per-poll ``step_timeout_seconds`` can't catch a menu that never
+        goes live (each ``_step_blocking`` returns promptly); this wall-clock
+        cap turns that logical loop into a loud, clean failure that callers
+        (``drive_vec`` / ``run_match``) already log-and-continue on.
+        """
+        deadline = time.monotonic() + self.start_timeout_seconds
         nav_steps = 0
+        # Track the autostart port's stage-select cursor extent: when a stall does
+        # surface (libmelee's bang-bang stage cursor flakily fails to settle under
+        # FFW load), this says whether it got near the target or nowhere close.
+        sss_box: list[float] | None = None  # [xmin, xmax, ymin, ymax]
         while True:
             gamestate = self._step_blocking()
             if gamestate.menu_state in LIVE_MENU_STATES:
                 return gamestate.to_canonical_dict()
-            nav_steps += 1
-            if nav_steps % 2000 == 0:
-                logger.warning(
-                    f"start_match: {nav_steps} menu steps without entering LIVE (still on {gamestate.menu_state})"
+            if gamestate.menu_state == melee.Menu.STAGE_SELECT and self._matchup is not None:
+                autostart_port = min(p.port for p in self._matchup.players)
+                cur = getattr(gamestate.players.get(autostart_port), "cursor", None)
+                if cur is not None:
+                    sss_box = (
+                        [cur.x, cur.x, cur.y, cur.y]
+                        if sss_box is None
+                        else [
+                            min(sss_box[0], cur.x),
+                            max(sss_box[1], cur.x),
+                            min(sss_box[2], cur.y),
+                            max(sss_box[3], cur.y),
+                        ]
+                    )
+            if time.monotonic() > deadline:
+                stage = f"; stage={self._matchup.stage.name}" if self._matchup is not None else ""
+                box = (
+                    f"; SSS cursor x∈[{sss_box[0]:.1f},{sss_box[1]:.1f}] y∈[{sss_box[2]:.1f},{sss_box[3]:.1f}]"
+                    if sss_box is not None
+                    else ""
                 )
+                raise TimeoutError(
+                    f"start_match: did not reach IN_GAME within {self.start_timeout_seconds:.0f}s "
+                    f"(stuck on {gamestate.menu_state} after {nav_steps} menu steps{stage}{box})"
+                )
+            nav_steps += 1
             self._drive_menus(gamestate)
 
     def step(self, inputs: dict[int, ControllerInputs]) -> tuple[dict, bool]:

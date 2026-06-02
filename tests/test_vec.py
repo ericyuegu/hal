@@ -237,6 +237,52 @@ def test_run_matches_vec_isolates_a_policy_failure(monkeypatch: pytest.MonkeyPat
     assert trajs[2] is None and trajs[3] is None  # wave 1's policy raised → None
 
 
+class _StartFails(FakeSession):
+    """A Session whose ``start_match`` always trips the stage-select stall —
+    stands in for libmelee's flaky menu navigation never reaching IN_GAME."""
+
+    def start_match(self, matchup: Matchup) -> dict:
+        raise TimeoutError("did not reach IN_GAME (stuck on Menu.STAGE_SELECT)")
+
+
+def test_run_matches_vec_retries_failed_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The first start attempt stalls; the bounded retry rebuilds a fresh Session
+    # on a new port and succeeds — the flaky stage-select stall clears per-attempt.
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,))]
+    seq = iter([_StartFails(length=5, ports=(1, 2)), FakeSession(length=5, ports=(1, 2))])
+    ports: list[int] = []
+
+    def fake_build(session_cfg, *, slippi_port, replay_dir):
+        ports.append(slippi_port)
+        return next(seq)
+
+    monkeypatch.setattr("hal.eval.harness._build_session", fake_build)
+    cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
+    trajs = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, base_slippi_port=51441)
+
+    assert trajs[0] is not None  # recovered on the retry
+    assert ports == [51441, 51442]  # initial attempt, then a fresh port (base + max_parallel)
+
+
+def test_run_matches_vec_gives_up_after_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every attempt stalls → the match stays None after start_retries are spent,
+    # logged-and-skipped rather than hanging the sweep.
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,))]
+    builds = 0
+
+    def fake_build(session_cfg, *, slippi_port, replay_dir):
+        nonlocal builds
+        builds += 1
+        return _StartFails(length=5, ports=(1, 2))
+
+    monkeypatch.setattr("hal.eval.harness._build_session", fake_build)
+    cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
+    trajs = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, start_retries=2)
+
+    assert trajs[0] is None  # never recovered
+    assert builds == 3  # initial attempt + 2 retries
+
+
 # --- real-Dolphin integration ------------------------------------------------
 
 

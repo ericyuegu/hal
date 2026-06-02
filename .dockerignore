@@ -1,0 +1,19 @@
+# Keep the build context lean and free of secrets/fixtures. Datasets, the
+# emulator, runs, and the host venv are mounted/fetched at runtime, never baked.
+.git
+.venv
+data/
+runs/
+wandb/
+Logs/
+logs/
+notebooks/
+.env
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+**/*.ipynb

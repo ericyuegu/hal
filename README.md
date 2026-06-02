@@ -9,37 +9,42 @@ Blog: https://ericyuegu.com/melee-pt1.
 ```bash
 git clone git@github.com:ericyuegu/hal.git
 cd hal
-uv sync                              # builds peppi-py from source — see Appendix if you don't have Rust
-cp .env.example .env && $EDITOR .env # fill in AWS_* creds — ask Eric
-source .env                          # or use direnv
+uv sync
 
 # download emulator & datasets
-uv run fetch                         # download ~2 GB into <repo>/data/
-uv run pytest tests/                 # expect: 39 passed
+cp .env.example .env && $EDITOR .env  # fill in AWS_* creds — ask Eric
+source .env                           # or use direnv
+uv run fetch                          # download ~2 GB into <repo>/data/
+uv run pytest tests/                  # expect: 39 passed
 ```
 
 All HAL data lives under `<repo>/data/` (gitignored). After fetch:
 
 ```
 data/
-  raw/        dev.7z                              # 37 MB slp archive (+ ranked-anonymized-*.7z if you have them)
-  processed/  dev/mds/                            # train/, val/, test/, manifest.jsonl, stats.json
-  emulator/   ssbm.ciso                           # ISO
-              exiai/squashfs-root/AppRun          # headless Dolphin
-  scratch/                                        # throwaway Dolphin recordings, debug dumps
-  runs/                                           # eval rollouts (per run_id)
+├── raw/
+│   └── dev.7z                        # 37 MB slp archive (+ ranked-anonymized-*.7z if you have them)
+├── processed/
+│   └── dev/
+│       └── mds/
+│           ├── train/
+│           ├── val/
+│           ├── test/
+│           ├── manifest.jsonl
+│           └── stats.json
+├── emulator/
+│   ├── ssbm.ciso                     # ISO
+│   └── exiai/
+│       └── squashfs-root/
+│           └── AppRun                # headless Dolphin
+├── scratch/                          # throwaway Dolphin recordings, debug dumps
+└── runs/                             # eval rollouts (per run_id)
 ```
 
 Real data on a different drive? Symlink: `ln -s /mnt/big/hal/data data` (or symlink individual files under `data/raw/`).
 
-`fetch` is idempotent (logs `skip <name> (sha match)`). Fetch a single fixture with `fetch --name {dev.7z | dev-mds | ssbm.ciso | dolphin-exiai}`. Override path defaults via `HAL_*` env vars — see `hal/paths.py`.
+Fetch a single fixture with `fetch --name {dev.7z | dev-mds | ssbm.ciso | dolphin-exiai}`. Override path defaults via `HAL_*` env vars — see `hal/paths.py`.
 
-The strongest end-to-end check is a closed-loop bit-exact round-trip through Dolphin:
-
-```bash
-uv run python -m hal.scripts.roundtrip --max-frames 200
-# expect: PASS (bit-exact across 11 post-fields × 2 ports)
-```
 
 ## Data pipeline
 
@@ -52,30 +57,43 @@ Three stages in `hal/scripts/` turn `.slp` files (loose or `.7z`-archived) into 
 `paths.txt` lines are either filesystem paths or `archive://<abs-archive>!<member>` synthetic paths; one file may mix both, and the materialize stage streams archive members from a bounded tmpfs ring (`/dev/shm/...`) without ever extracting to disk.
 
 ```bash
-# Stage 1 — index a .7z archive (no extraction; tmpfs-backed)
-uv run python -m hal.scripts.build_index \
-    --archive data/raw/dev.7z --output /tmp/index.jsonl
+# step 1
+uv run hal.scripts.build_index --archive data/raw/dev.7z --output /tmp/index.jsonl
 
-# Stage 2 — filter to a paths.txt (defaults: completed games, ≥1500 frames, six tournament stages)
-uv run python -m hal.scripts.filter \
-    --index /tmp/index.jsonl --output /tmp/paths.txt
+# step 2
+uv run hal.scripts.filter --index /tmp/index.jsonl --output /tmp/paths.txt
 
-# Stage 3 — paths.txt + index.jsonl → MDS shards
-uv run python -m hal.scripts.materialize \
-    --paths-file /tmp/paths.txt --index /tmp/index.jsonl --output /tmp/mds
+# step 3
+uv run hal.scripts.materialize --paths-file /tmp/paths.txt --index /tmp/index.jsonl --output /tmp/mds
 ```
 
-Fold additional archives into one `index.jsonl` with `--incremental` on Stage 1.
 
-## Closed-loop round-trip
+## Cloud training (vast.ai)
 
-The driver in `hal/sim/` plays an MDS row back through Dolphin and diffs against the original `.slp`:
+`scripts/launch_vast.py` rents a GPU and runs one training command on it,
+fire-and-forget: it pushes the current git SHA, queues for an offer under a price
+ceiling, rents it, and injects the SHA + command. The box clones that SHA into the
+prebuilt image (`docker/Dockerfile`), `uv sync`s, fetches data from R2, trains, then
+tears *itself* down — **destroy** on success (checkpoints in R2, logs in W&B),
+**stop** on failure (keeps `/opt/hal/train.log` for inspection). The instance is
+stateless; a preempted run resumes from its latest R2 checkpoint with `--resume`.
 
 ```bash
-uv run python -m hal.scripts.roundtrip --max-frames 200
+uv run scripts/launch_vast.py                          # search-only: print offers, rent nothing
+uv run scripts/launch_vast.py --dry-run -- <cmd>       # preflight + search, print what would be sent
+uv run scripts/launch_vast.py --max-price 0.80 \
+    -- uv run experiments/001_flow_matching_baseline.py --cfg.max-steps 100000
+uv run scripts/launch_vast.py \                        # resume a preempted run
+    -- uv run experiments/001_flow_matching_baseline.py --resume <run_name>
 ```
 
-Defaults read from `data/`; override via flags. Training and evaluation drivers are being rewritten on top of `hal/sim/` and the new MDS schema; nothing here ships yet.
+Everything after `--` is the training command. The host needs only a vast API key
+(`~/.config/vastai`); R2/W&B secrets live as vast **account** env-vars (`AWS_*`,
+`WANDB_API_KEY`) and inject into the box out-of-band — the launcher just verifies
+they're present and refuses a dirty tree. Useful flags: `--max-price` (impatience
+knob), `--keep-alive` (leave the box up to SSH in). Watch W&B or `vastai logs <id>`.
+
+To smoke-test the image locally instead: `docker compose -f docker/compose.yaml run --rm hal <cmd>`.
 
 ## Adding a new fixture (maintainer)
 

@@ -31,6 +31,34 @@ from hal.sim.vec import VecMatch
 # (stage, replica index, summary-or-None-if-crashed) per match in the grid.
 SweepResult = list[tuple[melee.Stage, int, MatchSummary | None]]
 
+STARTING_STOCKS = 4  # Melee match default
+FRAMES_PER_MINUTE = 3600  # 60 fps
+
+
+def vs_cpu_metrics(result: SweepResult) -> dict[str, float]:
+    """Reduce a ``sweep_vs_cpu`` grid to a flat metric dict for logging.
+
+    Assumes the ego model is on port 1 vs a CPU on port 2 (the ``sweep_vs_cpu``
+    default). Stocks/damage are reported as **per-game-minute rates**, pooled
+    frame-weighted over every non-crashed match (``sum(metric) / sum(minutes)``)
+    so the numbers are comparable across runs regardless of how many episodes ran
+    or how long each lasted. ``crashed`` is the fraction of matches whose Session
+    failed; an all-crashed (or zero-frame) sweep reports only ``{"crashed": 1.0}``.
+    """
+    summaries = [s for _, _, s in result if s is not None]
+    total_frames = sum(s.frames for s in summaries)
+    if not summaries or total_frames == 0:
+        return {"crashed": 1.0}
+    minutes = total_frames / FRAMES_PER_MINUTE
+    return {
+        "stocks_taken_per_min": sum(STARTING_STOCKS - s.p2_stocks_left for s in summaries) / minutes,
+        "stocks_lost_per_min": sum(STARTING_STOCKS - s.p1_stocks_left for s in summaries) / minutes,
+        "damage_dealt_per_min": sum(s.p2_damage_taken for s in summaries) / minutes,  # dealt by ego = taken by p2
+        "damage_taken_per_min": sum(s.p1_damage_taken for s in summaries) / minutes,
+        "frames": total_frames / len(summaries),  # mean episode length, kept as a diagnostic
+        "crashed": (len(result) - len(summaries)) / len(result),
+    }
+
 
 def sweep_vs_cpu(
     policy_factory: Callable[[], BatchPolicy],

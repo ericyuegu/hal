@@ -1,0 +1,35 @@
+# Local end-to-end testing of the cloud-training image. Captures the GPU
+# reservation, /dev/shm bump (StreamingDataset uses it), and R2 creds so
+# `docker compose -f docker/compose.yaml run --rm hal <cmd>` mirrors vast.ai.
+# Like vast, the container is stateless: data is fetched from R2 and checkpoints
+# are pushed back to R2. The image carries no code, so the repo is bind-mounted
+# at /opt/hal — local runs exercise the live working tree (the first `uv run`
+# installs `hal` into the baked /opt/venv). The host's data/ rides in at
+# /opt/hal/data, acting as a fixture cache so we don't re-fetch the 1.4 GB ISO.
+services:
+  hal:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: hal:cuda13
+    working_dir: /opt/hal
+    shm_size: "${HAL_SHM_SIZE:-16gb}"  # StreamingDataset coordinates workers via /dev/shm; override to probe the floor
+    # R2 creds + W&B key pass through from the host shell (entries with no `=`
+    # inherit the host value). Deliberately NOT env_file: ../.env — that file
+    # holds host-only HAL_* path overrides that would mis-point paths in-container.
+    environment:
+      - AWS_ENDPOINT_URL
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_BUCKET
+      - WANDB_API_KEY
+      - WANDB_MODE=offline            # smoke tests log offline
+    volumes:
+      - ..:/opt/hal                   # live working tree (image ships no code); data/ rides in as the fixture cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

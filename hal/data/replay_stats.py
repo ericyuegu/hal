@@ -88,26 +88,35 @@ class PlayerStatsMins:
         return any(getattr(self, f.name) is not None for f in fields(self))
 
 
-def _percent_gained(percent: Any, stock: Any) -> float:
+def cumulative_damage(percent: np.ndarray, stock: np.ndarray) -> float:
     """Sum of positive percent deltas, dropping stock-change frames.
 
-    Stock-change includes the death frame (percent resets to 0) and any
-    None-bounded transition. Used for both `damage_dealt` (passing the
-    opponent's columns) and `damage_taken` (passing self's columns).
-    The two arrays are pyarrow Arrays or None.
+    A stock change (death: percent resets to 0, or a None-bounded transition)
+    breaks the running tally so a reset isn't counted as damage. NaN-robust on
+    both arrays: a NaN delta (masked frame / sentinel boundary) compares False
+    in every gate, so it's excluded — this is the single definition of
+    cumulative damage shared by offline replay stats and live eval scoring.
     """
-    if percent is None or stock is None or len(percent) < 2:
+    if len(percent) < 2:
+        return 0.0
+    delta_pct = np.diff(percent)
+    delta_stk = np.diff(stock)
+    keep = (delta_stk == 0) & np.isfinite(delta_pct) & (delta_pct > 0)
+    return float(delta_pct[keep].sum())
+
+
+def _percent_gained(percent: Any, stock: Any) -> float:
+    """``cumulative_damage`` over pyarrow columns. Used for both `damage_dealt`
+    (passing the opponent's columns) and `damage_taken` (passing self's columns).
+    The two arrays are pyarrow Arrays or None."""
+    if percent is None or stock is None:
         return 0.0
     # None float -> NaN propagates through diff; None int -> -1 sentinel forces
     # delta_stk != 0 across the boundary, excluding those frames from the gate.
     pct = np.asarray(percent.to_pylist(), dtype=np.float64)
     stk_raw = stock.to_pylist()
     stk = np.fromiter((s if s is not None else -1 for s in stk_raw), dtype=np.int32, count=len(stk_raw))
-
-    delta_pct = np.diff(pct)
-    delta_stk = np.diff(stk)
-    keep = (delta_stk == 0) & np.isfinite(delta_pct) & (delta_pct > 0)
-    return float(delta_pct[keep].sum())
+    return cumulative_damage(pct, stk)
 
 
 def _final_stocks(stock: Any) -> int:

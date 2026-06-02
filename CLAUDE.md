@@ -9,6 +9,7 @@ The closed-loop driver (Dolphin + libmelee) lives in `hal/sim/`: `Session` owns 
 Cross-layer wire conventions (button bits, mask sentinels, raw↔wire math, port and stage/character bridges, post-frame field naming) are the single source of truth in `hal/wire.py`.
 Project policy (included characters/stages, player port conventions) lives in `hal/policy.py`.
 Integration fixtures (dev archive, MDS bundle, ISO, Dolphin) are declared in `hal/fixtures.py` and fetched into `<repo>/fixtures/` via `python -m hal.scripts.fetch`; see `README.md`.
+Cloud GPU training runs in a Docker image (`docker/`, vast.ai CUDA base) carrying code+deps only; `docker compose -f docker/compose.yaml run --rm hal …` mounts `data/`, reserves the GPU, bumps `--shm-size` (StreamingDataset uses `/dev/shm`), and runs Xvfb so the closed-loop eval gets a GL context. The instance is stateless: datasets/emulator are fetched at runtime (never baked) and checkpoints stream to R2 in the background (`hal/training/checkpoints.py`), with `--resume <run>` pulling them back. R2 client/creds are shared via `hal/r2.py` (one source for both `fetch` downloads and checkpoint uploads); checkpoints deliberately bypass the immutable, sha-pinned `Fixture`/`fetch` path.
 
 ## Principles
 
@@ -33,6 +34,7 @@ Integration fixtures (dev archive, MDS bundle, ISO, Dolphin) are declared in `ha
 - No utility grab-bags. `utils.py`, `helpers.py`, `common.py` are forbidden. Name files by what they own.
 - `hal/data/` owns single-replay primitives, value objects, pure transforms, and shared schema. `hal/scripts/` owns per-stage CLI entry points AND the cross-replay orchestration that drives the stage (incremental walks, pool plumbing, batched IO, archive dispatch). One module per stage; no cross-script helpers.
 - `hal/experiments/` holds single-file experiments (data preprocessing, model arch, training objective, optimizer, training loop). These must not cross-import from notebooks and vice versa.
+- Three "scripts" homes, by tier — don't conflate: `hal/scripts/` is package code (data-pipeline stage CLIs, shipped in the wheel, run as `python -m hal.scripts.X`); root `scripts/` is host ops that does NOT import `hal` (dev-box `setup.sh`, the `launch_vast.py` cloud launcher); `docker/` is the cloud image and what runs *inside* it (`Dockerfile`, `compose.yaml`, `entrypoint.sh`, `on-start.sh`). The launcher lives in `scripts/`, not `docker/`, because it runs on the host and is never baked into the image.
 
 ## Code Style
 
