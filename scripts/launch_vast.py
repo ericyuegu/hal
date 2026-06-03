@@ -69,30 +69,98 @@ REQUIRED_ACCOUNT_VARS = (
 )
 
 
+# The ssbm ISO the box fetches at runtime (~1.4 GB); folded into the one-time download
+# estimate alongside the MDS. The ~9 GB docker image pull is separate and not counted.
+ISO_GB = 1.4
+
+
+def storage_dph(offer: dict, disk: int) -> float:
+    """$/hr to hold `disk` GB at this offer's storage rate (``storage_cost`` is $/GB/month)."""
+    return offer.get("storage_cost", 0.0) * disk / 720.0
+
+
+def effective_dph(offer: dict, disk: int) -> float:
+    """Real $/hr once the disk is provisioned. The search-time ``dph_total`` is essentially
+    the GPU/base rate — the disk we ask for at create time isn't in it — so a cheap GPU with
+    a pricey 500 GB disk can quietly cost ~4x its quoted rate. This is what --max-price gates."""
+    return offer["dph_total"] + storage_dph(offer, disk)
+
+
+def download_cost(offer: dict, data_gb: float) -> float:
+    """One-time ingress $ to pull the MDS dataset (+ ISO) at this offer's $/GB ``inet_down_cost``."""
+    return (data_gb + ISO_GB) * offer["inet_down_cost"]
+
+
+def upload_cost(offer: dict, upload_gb: float) -> float:
+    """One-time egress $ to stream checkpoints out to R2 at this offer's $/GB ``inet_up_cost``."""
+    return upload_gb * offer["inet_up_cost"]
+
+
+def amortized_dph(offer: dict, *, disk: int, data_gb: float, upload_gb: float, run_hours: float) -> float:
+    """Effective $/hr with the one-time transfer costs (download + upload) spread over the
+    expected ``run_hours``. Adding a flat $ to a $/hr rate only makes sense once amortized, so
+    a shorter run carries a heavier per-hour transfer tax."""
+    one_time = download_cost(offer, data_gb) + upload_cost(offer, upload_gb)
+    return effective_dph(offer, disk) + one_time / run_hours
+
+
+def value_metric(offer: dict, *, disk: int, data_gb: float, upload_gb: float, run_hours: float) -> float:
+    """Ranking key (eff$/dlperf/hr): amortized effective $/hr per unit DLPerf. Lower is better
+    bang-for-buck — folds the GPU+disk rate and the one-time download+upload into a single
+    perf-normalized cost. This is what offers are sorted on."""
+    return amortized_dph(offer, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours) / offer["dlperf"]
+
+
 def build_query(max_price: float, disk: int, min_vram: int) -> str:
+    # dph_total<max_price is a safe coarse prefilter: effective_dph >= dph_total, so any
+    # offer clearing the effective cap also clears this. The real (disk-inclusive) cap is
+    # enforced client-side in search(), since storage_cost*disk isn't expressible here.
     q = [*FILTERS, f"disk_space>={disk}", f"dph_total<{max_price}"]
     if min_vram > 0:  # vast `gpu_ram` query is in GB; 0 = no VRAM floor
         q.append(f"gpu_ram>={min_vram}")
     return " ".join(q)
 
 
-def search(vast: VastAI, *, max_price: float, limit: int, disk: int, min_vram: int) -> list[dict]:
-    return vast.search_offers(query=build_query(max_price, disk, min_vram), order=ORDER, limit=limit)
+def search(
+    vast: VastAI,
+    *,
+    max_price: float,
+    limit: int,
+    disk: int,
+    min_vram: int,
+    data_gb: float,
+    upload_gb: float,
+    run_hours: float,
+) -> list[dict]:
+    """Offers whose *effective* $/hr (GPU + provisioned disk) clears --max-price, ranked by the
+    value metric (eff$/dlperf/hr, transfers folded in) — best bang-for-buck first."""
+    offers = vast.search_offers(query=build_query(max_price, disk, min_vram), order=ORDER, limit=limit)
+    qualifying = [o for o in offers if effective_dph(o, disk) <= max_price]
+    qualifying.sort(
+        key=lambda o: value_metric(o, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours)
+    )
+    return qualifying
 
 
-def print_offers(offers: list[dict]) -> None:
+def print_offers(offers: list[dict], *, disk: int, data_gb: float, upload_gb: float, run_hours: float) -> None:
     if not offers:
-        logger.warning("No offers match the bar. Raise --max-price or relax a FILTERS constraint.")
+        logger.warning("No offers clear --max-price once disk storage is counted. Raise it or shrink --disk.")
         return
-    logger.info(f"{len(offers)} offer(s), best DLPerf/$/hr first:")
-    header = f"{'id':>10}  {'gpu':16} {'dlperf/$':>9} {'$/hr':>7} {'tflops':>7} {'down':>9} {'$/GB':>8} {'rel':>5}"
+    logger.info(
+        f"{len(offers)} offer(s) within effective $/hr cap, best value first (disk={disk}GB, {run_hours:.0f}h run):"
+    )
+    header = (
+        f"{'id':>10}  {'gpu':16} {'gpu$/hr':>8} {'disk$/hr':>8} {'eff$/hr':>8} "
+        f"{'dl$':>6} {'ul$':>6} {'dlperf':>7} {'$/dlp/hr':>9} {'down':>9} {'rel':>5}"
+    )
     print(header)
     print("-" * len(header))
     for o in offers:
         print(
-            f"{o['id']:>10}  {o['gpu_name']:16} {o['dlperf_per_dphtotal']:9.0f} "
-            f"{o['dph_total']:7.3f} {o['total_flops']:7.0f} {o['inet_down']:7.0f}mbps "
-            f"{o['inet_down_cost']:8.4f} {o['reliability']:5.3f}"
+            f"{o['id']:>10}  {o['gpu_name']:16} {o['dph_total']:8.3f} {storage_dph(o, disk):8.3f} "
+            f"{effective_dph(o, disk):8.3f} {download_cost(o, data_gb):6.2f} {upload_cost(o, upload_gb):6.2f} "
+            f"{o['dlperf']:7.1f} {value_metric(o, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours):9.4f} "
+            f"{o['inet_down']:7.0f}mbps {o['reliability']:5.3f}"
         )
 
 
@@ -140,10 +208,30 @@ def preflight(vast: VastAI) -> tuple[str, str | None]:
     return sha, token
 
 
-def queue(vast: VastAI, *, max_price: float, limit: int, disk: int, min_vram: int, poll_interval_s: int) -> list[dict]:
+def queue(
+    vast: VastAI,
+    *,
+    max_price: float,
+    limit: int,
+    disk: int,
+    min_vram: int,
+    data_gb: float,
+    upload_gb: float,
+    run_hours: float,
+    poll_interval_s: int,
+) -> list[dict]:
     """Poll the market until at least one offer clears the bar; return them ranked."""
     while True:
-        offers = search(vast, max_price=max_price, limit=limit, disk=disk, min_vram=min_vram)
+        offers = search(
+            vast,
+            max_price=max_price,
+            limit=limit,
+            disk=disk,
+            min_vram=min_vram,
+            data_gb=data_gb,
+            upload_gb=upload_gb,
+            run_hours=run_hours,
+        )
         if offers:
             return offers
         logger.info(f"no offer <= ${max_price:.2f}/hr clears the bar; retrying in {poll_interval_s}s")
@@ -235,7 +323,9 @@ class Args:
     cmd: tyro.conf.Positional[list[str]] = field(default_factory=list)
     """Training command to run on the box, after `--` (e.g. `-- uv run experiments/001_...py`). Empty ⇒ search-only."""
     max_price: float = 1.10
-    """Hard $/hr ceiling — the impatience knob. Lower waits longer for a cheaper box."""
+    """Hard *effective* $/hr ceiling — GPU base PLUS the provisioned --disk's storage cost
+    (vast bills disk separately; it's not in the search-time dph_total and can exceed the
+    GPU). The impatience knob: lower waits longer for a cheaper box."""
     image: str = "ghcr.io/ericyuegu/hal:cuda13"
     """Image vast pulls (public ghcr; GITHUB_TOKEN only if you make it private)."""
     disk: int = 500
@@ -257,13 +347,36 @@ class Args:
     """Run preflight + one search and print exactly what would be sent, without renting."""
     keep_alive: bool = False
     """Debug: leave the box up on crash/finish (no self stop/destroy) so you can SSH in."""
+    data_gb: float = 40.0
+    """Estimated GB the box downloads once at startup (the MDS dataset; the ~1.4 GB ISO is
+    added on top). Priced at the offer's $/GB ingress and amortized into the ranking metric.
+    Default ≈ the prod MDS; set lower for the dev/smaller sets."""
+    upload_gb: float = 1.0
+    """Estimated GB the box uploads over the run (checkpoints streamed to R2). Priced at the
+    offer's $/GB egress (inet_up_cost) and amortized into the ranking metric."""
+    run_hours: float = 10.0
+    """Expected run length, used only to amortize the one-time download+upload costs into the
+    per-hour ranking metric (eff$/dlperf/hr = (effective $/hr + one-time$/run_hours) / dlperf).
+    A shorter run makes the transfer tax weigh more. Does not gate anything."""
 
 
 def main(args: Args) -> None:
     vast = VastAI()
 
+    search_kw = dict(
+        max_price=args.max_price,
+        limit=args.limit,
+        disk=args.disk,
+        min_vram=args.min_vram,
+        data_gb=args.data_gb,
+        upload_gb=args.upload_gb,
+        run_hours=args.run_hours,
+    )
+    print_kw = dict(disk=args.disk, data_gb=args.data_gb, upload_gb=args.upload_gb, run_hours=args.run_hours)
+
     if not args.cmd:
-        print_offers(search(vast, max_price=args.max_price, limit=args.limit, disk=args.disk, min_vram=args.min_vram))
+        offers = search(vast, **search_kw)
+        print_offers(offers, **print_kw)
         logger.info("search-only (pass a training command after `--` to launch). Nothing rented.")
         return
 
@@ -274,8 +387,8 @@ def main(args: Args) -> None:
         env["HAL_KEEP_ALIVE"] = "1"
 
     if args.dry_run:
-        offers = search(vast, max_price=args.max_price, limit=args.limit, disk=args.disk, min_vram=args.min_vram)
-        print_offers(offers)
+        offers = search(vast, **search_kw)
+        print_offers(offers, **print_kw)
         login = f"'-u {GHCR_USER} -p *** ghcr.io'" if token else "none (public image)"
         logger.info(f"[dry-run] image={args.image} disk={args.disk}GB runtype=ssh_proxy login={login}")
         logger.info(f"[dry-run] env (non-secret; secrets come from vast account env-vars)={env}")
@@ -284,15 +397,8 @@ def main(args: Args) -> None:
         logger.info(f"[dry-run] train cmd: {train_cmd}")
         return
 
-    offers = queue(
-        vast,
-        max_price=args.max_price,
-        limit=args.limit,
-        disk=args.disk,
-        min_vram=args.min_vram,
-        poll_interval_s=args.poll_interval_s,
-    )
-    print_offers(offers)
+    offers = queue(vast, **search_kw, poll_interval_s=args.poll_interval_s)
+    print_offers(offers, **print_kw)
     # Try offers best-first; a stuck/dead box (e.g. a host that can't provision the
     # disk or pull the image in time) fails over to the next rather than killing the run.
     for offer in offers:
@@ -311,7 +417,18 @@ def main(args: Args) -> None:
     else:
         raise SystemExit("every ranked offer failed to launch — rerun (the market may have healthier hosts).")
 
-    logger.success(f"instance {iid} ({offer['gpu_name']}, ${offer['dph_total']:.3f}/hr) on SHA {sha[:10]}")
+    eff = effective_dph(offer, args.disk)
+    logger.success(
+        f"instance {iid} ({offer['gpu_name']}, ${eff:.3f}/hr effective = "
+        f"${offer['dph_total']:.3f} GPU + ${storage_dph(offer, args.disk):.3f} disk[{args.disk}GB]) "
+        f"on SHA {sha[:10]}"
+    )
+    dl = download_cost(offer, args.data_gb)
+    ul = upload_cost(offer, args.upload_gb)
+    logger.info(
+        f"one-time transfer ≈ ${dl + ul:.2f} (↓${dl:.2f} {args.data_gb:.0f}GB MDS+ISO, "
+        f"↑${ul:.2f} {args.upload_gb:.0f}GB ckpts); amortized over {args.run_hours:.0f}h in the ranking"
+    )
     logger.info(f"booting: clone -> uv sync -> fetch -> train. Watch W&B + `vastai logs {iid}` for progress.")
     logger.info(f"peek:  {vast.ssh_url(id=iid) or f'vastai ssh-url {iid}'}  (tail /opt/hal/train.log)")
     teardown = (
