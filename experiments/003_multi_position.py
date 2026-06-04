@@ -139,7 +139,7 @@ class TrainConfig:
     val_split: str = "val"  # tiny datasets may have an empty val split; point this at "test"/"train"
     num_workers: int = 16  # data-pipeline-bound: the per-batch numpy preprocess + shard
     # decompress is CPU-heavy, so feed the GPU from more cores (cloud boxes have 24-36).
-    prefetch_factor: int = 8
+    prefetch_factor: int = 4  # num_workers * this = in-flight batches (fd + shm pressure)
 
 
 def _model_tag(cfg: TrainConfig) -> str:

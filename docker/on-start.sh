@@ -106,6 +106,13 @@ export DISPLAY=:99
 log "preflight: asserting CUDA is available"
 uv run python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_available() is False — host driver too old for the CUDA-13 image'"
 
+# DataLoader workers pass tensor-storage handles to the main process over a unix socket
+# via file descriptors; num_workers * prefetch_factor in-flight batches can exceed the
+# container's default open-fd soft limit (often 1024), crashing mid-run with
+# "RuntimeError: received 0 items of ancdata" in recvfds. Raise the soft limit to the
+# hard cap so fd-passing has headroom.
+ulimit -n "$(ulimit -Hn)" && log "open files (ulimit -n) -> $(ulimit -n)"
+
 cmd="$(printf '%s' "$HAL_TRAIN_CMD_B64" | base64 -d)"
 log "training: ${cmd}"
 # Run training outside the trap so we can branch on its exit code: success destroys
