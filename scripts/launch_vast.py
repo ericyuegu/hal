@@ -52,6 +52,8 @@ FILTERS = (
     "reliability>0.96",  # > 96%
     "inet_down>300",  # > 300 Mbps down
     "inet_down_cost<=0.01",  # <= $10/TB down
+    "cuda_max_good>=13",  # host driver must support the cuda13 image; older drivers
+    # silently fail torch CUDA init (err 804 forward-compat on consumer GPUs) -> CPU run
     "rentable=true",
 )
 ORDER = "dlperf_usd-"  # sort by DLPerf/$/hr, descending

@@ -99,6 +99,13 @@ mount -o remount,size=4g /dev/shm 2>/dev/null && log "/dev/shm -> 4g" || log "WA
 pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &)
 export DISPLAY=:99
 
+# Preflight: the image ships CUDA 13. A host whose driver is too old (cuda_max_good < 13)
+# fails torch's CUDA init (error 804: forward-compat unsupported on consumer GPUs), and the
+# trainer's `DEVICE = "cuda" if is_available() else "cpu"` then silently runs ~100x slower on
+# CPU and never self-stops. Assert here so a slipped-through box trips the boot trap -> stop.
+log "preflight: asserting CUDA is available"
+uv run python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_available() is False — host driver too old for the CUDA-13 image'"
+
 cmd="$(printf '%s' "$HAL_TRAIN_CMD_B64" | base64 -d)"
 log "training: ${cmd}"
 # Run training outside the trap so we can branch on its exit code: success destroys
