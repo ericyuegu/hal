@@ -70,6 +70,7 @@ from hal.eval.cross_stage import sweep_self_play
 from hal.eval.cross_stage import sweep_vs_cpu
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.harness import default_session_cfg
+from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
@@ -475,6 +476,58 @@ def recon_metrics(model: FlowMatchingPolicy, val_cache: list[TrainBatch], *, n_s
     }
 
 
+@torch.no_grad()
+def likelihood_metrics(
+    model: FlowMatchingPolicy,
+    val_cache: list[TrainBatch],
+    cfg: TrainConfig,
+    *,
+    n_ode_steps: int = 16,
+    n_mc: int = 8,
+    max_batches: int = 8,
+) -> dict[str, float]:
+    """Cross-family comparison metrics (shares ``hal.training.scoring`` with the
+    classification experiment): continuous bits/dim via the PF-ODE change-of-variables, and
+    a proper Bernoulli button score via a Monte-Carlo threshold bridge (sampling ``n_mc``
+    chunks and thresholding gives a per-button probability, since the flow models buttons as
+    continuous). Over a small fixed val subset (the PF-ODE is expensive).
+
+    NOTE: ``bits_per_dim`` is the 14-dim *joint* continuous NLL — NOT the classifier's
+    6-channel ``cont_density_bits_per_dim``; the buttons score is the apples-to-apples
+    cross-family axis."""
+    was_training = model.training
+    model.eval()
+    gen = torch.Generator(device=DEVICE).manual_seed(0)  # FIXED noise so curves track the model, not MC/probe noise
+    bpd_sum = 0.0
+    bpd_n = 0
+    probs_list: list[Tensor] = []
+    tgt_list: list[Tensor] = []
+    for batch in val_cache[:max_batches]:
+        ctx = batch.context
+        prefix, kpm = model.encode_context(ctx)
+        bpd = scoring.pf_ode_bits_per_dim(
+            lambda a, t, prefix=prefix, kpm=kpm: model.velocity(prefix, kpm, a, t),
+            batch.target,
+            n_steps=n_ode_steps,
+            gen=gen,
+        )
+        bpd_sum += bpd.sum().item()
+        bpd_n += bpd.shape[0]
+        acc = torch.zeros_like(batch.target[..., _N_CONT:])
+        for _ in range(n_mc):
+            acc += (integrate_chunk(model, ctx, n_steps=cfg.n_flow_steps, gen=gen)[..., _N_CONT:] > 0.5).float()
+        probs_list.append(acc / n_mc)
+        tgt_list.append(batch.target[..., _N_CONT:])
+    logloss, brier = scoring.bernoulli_scores_from_probs(torch.cat(probs_list), torch.cat(tgt_list))
+    if was_training:
+        model.train()
+    return {
+        "bits_per_dim": bpd_sum / max(bpd_n, 1),
+        "buttons/logloss_bits": logloss.item(),
+        "buttons/brier": brier.item(),
+    }
+
+
 def eval_vs_cpu(
     model: FlowMatchingPolicy,
     stats: dict[str, FeatureStats],
@@ -643,11 +696,13 @@ def train(
         if cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0:
             vl, vbreak = val_loss(model, val_cache)
             rm = recon_metrics(model, val_cache, n_steps=cfg.n_flow_steps)
+            lm = likelihood_metrics(model, val_cache, cfg)
             wandb.log(
                 {
                     "val/loss": vl,
                     **{f"val/loss/{k}": v for k, v in vbreak.items()},
                     **{f"val/{k}": v for k, v in rm.items()},
+                    **{f"val/{k}": v for k, v in lm.items()},
                 },
                 step=step,
             )
@@ -673,11 +728,13 @@ def train(
 
     vl_final, vbreak_final = val_loss(model, val_cache)
     rm_final = recon_metrics(model, val_cache, n_steps=cfg.n_flow_steps)
+    lm_final = likelihood_metrics(model, val_cache, cfg)
     wandb.log(
         {
             "val/loss": vl_final,
             **{f"val/loss/{k}": v for k, v in vbreak_final.items()},
             **{f"val/{k}": v for k, v in rm_final.items()},
+            **{f"val/{k}": v for k, v in lm_final.items()},
         },
         step=cfg.max_steps,
     )
