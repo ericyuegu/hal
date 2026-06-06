@@ -22,10 +22,18 @@ classifier's own mixed objective; ``val/cont_density_bits_per_dim`` (naive only)
 density-corrected continuous dim that lines up with a flow model's PF-ODE bits/dim;
 ``val/buttons/{logloss_bits,brier}`` score the buttons as a proper Bernoulli model.
 
+Closed-loop decode is sampled with a temperature knob (``cfg.decode`` / ``cfg.decode_temp``,
+default ``sample`` @ 1.0): greedy argmax collapses an autoregressive policy to a do-nothing
+fixed point in closed loop, so sampling is the default controller; argmax stays for the
+deterministic recon metric. This is the AR analog of the flow policies' integrate-from-noise
+decode and is kept deliberately separate.
+
 Run:
     python experiments/005_classification.py --audit                 # quantization report, no GPU train
-    python experiments/005_classification.py                         # train
-    python experiments/005_classification.py --eval <ckpt>           # closed-loop eval a checkpoint
+    python experiments/005_classification.py                         # train (closed-loop eval samples)
+    python experiments/005_classification.py --eval <ckpt>                       # eval at the trained decode
+    python experiments/005_classification.py --eval <ckpt> --eval-temp 0.7       # test-time temperature sweep
+    python experiments/005_classification.py --eval <ckpt> --eval-decode argmax  # re-eval an old run greedily
 """
 
 # %%
@@ -109,9 +117,13 @@ class TrainConfig:
     button_head: str = "multi_label"  # "multi_label" (8x BCE) | "single_label" (9-way CE, diagnostic)
     continuous_head: str = "naive_bins"  # "naive_bins" | "stick_clusters"
     n_bins: int = 21  # per continuous channel (and trigger bins in cluster mode); odd centers neutral
-    # decode (closed-loop controller + recon proxy)
-    decode: str = "argmax"  # "argmax" (deterministic) | "sample" (temperature softmax)
-    decode_temp: float = 1.0
+    # decode (closed-loop controller + recon proxy). Sampling is the DEFAULT: argmax greedily
+    # picks the mode of P(action | recent inputs), which for an autoregressive policy collapses
+    # to a "do nothing" fixed point in closed loop (it feeds neutral back to itself; the flow
+    # baselines escape this via their noise draw). argmax stays available for the deterministic
+    # recon metric and as a test-time override.
+    decode: str = "sample"  # "sample" (temperature) | "argmax" (greedy)
+    decode_temp: float = 1.0  # softmax/sigmoid temperature for sample decode (higher = more random)
     # training-stability divisor on the joint-NLL scalar ONLY; reported likelihood is never divided by it
     norm_div: float = 1.0
     # Seeds model init and the dataloader's window + ego-port sampling.
@@ -403,16 +415,22 @@ def decode(
     gen: torch.Generator | None = None,
 ) -> Float[Tensor, "B L_chunk d_action"]:
     """One action chunk per sample from the LAST context position, in raw action ranges
-    (``[-1,1]`` sticks, ``[0,1]`` triggers, ``{0,1}`` buttons). ``mode="argmax"`` takes the
-    mode (deterministic controller); ``"sample"`` draws from the temperature-scaled
-    distribution (distributional imitation). The single inference path: closed-loop play and
-    the recon proxy both call this."""
+    (``[-1,1]`` sticks, ``[0,1]`` triggers, ``{0,1}`` buttons).
+
+    This is the AUTOREGRESSIVE decoder: per-frame categorical (sticks/triggers, single-label
+    buttons) and Bernoulli (multi-label buttons) logits are turned into actions by either
+    ``"sample"`` (draw from the ``temp``-scaled distribution — the default; higher ``temp`` =
+    more random) or ``"argmax"`` (greedy mode — deterministic, for the recon metric). It is
+    deliberately separate from the flow policies' decoder (which integrates from noise); the
+    only shared piece is the discretizer inverse in ``hal.training.scoring``. The single
+    inference path for this policy: closed-loop play and the recon proxy both call this."""
     if mode not in ("argmax", "sample"):
         raise ValueError(f"decode mode must be argmax|sample, got {mode!r}")
     cond = model.encode_context(ctx)[:, -1, :]  # [B, d_model]
     lg = model.logits(cond)
 
     def pick(logits: Tensor) -> Tensor:
+        """Categorical choice over the last logit dim: greedy mode, or a ``temp``-scaled draw."""
         if mode == "argmax":
             return logits.argmax(-1)
         probs = F.softmax(logits / temp, dim=-1)
@@ -443,15 +461,20 @@ def make_policy(
     *,
     device: str = DEVICE,
     decode_mode: str | None = None,
+    decode_temp: float | None = None,
 ) -> RecedingHorizon:
     """Fresh open-loop closed-loop policy for one eval wave (rolling state must not leak).
-    The driver replans every ``L_chunk``, decoding one chunk from the last context position."""
+    The driver replans every ``L_chunk``, decoding one chunk from the last context position.
+    ``decode_mode``/``decode_temp`` override ``cfg`` for a test-time decode sweep (the AR
+    analog of the flow policies' ``n_flow_steps`` override) without retraining; closed-loop
+    sampling draws fresh randomness each replan (``gen=None``)."""
     mode = decode_mode or cfg.decode
+    temp = cfg.decode_temp if decode_temp is None else decode_temp
 
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         assert committed is None, "open-loop policy does not condition on a committed prefix"
-        return decode(model, ctx, mode=mode, temp=cfg.decode_temp).cpu().numpy()
+        return decode(model, ctx, mode=mode, temp=temp).cpu().numpy()
 
     return RecedingHorizon(
         predict_chunk=predict_chunk,
@@ -858,19 +881,23 @@ def _load_ckpt(ckpt_path: str) -> tuple[ClassifierPolicy, TrainConfig, dict[str,
     return model, cfg, stats, state
 
 
-def eval_ckpt(ckpt_path: str) -> None:
-    """Load a checkpoint, sweep stages vs CPU + self-play, print summaries."""
+def eval_ckpt(ckpt_path: str, *, decode_mode: str | None = None, decode_temp: float | None = None) -> None:
+    """Load a checkpoint, sweep stages vs CPU + self-play, print summaries. ``decode_mode``/
+    ``decode_temp`` override the trained cfg for this eval only (test-time decode sweep) — e.g.
+    to re-evaluate an argmax-trained checkpoint with sampling."""
     from hal.policy import INCLUDED_STAGES
 
     model, cfg, stats, state = _load_ckpt(ckpt_path)
-    print(f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}", flush=True)
+    mode = decode_mode or cfg.decode
+    temp = cfg.decode_temp if decode_temp is None else decode_temp
+    print(f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  decode={mode} temp={temp}", flush=True)
     replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
     replay_dir.mkdir(parents=True, exist_ok=True)
     session_cfg = default_session_cfg(replay_dir)
     stages = tuple(s for s in INCLUDED_STAGES if s is not melee.Stage.FOUNTAIN_OF_DREAMS)
 
     def policy_factory() -> RecedingHorizon:
-        return make_policy(model, stats, cfg)
+        return make_policy(model, stats, cfg, decode_mode=decode_mode, decode_temp=decode_temp)
 
     print("\n[eval] ============== vs-cpu ==============", flush=True)
     for stage, r, s in sweep_vs_cpu(
@@ -903,13 +930,15 @@ class Args:
     cfg: TrainConfig = field(default_factory=TrainConfig)
     audit: bool = False  # quantization fidelity report (no GPU train), then exit
     eval: str | None = None  # ckpt path; closed-loop eval instead of train
+    eval_decode: str | None = None  # override decode mode for --eval (sample|argmax); test-time sweep
+    eval_temp: float | None = None  # override decode temperature for --eval
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
 
 
 def main(args: Args) -> None:
     if args.eval is not None:
-        eval_ckpt(args.eval)
+        eval_ckpt(args.eval, decode_mode=args.eval_decode, decode_temp=args.eval_temp)
         return
     if args.audit:
         cfg = args.cfg

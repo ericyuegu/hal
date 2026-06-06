@@ -10,6 +10,7 @@ experiment is loaded by path since its filename starts with a digit."""
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -226,6 +227,25 @@ def test_decode_argmax_is_deterministic():
     a1 = exp.decode(model, ctx, mode="argmax")
     a2 = exp.decode(model, ctx, mode="argmax")
     assert torch.equal(a1, a2)
+
+
+def test_default_decode_is_sampling():
+    assert exp.TrainConfig().decode == "sample"
+
+
+def test_make_policy_samples_by_default_and_respects_overrides():
+    cfg = _cfg()  # decode defaults to "sample"
+    torch.manual_seed(0)
+    model = exp.ClassifierPolicy(cfg).eval()
+    ctx, _ = _batch(3, cfg)
+    # default policy samples → successive replans draw different actions (closed-loop stochasticity)
+    pol = exp.make_policy(model, {}, cfg, device="cpu")
+    a1, a2 = pol.predict_chunk(ctx, None), pol.predict_chunk(ctx, None)
+    assert a1.shape == (3, cfg.L_chunk, exp.A_DIM)
+    assert not np.allclose(a1, a2)
+    # argmax override → deterministic
+    greedy = exp.make_policy(model, {}, cfg, device="cpu", decode_mode="argmax")
+    assert np.allclose(greedy.predict_chunk(ctx, None), greedy.predict_chunk(ctx, None))
 
 
 if __name__ == "__main__":
