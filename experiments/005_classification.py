@@ -113,6 +113,14 @@ class TrainConfig:
     n_head_layers: int = 2
     head_heads: int = 4
     head_ff: int = 512
+    # matchup conditioning (schema v4): per-player character + global stage embeddings — the
+    # signal the old AR model had that v3 dropped. Needs a v4 MDS (stage + p{1,2}_character
+    # columns) + the v4 closed-loop obs injection; off => identical to the v3-data model.
+    cond_char_stage: bool = True
+    char_vocab: int = 64  # slp/libmelee Character ids (0..~32), padded
+    char_dim: int = 12
+    stage_vocab: int = 64  # libmelee Stage values, padded
+    stage_dim: int = 8
     # output factorization (the variant axis)
     button_head: str = "multi_label"  # "multi_label" (8x BCE) | "single_label" (9-way CE, diagnostic)
     continuous_head: str = "naive_bins"  # "naive_bins" | "stick_clusters"
@@ -148,23 +156,24 @@ class TrainConfig:
     val_n_batches: int = 16
     eval_every: int = 2048
     eval_max_frames: int = 7200
-    eval_replicas: int = 2
+    eval_replicas: int = 16
     eval_max_parallel: int = 8
     # checkpointing
     ckpt_every: int = 2048
     push_to_r2: bool = True
-    # data
-    data_root: str = "data/processed/ranked-anonymized-1/mds"
+    # data (v4 MDS carries the stage + p{1,2}_character columns cond_char_stage needs)
+    data_root: str = "data/processed/ranked-anonymized-1-v4/mds"
     cache_limit_gb: int = 440
     shuffle_block_size: int = 2000
     val_split: str = "val"
-    num_workers: int = 16
+    num_workers: int = 8
     prefetch_factor: int = 4
 
 
 def _model_tag(cfg: TrainConfig) -> str:
+    cs = "-cs" if cfg.cond_char_stage else ""
     return (
-        f"cls-{cfg.button_head}-{cfg.continuous_head}-b{cfg.n_bins}"
+        f"cls-{cfg.button_head}-{cfg.continuous_head}-b{cfg.n_bins}{cs}"
         f"-d{cfg.d_model}-L{cfg.n_layers}-Lc{cfg.L_ctx}-Lk{cfg.L_chunk}-tp{cfg.train_positions}"
     )
 
@@ -212,6 +221,13 @@ class ClassifierPolicy(nn.Module):
         n_cat = sum(dim for _, dim in CAT_FEATURES.values())
         per_player_dim = n_float + n_mask + n_cat
         per_frame_in_dim = 2 * per_player_dim + A_DIM  # ego + opp + ego controller history
+        # Matchup conditioning: a shared per-player character embedding (ego + opp) + one
+        # global stage embedding, concatenated onto every context token.
+        self.cond_char_stage = cfg.cond_char_stage
+        if cfg.cond_char_stage:
+            self.char_emb = nn.Embedding(cfg.char_vocab, cfg.char_dim)
+            self.stage_emb = nn.Embedding(cfg.stage_vocab, cfg.stage_dim)
+            per_frame_in_dim += 2 * cfg.char_dim + cfg.stage_dim
 
         # --- causal backbone ---
         self.ctx_proj = nn.Linear(per_frame_in_dim, d)
@@ -277,7 +293,13 @@ class ClassifierPolicy(nn.Module):
         ego = self._per_player_features(features, "ego")
         opp = self._per_player_features(features, "opp")
         hist = self._ego_history_features(features)
-        return self.ctx_proj(torch.cat([ego, opp, hist], dim=-1))
+        parts = [ego, opp, hist]
+        if self.cond_char_stage:
+            ec = self.char_emb(features["ego_character"].clamp(0, self.char_emb.num_embeddings - 1))
+            oc = self.char_emb(features["opp_character"].clamp(0, self.char_emb.num_embeddings - 1))
+            st = self.stage_emb(features["stage"].clamp(0, self.stage_emb.num_embeddings - 1))
+            parts += [ec, oc, st]
+        return self.ctx_proj(torch.cat(parts, dim=-1))
 
     def _backbone_mask(self, ctx_pad: Int[Tensor, " B"], T: int, device: torch.device) -> Tensor:
         idx = torch.arange(T, device=device)
@@ -462,11 +484,14 @@ def make_policy(
     device: str = DEVICE,
     decode_mode: str | None = None,
     decode_temp: float | None = None,
+    s: int | None = None,
 ) -> RecedingHorizon:
     """Fresh open-loop closed-loop policy for one eval wave (rolling state must not leak).
-    The driver replans every ``L_chunk``, decoding one chunk from the last context position.
-    ``decode_mode``/``decode_temp`` override ``cfg`` for a test-time decode sweep (the AR
-    analog of the flow policies' ``n_flow_steps`` override) without retraining; closed-loop
+    The driver replans every ``s`` frames (default ``L_chunk``), decoding one chunk from the
+    last context position and executing its first ``s`` actions. ``decode_mode``/``decode_temp``
+    override ``cfg`` for a test-time decode sweep (the AR analog of the flow policies'
+    ``n_flow_steps`` override) without retraining; ``s`` overrides the execution horizon to
+    probe control frequency (``s=1`` ≈ every-frame control, the old AR regime). Closed-loop
     sampling draws fresh randomness each replan (``gen=None``)."""
     mode = decode_mode or cfg.decode
     temp = cfg.decode_temp if decode_temp is None else decode_temp
@@ -481,7 +506,7 @@ def make_policy(
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=cfg.L_chunk,
-        s=cfg.L_chunk,
+        s=cfg.L_chunk if s is None else s,
         d=0,
         device=device,
     )
@@ -881,6 +906,97 @@ def _load_ckpt(ckpt_path: str) -> tuple[ClassifierPolicy, TrainConfig, dict[str,
     return model, cfg, stats, state
 
 
+def val_report(ckpt_path: str, *, n_batches: int = 24) -> None:
+    """D3 diagnostic: how well does a trained checkpoint FIT the human val data (teacher-forced,
+    no emulator)? Strong fit + weak closed-loop winrate ⇒ the bottleneck is the data's skill
+    ceiling / distribution shift, not optimization. Prints proper-scoring NLL plus sample-space
+    reconstruction (button F1, continuous MAE) at the deployed ``sample`` decode and at ``argmax``."""
+    from streaming.base.util import clean_stale_shared_memory
+
+    clean_stale_shared_memory()  # drop stale /dev/shm from prior (killed) StreamingDataset procs
+    model, cfg, stats, state = _load_ckpt(ckpt_path)
+    loader = make_loader(
+        split=cfg.val_split,
+        num_workers=4,
+        data_root=cfg.data_root,
+        remote=streams.remote_for_local(cfg.data_root),
+        cache_limit=f"{cfg.cache_limit_gb}gb",
+        shuffle_block_size=cfg.shuffle_block_size,
+        stats=stats,
+        L_ctx=cfg.L_ctx,
+        L_chunk=cfg.L_chunk,
+        batch_size=cfg.batch_size,
+        seed=cfg.seed,
+    )
+    val_cache = [b.to(DEVICE) for b in itertools.islice(loader, n_batches)]
+    if not val_cache:
+        raise RuntimeError("val loader yielded zero batches")
+    vm = val_metrics(model, val_cache, cfg)
+    rec_s = recon_metrics(model, val_cache, mode="sample", temp=cfg.decode_temp)
+    rec_a = recon_metrics(model, val_cache, mode="argmax")
+    frames = sum(b.target.shape[0] * b.target.shape[1] for b in val_cache)
+    print(f"\n[d3] {ckpt_path}  step={state['step']}  {frames} val frames  decode_temp={cfg.decode_temp}", flush=True)
+    print(f"[d3] action_nll_bits_per_frame = {vm['action_nll_bits_per_frame']:.3f}", flush=True)
+    print(
+        f"[d3] buttons: logloss_bits={vm['buttons/logloss_bits']:.4f}  brier={vm['buttons/brier']:.4f}  "
+        f"multipress_rate={vm['buttons/multipress_rate']:.4f}",
+        flush=True,
+    )
+    print(
+        f"[d3] recon(sample): button_acc={rec_s['recon_button_acc']:.4f} f1={rec_s['recon_button_f1']:.4f} "
+        f"cont_mae={rec_s['recon_cont_mae']:.4f}",
+        flush=True,
+    )
+    print(
+        f"[d3] recon(argmax): button_acc={rec_a['recon_button_acc']:.4f} f1={rec_a['recon_button_f1']:.4f} "
+        f"cont_mae={rec_a['recon_cont_mae']:.4f}",
+        flush=True,
+    )
+    for k in sorted(k for k in vm if k.startswith("loss/modality/")):
+        print(f"[d3]   {k} = {vm[k]:.4f} bits", flush=True)
+
+
+def eval_control_freq(
+    ckpt_path: str,
+    *,
+    s_values: tuple[int, ...] = (1,),
+    decode_mode: str | None = None,
+    decode_temp: float | None = None,
+    replicas: int | None = None,
+    max_frames: int = 7200,
+) -> None:
+    """D1 diagnostic: closed-loop control-frequency sweep on FD vs lvl-9 CPU, WITHOUT retraining.
+
+    A trained chunk model decodes ``L_chunk`` actions per replan; the execution horizon ``s``
+    controls how many it commits before replanning. ``s=L_chunk`` is the trained open-loop default
+    (~267 ms of unreactive input); ``s=1`` replans every frame using only the next-frame prediction
+    (the old AR every-frame regime). A large ``stocks_taken`` gap from ``s=1`` to ``s=L_chunk``
+    implicates control frequency rather than model quality. Same checkpoint, same decode."""
+    model, cfg, stats, state = _load_ckpt(ckpt_path)
+    mode = decode_mode or cfg.decode
+    temp = cfg.decode_temp if decode_temp is None else decode_temp
+    reps = replicas or cfg.eval_replicas
+    replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    # de-dup and always include the trained default L_chunk as the reference point
+    horizons = sorted({s for s in (*s_values, cfg.L_chunk) if 0 < s <= cfg.L_chunk})
+    print(
+        f"[d1] {ckpt_path}  step={state['step']}  decode={mode} temp={temp}  "
+        f"L_chunk={cfg.L_chunk}  horizons={horizons}  replicas={reps}",
+        flush=True,
+    )
+    for s in horizons:
+        results = sweep_vs_cpu(
+            lambda s=s: make_policy(model, stats, cfg, decode_mode=decode_mode, decode_temp=decode_temp, s=s),
+            session_cfg=default_session_cfg(replay_dir),
+            stages=(melee.Stage.FINAL_DESTINATION,),
+            replicas=reps,
+            max_parallel=cfg.eval_max_parallel,
+            max_frames=max_frames,
+        )
+        print(f"[d1] s={s:>2d}  {vs_cpu_metrics(results)}", flush=True)
+
+
 def eval_ckpt(ckpt_path: str, *, decode_mode: str | None = None, decode_temp: float | None = None) -> None:
     """Load a checkpoint, sweep stages vs CPU + self-play, print summaries. ``decode_mode``/
     ``decode_temp`` override the trained cfg for this eval only (test-time decode sweep) — e.g.
@@ -930,6 +1046,9 @@ class Args:
     cfg: TrainConfig = field(default_factory=TrainConfig)
     audit: bool = False  # quantization fidelity report (no GPU train), then exit
     eval: str | None = None  # ckpt path; closed-loop eval instead of train
+    eval_control_sweep: str | None = None  # ckpt path; D1 control-frequency sweep (s=1 vs L_chunk) on FD
+    eval_cs_replicas: int | None = None  # override replicas for --eval-control-sweep (default: cfg.eval_replicas)
+    val_report: str | None = None  # ckpt path; D3 teacher-forced val fit report (no emulator)
     eval_decode: str | None = None  # override decode mode for --eval (sample|argmax); test-time sweep
     eval_temp: float | None = None  # override decode temperature for --eval
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
@@ -939,6 +1058,17 @@ class Args:
 def main(args: Args) -> None:
     if args.eval is not None:
         eval_ckpt(args.eval, decode_mode=args.eval_decode, decode_temp=args.eval_temp)
+        return
+    if args.val_report is not None:
+        val_report(args.val_report)
+        return
+    if args.eval_control_sweep is not None:
+        eval_control_freq(
+            args.eval_control_sweep,
+            decode_mode=args.eval_decode,
+            decode_temp=args.eval_temp,
+            replicas=args.eval_cs_replicas,
+        )
         return
     if args.audit:
         cfg = args.cfg

@@ -116,6 +116,16 @@ def drive_vec(
         done = [not started[i] for i in range(n)]
         n_live0 = n - sum(done)
         logger.info(f"drive_vec: stepping {n_live0}/{n} matches up to {max_frames} frames")
+        # Per-match matchup metadata (stage + per-port character) as the libmelee enum *values*,
+        # so a char/stage-conditioned policy gets the same ids it trained on. Injected into each
+        # obs frame under ``_matchup``; flatten_canonical_frame emits the columns only when present.
+        match_meta = [
+            {
+                "stage": int(m.matchup.stage.value),
+                "character": {pl.port: int(pl.character.value) for pl in m.matchup.players},
+            }
+            for m in matches
+        ]
         t0 = time.monotonic()
         for t in range(max_frames - 1):
             live = [i for i in range(n) if not done[i]]
@@ -124,7 +134,11 @@ def drive_vec(
             if progress_every and t > 0 and t % progress_every == 0:
                 elapsed = time.monotonic() - t0
                 logger.info(f"drive_vec: frame {t}/{max_frames} | live {len(live)}/{n} | {t / elapsed:.0f} steps/s")
-            obs = {Slot(i, p): captured[i][-1] for i in live for p in matches[i].model_ports}
+            obs = {
+                Slot(i, p): {**captured[i][-1], "_matchup": match_meta[i]}
+                for i in live
+                for p in matches[i].model_ports
+            }
             inputs = policy(t, obs)
             step_futs = {
                 i: pool.submit(sessions[i].step, {p: inputs[Slot(i, p)] for p in matches[i].model_ports}) for i in live

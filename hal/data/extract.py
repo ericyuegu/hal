@@ -32,6 +32,7 @@ from hal.wire import POST_FIELD_SUFFIXES
 from hal.wire import dedupe_keep_idx
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
+from hal.wire import slp_stage_to_libmelee
 
 
 def _arr_to_np(arr: Any, dtype: DTypeLike, length: int) -> np.ndarray:
@@ -180,11 +181,17 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
 
     sample: dict[str, np.ndarray] = {
         "frame": kept_frame_ids[in_game],
+        # Per-replay constants broadcast across frames (SCHEMA_VERSION 4): stage as the
+        # libmelee Stage value (matches the closed-loop obs without a second translation);
+        # character is slp-native == libmelee Character value, broadcast per player below.
+        "stage": np.full(out_length, int(slp_stage_to_libmelee(int(g.start.stage)).value), dtype=np.int32),
     }
 
     for prefix, port in zip(PLAYER_PREFIXES, occupied_libmelee_ports, strict=True):
         peppi_idx = peppi_idx_by_libmelee_port[port]
         port_data = g.frames.ports[peppi_idx]
+        character = int(g.start.players[peppi_idx].character)
+        sample[f"{prefix}_character"] = np.full(out_length, character, dtype=np.int32)
         sample.update(_extract_player(port_data.leader, prefix, keep_idx, raw_length))
         sample.update(_extract_nana(port_data.follower, prefix, keep_idx, raw_length))
 

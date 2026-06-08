@@ -24,4 +24,13 @@ def flatten_canonical_frame(frame: dict) -> dict[str, float]:
         post = pd["leader"]["post"]
         for suffix in POST_FIELD_SUFFIXES:
             out[f"{prefix}_{suffix}"] = canonical_post_field(post, suffix)
+    # Matchup conditioning (SCHEMA_VERSION 4): the driver injects per-match stage + per-port
+    # character (constants, the libmelee Stage/Character values that match the training columns).
+    # Absent unless drive_vec injected them, so non-conditioned experiments are unaffected.
+    matchup = frame.get("_matchup")
+    if matchup is not None:
+        out["stage"] = matchup["stage"]
+        for libmelee_port, prefix in ((1, "p1"), (2, "p2")):
+            if libmelee_port in frame["ports"]:
+                out[f"{prefix}_character"] = matchup["character"][libmelee_port]
     return out

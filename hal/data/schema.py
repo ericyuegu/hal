@@ -17,6 +17,12 @@ from hal.wire import BUTTON_BITS
 # change) or to the extraction semantics that produce them. Consumers verify
 # the version matches before reading; mismatch is a hard error.
 #
+# 4: re-add the global ``stage`` + per-player ``p{1,2}_character`` columns (dropped
+#    at v3's predecessor) as per-replay constants broadcast across frames, so the
+#    policy can condition on matchup again. ``stage`` is stored as the libmelee
+#    ``Stage`` value (not slp-native) so it matches the closed-loop obs without a
+#    second translation; ``character`` slp-native id already equals the libmelee
+#    ``Character`` value.
 # 3: drop the per-player action_frame column. It was a 1-indexed run-length on
 #    the action id, but the closed-loop policy feeds the engine's state_age
 #    (0-indexed, resets within a constant action) — the two never matched, so
@@ -24,7 +30,7 @@ from hal.wire import BUTTON_BITS
 # 2: add raw_analog_cstick_x/y columns (slp >= 3.17) for bit-exact c-stick
 #    replay.
 # 1: initial introduction of the version field.
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 
 def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
@@ -74,11 +80,16 @@ def _nana_columns(prefix: str) -> dict[str, DTypeLike]:
     return {f"{prefix}_nana_{k.removeprefix(prefix + '_')}": v for k, v in _gamestate_columns(prefix).items()}
 
 
+# ``stage`` + ``p{1,2}_character`` are per-replay constants broadcast across frames
+# (not in peppi's per-frame post block) — see extract.broadcast and SCHEMA_VERSION 4.
 MDS_PER_FRAME_DTYPES: dict[str, DTypeLike] = {
     "frame": np.int32,
+    "stage": np.int32,
+    "p1_character": np.int32,
     **_gamestate_columns("p1"),
     **_controller_columns("p1"),
     **_nana_columns("p1"),
+    "p2_character": np.int32,
     **_gamestate_columns("p2"),
     **_controller_columns("p2"),
     **_nana_columns("p2"),

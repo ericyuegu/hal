@@ -147,6 +147,10 @@ def _classify(name: str) -> str:
         return "drop"
     if any(p in name for p in _DROP_PATTERNS):
         return "drop"
+    # Global stage + per-player character: int categoricals joined from the replay
+    # manifest (not in the per-frame MDS). Inert unless those columns are present.
+    if name == "stage" or name.endswith("_character"):
+        return "cat"
     if any(name.endswith(f"_{c}") for c in CAT_FEATURES):
         return "cat"
     if "_button_" in name:
