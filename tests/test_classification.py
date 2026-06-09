@@ -57,6 +57,8 @@ def _features(B: int, T: int, *, seed: int = 0) -> dict[str, torch.Tensor]:
             feats[f"{prefix}_{f}"] = torch.randn(B, T, generator=g)
         for cat, (vocab, _) in exp.CAT_FEATURES.items():
             feats[f"{prefix}_{cat}"] = torch.randint(0, vocab, (B, T), generator=g)
+        feats[f"{prefix}_character"] = torch.randint(0, 26, (B, T), generator=g)
+    feats["stage"] = torch.randint(0, 32, (B, T), generator=g)
     # ego controller history in the real action ranges so discretization is exercised
     for i, ch in enumerate(exp.ACTION_CHANNELS):
         if i < 4:

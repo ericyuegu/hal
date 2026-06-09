@@ -53,7 +53,7 @@ from hal.data.index import Stage3Annotation
 from hal.data.index import read_jsonl
 from hal.data.index import replay_uuid_from_path
 from hal.data.index import write_jsonl
-from hal.data.schema import MDS_DTYPE_STR_BY_COLUMN
+from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.stats import StatsAccumulator
@@ -167,7 +167,7 @@ def _open_writers(output: str, splits: Iterable[str]) -> dict[str, MDSWriter]:
     return {
         split: MDSWriter(
             out=str(_join(output, split)),
-            columns=MDS_DTYPE_STR_BY_COLUMN,
+            columns=MDS_COLUMNS,
             compression="zstd",
             size_limit=SHARD_SIZE_LIMIT,
             exist_ok=False,
@@ -291,6 +291,7 @@ def process_replays(
                 writer = writers[split]
                 # MDSWriter assigns sample_idx in write order; capture it before writing.
                 row_idx = rows_written[split]
+                result.sample["schema_version"] = SCHEMA_VERSION
                 writer.write(result.sample)
                 rows_written[split] += 1
 

@@ -68,8 +68,8 @@ DEV_ARCHIVE: Final[Fixture] = Fixture(
 DEV_MDS: Final[Fixture] = Fixture(
     name="dev-mds",
     r2_key="fixtures/dev-mds.tar.zst",
-    sha256="8a5de5bcf23bfc55bb9b86cab01fd180897b8c249d4fd291941430f7573f5810",
-    size_bytes=11_532_643,
+    sha256="eee07a043fef3223e58579d9ba7908a09c644b8124df92d6078cd764b4392676",
+    size_bytes=20_889_790,
     dest=Path("data/processed/dev/mds"),
     extract="tar_zst",
 )
@@ -80,11 +80,14 @@ ISO: Final[Fixture] = Fixture(
     size_bytes=1_449_165_376,
     dest=Path("data/emulator/ssbm.ciso"),
 )
+# Our fork of vladfi1's exi-ai-0.2.0 with stock trigger pipe semantics restored
+# (see the exi-ai-0.2.1 release notes; validated by
+# tests/test_roundtrip.py::test_analog_sweep_reads_back_grid_exact).
 DOLPHIN_EXIAI: Final[Fixture] = Fixture(
     name="dolphin-exiai",
-    url="https://github.com/vladfi1/slippi-Ishiiruka/releases/download/exi-ai-0.2.0/Slippi_Online-x86_64-ExiAI.AppImage",
-    sha256="87e9ef6d80ed03354a1647d0616016dbc91399aa9e86a69ae5a398edd0a0c2bd",
-    size_bytes=0,
+    url="https://github.com/ericyuegu/slippi-Ishiiruka/releases/download/exi-ai-0.2.1/Slippi_Online-x86_64-ExiAI.AppImage",
+    sha256="7f2e5ab4a65482cf164125dd7bbf0b1f8b997c0fd4d4435b71bd7fc8c6816cb4",
+    size_bytes=114_711_032,
     dest=Path("data/emulator/exiai"),
     extract="appimage",
 )

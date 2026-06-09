@@ -8,9 +8,10 @@ The output stream is rollback-deduplicated via ``wire.dedupe_keep_idx``: one
 row per ``frame_id``, keeping the engine's committed (last) value. Pre-
 countdown frames (``frame_id < wire.GAME_START_FRAME``) are dropped.
 
-See CLAUDE.md (Architecture → Conventions) for the rules this module assumes:
-no value mutation (peppi-native ranges), bitmask button unpacking, dtype-
-specific mask sentinels for slp-version-unavailable fields.
+Values are stored game-causal: slp-logical sticks as-is, per-shoulder triggers
+with sub-deadzone jitter zeroed (``wire.TRIGGER_DEADZONE``), buttons unpacked
+from the physical bitmask. Slp-version-unavailable fields get dtype-specific
+mask sentinels. See CLAUDE.md (Controller data model).
 """
 
 from collections.abc import Sequence
@@ -29,6 +30,7 @@ from hal.wire import BUTTON_BITS
 from hal.wire import GAME_START_FRAME
 from hal.wire import PLAYER_PREFIXES
 from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import TRIGGER_DEADZONE
 from hal.wire import dedupe_keep_idx
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
@@ -103,25 +105,21 @@ def _extract_player(leader: Data, prefix: str, keep_idx: np.ndarray, length: int
     for b, arr in _unpack_buttons(pre.buttons_physical, length).items():
         out[f"{prefix}_button_{b}"] = arr[keep_idx]
 
-    # Sticks (peppi-native [-1,1])
+    # Sticks (slp-logical: post-deadzone, [-1, 1])
     out[f"{prefix}_main_stick_x"] = _arr_to_np(pre.joystick.x, np.float32, length)[keep_idx]
     out[f"{prefix}_main_stick_y"] = _arr_to_np(pre.joystick.y, np.float32, length)[keep_idx]
     out[f"{prefix}_c_stick_x"] = _arr_to_np(pre.cstick.x, np.float32, length)[keep_idx]
     out[f"{prefix}_c_stick_y"] = _arr_to_np(pre.cstick.y, np.float32, length)[keep_idx]
 
-    # Triggers
-    out[f"{prefix}_trigger_logical"] = _arr_to_np(pre.triggers, np.float32, length)[keep_idx]
+    # Per-shoulder triggers, zeroed below the game's deadzone so the stored
+    # value is game-causal — the same post-deadzone convention the slp logical
+    # stick already has. (slp has no per-shoulder logical channel; its fused
+    # ``pre.triggers`` scalar loses which shoulder moved, so we derive ours.)
     tp = pre.triggers_physical
-    out[f"{prefix}_trigger_l_physical"] = _arr_to_np(tp.l if tp is not None else None, np.float32, length)[keep_idx]
-    out[f"{prefix}_trigger_r_physical"] = _arr_to_np(tp.r if tp is not None else None, np.float32, length)[keep_idx]
-
-    # Raw analog bytes (slp-version gated). Main stick: x >= 1.2.0, y >= 3.15.0.
-    # C-stick: both axes >= 3.17.0. Older slps backfill with the int8 mask
-    # sentinel so apply_inputs falls back to the lossy logical-to-wire path.
-    out[f"{prefix}_main_stick_raw_x"] = _arr_to_np(pre.raw_analog_x, np.int8, length)[keep_idx]
-    out[f"{prefix}_main_stick_raw_y"] = _arr_to_np(pre.raw_analog_y, np.int8, length)[keep_idx]
-    out[f"{prefix}_c_stick_raw_x"] = _arr_to_np(pre.raw_analog_cstick_x, np.int8, length)[keep_idx]
-    out[f"{prefix}_c_stick_raw_y"] = _arr_to_np(pre.raw_analog_cstick_y, np.int8, length)[keep_idx]
+    for shoulder, arr in (("l", tp.l if tp is not None else None), ("r", tp.r if tp is not None else None)):
+        trigger = _arr_to_np(arr, np.float32, length)[keep_idx]
+        trigger[trigger < TRIGGER_DEADZONE] = 0.0
+        out[f"{prefix}_trigger_{shoulder}"] = trigger
 
     return out
 

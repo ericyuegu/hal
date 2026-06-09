@@ -5,12 +5,11 @@
 dataclass for synthesized inputs) both satisfy it. ``apply_inputs`` is
 duck-typed against the protocol.
 
-Stick path: prefer ``raw`` int8 bytes per-axis when the slp recorded them;
-otherwise fall back to the ``logical`` float via libmelee's
-``fix_analog_stick``. The Controller is constructed with
-``fix_analog_inputs=False`` so the composed wire byte reaches Dolphin
-unmodified. Slp-version gating and the fallback-path physics drift are
-documented in CLAUDE.md (Architecture → Footguns).
+All values are logical (game-causal): sticks in [-1, 1], triggers in [0, 1],
+buttons a wire-bitmask. ``fix_analog_stick_signed`` / ``fix_analog_trigger``
+in libmelee own the wire conversion; the Controller is constructed with
+``fix_analog_inputs=False`` so the converted value reaches Dolphin unmodified.
+See CLAUDE.md (Controller data model).
 """
 
 from dataclasses import dataclass
@@ -22,8 +21,6 @@ import melee
 import numpy as np
 
 from hal.wire import BUTTON_BITS
-from hal.wire import MASK_INT8
-from hal.wire import raw_byte_to_wire
 from hal.wire import slp_button_to_melee
 
 # Pre-resolved (bit, libmelee enum) pairs for the per-frame press/release
@@ -46,10 +43,6 @@ class ControllerInputs(Protocol):
     trigger_l: float
     trigger_r: float
     buttons: int  # uint16 bitmask matching wire.BUTTON_BITS
-    raw_main_x: int  # int8 from slp (>= 1.2.0), or wire.MASK_INT8 if unrecorded
-    raw_main_y: int  # int8 from slp (>= 3.15.0), or wire.MASK_INT8 if unrecorded
-    raw_c_x: int  # int8 from slp (>= 3.17.0), or wire.MASK_INT8 if unrecorded
-    raw_c_y: int  # int8 from slp (>= 3.17.0), or wire.MASK_INT8 if unrecorded
 
 
 @runtime_checkable
@@ -80,10 +73,6 @@ class ControllerInputsValue:
     trigger_l: float
     trigger_r: float
     buttons: int
-    raw_main_x: int = MASK_INT8
-    raw_main_y: int = MASK_INT8
-    raw_c_x: int = MASK_INT8
-    raw_c_y: int = MASK_INT8
 
 
 # Frozen: one instance per (port, frame) is fine. ``dataclass(frozen=True,
@@ -121,11 +110,11 @@ class MdsControllerView:
 
     @property
     def trigger_l(self) -> float:
-        return float(self.columns[f"{self.port_prefix}_trigger_l_physical"][self.frame_idx])
+        return float(self.columns[f"{self.port_prefix}_trigger_l"][self.frame_idx])
 
     @property
     def trigger_r(self) -> float:
-        return float(self.columns[f"{self.port_prefix}_trigger_r_physical"][self.frame_idx])
+        return float(self.columns[f"{self.port_prefix}_trigger_r"][self.frame_idx])
 
     @property
     def buttons(self) -> int:
@@ -135,26 +124,6 @@ class MdsControllerView:
                 mask |= bit
         return mask
 
-    @property
-    def raw_main_x(self) -> int:
-        col = self.columns.get(f"{self.port_prefix}_main_stick_raw_x")
-        return int(col[self.frame_idx]) if col is not None else MASK_INT8
-
-    @property
-    def raw_main_y(self) -> int:
-        col = self.columns.get(f"{self.port_prefix}_main_stick_raw_y")
-        return int(col[self.frame_idx]) if col is not None else MASK_INT8
-
-    @property
-    def raw_c_x(self) -> int:
-        col = self.columns.get(f"{self.port_prefix}_c_stick_raw_x")
-        return int(col[self.frame_idx]) if col is not None else MASK_INT8
-
-    @property
-    def raw_c_y(self) -> int:
-        col = self.columns.get(f"{self.port_prefix}_c_stick_raw_y")
-        return int(col[self.frame_idx]) if col is not None else MASK_INT8
-
 
 def apply_inputs(controller: melee.Controller, src: ControllerInputs) -> None:
     """Punch one frame of inputs into a libmelee Controller.
@@ -163,13 +132,16 @@ def apply_inputs(controller: melee.Controller, src: ControllerInputs) -> None:
     not call ``flush()`` here. The button loop unconditionally presses or
     releases every button so we don't carry stale state from a previous source.
     """
-    main_x_wire = _stick_axis_wire(src.raw_main_x, src.main_x)
-    main_y_wire = _stick_axis_wire(src.raw_main_y, src.main_y)
-    controller.tilt_analog(melee.enums.Button.BUTTON_MAIN, main_x_wire, main_y_wire)
-
-    c_x_wire = _stick_axis_wire(src.raw_c_x, src.c_x)
-    c_y_wire = _stick_axis_wire(src.raw_c_y, src.c_y)
-    controller.tilt_analog(melee.enums.Button.BUTTON_C, c_x_wire, c_y_wire)
+    controller.tilt_analog(
+        melee.enums.Button.BUTTON_MAIN,
+        melee.controller.fix_analog_stick_signed(src.main_x),
+        melee.controller.fix_analog_stick_signed(src.main_y),
+    )
+    controller.tilt_analog(
+        melee.enums.Button.BUTTON_C,
+        melee.controller.fix_analog_stick_signed(src.c_x),
+        melee.controller.fix_analog_stick_signed(src.c_y),
+    )
     controller.press_shoulder(melee.enums.Button.BUTTON_L, melee.controller.fix_analog_trigger(src.trigger_l))
     controller.press_shoulder(melee.enums.Button.BUTTON_R, melee.controller.fix_analog_trigger(src.trigger_r))
 
@@ -179,15 +151,3 @@ def apply_inputs(controller: melee.Controller, src: ControllerInputs) -> None:
             controller.press_button(button)
         else:
             controller.release_button(button)
-
-
-def _stick_axis_wire(raw_byte: int, logical: float) -> float:
-    """Pick the per-axis wire float: raw byte if recorded, else logical fallback.
-
-    Both paths delegate to libmelee — raw to ``raw_byte_to_wire``, logical to
-    ``fix_analog_stick_signed`` (the signed [-1, 1] entry point matching peppi's
-    logical stick range).
-    """
-    if raw_byte != MASK_INT8:
-        return raw_byte_to_wire(raw_byte)
-    return melee.controller.fix_analog_stick_signed(logical)

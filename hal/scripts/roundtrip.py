@@ -22,6 +22,7 @@ from streaming import StreamingDataset
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
 from hal.data.index import resolve_replay_path
+from hal.data.schema import check_schema_version
 from hal.sim.diff import diff
 from hal.sim.loop import drive
 from hal.sim.session import ReplayMatchup
@@ -56,7 +57,10 @@ def _read_mds_row(mds_dir: Path, split: str, row_idx: int) -> dict:
         batch_size=1,
         allow_unsafe_types=False,
     )
-    return ds[row_idx]
+    sample = ds[row_idx]
+    check_schema_version(sample)
+    sample.pop("schema_version")  # row scalar; not a per-frame column
+    return sample
 
 
 def roundtrip(

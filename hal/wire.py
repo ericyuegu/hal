@@ -5,8 +5,8 @@ and ``hal.sim`` (inputs, trajectory, session). Anything declared
 here is the canonical encoding shared across offline-dataset and online-
 emulator code — no other module should re-state what's defined here.
 
-See CLAUDE.md (Architecture) for terminology (raw / wire / logical / physical)
-and the data-flow diagram (peppi → MDS → controller view → libmelee → Dolphin).
+See CLAUDE.md (Controller data model) for the logical-only
+controller representation and the peppi → MDS → libmelee → Dolphin data flow.
 """
 
 from collections.abc import Sequence
@@ -130,19 +130,16 @@ def mask_value(dtype: DTypeLike) -> float | int:
 
 
 # ---------------------------------------------------------------------------
-# Analog stick wire format (Dolphin pipe protocol)
+# Analog deadzones (Melee input processing)
 # ---------------------------------------------------------------------------
 
-# Delegate to libmelee's public ``raw_byte_to_wire`` so the wire-format math
-# (and the +0.1 fudge) lives in exactly one place — the same module that owns
-# ``fix_analog_stick`` and the Controller pipe writer.
-raw_byte_to_wire = melee.controller.raw_byte_to_wire
-
-
-def wire_to_raw_byte(wire: float) -> int:
-    """Inverse: recover the int8 byte that a wire float deserializes to in
-    Dolphin's parser. Useful for round-trip validation."""
-    return int((wire - 0.5) * 254.0 - 0.1)
+# Melee ignores trigger bytes below 43 (of the 140 that means full press), so
+# slp physical values under 43/140 are resting-hardware jitter with zero game
+# effect (~26% of human frame-shoulder samples). ``extract`` zeroes them so the
+# stored per-shoulder trigger is the game-causal signal, mirroring how the slp
+# logical stick is already post-deadzone. Pinned empirically: the slp logical
+# trigger engages at exactly 43/140 = 0.30714 across human replays.
+TRIGGER_DEADZONE: Final[float] = 43.0 / 140.0
 
 
 # ---------------------------------------------------------------------------

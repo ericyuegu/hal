@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 from torch.utils.data import get_worker_info
 
+from hal.data.schema import check_schema_version
 from hal.data.stats import FeatureStats
 from hal.training.features import Context
 from hal.training.features import TrainBatch
@@ -76,6 +77,9 @@ class WindowDataset(IterableDataset):
         rng = np.random.default_rng((self._seed, worker_id, self._epoch))
         self._epoch += 1
         for sample in self._mds:
+            check_schema_version(sample)
+            # Shallow copy without the row scalar; windowing slices every value.
+            sample = {k: v for k, v in sample.items() if k != "schema_version"}
             T = len(sample["frame"])
             # chunk[0] targets episode frame ``cs``; context is the L_ctx frames
             # before it. cs_min keeps >=1 real context frame (the cold-start

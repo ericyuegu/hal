@@ -12,6 +12,7 @@ from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.paths import DEV_ARCHIVE_PATH
 from hal.wire import BUTTON_BITS
 from hal.wire import MASK_INT32
+from hal.wire import TRIGGER_DEADZONE
 from hal.wire import mask_value as _mask_value
 
 
@@ -73,7 +74,8 @@ def test_schema_gamestate_fields_match_post_suffixes() -> None:
         and not col.startswith("p1_nana_")
         and "_button_" not in col
         and "stick" not in col
-        and not col.endswith(("_trigger_logical", "_trigger_l_physical", "_trigger_r_physical"))
+        and not col.endswith(("_trigger_l", "_trigger_r"))
+        and col != "p1_character"  # per-replay constant, not a post field
     }
     assert p1_gamestate == set(POST_FIELD_SUFFIXES)
 
@@ -138,3 +140,14 @@ def test_extract_replay_produces_full_schema(tmp_path: Path) -> None:
     for col, dtype in MDS_PER_FRAME_DTYPES.items():
         assert sample[col].shape == (frame_len,), f"length mismatch on {col}"
         assert sample[col].dtype == np.dtype(dtype), f"dtype mismatch on {col}"
+
+    # Triggers are stored game-causal: sub-deadzone hardware jitter zeroed.
+    for col in ("p1_trigger_l", "p1_trigger_r", "p2_trigger_l", "p2_trigger_r"):
+        t = sample[col][~np.isnan(sample[col])]
+        assert np.all((t == 0.0) | (t >= TRIGGER_DEADZONE)), f"{col} has sub-deadzone values"
+
+
+def test_schema_controller_block_is_logical_only() -> None:
+    """No raw byte columns and no fused trigger_logical — the pre-frame block
+    is exactly the model action space."""
+    assert not any("_raw_" in col or "trigger_logical" in col for col in MDS_PER_FRAME_DTYPES)

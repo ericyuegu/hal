@@ -28,6 +28,8 @@ if mp.get_start_method(allow_none=True) != "fork":
 from pathlib import Path
 
 import melee
+import numpy as np
+import peppi_py
 import pytest
 from streaming import StreamingDataset
 
@@ -38,6 +40,8 @@ from hal.paths import DEV_MDS_DIR as _DEV_MDS_DIR
 from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH as _ISO_PATH
 from hal.sim.diff import diff
+from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import ControllerInputsValue
 from hal.sim.loop import drive
 from hal.sim.session import PlayerSetup
 from hal.sim.session import ReplayMatchup
@@ -48,6 +52,8 @@ from hal.sim.sources import MdsControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.sources import demo_sequence
 from hal.sim.trajectory import Trajectory
+from hal.wire import GAME_START_FRAME
+from hal.wire import TRIGGER_DEADZONE
 
 ISO_PATH = Path(_ISO_PATH)
 DOLPHIN_PATH = Path(EMULATOR_PATH)
@@ -177,3 +183,109 @@ def test_fresh_recording_roundtrip_bit_exact(tmp_path: Path) -> None:
     assert report.passed, f"fresh-recording round-trip divergence: {report.summary()}\n" + "\n".join(
         f"  {d}" for d in report.divergences[:5]
     )
+
+
+# --- analog wire sweep -------------------------------------------------------
+
+_SWEEP_LEAD, _SWEEP_HOLD = 40, 3
+# Stick bytes probing the deadzone boundary (gate at 23/80 = 0.2875), mid-range
+# and clamp extremes. Triggers sweep the full 0..140 grid.
+_SWEEP_STICK_BYTES = (-80, -79, -40, -24, -23, -22, -21, 0, 21, 22, 23, 24, 40, 79, 80)
+
+
+def _sweep_program() -> tuple[list[ControllerInputs], list[tuple[str, float, int]]]:
+    """Build (per-frame inputs, [(channel, fed_value, punch_idx), ...])."""
+
+    def value(**kw: float) -> ControllerInputsValue:
+        base = dict(main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0)
+        base.update(kw)
+        return ControllerInputsValue(**base)  # type: ignore[arg-type]
+
+    punches: list[ControllerInputs] = [value()] * _SWEEP_LEAD
+    reads: list[tuple[str, float, int]] = []
+    for channel, values in (
+        ("trigger_l", [k / 140.0 for k in range(141)]),
+        ("trigger_r", [0.0, 43 / 140.0, 1.0]),
+        ("main_x", [b / 80.0 for b in _SWEEP_STICK_BYTES]),
+        ("c_x", [-1.0, -0.5, 0.5, 1.0]),
+    ):
+        for v in values:
+            punches.extend([value(**{channel: v})] * _SWEEP_HOLD)
+            reads.append((channel, v, len(punches) - 1))
+    punches.extend([value()] * 10)
+    return punches, reads
+
+
+@pytest.mark.integration
+def test_analog_sweep_reads_back_grid_exact(tmp_path: Path) -> None:
+    """Every game-distinguishable analog value survives the wire bit-exactly.
+
+    Drives the full trigger grid (0..140) plus deadzone-probing stick bytes
+    through ``apply_inputs`` and asserts the recorded .slp returns the exact
+    grid value. This is the regression that catches a trigger/stick wire
+    protocol mismatch (the GCPad-path trigger bug was invisible to the other
+    two tests because broken triggers replay consistently broken). Also pins
+    the trigger deadzone: the logical channel must engage at exactly
+    ``wire.TRIGGER_DEADZONE`` (byte 43).
+    """
+    _check_prereqs()
+    punches, reads = _sweep_program()
+    matchup = ReplayMatchup(
+        stage=melee.Stage.FINAL_DESTINATION,
+        players=(
+            PlayerSetup(port=1, character=melee.Character.FOX, costume=0),
+            PlayerSetup(port=2, character=melee.Character.FOX, costume=1),
+        ),
+        port_to_mds_prefix={1: "p1", 2: "p2"},
+    )
+    sources: dict[int, ControllerSource] = {
+        1: ScriptedControllerSource(sequence=punches),
+        2: ScriptedControllerSource(sequence=[]),  # neutral throughout
+    }
+    with Session(
+        iso_path=ISO_PATH,
+        dolphin_path=DOLPHIN_PATH,
+        slippi_port=51449,
+        tmp_home_directory=False,
+        replay_dir=str(tmp_path),
+    ) as s:
+        drive(s, matchup, sources, max_frames=len(punches))
+
+    slps = sorted(tmp_path.rglob("*.slp"))
+    assert slps, f"Slippi wrote no .slp under {tmp_path}"
+    game = peppi_py.read_slippi(str(slps[-1]))
+    pre = game.frames.ports[0].leader.pre
+    frame_ids = np.asarray(game.frames.id.to_pylist(), dtype=np.int64)
+    ig0 = int(np.argmax(frame_ids >= GAME_START_FRAME))
+    col = {
+        "trigger_l": np.asarray(pre.triggers_physical.l.to_pylist(), dtype=np.float32)[ig0:],
+        "trigger_r": np.asarray(pre.triggers_physical.r.to_pylist(), dtype=np.float32)[ig0:],
+        "trigger_logical": np.asarray(pre.triggers.to_pylist(), dtype=np.float32)[ig0:],
+        "main_x": np.asarray(pre.joystick.x.to_pylist(), dtype=np.float32)[ig0:],
+        "c_x": np.asarray(pre.cstick.x.to_pylist(), dtype=np.float32)[ig0:],
+    }
+
+    failures: list[str] = []
+    for channel, fed, punch_idx in reads:
+        i = punch_idx + 1  # punches at iteration t land in slp pre[t + 1]
+        rec = float(col[channel][i])
+        if channel.startswith("trigger"):
+            byte = round(fed * 140.0)
+            if round(rec * 140.0) != byte:
+                failures.append(f"{channel} fed {fed:.5f} (byte {byte}) read {rec:.5f}")
+            logical = float(col["trigger_logical"][i])
+            want_logical = 0.0 if fed < TRIGGER_DEADZONE else rec
+            if abs(logical - want_logical) > 1e-6:
+                failures.append(f"trigger_logical fed {fed:.5f} read {logical:.5f} want {want_logical:.5f}")
+        else:
+            byte = round(fed * 80.0)
+            rec_byte = round(rec * 80.0)
+            if abs(byte) <= 22:
+                ok = rec == 0.0
+            elif abs(byte) == 23:
+                ok = rec_byte in (0, byte)  # gate boundary; either side is on-grid
+            else:
+                ok = rec_byte == byte
+            if not ok:
+                failures.append(f"{channel} fed {fed:.5f} (byte {byte}) read {rec:.5f}")
+    assert not failures, f"{len(failures)} analog wire mismatches:\n" + "\n".join(failures[:20])

@@ -4,7 +4,7 @@ Owns the single source of truth for two wires:
 
 * MDS columns ↔ model-ready tensors (the per-feature routing + normalization
   below), and
-* a 15-channel action vector ↔ :class:`ControllerInputsValue` (the inference
+* a 14-channel action vector ↔ :class:`ControllerInputsValue` (the inference
   output bridge).
 
 Plus the typed model I/O value objects :class:`Context` and :class:`TrainBatch`.
@@ -69,8 +69,8 @@ ACTION_CHANNELS: tuple[str, ...] = (
     "main_stick_y",
     "c_stick_x",
     "c_stick_y",
-    "trigger_l_physical",
-    "trigger_r_physical",
+    "trigger_l",
+    "trigger_r",
     "button_a",
     "button_b",
     "button_x",
@@ -83,9 +83,8 @@ ACTION_CHANNELS: tuple[str, ...] = (
 assert len(ACTION_CHANNELS) == A_DIM
 
 _BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "d_up")
-# raw_* dropped (we use logical sticks); nana_* skipped for now; trigger_logical
-# redundant with the physical l/r channels already consumed.
-_DROP_PATTERNS = ("_raw_", "_nana_", "_trigger_logical")
+# nana_* skipped for now.
+_DROP_PATTERNS = ("_nana_",)
 
 NEUTRAL_ACTION = np.zeros(A_DIM, dtype=np.float32)
 
@@ -94,8 +93,8 @@ _STICK_TRIGGER_SUFFIXES = (
     "main_stick_y",
     "c_stick_x",
     "c_stick_y",
-    "trigger_l_physical",
-    "trigger_r_physical",
+    "trigger_l",
+    "trigger_r",
 )
 
 
@@ -188,9 +187,9 @@ def preprocess(
 
     Operates on either single-sample ``[L]`` arrays or batched ``[B, L]`` — the
     numpy ops broadcast either way and ``torch.from_numpy`` preserves the shape.
-    Sticks/triggers/buttons keep their raw ranges (they are the action target);
-    only FLOAT_FEATURES are normalized. Columns the classifier drops (``frame``,
-    ``ctx_pad``, raw/nana/trigger_logical) are not returned.
+    Sticks/triggers/buttons keep their native ranges (they are the action
+    target); only FLOAT_FEATURES are normalized. Columns the classifier drops
+    (``frame``, ``schema_version``, ``ctx_pad``, nana) are not returned.
     """
     out: dict[str, Tensor] = {}
     for name, arr in batch.items():

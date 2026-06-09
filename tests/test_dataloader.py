@@ -3,6 +3,7 @@ and train windows must still vary across epochs given a fixed seed."""
 
 import numpy as np
 
+from hal.data.schema import SCHEMA_VERSION
 from hal.training.dataloader import WindowDataset
 
 L_CTX, L_CHUNK = 6, 4
@@ -13,6 +14,7 @@ def _fake_mds(n_samples: int = 6, length: int = 60) -> list[dict[str, np.ndarray
     """In-memory stand-in for a StreamingDataset: each sample is one replay."""
     return [
         {
+            "schema_version": SCHEMA_VERSION,
             "frame": np.arange(length, dtype=np.int32),
             "p1_position_x": np.arange(length, dtype=np.float32),
             "p2_position_x": np.arange(length, dtype=np.float32) + 1000.0,

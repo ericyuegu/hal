@@ -1,11 +1,13 @@
 """Per-frame MDS schema.
 
 Defines the columns written into MDS shards (one ndarray per column, length =
-replay frame count). Per-replay scalars (``slp_version``, ``stage``, etc.)
-live in ``hal.data.index.ReplayIndexEntry``. Slp-native vocabulary
-(button bits, mask sentinels, player prefixes) lives in ``hal.wire``.
+replay frame count, plus the scalar ``schema_version``). Per-replay scalars
+(``slp_version``, ``stage``, etc.) live in ``hal.data.index.ReplayIndexEntry``.
+Slp-native vocabulary (button bits, mask sentinels, player prefixes) lives in
+``hal.wire``.
 
-See CLAUDE.md (Architecture) for naming, mask sentinels, and slp-version gating.
+See CLAUDE.md (Controller data model) for the logical-only
+controller representation, mask sentinels, and naming.
 """
 
 import numpy as np
@@ -13,16 +15,23 @@ from numpy.typing import DTypeLike
 
 from hal.wire import BUTTON_BITS
 
-# Bump on any breaking change to MDS_PER_FRAME_DTYPES (column add/remove/dtype
-# change) or to the extraction semantics that produce them. Consumers verify
-# the version matches before reading; mismatch is a hard error.
+# Bump on any breaking change to MDS_COLUMNS (column add/remove/dtype change)
+# or to the extraction semantics that produce them. Consumers verify the
+# version matches before reading; mismatch is a hard error.
 #
-# 4: re-add the global ``stage`` + per-player ``p{1,2}_character`` columns (dropped
-#    at v3's predecessor) as per-replay constants broadcast across frames, so the
-#    policy can condition on matchup again. ``stage`` is stored as the libmelee
-#    ``Stage`` value (not slp-native) so it matches the closed-loop obs without a
-#    second translation; ``character`` slp-native id already equals the libmelee
-#    ``Character`` value.
+# 4: (a) re-add the global ``stage`` + per-player ``p{1,2}_character`` columns
+#    (dropped at v3's predecessor) as per-replay constants broadcast across
+#    frames, so the policy can condition on matchup again. ``stage`` is stored
+#    as the libmelee ``Stage`` value (not slp-native) so it matches the
+#    closed-loop obs without a second translation; ``character`` slp-native id
+#    already equals the libmelee ``Character`` value.
+#    (b) logical-only controller block: drop the raw stick byte columns and the
+#    fused ``trigger_logical``; rename ``trigger_{l,r}_physical`` →
+#    ``trigger_{l,r}`` with sub-deadzone values zeroed (wire.TRIGGER_DEADZONE).
+#    The pre-frame block now is the model action space and round-trips
+#    game-exactly through ``apply_inputs``.
+#    (c) add the per-row ``schema_version`` scalar so the bare streaming read
+#    path fails loud on stale caches instead of a cryptic frombuffer error.
 # 3: drop the per-player action_frame column. It was a 1-indexed run-length on
 #    the action id, but the closed-loop policy feeds the engine's state_age
 #    (0-indexed, resets within a constant action) — the two never matched, so
@@ -55,20 +64,16 @@ def _controller_columns(prefix: str) -> dict[str, DTypeLike]:
     cols: dict[str, DTypeLike] = {f"{prefix}_button_{b}": np.int32 for b in BUTTON_BITS}
     cols.update(
         {
+            # Sticks are slp-logical (post-deadzone, [-1, 1] on the 1/80 grid);
+            # triggers are per-shoulder ([0, 1] on the 1/140 grid, zeroed below
+            # wire.TRIGGER_DEADZONE). Game-causal values only — this block is
+            # the model action space and what apply_inputs feeds back.
             f"{prefix}_main_stick_x": np.float32,
             f"{prefix}_main_stick_y": np.float32,
             f"{prefix}_c_stick_x": np.float32,
             f"{prefix}_c_stick_y": np.float32,
-            # `trigger_logical` is peppi's smoothed analog value (single channel,
-            # used by training as the analog-shoulder feature). `trigger_l/r_physical`
-            # are the slp-native per-shoulder bytes used by the emulator wire path.
-            f"{prefix}_trigger_logical": np.float32,
-            f"{prefix}_trigger_l_physical": np.float32,
-            f"{prefix}_trigger_r_physical": np.float32,
-            f"{prefix}_main_stick_raw_x": np.int8,
-            f"{prefix}_main_stick_raw_y": np.int8,
-            f"{prefix}_c_stick_raw_x": np.int8,  # slp >= 3.17.0; mask sentinel otherwise
-            f"{prefix}_c_stick_raw_y": np.int8,
+            f"{prefix}_trigger_l": np.float32,
+            f"{prefix}_trigger_r": np.float32,
         }
     )
     return cols
@@ -98,3 +103,22 @@ MDS_PER_FRAME_DTYPES: dict[str, DTypeLike] = {
 MDS_DTYPE_STR_BY_COLUMN: dict[str, str] = {
     name: f"ndarray:{np.dtype(dtype).name}" for name, dtype in MDS_PER_FRAME_DTYPES.items()
 }
+
+# Full writer spec: the per-frame ndarrays plus a scalar row version, so the
+# bare StreamingDataset read path (no manifest in sight) can fail loud on a
+# version mismatch instead of crashing in frombuffer on a stale cache.
+MDS_COLUMNS: dict[str, str] = {"schema_version": "int", **MDS_DTYPE_STR_BY_COLUMN}
+
+
+def check_schema_version(sample: dict) -> None:
+    """Assert one MDS row was materialized at this code's ``SCHEMA_VERSION``.
+
+    Call on the first row read from any split. Rows written before the scalar
+    existed (< v4) have no ``schema_version`` key at all.
+    """
+    found = sample.get("schema_version")
+    if found != SCHEMA_VERSION:
+        raise ValueError(
+            f"MDS row schema_version={found!r} != SCHEMA_VERSION={SCHEMA_VERSION}. "
+            "Re-materialize the dataset (and wipe stale local split caches)."
+        )
