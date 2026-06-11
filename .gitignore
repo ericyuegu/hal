@@ -15,6 +15,7 @@ notebooks/.*/
 /.claude/*.local.json
 /.claude/*.settings.json
 /.claude/*.lock
+/.claude/worktrees/
 
 # Secrets
 /secrets/
