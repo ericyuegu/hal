@@ -2,6 +2,8 @@
 
 Training superhuman AI for *Super Smash Bros. Melee* via imitation learning and RL.
 
+HAL is named after both [HAL Laboratory](https://en.wikipedia.org/wiki/HAL_Laboratory), the developer of Super Smash Bros. Melee, and [HAL 9000](https://en.wikipedia.org/wiki/HAL_9000), the infamous robot villain from 2001: A Space Odyssey.
+
 Blog: https://ericyuegu.com/melee-pt1.
 
 ## Quick start
