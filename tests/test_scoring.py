@@ -48,17 +48,58 @@ def test_stick_centers_live_in_target_space():
     for centers in (scoring.STICK_CLUSTER_CENTERS_MAIN, scoring.STICK_CLUSTER_CENTERS_C):
         assert centers.ndim == 2 and centers.shape[1] == 2
         assert centers.min() >= -1.0 and centers.max() <= 1.0
-    # neutral, the four cardinals are present (canonical [-1,1] coords)
-    main = scoring.STICK_CLUSTER_CENTERS_MAIN
-    for pt in ([0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]):
-        assert (main == torch.tensor(pt)).all(dim=1).any()
+    # neutral + the four full cardinals are present in both sets (canonical [-1,1] coords)
+    for centers in (scoring.STICK_CLUSTER_CENTERS_MAIN, scoring.STICK_CLUSTER_CENTERS_C):
+        for pt in ([0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]):
+            assert (centers == torch.tensor(pt)).all(dim=1).any()
+
+
+def test_c_stick_set_is_the_compact_nine_point_set():
+    # c-stick is 95% neutral, the rest on the rim cardinals/diagonals: neutral + 4 cardinals
+    # + 4 full diagonals, distinct from the larger main pose set.
+    c = scoring.STICK_CLUSTER_CENTERS_C
+    assert c.shape == (9, 2)
+    for pt in ([0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]):
+        assert (c == torch.tensor(pt)).all(dim=1).any()
+    assert scoring.STICK_CLUSTER_CENTERS_MAIN.shape[0] > c.shape[0]
+
+
+def test_stick_centers_are_unique():
+    for centers in (scoring.STICK_CLUSTER_CENTERS_MAIN, scoring.STICK_CLUSTER_CENTERS_C):
+        assert torch.unique(centers, dim=0).shape[0] == centers.shape[0]
 
 
 def test_nearest_cluster_is_identity_on_the_centers():
-    centers = scoring.STICK_CLUSTER_CENTERS_MAIN
-    idx = scoring.nearest_cluster(centers, centers)
-    assert torch.equal(idx, torch.arange(centers.shape[0]))
-    assert torch.equal(scoring.cluster_to_xy(idx, centers), centers)
+    for centers in (scoring.STICK_CLUSTER_CENTERS_MAIN, scoring.STICK_CLUSTER_CENTERS_C):
+        idx = scoring.nearest_cluster(centers, centers)
+        assert torch.equal(idx, torch.arange(centers.shape[0]))
+        assert torch.equal(scoring.cluster_to_xy(idx, centers), centers)
+
+
+# --- 1D trigger centers ------------------------------------------------------
+def test_trigger_centers_are_sorted_in_unit_interval():
+    t = scoring.TRIGGER_CENTERS
+    assert t.ndim == 1 and t.shape[0] == 5
+    assert t.min() >= 0.0 and t.max() <= 1.0
+    assert torch.equal(t, t.sort().values)  # ascending, the 0/analog/1 spread
+    assert t[0].item() == 0.0 and t[-1].item() == 1.0
+
+
+def test_nearest_center_round_trips_the_centers():
+    t = scoring.TRIGGER_CENTERS
+    idx = scoring.nearest_center(t, t)
+    assert torch.equal(idx, torch.arange(t.shape[0]))
+    assert torch.equal(scoring.center_to_value(idx, t), t)
+
+
+def test_nearest_center_snaps_to_closest_and_preserves_shape():
+    t = scoring.TRIGGER_CENTERS  # (0.0, 0.35, 0.6, 0.85, 1.0)
+    x = torch.tensor([[0.02, 0.99], [0.34, 0.62]])  # [..., 2] (per-shoulder), arbitrary batch dims
+    idx = scoring.nearest_center(x, t)
+    assert idx.shape == x.shape
+    assert torch.equal(idx, torch.tensor([[0, 4], [1, 2]]))
+    recon = scoring.center_to_value(idx, t)
+    assert torch.equal(recon, torch.tensor([[0.0, 1.0], [0.35, 0.6]]))
 
 
 # --- button class map (single-label) -----------------------------------------
@@ -85,6 +126,53 @@ def test_class_to_onehot_inverts_single_button():
     b[2, 7] = 1.0
     cls, _ = scoring.buttons_to_class(b)
     assert torch.equal(scoring.class_to_onehot(cls, n_buttons=8), b)
+
+
+# --- joint button-combo bitmask (256-way) ------------------------------------
+def test_combo_round_trips_every_id():
+    # pack(unpack(i)) == i for all 256, and unpack is the bit-decomposition of i.
+    ids = torch.arange(scoring.N_BUTTON_COMBOS)
+    bits = scoring.combo_to_buttons(ids)
+    assert bits.shape == (256, 8)
+    assert torch.isin(bits, torch.tensor([0.0, 1.0])).all()
+    assert torch.equal(scoring.buttons_to_combo(bits), ids)
+
+
+def test_combo_bit_k_is_button_channel_k():
+    # bit k of the combo id must be button channel k (ACTION_CHANNELS / _BUTTON_ORDER order):
+    # a single press on channel k yields combo id 2**k.
+    for k in range(8):
+        b = torch.zeros(8)
+        b[k] = 1.0
+        assert scoring.buttons_to_combo(b).item() == (1 << k)
+
+
+def test_combo_handles_arbitrary_batch_dims():
+    b = (torch.rand(3, 4, 8) > 0.5).float()
+    combo = scoring.buttons_to_combo(b)
+    assert combo.shape == (3, 4)
+    assert torch.equal(scoring.combo_to_buttons(combo), b)
+
+
+def test_combo_marginal_probs_matches_brute_force():
+    torch.manual_seed(0)
+    logits = torch.randn(5, 7, scoring.N_BUTTON_COMBOS)
+    got = scoring.combo_marginal_probs(logits)
+    assert got.shape == (5, 7, 8)
+    probs = torch.softmax(logits, dim=-1)
+    bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS))  # [256, 8]
+    want = torch.stack([(probs * bits[:, k]).sum(-1) for k in range(8)], dim=-1)
+    assert torch.allclose(got, want, atol=1e-6)
+    assert got.min() >= 0.0 and got.max() <= 1.0
+
+
+def test_combo_marginal_of_one_hot_logit_is_that_combos_bits():
+    # an all-mass-on-class-i distribution marginalizes to exactly combo i's bits.
+    for i in (0, 1, 5, 200, 255):
+        logits = torch.full((scoring.N_BUTTON_COMBOS,), -30.0)
+        logits[i] = 30.0
+        marg = scoring.combo_marginal_probs(logits)
+        assert torch.allclose(marg, scoring.combo_to_buttons(torch.tensor(i)), atol=1e-5)
 
 
 # --- proper scoring rules ----------------------------------------------------

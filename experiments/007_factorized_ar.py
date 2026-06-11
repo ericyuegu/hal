@@ -1,41 +1,46 @@
-"""Classification action-chunk policy (ablates loss type vs. flow matching).
+"""Factorized autoregressive action-chunk policy (fixes 005's conditional independence).
 
-Identical to ``003_multi_position.py`` — same causal backbone, same per-position
-multi-position supervision, same ``train_positions`` gradient-density knob — except the
-per-position *flow* head is replaced by a per-position *classification* head. Holding
-architecture and gradient density fixed isolates the BCE/CE-vs-MSE/flow learning dynamic:
-sweep ``train_positions ∈ {1, 64}`` on both this file and 003 for the architecture-matched
-2×2. (001's unified ``[ctx|chunk]`` Transformer is a different architecture, not the
-sparse control.)
+005's classification head is **not** autoregressive: given the backbone context, every one
+of the ``L_chunk`` frames and every channel group is predicted in ONE forward, so they are
+conditionally independent. The head sees no action inputs — neither teacher-forced targets
+nor sampled values — so chaining the heads on logits would add nothing (logits are
+deterministic given context; they carry no stochastic coupling). With ~65% frame-to-frame
+action persistence and median button holds of 5-7 frames, sampling each frame/group
+independently shreds temporal and cross-channel coherence.
 
-The head emits per-frame categorical logits in ONE forward — no noise, no flow time, no
-Euler integration. Buttons are a 256-way joint categorical over the full 8-bit combo bitmask
-(``combo``, primary — every co-press representable, conflicting presses impossible by
-construction), 8 independent Bernoullis (``multi_label`` — marginals only, can emit incoherent
-co-presses), or a 9-way "none-or-one" categorical (``single_label`` — diagnostic, dishonest on
-the ``--audit`` multipress frames). Continuous channels are per-axis bins
-(``naive_bins``) or joint-2D stick clusters + hand-tuned 1D trigger centers
-(``stick_clusters``); the discretizers live in ``hal.training.scoring`` so targets, decode,
-and metrics share one quantizer.
+007 keeps 005's backbone verbatim and replaces the head with a TRUE autoregression over
+**factorized channel-group sub-tokens** — AR across frames AND across the groups within a
+frame, each sub-token conditioned on the *realized* values of all earlier ones (teacher-forced
+targets at train, sampled outcomes at decode).
 
-Metrics are proper scoring rules in bits (``hal.training.scoring``) named so nothing
-implies invalid cross-family comparability: ``val/action_nll_bits_per_frame`` is the
-classifier's own mixed objective; ``val/cont_density_bits_per_dim`` (naive only) is the
-density-corrected continuous dim that lines up with a flow model's PF-ODE bits/dim;
-``val/buttons/{logloss_bits,brier}`` score the buttons as a proper Bernoulli model.
+Sub-token order per frame (fixed): **buttons (256-way combo) → main stick (65) → c-stick (9)
+→ triggers (joint L×R = 25)**. Buttons go first so the trigger analog can condition on the
+digital L/R click — empirically ``P(trigger==1.0 | click) ≈ 0.75``, strong coupling — and
+triggers go last so they see everything. The full product space stays reachable: no
+data-derived vocabulary, so this is the **RL-safe** variant — policy-gradient exploration can
+express button/stick combinations absent from human data, unlike a frozen observed-chord
+vocab.
 
-Closed-loop decode is sampled with a temperature knob (``cfg.decode`` / ``cfg.decode_temp``,
-default ``sample`` @ 1.0): greedy argmax collapses an autoregressive policy to a do-nothing
-fixed point in closed loop, so sampling is the default controller; argmax stays for the
-deterministic recon metric. This is the AR analog of the flow policies' integrate-from-noise
-decode and is kept deliberately separate.
+The head is a small causal Transformer decoder over ``L_chunk * 4`` sub-token positions
+(group-specific embedding tables for the previous realized class + learned group embeddings +
+chunk-frame position embeddings + projected backbone cond broadcast onto every token; learned
+BOS at the very first position). Group-specific output linears emit 256/65/9/25 logits at
+their own positions. Loss = sum of the four group CEs (nats), ``.mean()``, keeping 005's
+``norm_div`` divisor. Decode is 64 sequential steps sampling (or argmax) each sub-token given
+all previously realized ones — no KV cache (head is tiny: 2 layers, <=64 tokens), but the
+backbone is encoded ONCE per replan, never per step.
+
+Closed-loop decode is sampled by default (``cfg.decode`` / ``cfg.decode_temp``, default
+``sample`` @ 1.0): greedy argmax collapses an autoregressive policy to a do-nothing fixed
+point in closed loop, so sampling is the deployed controller; argmax stays for the
+deterministic recon metric and as a test-time override.
 
 Run:
-    python experiments/005_classification.py --audit                 # quantization report, no GPU train
-    python experiments/005_classification.py                         # train (closed-loop eval samples)
-    python experiments/005_classification.py --eval <ckpt>                       # eval at the trained decode
-    python experiments/005_classification.py --eval <ckpt> --eval-temp 0.7       # test-time temperature sweep
-    python experiments/005_classification.py --eval <ckpt> --eval-decode argmax  # re-eval an old run greedily
+    python experiments/007_factorized_ar.py                          # train (closed-loop eval samples)
+    python experiments/007_factorized_ar.py --cfg.opp-controller True # roofline: cheat on opp controller
+    python experiments/007_factorized_ar.py --eval <ckpt>                       # eval at the trained decode
+    python experiments/007_factorized_ar.py --eval <ckpt> --eval-temp 0.7       # test-time temperature sweep
+    python experiments/007_factorized_ar.py --eval <ckpt> --eval-decode argmax  # re-eval greedily
 """
 
 # %%
@@ -100,17 +105,32 @@ _LN2 = math.log(2.0)
 _N_CONT = 6
 _N_BUTTONS = A_DIM - _N_CONT
 
+# --- factorized sub-token groups (fixed AR order within a frame) -------------
+# Buttons first so the trigger analog can condition on the digital L/R click; triggers last so
+# they see everything. Vocab sizes come from the scoring discretizers (no data-derived vocab —
+# RL-safe: the full product space stays reachable).
+_N_TRIG_CENTERS = scoring.TRIGGER_CENTERS.shape[0]  # 5 per shoulder
+_GROUP_NAMES: tuple[str, ...] = ("buttons", "main_stick", "c_stick", "triggers")
+_GROUP_VOCABS: tuple[int, ...] = (
+    scoring.N_BUTTON_COMBOS,  # 256
+    scoring.STICK_CLUSTER_CENTERS_MAIN.shape[0],  # 65
+    scoring.STICK_CLUSTER_CENTERS_C.shape[0],  # 9
+    _N_TRIG_CENTERS * _N_TRIG_CENTERS,  # 25 (joint L*5 + R)
+)
+N_GROUPS = len(_GROUP_NAMES)  # 4
+_BUTTONS_G, _MAIN_G, _C_G, _TRIG_G = range(N_GROUPS)
+
 
 # %%
 @dataclass
 class TrainConfig:
-    # model backbone (identical to 003)
+    # model backbone (identical to 005)
     d_model: int = 256
     n_layers: int = 6
     n_heads: int = 8
     dim_feedforward: int = 1024
     dropout: float = 0.1
-    # per-position classification head (small Transformer over the L_chunk query tokens)
+    # autoregressive sub-token head (small causal Transformer over the L_chunk*4 sub-tokens)
     d_head: int = 128
     n_head_layers: int = 2
     head_heads: int = 4
@@ -123,19 +143,17 @@ class TrainConfig:
     char_dim: int = 12
     stage_vocab: int = 64  # libmelee Stage values, padded
     stage_dim: int = 8
-    # output factorization (the variant axis)
-    # "combo" (256-way joint bitmask, primary) | "multi_label" (8x BCE, marginals-only ablation)
-    # | "single_label" (9-way none-or-one CE, diagnostic — dishonest on multipress frames)
-    button_head: str = "combo"
-    continuous_head: str = "naive_bins"  # "naive_bins" | "stick_clusters"
-    n_bins: int = 21  # per continuous channel in naive_bins mode (unused in cluster mode); odd centers neutral
+    # Roofline cheat: concat the OPPONENT's 14-channel controller history onto every context
+    # token. A deliberate information cheat — a human cannot see the opponent's controller — to
+    # measure headroom only, never a deployable model. Tagged ``-oppc`` so cheat runs are obvious.
+    opp_controller: bool = False
     # decode (closed-loop controller + recon proxy). Sampling is the DEFAULT: argmax greedily
     # picks the mode of P(action | recent inputs), which for an autoregressive policy collapses
     # to a "do nothing" fixed point in closed loop (it feeds neutral back to itself; the flow
     # baselines escape this via their noise draw). argmax stays available for the deterministic
     # recon metric and as a test-time override.
     decode: str = "sample"  # "sample" (temperature) | "argmax" (greedy)
-    decode_temp: float = 1.0  # softmax/sigmoid temperature for sample decode (higher = more random)
+    decode_temp: float = 1.0  # softmax temperature for sample decode (higher = more random)
     # training-stability divisor on the joint-NLL scalar ONLY; reported likelihood is never divided by it
     norm_div: float = 1.0
     # Seeds model init and the dataloader's window + ego-port sampling.
@@ -176,42 +194,80 @@ class TrainConfig:
 
 def _model_tag(cfg: TrainConfig) -> str:
     cs = "-cs" if cfg.cond_char_stage else ""
+    oppc = "-oppc" if cfg.opp_controller else ""
     return (
-        f"cls-{cfg.button_head}-{cfg.continuous_head}-b{cfg.n_bins}{cs}"
-        f"-d{cfg.d_model}-L{cfg.n_layers}-Lc{cfg.L_ctx}-Lk{cfg.L_chunk}-tp{cfg.train_positions}"
+        f"fact{cs}{oppc}"
+        f"-d{cfg.d_model}-L{cfg.n_layers}-Lc{cfg.L_ctx}-Lk{cfg.L_chunk}"
+        f"-dh{cfg.d_head}-hl{cfg.n_head_layers}-tp{cfg.train_positions}"
     )
 
 
 # %%
-class ClassifierPolicy(nn.Module):
-    """Causal backbone (identical to 003) + per-position classification head.
+@jaxtyped(typechecker=beartype)
+def quantize_groups(
+    main_centers: Float[Tensor, "n_main 2"],
+    c_centers: Float[Tensor, "n_c 2"],
+    trig_centers: Float[Tensor, " n_trig"],
+    actions: Float[Tensor, "*batch d_action"],
+) -> Int[Tensor, "*batch n_groups"]:
+    """Quantize a raw ``A_DIM`` action vec to the four group class indices, in AR order
+    ``(buttons, main_stick, c_stick, triggers)``. Sticks use the nearest joint-2D cluster, the
+    triggers a joint ``tl * n_trig + tr`` of the two per-shoulder 1D centers, buttons the 256-way
+    combo bitmask. The decode inverse is ``dequantize_groups``; values that already sit on the
+    center grids round-trip exactly."""
+    cont, btn = actions[..., :_N_CONT], actions[..., _N_CONT:]
+    buttons = scoring.buttons_to_combo(btn)
+    main = scoring.nearest_cluster(cont[..., 0:2], main_centers)
+    c = scoring.nearest_cluster(cont[..., 2:4], c_centers)
+    trig = scoring.nearest_center(cont[..., 4:6], trig_centers)  # [*batch, 2]
+    triggers = trig[..., 0] * trig_centers.shape[0] + trig[..., 1]
+    return torch.stack([buttons, main, c, triggers], dim=-1)
 
-    The **backbone** is a decoder-style Transformer over the L_ctx context tokens under a
-    causal mask, so ``hidden[i]`` depends only on positions ``<= i``. The **head** denoise-
-    free: from a single backbone hidden vector it predicts the next-H-frame action chunk as
-    per-frame categorical logit groups in one forward (no noise / flow-time / integration).
-    Training supervises a chunk at every context position (``action_loss``); inference reads
-    only the last position's hidden vector (``decode``)."""
+
+@jaxtyped(typechecker=beartype)
+def dequantize_groups(
+    main_centers: Float[Tensor, "n_main 2"],
+    c_centers: Float[Tensor, "n_c 2"],
+    trig_centers: Float[Tensor, " n_trig"],
+    idx: Int[Tensor, "*batch n_groups"],
+) -> Float[Tensor, "*batch d_action"]:
+    """Inverse of ``quantize_groups``: the four group class indices → a raw ``A_DIM`` action vec
+    (``[-1,1]`` sticks, ``[0,1]`` triggers, ``{0,1}`` buttons). Trigger joint index unpacks to
+    ``(tl, tr) = divmod(idx, n_trig)``; buttons unpack the combo bitmask back to the 8 bits."""
+    n_trig = trig_centers.shape[0]
+    btn = scoring.combo_to_buttons(idx[..., _BUTTONS_G])  # [*batch, 8]
+    main = scoring.cluster_to_xy(idx[..., _MAIN_G], main_centers)  # [*batch, 2]
+    c = scoring.cluster_to_xy(idx[..., _C_G], c_centers)  # [*batch, 2]
+    tl = scoring.center_to_value(idx[..., _TRIG_G] // n_trig, trig_centers)
+    tr = scoring.center_to_value(idx[..., _TRIG_G] % n_trig, trig_centers)
+    trig = torch.stack([tl, tr], dim=-1)  # [*batch, 2]
+    return torch.cat([main, c, trig, btn], dim=-1)
+
+
+# %%
+class FactorizedARPolicy(nn.Module):
+    """Causal backbone (identical to 005) + autoregressive factorized sub-token head.
+
+    The **backbone** is a decoder-style Transformer over the L_ctx context tokens under a causal
+    mask, so ``hidden[i]`` depends only on positions ``<= i``. The **head** is a small causal
+    Transformer over the ``L_chunk * N_GROUPS`` sub-token stream: each sub-token's input is the
+    previous realized sub-token's class embedding (group-specific tables; learned BOS at the very
+    first position) + a learned group embedding + a chunk-frame position embedding + the projected
+    backbone cond (broadcast). Group-specific output linears emit per-group logits at their own
+    positions. Training teacher-forces ONE head forward per supervised context position; decode
+    walks the 64 positions sequentially, feeding each realized class back in."""
 
     def __init__(self, cfg: TrainConfig):
         super().__init__()
         self.L_ctx = cfg.L_ctx
         self.L_chunk = cfg.L_chunk
         self.n_heads = cfg.n_heads
-        self.button_head_kind = cfg.button_head
-        self.continuous_head_kind = cfg.continuous_head
-        self.n_bins = cfg.n_bins
+        self.opp_controller = cfg.opp_controller
         d = cfg.d_model
         dh = cfg.d_head
 
-        if cfg.button_head not in ("combo", "multi_label", "single_label"):
-            raise ValueError(f"button_head must be combo|multi_label|single_label, got {cfg.button_head!r}")
-        if cfg.continuous_head not in ("naive_bins", "stick_clusters"):
-            raise ValueError(f"continuous_head must be naive_bins|stick_clusters, got {cfg.continuous_head!r}")
         if cfg.decode not in ("argmax", "sample"):
             raise ValueError(f"decode must be argmax|sample, got {cfg.decode!r}")
-        if not cfg.n_bins > 0:
-            raise ValueError(f"n_bins must be > 0, got {cfg.n_bins}")
         if not cfg.decode_temp > 0:
             raise ValueError(f"decode_temp must be > 0, got {cfg.decode_temp}")
         if not cfg.norm_div > 0:
@@ -225,6 +281,8 @@ class ClassifierPolicy(nn.Module):
         n_cat = sum(dim for _, dim in CAT_FEATURES.values())
         per_player_dim = n_float + n_mask + n_cat
         per_frame_in_dim = 2 * per_player_dim + A_DIM  # ego + opp + ego controller history
+        if cfg.opp_controller:
+            per_frame_in_dim += A_DIM  # roofline cheat: opp controller history too
         # Matchup conditioning: a shared per-player character embedding (ego + opp) + one
         # global stage embedding, concatenated onto every context token.
         self.cond_char_stage = cfg.cond_char_stage
@@ -233,7 +291,7 @@ class ClassifierPolicy(nn.Module):
             self.stage_emb = nn.Embedding(cfg.stage_vocab, cfg.stage_dim)
             per_frame_in_dim += 2 * cfg.char_dim + cfg.stage_dim
 
-        # --- causal backbone ---
+        # --- causal backbone (verbatim from 005) ---
         self.ctx_proj = nn.Linear(per_frame_in_dim, d)
         self.pos_emb = nn.Embedding(self.L_ctx, d)
         layer = nn.TransformerEncoderLayer(
@@ -247,9 +305,13 @@ class ClassifierPolicy(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=cfg.n_layers, enable_nested_tensor=False)
 
-        # --- per-position head (operates on flattened B*T positions) ---
+        # --- AR sub-token head ---
         self.cond_proj = nn.Linear(d, dh)
-        self.chunk_pos_emb = nn.Embedding(self.L_chunk, dh)
+        self.group_emb = nn.Embedding(N_GROUPS, dh)  # which channel-group a sub-token position is
+        self.chunk_pos_emb = nn.Embedding(self.L_chunk, dh)  # which chunk frame k
+        # Previous realized class embedding, one table per group (the class spaces are disjoint).
+        self.group_in_embeds = nn.ModuleList([nn.Embedding(v, dh) for v in _GROUP_VOCABS])
+        self.bos = nn.Parameter(torch.zeros(dh))  # input at the very first sub-token (no predecessor)
         head_layer = nn.TransformerEncoderLayer(
             d_model=dh,
             nhead=cfg.head_heads,
@@ -260,28 +322,20 @@ class ClassifierPolicy(nn.Module):
             activation="gelu",
         )
         self.head_encoder = nn.TransformerEncoder(head_layer, num_layers=cfg.n_head_layers, enable_nested_tensor=False)
+        self.group_out = nn.ModuleList([nn.Linear(dh, v) for v in _GROUP_VOCABS])
 
-        # --- output logit groups ---
-        self.cont_binspecs = scoring.cont_binspecs(cfg.n_bins)
-        if cfg.continuous_head == "naive_bins":
-            self.cont_head = nn.Linear(dh, _N_CONT * cfg.n_bins)
-        else:
-            # Cluster mode: joint-2D heads for the sticks + a 1D hand-tuned trigger-center head
-            # per shoulder (the uniform trigger bins waste mass on the empty sub-deadzone range).
-            self.register_buffer("main_centers", scoring.STICK_CLUSTER_CENTERS_MAIN.clone())
-            self.register_buffer("c_centers", scoring.STICK_CLUSTER_CENTERS_C.clone())
-            self.register_buffer("trig_centers", scoring.TRIGGER_CENTERS.clone())
-            self.main_head = nn.Linear(dh, self.main_centers.shape[0])
-            self.c_head = nn.Linear(dh, self.c_centers.shape[0])
-            self.trig_head = nn.Linear(dh, 2 * self.trig_centers.shape[0])
-        button_out = {
-            "combo": scoring.N_BUTTON_COMBOS,
-            "multi_label": _N_BUTTONS,
-            "single_label": _N_BUTTONS + 1,
-        }[cfg.button_head]
-        self.button_head = nn.Linear(dh, button_out)
+        # Stick/trigger center grids (registered so they move with .to()/.cuda() and serialize).
+        self.register_buffer("main_centers", scoring.STICK_CLUSTER_CENTERS_MAIN.clone())
+        self.register_buffer("c_centers", scoring.STICK_CLUSTER_CENTERS_C.clone())
+        self.register_buffer("trig_centers", scoring.TRIGGER_CENTERS.clone())
+        # Causal mask over the L_chunk*N_GROUPS flattened sub-token stream (registered, never re-allocated).
+        S = self.L_chunk * N_GROUPS
+        self.register_buffer("_head_mask", torch.triu(torch.ones(S, S, dtype=torch.bool), diagonal=1))
+        # Per-position group ids (k repeats across the 4 groups → [S]) for the group/output gather.
+        self.register_buffer("_pos_group", torch.arange(S) % N_GROUPS)
+        self.register_buffer("_pos_frame", torch.arange(S) // N_GROUPS)
 
-    # --- backbone (verbatim from 003) ---
+    # --- backbone (verbatim from 005, plus optional opp-controller cheat) ---
     def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
         ref = features[f"{prefix}_position_x"]
         B, L = ref.shape
@@ -297,14 +351,16 @@ class ClassifierPolicy(nn.Module):
             parts.append(self.cat_embeds[cat_name](ids))
         return torch.cat(parts, dim=-1)
 
-    def _ego_history_features(self, features: dict[str, Tensor]) -> Tensor:
-        return torch.cat([features[f"ego_{ch}"][..., None] for ch in ACTION_CHANNELS], dim=-1)
+    def _controller_history(self, features: dict[str, Tensor], prefix: str) -> Tensor:
+        return torch.cat([features[f"{prefix}_{ch}"][..., None] for ch in ACTION_CHANNELS], dim=-1)
 
     def _context_tokens(self, features: dict[str, Tensor]) -> Float[Tensor, "B L_ctx d_model"]:
         ego = self._per_player_features(features, "ego")
         opp = self._per_player_features(features, "opp")
-        hist = self._ego_history_features(features)
+        hist = self._controller_history(features, "ego")
         parts = [ego, opp, hist]
+        if self.opp_controller:
+            parts.append(self._controller_history(features, "opp"))  # deliberate cheat (see cfg.opp_controller)
         if self.cond_char_stage:
             ec = self.char_emb(features["ego_character"].clamp(0, self.char_emb.num_embeddings - 1))
             oc = self.char_emb(features["opp_character"].clamp(0, self.char_emb.num_embeddings - 1))
@@ -330,30 +386,59 @@ class ClassifierPolicy(nn.Module):
         mask = self._backbone_mask(ctx.ctx_pad, T, tok.device)
         return self.encoder(tok, mask=mask)
 
-    # --- classification head ---
-    def logits(self, cond: Float[Tensor, "N d_model"]) -> dict[str, Tensor]:
-        """Per-position chunk logits from one backbone hidden vector. ``N`` flattens whatever
-        positions are decoded (B*T valid positions at train, B at inference). Returns the
-        per-group logit tensors; loss/decode iterate them per ``button_head``/``continuous_head``."""
-        H = self.L_chunk
+    # --- AR head ---
+    @jaxtyped(typechecker=beartype)
+    def _input_stream(
+        self, cond: Float[Tensor, "N d_model"], prev_idx: Int[Tensor, "N n_prev"], s_out: int
+    ) -> Float[Tensor, "N s_out d_head"]:
+        """Build the ``s_out`` head-input positions: position 0 is the learned BOS; position
+        ``p`` (1..s_out-1) embeds the realized class of stream sub-token ``p-1`` via that
+        sub-token's group table. ``prev_idx`` is the row-major ``(frame, group)`` realized-class
+        prefix (``[N, n_prev]`` in stream order; only its first ``s_out-1`` entries are consumed as
+        inputs — the last realized class is never an input since nothing follows it). A learned
+        group embedding (which channel-group) + chunk-frame position embedding + the projected
+        backbone cond are added to every position."""
         N = cond.shape[0]
-        chunk = self.cond_proj(cond)[:, None, :] + self.chunk_pos_emb.weight[None, :H, :]
-        h = self.head_encoder(chunk)  # [N, H, d_head]
-        out: dict[str, Tensor] = {}
-        if self.continuous_head_kind == "naive_bins":
-            out["cont"] = self.cont_head(h).reshape(N, H, _N_CONT, self.n_bins)
-        else:
-            out["main"] = self.main_head(h)
-            out["c"] = self.c_head(h)
-            out["trig"] = self.trig_head(h).reshape(N, H, 2, self.trig_centers.shape[0])
-        out["buttons"] = self.button_head(h)
+        n_in = s_out - 1  # realized classes consumed as inputs (the rest are outputs only)
+        emb = self.bos.to(cond.dtype).expand(N, 1, -1).clone()  # [N, 1, d_head] BOS at position 0
+        if n_in > 0:
+            classes = prev_idx[:, :n_in]
+            groups = self._pos_group[:n_in]  # group of stream sub-token p (= p % N_GROUPS)
+            per = torch.empty(N, n_in, emb.shape[-1], device=cond.device, dtype=cond.dtype)
+            for g in range(N_GROUPS):
+                sel = groups == g
+                if sel.any():
+                    per[:, sel] = self.group_in_embeds[g](classes[:, sel]).to(cond.dtype)
+            emb = torch.cat([emb, per], dim=1)  # [N, s_out, d_head]
+        emb = emb + self.group_emb(self._pos_group[:s_out]) + self.chunk_pos_emb(self._pos_frame[:s_out])
+        return emb + self.cond_proj(cond)[:, None, :]
+
+    @jaxtyped(typechecker=beartype)
+    def teacher_forced_logits(
+        self, cond: Float[Tensor, "N d_model"], tgt_idx: Int[Tensor, "N L_chunk n_groups"]
+    ) -> Float[Tensor, "N L_chunk n_groups max_vocab"]:
+        """ONE forward producing every sub-token's logits under teacher forcing: feed the realized
+        target classes as the AR inputs, run the causal head over all ``L_chunk * N_GROUPS``
+        positions, and apply each position's group output linear. Returned logits are right-padded
+        to ``max(_GROUP_VOCABS)`` on the class axis (unused entries are ``-inf``) so the four groups
+        stack into one tensor; the loss/decode index only each group's real ``_GROUP_VOCABS[g]``."""
+        N = cond.shape[0]
+        H = self.L_chunk
+        S = H * N_GROUPS
+        x = self._input_stream(cond, tgt_idx.reshape(N, S), S)  # [N, S, d_head], stream order
+        h = self.head_encoder(x, mask=self._head_mask)  # [N, S, d_head], causal
+        max_vocab = max(_GROUP_VOCABS)
+        out = h.new_full((N, H, N_GROUPS, max_vocab), float("-inf"))
+        h = h.reshape(N, H, N_GROUPS, -1)
+        for g in range(N_GROUPS):
+            out[:, :, g, : _GROUP_VOCABS[g]] = self.group_out[g](h[:, :, g])
         return out
 
 
 # %%
 def _position_targets(ctx: Context, target: Tensor, H: int) -> tuple[Tensor, Tensor]:
     """For every context position ``i``, the next-H-action target chunk + a validity mask
-    (verbatim from 003). ``A_full[:, :L_ctx] = stack_actions(ctx.features)``,
+    (verbatim from 005/003). ``A_full[:, :L_ctx] = stack_actions(ctx.features)``,
     ``A_full[:, L_ctx:] = target``; position ``i``'s leak-free target is ``A_full[i+1:i+1+H]``
     (last position recovers ``target``). Returns ``(tgt [B,T,H,A_DIM], valid [B,T])``."""
     a_full = torch.cat([stack_actions(ctx.features), target], dim=1)
@@ -366,50 +451,40 @@ def _position_targets(ctx: Context, target: Tensor, H: int) -> tuple[Tensor, Ten
 
 def _ce_nats(logits: Tensor, idx: Tensor) -> Tensor:
     """Per-element categorical cross-entropy in nats. ``logits [..., K]``, ``idx [...]`` →
-    ``[...]`` (the last logit dim is the class axis)."""
+    ``[...]`` (the last logit dim is the class axis). The ``-inf`` padding on the unused class
+    slots contributes nothing (its softmax mass is exactly 0)."""
     flat = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), idx.reshape(-1), reduction="none")
     return flat.reshape(idx.shape)
 
 
-def _component_nll(model: ClassifierPolicy, logits: dict[str, Tensor], tgt: Tensor) -> dict[str, Tensor]:
-    """The factorized joint NLL split into ``{main_stick, c_stick, triggers, buttons}``,
-    each ``[N, H]`` **nats** (summed over that modality's channels). Same code at train and
-    val so the marginals exactly partition the joint."""
-    cont_tgt, btn_tgt = tgt[..., :_N_CONT], tgt[..., _N_CONT:]
-    comps: dict[str, Tensor] = {}
-    if model.continuous_head_kind == "naive_bins":
-        ce = _ce_nats(logits["cont"], scoring.bins_to_idx(cont_tgt, model.cont_binspecs))  # [N,H,6]
-        comps["main_stick"] = ce[..., 0] + ce[..., 1]
-        comps["c_stick"] = ce[..., 2] + ce[..., 3]
-        comps["triggers"] = ce[..., 4] + ce[..., 5]
-    else:
-        comps["main_stick"] = _ce_nats(logits["main"], scoring.nearest_cluster(cont_tgt[..., 0:2], model.main_centers))
-        comps["c_stick"] = _ce_nats(logits["c"], scoring.nearest_cluster(cont_tgt[..., 2:4], model.c_centers))
-        trig_idx = scoring.nearest_center(cont_tgt[..., 4:6], model.trig_centers)  # [N,H,2]
-        tl = _ce_nats(logits["trig"][..., 0, :], trig_idx[..., 0])
-        tr = _ce_nats(logits["trig"][..., 1, :], trig_idx[..., 1])
-        comps["triggers"] = tl + tr
-    if model.button_head_kind == "combo":
-        comps["buttons"] = _ce_nats(logits["buttons"], scoring.buttons_to_combo(btn_tgt))
-    elif model.button_head_kind == "multi_label":
-        comps["buttons"] = F.binary_cross_entropy_with_logits(logits["buttons"], btn_tgt, reduction="none").sum(-1)
-    else:
-        cls, _ = scoring.buttons_to_class(btn_tgt)
-        comps["buttons"] = _ce_nats(logits["buttons"], cls)
-    return comps
+def _quantize(model: FactorizedARPolicy, actions: Tensor) -> Tensor:
+    return quantize_groups(model.main_centers, model.c_centers, model.trig_centers, actions)
+
+
+def _dequantize(model: FactorizedARPolicy, idx: Tensor) -> Tensor:
+    return dequantize_groups(model.main_centers, model.c_centers, model.trig_centers, idx)
+
+
+def _component_nll(model: FactorizedARPolicy, logits: Tensor, tgt_idx: Tensor) -> dict[str, Tensor]:
+    """The factorized joint NLL split into the four groups, each ``[N, H]`` **nats**. ``logits``
+    is ``[N, H, N_GROUPS, max_vocab]`` (from ``teacher_forced_logits``); ``tgt_idx`` the
+    ``[N, H, N_GROUPS]`` realized classes. Same code at train and val so the marginals exactly
+    partition the joint."""
+    return {name: _ce_nats(logits[:, :, g], tgt_idx[:, :, g]) for g, name in enumerate(_GROUP_NAMES)}
 
 
 def _select(
-    model: ClassifierPolicy,
+    model: FactorizedARPolicy,
     batch: TrainBatch,
     *,
     multi: bool,
     max_positions: int = -1,
     gen: torch.Generator | None = None,
-) -> tuple[dict[str, Tensor], Tensor]:
-    """Pick the supervised context positions (verbatim selection from 003's ``flow_loss``),
-    run the head once over the flattened ``N`` positions, and return ``(logits, tgt[N,H,A_DIM])``.
-    ``multi=False`` supervises only the last position (matches inference; used by val)."""
+) -> tuple[Tensor, Tensor]:
+    """Pick the supervised context positions (verbatim selection from 005), run the teacher-forced
+    head once over the flattened ``N`` positions, and return ``(logits [N,H,4,max_vocab],
+    tgt_idx [N,H,4])``. ``multi=False`` supervises only the last position (matches inference; used
+    by val)."""
     ctx = batch.context
     H = model.L_chunk
     hidden = model.encode_context(ctx)  # [B, T, d_model]
@@ -424,27 +499,28 @@ def _select(
     sel = valid.reshape(B * T)
     cond = hidden.reshape(B * T, -1)[sel]
     tgt = tgt.reshape(B * T, H, A_DIM)[sel]
-    return model.logits(cond), tgt
+    tgt_idx = _quantize(model, tgt)  # [N, H, 4]
+    return model.teacher_forced_logits(cond, tgt_idx), tgt_idx
 
 
 def action_loss(
-    model: ClassifierPolicy,
+    model: FactorizedARPolicy,
     batch: TrainBatch,
     *,
     multi: bool = True,
     max_positions: int = -1,
     gen: torch.Generator | None = None,
 ) -> dict[str, Tensor]:
-    """Per-modality joint NLL (nats, ``[N, H]``) over the supervised positions. Sum the four
+    """Per-group joint NLL (nats, ``[N, H]``) over the supervised positions. Sum the four
     components and ``.mean()`` for the training scalar; feed to ``nll_breakdown`` for the
-    modality/horizon split."""
-    logits, tgt = _select(model, batch, multi=multi, max_positions=max_positions, gen=gen)
-    return _component_nll(model, logits, tgt)
+    group/horizon split."""
+    logits, tgt_idx = _select(model, batch, multi=multi, max_positions=max_positions, gen=gen)
+    return _component_nll(model, logits, tgt_idx)
 
 
 @torch.no_grad()
 def decode(
-    model: ClassifierPolicy,
+    model: FactorizedARPolicy,
     ctx: Context,
     *,
     mode: str = "argmax",
@@ -454,47 +530,41 @@ def decode(
     """One action chunk per sample from the LAST context position, in raw action ranges
     (``[-1,1]`` sticks, ``[0,1]`` triggers, ``{0,1}`` buttons).
 
-    This is the AUTOREGRESSIVE decoder: per-frame categorical (sticks/triggers, single-label
-    buttons) and Bernoulli (multi-label buttons) logits are turned into actions by either
-    ``"sample"`` (draw from the ``temp``-scaled distribution — the default; higher ``temp`` =
-    more random) or ``"argmax"`` (greedy mode — deterministic, for the recon metric). It is
-    deliberately separate from the flow policies' decoder (which integrates from noise); the
-    only shared piece is the discretizer inverse in ``hal.training.scoring``. The single
-    inference path for this policy: closed-loop play and the recon proxy both call this."""
+    This is the AUTOREGRESSIVE decoder: it walks the ``L_chunk * N_GROUPS`` sub-token stream
+    sequentially, sampling (``"sample"`` — the default; draw from the ``temp``-scaled softmax) or
+    taking the mode (``"argmax"`` — deterministic, for the recon metric) of each sub-token's logits
+    GIVEN the realized classes of all earlier sub-tokens. The backbone is encoded ONCE (not per
+    step); the tiny head is recomputed each step (no KV cache: <=64 tokens, clarity over
+    cleverness). Deliberately separate from the flow policies' integrate-from-noise decoder."""
     if mode not in ("argmax", "sample"):
         raise ValueError(f"decode mode must be argmax|sample, got {mode!r}")
     cond = model.encode_context(ctx)[:, -1, :]  # [B, d_model]
-    lg = model.logits(cond)
+    B = cond.shape[0]
+    H = model.L_chunk
+    S = H * N_GROUPS
+    realized = torch.empty(B, S, dtype=torch.long, device=cond.device)  # flattened (frame, group) classes
 
     def pick(logits: Tensor) -> Tensor:
-        """Categorical choice over the last logit dim: greedy mode, or a ``temp``-scaled draw."""
+        """Categorical choice over the last logit dim at one stream position: greedy mode, or a
+        ``temp``-scaled draw. ``logits [B, K]`` → ``[B]``."""
         if mode == "argmax":
             return logits.argmax(-1)
         probs = F.softmax(logits / temp, dim=-1)
-        flat = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1, generator=gen)
-        return flat.reshape(logits.shape[:-1])
+        return torch.multinomial(probs, 1, generator=gen).squeeze(-1)
 
-    if model.continuous_head_kind == "naive_bins":
-        cont = scoring.idx_to_centers(pick(lg["cont"]), model.cont_binspecs)  # [B,H,6]
-    else:
-        main = scoring.cluster_to_xy(pick(lg["main"]), model.main_centers)
-        c = scoring.cluster_to_xy(pick(lg["c"]), model.c_centers)
-        trig = scoring.center_to_value(pick(lg["trig"]), model.trig_centers)  # [B,H,2]
-        cont = torch.cat([main, c, trig], dim=-1)
-    if model.button_head_kind == "combo":
-        btn = scoring.combo_to_buttons(pick(lg["buttons"]))  # 256-way pick → 8 float bits
-    elif model.button_head_kind == "multi_label":
-        if mode == "argmax":
-            btn = (lg["buttons"] > 0).float()  # sigmoid(x) > 0.5 ⇔ x > 0
-        else:
-            btn = torch.bernoulli(torch.sigmoid(lg["buttons"] / temp), generator=gen)
-    else:
-        btn = scoring.class_to_onehot(pick(lg["buttons"]), n_buttons=_N_BUTTONS)
-    return torch.cat([cont, btn], dim=-1)
+    for t in range(S):
+        g = t % N_GROUPS
+        x = model._input_stream(cond, realized[:, :t], t + 1)  # [B, t+1, d_head]: BOS + realized 0..t-1
+        h = model.head_encoder(x, mask=model._head_mask[: t + 1, : t + 1])  # causal over the known prefix
+        logits = model.group_out[g](h[:, t])  # [B, _GROUP_VOCABS[g]] — the next sub-token
+        realized[:, t] = pick(logits)
+
+    idx = realized.reshape(B, H, N_GROUPS)
+    return _dequantize(model, idx)
 
 
 def make_policy(
-    model: ClassifierPolicy,
+    model: FactorizedARPolicy,
     stats: dict[str, FeatureStats],
     cfg: TrainConfig,
     *,
@@ -506,10 +576,9 @@ def make_policy(
     """Fresh open-loop closed-loop policy for one eval wave (rolling state must not leak).
     The driver replans every ``s`` frames (default ``L_chunk``), decoding one chunk from the
     last context position and executing its first ``s`` actions. ``decode_mode``/``decode_temp``
-    override ``cfg`` for a test-time decode sweep (the AR analog of the flow policies'
-    ``n_flow_steps`` override) without retraining; ``s`` overrides the execution horizon to
-    probe control frequency (``s=1`` ≈ every-frame control, the old AR regime). Closed-loop
-    sampling draws fresh randomness each replan (``gen=None``)."""
+    override ``cfg`` for a test-time decode sweep without retraining; ``s`` overrides the
+    execution horizon to probe control frequency. Closed-loop sampling draws fresh randomness each
+    replan (``gen=None``)."""
     mode = decode_mode or cfg.decode
     temp = cfg.decode_temp if decode_temp is None else decode_temp
 
@@ -546,9 +615,9 @@ def lr_schedule(cfg: TrainConfig):
 
 
 def nll_breakdown(comps: dict[str, Tensor]) -> dict[str, float]:
-    """Modality + horizon marginals (bits) of the joint NLL, from the per-modality ``[N,H]``
-    nats components. ``modality/<name>``: mean over positions+frames. ``horizon/frame_kk``:
-    mean over positions+modalities at chunk position k."""
+    """Group + horizon marginals (bits) of the joint NLL, from the per-group ``[N,H]`` nats
+    components. ``modality/<name>``: mean over positions+frames. ``horizon/frame_kk``: mean over
+    positions+groups at chunk position k."""
     out = {f"modality/{name}": (c.mean().item() / _LN2) for name, c in comps.items()}
     per_frame = sum(comps.values()).mean(dim=0)  # [H]
     for k in range(per_frame.shape[0]):
@@ -556,51 +625,32 @@ def nll_breakdown(comps: dict[str, Tensor]) -> dict[str, float]:
     return out
 
 
-def _button_marginal_probs(model: ClassifierPolicy, button_logits: Tensor) -> Tensor:
-    """P(button_k pressed) ∈ [0,1], ``[..., 8]`` — the marginalized per-button probability of
-    each head: sigmoid (multi-label), the per-button softmax marginal over classes 1..8
-    (single-label), or the bit-marginal of the 256-way softmax (combo). Lets all three heads be
-    scored as a proper Bernoulli model of the buttons, so ``val/buttons/*`` stays comparable."""
-    if model.button_head_kind == "combo":
-        return scoring.combo_marginal_probs(button_logits)
-    if model.button_head_kind == "multi_label":
-        return torch.sigmoid(button_logits)
-    return F.softmax(button_logits, dim=-1)[..., 1:]  # drop the "none" class
-
-
 @torch.no_grad()
-def val_metrics(model: ClassifierPolicy, val_cache: list[TrainBatch], cfg: TrainConfig) -> dict[str, float]:
-    """Last-position (``multi=False``, inference-matched) proper-scoring metrics over the
-    cached val batches. Concatenates per-element tensors then reduces once, so the means are
-    exactly sample-weighted."""
+def val_metrics(model: FactorizedARPolicy, val_cache: list[TrainBatch], cfg: TrainConfig) -> dict[str, float]:
+    """Last-position (``multi=False``, inference-matched) proper-scoring metrics over the cached
+    val batches. Concatenates per-element tensors then reduces once, so the means are exactly
+    sample-weighted."""
     was_training = model.training
     model.eval()
     comps_cat: dict[str, list[Tensor]] = {}
-    cont_ch_nats: list[Tensor] = []  # [M,H,6] per-channel continuous nats (naive only)
     btn_probs: list[Tensor] = []
     btn_tgts: list[Tensor] = []
     multipress: list[Tensor] = []
     for batch in val_cache:
-        logits, tgt = _select(model, batch, multi=False)
-        comps = _component_nll(model, logits, tgt)
+        logits, tgt_idx = _select(model, batch, multi=False)
+        comps = _component_nll(model, logits, tgt_idx)
         for k, v in comps.items():
             comps_cat.setdefault(k, []).append(v)
-        if model.continuous_head_kind == "naive_bins":
-            cont_ch_nats.append(_ce_nats(logits["cont"], scoring.bins_to_idx(tgt[..., :_N_CONT], model.cont_binspecs)))
-        btn_probs.append(_button_marginal_probs(model, logits["buttons"]))
-        btn_tgts.append(tgt[..., _N_CONT:])
-        multipress.append(scoring.buttons_to_class(tgt[..., _N_CONT:])[1])
+        # Buttons scored as a proper Bernoulli model via the 256-way combo marginals.
+        btn_probs.append(scoring.combo_marginal_probs(logits[:, :, _BUTTONS_G, : scoring.N_BUTTON_COMBOS]))
+        tgt_btn = _dequantize(model, tgt_idx)[..., _N_CONT:]  # realized button bits from the combo class
+        btn_tgts.append(tgt_btn)
+        multipress.append((tgt_btn > 0.5).sum(-1) >= 2)
     comps = {k: torch.cat(v) for k, v in comps_cat.items()}
     out = nll_breakdown(comps)
     out = {f"loss/{k}": v for k, v in out.items()}
     out["action_nll_bits_per_frame"] = sum(comps.values()).mean().item() / _LN2
-
-    if model.continuous_head_kind == "naive_bins":
-        ch = torch.cat(cont_ch_nats).mean(dim=(0, 1)) / _LN2  # [6] discrete bits per channel
-        density = sum(ch[i].item() + math.log2(model.cont_binspecs[i].width) for i in range(_N_CONT)) / _N_CONT
-        out["cont_density_bits_per_dim"] = density
-    else:
-        out["cont_discrete_bits"] = (comps["main_stick"] + comps["c_stick"] + comps["triggers"]).mean().item() / _LN2
+    out["cont_discrete_bits"] = (comps["main_stick"] + comps["c_stick"] + comps["triggers"]).mean().item() / _LN2
 
     logloss, brier = scoring.bernoulli_scores_from_probs(torch.cat(btn_probs), torch.cat(btn_tgts))
     out["buttons/logloss_bits"] = logloss.item()
@@ -613,7 +663,7 @@ def val_metrics(model: ClassifierPolicy, val_cache: list[TrainBatch], cfg: Train
 
 @torch.no_grad()
 def recon_metrics(
-    model: ClassifierPolicy,
+    model: FactorizedARPolicy,
     val_cache: list[TrainBatch],
     *,
     mode: str,
@@ -621,9 +671,9 @@ def recon_metrics(
     gen: torch.Generator | None = None,
 ) -> dict[str, float]:
     """Sample-space reconstruction proxy: decode a chunk and score it vs ground truth.
-    ``mode="argmax"`` is the deterministic controller proxy; ``"sample"`` the distributional
-    one (argmax collapses multimodality) at ``temp`` — pass ``cfg.decode_temp`` so this
-    matches the policy actually deployed. Buttons → acc + F1 @ decode; continuous → MAE."""
+    ``mode="argmax"`` is the deterministic controller proxy; ``"sample"`` the distributional one
+    at ``temp`` — pass ``cfg.decode_temp`` so this matches the deployed policy. Buttons → acc + F1
+    @ decode; continuous → MAE."""
     was_training = model.training
     model.eval()
     tp = fp = fn = btn_correct = btn_total = 0
@@ -654,7 +704,7 @@ def recon_metrics(
 
 
 def eval_vs_cpu(
-    model: ClassifierPolicy,
+    model: FactorizedARPolicy,
     stats: dict[str, FeatureStats],
     cfg: TrainConfig,
     *,
@@ -695,7 +745,8 @@ def train(
         name=run_name,
         id=resume_state["wandb_id"] if resume_state else None,
         resume="allow" if resume_state else None,
-        tags=["classification", cfg.button_head, cfg.continuous_head, f"d{cfg.d_model}", f"tp{cfg.train_positions}"],
+        tags=["factorized_ar", f"d{cfg.d_model}", f"tp{cfg.train_positions}"]
+        + (["oppc"] if cfg.opp_controller else []),
         config=asdict(cfg),
     )
     ckpt_dir, replay_dir = setup_run_dir(run_name)
@@ -710,7 +761,7 @@ def train(
         else contextlib.nullcontext()
     )
     start_step = resume_state["step"] + 1 if resume_state else 0
-    model = ClassifierPolicy(cfg).to(DEVICE)
+    model = FactorizedARPolicy(cfg).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     if wandb.run is not None:
         wandb.run.summary["model/num_params"] = n_params
@@ -857,107 +908,10 @@ def train(
 
 
 # %%
-def run_audit(cfg: TrainConfig, stats: dict[str, FeatureStats], *, n_batches: int = 16) -> None:
-    """Quantization fidelity report over real val targets (no GPU train). Scores each
-    candidate discretizer so bins/clusters are chosen on evidence, not assumed."""
-    loader = make_loader(
-        split=cfg.val_split,
-        num_workers=0,
-        data_root=cfg.data_root,
-        remote=streams.remote_for_local(cfg.data_root),
-        cache_limit=f"{cfg.cache_limit_gb}gb",
-        shuffle_block_size=cfg.shuffle_block_size,
-        stats=stats,
-        L_ctx=cfg.L_ctx,
-        L_chunk=cfg.L_chunk,
-        batch_size=cfg.batch_size,
-        seed=cfg.seed,
-    )
-    batches = list(itertools.islice(loader, n_batches))
-    if not batches:
-        raise RuntimeError("val loader yielded zero batches")
-    cont = torch.cat([b.target[..., :_N_CONT].reshape(-1, _N_CONT) for b in batches])  # [M,6]
-    buttons = torch.cat([b.target[..., _N_CONT:].reshape(-1, _N_BUTTONS) for b in batches])  # [M,8]
-    print(f"\n[audit] {cont.shape[0]} frames from {len(batches)} val batches\n", flush=True)
-
-    def _mae(recon: Tensor, tgt: Tensor) -> float:
-        return (recon - tgt).abs().mean().item()
-
-    def _dead(idx: Tensor, n_centers: int, *, thresh: float = 0.001) -> int:
-        """Number of centers holding < ``thresh`` of the mass (massively over-binned signal)."""
-        occ = torch.bincount(idx, minlength=n_centers).float() / idx.numel()
-        return int((occ < thresh).sum())
-
-    print(f"  {'discretizer':<22} {'main_mae':>9} {'cstick_mae':>11} {'trig_mae':>9} {'>0.1 frac':>10} {'dead':>6}")
-    for nb in (15, 21, 31):
-        specs = scoring.cont_binspecs(nb)
-        idx = scoring.bins_to_idx(cont, specs)
-        recon = scoring.idx_to_centers(idx, specs)
-        main_mae = _mae(recon[:, 0:2], cont[:, 0:2])
-        c_mae = _mae(recon[:, 2:4], cont[:, 2:4])
-        trig_mae = _mae(recon[:, 4:6], cont[:, 4:6])
-        far = (recon[:, :4] - cont[:, :4]).abs().max(-1).values.gt(0.1).float().mean().item()
-        dead = sum(_dead(idx[:, ch], nb) for ch in range(4, 6))  # both trigger channels
-        print(
-            f"  {'naive_bins(' + str(nb) + ')':<22} {main_mae:>9.4f} {c_mae:>11.4f} {trig_mae:>9.4f} "
-            f"{far:>10.3f} {dead:>6}",
-            flush=True,
-        )
-
-    # joint-2D stick clusters: their own main/c sets + the hand-tuned 1D trigger centers.
-    main_c, c_c, trig_c = (
-        scoring.STICK_CLUSTER_CENTERS_MAIN,
-        scoring.STICK_CLUSTER_CENTERS_C,
-        scoring.TRIGGER_CENTERS,
-    )
-    main_idx = scoring.nearest_cluster(cont[:, 0:2], main_c)
-    c_idx = scoring.nearest_cluster(cont[:, 2:4], c_c)
-    trig_idx = scoring.nearest_center(cont[:, 4:6], trig_c)  # [M,2]
-    main_recon = scoring.cluster_to_xy(main_idx, main_c)
-    c_recon = scoring.cluster_to_xy(c_idx, c_c)
-    trig_recon = scoring.center_to_value(trig_idx, trig_c)
-    far = (main_recon - cont[:, 0:2]).abs().max(-1).values.gt(0.1).float().mean().item()
-    dead = (
-        _dead(main_idx, main_c.shape[0])
-        + _dead(c_idx, c_c.shape[0])
-        + sum(_dead(trig_idx[:, ch], trig_c.shape[0]) for ch in range(2))
-    )
-    print(
-        f"  {f'clusters(m{main_c.shape[0]}/c{c_c.shape[0]}/t{trig_c.shape[0]})':<22} "
-        f"{_mae(main_recon, cont[:, 0:2]):>9.4f} {_mae(c_recon, cont[:, 2:4]):>11.4f} "
-        f"{_mae(trig_recon, cont[:, 4:6]):>9.4f} {far:>10.3f} {dead:>6}",
-        flush=True,
-    )
-    print(
-        f"  (clusters dead@<0.1%: main {_dead(main_idx, main_c.shape[0])}/{main_c.shape[0]}  "
-        f"c {_dead(c_idx, c_c.shape[0])}/{c_c.shape[0]}  "
-        f"trig {sum(_dead(trig_idx[:, ch], trig_c.shape[0]) for ch in range(2))}/{2 * trig_c.shape[0]})",
-        flush=True,
-    )
-
-    pressed = (buttons > 0.5).sum(-1)
-    combo = scoring.buttons_to_combo(buttons)  # [M] in [0, 256)
-    counts = torch.bincount(combo, minlength=scoring.N_BUTTON_COMBOS).float()
-    occupied = int((counts > 0).sum())
-    cov = counts.sort(descending=True).values.cumsum(0) / counts.sum()
-    top16 = cov[15].item() if cov.numel() >= 16 else cov[-1].item()
-    cover99 = int((cov < 0.99).sum()) + 1  # combos needed to reach 99% mass
-    print(
-        f"\n[audit] buttons: any-press {float((pressed >= 1).float().mean()):.3f}  "
-        f"multipress(>=2) {float((pressed >= 2).float().mean()):.3f}  "
-        f"(single_label is only honest if multipress is small)\n"
-        f"[audit] combo (256-way joint): {occupied}/256 combos observed  "
-        f"top-16 coverage {top16:.3f}  combos for 99% mass {cover99}  "
-        f"(combo head is the full product space — empty classes are fine)\n",
-        flush=True,
-    )
-
-
-# %%
-def _load_ckpt(ckpt_path: str) -> tuple[ClassifierPolicy, TrainConfig, dict[str, FeatureStats], dict]:
+def _load_ckpt(ckpt_path: str) -> tuple[FactorizedARPolicy, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     cfg = TrainConfig(**state["cfg"])
-    model = ClassifierPolicy(cfg).to(DEVICE)
+    model = FactorizedARPolicy(cfg).to(DEVICE)
     model.load_state_dict(state["model"])
     model.eval()
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
@@ -1026,17 +980,16 @@ def eval_control_freq(
     """D1 diagnostic: closed-loop control-frequency sweep on FD vs lvl-9 CPU, WITHOUT retraining.
 
     A trained chunk model decodes ``L_chunk`` actions per replan; the execution horizon ``s``
-    controls how many it commits before replanning. ``s=L_chunk`` is the trained open-loop default
-    (~267 ms of unreactive input); ``s=1`` replans every frame using only the next-frame prediction
-    (the old AR every-frame regime). A large ``stocks_taken`` gap from ``s=1`` to ``s=L_chunk``
-    implicates control frequency rather than model quality. Same checkpoint, same decode."""
+    controls how many it commits before replanning. ``s=L_chunk`` is the trained open-loop default;
+    ``s=1`` replans every frame using only the next-frame prediction (the old AR every-frame
+    regime). A large ``stocks_taken`` gap from ``s=1`` to ``s=L_chunk`` implicates control
+    frequency rather than model quality. Same checkpoint, same decode."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
     mode = decode_mode or cfg.decode
     temp = cfg.decode_temp if decode_temp is None else decode_temp
     reps = replicas or cfg.eval_replicas
     replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
     replay_dir.mkdir(parents=True, exist_ok=True)
-    # de-dup and always include the trained default L_chunk as the reference point
     horizons = sorted({s for s in (*s_values, cfg.L_chunk) if 0 < s <= cfg.L_chunk})
     print(
         f"[d1] {ckpt_path}  step={state['step']}  decode={mode} temp={temp}  "
@@ -1057,8 +1010,7 @@ def eval_control_freq(
 
 def eval_ckpt(ckpt_path: str, *, decode_mode: str | None = None, decode_temp: float | None = None) -> None:
     """Load a checkpoint, sweep stages vs CPU + self-play, print summaries. ``decode_mode``/
-    ``decode_temp`` override the trained cfg for this eval only (test-time decode sweep) — e.g.
-    to re-evaluate an argmax-trained checkpoint with sampling."""
+    ``decode_temp`` override the trained cfg for this eval only (test-time decode sweep)."""
     from hal.policy import INCLUDED_STAGES
 
     model, cfg, stats, state = _load_ckpt(ckpt_path)
@@ -1099,10 +1051,9 @@ def eval_ckpt(ckpt_path: str, *, decode_mode: str | None = None, decode_temp: fl
 @dataclass
 class Args:
     """Top-level CLI surface. Pass TrainConfig fields as kebab-case flags,
-    e.g. ``--cfg.button-head single_label --cfg.continuous-head stick_clusters``."""
+    e.g. ``--cfg.opp-controller True --cfg.decode argmax``."""
 
     cfg: TrainConfig = field(default_factory=TrainConfig)
-    audit: bool = False  # quantization fidelity report (no GPU train), then exit
     eval: str | None = None  # ckpt path; closed-loop eval instead of train
     eval_control_sweep: str | None = None  # ckpt path; D1 control-frequency sweep (s=1 vs L_chunk) on FD
     eval_cs_replicas: int | None = None  # override replicas for --eval-control-sweep (default: cfg.eval_replicas)
@@ -1128,18 +1079,13 @@ def main(args: Args) -> None:
             replicas=args.eval_cs_replicas,
         )
         return
-    if args.audit:
-        cfg = args.cfg
-        run_audit(cfg, load_consolidated_stats(Path(cfg.data_root) / "stats.json"))
-        return
     if args.resume is not None:
         state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)
         if state is None:
             raise SystemExit(f"no latest.pt for run {args.resume!r} (local or R2)")
         # Only pure host-scaling knobs (worker/prefetch counts) follow the current code; the
-        # objective/ablation knobs (train_positions, head kinds, n_bins) are part of the
-        # experiment identity and MUST come from the checkpoint — resetting train_positions
-        # would silently flip a sparse (tp=1) run to the dense default.
+        # experiment-identity knobs (train_positions, opp_controller, dims) MUST come from the
+        # checkpoint so a resume can't silently flip the ablation.
         d = TrainConfig()
         cfg = replace(
             TrainConfig(**state["cfg"]),
@@ -1151,7 +1097,7 @@ def main(args: Args) -> None:
         return
     cfg = args.cfg
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
-    auto_comment = f"cls-{cfg.max_steps // 1000}k-b{cfg.batch_size}"
+    auto_comment = f"fact-{cfg.max_steps // 1000}k-b{cfg.batch_size}"
     train(cfg, stats, comment=args.comment or auto_comment)
 
 

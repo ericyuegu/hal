@@ -27,7 +27,7 @@ def _load_experiment():
 
 exp = _load_experiment()
 
-_COMBOS = [(bh, ch) for bh in ("multi_label", "single_label") for ch in ("naive_bins", "stick_clusters")]
+_COMBOS = [(bh, ch) for bh in ("combo", "multi_label", "single_label") for ch in ("naive_bins", "stick_clusters")]
 
 
 def _cfg(**overrides):
@@ -110,6 +110,23 @@ def test_loss_components_are_the_four_modalities():
     _, batch = _batch(2, cfg)
     comps = exp.action_loss(model, batch)
     assert set(comps) == {"main_stick", "c_stick", "triggers", "buttons"}
+
+
+def test_cluster_head_shapes_track_the_scoring_discretizers():
+    """Cluster-mode heads size to the scoring centers, not n_bins (trig is 1D centers now)."""
+    from hal.training import scoring
+
+    cfg = _cfg(continuous_head="stick_clusters", n_bins=21)  # n_bins != len(TRIGGER_CENTERS)
+    model = exp.ClassifierPolicy(cfg)
+    assert model.main_head.out_features == scoring.STICK_CLUSTER_CENTERS_MAIN.shape[0]
+    assert model.c_head.out_features == scoring.STICK_CLUSTER_CENTERS_C.shape[0]
+    assert model.trig_head.out_features == 2 * scoring.TRIGGER_CENTERS.shape[0]
+    _, batch = _batch(2, cfg)
+    logits, _ = exp._select(model, batch, multi=False)
+    N = logits["trig"].shape[0]
+    assert logits["main"].shape == (N, cfg.L_chunk, scoring.STICK_CLUSTER_CENTERS_MAIN.shape[0])
+    assert logits["c"].shape == (N, cfg.L_chunk, scoring.STICK_CLUSTER_CENTERS_C.shape[0])
+    assert logits["trig"].shape == (N, cfg.L_chunk, 2, scoring.TRIGGER_CENTERS.shape[0])
 
 
 # --- acceptance #2: leak-free per-position targets (shared with 003) ---------
@@ -202,6 +219,72 @@ def test_single_label_emits_at_most_one_button(mode):
     gen = torch.Generator().manual_seed(0)
     a = exp.decode(model, ctx, mode=mode, gen=gen)
     assert a[..., 6:].sum(-1).max() <= 1.0
+
+
+# --- combo head: bit-order agreement with the controller bridge --------------
+def test_default_button_head_is_combo():
+    assert exp.TrainConfig().button_head == "combo"
+
+
+def test_combo_head_is_256_way():
+    from hal.training import scoring
+
+    cfg = _cfg(button_head="combo")
+    model = exp.ClassifierPolicy(cfg)
+    assert model.button_head.out_features == scoring.N_BUTTON_COMBOS == 256
+    _, batch = _batch(2, cfg)
+    logits, _ = exp._select(model, batch, multi=False)
+    assert logits["buttons"].shape[-1] == 256
+
+
+def test_combo_bit_order_matches_action_vec_button_slots():
+    """The combo id's bit k must be action-vec slot ``6 + k`` — i.e. the ``_BUTTON_ORDER``
+    button decoded by ``action_vec_to_controller``. A single press on button ``_BUTTON_ORDER[k]``
+    must round-trip through pack→unpack to a one-hot at the same channel, and decode that combo
+    id to a controller pressing exactly that button. Get this wrong and controller outputs scramble."""
+    from hal.training import features
+    from hal.training import scoring
+    from hal.wire import BUTTON_BITS
+
+    assert features._BUTTON_ORDER == ("a", "b", "x", "y", "z", "r", "l", "d_up")
+    assert tuple(features.ACTION_CHANNELS[6:]) == tuple(f"button_{n}" for n in features._BUTTON_ORDER)
+
+    for k, name in enumerate(features._BUTTON_ORDER):
+        bits = torch.zeros(8)
+        bits[k] = 1.0
+        combo = scoring.buttons_to_combo(bits)
+        assert combo.item() == (1 << k), f"bit {k} ({name}) does not map to combo id 2**{k}"
+        # the full 14-dim action vec (sticks/triggers neutral, this one button bit set)
+        a = torch.zeros(exp.A_DIM)
+        a[6 + k] = 1.0
+        ctrl = features.action_vec_to_controller(a.numpy())
+        assert ctrl.buttons == BUTTON_BITS[name], f"channel {6 + k} decodes to the wrong button for {name}"
+        # decode(combo id) → bits → the same single channel
+        assert torch.equal(scoring.combo_to_buttons(combo), bits)
+
+
+def test_combo_train_path_loss_and_decode_smoke():
+    """A synthetic TrainBatch runs action_loss + decode in combo mode end-to-end (the train
+    path the trainer drives)."""
+    from hal.training import scoring
+
+    cfg = _cfg(button_head="combo")
+    torch.manual_seed(0)
+    model = exp.ClassifierPolicy(cfg)
+    _, batch = _batch(3, cfg)
+    comps = exp.action_loss(model, batch)
+    assert set(comps) == {"main_stick", "c_stick", "triggers", "buttons"}
+    loss = sum(comps.values()).mean()
+    assert loss.ndim == 0 and torch.isfinite(loss)
+    loss.backward()
+    assert model.button_head.weight.grad is not None and model.button_head.weight.grad.abs().sum() > 0
+    model.eval()
+    gen = torch.Generator().manual_seed(0)
+    a = exp.decode(model, batch.context, mode="sample", gen=gen)
+    btn = a[..., 6:]
+    assert torch.isin(btn, torch.tensor([0.0, 1.0])).all()
+    # combo decode emits a coherent co-press set (any subset of the 8), never a partial-bit value
+    assert torch.equal(scoring.combo_to_buttons(scoring.buttons_to_combo(btn)), btn)
 
 
 @pytest.mark.parametrize("button_head,continuous_head", _COMBOS)

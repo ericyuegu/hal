@@ -203,7 +203,9 @@ def preprocess(
             x = np.where(mask, 0, arr).astype(np.int64)
         elif kind == "float":
             s = feature_stats[consolidate_key(name)]
-            x = _standardize(arr, s) if "position" in name else _normalize(arr, s)
+            # percent + position are heavy-tailed: their dataset max (percent ~507, off the
+            # 0-160 decision range) squashes min-max into a sliver, so standardize them.
+            x = _standardize(arr, s) if ("position" in name or "percent" in name) else _normalize(arr, s)
             x = np.where(mask, 0.0, x)
         else:
             raise AssertionError(f"unhandled kind {kind} for {name}")
