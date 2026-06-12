@@ -152,6 +152,7 @@ def make_loader(
     num_workers: int = 4,
     prefetch_factor: int = 4,
     predownload: int | None = None,
+    pin_memory: bool | None = None,
 ) -> DataLoader:
     """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` (preprocessing runs in the workers).
@@ -199,6 +200,10 @@ def make_loader(
     )
     sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed)
     collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
+    # Pin by default only when there's a GPU to copy to (page-locking host memory is
+    # wasted on a CPU run). ``TrainBatch.pin_memory`` makes the custom batch poolable.
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
     return DataLoader(
         sampler,
         batch_size=batch_size,
@@ -206,4 +211,5 @@ def make_loader(
         collate_fn=collate,
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=pin_memory,
     )

@@ -128,6 +128,15 @@ class Context:
             ctx_pad=self.ctx_pad.to(device, non_blocking=True),
         )
 
+    def pin_memory(self) -> Context:
+        # Page-lock the collated tensors so the DataLoader pin thread enables the
+        # async (``non_blocking``) host→device copy in ``to``. Called by torch's
+        # pin_memory machinery when the loader has ``pin_memory=True``.
+        return Context(
+            features={k: v.pin_memory() for k, v in self.features.items()},
+            ctx_pad=self.ctx_pad.pin_memory(),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class TrainBatch:
@@ -138,6 +147,9 @@ class TrainBatch:
 
     def to(self, device: str | torch.device) -> TrainBatch:
         return TrainBatch(context=self.context.to(device), target=self.target.to(device, non_blocking=True))
+
+    def pin_memory(self) -> TrainBatch:
+        return TrainBatch(context=self.context.pin_memory(), target=self.target.pin_memory())
 
 
 # %%
