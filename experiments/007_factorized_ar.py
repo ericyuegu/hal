@@ -93,12 +93,15 @@ from hal.training.features import FLOAT_FEATURES
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
+from hal.training.runs import experiment_number
+from hal.training.runs import init_wandb
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
 from hal.training.stats import load_consolidated_stats
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+EXPERIMENT = experiment_number(__file__)
 _LN2 = math.log(2.0)
 
 # Channel split inside the A_DIM=14 action vec: [0:6] sticks+triggers (continuous), [6:14] buttons {0,1}.
@@ -165,7 +168,7 @@ class TrainConfig:
     # (random subset, redrawn per step). -1 supervises every valid position.
     train_positions: int = 64
     # optimization
-    batch_size: int = 32  # micro-batch run on the GPU per forward
+    batch_size: int = 512  # micro-batch run on the GPU per forward (default sized for cloud GPUs)
     grad_accum_steps: int = 1  # optimizer step sees batch_size * grad_accum_steps samples
     lr: float = 3e-4
     weight_decay: float = 0.01
@@ -741,14 +744,15 @@ def train(
 ) -> None:
     run_name = resume_run or make_run_name(_model_tag(cfg), cfg.data_root, comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
-    wandb.init(
-        project="hal",
-        name=run_name,
-        id=resume_state["wandb_id"] if resume_state else None,
-        resume="allow" if resume_state else None,
+    runlog = init_wandb(
+        experiment=EXPERIMENT,
+        run_name=run_name,
         tags=["factorized_ar", f"d{cfg.d_model}", f"tp{cfg.train_positions}"]
         + (["oppc"] if cfg.opp_controller else []),
-        config=asdict(cfg),
+        cfg=asdict(cfg),
+        samples_per_step=cfg.batch_size * cfg.grad_accum_steps,
+        tokens_per_sample=cfg.L_ctx + cfg.L_chunk,
+        resume_state=resume_state,
     )
     ckpt_dir, replay_dir = setup_run_dir(run_name)
 
@@ -818,7 +822,7 @@ def train(
         gen = torch.Generator(device=DEVICE).manual_seed(0)
         rm_arg = recon_metrics(model, val_cache, mode="argmax")
         rm_smp = recon_metrics(model, val_cache, mode="sample", temp=cfg.decode_temp, gen=gen)
-        wandb.log(
+        runlog.log(
             {
                 **{f"val/{k}": v for k, v in vm.items()},
                 **{f"val/argmax/{k}": v for k, v in rm_arg.items()},
@@ -867,7 +871,7 @@ def train(
                 torch.cuda.synchronize()
         breakdown = nll_breakdown({k: torch.cat(v) for k, v in comps_acc.items()})
         sps = cfg.batch_size * cfg.grad_accum_steps / sw.elapsed
-        wandb.log(
+        runlog.log(
             {
                 "train/loss": loss_val,
                 **{f"train/loss/{k}": v for k, v in breakdown.items()},
@@ -895,13 +899,13 @@ def train(
         if cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0:
             _save(f"step_{step:06d}.pt", step)
             metrics = _eval_and_upload(f"step_{step:06d}")
-            wandb.log({f"eval/{k}": v for k, v in metrics.items()}, step=step)
+            runlog.log({f"eval/{k}": v for k, v in metrics.items()}, step=step)
             print(f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: closed_loop {metrics}", flush=True)
 
     vm_final = _log_val(cfg.max_steps)
     print(f"[final] action_nll {vm_final['action_nll_bits_per_frame']:.3f}", flush=True)
     metrics_final = _eval_and_upload("final")
-    wandb.log({f"eval/{k}": v for k, v in metrics_final.items()}, step=cfg.max_steps)
+    runlog.log({f"eval/{k}": v for k, v in metrics_final.items()}, step=cfg.max_steps)
     print(f"[final] closed_loop {metrics_final}", flush=True)
     _save("final.pt", cfg.max_steps)
     if uploader is not None:

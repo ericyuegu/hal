@@ -82,12 +82,15 @@ from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import Context
 from hal.training.features import TrainBatch
+from hal.training.runs import experiment_number
+from hal.training.runs import init_wandb
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
 from hal.training.stats import load_consolidated_stats
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+EXPERIMENT = experiment_number(__file__)
 
 
 # %%
@@ -109,7 +112,7 @@ class TrainConfig:
     # inference
     n_flow_steps: int = 8
     # optimization
-    batch_size: int = 32  # micro-batch run on the GPU per forward
+    batch_size: int = 512  # micro-batch run on the GPU per forward (default sized for cloud GPUs)
     grad_accum_steps: int = 1  # optimizer step sees batch_size * grad_accum_steps samples
     lr: float = 3e-4
     weight_decay: float = 0.01
@@ -147,7 +150,7 @@ class TrainConfig:
     shuffle_block_size: int = 2000
     val_split: str = "val"  # tiny datasets may have an empty val split; point this at "test"/"train"
     num_workers: int = 8
-    prefetch_factor: int = 8
+    prefetch_factor: int = 4
 
 
 def _model_tag(cfg: TrainConfig) -> str:
@@ -565,13 +568,14 @@ def train(
 ) -> None:
     run_name = resume_run or make_run_name(_model_tag(cfg), cfg.data_root, comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
-    wandb.init(
-        project="hal",
-        name=run_name,
-        id=resume_state["wandb_id"] if resume_state else None,
-        resume="allow" if resume_state else None,
+    runlog = init_wandb(
+        experiment=EXPERIMENT,
+        run_name=run_name,
         tags=["flow-matching", "baseline", f"d{cfg.d_model}", f"L{cfg.n_layers}"],
-        config=asdict(cfg),
+        cfg=asdict(cfg),
+        samples_per_step=cfg.batch_size * cfg.grad_accum_steps,
+        tokens_per_sample=cfg.L_ctx + cfg.L_chunk,
+        resume_state=resume_state,
     )
     ckpt_dir, replay_dir = setup_run_dir(run_name)
 
@@ -666,7 +670,7 @@ def train(
         # block, so its extra host sync doesn't inflate the throughput measurement.
         breakdown = velocity_mse_breakdown(torch.cat(errs))
         sps = cfg.batch_size * cfg.grad_accum_steps / sw.elapsed
-        wandb.log(
+        runlog.log(
             {
                 "train/loss": loss_val,
                 **{f"train/loss/{k}": v for k, v in breakdown.items()},
@@ -697,7 +701,7 @@ def train(
             vl, vbreak = val_loss(model, val_cache)
             rm = recon_metrics(model, val_cache, n_steps=cfg.n_flow_steps)
             lm = likelihood_metrics(model, val_cache, cfg)
-            wandb.log(
+            runlog.log(
                 {
                     "val/loss": vl,
                     **{f"val/loss/{k}": v for k, v in vbreak.items()},
@@ -723,13 +727,13 @@ def train(
                 uploader=uploader,
             )
             metrics = _eval_and_upload(f"step_{step:06d}")
-            wandb.log({f"eval/{k}": v for k, v in metrics.items()}, step=step)
+            runlog.log({f"eval/{k}": v for k, v in metrics.items()}, step=step)
             print(f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: closed_loop {metrics}", flush=True)
 
     vl_final, vbreak_final = val_loss(model, val_cache)
     rm_final = recon_metrics(model, val_cache, n_steps=cfg.n_flow_steps)
     lm_final = likelihood_metrics(model, val_cache, cfg)
-    wandb.log(
+    runlog.log(
         {
             "val/loss": vl_final,
             **{f"val/loss/{k}": v for k, v in vbreak_final.items()},
@@ -740,7 +744,7 @@ def train(
     )
     print(f"[final] val_loss {vl_final:.4f} recon {rm_final}", flush=True)
     metrics_final = _eval_and_upload("final")
-    wandb.log({f"eval/{k}": v for k, v in metrics_final.items()}, step=cfg.max_steps)
+    runlog.log({f"eval/{k}": v for k, v in metrics_final.items()}, step=cfg.max_steps)
     print(f"[final] closed_loop {metrics_final}", flush=True)
     save_checkpoint(
         ckpt_dir / "final.pt",
