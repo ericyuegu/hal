@@ -257,6 +257,79 @@ def onstart_cmd() -> str:
     return f"bash -c {shlex.quote(ONSTART_PATH.read_text())}"
 
 
+# vast tracks an instance through two parallel state machines, surfaced as separate fields
+# (https://docs.vast.ai/api-reference/instances/show-instance):
+#   actual_status   - the container's live state: created -> loading (pulling image) ->
+#                     running; or a terminal exited/offline/unknown that never reaches running.
+#   intended_status - the *target* the scheduler is driving toward: running | stopped | frozen.
+#   cur_state / next_state - the machine contract's current and next-scheduled state.
+# A genuinely-up box has ALL FOUR at 'running'. The collision footgun: two concurrent rents
+# land on the same single-GPU host, one loses the GPU, and vast flips it to intended/cur/next
+# == 'stopped' while actual_status still reads a transient 'loading' (or even a flickering
+# 'running'). Trusting actual_status alone declares that dead box a success. So we require the
+# full quad AND corroboration that the disk actually provisioned (disk_util >= 0; it stays -1
+# on a box that never really came up), and treat any 'stopped'/terminal in the target fields as
+# an immediate, unrecoverable failure rather than something to wait out.
+_TERMINAL_CONTAINER = frozenset({"exited", "offline", "unknown"})
+_STOPPED_TARGETS = frozenset({"stopped", "exited", "offline"})
+
+
+@dataclass(frozen=True, slots=True)
+class Readiness:
+    """The verdict of one status poll. Exactly one of (ready, dead, waiting) holds.
+
+    ``dead`` is an unrecoverable state (vast is tearing the box down or it crashed) and
+    carries a reason; ``ready`` means genuinely up; otherwise we keep polling (``waiting``)."""
+
+    ready: bool
+    dead: bool
+    reason: str
+
+    @property
+    def waiting(self) -> bool:
+        return not (self.ready or self.dead)
+
+
+def classify(status: dict) -> Readiness:
+    """Map a raw ``show_instance`` dict to a readiness verdict.
+
+    Ready requires the full running quad (actual_status, cur_state, next_state, intended_status
+    all 'running') corroborated by a provisioned disk (disk_util >= 0). Dead is any signal that
+    the box will never reach running: the scheduler targeting 'stopped' (the collision case), a
+    terminal container state, or an error message — failed loud so we never report a stranded box
+    as a success."""
+    actual = status.get("actual_status")
+    cur = status.get("cur_state")
+    nxt = status.get("next_state")
+    intended = status.get("intended_status")
+    disk_util = status.get("disk_util", -1)
+    msg = status.get("status_msg")
+    error = status.get("error")
+
+    if error:
+        return Readiness(ready=False, dead=True, reason=f"vast reported error={error!r} (status_msg={msg!r})")
+    # The scheduler is driving the box to a stopped/terminal target -> it will never run. This is
+    # the concurrent-offer collision: the loser is flipped to intended/cur/next == 'stopped'.
+    if intended in _STOPPED_TARGETS or cur in _STOPPED_TARGETS or nxt in _STOPPED_TARGETS:
+        return Readiness(
+            ready=False,
+            dead=True,
+            reason=(
+                f"vast is driving the box to a stopped target "
+                f"(intended={intended!r} cur={cur!r} next={nxt!r}, actual={actual!r}) — "
+                "likely lost the GPU to a concurrent rent on the same host"
+            ),
+        )
+    if actual in _TERMINAL_CONTAINER:
+        return Readiness(ready=False, dead=True, reason=f"container reached terminal state {actual!r}")
+    if actual == "running" and cur == "running" and nxt == "running" and intended == "running" and disk_util >= 0:
+        return Readiness(ready=True, dead=False, reason=f"running (disk_util={disk_util}, status_msg={msg!r})")
+    # Still booting: loading/connecting, or a not-yet-corroborated 'running' (disk_util still -1).
+    return Readiness(
+        ready=False, dead=False, reason=f"actual={actual!r} cur={cur!r} next={nxt!r} intended={intended!r}"
+    )
+
+
 def launch(
     vast: VastAI,
     offer: dict,
@@ -268,12 +341,13 @@ def launch(
     timeout_s: int,
     keep_alive: bool,
 ) -> int | None:
-    """Rent the offer and poll to `running`, returning its id. On failure-to-launch
-    (stuck/dead before `running`), destroy to avoid a leaked billing instance and
-    return ``None`` so the caller can fail over to the next offer — unless
-    ``keep_alive``, in which case leave the box up (booting or for inspection) and
-    return its id. The ~9 GB image can take a while to pull+extract on a slow box,
-    hence a generous timeout."""
+    """Rent the offer and poll until *genuinely* running (the full status quad + a provisioned
+    disk; see ``classify``), returning its id. On failure-to-launch — a dead box (vast driving it
+    to stopped, e.g. it lost the GPU to a concurrent rent) or one still not ready after
+    ``timeout_s`` — destroy to avoid a leaked billing instance and return ``None`` so the caller
+    fails over to the next offer. ``keep_alive`` leaves a *booting/stuck* box up for inspection,
+    but never a dead one. The ~9 GB image can take a while to pull+extract on a slow box, hence a
+    generous timeout."""
     login = {"login": f"-u {GHCR_USER} -p {token} ghcr.io"} if token else {}  # ghcr auth only if image is private
     inst = vast.create_instance(
         id=offer["id"],
@@ -287,8 +361,11 @@ def launch(
     iid = inst["new_contract"]
     logger.info(f"created instance {iid} on offer {offer['id']} ({offer['gpu_name']}); polling to running")
 
-    def give_up(why: str) -> int | None:
-        if keep_alive:
+    def give_up(why: str, *, dead: bool) -> int | None:
+        # --keep-alive leaves a *booting/stuck* box up for inspection, but a `dead` box (vast is
+        # already driving it to stopped — e.g. it lost the GPU to a concurrent rent) has nothing
+        # left to inspect and would idle-bill its disk, so tear it down regardless and fail over.
+        if keep_alive and not dead:
             logger.warning(
                 f"{why}; left up (--keep-alive). Monitor: vastai logs {iid} ; destroy: vastai destroy instance {iid}"
             )
@@ -298,27 +375,31 @@ def launch(
         return None
 
     deadline = time.time() + timeout_s
-    terminal_reads = 0  # consecutive polls showing a terminal status
+    dead_reads = 0  # consecutive polls showing an unrecoverable verdict
+    last = "no poll yet"
     while True:
         try:
-            status = vast.show_instance(id=iid).get("actual_status")
-        except Exception as e:  # a transient API blip must not crash the poll
-            logger.warning(f"poll: show_instance({iid}) failed ({e!r}); retrying")
-            status = None
-        if status == "running":
+            verdict = classify(vast.show_instance(id=iid))
+        except (KeyError, TypeError, ValueError) as e:  # a malformed/transient read must not crash the poll
+            logger.warning(f"poll: classify(show_instance({iid})) failed ({e!r}); retrying")
+            dead_reads = 0
+            time.sleep(10)
+            continue
+        last = verdict.reason
+        if verdict.ready:
+            logger.info(f"instance {iid} ready: {verdict.reason}")
             return iid
-        # Never tear down on a *single* bad read: vast reports "unknown" transiently
-        # during state transitions, and an API hiccup yields None — either alone would
-        # otherwise destroy a box that's merely still loading. Require a terminal status
-        # to persist across two polls (a real host death holds; a blip clears).
-        if status in {"exited", "offline", "unknown"}:
-            terminal_reads += 1
-            if terminal_reads >= 2:
-                return give_up(f"instance {iid} died before running ({status})")
+        # Never tear down on a *single* bad read: vast can report a transient stopped/terminal
+        # target mid-transition. Require the dead verdict to persist across two polls (a real
+        # collision/death holds; a blip clears) before failing over.
+        if verdict.dead:
+            dead_reads += 1
+            if dead_reads >= 2:
+                return give_up(f"instance {iid} will not run: {verdict.reason}", dead=True)
         else:
-            terminal_reads = 0
+            dead_reads = 0
         if time.time() > deadline:
-            return give_up(f"instance {iid} stuck in {status!r} after {timeout_s}s")
+            return give_up(f"instance {iid} not ready after {timeout_s}s (last: {last})", dead=False)
         time.sleep(10)
 
 
