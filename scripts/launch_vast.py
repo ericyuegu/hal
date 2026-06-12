@@ -112,13 +112,15 @@ def value_metric(offer: dict, *, disk: int, data_gb: float, upload_gb: float, ru
     return amortized_dph(offer, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours) / offer["dlperf"]
 
 
-def build_query(max_price: float, disk: int, min_vram: int, min_dlperf: float) -> str:
+def build_query(max_price: float, disk: int, min_vram: int, min_ram: int, min_dlperf: float) -> str:
     # dph_total<max_price is a safe coarse prefilter: effective_dph >= dph_total, so any
     # offer clearing the effective cap also clears this. The real (disk-inclusive) cap is
     # enforced client-side in search(), since storage_cost*disk isn't expressible here.
     q = [*FILTERS, f"disk_space>={disk}", f"dph_total<{max_price}", f"dlperf>={min_dlperf}"]
     if min_vram > 0:  # vast `gpu_ram` query is in GB; 0 = no VRAM floor
         q.append(f"gpu_ram>={min_vram}")
+    if min_ram > 0:  # vast `cpu_ram` query is in GB (per-instance share); 0 = no RAM floor
+        q.append(f"cpu_ram>={min_ram}")
     return " ".join(q)
 
 
@@ -129,6 +131,7 @@ def search(
     limit: int,
     disk: int,
     min_vram: int,
+    min_ram: int,
     min_dlperf: float,
     data_gb: float,
     upload_gb: float,
@@ -136,7 +139,9 @@ def search(
 ) -> list[dict]:
     """Offers whose *effective* $/hr (GPU + provisioned disk) clears --max-price, ranked by the
     value metric (eff$/dlperf/hr, transfers folded in) — best bang-for-buck first."""
-    offers = vast.search_offers(query=build_query(max_price, disk, min_vram, min_dlperf), order=ORDER, limit=limit)
+    offers = vast.search_offers(
+        query=build_query(max_price, disk, min_vram, min_ram, min_dlperf), order=ORDER, limit=limit
+    )
     qualifying = [o for o in offers if effective_dph(o, disk) <= max_price]
     qualifying.sort(
         key=lambda o: value_metric(o, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours)
@@ -153,7 +158,7 @@ def print_offers(offers: list[dict], *, disk: int, data_gb: float, upload_gb: fl
     )
     header = (
         f"{'id':>10}  {'gpu':16} {'gpu$/hr':>8} {'disk$/hr':>8} {'eff$/hr':>8} "
-        f"{'dl$':>6} {'ul$':>6} {'dlperf':>7} {'$/dlp/hr':>9} {'down':>9} {'rel':>5}"
+        f"{'dl$':>6} {'ul$':>6} {'dlperf':>7} {'ram(GB)':>7} {'$/dlp/hr':>9} {'down':>9} {'rel':>5}"
     )
     print(header)
     print("-" * len(header))
@@ -161,7 +166,8 @@ def print_offers(offers: list[dict], *, disk: int, data_gb: float, upload_gb: fl
         print(
             f"{o['id']:>10}  {o['gpu_name']:16} {o['dph_total']:8.3f} {storage_dph(o, disk):8.3f} "
             f"{effective_dph(o, disk):8.3f} {download_cost(o, data_gb):6.2f} {upload_cost(o, upload_gb):6.2f} "
-            f"{o['dlperf']:7.1f} {value_metric(o, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours):9.4f} "
+            f"{o['dlperf']:7.1f} {o['cpu_ram'] / 1024:7.0f} "
+            f"{value_metric(o, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours):9.4f} "
             f"{o['inet_down']:7.0f}mbps {o['reliability']:5.3f}"
         )
 
@@ -217,6 +223,7 @@ def queue(
     limit: int,
     disk: int,
     min_vram: int,
+    min_ram: int,
     min_dlperf: float,
     data_gb: float,
     upload_gb: float,
@@ -231,6 +238,7 @@ def queue(
             limit=limit,
             disk=disk,
             min_vram=min_vram,
+            min_ram=min_ram,
             min_dlperf=min_dlperf,
             data_gb=data_gb,
             upload_gb=upload_gb,
@@ -422,6 +430,12 @@ class Args:
     """Minimum GPU VRAM in GB (vast `gpu_ram`); 0 = no floor. Memory-heavy runs need this
     so the $/perf ranking doesn't land them on a small card that OOMs (the launcher picks
     best DLPerf/$ first, which is usually a 12-16 GB card)."""
+    min_ram: int = 0
+    """Minimum per-instance system RAM in GB (vast `cpu_ram`); 0 = no floor. The dataloader
+    streams ~380 GB of MDS shards from R2/disk; the OS page cache (sized by RAM) is what keeps
+    re-read shards hot, so a low-RAM box stalls on re-reads and starves the GPU. In practice
+    RAM, not the GPU, set the throughput — same card with 16 GB ran ~3.5x slower than 515 GB.
+    Raise this for streaming-bound runs."""
     min_dlperf: float = 20.0
     """Minimum raw DLPerf score (vast `dlperf`). A floor on absolute throughput — the $/perf
     ranking alone can pick a slow-but-cheap card; raise this to force a faster GPU regardless
@@ -457,6 +471,7 @@ def main(args: Args) -> None:
         limit=args.limit,
         disk=args.disk,
         min_vram=args.min_vram,
+        min_ram=args.min_ram,
         min_dlperf=args.min_dlperf,
         data_gb=args.data_gb,
         upload_gb=args.upload_gb,
