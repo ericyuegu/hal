@@ -97,8 +97,8 @@ from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import make_loader
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
-from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
+from hal.training.features import PLAYER_CAT_FEATURES
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
@@ -405,11 +405,11 @@ class ChordARPolicy(nn.Module):
             raise ValueError(f"norm_div must be > 0, got {cfg.norm_div}")
 
         self.cat_embeds = nn.ModuleDict(
-            {name: nn.Embedding(vocab_size, dim) for name, (vocab_size, dim) in CAT_FEATURES.items()}
+            {name: nn.Embedding(vocab_size, dim) for name, (vocab_size, dim) in PLAYER_CAT_FEATURES.items()}
         )
         n_float = len(FLOAT_FEATURES)
         n_mask = len(FLOAT_FEATURES)
-        n_cat = sum(dim for _, dim in CAT_FEATURES.values())
+        n_cat = sum(dim for _, dim in PLAYER_CAT_FEATURES.values())
         per_player_dim = n_float + n_mask + n_cat
         per_frame_in_dim = 2 * per_player_dim + A_DIM  # ego + opp + ego controller history
         # Roofline cheat: the opponent's controller history as a second 14-channel block.
@@ -474,7 +474,7 @@ class ChordARPolicy(nn.Module):
         for f in FLOAT_FEATURES:
             mk = f"{prefix}_{f}_mask"
             parts.append(features[mk][..., None] if mk in features else torch.zeros(B, L, 1, device=device))
-        for cat_name, (vocab, _) in CAT_FEATURES.items():
+        for cat_name, (vocab, _) in PLAYER_CAT_FEATURES.items():
             ids = features[f"{prefix}_{cat_name}"].clamp(0, vocab - 1)
             parts.append(self.cat_embeds[cat_name](ids))
         return torch.cat(parts, dim=-1)

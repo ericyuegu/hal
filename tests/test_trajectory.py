@@ -52,13 +52,30 @@ def test_from_capture_absent_port_is_nan() -> None:
     assert np.all(np.isnan(traj.post[2]["percent"]))
 
 
-def test_capture_and_flatten_cover_identical_post_fields() -> None:
-    """from_capture and flatten_canonical_frame both cover exactly
-    POST_FIELD_SUFFIXES — the drift guard for the shared accessor."""
+def test_flatten_leader_matches_capture_post_fields() -> None:
+    """flatten_canonical_frame's LEADER block covers exactly POST_FIELD_SUFFIXES, identical to
+    from_capture — the drift guard for the shared accessor. flatten additionally emits a nana
+    follower block (gamestate-only) that from_capture does not carry; it mirrors the same suffixes
+    and is masked (NaN) when there's no follower (non-Ice-Climbers)."""
     from hal.training.canonical import flatten_canonical_frame
     from hal.wire import POST_FIELD_SUFFIXES
 
     frame = _frame(-123, {1: _post(), 2: _post()})
     capture_fields = set(Trajectory.from_capture([frame], ports=(1, 2)).post[1])
-    flat_p1_fields = {k[3:] for k in flatten_canonical_frame(frame) if k.startswith("p1_")}
-    assert capture_fields == set(POST_FIELD_SUFFIXES) == flat_p1_fields
+    flat = flatten_canonical_frame(frame)
+    leader = {k[3:] for k in flat if k.startswith("p1_") and not k.startswith("p1_nana_")}
+    nana = {k.removeprefix("p1_nana_") for k in flat if k.startswith("p1_nana_")}
+    assert capture_fields == set(POST_FIELD_SUFFIXES) == leader
+    assert nana == set(POST_FIELD_SUFFIXES)
+    assert all(np.isnan(flat[f"p1_nana_{s}"]) for s in POST_FIELD_SUFFIXES)
+
+
+def test_flatten_emits_real_nana_when_follower_present() -> None:
+    """Ice Climbers: a follower in the canonical frame yields real (unmasked) nana gamestate."""
+    from hal.training.canonical import flatten_canonical_frame
+
+    frame = _frame(-123, {1: _post()})
+    frame["ports"][1]["follower"] = {"post": _post(percent=88.0)}
+    flat = flatten_canonical_frame(frame)
+    assert flat["p1_nana_percent"] == 88.0
+    assert not np.isnan(flat["p1_nana_action"])

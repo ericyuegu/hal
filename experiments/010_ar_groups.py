@@ -1,22 +1,21 @@
-"""GPT next-token action policy (simplified architecture).
+"""GPT next-token action policy with an autoregressive-groups head (009 variant).
 
-A nanoGPT/GPT-2-style causal decoder over per-frame tokens doing plain LLM
-next-token prediction: each frame's hidden state predicts the *next* frame's
-action. One token per frame concatenates all four players' gamestate
-(ego, ego-nana, opp-nana, opp — float + mask + categorical embeddings, nana
-masked when absent) with the ego's own controller history and the matchup
-char/stage embeddings, projected to ``d_model``.
+Identical to 009 (GPT next-token backbone, 4-player input incl. nana) except the
+output head: instead of one joint linear emitting every group's vocab
+independently, the four groups are predicted AUTOREGRESSIVELY within each frame.
+Group ``g`` conditions on the realized classes of groups ``0..g-1`` (their
+embeddings concatenated onto the backbone hidden), so group ``g``'s linear has a
+GROWING input dim ``d_model + g·d_group`` — a fixed-in-dim linear from the hidden
+alone cannot be autoregressive. Order: buttons → main-stick → c-stick → triggers
+(buttons first so the trigger analog can condition on the digital L/R click).
 
-The output head jointly emits the concatenation of every action group's vocab
-(buttons 256 + main-stick 65 + c-stick 9 + triggers 25 = 355 logits). At decode
-each group's slice is softmax-sampled independently, so the groups are
-conditionally independent given the backbone context (the autoregressive-groups
-variant lives in 010_ar_groups.py).
+Training teacher-forces all four groups in one parallel forward (the conditioning
+classes are the targets); decode samples them sequentially (4 steps per frame).
 
 Run:
-    uv run experiments/009_simplify_arch.py
-    uv run experiments/009_simplify_arch.py --eval <ckpt>
-    uv run experiments/009_simplify_arch.py --eval <ckpt> --eval-temp 0.7
+    uv run experiments/010_ar_groups.py
+    uv run experiments/010_ar_groups.py --eval <ckpt>
+    uv run experiments/010_ar_groups.py --eval <ckpt> --eval-temp 0.7
 """
 
 # %%
@@ -96,8 +95,6 @@ _GROUP_VOCABS: tuple[int, ...] = (
 )
 N_GROUPS = len(_GROUP_NAMES)
 _BUTTONS_G, _MAIN_G, _C_G, _TRIG_G = range(N_GROUPS)
-_GROUP_OFFSETS: tuple[int, ...] = tuple(itertools.accumulate((0,) + _GROUP_VOCABS))[:N_GROUPS]  # (0,256,321,330)
-A_VOCAB = sum(_GROUP_VOCABS)  # 355
 
 
 # %%
@@ -106,7 +103,8 @@ class TrainConfig:
     # GPT backbone
     d_model: int = 256
     n_layers: int = 8
-    n_heads: int = 4
+    n_heads: int = 8
+    d_group: int = 32  # embedding dim for a realized group class fed to later groups' heads (AR conditioning)
     # Matchup conditioning (schema v4). char/stage embeddings are indexed by the RAW libmelee id
     # (characters 0-26 dense; stages sparse in 0-26), so the vocab must exceed the max id, not the
     # number of included categories; out-of-range ids clamp to the last row.
@@ -122,7 +120,7 @@ class TrainConfig:
     # optimization
     batch_size: int = 128
     grad_accum_steps: int = 1
-    lr: float = 1e-3
+    lr: float = 3e-4
     weight_decay: float = 0.01
     warmup_steps: int = 500
     max_steps: int = 2**15
@@ -148,7 +146,7 @@ class TrainConfig:
 
 
 def _model_tag(cfg: TrainConfig) -> str:
-    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}"
+    return f"gpt-ar-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-dg{cfg.d_group}-Lc{cfg.L_ctx}"
 
 
 # %%
@@ -294,8 +292,9 @@ class Block(nn.Module):
 
 # %%
 class GPT(nn.Module):
-    """Causal GPT over per-frame tokens. ``hidden[i]`` (causal) predicts the next frame's action
-    via a single joint head emitting ``A_VOCAB`` logits (the concatenation of the four group vocabs)."""
+    """Causal GPT over per-frame tokens + an autoregressive-groups head. ``hidden[i]`` (causal)
+    predicts the next frame's action: the four groups are decoded in order, each conditioned on the
+    realized classes of the earlier ones (``head_logits`` teacher-forced, ``head_decode`` sequential)."""
 
     def __init__(self, cfg: TrainConfig) -> None:
         super().__init__()
@@ -314,7 +313,13 @@ class GPT(nn.Module):
 
         self.ctx_proj = nn.Linear(d_in, cfg.d_model)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
-        self.lm_head = nn.Linear(cfg.d_model, A_VOCAB)
+
+        # Autoregressive-groups head: group g's input is the hidden plus the embedded realized classes
+        # of groups 0..g-1, so its linear's in-dim grows by d_group per earlier group.
+        self.group_in = nn.ModuleList([nn.Embedding(_GROUP_VOCABS[g], cfg.d_group) for g in range(N_GROUPS - 1)])
+        self.group_out = nn.ModuleList(
+            [nn.Linear(cfg.d_model + g * cfg.d_group, _GROUP_VOCABS[g]) for g in range(N_GROUPS)]
+        )
 
         # Stick/trigger center grids (registered so they move with .to() and serialize).
         self.register_buffer("main_centers", scoring.STICK_CLUSTER_CENTERS_MAIN.clone())
@@ -350,12 +355,41 @@ class GPT(nn.Module):
         diag = torch.eye(L, dtype=torch.bool, device=device)
         return (causal[None] & (key_real[:, None, :] | diag[None]))[:, None]
 
-    def forward(self, features: dict[str, Tensor], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L_ctx A_VOCAB"]:
+    def forward(self, features: dict[str, Tensor], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L_ctx d_model"]:
+        """Backbone hidden (one vector per frame); the AR head turns it into per-group logits."""
         x = self._context_tokens(features)
         mask = self._attn_mask(ctx_pad, x.size(1), x.device)
         for block in self.blocks:
             x = block(x, mask)
-        return self.lm_head(rmsnorm(x)).float()
+        return rmsnorm(x)
+
+    def head_logits(self, h: Tensor, tgt_idx: Tensor) -> list[Tensor]:
+        """Teacher-forced per-group logits ``[..., vocab_g]``. Group g's head sees the hidden plus the
+        embedded REALIZED (target) classes of groups 0..g-1, so one parallel forward yields all four."""
+        cond = [h]
+        out: list[Tensor] = []
+        for g in range(N_GROUPS):
+            out.append(self.group_out[g](torch.cat(cond, dim=-1)).float())
+            if g < N_GROUPS - 1:
+                cond.append(self.group_in[g](tgt_idx[..., g]).to(h.dtype))
+        return out
+
+    def head_decode(self, h: Tensor, *, temp: float, argmax: bool, gen: torch.Generator | None) -> Tensor:
+        """Sequentially decode the four groups for one frame (``h`` ``[B, d_model]``); group g
+        conditions on the SAMPLED classes of groups 0..g-1. Returns class indices ``[B, N_GROUPS]``."""
+        cond = [h]
+        picks: list[Tensor] = []
+        for g in range(N_GROUPS):
+            lg = self.group_out[g](torch.cat(cond, dim=-1)).float()
+            c = (
+                lg.argmax(-1)
+                if argmax
+                else torch.multinomial(F.softmax(lg / temp, dim=-1), 1, generator=gen).squeeze(-1)
+            )
+            picks.append(c)
+            if g < N_GROUPS - 1:
+                cond.append(self.group_in[g](c).to(h.dtype))
+        return torch.stack(picks, dim=-1)
 
 
 # %%
@@ -378,14 +412,13 @@ def _next_action_targets(ctx: Context, target: Tensor) -> tuple[Tensor, Tensor]:
     return nxt, valid
 
 
-def group_nll(logits: Tensor, tgt_idx: Tensor, valid: Tensor) -> dict[str, Tensor]:
+def group_nll(logits: list[Tensor], tgt_idx: Tensor, valid: Tensor) -> dict[str, Tensor]:
     """Per-group categorical NLL (nats) over the VALID positions only. Returns ``{name: [n_valid]}``
     1D tensors (same ordering across groups) so callers reduce once for exact sample weighting."""
     flat_valid = valid.reshape(-1)
     out: dict[str, Tensor] = {}
     for g, name in enumerate(_GROUP_NAMES):
-        lo = _GROUP_OFFSETS[g]
-        lg = logits[..., lo : lo + _GROUP_VOCABS[g]].reshape(-1, _GROUP_VOCABS[g])[flat_valid]
+        lg = logits[g].reshape(-1, _GROUP_VOCABS[g])[flat_valid]
         out[name] = F.cross_entropy(lg, tgt_idx[..., g].reshape(-1)[flat_valid], reduction="none")
     return out
 
@@ -395,7 +428,7 @@ def action_loss(model: GPT, batch: TrainBatch) -> dict[str, Tensor]:
     ctx = batch.context
     nxt, valid = _next_action_targets(ctx, batch.target)
     tgt_idx = _quantize(model, nxt)
-    logits = model(ctx.features, ctx.ctx_pad)
+    logits = model.head_logits(model(ctx.features, ctx.ctx_pad), tgt_idx)
     return group_nll(logits, tgt_idx, valid)
 
 
@@ -404,18 +437,10 @@ def decode(
     model: GPT, ctx: Context, *, temp: float = 1.0, argmax: bool = False, gen: torch.Generator | None = None
 ) -> Float[Tensor, "B 1 d_action"]:
     """One next-frame action per sample from the LAST context position, in raw action ranges.
-    Each group's logit slice is sampled (``temp``-scaled softmax) or taken greedily (``argmax``,
-    for the recon metric) independently."""
-    logits = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, A_VOCAB]
-    picks: list[Tensor] = []
-    for g in range(N_GROUPS):
-        lo = _GROUP_OFFSETS[g]
-        lg = logits[:, lo : lo + _GROUP_VOCABS[g]]
-        if argmax:
-            picks.append(lg.argmax(-1))
-        else:
-            picks.append(torch.multinomial(F.softmax(lg / temp, dim=-1), 1, generator=gen).squeeze(-1))
-    idx = torch.stack(picks, dim=-1)  # [B, N_GROUPS]
+    The four groups are decoded autoregressively (each conditions on the realized earlier ones),
+    sampling (``temp``-scaled softmax) or greedily (``argmax``, for the recon metric)."""
+    h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
+    idx = model.head_decode(h, temp=temp, argmax=argmax, gen=gen)  # [B, N_GROUPS]
     return _dequantize(model, idx)[:, None, :]
 
 
@@ -475,11 +500,11 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
         ctx = batch.context
         nxt, valid = _next_action_targets(ctx, batch.target)
         tgt_idx = _quantize(model, nxt)
-        logits = model(ctx.features, ctx.ctx_pad)
+        logits = model.head_logits(model(ctx.features, ctx.ctx_pad), tgt_idx)
         for k, v in group_nll(logits, tgt_idx, valid).items():
             comps_cat.setdefault(k, []).append(v)
         flat_valid = valid.reshape(-1)
-        btn_logits = logits[..., : scoring.N_BUTTON_COMBOS].reshape(-1, scoring.N_BUTTON_COMBOS)[flat_valid]
+        btn_logits = logits[_BUTTONS_G].reshape(-1, scoring.N_BUTTON_COMBOS)[flat_valid]
         btn_probs.append(scoring.combo_marginal_probs(btn_logits))
         tgt_btn = _dequantize(model, tgt_idx)[..., _N_CONT:].reshape(-1, _N_BUTTONS)[flat_valid]
         btn_tgts.append(tgt_btn)
@@ -571,7 +596,7 @@ def train(
         name=run_name,
         id=resume_state["wandb_id"] if resume_state else None,
         resume="allow" if resume_state else None,
-        tags=["gpt", f"d{cfg.d_model}", f"L{cfg.n_layers}"],
+        tags=["gpt-ar", f"d{cfg.d_model}", f"L{cfg.n_layers}"],
         config=asdict(cfg),
     )
     ckpt_dir, replay_dir = setup_run_dir(run_name)
@@ -815,7 +840,7 @@ def main(args: Args) -> None:
         return
     cfg = args.cfg
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
-    auto_comment = f"gpt-{cfg.max_steps // 1000}k-b{cfg.batch_size}"
+    auto_comment = f"gpt-ar-{cfg.max_steps // 1000}k-b{cfg.batch_size}"
     train(cfg, stats, comment=args.comment or auto_comment)
 
 

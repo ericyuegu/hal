@@ -13,8 +13,8 @@ import torch
 
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
-from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
+from hal.training.features import PLAYER_CAT_FEATURES
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 
@@ -35,7 +35,7 @@ def _batch(L_ctx: int, L_chunk: int, *, B: int = 2, seed: int = 0) -> TrainBatch
     for prefix in ("ego", "opp"):
         for f in FLOAT_FEATURES:
             feats[f"{prefix}_{f}"] = torch.randn(B, L_ctx, generator=g)
-        for cat, (vocab, _) in CAT_FEATURES.items():
+        for cat, (vocab, _) in PLAYER_CAT_FEATURES.items():
             feats[f"{prefix}_{cat}"] = torch.randint(0, vocab, (B, L_ctx), generator=g)
     for i, ch in enumerate(ACTION_CHANNELS):
         feats[f"ego_{ch}"] = (

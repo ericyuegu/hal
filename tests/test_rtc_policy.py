@@ -36,7 +36,9 @@ _FLOAT_KEYS = ("position_x", "position_y", "percent", "shield", "direction", "hi
 
 
 def _stats() -> dict[str, FeatureStats]:
-    return {k: FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0) for k in _FLOAT_KEYS}
+    # The obs bridge emits a (masked) nana follower block, so preprocess needs nana float stats too.
+    keys = (*_FLOAT_KEYS, *(f"nana_{k}" for k in _FLOAT_KEYS))
+    return {k: FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0) for k in keys}
 
 
 def _post(position_x: float) -> dict:

@@ -55,7 +55,7 @@ def _features(B: int, T: int, *, seed: int = 0) -> dict[str, torch.Tensor]:
     for prefix in ("ego", "opp"):
         for f in exp.FLOAT_FEATURES:
             feats[f"{prefix}_{f}"] = torch.randn(B, T, generator=g)
-        for cat, (vocab, _) in exp.CAT_FEATURES.items():
+        for cat, (vocab, _) in exp.PLAYER_CAT_FEATURES.items():
             feats[f"{prefix}_{cat}"] = torch.randint(0, vocab, (B, T), generator=g)
         feats[f"{prefix}_character"] = torch.randint(0, 26, (B, T), generator=g)
     feats["stage"] = torch.randint(0, 32, (B, T), generator=g)

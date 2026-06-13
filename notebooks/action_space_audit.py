@@ -178,11 +178,11 @@ for b in B_ORDER:
 print(f"\nfull 14-dim action persistence frame->frame: mean {np.mean(persist):.3f}")
 
 # %% categorical id ranges vs CAT_FEATURES vocabs
-from hal.training.features import CAT_FEATURES
+from hal.training.features import PLAYER_CAT_FEATURES
 
 for c in ("action", "stock", "jumps_used", "hurtbox_state", "airborne"):
     v = P[c]
-    vocab, dim = CAT_FEATURES[c]
+    vocab, dim = PLAYER_CAT_FEATURES[c]
     u = np.unique(v)
     print(f"{c}: vocab={vocab} dim={dim}   observed [{u.min()}, {u.max()}]  distinct {len(u)}")
 

@@ -48,12 +48,12 @@ FLOAT_FEATURES: tuple[str, ...] = (
 
 # (vocab_size, embed_dim) per categorical feature. action vocab rounded up
 # from libmelee's ~395 to a safe power-of-two-ish.
-CAT_FEATURES: dict[str, tuple[int, int]] = {
-    "action": (512, 32),
-    "stock": (5, 8),
-    "jumps_used": (9, 8),
-    "hurtbox_state": (4, 8),
-    "airborne": (2, 4),
+PLAYER_CAT_FEATURES: dict[str, tuple[int, int]] = {
+    "action": (512, 64),
+    "stock": (5, 2),
+    "jumps_used": (9, 2),
+    "hurtbox_state": (4, 2),
+    "airborne": (2, 1),
 }
 
 # Canonical ordering of the 14-channel ego action vector. Matches
@@ -83,8 +83,6 @@ ACTION_CHANNELS: tuple[str, ...] = (
 assert len(ACTION_CHANNELS) == A_DIM
 
 _BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "d_up")
-# nana_* skipped for now.
-_DROP_PATTERNS = ("_nana_",)
 
 NEUTRAL_ACTION = np.zeros(A_DIM, dtype=np.float32)
 
@@ -156,13 +154,11 @@ class TrainBatch:
 def _classify(name: str) -> str:
     if name == "frame":
         return "drop"
-    if any(p in name for p in _DROP_PATTERNS):
-        return "drop"
     # Global stage + per-player character: int categoricals joined from the replay
     # manifest (not in the per-frame MDS). Inert unless those columns are present.
     if name == "stage" or name.endswith("_character"):
         return "cat"
-    if any(name.endswith(f"_{c}") for c in CAT_FEATURES):
+    if any(name.endswith(f"_{c}") for c in PLAYER_CAT_FEATURES):
         return "cat"
     if "_button_" in name:
         return "button"
@@ -200,8 +196,9 @@ def preprocess(
     Operates on either single-sample ``[L]`` arrays or batched ``[B, L]`` — the
     numpy ops broadcast either way and ``torch.from_numpy`` preserves the shape.
     Sticks/triggers/buttons keep their native ranges (they are the action
-    target); only FLOAT_FEATURES are normalized. Columns the classifier drops
-    (``frame``, ``schema_version``, ``ctx_pad``, nana) are not returned.
+    target); only FLOAT_FEATURES are normalized. nana follower columns are
+    gamestate-only (float/cat), masked for non-Ice-Climbers players. Columns the
+    classifier drops (``frame``, ``schema_version``, ``ctx_pad``) are not returned.
     """
     out: dict[str, Tensor] = {}
     for name, arr in batch.items():
