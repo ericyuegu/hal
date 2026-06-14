@@ -135,7 +135,7 @@ class TrainConfig:
     # push checkpoints to R2 as we train (needs AWS_*); --resume pulls them back
     push_to_r2: bool = True
     # data
-    data_root: str = "data/processed/ranked-anonymized-1/mds"
+    data_root: str = "data/processed/ranked-anonymized-1/mds-v5"
     # cap the local shard cache (StreamingDataset evicts past this) as a disk-full guard.
     # Set above the ~380 GB decompressed prod MDS so the whole set caches once with no
     # eviction churn, but below container disk so it evicts before Errno 28. Ignored for

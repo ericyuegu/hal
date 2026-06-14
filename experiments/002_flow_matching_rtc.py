@@ -134,7 +134,7 @@ class TrainConfig:
     # push checkpoints to R2 as we train (needs AWS_*); --resume pulls them back
     push_to_r2: bool = True
     # data
-    data_root: str = "data/processed/ranked-anonymized-1/mds"
+    data_root: str = "data/processed/ranked-anonymized-1/mds-v5"
     val_split: str = "val"  # tiny datasets may have an empty val split; point this at "test"/"train"
     num_workers: int = 8
     prefetch_factor: int = 8

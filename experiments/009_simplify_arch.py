@@ -145,7 +145,7 @@ class TrainConfig:
     # checkpointing
     ckpt_every: int = 2048
     # data (v4 MDS carries the stage + p{1,2}_character + nana columns)
-    data_root: str = "data/processed/ranked-anonymized-1/mds"
+    data_root: str = "data/processed/ranked-anonymized-1/mds-v5"
     cache_limit_gb: int = 440
     shuffle_block_size: int = 2000
     val_split: str = "val"
