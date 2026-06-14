@@ -83,16 +83,11 @@ cd /opt/hal
 git checkout --quiet "$HAL_GIT_SHA"
 uv sync --locked
 
-# Fixtures (emulator/ISO) from R2, sha-pinned + idempotent.
-log "fetching fixtures"
+# Datasets/fixtures from R2 (sha-pinned, idempotent); stats.json sits outside the
+# streamed shards so pull it up front. Shards stream lazily during training.
+log "fetching fixtures + dataset stats"
 uv run fetch
-# Eagerly mirror the whole training dataset into the local cache up front. The shards are
-# small (~20 GB zstd) and a fast GPU otherwise throttles on lazy per-shard R2 downloads
-# during the first pass; pre-warming means the loader never blocks on the network
-# (StreamingDataset still decompresses + evicts locally). Idempotent, so --resume reuses
-# whatever the box already pulled.
-log "pre-fetching training dataset"
-uv run python -c "from hal import streams; [streams.pull_dataset(s) for s in streams.ALL]"
+uv run python -c "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"
 
 # StreamingDataset + the PyTorch DataLoader coordinate workers through /dev/shm; vast's
 # default 64MB is far too small (StreamingDataset shm arrays + batched-tensor IPC need a

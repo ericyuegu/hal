@@ -24,7 +24,6 @@ already gitignored via `/data/`. Treat the cache as streaming-managed.
 To pre-warm before going offline, iterate the dataset once end-to-end.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -83,33 +82,17 @@ def _split_uri(remote: str) -> tuple[str, str]:
     return bucket, key
 
 
-def pull_dataset(src: StreamSource, *, max_workers: int = 16) -> int:
-    """Eagerly mirror every object under the dataset's R2 prefix into the local cache.
+def pull_stats(src: StreamSource) -> Path:
+    """Download the dataset's root ``stats.json`` into the local cache.
 
-    StreamingDataset pulls per-split shards on demand, which lets a fast GPU throttle
-    on lazy per-shard R2 downloads during the first pass; the root ``stats.json`` (which
-    sits outside any split, so the streaming layer never fetches it) is also needed
-    before the first batch. This dataset is small (~20 GB zstd), so the cloud setup
-    downloads the whole tree — shards + ``stats.json`` — up front. With every shard
-    already on disk the loader never blocks on the network; StreamingDataset still owns
-    decompression and eviction. Parallel + idempotent (an object whose local copy already
-    matches the remote size is skipped), so a ``--resume`` reuses what the box pulled.
-    Returns the number of objects actually downloaded.
+    StreamingDataset pulls per-split shards on demand, but ``stats.json`` sits at
+    the MDS *root* (outside any split), so the streaming layer never fetches it.
+    Training needs it before the first batch — hence this explicit, idempotent
+    pull, called from the cloud setup script. Shards still stream lazily.
     """
     bucket, key = _split_uri(src.remote)
-    client = r2.client()
-    pages = client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{key}/")
-    objs = [o for page in pages for o in page.get("Contents", ()) if not o["Key"].endswith("/")]
-
-    def pull(obj: dict) -> bool:
-        dest = src.local_root / obj["Key"][len(key) + 1 :]
-        if dest.is_file() and dest.stat().st_size == obj["Size"]:
-            return False
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        client.download_file(bucket, obj["Key"], str(dest))
-        return True
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        downloaded = sum(pool.map(pull, objs))
-    logger.info(f"[streams] {src.name}: mirrored {len(objs)} objects ({downloaded} pulled) -> {src.local_root}")
-    return downloaded
+    dest = src.local_root / "stats.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    r2.client().download_file(bucket, f"{key}/stats.json", str(dest))
+    logger.info(f"[streams] {src.name}: stats.json -> {dest}")
+    return dest
