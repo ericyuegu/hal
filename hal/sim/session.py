@@ -33,7 +33,6 @@ from hal.data.index import ReplayIndexEntry
 from hal.data.slp_finalize import finalize_replay_dir
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
-from hal.wire import slp_character_to_libmelee
 from hal.wire import slp_stage_to_libmelee
 
 # Linux-only PR_SET_PDEATHSIG: have the kernel SIGKILL the Dolphin child if
@@ -138,7 +137,7 @@ class ReplayMatchup(Matchup):
         players = tuple(
             PlayerSetup(
                 port=p.port,
-                character=slp_character_to_libmelee(p.character),
+                character=melee.Character(p.character),
                 costume=p.costume,
                 controller_type=melee.ControllerType.STANDARD,
                 cpu_level=0,

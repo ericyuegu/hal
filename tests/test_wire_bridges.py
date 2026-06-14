@@ -4,9 +4,9 @@ Two facts that ARCHITECTURE used to cite from a notebook now live here:
 
 - Character ids do NOT identity-map. slp start-block ids are EXTERNAL/CSS ids
   (Fox=2, Falco=20); libmelee's ``Character`` enum is internal (Fox=1,
-  Falco=22). Reading one as the other silently miscasts every character. All
-  conversion goes through ``wire.slp_character_to_libmelee`` (external→enum)
-  and ``wire.libmelee_character_to_slp`` (enum→external). Anchors below are
+  Falco=22). Reading one as the other silently miscasts every character. The
+  index/MDS store the internal value; the single external→internal conversion
+  is ``wire.slp_character_to_libmelee`` at the peppi read. Anchors below are
   verified against post-frame internal ids in real replays.
 - Stage ids do NOT identity-map (slp 2 = Fountain of Dreams; libmelee
   ``Stage.FOUNTAIN_OF_DREAMS.value`` = 8). All stage conversion must go
@@ -61,32 +61,25 @@ def test_external_fox_is_not_read_as_internal() -> None:
     assert wire.slp_character_to_libmelee(2) is not melee.Character.CPTFALCON
 
 
-def test_character_bridge_round_trips() -> None:
-    """external → Character → external is the identity for every selectable id."""
-    for slp_id in wire.CHARACTERS_BY_NAME.values():
-        char = wire.slp_character_to_libmelee(slp_id)
-        assert wire.libmelee_character_to_slp(char) == slp_id
+def test_external_to_character_map_is_injective() -> None:
+    """No two external ids may map to the same Character — otherwise the single
+    external→internal conversion at the peppi read would be ambiguous."""
+    chars = list(wire._SLP_EXTERNAL_TO_CHARACTER.values())
+    assert len(chars) == len(set(chars))
 
 
-def test_characters_by_name_are_external_ids() -> None:
+def test_characters_by_name_are_internal_ids() -> None:
     """filter.py resolves ``--characters`` via CHARACTERS_BY_NAME against the
-    stored (external) ids, so the table must live in external space."""
-    assert wire.CHARACTERS_BY_NAME["FOX"] == 2
-    assert wire.CHARACTERS_BY_NAME["FALCO"] == 20
-    assert wire.CHARACTERS_BY_NAME["MARTH"] == 9
-    assert wire.CHARACTERS_BY_NAME["CPTFALCON"] == 0
+    stored (now internal/libmelee) ids, so the table must live in internal space."""
+    assert wire.CHARACTERS_BY_NAME["FOX"] == 1
+    assert wire.CHARACTERS_BY_NAME["FALCO"] == 22
+    assert wire.CHARACTERS_BY_NAME["MARTH"] == 18
+    assert wire.CHARACTERS_BY_NAME["CPTFALCON"] == 2
 
 
 def test_slp_character_to_libmelee_rejects_unknown() -> None:
     with pytest.raises(ValueError, match="unknown slp character id"):
         wire.slp_character_to_libmelee(99)
-
-
-def test_libmelee_character_to_slp_rejects_unselectable() -> None:
-    """NANA (the Ice Climbers follower) is not CSS-selectable and has no
-    external id; converting it must fail loud rather than fabricate one."""
-    with pytest.raises(ValueError, match="no slp character id"):
-        wire.libmelee_character_to_slp(melee.Character.NANA)
 
 
 def test_stage_ids_do_not_identity_map() -> None:

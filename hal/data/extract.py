@@ -34,6 +34,7 @@ from hal.wire import TRIGGER_DEADZONE
 from hal.wire import dedupe_keep_idx
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
+from hal.wire import slp_character_to_libmelee
 from hal.wire import slp_stage_to_libmelee
 
 
@@ -179,19 +180,23 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
 
     sample: dict[str, np.ndarray] = {
         "frame": kept_frame_ids[in_game],
-        # Per-replay constants broadcast across frames (SCHEMA_VERSION 4). Stage is stored as
-        # the libmelee Stage value (matches the closed-loop obs without a second translation).
-        # Character (below) is stored as the raw slp start-block id, which is the EXTERNAL /
-        # character-select id — NOT the libmelee Character value (Fox is 2 here vs
-        # Character.FOX=1). Closed-loop eval encodes its matchup character into this same
-        # external space (wire.libmelee_character_to_slp) so conditioning stays consistent.
+        # Per-replay constants broadcast across frames (SCHEMA_VERSION 5). Both stage and
+        # character are stored as their libmelee enum values — the same id space the
+        # closed-loop obs uses, so no second translation is needed downstream. Stage goes
+        # through slp_stage_to_libmelee; character (below) through slp_character_to_libmelee.
+        # The slp EXTERNAL / character-select id survives only here, at the peppi read.
         "stage": np.full(out_length, int(slp_stage_to_libmelee(int(g.start.stage)).value), dtype=np.int32),
     }
 
     for prefix, port in zip(PLAYER_PREFIXES, occupied_libmelee_ports, strict=True):
         peppi_idx = peppi_idx_by_libmelee_port[port]
         port_data = g.frames.ports[peppi_idx]
-        character = int(g.start.players[peppi_idx].character)
+        slp_character = int(g.start.players[peppi_idx].character)
+        try:
+            character = slp_character_to_libmelee(slp_character).value
+        except ValueError:
+            logger.debug(f"{replay_path}: unknown external character id {slp_character}; dropping replay")
+            return None
         sample[f"{prefix}_character"] = np.full(out_length, character, dtype=np.int32)
         sample.update(_extract_player(port_data.leader, prefix, keep_idx, raw_length))
         sample.update(_extract_nana(port_data.follower, prefix, keep_idx, raw_length))

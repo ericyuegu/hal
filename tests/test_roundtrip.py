@@ -60,9 +60,10 @@ ISO_PATH = Path(_ISO_PATH)
 DOLPHIN_PATH = Path(EMULATOR_PATH)
 DEV_MDS_DIR = Path(_DEV_MDS_DIR)
 
-# Fixture filter for bit-exact round-trips. Both sets are slp-native ids, matching
-# entry.stage (slp stage id) and p.character (slp EXTERNAL id) — character names go
-# through the external-id table so they can't silently drift to the wrong space.
+# Fixture filter for bit-exact round-trips. _RNG_STABLE_STAGES are slp-native stage
+# ids (matching entry.stage); _EXCLUDED_FIXTURE_CHARACTERS are libmelee Character
+# values, matching p.character (now the libmelee Character value) — character names
+# go through CHARACTERS_BY_NAME (internal) so they can't drift to the wrong space.
 # Excluded characters: Peach (turnips) / G&W (hammer) desync across runs; Sheik is
 # not directly character-select-selectable (libmelee from_internal(SHEIK)=255), so
 # ReplayMatchup.from_replay can't set it up via menu_helper.

@@ -147,6 +147,44 @@ def test_extract_replay_produces_full_schema(tmp_path: Path) -> None:
         assert np.all((t == 0.0) | (t >= TRIGGER_DEADZONE)), f"{col} has sub-deadzone values"
 
 
+@pytest.mark.skipif(
+    not Path(DEV_ARCHIVE_PATH).exists(),
+    reason=f"dev archive missing at {DEV_ARCHIVE_PATH}; run `python -m hal.scripts.fetch --name dev.7z`",
+)
+def test_extract_replay_stores_internal_character_id(tmp_path: Path) -> None:
+    """SCHEMA_VERSION 5 normalization: ``p{1,2}_character`` is the libmelee
+    INTERNAL Character value (the in-game / post-frame id), NOT the slp external
+    character-select id from the start block. Pre-v5 this stored the external id;
+    this test fails on that code (external != internal for these dev replays)."""
+    import peppi_py
+    import py7zr
+
+    with py7zr.SevenZipFile(DEV_ARCHIVE_PATH, "r") as z:
+        member = next(m for m in z.getnames() if m.endswith(".slp"))
+        z.extract(path=tmp_path, targets=[member])
+    slp = str(tmp_path / member)
+
+    sample = extract_replay(slp)
+    assert sample is not None, f"extract_replay returned None for {slp}"
+    stored = {int(sample["p1_character"][0]), int(sample["p2_character"][0])}
+
+    # Ground truth straight from peppi: start.character is the EXTERNAL id, the
+    # post-frame character is the INTERNAL id libmelee/the engine use.
+    g = peppi_py.read_slippi(slp, skip_frames=False)
+    occupied = [
+        (i, sp) for i, sp in enumerate(g.start.players) if str(getattr(sp.type, "name", sp.type)).upper() != "EMPTY"
+    ]
+    external = {int(sp.character) for _, sp in occupied}
+    internal = {int(g.frames.ports[i].leader.post.character[0]) for i, _ in occupied}
+
+    assert stored == internal, f"stored {stored} should be the internal/post-frame ids {internal}"
+    # Guard the test's own teeth: if this dev replay used a coincide-id character
+    # (external == internal) the assertion above couldn't distinguish the spaces.
+    assert external != internal, (
+        f"fixture {member} has external==internal ({external}); pick a replay where they differ"
+    )
+
+
 def test_schema_controller_block_is_logical_only() -> None:
     """No raw byte columns and no fused trigger_logical — the pre-frame block
     is exactly the model action space."""

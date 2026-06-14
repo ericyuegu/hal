@@ -19,12 +19,16 @@ from hal.wire import BUTTON_BITS
 # or to the extraction semantics that produce them. Consumers verify the
 # version matches before reading; mismatch is a hard error.
 #
+# 5: ``p{1,2}_character`` is normalized to the libmelee ``Character`` value
+#    (Fox=1) at the peppi read, matching how ``stage`` is already stored; it
+#    was previously the slp external/character-select id (Fox=2). The index
+#    ``ReplayIndexEntry.players[*].character`` is normalized the same way.
 # 4: (a) re-add the global ``stage`` + per-player ``p{1,2}_character`` columns
 #    (dropped at v3's predecessor) as per-replay constants broadcast across
 #    frames, so the policy can condition on matchup again. ``stage`` is stored
 #    as the libmelee ``Stage`` value (not slp-native) so it matches the
-#    closed-loop obs without a second translation; ``character`` slp-native id
-#    already equals the libmelee ``Character`` value.
+#    closed-loop obs without a second translation. (``character`` was stored as
+#    the slp external id here; normalized to the libmelee value at v5.)
 #    (b) logical-only controller block: drop the raw stick byte columns and the
 #    fused ``trigger_logical``; rename ``trigger_{l,r}_physical`` →
 #    ``trigger_{l,r}`` with sub-deadzone values zeroed (wire.TRIGGER_DEADZONE).
@@ -39,7 +43,7 @@ from hal.wire import BUTTON_BITS
 # 2: add raw_analog_cstick_x/y columns (slp >= 3.17) for bit-exact c-stick
 #    replay.
 # 1: initial introduction of the version field.
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 
 
 def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
@@ -86,7 +90,9 @@ def _nana_columns(prefix: str) -> dict[str, DTypeLike]:
 
 
 # ``stage`` + ``p{1,2}_character`` are per-replay constants broadcast across frames
-# (not in peppi's per-frame post block) — see extract.broadcast and SCHEMA_VERSION 4.
+# (not in peppi's per-frame post block) — see extract.broadcast and SCHEMA_VERSION 5.
+# Both are libmelee enum values: ``stage`` via slp_stage_to_libmelee, ``p{1,2}_character``
+# the libmelee ``Character`` value via slp_character_to_libmelee.
 MDS_PER_FRAME_DTYPES: dict[str, DTypeLike] = {
     "frame": np.int32,
     "stage": np.int32,

@@ -4,10 +4,11 @@ Stage 1 emits one entry per slp into ``index.jsonl``. Stage 3 writes the
 subset that landed in MDS into ``manifest.jsonl`` with ``Stage3Annotation``
 populated.
 
-Integer ids are slp-native (peppi-py vocabulary): characters are the slp EXTERNAL
-character-select id (Fox=2), stages the slp stage id — both differ from the libmelee
-enum values. See CLAUDE.md (Controller data model → Character-id footgun) and convert
-only through the ``wire.slp_*_to_libmelee`` bridges.
+Characters are stored as the libmelee ``Character`` value (Fox=1): the slp EXTERNAL
+character-select id is normalized via ``wire.slp_character_to_libmelee`` at read time.
+Stage stays the slp stage id (the one un-normalized game id here; consumers convert
+via ``wire.slp_stage_to_libmelee``).
+See CLAUDE.md (Controller data model → Character-id footgun).
 LRAS = "L + R + A + Start" controller-combo forfeit; valid only when the slp
 ended via ``NO_CONTEST`` — ``GameOutcome`` enforces this at construction.
 
@@ -30,6 +31,7 @@ from typing import get_args
 
 import fsspec
 import peppi_py
+from loguru import logger
 from peppi_py.game import EndMethod
 
 from hal.data.archive import parse_archive_member_path
@@ -40,6 +42,7 @@ from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 from hal.wire import VALID_LIBMELEE_PORTS
 from hal.wire import peppi_port_to_libmelee as _peppi_port_to_libmelee
+from hal.wire import slp_character_to_libmelee
 
 # slp Player.type values. EMPTY (unused port slot) is filtered out before
 # PlayerEntry is constructed, so it is not reachable here. Slip kept loose
@@ -133,7 +136,7 @@ class Stage3Annotation:
 @dataclass(frozen=True)
 class PlayerEntry:
     port: int  # 1..4 (libmelee convention; slp/peppi use 0..3)
-    character: int  # slp-native (in-game) character id
+    character: int  # libmelee Character value (Fox=1); normalized from slp external at read
     costume: int
     player_type: PlayerType
     code: str | None  # netplay connect code, e.g. "ZAIN#0"
@@ -163,6 +166,7 @@ class ReplayIndexEntry:
     outcome: GameOutcome | None  # None iff slp has no end block (truncated / in-progress)
     rank_filename: str | None  # heuristic rank label inferred from filename
     sha1: str | None  # sha1 hex digest of the whole file (None if compute_sha1=False)
+    schema_version: int  # the SCHEMA_VERSION this entry was built at; read_jsonl rejects mismatches
 
     annotation: Stage3Annotation | None = None
     stats: ReplayStats | None = None  # populated when build_index --with-stats
@@ -189,6 +193,7 @@ class ReplayIndexEntry:
             "outcome": self.outcome.to_dict() if self.outcome is not None else None,
             "rank_filename": self.rank_filename,
             "sha1": self.sha1,
+            "schema_version": self.schema_version,
             "annotation": self.annotation.to_dict() if self.annotation is not None else None,
             "stats": self.stats.to_dict() if self.stats is not None else None,
         }
@@ -209,6 +214,9 @@ class ReplayIndexEntry:
             outcome=GameOutcome.from_dict(outcome) if outcome is not None else None,
             rank_filename=data.get("rank_filename"),
             sha1=data.get("sha1"),
+            # Pre-versioning indexes have no schema_version; 0 (never a real version)
+            # makes read_jsonl's guard reject them with a clear rebuild message.
+            schema_version=data.get("schema_version", 0),
             annotation=Stage3Annotation.from_dict(annotation) if annotation is not None else None,
             stats=ReplayStats.from_dict(stats) if stats is not None else None,
         )
@@ -300,10 +308,17 @@ def extract_index_entry(
         # Anonymized .slps have empty metadata but still carry netplay.name
         # (e.g. "Diamond Player") and netplay.code on the start block.
         netplay = getattr(sp, "netplay", None)
+        try:
+            character = slp_character_to_libmelee(int(sp.character)).value
+        except ValueError:
+            # Out-of-range external character id (anomalous slp). Drop the row
+            # rather than store a bad id — consistent with the ~0.5% parse-failure drop.
+            logger.debug(f"{replay_path}: unknown external character id {int(sp.character)}; dropping replay")
+            return None
         players.append(
             PlayerEntry(
                 port=port,
-                character=int(sp.character),
+                character=character,
                 costume=int(sp.costume),
                 player_type=_narrow_player_type(type_name),
                 code=names.get("code") or (getattr(netplay, "code", "") or None),
@@ -352,6 +367,7 @@ def extract_index_entry(
         outcome=outcome,
         rank_filename=_rank_from_filename(Path(name_hint) if name_hint else replay_path),
         sha1=_sha1(replay_path) if compute_sha1 else None,
+        schema_version=SCHEMA_VERSION,
         stats=stats,
     )
 
@@ -386,11 +402,11 @@ def resolve_replay_path(entry: ReplayIndexEntry, *, root: Path = Path(REPO_DIR))
 def read_jsonl(path: Path, *, verify_schema_version: bool = True) -> Iterator[ReplayIndexEntry]:
     """Read a jsonl of ``ReplayIndexEntry`` rows.
 
-    When ``verify_schema_version`` is True (default), each row that carries a
-    ``Stage3Annotation`` must have ``schema_version == hal.data.schema.SCHEMA_VERSION``.
-    Mismatch raises — a manifest from a different schema build is not safe to
-    co-mingle with shards built against the current schema. Unannotated rows
-    (Stage 1 index) skip the check.
+    When ``verify_schema_version`` is True (default), EVERY row must have
+    ``schema_version == hal.data.schema.SCHEMA_VERSION`` — including unannotated
+    Stage-1 rows. A stale index (e.g. built before the character-id normalization)
+    would otherwise feed external ids into ``materialize`` and bake them into a v5
+    manifest while the MDS shards hold the internal ids. Mismatch raises loud.
     """
     with path.open() as f:
         for line in f:
@@ -398,13 +414,11 @@ def read_jsonl(path: Path, *, verify_schema_version: bool = True) -> Iterator[Re
             if not line:
                 continue
             entry = ReplayIndexEntry.from_dict(json.loads(line))
-            if (
-                verify_schema_version
-                and entry.annotation is not None
-                and entry.annotation.schema_version != SCHEMA_VERSION
-            ):
+            if verify_schema_version and entry.schema_version != SCHEMA_VERSION:
                 raise ValueError(
-                    f"manifest {path} row schema_version={entry.annotation.schema_version} "
-                    f"!= SCHEMA_VERSION={SCHEMA_VERSION}. Rerun process_replays."
+                    f"index {path} entry schema_version={entry.schema_version} != "
+                    f"SCHEMA_VERSION={SCHEMA_VERSION}. Rebuild the index "
+                    f"(`python -m hal.scripts.build_index ...`); a stale index silently "
+                    f"miscasts the normalized character ids."
                 )
             yield entry

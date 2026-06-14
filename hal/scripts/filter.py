@@ -269,7 +269,8 @@ class FilterConfig:
     disable, e.g. via `--stages` (no items) — keeps every stage."""
 
     characters: list[str] = field(default_factory=list)
-    """Character names (or slp-native ints). Empty = no character filter."""
+    """Character names (or libmelee Character ints, e.g. FOX==1). Empty = no
+    character filter. Matches the index's normalized internal ids."""
 
     ranks: list[str] = field(default_factory=list)
     """Rank substrings to keep, e.g. master,diamond,platinum. Empty = no
