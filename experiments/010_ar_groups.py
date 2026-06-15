@@ -589,7 +589,7 @@ def train(
     resume_run: str | None = None,
     resume_state: dict | None = None,
 ) -> None:
-    run_name = resume_run or make_run_name(_model_tag(cfg), cfg.data_root, comment)
+    run_name = resume_run or make_run_name(Path(__file__).stem, _model_tag(cfg), cfg.data_root, comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     wandb.init(
         project="hal",

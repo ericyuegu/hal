@@ -13,16 +13,18 @@ from datetime import datetime
 from pathlib import Path
 
 
-def make_run_name(model_tag: str, data_root: str, comment: str = "") -> str:
-    """``YYMMDD-HHMMSS_<model_tag>_<data_tag>[_comment]``.
+def make_run_name(exp: str, model_tag: str, data_root: str, comment: str = "") -> str:
+    """``YYMMDD-HHMMSS_<exp>_<model_tag>_<data_tag>[_comment]``.
 
-    ``model_tag`` is the experiment's own arch/hparam signature (e.g.
-    ``fm-d256-L6-H8-Lc256-Lk16-fs8``); ``data_tag`` is derived from the dataset
-    path so runs over the same data sort together.
+    ``exp`` is the experiment file's stem (e.g. ``011_muon``), so a run is always
+    attributable to the experiment that produced it -- sibling experiments can share a
+    ``model_tag``. ``model_tag`` is the experiment's own arch/hparam signature (e.g.
+    ``fm-d256-L6-H8-Lc256-Lk16-fs8``); ``data_tag`` is derived from the dataset path so
+    runs over the same data sort together.
     """
     stamp = datetime.now().strftime("%y%m%d-%H%M%S")
     data_tag = Path(data_root).parent.name.replace("anonymized", "anon")
-    parts = [stamp, model_tag, data_tag]
+    parts = [stamp, exp, model_tag, data_tag]
     if comment:
         parts.append(comment)
     return "_".join(parts)

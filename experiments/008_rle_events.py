@@ -937,7 +937,9 @@ def train(
         vocab_chords = build_vocab_from_loader(cfg, stats, device=DEVICE)
         print(f"[vocab] kept {vocab_chords.shape[0]} chords (cap {cfg.chord_vocab_size})", flush=True)
 
-    run_name = resume_run or make_run_name(_model_tag(cfg, vocab_chords.shape[0]), cfg.data_root, comment)
+    run_name = resume_run or make_run_name(
+        Path(__file__).stem, _model_tag(cfg, vocab_chords.shape[0]), cfg.data_root, comment
+    )
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     wandb.init(
         project="hal",
