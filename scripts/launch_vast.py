@@ -112,7 +112,7 @@ def value_metric(offer: dict, *, disk: int, data_gb: float, upload_gb: float, ru
     return amortized_dph(offer, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours) / offer["dlperf"]
 
 
-def build_query(max_price: float, disk: int, min_vram: int, min_ram: int, max_ram: int, min_dlperf: float) -> str:
+def build_query(max_price: float, disk: int, min_vram: int, min_ram: int, min_dlperf: float) -> str:
     # dph_total<max_price is a safe coarse prefilter: effective_dph >= dph_total, so any
     # offer clearing the effective cap also clears this. The real (disk-inclusive) cap is
     # enforced client-side in search(), since storage_cost*disk isn't expressible here.
@@ -121,8 +121,6 @@ def build_query(max_price: float, disk: int, min_vram: int, min_ram: int, max_ra
         q.append(f"gpu_ram>={min_vram}")
     if min_ram > 0:  # vast `cpu_ram` query is in GB (per-instance share); 0 = no RAM floor
         q.append(f"cpu_ram>={min_ram}")
-    if max_ram > 0:  # cap RAM to keep a dataset > cache, e.g. to reproduce a disk-bound run
-        q.append(f"cpu_ram<={max_ram}")
     return " ".join(q)
 
 
@@ -134,7 +132,6 @@ def search(
     disk: int,
     min_vram: int,
     min_ram: int,
-    max_ram: int,
     min_dlperf: float,
     data_gb: float,
     upload_gb: float,
@@ -143,7 +140,7 @@ def search(
     """Offers whose *effective* $/hr (GPU + provisioned disk) clears --max-price, ranked by the
     value metric (eff$/dlperf/hr, transfers folded in) — best bang-for-buck first."""
     offers = vast.search_offers(
-        query=build_query(max_price, disk, min_vram, min_ram, max_ram, min_dlperf), order=ORDER, limit=limit
+        query=build_query(max_price, disk, min_vram, min_ram, min_dlperf), order=ORDER, limit=limit
     )
     qualifying = [o for o in offers if effective_dph(o, disk) <= max_price]
     qualifying.sort(
@@ -227,7 +224,6 @@ def queue(
     disk: int,
     min_vram: int,
     min_ram: int,
-    max_ram: int,
     min_dlperf: float,
     data_gb: float,
     upload_gb: float,
@@ -243,7 +239,6 @@ def queue(
             disk=disk,
             min_vram=min_vram,
             min_ram=min_ram,
-            max_ram=max_ram,
             min_dlperf=min_dlperf,
             data_gb=data_gb,
             upload_gb=upload_gb,
@@ -441,11 +436,6 @@ class Args:
     re-read shards hot, so a low-RAM box stalls on re-reads and starves the GPU. In practice
     RAM, not the GPU, set the throughput — same card with 16 GB ran ~3.5x slower than 515 GB.
     Raise this for streaming-bound runs."""
-    max_ram: int = 0
-    """Maximum per-instance system RAM in GB (vast `cpu_ram`); 0 = no cap. Use to deliberately
-    land on a box whose RAM is smaller than the decompressed dataset (~380 GB) — e.g. to
-    reproduce/measure a disk-bound (page-cache-thrashing) run rather than have a big-RAM box
-    silently cache the whole set and hide it."""
     min_dlperf: float = 20.0
     """Minimum raw DLPerf score (vast `dlperf`). A floor on absolute throughput — the $/perf
     ranking alone can pick a slow-but-cheap card; raise this to force a faster GPU regardless
@@ -482,7 +472,6 @@ def main(args: Args) -> None:
         disk=args.disk,
         min_vram=args.min_vram,
         min_ram=args.min_ram,
-        max_ram=args.max_ram,
         min_dlperf=args.min_dlperf,
         data_gb=args.data_gb,
         upload_gb=args.upload_gb,
