@@ -41,10 +41,37 @@ def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.
     return rel
 
 
+def _choose_chunk_starts(T: int, L_ctx: int, L_chunk: int, K: int, rng: np.random.Generator) -> np.ndarray:
+    """Up to ``K`` chunk-start positions in ``[1, T - L_chunk]`` whose windows
+    ``[cs - L_ctx, cs + L_chunk)`` are pairwise non-overlapping.
+
+    Reading a whole replay off disk to emit a single ~``L_ctx+L_chunk`` window
+    wastes ~99% of the bytes read; emitting ``K`` windows amortizes that read.
+    The positions are stratified into ``k`` equal lanes (one window per lane,
+    randomly placed within it) so the windows spread across the episode and stay
+    distinct rather than clustering. ``k`` clamps to what the episode can fit, so
+    short replays yield fewer than ``K``. ``K=1`` reduces to a single window drawn
+    uniformly over the full range (the historical behavior)."""
+    L = L_ctx + L_chunk
+    cs_lo, cs_hi = 1, T - L_chunk
+    span = cs_hi - cs_lo + 1
+    if span < 1:
+        return np.empty(0, dtype=np.int64)
+    k = min(K, max(1, span // L))
+    stride = span // k
+    lane_lo = cs_lo + np.arange(k) * stride
+    # Each lane's window must end ``L`` before the next lane starts (non-overlap);
+    # the last lane has no successor, so it can range to the end of the episode.
+    lane_hi = lane_lo + (stride - L)
+    lane_hi[-1] = cs_hi
+    lane_hi = np.maximum(lane_hi, lane_lo)
+    return lane_lo + rng.integers(0, lane_hi - lane_lo + 1)
+
+
 class WindowDataset(IterableDataset):
-    """Wrap a StreamingDataset: pick a random ego port and a length
-    ``L_ctx + L_chunk`` window from each replay, laid out as ``[ctx | chunk]``.
-    Relabel p1/p2 → ego/opp before yielding.
+    """Wrap a StreamingDataset: pick a random ego port and ``windows_per_replay``
+    non-overlapping length-``L_ctx + L_chunk`` windows from each replay, laid out
+    as ``[ctx | chunk]``. Relabel p1/p2 → ego/opp before yielding.
 
     The window is anchored by its *chunk* position, drawn uniformly over the
     whole episode — including the opening frames. When the chunk sits near the
@@ -59,12 +86,15 @@ class WindowDataset(IterableDataset):
     actions slices that prefix out of the chunk itself (its first frames).
     """
 
-    def __init__(self, mds: StreamingDataset, L_ctx: int, L_chunk: int, *, seed: int) -> None:
+    def __init__(
+        self, mds: StreamingDataset, L_ctx: int, L_chunk: int, *, seed: int, windows_per_replay: int = 1
+    ) -> None:
         self._mds = mds
         self.L_ctx = L_ctx
         self.L_chunk = L_chunk
         self._L = L_ctx + L_chunk
         self._seed = seed
+        self._K = windows_per_replay
         self._epoch = 0
 
     def __iter__(self) -> Iterator[dict[str, np.ndarray]]:
@@ -82,20 +112,17 @@ class WindowDataset(IterableDataset):
             sample = {k: v for k, v in sample.items() if k != "schema_version"}
             T = len(sample["frame"])
             # chunk[0] targets episode frame ``cs``; context is the L_ctx frames
-            # before it. cs_min keeps >=1 real context frame (the cold-start
-            # floor: inference always has the just-observed frame); cs_max keeps
-            # the L_chunk-long chunk inside the episode.
-            cs_min = 1
-            cs_max = T - self.L_chunk
-            if cs_max < cs_min:
-                continue
-            cs = int(rng.integers(cs_min, cs_max + 1))
-            start = cs - self.L_ctx  # virtual window start; < 0 ⇒ left-pad
-            pad = max(0, -start)
-            window = self._padded_window(sample, start, pad)
-            window["ctx_pad"] = np.int64(min(pad, self.L_ctx))
-            ego_prefix = "p1" if rng.random() < 0.5 else "p2"
-            yield relabel_ego(window, ego_prefix)
+            # before it. The K chunk-starts keep >=1 real context frame (the
+            # cold-start floor: inference always has the just-observed frame), the
+            # L_chunk-long chunk inside the episode, and their windows disjoint.
+            for cs in _choose_chunk_starts(T, self.L_ctx, self.L_chunk, self._K, rng):
+                cs = int(cs)
+                start = cs - self.L_ctx  # virtual window start; < 0 ⇒ left-pad
+                pad = max(0, -start)
+                window = self._padded_window(sample, start, pad)
+                window["ctx_pad"] = np.int64(min(pad, self.L_ctx))
+                ego_prefix = "p1" if rng.random() < 0.5 else "p2"
+                yield relabel_ego(window, ego_prefix)
 
     def _padded_window(self, sample: dict[str, np.ndarray], start: int, pad: int) -> dict[str, np.ndarray]:
         """Length-``_L`` window beginning at virtual frame ``start`` (may be <0).
@@ -153,6 +180,7 @@ def make_loader(
     prefetch_factor: int = 4,
     predownload: int | None = None,
     pin_memory: bool | None = None,
+    windows_per_replay: int = 1,
 ) -> DataLoader:
     """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` (preprocessing runs in the workers).
@@ -198,7 +226,7 @@ def make_loader(
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
     )
-    sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed)
+    sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed, windows_per_replay=windows_per_replay)
     collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
     # Pin by default only when there's a GPU to copy to (page-locking host memory is
     # wasted on a CPU run). ``TrainBatch.pin_memory`` makes the custom batch poolable.

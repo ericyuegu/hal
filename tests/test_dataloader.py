@@ -5,6 +5,7 @@ import numpy as np
 
 from hal.data.schema import SCHEMA_VERSION
 from hal.training.dataloader import WindowDataset
+from hal.training.dataloader import _choose_chunk_starts
 
 L_CTX, L_CHUNK = 6, 4
 _L = L_CTX + L_CHUNK
@@ -71,3 +72,43 @@ def test_cold_start_floor_skips_too_short() -> None:
     assert list(WindowDataset(_fake_mds(n_samples=2, length=L_CHUNK), L_CTX, L_CHUNK, seed=0)) == []
     # one extra frame is enough for a single anchor (cs=1, fully left-padded ctx).
     assert list(WindowDataset(_fake_mds(n_samples=2, length=L_CHUNK + 1), L_CTX, L_CHUNK, seed=0))
+
+
+def test_choose_chunk_starts_nonoverlapping_and_bounded() -> None:
+    """Up to K chunk-starts, stratified with pairwise gap >= _L so the
+    [cs - L_ctx, cs + L_chunk) windows never overlap; all in [1, T - L_chunk];
+    count clamps to what the episode can fit."""
+    rng = np.random.default_rng(0)
+    for T in [11, 30, 44, 60, 100, 300]:
+        for K in [1, 2, 4, 16]:
+            cs = _choose_chunk_starts(T, L_CTX, L_CHUNK, K, rng)
+            fit = max(1, (T - L_CHUNK) // _L)
+            assert len(cs) == min(K, fit)
+            assert (cs >= 1).all() and (cs <= T - L_CHUNK).all()
+            assert (np.diff(np.sort(cs)) >= _L).all()
+
+
+def test_yields_k_nonoverlapping_windows_per_replay() -> None:
+    """K=4 over a long replay emits 4 windows whose real (non-pad) frames are
+    pairwise disjoint — distinct training examples, not near-duplicate slices."""
+    K = 4
+    wins = list(WindowDataset(_fake_mds(n_samples=1, length=60), L_CTX, L_CHUNK, seed=0, windows_per_replay=K))
+    assert len(wins) == K
+    seen: set[int] = set()
+    for w in wins:
+        real = set(w["frame"][int(w["ctx_pad"]) :].tolist())
+        assert real and real.isdisjoint(seen)
+        seen |= real
+
+
+def test_windows_per_replay_clamps_to_short_replay() -> None:
+    """A replay too short for K disjoint windows yields only what fits (here 2),
+    never overlapping ones to hit the count."""
+    wins = list(WindowDataset(_fake_mds(n_samples=1, length=30), L_CTX, L_CHUNK, seed=0, windows_per_replay=4))
+    assert len(wins) == 2
+
+
+def test_windows_per_replay_default_is_one() -> None:
+    """Default K=1 keeps the historical one-window-per-replay behavior."""
+    wins = list(WindowDataset(_fake_mds(n_samples=3, length=60), L_CTX, L_CHUNK, seed=0))
+    assert len(wins) == 3
