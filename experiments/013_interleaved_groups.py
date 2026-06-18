@@ -138,18 +138,23 @@ class TrainConfig:
     # point in closed loop, so deployed play always samples; argmax stays for the recon metric.
     decode_temp: float = 1.0
     seed: int = 0
-    L_ctx: int = 256  # FRAMES; the interleaved token sequence is P * L_ctx long.
-    # optimization. The interleaved sequence is P=5x longer (quadratic attention), so the batch is
-    # smaller than 011/012 with grad-accum recovering the effective size. Training is disk-bound
-    # (GPU ~15-20% util), so the extra per-window compute is largely free wall-clock until ~80% util.
-    batch_size: int = 128
-    grad_accum_steps: int = 8
+    # FRAMES; the interleaved token sequence is P * L_ctx long. Set to 51 (=> 255 tokens) so the
+    # token budget — hence FLOPs/step — matches the d256/L8 joint-marginal baseline at its 256-frame
+    # (256-token) window: an iso-FLOP / iso-step / iso-backbone head-to-head where the ONLY arch
+    # change is the interleaved-AR token structure. The cost of the 5 tokens/frame is paid in context
+    # (51 vs 256 frames), not in compute or capacity, so neither model is starved nor needs grad-accum.
+    L_ctx: int = 51
+    # optimization. Matched token budget lets the whole effective batch fit one forward — no grad-accum.
+    # The matched-context variant (--cfg.L-ctx 256) is 5x longer, so there shrink the micro-batch and
+    # raise grad-accum to keep effective batch 512 (e.g. --cfg.batch-size 256 --cfg.grad-accum-steps 2).
+    batch_size: int = 512
+    grad_accum_steps: int = 1
     # Two LRs: Muon for the blocks' hidden matrices, AdamW for the input proj / heads / embeddings / biases.
     muon_lr: float = 0.02
     adam_lr: float = 8.5e-4
     weight_decay: float = 0.01
     warmup_steps: int = 500
-    max_steps: int = 2**15
+    max_steps: int = 2**14
     amp_dtype: str = "bfloat16"  # "bfloat16" | "float32"
     allow_tf32: bool = True
     # eval cadence
