@@ -273,3 +273,6 @@ fabric.properties
 
 # Cursor IDE
 /.cursor/
+
+# local closed-loop eval artifacts (throwaway)
+local_eval/
