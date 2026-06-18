@@ -36,10 +36,7 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import contextlib
 import itertools
-import json
 import math
-import subprocess
-import sys
 import time
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -53,7 +50,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
-import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -62,6 +58,7 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
+import wandb
 from hal import streams
 from hal.data.stats import FeatureStats
 from hal.eval.cross_stage import sweep_vs_cpu_prior
@@ -164,10 +161,10 @@ class TrainConfig:
     # Each parallel slot is one Dolphin boot that (via instant-restart) plays many prior-sampled
     # matches back-to-back. Profile {0.5, 1, 2, 4} for the best eval throughput vs trainer impact.
     eval_parallel_per_cpu: float = 1.0
-    # Closed-loop eval always runs in a background subprocess (training keeps using the GPU); the
-    # trainer drains its result between steps. If a prior eval is still running at the next boundary
-    # the trainer waits for it, bounded by eval_timeout_seconds (then kills the worker).
-    eval_timeout_seconds: float = 900.0
+    # Closed-loop eval runs SYNCHRONOUSLY at each eval boundary: training pauses and the eval gets the
+    # GPU (and the box) uncontended. Async/subprocess eval starved + timed out under the disk-bound
+    # trainer (every in-training eval in the 012 run hit the cap), so we pay the pause instead — each
+    # eval's wall-time is bounded by eval_max_frames per boot, not a timeout.
     # checkpointing
     ckpt_every: int = 2048
     # data (v4 MDS carries the stage + p{1,2}_character + nana columns)
@@ -821,82 +818,13 @@ def train(
             uploader=uploader,
         )
 
-    # At most one async eval in flight. The worker is a separate process (own GPU/CUDA + GIL) that
-    # evals the just-saved checkpoint and writes a metrics JSON; the trainer drains it between steps.
-    pending_eval: dict | None = None
-
-    def _drain_eval(*, wait: bool) -> None:
-        """Reap the in-flight eval. ``wait`` blocks (bounded by ``eval_timeout_seconds``) for the
-        result; otherwise just polls. A worker over budget is killed. On success: log + upload .slp."""
-        nonlocal pending_eval
-        if pending_eval is None:
-            return
-        proc: subprocess.Popen = pending_eval["proc"]
-        if wait:
-            try:
-                proc.wait(timeout=max(0.0, cfg.eval_timeout_seconds - (time.monotonic() - pending_eval["t0"])))
-            except subprocess.TimeoutExpired:
-                pass
-        rc = proc.poll()
-        if rc is None:
-            if not wait and (time.monotonic() - pending_eval["t0"]) <= cfg.eval_timeout_seconds:
-                return  # still running, within budget — re-check next iteration
-            proc.kill()
-            proc.wait()
-            print(
-                f"[eval] step {pending_eval['step']} timed out (>{cfg.eval_timeout_seconds:.0f}s); "
-                f"killed. see {pending_eval['log']}",
-                flush=True,
-            )
-        else:
-            step, result = pending_eval["step"], pending_eval["result"]
-            if rc == 0 and result.is_file():
-                data = json.loads(result.read_text())
-                _log_eval(data["step"], data["metrics"])
-                n = uploader.upload_tree(pending_eval["replay"], base=ckpt_dir, pattern="*.slp")
-                print(f"[eval] queued {n} .slp for R2 (step {step})", flush=True)
-            else:
-                print(f"[eval] worker for step {step} failed (rc={rc}); see {pending_eval['log']}", flush=True)
-        pending_eval["log_f"].close()
-        pending_eval = None
-
-    def _launch_eval(step: int) -> None:
-        """Save the checkpoint and spawn a background eval worker for it. Waits out any prior eval
-        first (bounded), so only one runs at a time."""
-        nonlocal pending_eval
-        _drain_eval(wait=True)
+    def _eval_step(step: int) -> None:
+        """Synchronous closed-loop eval at a training boundary: save the checkpoint, run the eval on
+        the live model (training is paused, so the GPU is uncontended), log + upload .slp."""
         _save(f"step_{step:06d}.pt", step)
-        result = ckpt_dir / "eval_results" / f"step_{step:06d}.json"
-        log = ckpt_dir / "eval_logs" / f"step_{step:06d}.log"
-        result.parent.mkdir(parents=True, exist_ok=True)
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log_f = open(log, "w")  # noqa: SIM115 — spans the worker's lifetime; closed in _drain_eval
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--eval-worker",
-                str(ckpt_dir / f"step_{step:06d}.pt"),
-                "--eval-worker-step",
-                str(step),
-                "--eval-worker-result",
-                str(result),
-                "--eval-worker-replay",
-                str(replay_dir / f"step_{step:06d}"),
-            ],
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-        )
-        pending_eval = {
-            "step": step,
-            "proc": proc,
-            "result": result,
-            "replay": replay_dir / f"step_{step:06d}",
-            "log": log,
-            "log_f": log_f,
-            "t0": time.monotonic(),
-        }
-        print(f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: launched async eval (pid {proc.pid})", flush=True)
+        tag = f"step_{step:06d}"
+        print(f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: running synchronous eval…", flush=True)
+        _log_eval(step, _eval_and_upload(tag))
 
     model.train()
     it = iter(train_loader)
@@ -955,11 +883,9 @@ def train(
                 flush=True,
             )
         wandb.log(log)
-        _drain_eval(wait=False)
         if cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0:
-            _launch_eval(step)
+            _eval_step(step)
 
-    _drain_eval(wait=True)  # finish the last async eval before the final pass
     vm_final = _val_log_dict()
     wandb.log({**vm_final, "global_step": cfg.max_steps})
     print(f"[final] action_nll {vm_final['val/loss']:.3f}", flush=True)
@@ -1020,20 +946,6 @@ def eval_ckpt(ckpt_path: str, *, decode_temp: float | None = None) -> None:
 
 
 # %%
-def run_eval_worker(ckpt_path: str, step: int, result_path: str, replay_dir: str) -> None:
-    """One-shot closed-loop eval for the async path: load a checkpoint, sweep vs CPU, and write the
-    flat metric dict to ``result_path`` (atomically) with the .slp recordings under ``replay_dir``.
-    Touches neither W&B nor R2 — the launching trainer is the sole writer/uploader."""
-    model, cfg, stats, _ = _load_ckpt(ckpt_path)
-    metrics = eval_vs_cpu(model, stats, cfg, max_frames=cfg.eval_max_frames, replay_dir=Path(replay_dir))
-    out = Path(result_path)
-    tmp = out.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"step": step, "metrics": metrics}))
-    tmp.replace(out)  # atomic rename: the trainer never reads a partial file
-    print(f"[eval-worker] step {step}: {metrics}", flush=True)
-
-
-# %%
 @dataclass
 class Args:
     """Top-level CLI surface. Pass TrainConfig fields as kebab-case flags, e.g. ``--cfg.d-model 512``."""
@@ -1043,18 +955,9 @@ class Args:
     eval_temp: float | None = None  # override decode temperature for --eval
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
-    # internal: one-shot async-eval worker (the trainer spawns this; not for manual use).
-    eval_worker: str | None = None  # ckpt path
-    eval_worker_step: int = 0
-    eval_worker_result: str | None = None
-    eval_worker_replay: str | None = None
 
 
 def main(args: Args) -> None:
-    if args.eval_worker is not None:
-        assert args.eval_worker_result is not None and args.eval_worker_replay is not None
-        run_eval_worker(args.eval_worker, args.eval_worker_step, args.eval_worker_result, args.eval_worker_replay)
-        return
     if args.eval is not None:
         eval_ckpt(args.eval, decode_temp=args.eval_temp)
         return
