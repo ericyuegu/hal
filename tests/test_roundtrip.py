@@ -43,6 +43,7 @@ from hal.sim.diff import diff
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import ControllerInputsValue
 from hal.sim.loop import drive
+from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.session import ReplayMatchup
 from hal.sim.session import Session
@@ -52,6 +53,8 @@ from hal.sim.sources import MdsControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.sources import demo_sequence
 from hal.sim.trajectory import Trajectory
+from hal.sim.vec import VecMatch
+from hal.sim.vec import drive_vec
 from hal.wire import CHARACTERS_BY_NAME
 from hal.wire import GAME_START_FRAME
 from hal.wire import TRIGGER_DEADZONE
@@ -224,6 +227,132 @@ def _sweep_program() -> tuple[list[ControllerInputs], list[tuple[str, float, int
             reads.append((channel, v, len(punches) - 1))
     punches.extend([value()] * 10)
     return punches, reads
+
+
+# --- instant-restart (Gecko "Instant Match") correctness ---------------------
+
+
+@pytest.mark.integration
+def test_instant_restart_enabled_match_is_bit_exact(tmp_path: Path) -> None:
+    """Enabling the instant-restart Gecko code does not perturb a match's recording.
+
+    Same as ``test_fresh_recording_roundtrip_bit_exact`` but with
+    ``instant_match_restart=True`` on Battlefield (an RNG-stable stage). The Gecko
+    code only fires on match *end*, so the first 200 in-match frames must still
+    record→replay bit-exact — proving the code's mere presence is inert mid-match."""
+    _check_prereqs()
+    n_frames = 200
+    matchup = ReplayMatchup(
+        stage=melee.Stage.BATTLEFIELD,
+        players=(
+            PlayerSetup(port=1, character=melee.Character.FOX, costume=0),
+            PlayerSetup(port=2, character=melee.Character.FOX, costume=1),
+        ),
+        port_to_mds_prefix={1: "p1", 2: "p2"},
+    )
+    record_sources: dict[int, ControllerSource] = {
+        1: ScriptedControllerSource(sequence=demo_sequence(n_frames, port="p1")),
+        2: ScriptedControllerSource(sequence=demo_sequence(n_frames, port="p2")),
+    }
+    with Session(
+        iso_path=ISO_PATH,
+        dolphin_path=DOLPHIN_PATH,
+        slippi_port=51449,
+        tmp_home_directory=False,
+        replay_dir=str(tmp_path),
+        instant_match_restart=True,
+    ) as s:
+        drive(s, matchup, record_sources, max_frames=n_frames)
+
+    new_slps = sorted(tmp_path.rglob("*.slp"))
+    assert new_slps, f"Slippi wrote no .slp under {tmp_path}"
+    fresh_slp = new_slps[-1]
+    rows = extract_replay(str(fresh_slp))
+    assert rows is not None, f"extract_replay returned None for fresh slp {fresh_slp}"
+
+    replay_sources: dict[int, ControllerSource] = {
+        1: MdsControllerSource(columns=rows, port_prefix="p1"),
+        2: MdsControllerSource(columns=rows, port_prefix="p2"),
+    }
+    with Session(
+        iso_path=ISO_PATH,
+        dolphin_path=DOLPHIN_PATH,
+        slippi_port=51449,
+        tmp_home_directory=False,
+        replay_dir=str(tmp_path),
+        instant_match_restart=True,
+    ) as s:
+        live = drive(s, matchup, replay_sources, max_frames=n_frames)
+
+    truth = Trajectory.from_slp(str(fresh_slp)).take(n_frames)
+    report = diff(live, truth, max_frames=n_frames)
+    assert report.passed, f"instant-restart match-1 round-trip divergence: {report.summary()}\n" + "\n".join(
+        f"  {d}" for d in report.divergences[:5]
+    )
+
+
+class _WalkOffBatchPolicy:
+    """Torch-free BatchPolicy: hold full-right on every model slot. The model Fox
+    runs off the stage and self-destructs repeatedly, ending each match quickly so
+    instant-restart fires — a deterministic way to exercise the restart boundary."""
+
+    def __call__(self, frame_index: int, obs):  # noqa: ANN001
+        from hal.sim.inputs import ControllerInputsValue
+
+        right = ControllerInputsValue(
+            main_x=1.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0
+        )
+        return {slot: right for slot in obs}
+
+
+@pytest.mark.integration
+def test_instant_restart_plays_clean_independent_matches(tmp_path: Path) -> None:
+    """Instant-restart yields several segmented matches per boot with no state
+    carryover. The model walks off and self-destructs; each match end triggers a
+    seamless Gecko restart (``in_game`` never drops — the frame ``id`` reset is the
+    boundary). We assert drive_vec segments them (>=2 trajectories from one boot)
+    and that every match opens from a CLEAN reset — the model at 4 stocks and ~0% —
+    so no stocks/damage bleed across the restart boundary."""
+    _check_prereqs()
+    matchup = Matchup(
+        stage=melee.Stage.BATTLEFIELD,  # seed stage; restart randomizes subsequent stages
+        players=(
+            PlayerSetup(port=1, character=melee.Character.FOX, cpu_level=0),
+            PlayerSetup(port=2, character=melee.Character.FOX, cpu_level=1),
+        ),
+    )
+    session = Session(
+        iso_path=ISO_PATH,
+        dolphin_path=DOLPHIN_PATH,
+        slippi_port=51449,
+        blocking_input=True,
+        tmp_home_directory=False,
+        replay_dir=str(tmp_path),
+        use_exi_inputs=True,
+        enable_ffw=True,
+        emulation_speed=0.0,
+        polling_mode=True,
+        instant_match_restart=True,
+    )
+    boots = drive_vec(
+        [session],
+        [VecMatch(matchup=matchup, model_ports=(1,))],
+        _WalkOffBatchPolicy(),
+        max_frames=12_000,
+        instant_restart=True,
+    )
+
+    trajs = boots[0]
+    assert len(trajs) >= 2, f"instant-restart produced {len(trajs)} match(es); expected >= 2 in 12k frames"
+    for mi, t in enumerate(trajs):
+        # Opening frames of each match: the model is back to 4 stocks and ~0% — a
+        # fresh match, not a continuation of the previous one's end state.
+        stock0 = int(np.nanmax(t.post[1]["stock"][:5]))
+        pct0 = float(np.nanmin(np.abs(t.post[1]["percent"][:5])))
+        assert stock0 == 4, f"match {mi} opened at {stock0} stocks, not 4 (carryover across restart?)"
+        assert pct0 < 1.0, f"match {mi} opened at {pct0:.1f}%, not ~0 (carryover across restart?)"
+    # Recordings segment too: Slippi writes one .slp per match.
+    assert len(sorted(tmp_path.rglob("*.slp"))) >= 2
 
 
 @pytest.mark.integration

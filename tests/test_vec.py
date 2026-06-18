@@ -61,8 +61,11 @@ def _post() -> dict:
     }
 
 
-def _frame(i: int, ports: tuple[int, ...]) -> dict:
-    return {"id": i, "start": {"random_seed": 0}, "ports": {p: {"leader": {"post": _post()}} for p in ports}}
+def _frame(i: int, ports: tuple[int, ...], stage: melee.Stage | None = None) -> dict:
+    f = {"id": i, "start": {"random_seed": 0}, "ports": {p: {"leader": {"post": _post()}} for p in ports}}
+    if stage is not None:
+        f["stage"] = int(stage.value)  # mirrors Session._canonical: live libmelee stage value
+    return f
 
 
 class FakeSession:
@@ -132,10 +135,11 @@ def test_drive_vec_self_play_batches_both_ports_and_skips_internal() -> None:
     # match 1 ends first (len 4) → live set shrinks to just the self-play slots.
     assert policy.frames[-1] == {Slot(0, 1), Slot(0, 2)}
 
-    # Trajectories: one per match, capturing every matchup port (model or not).
-    assert [len(t) for t in trajs] == [7, 5]  # length + the start frame
-    assert set(trajs[0].post) == {1, 2}
-    assert set(trajs[1].post) == {1, 2}
+    # No instant-restart: each boot plays exactly one match, capturing every port.
+    assert [len(boot) for boot in trajs] == [1, 1]
+    assert [len(boot[0]) for boot in trajs] == [7, 5]  # length + the start frame
+    assert set(trajs[0][0].post) == {1, 2}
+    assert set(trajs[1][0].post) == {1, 2}
 
 
 def test_drive_vec_isolates_a_crashing_session() -> None:
@@ -153,9 +157,9 @@ def test_drive_vec_isolates_a_crashing_session() -> None:
 
     trajs = drive_vec(sessions, matches, policy, max_frames=20)
 
-    assert trajs[2] is None  # crashed match → None
-    assert trajs[0] is not None and trajs[1] is not None  # survivors complete
-    assert len(trajs[0]) == 9
+    assert trajs[2] == []  # crashed before completing a match → no trajectories
+    assert trajs[0] and trajs[1]  # survivors complete
+    assert len(trajs[0][0]) == 9
     # Batch carries match 2's two slots until it crashes, then drops them.
     assert len(policy.frames[0]) == 5  # 2 + 1 + 2
     assert Slot(2, 1) not in policy.frames[-1]
@@ -170,8 +174,92 @@ def test_drive_vec_returns_none_when_start_fails() -> None:
     sessions = [FakeSession(length=5, ports=(1, 2)), StartFails(length=5, ports=(1, 2))]
     trajs = drive_vec(sessions, matches, RecordingPolicy(), max_frames=10)
 
-    assert trajs[1] is None
-    assert trajs[0] is not None
+    assert trajs[1] == []
+    assert trajs[0]
+
+
+class RestartFakeSession:
+    """A Session mimicking the Gecko "Instant Match" flow: matches play
+    back-to-back with ``in_game`` staying True the whole time; the boundary is the
+    frame ``id`` resetting (the new match's countdown). Each match has its own
+    ``stage``. After the last match a single ``in_game=False`` frame ends the boot.
+    ``start_match`` hands back match 0's first frame (id 0)."""
+
+    def __init__(self, *, matches: list[tuple[int, melee.Stage]], ports: tuple[int, ...]) -> None:
+        self.ports = ports
+        self._steps: list[tuple[dict, bool]] = []
+        self._start = _frame(0, ports, stage=matches[0][1])
+        for mi, (length, stage) in enumerate(matches):
+            first = 1 if mi == 0 else 0  # match 0's id-0 frame came from start_match
+            for k in range(first, length):
+                # id restarts at 0 each match → a drop vs the previous match's last id
+                # is the restart boundary; in_game stays True (seamless restart).
+                self._steps.append((_frame(k, ports, stage=stage), True))
+        self._steps.append((_frame(99, ports, stage=matches[-1][1]), False))  # final match ends the boot
+        self._i = 0
+
+    def __enter__(self) -> RestartFakeSession:
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def start_match(self, matchup: Matchup) -> dict:
+        return self._start
+
+    def step(self, inputs: Mapping[int, ControllerInputs]) -> tuple[dict, bool]:
+        out = self._steps[self._i]
+        self._i = min(self._i + 1, len(self._steps) - 1)
+        return out
+
+
+class StageRecordingPolicy:
+    """Records the live ``_matchup`` stage seen for a fixed slot each frame."""
+
+    def __init__(self, slot: Slot) -> None:
+        self.slot = slot
+        self.stages: list[int] = []
+
+    def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]:
+        if self.slot in obs:
+            self.stages.append(obs[self.slot]["_matchup"]["stage"])
+        return {slot: _NEUTRAL for slot in obs}
+
+
+def test_drive_vec_instant_restart_segments_matches_and_tracks_live_stage() -> None:
+    # One boot plays three matches on three different stages (instant-restart):
+    # in_game stays True; each match's frame id restarts at 0, marking the boundary.
+    plan = [(5, melee.Stage.BATTLEFIELD), (4, melee.Stage.FINAL_DESTINATION), (3, melee.Stage.YOSHIS_STORY)]
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,))]
+    sessions = [RestartFakeSession(matches=plan, ports=(1, 2))]
+    policy = StageRecordingPolicy(Slot(0, 1))
+
+    trajs = drive_vec(sessions, matches, policy, max_frames=200, instant_restart=True)
+
+    # One boot → three segmented trajectories (split at each frame-id reset).
+    assert len(trajs[0]) == 3
+    assert all(len(t) >= 3 for t in trajs[0])
+    # The policy saw each match's live stage in order — restart changes the stage,
+    # and the seed (BATTLEFIELD) does not leak into matches 2 and 3.
+    seen = policy.stages
+    assert seen[0] == int(melee.Stage.BATTLEFIELD.value)
+    first_fd = seen.index(int(melee.Stage.FINAL_DESTINATION.value))
+    first_ys = seen.index(int(melee.Stage.YOSHIS_STORY.value))
+    assert first_fd < first_ys
+    assert all(s == int(melee.Stage.BATTLEFIELD.value) for s in seen[:first_fd])
+
+
+def test_drive_vec_without_instant_restart_stops_at_first_match() -> None:
+    # Same multi-match script, but instant_restart=False → frame-id resets are NOT
+    # treated as boundaries; the boot ends only when in_game goes False (after the
+    # last scripted frame), folding every frame into a single trajectory.
+    plan = [(5, melee.Stage.BATTLEFIELD), (4, melee.Stage.FINAL_DESTINATION)]
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,))]
+    sessions = [RestartFakeSession(matches=plan, ports=(1, 2))]
+
+    trajs = drive_vec(sessions, matches, RecordingPolicy(), max_frames=200, instant_restart=False)
+
+    assert len(trajs[0]) == 1  # no mid-stream segmentation without instant_restart
 
 
 def test_run_matches_vec_multi_wave(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,8 +298,9 @@ def test_run_matches_vec_multi_wave(monkeypatch: pytest.MonkeyPatch) -> None:
     assert waves_built == 3
     # Ports restart at base each wave: [51441,51442 | 51441,51442 | 51441].
     assert assigned_ports == [51441, 51442, 51441, 51442, 51441]
-    # Results aligned to input order (length = match length + start frame).
-    assert [len(t) for t in trajs] == [4, 6, 8, 10, 12]
+    # Results aligned to input order; one match per boot (length + start frame).
+    assert [len(boot) for boot in trajs] == [1, 1, 1, 1, 1]
+    assert [len(boot[0]) for boot in trajs] == [4, 6, 8, 10, 12]
 
 
 def test_run_matches_vec_isolates_a_policy_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,8 +322,8 @@ def test_run_matches_vec_isolates_a_policy_failure(monkeypatch: pytest.MonkeyPat
     cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
     trajs = run_matches_vec(cfg, matches, policy_factory, max_frames=20, max_parallel=2)
 
-    assert trajs[0] is not None and trajs[1] is not None  # wave 0 survived
-    assert trajs[2] is None and trajs[3] is None  # wave 1's policy raised → None
+    assert trajs[0] and trajs[1]  # wave 0 survived
+    assert trajs[2] == [] and trajs[3] == []  # wave 1's policy raised → no trajectories
 
 
 class _StartFails(FakeSession):
@@ -260,7 +349,7 @@ def test_run_matches_vec_retries_failed_start(monkeypatch: pytest.MonkeyPatch) -
     cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
     trajs = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, base_slippi_port=51441)
 
-    assert trajs[0] is not None  # recovered on the retry
+    assert trajs[0]  # recovered on the retry
     assert ports == [51441, 51442]  # initial attempt, then a fresh port (base + max_parallel)
 
 
@@ -279,7 +368,7 @@ def test_run_matches_vec_gives_up_after_retries(monkeypatch: pytest.MonkeyPatch)
     cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
     trajs = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, start_retries=2)
 
-    assert trajs[0] is None  # never recovered
+    assert trajs[0] == []  # never recovered
     assert builds == 3  # initial attempt + 2 retries
 
 
@@ -356,8 +445,10 @@ def test_parallel_eval_real_dolphin_multi_wave_self_play() -> None:
         max_parallel=2,
     )
 
-    assert all(t is not None for t in trajs), "a real match crashed"
-    assert all(len(t) > 50 for t in trajs), [None if t is None else len(t) for t in trajs]
+    # No instant-restart here → each boot is exactly one match (singleton list).
+    assert all(boot for boot in trajs), f"a real match crashed: {[len(b) for b in trajs]}"
+    assert all(len(boot) == 1 for boot in trajs), [len(b) for b in trajs]
+    assert all(len(boot[0]) > 50 for boot in trajs), [len(b[0]) for b in trajs]
     # Wave 0 steps match 0 (self-play → 2 slots) and match 1 (vs-cpu → 1 slot)
     # together, so the policy gets one batched call of 3 slots — cross-match
     # plus self-play batching, on real Dolphin.

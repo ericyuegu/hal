@@ -177,6 +177,7 @@ class Session:
         use_exi_inputs: bool = False,
         enable_ffw: bool = False,
         polling_mode: bool = False,
+        instant_match_restart: bool = False,
     ) -> None:
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
@@ -225,6 +226,11 @@ class Session:
         # unattended eval. Replay-style consumers (round-trip, MDS playback) keep
         # False so frame delivery stays bit-for-bit and pays no poll spin.
         self.polling_mode = polling_mode
+        # Boot with the "Instant Match" Gecko code: a finished match restarts
+        # directly into a new one on a random legal stage, bypassing the (flaky)
+        # stage-select menu. The eval driver navigates the menu once per boot and
+        # then plays many matches; see hal/sim/vec.drive_vec.
+        self.instant_match_restart = instant_match_restart
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._menu_helpers: dict[int, melee.MenuHelper] = {}
@@ -252,6 +258,10 @@ class Session:
             emulation_speed=self.emulation_speed,
             use_exi_inputs=self.use_exi_inputs,
             enable_ffw=self.enable_ffw,
+            # Pinned libmelee ships the "Instant Match" Gecko code (GALE01r2.ini); when
+            # set, a finished match restarts directly into a new one on a random legal
+            # stage, so the eval driver navigates the stage-select menu only once per boot.
+            instant_match_restart=self.instant_match_restart,
         )
         # libmelee writes Dolphin.ini via Python configparser, which lowercases
         # option names ("slippireplaydir = ..."); Slippi-Ishiiruka's own parser
@@ -415,7 +425,7 @@ class Session:
         while True:
             gamestate = self._step_blocking()
             if gamestate.menu_state in LIVE_MENU_STATES:
-                return gamestate.to_canonical_dict()
+                return self._canonical(gamestate)
             if gamestate.menu_state == melee.Menu.STAGE_SELECT and self._matchup is not None:
                 autostart_port = min(p.port for p in self._matchup.players)
                 cur = getattr(gamestate.players.get(autostart_port), "cursor", None)
@@ -444,19 +454,30 @@ class Session:
             nav_steps += 1
             self._drive_menus(gamestate)
 
+    @staticmethod
+    def _canonical(gamestate: melee.GameState) -> dict:
+        """``to_canonical_dict`` plus the live ``stage`` (libmelee value). The canonical
+        per-frame dict mirrors peppi and carries no stage, but instant-restart hops
+        stages mid-session, so the driver needs the *current* one to condition on."""
+        d = gamestate.to_canonical_dict()
+        d["stage"] = int(gamestate.stage.value)
+        return d
+
     def step(self, inputs: dict[int, ControllerInputs]) -> tuple[dict, bool]:
         """Punch inputs, advance one frame, return (canonical, in_game).
 
         ``in_game=False`` signals match end (menu state left IN_GAME /
         SUDDEN_DEATH). The caller — typically ``drive`` — uses this to stop
-        the playback loop early.
+        the playback loop early. Under instant-restart the match restarts in-place
+        (``in_game`` stays True); the canonical ``id`` resetting to the pre-game
+        countdown is the match boundary (see ``hal.sim.vec.drive_vec``).
         """
         if self._console is None:
             raise RuntimeError("Session must be used as a context manager")
         for port, src in inputs.items():
             apply_inputs(self._controllers[port], src)
         gamestate = self._step_blocking()
-        return gamestate.to_canonical_dict(), gamestate.menu_state in LIVE_MENU_STATES
+        return self._canonical(gamestate), gamestate.menu_state in LIVE_MENU_STATES
 
     def _step_blocking(self) -> melee.GameState:
         """``console.step`` retry-poll, dropping intermediate Nones.

@@ -16,8 +16,9 @@ from hal.sim.session import Session
 
 
 class _FakeGameState:
-    def __init__(self, menu_state: melee.Menu) -> None:
+    def __init__(self, menu_state: melee.Menu, stage: melee.Stage = melee.Stage.FINAL_DESTINATION) -> None:
         self.menu_state = menu_state
+        self.stage = stage  # Session._canonical reads gamestate.stage for the live stage
 
     def to_canonical_dict(self) -> dict:
         return {"menu": self.menu_state}
@@ -53,4 +54,5 @@ def test_navigate_to_live_returns_on_live_menu() -> None:
     s._step_blocking = lambda: next(seq)  # type: ignore[method-assign]
     s._drive_menus = lambda gamestate: None  # type: ignore[method-assign]
 
-    assert s._navigate_to_live() == {"menu": melee.Menu.IN_GAME}
+    # _navigate_to_live returns the canonical dict augmented with the live stage.
+    assert s._navigate_to_live() == {"menu": melee.Menu.IN_GAME, "stage": int(melee.Stage.FINAL_DESTINATION.value)}

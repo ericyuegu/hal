@@ -37,10 +37,10 @@ import time
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 
-import melee
 import numpy as np
 import torch
 import torch.nn as nn
@@ -57,8 +57,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import wandb
 from hal import streams
 from hal.data.stats import FeatureStats
-from hal.eval.cross_stage import sweep_self_play
-from hal.eval.cross_stage import sweep_vs_cpu
+from hal.eval.cross_stage import sweep_vs_cpu_prior
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.harness import default_session_cfg
 from hal.training import scoring
@@ -147,8 +146,10 @@ class TrainConfig:
     val_n_batches: int = 16
     eval_every: int = 2048
     eval_max_frames: int = 7200
-    eval_replicas: int = 16
-    eval_max_parallel: int = 8
+    # Closed-loop eval parallelism scales with the box: max_parallel = round(this * cpu_count).
+    # Each parallel slot is one Dolphin boot that (via instant-restart) plays many prior-sampled
+    # matches back-to-back. Profile {0.5, 1, 2, 4} for the best eval throughput vs trainer impact.
+    eval_parallel_per_cpu: float = 1.0
     # Closed-loop eval always runs in a background subprocess (training keeps using the GPU); the
     # trainer drains its result between steps. If a prior eval is still running at the next boundary
     # the trainer waits for it, bounded by eval_timeout_seconds (then kills the worker).
@@ -172,6 +173,11 @@ class TrainConfig:
 def _model_tag(cfg: TrainConfig) -> str:
     offs = ".".join(str(o) for o in cfg.head_offsets)
     return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-o{offs}"
+
+
+def _eval_max_parallel(cfg: TrainConfig) -> int:
+    """Concurrent Dolphin boots per eval wave, scaled to the host's CPU count."""
+    return max(1, round(cfg.eval_parallel_per_cpu * (os.cpu_count() or 1)))
 
 
 # %%
@@ -639,16 +645,21 @@ def recon_metrics(
 def eval_vs_cpu(
     model: GPT, stats: dict[str, FeatureStats], cfg: TrainConfig, *, max_frames: int, replay_dir: Path | None = None
 ) -> dict[str, float]:
-    """In-training closed-loop eval on FD vs lvl-9 CPU, reduced to a flat metric dict."""
+    """In-training closed-loop eval vs lvl-9 CPU over prior-sampled char matchups.
+
+    ``max_parallel`` Dolphin boots (one per distinct prior-sampled matchup, scaled to
+    the box's CPUs) each play many matches back-to-back via instant-restart on random
+    legal stages — broad, prior-weighted coverage that navigates the flaky stage-select
+    menu only once per boot. Reduced to a flat metric dict."""
     was_training = model.training
     model.eval()
+    n = _eval_max_parallel(cfg)
     try:
-        results = sweep_vs_cpu(
+        results = sweep_vs_cpu_prior(
             lambda: make_policy(model, stats, cfg),
-            session_cfg=default_session_cfg(replay_dir),
-            stages=(melee.Stage.FINAL_DESTINATION,),
-            replicas=cfg.eval_replicas,
-            max_parallel=cfg.eval_max_parallel,
+            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+            n_matchups=n,
+            max_parallel=n,
             max_frames=max_frames,
         )
     finally:
@@ -932,9 +943,23 @@ def train(
 
 
 # %%
+def _cfg_from_state(saved: dict) -> TrainConfig:
+    """Rebuild a ``TrainConfig`` from a checkpoint's saved cfg dict, tolerating
+    schema drift in *eval/host* knobs across code versions: keys no longer on
+    ``TrainConfig`` (e.g. the old ``eval_max_parallel``/``eval_replicas``, replaced
+    by ``eval_parallel_per_cpu``) are dropped and new fields take their defaults, so
+    past checkpoints still load. Model-identity fields (``d_model``, ``head_offsets``,
+    …) are unaffected — they're always present and reconstruct exactly."""
+    known = {f.name for f in fields(TrainConfig)}
+    dropped = sorted(set(saved) - known)
+    if dropped:
+        print(f"[ckpt] dropping {len(dropped)} stale cfg key(s) not on current TrainConfig: {dropped}", flush=True)
+    return TrainConfig(**{k: v for k, v in saved.items() if k in known})
+
+
 def _load_ckpt(ckpt_path: str) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-    cfg = TrainConfig(**state["cfg"])
+    cfg = _cfg_from_state(state["cfg"])
     model = GPT(cfg).to(DEVICE)
     model.load_state_dict(state["model"])
     model.eval()
@@ -943,41 +968,29 @@ def _load_ckpt(ckpt_path: str) -> tuple[GPT, TrainConfig, dict[str, FeatureStats
 
 
 def eval_ckpt(ckpt_path: str, *, decode_temp: float | None = None) -> None:
-    """Load a checkpoint, sweep stages vs CPU + self-play, print summaries. ``decode_temp`` overrides
-    the trained cfg for this eval only (test-time temperature sweep)."""
-    from hal.policy import INCLUDED_STAGES
-
+    """Load a checkpoint and run the prior-distribution vs-CPU sweep, printing the
+    pooled metrics. ``decode_temp`` overrides the trained cfg for this eval only
+    (test-time temperature sweep)."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
     temp = cfg.decode_temp if decode_temp is None else decode_temp
     print(f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  temp={temp}", flush=True)
     replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
     replay_dir.mkdir(parents=True, exist_ok=True)
-    session_cfg = default_session_cfg(replay_dir)
-    stages = tuple(s for s in INCLUDED_STAGES if s is not melee.Stage.FOUNTAIN_OF_DREAMS)
+    session_cfg = default_session_cfg(replay_dir, instant_match_restart=True)
+    n = _eval_max_parallel(cfg)
 
     def policy_factory() -> RecedingHorizon:
         return make_policy(model, stats, cfg, decode_temp=decode_temp)
 
-    print("\n[eval] ============== vs-cpu ==============", flush=True)
-    for stage, r, s in sweep_vs_cpu(
+    print(f"\n[eval] ===== vs-cpu, {n} prior-sampled matchups (instant-restart) =====", flush=True)
+    results = sweep_vs_cpu_prior(
         policy_factory,
         session_cfg=session_cfg,
-        stages=stages,
-        replicas=cfg.eval_replicas,
-        max_parallel=cfg.eval_max_parallel,
+        n_matchups=n,
+        max_parallel=n,
         max_frames=15_000,
-    ):
-        print(f"  {stage.name:18s} r{r} {s.as_dict() if s else 'CRASHED'}", flush=True)
-    print("\n[eval] ============== self-play ==============", flush=True)
-    for stage, r, s in sweep_self_play(
-        policy_factory,
-        session_cfg=session_cfg,
-        stages=stages,
-        replicas=cfg.eval_replicas,
-        max_parallel=cfg.eval_max_parallel,
-        max_frames=15_000,
-    ):
-        print(f"  {stage.name:18s} r{r} {s.as_dict() if s else 'CRASHED'}", flush=True)
+    )
+    print(f"  {vs_cpu_metrics(results)}", flush=True)
 
 
 # %%
@@ -1026,7 +1039,7 @@ def main(args: Args) -> None:
         # Only pure host-scaling knobs (worker/prefetch counts) follow the current code; the
         # model-identity knobs MUST come from the checkpoint so a resume can't silently change them.
         d = TrainConfig()
-        cfg = replace(TrainConfig(**state["cfg"]), num_workers=d.num_workers, prefetch_factor=d.prefetch_factor)
+        cfg = replace(_cfg_from_state(state["cfg"]), num_workers=d.num_workers, prefetch_factor=d.prefetch_factor)
         stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
         train(cfg, stats, resume_run=args.resume, resume_state=state)
         return

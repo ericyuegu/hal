@@ -55,12 +55,19 @@ class SessionConfig:
     # Eval sessions poll slippstream so a hung/paused match trips
     # step_timeout_seconds instead of blocking forever (see Session.polling_mode).
     polling_mode: bool = True
+    # Boot Dolphin with the "Instant Match" Gecko code so a finished match restarts
+    # directly into a new one (random legal stage), skipping the flaky stage-select
+    # menu on every match after the first; drive_vec then plays many matches per boot.
+    # Off by default — single-match-per-boot is the historical sweep contract; an eval
+    # that wants many prior-sampled matches per boot (see hal.eval.matchups) opts in.
+    instant_match_restart: bool = False
 
 
-def default_session_cfg(replay_dir: Path | None = None) -> SessionConfig:
+def default_session_cfg(replay_dir: Path | None = None, *, instant_match_restart: bool = False) -> SessionConfig:
     """The standard headless eval Session: exi-ai Dolphin + fixture ISO, fast-
     forward, blocking input, throwaway tmp home. ``replay_dir`` (when not None)
-    preserves the match .slps; else they die with the Session's tmp home."""
+    preserves the match .slps; else they die with the Session's tmp home.
+    ``instant_match_restart`` opts into the many-matches-per-boot eval flow."""
     ensure(DOLPHIN_EXIAI)
     return SessionConfig(
         iso_path=ensure(ISO),
@@ -72,6 +79,7 @@ def default_session_cfg(replay_dir: Path | None = None) -> SessionConfig:
         step_timeout_seconds=30.0,
         tmp_home_directory=True,
         replay_dir=str(replay_dir) if replay_dir is not None else None,
+        instant_match_restart=instant_match_restart,
     )
 
 
@@ -92,6 +100,7 @@ def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: 
         enable_ffw=session_cfg.enable_ffw,
         emulation_speed=session_cfg.emulation_speed,
         polling_mode=session_cfg.polling_mode,
+        instant_match_restart=session_cfg.instant_match_restart,
     )
 
 
@@ -121,26 +130,33 @@ def _drive_wave(
     max_frames: int,
     base_replay: Path | None,
     slippi_port_base: int,
-) -> dict[int, Trajectory | None]:
-    """Build fresh Sessions for the given global match ``indices`` and drive them
-    once through ``drive_vec``. Returns ``{global_index: Trajectory | None}``.
+) -> dict[int, list[Trajectory]]:
+    """Build fresh Sessions for the given global boot ``indices`` and drive them
+    once through ``drive_vec``. Returns ``{global_index: [Trajectory, ...]}`` — the
+    matches each boot played (empty if it failed to start or crashed first).
 
     A wave-wide failure (Session build or the shared batched-policy call, e.g. CUDA
-    OOM) can't be attributed to one match, so every index is left ``None`` and
-    logged — the log-and-continue contract shared with ``run_match``."""
+    OOM) can't be attributed to one boot, so every index is left empty and logged —
+    the log-and-continue contract shared with ``run_match``."""
     try:
         sessions: list[Session] = []
         for offset, gi in enumerate(indices):
             replay_dir = None
             if base_replay is not None:
-                replay_dir = base_replay / f"match_{gi:03d}"
+                replay_dir = base_replay / f"boot_{gi:03d}"
                 replay_dir.mkdir(parents=True, exist_ok=True)
             sessions.append(_build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir))
-        trajs = drive_vec(sessions, [matches[gi] for gi in indices], policy_factory(), max_frames=max_frames)
+        boots = drive_vec(
+            sessions,
+            [matches[gi] for gi in indices],
+            policy_factory(),
+            max_frames=max_frames,
+            instant_restart=session_cfg.instant_match_restart,
+        )
     except Exception as e:
-        logger.warning(f"run_matches_vec: wave {list(indices)} failed: {e!r}; its matches stay None")
-        return {gi: None for gi in indices}
-    return dict(zip(indices, trajs, strict=True))
+        logger.warning(f"run_matches_vec: wave {list(indices)} failed: {e!r}; its boots stay empty")
+        return {gi: [] for gi in indices}
+    return dict(zip(indices, boots, strict=True))
 
 
 def run_matches_vec(
@@ -152,28 +168,31 @@ def run_matches_vec(
     max_parallel: int,
     base_slippi_port: int = 51441,
     start_retries: int = 2,
-) -> list[Trajectory | None]:
-    """Run ``matches`` concurrently in waves of up to ``max_parallel`` Sessions,
-    each frame batched through a single ``BatchPolicy`` call (see ``drive_vec``).
+) -> list[list[Trajectory]]:
+    """Run ``matches`` (boots) concurrently in waves of up to ``max_parallel``
+    Sessions, each frame batched through a single ``BatchPolicy`` call (see
+    ``drive_vec``). With instant-restart each boot plays many matches; the returned
+    inner list is that boot's matches.
 
     Each wave's Sessions get distinct slippi_ports (``base_slippi_port + offset``)
-    and, when ``session_cfg.replay_dir`` is set, a per-match replay subdir so
-    their .slps don't collide. ``policy_factory`` builds a fresh policy per wave —
-    per-slot rolling state must not leak across waves, and ``Slot.match`` indices
-    restart at 0 each wave. Returns one entry per match, aligned to ``matches``;
-    ``None`` where that Session failed after all retries.
+    and, when ``session_cfg.replay_dir`` is set, a per-boot replay subdir so their
+    .slps don't collide. ``policy_factory`` builds a fresh policy per wave — per-slot
+    rolling state must not leak across waves, and ``Slot.match`` indices restart at 0
+    each wave. Returns one list per boot, aligned to ``matches``; empty where that
+    Session produced no match after all retries.
 
     libmelee's stage-select cursor navigation flakily fails to settle under
     concurrent FFW load (frame-delivery jitter starves its bang-bang controller),
-    so a match intermittently never reaches IN_GAME and ``start_match`` trips its
-    wall-clock cap. ``start_retries`` re-drives the still-``None`` matches of a
-    wave on fresh Sessions (new Dolphin + slippi_port) to absorb that ~per-match
-    flake; a wholly-dead match still ends up ``None`` and is logged.
+    so a boot's first match intermittently never reaches IN_GAME and ``start_match``
+    trips its wall-clock cap. ``start_retries`` re-drives the still-empty boots of a
+    wave on fresh Sessions (new Dolphin + slippi_port) to absorb that flake; a wholly-
+    dead boot still ends up empty and is logged. (Instant-restart navigates the menu
+    only once per boot, so this flake now scales with boots, not matches.)
     """
     if max_parallel < 1:
         raise ValueError(f"max_parallel must be >= 1, got {max_parallel}")
     base_replay = Path(session_cfg.replay_dir) if session_cfg.replay_dir is not None else None
-    out: list[Trajectory | None] = [None] * len(matches)
+    out: list[list[Trajectory]] = [[] for _ in matches]
     for wave_start in range(0, len(matches), max_parallel):
         pending = list(range(wave_start, min(wave_start + max_parallel, len(matches))))
         for attempt in range(start_retries + 1):
@@ -189,15 +208,15 @@ def run_matches_vec(
                 base_replay=base_replay,
                 slippi_port_base=slippi_port_base,
             )
-            for gi, traj in results.items():
-                if traj is not None:
-                    out[gi] = traj
-            pending = [gi for gi in pending if out[gi] is None]
+            for gi, boot in results.items():
+                if boot:
+                    out[gi] = boot
+            pending = [gi for gi in pending if not out[gi]]
             if not pending:
                 break
             if attempt < start_retries:
                 logger.warning(
-                    f"run_matches_vec: {len(pending)} match(es) failed to reach IN_GAME; "
+                    f"run_matches_vec: {len(pending)} boot(s) failed to reach IN_GAME; "
                     f"retrying on fresh Sessions (attempt {attempt + 2}/{start_retries + 1})"
                 )
     return out
