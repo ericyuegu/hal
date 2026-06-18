@@ -160,12 +160,13 @@ class TrainConfig:
     # eval cadence
     val_every: int = 1024
     val_n_batches: int = 16
-    eval_every: int = 2048
-    eval_max_frames: int = 7200
+    eval_every: int = 4096
+    eval_max_frames: int = 1800
     # Closed-loop eval parallelism scales with the box: max_parallel = round(this * cpu_count).
     # Each parallel slot is one Dolphin boot that (via instant-restart) plays many prior-sampled
-    # matches back-to-back. Profile {0.5, 1, 2, 4} for the best eval throughput vs trainer impact.
-    eval_parallel_per_cpu: float = 1.0
+    # matches back-to-back. The vast boxes are big (32 vCPU); 2.0 (~64 boots) collects lots of matches
+    # per wave — they handle the oversubscription fine.
+    eval_parallel_per_cpu: float = 2.0
     # Closed-loop eval runs SYNCHRONOUSLY at each eval boundary: training pauses and the eval gets the
     # GPU (and the box) uncontended. Async/subprocess eval starved + timed out under the disk-bound
     # trainer (every in-training eval in the 012 run hit the cap), so we pay the pause instead — each
@@ -970,10 +971,20 @@ def main(args: Args) -> None:
         state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)
         if state is None:
             raise SystemExit(f"no latest.pt for run {args.resume!r} (local or R2)")
-        # Only pure host-scaling knobs (worker/prefetch counts) follow the current code; the
-        # model-identity knobs MUST come from the checkpoint so a resume can't silently change them.
+        # Operational knobs (host scaling + eval/val cadence) follow the CURRENT code so a resume can
+        # retune them; the model-identity knobs MUST come from the checkpoint so a resume can't silently
+        # change them. Eval cadence is operational (it never touches the weights), so refresh it too —
+        # this is what lets a resume turn closed-loop eval back on / change its parallelism.
         d = TrainConfig()
-        cfg = replace(_cfg_from_state(state["cfg"]), num_workers=d.num_workers, prefetch_factor=d.prefetch_factor)
+        cfg = replace(
+            _cfg_from_state(state["cfg"]),
+            num_workers=d.num_workers,
+            prefetch_factor=d.prefetch_factor,
+            eval_every=d.eval_every,
+            eval_max_frames=d.eval_max_frames,
+            eval_parallel_per_cpu=d.eval_parallel_per_cpu,
+            val_every=d.val_every,
+        )
         stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
         train(cfg, stats, resume_run=args.resume, resume_state=state)
         return
