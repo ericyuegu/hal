@@ -191,8 +191,15 @@ def _model_tag(cfg: TrainConfig) -> str:
 
 
 def _eval_max_parallel(cfg: TrainConfig) -> int:
-    """Concurrent Dolphin boots per eval wave, scaled to the host's CPU count."""
-    return max(1, round(cfg.eval_parallel_per_cpu * (os.cpu_count() or 1)))
+    """Concurrent Dolphin boots per eval wave: ``eval_parallel_per_cpu * cpu_count``, but RAM-capped.
+    Each headless Dolphin needs a few GB; some vast hosts expose 256 vCPUs to the container, so the
+    raw cpu scaling asks for 512 boots that overrun RAM and ALL fail to reach IN_GAME (-> crashed).
+    Cap at ~one boot per 6 GB of total RAM so the wave fits (eval is synchronous, so the trainer's
+    memory is idle and the box's RAM is the real limit)."""
+    raw = round(cfg.eval_parallel_per_cpu * (os.cpu_count() or 1))
+    total_gb = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1e9
+    ram_cap = max(4, int(total_gb // 6))
+    return max(1, min(raw, ram_cap))
 
 
 # %%
