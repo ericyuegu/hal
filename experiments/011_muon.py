@@ -155,6 +155,10 @@ class TrainConfig:
     data_root: str = "data/processed/ranked-anonymized-1/mds"
     cache_limit_gb: int = 440
     shuffle_block_size: int = 2000
+    # Each replay deserialized off disk yields this many non-overlapping windows, amortizing the
+    # whole-replay read (the disk bottleneck) over K samples. Train only; val stays 1/replay so its
+    # loss stays comparable. Without this the GPU is disk-starved (~45s/step from 840s loader stalls).
+    windows_per_replay: int = 4
     val_split: str = "val"
     num_workers: int = 16
     prefetch_factor: int = 4
@@ -656,7 +660,11 @@ def train(
         seed=cfg.seed,
     )
     train_loader = make_loader(
-        split="train", num_workers=cfg.num_workers, prefetch_factor=cfg.prefetch_factor, **loader_kwargs
+        split="train",
+        num_workers=cfg.num_workers,
+        prefetch_factor=cfg.prefetch_factor,
+        windows_per_replay=cfg.windows_per_replay,
+        **loader_kwargs,
     )
     val_loader = make_loader(split=cfg.val_split, num_workers=0, **loader_kwargs)
 
