@@ -94,6 +94,9 @@ ignore = ["E501"]
 markers = [
     "integration: tests that launch external services or emulators",
 ]
+# 014 self-play RL modules are run as scripts (script dir on sys.path); mirror that
+# for pytest so tests can import the experiment's sibling modules by bare name.
+pythonpath = ["experiments/014_selfplay_rl"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["hal"]
