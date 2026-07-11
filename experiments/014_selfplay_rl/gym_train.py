@@ -72,7 +72,7 @@ PONG_ENV_KWARGS: Mapping[str, object] = {
 NetBundle = tuple[nn.Module, nn.Module, nn.Module]
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Preset:
     """Everything ``main`` needs that varies by task; built by the preset fns."""
 
@@ -272,6 +272,11 @@ def main(args: Args) -> None:
         ema.load_state_dict(ckpt["ema"])
         algo.load_state_dict(ckpt["algo"])
         counters["iter"], counters["frames"] = ckpt["iter"], ckpt["env_frames"]
+        if counters["iter"] >= iterations:
+            raise ValueError(
+                f"resume checkpoint is already at iter={counters['iter']} >= {iterations} total iterations "
+                f"({preset.gym.total_frames} frames); raise --total-frames to continue this run"
+            )
         logger.info(f"resumed from {args.resume} at iter={counters['iter']} frames={counters['frames']}")
 
     if args.wandb:
@@ -301,6 +306,9 @@ def main(args: Args) -> None:
         "ep_len": np.zeros(num_envs, dtype=np.int64),
     }
     start = time.time()
+    # sps counts only frames stepped THIS process: on --resume, counters["frames"] restores the
+    # lifetime total, and dividing that by post-resume elapsed would inflate sps by resume-point/elapsed.
+    frames_at_start = counters["frames"]
 
     def collect() -> tuple[VectorReplayBuffer, list[float], list[float]]:
         with snapshot_lock:
@@ -358,7 +366,7 @@ def main(args: Args) -> None:
         metrics = update_with_kl_stop(algo, buf, preset.ppo, on_epoch_end=advance_ema)
         counters["iter"] += 1
         counters["frames"] += horizon * num_envs
-        sps = counters["frames"] / (time.time() - start)
+        sps = (counters["frames"] - frames_at_start) / (time.time() - start)
         ret_mean = float(np.mean(ep_returns)) if ep_returns else float("nan")
         len_mean = float(np.mean(ep_lens)) if ep_lens else float("nan")
         logger.info(
