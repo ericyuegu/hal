@@ -7,6 +7,7 @@ runner keeps the collector at most one iteration ahead, runs every iteration
 exactly once in order, and propagates a collector exception.
 """
 
+import threading
 import time
 
 import numpy as np
@@ -41,7 +42,7 @@ def _policy(actor: MLPActor) -> ProbabilisticActorPolicy:
     )
 
 
-def _make_algo(cls, lr: float = 3e-4) -> tuple:
+def _make_algo(cls: type[PPO], lr: float = 3e-4) -> tuple[PPO, MLPActor, MLPCritic]:
     torch.manual_seed(0)
     actor, critic = MLPActor(), MLPCritic()
     algo = cls(
@@ -184,6 +185,31 @@ def test_pipeline_propagates_collector_exception() -> None:
         run_pipeline(collect=collect, learn=learn, iterations=10, overlap=True)
     # payloads produced before the failure were still learned in order
     assert learned == [0, 1, 2] or learned == [0, 1] or learned == [0]
+
+
+def test_pipeline_learner_exception_no_deadlock() -> None:
+    # Regression: learner raises while the collector is blocked put()-ing into the
+    # full maxsize-1 queue (steady state). The pipeline must propagate the learner's
+    # exception promptly (no infinite join) and leave no collector thread alive.
+    counter = {"c": 0}
+
+    def collect() -> int:
+        i = counter["c"]
+        counter["c"] += 1
+        return i  # instant -> collector races ahead and parks in the blocking put
+
+    def learn(i: int) -> None:
+        if i == 1:
+            time.sleep(0.05)  # let the collector reach the full-queue put
+            raise ValueError("learner boom")
+
+    start = time.monotonic()
+    with pytest.raises(ValueError, match="learner boom"):
+        run_pipeline(collect=collect, learn=learn, iterations=50, overlap=True)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 5.0  # bounded shutdown, not a hang on join()
+    assert all(t.name != "rl-collector" or not t.is_alive() for t in threading.enumerate())
 
 
 def test_pipeline_sync_matches_inline() -> None:

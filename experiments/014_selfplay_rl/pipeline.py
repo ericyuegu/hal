@@ -13,14 +13,18 @@ both guarded by a ``threading.Lock`` the caller shares between them. This runner
 stays payload-agnostic (gym buffers now, Melee rollout iterations later) and owns
 only the threading handshake, not what a payload is.
 
-A collector exception is re-raised on the main thread (fail loud): the collector
-never dies silently, and iterations always run exactly once, in order.
+Failure on either side is loud and prompt: a collector exception is re-raised on
+the main thread, and a learner exception sets a stop event the collector polls
+around its (bounded-wait) ``put``, so the thread winds down and the learner's
+traceback propagates instead of deadlocking against a full queue.
 """
 
 import queue
 import threading
 from collections.abc import Callable
+from typing import cast
 
+_POLL_SECONDS = 0.05
 _SENTINEL = object()
 
 
@@ -40,25 +44,46 @@ def run_pipeline[P](
         return
 
     handoff: queue.Queue[object] = queue.Queue(maxsize=1)
+    stop = threading.Event()
     collector_error: list[BaseException] = []
 
     def produce() -> None:
         try:
             for _ in range(iterations):
-                handoff.put(collect())
-        except BaseException as exc:  # propagate to the learner thread; never die silently
+                payload = collect()
+                while not stop.is_set():
+                    try:
+                        handoff.put(payload, timeout=_POLL_SECONDS)
+                        break
+                    except queue.Full:
+                        continue
+                if stop.is_set():
+                    return
+        except BaseException as exc:  # re-raised on the main thread; never die silently
             collector_error.append(exc)
-            handoff.put(_SENTINEL)
+
+    def next_payload(collector: threading.Thread) -> object:
+        while True:
+            try:
+                return handoff.get(timeout=_POLL_SECONDS)
+            except queue.Empty:
+                if collector.is_alive():
+                    continue
+                try:  # collector exited between our timeout and its final put — drain once
+                    return handoff.get_nowait()
+                except queue.Empty:
+                    return _SENTINEL  # collector died with an error; end the loop
 
     collector = threading.Thread(target=produce, name="rl-collector")
     collector.start()
     try:
         for _ in range(iterations):
-            payload = handoff.get()
+            payload = next_payload(collector)
             if payload is _SENTINEL:
                 break
-            learn(payload)  # type: ignore[arg-type]
+            learn(cast(P, payload))
     finally:
+        stop.set()  # unblock a collector waiting on a full queue so join() returns promptly
         collector.join()
 
     if collector_error:

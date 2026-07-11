@@ -20,6 +20,7 @@ import envpool
 import numpy as np
 import torch
 import tyro
+from envpool.python.envpool import EnvPoolMixin
 from loguru import logger
 from nets_gym import MLPActor
 from nets_gym import MLPCritic
@@ -59,7 +60,7 @@ def _sample(act_net: MLPActor, obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     return act.cpu().numpy(), dist.log_prob(act).cpu().numpy()
 
 
-def _make_env(task: str, num_envs: int, seed: int):
+def _make_env(task: str, num_envs: int, seed: int) -> EnvPoolMixin:
     return envpool.make(task, env_type="gymnasium", num_envs=num_envs, seed=seed)
 
 
@@ -123,16 +124,19 @@ def main(args: Args) -> None:
     ).to(device)
 
     snapshot_lock = threading.Lock()
+    # Only the learner thread touches this deque; the collector reports finished
+    # episodes inside its payload (no cross-thread mutation during np.mean).
     ep_returns: deque[float] = deque(maxlen=100)
     rollout = {"obs": env.reset()[0], "ep_ret": np.zeros(num_envs, dtype=np.float64)}
     counters = {"iter": 0, "frames": 0}
     start = time.time()
 
-    def collect() -> VectorReplayBuffer:
+    def collect() -> tuple[VectorReplayBuffer, list[float]]:
         with snapshot_lock:
             ema.copy_to(act_net)
         buf = VectorReplayBuffer(horizon * num_envs, buffer_num=num_envs)
         obs, ep_ret = rollout["obs"], rollout["ep_ret"]
+        finished: list[float] = []
         with torch.inference_mode():
             for _ in range(horizon):
                 act, logp = _sample(act_net, obs)
@@ -152,16 +156,19 @@ def main(args: Args) -> None:
                 ep_ret += rew
                 done = term | trunc
                 for i in np.where(done)[0]:
-                    ep_returns.append(float(ep_ret[i]))
+                    finished.append(float(ep_ret[i]))
                     ep_ret[i] = 0.0
                 obs = obs_next.copy()
                 if done.any():
                     reset_obs, _ = env.reset(ids[done])
                     obs[done] = reset_obs
         rollout["obs"] = obs
-        return buf
+        return buf, finished
 
-    def learn(buf: VectorReplayBuffer) -> None:
+    def learn(payload: tuple[VectorReplayBuffer, list[float]]) -> None:
+        buf, finished = payload
+        ep_returns.extend(finished)
+
         def advance_ema() -> None:
             with snapshot_lock:
                 ema.update(learner_actor)
