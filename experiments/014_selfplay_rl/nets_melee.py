@@ -323,7 +323,7 @@ class Block(nn.Module):
 @runtime_checkable
 class Critic(Protocol):
     """Value-estimation seam. The default reads the ego trunk hidden; a centralized
-    (MAPPO) critic that sees both ports slots in behind the same call without
+    (MAPPO) critic that sees both ports can slot in behind the same call without
     touching the actor path."""
 
     def values(self, hidden: Float[Tensor, "*batch d_model"]) -> Float[Tensor, "*batch"]: ...

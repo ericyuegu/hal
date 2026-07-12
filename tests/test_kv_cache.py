@@ -97,7 +97,7 @@ def test_rebuild_restores_exact_windowed_forward() -> None:
 
 
 def test_drift_diagnostic_between_rebuilds() -> None:
-    # No assert: quantify how far post-eviction incremental drifts from the every-frame
+    # Quantify how far post-eviction incremental drifts from the every-frame
     # windowed forward (012's semantics) at eviction depth. Informs refresh_every.
     net = _make_net()
     L = CFG.L_ctx
@@ -114,7 +114,10 @@ def test_drift_diagnostic_between_rebuilds() -> None:
                 d = float((net.policy_logits(h_inc) - net.policy_logits(h_full)).abs().max())
                 max_dlogit = max(max_dlogit, d)
     print(f"\n[drift] max |Δlogit| at eviction depth over {N - L} frames: {max_dlogit:.4g}")
-    assert max_dlogit >= 0.0  # diagnostic only
+    # Post-eviction incremental MUST differ from the every-frame windowed forward
+    # (their deep K/V see different histories) — zero drift would mean the
+    # diagnostic is measuring nothing (e.g. eviction never engaged).
+    assert max_dlogit > 0.0
 
 
 def test_reset_slot_behaves_cold() -> None:
@@ -161,3 +164,31 @@ def test_mixed_length_batch_matches_per_slot() -> None:
             solo.step_incremental(net, torch.tensor([0]), _frame(seqs[i], t))
         h_solo = solo.step_incremental(net, torch.tensor([0]), _frame(seqs[i], n))
         assert torch.allclose(h_joint[i : i + 1], h_solo, atol=ATOL), f"slot {i} mismatch in batch"
+
+
+def test_all_slots_path_mixed_lengths_after_reset() -> None:
+    # The slot_ids=None fast path (cache views, no gather) with 3 slots at MIXED
+    # lengths — one mid-rollout reset_slot — must match per-slot stepping.
+    net = _make_net()
+    lengths = [4, 6, 9]
+    seqs = [_seq_features(1, max(lengths) + 1, seed=20 + i) for i in range(3)]
+
+    cache = SlotCaches(net, n_slots=3)
+    for i, n in enumerate(lengths):
+        for t in range(n):
+            cache.step_incremental(net, torch.tensor([i]), _frame(seqs[i], t))
+    cache.reset_slot(1)  # slot 1 cold-starts: its next joint step is its frame 0
+    lengths[1] = 0
+
+    joint_feats = {
+        k: torch.cat([seqs[i][k][:, lengths[i] : lengths[i] + 1] for i in range(3)], dim=0) for k in seqs[0]
+    }
+    joint_ctx = Context(features=joint_feats, ctx_pad=torch.zeros(3, dtype=torch.long))
+    h_joint = cache.step_incremental(net, None, joint_ctx)  # all-slots view path
+
+    for i, n in enumerate(lengths):
+        solo = SlotCaches(net, n_slots=1)
+        for t in range(n):
+            solo.step_incremental(net, torch.tensor([0]), _frame(seqs[i], t))
+        h_solo = solo.step_incremental(net, torch.tensor([0]), _frame(seqs[i], n))
+        assert torch.allclose(h_joint[i : i + 1], h_solo, atol=ATOL), f"slot {i} mismatch on all-slots path"

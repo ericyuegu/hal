@@ -16,7 +16,10 @@ only the threading handshake, not what a payload is.
 Failure on either side is loud and prompt: a collector exception is re-raised on
 the main thread, and a learner exception sets a stop event the collector polls
 around its (bounded-wait) ``put``, so the thread winds down and the learner's
-traceback propagates instead of deadlocking against a full queue.
+traceback propagates instead of deadlocking against a full queue. One caveat: a
+learner exception still waits out any in-flight ``collect()`` before surfacing —
+there is no generic way to interrupt a running collect, so shutdown latency is
+bounded by one collection iteration.
 """
 
 import queue

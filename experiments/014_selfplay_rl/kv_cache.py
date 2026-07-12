@@ -56,7 +56,10 @@ class SlotCaches:
     ``cap`` = ``L_ctx``; ``max_pos`` bounds absolute RoPE positions between rebuilds
     (a full forward resets ``next_pos`` back to the window length, so with periodic
     rebuild the position never exceeds ``L_ctx + refresh_every``). Positions past the
-    table fail loud — the signal to rebuild more often."""
+    table fail loud — the signal to rebuild more often. The bounds check reads
+    ``_next_pos_cpu``, a plain-int mirror of ``next_pos`` kept in lockstep by
+    step/rebuild/reset, so the per-frame hot path never syncs the device tensor
+    (``pos.max()`` on a CUDA tensor would stall the stream every frame)."""
 
     def __init__(
         self, net: PolicyValueNet, n_slots: int, *, device: str | torch.device = "cpu", max_pos: int = 0
@@ -75,6 +78,7 @@ class SlotCaches:
         self.length = torch.zeros(n_slots, dtype=torch.long, device=self.device)
         self.write_idx = torch.zeros(n_slots, dtype=torch.long, device=self.device)  # ring cursor
         self.next_pos = torch.zeros(n_slots, dtype=torch.long, device=self.device)
+        self._next_pos_cpu = [0] * n_slots  # host mirror of next_pos (bounds check w/o device sync)
         self._rows = torch.arange(n_slots, device=self.device)
         # Rope table, gathered per-slot in the incremental path. inv_freq is identical
         # across blocks (deterministic from head_dim), so one table serves every layer.
@@ -90,11 +94,14 @@ class SlotCaches:
         self.length[i] = 0
         self.write_idx[i] = 0
         self.next_pos[i] = 0
+        self._next_pos_cpu[i] = 0
 
-    def _rope_at(self, pos: Int[Tensor, " n"]) -> tuple[Tensor, Tensor]:
-        if int(pos.max()) >= self.max_pos:
+    def _rope_at(self, pos: Int[Tensor, " n"], pos_max: int) -> tuple[Tensor, Tensor]:
+        """``pos_max`` is the host-side max of ``pos`` (from ``_next_pos_cpu``), so the
+        fail-loud table-overrun check costs no device sync on the per-frame path."""
+        if pos_max >= self.max_pos:
             raise IndexError(
-                f"RoPE position {int(pos.max())} >= table size {self.max_pos}; rebuild more often "
+                f"RoPE position {pos_max} >= table size {self.max_pos}; rebuild more often "
                 f"(refresh_every) or raise max_pos"
             )
         cos = self.rope_cos[pos][:, None, None, :]  # [n, 1, 1, half]
@@ -113,11 +120,15 @@ class SlotCaches:
         rollout path — no gather copy); an explicit index steps a subset via gather."""
         all_slots = slot_ids is None
         ids = self._rows if all_slots else slot_ids
+        # Host-side slot indices for the CPU next_pos mirror. tolist() on the subset
+        # path can sync a CUDA slot_ids, but that path already gathers K/V copies;
+        # the all-slots rollout hot path stays sync-free.
+        ids_cpu = range(self.n_slots) if all_slots else [int(i) for i in slot_ids.tolist()]
         n = ids.shape[0]
         if ctx.batch != n:
             raise ValueError(f"ctx batch {ctx.batch} != slot count {n}")
         pos = self.next_pos[ids]  # [n] absolute position of the new token
-        cos, sin = self._rope_at(pos)
+        cos, sin = self._rope_at(pos, max(self._next_pos_cpu[i] for i in ids_cpu))
 
         # Per-slot ring bookkeeping (same across layers -> computed once).
         wpos = self.write_idx[ids]  # [n] ring slot the new token overwrites (oldest)
@@ -141,6 +152,8 @@ class SlotCaches:
         self.length[ids] = new_len
         self.next_pos[ids] = pos + 1
         self.write_idx[ids] = (wpos + 1) % self.cap
+        for i in ids_cpu:
+            self._next_pos_cpu[i] += 1
         return rmsnorm(x)[:, 0]
 
     @jaxtyped(typechecker=beartype)
@@ -174,3 +187,5 @@ class SlotCaches:
         self.length[slot_ids] = valid
         self.write_idx[slot_ids] = valid % self.cap
         self.next_pos[slot_ids] = Lw
+        for i in slot_ids.tolist():
+            self._next_pos_cpu[i] = Lw
