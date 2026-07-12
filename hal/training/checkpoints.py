@@ -97,20 +97,29 @@ def save_checkpoint(
     cfg: dict,
     wandb_id: str | None,
     uploader: BackgroundUploader | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Write a resumable checkpoint (model + optimizer + scheduler + config +
-    wandb id) and, if an uploader is given, enqueue it for R2 sync."""
-    torch.save(
-        {
-            "step": step,
-            "model": model.state_dict(),
-            "opt": opt.state_dict(),
-            "sched": sched.state_dict(),
-            "cfg": cfg,
-            "wandb_id": wandb_id,
-        },
-        path,
-    )
+    wandb id) and, if an uploader is given, enqueue it for R2 sync.
+
+    ``extra`` (if given) is merged into the payload dict so callers can persist
+    run-specific state (e.g. the RL learner's EMA weights, value-warmup flag)
+    alongside the standard resume fields. Reserved keys (step/model/opt/sched/
+    cfg/wandb_id) must not appear in ``extra``."""
+    payload: dict[str, Any] = {
+        "step": step,
+        "model": model.state_dict(),
+        "opt": opt.state_dict(),
+        "sched": sched.state_dict(),
+        "cfg": cfg,
+        "wandb_id": wandb_id,
+    }
+    if extra is not None:
+        clashes = payload.keys() & extra.keys()
+        if clashes:
+            raise ValueError(f"extra checkpoint keys clash with reserved payload keys: {sorted(clashes)}")
+        payload.update(extra)
+    torch.save(payload, path)
     print(f"[ckpt] saved {path}", flush=True)
     if uploader is not None:
         uploader.upload(path)
