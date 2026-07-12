@@ -80,21 +80,34 @@ def terminal_bonus(
     *,
     terminated: bool,
 ) -> float:
-    """``+win_bonus`` if ego won, ``-win_bonus`` if lost, 0 on tie or truncation.
+    """``+win_bonus`` if ego won, ``-win_bonus`` if lost, 0 on a genuine tie or truncation.
+
+    Frame contract: ``final_flat`` MUST be the last pre-reset frame of the ENDED
+    match. Under instant-restart the boundary obs after a terminated episode is
+    the NEXT match's first frame (finite, both sides back at full stocks — reads
+    as a tie), and an IN_GAME→menu transition frame carries NaN per-port fields;
+    handing either one here would silently zero the bonus on every match.
 
     Only a genuine episode end (``terminated``) can pay the bonus — a rollout cut
     at the frame budget (``terminated=False``) always returns 0 so the learner
-    doesn't credit a win/loss it never saw. The winner is decided by remaining
-    stocks at ``final_flat``; a NaN transition frame (either stock non-finite) is
-    treated as undecided and pays 0, guarding against the IN_GAME→menu frames that
-    carry masked per-port fields."""
+    doesn't credit a win/loss it never saw. On a terminated episode the correct
+    frame always carries a decidable stock reading, so a non-finite stock raises
+    (wrong frame) rather than silently paying 0. Equal stocks pay 0: the genuine
+    timeout tie has equal-but-depleted stocks. Equal FULL stocks (4-4) is the
+    wrong-frame symptom, but it is finite and indistinguishable from a (never
+    occurring in practice) 4-4 timeout, so it cannot be detected here — the frame
+    contract above is load-bearing."""
     if not terminated:
         return 0.0
     opp = _opp_port(ego_port)
     ego_stock = final_flat[f"p{ego_port}_stock"]
     opp_stock = final_flat[f"p{opp}_stock"]
     if not (math.isfinite(ego_stock) and math.isfinite(opp_stock)):
-        return 0.0
+        raise ValueError(
+            f"terminal_bonus: non-finite stock reading (p{ego_port}_stock={ego_stock}, p{opp}_stock={opp_stock}) "
+            "on a terminated episode — final_flat must be the last pre-reset frame of the ended match, not an "
+            "IN_GAME→menu transition frame or the next match's first frame"
+        )
     if ego_stock > opp_stock:
         return cfg.win_bonus
     if ego_stock < opp_stock:

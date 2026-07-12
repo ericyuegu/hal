@@ -9,6 +9,7 @@ exactly once with the correct sign.
 import math
 
 import numpy as np
+import pytest
 from rewards import step_reward
 from rewards import terminal_bonus
 from rl_config import RewardConfig
@@ -98,6 +99,7 @@ def test_terminal_bonus_win_loss_tie_truncation() -> None:
     tie = {"p1_percent": 0.0, "p2_percent": 0.0, "p1_stock": 1.0, "p2_stock": 1.0}
     assert terminal_bonus(win, 1, cfg, terminated=True) == 2.0
     assert terminal_bonus(loss, 1, cfg, terminated=True) == -2.0
+    # Equal-but-depleted stocks = the genuine timeout tie -> legitimate 0.
     assert terminal_bonus(tie, 1, cfg, terminated=True) == 0.0
     # Truncation never pays a bonus, even from a winning frame.
     assert terminal_bonus(win, 1, cfg, terminated=False) == 0.0
@@ -105,7 +107,13 @@ def test_terminal_bonus_win_loss_tie_truncation() -> None:
     assert terminal_bonus(loss, 2, cfg, terminated=True) == 2.0
 
 
-def test_terminal_bonus_nan_frame_is_undecided() -> None:
+def test_terminal_bonus_nan_on_terminated_raises() -> None:
+    # A terminated match always has a decidable stock reading on the correct
+    # (last pre-reset) frame; NaN there means the caller handed the wrong frame
+    # (IN_GAME->menu transition or the next match's first frame) -> fail loud.
     cfg = RewardConfig(win_bonus=2.0)
     nan_frame = {"p1_percent": 0.0, "p2_percent": 0.0, "p1_stock": NAN, "p2_stock": 1.0}
-    assert terminal_bonus(nan_frame, 1, cfg, terminated=True) == 0.0
+    with pytest.raises(ValueError, match="non-finite stock"):
+        terminal_bonus(nan_frame, 1, cfg, terminated=True)
+    # Truncation is exempt: the budget can cut anywhere, including on a masked frame.
+    assert terminal_bonus(nan_frame, 1, cfg, terminated=False) == 0.0

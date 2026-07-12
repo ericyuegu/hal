@@ -9,6 +9,7 @@ scatter map round-trips, and a window's stacked features are byte-identical to
 """
 
 import numpy as np
+from nets_melee import N_GROUPS
 from rollout import FinalizedStream
 from rollout import build_windows
 from rollout import gae_inputs
@@ -22,7 +23,6 @@ from hal.training.closed_loop import _SlotState
 from hal.training.features import A_DIM
 from hal.wire import POST_FIELD_SUFFIXES
 
-N_GROUPS = 4
 GAMMA = 0.997
 LAMBDA = 0.95
 

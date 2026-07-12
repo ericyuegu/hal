@@ -222,7 +222,13 @@ def _tile_end_aligned(lo: int, hi: int, L_ctx: int) -> list[tuple[int, int]]:
 
 def build_windows(stream: FinalizedStream, L_ctx: int, *, stream_id: int = 0) -> list[Window]:
     """Split ``stream`` at episode boundaries and tile each segment into ``<= L_ctx``
-    end-aligned windows (see module docstring). Empty when the stream has no steps."""
+    end-aligned windows (see module docstring). Empty when the stream has no steps.
+
+    Ratio-context approximation: mid-segment window positions recompute logp from
+    only the within-window context, while collection saw a rolling ``L_ctx`` reaching
+    further back — exact only while the episode still fits one window (pre-eviction).
+    ``ratio_dev_epoch0`` from ``melee_ppo_update`` is the standing diagnostic for how
+    much this (plus policy lag) perturbs the epoch-0 ratios."""
     T = stream.n_transitions
     if T == 0:
         return []

@@ -231,6 +231,11 @@ def melee_ppo_update(
             adv = batch.adv
             if _ADV_NORM:
                 adv_valid = adv[valid]
+                if adv_valid.numel() < 2:
+                    raise ValueError(
+                        f"advantage normalization needs >=2 valid positions, got {adv_valid.numel()} "
+                        "(ddof=1 std is NaN below that) — collect more transitions or use bigger minibatches"
+                    )
                 adv = (adv - adv_valid.mean()) / (adv_valid.std() + _ADV_NORM_EPS)
             ratio = (logp - batch.logp_old).exp()
             surr1 = ratio * adv
