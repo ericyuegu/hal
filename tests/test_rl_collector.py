@@ -321,6 +321,97 @@ def test_finalize_adjacent_reset_warns_bonus_lost_and_recovers() -> None:
     assert not st.stream._terminated[-1]
 
 
+# --- matchup rotation (A) -----------------------------------------------------
+def test_wave_matchups_tile_the_prior_in_nonoverlapping_slices() -> None:
+    """Each wave's matchups are the next contiguous ``n_boots`` slice of the prior; because
+    ``matchups_for`` is prefix-stable, successive waves tile it with no overlap — so a run
+    that reboots waves rotates through the full training distribution, not one fixed slice."""
+    from melee_train import wave_matchups
+
+    from hal.eval.matchups import matchups_for
+
+    n = 4
+    full = matchups_for(3 * n)  # first 12 prior matchups, in the deterministic prefix order
+    for w in range(3):
+        wave = wave_matchups(w, n)
+        assert len(wave) == n
+        got = [(m.players[0].character, m.players[1].character) for m in wave]
+        assert got == full[w * n : (w + 1) * n]
+
+
+def test_reset_slots_rotation_rebinds_fresh_stream_matchup() -> None:
+    """The wave-reboot rotation path: ``reset_slots(matchups=...)`` orphans the in-flight
+    stream under its OLD matchup and starts the fresh stream on the NEW slice's matchup."""
+    pol, (slot,), _ = _make_policy(rollout_frames=100)
+    old = pol.state[slot].matchup
+    for t in range(4):
+        pol(t, {slot: _frame(t, p1_pct=t, p2_pct=t)})
+    assert pol.state[slot].stream.n_recorded == 3  # in flight
+
+    new_meta = {slot: {"stage": 2, "character": {1: 22, 2: 1}}}
+    pol.reset_slots([slot], matchups=new_meta)
+    assert pol._orphans[-1].matchup == old  # orphaned stream keeps the matchup it was collected under
+    assert pol.state[slot].matchup == new_meta[slot]  # slot rebound to the new slice
+    assert pol.state[slot].stream.matchup == new_meta[slot]  # fresh stream carries it forward
+
+
+def test_eval_policy_steps_identically_to_collector() -> None:
+    """Parity: ``EvalBatchPolicy`` and ``RLBatchPolicy`` hand-duplicate the same three-pass
+    stepping (reset detect, hist caps, ``ego_hist[:-1]`` rebuild, refresh clock). Driven with
+    the same net/seed over one canned obs sequence (with a reset and several rebuilds), they
+    must emit identical actions AND evolve identical KV-cache state — the standing equivalence
+    check for the duplicated stepping cores."""
+    from melee_eval import EvalBatchPolicy
+
+    stats = _stats()
+    torch.manual_seed(0)
+    net = PolicyValueNet(CFG).eval()  # one net; each policy gets its own seeded handle over it
+    rl_log: list = []
+    ev_log: list = []
+    rl_handle = _RecordingHandle(NetActingPolicy(net, n_slots=1, device="cpu", seed=0), rl_log)
+    ev_handle = _RecordingHandle(NetActingPolicy(net, n_slots=1, device="cpu", seed=0), ev_log)
+    slot = Slot(0, 1)
+    refresh = 4
+    rl_pol = RLBatchPolicy(
+        handles={"ema": rl_handle},
+        assign=lambda s: "ema",
+        slots=[slot],
+        ego_port_of=lambda s: s.port,
+        matchup_of=lambda s: {"stage": 3, "character": {1: 1, 2: 1}},
+        reward_cfg=RewardConfig(),
+        stats=stats,
+        L_ctx=CFG.L_ctx,
+        refresh_every=refresh,
+        rollout_frames=10_000,
+    )
+    ev_pol = EvalBatchPolicy(
+        handles={"ema": ev_handle},
+        handle_of=lambda s: "ema",
+        stats=stats,
+        L_ctx=CFG.L_ctx,
+        refresh_every=refresh,
+    )
+    seq = [_frame(i, p1_pct=i, p2_pct=2 * i, p2_stock=(4.0 if i < 5 else 1.0)) for i in range(6)]
+    seq.append(_frame(0))  # id drop -> instant-restart reset (both must cold-start the cache)
+    seq += [_frame(i, p1_pct=float(i)) for i in range(1, 10)]  # post-reset frames span several rebuilds
+
+    for t, f in enumerate(seq):
+        rl_pol(t, {slot: f})
+        ev_pol(t, {slot: f})
+
+    assert len(rl_log) == len(ev_log) == len(seq)
+    for (_, a_rl, lp_rl, v_rl), (_, a_ev, lp_ev, v_ev) in zip(rl_log, ev_log, strict=True):
+        assert np.array_equal(a_rl, a_ev)  # identical sampled action indices
+        assert np.array_equal(v_rl, v_ev)  # identical dequantized action vectors
+        np.testing.assert_allclose(lp_rl, lp_ev, rtol=0, atol=0)  # identical behavior log-probs
+    rc, ec = rl_handle.inner.caches, ev_handle.inner.caches
+    assert torch.equal(rc.length, ec.length)  # cache lengths in lockstep through the reset + rebuilds
+    assert torch.equal(rc.write_idx, ec.write_idx)
+    assert torch.equal(rc.next_pos, ec.next_pos)
+    assert torch.equal(rc.K, ec.K)  # identical K/V ring contents
+    assert torch.equal(rc.V, ec.V)
+
+
 # --- real-Dolphin integration ------------------------------------------------
 WARM_START = Path(
     "runs/260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024/final.pt"
@@ -338,7 +429,7 @@ def test_collector_real_dolphin() -> None:
     from melee_collector import drive_rl
     from nets_melee import load_il_policy
 
-    from hal.eval.harness import _build_session
+    from hal.eval.harness import build_session
     from hal.eval.harness import default_session_cfg
     from hal.paths import EMULATOR_PATH
     from hal.paths import ISO_PATH
@@ -391,13 +482,13 @@ def test_collector_real_dolphin() -> None:
     )
 
     def build_boot(i: int, attempt: int):
-        return _build_session(session_cfg, slippi_port=51461 + (attempt % 8) * n_boots + i, replay_dir=None)
+        return build_session(session_cfg, slippi_port=51461 + (attempt % 8) * n_boots + i, replay_dir=None)
 
     q: queue.Queue = queue.Queue(maxsize=1)
     stop = threading.Event()
     drive_rl(
         build_boot,
-        matchups,
+        lambda _w: matchups,
         [ports] * n_boots,
         pol,
         n_iterations=1,

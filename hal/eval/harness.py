@@ -83,10 +83,12 @@ def default_session_cfg(replay_dir: Path | None = None, *, instant_match_restart
     )
 
 
-def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None) -> Session:
+def build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None) -> Session:
     """Construct (don't enter) a Session from a SessionConfig, overriding the
     two fields that must differ per concurrent instance: ``slippi_port`` and
-    ``replay_dir``."""
+    ``replay_dir``.
+
+    Public API: the 014 RL training entry builds its self-play boots through this."""
     return Session(
         iso_path=session_cfg.iso_path,
         dolphin_path=session_cfg.dolphin_path,
@@ -114,7 +116,7 @@ def run_match(
     """Drive one match end-to-end. Returns the trajectory, or None if the
     Session raised (logged at WARNING)."""
     try:
-        with _build_session(session_cfg, slippi_port=51441, replay_dir=session_cfg.replay_dir) as s:
+        with build_session(session_cfg, slippi_port=51441, replay_dir=session_cfg.replay_dir) as s:
             return drive(s, matchup, sources, max_frames=max_frames)
     except Exception as e:
         logger.warning(f"run_match: Session crashed: {e!r}")
@@ -145,7 +147,7 @@ def _drive_wave(
             if base_replay is not None:
                 replay_dir = base_replay / f"boot_{gi:03d}"
                 replay_dir.mkdir(parents=True, exist_ok=True)
-            sessions.append(_build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir))
+            sessions.append(build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir))
         boots = drive_vec(
             sessions,
             [matches[gi] for gi in indices],

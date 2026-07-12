@@ -65,8 +65,8 @@ from hal.sim.trajectory import Trajectory
 from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
 from hal.training.canonical import flatten_canonical_frame
-from hal.training.closed_loop import _PORT_TO_PREFIX
-from hal.training.closed_loop import _live_batch_from_rolling
+from hal.training.closed_loop import PORT_TO_PREFIX
+from hal.training.closed_loop import live_batch_from_rolling
 from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import Context
 from hal.training.features import action_vec_to_controller
@@ -309,7 +309,7 @@ class EvalBatchPolicy:
             if len(st.flat_hist) > self.L_ctx:
                 st.flat_hist.pop(0)
             prev_action = st.ego_hist[-1] if st.ego_hist else NEUTRAL_ACTION
-            tokens[st.handle].append(_token_features(cur_flat, prev_action, _PORT_TO_PREFIX[st.ego_port]))
+            tokens[st.handle].append(_token_features(cur_flat, prev_action, PORT_TO_PREFIX[st.ego_port]))
 
         # PASS 2: one batched incremental decode per handle; record only the ego action.
         actions: dict[Slot, object] = {}
@@ -342,7 +342,7 @@ class EvalBatchPolicy:
         for slot in slots:
             st = self.state[slot]
             per_slot.append(
-                _live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], _PORT_TO_PREFIX[st.ego_port], self.L_ctx)
+                live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], PORT_TO_PREFIX[st.ego_port], self.L_ctx)
             )
             ctx_pad.append(max(0, self.L_ctx - len(st.flat_hist)))
         stacked = {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
@@ -436,6 +436,7 @@ def run_h2h(
     readouts: list[H2HMatch] = []
     n_discarded = 0
     n_censored = 0
+    n_dropped = 0  # boots whose matchup exhausted its requeues without ever producing a match
     boot0 = 0  # global boot counter: the parity identity, advancing over every boot launched
     wave = 0
     while len(readouts) < n_matches_target and queue:
@@ -498,6 +499,7 @@ def run_h2h(
                     queue.append((matchup, attempts + 1))
                     logger.warning(f"h2h: boot {boot0 + j} produced no match; re-queued (attempt {attempts + 1})")
                 else:
+                    n_dropped += 1
                     logger.warning(f"h2h: boot {boot0 + j} failed {attempts + 1} times; dropping its matchup")
                 continue
             n_censored += 1  # the boot's final segment: in progress at the budget, never finished
@@ -518,7 +520,11 @@ def run_h2h(
         raise RuntimeError("head-to-head produced no valid matches — every segment was discarded or censored")
     if n_discarded:
         logger.warning(f"h2h: discarded {n_discarded} non-finite/degenerate match segment(s)")
-    return {**summarize_h2h(readouts, n_discarded=n_discarded, seed=seed), "n_censored": n_censored}
+    return {
+        **summarize_h2h(readouts, n_discarded=n_discarded, seed=seed),
+        "n_censored": n_censored,
+        "n_dropped_boots": n_dropped,
+    }
 
 
 # =============================================================================

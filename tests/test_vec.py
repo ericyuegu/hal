@@ -273,7 +273,7 @@ def test_run_matches_vec_multi_wave(monkeypatch: pytest.MonkeyPatch) -> None:
         (VecMatch(matchup=_matchup((1, 2)), model_ports=(1, 2)), 11),
     ]
     matches = [m for m, _ in specs]
-    # _build_session is called once per match, in match order (wave by wave,
+    # build_session is called once per match, in match order (wave by wave,
     # offset by offset) — hand back a fake whose length identifies the match.
     fakes = iter(FakeSession(length=n, ports=(1, 2)) for _, n in specs)
     assigned_ports: list[int] = []
@@ -282,7 +282,7 @@ def test_run_matches_vec_multi_wave(monkeypatch: pytest.MonkeyPatch) -> None:
         assigned_ports.append(slippi_port)
         return next(fakes)
 
-    monkeypatch.setattr("hal.eval.harness._build_session", fake_build)
+    monkeypatch.setattr("hal.eval.harness.build_session", fake_build)
 
     waves_built = 0
 
@@ -310,7 +310,7 @@ def test_run_matches_vec_isolates_a_policy_failure(monkeypatch: pytest.MonkeyPat
     # whole wave is logged-and-skipped rather than aborting the sweep).
     matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,)) for _ in range(4)]
     fakes = iter(FakeSession(length=5, ports=(1, 2)) for _ in range(4))
-    monkeypatch.setattr("hal.eval.harness._build_session", lambda *a, **k: next(fakes))
+    monkeypatch.setattr("hal.eval.harness.build_session", lambda *a, **k: next(fakes))
 
     waves_built = 0
 
@@ -345,7 +345,7 @@ def test_run_matches_vec_retries_failed_start(monkeypatch: pytest.MonkeyPatch) -
         ports.append(slippi_port)
         return next(seq)
 
-    monkeypatch.setattr("hal.eval.harness._build_session", fake_build)
+    monkeypatch.setattr("hal.eval.harness.build_session", fake_build)
     cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
     trajs = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, base_slippi_port=51441)
 
@@ -364,7 +364,7 @@ def test_run_matches_vec_gives_up_after_retries(monkeypatch: pytest.MonkeyPatch)
         builds += 1
         return _StartFails(length=5, ports=(1, 2))
 
-    monkeypatch.setattr("hal.eval.harness._build_session", fake_build)
+    monkeypatch.setattr("hal.eval.harness.build_session", fake_build)
     cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
     trajs = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, start_retries=2)
 

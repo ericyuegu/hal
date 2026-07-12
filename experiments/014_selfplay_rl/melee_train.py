@@ -40,6 +40,7 @@ from melee_collector import IterationPayload
 from melee_collector import NetActingPolicy
 from melee_collector import RLBatchPolicy
 from melee_collector import drive_rl
+from melee_collector import matchup_meta
 from nets_melee import ArchConfig
 from nets_melee import PolicyValueNet
 from nets_melee import load_il_policy
@@ -60,7 +61,7 @@ from rollout import scatter_gae
 
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.harness import SessionConfig
-from hal.eval.harness import _build_session
+from hal.eval.harness import build_session
 from hal.eval.harness import default_session_cfg
 from hal.eval.matchups import matchups_for
 from hal.sim.session import Matchup
@@ -115,7 +116,14 @@ def _apply_smoke(args: Args) -> Args:
     # (<0.05); tiny streams would be dominated by the cross-iteration carryover mismatch.
     return dataclasses.replace(
         args,
-        rl=dataclasses.replace(args.rl, n_boots=2, rollout_frames=2048, refresh_every=64, value_warmup_iters=2),
+        rl=dataclasses.replace(
+            args.rl,
+            n_boots=2,
+            rollout_frames=2048,
+            refresh_every=64,
+            value_warmup_iters=2,
+            reboot_every_iters=2,  # exercise wave-reboot matchup rotation within the 5-iter smoke
+        ),
         pipeline=PipelineConfig(overlap=False),
         total_iterations=5,
         ckpt_every_iters=5,
@@ -198,32 +206,29 @@ def _rollout_stats(iteration: RolloutIteration) -> dict[str, float]:
 
 
 # --- session wiring -----------------------------------------------------------
-def _matchups(n_boots: int) -> list[Matchup]:
-    """One self-play ``Matchup`` per boot from the training character prior; both ports
-    model-driven (cpu_level 0), seeded on Battlefield (instant-restart randomizes after)."""
-    out: list[Matchup] = []
-    for ego_char, opp_char in matchups_for(n_boots):
-        out.append(
-            Matchup(
-                stage=PRIOR_SWEEP_SEED_STAGE,
-                players=(
-                    PlayerSetup(port=1, character=ego_char, cpu_level=0),
-                    PlayerSetup(port=2, character=opp_char, cpu_level=0),
-                ),
-            )
+def wave_matchups(wave: int, n_boots: int) -> list[Matchup]:
+    """The self-play ``Matchup``s for wave ``wave``: the ``wave``-th contiguous ``n_boots``
+    slice of the training-prior matchups. ``matchups_for`` is prefix-stable, so
+    ``matchups_for((wave + 1) * n_boots)[wave * n_boots:]`` is exactly this wave's slice —
+    successive waves tile the prior with no overlap, so across wave reboots the run rotates
+    through the FULL training matchup distribution rather than self-playing one fixed slice.
+    Both ports model-driven (cpu_level 0), seeded on Battlefield (instant-restart randomizes
+    the stage after)."""
+    prior = matchups_for((wave + 1) * n_boots)[wave * n_boots :]
+    return [
+        Matchup(
+            stage=PRIOR_SWEEP_SEED_STAGE,
+            players=(
+                PlayerSetup(port=1, character=ego_char, cpu_level=0),
+                PlayerSetup(port=2, character=opp_char, cpu_level=0),
+            ),
         )
-    return out
+        for ego_char, opp_char in prior
+    ]
 
 
 def _slot_matchups(matchups: list[Matchup], ports: tuple[int, ...]) -> dict[Slot, dict]:
-    return {
-        Slot(i, p): {
-            "stage": int(m.stage.value),
-            "character": {pl.port: int(pl.character.value) for pl in m.players},
-        }
-        for i, m in enumerate(matchups)
-        for p in ports
-    }
+    return {Slot(i, p): matchup_meta(m) for i, m in enumerate(matchups) for p in ports}
 
 
 def _boot_builder(session_cfg: SessionConfig, n_boots: int, base_port: int, replay_root: Path | None) -> BuildBoot:
@@ -237,7 +242,7 @@ def _boot_builder(session_cfg: SessionConfig, n_boots: int, base_port: int, repl
             replay_dir = replay_root / f"boot_{i:03d}"
             replay_dir.mkdir(parents=True, exist_ok=True)
         port = base_port + (attempt % 8) * n_boots + i
-        return _build_session(session_cfg, slippi_port=port, replay_dir=replay_dir)
+        return build_session(session_cfg, slippi_port=port, replay_dir=replay_dir)
 
     return build
 
@@ -257,6 +262,11 @@ def _resnapshot_ema(ema: EMAWeights, module: torch.nn.Module) -> None:
 def main(args: Args) -> None:
     if args.smoke:
         args = _apply_smoke(args)
+    if args.temp != 1.0:
+        raise ValueError(
+            f"temp must be 1.0 for training, got {args.temp}: NetActingPolicy records temperature-scaled logp "
+            "but melee_ppo_update recomputes with raw logits, so any other temp silently corrupts the PPO ratios"
+        )
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -284,7 +294,7 @@ def main(args: Args) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     replay_root = ckpt_dir / "replays"
 
-    counters = {"iter": 0, "transitions": 0}
+    counters = {"iter": 0, "transitions": 0, "empty_iters": 0}
     total_iters = args.total_iterations
     wandb_id = None
     if args.resume is not None:
@@ -345,7 +355,7 @@ def main(args: Args) -> None:
         seed=args.seed,
         max_pos=cfg.L_ctx + args.rl.refresh_every + 8,
     )
-    matchups = _matchups(args.rl.n_boots)
+    matchups = wave_matchups(0, args.rl.n_boots)
     slot_matchup = _slot_matchups(matchups, ports)
     slots = list(slot_matchup)
     pol = RLBatchPolicy(
@@ -378,7 +388,12 @@ def main(args: Args) -> None:
         t_learn = time.monotonic()  # learner_s_per_iter includes the value pass below
         windows, vdiag = _prepare_windows(learner, iteration, stats, args.ppo, device)
         if not windows:
-            logger.warning("learn: iteration produced no windows; skipping update")
+            counters["empty_iters"] += 1
+            logger.warning(
+                f"learn: iteration produced NO windows ({iteration.n_transitions} transitions); skipping update — "
+                f"empty_iters={counters['empty_iters']} (learner iter={counters['iter']} now trails drive's emitted "
+                "count by this much; a persistent gap means the collector keeps yielding stepless iterations)"
+            )
             return
         warmup = counters["iter"] < args.rl.value_warmup_iters
         if not warmup and not phase["ppo_started"]:
@@ -462,7 +477,7 @@ def main(args: Args) -> None:
         try:
             drive_rl(
                 build_boot,
-                matchups,
+                lambda w: wave_matchups(w, args.rl.n_boots),
                 [ports] * args.rl.n_boots,
                 pol,
                 n_iterations=remaining,
@@ -470,6 +485,7 @@ def main(args: Args) -> None:
                 stop=stop,
                 on_iteration=on_iteration,
                 sync_gate=sync_gate,
+                reboot_every_iters=args.rl.reboot_every_iters,
                 progress_every=600,
             )
         except BaseException as exc:  # noqa: BLE001 — surfaced on the main thread

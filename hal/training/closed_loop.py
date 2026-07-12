@@ -50,7 +50,9 @@ from hal.training.features import preprocess
 # ``d == 0`` or at bootstrap).
 PredictChunk = Callable[[Context, np.ndarray | None], np.ndarray]
 
-_PORT_TO_PREFIX: dict[int, Literal["p1", "p2"]] = {1: "p1", 2: "p2"}
+PORT_TO_PREFIX: dict[int, Literal["p1", "p2"]] = {1: "p1", 2: "p2"}
+"""Player port → feature prefix. Public API: the 014 RL collector/eval/rollout modules
+build ego-relabeled features against this same map."""
 
 
 @dataclass
@@ -62,13 +64,17 @@ class _SlotState:
     pending: np.ndarray | None = None
 
 
-def _live_batch_from_rolling(
+def live_batch_from_rolling(
     flat_history: list[dict],
     ego_inputs_hist: list[np.ndarray],
     ego_prefix: str,
     L_ctx: int,
 ) -> dict[str, np.ndarray]:
     """``[1, L_ctx]`` batch the model expects, built from one slot's rolling buffers.
+
+    Public API: the 014 RL collector/eval/rollout modules build every PPO-recompute and
+    acting window through this same path so their features are byte-identical to the
+    closed-loop driver's.
 
     Before the buffers fill to ``L_ctx`` (the first ``L_ctx`` closed-loop frames)
     we LEFT-PAD with zeros. The padded prefix is hidden from attention via
@@ -197,10 +203,10 @@ class RecedingHorizon:
 
     def _build_stacked_batch(self, live: list[Slot]) -> dict[str, np.ndarray]:
         per_slot = [
-            _live_batch_from_rolling(
+            live_batch_from_rolling(
                 self._slots[sl].flat_hist,
                 self._slots[sl].ego_inputs_hist,
-                ego_prefix=_PORT_TO_PREFIX[sl.port],
+                ego_prefix=PORT_TO_PREFIX[sl.port],
                 L_ctx=self.L_ctx,
             )
             for sl in live

@@ -28,7 +28,7 @@ Off-by-one contracts (binding, from ``rewards.py`` / ``rollout.py``):
   read from the last PRE-reset frame and credited to the last recorded step (the
   transition into that frame), which is marked ``terminated``;
 * the ego action at a frame's token is the action executed the PREVIOUS frame (column
-  ``k`` carries ``a_{k-1}``), matching ``_live_batch_from_rolling`` — the invariant that
+  ``k`` carries ``a_{k-1}``), matching ``live_batch_from_rolling`` — the invariant that
   keeps collection log-probs faithful to the PPO recompute.
 """
 
@@ -64,8 +64,8 @@ from hal.sim.session import Matchup
 from hal.sim.session import Session
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
-from hal.training.closed_loop import _PORT_TO_PREFIX
-from hal.training.closed_loop import _live_batch_from_rolling
+from hal.training.closed_loop import PORT_TO_PREFIX
+from hal.training.closed_loop import live_batch_from_rolling
 from hal.training.dataloader import relabel_ego
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import NEUTRAL_ACTION
@@ -101,7 +101,19 @@ class ActingPolicy(Protocol):
 class NetActingPolicy:
     """Default :class:`ActingPolicy`: incremental decode + periodic rebuild over a
     ``PolicyValueNet``. Holds the net used at COLLECTION time (the EMA snapshot for the
-    learner handle); ``step``/``rebuild`` never touch autograd."""
+    learner handle).
+
+    ``step``/``rebuild`` run under ``torch.inference_mode`` (not just ``no_grad``): the
+    outputs never re-enter autograd (they are copied to numpy immediately, and the learner
+    recomputes log-probs on FRESH ``forward_full`` tensors built from the numpy windows, so
+    the infamous "infectious inference-tensor" hazard — inference tensors raising when
+    reused in a grad-tracked op — cannot arise here; the KV ring buffers are read/written
+    only inside these two inference-mode methods). Validated: KV-equivalence tests + the
+    end-to-end smoke keep ``ratio_dev_epoch0`` in the window-approximation floor, so
+    inference_mode does not perturb the collection-vs-recompute log-probs. If a real run's
+    first-hour ``overlap_frac`` comes in under target, the next lever is running these acting
+    forwards on a dedicated CUDA stream (overlap the collector's inference with the learner's
+    backward), not reverting the grad mode."""
 
     def __init__(
         self,
@@ -124,12 +136,12 @@ class NetActingPolicy:
         self._gen = torch.Generator(device=self.device)
         self._gen.manual_seed(seed)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def step(self, rows: Tensor, ctx: Context) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         hidden = self.caches.step_incremental(self.net, rows.to(self.device), ctx.to(self.device))
         return self._sample(hidden)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def rebuild(self, rows: Tensor, windows: Context) -> None:
         self.caches.rebuild(self.net, rows.to(self.device), windows.to(self.device))
 
@@ -185,7 +197,7 @@ class _SlotRL:
 
 def _token_features(cur_flat: dict, prev_action: np.ndarray, ego_prefix: str) -> dict[str, np.ndarray]:
     """The single new token ``[1, 1, ...]`` for incremental decode — byte-identical to
-    the LAST column of ``_live_batch_from_rolling`` (ego channel = the previous action,
+    the LAST column of ``live_batch_from_rolling`` (ego channel = the previous action,
     column ``k`` carries ``a_{k-1}``), so the cached rollout log-prob matches the PPO
     recompute pre-eviction."""
     out: dict[str, np.ndarray] = {}
@@ -261,17 +273,21 @@ class RLBatchPolicy:
             stream=SlotStream(ego_port, matchup=self.matchup_of(slot)),
         )
 
-    def reset_slots(self, slots: Sequence[Slot]) -> None:
+    def reset_slots(self, slots: Sequence[Slot], *, matchups: Mapping[Slot, dict] | None = None) -> None:
         """Cold-restart the given slots after a wave reboot. Each slot's in-progress
         stream is FLUSHED, not discarded: its tail is marked truncated, the boundary obs
         appended, and the closed stream parked as an orphan that joins the next finalized
-        iteration — so recorded transitions survive the reboot."""
+        iteration — so recorded transitions survive the reboot. The orphaned stream keeps
+        the OLD matchup it was collected under; when ``matchups`` is given (the wave-reboot
+        rotation) each slot's fresh stream picks up the NEW matchup for the next slice."""
         for slot in slots:
             st = self.state[slot]
             if st.stream.n_recorded > 0:
                 st.stream.truncate_last()
                 st.stream.append_boundary(st.flat_hist[-1])
                 self._orphans.append(st.stream)
+            if matchups is not None:
+                st.matchup = matchups[slot]
             st.stream = SlotStream(st.ego_port, matchup=st.matchup)
             st.flat_hist.clear()
             st.ego_hist.clear()
@@ -339,7 +355,7 @@ class RLBatchPolicy:
                 )
                 st.episode_steps += 1
             prev_action = st.ego_hist[-1] if st.ego_hist else NEUTRAL_ACTION
-            tokens[st.handle].append(_token_features(cur_flat, prev_action, _PORT_TO_PREFIX[st.ego_port]))
+            tokens[st.handle].append(_token_features(cur_flat, prev_action, PORT_TO_PREFIX[st.ego_port]))
 
         # PASS 2: one batched incremental decode per handle; record the pending step.
         actions: dict[Slot, ControllerInputs] = {}
@@ -384,7 +400,7 @@ class RLBatchPolicy:
         for slot in slots:
             st = self.state[slot]
             per_slot.append(
-                _live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], _PORT_TO_PREFIX[st.ego_port], self.L_ctx)
+                live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], PORT_TO_PREFIX[st.ego_port], self.L_ctx)
             )
             ctx_pad.append(max(0, self.L_ctx - len(st.flat_hist)))
         stacked = {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
@@ -427,6 +443,17 @@ _EMPTY_FLAT: Mapping[str, float] = MappingProxyType({})
 # fresh-ports-per-retry discipline so a stuck, not-yet-reaped Dolphin can't collide).
 BuildBoot = Callable[[int, int], Session]
 
+# wave index -> that wave's per-boot Matchups. Waves rotate through the training prior so a
+# long run self-plays the full character matchup distribution, not just the first n_boots.
+WaveMatchups = Callable[[int], Sequence[Matchup]]
+
+
+def matchup_meta(m: Matchup) -> dict:
+    """The per-slot matchup metadata dict (injected live stage + per-port character ids).
+    One builder shared by boot-wave setup and wave-reboot matchup rotation, so a rotated
+    wave's stream metadata and injected stage stay consistent with what it booted."""
+    return {"stage": int(m.stage.value), "character": {pl.port: int(pl.character.value) for pl in m.players}}
+
 
 @dataclass(frozen=True, slots=True)
 class CollectStats:
@@ -443,7 +470,7 @@ IterationPayload = tuple[RolloutIteration, CollectStats]
 
 def drive_rl(
     build_boot: BuildBoot,
-    matchups: Sequence[Matchup],
+    wave_matchups: WaveMatchups,
     model_ports: Sequence[tuple[int, ...]],
     policy: RLBatchPolicy,
     *,
@@ -453,6 +480,7 @@ def drive_rl(
     on_iteration: Callable[[], None],
     sync_gate: threading.Event | None = None,
     start_retries: int = 2,
+    reboot_every_iters: int = 0,
     max_frames: int = 10_000_000,
     progress_every: int = 600,
 ) -> None:
@@ -466,24 +494,52 @@ def drive_rl(
     :class:`CollectStats`) to ``queue_out``. ``on_iteration`` runs at every boundary
     (after the sync gate) to copy the freshly-advanced EMA into the behavior net. In sync
     mode (``sync_gate`` set) the loop blocks on the gate after each put, so the collector
-    never runs ahead of the learner (lag 0). A boot that dies is dropped; if fewer than
-    half remain the whole wave reboots (in-progress streams flush truncated via
-    ``policy.reset_slots``). Exceptions propagate (the learner thread sets ``stop`` on its
-    own failure; a drive-loop death surfaces via ``queue_out`` going empty), and every
-    entered Session is torn down on the way out."""
+    never runs ahead of the learner (lag 0).
+
+    Matchup rotation: the wave's matchups come from ``wave_matchups(wave_idx)`` (wave 0 at
+    launch). Every wave reboot advances ``wave_idx``, so the run cycles through the full
+    training prior instead of self-playing one fixed slice for its whole duration. A reboot
+    fires on attrition (fewer than half the boots alive) OR on a schedule
+    (``reboot_every_iters`` learned iterations, ``0`` = attrition-only); either way the
+    in-progress streams flush truncated via ``policy.reset_slots`` (their recorded
+    transitions carry into the next iteration as orphans) and the fresh streams pick up the
+    new slice's matchups. Exceptions propagate (the learner thread sets ``stop`` on its own
+    failure; a drive-loop death surfaces via ``queue_out`` going empty), and every entered
+    Session is torn down on the way out."""
     entered: list[Session] = []
-    n = len(matchups)
+    n = len(model_ports)
     attempt0 = 0  # advances per wave so reboot retries rotate onto fresh ports too
+    wave_idx = 0
+    matchups: Sequence[Matchup] = wave_matchups(wave_idx)
+    if len(matchups) != n:
+        raise ValueError(f"wave_matchups({wave_idx}) returned {len(matchups)} matchups; expected {n}")
     with ThreadPoolExecutor(max_workers=32) as pool:
         try:
             sessions, done, last_frame = _boot_wave(
                 build_boot, matchups, entered, pool, attempt0=attempt0, start_retries=start_retries
             )
             attempt0 += start_retries + 1
+
+            def reboot_wave(reason: str) -> None:
+                nonlocal sessions, done, last_frame, attempt0, wave_idx, matchups
+                _teardown(entered)
+                wave_idx += 1
+                matchups = wave_matchups(wave_idx)
+                if len(matchups) != n:
+                    raise ValueError(f"wave_matchups({wave_idx}) returned {len(matchups)} matchups; expected {n}")
+                new_meta = {Slot(i, p): matchup_meta(matchups[i]) for i in range(n) for p in model_ports[i]}
+                logger.warning(f"drive_rl: rebooting wave ({reason}) -> matchup slice {wave_idx}")
+                policy.reset_slots(list(policy.state), matchups=new_meta)  # flushes in-progress streams truncated
+                sessions, done, last_frame = _boot_wave(
+                    build_boot, matchups, entered, pool, attempt0=attempt0, start_retries=start_retries
+                )
+                attempt0 += start_retries + 1
+
             logger.info(f"drive_rl: {sum(not d for d in done)}/{n} boots up; target {n_iterations} iterations")
             on_iteration()  # prime the behavior net (EMA -> act_net) before the first collect
 
             emitted = 0
+            pending_reboot = False
             t0 = time.monotonic()
             frames_stepped = 0
             frames_mark = 0
@@ -492,14 +548,10 @@ def drive_rl(
                 if stop.is_set() or emitted >= n_iterations:
                     break
                 live = [i for i in range(n) if not done[i]]
-                if len(live) < max(1, n // 2):
-                    logger.warning(f"drive_rl: only {len(live)}/{n} boots alive at frame {t}; rebooting wave")
-                    _teardown(entered)
-                    policy.reset_slots(list(policy.state))  # flushes in-progress streams truncated
-                    sessions, done, last_frame = _boot_wave(
-                        build_boot, matchups, entered, pool, attempt0=attempt0, start_retries=start_retries
-                    )
-                    attempt0 += start_retries + 1
+                attrition = len(live) < max(1, n // 2)
+                if attrition or pending_reboot:
+                    reboot_wave("attrition" if attrition else f"scheduled@{emitted}iters")
+                    pending_reboot = False
                     continue
                 if progress_every and t > 0 and t % progress_every == 0:
                     logger.info(f"drive_rl: frame {t} | live {len(live)}/{n} | {t / (time.monotonic() - t0):.0f} f/s")
@@ -546,6 +598,8 @@ def drive_rl(
                     on_iteration()
                     frames_mark = frames_stepped  # sps window restarts AFTER the gate/EMA copy
                     t_mark = time.monotonic()
+                    # Schedule a wave reboot (matchup rotation) at the next frame boundary.
+                    pending_reboot = reboot_every_iters > 0 and emitted % reboot_every_iters == 0
             logger.info(f"drive_rl: done after {emitted} iterations")
         finally:
             _teardown(entered)
@@ -580,10 +634,7 @@ def _boot_wave(
     n = len(matchups)
     sessions: list[Session | None] = [None] * n
     last_frame: list[dict] = [{} for _ in range(n)]
-    meta = [
-        {"stage": int(m.stage.value), "character": {pl.port: int(pl.character.value) for pl in m.players}}
-        for m in matchups
-    ]
+    meta = [matchup_meta(m) for m in matchups]
     pending = list(range(n))
     for attempt in range(start_retries + 1):
         # Enter each session as it is built and append to ``entered`` immediately, so a

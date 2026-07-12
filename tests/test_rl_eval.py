@@ -309,6 +309,7 @@ def test_h2h_censors_each_boots_final_segment() -> None:
     n_boots_run = sum(len(wave) for wave in call_log)
     assert s["n_censored"] == n_boots_run  # one censored (in-progress) segment per successful boot
     assert s["n_ties"] == 0  # the partial (tied) segments never entered scoring
+    assert s["n_dropped_boots"] == 0  # every boot produced a match, so none exhausted its requeues
 
 
 # --- JSON round-trip --------------------------------------------------------

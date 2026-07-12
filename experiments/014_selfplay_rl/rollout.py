@@ -9,7 +9,7 @@ Three stages sit between the Dolphin collector (M4b) and the PPO learner:
   value can be read at the bootstrap position.
 * :func:`build_windows` cuts a finalized stream into non-overlapping context
   windows of ``<= L_ctx`` frames, segmented at episode boundaries. Each window's
-  feature rows are built through the SAME ``_live_batch_from_rolling`` path the
+  feature rows are built through the SAME ``live_batch_from_rolling`` path the
   closed-loop driver uses, so a window's stacked arrays are byte-identical to what
   ``RecedingHorizon`` would feed the model for the same trailing frames — the
   invariant that keeps the PPO recompute faithful to collection (pinned by test).
@@ -37,8 +37,8 @@ from tianshou.algorithm.algorithm_base import _gae
 from torch import Tensor
 
 from hal.data.stats import FeatureStats
-from hal.training.closed_loop import _PORT_TO_PREFIX
-from hal.training.closed_loop import _live_batch_from_rolling
+from hal.training.closed_loop import PORT_TO_PREFIX
+from hal.training.closed_loop import live_batch_from_rolling
 from hal.training.features import A_DIM
 from hal.training.features import Context
 from hal.training.features import preprocess
@@ -55,7 +55,7 @@ class SlotStream:
     into a :class:`FinalizedStream` of numpy arrays."""
 
     def __init__(self, ego_port: int, *, matchup: dict | None = None) -> None:
-        if ego_port not in _PORT_TO_PREFIX:
+        if ego_port not in PORT_TO_PREFIX:
             raise ValueError(f"ego_port must be 1 or 2, got {ego_port}")
         self.ego_port = ego_port
         self.matchup = matchup
@@ -204,7 +204,7 @@ class Window:
     """One ``L_ctx``-row context block over a stream segment.
 
     ``feats`` holds the relabeled ego/opp gamestate + ego-action columns (each row
-    a frame; left-padded rows zero-filled), exactly as ``_live_batch_from_rolling``
+    a frame; left-padded rows zero-filled), exactly as ``live_batch_from_rolling``
     produces them. ``frame_pos`` maps each row back to its stream frame index
     (``-1`` for pad); ``valid`` marks rows that carry a scored transition (a real
     action + reward — excludes pad rows and the value-only bootstrap frame ``T``).
@@ -224,7 +224,7 @@ class Window:
     returns: np.ndarray  # [L_ctx] float32 (0 until scatter_gae)
 
 
-def _segment_bounds(terminated: np.ndarray, T: int) -> np.ndarray:
+def _segment_ids(terminated: np.ndarray, T: int) -> np.ndarray:
     """Per-frame episode id over frames ``0..T``. Frame ``i`` (``i < T``) belongs to
     the episode with ``sum(terminated[:i])`` prior terminations; the bootstrap frame
     ``T`` is attached to the last real episode (its value is masked in GAE whenever
@@ -261,8 +261,8 @@ def build_windows(stream: FinalizedStream, L_ctx: int, *, stream_id: int = 0) ->
     T = stream.n_transitions
     if T == 0:
         return []
-    ego_prefix = _PORT_TO_PREFIX[stream.ego_port]
-    ep = _segment_bounds(stream.terminated, T)
+    ego_prefix = PORT_TO_PREFIX[stream.ego_port]
+    ep = _segment_ids(stream.terminated, T)
     changes = np.flatnonzero(ep[1:] != ep[:-1]) + 1
     seg_starts = np.concatenate([[0], changes])
     seg_ends = np.concatenate([changes - 1, [T]])  # inclusive frame index of each segment's last frame
@@ -277,13 +277,13 @@ def build_windows(stream: FinalizedStream, L_ctx: int, *, stream_id: int = 0) ->
 def _build_window(stream: FinalizedStream, a: int, b: int, L_ctx: int, ego_prefix: str, stream_id: int) -> Window:
     T = stream.n_transitions
     n = b - a + 1
-    # ego action list feeding _live_batch_from_rolling. The action that produced the
+    # ego action list feeding live_batch_from_rolling. The action that produced the
     # block's first frame is NEUTRAL only at an episode start (cold buffer); otherwise
     # it is the real preceding action, so the block front-pads ego by 0 (full context).
     ego_lo = a if _at_episode_start(stream.terminated, a) else a - 1
     ego = list(stream.ego_act[ego_lo:b])  # indices ego_lo .. b-1
     flat_block = list(stream.flat[a : b + 1])
-    stacked = _live_batch_from_rolling(flat_block, ego, ego_prefix, L_ctx)
+    stacked = live_batch_from_rolling(flat_block, ego, ego_prefix, L_ctx)
     feats = {k: v[0] for k, v in stacked.items()}
     ctx_pad = L_ctx - n
 
