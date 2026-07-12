@@ -27,6 +27,7 @@ import json
 import subprocess
 import time
 import warnings
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -39,6 +40,7 @@ import numpy as np
 import torch
 import tyro
 from loguru import logger
+from melee import Character
 from melee_collector import ActingPolicy
 from melee_collector import NetActingPolicy
 from melee_collector import _token_features
@@ -127,7 +129,7 @@ def readout_from_traj(traj: Trajectory, ema_port: int) -> H2HMatch | None:
     return attribute_h2h(summarize_trajectory(traj), ema_port)
 
 
-def _bootstrap_percentiles(samples: np.ndarray, seed: int) -> tuple[float, float]:
+def _bootstrap_percentiles(samples: np.ndarray) -> tuple[float, float]:
     finite = samples[np.isfinite(samples)]
     if finite.size == 0:
         return (float("nan"), float("nan"))
@@ -161,14 +163,16 @@ def summarize_h2h(matches: Sequence[H2HMatch], *, n_discarded: int, seed: int) -
         warnings.simplefilter("ignore", category=RuntimeWarning)
         wr_samples = np.nanmean(win[idx], axis=1)
     sd_samples = stock_diff[idx].mean(axis=1)
-    win_ci = _bootstrap_percentiles(wr_samples, seed)
-    stock_ci = _bootstrap_percentiles(sd_samples, seed)
+    win_ci = _bootstrap_percentiles(wr_samples)
+    stock_ci = _bootstrap_percentiles(sd_samples)
 
     total_min = sum(m.frames for m in matches) / FRAMES_PER_MINUTE
     ema_dmg_min = sum(m.ema_damage_dealt for m in matches) / total_min if total_min else 0.0
     il_dmg_min = sum(m.il_damage_dealt for m in matches) / total_min if total_min else 0.0
 
-    ci_excludes_half = not (win_ci[0] <= 0.5 <= win_ci[1])
+    # PASS requires a FINITE CI that excludes 0.5 — an all-ties run yields a nan CI, which
+    # must read as "no evidence", not as "excludes 0.5" via a nan comparison quirk.
+    ci_excludes_half = bool(np.isfinite(win_ci).all()) and not (win_ci[0] <= 0.5 <= win_ci[1])
     g3 = "PASS" if (ci_excludes_half and mean_stock_diff > 0) else "FAIL"
     return {
         "n_matches": len(matches),
@@ -214,7 +218,7 @@ def g3_vs_cpu_pass(ckpt_summaries: Sequence[MatchSummary], baseline_net_rate: fl
     worse than the baseline (a regression only fails when the whole CI sits below baseline)."""
     if not ckpt_summaries:
         return False
-    _, hi = _bootstrap_percentiles(_bootstrap_net_rate(ckpt_summaries, seed), seed)
+    _, hi = _bootstrap_percentiles(_bootstrap_net_rate(ckpt_summaries, seed))
     return bool(hi >= baseline_net_rate)
 
 
@@ -377,7 +381,9 @@ def _load(ckpt: Path | None, warm_start_name: str, refresh_every: int, device: s
     return LoadedPolicy(net=net, L_ctx=cfg.L_ctx, refresh_every=refresh_every, stats=stats, warm_start=warm_start_name)
 
 
-def _acting(net: PolicyValueNet, *, n_slots: int, L_ctx: int, refresh_every: int, temp: float, seed: int, device: str):
+def _acting(
+    net: PolicyValueNet, *, n_slots: int, L_ctx: int, refresh_every: int, temp: float, seed: int, device: str
+) -> NetActingPolicy:
     return NetActingPolicy(
         net, n_slots=n_slots, device=device, temp=temp, seed=seed, max_pos=L_ctx + refresh_every + 8
     )
@@ -386,6 +392,14 @@ def _acting(net: PolicyValueNet, *, n_slots: int, L_ctx: int, refresh_every: int
 # =============================================================================
 # Head-to-head driver
 # =============================================================================
+# A failed boot (never reached IN_GAME) is re-queued this many times before being dropped.
+_H2H_BOOT_RETRIES = 2
+
+# run_matches_vec-compatible runner, injectable so the retry/parity plumbing is testable
+# without Dolphin (see test_rl_eval.py).
+H2HRunner = Callable[..., list[list[Trajectory]]]
+
+
 def run_h2h(
     ema: LoadedPolicy,
     il: LoadedPolicy,
@@ -398,17 +412,34 @@ def run_h2h(
     seed: int,
     device: str,
     base_slippi_port: int,
+    runner: H2HRunner = run_matches_vec,
 ) -> dict:
     """EMA vs frozen IL over prior matchups until ``n_matches_target`` valid matches (or the
-    matchup pool is exhausted). Matchups are processed in single waves of ``n_boots`` — so a
-    wave's local ``Slot.match`` index equals its global boot index and the port-alternation
-    parity used by the acting handles matches the parity used for attribution exactly."""
-    matchup_pool = matchups_for(max(n_boots, n_matches_target))
+    matchup queue is exhausted).
+
+    Parity discipline (retry-invariant by construction): each wave runs its whole chunk in ONE
+    ``drive_vec`` pass — ``start_retries=0``, so ``run_matches_vec`` never re-drives a subset
+    whose local ``Slot.match`` indices would restart at 0 and desync from the parity list. A
+    boot that produced nothing is instead RE-QUEUED into a later wave under a fresh global boot
+    index, with its parity re-derived from that new index on both sides: the factory's
+    ``handle_of`` and the attribution below read the same per-wave ``ema_ports`` list, indexed
+    by the same wave-local position. Ports rotate per wave (the rotation ``start_retries``
+    used to provide) so a stuck, not-yet-reaped Dolphin can't collide with the next wave.
+
+    Censoring: under instant-restart a boot's LAST segment is the match still in progress when
+    the frame budget ran out (``drive_vec`` flushes it), so it is dropped as censored by
+    construction — scoring it would count a partial as a finished match and bias the stats
+    toward whoever happened to lead mid-match."""
+    queue: deque[tuple[tuple[Character, Character], int]] = deque(
+        (m, 0) for m in matchups_for(max(n_boots, n_matches_target))
+    )
     readouts: list[H2HMatch] = []
     n_discarded = 0
-    boot0 = 0
-    while len(readouts) < n_matches_target and boot0 < len(matchup_pool):
-        chunk = matchup_pool[boot0 : boot0 + n_boots]
+    n_censored = 0
+    boot0 = 0  # global boot counter: the parity identity, advancing over every boot launched
+    wave = 0
+    while len(readouts) < n_matches_target and queue:
+        chunk = [queue.popleft() for _ in range(min(n_boots, len(queue)))]
         ema_ports = [ema_port_for_boot(boot0 + j) for j in range(len(chunk))]
         matches = [
             VecMatch(
@@ -421,10 +452,10 @@ def run_h2h(
                 ),
                 model_ports=(1, 2),
             )
-            for ego_char, opp_char in chunk
+            for (ego_char, opp_char), _ in chunk
         ]
 
-        def factory(ema_ports: list[int] = ema_ports, wave: int = boot0) -> EvalBatchPolicy:
+        def factory(ema_ports: list[int] = ema_ports, wave: int = wave) -> EvalBatchPolicy:
             ema_handle = _acting(
                 ema.net,
                 n_slots=len(ema_ports),
@@ -451,32 +482,43 @@ def run_h2h(
                 refresh_every=ema.refresh_every,
             )
 
-        boots = run_matches_vec(
+        boots = runner(
             session_cfg,
             matches,
             factory,
             max_frames=max_frames,
             max_parallel=len(chunk),
-            base_slippi_port=base_slippi_port,
+            base_slippi_port=base_slippi_port + (wave % 8) * n_boots,
+            start_retries=0,  # internal subset retries would desync Slot.match from ema_ports
         )
-        for local_i, boot in enumerate(boots):
-            ema_port = ema_ports[local_i]
-            for traj in boot:
-                m = readout_from_traj(traj, ema_port)
+        for j, boot in enumerate(boots):
+            matchup, attempts = chunk[j]
+            if not boot:
+                if attempts < _H2H_BOOT_RETRIES:
+                    queue.append((matchup, attempts + 1))
+                    logger.warning(f"h2h: boot {boot0 + j} produced no match; re-queued (attempt {attempts + 1})")
+                else:
+                    logger.warning(f"h2h: boot {boot0 + j} failed {attempts + 1} times; dropping its matchup")
+                continue
+            n_censored += 1  # the boot's final segment: in progress at the budget, never finished
+            for traj in boot[:-1]:
+                m = readout_from_traj(traj, ema_ports[j])
                 if m is None:
                     n_discarded += 1
                 else:
                     readouts.append(m)
         logger.info(
-            f"h2h: wave boots {boot0}..{boot0 + len(chunk) - 1} -> {len(readouts)} matches, {n_discarded} discarded"
+            f"h2h: wave {wave} (boots {boot0}..{boot0 + len(chunk) - 1}) -> "
+            f"{len(readouts)} matches, {n_discarded} discarded, {n_censored} censored"
         )
-        boot0 += n_boots
+        boot0 += len(chunk)
+        wave += 1
 
     if not readouts:
-        raise RuntimeError("head-to-head produced no valid matches — every segment was discarded or empty")
+        raise RuntimeError("head-to-head produced no valid matches — every segment was discarded or censored")
     if n_discarded:
         logger.warning(f"h2h: discarded {n_discarded} non-finite/degenerate match segment(s)")
-    return summarize_h2h(readouts, n_discarded=n_discarded, seed=seed)
+    return {**summarize_h2h(readouts, n_discarded=n_discarded, seed=seed), "n_censored": n_censored}
 
 
 # =============================================================================
@@ -533,7 +575,7 @@ def run_vs_cpu(
     net_rate = vs_cpu_net_stock_rate(summaries) if summaries else float("nan")
     report: dict = {"vs_cpu_metrics": metrics, "net_stock_rate": net_rate, "cpu_level": cpu_level}
     if summaries:
-        report["net_stock_rate_ci95"] = list(_bootstrap_percentiles(_bootstrap_net_rate(summaries, seed), seed))
+        report["net_stock_rate_ci95"] = list(_bootstrap_percentiles(_bootstrap_net_rate(summaries, seed)))
     if baseline is not None:
         base_metrics = baseline["vs_cpu_metrics"]
         report["baseline"] = base_metrics
@@ -566,6 +608,8 @@ class Args:
     out: Path | None = None  # JSON output path (default runs/<derived>/eval_<mode>_<ts>.json)
     device: str | None = None
     base_slippi_port: int = 55000
+    wandb_run: str | None = None  # existing W&B run id to append eval metrics to
+    global_step: int | None = None  # W&B global_step for the appended metrics (default: ckpt's transitions)
 
 
 def _git_sha() -> str:
@@ -574,6 +618,29 @@ def _git_sha() -> str:
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         logger.warning(f"git sha unavailable: {e!r}")
         return "unknown"
+
+
+def _log_wandb(run_id: str, report: dict, global_step: int) -> None:
+    """Append eval metrics to an existing W&B run. Repo conventions: W&B's own step stays
+    the timestamp; the training step rides as ``global_step`` data + ``define_metric`` (never
+    ``step=``), so async evals back-date onto the training axis; keys one level deep."""
+    import wandb
+
+    metrics: dict[str, float] = {}
+    if report["mode"] == "h2h":
+        metrics["eval/h2h_win_rate"] = float(report["ema_win_rate"])
+        metrics["eval/h2h_stock_diff"] = float(report["mean_stock_diff"])
+        metrics["eval/h2h_n_matches"] = float(report["n_matches"])
+    else:
+        for k, v in report["vs_cpu_metrics"].items():
+            metrics[f"eval/vs_cpu_{k}"] = float(v)
+        metrics["eval/vs_cpu_net_stock_rate"] = float(report["net_stock_rate"])
+    run = wandb.init(project="hal", id=run_id, resume="must")
+    wandb.define_metric("global_step")
+    wandb.define_metric("eval/*", step_metric="global_step")
+    wandb.log({"global_step": global_step, **metrics})
+    run.finish()
+    logger.info(f"appended {len(metrics)} eval metric(s) to W&B run {run_id} at global_step {global_step}")
 
 
 def _default_out(args: Args, mode: str, policy: str) -> Path:
@@ -594,9 +661,15 @@ def main(args: Args) -> None:
     policy = "il" if args.il_only else "ema"
     mode = "vs_cpu" if args.vs_cpu else "h2h"
 
+    if args.wandb_run is not None and args.global_step is None and args.ckpt is None:
+        raise ValueError("--wandb-run with --il-only requires an explicit --global-step (no ckpt transitions counter)")
+
     warm_start_name = args.warm_start
+    ckpt_transitions: int | None = None
     if args.ckpt is not None:
-        ckpt_warm = torch.load(args.ckpt, map_location="cpu", weights_only=False)["cfg"]["rl"]["warm_start"]
+        ckpt_state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        ckpt_transitions = int(ckpt_state["transitions"])
+        ckpt_warm = ckpt_state["cfg"]["rl"]["warm_start"]
         if ckpt_warm != warm_start_name:
             logger.warning(
                 f"using checkpoint's warm_start {ckpt_warm!r} (overriding --warm-start {warm_start_name!r})"
@@ -656,8 +729,12 @@ def main(args: Args) -> None:
     out = args.out or _default_out(args, mode, policy)
     write_report(out, report)
     logger.info(f"wrote {out} ({report['wall_clock_s']:.0f}s wall-clock)")
-    for line in json.dumps({k: v for k, v in report.items() if not isinstance(v, dict)}, indent=2).splitlines():
+    for line in json.dumps({k: v for k, v in report.items() if k != "config"}, indent=2).splitlines():
         logger.info(line)
+    if args.wandb_run is not None:
+        step = args.global_step if args.global_step is not None else ckpt_transitions
+        assert step is not None  # guarded at entry: --il-only + --wandb-run requires --global-step
+        _log_wandb(args.wandb_run, report, step)
 
 
 if __name__ == "__main__":
