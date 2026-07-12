@@ -260,6 +260,67 @@ def test_sync_mode_determinism() -> None:
     assert np.array_equal(a_rew0, b_rew0)
 
 
+def test_wave_reboot_flushes_streams_truncated() -> None:
+    """A wave reboot must not discard recorded transitions: ``reset_slots`` flushes the
+    in-flight stream (truncated tail + boundary) as an orphan that joins the next
+    finalized iteration."""
+    pol, (slot,), _ = _make_policy(rollout_frames=12)
+    for t in range(6):
+        pol(t, {slot: _frame(t, p1_pct=t, p2_pct=t)})
+    assert pol.state[slot].stream.n_recorded == 5  # in flight at the "reboot"
+
+    pol.reset_slots([slot])
+    assert pol.state[slot].stream.n_recorded == 0  # fresh stream post-reboot
+    assert pol.state[slot].last_id is None  # sentinel: rebooted slot's first frame can't read as a reset
+
+    it = None
+    for t in range(30):  # ids restart at 0 — must NOT trigger a spurious episode reset
+        pol(100 + t, {slot: _frame(t, p1_pct=t, p2_pct=t)})
+        it = pol.take_iteration()
+        if it is not None:
+            break
+    assert it is not None
+    assert it.n_transitions >= 12
+    orphan, live = it.streams  # orphans come first in the finalized iteration
+    assert orphan.n_transitions == 5  # the pre-reboot transitions survived
+    assert bool(orphan.truncated[-1]) and not bool(orphan.terminated[-1])
+    assert len(orphan.flat) == orphan.n_transitions + 1
+    assert live.n_transitions == it.n_transitions - 5
+
+
+def test_finalize_adjacent_reset_warns_bonus_lost_and_recovers() -> None:
+    """An episode ending on the first frame after an iteration boundary cannot credit its
+    terminal bonus (the steps were already emitted truncated) — the collector must log the
+    loss loudly and keep collecting consistently, not crash or mis-terminate."""
+    from loguru import logger
+
+    pol, (slot,), _ = _make_policy(rollout_frames=5)
+    it = None
+    t = 0
+    while it is None:
+        pol(t, {slot: _frame(t, p1_pct=t)})
+        it = pol.take_iteration()
+        t += 1
+    assert pol.state[slot].stream.n_recorded == 0  # fresh stream right after finalize
+    assert pol.state[slot].episode_steps > 0  # but the episode is still running
+
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        pol(t, {slot: _frame(0)})  # id drops -> episode boundary on the finalize-adjacent frame
+    finally:
+        logger.remove(sink)
+    assert any("terminal bonus LOST" in m for m in msgs), msgs
+
+    st = pol.state[slot]
+    assert st.episode_steps == 0  # new episode
+    assert st.stream.n_recorded == 0  # the dropped pending never became a step
+    pol(t + 1, {slot: _frame(1)})
+    pol(t + 2, {slot: _frame(2)})
+    assert st.stream.n_recorded == 2  # collection resumed cleanly
+    assert not st.stream._terminated[-1]
+
+
 # --- real-Dolphin integration ------------------------------------------------
 WARM_START = Path(
     "runs/260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024/final.pt"
@@ -329,14 +390,15 @@ def test_collector_real_dolphin() -> None:
         rollout_frames=600,
     )
 
-    def build_sessions():
-        sessions = [_build_session(session_cfg, slippi_port=51461 + i, replay_dir=None) for i in range(n_boots)]
-        return sessions, matchups, [ports] * n_boots
+    def build_boot(i: int, attempt: int):
+        return _build_session(session_cfg, slippi_port=51461 + (attempt % 8) * n_boots + i, replay_dir=None)
 
     q: queue.Queue = queue.Queue(maxsize=1)
     stop = threading.Event()
     drive_rl(
-        build_sessions,
+        build_boot,
+        matchups,
+        [ports] * n_boots,
         pol,
         n_iterations=1,
         queue_out=q,
@@ -345,8 +407,9 @@ def test_collector_real_dolphin() -> None:
         sync_gate=None,
         progress_every=0,
     )
-    it = q.get(timeout=5.0)
+    it, cstats = q.get(timeout=5.0)
     assert it.n_transitions >= 600
+    assert cstats.frames > 0 and cstats.lockstep_sps > 0
     assert len(it.streams) == len(slots)
     for st in it.streams:
         assert len(st.flat) == st.n_transitions + 1
