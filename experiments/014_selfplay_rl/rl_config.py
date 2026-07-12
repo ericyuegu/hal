@@ -54,7 +54,6 @@ class GymConfig:
     num_envs: int = 8
     horizon: int = 128
     total_frames: int = 500_000
-    seed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,4 +70,7 @@ class MeleeRLConfig:
     value_warmup_iters: int = 20
     kl_il_coef: float = 0.05
     warm_start: str = "260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024"
-    eval_every_iters: int = 50
+    # Reboot the whole self-play wave every N learned iterations so the character matchups
+    # rotate through the full training prior (each reboot advances to the next prior slice),
+    # not just the first n_boots. In-progress streams flush truncated via the orphan path.
+    reboot_every_iters: int = 150
