@@ -90,9 +90,8 @@ def _bench_full(net: PolicyValueNet, cfg: ArchConfig, n: int) -> float:
     """ms/step for the full re-forward path (trailing L_ctx window every frame)."""
     L = cfg.L_ctx
     feats = _seq_features(n, L + N_FRAMES, cfg, seed=n)
-    steps = list(range(WARMUP + N_FRAMES))
-    t0 = None
-    for i in steps:
+    t0 = 0.0
+    for i in range(WARMUP + N_FRAMES):
         hi = L + i
         h = net.forward_full(_window(feats, hi - L, hi, n))[:, -1]
         net.policy_logits(h)
@@ -111,7 +110,7 @@ def _bench_kv(net: PolicyValueNet, cfg: ArchConfig, n: int) -> float:
     feats = _seq_features(n, L + WARMUP + N_FRAMES, cfg, seed=n + 1000)
     cache = SlotCaches(net, n_slots=n, device=DEVICE, max_pos=L + REFRESH_EVERY + 8)
     slots = torch.arange(n, device=DEVICE)
-    t0 = None
+    t0 = 0.0
     for i in range(WARMUP + N_FRAMES):
         pos = L + i
         if i > 0 and i % REFRESH_EVERY == 0:  # periodic rebuild over the trailing window
