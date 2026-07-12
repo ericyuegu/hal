@@ -190,8 +190,10 @@ def value_warmup_update(
     The trunk forward runs under ``no_grad`` (its hidden is a detached leaf), so only the
     (zero-initialised) ``value_head`` receives gradient — the caller passes an optimizer
     over ``value_head.parameters()`` exactly. MSE against ``returns`` over valid positions,
-    ``ppo_cfg.epochs`` passes of ``ppo_cfg.minibatch_size`` windows. ``on_step`` advances
-    the EMA per minibatch (harmless during warmup — only the critic moves)."""
+    ``ppo_cfg.epochs`` passes of ``ppo_cfg.minibatch_size`` windows. ``on_step`` advances the
+    EMA per minibatch if given, but ``melee_train`` deliberately passes ``on_step=None`` here:
+    even with only the critic moving, ``ema.update`` is not a fixed point (~ulp drift), so
+    letting it run would nudge the acting EMA off byte-identical IL during warmup."""
     if not windows:
         raise ValueError("value_warmup_update called with no windows")
     n = len(windows)
@@ -276,7 +278,14 @@ def melee_ppo_update(
     ``ppo_cfg.minibatch_size`` counts WINDOWS per minibatch here (each window is up to
     ``L_ctx`` transitions), not individual transitions. Returns diagnostic scalars incl.
     ``ratio_dev_epoch0`` = mean ``|ratio - 1|`` on the first minibatch of epoch 0 (≈ 0 when
-    the update policy still equals the collector policy)."""
+    the update policy still equals the collector policy).
+
+    The epoch-0 KL-reference is captured per window at its FIRST visit within epoch 0 (reusing
+    that minibatch's update forward), so at scale later minibatches' references already include
+    the parameter movement from earlier steps in the same epoch — the ``approx_kl_update``
+    stop is thus measured against a slightly staggered reference, not a single frozen snapshot.
+    Acceptable (the stop only needs to bound net drift); revisit if the stop looks lax at
+    production window counts (many minibatches per epoch widen the stagger)."""
     if not windows:
         raise ValueError("melee_ppo_update called with no windows")
     n = len(windows)

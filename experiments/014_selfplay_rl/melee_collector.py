@@ -586,9 +586,16 @@ def _boot_wave(
     ]
     pending = list(range(n))
     for attempt in range(start_retries + 1):
-        fresh: dict[int, Session] = {i: build_boot(i, attempt0 + attempt) for i in pending}
-        for s in fresh.values():
+        # Enter each session as it is built and append to ``entered`` immediately, so a
+        # mid-batch __enter__ failure still leaves every already-entered session tracked
+        # for teardown (a build/enter that raises here propagates, and the finally in
+        # drive_rl tears down whatever was entered).
+        fresh: dict[int, Session] = {}
+        for i in pending:
+            s = build_boot(i, attempt0 + attempt)
             s.__enter__()
+            entered.append(s)
+            fresh[i] = s
         futs = {i: pool.submit(s.start_match, matchups[i]) for i, s in fresh.items()}
         still_down: list[int] = []
         for i, fut in futs.items():
@@ -596,13 +603,13 @@ def _boot_wave(
                 f0 = fut.result()
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"drive_rl: boot {i} start failed (attempt {attempt + 1}/{start_retries + 1}): {e!r}")
+                entered.remove(fresh[i])  # tear down the failed attempt now, drop from the tracked set
                 _close_one(fresh[i])
                 still_down.append(i)
                 continue
             f0["_matchup"] = meta[i]
             last_frame[i] = f0
-            sessions[i] = fresh[i]
-            entered.append(fresh[i])
+            sessions[i] = fresh[i]  # already in ``entered`` (appended at enter time)
         pending = still_down
         if not pending:
             break

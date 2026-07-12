@@ -309,8 +309,12 @@ def main(args: Args) -> None:
         if counters["iter"] >= total_iters:
             raise ValueError(f"resume iter {counters['iter']} >= total_iterations {total_iters}")
     ema.copy_to(act_net)  # behavior net starts at the (resumed) EMA weights
-    # True once the warmup→PPO switch has re-anchored the EMA this process (already done
-    # for a resumed run past warmup: its checkpointed EMA is the post-anchor truth).
+    # True once the warmup→PPO switch has re-anchored the EMA this process. A run resumed
+    # PAST warmup skips re-anchoring: its checkpointed EMA is already the post-anchor truth.
+    # A run resumed EXACTLY at the boundary (iter == value_warmup_iters) also starts True, so
+    # it likewise skips the re-anchor — consequence-free here, because that checkpoint was
+    # saved right after the switch already ran and re-snapshotted the EMA in the prior process
+    # (value_warmup_done=True at that iter), so there is nothing left to re-anchor.
     phase = {"ppo_started": counters["iter"] >= args.rl.value_warmup_iters}
     transitions_at_start = counters["transitions"]  # keep transitions_per_s honest across --resume
 
