@@ -8,6 +8,9 @@ from hal.training.ema import EMAWeights
 
 def _module() -> torch.nn.Module:
     net = torch.nn.Linear(3, 2, bias=True)
+    # A non-parameter buffer so copy_to / load_state_dict exercise the buffer paths
+    # (verbatim-copied, never EMA-averaged) in the shared-helper tests, not just params.
+    net.register_buffer("running", torch.arange(2, dtype=torch.float32))
     return net
 
 
