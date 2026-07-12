@@ -173,6 +173,47 @@ def _forward_logp(
     return net.values(hidden), dist.log_prob(act_idx), dist
 
 
+def value_warmup_update(
+    net: PolicyValueNet,
+    optim: torch.optim.Optimizer,
+    windows: list[Window],
+    ppo_cfg: PPOConfig,
+    stats: dict[str, FeatureStats],
+    *,
+    device: str = "cpu",
+    generator: torch.Generator | None = None,
+    on_step: Callable[[], None] | None = None,
+) -> dict[str, float]:
+    """Value-head-only warm-start: fit ``V(s)`` to the GAE returns while the actor stays
+    byte-identical to the IL policy.
+
+    The trunk forward runs under ``no_grad`` (its hidden is a detached leaf), so only the
+    (zero-initialised) ``value_head`` receives gradient — the caller passes an optimizer
+    over ``value_head.parameters()`` exactly. MSE against ``returns`` over valid positions,
+    ``ppo_cfg.epochs`` passes of ``ppo_cfg.minibatch_size`` windows. ``on_step`` advances
+    the EMA per minibatch (harmless during warmup — only the critic moves)."""
+    if not windows:
+        raise ValueError("value_warmup_update called with no windows")
+    n = len(windows)
+    mb = max(1, ppo_cfg.minibatch_size)
+    vf_losses: list[float] = []
+    for _ in range(ppo_cfg.epochs):
+        perm = torch.randperm(n, generator=generator).tolist()
+        for start in range(0, n, mb):
+            batch = collate_windows([windows[i] for i in perm[start : start + mb]], stats).to(device)
+            with torch.no_grad():
+                hidden = net.forward_full(batch.context)
+            values = net.values(hidden)  # grad flows only to value_head; trunk hidden detached
+            vf_loss = _masked_mean((batch.returns - values).pow(2), batch.valid)
+            optim.zero_grad()
+            vf_loss.backward()
+            optim.step()
+            if on_step is not None:
+                on_step()
+            vf_losses.append(float(vf_loss.detach()))
+    return {"vf_loss": float(np.mean(vf_losses))}
+
+
 @torch.no_grad()
 def _windowed_approx_kl(
     net: PolicyValueNet, windows: list[Window], stats: dict[str, FeatureStats], device: str
@@ -196,9 +237,14 @@ def melee_ppo_update(
     *,
     device: str = "cpu",
     generator: torch.Generator | None = None,
+    on_step: Callable[[], None] | None = None,
 ) -> dict[str, float]:
     """Windowed PPO update over Melee rollout windows, with an approx-KL early stop
     and an optional KL-to-IL anchor.
+
+    ``on_step`` (if given) runs after every optimizer step — the hook the caller uses to
+    advance the EMA behavior weights per minibatch (mirrors ``update_with_kl_stop``'s
+    per-epoch ``on_epoch_end``, one level finer).
 
     The per-minibatch loss is a masked transcription of tianshou ``PPO._update_with_batch``
     (matched defaults: advantage_normalization ON with ddof=1 std + eps 1e-8, value_clip
@@ -257,6 +303,8 @@ def melee_ppo_update(
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(net.parameters(), ppo_cfg.max_grad_norm)
             optim.step()
+            if on_step is not None:
+                on_step()
 
             if epoch == 0 and mb_i == 0:
                 with torch.no_grad():

@@ -96,6 +96,33 @@ class SlotStream:
         self._flat.append(flat)
         self._closed = True
 
+    @property
+    def n_recorded(self) -> int:
+        """Transitions appended so far (``T`` before ``append_boundary``)."""
+        return len(self._logp)
+
+    def terminate_last(self, bonus: float) -> None:
+        """Credit a terminal transition: add the win/loss ``bonus`` to the last recorded
+        step's reward and mark it ``terminated`` (the collector calls this at an
+        instant-restart episode boundary — the transition into the last pre-reset frame
+        is the terminal one, so the bonus lands there, not on the discarded post-reset
+        action)."""
+        if self._closed:
+            raise RuntimeError("terminate_last after append_boundary")
+        if not self._rew:
+            raise ValueError("terminate_last on a stream with no recorded steps")
+        self._rew[-1] += float(bonus)
+        self._terminated[-1] = True
+
+    def truncate_last(self) -> None:
+        """Mark the last recorded step ``truncated`` (the iteration-budget tail bootstraps
+        from the boundary value). No-op on an empty stream; never overrides ``terminated``
+        (a step that ended an episode is not a truncation)."""
+        if self._closed:
+            raise RuntimeError("truncate_last after append_boundary")
+        if self._rew and not self._terminated[-1]:
+            self._truncated[-1] = True
+
     def finalize(self) -> FinalizedStream:
         T = len(self._logp)
         if len(self._flat) != T + 1:
