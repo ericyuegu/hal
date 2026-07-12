@@ -23,20 +23,24 @@ bidirectional shutdown (a stop event both sides honor).
 import copy
 import dataclasses
 import queue
+import signal
 import threading
 import time
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
-import melee
 import numpy as np
 import torch
 import tyro
 from loguru import logger
+from melee_collector import BuildBoot
+from melee_collector import CollectStats
+from melee_collector import IterationPayload
 from melee_collector import NetActingPolicy
 from melee_collector import RLBatchPolicy
 from melee_collector import drive_rl
+from nets_melee import ArchConfig
 from nets_melee import PolicyValueNet
 from nets_melee import load_il_policy
 from ppo import melee_ppo_update
@@ -222,35 +226,32 @@ def _slot_matchups(matchups: list[Matchup], ports: tuple[int, ...]) -> dict[Slot
     }
 
 
-def _session_factory(
-    session_cfg: SessionConfig,
-    matchups: list[Matchup],
-    ports: tuple[int, ...],
-    base_port: int,
-    replay_root: Path | None,
-):
-    def build() -> tuple[list[Session], list[Matchup], list[tuple[int, ...]]]:
-        sessions: list[Session] = []
-        for i in range(len(matchups)):
-            replay_dir = None
-            if replay_root is not None:
-                replay_dir = replay_root / f"boot_{i:03d}"
-                replay_dir.mkdir(parents=True, exist_ok=True)
-            sessions.append(_build_session(session_cfg, slippi_port=base_port + i, replay_dir=replay_dir))
-        return sessions, matchups, [ports] * len(matchups)
+def _boot_builder(session_cfg: SessionConfig, n_boots: int, base_port: int, replay_root: Path | None) -> BuildBoot:
+    """Per-``(boot, attempt)`` Session builder for ``drive_rl``. Each retry attempt
+    rotates onto a fresh port block (``(attempt % 8) * n_boots`` — the same discipline as
+    ``run_matches_vec``) so a stuck, not-yet-reaped Dolphin can't collide with the retry."""
+
+    def build(i: int, attempt: int) -> Session:
+        replay_dir = None
+        if replay_root is not None:
+            replay_dir = replay_root / f"boot_{i:03d}"
+            replay_dir.mkdir(parents=True, exist_ok=True)
+        port = base_port + (attempt % 8) * n_boots + i
+        return _build_session(session_cfg, slippi_port=port, replay_dir=replay_dir)
 
     return build
 
 
-_ZERO_TRAIN = {
-    "clip_loss": 0.0,
-    "entropy": 0.0,
-    "approx_kl": 0.0,
-    "ratio_dev_epoch0": 0.0,
-    "kl_il": 0.0,
-    "gnorm": 0.0,
-    "epochs_used": 0.0,
-}
+def _resnapshot_ema(ema: EMAWeights, module: torch.nn.Module) -> None:
+    """Reset the EMA shadow to the module's current weights. Used at the warmup→PPO phase
+    switch: the EMA is frozen through warmup (acting stays byte-identical IL), so it must
+    re-anchor to the warmed learner before it starts trailing PPO updates."""
+    ema.load_state_dict(
+        {
+            **{n: p.detach() for n, p in module.named_parameters()},
+            **{n: b.detach() for n, b in module.named_buffers()},
+        }
+    )
 
 
 def main(args: Args) -> None:
@@ -295,12 +296,23 @@ def main(args: Args) -> None:
         counters["iter"] = state["step"]
         counters["transitions"] = state["transitions"]
         wandb_id = state.get("wandb_id")
+        warmup_done = bool(state["value_warmup_done"])
+        if warmup_done != (counters["iter"] >= args.rl.value_warmup_iters):
+            raise ValueError(
+                f"resume phase mismatch: checkpoint value_warmup_done={warmup_done} at iter={counters['iter']}, "
+                f"but --rl.value-warmup-iters={args.rl.value_warmup_iters} implies the opposite — resume with the "
+                "same warmup config the checkpoint was trained under"
+            )
         logger.info(f"resumed from {args.resume} at iter={counters['iter']} transitions={counters['transitions']}")
         if args.smoke:  # a smoke resume just proves one more clean iteration off the checkpoint
             total_iters = counters["iter"] + 1
         if counters["iter"] >= total_iters:
             raise ValueError(f"resume iter {counters['iter']} >= total_iterations {total_iters}")
     ema.copy_to(act_net)  # behavior net starts at the (resumed) EMA weights
+    # True once the warmup→PPO switch has re-anchored the EMA this process (already done
+    # for a resumed run past warmup: its checkpointed EMA is the post-anchor truth).
+    phase = {"ppo_started": counters["iter"] >= args.rl.value_warmup_iters}
+    transitions_at_start = counters["transitions"]  # keep transitions_per_s honest across --resume
 
     if args.wandb:
         import wandb
@@ -345,10 +357,10 @@ def main(args: Args) -> None:
         rollout_frames=args.rl.rollout_frames,
     )
     session_cfg = default_session_cfg(replay_root, instant_match_restart=True)
-    build_sessions = _session_factory(session_cfg, matchups, ports, args.base_slippi_port, replay_root)
+    build_boot = _boot_builder(session_cfg, args.rl.n_boots, args.base_slippi_port, replay_root)
 
     snapshot_lock = threading.Lock()
-    q: queue.Queue[RolloutIteration] = queue.Queue(maxsize=1)
+    q: queue.Queue[IterationPayload] = queue.Queue(maxsize=1)
     stop = threading.Event()
     sync_gate = threading.Event() if not args.pipeline.overlap else None
 
@@ -358,25 +370,29 @@ def main(args: Args) -> None:
 
     t_start = time.monotonic()
 
-    def learn(iteration: RolloutIteration) -> None:
-        wait0 = time.monotonic()
+    def learn(iteration: RolloutIteration, cstats: CollectStats, queue_wait_s: float) -> None:
+        t_learn = time.monotonic()  # learner_s_per_iter includes the value pass below
         windows, vdiag = _prepare_windows(learner, iteration, stats, args.ppo, device)
         if not windows:
             logger.warning("learn: iteration produced no windows; skipping update")
             return
         warmup = counters["iter"] < args.rl.value_warmup_iters
+        if not warmup and not phase["ppo_started"]:
+            # Warmup froze the EMA (acting stayed byte-identical IL); re-anchor it to the
+            # warmed learner before it starts trailing PPO updates.
+            with snapshot_lock:
+                _resnapshot_ema(ema, learner)
+            phase["ppo_started"] = True
 
         def advance_ema() -> None:
             with snapshot_lock:
                 ema.update(learner)
 
-        t_learn = time.monotonic()
         if warmup:
-            metrics = {**_ZERO_TRAIN, "vf_loss": 0.0}
-            metrics.update(
-                value_warmup_update(
-                    learner, opt_warm, windows, args.ppo, stats, device=device, generator=gen, on_step=advance_ema
-                )
+            # on_step=None: the EMA (and therefore act_net) must not move during warmup —
+            # ema.update is not a fixed point even for unchanged params (~ulp drift).
+            metrics = value_warmup_update(
+                learner, opt_warm, windows, args.ppo, stats, device=device, generator=gen, on_step=None
             )
         else:
             metrics = melee_ppo_update(
@@ -397,19 +413,26 @@ def main(args: Args) -> None:
         rl_stats = _rollout_stats(iteration)
         elapsed = time.monotonic() - t_start
         thr = {
-            "transitions_per_s": counters["transitions"] / elapsed if elapsed else 0.0,
+            "transitions_per_s": (counters["transitions"] - transitions_at_start) / elapsed if elapsed else 0.0,
             "learner_s_per_iter": learn_s,
-            "queue_wait_s": t_learn - wait0,
-            "lockstep_sps": iteration.n_transitions / (len(slots)) / max(1e-6, learn_s),
+            "queue_wait_s": queue_wait_s,  # real blocking time in _next_iteration
+            "lockstep_sps": cstats.lockstep_sps,  # collector-measured stepping rate
         }
-        logger.info(
-            f"iter={counters['iter']} phase={'warmup' if warmup else 'ppo'} "
-            f"transitions={counters['transitions']} reward_mean={rl_stats['reward_mean']:.4f} "
-            f"dmg/min={rl_stats['dmg_dealt_per_min']:.1f} ep_return={rl_stats['ep_return_mean']:.2f} "
-            f"n_eps={int(rl_stats['n_episodes'])} vf={metrics['vf_loss']:.3f} clip={metrics['clip_loss']:.3f} "
-            f"kl={metrics['approx_kl']:.4f} epochs={int(metrics['epochs_used'])} "
-            f"ratio_dev0={metrics['ratio_dev_epoch0']:.4f} v_ev={vdiag['v_explained_var']:.3f} learn_s={learn_s:.1f}"
+        common = (
+            f"iter={counters['iter']} transitions={counters['transitions']} "
+            f"reward_mean={rl_stats['reward_mean']:.4f} dmg/min={rl_stats['dmg_dealt_per_min']:.1f} "
+            f"ep_return={rl_stats['ep_return_mean']:.2f} n_eps={int(rl_stats['n_episodes'])} "
+            f"vf={metrics['vf_loss']:.3f} v_ev={vdiag['v_explained_var']:.3f} "
+            f"sps={cstats.lockstep_sps:.0f} learn_s={learn_s:.1f}"
         )
+        if warmup:  # value-head-only phase: policy metrics don't exist, so none are printed
+            logger.info(f"{common} phase=warmup")
+        else:
+            logger.info(
+                f"{common} phase=ppo clip={metrics['clip_loss']:.3f} "
+                f"kl_upd={metrics['approx_kl_update']:.4f} kl_col={metrics['approx_kl_collect']:.4f} "
+                f"epochs={int(metrics['epochs_used'])} ratio_dev0={metrics['ratio_dev_epoch0']:.4f}"
+            )
         _check_finite(metrics)
         if args.wandb:
             import wandb
@@ -418,19 +441,8 @@ def main(args: Args) -> None:
                 {
                     "global_step": counters["transitions"],
                     **{f"rollout/{k}": v for k, v in rl_stats.items()},
-                    **{
-                        f"train/{k}": metrics[k]
-                        for k in (
-                            "clip_loss",
-                            "vf_loss",
-                            "entropy",
-                            "approx_kl",
-                            "ratio_dev_epoch0",
-                            "kl_il",
-                            "gnorm",
-                            "epochs_used",
-                        )
-                    },
+                    # metrics carries only what this phase measured (warmup: vf_loss only)
+                    **{f"train/{k}": v for k, v in metrics.items()},
                     **{f"train/{k}": v for k, v in vdiag.items()},
                     **{f"throughput/{k}": v for k, v in thr.items()},
                 }
@@ -445,7 +457,9 @@ def main(args: Args) -> None:
     def drive_target() -> None:
         try:
             drive_rl(
-                build_sessions,
+                build_boot,
+                matchups,
+                [ports] * args.rl.n_boots,
                 pol,
                 n_iterations=remaining,
                 queue_out=q,
@@ -460,40 +474,59 @@ def main(args: Args) -> None:
 
     collector = threading.Thread(target=drive_target, name="rl-drive", daemon=True)
     collector.start()
+    interrupted = False
     try:
         for _ in range(remaining):
-            payload = _next_iteration(q, collector, stop)
+            payload, wait_s = _next_iteration(q, collector, stop)
             if payload is None:
                 break
-            learn(payload)
+            iteration, cstats = payload
+            learn(iteration, cstats, wait_s)
             if sync_gate is not None:
                 sync_gate.set()  # release the collector for the next (lag-0) iteration
+    except KeyboardInterrupt:
+        interrupted = True
+        # SIGINT goes to the whole process group (Dolphins included), and repeats/echoes
+        # would blow through the shutdown path before the final save — ignore from here on.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        logger.warning("SIGINT: stopping collection; final checkpoint follows (further SIGINT ignored)")
     finally:
         stop.set()
         if sync_gate is not None:
             sync_gate.set()  # unblock a collector parked on the gate so it can wind down
-        collector.join()
+        while collector.is_alive():
+            try:
+                collector.join()
+            except KeyboardInterrupt:  # a repeat SIGINT racing the SIG_IGN swap above
+                interrupted = True
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    if drive_error:
-        raise drive_error[0]
     _save(ckpt_dir / "latest.pt", counters, learner, opt_ppo, opt_warm, const_sched, ema, args, cfg, wandb_id)
+    if drive_error and not interrupted:
+        raise drive_error[0]
     logger.info(f"done: {counters['iter']} iterations, {counters['transitions']} transitions")
 
 
 _POLL = 0.1
 
 
-def _next_iteration(q: queue.Queue[RolloutIteration], collector: threading.Thread, stop: threading.Event):
+def _next_iteration(
+    q: queue.Queue[IterationPayload], collector: threading.Thread, stop: threading.Event
+) -> tuple[IterationPayload | None, float]:
+    """Block for the next payload; returns it plus the real time spent blocked here
+    (``queue_wait_s`` — the honest learner-starvation signal). ``None`` when the
+    collector died/stopped with nothing queued."""
+    t0 = time.monotonic()
     while True:
         try:
-            return q.get(timeout=_POLL)
+            return q.get(timeout=_POLL), time.monotonic() - t0
         except queue.Empty:
             if collector.is_alive() and not stop.is_set():
                 continue
             try:
-                return q.get_nowait()
+                return q.get_nowait(), time.monotonic() - t0
             except queue.Empty:
-                return None
+                return None, time.monotonic() - t0
 
 
 def _check_finite(metrics: dict[str, float]) -> None:
@@ -502,7 +535,18 @@ def _check_finite(metrics: dict[str, float]) -> None:
         raise ValueError(f"non-finite train metric(s): {bad} in {metrics}")
 
 
-def _save(path, counters, learner, opt_ppo, opt_warm, sched, ema, args, cfg, wandb_id) -> None:
+def _save(
+    path: Path,
+    counters: dict[str, int],
+    learner: PolicyValueNet,
+    opt_ppo: torch.optim.Optimizer,
+    opt_warm: torch.optim.Optimizer,
+    sched: torch.optim.lr_scheduler.LRScheduler,
+    ema: EMAWeights,
+    args: Args,
+    cfg: ArchConfig,
+    wandb_id: str | None,
+) -> None:
     save_checkpoint(
         path,
         step=counters["iter"],

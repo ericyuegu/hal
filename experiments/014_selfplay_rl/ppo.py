@@ -215,15 +215,22 @@ def value_warmup_update(
 
 
 @torch.no_grad()
-def _windowed_approx_kl(
-    net: PolicyValueNet, windows: list[Window], stats: dict[str, FeatureStats], device: str
-) -> float:
-    """Mean ``logp_behavior - logp_current`` over every valid window position — the
-    same behavior-vs-current approx KL ``update_with_kl_stop`` measures on the gym
-    buffer, here over the whole window set for the early-stop test between epochs."""
+def _windowed_kls(
+    net: PolicyValueNet,
+    windows: list[Window],
+    stats: dict[str, FeatureStats],
+    logp_epoch0: torch.Tensor,
+    device: str,
+) -> tuple[float, float]:
+    """One no-grad forward over the whole window set → two approx KLs of the current
+    policy: vs the epoch-0 recompute (``logp_epoch0``, rows in ``windows`` order — the
+    early-stop signal: movement caused by THIS update phase) and vs the recorded
+    collection log-prob (diagnostic; carries the window-context recompute floor)."""
     batch = collate_windows(windows, stats).to(device)
     _, logp_cur, _ = _forward_logp(net, batch.context, batch.act_idx)
-    return float(_masked_mean(batch.logp_old - logp_cur, batch.valid))
+    kl_update = float(_masked_mean(logp_epoch0.to(device) - logp_cur, batch.valid))
+    kl_collect = float(_masked_mean(batch.logp_old - logp_cur, batch.valid))
+    return kl_update, kl_collect
 
 
 def melee_ppo_update(
@@ -255,6 +262,17 @@ def melee_ppo_update(
     ``BehaviorLogpPPO``). When ``il_net`` is given, ``+kl_il_coef * KL(current || IL)`` (IL
     forward under no_grad) is added — the anchor that keeps the policy near the warm-start.
 
+    KL early-stop is DECOUPLED from the collection log-prob: the windowed recompute
+    carries an irreducible context-approximation floor vs collection (mid-stream windows
+    see less history than the rolling collection buffer did), so measuring drift against
+    ``window.logp`` would trip ``target_kl`` from epoch 1 forever and silently cap PPO at
+    one epoch. Instead, epoch 0 stashes each window's recomputed ``logp`` (detached, at
+    its first visit — reusing the update forward, no extra pass) and the between-epoch
+    stop measures ``approx_kl_update`` = KL of the current policy vs that epoch-0
+    recompute — i.e. movement caused by THIS update phase only. The PPO ratios still use
+    the recorded collection log-prob (the genuine importance weight); ``approx_kl_collect``
+    (current vs collection) is returned as a diagnostic alongside.
+
     ``ppo_cfg.minibatch_size`` counts WINDOWS per minibatch here (each window is up to
     ``L_ctx`` transitions), not individual transitions. Returns diagnostic scalars incl.
     ``ratio_dev_epoch0`` = mean ``|ratio - 1|`` on the first minibatch of epoch 0 (≈ 0 when
@@ -262,17 +280,23 @@ def melee_ppo_update(
     if not windows:
         raise ValueError("melee_ppo_update called with no windows")
     n = len(windows)
+    L = windows[0].logp.shape[0]
     mb = max(1, ppo_cfg.minibatch_size)
     clip_losses, vf_losses, entropies, kl_ils, gnorms = [], [], [], [], []
     ratio_dev_epoch0 = 0.0
-    approx_kl = 0.0
+    approx_kl_update = 0.0
+    approx_kl_collect = 0.0
     epochs_used = 0
+    logp_epoch0 = torch.zeros(n, L)  # per-window epoch-0 recompute (early-stop reference)
     for epoch in range(ppo_cfg.epochs):
         perm = torch.randperm(n, generator=generator).tolist()
         for mb_i, start in enumerate(range(0, n, mb)):
-            batch = collate_windows([windows[i] for i in perm[start : start + mb]], stats).to(device)
+            mb_idx = perm[start : start + mb]
+            batch = collate_windows([windows[i] for i in mb_idx], stats).to(device)
             valid = batch.valid
             values, logp, dist = _forward_logp(net, batch.context, batch.act_idx)
+            if epoch == 0:  # stash the update-phase reference at each window's first visit
+                logp_epoch0[mb_idx] = logp.detach().cpu()
 
             adv = batch.adv
             if _ADV_NORM:
@@ -315,14 +339,15 @@ def melee_ppo_update(
             kl_ils.append(float(kl_il.detach()))
             gnorms.append(float(gnorm))
         epochs_used += 1
-        approx_kl = _windowed_approx_kl(net, windows, stats, device)
-        if approx_kl > ppo_cfg.target_kl:
+        approx_kl_update, approx_kl_collect = _windowed_kls(net, windows, stats, logp_epoch0, device)
+        if approx_kl_update > ppo_cfg.target_kl:
             break
     return {
         "clip_loss": float(np.mean(clip_losses)),
         "vf_loss": float(np.mean(vf_losses)),
         "entropy": float(np.mean(entropies)),
-        "approx_kl": approx_kl,
+        "approx_kl_update": approx_kl_update,
+        "approx_kl_collect": approx_kl_collect,
         "kl_il": float(np.mean(kl_ils)),
         "gnorm": float(np.mean(gnorms)),
         "epochs_used": float(epochs_used),

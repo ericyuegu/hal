@@ -111,6 +111,8 @@ class SlotStream:
             raise RuntimeError("terminate_last after append_boundary")
         if not self._rew:
             raise ValueError("terminate_last on a stream with no recorded steps")
+        if self._terminated[-1]:
+            raise RuntimeError("terminate_last: last step already terminated (double episode boundary)")
         self._rew[-1] += float(bonus)
         self._terminated[-1] = True
 

@@ -41,6 +41,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
+from types import MappingProxyType
 from typing import Protocol
 
 import numpy as np
@@ -161,7 +162,14 @@ class _Pending:
 
 @dataclass(slots=True)
 class _SlotRL:
-    """One model-driven port's live collection state."""
+    """One model-driven port's live collection state.
+
+    ``last_id`` is ``None`` until the slot's first frame (sentinel: the first frame of a
+    fresh/rebooted slot can never read as an instant-restart reset). ``episode_steps``
+    counts transitions recorded in the CURRENT episode across stream finalizations — it
+    distinguishes a boot-adjacent boundary (nothing ever recorded: benign) from a
+    finalize-adjacent one (the episode's steps live in an already-emitted stream, so its
+    terminal bonus is genuinely lost)."""
 
     ego_port: int
     handle: str
@@ -171,7 +179,8 @@ class _SlotRL:
     flat_hist: list[dict] = field(default_factory=list)
     ego_hist: list[np.ndarray] = field(default_factory=list)
     pending: _Pending | None = None
-    last_id: int = 0
+    last_id: int | None = None
+    episode_steps: int = 0
 
 
 def _token_features(cur_flat: dict, prev_action: np.ndarray, ego_prefix: str) -> dict[str, np.ndarray]:
@@ -232,6 +241,9 @@ class RLBatchPolicy:
             self._init_slot(slot)
         self._global_frame = 0
         self._pending_iters: list[RolloutIteration] = []
+        # Streams flushed (truncated + boundary appended) by a wave reboot, carried into
+        # the next finalized iteration so recorded transitions are never discarded.
+        self._orphans: list[SlotStream] = []
 
     # -- slot lifecycle --------------------------------------------------------
     def _init_slot(self, slot: Slot) -> None:
@@ -250,16 +262,22 @@ class RLBatchPolicy:
         )
 
     def reset_slots(self, slots: Sequence[Slot]) -> None:
-        """Cold-restart the given slots (drop rolling history + partial stream, reset the
-        cache row) — used after a wave reboot so a reused Slot index doesn't carry the
-        dead match's context."""
+        """Cold-restart the given slots after a wave reboot. Each slot's in-progress
+        stream is FLUSHED, not discarded: its tail is marked truncated, the boundary obs
+        appended, and the closed stream parked as an orphan that joins the next finalized
+        iteration — so recorded transitions survive the reboot."""
         for slot in slots:
             st = self.state[slot]
+            if st.stream.n_recorded > 0:
+                st.stream.truncate_last()
+                st.stream.append_boundary(st.flat_hist[-1])
+                self._orphans.append(st.stream)
+            st.stream = SlotStream(st.ego_port, matchup=st.matchup)
             st.flat_hist.clear()
             st.ego_hist.clear()
             st.pending = None
-            st.last_id = 0
-            st.stream = SlotStream(st.ego_port, matchup=st.matchup)
+            st.last_id = None
+            st.episode_steps = 0
             self.handles[st.handle].reset_slot(st.row)
 
     def _on_reset(self, st: _SlotRL) -> None:
@@ -269,11 +287,19 @@ class RLBatchPolicy:
         if st.stream.n_recorded > 0:
             bonus = terminal_bonus(st.flat_hist[-1], st.ego_port, self.reward_cfg, terminated=True)
             st.stream.terminate_last(bonus)
+        elif st.episode_steps > 0:
+            # The episode's steps were emitted (truncated) with the last iteration and its
+            # fresh stream has none — the terminated flag + win/loss bonus cannot attach.
+            logger.warning(
+                f"RLBatchPolicy: terminal bonus LOST on ego_port {st.ego_port} — episode ended on the first "
+                f"frame after an iteration boundary ({st.episode_steps} steps already finalized as truncated)"
+            )
         else:
-            logger.warning(f"RLBatchPolicy: episode boundary on {st.ego_port} with no recorded step; bonus dropped")
+            logger.debug(f"RLBatchPolicy: boundary on ego_port {st.ego_port} before any recorded step (boot noise)")
         st.flat_hist.clear()
         st.ego_hist.clear()
         st.pending = None
+        st.episode_steps = 0
         self.handles[st.handle].reset_slot(st.row)
 
     # -- per-frame step --------------------------------------------------------
@@ -289,11 +315,14 @@ class RLBatchPolicy:
         tokens: dict[str, list[dict[str, np.ndarray]]] = {h: [] for h in by_handle}
         for slot in live:
             st = self.state[slot]
-            fid = int(obs[slot].get("id", st.last_id + 1))
-            if fid < st.last_id:  # id dropped -> instant-restart into a new match
+            frame = obs[slot]
+            if "id" not in frame:
+                raise KeyError(f"obs frame for slot {slot} has no 'id' — cannot detect episode boundaries")
+            fid = int(frame["id"])
+            if st.last_id is not None and fid < st.last_id:  # id dropped -> instant-restart into a new match
                 self._on_reset(st)
             st.last_id = fid
-            cur_flat = flatten_canonical_frame(obs[slot])
+            cur_flat = flatten_canonical_frame(frame)
             st.flat_hist.append(cur_flat)
             if len(st.flat_hist) > self.L_ctx:
                 st.flat_hist.pop(0)
@@ -308,6 +337,7 @@ class RLBatchPolicy:
                     terminated=False,
                     truncated=False,
                 )
+                st.episode_steps += 1
             prev_action = st.ego_hist[-1] if st.ego_hist else NEUTRAL_ACTION
             tokens[st.handle].append(_token_features(cur_flat, prev_action, _PORT_TO_PREFIX[st.ego_port]))
 
@@ -340,7 +370,8 @@ class RLBatchPolicy:
         return actions
 
     def _total_transitions(self) -> int:
-        return sum(st.stream.n_recorded for st in self.state.values())
+        live = sum(st.stream.n_recorded for st in self.state.values())
+        return live + sum(s.n_recorded for s in self._orphans)
 
     def _collate_tokens(self, tokens: list[dict[str, np.ndarray]]) -> Context:
         stacked = {k: np.concatenate([t[k] for t in tokens], axis=0) for k in tokens[0]}
@@ -361,12 +392,14 @@ class RLBatchPolicy:
         return Context(features=feats, ctx_pad=torch.tensor(ctx_pad, dtype=torch.long))
 
     def _finalize_iteration(self) -> RolloutIteration:
-        """Truncate every stream's tail, append its boundary obs (frame ``T``), reduce to a
-        :class:`RolloutIteration`, then start fresh streams. Rolling history + caches +
-        the pending step persist, so the next stream picks up mid-episode with no gap and
-        the boundary frame is the shared bootstrap of both."""
+        """Truncate every live stream's tail, append its boundary obs (frame ``T``), and
+        reduce — together with any reboot-orphaned streams — to a :class:`RolloutIteration`,
+        then start fresh streams. Rolling history + caches + the pending step persist, so
+        the next stream picks up mid-episode with no gap and the boundary frame is the
+        shared bootstrap of both."""
         streams = list(self.state.values())
-        finalized_inputs: list[SlotStream] = []
+        finalized_inputs: list[SlotStream] = self._orphans  # already truncated + closed by reset_slots
+        self._orphans = []
         for st in streams:
             st.stream.truncate_last()
             boundary = st.flat_hist[-1] if st.flat_hist else _EMPTY_FLAT
@@ -383,67 +416,103 @@ class RLBatchPolicy:
 
 
 # A stream that recorded no steps this iteration still needs one boundary flat to finalize
-# (T=0 -> build_windows yields nothing); this placeholder is only ever the T+1 frame of an
-# empty stream and never enters a window or a reward.
-_EMPTY_FLAT: dict[str, float] = {}
+# (T=0 -> build_windows yields nothing); this read-only placeholder is only ever the T+1
+# frame of an empty stream and never enters a window or a reward.
+_EMPTY_FLAT: Mapping[str, float] = MappingProxyType({})
 
 
 # --- drive loop ---------------------------------------------------------------
+# (boot_index, attempt) -> a fresh, un-entered Session. The factory owns port assignment
+# and must give each (boot, attempt) a distinct slippi_port (mirroring run_matches_vec's
+# fresh-ports-per-retry discipline so a stuck, not-yet-reaped Dolphin can't collide).
+BuildBoot = Callable[[int, int], Session]
+
+
+@dataclass(frozen=True, slots=True)
+class CollectStats:
+    """Collector-side throughput for one iteration: lockstep frames stepped since the
+    previous boundary and the frames/s over that stepping interval (collector wall-clock
+    between boundaries — excludes the sync-gate wait, so it is honest in sync mode)."""
+
+    frames: int
+    lockstep_sps: float
+
+
+IterationPayload = tuple[RolloutIteration, CollectStats]
+
+
 def drive_rl(
-    build_sessions: Callable[[], tuple[list[Session], list[Matchup], list[tuple[int, ...]]]],
+    build_boot: BuildBoot,
+    matchups: Sequence[Matchup],
+    model_ports: Sequence[tuple[int, ...]],
     policy: RLBatchPolicy,
     *,
     n_iterations: int,
-    queue_out: queue.Queue[RolloutIteration],
+    queue_out: queue.Queue[IterationPayload],
     stop: threading.Event,
     on_iteration: Callable[[], None],
     sync_gate: threading.Event | None = None,
+    start_retries: int = 2,
     max_frames: int = 10_000_000,
     progress_every: int = 600,
 ) -> None:
     """Persistent, iteration-oriented drive loop (the ``drive_vec`` sibling for RL).
 
-    ``build_sessions`` returns freshly-constructed (not entered) Sessions + their
-    ``Matchup``s + per-boot model ports; ``drive_rl`` enters them, starts every match
-    concurrently, then steps all boots on a thread pool one lockstep frame at a time,
-    feeding ``policy`` and relaying each finished :class:`RolloutIteration` to
-    ``queue_out``. ``on_iteration`` runs at every boundary (after the sync gate) to copy
-    the freshly-advanced EMA into the behavior net. In sync mode (``sync_gate`` set) the
-    loop blocks on the gate after each put, so the collector never runs ahead of the
-    learner (lag 0). A boot that dies is dropped; if fewer than half remain the whole
-    wave reboots (its slots reset). Exceptions propagate (the learner thread sets
-    ``stop`` on its own failure; a drive-loop death surfaces via ``queue_out`` going
-    empty), and every entered Session is torn down on the way out."""
+    ``build_boot(i, attempt)`` constructs boot ``i``'s Session; ``drive_rl`` enters and
+    starts every boot concurrently, re-driving start-flaked boots on fresh Sessions/ports
+    up to ``start_retries`` times (the libmelee stage-select flake — same absorption as
+    ``run_matches_vec``), then steps all boots on a thread pool one lockstep frame at a
+    time, feeding ``policy`` and relaying each finished iteration (plus collector-side
+    :class:`CollectStats`) to ``queue_out``. ``on_iteration`` runs at every boundary
+    (after the sync gate) to copy the freshly-advanced EMA into the behavior net. In sync
+    mode (``sync_gate`` set) the loop blocks on the gate after each put, so the collector
+    never runs ahead of the learner (lag 0). A boot that dies is dropped; if fewer than
+    half remain the whole wave reboots (in-progress streams flush truncated via
+    ``policy.reset_slots``). Exceptions propagate (the learner thread sets ``stop`` on its
+    own failure; a drive-loop death surfaces via ``queue_out`` going empty), and every
+    entered Session is torn down on the way out."""
     entered: list[Session] = []
+    n = len(matchups)
+    attempt0 = 0  # advances per wave so reboot retries rotate onto fresh ports too
     with ThreadPoolExecutor(max_workers=32) as pool:
         try:
-            sessions, matchups, ports_of, done, last_frame = _boot_wave(build_sessions, entered, pool)
-            n0 = len(sessions)
-            logger.info(f"drive_rl: {sum(not d for d in done)}/{n0} boots up; target {n_iterations} iterations")
+            sessions, done, last_frame = _boot_wave(
+                build_boot, matchups, entered, pool, attempt0=attempt0, start_retries=start_retries
+            )
+            attempt0 += start_retries + 1
+            logger.info(f"drive_rl: {sum(not d for d in done)}/{n} boots up; target {n_iterations} iterations")
             on_iteration()  # prime the behavior net (EMA -> act_net) before the first collect
 
             emitted = 0
             t0 = time.monotonic()
+            frames_stepped = 0
+            frames_mark = 0
+            t_mark = time.monotonic()
             for t in range(max_frames):
                 if stop.is_set() or emitted >= n_iterations:
                     break
-                live = [i for i in range(len(sessions)) if not done[i]]
-                if len(live) < max(1, n0 // 2):
-                    logger.warning(f"drive_rl: only {len(live)}/{n0} boots alive at frame {t}; rebooting wave")
+                live = [i for i in range(n) if not done[i]]
+                if len(live) < max(1, n // 2):
+                    logger.warning(f"drive_rl: only {len(live)}/{n} boots alive at frame {t}; rebooting wave")
                     _teardown(entered)
-                    policy.reset_slots(list(policy.state))
-                    sessions, matchups, ports_of, done, last_frame = _boot_wave(build_sessions, entered, pool)
-                    n0 = len(sessions)
+                    policy.reset_slots(list(policy.state))  # flushes in-progress streams truncated
+                    sessions, done, last_frame = _boot_wave(
+                        build_boot, matchups, entered, pool, attempt0=attempt0, start_retries=start_retries
+                    )
+                    attempt0 += start_retries + 1
                     continue
                 if progress_every and t > 0 and t % progress_every == 0:
-                    logger.info(f"drive_rl: frame {t} | live {len(live)}/{n0} | {t / (time.monotonic() - t0):.0f} f/s")
+                    logger.info(f"drive_rl: frame {t} | live {len(live)}/{n} | {t / (time.monotonic() - t0):.0f} f/s")
 
                 for i in live:  # refresh injected live stage (instant-restart randomizes per match)
                     meta = last_frame[i]["_matchup"]
                     meta["stage"] = last_frame[i].get("stage", meta["stage"])
-                obs = {Slot(i, p): last_frame[i] for i in live for p in ports_of[i]}
+                obs = {Slot(i, p): last_frame[i] for i in live for p in model_ports[i]}
                 inputs = policy(t, obs)
-                futs = {i: pool.submit(sessions[i].step, {p: inputs[Slot(i, p)] for p in ports_of[i]}) for i in live}
+                futs = {
+                    i: pool.submit(sessions[i].step, {p: inputs[Slot(i, p)] for p in model_ports[i]}) for i in live
+                }
+                frames_stepped += 1
                 for i, fut in futs.items():
                     try:
                         frame, in_game = fut.result()
@@ -460,7 +529,12 @@ def drive_rl(
 
                 iteration = policy.take_iteration()
                 if iteration is not None:
-                    _put(queue_out, iteration, stop)
+                    step_s = time.monotonic() - t_mark
+                    stats = CollectStats(
+                        frames=frames_stepped - frames_mark,
+                        lockstep_sps=(frames_stepped - frames_mark) / max(1e-9, step_s),
+                    )
+                    _put(queue_out, (iteration, stats), stop)
                     emitted += 1
                     if stop.is_set():
                         break
@@ -470,6 +544,8 @@ def drive_rl(
                                 return
                         sync_gate.clear()
                     on_iteration()
+                    frames_mark = frames_stepped  # sps window restarts AFTER the gate/EMA copy
+                    t_mark = time.monotonic()
             logger.info(f"drive_rl: done after {emitted} iterations")
         finally:
             _teardown(entered)
@@ -478,7 +554,7 @@ def drive_rl(
 _POLL_SECONDS = 0.05
 
 
-def _put(q: queue.Queue[RolloutIteration], item: RolloutIteration, stop: threading.Event) -> None:
+def _put(q: queue.Queue[IterationPayload], item: IterationPayload, stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             q.put(item, timeout=_POLL_SECONDS)
@@ -488,39 +564,61 @@ def _put(q: queue.Queue[RolloutIteration], item: RolloutIteration, stop: threadi
 
 
 def _boot_wave(
-    build_sessions: Callable[[], tuple[list[Session], list[Matchup], list[tuple[int, ...]]]],
+    build_boot: BuildBoot,
+    matchups: Sequence[Matchup],
     entered: list[Session],
     pool: ThreadPoolExecutor,
-) -> tuple[list[Session], list[Matchup], list[tuple[int, ...]], list[bool], list[dict]]:
-    """Enter + concurrently start a fresh wave of Sessions (appending each to ``entered``
-    for guaranteed teardown). A boot that fails to reach IN_GAME is marked done; the
-    survivors set the shared t=0."""
-    sessions, matchups, ports_of = build_sessions()
-    for s in sessions:
-        s.__enter__()
-        entered.append(s)
-    done = [False] * len(sessions)
-    last_frame: list[dict] = [{} for _ in sessions]
+    *,
+    attempt0: int,
+    start_retries: int,
+) -> tuple[list[Session | None], list[bool], list[dict]]:
+    """Enter + concurrently start a fresh wave, retrying start-flaked boots on fresh
+    Sessions/ports (``build_boot(i, attempt)``) up to ``start_retries`` times — the
+    stage-select flake clears per-attempt (see ``run_matches_vec``). Successful sessions
+    are appended to ``entered`` for guaranteed teardown; a failed attempt's session is
+    torn down immediately. Boots still down after all retries are marked done."""
+    n = len(matchups)
+    sessions: list[Session | None] = [None] * n
+    last_frame: list[dict] = [{} for _ in range(n)]
     meta = [
         {"stage": int(m.stage.value), "character": {pl.port: int(pl.character.value) for pl in m.players}}
         for m in matchups
     ]
-    futs = {i: pool.submit(s.start_match, m) for i, (s, m) in enumerate(zip(sessions, matchups, strict=True))}
-    for i, fut in futs.items():
-        try:
-            f0 = fut.result()
+    pending = list(range(n))
+    for attempt in range(start_retries + 1):
+        fresh: dict[int, Session] = {i: build_boot(i, attempt0 + attempt) for i in pending}
+        for s in fresh.values():
+            s.__enter__()
+        futs = {i: pool.submit(s.start_match, matchups[i]) for i, s in fresh.items()}
+        still_down: list[int] = []
+        for i, fut in futs.items():
+            try:
+                f0 = fut.result()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"drive_rl: boot {i} start failed (attempt {attempt + 1}/{start_retries + 1}): {e!r}")
+                _close_one(fresh[i])
+                still_down.append(i)
+                continue
             f0["_matchup"] = meta[i]
             last_frame[i] = f0
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"drive_rl: boot {i} start failed: {e!r}")
-            done[i] = True
-    return sessions, matchups, ports_of, done, last_frame
+            sessions[i] = fresh[i]
+            entered.append(fresh[i])
+        pending = still_down
+        if not pending:
+            break
+        if attempt < start_retries:
+            logger.warning(f"drive_rl: retrying {len(pending)} boot(s) on fresh Sessions/ports")
+    done = [sessions[i] is None for i in range(n)]
+    return sessions, done, last_frame
+
+
+def _close_one(s: Session) -> None:
+    try:
+        s.__exit__(None, None, None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"drive_rl: session teardown error: {e!r}")
 
 
 def _teardown(entered: list[Session]) -> None:
     while entered:
-        s = entered.pop()
-        try:
-            s.__exit__(None, None, None)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"drive_rl: session teardown error: {e!r}")
+        _close_one(entered.pop())
