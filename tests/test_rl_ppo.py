@@ -9,22 +9,41 @@ exactly once in order, and propagates a collector exception.
 
 import threading
 import time
+from dataclasses import replace
 
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch
 from nets_gym import MLPActor
 from nets_gym import MLPCritic
+from nets_melee import A_VOCAB
+from nets_melee import ArchConfig
+from nets_melee import FactoredCategorical
+from nets_melee import PolicyValueNet
 from pipeline import run_pipeline
 from ppo import BehaviorLogpPPO
 from ppo import build_batch_add
+from ppo import melee_ppo_update
 from ppo import update_with_kl_stop
 from rl_config import PPOConfig
+from rollout import FinalizedStream
+from rollout import build_windows
+from rollout import collate_windows
+from rollout import gae_inputs
+from rollout import scatter_gae
 from tianshou.algorithm import PPO
 from tianshou.algorithm.modelfree.reinforce import ProbabilisticActorPolicy
 from tianshou.algorithm.optim import AdamOptimizerFactory
+from tianshou.data import Batch
 from tianshou.data import VectorReplayBuffer
 from tianshou.utils.net.discrete import dist_fn_categorical_from_logits
+from tianshou.utils.torch_utils import policy_within_training_step
+
+from hal.data.stats import FeatureStats
+from hal.training.features import A_DIM
+from hal.training.features import FLOAT_FEATURES
+from hal.wire import POST_FIELD_SUFFIXES
 
 NUM_ENVS = 2
 HORIZON = 64
@@ -226,3 +245,208 @@ def test_pipeline_sync_matches_inline() -> None:
 
     run_pipeline(collect=collect, learn=learn, iterations=5, overlap=False)
     assert seen == [0, 1, 2, 3, 4]
+
+
+# --- Melee windowed PPO update: parity + sync-case ratio ----------------------
+_TINY_CFG = ArchConfig(
+    d_model=16, n_layers=1, n_heads=2, L_ctx=8, char_vocab=8, char_dim=4, stage_vocab=8, stage_dim=2
+)
+_STATS = {
+    key: FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
+    for f in FLOAT_FEATURES
+    for key in (f, f"nana_{f}")  # consolidate_key strips ego_/opp_ but keeps the nana_ infix
+}
+_CAT_SUFFIXES = frozenset({"stock", "action", "jumps_used", "airborne", "hurtbox_state"})
+_GAE = {"gamma": 0.99, "gae_lambda": 0.95}
+
+
+def _flat_frame(rng: np.random.Generator) -> dict:
+    out: dict[str, float] = {}
+    for p in ("p1", "p2", "p1_nana", "p2_nana"):
+        for suf in POST_FIELD_SUFFIXES:
+            out[f"{p}_{suf}"] = float(rng.integers(0, 3)) if suf in _CAT_SUFFIXES else float(rng.standard_normal())
+    out["stage"] = 3
+    out["p1_character"] = 1
+    out["p2_character"] = 2
+    return out
+
+
+def _full_stream(T: int, *, logp: np.ndarray | None = None, seed: int = 0) -> FinalizedStream:
+    rng = np.random.default_rng(seed)
+    return FinalizedStream(
+        ego_port=1,
+        matchup=None,
+        flat=tuple(_flat_frame(rng) for _ in range(T + 1)),
+        ego_act=rng.uniform(-1, 1, size=(T, A_DIM)).astype(np.float32),
+        act_idx=rng.integers(0, 5, size=(T, 4)).astype(np.int64),
+        logp=(rng.standard_normal(T).astype(np.float32) if logp is None else logp),
+        rew=rng.standard_normal(T).astype(np.float32),
+        terminated=np.array([t == T - 1 for t in range(T)]),  # single complete episode
+        truncated=np.zeros(T, bool),
+    )
+
+
+def _forward_frame_arrays(net: PolicyValueNet, windows: list, T: int, d: int):
+    """Run the net over ``windows`` once and gather per-frame hidden/value/behavior-logp
+    by ``frame_pos`` (works for any window length; each real frame appears once)."""
+    batch = collate_windows(windows, _STATS)
+    with torch.no_grad():
+        hidden = net.forward_full(batch.context)  # [B, L, d]
+        values = net.values(hidden)  # [B, L]
+        logp = FactoredCategorical(net.policy_logits(hidden)).log_prob(batch.act_idx)  # [B, L]
+    h = np.zeros((T + 1, d), np.float32)
+    v = np.zeros(T + 1, np.float32)
+    lp = np.zeros(T + 1, np.float32)
+    for r, w in enumerate(windows):
+        for j, fr in enumerate(w.frame_pos.tolist()):
+            if fr >= 0:
+                h[fr] = hidden[r, j].numpy()
+                v[fr] = float(values[r, j])
+                lp[fr] = float(logp[r, j])
+    return h, v, lp
+
+
+class _HeadActor(torch.nn.Module):
+    """Linear head over a precomputed trunk hidden (tianshou actor mirror of policy_head)."""
+
+    def __init__(self, weight: torch.Tensor, bias: torch.Tensor) -> None:
+        super().__init__()
+        self.head = torch.nn.Linear(weight.shape[1], weight.shape[0])
+        self.head.weight.data.copy_(weight)
+        self.head.bias.data.copy_(bias)
+
+    def forward(self, obs, state=None, info=None):  # noqa: ANN001, ANN201
+        return self.head(torch.as_tensor(obs, dtype=torch.float32)), None
+
+
+class _HeadCritic(torch.nn.Module):
+    def __init__(self, weight: torch.Tensor, bias: torch.Tensor) -> None:
+        super().__init__()
+        self.head = torch.nn.Linear(weight.shape[1], weight.shape[0])
+        self.head.weight.data.copy_(weight)
+        self.head.bias.data.copy_(bias)
+
+    def forward(self, obs):  # noqa: ANN001, ANN201
+        return self.head(torch.as_tensor(obs, dtype=torch.float32))
+
+
+class _FactoredTorchDist:
+    """FactoredCategorical wrapped in the log_prob/entropy/sample surface tianshou's
+    ProbabilisticActorPolicy needs — so both update paths share the exact same
+    distribution and only the surrounding PPO loss math is under test."""
+
+    def __init__(self, logits: torch.Tensor) -> None:
+        self._fc = FactoredCategorical(logits)
+
+    def log_prob(self, act: torch.Tensor) -> torch.Tensor:
+        return self._fc.log_prob(act.long())
+
+    def entropy(self) -> torch.Tensor:
+        return self._fc.entropy()
+
+    def sample(self, sample_shape=torch.Size()) -> torch.Tensor:  # noqa: ANN001, B008
+        return self._fc.sample()
+
+    @property
+    def mode(self) -> torch.Tensor:
+        return torch.stack([lp.argmax(-1) for lp in self._fc._log_probs], dim=-1)
+
+
+def _tianshou_one_step(net: PolicyValueNet, stream: FinalizedStream, h: np.ndarray, cfg: PPOConfig, lr: float):
+    """One stock-tianshou PPO update on the same data/hidden/heads; returns head deltas."""
+    T = stream.n_transitions
+    ph0 = net.policy_head.weight.detach().clone()
+    vh0 = net.value_head.weight.detach().clone()
+    actor = _HeadActor(net.policy_head.weight.detach(), net.policy_head.bias.detach())
+    critic = _HeadCritic(net.value_head.weight.detach(), net.value_head.bias.detach())
+    policy = ProbabilisticActorPolicy(
+        actor=actor,
+        dist_fn=_FactoredTorchDist,
+        action_space=gym.spaces.MultiDiscrete([A_VOCAB, A_VOCAB, A_VOCAB, A_VOCAB]),
+        action_scaling=False,
+        action_bound_method=None,
+    )
+    algo = PPO(
+        policy=policy,
+        critic=critic,
+        optim=AdamOptimizerFactory(lr=lr),
+        eps_clip=cfg.clip,
+        gamma=cfg.gamma,
+        gae_lambda=cfg.gae_lambda,
+        ent_coef=cfg.ent_coef,
+        vf_coef=cfg.vf_coef,
+        max_grad_norm=cfg.max_grad_norm,
+        advantage_normalization=True,  # tianshou default (matched)
+        value_clip=False,  # tianshou default (matched)
+    )
+    buf = VectorReplayBuffer(T, buffer_num=1)
+    ids = np.zeros(1, np.int64)
+    for t in range(T):
+        buf.add(
+            Batch(
+                obs=h[t : t + 1],
+                act=stream.act_idx[t : t + 1],
+                rew=stream.rew[t : t + 1],
+                terminated=stream.terminated[t : t + 1],
+                truncated=stream.truncated[t : t + 1],
+                obs_next=h[t + 1 : t + 2],
+            ),
+            buffer_ids=ids,
+        )
+    with policy_within_training_step(algo.policy):
+        algo.update(buf, batch_size=None, repeat=1)
+    return actor.head.weight.detach() - ph0, critic.head.weight.detach() - vh0
+
+
+def test_melee_ppo_matches_tianshou_one_step() -> None:
+    # Same tiny net semantics, same data/hidden, kl_il_coef=0, one epoch, one minibatch,
+    # grad-clip disabled (a global norm over different param sets would otherwise rescale
+    # the shared head grads differently) -> head parameter deltas must match tianshou.
+    torch.manual_seed(0)
+    net = PolicyValueNet(_TINY_CFG)
+    d = _TINY_CFG.d_model
+    T = 6
+    lr = 1e-3
+    cfg = PPOConfig(lr=lr, clip=0.2, epochs=1, minibatch_size=10_000, ent_coef=0.01, vf_coef=0.5, max_grad_norm=1e9)
+
+    stream0 = _full_stream(T, seed=1)
+    w0 = build_windows(stream0, L_ctx=1)
+    h, v, lp = _forward_frame_arrays(net, w0, T, d)
+
+    # Behavior logp is on-policy (stock PPO recomputes it identically at epoch 0).
+    stream = replace(stream0, logp=lp[:T].astype(np.float32))
+    ((adv, returns),) = gae_inputs([stream], [v], **_GAE)
+    windows = [scatter_gae(w, adv, returns) for w in build_windows(stream, L_ctx=1)]
+
+    ph0 = net.policy_head.weight.detach().clone()
+    vh0 = net.value_head.weight.detach().clone()
+    d_actor, d_critic = _tianshou_one_step(net, stream, h, cfg, lr)  # heads read pre-update snapshot
+
+    optim = torch.optim.Adam(net.parameters(), lr=lr)
+    melee_ppo_update(net, None, optim, windows, cfg, 0.0, _STATS)
+    d_ph = net.policy_head.weight.detach() - ph0
+    d_vh = net.value_head.weight.detach() - vh0
+
+    assert torch.allclose(d_ph, d_actor, atol=1e-6), f"policy-head delta mismatch: {(d_ph - d_actor).abs().max()}"
+    assert torch.allclose(d_vh, d_critic, atol=1e-6), f"value-head delta mismatch: {(d_vh - d_critic).abs().max()}"
+
+
+def test_ratio_dev_epoch0_is_zero_on_policy() -> None:
+    # Windows built from the SAME net that produced the behavior logp -> the first
+    # epoch-0 minibatch recompute equals the behavior logp, so mean|ratio-1| ~ 0.
+    torch.manual_seed(1)
+    net = PolicyValueNet(_TINY_CFG)
+    d = _TINY_CFG.d_model
+    T = 5  # single episode <= L_ctx: cold-start window context matches collection exactly
+    cfg = PPOConfig(clip=0.2, epochs=1, minibatch_size=10_000, max_grad_norm=1e9)
+
+    stream0 = _full_stream(T, seed=2)
+    w0 = build_windows(stream0, L_ctx=_TINY_CFG.L_ctx)
+    _, v, lp = _forward_frame_arrays(net, w0, T, d)
+    stream = replace(stream0, logp=lp[:T].astype(np.float32))
+    ((adv, returns),) = gae_inputs([stream], [v], **_GAE)
+    windows = [scatter_gae(w, adv, returns) for w in build_windows(stream, L_ctx=_TINY_CFG.L_ctx)]
+
+    optim = torch.optim.Adam(net.parameters(), lr=1e-3)
+    metrics = melee_ppo_update(net, None, optim, windows, cfg, 0.0, _STATS)
+    assert metrics["ratio_dev_epoch0"] < 1e-4, metrics["ratio_dev_epoch0"]
