@@ -393,7 +393,9 @@ def test_eval_policy_steps_identically_to_collector() -> None:
     )
     seq = [_frame(i, p1_pct=i, p2_pct=2 * i, p2_stock=(4.0 if i < 5 else 1.0)) for i in range(6)]
     seq.append(_frame(0))  # id drop -> instant-restart reset (both must cold-start the cache)
-    seq += [_frame(i, p1_pct=float(i)) for i in range(1, 10)]  # post-reset frames span several rebuilds
+    # Post-reset frames span several rebuilds AND exceed L_ctx=16, so the ring-buffer
+    # eviction path is part of the comparison, not just fresh growth.
+    seq += [_frame(i, p1_pct=float(i)) for i in range(1, 25)]
 
     for t, f in enumerate(seq):
         rl_pol(t, {slot: f})

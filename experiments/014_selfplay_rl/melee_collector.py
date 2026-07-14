@@ -481,6 +481,7 @@ def drive_rl(
     sync_gate: threading.Event | None = None,
     start_retries: int = 2,
     reboot_every_iters: int = 0,
+    wave0: int = 0,
     max_frames: int = 10_000_000,
     progress_every: int = 600,
 ) -> None:
@@ -496,8 +497,10 @@ def drive_rl(
     mode (``sync_gate`` set) the loop blocks on the gate after each put, so the collector
     never runs ahead of the learner (lag 0).
 
-    Matchup rotation: the wave's matchups come from ``wave_matchups(wave_idx)`` (wave 0 at
-    launch). Every wave reboot advances ``wave_idx``, so the run cycles through the full
+    Matchup rotation: the wave's matchups come from ``wave_matchups(wave_idx)`` (wave
+    ``wave0`` at launch — a resumed run seeds this so rotation continues through the prior
+    instead of restarting at slice 0). Every wave reboot advances ``wave_idx``, so the run
+    cycles through the full
     training prior instead of self-playing one fixed slice for its whole duration. A reboot
     fires on attrition (fewer than half the boots alive) OR on a schedule
     (``reboot_every_iters`` learned iterations, ``0`` = attrition-only); either way the
@@ -509,7 +512,7 @@ def drive_rl(
     entered: list[Session] = []
     n = len(model_ports)
     attempt0 = 0  # advances per wave so reboot retries rotate onto fresh ports too
-    wave_idx = 0
+    wave_idx = wave0
     matchups: Sequence[Matchup] = wave_matchups(wave_idx)
     if len(matchups) != n:
         raise ValueError(f"wave_matchups({wave_idx}) returned {len(matchups)} matchups; expected {n}")

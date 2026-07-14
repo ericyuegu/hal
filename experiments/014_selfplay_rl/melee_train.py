@@ -355,7 +355,11 @@ def main(args: Args) -> None:
         seed=args.seed,
         max_pos=cfg.L_ctx + args.rl.refresh_every + 8,
     )
-    matchups = wave_matchups(0, args.rl.n_boots)
+    # A resumed run continues matchup rotation where the schedule left off rather than
+    # restarting at slice 0 (attrition reboots aren't counted — the seed is the scheduled
+    # floor, which is enough to keep long runs from re-grinding the head of the prior).
+    wave0 = counters["iter"] // args.rl.reboot_every_iters if args.rl.reboot_every_iters else 0
+    matchups = wave_matchups(wave0, args.rl.n_boots)
     slot_matchup = _slot_matchups(matchups, ports)
     slots = list(slot_matchup)
     pol = RLBatchPolicy(
@@ -486,6 +490,7 @@ def main(args: Args) -> None:
                 on_iteration=on_iteration,
                 sync_gate=sync_gate,
                 reboot_every_iters=args.rl.reboot_every_iters,
+                wave0=wave0,
                 progress_every=600,
             )
         except BaseException as exc:  # noqa: BLE001 — surfaced on the main thread
