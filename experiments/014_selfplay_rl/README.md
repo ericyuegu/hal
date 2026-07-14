@@ -26,7 +26,7 @@ debugged before the expensive closed-loop emulator is in the picture.
 - **G4** — throughput report: GPU util, lockstep fps, overlap fraction retention
   (target ≥ 70%), and a KV-cache benchmark plus numerical-equivalence check.
 
-## Run commands (placeholders; scripts land in later milestones)
+## Run commands
 
 ```bash
 # G1: Gym/CartPole PPO smoke
@@ -36,11 +36,68 @@ uv run experiments/014_selfplay_rl/gym_train.py --task CartPole-v1
 uv run experiments/014_selfplay_rl/gym_train.py --task Pong-v5
 
 # G3: Melee self-play PPO (warm-started from 012)
-uv run experiments/014_selfplay_rl/melee_train.py
+uv run experiments/014_selfplay_rl/melee_train.py --wandb --run-name <name> --rl.n-boots 6
 
-# G3 eval: EMA self-play vs frozen 012 IL / vs CPU
-uv run experiments/014_selfplay_rl/melee_eval.py
+# G3 eval: EMA vs frozen 012 IL head-to-head, then vs lvl-9 CPU vs pinned baseline.
+# NEVER run evals concurrently with a live trainer on the dev box (10+ Dolphins +
+# two CUDA processes hard-froze it once); run standalone, ideally memory-capped:
+#   systemd-run --user --scope -p MemoryMax=20G -- uv run ...
+uv run experiments/014_selfplay_rl/melee_eval.py --ckpt runs/<run>/latest.pt --h2h-matches 50 --n-boots 4
+uv run experiments/014_selfplay_rl/melee_eval.py --ckpt runs/<run>/latest.pt --vs-cpu --baseline runs/baseline_012_vs_cpu.json
+
+# G4: KV-cache benchmark (clean GPU only; co-resident training skews it)
+uv run experiments/014_selfplay_rl/bench_kv.py
 ```
+
+## Results (2026-07-14, run `014_selfplay_rl_g3_seed0`, checkpoint iter 4200 / 17.2M transitions)
+
+All four gates passed.
+
+- **G1 PASS** — CartPole 500.0/500.0 avg return in sync and overlap modes.
+- **G2 PASS** — Pong +20.9 at 10M frames (threshold +18), ~1713 sps, ahead of the
+  CleanRL reference curve (W&B `014_pong_g2_seed0`).
+- **G3 PASS** (both halves, eval JSONs in `runs/014_selfplay_rl_g3_seed0/`):
+  - *Head-to-head vs frozen 012 IL* — **51/52 wins** (win rate 0.981,
+    CI95 [0.942, 1.0]), mean stock diff **+2.92** [2.63, 3.19], damage
+    151.0 vs 78.2 per min.
+  - *vs lvl-9 CPU* (100 matches vs the 108-match pinned IL baseline) — net stock
+    rate **+0.842**/min [0.706, 0.980] vs IL's **−0.728** (sign flipped, far past
+    the no-regression bar); damage 184.4 dealt / 103.0 taken per min vs IL's
+    122.7 / 117.7; stocks 1.45 taken / 0.61 lost per min vs 0.83 / 1.56.
+
+### G4 throughput report (dev box: RTX 3060 12GB, 12 CPUs, 6 boots × 2 ports)
+
+Run-average over the 4200-iteration training run (W&B history means):
+
+| metric | value |
+|---|---|
+| transitions/s | 561 (~48M/day; ~700 in low-attrition stretches) |
+| lockstep fps | 68.6 across 6 Dolphins (12 policy slots) |
+| learner s/iter | 0.77 |
+| collector queue wait s/iter | 6.7 |
+| GPU util (steady state) | ~19% |
+
+The run is **collection-bound by design**: learner work is ~10% of iteration
+wall-clock, so double-buffering hides effectively all of it (overlap retention
+≈ 100%, well past the ≥70% target — the binding constraint is Dolphin lockstep
+throughput, not GPU contention). PPO health over the run: `epochs_used` 3.0
+(the approx-KL early stop essentially never fired), `approx_kl_update` ~8e-4,
+`ratio_dev_epoch0` ~0.057 (the expected window-context recompute floor),
+`v_explained_var` 0.80 mean rising to 0.93 by end.
+
+KV-cache benchmark (clean GPU, real 012 d256/L8 checkpoint, refresh_every=64;
+fp32 pre-eviction equivalence max |Δlogit| 1.9e-5):
+
+| n_slots | full ms/step | kv ms/step | speedup |
+|---|---|---|---|
+| 4 | 7.90 | 7.16 | 1.10× |
+| 8 | 8.43 | 7.28 | 1.16× |
+| 16 | 15.92 | 7.46 | **2.13×** |
+
+At small slot counts both paths are kernel-launch-latency-bound; the FLOP
+savings only become wall-clock past ~8 slots. The 50× figure sometimes quoted
+for incremental decode is FLOPs-only and does not survive contact with a
+12-launch-deep d256/L8 graph at batch ≤16.
 
 ## Extension seams (designed, not built)
 

@@ -1,0 +1,66 @@
+{
+  "baseline": {
+    "crashed": 0.02702702702702703,
+    "damage_dealt_per_min": 122.66178754356285,
+    "damage_taken_per_min": 117.70382238084105,
+    "frames": 7782.5462962962965,
+    "matches": 108.0,
+    "stocks_lost_per_min": 1.5590441574510865,
+    "stocks_taken_per_min": 0.8309191388612933
+  },
+  "baseline_net_stock_rate": -0.7281250185897932,
+  "ckpt": "runs/014_selfplay_rl_g3_seed0/latest.pt",
+  "config": {
+    "base_slippi_port": 55000,
+    "baseline": "runs/baseline_012_vs_cpu.json",
+    "ckpt": "runs/014_selfplay_rl_g3_seed0/latest.pt",
+    "cpu_level": 9,
+    "device": null,
+    "global_step": null,
+    "h2h_matches": 50,
+    "il_only": false,
+    "max_frames": 30000,
+    "n_boots": 4,
+    "out": "runs/014_selfplay_rl_g3_seed0/g3_vscpu_iter4200.json",
+    "refresh_every": 64,
+    "seed": 2,
+    "sweep_matches": 40,
+    "temp": 1.0,
+    "vs_cpu": true,
+    "wandb_run": null,
+    "warm_start": "260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024"
+  },
+  "cpu_level": 9,
+  "deltas": {
+    "crashed": 0.002099186565205982,
+    "damage_dealt_per_min": 61.75308770132018,
+    "damage_taken_per_min": -14.747769570900417,
+    "frames": 936.7937037037036,
+    "matches": -8.0,
+    "stocks_lost_per_min": -0.9479887335313861,
+    "stocks_taken_per_min": 0.6224018693801563
+  },
+  "g3_vs_cpu": "PASS",
+  "g3_vs_cpu_criterion": "net-stock-rate bootstrap 95% CI upper bound >= baseline net-stock-rate",
+  "git_sha": "4640c1fdab1eb9956aebc2a89a89258e15a33afc",
+  "mode": "vs_cpu",
+  "net_stock_rate": 0.8422655843217491,
+  "net_stock_rate_ci95": [
+    0.7061957781539334,
+    0.9802589247585913
+  ],
+  "policy": "ema",
+  "seed": 2,
+  "temp": 1.0,
+  "vs_cpu_metrics": {
+    "crashed": 0.02912621359223301,
+    "damage_dealt_per_min": 184.41487524488304,
+    "damage_taken_per_min": 102.95605280994063,
+    "frames": 8719.34,
+    "matches": 100.0,
+    "stocks_lost_per_min": 0.6110554239197004,
+    "stocks_taken_per_min": 1.4533210082414496
+  },
+  "wall_clock_s": 4769.545836464997,
+  "warm_start": "260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024"
+}

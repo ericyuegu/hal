@@ -1,0 +1,48 @@
+{
+  "ckpt": "runs/014_selfplay_rl_g3_seed0/latest.pt",
+  "config": {
+    "base_slippi_port": 55000,
+    "baseline": null,
+    "ckpt": "runs/014_selfplay_rl_g3_seed0/latest.pt",
+    "cpu_level": 9,
+    "device": null,
+    "global_step": null,
+    "h2h_matches": 50,
+    "il_only": false,
+    "max_frames": 30000,
+    "n_boots": 4,
+    "out": "runs/014_selfplay_rl_g3_seed0/g3_h2h_iter4200.json",
+    "refresh_every": 64,
+    "seed": 2,
+    "sweep_matches": 40,
+    "temp": 1.0,
+    "vs_cpu": false,
+    "wandb_run": null,
+    "warm_start": "260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024"
+  },
+  "ema_damage_per_min": 151.04035685160574,
+  "ema_win_rate": 0.9807692307692307,
+  "g3_h2h": "PASS",
+  "git_sha": "4640c1fdab1eb9956aebc2a89a89258e15a33afc",
+  "il_damage_per_min": 78.24301756966395,
+  "mean_stock_diff": 2.923076923076923,
+  "mode": "h2h",
+  "n_censored": 20,
+  "n_discarded": 0,
+  "n_dropped_boots": 0,
+  "n_matches": 52,
+  "n_ties": 0,
+  "policy": "ema",
+  "seed": 2,
+  "stock_diff_ci95": [
+    2.6346153846153846,
+    3.1923076923076925
+  ],
+  "temp": 1.0,
+  "wall_clock_s": 3324.5319532989997,
+  "warm_start": "260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024",
+  "win_rate_ci95": [
+    0.9423076923076923,
+    1.0
+  ]
+}
