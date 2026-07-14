@@ -172,26 +172,35 @@ class _Pending:
     ego_act: np.ndarray
 
 
-@dataclass(slots=True)
-class _SlotRL:
-    """One model-driven port's live collection state.
+@dataclass(slots=True, kw_only=True)
+class _StepSlot:
+    """Rolling per-slot state shared by collection and eval: the ``handle`` + cache ``row``
+    this slot decodes on, its ``ego_port``, the trailing gamestate/ego-action windows (capped
+    at ``L_ctx``), and ``last_id`` for instant-restart detection.
 
     ``last_id`` is ``None`` until the slot's first frame (sentinel: the first frame of a
-    fresh/rebooted slot can never read as an instant-restart reset). ``episode_steps``
-    counts transitions recorded in the CURRENT episode across stream finalizations — it
-    distinguishes a boot-adjacent boundary (nothing ever recorded: benign) from a
-    finalize-adjacent one (the episode's steps live in an already-emitted stream, so its
-    terminal bonus is genuinely lost)."""
+    fresh/rebooted slot can never read as an instant-restart reset)."""
 
-    ego_port: int
     handle: str
     row: int
-    matchup: dict | None
-    stream: SlotStream
+    ego_port: int
     flat_hist: list[dict] = field(default_factory=list)
     ego_hist: list[np.ndarray] = field(default_factory=list)
-    pending: _Pending | None = None
     last_id: int | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class _SlotRL(_StepSlot):
+    """One model-driven port's live collection state on top of the shared rolling window.
+
+    ``episode_steps`` counts transitions recorded in the CURRENT episode across stream
+    finalizations — it distinguishes a boot-adjacent boundary (nothing ever recorded:
+    benign) from a finalize-adjacent one (the episode's steps live in an already-emitted
+    stream, so its terminal bonus is genuinely lost)."""
+
+    matchup: dict | None
+    stream: SlotStream
+    pending: _Pending | None = None
     episode_steps: int = 0
 
 
@@ -212,6 +221,137 @@ def _token_features(cur_flat: dict, prev_action: np.ndarray, ego_prefix: str) ->
     out.pop("frame", None)
     relabeled = relabel_ego(out, ego_prefix)
     return {k: v[None, ...] for k, v in relabeled.items()}  # [1, 1]
+
+
+# --- shared stepping core -----------------------------------------------------
+# The three points where the two policies diverge, each an optional hook (eval passes none).
+OnReset = Callable[[Slot], None]  # instant-restart boundary, BEFORE the common history/cache reset
+AfterFrame = Callable[[Slot, dict], None]  # frame flattened + capped, BEFORE its token is built
+AfterAction = Callable[[Slot, np.ndarray, float, np.ndarray], None]  # (slot, act_idx, logp, action_vec) sampled
+
+
+class _KVStepper:
+    """The one KV-cached per-frame stepping core, shared by :class:`RLBatchPolicy`
+    (collection) and ``EvalBatchPolicy`` (judging).
+
+    Owns the handle -> :class:`ActingPolicy` map, the stable per-handle cache-row counter, and
+    the drift-refresh clock, and runs the three-pass frame step over a batch of live slots
+    grouped by handle: PASS 1 detects an instant-restart ``id`` drop (cold-starting the slot's
+    history + cache), flattens the frame into the rolling window (capped at ``L_ctx``) and
+    builds its single incremental-decode token; PASS 2 runs one batched incremental decode per
+    handle and caps the ego-action window; PASS 3 periodically rebuilds each handle's caches
+    from the trailing windows (RoPE-drift reset + ``max_pos`` bound). The variant bookkeeping —
+    reward/stream recording for collection, nothing for eval — rides the three optional hooks;
+    the log-prob-faithful token build, the history caps, and the reset/refresh clocks live here
+    exactly once so the two policies cannot drift apart."""
+
+    def __init__(
+        self,
+        *,
+        handles: Mapping[str, ActingPolicy],
+        stats: dict[str, FeatureStats],
+        L_ctx: int,
+        refresh_every: int,
+    ) -> None:
+        self.handles = dict(handles)
+        self.stats = stats
+        self.L_ctx = L_ctx
+        self.refresh_every = refresh_every
+        self._rows: dict[str, int] = {name: 0 for name in self.handles}
+        self._global_frame = 0
+
+    def attach_row(self, handle: str) -> int:
+        """Assign the next stable cache row within ``handle``'s ``SlotCaches`` (once per slot)."""
+        if handle not in self.handles:
+            raise KeyError(f"slot assigned to unknown handle {handle!r}")
+        row = self._rows[handle]
+        self._rows[handle] += 1
+        return row
+
+    def reset_row(self, st: _StepSlot) -> None:
+        """Cold-start a slot: drop its rolling history and reset its cache row to length 0."""
+        st.flat_hist.clear()
+        st.ego_hist.clear()
+        self.handles[st.handle].reset_slot(st.row)
+
+    def step(
+        self,
+        live: Sequence[Slot],
+        obs: Mapping[Slot, dict],
+        state: Mapping[Slot, _StepSlot],
+        *,
+        on_reset: OnReset | None = None,
+        after_frame: AfterFrame | None = None,
+        after_action: AfterAction | None = None,
+    ) -> dict[Slot, ControllerInputs]:
+        by_handle: dict[str, list[Slot]] = {}
+        for slot in live:
+            by_handle.setdefault(state[slot].handle, []).append(slot)
+
+        # PASS 1: reset detection, flatten, (variant) complete the previous step, build this frame's token.
+        tokens: dict[str, list[dict[str, np.ndarray]]] = {h: [] for h in by_handle}
+        for slot in live:
+            st = state[slot]
+            frame = obs[slot]
+            if "id" not in frame:
+                raise KeyError(f"obs frame for slot {slot} has no 'id' — cannot detect episode boundaries")
+            fid = int(frame["id"])
+            if st.last_id is not None and fid < st.last_id:  # id dropped -> instant-restart into a new match
+                if on_reset is not None:
+                    on_reset(slot)  # variant terminal bookkeeping, while flat_hist[-1] is still pre-reset
+                self.reset_row(st)
+            st.last_id = fid
+            cur_flat = flatten_canonical_frame(frame)
+            st.flat_hist.append(cur_flat)
+            if len(st.flat_hist) > self.L_ctx:
+                st.flat_hist.pop(0)
+            if after_frame is not None:
+                after_frame(slot, cur_flat)
+            prev_action = st.ego_hist[-1] if st.ego_hist else NEUTRAL_ACTION
+            tokens[st.handle].append(_token_features(cur_flat, prev_action, PORT_TO_PREFIX[st.ego_port]))
+
+        # PASS 2: one batched incremental decode per handle; (variant) record the sampled action.
+        actions: dict[Slot, ControllerInputs] = {}
+        for handle, slots in by_handle.items():
+            rows = torch.tensor([state[s].row for s in slots], dtype=torch.long)
+            act_idx, logp, vecs = self.handles[handle].step(rows, self._collate_tokens(tokens[handle]))
+            for j, slot in enumerate(slots):
+                st = state[slot]
+                vec = vecs[j]
+                st.ego_hist.append(vec)
+                if len(st.ego_hist) > self.L_ctx:
+                    st.ego_hist.pop(0)
+                if after_action is not None:
+                    after_action(slot, act_idx[j], float(logp[j]), vec)
+                actions[slot] = action_vec_to_controller(vec)
+
+        # PASS 3: periodic rebuild (drift reset) — the window's last column reproduces this
+        # frame's token (ego one short via ego_hist[:-1]); step_incremental already produced the
+        # action, rebuild only reseeds the caches for future frames.
+        if self._global_frame > 0 and self._global_frame % self.refresh_every == 0:
+            for handle, slots in by_handle.items():
+                rows = torch.tensor([state[s].row for s in slots], dtype=torch.long)
+                self.handles[handle].rebuild(rows, self._collate_windows(slots, state))
+        self._global_frame += 1
+        return actions
+
+    def _collate_tokens(self, tokens: list[dict[str, np.ndarray]]) -> Context:
+        stacked = {k: np.concatenate([t[k] for t in tokens], axis=0) for k in tokens[0]}
+        feats = preprocess(stacked, self.stats)
+        return Context(features=feats, ctx_pad=torch.zeros(len(tokens), dtype=torch.long))
+
+    def _collate_windows(self, slots: list[Slot], state: Mapping[Slot, _StepSlot]) -> Context:
+        per_slot: list[dict[str, np.ndarray]] = []
+        ctx_pad: list[int] = []
+        for slot in slots:
+            st = state[slot]
+            per_slot.append(
+                live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], PORT_TO_PREFIX[st.ego_port], self.L_ctx)
+            )
+            ctx_pad.append(max(0, self.L_ctx - len(st.flat_hist)))
+        stacked = {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
+        feats = preprocess(stacked, self.stats)
+        return Context(features=feats, ctx_pad=torch.tensor(ctx_pad, dtype=torch.long))
 
 
 class RLBatchPolicy:
@@ -236,22 +376,17 @@ class RLBatchPolicy:
         refresh_every: int,
         rollout_frames: int,
     ) -> None:
-        self.handles = dict(handles)
+        self.stepper = _KVStepper(handles=handles, stats=stats, L_ctx=L_ctx, refresh_every=refresh_every)
+        self.handles = self.stepper.handles  # exposed for the cache-state assertions in tests
         self.assign = assign
         self.ego_port_of = ego_port_of
         self.matchup_of = matchup_of
         self.reward_cfg = reward_cfg
-        self.stats = stats
-        self.L_ctx = L_ctx
-        self.refresh_every = refresh_every
         self.rollout_frames = rollout_frames
 
-        # Stable Slot -> row within its handle's caches, assigned once.
-        self._rows: dict[str, int] = {name: 0 for name in self.handles}
         self.state: dict[Slot, _SlotRL] = {}
         for slot in slots:
             self._init_slot(slot)
-        self._global_frame = 0
         self._pending_iters: list[RolloutIteration] = []
         # Streams flushed (truncated + boundary appended) by a wave reboot, carried into
         # the next finalized iteration so recorded transitions are never discarded.
@@ -260,15 +395,12 @@ class RLBatchPolicy:
     # -- slot lifecycle --------------------------------------------------------
     def _init_slot(self, slot: Slot) -> None:
         handle = self.assign(slot)
-        if handle not in self.handles:
-            raise KeyError(f"slot {slot} assigned to unknown handle {handle!r}")
-        row = self._rows[handle]
-        self._rows[handle] += 1
+        row = self.stepper.attach_row(handle)  # stable Slot -> cache row, assigned once
         ego_port = self.ego_port_of(slot)
         self.state[slot] = _SlotRL(
-            ego_port=ego_port,
             handle=handle,
             row=row,
+            ego_port=ego_port,
             matchup=self.matchup_of(slot),
             stream=SlotStream(ego_port, matchup=self.matchup_of(slot)),
         )
@@ -289,17 +421,17 @@ class RLBatchPolicy:
             if matchups is not None:
                 st.matchup = matchups[slot]
             st.stream = SlotStream(st.ego_port, matchup=st.matchup)
-            st.flat_hist.clear()
-            st.ego_hist.clear()
+            self.stepper.reset_row(st)  # drop rolling history + cold-start the cache row
             st.pending = None
             st.last_id = None
             st.episode_steps = 0
-            self.handles[st.handle].reset_slot(st.row)
 
-    def _on_reset(self, st: _SlotRL) -> None:
-        """Instant-restart boundary: the frame in hand is the NEW match; ``flat_hist[-1]``
-        is the last pre-reset frame. Credit its win/loss to the last recorded step, drop
-        the post-reset pending, and cold-start the slot's history + cache."""
+    def _on_reset(self, slot: Slot) -> None:
+        """Instant-restart hook (runs BEFORE the stepper cold-starts the slot's history +
+        cache): the frame in hand is the NEW match and ``flat_hist[-1]`` is still the last
+        pre-reset frame. Credit its win/loss to the last recorded step and drop the
+        post-reset pending."""
+        st = self.state[slot]
         if st.stream.n_recorded > 0:
             bonus = terminal_bonus(st.flat_hist[-1], st.ego_port, self.reward_cfg, terminated=True)
             st.stream.terminate_last(bonus)
@@ -312,75 +444,46 @@ class RLBatchPolicy:
             )
         else:
             logger.debug(f"RLBatchPolicy: boundary on ego_port {st.ego_port} before any recorded step (boot noise)")
-        st.flat_hist.clear()
-        st.ego_hist.clear()
         st.pending = None
         st.episode_steps = 0
-        self.handles[st.handle].reset_slot(st.row)
+
+    def _complete_pending(self, slot: Slot, cur_flat: dict) -> None:
+        """Complete the pending step now its next obs (``cur_flat``) is in hand — the reward
+        off-by-one from ``rewards.py`` reads frames ``(t, t+1)``."""
+        st = self.state[slot]
+        if st.pending is None:
+            return
+        rew = step_reward(st.pending.flat, cur_flat, st.ego_port, self.reward_cfg)
+        st.stream.append_step(
+            flat=st.pending.flat,
+            ego_act=st.pending.ego_act,
+            act_idx=st.pending.act_idx,
+            logp=st.pending.logp,
+            rew=rew,
+            terminated=False,
+            truncated=False,
+        )
+        st.episode_steps += 1
+
+    def _record_pending(self, slot: Slot, act_idx: np.ndarray, logp: float, vec: np.ndarray) -> None:
+        """Stash the just-sampled action as the pending step (its reward needs the next obs);
+        ``flat_hist[-1]`` is this frame, the step's stored pre-obs."""
+        st = self.state[slot]
+        st.pending = _Pending(flat=st.flat_hist[-1], act_idx=act_idx, logp=logp, ego_act=vec)
 
     # -- per-frame step --------------------------------------------------------
     def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]:
         live = [s for s in self.state if s in obs]  # stable order = insertion order
         if not live:
             return {}
-        by_handle: dict[str, list[Slot]] = {}
-        for slot in live:
-            by_handle.setdefault(self.state[slot].handle, []).append(slot)
-
-        # PASS 1: reset detection, flatten, complete the previous step, build this frame's token.
-        tokens: dict[str, list[dict[str, np.ndarray]]] = {h: [] for h in by_handle}
-        for slot in live:
-            st = self.state[slot]
-            frame = obs[slot]
-            if "id" not in frame:
-                raise KeyError(f"obs frame for slot {slot} has no 'id' — cannot detect episode boundaries")
-            fid = int(frame["id"])
-            if st.last_id is not None and fid < st.last_id:  # id dropped -> instant-restart into a new match
-                self._on_reset(st)
-            st.last_id = fid
-            cur_flat = flatten_canonical_frame(frame)
-            st.flat_hist.append(cur_flat)
-            if len(st.flat_hist) > self.L_ctx:
-                st.flat_hist.pop(0)
-            if st.pending is not None:
-                rew = step_reward(st.pending.flat, cur_flat, st.ego_port, self.reward_cfg)
-                st.stream.append_step(
-                    flat=st.pending.flat,
-                    ego_act=st.pending.ego_act,
-                    act_idx=st.pending.act_idx,
-                    logp=st.pending.logp,
-                    rew=rew,
-                    terminated=False,
-                    truncated=False,
-                )
-                st.episode_steps += 1
-            prev_action = st.ego_hist[-1] if st.ego_hist else NEUTRAL_ACTION
-            tokens[st.handle].append(_token_features(cur_flat, prev_action, PORT_TO_PREFIX[st.ego_port]))
-
-        # PASS 2: one batched incremental decode per handle; record the pending step.
-        actions: dict[Slot, ControllerInputs] = {}
-        for handle, slots in by_handle.items():
-            rows = torch.tensor([self.state[s].row for s in slots], dtype=torch.long)
-            ctx = self._collate_tokens(tokens[handle])
-            act_idx, logp, vecs = self.handles[handle].step(rows, ctx)
-            for j, slot in enumerate(slots):
-                st = self.state[slot]
-                vec = vecs[j]
-                st.ego_hist.append(vec)
-                if len(st.ego_hist) > self.L_ctx:
-                    st.ego_hist.pop(0)
-                st.pending = _Pending(flat=st.flat_hist[-1], act_idx=act_idx[j], logp=float(logp[j]), ego_act=vec)
-                actions[slot] = action_vec_to_controller(vec)
-
-        # PASS 3: periodic rebuild (drift reset) — the window's last column reproduces this
-        # frame's token (ego one short via ego_hist[:-1]); step_incremental already produced
-        # the action, rebuild only reseeds the caches for future frames.
-        if self._global_frame > 0 and self._global_frame % self.refresh_every == 0:
-            for handle, slots in by_handle.items():
-                rows = torch.tensor([self.state[s].row for s in slots], dtype=torch.long)
-                self.handles[handle].rebuild(rows, self._collate_windows(slots))
-
-        self._global_frame += 1
+        actions = self.stepper.step(
+            live,
+            obs,
+            self.state,
+            on_reset=self._on_reset,
+            after_frame=self._complete_pending,
+            after_action=self._record_pending,
+        )
         if self._total_transitions() >= self.rollout_frames:
             self._pending_iters.append(self._finalize_iteration())
         return actions
@@ -388,24 +491,6 @@ class RLBatchPolicy:
     def _total_transitions(self) -> int:
         live = sum(st.stream.n_recorded for st in self.state.values())
         return live + sum(s.n_recorded for s in self._orphans)
-
-    def _collate_tokens(self, tokens: list[dict[str, np.ndarray]]) -> Context:
-        stacked = {k: np.concatenate([t[k] for t in tokens], axis=0) for k in tokens[0]}
-        feats = preprocess(stacked, self.stats)
-        return Context(features=feats, ctx_pad=torch.zeros(len(tokens), dtype=torch.long))
-
-    def _collate_windows(self, slots: list[Slot]) -> Context:
-        per_slot: list[dict[str, np.ndarray]] = []
-        ctx_pad: list[int] = []
-        for slot in slots:
-            st = self.state[slot]
-            per_slot.append(
-                live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], PORT_TO_PREFIX[st.ego_port], self.L_ctx)
-            )
-            ctx_pad.append(max(0, self.L_ctx - len(st.flat_hist)))
-        stacked = {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
-        feats = preprocess(stacked, self.stats)
-        return Context(features=feats, ctx_pad=torch.tensor(ctx_pad, dtype=torch.long))
 
     def _finalize_iteration(self) -> RolloutIteration:
         """Truncate every live stream's tail, append its boundary obs (frame ``T``), and

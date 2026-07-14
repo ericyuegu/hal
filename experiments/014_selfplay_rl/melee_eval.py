@@ -13,9 +13,10 @@ Two modes over one shared acting path:
   ``vs_cpu_metrics``. ``--il-only`` pins a baseline; ``--ckpt --baseline <json>`` reports
   deltas and the ``G3 VS-CPU`` no-regression verdict.
 
-The acting is the collector's KV-cached stepping (``NetActingPolicy`` + ``_token_features``)
-behind a handle seam — ``EvalBatchPolicy`` is that path stripped of reward/stream/iteration
-bookkeeping. Two handles ("ema", "il") for head-to-head; one for vs-CPU.
+The acting is the collector's shared KV-cached stepping core (``melee_collector._KVStepper``)
+behind a handle seam — ``EvalBatchPolicy`` drives it with none of the collection hooks
+(reward/stream/iteration bookkeeping). Two handles ("ema", "il") for head-to-head; one for
+vs-CPU.
 
     uv run experiments/014_selfplay_rl/melee_eval.py --ckpt runs/<run>/latest.pt --h2h-matches 50
     uv run experiments/014_selfplay_rl/melee_eval.py --ckpt runs/<run>/latest.pt --vs-cpu --baseline il.json
@@ -32,7 +33,6 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
-from dataclasses import field
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +43,8 @@ from loguru import logger
 from melee import Character
 from melee_collector import ActingPolicy
 from melee_collector import NetActingPolicy
-from melee_collector import _token_features
+from melee_collector import _KVStepper
+from melee_collector import _StepSlot
 from nets_melee import PolicyValueNet
 from nets_melee import load_il_policy
 from rl_config import MeleeRLConfig
@@ -64,13 +65,6 @@ from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory
 from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
-from hal.training.canonical import flatten_canonical_frame
-from hal.training.closed_loop import PORT_TO_PREFIX
-from hal.training.closed_loop import live_batch_from_rolling
-from hal.training.features import NEUTRAL_ACTION
-from hal.training.features import Context
-from hal.training.features import action_vec_to_controller
-from hal.training.features import preprocess
 from hal.training.stats import load_consolidated_stats
 
 _BOOTSTRAP_DRAWS = 10_000
@@ -230,26 +224,14 @@ def write_report(path: Path, report: dict) -> None:
 # =============================================================================
 # Acting policy (torch): the collector's KV path, stripped of training bookkeeping
 # =============================================================================
-@dataclass(slots=True)
-class _EvalSlot:
-    handle: str
-    row: int
-    ego_port: int
-    flat_hist: list[dict] = field(default_factory=list)
-    ego_hist: list[np.ndarray] = field(default_factory=list)
-    last_id: int | None = None
-
-
 class EvalBatchPolicy:
     """``BatchPolicy`` that acts with one or more ``ActingPolicy`` handles, batched over
-    slots, with NO reward/logp/stream/iteration bookkeeping.
-
-    Mirrors ``RLBatchPolicy``'s three-pass frame step (reset detect + token build, one
-    batched incremental decode per handle, periodic drift-reset rebuild) but reuses the
-    collector's ``NetActingPolicy`` for the KV/sampling math verbatim — only the collection
-    plumbing is dropped. ``handle_of`` routes each slot to a handle ("ema"/"il" for
-    head-to-head, a single handle for vs-CPU); rows within a handle's caches are assigned
-    lazily in slot-appearance order. Construct fresh per wave (caches must not leak)."""
+    slots, with NO reward/logp/stream/iteration bookkeeping — the collector's
+    :class:`_KVStepper` core (KV-cached incremental decode + periodic drift-reset rebuild)
+    driven with none of the collection hooks. ``handle_of`` routes each slot to a handle
+    ("ema"/"il" for head-to-head, a single handle for vs-CPU); rows within a handle's caches
+    are assigned lazily in slot-appearance order. Construct fresh per wave (caches must not
+    leak)."""
 
     def __init__(
         self,
@@ -260,93 +242,22 @@ class EvalBatchPolicy:
         L_ctx: int,
         refresh_every: int,
     ) -> None:
-        self.handles = dict(handles)
+        self.stepper = _KVStepper(handles=handles, stats=stats, L_ctx=L_ctx, refresh_every=refresh_every)
         self.handle_of = handle_of
-        self.stats = stats
-        self.L_ctx = L_ctx
-        self.refresh_every = refresh_every
-        self._rows: dict[str, int] = {name: 0 for name in self.handles}
-        self.state: dict[Slot, _EvalSlot] = {}
-        self._global_frame = 0
+        self.state: dict[Slot, _StepSlot] = {}
 
-    def _slot(self, slot: Slot) -> _EvalSlot:
-        st = self.state.get(slot)
-        if st is None:
+    def _ensure(self, slot: Slot) -> None:
+        if slot not in self.state:
             handle = self.handle_of(slot)
-            if handle not in self.handles:
-                raise KeyError(f"slot {slot} routed to unknown handle {handle!r}")
-            row = self._rows[handle]
-            self._rows[handle] += 1
-            st = _EvalSlot(handle=handle, row=row, ego_port=slot.port)
-            self.state[slot] = st
-        return st
-
-    def _reset(self, st: _EvalSlot) -> None:
-        st.flat_hist.clear()
-        st.ego_hist.clear()
-        self.handles[st.handle].reset_slot(st.row)
+            self.state[slot] = _StepSlot(handle=handle, row=self.stepper.attach_row(handle), ego_port=slot.port)
 
     def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, object]:
         live = list(obs)
         if not live:
             return {}
-        by_handle: dict[str, list[Slot]] = {}
         for slot in live:
-            st = self._slot(slot)
-            by_handle.setdefault(st.handle, []).append(slot)
-
-        # PASS 1: reset detection (id drop = instant-restart into a new match), flatten, token.
-        tokens: dict[str, list[dict[str, np.ndarray]]] = {h: [] for h in by_handle}
-        for slot in live:
-            st = self.state[slot]
-            frame = obs[slot]
-            fid = int(frame["id"])
-            if st.last_id is not None and fid < st.last_id:
-                self._reset(st)
-            st.last_id = fid
-            cur_flat = flatten_canonical_frame(frame)
-            st.flat_hist.append(cur_flat)
-            if len(st.flat_hist) > self.L_ctx:
-                st.flat_hist.pop(0)
-            prev_action = st.ego_hist[-1] if st.ego_hist else NEUTRAL_ACTION
-            tokens[st.handle].append(_token_features(cur_flat, prev_action, PORT_TO_PREFIX[st.ego_port]))
-
-        # PASS 2: one batched incremental decode per handle; record only the ego action.
-        actions: dict[Slot, object] = {}
-        for handle, slots in by_handle.items():
-            rows = torch.tensor([self.state[s].row for s in slots], dtype=torch.long)
-            _, _, vecs = self.handles[handle].step(rows, self._collate_tokens(tokens[handle]))
-            for j, slot in enumerate(slots):
-                st = self.state[slot]
-                vec = vecs[j]
-                st.ego_hist.append(vec)
-                if len(st.ego_hist) > self.L_ctx:
-                    st.ego_hist.pop(0)
-                actions[slot] = action_vec_to_controller(vec)
-
-        # PASS 3: periodic rebuild (RoPE-drift reset + max_pos bound on long matches).
-        if self._global_frame > 0 and self._global_frame % self.refresh_every == 0:
-            for handle, slots in by_handle.items():
-                rows = torch.tensor([self.state[s].row for s in slots], dtype=torch.long)
-                self.handles[handle].rebuild(rows, self._collate_windows(slots))
-        self._global_frame += 1
-        return actions
-
-    def _collate_tokens(self, tokens: list[dict[str, np.ndarray]]) -> Context:
-        stacked = {k: np.concatenate([t[k] for t in tokens], axis=0) for k in tokens[0]}
-        return Context(features=preprocess(stacked, self.stats), ctx_pad=torch.zeros(len(tokens), dtype=torch.long))
-
-    def _collate_windows(self, slots: list[Slot]) -> Context:
-        per_slot: list[dict[str, np.ndarray]] = []
-        ctx_pad: list[int] = []
-        for slot in slots:
-            st = self.state[slot]
-            per_slot.append(
-                live_batch_from_rolling(st.flat_hist, st.ego_hist[:-1], PORT_TO_PREFIX[st.ego_port], self.L_ctx)
-            )
-            ctx_pad.append(max(0, self.L_ctx - len(st.flat_hist)))
-        stacked = {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
-        return Context(features=preprocess(stacked, self.stats), ctx_pad=torch.tensor(ctx_pad, dtype=torch.long))
+            self._ensure(slot)
+        return self.stepper.step(live, obs, self.state)  # no hooks: eval acts without recording
 
 
 # =============================================================================
