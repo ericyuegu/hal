@@ -111,9 +111,10 @@ class Args:
 
 
 def _apply_smoke(args: Args) -> Args:
-    # rollout_frames=2048 -> ~512 transitions/stream (>= L_ctx=256), so the PPO recompute
-    # windows carry enough context to keep ratio_dev_epoch0 in the window-approximation floor
-    # (<0.05); tiny streams would be dominated by the cross-iteration carryover mismatch.
+    # rollout_frames=2048 -> ~512 transitions/stream (>= L_ctx=256), so burn-in windows get
+    # full within-stream context. Expected: the FIRST PPO iteration (behavior == learner,
+    # EMA just re-anchored) shows ratio_dev_epoch0 near the KV-drift floor (<0.01); later
+    # iterations add genuine EMA policy lag on top.
     return dataclasses.replace(
         args,
         rl=dataclasses.replace(

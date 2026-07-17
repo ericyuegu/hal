@@ -2,10 +2,12 @@
 
 ## Goal
 
-Fine-tune the 012 imitation-learning policy with self-play PPO, AlphaStar-style.
+Fine-tune the 012 imitation-learning policy with **EMA mirror self-play PPO**.
 Both ports are driven by the *same* network: the learner updates fast weights
 while an EMA copy (`hal/training/ema.py`) supplies the trailing **behavior**
-policy that acts in the collector, stabilizing the opponent distribution. Every
+policy that acts in the collector, stabilizing the opponent distribution. (This
+is a single trailing opponent, not AlphaStar-style league training — a diverse
+population with PFSP matchmaking remains an extension seam, see below.) Every
 run **warm-starts** from the 012 IL checkpoint (see `MeleeRLConfig.warm_start`)
 so the policy begins competent and RL only has to sharpen it. A KL-to-IL penalty
 (`kl_il_coef`) keeps the policy from drifting off the human-data manifold.
@@ -49,9 +51,35 @@ uv run experiments/014_selfplay_rl/melee_eval.py --ckpt runs/<run>/latest.pt --v
 uv run experiments/014_selfplay_rl/bench_kv.py
 ```
 
+## Post-run review fixes (2026-07-16)
+
+External review of the G3 run surfaced four issues, all fixed after the results
+below were produced (so those numbers predate the fixes and later runs are not
+metric-comparable to them):
+
+- **Burn-in windows** — the PPO recompute previously tiled streams edge-to-edge
+  and scored every position, so mid-episode positions saw far less context than
+  the rolling `L_ctx` window the acting policy had (a ~0.057 spurious
+  `ratio_dev_epoch0` floor vs a 0.015 KL budget). Windows now overlap at
+  `MeleeRLConfig.ppo_window_stride` (default 64): each `L_ctx` window scores only
+  its trailing `stride` positions, burning in on the rest, and streams carry a
+  context-only prefix across iteration boundaries. Learner compute scales
+  ~`L_ctx/stride` (4× at defaults) — cheap, the run is collection-bound.
+- **KL early-stop reference** — the epoch-0 reference logp was captured lazily
+  during epoch 0 (after earlier minibatches had already moved the model), and the
+  signed estimator could go negative. Now: one dedicated pre-update snapshot pass
+  plus the non-negative k3 estimator `(r-1) - log r` for both `approx_kl_update`
+  and `approx_kl_collect`, with `clip_frac` and `ratio_ess` logged alongside.
+- **Rebuild on EMA swap** — after the per-iteration EMA→act_net copy, cached K/V
+  from the old weights kept serving for up to `refresh_every-1` frames (a hybrid
+  behavior state no snapshot reproduces). The stepper now force-rebuilds every
+  cache on the first frame after a weight swap.
+- **Rebuild GPU syncs** — the cache rebuild converted device scalars per
+  (row, layer) and the all-slot no-gather decode path was never taken; both fixed.
+
 ## Results (2026-07-14, run `014_selfplay_rl_g3_seed0`, checkpoint iter 4200 / 17.2M transitions)
 
-All four gates passed.
+All four gates passed. (Pre-fix numbers — see above.)
 
 - **G1 PASS** — CartPole 500.0/500.0 avg return in sync and overlap modes.
 - **G2 PASS** — Pong +20.9 at 10M frames (threshold +18), ~1713 sps, ahead of the
