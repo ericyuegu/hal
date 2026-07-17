@@ -138,7 +138,10 @@ class NetActingPolicy:
 
     @torch.inference_mode()
     def step(self, rows: Tensor, ctx: Context) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        hidden = self.caches.step_incremental(self.net, rows.to(self.device), ctx.to(self.device))
+        n = self.caches.n_slots
+        all_slots = rows.shape[0] == n and rows.tolist() == list(range(n))
+        slot_ids = None if all_slots else rows.to(self.device)  # None -> the no-gather view path
+        hidden = self.caches.step_incremental(self.net, slot_ids, ctx.to(self.device))
         return self._sample(hidden)
 
     @torch.inference_mode()

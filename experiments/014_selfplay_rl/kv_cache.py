@@ -171,19 +171,21 @@ class SlotCaches:
         if Lw > self.cap:
             raise ValueError(f"rebuild window length {Lw} exceeds cap {self.cap}")
         _, kvs = net.forward_full_capture(windows)  # per layer (k, v): [n, Lw, n_heads, head_dim]
-        ctx_pad = windows.ctx_pad.to(self.device)
-        valid = (Lw - ctx_pad).clamp(min=0)  # [n] real tokens per slot
+        # Host-side pad/vlen ints up front (one sync at most): the copy loop below must not
+        # convert device scalars per row — that stalls the stream once per (row, layer).
+        pads = windows.ctx_pad.tolist()
+        vlens = [max(0, Lw - int(p)) for p in pads]
+        K_all = torch.stack([k.to(self.device) for k, _ in kvs], dim=1)  # [n, n_layers, Lw, H, D]
+        V_all = torch.stack([v.to(self.device) for _, v in kvs], dim=1)
 
         self.K[slot_ids] = 0
         self.V[slot_ids] = 0
-        for li, (k, v) in enumerate(kvs):
-            k = k.to(self.device)
-            v = v.to(self.device)
-            for r in range(n):
-                vlen = int(valid[r])
-                pad = int(ctx_pad[r])
-                self.K[slot_ids[r], li, :vlen] = k[r, pad : pad + vlen]
-                self.V[slot_ids[r], li, :vlen] = v[r, pad : pad + vlen]
+        for r in range(n):  # one slice-assign per row across ALL layers
+            vlen = vlens[r]
+            pad = int(pads[r])
+            self.K[slot_ids[r], :, :vlen] = K_all[r, :, pad : pad + vlen]
+            self.V[slot_ids[r], :, :vlen] = V_all[r, :, pad : pad + vlen]
+        valid = torch.tensor(vlens, dtype=torch.long, device=self.device)
         self.length[slot_ids] = valid
         self.write_idx[slot_ids] = valid % self.cap
         self.next_pos[slot_ids] = Lw
