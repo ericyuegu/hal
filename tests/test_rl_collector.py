@@ -196,6 +196,45 @@ def test_collection_logp_matches_ppo_recompute_pre_eviction() -> None:
     assert float((logp_recompute[v] - batch.logp_old[v]).abs().max()) < 1e-4
 
 
+def _swap_weights_run(*, force_rebuild: bool) -> float:
+    """Collect 6 frames, swap the acting net's weights in place (the shape of the
+    EMA→act_net copy), optionally ``request_rebuild``, collect 6 more; return the max
+    |recompute - recorded| logp over the steps that ride the (re-seeded) cache."""
+    pol, (slot,), net = _make_policy(refresh_every=1000)  # periodic rebuild off — isolate the request
+    seq = [_frame(i, p1_pct=0.5 * i, p2_pct=0.7 * i) for i in range(12)]
+    for t in range(6):
+        pol(t, {slot: seq[t]})
+
+    torch.manual_seed(99)
+    net.load_state_dict(PolicyValueNet(CFG).state_dict())  # in-place: the handle's net object
+    if force_rebuild:
+        pol.stepper.request_rebuild()
+    for t in range(6, 12):
+        pol(t, {slot: seq[t]})
+
+    st = pol.state[slot].stream
+    st.append_boundary(pol.state[slot].flat_hist[-1])
+    windows = build_windows(st.finalize(), CFG.L_ctx, stream_id=0)
+    batch = collate_windows(windows, _stats())
+    with torch.no_grad():
+        dist = FactoredCategorical(net.policy_logits(net.forward_full(batch.context)))
+        logp_recompute = dist.log_prob(batch.act_idx)
+    fp = torch.from_numpy(np.stack([w.frame_pos for w in windows]))
+    # Frame 6's action is sampled BEFORE the end-of-step rebuild (hybrid by design);
+    # steps 7+ decode against whatever K/V state the arm under test left behind.
+    post = batch.valid & (fp >= 7)
+    assert bool(post.any())
+    return float((logp_recompute[post] - batch.logp_old[post]).abs().max())
+
+
+def test_request_rebuild_reseeds_caches_after_weight_swap() -> None:
+    """After a weight swap, ``request_rebuild`` must re-seed the caches so subsequent
+    behavior logp matches the new net's full recompute; without it, K/V computed by the
+    old weights keep corrupting the decode (the control arm proves the test bites)."""
+    assert _swap_weights_run(force_rebuild=True) < 1e-4
+    assert _swap_weights_run(force_rebuild=False) > 1e-3
+
+
 def test_ego_action_is_channel_of_next_frame_window() -> None:
     """In a built window, the ego action executed at frame ``t`` is the ego controller
     channel of frame ``t+1`` (column ``k`` carries ``a_{k-1}``)."""

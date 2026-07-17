@@ -385,6 +385,9 @@ def main(args: Args) -> None:
     def on_iteration() -> None:
         with snapshot_lock:
             ema.copy_to(act_net)
+        # act_net just changed under the caches: K/V computed by the old weights would
+        # otherwise serve up to refresh_every-1 more frames of hybrid behavior.
+        pol.stepper.request_rebuild()
 
     t_start = time.monotonic()
 

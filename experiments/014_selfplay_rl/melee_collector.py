@@ -259,6 +259,15 @@ class _KVStepper:
         self.refresh_every = refresh_every
         self._rows: dict[str, int] = {name: 0 for name in self.handles}
         self._global_frame = 0
+        self._force_rebuild = False
+
+    def request_rebuild(self) -> None:
+        """Rebuild every handle's caches at the end of the NEXT ``step`` call, off the
+        periodic clock. The caller's hook for acting-weight swaps (the EMA→act_net copy):
+        cached K/V computed under the old weights would otherwise persist — a hybrid
+        behavior state no snapshot reproduces — until the periodic rebuild, up to
+        ``refresh_every - 1`` frames later."""
+        self._force_rebuild = True
 
     def attach_row(self, handle: str) -> int:
         """Assign the next stable cache row within ``handle``'s ``SlotCaches`` (once per slot)."""
@@ -328,10 +337,11 @@ class _KVStepper:
         # PASS 3: periodic rebuild (drift reset) — the window's last column reproduces this
         # frame's token (ego one short via ego_hist[:-1]); step_incremental already produced the
         # action, rebuild only reseeds the caches for future frames.
-        if self._global_frame > 0 and self._global_frame % self.refresh_every == 0:
+        if self._force_rebuild or (self._global_frame > 0 and self._global_frame % self.refresh_every == 0):
             for handle, slots in by_handle.items():
                 rows = torch.tensor([state[s].row for s in slots], dtype=torch.long)
                 self.handles[handle].rebuild(rows, self._collate_windows(slots, state))
+            self._force_rebuild = False
         self._global_frame += 1
         return actions
 
