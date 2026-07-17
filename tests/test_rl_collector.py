@@ -20,6 +20,7 @@ import multiprocessing as mp
 if mp.get_start_method(allow_none=True) != "fork":
     mp.set_start_method("fork", force=True)
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,7 @@ from rollout import build_windows
 from rollout import collate_windows
 
 from hal.sim.vec import Slot
+from hal.training.features import A_DIM
 from hal.training.stats import load_consolidated_stats
 
 CFG = ArchConfig(d_model=32, n_layers=2, n_heads=2, L_ctx=16, char_vocab=8, char_dim=4, stage_vocab=8, stage_dim=2)
@@ -254,6 +256,39 @@ def test_ego_action_is_channel_of_next_frame_window() -> None:
             assert ego_col[row] == pytest.approx(float(fin.ego_act[fp - 1][0]), abs=1e-6)
 
 
+def test_prefix_carries_context_across_iteration_boundary() -> None:
+    """A stream finalized mid-episode hands the rolling window's frames to its successor
+    as burn-in prefix, so the successor's strided-window recompute matches the recorded
+    behavior logp exactly pre-eviction — including its head positions, which without the
+    prefix recompute from a cold window (the control arm pins that failure mode)."""
+    pol, (slot,), net = _make_policy(refresh_every=1000, rollout_frames=6)
+    it = None
+    for t in range(14):
+        pol(t, {slot: _frame(t, p1_pct=0.5 * t, p2_pct=0.7 * t)})
+        it = it or pol.take_iteration()
+    assert it is not None  # first iteration emitted; the live stream is its successor
+
+    st = pol.state[slot]
+    assert st.stream.prefix_flat  # successor carries the pre-boundary context
+    st.stream.append_boundary(st.flat_hist[-1])
+    fin = st.stream.finalize()
+    assert len(fin.prefix_flat) == fin.prefix_ego.shape[0]
+
+    def max_dev(stream) -> float:  # noqa: ANN001
+        windows = build_windows(stream, CFG.L_ctx, stride=2, stream_id=0)
+        batch = collate_windows(windows, _stats())
+        with torch.no_grad():
+            dist = FactoredCategorical(net.policy_logits(net.forward_full(batch.context)))
+            logp = dist.log_prob(batch.act_idx)
+        v = batch.valid
+        assert bool(v.any())
+        return float((logp[v] - batch.logp_old[v]).abs().max())
+
+    assert max_dev(fin) < 1e-4
+    bare = replace(fin, prefix_flat=(), prefix_ego=np.zeros((0, A_DIM), np.float32))
+    assert max_dev(bare) > 1e-3  # control: without the prefix the head recompute is cold
+
+
 def test_finalize_truncates_tail_and_keeps_boundary_frame() -> None:
     pol, (slot,), _ = _make_policy(rollout_frames=5)  # finalize once 5 transitions land
     it = None
@@ -342,6 +377,7 @@ def test_finalize_adjacent_reset_warns_bonus_lost_and_recovers() -> None:
         t += 1
     assert pol.state[slot].stream.n_recorded == 0  # fresh stream right after finalize
     assert pol.state[slot].episode_steps > 0  # but the episode is still running
+    assert pol.state[slot].stream.prefix_flat  # successor carries the pre-boundary context
 
     msgs: list[str] = []
     sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
@@ -354,6 +390,7 @@ def test_finalize_adjacent_reset_warns_bonus_lost_and_recovers() -> None:
     st = pol.state[slot]
     assert st.episode_steps == 0  # new episode
     assert st.stream.n_recorded == 0  # the dropped pending never became a step
+    assert st.stream.prefix_flat == ()  # the dead match's context prefix was dropped with it
     pol(t + 1, {slot: _frame(1)})
     pol(t + 2, {slot: _frame(2)})
     assert st.stream.n_recorded == 2  # collection resumed cleanly

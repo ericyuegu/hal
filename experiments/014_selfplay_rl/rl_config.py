@@ -67,6 +67,11 @@ class MeleeRLConfig:
     n_boots: int = 4
     rollout_frames: int = 4096
     refresh_every: int = 64
+    # PPO-recompute scored-span width: each L_ctx window scores only its trailing
+    # ppo_window_stride positions (the rest is burn-in context), so recompute context
+    # matches the rolling collection window to within stride-1 evicted frames. Learner
+    # compute scales ~L_ctx/stride; L_ctx (=256) means no burn-in (edge-to-edge tiling).
+    ppo_window_stride: int = 64
     value_warmup_iters: int = 20
     kl_il_coef: float = 0.05
     warm_start: str = "260616-004736_012_multi_token_gpt-d256-L8-h4-Lc256-o1.5.9.13_ranked-anon-1_gpt-16k-b1024"

@@ -6,13 +6,20 @@ Three stages sit between the Dolphin collector (M4b) and the PPO learner:
   action indices, behavior log-probs, shaped rewards, done flags, the dequantized
   ego action vectors, and the flat gamestate frames. ``T`` transitions store
   ``T + 1`` flat frames (every step's pre-obs plus the final boundary obs) so a
-  value can be read at the bootstrap position.
-* :func:`build_windows` cuts a finalized stream into non-overlapping context
-  windows of ``<= L_ctx`` frames, segmented at episode boundaries. Each window's
-  feature rows are built through the SAME ``live_batch_from_rolling`` path the
-  closed-loop driver uses, so a window's stacked arrays are byte-identical to what
-  ``RecedingHorizon`` would feed the model for the same trailing frames — the
-  invariant that keeps the PPO recompute faithful to collection (pinned by test).
+  value can be read at the bootstrap position. A stream created mid-episode (at an
+  iteration finalize) also carries a context-only PREFIX — the collector's rolling
+  frames/actions preceding frame 0 — so the recompute can burn in across the
+  iteration boundary. The prefix is never scored, rewarded, or entered into GAE.
+* :func:`build_windows` cuts a finalized stream into end-aligned ``L_ctx`` context
+  windows at ``stride`` spacing, segmented at episode boundaries. Each window
+  SCORES only its trailing ``stride`` frames (its scored span); everything before
+  is burn-in that exists purely to reproduce the rolling ``L_ctx`` context the
+  acting policy saw at collection. The scored spans partition the stream, so every
+  transition is scored exactly once. Each window's feature rows are built through
+  the SAME ``live_batch_from_rolling`` path the closed-loop driver uses, so a
+  window's stacked arrays are byte-identical to what ``RecedingHorizon`` would
+  feed the model for the same trailing frames — the invariant that keeps the PPO
+  recompute faithful to collection (pinned by test).
 * :func:`gae_inputs` turns per-stream value arrays (``T + 1`` positions) into
   advantages/returns via tianshou's own ``_gae``, and :func:`scatter_gae` writes
   them back onto window rows through the ``frame_pos`` index map.
@@ -20,12 +27,14 @@ Three stages sit between the Dolphin collector (M4b) and the PPO learner:
 Off-by-one contract (consistent with ``rewards.py``): reward/terminated/truncated
 index the transition ``t`` (frames ``t, t+1``); ``terminated[t]`` masks the
 next-state value ``v_s_[t]``; a ``truncated`` tail bootstraps from the value at
-frame ``T``. Windows are end-aligned within a segment: the trailing window is a
-full ``L_ctx`` block ending at the last frame (so it matches ``RecedingHorizon``'s
-rolling buffer), and the short *head* window is left-padded with ``ctx_pad``.
+frame ``T``. Scored spans are end-aligned within a segment: the trailing span is a
+full ``stride`` block ending at the last frame, the short *head* span begins at the
+segment start, and a window shorter than ``L_ctx`` (nothing further back to burn in
+on) is left-padded with ``ctx_pad``.
 """
 
 from dataclasses import dataclass
+from dataclasses import field
 from dataclasses import replace
 
 import numpy as np
@@ -54,11 +63,23 @@ class SlotStream:
     bootstrap value has a frame to condition on. ``finalize`` freezes the lists
     into a :class:`FinalizedStream` of numpy arrays."""
 
-    def __init__(self, ego_port: int, *, matchup: dict | None = None) -> None:
+    def __init__(
+        self,
+        ego_port: int,
+        *,
+        matchup: dict | None = None,
+        prefix_flat: tuple[dict, ...] = (),
+        prefix_ego: np.ndarray | None = None,
+    ) -> None:
         if ego_port not in PORT_TO_PREFIX:
             raise ValueError(f"ego_port must be 1 or 2, got {ego_port}")
+        ego = _EMPTY_PREFIX_EGO if prefix_ego is None else np.asarray(prefix_ego, np.float32).reshape(-1, A_DIM)
+        if len(prefix_flat) != ego.shape[0]:
+            raise ValueError(f"prefix_flat has {len(prefix_flat)} frames but prefix_ego has {ego.shape[0]} actions")
         self.ego_port = ego_port
         self.matchup = matchup
+        self.prefix_flat = tuple(prefix_flat)
+        self.prefix_ego = ego
         self._flat: list[dict] = []
         self._ego_act: list[np.ndarray] = []
         self._act_idx: list[np.ndarray] = []
@@ -95,6 +116,15 @@ class SlotStream:
             raise RuntimeError("append_boundary called twice")
         self._flat.append(flat)
         self._closed = True
+
+    def clear_prefix(self) -> None:
+        """Drop the carried context prefix. For a stream whose episode ended before any
+        step was recorded: the prefix belongs to the match that just died, and frame 0
+        restarts cold — exactly like the collection caches."""
+        if self._flat:
+            raise RuntimeError("clear_prefix after steps were recorded (the prefix is their live context)")
+        self.prefix_flat = ()
+        self.prefix_ego = _EMPTY_PREFIX_EGO
 
     @property
     def n_recorded(self) -> int:
@@ -139,12 +169,22 @@ class SlotStream:
             rew=np.asarray(self._rew, np.float32),
             terminated=np.asarray(self._terminated, bool),
             truncated=np.asarray(self._truncated, bool),
+            prefix_flat=self.prefix_flat,
+            prefix_ego=self.prefix_ego,
         )
+
+
+_EMPTY_PREFIX_EGO = np.zeros((0, A_DIM), np.float32)
 
 
 @dataclass(frozen=True, slots=True)
 class FinalizedStream:
-    """One slot's finalized rollout: ``T`` transitions + ``T + 1`` flat frames."""
+    """One slot's finalized rollout: ``T`` transitions + ``T + 1`` flat frames.
+
+    ``prefix_flat``/``prefix_ego`` carry the ``<= L_ctx - 1`` frames (and the actions
+    executed AT those frames) immediately preceding frame 0, for a stream that starts
+    mid-episode at an iteration boundary — burn-in context only, never scored. Empty
+    when frame 0 begins an episode (collection cold-started there too)."""
 
     ego_port: int
     matchup: dict | None
@@ -155,6 +195,14 @@ class FinalizedStream:
     rew: np.ndarray  # [T] float32
     terminated: np.ndarray  # [T] bool
     truncated: np.ndarray  # [T] bool
+    prefix_flat: tuple[dict, ...] = ()
+    prefix_ego: np.ndarray = field(default_factory=lambda: _EMPTY_PREFIX_EGO)  # [P, A_DIM] float32
+
+    def __post_init__(self) -> None:
+        if len(self.prefix_flat) != self.prefix_ego.shape[0]:
+            raise ValueError(
+                f"prefix_flat has {len(self.prefix_flat)} frames but prefix_ego has {self.prefix_ego.shape[0]} actions"
+            )
 
     @property
     def n_transitions(self) -> int:
@@ -201,14 +249,18 @@ def build_iteration(streams: list[SlotStream]) -> RolloutIteration:
 
 @dataclass(frozen=True, slots=True)
 class Window:
-    """One ``L_ctx``-row context block over a stream segment.
+    """One ``L_ctx``-row context block whose trailing ``stride`` rows are scored.
 
     ``feats`` holds the relabeled ego/opp gamestate + ego-action columns (each row
     a frame; left-padded rows zero-filled), exactly as ``live_batch_from_rolling``
     produces them. ``frame_pos`` maps each row back to its stream frame index
-    (``-1`` for pad); ``valid`` marks rows that carry a scored transition (a real
-    action + reward — excludes pad rows and the value-only bootstrap frame ``T``).
-    ``adv``/``returns`` are zero until :func:`scatter_gae` fills the valid rows."""
+    (``-1`` for pad AND for prefix rows, which have no stream frame). ``scored``
+    marks the rows of this window's scored span — the rows whose recompute this
+    window is responsible for (every stream frame incl. the bootstrap frame ``T``
+    is scored in exactly one window; earlier rows are burn-in context). ``valid``
+    = scored rows that carry a real transition (excludes the value-only bootstrap
+    frame ``T``) — the only rows that enter any loss. ``adv``/``returns`` are zero
+    until :func:`scatter_gae` fills the valid rows."""
 
     feats: dict[str, np.ndarray]
     ctx_pad: int
@@ -217,7 +269,8 @@ class Window:
     rew: np.ndarray  # [L_ctx] float32
     terminated: np.ndarray  # [L_ctx] bool
     truncated: np.ndarray  # [L_ctx] bool
-    valid: np.ndarray  # [L_ctx] bool
+    scored: np.ndarray  # [L_ctx] bool (this window's scored span, incl. the bootstrap frame)
+    valid: np.ndarray  # [L_ctx] bool (scored & real transition)
     frame_pos: np.ndarray  # [L_ctx] int64
     stream_id: int
     adv: np.ndarray  # [L_ctx] float32 (0 until scatter_gae)
@@ -249,19 +302,31 @@ def _tile_end_aligned(lo: int, hi: int, L_ctx: int) -> list[tuple[int, int]]:
     return blocks
 
 
-def build_windows(stream: FinalizedStream, L_ctx: int, *, stream_id: int = 0) -> list[Window]:
-    """Split ``stream`` at episode boundaries and tile each segment into ``<= L_ctx``
-    end-aligned windows (see module docstring). Empty when the stream has no steps.
+def build_windows(
+    stream: FinalizedStream, L_ctx: int, *, stride: int | None = None, stream_id: int = 0
+) -> list[Window]:
+    """Split ``stream`` at episode boundaries and cover each segment with end-aligned
+    ``L_ctx`` windows whose scored spans tile the segment in ``stride`` blocks (see
+    module docstring). ``stride=None`` means ``L_ctx`` (edge-to-edge, no burn-in).
+    Empty when the stream has no steps.
 
-    Ratio-context approximation: mid-segment window positions recompute logp from
-    only the within-window context, while collection saw a rolling ``L_ctx`` reaching
-    further back — exact only while the episode still fits one window (pre-eviction).
-    ``ratio_dev_epoch0`` from ``melee_ppo_update`` is the standing diagnostic for how
-    much this (plus policy lag) perturbs the epoch-0 ratios."""
+    Burn-in makes the recompute context match collection: a scored position sees at
+    least ``L_ctx - stride + 1`` trailing frames (reaching into ``prefix_flat`` across
+    the stream head, but never across an episode boundary — collection cold-started
+    there, so a short window is exact). The residual mismatch vs the rolling collection
+    buffer is at most the ``stride - 1`` OLDEST frames; ``ratio_dev_epoch0`` from
+    ``melee_ppo_update`` is the standing diagnostic for how much this (plus KV drift
+    between rebuilds) perturbs the epoch-0 ratios."""
+    stride = L_ctx if stride is None else stride
+    if not 1 <= stride <= L_ctx:
+        raise ValueError(f"stride must be in [1, L_ctx={L_ctx}], got {stride}")
     T = stream.n_transitions
     if T == 0:
         return []
     ego_prefix = PORT_TO_PREFIX[stream.ego_port]
+    P = len(stream.prefix_flat)
+    flat_all = list(stream.prefix_flat) + list(stream.flat)  # combined index c = frame + P
+    ego_all = np.concatenate([stream.prefix_ego, stream.ego_act])  # [P + T] actions AT frame c - P
     ep = _segment_ids(stream.terminated, T)
     changes = np.flatnonzero(ep[1:] != ep[:-1]) + 1
     seg_starts = np.concatenate([[0], changes])
@@ -269,20 +334,38 @@ def build_windows(stream: FinalizedStream, L_ctx: int, *, stream_id: int = 0) ->
 
     windows: list[Window] = []
     for lo, hi in zip(seg_starts, seg_ends, strict=True):
-        for a, b in _tile_end_aligned(int(lo), int(hi), L_ctx):
-            windows.append(_build_window(stream, a, b, L_ctx, ego_prefix, stream_id))
+        lo, hi = int(lo), int(hi)
+        ctx_lo = -P if lo == 0 else lo  # only the stream-head segment may burn into the prefix
+        for s_lo, s_hi in _tile_end_aligned(lo, hi, stride):
+            a = max(ctx_lo, s_hi - L_ctx + 1)
+            windows.append(_build_window(stream, flat_all, ego_all, a, s_hi, s_lo, L_ctx, ego_prefix, stream_id))
     return windows
 
 
-def _build_window(stream: FinalizedStream, a: int, b: int, L_ctx: int, ego_prefix: str, stream_id: int) -> Window:
+def _build_window(
+    stream: FinalizedStream,
+    flat_all: list[dict],
+    ego_all: np.ndarray,
+    a: int,
+    b: int,
+    s_lo: int,
+    L_ctx: int,
+    ego_prefix: str,
+    stream_id: int,
+) -> Window:
+    """Window over combined frames ``a..b`` (``a`` may be negative — prefix reach),
+    scoring frames ``s_lo..b``. ``flat_all``/``ego_all`` are the prefix+stream arrays
+    (combined index = frame + P)."""
     T = stream.n_transitions
+    P = len(stream.prefix_flat)
     n = b - a + 1
-    # ego action list feeding live_batch_from_rolling. The action that produced the
-    # block's first frame is NEUTRAL only at an episode start (cold buffer); otherwise
-    # it is the real preceding action, so the block front-pads ego by 0 (full context).
-    ego_lo = a if _at_episode_start(stream.terminated, a) else a - 1
-    ego = list(stream.ego_act[ego_lo:b])  # indices ego_lo .. b-1
-    flat_block = list(stream.flat[a : b + 1])
+    # ego action list feeding live_batch_from_rolling (right-aligned; short lists front-pad
+    # NEUTRAL). The action that produced the block's first frame is NEUTRAL at an episode
+    # start (cold buffer) and when the rolling cap already evicted it (max(a-1, -P) clamps);
+    # otherwise it is the real preceding action, so the block front-pads ego by 0.
+    ego_lo = a if _at_episode_start(stream, a) else max(a - 1, -P)
+    ego = list(ego_all[ego_lo + P : b + P])
+    flat_block = flat_all[a + P : b + 1 + P]
     stacked = live_batch_from_rolling(flat_block, ego, ego_prefix, L_ctx)
     feats = {k: v[0] for k, v in stacked.items()}
     ctx_pad = L_ctx - n
@@ -292,19 +375,23 @@ def _build_window(stream: FinalizedStream, a: int, b: int, L_ctx: int, ego_prefi
     rew = np.zeros(L_ctx, np.float32)
     terminated = np.zeros(L_ctx, bool)
     truncated = np.zeros(L_ctx, bool)
+    scored = np.zeros(L_ctx, bool)
     valid = np.zeros(L_ctx, bool)
     frame_pos = np.full(L_ctx, -1, np.int64)
     for j in range(n):
         row = ctx_pad + j
         frame = a + j
+        if frame < 0:  # prefix row: burn-in context only, no stream frame behind it
+            continue
         frame_pos[row] = frame
-        if frame < T:  # scored transition (frame T is value-only bootstrap)
+        scored[row] = frame >= s_lo  # frame <= b == the span end by construction
+        if frame < T:  # real transition (frame T is the value-only bootstrap)
             act_idx[row] = stream.act_idx[frame]
             logp[row] = stream.logp[frame]
             rew[row] = stream.rew[frame]
             terminated[row] = stream.terminated[frame]
             truncated[row] = stream.truncated[frame]
-            valid[row] = True
+            valid[row] = scored[row]
     return Window(
         feats=feats,
         ctx_pad=ctx_pad,
@@ -313,6 +400,7 @@ def _build_window(stream: FinalizedStream, a: int, b: int, L_ctx: int, ego_prefi
         rew=rew,
         terminated=terminated,
         truncated=truncated,
+        scored=scored,
         valid=valid,
         frame_pos=frame_pos,
         stream_id=stream_id,
@@ -321,9 +409,12 @@ def _build_window(stream: FinalizedStream, a: int, b: int, L_ctx: int, ego_prefi
     )
 
 
-def _at_episode_start(terminated: np.ndarray, frame: int) -> bool:
-    """Frame 0, or the frame right after a terminated transition, begins an episode."""
-    return frame == 0 or bool(terminated[frame - 1])
+def _at_episode_start(stream: FinalizedStream, frame: int) -> bool:
+    """Frame 0 with no carried prefix, or the frame right after a terminated transition,
+    begins an episode. Negative frames (prefix reach) are mid-episode by construction."""
+    if frame <= 0:
+        return frame == 0 and not stream.prefix_flat
+    return bool(stream.terminated[frame - 1])
 
 
 def gae_inputs(

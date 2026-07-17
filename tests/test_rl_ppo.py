@@ -491,6 +491,41 @@ def test_zero_lr_gives_zero_update_kl() -> None:
     assert metrics["epochs_used"] == float(cfg.epochs)
 
 
+def test_strided_windows_partition_frames() -> None:
+    """Burn-in windows: scored spans cover every frame (incl. the bootstrap) exactly once,
+    valid rows cover every transition exactly once, spans are at most ``stride`` wide, and
+    no window's context reaches across an episode boundary."""
+    T = 23
+    stream0 = _full_stream(T, seed=6)
+    term = np.zeros(T, bool)
+    term[9] = True  # mid-stream episode boundary; the tail stays unterminated
+    stream = replace(stream0, terminated=term)
+    L_ctx, stride = 8, 3
+    windows = build_windows(stream, L_ctx, stride=stride)
+
+    scored_frames = np.concatenate([w.frame_pos[w.scored] for w in windows])
+    assert sorted(scored_frames.tolist()) == list(range(T + 1))
+    valid_frames = np.concatenate([w.frame_pos[w.valid] for w in windows])
+    assert sorted(valid_frames.tolist()) == list(range(T))
+
+    seg = np.zeros(T + 1, np.int64)  # frame -> episode id (bootstrap rides the last episode)
+    seg[1:] = np.cumsum(term.astype(np.int64))
+    seg[T] = seg[T - 1]
+    for w in windows:
+        assert int(w.scored.sum()) <= stride  # spans (bootstrap included) never exceed the stride
+        fp = w.frame_pos[w.frame_pos >= 0]
+        assert len(set(seg[fp].tolist())) == 1, "window context crosses an episode boundary"
+
+
+def test_default_stride_is_edge_to_edge() -> None:
+    """``stride=None`` reproduces the non-overlapping tiling: every real row scored."""
+    T = 13
+    stream = _full_stream(T, seed=7)
+    for w in build_windows(stream, L_ctx=8):
+        real = w.frame_pos >= 0
+        assert np.array_equal(w.scored, real)
+
+
 def test_new_diagnostics_ranges() -> None:
     torch.manual_seed(5)
     net = PolicyValueNet(_TINY_CFG)

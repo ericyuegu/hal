@@ -457,6 +457,10 @@ class RLBatchPolicy:
             )
         else:
             logger.debug(f"RLBatchPolicy: boundary on ego_port {st.ego_port} before any recorded step (boot noise)")
+        if st.stream.n_recorded == 0:
+            # The stream's carried context prefix belongs to the match that just ended;
+            # its frame 0 restarts cold, exactly like the collection caches.
+            st.stream.clear_prefix()
         st.pending = None
         st.episode_steps = 0
 
@@ -510,7 +514,10 @@ class RLBatchPolicy:
         reduce — together with any reboot-orphaned streams — to a :class:`RolloutIteration`,
         then start fresh streams. Rolling history + caches + the pending step persist, so
         the next stream picks up mid-episode with no gap and the boundary frame is the
-        shared bootstrap of both."""
+        shared bootstrap of both. The fresh stream carries the rolling window's frames
+        before the boundary as its context-only PREFIX (``flat_hist[-1]`` is the pending
+        step's pre-obs — the new stream's frame 0 — so the prefix is everything older),
+        letting the PPO recompute burn in across the iteration boundary."""
         streams = list(self.state.values())
         finalized_inputs: list[SlotStream] = self._orphans  # already truncated + closed by reset_slots
         self._orphans = []
@@ -521,7 +528,10 @@ class RLBatchPolicy:
             finalized_inputs.append(st.stream)
         iteration = build_iteration(finalized_inputs)
         for st in streams:
-            st.stream = SlotStream(st.ego_port, matchup=st.matchup)
+            prefix_ego = np.stack(st.ego_hist[:-1]) if len(st.ego_hist) > 1 else None
+            st.stream = SlotStream(
+                st.ego_port, matchup=st.matchup, prefix_flat=tuple(st.flat_hist[:-1]), prefix_ego=prefix_ego
+            )
         return iteration
 
     def take_iteration(self) -> RolloutIteration | None:

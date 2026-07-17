@@ -132,10 +132,10 @@ def _apply_smoke(args: Args) -> Args:
 
 
 # --- learner-side rollout math ------------------------------------------------
-def _all_windows(streams: tuple[FinalizedStream, ...], L_ctx: int) -> list[Window]:
+def _all_windows(streams: tuple[FinalizedStream, ...], L_ctx: int, stride: int) -> list[Window]:
     windows: list[Window] = []
     for si, stream in enumerate(streams):
-        windows.extend(build_windows(stream, L_ctx, stream_id=si))
+        windows.extend(build_windows(stream, L_ctx, stride=stride, stream_id=si))
     return windows
 
 
@@ -144,23 +144,24 @@ def _stream_values(
     net: PolicyValueNet, windows: list[Window], streams: tuple[FinalizedStream, ...], stats: dict, device: str
 ) -> list[np.ndarray]:
     """``V`` at every ``T+1`` frame of each stream, read from one batched forward over the
-    windows (each frame appears in exactly one window via the non-overlapping tiling)."""
+    windows. With burn-in a frame appears in several windows; its value is read from the
+    one window that SCORES it (the scored spans partition each stream), so every frame is
+    written exactly once and always with at least the scored-span context behind it."""
     batch = collate_windows(windows, stats).to(device)
     v = net.values(net.forward_full(batch.context)).cpu().numpy()  # [B_w, L]
     values = [np.zeros(s.n_transitions + 1, np.float64) for s in streams]
     for wi, w in enumerate(windows):
-        fp = w.frame_pos
-        real = fp >= 0
-        values[w.stream_id][fp[real]] = v[wi][real]
+        take = w.scored
+        values[w.stream_id][w.frame_pos[take]] = v[wi][take]
     return values
 
 
 def _prepare_windows(
-    net: PolicyValueNet, iteration: RolloutIteration, stats: dict, ppo: PPOConfig, device: str
+    net: PolicyValueNet, iteration: RolloutIteration, stats: dict, ppo: PPOConfig, device: str, *, stride: int
 ) -> tuple[list[Window], dict[str, float]]:
     """Value pass → GAE → scatter advantages/returns onto windows; return the scattered
     windows plus value diagnostics (``adv_std``, ``v_explained_var``)."""
-    windows = _all_windows(iteration.streams, net.cfg.L_ctx)
+    windows = _all_windows(iteration.streams, net.cfg.L_ctx, stride)
     if not windows:
         return [], {"adv_std": 0.0, "v_explained_var": 0.0}
     values = _stream_values(net, windows, iteration.streams, stats, device)
@@ -279,6 +280,8 @@ def main(args: Args) -> None:
     stats = load_consolidated_stats(Path(data_root) / "stats.json")
 
     learner, cfg = load_il_policy(warm_start)
+    if not 1 <= args.rl.ppo_window_stride <= cfg.L_ctx:
+        raise ValueError(f"--rl.ppo-window-stride must be in [1, L_ctx={cfg.L_ctx}], got {args.rl.ppo_window_stride}")
     learner = learner.to(device).train()
     il_net = copy.deepcopy(learner).to(device).eval().requires_grad_(False)
     act_net = copy.deepcopy(learner).to(device).eval().requires_grad_(False)
@@ -393,7 +396,9 @@ def main(args: Args) -> None:
 
     def learn(iteration: RolloutIteration, cstats: CollectStats, queue_wait_s: float) -> None:
         t_learn = time.monotonic()  # learner_s_per_iter includes the value pass below
-        windows, vdiag = _prepare_windows(learner, iteration, stats, args.ppo, device)
+        windows, vdiag = _prepare_windows(
+            learner, iteration, stats, args.ppo, device, stride=args.rl.ppo_window_stride
+        )
         if not windows:
             counters["empty_iters"] += 1
             logger.warning(
