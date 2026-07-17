@@ -450,3 +450,56 @@ def test_ratio_dev_epoch0_is_zero_on_policy() -> None:
     optim = torch.optim.Adam(net.parameters(), lr=1e-3)
     metrics = melee_ppo_update(net, None, optim, windows, cfg, 0.0, _STATS)
     assert metrics["ratio_dev_epoch0"] < 1e-4, metrics["ratio_dev_epoch0"]
+
+
+def _on_policy_windows(net: PolicyValueNet, T: int, *, seed: int) -> list:
+    """GAE-scattered windows whose behavior logp equals the net's own recompute."""
+    stream0 = _full_stream(T, seed=seed)
+    w0 = build_windows(stream0, L_ctx=_TINY_CFG.L_ctx)
+    _, v, lp = _forward_frame_arrays(net, w0, T, _TINY_CFG.d_model)
+    stream = replace(stream0, logp=lp[:T].astype(np.float32))
+    ((adv, returns),) = gae_inputs([stream], [v], **_GAE)
+    return [scatter_gae(w, adv, returns) for w in build_windows(stream, L_ctx=_TINY_CFG.L_ctx)]
+
+
+def test_approx_kl_nonnegative() -> None:
+    # k3 estimator: even when probability mass moves TOWARD the reference actions
+    # (which drove the old signed estimator negative), both approx KLs stay >= 0.
+    torch.manual_seed(3)
+    net = PolicyValueNet(_TINY_CFG)
+    cfg = PPOConfig(clip=0.2, epochs=3, minibatch_size=1, target_kl=1e9, max_grad_norm=1e9)
+    windows = _on_policy_windows(net, 6, seed=3)
+
+    optim = torch.optim.Adam(net.parameters(), lr=1e-2)  # big steps: real drift every epoch
+    metrics = melee_ppo_update(net, None, optim, windows, cfg, 0.0, _STATS)
+    assert metrics["approx_kl_update"] >= 0.0, metrics["approx_kl_update"]
+    assert metrics["approx_kl_collect"] >= 0.0, metrics["approx_kl_collect"]
+    assert metrics["approx_kl_update"] > 0.0  # lr=1e-2 for 3 epochs must register as movement
+
+
+def test_zero_lr_gives_zero_update_kl() -> None:
+    # With lr=0 the net never moves, so current == the pre-update reference exactly:
+    # the update KL is 0 and the early stop can never fire.
+    torch.manual_seed(4)
+    net = PolicyValueNet(_TINY_CFG)
+    cfg = PPOConfig(clip=0.2, epochs=3, minibatch_size=1, target_kl=0.015, max_grad_norm=1e9)
+    windows = _on_policy_windows(net, 6, seed=4)
+
+    optim = torch.optim.Adam(net.parameters(), lr=0.0)
+    metrics = melee_ppo_update(net, None, optim, windows, cfg, 0.0, _STATS)
+    assert metrics["approx_kl_update"] == pytest.approx(0.0, abs=1e-9)
+    assert metrics["epochs_used"] == float(cfg.epochs)
+
+
+def test_new_diagnostics_ranges() -> None:
+    torch.manual_seed(5)
+    net = PolicyValueNet(_TINY_CFG)
+    cfg = PPOConfig(clip=0.2, epochs=2, minibatch_size=1, target_kl=1e9, max_grad_norm=1e9)
+    windows = _on_policy_windows(net, 6, seed=5)
+
+    optim = torch.optim.Adam(net.parameters(), lr=1e-3)
+    metrics = melee_ppo_update(net, None, optim, windows, cfg, 0.0, _STATS)
+    assert 0.0 <= metrics["clip_frac"] <= 1.0
+    assert 0.0 < metrics["ratio_ess"] <= 1.0
+    # On-policy: recompute == recorded logp, so the importance weights are all 1 -> ESS 1.
+    assert metrics["ratio_ess"] == pytest.approx(1.0, abs=1e-6)

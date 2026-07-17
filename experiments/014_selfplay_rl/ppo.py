@@ -221,18 +221,59 @@ def _windowed_kls(
     net: PolicyValueNet,
     windows: list[Window],
     stats: dict[str, FeatureStats],
-    logp_epoch0: torch.Tensor,
+    logp_ref: torch.Tensor,
     device: str,
 ) -> tuple[float, float]:
     """One no-grad forward over the whole window set → two approx KLs of the current
-    policy: vs the epoch-0 recompute (``logp_epoch0``, rows in ``windows`` order — the
+    policy: vs the pre-update recompute (``logp_ref``, rows in ``windows`` order — the
     early-stop signal: movement caused by THIS update phase) and vs the recorded
-    collection log-prob (diagnostic; carries the window-context recompute floor)."""
+    collection log-prob (diagnostic; carries the window-context recompute floor).
+
+    Both use the non-negative k3 estimator ``(r - 1) - log r`` with ``r = exp(logp_cur
+    - logp_ref)`` (Schulman's KL approximation): unbiased for ``KL(ref || cur)`` under
+    reference-policy samples and ≥ 0 pointwise, so drift never reads as negative."""
     batch = collate_windows(windows, stats).to(device)
     _, logp_cur, _ = _forward_logp(net, batch.context, batch.act_idx)
-    kl_update = float(_masked_mean(logp_epoch0.to(device) - logp_cur, batch.valid))
-    kl_collect = float(_masked_mean(batch.logp_old - logp_cur, batch.valid))
+    d_upd = logp_cur - logp_ref.to(device)
+    d_col = logp_cur - batch.logp_old
+    kl_update = float(_masked_mean((d_upd.exp() - 1.0) - d_upd, batch.valid))
+    kl_collect = float(_masked_mean((d_col.exp() - 1.0) - d_col, batch.valid))
     return kl_update, kl_collect
+
+
+@torch.no_grad()
+def _reference_pass(
+    net: PolicyValueNet,
+    windows: list[Window],
+    stats: dict[str, FeatureStats],
+    mb: int,
+    device: str,
+) -> tuple[torch.Tensor, float, float]:
+    """Pre-update snapshot over ALL windows, chunked at ``mb`` windows per forward:
+    per-position ``logp_ref`` [n, L] (cpu — the KL early-stop reference), plus two
+    collection diagnostics measured against the recorded behavior log-prob:
+    ``ratio_dev_epoch0`` (mean ``|ratio - 1|`` over valid positions) and ``ratio_ess``
+    (normalized effective sample size of the importance weights, 1.0 when the recompute
+    matches collection exactly)."""
+    n = len(windows)
+    L = windows[0].logp.shape[0]
+    logp_ref = torch.zeros(n, L)
+    dev_sum = 0.0
+    w_sum = 0.0
+    w2_sum = 0.0
+    n_valid = 0
+    for start in range(0, n, mb):
+        batch = collate_windows(windows[start : start + mb], stats).to(device)
+        _, logp, _ = _forward_logp(net, batch.context, batch.act_idx)
+        logp_ref[start : start + mb] = logp.detach().cpu()
+        w = (logp - batch.logp_old).exp()[batch.valid]
+        dev_sum += float((w - 1.0).abs().sum())
+        w_sum += float(w.sum())
+        w2_sum += float(w.pow(2).sum())
+        n_valid += int(batch.valid.sum())
+    ratio_dev = dev_sum / max(1, n_valid)
+    ratio_ess = (w_sum * w_sum) / (n_valid * w2_sum) if w2_sum > 0.0 else 0.0
+    return logp_ref, ratio_dev, ratio_ess
 
 
 def melee_ppo_update(
@@ -268,44 +309,35 @@ def melee_ppo_update(
     carries an irreducible context-approximation floor vs collection (mid-stream windows
     see less history than the rolling collection buffer did), so measuring drift against
     ``window.logp`` would trip ``target_kl`` from epoch 1 forever and silently cap PPO at
-    one epoch. Instead, epoch 0 stashes each window's recomputed ``logp`` (detached, at
-    its first visit — reusing the update forward, no extra pass) and the between-epoch
-    stop measures ``approx_kl_update`` = KL of the current policy vs that epoch-0
-    recompute — i.e. movement caused by THIS update phase only. The PPO ratios still use
-    the recorded collection log-prob (the genuine importance weight); ``approx_kl_collect``
-    (current vs collection) is returned as a diagnostic alongside.
+    one epoch. Instead, a dedicated no-grad pass BEFORE the first optimizer step snapshots
+    each window's recomputed ``logp`` (an exact pre-update reference), and the between-epoch
+    stop measures ``approx_kl_update`` = k3 KL of the current policy vs that snapshot —
+    i.e. movement caused by THIS update phase only. The PPO ratios still use the recorded
+    collection log-prob (the genuine importance weight); ``approx_kl_collect`` (current vs
+    collection, same k3 form) is returned as a diagnostic alongside.
 
     ``ppo_cfg.minibatch_size`` counts WINDOWS per minibatch here (each window is up to
     ``L_ctx`` transitions), not individual transitions. Returns diagnostic scalars incl.
-    ``ratio_dev_epoch0`` = mean ``|ratio - 1|`` on the first minibatch of epoch 0 (≈ 0 when
-    the update policy still equals the collector policy).
-
-    The epoch-0 KL-reference is captured per window at its FIRST visit within epoch 0 (reusing
-    that minibatch's update forward), so at scale later minibatches' references already include
-    the parameter movement from earlier steps in the same epoch — the ``approx_kl_update``
-    stop is thus measured against a slightly staggered reference, not a single frozen snapshot.
-    Acceptable (the stop only needs to bound net drift); revisit if the stop looks lax at
-    production window counts (many minibatches per epoch widen the stagger)."""
+    ``ratio_dev_epoch0`` = mean ``|ratio - 1|`` over ALL valid positions in the reference
+    pass (≈ 0 when the update policy still equals the collector policy), ``ratio_ess``
+    (normalized ESS of the reference-pass importance weights), and ``clip_frac`` (fraction
+    of valid positions outside the clip range, averaged over every minibatch run)."""
     if not windows:
         raise ValueError("melee_ppo_update called with no windows")
     n = len(windows)
-    L = windows[0].logp.shape[0]
     mb = max(1, ppo_cfg.minibatch_size)
-    clip_losses, vf_losses, entropies, kl_ils, gnorms = [], [], [], [], []
-    ratio_dev_epoch0 = 0.0
+    clip_losses, vf_losses, entropies, kl_ils, gnorms, clip_fracs = [], [], [], [], [], []
     approx_kl_update = 0.0
     approx_kl_collect = 0.0
     epochs_used = 0
-    logp_epoch0 = torch.zeros(n, L)  # per-window epoch-0 recompute (early-stop reference)
-    for epoch in range(ppo_cfg.epochs):
+    logp_ref, ratio_dev_epoch0, ratio_ess = _reference_pass(net, windows, stats, mb, device)
+    for _ in range(ppo_cfg.epochs):
         perm = torch.randperm(n, generator=generator).tolist()
-        for mb_i, start in enumerate(range(0, n, mb)):
+        for start in range(0, n, mb):
             mb_idx = perm[start : start + mb]
             batch = collate_windows([windows[i] for i in mb_idx], stats).to(device)
             valid = batch.valid
             values, logp, dist = _forward_logp(net, batch.context, batch.act_idx)
-            if epoch == 0:  # stash the update-phase reference at each window's first visit
-                logp_epoch0[mb_idx] = logp.detach().cpu()
 
             adv = batch.adv
             if _ADV_NORM:
@@ -339,16 +371,15 @@ def melee_ppo_update(
             if on_step is not None:
                 on_step()
 
-            if epoch == 0 and mb_i == 0:
-                with torch.no_grad():
-                    ratio_dev_epoch0 = float(_masked_mean((ratio - 1.0).abs(), valid))
+            with torch.no_grad():
+                clip_fracs.append(float(_masked_mean(((ratio - 1.0).abs() > ppo_cfg.clip).float(), valid)))
             clip_losses.append(float(clip_loss.detach()))
             vf_losses.append(float(vf_loss.detach()))
             entropies.append(float(entropy.detach()))
             kl_ils.append(float(kl_il.detach()))
             gnorms.append(float(gnorm))
         epochs_used += 1
-        approx_kl_update, approx_kl_collect = _windowed_kls(net, windows, stats, logp_epoch0, device)
+        approx_kl_update, approx_kl_collect = _windowed_kls(net, windows, stats, logp_ref, device)
         if approx_kl_update > ppo_cfg.target_kl:
             break
     return {
@@ -361,4 +392,6 @@ def melee_ppo_update(
         "gnorm": float(np.mean(gnorms)),
         "epochs_used": float(epochs_used),
         "ratio_dev_epoch0": ratio_dev_epoch0,
+        "ratio_ess": ratio_ess,
+        "clip_frac": float(np.mean(clip_fracs)),
     }
