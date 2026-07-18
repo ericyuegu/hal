@@ -26,6 +26,15 @@ from hal.training.features import TrainBatch
 from hal.training.features import preprocess
 from hal.training.features import stack_actions
 
+# Frozen val-window geometry shared by every experiment: the val loader is always built with this
+# ``L_chunk`` so val windows — hence val NLLs — are comparable across experiments regardless of each
+# run's train-time ``L_chunk``. ``_choose_chunk_starts`` draws windows in a way that depends on
+# ``L_chunk`` (its valid chunk-start support ``[1, T - L_chunk]`` and the RNG stream it consumes), so
+# a val loader built with each run's own ``L_chunk`` samples different windows and makes val losses
+# incomparable. Wide enough to cover multi-frame target horizons (e.g. 012's farthest auxiliary head);
+# each experiment slices the target down to the frames it scores.
+VAL_L_CHUNK = 16
+
 
 def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.ndarray]:
     """Rename p1_*/p2_* keys to ego_*/opp_* based on `ego_prefix`."""

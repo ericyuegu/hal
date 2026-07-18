@@ -257,6 +257,37 @@ _COMBO_BITS: Tensor = (
     (torch.arange(N_BUTTON_COMBOS)[:, None] >> torch.arange(N_BUTTONS)[None, :]) & 1
 ).float()  # [256, 8]
 
+# Empirical per-combo frame counts over 3,364,486 ranked-anonymized-1 train frames (150
+# replays, both ports; combo id encoding = ``buttons_to_combo``). 85/256 combos ever occur;
+# 41 have >=100 occurrences. Source of truth for decode-time support masking and the
+# dead-probability-mass diagnostic. Regenerate by re-running the bincount over the MDS train
+# split if the dataset changes.
+BTN_COMBO_COUNTS: tuple[int, ...] = (
+    2334029, 130944, 145282, 1553, 118177, 13193, 1016, 24, 150287, 19621, 1122, 309, 1808, 697, 13, 2,
+    18717, 1051, 411, 8, 4237, 151, 84, 3, 3726, 62, 1, 1, 25, 0, 0, 0,
+    151338, 4518, 1854, 215, 8770, 173, 4, 0, 14604, 505, 34, 43, 33, 23, 0, 0,
+    299, 1, 0, 3, 4, 0, 0, 0, 18, 1, 0, 0, 0, 0, 0, 0,
+    203849, 6246, 2072, 51, 8911, 1095, 134, 2, 6724, 383, 57, 3, 8, 31, 0, 0,
+    1598, 116, 4, 0, 1, 0, 1, 0, 15, 0, 0, 0, 0, 0, 0, 0,
+    1876, 90, 4, 6, 1121, 7, 0, 0, 957, 3, 2, 0, 19, 0, 0, 0,
+    31, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    64, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+)  # fmt: skip
+assert len(BTN_COMBO_COUNTS) == N_BUTTON_COMBOS
+
+
+def btn_combo_support(min_count: int) -> Tensor:
+    """``[256]`` bool mask of button combos with at least ``min_count`` train occurrences
+    (``BTN_COMBO_COUNTS``). ``min_count=0`` keeps every combo (masking disabled)."""
+    return torch.tensor([c >= min_count for c in BTN_COMBO_COUNTS], dtype=torch.bool)
+
 
 def buttons_to_combo(buttons: Tensor) -> Tensor:
     """``[..., 8]`` button bits {0,1} → ``[...]`` long combo id in ``[0, 256)``. Bit ``k`` of
@@ -317,6 +348,41 @@ def cont_density_bits(discrete_nll_bits: Tensor, bin_width: float) -> Tensor:
     bin-width Jacobian: density = mass / width ⇒ ``-log2 density = nll_bits + log2(width)``.
     Makes a binned-continuous score comparable to a flow model's PF-ODE bits/dim."""
     return discrete_nll_bits + math.log2(bin_width)
+
+
+# --- transition-conditioned change metrics -----------------------------------
+# Controller streams are mostly holds; the skill lives in the rare frames where an action group's
+# id changes (press/release/stick-move). These helpers isolate those transition frames so a metric
+# can score them apart from the trivially-predicted holds, and match predicted vs true change-events
+# with a ±1-frame tolerance (the causal event is the same one frame early/late).
+def transition_mask(idx_full: Tensor) -> Tensor:
+    """``[B, L+1, n_groups]`` quantized group indices (each frame ``t`` and its successor present) →
+    ``[B, L, n_groups]`` bool, True at position ``t`` where the next frame's group id differs from the
+    current frame's — a "transition" target (the group changes) rather than a hold."""
+    return idx_full[:, 1:] != idx_full[:, :-1]
+
+
+def _dilate_pm1(mask: Tensor) -> Tensor:
+    """±1-frame temporal dilation of a ``[B, L]`` bool along L (kernel-3 max-pool): True wherever the
+    input is True at ``t-1``, ``t`` or ``t+1``."""
+    pooled = F.max_pool1d(mask.to(torch.float32)[:, None, :], kernel_size=3, stride=1, padding=1)
+    return pooled[:, 0] > 0.5
+
+
+def change_event_prf(pred_change: Tensor, true_change: Tensor) -> tuple[float, float, float]:
+    """Tolerant precision / recall / F1 for one group's per-position change events (``[B, L]`` bool),
+    matched with ±1-frame slack. A predicted change is a hit if a true change falls within ±1 frame
+    (the truth dilated by a kernel-3 max-pool); recall is symmetric (predictions dilated). The slack
+    absorbs the one-frame jitter between a predicted and an actual press/release. Returns
+    ``(precision, recall, f1)``, each 0.0 when its side has no events."""
+    true_hit = _dilate_pm1(true_change)  # a predicted change is correct if truth lies within ±1
+    pred_hit = _dilate_pm1(pred_change)  # a true change is caught if a prediction lies within ±1
+    n_pred = int(pred_change.sum())
+    n_true = int(true_change.sum())
+    precision = int((pred_change & true_hit).sum()) / n_pred if n_pred else 0.0
+    recall = int((true_change & pred_hit).sum()) / n_true if n_true else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return precision, recall, f1
 
 
 # --- PF-ODE bits/dim (flow-model continuous likelihood) ----------------------

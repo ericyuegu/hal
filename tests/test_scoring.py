@@ -175,6 +175,70 @@ def test_combo_marginal_of_one_hot_logit_is_that_combos_bits():
         assert torch.allclose(marg, scoring.combo_to_buttons(torch.tensor(i)), atol=1e-5)
 
 
+def test_btn_combo_support_thresholds():
+    support = scoring.btn_combo_support(100)
+    assert support.shape == (scoring.N_BUTTON_COMBOS,) and support.dtype == torch.bool
+    # exactly the combos whose train count clears the threshold (the CLAUDE-documented 41 at >=100).
+    counts = torch.tensor(scoring.BTN_COMBO_COUNTS)
+    assert torch.equal(support, counts >= 100)
+    assert int(support.sum()) == 41
+    assert support[0]  # combo 0 (no buttons) dominates and is always supported
+    # raising the threshold keeps a strict subset; min_count=0 keeps every combo (masking disabled)
+    assert bool((scoring.btn_combo_support(1000) & ~support).any()) is False
+    assert scoring.btn_combo_support(0).all()
+
+
+def test_dead_mass_is_softmax_mass_on_unsupported_combos():
+    support = scoring.btn_combo_support(100)
+    dead = ~support
+    dead_idx = int(dead.nonzero()[0])  # a combo with < 100 train frames
+    live_idx = int(support.nonzero()[0])  # a combo with >= 100 (combo 0)
+    # all softmax mass parked on a dead combo -> dead mass ~ 1
+    logits = torch.full((1, scoring.N_BUTTON_COMBOS), -30.0)
+    logits[0, dead_idx] = 30.0
+    assert torch.softmax(logits, dim=-1)[:, dead].sum(-1).item() > 0.999
+    # all mass on a supported combo -> dead mass ~ 0
+    logits = torch.full((1, scoring.N_BUTTON_COMBOS), -30.0)
+    logits[0, live_idx] = 30.0
+    assert torch.softmax(logits, dim=-1)[:, dead].sum(-1).item() < 1e-3
+
+
+# --- transition-conditioned change metrics -----------------------------------
+def test_transition_mask_flags_group_id_changes():
+    # [B=1, L+1=4, n_groups=2]: g0 ids [0,1,1,2] (change, hold, change); g1 ids [5,5,6,6] (hold, change, hold).
+    idx_full = torch.tensor([[[0, 5], [1, 5], [1, 6], [2, 6]]])
+    tm = scoring.transition_mask(idx_full)
+    assert tm.shape == (1, 3, 2)
+    assert tm[0, :, 0].tolist() == [True, False, True]
+    assert tm[0, :, 1].tolist() == [False, True, False]
+
+
+def _prf(pred: list[bool], true: list[bool]) -> tuple[float, float, float]:
+    return scoring.change_event_prf(torch.tensor([pred]), torch.tensor([true]))
+
+
+def test_change_event_prf_exact_hit_is_perfect():
+    assert _prf([False, True, False, False], [False, True, False, False]) == (1.0, 1.0, 1.0)
+
+
+def test_change_event_prf_pm1_hit_counts():
+    # predicted one frame early still counts (±1 tolerance), symmetric so P=R=F1=1.
+    assert _prf([False, True, False, False], [False, False, True, False]) == (1.0, 1.0, 1.0)
+    # two frames off is a miss on both sides.
+    assert _prf([False, True, False, False, False], [False, False, False, True, False]) == (0.0, 0.0, 0.0)
+
+
+def test_change_event_prf_miss_and_one_sided():
+    # a prediction far from the only true change: precision 0, recall 0.
+    assert _prf([True, False, False, False], [False, False, False, True]) == (0.0, 0.0, 0.0)
+    # prediction with no truth anywhere: precision 0 (wrong), recall 0 (nothing to catch).
+    assert _prf([True, False, False], [False, False, False]) == (0.0, 0.0, 0.0)
+
+
+def test_change_event_prf_empty_is_zero():
+    assert _prf([False, False, False], [False, False, False]) == (0.0, 0.0, 0.0)
+
+
 # --- proper scoring rules ----------------------------------------------------
 def test_bernoulli_logloss_uniform_is_one_bit():
     logits = torch.zeros(5, 8)  # p = 0.5 everywhere
