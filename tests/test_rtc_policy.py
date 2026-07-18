@@ -1,9 +1,13 @@
-"""Regression guard for the closed-loop policy's rolling-buffer alignment.
+"""Regression guards for the closed-loop policy's rolling-buffer invariants.
 
 ``RecedingHorizon`` builds its model context by pairing, at each position, a
 past gamestate with the ego action that *produced* it. If the rolling buffers
 ever drift out of lockstep, the model would see a frame-shifted observation at
-inference that it never saw in training. This pins the invariant.
+inference that it never saw in training. This pins the alignment invariant.
+
+It also clears those buffers at an instant-restart match boundary (the frame id
+resetting to the pre-game countdown), so a new match never opens on a context
+spanning two matches — a window with zero training support. This pins that too.
 
 The policy lives in ``hal.training.closed_loop``; the experiment (loaded by path,
 since its filename starts with a digit) wires a model into it via ``make_policy``.
@@ -18,6 +22,7 @@ import torch
 
 from hal.data.stats import FeatureStats
 from hal.sim.vec import Slot
+from hal.training.features import ACTION_CHANNELS
 
 _EXP_PATH = Path(__file__).resolve().parent.parent / "experiments" / "002_flow_matching_rtc.py"
 
@@ -171,3 +176,73 @@ def test_rtc_commits_previous_chunks_prefix():
         np.testing.assert_allclose(prefix[0], pendings[i - 1][s : s + d], rtol=1e-5, atol=1e-6)
         # and the integrator pinned the new chunk's first d positions to it
         np.testing.assert_allclose(pendings[i][:d], prefix[0], rtol=1e-5, atol=1e-6)
+
+
+def _obs_id(*, frame_id: int, tag: float, ego_port: int) -> dict:
+    """Canonical frame with an explicit ``id`` (so a drop forces an instant-restart reset)
+    and ego ``position_x`` set to ``tag`` (so we can recover which frames survive in the
+    post-reset context)."""
+    opp_port = 2 if ego_port == 1 else 1
+    return {
+        "id": frame_id,
+        "start": {"random_seed": 0},
+        "ports": {
+            ego_port: {"leader": {"post": _post(tag)}},
+            opp_port: {"leader": {"post": _post(-1.0)}},
+        },
+    }
+
+
+def test_buffers_reset_at_instant_restart_match_boundary():
+    """Instant-restart plays many matches per Dolphin boot; each new match's frame id resets
+    to the pre-game countdown (drops below the prior match's). The policy must clear its
+    rolling buffers at that drop, so a match never opens on the previous match's gamestate +
+    ego context — a full L_ctx window spanning two matches has zero training support."""
+    cfg, policy = _build_policy(execution_horizon=1)  # s == 1 → the policy replans every frame
+    slot = Slot(0, 1)
+
+    ctx_pads: list[int] = []
+    batches: list[dict[str, np.ndarray]] = []
+    real_predict = policy.predict_chunk
+    real_build = policy._build_stacked_batch
+
+    def spy_predict(ctx, committed):
+        ctx_pads.append(int(ctx.ctx_pad[0]))
+        return real_predict(ctx, committed)
+
+    def spy_build(live):
+        batch = real_build(live)
+        batches.append({k: v.copy() for k, v in batch.items()})
+        return batch
+
+    policy.predict_chunk = spy_predict
+    policy._build_stacked_batch = spy_build
+
+    # Match 1: a rising id run long enough to saturate the L_ctx buffer. Match 2: the id
+    # drops to a new countdown then rises again — the instant-restart boundary. Each frame's
+    # ego position_x is tagged with the call index so the surviving context is identifiable.
+    pre_ids = list(range(390, 390 + 2 * cfg.L_ctx))
+    post_ids = list(range(-123, -123 + 2 * cfg.L_ctx))
+    reset_call = len(pre_ids)  # first post-reset call; with s == 1 also the first post-reset replan
+    for t, fid in enumerate(pre_ids + post_ids):
+        policy(t, {slot: _obs_id(frame_id=fid, tag=float(t), ego_port=1)})
+
+    # Precondition: the buffer saturated before the reset (ctx_pad hit 0), so the reset is
+    # clearing a full two-match-spanning window, not an already-short one.
+    assert ctx_pads[reset_call - 1] == 0, "buffer never saturated before the reset"
+
+    # First post-reset replan: only the single post-reset frame is in context.
+    assert ctx_pads[reset_call] == cfg.L_ctx - 1
+
+    # Ego history is fully neutral-padded — no ego action carried across the boundary.
+    reset_batch = batches[reset_call]
+    for ch in ACTION_CHANNELS:
+        col = reset_batch[f"ego_{ch}"][0]
+        assert np.all(col == 0.0), f"ego channel {ch} not neutral after reset: {col}"
+
+    # Once the buffer refills, every gamestate in context is a post-reset frame (tag >=
+    # reset_call); no pre-reset frame ever leaks back in.
+    saturated_call = reset_call + cfg.L_ctx - 1
+    assert ctx_pads[saturated_call] == 0, "buffer did not refill after the reset"
+    tags = batches[saturated_call]["ego_position_x"][0]
+    assert np.all(tags >= reset_call), f"a pre-reset frame leaked into post-reset context: {tags}"

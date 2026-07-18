@@ -5,7 +5,8 @@ adapts any action-chunk model to the vectorized eval driver. It owns every part
 of closed-loop play that is *invariant* across model architectures:
 
 * per-slot rolling buffers (observed gamestate + the ego's own intended actions),
-  capped at ``L_ctx``;
+  capped at ``L_ctx`` and cleared at each instant-restart match boundary so a
+  slot's context never spans two matches;
 * the cold-start left-pad + alignment that lets the policy act from frame 0 while
   the buffer fills with real gameplay (reported as ``ctx_pad`` so the model masks
   the not-yet-filled prefix from attention);
@@ -60,6 +61,7 @@ class _SlotState:
     flat_hist: list = field(default_factory=list)
     ego_inputs_hist: list = field(default_factory=list)
     pending: np.ndarray | None = None
+    last_id: int | None = None  # previous frame's canonical id; a drop = instant-restart boundary
 
 
 def _live_batch_from_rolling(
@@ -120,6 +122,14 @@ class RecedingHorizon:
     call. Slots only drop out (matches end) — never appear mid-rollout — so the
     batch shrinks monotonically.
 
+    Under instant-restart one boot plays many matches back-to-back; at each match
+    boundary — the slot's incoming frame id drops below its last, as Dolphin
+    restarts in-place into a new match — that slot's rolling buffers are cleared so
+    its context never spans two matches, and it re-warms from the boundary
+    (``ctx_pad`` reflects the refilling prefix). Boots restart at different frames,
+    so this per-slot warm-up is no longer lockstep after match one, but replanning
+    stays batched on the shared clock.
+
     Construct fresh per eval wave (rolling state must not leak across waves).
     """
 
@@ -144,6 +154,18 @@ class RecedingHorizon:
         live = list(obs)
         for slot in live:
             st = self._slots.setdefault(slot, _SlotState())
+            fid = obs[slot]["id"]
+            # Instant-restart boundary: Dolphin restarted in-place into a new match, so the
+            # canonical frame id reset to the pre-game countdown (dropped below the last id).
+            # Clear this slot's buffers so its context never spans two matches (stale stage,
+            # stocks back to 4, teleported positions — a window with zero training support).
+            # pending / the replan clock are left alone: with s == 1 (every current experiment)
+            # a replan happens this same call so no stale chunk plays; with s > 1 the
+            # pre-boundary chunk may still execute for up to s - 1 frames past the reset.
+            if st.last_id is not None and fid < st.last_id:
+                st.flat_hist.clear()
+                st.ego_inputs_hist.clear()
+            st.last_id = fid
             st.flat_hist.append(flatten_canonical_frame(obs[slot]))
             if len(st.flat_hist) > self.L_ctx:
                 st.flat_hist.pop(0)
