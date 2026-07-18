@@ -64,7 +64,10 @@ def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
 
 
 def _controller_columns(prefix: str) -> dict[str, DTypeLike]:
-    """Pre-frame block fields. Action[t] -> state[t+1] alignment."""
+    """Pre-frame block fields. Same-row alignment: row t's controller is the input active
+    during frame t and its consequence lands in row t's post-state (a Y press and its
+    KNEE_BEND jumpsquat share a row) — identical to the closed-loop ``(post_i, pre_i)``
+    pairing in ``hal/training/closed_loop.py``. Verified in ``notebooks/alignment_probe.py``."""
     cols: dict[str, DTypeLike] = {f"{prefix}_button_{b}": np.int32 for b in BUTTON_BITS}
     cols.update(
         {
