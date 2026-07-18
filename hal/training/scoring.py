@@ -257,27 +257,28 @@ _COMBO_BITS: Tensor = (
     (torch.arange(N_BUTTON_COMBOS)[:, None] >> torch.arange(N_BUTTONS)[None, :]) & 1
 ).float()  # [256, 8]
 
-# Empirical per-combo frame counts over 3,364,486 ranked-anonymized-1 train frames (150
-# replays, both ports; combo id encoding = ``buttons_to_combo``). 85/256 combos ever occur;
-# 41 have >=100 occurrences. Source of truth for decode-time support masking and the
-# dead-probability-mass diagnostic. Regenerate by re-running the bincount over the MDS train
-# split if the dataset changes.
+# Empirical per-combo frame counts over 13,748,672 ranked-anonymized-1 train frames (614
+# replays, both ports, shard order; combo id encoding = ``buttons_to_combo``). 116/256 combos
+# ever occur; 52 have >=100 occurrences. A ``min_count`` threshold is an absolute count
+# against this total — reason in rates when changing it. Source of truth for decode-time
+# support masking and the dead-probability-mass diagnostic. Regenerate by re-running the
+# bincount over the MDS train split if the dataset changes.
 BTN_COMBO_COUNTS: tuple[int, ...] = (
-    2334029, 130944, 145282, 1553, 118177, 13193, 1016, 24, 150287, 19621, 1122, 309, 1808, 697, 13, 2,
-    18717, 1051, 411, 8, 4237, 151, 84, 3, 3726, 62, 1, 1, 25, 0, 0, 0,
-    151338, 4518, 1854, 215, 8770, 173, 4, 0, 14604, 505, 34, 43, 33, 23, 0, 0,
-    299, 1, 0, 3, 4, 0, 0, 0, 18, 1, 0, 0, 0, 0, 0, 0,
-    203849, 6246, 2072, 51, 8911, 1095, 134, 2, 6724, 383, 57, 3, 8, 31, 0, 0,
-    1598, 116, 4, 0, 1, 0, 1, 0, 15, 0, 0, 0, 0, 0, 0, 0,
-    1876, 90, 4, 6, 1121, 7, 0, 0, 957, 3, 2, 0, 19, 0, 0, 0,
-    31, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    64, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    9562757, 522338, 600727, 6122, 432357, 54780, 4402, 48, 608471, 82243, 5715, 933, 2890, 3866, 31, 4,
+    75577, 3279, 1288, 62, 20197, 1368, 478, 77, 17765, 420, 11, 9, 54, 34, 1, 12,
+    641271, 22183, 8145, 669, 35960, 983, 18, 2, 65415, 2104, 101, 158, 85, 54, 0, 0,
+    1201, 16, 2, 15, 35, 5, 0, 0, 75, 39, 3, 7, 4, 5, 0, 3,
+    836188, 26015, 7800, 257, 31215, 4152, 486, 21, 26910, 2171, 215, 10, 38, 184, 0, 0,
+    7053, 267, 34, 4, 370, 70, 86, 27, 77, 8, 0, 0, 1, 1, 0, 0,
+    8401, 586, 55, 36, 4162, 61, 24, 9, 3824, 111, 2, 0, 42, 28, 0, 0,
+    55, 9, 10, 41, 1, 2, 0, 0, 6, 98, 0, 5, 0, 19, 0, 0,
+    513, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    5, 18, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 )  # fmt: skip
 assert len(BTN_COMBO_COUNTS) == N_BUTTON_COMBOS

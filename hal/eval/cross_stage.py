@@ -51,13 +51,14 @@ SweepResult = list[tuple[melee.Stage, int, MatchSummary | None]]
 
 STARTING_STOCKS = 4  # Melee match default
 FRAMES_PER_MINUTE = 3600  # 60 fps
-# Frozen active-frame protocol. Canonical frame ids run -123..-1 for the pre-GO
-# countdown (the match is "live" but no player can act) and hit 0 at GO — the first
-# frame players control. So every match carries exactly PREGAME_FRAMES dead frames
-# before any active play, and active frames are those with id >= 0. Evidence:
-# hal/sim/trajectory.py (frame_id "starting at -123"); libmelee console.py sets
-# gamestate._canonical.id = gamestate.frame; hal/sim/vec.py segments a new match
-# when the id counter resets to the countdown.
+# Frozen active-frame protocol: active frames are those with id >= 0. Canonical frame
+# ids run -123..-1 before GO (hal/sim/trajectory.py; libmelee sets canonical id =
+# gamestate.frame; hal/sim/vec.py segments a new match when the id resets). NOTE:
+# players already control their characters from ~frame -39 (measured on ranked val
+# replays: 79/80 player-sides show pre-0 input activity, some take pre-0 damage), so
+# id >= 0 is a comparability CONVENTION that also trims those first controllable
+# frames, not a claim that pre-0 frames are inert. Changing the cutoff would unfreeze
+# the protocol.
 PREGAME_FRAMES = 123
 
 # Per-active-minute rate keys, in a fixed order shared by the reduction, the CI
@@ -527,7 +528,8 @@ def paired_vs_cpu_deltas(
     if pairing_rate < 0.5:
         raise ValueError(
             f"paired_vs_cpu_deltas: paired only {len(pairs)} of {len(rows_a)}/{len(rows_b)} rows "
-            f"(pairing_rate {pairing_rate:.2f} < 0.5); runs likely used different matchup schedules"
+            f"(pairing_rate {pairing_rate:.2f} < 0.5); runs likely used different matchup schedules, "
+            f"or one run crashed away most of its boots"
         )
 
     out: dict[str, float] = {

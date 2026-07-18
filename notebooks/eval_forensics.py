@@ -47,7 +47,7 @@ from hal.wire import slp_stage_to_libmelee  # noqa: E402
 # %%
 # Config + reference constants.
 
-SCRATCH = Path("/tmp/claude-1000/-home-ericgu-src-hal/cc158dee-eb6c-43f5-8726-66a31a704ebf/scratchpad/forensics")
+SCRATCH = Path.home() / "data" / "scratch" / "eval_forensics"
 DATA_ROOT = SCRATCH / "data"
 PLOT_DIR = SCRATCH / "plots"
 PLOT_DIR.mkdir(parents=True, exist_ok=True)

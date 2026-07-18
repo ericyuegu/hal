@@ -178,10 +178,10 @@ def test_combo_marginal_of_one_hot_logit_is_that_combos_bits():
 def test_btn_combo_support_thresholds():
     support = scoring.btn_combo_support(100)
     assert support.shape == (scoring.N_BUTTON_COMBOS,) and support.dtype == torch.bool
-    # exactly the combos whose train count clears the threshold (the CLAUDE-documented 41 at >=100).
+    # exactly the combos whose train count clears the threshold (52 at >=100 in the current table).
     counts = torch.tensor(scoring.BTN_COMBO_COUNTS)
     assert torch.equal(support, counts >= 100)
-    assert int(support.sum()) == 41
+    assert int(support.sum()) == 52
     assert support[0]  # combo 0 (no buttons) dominates and is always supported
     # raising the threshold keeps a strict subset; min_count=0 keeps every combo (masking disabled)
     assert bool((scoring.btn_combo_support(1000) & ~support).any()) is False
