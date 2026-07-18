@@ -74,3 +74,15 @@ def test_orientation_alternates_so_model_plays_both_sides() -> None:
     fox_falco = [(e, o) for e, o in alloc if {e, o} == {Character.FOX, Character.FALCO}]
     assert (Character.FOX, Character.FALCO) in fox_falco
     assert (Character.FALCO, Character.FOX) in fox_falco
+
+
+def test_schedule_shared_across_parallelism_for_paired_eval() -> None:
+    """Two checkpoints evaluated at different parallelism (different ``n``) still agree
+    boot-for-boot on the common prefix. This is the invariant ``paired_vs_cpu_deltas``
+    leans on: boot ``i`` is the SAME matchup in both runs, so per-match rows align by
+    ``(boot index, matchup)`` without any shared RNG."""
+    small = matchups_for(12)
+    big = matchups_for(37)
+    assert small == big[: len(small)]
+    for boot_index, matchup in enumerate(small):
+        assert big[boot_index] == matchup, f"boot {boot_index} matchup drifted with n"
