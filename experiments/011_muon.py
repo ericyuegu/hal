@@ -444,6 +444,11 @@ def _btn_support_dead(min_count: int, device: torch.device) -> Tensor:
     dead = _BTN_SUPPORT_DEAD_CACHE.get((min_count, device))
     if dead is None:
         dead = _BTN_COMBO_COUNTS.to(device) < min_count
+        if bool(dead.all()):
+            raise ValueError(
+                f"btn_support_min={min_count} masks every button combo "
+                f"(max train count is {int(_BTN_COMBO_COUNTS.max())})"
+            )
         _BTN_SUPPORT_DEAD_CACHE[(min_count, device)] = dead
     return dead
 

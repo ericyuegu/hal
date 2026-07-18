@@ -14,11 +14,17 @@ independent given context; the autoregressive-groups variant lives in
 Meta/DeepSeek multi-token prediction — they shape the trunk but are never used at
 inference: closed-loop play decodes ONLY the offset-1 head (``head_offsets`` must
 contain ``1``), so the deployed policy is byte-for-byte the 011 next-token policy.
+Chunked execution (``exec_horizon`` s>1, deploy-time only) instead runs the contiguous
+heads 1..s from a single backbone forward and executes all s actions before replanning
+— s× cheaper closed-loop play; s=1 is the default and reproduces the per-frame policy.
 
 Run:
     uv run experiments/012_multi_token.py
     uv run experiments/012_multi_token.py --cfg.head-offsets 1 5 9 13
+    uv run experiments/012_multi_token.py --cfg.history-dropout-p 0.25
+    uv run experiments/012_multi_token.py --cfg.transition-loss-weight 5.0
     uv run experiments/012_multi_token.py --eval <ckpt> --eval-temp 0.7
+    uv run experiments/012_multi_token.py --eval <ckpt> --eval-exec-horizon 2
 """
 
 # %%
@@ -82,9 +88,6 @@ from hal.training.stats import load_consolidated_stats
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
-# Closed-loop decodes ONLY the offset-1 head: one frame ahead, replan every frame. The dataloader's
-# target horizon is wider (max(head_offsets)) so the auxiliary far-horizon heads have targets.
-CLOSED_LOOP_L_CHUNK = 1
 
 # Action-vector channel split (A_DIM=14): [0:6] sticks+triggers (continuous), [6:14] buttons {0,1}.
 _N_CONT = 6
@@ -130,6 +133,14 @@ class TrainConfig:
     # head, so the far-horizon heads are a training-only signal. Spread-out offsets beat contiguous.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
     aux_loss_weight: float = 1.0  # weight on the non-primary (offset != 1) heads' NLL in the objective
+    # Per-sample ego-history input dropout (train only): with probability p, zero a sample's ego
+    # controller-history slice of the context token so the trunk cannot lean on copying its own recent
+    # inputs. Lives purely in the model's input assembly (targets untouched). 0.0 = current 012 behavior.
+    history_dropout_p: float = 0.0
+    # Upweight transition-target positions (the predicted group id differs from the frame before it) in the
+    # BACKPROP objective only; every logged/val NLL stays unweighted so arms compare. Per (offset, group) the
+    # plain mean becomes sum(w·nll)/sum(w) with w=λ on transitions else 1. λ=1.0 reduces exactly to the mean.
+    transition_loss_weight: float = 1.0
     # Matchup conditioning (schema v4). char/stage embeddings are indexed by the RAW libmelee id
     # (characters 0-26 dense; stages sparse in 0-26), so the vocab must exceed the max id, not the
     # number of included categories; out-of-range ids clamp to the last row.
@@ -150,6 +161,10 @@ class TrainConfig:
     decode_btn_support_min: int = 0
     decode_min_p: float = 0.0
     decode_click_trigger_fix: bool = False
+    # Chunked execution (deploy-time only): replan every s frames, executing the contiguous heads 1..s from
+    # ONE backbone forward (head_offsets must contain 1..s). s=1 = per-frame decode (current 012). Training
+    # is unaffected — closed-loop deployment only; eval can override via --eval-exec-horizon.
+    exec_horizon: int = 1
     seed: int = 0
     L_ctx: int = 256
     # optimization
@@ -357,6 +372,9 @@ class GPT(nn.Module):
         super().__init__()
         if not cfg.decode_temp > 0:
             raise ValueError(f"decode_temp must be > 0, got {cfg.decode_temp}")
+        if not 0.0 <= cfg.history_dropout_p <= 1.0:
+            raise ValueError(f"history_dropout_p must be in [0, 1], got {cfg.history_dropout_p}")
+        self.history_dropout_p = cfg.history_dropout_p
         offs = tuple(cfg.head_offsets)
         if not offs:
             raise ValueError("head_offsets must be non-empty")
@@ -403,7 +421,15 @@ class GPT(nn.Module):
 
     def _context_tokens(self, features: dict[str, Tensor]) -> Float[Tensor, "B L_ctx d_model"]:
         parts = [self._per_player_features(features, p) for p in _PLAYER_PREFIXES]
-        parts.append(torch.cat([features[f"ego_{ch}"][..., None] for ch in ACTION_CHANNELS], dim=-1))
+        # Ego controller history slice, assembled into a FRESH tensor (never mutating `features`, so the
+        # targets built from stack_actions(features) stay intact). Per-sample history dropout (train only):
+        # draw a Bernoulli keep-mask via the module RNG (probability history_dropout_p of dropping) and zero
+        # the whole slice for dropped samples, forcing the trunk off copying its own recent inputs.
+        ego_hist = torch.cat([features[f"ego_{ch}"][..., None] for ch in ACTION_CHANNELS], dim=-1)
+        if self.training and self.history_dropout_p > 0.0:
+            keep = (torch.rand(ego_hist.shape[0], device=ego_hist.device) >= self.history_dropout_p).to(ego_hist.dtype)
+            ego_hist = ego_hist * keep[:, None, None]
+        parts.append(ego_hist)
         parts.append(self.char_emb(features["ego_character"].clamp(0, self.char_emb.num_embeddings - 1)))
         parts.append(self.char_emb(features["opp_character"].clamp(0, self.char_emb.num_embeddings - 1)))
         parts.append(self.stage_emb(features["stage"].clamp(0, self.stage_emb.num_embeddings - 1)))
@@ -462,19 +488,33 @@ def group_nll(logits: Tensor, tgt_idx: Tensor, valid: Tensor) -> dict[str, Tenso
     return out
 
 
-def action_loss(model: GPT, batch: TrainBatch) -> dict[tuple[int, str], Tensor]:
-    """Dense multi-token NLL: every valid context position predicts the action at each head offset.
-    Keyed by ``(offset, group_name)`` → ``[n_valid]`` nats; one shared backbone forward, one head each."""
+def action_loss(model: GPT, batch: TrainBatch) -> tuple[dict[tuple[int, str], Tensor], dict[tuple[int, str], Tensor]]:
+    """Dense multi-token NLL + aligned transition flags. Every valid context position predicts the action at
+    each head offset; one shared backbone forward, one head each. ``a_full = [history | target]`` is quantized
+    ONCE ([B, L_ctx+max_off, n_groups]) and its per-frame boundary mask computed once, both sliced per offset:
+    for head ``o`` position ``i``'s target frame is ``i+o`` and it is a transition iff ``q[i+o] != q[i+o-1]``.
+    Returns ``(nll, trans)`` both keyed ``(offset, group_name)`` → ``[n_valid]`` (nats; bool), aligned position
+    for position so the objective can upweight transitions without touching the logged NLL."""
     ctx = batch.context
     h = model(ctx.features, ctx.ctx_pad)  # [B, L_ctx, d_model]
-    targets, valid = _multi_offset_targets(ctx, batch.target, model.head_offsets)
-    comps: dict[tuple[int, str], Tensor] = {}
+    a_full = torch.cat([stack_actions(ctx.features), batch.target], dim=1)  # [B, L_ctx + max_off, A_DIM]
+    q_full = _quantize(model, a_full)  # [B, L_ctx + max_off, n_groups]
+    L_ctx = a_full.size(1) - batch.target.size(1)
+    pos = torch.arange(L_ctx, device=a_full.device)
+    valid = pos[None, :] >= ctx.ctx_pad[:, None]  # [B, L_ctx], shared by all offsets
+    flat_valid = valid.reshape(-1)
+    bnd_full = scoring.transition_mask(q_full)  # [B, L_ctx + max_off - 1, n_groups]; pos t = (q[t+1] != q[t])
+    nll: dict[tuple[int, str], Tensor] = {}
+    trans: dict[tuple[int, str], Tensor] = {}
     for hi, o in enumerate(model.head_offsets):
         logits = model.heads[hi](h).float()  # [B, L_ctx, A_VOCAB]
-        tgt_idx = _quantize(model, targets[o])
-        for name, c in group_nll(logits, tgt_idx, valid).items():
-            comps[(o, name)] = c
-    return comps
+        tgt_idx = q_full[:, o : o + L_ctx]  # target frame i+o
+        bnd_o = bnd_full[:, o - 1 : o - 1 + L_ctx]  # transition at i iff q[i+o] != q[i+o-1]
+        gnll = group_nll(logits, tgt_idx, valid)
+        for g, name in enumerate(_GROUP_NAMES):
+            nll[(o, name)] = gnll[name]
+            trans[(o, name)] = bnd_o[..., g].reshape(-1)[flat_valid]
+    return nll, trans
 
 
 def _btn_support_dead(min_count: int, device: torch.device) -> Tensor:
@@ -484,8 +524,74 @@ def _btn_support_dead(min_count: int, device: torch.device) -> Tensor:
     dead = _BTN_SUPPORT_DEAD_CACHE.get((min_count, device))
     if dead is None:
         dead = _BTN_COMBO_COUNTS.to(device) < min_count
+        if bool(dead.all()):
+            raise ValueError(
+                f"btn_support_min={min_count} masks every button combo "
+                f"(max train count is {int(_BTN_COMBO_COUNTS.max())})"
+            )
         _BTN_SUPPORT_DEAD_CACHE[(min_count, device)] = dead
     return dead
+
+
+def _resolve_decode_args(
+    temp: float,
+    temps: tuple[float, float, float, float] | None,
+    btn_support_min: int,
+    min_p: float,
+    argmax: bool,
+) -> tuple[float, ...]:
+    """Validate the shared decode knobs and resolve the per-group temperatures (buttons, main_stick, c_stick,
+    triggers): ``temps`` overrides the scalar ``temp`` when given. Fails loud on a wrong-length ``temps``, a
+    negative support floor, a min-p outside [0, 1], or a non-positive sampling temperature."""
+    if temps is not None and len(temps) != N_GROUPS:
+        raise ValueError(f"decode temps must have {N_GROUPS} entries (one per group), got {len(temps)}")
+    if btn_support_min < 0:
+        raise ValueError(f"decode btn_support_min must be >= 0, got {btn_support_min}")
+    if not 0.0 <= min_p <= 1.0:
+        raise ValueError(f"decode min_p must be in [0, 1], got {min_p}")
+    group_temps = (temp,) * N_GROUPS if temps is None else temps
+    if not argmax and any(t <= 0 for t in group_temps):
+        raise ValueError(f"decode temperatures must be > 0, got {group_temps}")
+    return group_temps
+
+
+def _sample_action_from_logits(
+    model: GPT,
+    logits: Tensor,
+    *,
+    group_temps: tuple[float, ...],
+    btn_support_min: int,
+    min_p: float,
+    click_trigger_fix: bool,
+    argmax: bool,
+    gen: torch.Generator | None,
+) -> Float[Tensor, "B d_action"]:
+    """Sample one action vector from a single head's ``[B, A_VOCAB]`` joint logits, applying the decode
+    hygiene in order support-mask -> per-group temperature -> min-p -> per-group sample (or ``argmax``),
+    then dequantize + the click=>trigger fix. Shared by the offset-1 ``decode`` and the chunked
+    ``decode_chunk`` so the per-group sampler never forks between the two deploy paths."""
+    if btn_support_min >= 1:
+        dead = _btn_support_dead(btn_support_min, logits.device)
+        logits = logits.clone()
+        logits[:, : scoring.N_BUTTON_COMBOS].masked_fill_(dead, float("-inf"))
+    picks: list[Tensor] = []
+    for g in range(N_GROUPS):
+        lo = _GROUP_OFFSETS[g]
+        lg = logits[:, lo : lo + _GROUP_VOCABS[g]]
+        if argmax:
+            picks.append(lg.argmax(-1))
+            continue
+        probs = F.softmax(lg / group_temps[g], dim=-1)
+        if min_p > 0:
+            probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+        picks.append(torch.multinomial(probs, 1, generator=gen).squeeze(-1))
+    idx = torch.stack(picks, dim=-1)  # [B, N_GROUPS]
+    a = _dequantize(model, idx)  # [B, A_DIM]
+    if click_trigger_fix:
+        a[..., _TRIGGER_L_CH] = torch.where(a[..., _BUTTON_L_CH] > 0.5, 1.0, a[..., _TRIGGER_L_CH])
+        a[..., _TRIGGER_R_CH] = torch.where(a[..., _BUTTON_R_CH] > 0.5, 1.0, a[..., _TRIGGER_R_CH])
+    return a
 
 
 @torch.no_grad()
@@ -509,40 +615,73 @@ def decode(
     per group (buttons, main_stick, c_stick, triggers); ``min_p`` > 0 keeps only classes with
     ``p >= min_p * p_max`` then renormalizes; ``click_trigger_fix`` forces trigger_l/r to 1.0 wherever the
     sampled combo sets the digital L/R bit. ``argmax`` ignores ``temps``/``min_p`` but respects the mask."""
-    if temps is not None and len(temps) != N_GROUPS:
-        raise ValueError(f"decode temps must have {N_GROUPS} entries (one per group), got {len(temps)}")
-    if btn_support_min < 0:
-        raise ValueError(f"decode btn_support_min must be >= 0, got {btn_support_min}")
-    if not 0.0 <= min_p <= 1.0:
-        raise ValueError(f"decode min_p must be in [0, 1], got {min_p}")
-    group_temps = (temp,) * N_GROUPS if temps is None else temps
-    if not argmax and any(t <= 0 for t in group_temps):
-        raise ValueError(f"decode temperatures must be > 0, got {group_temps}")
-
+    group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
     logits = model.heads[model.primary_head_idx](h).float()  # [B, A_VOCAB]
-    if btn_support_min >= 1:
-        dead = _btn_support_dead(btn_support_min, logits.device)
-        logits = logits.clone()
-        logits[:, : scoring.N_BUTTON_COMBOS].masked_fill_(dead, float("-inf"))
-    picks: list[Tensor] = []
-    for g in range(N_GROUPS):
-        lo = _GROUP_OFFSETS[g]
-        lg = logits[:, lo : lo + _GROUP_VOCABS[g]]
-        if argmax:
-            picks.append(lg.argmax(-1))
-            continue
-        probs = F.softmax(lg / group_temps[g], dim=-1)
-        if min_p > 0:
-            probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
-            probs = probs / probs.sum(dim=-1, keepdim=True)
-        picks.append(torch.multinomial(probs, 1, generator=gen).squeeze(-1))
-    idx = torch.stack(picks, dim=-1)  # [B, N_GROUPS]
-    a = _dequantize(model, idx)[:, None, :]  # [B, 1, A_DIM]
-    if click_trigger_fix:
-        a[..., _TRIGGER_L_CH] = torch.where(a[..., _BUTTON_L_CH] > 0.5, 1.0, a[..., _TRIGGER_L_CH])
-        a[..., _TRIGGER_R_CH] = torch.where(a[..., _BUTTON_R_CH] > 0.5, 1.0, a[..., _TRIGGER_R_CH])
-    return a
+    a = _sample_action_from_logits(
+        model,
+        logits,
+        group_temps=group_temps,
+        btn_support_min=btn_support_min,
+        min_p=min_p,
+        click_trigger_fix=click_trigger_fix,
+        argmax=argmax,
+        gen=gen,
+    )
+    return a[:, None, :]  # [B, 1, A_DIM]
+
+
+@torch.no_grad()
+def decode_chunk(
+    model: GPT,
+    ctx: Context,
+    offsets: tuple[int, ...],
+    *,
+    temp: float = 1.0,
+    temps: tuple[float, float, float, float] | None = None,
+    btn_support_min: int = 0,
+    min_p: float = 0.0,
+    click_trigger_fix: bool = False,
+    argmax: bool = False,
+    gen: torch.Generator | None = None,
+) -> Float[Tensor, "B s d_action"]:
+    """Chunked receding-horizon decode: from ONE backbone forward's last hidden state, sample the action at
+    each offset in ``offsets`` (the contiguous execution horizon 1..s) via that offset's own head, stacked in
+    offset order → ``[B, s, A_DIM]``. One forward per s frames — the deploy-time saving of chunked execution.
+    Same per-group sampling + hygiene as ``decode``; ``offsets == (1,)`` is byte-identical to ``decode``."""
+    group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
+    h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
+    actions: list[Tensor] = []
+    for o in offsets:
+        logits = model.heads[model.head_offsets.index(o)](h).float()  # [B, A_VOCAB]
+        actions.append(
+            _sample_action_from_logits(
+                model,
+                logits,
+                group_temps=group_temps,
+                btn_support_min=btn_support_min,
+                min_p=min_p,
+                click_trigger_fix=click_trigger_fix,
+                argmax=argmax,
+                gen=gen,
+            )
+        )
+    return torch.stack(actions, dim=1)  # [B, s, A_DIM]
+
+
+def _exec_horizon_offsets(head_offsets: tuple[int, ...], s: int) -> tuple[int, ...]:
+    """The contiguous execution-horizon offsets ``(1, ..., s)`` decoded per chunk. Fails loud if ``s < 1`` or
+    ``head_offsets`` is missing any of them (e.g. offsets (1,5,9,13) with s=2 has no offset-2 head)."""
+    if s < 1:
+        raise ValueError(f"exec_horizon must be >= 1, got {s}")
+    required = tuple(range(1, s + 1))
+    missing = [o for o in required if o not in head_offsets]
+    if missing:
+        raise ValueError(
+            f"exec_horizon={s} needs head_offsets to contain the contiguous prefix {required}; "
+            f"missing {missing} in {head_offsets}"
+        )
+    return required
 
 
 def make_policy(
@@ -551,15 +690,20 @@ def make_policy(
     cfg: TrainConfig,
     *,
     device: str = DEVICE,
+    exec_horizon: int | None = None,
     decode_temp: float | None = None,
     decode_temps: tuple[float, float, float, float] | None = None,
     decode_btn_support_min: int | None = None,
     decode_min_p: float | None = None,
     decode_click_trigger_fix: bool | None = None,
 ) -> RecedingHorizon:
-    """Fresh closed-loop policy for one eval wave: replan every frame, decode the next action, sample.
-    Each decode-hygiene knob falls back to its ``cfg`` field when the override is ``None`` (mirroring
-    ``decode_temp``), so an eval can A/B a knob without a retrain."""
+    """Fresh closed-loop policy for one eval wave. Replan every ``s`` frames (``exec_horizon``, defaulting to
+    ``cfg.exec_horizon``): s=1 decodes the offset-1 head per frame (byte-identical to prior 012); s>1 decodes
+    the contiguous heads 1..s from one backbone forward and executes all s before replanning. Each decode-
+    hygiene knob falls back to its ``cfg`` field when the override is ``None`` so an eval can A/B without a
+    retrain."""
+    s = cfg.exec_horizon if exec_horizon is None else exec_horizon
+    offsets = _exec_horizon_offsets(model.head_offsets, s)
     temp = cfg.decode_temp if decode_temp is None else decode_temp
     temps = cfg.decode_temps if decode_temps is None else decode_temps
     btn_support_min = cfg.decode_btn_support_min if decode_btn_support_min is None else decode_btn_support_min
@@ -568,8 +712,8 @@ def make_policy(
 
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        assert committed is None, "next-token policy does not condition on a committed prefix"
-        return (
+        assert committed is None, "receding-horizon policy does not condition on a committed prefix"
+        chunk = (
             decode(
                 model,
                 ctx,
@@ -579,12 +723,22 @@ def make_policy(
                 min_p=min_p,
                 click_trigger_fix=click_fix,
             )
-            .cpu()
-            .numpy()
+            if s == 1
+            else decode_chunk(
+                model,
+                ctx,
+                offsets,
+                temp=temp,
+                temps=temps,
+                btn_support_min=btn_support_min,
+                min_p=min_p,
+                click_trigger_fix=click_fix,
+            )
         )
+        return chunk.cpu().numpy()
 
     return RecedingHorizon(
-        predict_chunk=predict_chunk, stats=stats, L_ctx=cfg.L_ctx, L_chunk=CLOSED_LOOP_L_CHUNK, s=1, d=0, device=device
+        predict_chunk=predict_chunk, stats=stats, L_ctx=cfg.L_ctx, L_chunk=s, s=s, d=0, device=device
     )
 
 
@@ -644,10 +798,29 @@ def nll_breakdown(comps: dict[str, Tensor]) -> dict[str, float]:
     return out
 
 
-def objective(comps: dict[tuple[int, str], Tensor], aux_weight: float) -> Tensor:
-    """Weighted-sum multi-token training objective (nats): the offset-1 (primary) head's per-group mean
-    NLL at weight 1, every auxiliary head (offset != 1) at ``aux_weight``."""
-    terms = [(1.0 if o == 1 else aux_weight) * c.mean() for (o, _name), c in comps.items()]
+def _weighted_mean(nll: Tensor, is_trans: Tensor, weight: float) -> Tensor:
+    """Mean per-position NLL (nats) with transition positions upweighted by ``weight``. ``weight == 1.0`` is
+    exactly the plain mean (current 012); otherwise ``sum(w·nll)/sum(w)`` with ``w = weight`` on transitions
+    (``is_trans``) else 1 — the rare press/release/stick-move frames dominate the objective."""
+    if weight == 1.0:
+        return nll.mean()
+    w = torch.where(is_trans, weight, 1.0).to(nll.dtype)
+    return (w * nll).sum() / w.sum()
+
+
+def objective(
+    nll: dict[tuple[int, str], Tensor],
+    trans: dict[tuple[int, str], Tensor],
+    aux_weight: float,
+    transition_weight: float,
+) -> Tensor:
+    """Weighted-sum multi-token training objective (nats): the offset-1 (primary) head's per-group NLL at
+    weight 1, every auxiliary head (offset != 1) at ``aux_weight``; within each (offset, group) the per-group
+    reduction upweights transition targets by ``transition_weight`` (1.0 = plain mean, i.e. current 012)."""
+    terms = [
+        (1.0 if o == 1 else aux_weight) * _weighted_mean(c, trans[(o, name)], transition_weight)
+        for (o, name), c in nll.items()
+    ]
     return torch.stack(terms).sum()
 
 
@@ -1041,6 +1214,7 @@ def train(
         with profile("step") as sw:
             opt.zero_grad()
             comps_acc: dict[tuple[int, str], list[Tensor]] = {}
+            obj_acc: Tensor | None = None
             for _ in range(cfg.grad_accum_steps):
                 try:
                     batch = next(it).to(DEVICE)
@@ -1048,9 +1222,11 @@ def train(
                     it = iter(train_loader)
                     batch = next(it).to(DEVICE)
                 with autocast:
-                    comps = action_loss(model, batch)
-                    loss = objective(comps, cfg.aux_loss_weight) / cfg.grad_accum_steps
+                    comps, trans = action_loss(model, batch)
+                    obj = objective(comps, trans, cfg.aux_loss_weight, cfg.transition_loss_weight)
+                    loss = obj / cfg.grad_accum_steps
                 loss.backward()
+                obj_acc = obj.detach() if obj_acc is None else obj_acc + obj.detach()
                 for k, v in comps.items():
                     comps_acc.setdefault(k, []).append(v.detach())
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))  # measure only
@@ -1058,6 +1234,8 @@ def train(
             sched.step()
             if DEVICE == "cuda":
                 torch.cuda.synchronize()
+        assert obj_acc is not None  # grad_accum_steps >= 1
+        objective_bits = (obj_acc / cfg.grad_accum_steps).item() / _LN2  # the actual backprop objective, bits
         comps_cat = {k: torch.cat(v) for k, v in comps_acc.items()}
         primary = nll_breakdown({name: comps_cat[(1, name)] for name in _GROUP_NAMES})
         aux_offsets = [o for o in cfg.head_offsets if o != 1]
@@ -1073,6 +1251,7 @@ def train(
             "train/loss": primary["total"],  # offset-1 head (deployed); aux heads tracked separately
             **{f"train/nll_{name}": primary[name] for name in _GROUP_NAMES},
             "train/aux_loss": aux_loss,  # mean total bits/frame over the auxiliary (offset != 1) heads
+            "train/objective": objective_bits,  # weighted backprop objective (transition-upweighted), bits
             "lr/muon": next(g["lr"] for g in opt.param_groups if g["use_muon"]),
             "lr/adam": next(g["lr"] for g in opt.param_groups if not g["use_muon"]),
             "train/gnorm": grad_norm.item(),
@@ -1137,6 +1316,7 @@ def _load_ckpt(ckpt_path: str) -> tuple[GPT, TrainConfig, dict[str, FeatureStats
 def eval_ckpt(
     ckpt_path: str,
     *,
+    eval_exec_horizon: int | None = None,
     decode_temp: float | None = None,
     decode_temps: tuple[float, float, float, float] | None = None,
     decode_btn_support_min: int | None = None,
@@ -1144,17 +1324,18 @@ def eval_ckpt(
     decode_click_trigger_fix: bool | None = None,
 ) -> None:
     """Load a checkpoint and run the prior-distribution vs-CPU sweep, printing the pooled metrics. Each
-    decode-hygiene override (temp, per-group temps, button-support floor, min-p, click=>trigger fix)
+    override (execution horizon, temp, per-group temps, button-support floor, min-p, click=>trigger fix)
     replaces the trained cfg for this eval only (test-time sweep); ``None`` keeps the trained value."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
+    exec_horizon = cfg.exec_horizon if eval_exec_horizon is None else eval_exec_horizon
     temp = cfg.decode_temp if decode_temp is None else decode_temp
     temps = cfg.decode_temps if decode_temps is None else decode_temps
     btn_support_min = cfg.decode_btn_support_min if decode_btn_support_min is None else decode_btn_support_min
     min_p = cfg.decode_min_p if decode_min_p is None else decode_min_p
     click_fix = cfg.decode_click_trigger_fix if decode_click_trigger_fix is None else decode_click_trigger_fix
     print(
-        f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  temp={temp}  temps={temps}  "
-        f"btn_support_min={btn_support_min}  min_p={min_p}  click_trigger_fix={click_fix}",
+        f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  exec_horizon={exec_horizon}  "
+        f"temp={temp}  temps={temps}  btn_support_min={btn_support_min}  min_p={min_p}  click_trigger_fix={click_fix}",
         flush=True,
     )
     replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
@@ -1167,6 +1348,7 @@ def eval_ckpt(
             model,
             stats,
             cfg,
+            exec_horizon=eval_exec_horizon,
             decode_temp=decode_temp,
             decode_temps=decode_temps,
             decode_btn_support_min=decode_btn_support_min,
@@ -1206,6 +1388,7 @@ class Args:
 
     cfg: TrainConfig = field(default_factory=TrainConfig)
     eval: str | None = None  # ckpt path; closed-loop eval instead of train
+    eval_exec_horizon: int | None = None  # override execution horizon s for --eval (chunked decode; 1=per-frame)
     eval_temp: float | None = None  # override decode temperature for --eval
     eval_temps: tuple[float, float, float, float] | None = None  # per-group temps (buttons, main, c, triggers)
     eval_btn_support_min: int | None = None  # mask button combos with < this many train frames (0=off)
@@ -1228,6 +1411,7 @@ def main(args: Args) -> None:
     if args.eval is not None:
         eval_ckpt(
             args.eval,
+            eval_exec_horizon=args.eval_exec_horizon,
             decode_temp=args.eval_temp,
             decode_temps=args.eval_temps,
             decode_btn_support_min=args.eval_btn_support_min,
