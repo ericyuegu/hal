@@ -32,6 +32,17 @@ To launch experiments on cloud, wrap your local training command with a launcher
 uv run scripts/launch_vast.py --max-price 1.0 -- uv run experiments/001_flow_matching_baseline.py
 ```
 
+Google Compute Engine is also supported. The launcher uses your interactive
+`gcloud auth login` session (no service-account key file) and reads job secrets
+from Secret Manager through the VM's attached service account:
+```
+uv run scripts/launch_gce.py --dry-run --zone us-central1-a -- uv run experiments/001_flow_matching_baseline.py
+uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@PROJECT.iam.gserviceaccount.com -- uv run experiments/001_flow_matching_baseline.py
+```
+The service account needs `roles/secretmanager.secretAccessor` on the secrets
+listed by `--secret`. See `uv run scripts/launch_gce.py --help` for GPU, Spot,
+network, disk, and lifecycle options.
+
 
 ## Data
 
