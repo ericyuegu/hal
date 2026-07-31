@@ -157,8 +157,8 @@ def test_rtc_commits_previous_chunks_prefix():
         committed_seen.append(None if committed is None else committed.copy())
         return real_predict(ctx, committed)
 
-    def spy_replan(live):
-        real_replan(live)
+    def spy_replan(live, committed):
+        real_replan(live, committed)
         pendings.append(policy._slots[slot].pending.copy())
 
     policy.predict_chunk = spy_predict
@@ -246,3 +246,59 @@ def test_buffers_reset_at_instant_restart_match_boundary():
     assert ctx_pads[saturated_call] == 0, "buffer did not refill after the reset"
     tags = batches[saturated_call]["ego_position_x"][0]
     assert np.all(tags >= reset_call), f"a pre-reset frame leaked into post-reset context: {tags}"
+
+
+def test_async_restart_discards_only_that_slots_pending_chunk():
+    """With s>1, a reset between shared boundaries must replan that slot immediately.
+
+    The other boot must execute the remainder of its existing chunk; otherwise instant
+    restarts make execution depend on unrelated boots' match lengths and concurrency.
+    """
+    cfg, policy = _build_policy(execution_horizon=4)
+    reset_slot = Slot(0, 1)
+    steady_slot = Slot(1, 1)
+    calls: list[tuple[int, list[int]]] = []
+
+    def tagged_predict(ctx, committed):
+        assert committed is None
+        call = len(calls)
+        calls.append((ctx.ctx_pad.shape[0], ctx.ctx_pad.tolist()))
+        plans = np.zeros((ctx.ctx_pad.shape[0], cfg.L_chunk, exp.A_DIM), dtype=np.float32)
+        for row in range(plans.shape[0]):
+            plans[row, :, 0] = 0.1 * (call + 1) + 0.01 * row + 0.001 * np.arange(cfg.L_chunk)
+        return plans
+
+    policy.predict_chunk = tagged_predict
+    policy(
+        0,
+        {
+            reset_slot: _obs_id(frame_id=100, tag=0.0, ego_port=1),
+            steady_slot: _obs_id(frame_id=100, tag=0.0, ego_port=1),
+        },
+    )
+    policy(
+        1,
+        {
+            reset_slot: _obs_id(frame_id=101, tag=1.0, ego_port=1),
+            steady_slot: _obs_id(frame_id=101, tag=1.0, ego_port=1),
+        },
+    )
+    old_reset_chunk = policy._slots[reset_slot].pending.copy()
+    steady_chunk = policy._slots[steady_slot].pending.copy()
+
+    policy(
+        2,
+        {
+            reset_slot: _obs_id(frame_id=-123, tag=2.0, ego_port=1),
+            steady_slot: _obs_id(frame_id=102, tag=2.0, ego_port=1),
+        },
+    )
+
+    assert calls == [(2, [cfg.L_ctx - 1, cfg.L_ctx - 1]), (1, [cfg.L_ctx - 1])]
+    reset_state = policy._slots[reset_slot]
+    steady_state = policy._slots[steady_slot]
+    assert reset_state.offset == 1
+    assert steady_state.offset == 3
+    assert reset_state.pending[0, 0] != pytest.approx(old_reset_chunk[2, 0])
+    assert reset_state.ego_inputs_hist[-1][0] == pytest.approx(reset_state.pending[0, 0])
+    assert steady_state.ego_inputs_hist[-1][0] == pytest.approx(steady_chunk[2, 0])

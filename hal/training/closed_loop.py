@@ -10,8 +10,9 @@ of closed-loop play that is *invariant* across model architectures:
 * the cold-start left-pad + alignment that lets the policy act from frame 0 while
   the buffer fills with real gameplay (reported as ``ctx_pad`` so the model masks
   the not-yet-filled prefix from attention);
-* the replan clock — replan every ``s`` frames (the execution horizon) and execute
-  the chunk's first ``s`` actions, where ``s == L_chunk`` is plain open-loop;
+* a per-slot replan clock — replan each slot every ``s`` frames (the execution
+  horizon) and execute the chunk's first ``s`` actions, where ``s == L_chunk`` is
+  plain open-loop; an instant restart resets that slot's clock and pending chunk;
 * the real-time-chunking commitment: when the inference delay ``d > 0``, each new
   chunk is conditioned on the ``d`` actions already committed for its first frames
   (the previous chunk's ``[s : s+d]``; ``None`` at bootstrap), so the handoff is
@@ -61,6 +62,7 @@ class _SlotState:
     flat_hist: list = field(default_factory=list)
     ego_inputs_hist: list = field(default_factory=list)
     pending: np.ndarray | None = None
+    offset: int = 0
     last_id: int | None = None  # previous frame's canonical id; a drop = instant-restart boundary
 
 
@@ -116,19 +118,16 @@ def _live_batch_from_rolling(
 class RecedingHorizon:
     """``BatchPolicy`` for any action-chunk model across N slots.
 
-    Every slot appears at frame 0 and warms up in lockstep, so all live slots
-    replan on the same frames: at each boundary their contexts are stacked into a
-    single ``[n_live, L_ctx, ...]`` batch and run through one ``predict_chunk``
-    call. Slots only drop out (matches end) — never appear mid-rollout — so the
-    batch shrinks monotonically.
+    Slots that share a replan boundary are stacked into one ``[n_due, L_ctx, ...]``
+    batch and run through one ``predict_chunk`` call. Each slot owns its clock,
+    because instant-restart boundaries occur asynchronously across Dolphin boots.
 
     Under instant-restart one boot plays many matches back-to-back; at each match
     boundary — the slot's incoming frame id drops below its last, as Dolphin
     restarts in-place into a new match — that slot's rolling buffers are cleared so
     its context never spans two matches, and it re-warms from the boundary
-    (``ctx_pad`` reflects the refilling prefix). Boots restart at different frames,
-    so this per-slot warm-up is no longer lockstep after match one, but replanning
-    stays batched on the shared clock.
+    (``ctx_pad`` reflects the refilling prefix). Its old pending chunk is discarded
+    and it replans immediately; unrelated boots keep their current chunks.
 
     Construct fresh per eval wave (rolling state must not leak across waves).
     """
@@ -141,8 +140,6 @@ class RecedingHorizon:
     d: int  # inference delay: length of the committed action prefix (0 = open-loop)
     device: str = "cuda"
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
-    _offset: int = 0
-    _bootstrapped: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.s <= self.L_chunk:
@@ -159,12 +156,11 @@ class RecedingHorizon:
             # canonical frame id reset to the pre-game countdown (dropped below the last id).
             # Clear this slot's buffers so its context never spans two matches (stale stage,
             # stocks back to 4, teleported positions — a window with zero training support).
-            # pending / the replan clock are left alone: with s == 1 (every current experiment)
-            # a replan happens this same call so no stale chunk plays; with s > 1 the
-            # pre-boundary chunk may still execute for up to s - 1 frames past the reset.
             if st.last_id is not None and fid < st.last_id:
                 st.flat_hist.clear()
                 st.ego_inputs_hist.clear()
+                st.pending = None
+                st.offset = 0
             st.last_id = fid
             st.flat_hist.append(flatten_canonical_frame(obs[slot]))
             if len(st.flat_hist) > self.L_ctx:
@@ -173,16 +169,28 @@ class RecedingHorizon:
         # buffer prefix is hidden from attention via ctx_pad (see _replan), so the
         # model sees only real frames and the buffer fills with REAL gameplay
         # rather than frames produced by an idling model.
-        if not self._bootstrapped or self._offset >= self.s:
-            self._replan(live)
-            self._offset = 0
-            self._bootstrapped = True
+        due = [sl for sl in live if self._slots[sl].pending is None or self._slots[sl].offset >= self.s]
+        if self.d == 0:
+            if due:
+                self._replan(due, committed=None)
+        else:
+            # A bootstrap/reset has no prior commitment. Continuing slots do, so the
+            # two cases need separate forwards when both occur on the same frame.
+            bootstrap = [sl for sl in due if self._slots[sl].pending is None]
+            continuing = [sl for sl in due if self._slots[sl].pending is not None]
+            if bootstrap:
+                self._replan(bootstrap, committed=None)
+            if continuing:
+                self._replan(continuing, committed=self._committed(continuing))
         actions: dict[Slot, np.ndarray] = {}
         for sl in live:
-            a = self._slots[sl].pending[self._offset]
+            st = self._slots[sl]
+            if st.pending is None:
+                raise RuntimeError(f"slot {sl} has no pending action chunk after replanning")
+            a = st.pending[st.offset]
             actions[sl] = a
             self._push_ego(sl, a)
-        self._offset += 1
+            st.offset += 1
         return {sl: action_vec_to_controller(a) for sl, a in actions.items()}
 
     def _push_ego(self, slot: Slot, a: np.ndarray) -> None:
@@ -191,7 +199,7 @@ class RecedingHorizon:
         if len(st.ego_inputs_hist) > self.L_ctx:
             st.ego_inputs_hist.pop(0)
 
-    def _replan(self, live: list[Slot]) -> None:
+    def _replan(self, live: list[Slot], committed: np.ndarray | None) -> None:
         """One batched forward over every live slot. ``live`` order is fixed by
         the caller and reused to scatter the per-slot chunks back."""
         stacked = self._build_stacked_batch(live)
@@ -203,19 +211,31 @@ class RecedingHorizon:
             dtype=torch.long,
             device=self.device,
         )
-        committed = self._committed(live)
         plans = self.predict_chunk(Context(features=feats, ctx_pad=ctx_pad), committed)
+        expected = (len(live), self.L_chunk)
+        if plans.ndim != 3 or plans.shape[:2] != expected:
+            raise ValueError(
+                f"predict_chunk returned shape {plans.shape}; expected [n_due, L_chunk, d_action] "
+                f"with prefix {expected}"
+            )
         for i, sl in enumerate(live):
             self._slots[sl].pending = plans[i]
+            self._slots[sl].offset = 0
 
     def _committed(self, live: list[Slot]) -> np.ndarray | None:
         """The ``d`` already-committed actions each new chunk is conditioned on:
         the previous chunk's actions for the new chunk's prefix frames (its
         ``[s : s+d]``, since the new chunk is anchored ``s`` frames later). ``None``
         at bootstrap (no previous chunk) or when ``d == 0`` (open-loop)."""
-        if self.d <= 0 or not self._bootstrapped:
+        if self.d <= 0:
             return None
-        return np.stack([self._slots[sl].pending[self.s : self.s + self.d].astype(np.float32) for sl in live], axis=0)
+        committed: list[np.ndarray] = []
+        for sl in live:
+            pending = self._slots[sl].pending
+            if pending is None:
+                raise RuntimeError(f"cannot build a committed prefix for bootstrap slot {sl}")
+            committed.append(pending[self.s : self.s + self.d].astype(np.float32))
+        return np.stack(committed, axis=0)
 
     def _build_stacked_batch(self, live: list[Slot]) -> dict[str, np.ndarray]:
         per_slot = [
