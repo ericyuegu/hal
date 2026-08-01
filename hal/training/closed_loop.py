@@ -64,6 +64,7 @@ class _SlotState:
     pending: np.ndarray | None = None
     offset: int = 0
     last_id: int | None = None  # previous frame's canonical id; a drop = instant-restart boundary
+    reset_pending: bool = True
 
 
 def _live_batch_from_rolling(
@@ -139,6 +140,10 @@ class RecedingHorizon:
     s: int  # execution horizon: replan + execute this many actions per chunk
     d: int  # inference delay: length of the committed action prefix (0 = open-loop)
     device: str = "cuda"
+    # Optional incremental decoder. When supplied, only the current frame token is built and
+    # passed to this callback; it owns a device-resident KV cache. Full-context behavior remains
+    # the default for all existing policies.
+    predict_incremental: PredictChunk | None = None
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -161,6 +166,7 @@ class RecedingHorizon:
                 st.ego_inputs_hist.clear()
                 st.pending = None
                 st.offset = 0
+                st.reset_pending = True
             st.last_id = fid
             st.flat_hist.append(flatten_canonical_frame(obs[slot]))
             if len(st.flat_hist) > self.L_ctx:
@@ -202,16 +208,41 @@ class RecedingHorizon:
     def _replan(self, live: list[Slot], committed: np.ndarray | None) -> None:
         """One batched forward over every live slot. ``live`` order is fixed by
         the caller and reused to scatter the per-slot chunks back."""
-        stacked = self._build_stacked_batch(live)
-        feats = {k: v.to(self.device) for k, v in preprocess(stacked, self.stats).items()}
+        incremental = self.predict_incremental is not None
+        stacked = self._build_current_batch(live) if incremental else self._build_stacked_batch(live)
+        # preprocess() returns one [B, L_ctx] tensor per feature (73 tensors for the current
+        # schema). Moving each tensor independently makes CUDA scheduling/allocator overhead
+        # dominate when a trainer is using the same device. Pack by dtype first, perform only
+        # two host→device transfers, then reconstruct the original feature mapping. This keeps
+        # feature names and model inputs byte-for-byte identical while substantially reducing
+        # transfer launch overhead. A future device-resident ring buffer can replace the host
+        # packing without changing this interface.
+        preprocessed = preprocess(stacked, self.stats)
+        float_items = [(k, v) for k, v in preprocessed.items() if v.dtype.is_floating_point]
+        int_items = [(k, v) for k, v in preprocessed.items() if not v.dtype.is_floating_point]
+        feats: dict[str, torch.Tensor] = {}
+        if float_items:
+            packed = torch.stack([v for _, v in float_items], dim=0).to(self.device)
+            feats.update({k: v for (k, _), v in zip(float_items, packed.unbind(0), strict=True)})
+        if int_items:
+            packed = torch.stack([v for _, v in int_items], dim=0).to(self.device)
+            feats.update({k: v for (k, _), v in zip(int_items, packed.unbind(0), strict=True)})
         # Hide each slot's still-empty buffer prefix from attention (frames
         # 0..L_ctx fill from empty); 0 once a slot's history reaches L_ctx.
         ctx_pad = torch.tensor(
-            [max(0, self.L_ctx - len(self._slots[sl].flat_hist)) for sl in live],
+            [0 if incremental else max(0, self.L_ctx - len(self._slots[sl].flat_hist)) for sl in live],
             dtype=torch.long,
             device=self.device,
         )
-        plans = self.predict_chunk(Context(features=feats, ctx_pad=ctx_pad), committed)
+        ctx = Context(
+            features=feats,
+            ctx_pad=ctx_pad,
+            slot_ids=torch.tensor([sl.match * 8 + sl.port for sl in live], dtype=torch.long, device=self.device),
+            reset=torch.tensor([self._slots[sl].reset_pending for sl in live], dtype=torch.bool, device=self.device),
+        )
+        plans = (self.predict_incremental or self.predict_chunk)(ctx, committed)
+        for sl in live:
+            self._slots[sl].reset_pending = False
         expected = (len(live), self.L_chunk)
         if plans.ndim != 3 or plans.shape[:2] != expected:
             raise ValueError(
@@ -247,4 +278,25 @@ class RecedingHorizon:
             )
             for sl in live
         ]
+        return {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
+
+    def _build_current_batch(self, live: list[Slot]) -> dict[str, np.ndarray]:
+        """Build only the newest frame for an incremental decoder.
+
+        The action-history token for the current observation is the previous action; at a
+        match boundary there is no previous action and the neutral vector is the training
+        alignment filler. The decoder's KV cache supplies all older context.
+        """
+        per_slot = []
+        for sl in live:
+            st = self._slots[sl]
+            ego = st.ego_inputs_hist[-1:] if st.ego_inputs_hist else []
+            per_slot.append(
+                _live_batch_from_rolling(
+                    [st.flat_hist[-1]],
+                    ego,
+                    ego_prefix=_PORT_TO_PREFIX[sl.port],
+                    L_ctx=1,
+                )
+            )
         return {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}

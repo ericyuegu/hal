@@ -23,7 +23,7 @@ Reductions and per-match views:
   match (characters, boot index, ordinal, active frames, damage, stocks), the
   currency for paired cross-checkpoint comparison.
 - ``paired_vs_cpu_deltas`` — common-random-numbers delta of two runs' rows,
-  aligned by (boot index, matchup) under the same ``matchups_for`` schedule.
+  aligned by (boot index, matchup) under the same CPU-selectable prior schedule.
 """
 
 from collections.abc import Callable
@@ -39,7 +39,7 @@ import numpy as np
 
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import run_matches_vec
-from hal.eval.matchups import matchups_for
+from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.scoring import MatchSummary
 from hal.eval.scoring import summarize_trajectory
 from hal.sim.session import Matchup
@@ -346,8 +346,12 @@ def _prior_vec_matches(
     ego_port: Literal[1, 2],
     seed_stage: melee.Stage,
 ) -> list[VecMatch]:
-    """``n_matchups`` prior-drawn vs-CPU ``VecMatch`` boots, indexed by ``matchups_for``
-    order (prefix-stable in ``n``, so boot ``i`` is the same matchup across runs)."""
+    """``n_matchups`` prior-drawn vs-CPU ``VecMatch`` boots.
+
+    The schedule is the empirical matchup prior conditioned on a CPU-selectable
+    opponent (CPU Sheik is impossible in local VS mode), and remains prefix-stable
+    in ``n`` so boot ``i`` is the same matchup across runs.
+    """
     cpu_port: Literal[1, 2] = 2 if ego_port == 1 else 1
     return [
         VecMatch(
@@ -360,7 +364,7 @@ def _prior_vec_matches(
             ),
             model_ports=(ego_port,),
         )
-        for ego_char, opp_char in matchups_for(n_matchups)
+        for ego_char, opp_char in matchups_for_vs_cpu(n_matchups)
     ]
 
 

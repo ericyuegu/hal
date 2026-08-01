@@ -234,6 +234,7 @@ class Session:
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._menu_helpers: dict[int, melee.MenuHelper] = {}
+        self._stage_select_steps = 0
         self._matchup: Matchup | None = None
         # Bound method so atexit.unregister can target it during _teardown.
         self._atexit_kill = self._kill_dolphin_only
@@ -425,6 +426,7 @@ class Session:
         while True:
             gamestate = self._step_blocking()
             if gamestate.menu_state in LIVE_MENU_STATES:
+                self._validate_live_characters(gamestate)
                 return self._canonical(gamestate)
             if gamestate.menu_state == melee.Menu.STAGE_SELECT and self._matchup is not None:
                 autostart_port = min(p.port for p in self._matchup.players)
@@ -453,6 +455,21 @@ class Session:
                 )
             nav_steps += 1
             self._drive_menus(gamestate)
+
+    def _validate_live_characters(self, gamestate: melee.GameState) -> None:
+        """Fail loudly if menu automation launched the wrong character.
+
+        CPU Sheik is selected through Zelda + an A hold on stage select, so this
+        check protects the evaluation labels if Dolphin/libmelee behavior changes.
+        """
+        assert self._matchup is not None
+        mismatches = []
+        for player in self._matchup.players:
+            state = gamestate.players.get(player.port)
+            if state is not None and state.character != player.character:
+                mismatches.append(f"p{player.port}: expected {player.character.name}, got {state.character.name}")
+        if mismatches:
+            raise RuntimeError("match started with wrong character(s): " + "; ".join(mismatches))
 
     @staticmethod
     def _canonical(gamestate: melee.GameState) -> dict:
@@ -516,6 +533,8 @@ class Session:
         # so the gate would deadlock there — the configuration is locked in
         # by then, allow autostart unconditionally.
         in_css = gamestate.menu_state in (melee.Menu.CHARACTER_SELECT, melee.Menu.SLIPPI_ONLINE_CSS)
+        in_sss = gamestate.menu_state == melee.Menu.STAGE_SELECT
+        self._stage_select_steps = self._stage_select_steps + 1 if in_sss else 0
         cpu_ready = not in_css or all(
             (s := gamestate.players.get(p.port)) is not None
             and s.controller_status == melee.ControllerStatus.CONTROLLER_CPU
@@ -534,6 +553,36 @@ class Session:
                 autostart=player.port == autostart_port and cpu_ready,
                 frozen_stadium=self.frozen_stadium,
             )
+        if in_sss:
+            helper = self._menu_helpers[autostart_port]
+            controller = self._controllers[autostart_port]
+            cursor = getattr(gamestate.players.get(autostart_port), "cursor", None)
+            target = {
+                melee.Stage.BATTLEFIELD: (1.0, -9.0),
+                melee.Stage.FINAL_DESTINATION: (6.7, -9.0),
+                melee.Stage.DREAMLAND: (12.5, -9.0),
+                melee.Stage.POKEMON_STADIUM: (15.0, 3.5),
+                melee.Stage.YOSHIS_STORY: (3.5, 15.5),
+                melee.Stage.FOUNTAIN_OF_DREAMS: (10.0, 15.5),
+                melee.Stage.RANDOM_STAGE: (-13.5, 3.5),
+            }.get(self._matchup.stage)
+            # menuhelper latches stage_selected after its first A press. If that
+            # single frame is eaten under concurrent FFW load it subsequently
+            # releases forever. Pulse A until Dolphin actually leaves SSS. Also
+            # recover from the observed Battlefield cursor limit-cycle once it is
+            # inside the icon's practical hitbox.
+            near_target = (
+                cursor is not None
+                and target is not None
+                and abs(cursor.x - target[0]) <= 3.0
+                and abs(cursor.y - target[1]) <= 3.0
+            )
+            if helper.stage_selected or (self._stage_select_steps >= 120 and near_target):
+                controller.tilt_analog(melee.Button.BUTTON_MAIN, 0.5, 0.5)
+                if self._stage_select_steps % 2:
+                    controller.press_button(melee.Button.BUTTON_A)
+                else:
+                    controller.release_button(melee.Button.BUTTON_A)
 
 
 @contextmanager

@@ -11,6 +11,7 @@ from melee import Character
 
 from hal.eval.matchups import MATCHUP_PRIOR
 from hal.eval.matchups import matchups_for
+from hal.eval.matchups import matchups_for_vs_cpu
 from hal.policy import INCLUDED_CHARACTERS
 
 
@@ -28,6 +29,21 @@ def test_empty_and_negative() -> None:
     assert matchups_for(0) == []
     try:
         matchups_for(-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for n<0")
+
+
+def test_vs_cpu_schedule_skips_unselectable_cpu_sheik_and_is_prefix_stable() -> None:
+    big = matchups_for_vs_cpu(200)
+    assert len(big) == 200
+    assert all(opp is not Character.SHEIK for _, opp in big)
+    assert any(ego is Character.SHEIK for ego, _ in big)
+    for n in (0, 1, 12, 37, 96):
+        assert matchups_for_vs_cpu(n) == big[:n]
+    try:
+        matchups_for_vs_cpu(-1)
     except ValueError:
         pass
     else:

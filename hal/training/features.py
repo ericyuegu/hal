@@ -115,6 +115,10 @@ class Context:
 
     features: dict[str, Tensor]
     ctx_pad: Tensor  # [B] int64
+    # Optional closed-loop metadata. Training and full-context inference leave these unset;
+    # incremental inference uses them to reset per-slot KV state at match boundaries.
+    slot_ids: Tensor | None = None  # [B] int64
+    reset: Tensor | None = None  # [B] bool
 
     @property
     def batch(self) -> int:
@@ -124,6 +128,8 @@ class Context:
         return Context(
             features={k: v.to(device, non_blocking=True) for k, v in self.features.items()},
             ctx_pad=self.ctx_pad.to(device, non_blocking=True),
+            slot_ids=None if self.slot_ids is None else self.slot_ids.to(device, non_blocking=True),
+            reset=None if self.reset is None else self.reset.to(device, non_blocking=True),
         )
 
     def pin_memory(self) -> Context:
@@ -133,6 +139,8 @@ class Context:
         return Context(
             features={k: v.pin_memory() for k, v in self.features.items()},
             ctx_pad=self.ctx_pad.pin_memory(),
+            slot_ids=None if self.slot_ids is None else self.slot_ids.pin_memory(),
+            reset=None if self.reset is None else self.reset.pin_memory(),
         )
 
 
