@@ -12,6 +12,8 @@ Sweep flavors:
 - ``sweep_vs_cpu`` — model on one port, in-game CPU on the other.
 - ``sweep_self_play`` — both ports driven by the same batched policy.
 - ``sweep_vs_cpu_prior`` — instant-restart vs-CPU over the training matchup prior.
+- ``sweep_vs_cpu_prior_with_rows`` — the same prior sweep, retaining both pooled
+  reduction input and exact per-match rows from one set of emulator trajectories.
 
 Reductions and per-match views:
 
@@ -413,6 +415,11 @@ def sweep_vs_cpu_prior(
         seed_stage=seed_stage,
         max_frames=max_frames,
     )
+    return _prior_sweep_result(boots, seed_stage)
+
+
+def _prior_sweep_result(boots: Sequence[Sequence[Trajectory]], seed_stage: melee.Stage) -> SweepResult:
+    """Summarize already-driven prior boots without losing their boot indices."""
     out: SweepResult = []
     for bi, boot in enumerate(boots):
         if not boot:
@@ -420,6 +427,36 @@ def sweep_vs_cpu_prior(
         else:
             out.extend((seed_stage, bi, summarize_trajectory(t)) for t in boot)
     return out
+
+
+def sweep_vs_cpu_prior_with_rows(
+    policy_factory: Callable[[], BatchPolicy],
+    *,
+    session_cfg: SessionConfig,
+    n_matchups: int,
+    max_parallel: int,
+    cpu_level: int = 9,
+    ego_port: Literal[1, 2] = 1,
+    seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
+    max_frames: int = 15_000,
+) -> tuple[SweepResult, list[MatchRow]]:
+    """Run the prior sweep once and retain both pooled-metric input and exact rows.
+
+    This avoids a second emulator sweep when an experiment needs the legacy
+    ``SweepResult`` reduction plus trajectory-derived rows for paired checkpoint
+    comparisons. Both outputs therefore describe the identical matches.
+    """
+    matches, boots = _drive_prior(
+        policy_factory,
+        session_cfg=session_cfg,
+        n_matchups=n_matchups,
+        max_parallel=max_parallel,
+        cpu_level=cpu_level,
+        ego_port=ego_port,
+        seed_stage=seed_stage,
+        max_frames=max_frames,
+    )
+    return _prior_sweep_result(boots, seed_stage), match_rows(boots, matches, ego_port=ego_port)
 
 
 def sweep_vs_cpu_prior_rows(

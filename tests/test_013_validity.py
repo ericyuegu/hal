@@ -154,11 +154,11 @@ def test_eval_matchup_count_is_independent_of_cpu_concurrency(monkeypatch, n_mat
     def fake_sweep(_policy_factory, **kwargs):
         captured["n_matchups"] = kwargs["n_matchups"]
         captured["max_parallel"] = kwargs["max_parallel"]
-        return []
+        return [], []
 
     monkeypatch.setattr(exp013.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(exp013, "default_session_cfg", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(exp013, "sweep_vs_cpu_prior", fake_sweep)
+    monkeypatch.setattr(exp013, "sweep_vs_cpu_prior_with_rows", fake_sweep)
     monkeypatch.setattr(exp013, "vs_cpu_metrics", lambda _results, *, seed: {"seed": float(seed)})
 
     result = exp013.eval_vs_cpu(model, {}, cfg, max_frames=10, n_matchups=n_matchups)
@@ -209,3 +209,85 @@ def test_reconstruction_uses_every_configured_decode_knob(monkeypatch):
             "gen": gen,
         }
     ]
+
+
+def test_gradient_diagnostics_are_shared_trunk_only_and_observational():
+    cfg = _tiny_cfg(exp013, gradient_diagnostic_batch_size=1)
+    model = exp013.GPT(cfg).train()
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+    metrics = exp013.gradient_diagnostics(model, _batch(exp013), cfg)
+
+    assert model.training
+    assert all(parameter.grad is None for parameter in model.parameters())
+    assert metrics.keys() >= {
+        "grad/head_1_norm",
+        "grad/head_2_norm",
+        "grad/cos_1_2",
+        "grad/weighted_aux_norm",
+        "grad/weighted_aux_to_primary_norm",
+        "grad/cos_1_weighted_aux",
+        "grad/sign_conflict_frac_1_weighted_aux",
+    }
+    assert metrics["grad/head_1_norm"] > 0
+    assert metrics["grad/head_2_norm"] > 0
+    assert -1.0 <= metrics["grad/cos_1_2"] <= 1.0
+    assert 0.0 <= metrics["grad/sign_conflict_frac_1_weighted_aux"] <= 1.0
+
+
+def test_val_metrics_include_behavior_and_dataset_scoped_mass_diagnostics():
+    cfg = _tiny_cfg(exp013, diagnostic_rare_button_count=2)
+    model = exp013.GPT(cfg).eval()
+    counts = torch.zeros(exp013.scoring.N_BUTTON_COMBOS, dtype=torch.long)
+    counts[0] = 10
+    model.button_combo_counts.copy_(counts)
+
+    metrics = exp013.val_metrics(model, [_batch(exp013)], cfg)
+
+    assert metrics["btn_counts_available"] == 1.0
+    for key in (
+        "btn_rare_mass",
+        "btn_unseen_mass",
+        "click_trigger_invalid_mass",
+        "pred_change_rate_buttons",
+        "pred_persistence_buttons",
+        "pred_flipback_rate_buttons",
+    ):
+        assert 0.0 <= metrics[key] <= 1.0
+    assert metrics["btn_rare_count_threshold"] == 2.0
+
+
+def test_match_rows_file_contains_pairing_protocol_even_when_empty(tmp_path: Path):
+    path = tmp_path / "match_rows.json"
+    protocol = exp013.EvalProtocol(
+        n_matchups=96,
+        max_parallel=8,
+        max_frames=7200,
+        seed=4,
+        exec_horizon=1,
+        decode_temp=0.7,
+        decode_temps=(0.5, 0.6, 0.7, 0.8),
+        decode_btn_support_min=3,
+        decode_min_p=0.05,
+        decode_click_trigger_fix=True,
+    )
+
+    exp013._write_match_rows(path, [], protocol)
+
+    payload = json.loads(path.read_text())
+    assert payload == {
+        "schema_version": 1,
+        "protocol": {
+            "n_matchups": 96,
+            "max_parallel": 8,
+            "max_frames": 7200,
+            "seed": 4,
+            "exec_horizon": 1,
+            "decode_temp": 0.7,
+            "decode_temps": [0.5, 0.6, 0.7, 0.8],
+            "decode_btn_support_min": 3,
+            "decode_min_p": 0.05,
+            "decode_click_trigger_fix": True,
+        },
+        "rows": [],
+    }

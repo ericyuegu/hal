@@ -18,6 +18,7 @@ from hal.eval.cross_stage import STARTING_STOCKS
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import match_rows
 from hal.eval.cross_stage import paired_vs_cpu_deltas
+from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.scoring import MatchSummary
 from hal.eval.scoring import last_finite_stock
@@ -283,6 +284,27 @@ def test_match_row_dict_roundtrip() -> None:
     assert MatchRow.from_dict(row.as_dict()) == row
     # Extra annotation keys are ignored on load.
     assert MatchRow.from_dict({**row.as_dict(), "run": "abc", "step": 1000}) == row
+
+
+def test_combined_prior_sweep_reuses_identical_boots_for_summaries_and_rows(monkeypatch) -> None:
+    flat = {"p1_stock": [4.0] * 3, "p2_stock": [4.0] * 3, "p1_pct": [0.0] * 3, "p2_pct": [0.0] * 3}
+    matches = [_vm()]
+    boots = [[_traj([-1, 0, 1], **flat)]]
+
+    def fake_drive(*_args, **_kwargs):
+        return matches, boots
+
+    monkeypatch.setattr("hal.eval.cross_stage._drive_prior", fake_drive)
+    result, rows = sweep_vs_cpu_prior_with_rows(
+        lambda: None,
+        session_cfg=None,
+        n_matchups=1,
+        max_parallel=1,
+    )
+
+    assert len(result) == len(rows) == 1
+    assert result[0][1] == rows[0].boot_index == 0
+    assert result[0][2] is not None and result[0][2].frames == rows[0].total_frames == 3
 
 
 # --------------------------------------------------------------- paired comparison

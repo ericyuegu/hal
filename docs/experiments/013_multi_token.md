@@ -13,8 +13,33 @@ unchanged unless a difference is explicitly listed here.
 - The policy sampler has an explicit evaluation seed; matchup count, frame budget, seed, and concurrency are saved
   in the checkpoint configuration.
 - Manual checkpoint evaluation defaults to the final 96-matchup protocol, with explicit CLI overrides available.
+- Every sweep persists `match_rows.json` beside its replays. The file contains the exact trajectory-derived rows and
+  the matchup count, concurrency, frame budget, seed, execution horizon, and decode settings needed to audit or pair
+  it with another checkpoint.
 - Interpret closed-loop comparisons through paired matchup rows and uncertainty intervals, not one pooled point
   estimate. Offline NLL and transition metrics are diagnostics, not substitutes for closed-loop performance.
+
+## Diagnostic instrumentation added after the validity baseline
+
+These metrics are observational: they run in eval mode on frozen validation data, use `autograd.grad` rather than
+`.backward()`, do not populate parameter gradients, and do not consume the training RNG stream.
+
+- At each validation boundary, use the first `gradient_diagnostic_batch_size` examples (default 64) from the first
+  frozen validation batch to compute each horizon loss's exact gradient over shared parameters. Output-head
+  parameters are excluded.
+- Log `grad/head_<o>_norm` and every pairwise `grad/cos_<o>_<p>`.
+- Also log the direction the configured objective actually applies,
+  `aux_loss_weight * sum(auxiliary_head_gradients)`: its norm, norm relative to the primary, cosine with the primary,
+  and coordinate-wise sign-conflict fraction. This catches objective-scale domination separately from semantic
+  gradient conflict.
+- Validation logs the argmax next-action change rate relative to the observed current action, adjacent prediction
+  persistence, and A-B-A one-frame flipback rate for each action group.
+- Validation logs raw factorized-model probability mass on digital L/R clicks without a full corresponding analog
+  trigger. This is measured before the optional click-trigger decode repair, so it diagnoses the model rather than
+  the postprocessor.
+- When a checkpoint embeds validated full-dataset button counts, validation logs mass on unseen combos and combos
+  below `diagnostic_rare_button_count` (default 100). Without that artifact it logs counts-unavailable and omits the
+  two mass values; it never substitutes the old reference-sample table.
 
 ## Four ablations after the 013 validity baseline
 
@@ -47,7 +72,9 @@ Unexpected-result interpretation:
 ### B. Spread horizons with normalized auxiliary weight
 
 Configuration: `head_offsets=(1,5,9,13)` and
-`loss = primary + lambda_aux * mean(auxiliary_heads)`, initially `lambda_aux=0.25`.
+`loss = primary + lambda_aux * mean(auxiliary_heads)`, initially `lambda_aux=0.25`. The current 013
+`aux_loss_weight` is a **per-head** multiplier, so this arm must set it to `lambda_aux / 3`; setting it directly to
+0.25 would give the auxiliary sum total weight 0.75 and would not implement this hypothesis.
 
 Hypothesis: spread horizons may teach slower game-state/intent features, but their total influence should be much
 smaller than the deployed task. This should retain any representation benefit while avoiding the 012 objective in

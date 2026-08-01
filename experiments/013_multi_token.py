@@ -45,6 +45,8 @@ import math
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from collections.abc import Iterator
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -68,7 +70,8 @@ from torch.optim.lr_scheduler import LambdaLR
 import wandb
 from hal import streams
 from hal.data.stats import FeatureStats
-from hal.eval.cross_stage import sweep_vs_cpu_prior
+from hal.eval.cross_stage import MatchRow
+from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.harness import default_session_cfg
 from hal.training import scoring
@@ -132,9 +135,12 @@ class TrainConfig:
     n_heads: int = 4
     # Multi-token (multi-frame) auxiliary output heads: one independent head per future-frame offset;
     # head o predicts the action o frames ahead. MUST contain 1 — closed-loop decodes only the offset-1
-    # head, so the far-horizon heads are a training-only signal. Spread-out offsets beat contiguous.
+    # head, so the far-horizon heads are a training-only signal. The spread-out default is inherited
+    # from 012; the planned ablations compare it with next-only and contiguous alternatives.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
-    aux_loss_weight: float = 1.0  # weight on the non-primary (offset != 1) heads' NLL in the objective
+    # PER-AUXILIARY-HEAD multiplier. Total auxiliary scalar weight is this times the number of aux heads;
+    # use lambda_total / n_aux to implement primary + lambda_total * mean(auxiliary heads).
+    aux_loss_weight: float = 1.0
     # Per-sample ego-history input dropout (train only): with probability p, zero a sample's ego
     # controller-history slice of the context token so the trunk cannot lean on copying its own recent
     # inputs. Lives purely in the model's input assembly (targets untouched). 0.0 = current 012 behavior.
@@ -168,6 +174,7 @@ class TrainConfig:
     # ONE backbone forward (head_offsets must contain 1..s). s=1 = per-frame decode (current 012). Training
     # is unaffected — closed-loop deployment only; eval can override via --eval-exec-horizon.
     exec_horizon: int = 1
+    # Reproducible training RNG and transformer context geometry.
     seed: int = 0
     L_ctx: int = 256
     # optimization
@@ -180,6 +187,7 @@ class TrainConfig:
     # When False, keep the output-head (heads) weights out of weight decay (route them to the no-decay
     # AdamW group). Default True leaves the heads in the decayed group — exactly the current behavior.
     head_weight_decay: bool = True
+    # Shared warmup/cosine schedule and training duration.
     warmup_steps: int = 500
     max_steps: int = 2**15
     amp_dtype: str = "bfloat16"  # "bfloat16" | "float32"
@@ -187,6 +195,13 @@ class TrainConfig:
     # eval cadence
     val_every: int = 1024
     val_n_batches: int = 16
+    # Exact per-head shared-trunk gradient Gram matrix on this many examples from the first frozen val
+    # batch, computed only at validation cadence. Keeps the diagnostic observational and bounded-cost.
+    gradient_diagnostic_batch_size: int = 64
+    # Validation-only rarity threshold. The metric is emitted only when the checkpoint embeds validated
+    # full-dataset button counts; it never falls back to the old reference-sample table.
+    diagnostic_rare_button_count: int = 100
+    # Closed-loop evaluation cadence and per-boot frame budget.
     eval_every: int = 2048
     eval_max_frames: int = 7200
     # Periodic eval is a cheap diagnostic; final eval uses enough fixed prior-sampled matchups for a useful estimate.
@@ -209,6 +224,7 @@ class TrainConfig:
     # Optional versioned JSON artifact containing full-dataset button-combo counts. Required when
     # decode_btn_support_min > 0; the 012 614-replay reference sample is not authoritative support.
     button_combo_counts_path: str | None = None
+    # Streaming dataset cache and shuffle geometry.
     cache_limit_gb: int = 440
     shuffle_block_size: int = 2000
     # Each replay deserialized off disk yields this many non-overlapping windows,
@@ -760,6 +776,8 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         "stage_vocab": cfg.stage_vocab,
         "stage_dim": cfg.stage_dim,
         "val_n_batches": cfg.val_n_batches,
+        "gradient_diagnostic_batch_size": cfg.gradient_diagnostic_batch_size,
+        "diagnostic_rare_button_count": cfg.diagnostic_rare_button_count,
         "eval_n_matchups": cfg.eval_n_matchups,
         "final_eval_n_matchups": cfg.final_eval_n_matchups,
         "eval_max_frames": cfg.eval_max_frames,
@@ -847,6 +865,38 @@ def _load_model_state(model: GPT, state_dict: dict[str, Tensor]) -> None:
         raise RuntimeError(f"checkpoint/model mismatch: missing={sorted(missing)}, unexpected={sorted(unexpected)}")
 
 
+@dataclass(frozen=True, slots=True)
+class DecodeSettings:
+    temp: float
+    temps: tuple[float, float, float, float] | None
+    btn_support_min: int
+    min_p: float
+    click_trigger_fix: bool
+
+
+def _decode_settings(
+    model: GPT,
+    cfg: TrainConfig,
+    *,
+    temp: float | None = None,
+    temps: tuple[float, float, float, float] | None = None,
+    btn_support_min: int | None = None,
+    min_p: float | None = None,
+    click_trigger_fix: bool | None = None,
+) -> DecodeSettings:
+    settings = DecodeSettings(
+        temp=cfg.decode_temp if temp is None else temp,
+        temps=cfg.decode_temps if temps is None else temps,
+        btn_support_min=cfg.decode_btn_support_min if btn_support_min is None else btn_support_min,
+        min_p=cfg.decode_min_p if min_p is None else min_p,
+        click_trigger_fix=cfg.decode_click_trigger_fix if click_trigger_fix is None else click_trigger_fix,
+    )
+    _resolve_decode_args(settings.temp, settings.temps, settings.btn_support_min, settings.min_p, argmax=False)
+    if settings.btn_support_min > 0 and bool((model.button_combo_counts < 0).any()):
+        raise ValueError("button-support masking requested, but this checkpoint has no dataset-scoped counts")
+    return settings
+
+
 def make_policy(
     model: GPT,
     stats: dict[str, FeatureStats],
@@ -868,14 +918,15 @@ def make_policy(
     retrain."""
     s = cfg.exec_horizon if exec_horizon is None else exec_horizon
     offsets = _exec_horizon_offsets(model.head_offsets, s)
-    temp = cfg.decode_temp if decode_temp is None else decode_temp
-    temps = cfg.decode_temps if decode_temps is None else decode_temps
-    btn_support_min = cfg.decode_btn_support_min if decode_btn_support_min is None else decode_btn_support_min
-    min_p = cfg.decode_min_p if decode_min_p is None else decode_min_p
-    click_fix = cfg.decode_click_trigger_fix if decode_click_trigger_fix is None else decode_click_trigger_fix
-    _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax=False)
-    if btn_support_min > 0 and bool((model.button_combo_counts < 0).any()):
-        raise ValueError("button-support masking requested, but this checkpoint has no dataset-scoped counts")
+    settings = _decode_settings(
+        model,
+        cfg,
+        temp=decode_temp,
+        temps=decode_temps,
+        btn_support_min=decode_btn_support_min,
+        min_p=decode_min_p,
+        click_trigger_fix=decode_click_trigger_fix,
+    )
     model_device = next(model.parameters()).device
     gen = None if decode_seed is None else torch.Generator(device=model_device).manual_seed(decode_seed)
 
@@ -886,11 +937,11 @@ def make_policy(
             decode(
                 model,
                 ctx,
-                temp=temp,
-                temps=temps,
-                btn_support_min=btn_support_min,
-                min_p=min_p,
-                click_trigger_fix=click_fix,
+                temp=settings.temp,
+                temps=settings.temps,
+                btn_support_min=settings.btn_support_min,
+                min_p=settings.min_p,
+                click_trigger_fix=settings.click_trigger_fix,
                 gen=gen,
             )
             if s == 1
@@ -898,11 +949,11 @@ def make_policy(
                 model,
                 ctx,
                 offsets,
-                temp=temp,
-                temps=temps,
-                btn_support_min=btn_support_min,
-                min_p=min_p,
-                click_trigger_fix=click_fix,
+                temp=settings.temp,
+                temps=settings.temps,
+                btn_support_min=settings.btn_support_min,
+                min_p=settings.min_p,
+                click_trigger_fix=settings.click_trigger_fix,
                 gen=gen,
             )
         )
@@ -979,6 +1030,18 @@ def _weighted_mean(nll: Tensor, is_trans: Tensor, weight: float) -> Tensor:
     return (w * nll).sum() / w.sum()
 
 
+def _offset_objective(
+    nll: dict[tuple[int, str], Tensor],
+    trans: dict[tuple[int, str], Tensor],
+    offset: int,
+    transition_weight: float,
+) -> Tensor:
+    """One head's unscaled sum-over-groups objective in nats."""
+    return torch.stack(
+        [_weighted_mean(nll[(offset, name)], trans[(offset, name)], transition_weight) for name in _GROUP_NAMES]
+    ).sum()
+
+
 def objective(
     nll: dict[tuple[int, str], Tensor],
     trans: dict[tuple[int, str], Tensor],
@@ -995,6 +1058,96 @@ def objective(
     return torch.stack(terms).sum()
 
 
+def _slice_batch(batch: TrainBatch, n: int) -> TrainBatch:
+    """First ``n`` examples of a frozen batch, preserving Context structure."""
+    return TrainBatch(
+        context=Context(
+            features={name: value[:n] for name, value in batch.context.features.items()},
+            ctx_pad=batch.context.ctx_pad[:n],
+        ),
+        target=batch.target[:n],
+    )
+
+
+def _gradient_dot(a: tuple[Tensor, ...], b: tuple[Tensor, ...]) -> Tensor:
+    return torch.stack([torch.dot(x.reshape(-1), y.reshape(-1)) for x, y in zip(a, b, strict=True)]).sum()
+
+
+def _gradient_cosine(a: tuple[Tensor, ...], b: tuple[Tensor, ...], norm_a: Tensor, norm_b: Tensor) -> Tensor:
+    denom = (norm_a * norm_b).clamp_min(torch.finfo(norm_a.dtype).tiny)
+    return (_gradient_dot(a, b) / denom).clamp(-1.0, 1.0)
+
+
+@contextlib.contextmanager
+def _evaluation_mode(model: nn.Module) -> Iterator[None]:
+    """Temporarily enter eval mode and restore the exact prior mode on every exit."""
+    was_training = model.training
+    model.eval()
+    try:
+        yield
+    finally:
+        model.train(was_training)
+
+
+def gradient_diagnostics(model: GPT, batch: TrainBatch, cfg: TrainConfig) -> dict[str, float]:
+    """Exact shared-trunk gradient norms/cosines for each horizon on a fixed val subset.
+
+    Output-head parameters are deliberately excluded: the question is whether each
+    task asks the representation shared with the deployed head to move in an aligned
+    direction. ``autograd.grad`` leaves ``parameter.grad`` untouched, and eval mode
+    disables history dropout, so this cannot perturb the optimizer or RNG stream.
+    """
+    with _evaluation_mode(model):
+        return _gradient_diagnostics_eval(model, batch, cfg)
+
+
+def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) -> dict[str, float]:
+    diagnostic_batch = _slice_batch(batch, min(cfg.gradient_diagnostic_batch_size, batch.context.batch))
+    nll, trans = action_loss(model, diagnostic_batch)
+    losses = {
+        offset: _offset_objective(nll, trans, offset, cfg.transition_loss_weight) for offset in model.head_offsets
+    }
+    trunk = tuple(parameter for name, parameter in model.named_parameters() if not name.startswith("heads."))
+    gradients: dict[int, tuple[Tensor, ...]] = {}
+    for i, offset in enumerate(model.head_offsets):
+        gradients[offset] = tuple(
+            gradient.detach()
+            for gradient in torch.autograd.grad(
+                losses[offset],
+                trunk,
+                retain_graph=i + 1 < len(model.head_offsets),
+            )
+        )
+
+    norms = {offset: _gradient_dot(gradient, gradient).sqrt() for offset, gradient in gradients.items()}
+    out = {f"grad/head_{offset}_norm": norm.item() for offset, norm in norms.items()}
+    for i, left in enumerate(model.head_offsets):
+        for right in model.head_offsets[i + 1 :]:
+            out[f"grad/cos_{left}_{right}"] = _gradient_cosine(
+                gradients[left], gradients[right], norms[left], norms[right]
+            ).item()
+
+    aux_offsets = tuple(offset for offset in model.head_offsets if offset != 1)
+    if aux_offsets:
+        # This is the direction the CURRENT objective applies, not a mean-head convention:
+        # aux_loss_weight * sum_o g_o. Its norm ratio makes objective-scale domination visible.
+        weighted_aux = tuple(
+            cfg.aux_loss_weight * sum((gradients[offset][pi] for offset in aux_offsets), start=torch.zeros_like(p))
+            for pi, p in enumerate(trunk)
+        )
+        aux_norm = _gradient_dot(weighted_aux, weighted_aux).sqrt()
+        primary = gradients[1]
+        out["grad/weighted_aux_norm"] = aux_norm.item()
+        out["grad/weighted_aux_to_primary_norm"] = (aux_norm / norms[1].clamp_min(norms[1].new_tensor(1e-30))).item()
+        out["grad/cos_1_weighted_aux"] = _gradient_cosine(primary, weighted_aux, norms[1], aux_norm).item()
+        conflicting = sum(
+            int(((p != 0) & (a != 0) & ((p > 0) != (a > 0))).sum()) for p, a in zip(primary, weighted_aux)
+        )
+        comparable = sum(int(((p != 0) & (a != 0)).sum()) for p, a in zip(primary, weighted_aux))
+        out["grad/sign_conflict_frac_1_weighted_aux"] = conflicting / comparable if comparable else 0.0
+    return out
+
+
 def _offset_total_bits(comps: dict[tuple[int, str], Tensor], o: int) -> float:
     """Total bits/frame summed over the four groups for one head offset ``o``."""
     return sum(comps[(o, name)].mean() for name in _GROUP_NAMES).item() / _LN2
@@ -1003,6 +1156,13 @@ def _offset_total_bits(comps: dict[tuple[int, str], Tensor], o: int) -> float:
 def _masked_mean_bits(nats: Tensor, mask: Tensor) -> float:
     """Mean of per-position NLL (nats) over the masked subset, in bits; 0.0 when the subset is empty."""
     return (nats[mask].mean().item() / _LN2) if bool(mask.any()) else 0.0
+
+
+def _bool_mean(parts: list[Tensor], *, invert: bool = False) -> float:
+    values = torch.cat(parts)
+    if values.numel() == 0:
+        return 0.0
+    return ((~values) if invert else values).float().mean().item()
 
 
 def _group_kl_bits(logits_p: Tensor, logits_q: Tensor) -> Tensor:
@@ -1024,17 +1184,31 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
     tracks how predictability decays with horizon. The offset-1 (deployed) head additionally drives button
     proper-scoring, transition-vs-hold NLL splits, ±1-tolerant change-event F1, a copycat history-ablation
     probe. Per-element tensors are concatenated then reduced once (exactly sample-weighted)."""
-    was_training = model.training
-    model.eval()
+    with _evaluation_mode(model):
+        return _val_metrics_eval(model, val_cache, cfg)
+
+
+def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> dict[str, float]:
     comps_cat: dict[tuple[int, str], list[Tensor]] = {}
     ablated_cat: dict[str, list[Tensor]] = {}
     trans_cat: dict[str, list[Tensor]] = {}
     pred_change_cat: dict[str, list[Tensor]] = {}
+    pred_next_change_cat: dict[str, list[Tensor]] = {}
+    pred_temporal_change_cat: dict[str, list[Tensor]] = {}
+    pred_flipback_cat: dict[str, list[Tensor]] = {}
     true_change_cat: dict[str, list[Tensor]] = {}
     kl_bits: list[Tensor] = []
     btn_probs: list[Tensor] = []
     btn_tgts: list[Tensor] = []
     multipress: list[Tensor] = []
+    rare_mass: list[Tensor] = []
+    unseen_mass: list[Tensor] = []
+    click_trigger_invalid_l: list[Tensor] = []
+    click_trigger_invalid_r: list[Tensor] = []
+    counts_available = bool((model.button_combo_counts >= 0).all())
+    rare_mask = model.button_combo_counts < cfg.diagnostic_rare_button_count
+    unseen_mask = model.button_combo_counts == 0
+    combo_bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS, device=model.main_centers.device))
     for batch in val_cache:
         ctx = batch.context
         h = model(ctx.features, ctx.ctx_pad)
@@ -1045,6 +1219,8 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
         h_ablated = model(ablated_features, ctx.ctx_pad)
         targets, valid = _multi_offset_targets(ctx, batch.target[:, : max(model.head_offsets)], model.head_offsets)
         flat_valid = valid.reshape(-1)
+        adjacent_valid = valid[:, 1:] & valid[:, :-1]
+        triple_valid = valid[:, 2:] & valid[:, 1:-1] & valid[:, :-2]
         cur_idx = _quantize(model, stack_actions(ctx.features))  # [B, L_ctx, n_groups] current frames
         for hi, o in enumerate(model.head_offsets):
             logits = model.heads[hi](h).float()
@@ -1062,10 +1238,35 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
                     pred_id = logits[..., lo : lo + _GROUP_VOCABS[g]].argmax(-1)  # [B, L_ctx] argmax next-frame id
                     tc = true_change[..., g]
                     trans_cat.setdefault(name, []).append(tc.reshape(-1)[flat_valid])
-                    pred_change_cat.setdefault(name, []).append((pred_id != cur_idx[..., g]) & valid)
+                    pred_change = (pred_id != cur_idx[..., g]) & valid
+                    pred_change_cat.setdefault(name, []).append(pred_change)
+                    pred_next_change_cat.setdefault(name, []).append(pred_change.reshape(-1)[flat_valid])
+                    pred_temporal_change_cat.setdefault(name, []).append(
+                        (pred_id[:, 1:] != pred_id[:, :-1])[adjacent_valid]
+                    )
+                    pred_flipback_cat.setdefault(name, []).append(
+                        ((pred_id[:, 2:] == pred_id[:, :-2]) & (pred_id[:, 1:-1] != pred_id[:, :-2]))[triple_valid]
+                    )
                     true_change_cat.setdefault(name, []).append(tc & valid)
                 btn_logits = logits[..., : scoring.N_BUTTON_COMBOS].reshape(-1, scoring.N_BUTTON_COMBOS)[flat_valid]
-                btn_probs.append(scoring.combo_marginal_probs(btn_logits))
+                combo_probs = F.softmax(btn_logits, dim=-1)
+                marginal_btn_probs = combo_probs @ combo_bits.to(combo_probs.dtype)
+                btn_probs.append(marginal_btn_probs)
+                if counts_available:
+                    rare_mass.append(combo_probs[:, rare_mask].sum(-1))
+                    unseen_mass.append(combo_probs[:, unseen_mask].sum(-1))
+                trig_lo = _GROUP_OFFSETS[_TRIG_G]
+                n_trig = model.trig_centers.shape[0]
+                trig_probs = F.softmax(
+                    logits[..., trig_lo : trig_lo + _GROUP_VOCABS[_TRIG_G]].reshape(-1, _GROUP_VOCABS[_TRIG_G])[
+                        flat_valid
+                    ],
+                    dim=-1,
+                ).reshape(-1, n_trig, n_trig)
+                trigger_l_full = trig_probs[:, -1, :].sum(-1)
+                trigger_r_full = trig_probs[:, :, -1].sum(-1)
+                click_trigger_invalid_l.append(marginal_btn_probs[:, _BUTTON_L_CH - _N_CONT] * (1.0 - trigger_l_full))
+                click_trigger_invalid_r.append(marginal_btn_probs[:, _BUTTON_R_CH - _N_CONT] * (1.0 - trigger_r_full))
                 tgt_btn = _dequantize(model, tgt_idx)[..., _N_CONT:].reshape(-1, _N_BUTTONS)[flat_valid]
                 btn_tgts.append(tgt_btn)
                 multipress.append((tgt_btn > 0.5).sum(-1) >= 2)
@@ -1083,15 +1284,28 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
         "btn_logloss": logloss.item(),
         "btn_brier": brier.item(),
         "btn_multipress": torch.cat(multipress).float().mean().item(),
+        "btn_counts_available": float(counts_available),
+        "click_trigger_invalid_l_mass": torch.cat(click_trigger_invalid_l).mean().item(),
+        "click_trigger_invalid_r_mass": torch.cat(click_trigger_invalid_r).mean().item(),
         "ablate_hist_kl": torch.cat(kl_bits).mean().item(),  # KL(full ‖ history-ablated), bits
         **{f"nll_off{o}": _offset_total_bits(comps, o) for o in model.head_offsets},
     }
+    out["click_trigger_invalid_mass"] = 0.5 * (
+        out["click_trigger_invalid_l_mass"] + out["click_trigger_invalid_r_mass"]
+    )
+    if counts_available:
+        out["btn_rare_mass"] = torch.cat(rare_mass).mean().item()
+        out["btn_unseen_mass"] = torch.cat(unseen_mass).mean().item()
+        out["btn_rare_count_threshold"] = float(cfg.diagnostic_rare_button_count)
     ablate_total = 0.0
     for name in _GROUP_NAMES:
         trans = torch.cat(trans_cat[name])
         out[f"nll_{name}_trans"] = _masked_mean_bits(comps[(1, name)], trans)
         out[f"nll_{name}_hold"] = _masked_mean_bits(comps[(1, name)], ~trans)
         out[f"trans_rate_{name}"] = trans.float().mean().item()
+        out[f"pred_change_rate_{name}"] = _bool_mean(pred_next_change_cat[name])
+        out[f"pred_persistence_{name}"] = _bool_mean(pred_temporal_change_cat[name], invert=True)
+        out[f"pred_flipback_rate_{name}"] = _bool_mean(pred_flipback_cat[name])
         out[f"changeF1_{name}"] = scoring.change_event_prf(
             torch.cat(pred_change_cat[name]), torch.cat(true_change_cat[name])
         )[2]
@@ -1099,8 +1313,6 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
         out[f"ablate_hist_dnll_{name}"] = d
         ablate_total += d
     out["ablate_hist_dnll"] = ablate_total
-    if was_training:
-        model.train()
     return out
 
 
@@ -1119,8 +1331,32 @@ def recon_metrics(
 ) -> dict[str, float]:
     """Sample-space reconstruction proxy: decode the next action and score it vs ground truth.
     Buttons → acc + F1 @ decode; continuous → MAE. ``argmax`` is the deterministic controller proxy."""
-    was_training = model.training
-    model.eval()
+    with _evaluation_mode(model):
+        return _recon_metrics_eval(
+            model,
+            val_cache,
+            argmax=argmax,
+            temp=temp,
+            temps=temps,
+            btn_support_min=btn_support_min,
+            min_p=min_p,
+            click_trigger_fix=click_trigger_fix,
+            gen=gen,
+        )
+
+
+def _recon_metrics_eval(
+    model: GPT,
+    val_cache: list[TrainBatch],
+    *,
+    argmax: bool,
+    temp: float,
+    temps: tuple[float, float, float, float] | None,
+    btn_support_min: int,
+    min_p: float,
+    click_trigger_fix: bool,
+    gen: torch.Generator | None,
+) -> dict[str, float]:
     tp = fp = fn = btn_correct = btn_total = 0
     cont_abs_err = 0.0
     cont_count = 0
@@ -1148,8 +1384,6 @@ def recon_metrics(
         btn_total += pb.numel()
         cont_abs_err += float((pred[..., :_N_CONT] - tgt[..., :_N_CONT]).abs().sum())
         cont_count += tgt[..., :_N_CONT].numel()
-    if was_training:
-        model.train()
     prec = tp / (tp + fp) if tp + fp else 0.0
     rec = tp / (tp + fn) if tp + fn else 0.0
     f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
@@ -1158,6 +1392,83 @@ def recon_metrics(
         "recon_button_f1": f1,
         "recon_cont_mae": cont_abs_err / cont_count,
     }
+
+
+@dataclass(frozen=True, slots=True)
+class EvalProtocol:
+    n_matchups: int
+    max_parallel: int
+    max_frames: int
+    seed: int
+    exec_horizon: int
+    decode_temp: float
+    decode_temps: tuple[float, float, float, float] | None
+    decode_btn_support_min: int
+    decode_min_p: float
+    decode_click_trigger_fix: bool
+
+
+def _eval_protocol(
+    cfg: TrainConfig,
+    *,
+    settings: DecodeSettings,
+    exec_horizon: int,
+    default_n_matchups: int,
+    n_matchups: int | None = None,
+    max_frames: int | None = None,
+    seed: int | None = None,
+) -> EvalProtocol:
+    n = default_n_matchups if n_matchups is None else n_matchups
+    frames = cfg.eval_max_frames if max_frames is None else max_frames
+    resolved_seed = cfg.eval_seed if seed is None else seed
+    if n <= 0:
+        raise ValueError(f"n_matchups must be > 0, got {n}")
+    if frames <= 0:
+        raise ValueError(f"max_frames must be > 0, got {frames}")
+    return EvalProtocol(
+        n_matchups=n,
+        max_parallel=_eval_max_parallel(cfg, n),
+        max_frames=frames,
+        seed=resolved_seed,
+        exec_horizon=exec_horizon,
+        decode_temp=settings.temp,
+        decode_temps=settings.temps,
+        decode_btn_support_min=settings.btn_support_min,
+        decode_min_p=settings.min_p,
+        decode_click_trigger_fix=settings.click_trigger_fix,
+    )
+
+
+def _write_match_rows(path: Path, rows: list[MatchRow], protocol: EvalProtocol) -> None:
+    """Atomically persist exact trajectory-derived rows plus pairing protocol."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "protocol": asdict(protocol),
+        "rows": [row.as_dict() for row in rows],
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True))
+    tmp.replace(path)
+
+
+def _run_eval_sweep(
+    policy_factory: Callable[[], RecedingHorizon],
+    *,
+    protocol: EvalProtocol,
+    replay_dir: Path | None,
+    rows_path: Path | None,
+) -> dict[str, float]:
+    results, rows = sweep_vs_cpu_prior_with_rows(
+        policy_factory,
+        session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+        n_matchups=protocol.n_matchups,
+        max_parallel=protocol.max_parallel,
+        max_frames=protocol.max_frames,
+    )
+    if rows_path is not None:
+        _write_match_rows(rows_path, rows, protocol)
+    return vs_cpu_metrics(results, seed=protocol.seed)
 
 
 def eval_vs_cpu(
@@ -1169,36 +1480,46 @@ def eval_vs_cpu(
     replay_dir: Path | None = None,
     n_matchups: int | None = None,
     eval_seed: int | None = None,
+    rows_path: Path | None = None,
 ) -> dict[str, float]:
     """In-training closed-loop eval vs lvl-9 CPU over prior-sampled char matchups.
 
     A fixed ``n_matchups`` controls statistical coverage; host CPU count controls only
     how many of those boots execute concurrently. Each policy wave gets an explicit,
     deterministic sampling seed. Reduced to a flat metric dict."""
-    was_training = model.training
-    model.eval()
-    n = cfg.eval_n_matchups if n_matchups is None else n_matchups
-    if n <= 0:
-        raise ValueError(f"n_matchups must be > 0, got {n}")
-    max_parallel = _eval_max_parallel(cfg, n)
-    seed = cfg.eval_seed if eval_seed is None else eval_seed
+    settings = _decode_settings(model, cfg)
+    protocol = _eval_protocol(
+        cfg,
+        settings=settings,
+        exec_horizon=cfg.exec_horizon,
+        default_n_matchups=cfg.eval_n_matchups,
+        n_matchups=n_matchups,
+        max_frames=max_frames,
+        seed=eval_seed,
+    )
     policy_index = itertools.count()
 
     def policy_factory() -> RecedingHorizon:
-        return make_policy(model, stats, cfg, decode_seed=seed + next(policy_index))
-
-    try:
-        results = sweep_vs_cpu_prior(
-            policy_factory,
-            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
-            n_matchups=n,
-            max_parallel=max_parallel,
-            max_frames=max_frames,
+        return make_policy(
+            model,
+            stats,
+            cfg,
+            exec_horizon=protocol.exec_horizon,
+            decode_temp=settings.temp,
+            decode_temps=settings.temps,
+            decode_btn_support_min=settings.btn_support_min,
+            decode_min_p=settings.min_p,
+            decode_click_trigger_fix=settings.click_trigger_fix,
+            decode_seed=protocol.seed + next(policy_index),
         )
-    finally:
-        if was_training:
-            model.train()
-    return vs_cpu_metrics(results, seed=seed)
+
+    with _evaluation_mode(model):
+        return _run_eval_sweep(
+            policy_factory,
+            protocol=protocol,
+            replay_dir=replay_dir,
+            rows_path=rows_path,
+        )
 
 
 # %%
@@ -1295,6 +1616,7 @@ def train(
         """Synchronous closed-loop eval on the live model + .slp upload (the final eval).
         Returns the flat metric dict."""
         sub = replay_dir / step_tag
+        rows_path = sub / "match_rows.json"
         metrics = eval_vs_cpu(
             model,
             stats,
@@ -1302,21 +1624,24 @@ def train(
             max_frames=cfg.eval_max_frames,
             replay_dir=sub,
             n_matchups=n_matchups,
+            rows_path=rows_path,
         )
         n = uploader.upload_tree(sub, base=ckpt_dir, pattern="*.slp")
-        print(f"[eval] queued {n} .slp for R2 ({step_tag})", flush=True)
+        uploader.upload(rows_path, key=str(rows_path.relative_to(ckpt_dir)))
+        print(f"[eval] queued {n} .slp + matchup rows for R2 ({step_tag})", flush=True)
         return metrics
 
     def _val_log_dict() -> dict[str, float]:
         """Flat ``val/*`` metric dict (one W&B section). Merged into the per-step log; no wandb.log here."""
         vm = val_metrics(model, val_cache, cfg)
         gen = torch.Generator(device=DEVICE).manual_seed(cfg.eval_seed)
+        settings = _decode_settings(model, cfg)
         decode_kwargs = {
-            "temp": cfg.decode_temp,
-            "temps": cfg.decode_temps,
-            "btn_support_min": cfg.decode_btn_support_min,
-            "min_p": cfg.decode_min_p,
-            "click_trigger_fix": cfg.decode_click_trigger_fix,
+            "temp": settings.temp,
+            "temps": settings.temps,
+            "btn_support_min": settings.btn_support_min,
+            "min_p": settings.min_p,
+            "click_trigger_fix": settings.click_trigger_fix,
         }
         recon = {"argmax": recon_metrics(model, val_cache, argmax=True, **decode_kwargs)}
         recon["sample"] = recon_metrics(model, val_cache, argmax=False, gen=gen, **decode_kwargs)
@@ -1325,6 +1650,7 @@ def train(
             out[f"val/recon_{tag}_acc"] = rm["recon_button_acc"]
             out[f"val/recon_{tag}_f1"] = rm["recon_button_f1"]
             out[f"val/recon_{tag}_mae"] = rm["recon_cont_mae"]
+        out.update(gradient_diagnostics(model, val_cache[0], cfg))
         return out
 
     def _log_eval(step: int, metrics: dict[str, float]) -> None:
@@ -1377,7 +1703,10 @@ def train(
                 data = json.loads(result.read_text())
                 _log_eval(data["step"], data["metrics"])
                 n = uploader.upload_tree(pending_eval["replay"], base=ckpt_dir, pattern="*.slp")
-                print(f"[eval] queued {n} .slp for R2 (step {step})", flush=True)
+                rows_path = pending_eval["replay"] / "match_rows.json"
+                if rows_path.is_file():
+                    uploader.upload(rows_path, key=str(rows_path.relative_to(ckpt_dir)))
+                print(f"[eval] queued {n} .slp + matchup rows for R2 (step {step})", flush=True)
             else:
                 print(f"[eval] worker for step {step} failed (rc={rc}); see {pending_eval['log']}", flush=True)
         pending_eval["log_f"].close()
@@ -1550,31 +1879,33 @@ def eval_ckpt(
     replaces the trained cfg for this eval only (test-time sweep); ``None`` keeps the trained value."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
     exec_horizon = cfg.exec_horizon if eval_exec_horizon is None else eval_exec_horizon
-    temp = cfg.decode_temp if decode_temp is None else decode_temp
-    temps = cfg.decode_temps if decode_temps is None else decode_temps
-    btn_support_min = cfg.decode_btn_support_min if decode_btn_support_min is None else decode_btn_support_min
-    min_p = cfg.decode_min_p if decode_min_p is None else decode_min_p
-    click_fix = cfg.decode_click_trigger_fix if decode_click_trigger_fix is None else decode_click_trigger_fix
-    n = cfg.final_eval_n_matchups if eval_n_matchups is None else eval_n_matchups
-    max_frames = cfg.eval_max_frames if eval_max_frames is None else eval_max_frames
-    seed = cfg.eval_seed if eval_seed is None else eval_seed
-    if n <= 0:
-        raise ValueError(f"eval_n_matchups must be > 0, got {n}")
-    if max_frames <= 0:
-        raise ValueError(f"eval_max_frames must be > 0, got {max_frames}")
+    settings = _decode_settings(
+        model,
+        cfg,
+        temp=decode_temp,
+        temps=decode_temps,
+        btn_support_min=decode_btn_support_min,
+        min_p=decode_min_p,
+        click_trigger_fix=decode_click_trigger_fix,
+    )
+    protocol = _eval_protocol(
+        cfg,
+        settings=settings,
+        exec_horizon=exec_horizon,
+        default_n_matchups=cfg.final_eval_n_matchups,
+        n_matchups=eval_n_matchups,
+        max_frames=eval_max_frames,
+        seed=eval_seed,
+    )
     _exec_horizon_offsets(model.head_offsets, exec_horizon)
-    _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax=False)
-    if btn_support_min > 0 and bool((model.button_combo_counts < 0).any()):
-        raise ValueError("button-support masking requested, but this checkpoint has no dataset-scoped counts")
     print(
         f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  exec_horizon={exec_horizon}  "
-        f"temp={temp}  temps={temps}  btn_support_min={btn_support_min}  min_p={min_p}  click_trigger_fix={click_fix}",
+        f"temp={settings.temp}  temps={settings.temps}  btn_support_min={settings.btn_support_min}  "
+        f"min_p={settings.min_p}  click_trigger_fix={settings.click_trigger_fix}",
         flush=True,
     )
     replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
     replay_dir.mkdir(parents=True, exist_ok=True)
-    session_cfg = default_session_cfg(replay_dir, instant_match_restart=True)
-    max_parallel = _eval_max_parallel(cfg, n)
     policy_index = itertools.count()
 
     def policy_factory() -> RecedingHorizon:
@@ -1582,28 +1913,27 @@ def eval_ckpt(
             model,
             stats,
             cfg,
-            exec_horizon=eval_exec_horizon,
-            decode_temp=decode_temp,
-            decode_temps=decode_temps,
-            decode_btn_support_min=decode_btn_support_min,
-            decode_min_p=decode_min_p,
-            decode_click_trigger_fix=decode_click_trigger_fix,
-            decode_seed=seed + next(policy_index),
+            exec_horizon=protocol.exec_horizon,
+            decode_temp=settings.temp,
+            decode_temps=settings.temps,
+            decode_btn_support_min=settings.btn_support_min,
+            decode_min_p=settings.min_p,
+            decode_click_trigger_fix=settings.click_trigger_fix,
+            decode_seed=protocol.seed + next(policy_index),
         )
 
     print(
-        f"\n[eval] ===== vs-cpu, {n} prior-sampled matchups, max_parallel={max_parallel} "
-        f"(instant-restart, seed={seed}) =====",
+        f"\n[eval] ===== vs-cpu, {protocol.n_matchups} prior-sampled matchups, "
+        f"max_parallel={protocol.max_parallel} (instant-restart, seed={protocol.seed}) =====",
         flush=True,
     )
-    results = sweep_vs_cpu_prior(
+    metrics = _run_eval_sweep(
         policy_factory,
-        session_cfg=session_cfg,
-        n_matchups=n,
-        max_parallel=max_parallel,
-        max_frames=max_frames,
+        protocol=protocol,
+        replay_dir=replay_dir,
+        rows_path=replay_dir / "match_rows.json",
     )
-    print(f"  {vs_cpu_metrics(results, seed=seed)}", flush=True)
+    print(f"  {metrics}", flush=True)
 
 
 # %%
@@ -1612,7 +1942,15 @@ def run_eval_worker(ckpt_path: str, step: int, result_path: str, replay_dir: str
     flat metric dict to ``result_path`` (atomically) with the .slp recordings under ``replay_dir``.
     Touches neither W&B nor R2 — the launching trainer is the sole writer/uploader."""
     model, cfg, stats, _ = _load_ckpt(ckpt_path)
-    metrics = eval_vs_cpu(model, stats, cfg, max_frames=cfg.eval_max_frames, replay_dir=Path(replay_dir))
+    replay_path = Path(replay_dir)
+    metrics = eval_vs_cpu(
+        model,
+        stats,
+        cfg,
+        max_frames=cfg.eval_max_frames,
+        replay_dir=replay_path,
+        rows_path=replay_path / "match_rows.json",
+    )
     out = Path(result_path)
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps({"step": step, "metrics": metrics}))
