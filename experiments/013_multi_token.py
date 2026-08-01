@@ -2009,6 +2009,10 @@ def eval_ckpt(
     eval_n_matchups: int | None = None,
     eval_max_frames: int | None = None,
     eval_seed: int | None = None,
+    wandb_run_id: str | None = None,
+    wandb_project: str = "hal",
+    wandb_entity: str | None = None,
+    wandb_label: str | None = None,
 ) -> None:
     """Load a checkpoint and run the prior-distribution vs-CPU sweep, printing the pooled metrics. Each
     override (execution horizon, temp, per-group temps, button-support floor, min-p, click=>trigger fix)
@@ -2069,6 +2073,35 @@ def eval_ckpt(
         replay_dir=replay_dir,
         rows_path=replay_dir / "match_rows.json",
     )
+    if wandb_run_id is not None:
+        run = wandb.init(
+            project=wandb_project,
+            entity=wandb_entity,
+            id=wandb_run_id,
+            resume="allow",
+            name=wandb_label,
+            config={
+                "manual_eval_checkpoint": str(Path(ckpt_path).resolve()),
+                "manual_eval_label": wandb_label or "",
+            },
+        )
+        wandb.define_metric("global_step")
+        wandb.define_metric("eval/*", step_metric="global_step")
+        protocol_log = {
+            f"eval_protocol/{key}": value
+            for key, value in asdict(protocol).items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        wandb.log(
+            {
+                **{f"eval/{key}": value for key, value in metrics.items()},
+                **protocol_log,
+                "global_step": state["step"],
+            }
+        )
+        run.summary["eval/last_checkpoint"] = str(Path(ckpt_path).resolve())
+        run.summary["eval/last_label"] = wandb_label or "manual"
+        wandb.finish()
     print(f"  {metrics}", flush=True)
 
 
@@ -2110,6 +2143,10 @@ class Args:
     eval_n_matchups: int | None = None  # manual --eval override; default is cfg.final_eval_n_matchups (96)
     eval_max_frames: int | None = None  # manual --eval override; default is checkpoint cfg.eval_max_frames
     eval_seed: int | None = None  # manual --eval sampling/bootstrap seed override
+    wandb_run_id: str | None = None  # resume an existing run and log this manual eval to it
+    wandb_project: str = "hal"
+    wandb_entity: str | None = None
+    wandb_label: str | None = None
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
     # internal: one-shot async-eval worker (the trainer spawns this; not for manual use).
@@ -2136,6 +2173,10 @@ def main(args: Args) -> None:
             eval_n_matchups=args.eval_n_matchups,
             eval_max_frames=args.eval_max_frames,
             eval_seed=args.eval_seed,
+            wandb_run_id=args.wandb_run_id,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_label=args.wandb_label,
         )
         return
     if args.resume is not None:
