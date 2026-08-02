@@ -6,7 +6,7 @@ decode-time controls added on top of that path — button-combo support masking,
 temperatures, min-p nucleus filtering, and the digital-click => analog-trigger fix — plus the
 invariant that with every knob at its default the sampler is bit-for-bit the pre-change one.
 
-The experiment filenames start with a digit, so they load by path (like ``test_rtc_policy``); the
+The experiment filenames start with a digit, so they load by path (like ``test_002_flow_matching_rtc``); the
 decode logic is identical across the two files, so every test runs against both via parametrization.
 Models are tiny and CPU-only, with the output head overwritten by a fixed-logit stub so the sampled
 group is fully controlled — no training, no real gamestate signal.
@@ -25,7 +25,7 @@ from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import Context
 
-_EXP_DIR = Path(__file__).resolve().parent.parent / "experiments"
+_EXP_DIR = Path(__file__).resolve().parent.parent.parent / "experiments"
 _PLAYER_PREFIXES = ("ego", "ego_nana", "opp_nana", "opp")
 
 

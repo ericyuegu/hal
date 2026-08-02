@@ -89,6 +89,9 @@ ignore = ["E501"]
 "**/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
+# Without this a bare `pytest` walks runs/, wandb/ and data/ and dies on the
+# first unreadable artifact.
+testpaths = ["tests"]
 markers = [
     "integration: tests that launch external services or emulators",
 ]

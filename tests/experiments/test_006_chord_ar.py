@@ -1,6 +1,6 @@
 """Correctness contracts for the chord-AR action-chunk policy (experiment 006).
 
-Mirrors ``test_classification.py``'s synthetic-batch patterns (tiny dims, CPU). The chord-
+Mirrors ``test_005_classification.py``'s synthetic-batch patterns (tiny dims, CPU). The chord-
 specific contracts: pack/unpack is a bijection on the quantized product space; the data-
 derived vocab build and OOV projection are deterministic; the teacher-forced loss is finite
 and backprops into backbone + head; the head is strictly autoregressive (logits at position
@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 
-_EXP_PATH = Path(__file__).resolve().parent.parent / "experiments" / "006_chord_ar.py"
+_EXP_PATH = Path(__file__).resolve().parent.parent.parent / "experiments" / "006_chord_ar.py"
 
 
 def _load_experiment():

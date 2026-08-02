@@ -18,7 +18,7 @@ from hal.training.features import FLOAT_FEATURES
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 
-_EXP_DIR = Path(__file__).resolve().parent.parent / "experiments"
+_EXP_DIR = Path(__file__).resolve().parent.parent.parent / "experiments"
 
 
 def _load(name: str):

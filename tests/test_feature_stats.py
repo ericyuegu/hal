@@ -1,4 +1,4 @@
-"""Pinning tests for ``hal.data.stats``.
+"""Pinning tests for ``hal.data.feature_stats``.
 
 These tests stand alone — no MDS fixtures, no Dolphin. They guard the math
 (Welford against numpy, merge associativity, mixture analytics) and the
@@ -10,12 +10,12 @@ import math
 import numpy as np
 import pytest
 
-from hal.data.stats import FeatureStats
-from hal.data.stats import FeatureStatsSufficient
-from hal.data.stats import StatsAccumulator
-from hal.data.stats import dump_sufficient_stats
-from hal.data.stats import load_and_merge_stats
-from hal.data.stats import load_sufficient_stats
+from hal.data.feature_stats import FeatureStats
+from hal.data.feature_stats import FeatureStatsSufficient
+from hal.data.feature_stats import StatsAccumulator
+from hal.data.feature_stats import dump_sufficient_stats
+from hal.data.feature_stats import load_and_merge_stats
+from hal.data.feature_stats import load_sufficient_stats
 
 FEATURE = "x"
 TOL = 1e-9

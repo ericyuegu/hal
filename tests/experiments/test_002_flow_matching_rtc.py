@@ -20,11 +20,11 @@ import numpy as np
 import pytest
 import torch
 
-from hal.data.stats import FeatureStats
+from hal.data.feature_stats import FeatureStats
 from hal.sim.vec import Slot
 from hal.training.features import ACTION_CHANNELS
 
-_EXP_PATH = Path(__file__).resolve().parent.parent / "experiments" / "002_flow_matching_rtc.py"
+_EXP_PATH = Path(__file__).resolve().parent.parent.parent / "experiments" / "002_flow_matching_rtc.py"
 
 
 def _load_experiment():

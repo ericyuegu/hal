@@ -34,7 +34,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-from hal.data.stats import FeatureStats
+from hal.data.feature_stats import FeatureStats
 from hal.sim.inputs import ControllerInputs
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame

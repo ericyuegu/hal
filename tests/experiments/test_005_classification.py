@@ -1,6 +1,6 @@
 """Correctness contracts for the classification action-chunk policy (experiment 005).
 
-Mirrors ``test_multi_position.py``: the backbone invariants (finite differentiable loss
+Mirrors ``test_003_multi_position.py``: the backbone invariants (finite differentiable loss
 into the backbone, leak-free per-position targets, a strictly causal backbone) must hold
 exactly as in 003 since the backbone is shared; plus the head-specific contracts — the
 decode produces a valid raw action vector for every (button_head × continuous_head ×
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-_EXP_PATH = Path(__file__).resolve().parent.parent / "experiments" / "005_classification.py"
+_EXP_PATH = Path(__file__).resolve().parent.parent.parent / "experiments" / "005_classification.py"
 
 
 def _load_experiment():

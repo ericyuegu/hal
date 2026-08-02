@@ -2,7 +2,7 @@
 chunked execution). Each is a delta of the multi-token experiment whose DEFAULT must reproduce prior 012
 behavior bit-for-bit; these pin the on-behavior and the off-is-unchanged invariant for every one.
 
-012 loads by path (its filename starts with a digit, like ``test_decode`` / ``test_rtc_policy``). Models are
+012 loads by path (its filename starts with a digit, like ``test_decode`` / ``test_002_flow_matching_rtc``). Models are
 tiny and CPU-only; where the decoded group must be controlled the output head is overwritten by a fixed-logit
 stub so no training is needed.
 """
@@ -22,7 +22,7 @@ from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
 
-_EXP_DIR = Path(__file__).resolve().parent.parent / "experiments"
+_EXP_DIR = Path(__file__).resolve().parent.parent.parent / "experiments"
 
 
 def _load_experiment(filename: str):

@@ -24,7 +24,7 @@ from torch.optim import AdamW
 
 from hal import streams
 from hal.training.dataloader import make_loader
-from hal.training.stats import load_consolidated_stats
+from hal.training.ego_stats import load_consolidated_stats
 
 # Load the digit-prefixed experiment file as a module (can't `import 001_...`).
 _EXP = Path(__file__).resolve().parents[1] / "experiments" / "001_flow_matching_baseline.py"

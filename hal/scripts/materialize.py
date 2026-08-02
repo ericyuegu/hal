@@ -47,6 +47,9 @@ from hal.data.archive import ReplayWork
 from hal.data.archive import iter_replay_work
 from hal.data.archive import parse_archive_member_path
 from hal.data.extract import extract_replay
+from hal.data.feature_stats import StatsAccumulator
+from hal.data.feature_stats import dump_sufficient_stats
+from hal.data.feature_stats import float_feature_names
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import Split
 from hal.data.index import Stage3Annotation
@@ -56,9 +59,6 @@ from hal.data.index import write_jsonl
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION
-from hal.data.stats import StatsAccumulator
-from hal.data.stats import dump_sufficient_stats
-from hal.data.stats import float_feature_names
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 

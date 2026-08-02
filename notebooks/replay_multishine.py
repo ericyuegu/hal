@@ -406,7 +406,7 @@ def verify(ckpt_path: Path, *, measure_frames: int = 1800, n_flow_steps: int | N
     exp = _load_exp001()
     import torch
 
-    from hal.training.stats import load_consolidated_stats
+    from hal.training.ego_stats import load_consolidated_stats
 
     state = torch.load(ckpt_path, map_location=exp.DEVICE, weights_only=False)
     cfg = exp.TrainConfig(**state["cfg"])

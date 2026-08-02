@@ -20,8 +20,8 @@ from hal.eval.cross_stage import match_rows
 from hal.eval.cross_stage import paired_vs_cpu_deltas
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
-from hal.eval.scoring import MatchSummary
-from hal.eval.scoring import last_finite_stock
+from hal.eval.match_summary import MatchSummary
+from hal.eval.match_summary import last_finite_stock
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory

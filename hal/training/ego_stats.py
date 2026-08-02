@@ -11,10 +11,10 @@ the result by the bare feature name (``position_x``, ``percent``, …).
 
 from pathlib import Path
 
-from hal.data.stats import FeatureStats
-from hal.data.stats import FeatureStatsSufficient
-from hal.data.stats import load_sufficient_stats
-from hal.data.stats import merge_sufficient
+from hal.data.feature_stats import FeatureStats
+from hal.data.feature_stats import FeatureStatsSufficient
+from hal.data.feature_stats import load_sufficient_stats
+from hal.data.feature_stats import merge_sufficient
 
 
 def consolidate_key(name: str) -> str:

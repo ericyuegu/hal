@@ -31,10 +31,10 @@ from melee.stages import BLASTZONES
 from melee.stages import EDGE_POSITION
 from torch import Tensor
 
-from hal.data.stats import FeatureStats
+from hal.data.feature_stats import FeatureStats
 from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import ControllerInputsValue
-from hal.training.stats import consolidate_key
+from hal.training.ego_stats import consolidate_key
 from hal.wire import BUTTON_BITS
 from hal.wire import mask_value
 

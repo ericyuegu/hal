@@ -4,7 +4,7 @@ Pins the four invariants the multi-position split must hold regardless of traini
 finite differentiable loss, leak-free per-position targets, a strictly causal
 backbone (no target leaks into the hidden it conditions on), and an unchanged
 inference surface that reads only the last position. The experiment is loaded by
-path since its filename starts with a digit (mirrors ``test_rtc_policy.py``).
+path since its filename starts with a digit (mirrors ``test_002_flow_matching_rtc.py``).
 """
 
 import importlib.util
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import torch
 
-_EXP_PATH = Path(__file__).resolve().parent.parent / "experiments" / "003_multi_position.py"
+_EXP_PATH = Path(__file__).resolve().parent.parent.parent / "experiments" / "003_multi_position.py"
 
 
 def _load_experiment():

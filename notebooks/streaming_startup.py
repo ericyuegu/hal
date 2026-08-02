@@ -25,7 +25,7 @@ from loguru import logger
 
 from hal import streams
 from hal.training.dataloader import make_loader
-from hal.training.stats import load_consolidated_stats
+from hal.training.ego_stats import load_consolidated_stats
 
 
 @dataclass(frozen=True)

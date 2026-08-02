@@ -49,8 +49,8 @@ from hal.data.extract import extract_replay
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import collate_train_batch
 from hal.training.dataloader import relabel_ego
+from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import ACTION_CHANNELS
-from hal.training.stats import load_consolidated_stats
 from hal.wire import PLAYER_PREFIXES
 from hal.wire import peppi_port_to_libmelee
 

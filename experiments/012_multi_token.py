@@ -62,7 +62,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
 from hal import streams
-from hal.data.stats import FeatureStats
+from hal.data.feature_stats import FeatureStats
 from hal.eval.cross_stage import sweep_vs_cpu_prior
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.harness import default_session_cfg
@@ -73,6 +73,7 @@ from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import VAL_L_CHUNK
 from hal.training.dataloader import make_loader
+from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import CAT_FEATURES
@@ -84,7 +85,6 @@ from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
-from hal.training.stats import load_consolidated_stats
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)

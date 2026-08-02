@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 import torch
 
-from hal.data.stats import FeatureStats
+from hal.data.feature_stats import FeatureStats
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.closed_loop import RecedingHorizon
@@ -38,7 +38,7 @@ from hal.training.features import SPATIAL_FEATURES
 from hal.training.features import derive_spatial
 from hal.training.features import preprocess
 
-_EXP_DIR = Path(__file__).resolve().parent.parent / "experiments"
+_EXP_DIR = Path(__file__).resolve().parent.parent.parent / "experiments"
 
 STAGE = melee.Stage.FINAL_DESTINATION
 EGO_PORT, OPP_PORT = 1, 2

@@ -19,8 +19,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 from torch.utils.data import get_worker_info
 
+from hal.data.feature_stats import FeatureStats
 from hal.data.schema import check_schema_version
-from hal.data.stats import FeatureStats
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import preprocess

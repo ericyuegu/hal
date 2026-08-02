@@ -1,6 +1,6 @@
 """Correctness contracts for the factorized autoregressive action-chunk policy (experiment 007).
 
-Mirrors ``test_classification.py``: the shared backbone invariants (finite differentiable loss,
+Mirrors ``test_005_classification.py``: the shared backbone invariants (finite differentiable loss,
 leak-free per-position targets, a strictly causal backbone) must hold exactly as in 005 since the
 backbone is copied verbatim; plus the head-specific AR contracts unique to 007 —
 
@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import torch
 
-_EXP_PATH = Path(__file__).resolve().parent.parent / "experiments" / "007_factorized_ar.py"
+_EXP_PATH = Path(__file__).resolve().parent.parent.parent / "experiments" / "007_factorized_ar.py"
 
 
 def _load_experiment():

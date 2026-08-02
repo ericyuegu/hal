@@ -39,9 +39,9 @@ import numpy as np
 
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import run_matches_vec
+from hal.eval.match_summary import MatchSummary
+from hal.eval.match_summary import summarize_trajectory
 from hal.eval.matchups import matchups_for_vs_cpu
-from hal.eval.scoring import MatchSummary
-from hal.eval.scoring import summarize_trajectory
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory
