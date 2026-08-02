@@ -10,6 +10,7 @@ controller representation and the peppi → MDS → libmelee → Dolphin data fl
 """
 
 from collections.abc import Sequence
+from typing import Any
 from typing import Final
 
 import melee
@@ -225,13 +226,43 @@ CHARACTERS_BY_NAME: Final[dict[str, int]] = {c.name: int(c.value) for c in _SLP_
 # Post-frame field naming
 # ---------------------------------------------------------------------------
 
+# Components of the post-frame ``velocities`` block. ``self_x_air`` and
+# ``self_x_ground`` are separate engine slots (which one is live is selected by
+# ``airborne``); knockback is carried separately from self-velocity and the two
+# are summed to get the frame's actual displacement.
+VELOCITY_COMPONENTS: Final[tuple[str, ...]] = (
+    "self_x_air",
+    "self_x_ground",
+    "self_y",
+    "knockback_x",
+    "knockback_y",
+)
+
+# ``state_flags`` is a 5-byte raw bitfield on the action state. Stored undecoded
+# (one int column per byte); the per-bit meanings are a decode layer we leave to
+# consumers rather than baking a second, drift-prone vocabulary in here.
+N_STATE_FLAG_BYTES: Final[int] = 5
+
+# Accessor paths for the post suffixes that are NOT a bare same-named field of
+# the post block. Each path is valid against BOTH peppi's ``Post`` (attribute,
+# then index into a tuple-of-arrays) and libmelee's canonical post dict (key,
+# then tuple index), so one declaration drives the offline and online readers.
+_POST_FIELD_PATHS: Final[dict[str, tuple[str | int, ...]]] = {
+    "position_x": ("position", "x"),
+    "position_y": ("position", "y"),
+    **{f"velocities_{c}": ("velocities", c) for c in VELOCITY_COMPONENTS},
+    **{f"state_flags_{i}": ("state_flags", i) for i in range(N_STATE_FLAG_BYTES)},
+    # The engine's live, transform-aware character (already the libmelee
+    # INTERNAL id — no conversion). Renamed because the MDS already spends
+    # ``p{1,2}_character`` on the per-replay character-SELECT pick.
+    "character_live": ("character",),
+}
+
 # MDS column suffixes for the per-frame post block. Names match peppi-py's
-# (renamed) ``Post`` dataclass and libmelee's canonical ``Post`` 1:1, so a
-# single suffix is all that's needed to address both.
-#
-# Special case that consumers handle at call sites (not encoded in this list):
-#   - ``position_x`` / ``position_y``: peppi nests them under
-#     ``post.position.{x,y}``.
+# (renamed) ``Post`` dataclass and libmelee's canonical ``Post`` 1:1 except for
+# the entries in ``_POST_FIELD_PATHS`` (nested blocks, the indexed state-flag
+# bytes, the renamed live character), so a single suffix addresses both sides
+# via ``post_field_path``.
 POST_FIELD_SUFFIXES: Final[tuple[str, ...]] = (
     "position_x",
     "position_y",
@@ -244,21 +275,124 @@ POST_FIELD_SUFFIXES: Final[tuple[str, ...]] = (
     "jumps_used",
     "airborne",
     "hurtbox_state",
+    "character_live",
+    "state_age",
+    "misc_as",
+    "l_cancel",
+    "ground",
+    *(f"state_flags_{i}" for i in range(N_STATE_FLAG_BYTES)),
+    *(f"velocities_{c}" for c in VELOCITY_COMPONENTS),
 )
+
+
+def post_field_path(suffix: str) -> tuple[str | int, ...]:
+    """Accessor path for one ``POST_FIELD_SUFFIXES`` entry.
+
+    Walk it with ``getattr``/index against peppi's SoA ``Post`` or with
+    key/index against libmelee's canonical post dict — the path is the same
+    either way, which is what keeps ``extract``, ``Trajectory`` and the
+    closed-loop observation reading identical fields.
+    """
+    return _POST_FIELD_PATHS.get(suffix, (suffix,))
 
 
 def canonical_post_field(post: dict, suffix: str) -> float:
     """Read one ``POST_FIELD_SUFFIXES`` value from a libmelee canonical post dict
-    (the shape ``Session.step`` yields). ``position_{x,y}`` are nested under
-    ``post['position']``; a field absent on this slp/build comes back as
+    (the shape ``Session.step`` yields). A field absent on this slp/build — or
+    nested under a block this slp version never recorded — comes back as
     ``MASK_FLOAT`` (NaN), the same mask convention ``Trajectory.from_slp`` uses.
 
     Shared by ``sim.trajectory.from_capture`` and
     ``training.canonical.flatten_canonical_frame`` so the two never drift.
     """
-    if suffix == "position_x":
-        return float(post["position"]["x"])
-    if suffix == "position_y":
-        return float(post["position"]["y"])
-    value = post.get(suffix)
-    return float(value) if value is not None else MASK_FLOAT
+    value: Any = post
+    for step in post_field_path(suffix):
+        value = value.get(step) if isinstance(value, dict) else value[step]
+        if value is None:
+            return MASK_FLOAT
+    return float(value)
+
+
+# ---------------------------------------------------------------------------
+# Items / projectiles
+# ---------------------------------------------------------------------------
+
+# Item slots stored per frame. Melee tracks up to 15 live items; 4 covers the
+# 1v1 projectile load (lasers, needles, turnips, bombs, arrows) at a bounded
+# column cost. Absent slots carry the dtype mask sentinel.
+ITEM_SLOTS: Final[int] = 4
+
+# Accessor paths for one item's stored fields, valid against BOTH peppi's SoA
+# ``Item`` and libmelee's canonical item dict — same contract as
+# ``_POST_FIELD_PATHS``. Ordering of this dict is the column order.
+ITEM_FIELD_PATHS: Final[dict[str, tuple[str, ...]]] = {
+    "type": ("type",),
+    "state": ("state",),
+    "pos_x": ("position", "x"),
+    "pos_y": ("position", "y"),
+    "vel_x": ("velocity", "x"),
+    "vel_y": ("velocity", "y"),
+    "owner": ("owner",),
+}
+ITEM_FIELD_SUFFIXES: Final[tuple[str, ...]] = tuple(ITEM_FIELD_PATHS)
+
+# Slot assignment is by ASCENDING SPAWN ID (``Item.id``, the engine's
+# monotonically increasing spawn counter). That makes the slot ordering
+# deterministic, identical for the offline (peppi) and online (libmelee)
+# readers, and stable frame-to-frame: an item keeps its slot until an OLDER
+# item despawns. Overflow past ``ITEM_SLOTS`` drops the newest items.
+ITEM_SPAWN_ID_FIELD: Final[str] = "id"
+
+# The slp records -1 as the owner of an unowned item (most stage/neutral items).
+ITEM_OWNER_NONE: Final[int] = -1
+
+
+def item_column(slot: int, suffix: str) -> str:
+    """MDS column name for one item slot's field. Items are global state, not
+    per-player, so they carry no ``p{1,2}`` prefix."""
+    return f"item{slot}_{suffix}"
+
+
+def item_owner_to_libmelee_port(owner: int) -> int:
+    """slp item owner -> libmelee port (1..4); ``ITEM_OWNER_NONE`` passes through.
+
+    The raw slp value is a peppi 0..3 port, while every other port the MDS and
+    index store is already libmelee 1..4. Normalizing here keeps ``owner``
+    directly comparable to the ports p1/p2 were assigned from.
+    """
+    if owner == ITEM_OWNER_NONE:
+        return ITEM_OWNER_NONE
+    if not 0 <= owner < len(VALID_LIBMELEE_PORTS):
+        raise ValueError(f"item owner {owner} is neither {ITEM_OWNER_NONE} (unowned) nor a peppi port 0..3")
+    return peppi_port_to_libmelee(owner)
+
+
+def canonical_item_field(item: dict, suffix: str) -> float:
+    """Read one ``ITEM_FIELD_SUFFIXES`` value from a libmelee canonical item dict.
+    Absent on this slp/build -> ``MASK_FLOAT``, matching ``canonical_post_field``."""
+    value: Any = item
+    for step in ITEM_FIELD_PATHS[suffix]:
+        value = value.get(step) if isinstance(value, dict) else value[step]
+        if value is None:
+            return MASK_FLOAT
+    if suffix == "owner":
+        return float(item_owner_to_libmelee_port(int(value)))
+    return float(value)
+
+
+def canonical_item_columns(items: Sequence[dict] | None) -> dict[str, float]:
+    """Flat ``item{k}_*`` columns for one frame of a libmelee canonical frame's
+    ``items`` list, ordered by ascending spawn id (see ``ITEM_SPAWN_ID_FIELD``).
+
+    Every slot is emitted every frame: slots past the live-item count — and all
+    of them when the slp/build predates item events (``items is None``) — carry
+    ``MASK_FLOAT``, so the online column set matches the MDS unconditionally.
+    """
+    out = {item_column(slot, s): MASK_FLOAT for slot in range(ITEM_SLOTS) for s in ITEM_FIELD_SUFFIXES}
+    if not items:
+        return out
+    live = sorted(items, key=lambda it: it[ITEM_SPAWN_ID_FIELD])[:ITEM_SLOTS]
+    for slot, item in enumerate(live):
+        for suffix in ITEM_FIELD_SUFFIXES:
+            out[item_column(slot, suffix)] = canonical_item_field(item, suffix)
+    return out

@@ -6,9 +6,10 @@ without caring which side came from where. We keep only post-frame data here
 ``MdsControllerSource`` and are not duplicated.
 
 Layout: ``post[libmelee_port][field]`` is a 1D ndarray of length N. Field
-names are the MDS column suffixes from ``hal.wire.POST_FIELD_SUFFIXES``, which
-match peppi-py's (renamed) ``Post`` and libmelee's canonical ``Post`` 1:1, so
-no translation layer is needed between the three input paths.
+names are the MDS column suffixes from ``hal.wire.POST_FIELD_SUFFIXES``, and
+``hal.wire.post_field_path`` resolves each against peppi-py's ``Post`` and
+libmelee's canonical ``Post`` alike, so no translation layer is needed between
+the three input paths.
 """
 
 import tempfile
@@ -25,6 +26,7 @@ from hal.data.archive import read_archive_member_to_file
 from hal.wire import POST_FIELD_SUFFIXES
 from hal.wire import canonical_post_field
 from hal.wire import peppi_port_to_libmelee
+from hal.wire import post_field_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,17 +148,16 @@ class Trajectory:
 def _peppi_post_field(post: Post, field: str, n: int) -> np.ndarray:
     """Pull one named post-field out of peppi's nested SoA.
 
-    Position lives under ``post.position.{x,y}`` rather than as flat fields,
-    so we special-case it. Optional fields that are entirely absent on this
-    slp version are filled with NaN, matching MDS's mask convention for
-    float columns (hal/data/extract._mask_value). ``diff`` then compares
+    Nested blocks (``post.position.{x,y}``, ``post.velocities.*``) and the
+    indexed ``state_flags`` bytes are addressed through
+    ``wire.post_field_path``, the same path the closed-loop reader walks.
+    Optional fields entirely absent on this slp version are filled with NaN,
+    matching MDS's mask convention for float columns. ``diff`` then compares
     with ``equal_nan=True`` so masked-on-both-sides reads as equal.
     """
-    if field == "position_x":
-        return np.asarray(post.position.x)
-    if field == "position_y":
-        return np.asarray(post.position.y)
-    raw = getattr(post, field, None)
-    if raw is None:
-        return np.full(n, np.nan, dtype=np.float32)
+    raw: object = post
+    for step in post_field_path(field):
+        raw = getattr(raw, step, None) if isinstance(step, str) else raw[step]
+        if raw is None:
+            return np.full(n, np.nan, dtype=np.float32)
     return np.asarray(raw)

@@ -110,6 +110,7 @@ def test_unknown_stage_raises() -> None:
 
 def _canonical_post(**overrides: object) -> dict:
     post = {
+        "character": 22,
         "position": {"x": 1.5, "y": -2.5},
         "percent": 12.0,
         "shield": 60.0,
@@ -120,6 +121,18 @@ def _canonical_post(**overrides: object) -> dict:
         "airborne": 1,
         "hurtbox_state": 0,
         "hitlag_left": 0.0,
+        "state_age": 8.0,
+        "state_flags": (0, 1, 2, 3, 4),
+        "misc_as": 5.0,
+        "l_cancel": 1,
+        "ground": 7,
+        "velocities": {
+            "self_x_air": 1.0,
+            "self_x_ground": 2.0,
+            "self_y": 3.0,
+            "knockback_x": 4.0,
+            "knockback_y": 5.0,
+        },
     }
     post.update(overrides)
     return post
@@ -129,6 +142,39 @@ def test_canonical_post_field_nests_position() -> None:
     post = _canonical_post()
     assert wire.canonical_post_field(post, "position_x") == 1.5
     assert wire.canonical_post_field(post, "position_y") == -2.5
+
+
+def test_canonical_post_field_nests_velocities() -> None:
+    """The velocities block is nested exactly like position — one suffix has to
+    address peppi's ``post.velocities.self_y`` and libmelee's dict alike."""
+    post = _canonical_post()
+    for component, expected in (("self_x_air", 1.0), ("self_x_ground", 2.0), ("self_y", 3.0)):
+        assert wire.canonical_post_field(post, f"velocities_{component}") == expected
+
+
+def test_canonical_post_field_indexes_state_flags() -> None:
+    """state_flags is a 5-byte tuple; each byte is its own suffix/column, stored raw."""
+    post = _canonical_post()
+    read = [wire.canonical_post_field(post, f"state_flags_{i}") for i in range(wire.N_STATE_FLAG_BYTES)]
+    assert read == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_canonical_post_field_character_live_reads_post_character() -> None:
+    """``character_live`` is the post block's own (live, transform-aware) character.
+    It is renamed only because the MDS spends ``p{1,2}_character`` on the per-replay
+    character-SELECT pick, which the post block does not carry."""
+    assert wire.canonical_post_field(_canonical_post(character=19), "character_live") == 19.0
+    assert wire.post_field_path("character_live") == ("character",)
+
+
+def test_canonical_post_field_absent_nested_block_masks_every_component() -> None:
+    """slp < 3.5 has no velocities block at all; every component must mask rather
+    than raise or read a neighbouring field."""
+    import numpy as np
+
+    post = _canonical_post()
+    del post["velocities"]
+    assert all(np.isnan(wire.canonical_post_field(post, f"velocities_{c}")) for c in wire.VELOCITY_COMPONENTS)
 
 
 def test_canonical_post_field_absent_optional_is_nan() -> None:
@@ -146,6 +192,87 @@ def test_canonical_post_field_preserves_genuine_zero() -> None:
 def test_canonical_post_field_covers_every_post_suffix() -> None:
     """Every POST_FIELD_SUFFIXES entry is resolvable from a full canonical post —
     so from_capture and flatten_canonical_frame can both just loop the tuple."""
+    import numpy as np
+
     post = _canonical_post()
     for suffix in wire.POST_FIELD_SUFFIXES:
-        wire.canonical_post_field(post, suffix)  # must not raise
+        value = wire.canonical_post_field(post, suffix)
+        assert not np.isnan(value), f"{suffix} masked on a fully-populated post block"
+
+
+# --- items: shared spawn-id slot ordering between the offline and online readers ---
+
+
+def _canonical_item(spawn_id: int, **overrides: object) -> dict:
+    item = {
+        "type": 55,
+        "state": 0,
+        "direction": -1.0,
+        "velocity": {"x": -5.0, "y": 0.0},
+        "position": {"x": 10.0, "y": 20.0},
+        "damage": 0,
+        "timer": 83.0,
+        "id": spawn_id,
+        "misc": (0, 0, 0, 0),
+        "owner": 0,
+        "instance_id": None,
+    }
+    item.update(overrides)
+    return item
+
+
+def test_canonical_item_columns_orders_slots_by_ascending_spawn_id() -> None:
+    """Slot order is the spawn-id order, NOT the order libmelee happened to
+    append the items — that's what makes the columns comparable frame to frame
+    and identical to what the offline extractor writes."""
+    items = [_canonical_item(9, type=1), _canonical_item(4, type=2), _canonical_item(7, type=3)]
+    cols = wire.canonical_item_columns(items)
+    assert [cols[wire.item_column(k, "type")] for k in range(3)] == [2.0, 3.0, 1.0]
+
+
+def test_canonical_item_columns_masks_unfilled_slots() -> None:
+    import numpy as np
+
+    cols = wire.canonical_item_columns([_canonical_item(1)])
+    assert not np.isnan(cols[wire.item_column(0, "pos_x")])
+    for slot in range(1, wire.ITEM_SLOTS):
+        assert all(np.isnan(cols[wire.item_column(slot, s)]) for s in wire.ITEM_FIELD_SUFFIXES)
+
+
+def test_canonical_item_columns_no_items_is_all_masked() -> None:
+    """``items is None`` (slp/build predates item events) and an empty list both
+    emit the full column set, fully masked — the online obs shape never varies."""
+    import numpy as np
+
+    for items in (None, []):
+        cols = wire.canonical_item_columns(items)
+        assert set(cols) == {wire.item_column(k, s) for k in range(wire.ITEM_SLOTS) for s in wire.ITEM_FIELD_SUFFIXES}
+        assert all(np.isnan(v) for v in cols.values())
+
+
+def test_canonical_item_columns_overflow_drops_newest() -> None:
+    """More live items than slots: the oldest ITEM_SLOTS survive, so an item's
+    slot only moves when an OLDER item despawns."""
+    items = [_canonical_item(spawn_id, type=spawn_id) for spawn_id in range(wire.ITEM_SLOTS + 3)]
+    cols = wire.canonical_item_columns(items)
+    assert [cols[wire.item_column(k, "type")] for k in range(wire.ITEM_SLOTS)] == [
+        float(k) for k in range(wire.ITEM_SLOTS)
+    ]
+
+
+def test_canonical_item_owner_is_normalized_to_libmelee_port() -> None:
+    """slp records the owner as a peppi 0..3 port; the stored value is the
+    libmelee 1..4 port every other port in the MDS/index uses."""
+    cols = wire.canonical_item_columns([_canonical_item(1, owner=0)])
+    assert cols[wire.item_column(0, "owner")] == 1.0
+    assert wire.item_owner_to_libmelee_port(3) == 4
+
+
+def test_unowned_item_owner_passes_through() -> None:
+    cols = wire.canonical_item_columns([_canonical_item(1, owner=wire.ITEM_OWNER_NONE)])
+    assert cols[wire.item_column(0, "owner")] == float(wire.ITEM_OWNER_NONE)
+
+
+def test_item_owner_rejects_out_of_range_port() -> None:
+    with pytest.raises(ValueError, match="item owner"):
+        wire.item_owner_to_libmelee_port(4)

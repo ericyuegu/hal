@@ -7,6 +7,7 @@ from hal.sim.trajectory import Trajectory
 
 def _post(**overrides: object) -> dict:
     post = {
+        "character": 1,
         "position": {"x": 1.0, "y": 2.0},
         "percent": 0.0,
         "shield": 60.0,
@@ -17,6 +18,18 @@ def _post(**overrides: object) -> dict:
         "airborne": 0,
         "hurtbox_state": 0,
         "hitlag_left": 0.0,
+        "state_age": 3.0,
+        "state_flags": (0, 0, 0, 0, 0),
+        "misc_as": 0.0,
+        "l_cancel": 0,
+        "ground": 7,
+        "velocities": {
+            "self_x_air": 0.0,
+            "self_x_ground": 0.0,
+            "self_y": 0.0,
+            "knockback_x": 0.0,
+            "knockback_y": 0.0,
+        },
     }
     post.update(overrides)
     return post
@@ -27,6 +40,7 @@ def _frame(i: int, ports_post: dict[int, dict]) -> dict:
         "id": i,
         "start": {"random_seed": 0},
         "ports": {p: {"leader": {"post": post}} for p, post in ports_post.items()},
+        "items": [],
     }
 
 
@@ -68,6 +82,20 @@ def test_flatten_leader_matches_capture_post_fields() -> None:
     assert capture_fields == set(POST_FIELD_SUFFIXES) == leader
     assert nana == set(POST_FIELD_SUFFIXES)
     assert all(np.isnan(flat[f"p1_nana_{s}"]) for s in POST_FIELD_SUFFIXES)
+
+
+def test_flatten_emits_the_global_item_block() -> None:
+    """Items are global (unprefixed) columns and every slot is emitted every frame,
+    masked when empty — so the closed-loop obs column set matches the MDS exactly."""
+    from hal.training.canonical import flatten_canonical_frame
+    from hal.wire import ITEM_FIELD_SUFFIXES
+    from hal.wire import ITEM_SLOTS
+    from hal.wire import item_column
+
+    flat = flatten_canonical_frame(_frame(-123, {1: _post()}))
+    for slot in range(ITEM_SLOTS):
+        for suffix in ITEM_FIELD_SUFFIXES:
+            assert np.isnan(flat[item_column(slot, suffix)])
 
 
 def test_flatten_emits_real_nana_when_follower_present() -> None:
