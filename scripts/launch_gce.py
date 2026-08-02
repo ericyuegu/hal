@@ -21,11 +21,12 @@ Launch examples::
         uv run experiments/001_flow_matching_baseline.py --cfg.max-steps 100000
 
 The startup log is available with ``gcloud compute instances get-serial-port-output``.
-On completion the VM shuts down, stopping compute charges but retaining its boot
-disk for inspection. Delete the instance when it is no longer needed.
+On completion the VM shuts down, stopping compute charges. With ``--no-spot`` the
+boot disk is retained for inspection and the instance must be deleted manually; the
+default Spot VM sets ``--instance-termination-action=DELETE``, so its disk (and any
+Local SSD dataset cache) goes away with it. Checkpoints stream to R2 throughout, so
+a deleted or preempted run is still resumable with ``--resume``.
 """
-
-from __future__ import annotations
 
 import base64
 import re
@@ -53,6 +54,12 @@ DEFAULT_SECRETS = (
 )
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESOURCE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+# Accelerator-optimized families carry their GPUs as part of the machine type; the API
+# rejects a --accelerator flag on them. Everything else (n1-*) must name one explicitly.
+_GPU_BUNDLED_FAMILIES = ("a2-", "a3-", "a4-", "g2-", "g4-")
+# One Local SSD device is always 375GB on GCE; capacity scales by attaching more, and
+# accelerator-optimized machine types fix how many they accept.
+LOCAL_SSD_GB = 375
 
 
 def _run_gcloud(*args: str, capture: bool = True) -> str:
@@ -81,10 +88,20 @@ def parse_secrets(specs: list[str] | tuple[str, ...]) -> list[tuple[str, str]]:
 
 
 def startup_script(
-    *, sha: str, train_cmd: str, project: str, secrets: list[tuple[str, str]], image: str, keep_alive: bool
+    *,
+    sha: str,
+    train_cmd: str,
+    project: str,
+    secrets: list[tuple[str, str]],
+    image: str,
+    keep_alive: bool,
+    local_ssd_count: int,
 ) -> str:
     """Render the metadata startup script. It contains secret names, never values."""
-    secret_specs = "\n".join(f"{env_name}={secret_id}" for env_name, secret_id in secrets)
+    # Every spec line is newline-*terminated*, not newline-separated: the boot script reads
+    # them with `while read`, which returns non-zero on a final unterminated line and so
+    # silently skips it — that dropped the last secret (WANDB_API_KEY) on every launch.
+    secret_specs = "".join(f"{env_name}={secret_id}\n" for env_name, secret_id in secrets)
     values = {
         "HAL_GIT_SHA": sha,
         "HAL_TRAIN_CMD_B64": base64.b64encode(train_cmd.encode()).decode(),
@@ -92,9 +109,22 @@ def startup_script(
         "HAL_SECRET_SPECS_B64": base64.b64encode(secret_specs.encode()).decode(),
         "HAL_IMAGE": image,
         "HAL_KEEP_ALIVE": "1" if keep_alive else "0",
+        "HAL_LOCAL_SSD_COUNT": str(local_ssd_count),
     }
     exports = "\n".join(f"export {name}={shlex.quote(value)}" for name, value in values.items())
     return f"#!/usr/bin/env bash\n{exports}\n\n{STARTUP_PATH.read_text()}"
+
+
+def validate_shape(machine_type: str, accelerator: str) -> None:
+    """Reject the two accelerator/machine-type combinations the API refuses."""
+    bundled = machine_type.startswith(_GPU_BUNDLED_FAMILIES)
+    if bundled and accelerator:
+        raise SystemExit(
+            f"{machine_type} attaches its GPUs as part of the machine type; "
+            f"pass --accelerator '' instead of {accelerator!r}."
+        )
+    if not bundled and not accelerator:
+        raise SystemExit(f"{machine_type} does not bundle GPUs; name one with --accelerator (e.g. nvidia-tesla-t4).")
 
 
 def create_command(args: Args, *, project: str, name: str, startup_file: str) -> list[str]:
@@ -107,7 +137,6 @@ def create_command(args: Args, *, project: str, name: str, startup_file: str) ->
         f"--project={project}",
         f"--zone={args.zone}",
         f"--machine-type={args.machine_type}",
-        f"--accelerator=type={args.accelerator},count={args.gpu_count}",
         "--maintenance-policy=TERMINATE",
         "--no-restart-on-failure",
         f"--image-family={args.image_family}",
@@ -119,6 +148,9 @@ def create_command(args: Args, *, project: str, name: str, startup_file: str) ->
         "--labels=app=hal,workload=training",
         "--quiet",
     ]
+    if args.accelerator:
+        command.append(f"--accelerator=type={args.accelerator},count={args.gpu_count}")
+    command.extend("--local-ssd=interface=NVME" for _ in range(args.local_ssd_count))
     if args.service_account:
         command.append(f"--service-account={args.service_account}")
     if args.spot:
@@ -167,14 +199,25 @@ class Args:
     """Compute zone. GPU models and quota are zone-specific."""
     name: str | None = None
     """Instance name. Defaults to hal-<UTC timestamp>-<git SHA>."""
-    machine_type: str = "n1-standard-8"
-    """Machine type hosting the attached GPU."""
-    accelerator: str = "nvidia-tesla-t4"
-    """GCE accelerator type, for example nvidia-tesla-t4 or nvidia-tesla-a100."""
+    machine_type: str = "g2-standard-32"
+    """Machine type. Its vCPU count feeds the dataloader, which is what bounds throughput."""
+    accelerator: str = ""
+    """GPU type for families that need one named (n1-*). Empty for a2/a3/a4/g2/g4, which bundle theirs.
+
+    The CUDA-13 image has no sm_70, so Volta (nvidia-tesla-v100) cannot run it, and Turing
+    (nvidia-tesla-t4) has no bfloat16 for the default --cfg.amp-dtype."""
     gpu_count: int = 1
-    """Number of GPUs."""
-    disk: int = 500
-    """Boot disk size in GB; retained when a normally completed VM shuts down."""
+    """Number of GPUs. Ignored for the GPU-bundled families, whose count is part of the machine type."""
+    local_ssd_count: int = 1
+    """375GB NVMe Local SSDs, striped and mounted for the dataset cache.
+
+    The 351GiB train split is read once per shuffled epoch, so page cache does not help and
+    the read path needs ~315MB/s to sustain 400 samples/s — past what a persistent disk of
+    this size delivers. Accelerator-optimized machine types fix how many devices they accept.
+    Contents are ephemeral by design: the cache re-streams from R2."""
+    disk: int = 150
+    """Boot disk size in GB. Holds the OS, the container image, and runs/ — the dataset lives
+    on Local SSD. Retained when a --no-spot VM shuts down."""
     disk_type: str = "pd-balanced"
     """Boot disk type."""
     image_family: str = "common-cu129-ubuntu-2404-nvidia-580"
@@ -198,6 +241,7 @@ class Args:
 def main(args: Args) -> None:
     if not args.cmd:
         raise SystemExit("pass a training command after `--` (use --dry-run to validate without creating a VM).")
+    validate_shape(args.machine_type, args.accelerator)
     try:
         secrets = parse_secrets(args.secret)
     except ValueError as exc:
@@ -206,7 +250,13 @@ def main(args: Args) -> None:
     train_cmd = shlex.join(args.cmd)
     name = args.name or f"hal-{datetime.now(UTC):%Y%m%d-%H%M%S}-{sha[:7]}"
     rendered = startup_script(
-        sha=sha, train_cmd=train_cmd, project=project, secrets=secrets, image=args.image, keep_alive=args.keep_alive
+        sha=sha,
+        train_cmd=train_cmd,
+        project=project,
+        secrets=secrets,
+        image=args.image,
+        keep_alive=args.keep_alive,
+        local_ssd_count=args.local_ssd_count,
     )
 
     # gcloud requires a file for a multiline startup script. The file only contains
@@ -226,11 +276,16 @@ def main(args: Args) -> None:
             return
         subprocess.run(command, check=True)
 
-    logger.success(f"created {name} in {args.zone} on SHA {sha[:10]}")
+    logger.success(
+        f"created {name} in {args.zone} on SHA {sha[:10]} "
+        f"({args.machine_type}, {args.local_ssd_count * LOCAL_SSD_GB}GB Local SSD cache)"
+    )
     logger.info(f"logs: gcloud compute instances get-serial-port-output {name} --zone={args.zone} --project={project}")
     logger.info(f"ssh:  gcloud compute ssh {name} --zone={args.zone} --project={project}")
     if args.keep_alive:
         logger.warning("--keep-alive is set: the VM will continue billing until stopped or deleted manually.")
+    elif args.spot:
+        logger.info("the VM shuts down after training; Spot termination-action=DELETE removes it and its disks.")
     else:
         logger.info(
             f"the VM shuts down after training; delete its retained disk with: "
