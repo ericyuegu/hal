@@ -47,7 +47,12 @@ log "loaded ${loaded} secrets"
 # than falling back to the boot disk, which would silently train at a third of the throughput.
 mapfile -t ssd_devices < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
 if [ "${#ssd_devices[@]}" -ne "$HAL_LOCAL_SSD_COUNT" ]; then
+  # Dump what the box actually exposes. The google-* symlinks come from guest-agent udev
+  # rules, so a naming surprise should be answerable from this log alone rather than
+  # costing another boot.
   log "FATAL: expected ${HAL_LOCAL_SSD_COUNT} Local SSD(s), found ${#ssd_devices[@]}"
+  log "--- /dev/disk/by-id ---"; ls -l /dev/disk/by-id/ 2>&1 || true
+  log "--- lsblk ---"; lsblk 2>&1 || true
   false
 fi
 if [ "$HAL_LOCAL_SSD_COUNT" -gt 1 ]; then
@@ -132,6 +137,10 @@ run_flags=(--rm)
 if [ "${HAL_KEEP_ALIVE:-0}" = "1" ]; then
   run_flags=()
 fi
+
+# A startup script re-runs on every boot, so a kept container from a previous boot would
+# collide on --name. Clear it rather than failing the whole run.
+docker rm -f hal-train >/dev/null 2>&1 || true
 
 set +e
 docker run "${run_flags[@]}" --name hal-train --gpus all --ipc=host \
