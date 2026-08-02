@@ -8,16 +8,22 @@ buffer using the same column schema it trained on.
 
 Mirrors the per-frame extraction in :func:`hal.sim.trajectory.from_capture`;
 both pull each field through ``wire.canonical_post_field`` over the shared
-``wire.POST_FIELD_SUFFIXES``, so the two can never drift apart.
+``wire.POST_FIELD_SUFFIXES``, so the two can never drift apart. The global item
+slots come from ``wire.canonical_item_columns``, which applies the same
+spawn-id ordering the offline extractor does.
 """
 
 from hal.wire import MASK_FLOAT
 from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import canonical_item_columns
 from hal.wire import canonical_post_field
 
 
 def flatten_canonical_frame(frame: dict) -> dict[str, float]:
-    out: dict[str, float] = {}
+    # Global item (projectile) slots, ordered by ascending spawn id — the same
+    # rule extract applies to peppi's items, so the K slots line up frame for
+    # frame with the MDS columns (SCHEMA_VERSION 6).
+    out: dict[str, float] = canonical_item_columns(frame.get("items"))
     for libmelee_port, prefix in ((1, "p1"), (2, "p2")):
         pd = frame["ports"].get(libmelee_port)
         if pd is None:

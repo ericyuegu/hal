@@ -11,7 +11,9 @@ countdown frames (``frame_id < wire.GAME_START_FRAME``) are dropped.
 Values are stored game-causal: slp-logical sticks as-is, per-shoulder triggers
 with sub-deadzone jitter zeroed (``wire.TRIGGER_DEADZONE``), buttons unpacked
 from the physical bitmask. Slp-version-unavailable fields get dtype-specific
-mask sentinels. See CLAUDE.md (Controller data model).
+mask sentinels. Items (projectiles) are global, not per-player: the K lowest
+spawn ids alive on a frame fill the ``item{k}_*`` slots, the rest are masked.
+See CLAUDE.md (Controller data model, Per-frame schema).
 """
 
 from collections.abc import Sequence
@@ -22,18 +24,26 @@ import peppi_py
 from loguru import logger
 from numpy.typing import DTypeLike
 from peppi_py.frame import Data
+from peppi_py.frame import Frame
+from peppi_py.frame import Item
 from peppi_py.frame import Post
 from peppi_py.game import Game
 
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.wire import BUTTON_BITS
 from hal.wire import GAME_START_FRAME
+from hal.wire import ITEM_FIELD_PATHS
+from hal.wire import ITEM_FIELD_SUFFIXES
+from hal.wire import ITEM_SLOTS
 from hal.wire import PLAYER_PREFIXES
 from hal.wire import POST_FIELD_SUFFIXES
 from hal.wire import TRIGGER_DEADZONE
 from hal.wire import dedupe_keep_idx
+from hal.wire import item_column
+from hal.wire import item_owner_to_libmelee_port
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
+from hal.wire import post_field_path
 from hal.wire import slp_character_to_libmelee
 from hal.wire import slp_stage_to_libmelee
 
@@ -58,10 +68,13 @@ def _list_to_np(values: Sequence[Any] | None, dtype: DTypeLike, length: int) -> 
     return np.array([v if v is not None else mask for v in values], dtype=dtype)
 
 
-def _resolve(obj: Any, dotted: str) -> Any:
+def _walk(obj: Any, path: Sequence[str | int]) -> Any:
+    """Follow a ``wire`` accessor path into peppi's SoA (attribute for a named
+    step, index for a positional one). ``None`` anywhere means this slp version
+    never recorded the block, so the whole column is masked."""
     cur: Any = obj
-    for part in dotted.split("."):
-        cur = getattr(cur, part)
+    for step in path:
+        cur = getattr(cur, step) if isinstance(step, str) else cur[step]
         if cur is None:
             return None
     return cur
@@ -76,13 +89,78 @@ def _gamestate_arrays(post: Post, key_prefix: str, keep_idx: np.ndarray, length:
     for suffix in POST_FIELD_SUFFIXES:
         col = f"{key_prefix}_{suffix}"
         dtype = MDS_PER_FRAME_DTYPES[col]
-        if suffix in ("position_x", "position_y"):
-            # peppi nests these as post.position.x / post.position.y
-            value = _resolve(post, f"position.{suffix[-1]}")
-        else:
-            value = getattr(post, suffix)
-        out[col] = _arr_to_np(value, dtype, length)[keep_idx]
+        out[col] = _arr_to_np(_walk(post, post_field_path(suffix)), dtype, length)[keep_idx]
     return out
+
+
+def _item_dtype(suffix: str) -> DTypeLike:
+    """Storage dtype for one item field — identical across the slots."""
+    return MDS_PER_FRAME_DTYPES[item_column(0, suffix)]
+
+
+def _item_arrays(frames: Frame, keep_idx: np.ndarray) -> dict[str, np.ndarray]:
+    """Global ``item{k}_*`` columns, already indexed to the kept rows.
+
+    peppi stores items as one flat SoA plus ``item_offset``, an Arrow-style
+    offsets array where frame ``i``'s items are ``[offset[i], offset[i+1])``.
+    Slot assignment is by ascending spawn id (``wire.ITEM_SPAWN_ID_FIELD``) so
+    it matches ``wire.canonical_item_columns`` on the closed-loop side; items
+    past ``ITEM_SLOTS`` are dropped and empty slots stay masked.
+    """
+    out_length = int(keep_idx.size)
+    out = {
+        item_column(slot, suffix): np.full(out_length, mask_value(_item_dtype(suffix)), dtype=_item_dtype(suffix))
+        for slot in range(ITEM_SLOTS)
+        for suffix in ITEM_FIELD_SUFFIXES
+    }
+    items = frames.items
+    if items is None or frames.item_offset is None:
+        return out  # slp < 3.0 predates item events
+
+    offsets = np.asarray(frames.item_offset.to_pylist(), dtype=np.int64)
+    n_items = int(offsets[-1])
+    if n_items == 0:
+        return out
+
+    flat = {
+        suffix: _arr_to_np(_walk(items, ITEM_FIELD_PATHS[suffix]), _item_dtype(suffix), n_items)
+        for suffix in ITEM_FIELD_SUFFIXES
+        if suffix != "owner"
+    }
+    flat["owner"] = _item_owner_array(items, n_items)
+    spawn_id = _arr_to_np(items.id, np.int64, n_items)
+
+    # Rank every flat item by (its frame, then spawn id), then scatter the first
+    # ITEM_SLOTS of each frame into their slot columns — one vectorized pass
+    # instead of a per-frame Python loop over the whole replay.
+    raw_row_of_item = np.repeat(np.arange(offsets.size - 1), np.diff(offsets))
+    order = np.lexsort((spawn_id, raw_row_of_item))
+    ranked_raw_row = raw_row_of_item[order]
+    slot_of_item = np.arange(n_items) - offsets[ranked_raw_row]
+    out_row_of_raw = np.full(offsets.size - 1, -1, dtype=np.int64)
+    out_row_of_raw[keep_idx] = np.arange(out_length)
+    out_row_of_item = out_row_of_raw[ranked_raw_row]
+    for slot in range(ITEM_SLOTS):
+        take = (slot_of_item == slot) & (out_row_of_item >= 0)
+        rows = out_row_of_item[take]
+        src = order[take]
+        for suffix in ITEM_FIELD_SUFFIXES:
+            out[item_column(slot, suffix)][rows] = flat[suffix][src]
+    return out
+
+
+def _item_owner_array(items: Item, n_items: int) -> np.ndarray:
+    """Item owners as libmelee ports (1..4), ``wire.ITEM_OWNER_NONE`` preserved.
+
+    The slp value is a peppi 0..3 port; every other port in the MDS is libmelee
+    1..4. Converted element-wise through the wire bridge (items are sparse —
+    hundreds per replay, not one per frame) so the online reader can't drift.
+    """
+    dtype = _item_dtype("owner")
+    if items.owner is None:
+        return np.full(n_items, mask_value(dtype), dtype=dtype)
+    owners = [None if v is None else item_owner_to_libmelee_port(v) for v in items.owner.to_pylist()]
+    return _list_to_np(owners, dtype, n_items)
 
 
 def _unpack_buttons(physical: Any, length: int) -> dict[str, np.ndarray]:
@@ -186,6 +264,7 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         # through slp_stage_to_libmelee; character (below) through slp_character_to_libmelee.
         # The slp EXTERNAL / character-select id survives only here, at the peppi read.
         "stage": np.full(out_length, int(slp_stage_to_libmelee(int(g.start.stage)).value), dtype=np.int32),
+        **_item_arrays(g.frames, keep_idx),
     }
 
     for prefix, port in zip(PLAYER_PREFIXES, occupied_libmelee_ports, strict=True):

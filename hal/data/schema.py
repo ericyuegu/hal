@@ -14,11 +14,30 @@ import numpy as np
 from numpy.typing import DTypeLike
 
 from hal.wire import BUTTON_BITS
+from hal.wire import ITEM_SLOTS
+from hal.wire import N_STATE_FLAG_BYTES
+from hal.wire import POST_FIELD_SUFFIXES
+from hal.wire import VELOCITY_COMPONENTS
+from hal.wire import item_column
 
 # Bump on any breaking change to MDS_COLUMNS (column add/remove/dtype change)
 # or to the extraction semantics that produce them. Consumers verify the
 # version matches before reading; mismatch is a hard error.
 #
+# 6: widen the per-frame post block and add global item (projectile) slots.
+#    (a) per-player: the ``velocities`` block (5 channels), ``misc_as``,
+#    ``state_age``, the 5 raw ``state_flags`` bytes, ``l_cancel``, ``ground``,
+#    and ``character_live``. All are ``wire.POST_FIELD_SUFFIXES`` entries, so
+#    the nana follower block picks them up too.
+#    (b) global: ``item{0..3}_*`` — the K=4 lowest-spawn-id live items, with
+#    ``wire.ITEM_FIELD_SUFFIXES`` fields each.
+#    ``character_live`` is the engine's live, transform-aware character, so a
+#    Sheik<->Zelda transform is now visible per frame; the broadcast
+#    ``p{1,2}_character`` character-SELECT pick is unchanged and still stale
+#    across transforms. ``state_age`` is the engine-truth replacement for the
+#    ``action_frame`` column dropped at v3: v3 removed a RECONSTRUCTED
+#    run-length that was off-by-one against the engine, this stores the
+#    engine's own counter, which is exactly what the closed-loop policy reads.
 # 5: ``p{1,2}_character`` is normalized to the libmelee ``Character`` value
 #    (Fox=1) at the peppi read, matching how ``stage`` is already stored; it
 #    was previously the slp external/character-select id (Fox=2). The index
@@ -43,23 +62,71 @@ from hal.wire import BUTTON_BITS
 # 2: add raw_analog_cstick_x/y columns (slp >= 3.17) for bit-exact c-stick
 #    replay.
 # 1: initial introduction of the version field.
-SCHEMA_VERSION: int = 5
+SCHEMA_VERSION: int = 6
+
+# Storage dtype per ``wire.POST_FIELD_SUFFIXES`` entry. Every suffix must appear
+# here; ``_gamestate_columns`` iterates the wire tuple and raises at import on a
+# suffix with no declared dtype. Fields peppi reports as None for older slp
+# versions get the dtype's mask sentinel at extract, not a default value.
+_POST_FIELD_DTYPES: dict[str, DTypeLike] = {
+    "position_x": np.float32,
+    "position_y": np.float32,
+    "percent": np.float32,
+    "shield": np.float32,
+    "stock": np.int32,
+    "direction": np.float32,
+    "action": np.int32,
+    "hitlag_left": np.float32,  # peppi reports None for slp < ~3.8.0; masked
+    "jumps_used": np.int32,
+    "airborne": np.int32,
+    "hurtbox_state": np.int32,  # 0=vulnerable, 1=invulnerable, 2=intangible
+    # Live, transform-aware character id (libmelee INTERNAL space, as the engine
+    # reports it). Distinct from the broadcast ``p{1,2}_character`` select-pick.
+    "character_live": np.int32,
+    # Frames the character has spent in the current ``action``. The engine's own
+    # counter, 0-indexed and reset within a constant action id — this is what the
+    # closed-loop policy already reads, and the reason the reconstructed
+    # ``action_frame`` column was dropped at v3.
+    "state_age": np.float32,
+    # Multiplexed by action state: during hitstun action states it is the number
+    # of hitstun frames remaining; in other states the engine reuses the slot for
+    # unrelated per-state counters (e.g. charge/entry timers), sometimes as a raw
+    # int bit pattern rather than a meaningful float. Stored as the raw f32 so
+    # every interpretation is recoverable; consumers must gate on ``action``.
+    "misc_as": np.float32,
+    # 0=not applicable, 1=successful L-cancel, 2=unsuccessful.
+    "l_cancel": np.int32,
+    # Ground/platform id the character is standing on (meaningless while airborne).
+    "ground": np.int32,
+    **{f"state_flags_{i}": np.int32 for i in range(N_STATE_FLAG_BYTES)},
+    **{f"velocities_{c}": np.float32 for c in VELOCITY_COMPONENTS},
+}
+
+# Per-item-slot storage dtypes. peppi's native widths (u16 type, u8 state, i8
+# owner) are widened to int32 so every categorical column in the schema shares
+# one mask sentinel (``wire.MASK_INT32``).
+_ITEM_FIELD_DTYPES: dict[str, DTypeLike] = {
+    "type": np.int32,
+    "state": np.int32,
+    "pos_x": np.float32,
+    "pos_y": np.float32,
+    "vel_x": np.float32,
+    "vel_y": np.float32,
+    "owner": np.int32,  # libmelee port 1..4, or wire.ITEM_OWNER_NONE when unowned
+}
 
 
 def _gamestate_columns(prefix: str) -> dict[str, DTypeLike]:
-    """Post-frame block fields that are 1:1 mappable from peppi."""
+    """Post-frame block fields, one per ``wire.POST_FIELD_SUFFIXES`` entry."""
+    return {f"{prefix}_{suffix}": _POST_FIELD_DTYPES[suffix] for suffix in POST_FIELD_SUFFIXES}
+
+
+def _item_columns() -> dict[str, DTypeLike]:
+    """Global item (projectile) slots. Slot k holds the k-th lowest live spawn
+    id this frame; unfilled slots are masked. See ``wire.ITEM_SPAWN_ID_FIELD``
+    for the ordering contract the online reader shares."""
     return {
-        f"{prefix}_position_x": np.float32,
-        f"{prefix}_position_y": np.float32,
-        f"{prefix}_percent": np.float32,
-        f"{prefix}_shield": np.float32,
-        f"{prefix}_stock": np.int32,
-        f"{prefix}_direction": np.float32,
-        f"{prefix}_action": np.int32,
-        f"{prefix}_hitlag_left": np.float32,  # peppi reports None for slp < ~3.8.0; masked
-        f"{prefix}_jumps_used": np.int32,
-        f"{prefix}_airborne": np.int32,
-        f"{prefix}_hurtbox_state": np.int32,  # 0=vulnerable, 1=invulnerable, 2=intangible
+        item_column(slot, suffix): dtype for slot in range(ITEM_SLOTS) for suffix, dtype in _ITEM_FIELD_DTYPES.items()
     }
 
 
@@ -95,10 +162,12 @@ def _nana_columns(prefix: str) -> dict[str, DTypeLike]:
 # ``stage`` + ``p{1,2}_character`` are per-replay constants broadcast across frames
 # (not in peppi's per-frame post block) — see extract.broadcast and SCHEMA_VERSION 5.
 # Both are libmelee enum values: ``stage`` via slp_stage_to_libmelee, ``p{1,2}_character``
-# the libmelee ``Character`` value via slp_character_to_libmelee.
+# the libmelee ``Character`` value via slp_character_to_libmelee. ``item{k}_*`` is global
+# per-frame state, hence no player prefix.
 MDS_PER_FRAME_DTYPES: dict[str, DTypeLike] = {
     "frame": np.int32,
     "stage": np.int32,
+    **_item_columns(),
     "p1_character": np.int32,
     **_gamestate_columns("p1"),
     **_controller_columns("p1"),
