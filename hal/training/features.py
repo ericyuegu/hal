@@ -3,7 +3,7 @@
 Owns the single source of truth for two wires:
 
 * MDS columns ↔ model-ready tensors (the per-feature routing + normalization
-  below), and
+  below, plus the derived spatial block), and
 * a 14-channel action vector ↔ :class:`ControllerInputsValue` (the inference
   output bridge).
 
@@ -22,12 +22,17 @@ Tensor-dim names (docstrings):
 """
 
 from dataclasses import dataclass
+from typing import Final
 
 import numpy as np
 import torch
+from melee import Stage
+from melee.stages import BLASTZONES
+from melee.stages import EDGE_POSITION
 from torch import Tensor
 
 from hal.data.stats import FeatureStats
+from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import ControllerInputsValue
 from hal.training.stats import consolidate_key
 from hal.wire import BUTTON_BITS
@@ -97,6 +102,202 @@ _STICK_TRIGGER_SUFFIXES = (
 
 
 # %%
+# --- Derived spatial features -------------------------------------------------
+#
+# The MDS (schema v5) stores absolute positions but neither velocities nor stage
+# geometry, so a model has to infer both through attention. :func:`derive_spatial`
+# hands it that state, computed on the fly from the raw columns — no MDS
+# re-materialization, and one code path for train and closed-loop eval because
+# both funnel through :func:`preprocess`.
+#
+# Ledge and blastzone geometry come straight from libmelee's stage tables
+# (``melee.stages.EDGE_POSITION`` / ``melee.stages.BLASTZONES``, sourced from
+# Magus420's frame-data thread), so there is no second geometry table to drift.
+# An id that is neither a known stage nor ``Stage.NO_STAGE`` fails loud.
+#
+# Values stay in RAW game units and are scaled by the fixed constants below.
+# Dataset statistics are deliberately NOT used: a distance is a physical quantity
+# whose scale is known a priori, and a stats-derived scale would silently change
+# the feature when the dataset changes.
+
+# Positions span roughly ±275 (x) / ±355 (y) and blastzone spans reach ~510, so a
+# 1/100 scale lands every offset/distance in about [-3, 5].
+_SPATIAL_POS_SCALE: Final[float] = 1.0 / 100.0
+# Per-frame position deltas: ordinary locomotion is 0-4 units/frame and heavy
+# knockback ~30, so 1/10 keeps normal motion visible without crushing hits. The
+# rare respawn teleport is a genuine large value and is left unclipped.
+_SPATIAL_DPOS_SCALE: Final[float] = 1.0 / 10.0
+
+# The ledge lip sits at y = 0 on every included stage (the main platform surface).
+_LEDGE_Y: Final[float] = 0.0
+
+_SPATIAL_PLAYERS: Final[tuple[str, ...]] = ("ego", "opp")
+
+# (name, scale) for the ego/opp-symmetric block, in token order.
+_SHARED_SPATIAL: Final[tuple[tuple[str, float], ...]] = (
+    ("rel_dx", _SPATIAL_POS_SCALE),  # opp_x - ego_x
+    ("rel_dy", _SPATIAL_POS_SCALE),  # opp_y - ego_y
+    ("rel_dist", _SPATIAL_POS_SCALE),  # euclidean
+    ("rel_dx_ego_facing", _SPATIAL_POS_SCALE),  # +ve => opponent is in front of ego
+    ("rel_dx_opp_facing", _SPATIAL_POS_SCALE),  # +ve => ego is in front of the opponent
+)
+
+# (suffix, scale) emitted per player in _SPATIAL_PLAYERS, in token order.
+_PLAYER_SPATIAL: Final[tuple[tuple[str, float], ...]] = (
+    ("ledge_dx", _SPATIAL_POS_SCALE),  # |x| - edge; +ve => past the ledge, out over the void
+    ("ledge_dy", _SPATIAL_POS_SCALE),  # y - ledge height; pairs with ledge_dx at ONE scale
+    ("offstage", 1.0),  # flag: |x| > edge
+    ("blast_left", _SPATIAL_POS_SCALE),  # x - left blastzone   (+ve => inside)
+    ("blast_right", _SPATIAL_POS_SCALE),  # right blastzone - x
+    ("blast_top", _SPATIAL_POS_SCALE),  # top blastzone - y
+    ("blast_bottom", _SPATIAL_POS_SCALE),  # y - bottom blastzone
+    ("dpos_x", _SPATIAL_DPOS_SCALE),  # x[t] - x[t-1]
+    ("dpos_y", _SPATIAL_DPOS_SCALE),  # y[t] - y[t-1]
+)
+
+SPATIAL_FEATURES: Final[tuple[str, ...]] = tuple(name for name, _ in _SHARED_SPATIAL) + tuple(
+    f"{player}_{suffix}" for player in _SPATIAL_PLAYERS for suffix, _ in _PLAYER_SPATIAL
+)
+
+# ``1.0`` = invalid, matching the ``{feature}_mask`` sidecar convention. Both are
+# emitted unconditionally so the model's input width never depends on the data.
+# ``spatial_mask`` covers the whole per-frame block; ``spatial_dpos_mask`` is the
+# stricter two-frame validity the finite differences need.
+SPATIAL_MASKS: Final[tuple[str, ...]] = ("spatial_mask", "spatial_dpos_mask")
+
+SPATIAL_COLUMNS: Final[tuple[str, ...]] = SPATIAL_FEATURES + SPATIAL_MASKS
+
+_SPATIAL_SCALES: Final[dict[str, float]] = {
+    **{name: scale for name, scale in _SHARED_SPATIAL},
+    **{f"{player}_{suffix}": scale for player in _SPATIAL_PLAYERS for suffix, scale in _PLAYER_SPATIAL},
+}
+
+# Raw columns the block is a pure function of. ``stage`` doubles as the gate: a
+# batch without it predates matchup conditioning and gets no spatial block.
+_SPATIAL_GATE: Final[str] = "stage"
+_SPATIAL_INPUTS: Final[tuple[str, ...]] = (
+    _SPATIAL_GATE,
+    *(f"{player}_{column}" for player in _SPATIAL_PLAYERS for column in ("position_x", "position_y", "direction")),
+)
+
+
+def _stage_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Dense ``stage id -> geometry`` lookups over the included stages: ``(known,
+    edge_x, blastzones)`` where ``blastzones`` rows are ``(left, right, top, bottom)``."""
+    size = max(stage.value for stage in INCLUDED_STAGES) + 1
+    known = np.zeros(size, dtype=bool)
+    edge_x = np.zeros(size, dtype=np.float32)
+    blastzones = np.zeros((size, 4), dtype=np.float32)
+    for stage in INCLUDED_STAGES:
+        known[stage.value] = True
+        edge_x[stage.value] = EDGE_POSITION[stage]
+        blastzones[stage.value] = BLASTZONES[stage]
+    return known, edge_x, blastzones
+
+
+_STAGE_KNOWN, _STAGE_EDGE_X, _STAGE_BLASTZONES = _stage_tables()
+
+
+def _stage_known(stage: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(ids, known)`` for a raw stage column. ``Stage.NO_STAGE`` (0) is the
+    zero-filled cold-start pad and reads as not-known; any OTHER unmapped id is a
+    schema or matchup bug and raises rather than falling back to some geometry."""
+    ids = np.asarray(stage).astype(np.int64)
+    in_range = (ids >= 0) & (ids < _STAGE_KNOWN.shape[0])
+    known = in_range & _STAGE_KNOWN[np.where(in_range, ids, 0)]
+    unmapped = ~known & (ids != Stage.NO_STAGE.value)
+    if unmapped.any():
+        raise ValueError(
+            f"stage id(s) {sorted(set(ids[unmapped].tolist()))} have no libmelee ledge/blastzone geometry; "
+            f"expected one of {tuple(stage.name for stage in INCLUDED_STAGES)} "
+            f"or {Stage.NO_STAGE.value} (the zero-filled cold-start pad)"
+        )
+    return ids, known
+
+
+def derive_spatial(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Engineered relative / stage-geometry / velocity features for one ``[L]`` or
+    ``[B, L]`` batch of RAW MDS columns, keyed by :data:`SPATIAL_COLUMNS`.
+
+    Both consumers left-pad a not-yet-real frame with an ALL-ZERO row (the train
+    window's cold start, the closed-loop rolling buffer's fill and its post
+    instant-restart refill), and a zero row is indistinguishable from a legitimate
+    0.0 position by value — but not by ``stage``, which reads ``Stage.NO_STAGE``
+    exactly on those rows and a real stage id on every observed one. That single
+    rule reproduces ``ctx_pad`` identically on both paths without either consumer
+    having to plumb it in, and it is what keeps a finite difference from running
+    across the pad→real boundary (position ``ctx_pad`` has no predecessor, so its
+    delta is masked, not a spurious jump from the origin).
+
+    A frame is *observed* iff its stage is known AND every ego/opp position and
+    direction it reads is unmasked; the block is all-or-nothing per frame. A delta
+    is valid iff its frame and the one before it are both observed. Invalid entries
+    are zeroed and flagged in :data:`SPATIAL_MASKS`.
+
+    Velocities are finite differences of stored positions — a proxy for the engine's
+    true per-frame velocity, which schema v5 does not carry; they differ from it
+    wherever the engine clamps or teleports (respawns, ledge snaps).
+    """
+    missing = [name for name in _SPATIAL_INPUTS if name not in batch]
+    if missing:
+        raise ValueError(f"derive_spatial needs raw columns {missing}, which the batch does not carry")
+
+    ids, known = _stage_known(batch[_SPATIAL_GATE])
+    observed = known
+    for name in _SPATIAL_INPUTS[1:]:
+        observed = observed & ~_is_masked(np.asarray(batch[name]))
+    dpos_valid = np.zeros(observed.shape, dtype=bool)
+    dpos_valid[..., 1:] = observed[..., 1:] & observed[..., :-1]
+
+    def column(name: str) -> np.ndarray:
+        """Raw float column with unobserved frames zeroed, so no NaN enters the arithmetic."""
+        return np.where(observed, np.asarray(batch[name], dtype=np.float32), 0.0)
+
+    def delta(values: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(values)
+        out[..., 1:] = values[..., 1:] - values[..., :-1]
+        return out
+
+    safe_ids = np.where(known, ids, 0)
+    edge_x = _STAGE_EDGE_X[safe_ids]
+    blastzones = _STAGE_BLASTZONES[safe_ids]
+
+    position = {
+        player: (column(f"{player}_position_x"), column(f"{player}_position_y")) for player in _SPATIAL_PLAYERS
+    }
+    ego_x, ego_y = position["ego"]
+    opp_x, opp_y = position["opp"]
+    rel_dx, rel_dy = opp_x - ego_x, opp_y - ego_y
+    raw: dict[str, np.ndarray] = {
+        "rel_dx": rel_dx,
+        "rel_dy": rel_dy,
+        "rel_dist": np.hypot(rel_dx, rel_dy),
+        "rel_dx_ego_facing": rel_dx * np.sign(column("ego_direction")),
+        "rel_dx_opp_facing": -rel_dx * np.sign(column("opp_direction")),
+    }
+    for player, (x, y) in position.items():
+        raw[f"{player}_ledge_dx"] = np.abs(x) - edge_x
+        raw[f"{player}_ledge_dy"] = y - _LEDGE_Y
+        raw[f"{player}_offstage"] = (np.abs(x) > edge_x).astype(np.float32)
+        raw[f"{player}_blast_left"] = x - blastzones[..., 0]
+        raw[f"{player}_blast_right"] = blastzones[..., 1] - x
+        raw[f"{player}_blast_top"] = blastzones[..., 2] - y
+        raw[f"{player}_blast_bottom"] = y - blastzones[..., 3]
+        raw[f"{player}_dpos_x"] = delta(x)
+        raw[f"{player}_dpos_y"] = delta(y)
+
+    out = {
+        name: (
+            np.where(dpos_valid if name.endswith(("_dpos_x", "_dpos_y")) else observed, raw[name], 0.0) * scale
+        ).astype(np.float32)
+        for name, scale in _SPATIAL_SCALES.items()
+    }
+    out["spatial_mask"] = (~observed).astype(np.float32)
+    out["spatial_dpos_mask"] = (~dpos_valid).astype(np.float32)
+    return out
+
+
+# %%
 @dataclass(frozen=True, slots=True)
 class Context:
     """The observed gamestate the model conditions on. Built identically by the
@@ -162,6 +363,12 @@ class TrainBatch:
 def _classify(name: str) -> str:
     if name == "frame":
         return "drop"
+    # The spatial block is computed on the fly with its own fixed scalings; routing
+    # it as a "float" would look up dataset stats it has no entry for. Seeing one as
+    # an INPUT column means the MDS started materializing it — a schema change, not
+    # something to silently normalize, so preprocess raises on this kind.
+    if name in SPATIAL_COLUMNS:
+        return "derived"
     # Global stage + per-player character: int categoricals joined from the replay
     # manifest (not in the per-frame MDS). Inert unless those columns are present.
     if name == "stage" or name.endswith("_character"):
@@ -207,12 +414,22 @@ def preprocess(
     target); only FLOAT_FEATURES are normalized. nana follower columns are
     gamestate-only (float/cat), masked for non-Ice-Climbers players. Columns the
     classifier drops (``frame``, ``schema_version``, ``ctx_pad``) are not returned.
+
+    Batches carrying the matchup-conditioning ``stage`` column additionally get the
+    derived :data:`SPATIAL_COLUMNS` block (see :func:`derive_spatial`); it is
+    emitted unconditionally from here so train and closed-loop eval share one code
+    path, and models that do not want it simply never read those keys.
     """
     out: dict[str, Tensor] = {}
     for name, arr in batch.items():
         kind = _classify(name)
         if kind == "drop":
             continue
+        if kind == "derived":
+            raise ValueError(
+                f"{name!r} arrived as an input column, but the spatial block is derived on the fly by "
+                "derive_spatial; materializing it into the MDS needs a schema bump and this derivation removed"
+            )
         mask = _is_masked(arr)
         if kind == "button" or kind == "stick_trigger":
             x = np.where(mask, 0.0, arr).astype(np.float32)
@@ -229,6 +446,9 @@ def preprocess(
         out[name] = torch.from_numpy(np.ascontiguousarray(x))
         if kind == "float" and mask.any():
             out[f"{name}_mask"] = torch.from_numpy(np.ascontiguousarray(mask.astype(np.float32)))
+    if _SPATIAL_GATE in batch:
+        for name, value in derive_spatial(batch).items():
+            out[name] = torch.from_numpy(np.ascontiguousarray(value))
     return out
 
 
