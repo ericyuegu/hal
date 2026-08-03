@@ -31,6 +31,7 @@ One controller representation end-to-end: the **logical** (game-causal) values p
 - Don't re-implement library helpers (libmelee, peppi-py, streaming, torch). Local copies drift and turn upstream upgrades into silent behavior changes. If the upstream genuinely doesn't fit, write the smallest primitive that fills the gap and reuse the library for everything else. Fork-dep fixes (libmelee, peppi-py) go upstream, not into a local translation layer.
 - Don't reference our conversations or "existing convention from elsewhere in the repo" in code comments.
 - Follow the 3-tier codebase layout for organizing shared infra: https://www.moderndescartes.com/essays/research_code/
+- Write in ASD-STE100 Simplified Technical English.
 
 **Architecture**
 - One source of truth per cross-cutting vocabulary. `wire.py` owns slp/wire conventions (button bits, ports, mask sentinels); `policy.py` owns included character/stage tuples. No second source.
