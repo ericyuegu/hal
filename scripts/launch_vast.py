@@ -287,11 +287,15 @@ class Readiness:
     """The verdict of one status poll. Exactly one of (ready, dead, waiting) holds.
 
     ``dead`` is an unrecoverable state (vast is tearing the box down or it crashed) and
-    carries a reason; ``ready`` means genuinely up; otherwise we keep polling (``waiting``)."""
+    carries a reason; ``ready`` means genuinely up; otherwise we keep polling (``waiting``).
+    ``quad_running`` marks a waiting verdict whose full status quad already reads 'running'
+    (only the disk corroboration is missing) — some hosts never report ``disk_util``, and a
+    box in that state must never be auto-destroyed."""
 
     ready: bool
     dead: bool
     reason: str
+    quad_running: bool = False
 
     @property
     def waiting(self) -> bool:
@@ -330,11 +334,16 @@ def classify(status: dict) -> Readiness:
         )
     if actual in _TERMINAL_CONTAINER:
         return Readiness(ready=False, dead=True, reason=f"container reached terminal state {actual!r}")
-    if actual == "running" and cur == "running" and nxt == "running" and intended == "running" and disk_util >= 0:
+    quad = actual == "running" and cur == "running" and nxt == "running" and intended == "running"
+    if quad and disk_util >= 0:
         return Readiness(ready=True, dead=False, reason=f"running (disk_util={disk_util}, status_msg={msg!r})")
-    # Still booting: loading/connecting, or a not-yet-corroborated 'running' (disk_util still -1).
+    # Still booting: loading/connecting, or a not-yet-corroborated 'running' (disk_util still -1;
+    # some hosts never report it — the poll loop promotes a *persistently* quad-running box).
     return Readiness(
-        ready=False, dead=False, reason=f"actual={actual!r} cur={cur!r} next={nxt!r} intended={intended!r}"
+        ready=False,
+        dead=False,
+        reason=f"actual={actual!r} cur={cur!r} next={nxt!r} intended={intended!r} disk_util={disk_util}",
+        quad_running=quad,
     )
 
 
@@ -384,6 +393,7 @@ def launch(
 
     deadline = time.time() + timeout_s
     dead_reads = 0  # consecutive polls showing an unrecoverable verdict
+    quad_reads = 0  # consecutive polls with the full quad running but no disk corroboration
     last = "no poll yet"
     while True:
         try:
@@ -397,6 +407,15 @@ def launch(
         if verdict.ready:
             logger.info(f"instance {iid} ready: {verdict.reason}")
             return iid
+        # Some hosts never report disk_util, so the corroborated-ready branch never fires even
+        # though the box is healthy and training. Promote a box whose full quad has read
+        # 'running' for 12 polls (~2 min) with no contrary evidence (a malformed read does not
+        # reset the streak): the on-start script fails loud on a disk that genuinely never
+        # provisioned, so a stably-running quad is trustworthy on its own.
+        quad_reads = quad_reads + 1 if verdict.quad_running else 0
+        if quad_reads >= 12:
+            logger.warning(f"instance {iid} ready (disk_util never reported; quad stable): {verdict.reason}")
+            return iid
         # Never tear down on a *single* bad read: vast can report a transient stopped/terminal
         # target mid-transition. Require the dead verdict to persist across two polls (a real
         # collision/death holds; a blip clears) before failing over.
@@ -407,6 +426,14 @@ def launch(
         else:
             dead_reads = 0
         if time.time() > deadline:
+            if verdict.quad_running:
+                # A quad-running box may already be training; destroying it here is the one
+                # unrecoverable mistake. Leave it up and hand back control.
+                logger.warning(
+                    f"instance {iid} quad-running at timeout but disk never corroborated; left up. "
+                    f"Monitor: vastai logs {iid} ; destroy deliberately: vastai destroy instance {iid}"
+                )
+                return iid
             return give_up(f"instance {iid} not ready after {timeout_s}s (last: {last})", dead=False)
         time.sleep(10)
 
