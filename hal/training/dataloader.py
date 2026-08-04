@@ -23,6 +23,7 @@ from hal.data.feature_stats import FeatureStats
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
 from hal.training.features import Context
+from hal.training.features import ExtraColumns
 from hal.training.features import TrainBatch
 from hal.training.features import preprocess
 from hal.training.features import stack_actions
@@ -164,7 +165,13 @@ def collate_windows(batch: list[dict]) -> dict[str, np.ndarray]:
     return {k: np.stack([s[k] for s in batch]) for k in keys}
 
 
-def collate_train_batch(batch: list[dict], *, stats: dict[str, FeatureStats], L_ctx: int) -> TrainBatch:
+def collate_train_batch(
+    batch: list[dict],
+    *,
+    stats: dict[str, FeatureStats],
+    L_ctx: int,
+    extra: ExtraColumns | None = None,
+) -> TrainBatch:
     """Worker-side collate: stack → ``preprocess`` → split ``[ctx | chunk]``.
 
     The window the sampler yields is laid out ``[ctx | chunk]`` over
@@ -172,10 +179,14 @@ def collate_train_batch(batch: list[dict], *, stats: dict[str, FeatureStats], L_
     frames; the target action chunk is the remaining frames sliced off the
     stacked ego-action channels at ``[L_ctx :]``. Returns a fully-tensorized
     ``TrainBatch`` so the training loop does no reshaping — just ``.to(device)``.
+
+    ``extra`` is the experiment's column routing beyond the built-in feature
+    tables (see ``features.ExtraColumns``); the closed-loop policy must carry the
+    same one so both observation paths build the same token.
     """
     stacked = collate_windows(batch)
     ctx_pad = torch.from_numpy(stacked["ctx_pad"].astype(np.int64))
-    feats = preprocess(stacked, stats)
+    feats = preprocess(stacked, stats, extra=extra)
     actions = stack_actions(feats)
     context_features = {k: v[:, :L_ctx] for k, v in feats.items()}
     target = actions[:, L_ctx:]
@@ -200,6 +211,7 @@ def make_loader(
     pin_memory: bool | None = None,
     windows_per_replay: int = 1,
     schema_version: int = SCHEMA_VERSION,
+    extra: ExtraColumns | None = None,
 ) -> DataLoader:
     """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` (preprocessing runs in the workers).
@@ -248,7 +260,7 @@ def make_loader(
     sampler = WindowDataset(
         mds, L_ctx, L_chunk, seed=seed, windows_per_replay=windows_per_replay, schema_version=schema_version
     )
-    collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
+    collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx, extra=extra)
     # Pin by default only when there's a GPU to copy to (page-locking host memory is
     # wasted on a CPU run). ``TrainBatch.pin_memory`` makes the custom batch poolable.
     if pin_memory is None:

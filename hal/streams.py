@@ -61,7 +61,13 @@ RANKED_ANONYMIZED_1: Final[StreamSource] = StreamSource(
     local=Path("data/processed/ranked-anonymized-1/mds"),
 )
 
-ALL: Final[tuple[StreamSource, ...]] = (RANKED_ANONYMIZED_1,)
+RANKED_ANONYMIZED_1_V6: Final[StreamSource] = StreamSource(
+    name="ranked-anonymized-1-v6",
+    remote="s3://hal/processed/ranked-anonymized-1/mds-v6",
+    local=Path("data/processed/ranked-anonymized-1/mds-v6"),
+)
+
+ALL: Final[tuple[StreamSource, ...]] = (RANKED_ANONYMIZED_1, RANKED_ANONYMIZED_1_V6)
 BY_NAME: Final[dict[str, StreamSource]] = {s.name: s for s in ALL}
 # Reverse map: local cache root (string) -> remote URI. Lets the dataloader turn
 # a plain `data_root` into its R2 origin, while purely-local paths (dev MDS,

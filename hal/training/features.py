@@ -21,6 +21,7 @@ Tensor-dim names (docstrings):
     d_action    = action vector dim (A_DIM)
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -36,6 +37,7 @@ from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import ControllerInputsValue
 from hal.training.ego_stats import consolidate_key
 from hal.wire import BUTTON_BITS
+from hal.wire import VELOCITY_COMPONENTS
 from hal.wire import mask_value
 
 A_DIM = 14  # 4 sticks + 2 triggers + 8 buttons (START excluded — see ACTION_CHANNELS)
@@ -60,6 +62,70 @@ CAT_FEATURES: dict[str, tuple[int, int]] = {
     "hurtbox_state": (4, 2),
     "airborne": (2, 1),
 }
+
+# Normalizations a float column can take: see _standardize / _normalize.
+FLOAT_TRANSFORMS: Final[tuple[str, ...]] = ("standardize", "minmax")
+
+
+@dataclass(frozen=True, slots=True)
+class ExtraColumns:
+    """MDS column suffixes a consumer routes ON TOP OF the two tables above.
+
+    Schema v6 widened the per-frame post block. A model built before that must keep
+    its exact input width, so :func:`preprocess` routes the new columns only for the
+    consumer that asks for them: with no ``extra`` it drops them, exactly as it did
+    before the columns existed. The consumer declares the routing once and passes it
+    down BOTH observation paths (train collate and closed-loop replan), so the two
+    can never disagree about which columns a model sees.
+
+    ``floats`` maps a suffix to its normalization (one of :data:`FLOAT_TRANSFORMS`).
+    ``cats`` maps a suffix to the ``(vocab, embed_dim)`` of the table the model builds
+    for it, or to ``None`` when the model indexes an embedding it already owns. The
+    tables themselves stay model-side; this declares only the routing and the shapes.
+    """
+
+    floats: Mapping[str, str]
+    cats: Mapping[str, tuple[int, int] | None]
+
+    def __post_init__(self) -> None:
+        unknown = sorted(set(self.floats.values()) - set(FLOAT_TRANSFORMS))
+        if unknown:
+            raise ValueError(f"unknown float transform(s) {unknown}; expected one of {FLOAT_TRANSFORMS}")
+        both = sorted(set(self.floats) & set(self.cats))
+        if both:
+            raise ValueError(f"{both} declared as both a float and a categorical column")
+
+
+# Schema v6's additions to the per-player post block, less the ones no model reads yet
+# (the five raw ``state_flags`` bytes and the global ``item{0..3}_*`` slots).
+V6_PLAYER_COLUMNS: Final[ExtraColumns] = ExtraColumns(
+    floats={
+        # Engine velocities. Self-velocity has separate air and ground slots (``airborne``
+        # selects the live one) and knockback is carried apart from it; the engine sums
+        # them for the frame's displacement. Heavy-tailed — one knockback spike dwarfs
+        # locomotion — so they standardize rather than min-max.
+        **{f"velocities_{component}": "standardize" for component in VELOCITY_COMPONENTS},
+        # Frames the character has spent in the current action (the engine's own counter).
+        "state_age": "standardize",
+        # Multiplexed by action state: hitstun frames remaining DURING hitstun states, an
+        # unrelated per-state counter elsewhere. Stored raw, so a consumer that reads it
+        # must gate on ``action`` — this table only fixes its scale.
+        "misc_as": "standardize",
+    },
+    cats={
+        "l_cancel": (3, 2),  # 0 = not applicable, 1 = successful, 2 = unsuccessful
+        # Ground/platform id the character stands on. Fifteen ids, max 54, over all six
+        # included stages (398 ranked-anonymized-1 val replays), plus the u16 "no ground"
+        # sentinel 65535 while airborne — that one clamps into the last row and owns it.
+        "ground": (64, 4),
+        # Live, transform-aware character id (libmelee internal space). No table of its
+        # own: it is the per-frame form of the character-SELECT pick, so a model indexes
+        # its existing character embedding with it.
+        "character_live": None,
+    },
+)
+
+_NO_EXTRA: Final[ExtraColumns] = ExtraColumns(floats={}, cats={})
 
 # Canonical ordering of the 14-channel ego action vector. Matches
 # ControllerInputsValue field order for sticks/triggers and BUTTON_BITS for
@@ -166,6 +232,24 @@ SPATIAL_FEATURES: Final[tuple[str, ...]] = tuple(name for name, _ in _SHARED_SPA
 SPATIAL_MASKS: Final[tuple[str, ...]] = ("spatial_mask", "spatial_dpos_mask")
 
 SPATIAL_COLUMNS: Final[tuple[str, ...]] = SPATIAL_FEATURES + SPATIAL_MASKS
+
+# The compute-effective subset (8 of 25 columns), in token order. Offstage / ledge /
+# bottom-blastzone address the measured failure budget (91% of deaths at the bottom
+# blastzone); the two relative channels cover spacing; the frame validity mask stays.
+# Dropped: ``ledge_dy`` (linear in ``position_y``), the side and top blast margins (a
+# small share of deaths), and the finite-difference ``dpos_*`` proxy with its second
+# mask — schema v6 stores the engine's own velocities, which supersede it.
+SPATIAL_COLUMNS_LEAN: Final[tuple[str, ...]] = (
+    "ego_offstage",
+    "opp_offstage",
+    "ego_ledge_dx",
+    "opp_ledge_dx",
+    "ego_blast_bottom",
+    "rel_dx_ego_facing",
+    "rel_dy",
+    "spatial_mask",
+)
+assert set(SPATIAL_COLUMNS_LEAN) <= set(SPATIAL_COLUMNS)
 
 _SPATIAL_SCALES: Final[dict[str, float]] = {
     **{name: scale for name, scale in _SHARED_SPATIAL},
@@ -360,7 +444,11 @@ class TrainBatch:
 
 
 # %%
-def _classify(name: str) -> str:
+def _has_suffix(name: str, suffixes: Mapping[str, object] | tuple[str, ...]) -> bool:
+    return any(name.endswith(f"_{suffix}") for suffix in suffixes)
+
+
+def _classify(name: str, extra: ExtraColumns = _NO_EXTRA) -> str:
     if name == "frame":
         return "drop"
     # The spatial block is computed on the fly with its own fixed scalings; routing
@@ -369,17 +457,21 @@ def _classify(name: str) -> str:
     # something to silently normalize, so preprocess raises on this kind.
     if name in SPATIAL_COLUMNS:
         return "derived"
+    # Extra floats resolve BEFORE any categorical: ``velocities_self_x_ground`` also
+    # ends with the ``ground`` categorical's suffix.
+    if _has_suffix(name, extra.floats):
+        return "float"
     # Global stage + per-player character: int categoricals joined from the replay
     # manifest (not in the per-frame MDS). Inert unless those columns are present.
     if name == "stage" or name.endswith("_character"):
         return "cat"
-    if any(name.endswith(f"_{c}") for c in CAT_FEATURES):
+    if _has_suffix(name, CAT_FEATURES) or _has_suffix(name, extra.cats):
         return "cat"
     if "_button_" in name:
         return "button"
-    if any(name.endswith(f"_{s}") for s in _STICK_TRIGGER_SUFFIXES):
+    if _has_suffix(name, _STICK_TRIGGER_SUFFIXES):
         return "stick_trigger"
-    if any(name.endswith(f"_{f}") for f in FLOAT_FEATURES):
+    if _has_suffix(name, FLOAT_FEATURES):
         return "float"
     return "drop"
 
@@ -402,9 +494,21 @@ def _standardize(arr: np.ndarray, s: FeatureStats) -> np.ndarray:
     return ((arr - s.mean) / s.std).astype(np.float32)
 
 
+def _float_transform(name: str, extra: ExtraColumns) -> str:
+    """Normalization for one float column. ``extra`` declares it per suffix; otherwise
+    percent + position standardize — their dataset max (percent ~507, off the 0-160
+    decision range) squashes min-max into a sliver — and every other float min-maxes."""
+    for suffix, transform in extra.floats.items():
+        if name.endswith(f"_{suffix}"):
+            return transform
+    return "standardize" if ("position" in name or "percent" in name) else "minmax"
+
+
 def preprocess(
     batch: dict[str, np.ndarray],
     feature_stats: dict[str, FeatureStats],
+    *,
+    extra: ExtraColumns | None = None,
 ) -> dict[str, Tensor]:
     """Tokenizer-style per-feature sanitization + per-float mask sidecars.
 
@@ -419,10 +523,15 @@ def preprocess(
     derived :data:`SPATIAL_COLUMNS` block (see :func:`derive_spatial`); it is
     emitted unconditionally from here so train and closed-loop eval share one code
     path, and models that do not want it simply never read those keys.
+
+    ``extra`` (see :class:`ExtraColumns`) routes columns beyond the built-in tables —
+    the schema-v6 post block. Without it those columns are dropped, so every model
+    built before v6 keeps its exact input width.
     """
+    routing = _NO_EXTRA if extra is None else extra
     out: dict[str, Tensor] = {}
     for name, arr in batch.items():
-        kind = _classify(name)
+        kind = _classify(name, routing)
         if kind == "drop":
             continue
         if kind == "derived":
@@ -437,9 +546,8 @@ def preprocess(
             x = np.where(mask, 0, arr).astype(np.int64)
         elif kind == "float":
             s = feature_stats[consolidate_key(name)]
-            # percent + position are heavy-tailed: their dataset max (percent ~507, off the
-            # 0-160 decision range) squashes min-max into a sliver, so standardize them.
-            x = _standardize(arr, s) if ("position" in name or "percent" in name) else _normalize(arr, s)
+            transform = _float_transform(name, routing)
+            x = _standardize(arr, s) if transform == "standardize" else _normalize(arr, s)
             x = np.where(mask, 0.0, x)
         else:
             raise AssertionError(f"unhandled kind {kind} for {name}")

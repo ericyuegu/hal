@@ -42,6 +42,7 @@ from hal.training.dataloader import relabel_ego
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import Context
+from hal.training.features import ExtraColumns
 from hal.training.features import action_vec_to_controller
 from hal.training.features import preprocess
 
@@ -144,6 +145,10 @@ class RecedingHorizon:
     # passed to this callback; it owns a device-resident KV cache. Full-context behavior remains
     # the default for all existing policies.
     predict_incremental: PredictChunk | None = None
+    # The model's column routing beyond the built-in feature tables (schema v6 and later).
+    # Must be the SAME object the train loader collates with, or the closed-loop token
+    # would differ from the trained one.
+    extra: ExtraColumns | None = None
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -217,7 +222,7 @@ class RecedingHorizon:
         # feature names and model inputs byte-for-byte identical while substantially reducing
         # transfer launch overhead. A future device-resident ring buffer can replace the host
         # packing without changing this interface.
-        preprocessed = preprocess(stacked, self.stats)
+        preprocessed = preprocess(stacked, self.stats, extra=self.extra)
         float_items = [(k, v) for k, v in preprocessed.items() if v.dtype.is_floating_point]
         int_items = [(k, v) for k, v in preprocessed.items() if not v.dtype.is_floating_point]
         feats: dict[str, torch.Tensor] = {}
