@@ -11,6 +11,7 @@ to log-and-continue across many stages, not abort on the first crash.
 ``run_matches_vec`` carries the same contract per match.
 """
 
+import os
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -31,6 +32,20 @@ from hal.sim.trajectory import Trajectory
 from hal.sim.vec import BatchPolicy
 from hal.sim.vec import VecMatch
 from hal.sim.vec import drive_vec
+
+
+def usable_cpus() -> int:
+    """CPUs this process may actually run on — the ceiling for concurrent Dolphin boots.
+
+    ``os.cpu_count`` reports the HOST's cores, so inside a container with a smaller
+    CPU quota it oversubscribes: a 16-vCPU box reported 64 and booted 64 lockstep
+    emulators. The affinity mask is the real allowance; where the platform has no
+    such mask, the core count is the best answer available.
+    """
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        return max(1, len(getaffinity(0)))
+    return max(1, os.cpu_count() or 1)
 
 
 @dataclass(frozen=True, slots=True)

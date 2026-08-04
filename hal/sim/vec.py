@@ -17,6 +17,7 @@ Torch-free, like the rest of ``hal/sim``: the model lives behind ``BatchPolicy``
 in the experiment.
 """
 
+import math
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -66,6 +67,24 @@ class BatchPolicy(Protocol):
     def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]: ...
 
 
+def _frame_id(frame: Mapping, previous: int) -> int:
+    """The canonical frame counter of one stepped frame, as an int.
+
+    A non-finite id — seen in production from a torn libmelee frame — is unusable
+    three times over: it never compares as a match boundary, it poisons every later
+    comparison against it, and it raises ``cannot convert float NaN to integer`` when
+    ``Trajectory.from_capture`` writes it into an int32 column. That last one happens
+    OUTSIDE the per-boot guard below and would abort the whole wave, so the frame is
+    rejected here, where the cost is one boot.
+    """
+    fid = frame.get("id", previous + 1)
+    if isinstance(fid, int):
+        return fid
+    if not math.isfinite(fid):
+        raise ValueError(f"canonical frame id is {fid!r}; the emulator produced a torn frame")
+    return int(fid)
+
+
 def drive_vec(
     sessions: Sequence[Session],
     matches: Sequence[VecMatch],
@@ -110,6 +129,9 @@ def drive_vec(
     done = [True] * n
     last_id = [0] * n
     ports_of = [tuple(p.port for p in m.matchup.players) for m in matches]
+    # Every slot this call can ever hand the policy, built once: the step loop runs at
+    # 60 Hz across N boots, so nothing whose value is fixed for the run belongs in it.
+    slots_of = [tuple(Slot(i, p) for p in m.model_ports) for i, m in enumerate(matches)]
     # Per-match matchup metadata injected into each obs frame under ``_matchup``
     # (flatten_canonical_frame emits the columns only when present). Characters are
     # fixed for the boot; ``stage`` is refreshed each frame from the live frame.
@@ -141,8 +163,8 @@ def drive_vec(
         for i, fut in start_futs.items():
             try:
                 f0 = fut.result()
+                last_id[i] = _frame_id(f0, -1)
                 seg[i].append(f0)
-                last_id[i] = f0.get("id", 0)
                 started[i] = True
                 done[i] = False
             except Exception as e:
@@ -159,23 +181,28 @@ def drive_vec(
                 elapsed = time.monotonic() - t0
                 logger.info(f"drive_vec: frame {t}/{max_frames} | live {len(live)}/{n} | {t / elapsed:.0f} steps/s")
             # Refresh each live slot's injected stage from the frame about to be shown
-            # (instant-restart changes it); characters are fixed for the boot.
+            # (instant-restart changes it); characters are fixed for the boot. One
+            # observation per BOOT, shared by that boot's slots: the ports of a match see
+            # the same frame, and the policy tells them apart by slot, not by dict.
+            obs: dict[Slot, dict] = {}
             for i in live:
                 match_meta[i]["stage"] = seg[i][-1].get("stage", match_meta[i]["stage"])
-            obs = {Slot(i, p): {**seg[i][-1], "_matchup": match_meta[i]} for i in live for p in matches[i].model_ports}
+                view = {**seg[i][-1], "_matchup": match_meta[i]}
+                for slot in slots_of[i]:
+                    obs[slot] = view
             inputs = policy(t, obs) if obs else {}
             step_futs = {
-                i: pool.submit(sessions[i].step, {p: inputs[Slot(i, p)] for p in matches[i].model_ports}) for i in live
+                i: pool.submit(sessions[i].step, {slot.port: inputs[slot] for slot in slots_of[i]}) for i in live
             }
             for i, fut in step_futs.items():
                 try:
                     frame, in_game = fut.result()
+                    fid = _frame_id(frame, last_id[i])
                 except Exception as e:
                     logger.warning(f"drive_vec: boot {i} step crashed: {e!r}")
                     seg[i] = []  # drop the partial match; keep matches already completed
                     done[i] = True
                     continue
-                fid = frame.get("id", last_id[i] + 1)
                 if instant_restart and fid < last_id[i]:
                     # Frame counter reset → Dolphin instant-restarted into a new match.
                     # Close the just-finished match and open a fresh segment.

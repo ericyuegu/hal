@@ -38,7 +38,6 @@ on a cloud box that destroys itself when training ends.
 """
 
 import json
-import os
 import struct
 import time
 from collections.abc import Callable
@@ -60,6 +59,7 @@ from hal.eval.cross_stage import STARTING_STOCKS
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import run_matches_vec
+from hal.eval.harness import usable_cpus
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.matchups import matchups_for
 from hal.policy import INCLUDED_STAGES
@@ -773,7 +773,7 @@ def run_h2h(
     ``matches.jsonl`` (appended after each orientation, so a crash in the second sweep
     cannot lose the first) and the replays. Nothing is uploaded: the caller owns transfer.
 
-    ``max_parallel`` 0 means one concurrent Dolphin boot per CPU. ``session_cfg`` defaults
+    ``max_parallel`` 0 means one concurrent Dolphin boot per USABLE CPU. ``session_cfg`` defaults
     to the standard headless eval session; a supplied one has its ``replay_dir`` replaced
     per orientation. ``meta`` is merged into ``meta.json``, which is where a caller
     records the checkpoints and decode settings behind its policy builders.
@@ -792,7 +792,7 @@ def run_h2h(
     out_path.mkdir(parents=True, exist_ok=True)
     specs = match_specs(mirrored_configs(n_configs, stages=stages), name_a=name_a, name_b=name_b)
     builders = {name_a: build_policy_a, name_b: build_policy_b}
-    parallel = max_parallel or (os.cpu_count() or 1)
+    parallel = max_parallel or usable_cpus()
 
     run_meta: dict[str, Any] = {
         "model_a": name_a,

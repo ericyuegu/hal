@@ -73,8 +73,16 @@ class FakeSession:
     of in-game frames, then reports the match ended. ``crash_at`` raises from
     ``step`` to exercise per-match crash isolation."""
 
-    def __init__(self, *, length: int, ports: tuple[int, ...], crash_at: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        length: int,
+        ports: tuple[int, ...],
+        crash_at: int | None = None,
+        nan_id_at: int | None = None,
+    ) -> None:
         self.length, self.ports, self.crash_at, self.t = length, ports, crash_at, 0
+        self.nan_id_at = nan_id_at
 
     def __enter__(self) -> FakeSession:
         return self
@@ -89,7 +97,10 @@ class FakeSession:
         self.t += 1
         if self.crash_at is not None and self.t >= self.crash_at:
             raise RuntimeError("fake dolphin crash")
-        return _frame(self.t, self.ports), self.t < self.length
+        frame = _frame(self.t, self.ports)
+        if self.nan_id_at is not None and self.t == self.nan_id_at:
+            frame["id"] = float("nan")
+        return frame, self.t < self.length
 
 
 class RecordingPolicy:
@@ -163,6 +174,29 @@ def test_drive_vec_isolates_a_crashing_session() -> None:
     # Batch carries match 2's two slots until it crashes, then drops them.
     assert len(policy.frames[0]) == 5  # 2 + 1 + 2
     assert Slot(2, 1) not in policy.frames[-1]
+
+
+def test_drive_vec_isolates_a_torn_frame_id() -> None:
+    """A NaN canonical frame id costs one boot, not the wave.
+
+    NaN never compares as a match boundary and raises only later, when the segment is
+    transposed into an int32 column — from outside the per-boot guard. Rejecting it at
+    ingest keeps the failure inside the boot that produced it.
+    """
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,)) for _ in range(3)]
+    sessions = [
+        FakeSession(length=8, ports=(1, 2)),
+        FakeSession(length=8, ports=(1, 2), nan_id_at=3),
+        FakeSession(length=8, ports=(1, 2)),
+    ]
+    policy = RecordingPolicy()
+
+    trajs = drive_vec(sessions, matches, policy, max_frames=20)
+
+    assert trajs[1] == []
+    assert [len(boot) for boot in (trajs[0], trajs[2])] == [1, 1]
+    assert len(trajs[0][0]) == 9
+    assert Slot(1, 1) not in policy.frames[-1]
 
 
 def test_drive_vec_returns_none_when_start_fails() -> None:

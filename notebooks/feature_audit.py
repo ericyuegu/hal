@@ -7,7 +7,9 @@ paths and printed side by side:
 * train path  — ``StreamingDataset`` -> ``WindowDataset`` -> ``collate_train_batch``
   (which calls ``hal.training.features.preprocess`` in the DataLoader worker);
 * eval path   — canonical libmelee frame dict -> ``flatten_canonical_frame`` ->
-  ``closed_loop._live_batch_from_rolling`` -> the SAME ``preprocess``.
+  a stacked raw window (the closed loop's ring path preprocesses the same raw values
+  per frame; bit-exactness of that path is pinned by tests/test_closed_loop_rings.py)
+  -> the SAME ``preprocess``.
 
 The two paths must agree feature for feature at every context position. Cell 4
 measures that; cells 3 and 5 show what each column is, which model block reads it,
@@ -38,10 +40,10 @@ from hal.data.feature_stats import load_sufficient_stats
 from hal.data.feature_stats import merge_sufficient
 from hal.data.schema import SCHEMA_VERSION
 from hal.training.canonical import flatten_canonical_frame
-from hal.training.closed_loop import _live_batch_from_rolling
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import collate_train_batch
 from hal.training.dataloader import collate_windows
+from hal.training.dataloader import relabel_ego
 from hal.training.ego_stats import consolidate_key
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import _SPATIAL_SCALES
@@ -421,7 +423,19 @@ ego_inputs_hist = [
 assert not np.isnan(np.stack(ego_inputs_hist)).any(), (
     "recorded ego controller input is masked; history is not faithful"
 )
-eval_batch = _live_batch_from_rolling(flat_history, ego_inputs_hist, ego_prefix="p1", L_ctx=L_CTX)
+# Stack the flat frames into a raw [1, L] window the way the closed loop feeds
+# ``preprocess`` (the ring-buffer path preprocesses per frame; this notebook keeps the
+# window form so both paths run the same function on the same raw values). Scalars from
+# the canonical dict stack as float64/int64; the wire dtypes are float32/int32.
+eval_stacked = {}
+for k in flat_history[0]:
+    a = np.stack([f[k] for f in flat_history])[None]
+    eval_stacked[k] = a.astype(np.int32) if a.dtype.kind in "iu" else a.astype(np.float32)
+eval_batch = relabel_ego(eval_stacked, "p1")
+eval_batch.pop("frame", None)
+for c, channel in enumerate(ACTION_CHANNELS):
+    eval_batch[f"ego_{channel}"] = np.stack([h[c] for h in ego_inputs_hist])[None].astype(np.float32)
+eval_batch["ctx_pad"] = np.int64(CTX_PAD)
 eval_feats = preprocess(eval_batch, stats)
 
 print(f"eval-path raw columns: {len(eval_batch)}   model-input tensors: {len(eval_feats)}")

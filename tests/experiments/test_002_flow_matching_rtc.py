@@ -40,6 +40,15 @@ exp = _load_experiment()
 _FLOAT_KEYS = ("position_x", "position_y", "percent", "shield", "direction", "hitlag_left")
 
 
+def _named(windows) -> dict[str, np.ndarray]:
+    """One stacked replan batch as ``name -> [B, L]``. The stats below are the identity
+    on both transforms, so a normalized column still reads as its raw value."""
+    n_value = len(windows.layout.value_names)
+    named = dict(zip(windows.layout.value_names, windows.floats[:n_value], strict=True))
+    named.update(zip(windows.layout.cat_names, windows.cats, strict=True))
+    return named
+
+
 def _stats() -> dict[str, FeatureStats]:
     # The obs bridge emits a (masked) nana follower block, so preprocess needs nana float stats too.
     keys = (*_FLOAT_KEYS, *(f"nana_{k}" for k in _FLOAT_KEYS))
@@ -106,13 +115,13 @@ def test_context_pairs_each_gamestate_with_the_action_that_produced_it():
     slot = Slot(0, ego_port)
 
     captured: list[dict[str, np.ndarray]] = []
-    real_build = policy._build_stacked_batch
+    real_build = policy._stack_windows
     real_push = policy._push_ego
 
-    def spy_build(live):
-        batch = real_build(live)
-        captured.append({k: v.copy() for k, v in batch.items()})
-        return batch
+    def spy_build(live, length):
+        windows = real_build(live, length)
+        captured.append({k: v.copy() for k, v in _named(windows).items()})
+        return windows
 
     returned: list[np.ndarray] = []
 
@@ -121,7 +130,7 @@ def test_context_pairs_each_gamestate_with_the_action_that_produced_it():
             returned.append(np.asarray(a, dtype=np.float32).copy())
         real_push(s, a)
 
-    policy._build_stacked_batch = spy_build
+    policy._stack_windows = spy_build
     policy._push_ego = spy_push
 
     for t in range(4 * cfg.L_ctx):
@@ -204,19 +213,19 @@ def test_buffers_reset_at_instant_restart_match_boundary():
     ctx_pads: list[int] = []
     batches: list[dict[str, np.ndarray]] = []
     real_predict = policy.predict_chunk
-    real_build = policy._build_stacked_batch
+    real_build = policy._stack_windows
 
     def spy_predict(ctx, committed):
         ctx_pads.append(int(ctx.ctx_pad[0]))
         return real_predict(ctx, committed)
 
-    def spy_build(live):
-        batch = real_build(live)
-        batches.append({k: v.copy() for k, v in batch.items()})
-        return batch
+    def spy_build(live, length):
+        windows = real_build(live, length)
+        batches.append({k: v.copy() for k, v in _named(windows).items()})
+        return windows
 
     policy.predict_chunk = spy_predict
-    policy._build_stacked_batch = spy_build
+    policy._stack_windows = spy_build
 
     # Match 1: a rising id run long enough to saturate the L_ctx buffer. Match 2: the id
     # drops to a new countdown then rises again — the instant-restart boundary. Each frame's
@@ -300,5 +309,5 @@ def test_async_restart_discards_only_that_slots_pending_chunk():
     assert reset_state.offset == 1
     assert steady_state.offset == 3
     assert reset_state.pending[0, 0] != pytest.approx(old_reset_chunk[2, 0])
-    assert reset_state.ego_inputs_hist[-1][0] == pytest.approx(reset_state.pending[0, 0])
-    assert steady_state.ego_inputs_hist[-1][0] == pytest.approx(steady_chunk[2, 0])
+    assert reset_state.last_action[0] == pytest.approx(reset_state.pending[0, 0])
+    assert steady_state.last_action[0] == pytest.approx(steady_chunk[2, 0])

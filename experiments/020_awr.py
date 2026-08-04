@@ -94,6 +94,7 @@ from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.h2h import run_h2h
 from hal.eval.harness import default_session_cfg
+from hal.eval.harness import usable_cpus
 from hal.eval.paired import summarize_paired
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
@@ -323,7 +324,7 @@ def _model_tag(cfg: TrainConfig) -> str:
 
 def _eval_max_parallel(cfg: TrainConfig, n_matchups: int) -> int:
     """Concurrent Dolphin boots per wave; never changes the fixed statistical sample size."""
-    return min(n_matchups, max(1, round(cfg.eval_parallel_per_cpu * (os.cpu_count() or 1))))
+    return min(n_matchups, max(1, round(cfg.eval_parallel_per_cpu * usable_cpus())))
 
 
 def _load_button_combo_counts(cfg: TrainConfig) -> Tensor | None:
