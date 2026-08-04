@@ -2420,10 +2420,16 @@ def main(args: Args) -> None:
         state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)
         if state is None:
             raise SystemExit(f"no latest.pt for run {args.resume!r} (local or R2)")
-        # Only pure host-scaling knobs (worker/prefetch counts) follow the current code; the
-        # model-identity knobs MUST come from the checkpoint so a resume can't silently change them.
-        d = TrainConfig()
-        cfg = replace(_cfg_from_state(state["cfg"]), num_workers=d.num_workers, prefetch_factor=d.prefetch_factor)
+        # Only pure host-scaling knobs follow the CLI on a resume; the model-identity knobs
+        # MUST come from the checkpoint so a resume can't silently change them. ``cache_limit_gb``
+        # is a host knob: a resume onto a bigger disk must be able to raise it.
+        d = args.cfg
+        cfg = replace(
+            _cfg_from_state(state["cfg"]),
+            num_workers=d.num_workers,
+            prefetch_factor=d.prefetch_factor,
+            cache_limit_gb=d.cache_limit_gb,
+        )
         stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
         train(cfg, stats, resume_run=args.resume, resume_state=state)
         return
