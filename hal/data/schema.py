@@ -188,15 +188,19 @@ MDS_DTYPE_STR_BY_COLUMN: dict[str, str] = {
 MDS_COLUMNS: dict[str, str] = {"schema_version": "int", **MDS_DTYPE_STR_BY_COLUMN}
 
 
-def check_schema_version(sample: dict) -> None:
-    """Assert one MDS row was materialized at this code's ``SCHEMA_VERSION``.
+def check_schema_version(sample: dict, *, expected: int = SCHEMA_VERSION) -> None:
+    """Assert one MDS row was materialized at the schema version the consumer targets.
 
     Call on the first row read from any split. Rows written before the scalar
-    existed (< v4) have no ``schema_version`` key at all.
+    existed (< v4) have no ``schema_version`` key at all. ``expected`` defaults
+    to this code's ``SCHEMA_VERSION``; a consumer that deliberately reads an
+    older materialization must declare that version explicitly (visible in its
+    config) — a mismatch always raises.
     """
     found = sample.get("schema_version")
-    if found != SCHEMA_VERSION:
+    if found != expected:
         raise ValueError(
-            f"MDS row schema_version={found!r} != SCHEMA_VERSION={SCHEMA_VERSION}. "
-            "Re-materialize the dataset (and wipe stale local split caches)."
+            f"MDS row schema_version={found!r} != expected={expected} (code SCHEMA_VERSION={SCHEMA_VERSION}). "
+            "Re-materialize the dataset (and wipe stale local split caches), or declare the version this "
+            "consumer targets."
         )

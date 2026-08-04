@@ -20,6 +20,7 @@ from torch.utils.data import IterableDataset
 from torch.utils.data import get_worker_info
 
 from hal.data.feature_stats import FeatureStats
+from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
 from hal.training.features import Context
 from hal.training.features import TrainBatch
@@ -96,7 +97,14 @@ class WindowDataset(IterableDataset):
     """
 
     def __init__(
-        self, mds: StreamingDataset, L_ctx: int, L_chunk: int, *, seed: int, windows_per_replay: int = 1
+        self,
+        mds: StreamingDataset,
+        L_ctx: int,
+        L_chunk: int,
+        *,
+        seed: int,
+        windows_per_replay: int = 1,
+        schema_version: int = SCHEMA_VERSION,
     ) -> None:
         self._mds = mds
         self.L_ctx = L_ctx
@@ -104,6 +112,7 @@ class WindowDataset(IterableDataset):
         self._L = L_ctx + L_chunk
         self._seed = seed
         self._K = windows_per_replay
+        self._schema_version = schema_version
         self._epoch = 0
 
     def __iter__(self) -> Iterator[dict[str, np.ndarray]]:
@@ -116,7 +125,7 @@ class WindowDataset(IterableDataset):
         rng = np.random.default_rng((self._seed, worker_id, self._epoch))
         self._epoch += 1
         for sample in self._mds:
-            check_schema_version(sample)
+            check_schema_version(sample, expected=self._schema_version)
             # Shallow copy without the row scalar; windowing slices every value.
             sample = {k: v for k, v in sample.items() if k != "schema_version"}
             T = len(sample["frame"])
@@ -190,6 +199,7 @@ def make_loader(
     predownload: int | None = None,
     pin_memory: bool | None = None,
     windows_per_replay: int = 1,
+    schema_version: int = SCHEMA_VERSION,
 ) -> DataLoader:
     """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` (preprocessing runs in the workers).
@@ -235,7 +245,9 @@ def make_loader(
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
     )
-    sampler = WindowDataset(mds, L_ctx, L_chunk, seed=seed, windows_per_replay=windows_per_replay)
+    sampler = WindowDataset(
+        mds, L_ctx, L_chunk, seed=seed, windows_per_replay=windows_per_replay, schema_version=schema_version
+    )
     collate = functools.partial(collate_train_batch, stats=stats, L_ctx=L_ctx)
     # Pin by default only when there's a GPU to copy to (page-locking host memory is
     # wasted on a CPU run). ``TrainBatch.pin_memory`` makes the custom batch poolable.
