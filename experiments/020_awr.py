@@ -11,9 +11,11 @@ alike, so the policy's ceiling is the average of the data. AWR keeps the same
 maximum-likelihood objective and reweights it by how well the demonstrated frame
 turned out:
 
-    r_t = -1 on an ego stock loss, +1 on an opponent stock loss   (+ optional damage shaping)
+    r_t = -1 on an ego stock loss, +1 on an opponent stock loss   (+ optional damage / match-win shaping)
     G_t = sum_k gamma^k r_{t+k}                                    (reverse scan, FULL replay)
-    A_t = G_t - V(s_t)                                             (V = a value head on the trunk)
+    A_t = G_{t+1} - V(s_t)          (V = a value head on the trunk; the return starts at the PREDICTED
+                                     frame, so a reward that landed before the action could act is
+                                     never part of the action's credit)
     w_t = clip(exp(A_t / beta), w_max),  rescaled to mean 1 over the batch
     loss = sum over heads/groups of  weighted_mean(w_t, per-frame NLL)  +  value MSE
 
@@ -193,6 +195,10 @@ class TrainConfig:
     # damage taken minus the ego's, each clipped at >= 0 so a respawn's percent reset is not read
     # as healing. 0 = stock events only.
     awr_damage_shaping: float = 0.0
+    # Extra reward on the MATCH-DECIDING stock event (the drop that empties a player's stock count),
+    # in stock units, on top of the ordinary +-1. Makes the last stock worth (1 + this) stocks, so
+    # closing a game out earns more credit than an early stock. 0 = every stock equal.
+    awr_win_reward: float = 0.0
     # GPT backbone
     d_model: int = 256
     n_layers: int = 8
@@ -563,6 +569,15 @@ def stock_loss_events(stock: np.ndarray) -> np.ndarray:
     return out
 
 
+def match_point_events(stock: np.ndarray) -> np.ndarray:
+    """1.0 on the frame a player's LAST stock is lost (the count drops to 0), else 0.0.
+
+    A subset of ``stock_loss_events``: the same drop detection, kept only where the new count is
+    zero. A ranked game that ends by quit-out never empties a stock count, so it has no event."""
+    ids = np.asarray(stock).astype(np.int64)
+    return stock_loss_events(stock) * (ids == 0).astype(np.float32)
+
+
 def damage_taken(percent: np.ndarray) -> np.ndarray:
     """Per-frame INCREASE in a player's percent, clipped at >= 0.
 
@@ -574,14 +589,20 @@ def damage_taken(percent: np.ndarray) -> np.ndarray:
     return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def frame_reward(sample: dict[str, np.ndarray], *, ego: str, opp: str, damage_shaping: float) -> np.ndarray:
+def frame_reward(
+    sample: dict[str, np.ndarray], *, ego: str, opp: str, damage_shaping: float, win_reward: float
+) -> np.ndarray:
     """Per-frame reward for the player at port ``ego`` over one whole replay.
 
     ``+1`` when the opponent loses a stock, ``-1`` when the ego does (both on the frame the drop
-    becomes visible), plus ``damage_shaping`` times the percent the opponent took minus the percent
-    the ego took on that frame. The sparse stock term is the outcome the match is scored on; the
-    shaping term is off by default and exists to densify the signal, not to redefine it."""
+    becomes visible), plus ``win_reward`` extra on the match-deciding stock, plus ``damage_shaping``
+    times the percent the opponent took minus the percent the ego took on that frame. The sparse
+    stock term is the outcome the match is scored on; the shaping terms are off by default and
+    exist to densify / re-rank the signal, not to redefine it."""
     reward = stock_loss_events(sample[f"{opp}_stock"]) - stock_loss_events(sample[f"{ego}_stock"])
+    if win_reward:
+        wins = match_point_events(sample[f"{opp}_stock"]) - match_point_events(sample[f"{ego}_stock"])
+        reward = reward + win_reward * wins
     if damage_shaping:
         dealt = damage_taken(sample[f"{opp}_percent"]) - damage_taken(sample[f"{ego}_percent"])
         reward = reward + damage_shaping * dealt
@@ -600,7 +621,9 @@ def discounted_returns(reward: np.ndarray, gamma: float) -> np.ndarray:
     return np.fromiter(tail, dtype=np.float32, count=len(reward))[::-1].copy()
 
 
-def replay_returns(sample: dict[str, np.ndarray], *, gamma: float, damage_shaping: float) -> dict[str, np.ndarray]:
+def replay_returns(
+    sample: dict[str, np.ndarray], *, gamma: float, damage_shaping: float, win_reward: float
+) -> dict[str, np.ndarray]:
     """Both ports' return columns for one replay row, keyed ``p{1,2}_awr_return``.
 
     Named per port rather than per role because the sampler picks the ego port AFTER windowing:
@@ -608,7 +631,7 @@ def replay_returns(sample: dict[str, np.ndarray], *, gamma: float, damage_shapin
     code, exactly as it does for every gamestate column."""
     return {
         f"{port}_{_RETURN_SUFFIX}": discounted_returns(
-            frame_reward(sample, ego=port, opp=other, damage_shaping=damage_shaping), gamma
+            frame_reward(sample, ego=port, opp=other, damage_shaping=damage_shaping, win_reward=win_reward), gamma
         )
         for port, other in (("p1", "p2"), ("p2", "p1"))
     }
@@ -628,23 +651,32 @@ class ReturnLabeledReplays:
     ``dataset``/``collate`` argument on ``make_loader`` would make the injection explicit; that is a
     shared-infra change, so it is flagged rather than taken here."""
 
-    def __init__(self, replays: Iterable[dict], *, gamma: float, damage_shaping: float) -> None:
+    def __init__(self, replays: Iterable[dict], *, gamma: float, damage_shaping: float, win_reward: float) -> None:
         self._replays = replays
         self._gamma = gamma
         self._damage_shaping = damage_shaping
+        self._win_reward = win_reward
 
     def __iter__(self) -> Iterator[dict]:
         for sample in self._replays:
-            yield {**sample, **replay_returns(sample, gamma=self._gamma, damage_shaping=self._damage_shaping)}
+            yield {
+                **sample,
+                **replay_returns(
+                    sample, gamma=self._gamma, damage_shaping=self._damage_shaping, win_reward=self._win_reward
+                ),
+            }
 
 
 @dataclass(frozen=True, slots=True)
 class AWRBatch:
-    """One ``TrainBatch`` plus the ego's discounted return at each CONTEXT position.
+    """One ``TrainBatch`` plus the ego's discounted return, aligned to the PREDICTED frame.
 
     ``TrainBatch`` is the shared, frozen train/eval contract, so the extra target composes with it
-    instead of extending it. ``returns[b, t]`` is ``G_t`` at context frame ``t`` — the state whose
-    hidden vector the value head reads and whose action every offset head predicts."""
+    instead of extending it. ``returns[b, t]`` is ``G_{t+1}`` — the return from the frame the
+    offset-1 head at context position ``t`` predicts. The value head trains to the same target, so
+    ``V(s_t)`` estimates the expected outcome of the action about to be chosen and the advantage
+    ``G_{t+1} - V(s_t)`` never includes a reward that landed before that action could act. (With
+    sparse stock rewards the one-frame shift is cosmetic; with dense damage shaping it is real.)"""
 
     batch: TrainBatch
     returns: Tensor  # [B, L_ctx] float32
@@ -663,10 +695,12 @@ class AWRBatch:
 
 def collate_awr_batch(windows: list[dict], *, stats: dict[str, FeatureStats], L_ctx: int) -> AWRBatch:
     """Worker-side collate: hal's ``collate_train_batch`` builds the observation/action batch and the
-    ego return column is stacked beside it, sliced to the context positions. The return columns stay
-    in the window dicts hal collates: ``features._classify`` does not recognize the suffix, so
+    ego return column is stacked beside it, sliced to the PREDICTED frames (``1 .. L_ctx``): position
+    ``t``'s return is ``G_{t+1}``, see :class:`AWRBatch`. The window always extends ``VAL_L_CHUNK``
+    target frames past the context, so the shifted slice never runs off the end. The return columns
+    stay in the window dicts hal collates: ``features._classify`` does not recognize the suffix, so
     ``preprocess`` drops them and they can never reach the model as an input feature."""
-    returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, :L_ctx]
+    returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, 1 : L_ctx + 1]
     batch = collate_train_batch(windows, stats=stats, L_ctx=L_ctx)
     return AWRBatch(batch=batch, returns=torch.from_numpy(np.ascontiguousarray(returns)))
 
@@ -681,7 +715,12 @@ def _attach_returns(loader: DataLoader, cfg: TrainConfig, stats: dict[str, Featu
     sampler = loader.dataset
     if not isinstance(sampler, WindowDataset):
         raise TypeError(f"expected make_loader to yield a WindowDataset sampler, got {type(sampler).__name__}")
-    sampler._mds = ReturnLabeledReplays(sampler._mds, gamma=cfg.awr_gamma, damage_shaping=cfg.awr_damage_shaping)
+    sampler._mds = ReturnLabeledReplays(
+        sampler._mds,
+        gamma=cfg.awr_gamma,
+        damage_shaping=cfg.awr_damage_shaping,
+        win_reward=cfg.awr_win_reward,
+    )
     loader.collate_fn = functools.partial(collate_awr_batch, stats=stats, L_ctx=cfg.L_ctx)
     return loader
 
@@ -1174,7 +1213,7 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         raise ValueError(f"awr_beta must be finite and > 0, got {cfg.awr_beta!r}")
     if not math.isfinite(cfg.awr_weight_max) or cfg.awr_weight_max <= 0:
         raise ValueError(f"awr_weight_max must be finite and > 0, got {cfg.awr_weight_max!r}")
-    for name in ("awr_value_loss_weight", "awr_damage_shaping"):
+    for name in ("awr_value_loss_weight", "awr_damage_shaping", "awr_win_reward"):
         value = getattr(cfg, name)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be finite and >= 0, got {value!r}")
@@ -2616,7 +2655,11 @@ def return_audit(cfg: TrainConfig, *, split: str, betas: tuple[float, ...] = _AU
     for sample in mds:
         check_schema_version(sample, expected=cfg.mds_schema_version)
         # One row per (replay, port): the ego is drawn per window at train time, so both are real targets.
-        per_replay.extend(replay_returns(sample, gamma=cfg.awr_gamma, damage_shaping=cfg.awr_damage_shaping).values())
+        per_replay.extend(
+            replay_returns(
+                sample, gamma=cfg.awr_gamma, damage_shaping=cfg.awr_damage_shaping, win_reward=cfg.awr_win_reward
+            ).values()
+        )
     if not per_replay:
         raise RuntimeError(f"no replays under {root}")
     returns = np.concatenate(per_replay)
@@ -2637,6 +2680,7 @@ def return_audit(cfg: TrainConfig, *, split: str, betas: tuple[float, ...] = _AU
         "frames": int(returns.size),
         "gamma": cfg.awr_gamma,
         "damage_shaping": cfg.awr_damage_shaping,
+        "win_reward": cfg.awr_win_reward,
         "mean": float(returns.mean()),
         "std": float(returns.std()),
         "within_replay_std": float(np.mean([g.std() for g in per_replay])),
@@ -2646,7 +2690,7 @@ def return_audit(cfg: TrainConfig, *, split: str, betas: tuple[float, ...] = _AU
     }
     print(
         f"[audit] {out['replays']} replays  {out['frames']} port-frames  gamma={cfg.awr_gamma}  "
-        f"damage_shaping={cfg.awr_damage_shaping}",
+        f"damage_shaping={cfg.awr_damage_shaping}  win_reward={cfg.awr_win_reward}",
         flush=True,
     )
     print(f"[audit] G mean={out['mean']:+.4f} std={out['std']:.4f} within-replay std={out['within_replay_std']:.4f}")

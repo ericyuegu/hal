@@ -125,6 +125,7 @@ def test_awr_defaults_are_the_audited_recipe() -> None:
     assert cfg.awr_weight_max == 20.0
     assert cfg.awr_value_loss_weight == 1.0
     assert cfg.awr_damage_shaping == 0.0  # stock events only
+    assert cfg.awr_win_reward == 0.0  # every stock equal
 
 
 def test_loader_kwargs_declare_the_mds_schema_version() -> None:
@@ -213,7 +214,7 @@ def _toy_replay(frames: int = 12) -> dict[str, np.ndarray]:
 def test_returns_match_a_hand_computed_toy_episode() -> None:
     """gamma=0.5, ego loses a stock at t=5 and takes one at t=8: G is the exact discounted sum."""
     sample = _toy_replay()
-    returns = exp020.replay_returns(sample, gamma=0.5, damage_shaping=0.0)
+    returns = exp020.replay_returns(sample, gamma=0.5, damage_shaping=0.0, win_reward=0.0)
     ego = returns["p1_awr_return"]
     expected = np.array(
         [-(0.5 ** (5 - t)) + 0.5 ** (8 - t) if t <= 5 else (0.5 ** (8 - t) if t <= 8 else 0.0) for t in range(12)],
@@ -242,10 +243,41 @@ def test_percent_reset_at_respawn_is_not_damage() -> None:
         "p1_percent": np.zeros(frames, dtype=np.float32),
         "p2_percent": np.array([0.0, 30.0, 80.0, 0.0, 0.0, 10.0], dtype=np.float32),
     }
-    reward = exp020.frame_reward(sample, ego="p1", opp="p2", damage_shaping=1.0)
+    reward = exp020.frame_reward(sample, ego="p1", opp="p2", damage_shaping=1.0, win_reward=0.0)
     np.testing.assert_allclose(reward, [0.0, 30.0, 50.0, 0.0, 0.0, 10.0], rtol=0, atol=1e-6)
     # With shaping off the same episode is all zeros: no stock changed hands.
-    np.testing.assert_allclose(exp020.frame_reward(sample, ego="p1", opp="p2", damage_shaping=0.0), np.zeros(frames))
+    np.testing.assert_allclose(
+        exp020.frame_reward(sample, ego="p1", opp="p2", damage_shaping=0.0, win_reward=0.0), np.zeros(frames)
+    )
+
+
+def test_match_point_fires_only_when_a_stock_count_empties() -> None:
+    """The 2->1 drop is an ordinary stock; the 1->0 drop is the match point. A masked frame next
+    to a drop suppresses it, exactly as in ``stock_loss_events``."""
+    stock = np.array([2, 2, 1, 1, 0, 0], dtype=np.int32)
+    np.testing.assert_array_equal(exp020.match_point_events(stock), [0, 0, 0, 0, 1, 0])
+    quit_out = np.array([2, 1, 1], dtype=np.int32)  # game ends without reaching 0
+    np.testing.assert_array_equal(exp020.match_point_events(quit_out), [0, 0, 0])
+    masked = np.array([1, np.iinfo(np.int32).max, 0], dtype=np.int32)
+    np.testing.assert_array_equal(exp020.match_point_events(masked), [0, 0, 0])
+
+
+def test_win_reward_makes_the_last_stock_worth_more() -> None:
+    """With win_reward=3 the match-deciding stock pays 1+3=4 and an ordinary stock still pays 1."""
+    frames = 8
+    sample = {
+        "p1_stock": np.full(frames, 2, dtype=np.int32),
+        "p2_stock": np.full(frames, 2, dtype=np.int32),
+        "p1_percent": np.zeros(frames, dtype=np.float32),
+        "p2_percent": np.zeros(frames, dtype=np.float32),
+    }
+    sample["p2_stock"][3:] = 1  # ordinary stock at t=3
+    sample["p2_stock"][6:] = 0  # match point at t=6
+    reward = exp020.frame_reward(sample, ego="p1", opp="p2", damage_shaping=0.0, win_reward=3.0)
+    np.testing.assert_allclose(reward, [0, 0, 0, 1, 0, 0, 4, 0], rtol=0, atol=1e-7)
+    # The loser's viewpoint is the exact mirror.
+    mirror = exp020.frame_reward(sample, ego="p2", opp="p1", damage_shaping=0.0, win_reward=3.0)
+    np.testing.assert_allclose(mirror, -reward, rtol=0, atol=1e-7)
 
 
 def test_return_is_the_full_episode_not_the_window() -> None:
@@ -259,7 +291,7 @@ def test_return_is_the_full_episode_not_the_window() -> None:
         "p2_percent": np.zeros(frames, dtype=np.float32),
     }
     sample["p2_stock"][900:] = 3
-    ego = exp020.replay_returns(sample, gamma=0.999, damage_shaping=0.0)["p1_awr_return"]
+    ego = exp020.replay_returns(sample, gamma=0.999, damage_shaping=0.0, win_reward=0.0)["p1_awr_return"]
     assert ego[0] == pytest.approx(0.999**900, rel=1e-5)
     assert ego[899] == pytest.approx(0.999, rel=1e-6)
 
@@ -289,7 +321,7 @@ def _mds_replay(frames: int) -> dict[str, np.ndarray]:
 
 def _windows(replay: dict, *, L_ctx: int, L_chunk: int, gamma: float, K: int, seed: int) -> list[dict]:
     """Drive hal's real sampler over an in-memory return-labeled replay stream."""
-    labeled = exp020.ReturnLabeledReplays([replay], gamma=gamma, damage_shaping=0.0)
+    labeled = exp020.ReturnLabeledReplays([replay], gamma=gamma, damage_shaping=0.0, win_reward=0.0)
     return list(WindowDataset(labeled, L_ctx, L_chunk, seed=seed, windows_per_replay=K, schema_version=6))
 
 
@@ -329,12 +361,27 @@ def test_returns_do_not_reach_the_model_as_a_feature() -> None:
     assert batch.batch.context.batch == len(windows)
 
 
+def test_collate_shifts_the_return_to_the_predicted_frame() -> None:
+    """``batch.returns[b, t]`` must be the WINDOW column at ``t+1``: the return of the frame the
+    offset-1 head predicts, so a reward that lands on the context frame itself (caused by the
+    PREVIOUS action) never enters this action's advantage."""
+    L_ctx = 8
+    replay = _mds_replay(60)
+    replay["p2_stock"][40:] = 3
+    windows = _windows(replay, L_ctx=L_ctx, L_chunk=2, gamma=0.9, K=3, seed=2)
+    batch = exp020.collate_awr_batch(windows, stats=_stats(), L_ctx=L_ctx)
+    for b, window in enumerate(windows):
+        np.testing.assert_allclose(
+            batch.returns[b].numpy(), window[exp020.EGO_RETURN_COLUMN][1 : L_ctx + 1], rtol=0, atol=0
+        )
+
+
 def test_left_padded_positions_carry_a_zero_return() -> None:
     """A window that starts before the episode is left-padded by hal; the return column pads with
     it, and those positions are masked out of the loss by ctx_pad anyway."""
     replay = _mds_replay(20)
     replay["p2_stock"][10:] = 3
-    labeled = exp020.ReturnLabeledReplays([replay], gamma=0.9, damage_shaping=0.0)
+    labeled = exp020.ReturnLabeledReplays([replay], gamma=0.9, damage_shaping=0.0, win_reward=0.0)
     sampler = WindowDataset(labeled, 16, 2, seed=3, windows_per_replay=4, schema_version=6)
     padded = [w for w in sampler if int(w["ctx_pad"]) > 0]
     assert padded, "expected at least one cold-start window from a 20-frame replay"
