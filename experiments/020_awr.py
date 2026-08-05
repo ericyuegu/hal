@@ -181,8 +181,14 @@ class TrainConfig:
     # variance one lucky trajectory can inject.
     awr_weight_max: float = 20.0
     # Scalar on the value head's MSE inside the backprop objective. The policy loss never
-    # backpropagates into the value head (the advantage is detached), so this trains V alone.
+    # backpropagates into the value head (the advantage is detached). The reverse path is NOT
+    # closed by default: the MSE reaches the shared trunk through the value head's input unless
+    # awr_value_detach_trunk is set.
     awr_value_loss_weight: float = 1.0
+    # Feed the value head a detached trunk state. False (the deployed 020 run) lets the value MSE
+    # also train the trunk — a second, unplanned axis vs 016. True makes the arm pure reweighting:
+    # V trains through value_head alone and the trunk sees only the (weighted) imitation gradient.
+    awr_value_detach_trunk: bool = False
     # Optional dense shaping term added to the sparse stock reward, per percent: the opponent's
     # damage taken minus the ego's, each clipped at >= 0 so a respawn's percent reset is not read
     # as healing. 0 = stock events only.
@@ -685,8 +691,10 @@ def awr_weights(
 ) -> tuple[Float[Tensor, " n_valid"], dict[str, float]]:
     """``w = clip(exp(A / beta), w_max)``, rescaled so the batch mean is 1.
 
-    The rescaling keeps the objective's overall scale (hence the effective learning rate) fixed
-    whatever the advantage distribution does, so beta changes WHICH frames count, not how loudly.
+    The mean-1 rescale is cosmetic for the objective — ``_weighted_mean`` divides by ``sum(w)``,
+    so the loss is batch-relative (self-normalized) with or without it. The self-normalization is
+    what keeps the effective learning rate fixed while beta changes WHICH frames count, not how
+    loudly; the rescale only pins the logged weight histogram to a fixed scale.
     The weights are pure data — the advantage must arrive detached, so no gradient can flow into the
     value head through the policy loss. Reported alongside: the effective sample size fraction
     ``(sum w)^2 / (N * sum w^2)`` (1.0 = uniform weighting, small = a few frames own the batch) and
@@ -709,9 +717,10 @@ class GPT(nn.Module):
     decode uses only the offset-1 head (``primary_head_idx``); the rest are an auxiliary training signal.
 
     ``value_head`` is 020's only architectural addition: one scalar per frame off the same trunk hidden
-    state, trained to the discounted return so the AWR advantage has a baseline. It is built LAST so
-    every other parameter draws the same initialization 016 does from the same seed, and decode never
-    reads it — the deployed policy is 016's."""
+    state, trained to the discounted return so the AWR advantage has a baseline (that MSE also trains
+    the trunk unless ``cfg.awr_value_detach_trunk``). It is built LAST so every other parameter draws
+    the same initialization 016 does from the same seed, and decode never reads it — the deployed
+    policy is 016's."""
 
     def __init__(self, cfg: TrainConfig) -> None:
         super().__init__()
@@ -871,7 +880,7 @@ class LossParts:
     valid: Bool[Tensor, "B L_ctx"]
 
 
-def action_loss(model: GPT, batch: TrainBatch) -> LossParts:
+def action_loss(model: GPT, batch: TrainBatch, *, value_detach: bool = False) -> LossParts:
     """Dense multi-token NLL + aligned transition flags. Every valid context position predicts the action at
     each head offset; one shared backbone forward, one head each. ``a_full = [history | target]`` is quantized
     ONCE ([B, L_ctx+max_off, n_groups]) and its per-frame boundary mask computed once, both sliced per offset:
@@ -903,7 +912,8 @@ def action_loss(model: GPT, batch: TrainBatch) -> LossParts:
         for g, name in enumerate(_GROUP_NAMES):
             nll[(o, name)] = gnll[name]
             trans[(o, name)] = bnd_o[..., g].reshape(-1)[flat_valid]
-    value = model.value_head(h).float().reshape(-1)[flat_valid]  # [n_valid] V(s_i)
+    value_in = h.detach() if value_detach else h
+    value = model.value_head(value_in).float().reshape(-1)[flat_valid]  # [n_valid] V(s_i)
     return LossParts(nll=nll, transition=trans, value=value, valid=valid)
 
 
@@ -2329,9 +2339,10 @@ def train(
                     it = iter(train_loader)
                     batch = next(it).to(DEVICE)
                 with autocast:
-                    parts = action_loss(model, batch.batch)
+                    parts = action_loss(model, batch.batch, value_detach=cfg.awr_value_detach_trunk)
                     # AWR: score the demonstrated frames by their outcome. The advantage is detached, so
-                    # the policy loss trains the policy and the MSE trains V — never the reverse.
+                    # the policy loss never trains V; the value MSE reaches the shared trunk unless
+                    # awr_value_detach_trunk closes that path too.
                     weight: Tensor | None = None
                     value_loss = torch.zeros((), device=parts.value.device)
                     if cfg.awr_enabled:

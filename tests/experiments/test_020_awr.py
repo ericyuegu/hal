@@ -389,6 +389,25 @@ def test_policy_loss_never_trains_the_value_head_and_the_value_loss_does() -> No
     assert torch.count_nonzero(model.value_head.weight.grad) > 0
 
 
+def test_value_detach_trunk_gates_the_trunk_gradient() -> None:
+    """Default False: the value MSE trains the shared trunk (the deployed 020 behavior — a second
+    axis vs 016). True: the value gradient stops at the head, so the arm is pure reweighting."""
+    cfg = _tiny_cfg(exp020)
+    batch = _awr_batch(cfg)
+    for detach, trunk_moves in ((False, True), (True, False)):
+        model = _model(cfg)
+        parts = exp020.action_loss(model, batch.batch, value_detach=detach)
+        returns = batch.valid_returns(parts.valid)
+        F.mse_loss(parts.value, returns).backward()
+        assert torch.count_nonzero(model.value_head.weight.grad) > 0
+        trunk_grads = [p.grad for p in model.blocks.parameters() if p.grad is not None]
+        trunk_moved = any(torch.count_nonzero(g) > 0 for g in trunk_grads)
+        assert trunk_moved == trunk_moves, f"value_detach={detach}: trunk gradient present={trunk_moved}"
+        ctx_grad = model.ctx_proj.weight.grad
+        ctx_moved = ctx_grad is not None and bool(torch.count_nonzero(ctx_grad) > 0)
+        assert ctx_moved == trunk_moves, f"value_detach={detach}: ctx_proj gradient present={ctx_moved}"
+
+
 def test_awr_val_metrics_are_finite() -> None:
     cfg = _tiny_cfg(exp020)
     model = _model(cfg)
