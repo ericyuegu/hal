@@ -233,6 +233,24 @@ def test_incremental_rejects_decoding_past_a_full_context() -> None:
         trunk.forward_incremental(x, past)
 
 
+def test_the_flex_probe_reads_the_same_under_no_grad() -> None:
+    """Every eval and h2h worker runs its first forward under ``torch.no_grad()``. The probe does a
+    backward, so without its own ``enable_grad`` it raises there, reads that as "no flex", and caches
+    the dense path for the life of the process (measured 35% slower validation)."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    flex_is_usable.cache_clear()
+    outside = flex_is_usable(device)
+    flex_is_usable.cache_clear()
+    with torch.no_grad():
+        inside = flex_is_usable(device)
+    flex_is_usable.cache_clear()
+
+    assert inside == outside
+    if device == "cpu":
+        assert inside is False  # no CPU backward; the verdict must be a clean False, not a raise
+
+
 @pytest.mark.skipif(flex_is_usable("cpu"), reason="the fallback needs a device without FlexAttention")
 def test_require_flex_refuses_the_dense_fallback() -> None:
     """A cloud run can demand the fast kernel. On a box without it the trunk raises; it never trains

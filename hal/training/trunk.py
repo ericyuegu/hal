@@ -174,11 +174,16 @@ def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMas
 def flex_is_usable(device_type: str) -> bool:
     """Whether FlexAttention compiles on this box. Triton, the driver and the GPU all take part, so
     the probe is one small call, not a version comparison. The call includes a backward, because the
-    forward alone runs on CPU but the backward does not."""
+    forward alone runs on CPU but the backward does not.
+
+    ``enable_grad`` because the first caller is often an eval worker, whose first forward runs under
+    ``torch.no_grad()``. Without it the backward raises there, the probe reads that as "no flex", and
+    the answer is cached for the life of the process."""
     try:
-        q, k, v = (torch.zeros(1, 1, 128, 16, device=device_type, requires_grad=True) for _ in range(3))
-        pad = torch.zeros(1, dtype=torch.long, device=device_type)
-        _flex_attention(q, k, v, block_mask=block_mask(pad, 128, 0)).sum().backward()
+        with torch.enable_grad():
+            q, k, v = (torch.zeros(1, 1, 128, 16, device=device_type, requires_grad=True) for _ in range(3))
+            pad = torch.zeros(1, dtype=torch.long, device=device_type)
+            _flex_attention(q, k, v, block_mask=block_mask(pad, 128, 0)).sum().backward()
     except (RuntimeError, NotImplementedError) as e:
         logger.warning(f"FlexAttention does not run on {device_type} ({type(e).__name__}: {e}); trunk uses SDPA")
         return False
