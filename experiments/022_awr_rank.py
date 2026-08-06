@@ -214,10 +214,12 @@ class TrainConfig:
     # Set it on a cloud run: the fallback trains about 4x slower and says so only in a log line.
     require_flex: bool = False
     # Multi-token (multi-frame) auxiliary output heads: one independent head per future-frame offset;
-    # head o predicts the action o frames ahead. MUST contain 1 — closed-loop decodes only the offset-1
-    # head, so the far-horizon heads are a training-only signal. The spread-out default is inherited
-    # from 012; the planned ablations compare it with next-only and contiguous alternatives.
-    head_offsets: tuple[int, ...] = (1, 5, 9, 13)
+    # head o predicts the action o frames ahead. MUST contain 1 — per-frame closed-loop decode reads
+    # only the offset-1 head. Contiguous, because chunked execution (exec_horizon s) runs the heads
+    # 1..s from one forward and 012's spread-out (1,5,9,13) has no offset-2 head to stride with;
+    # experiment 015 measured (1,2,3,4) as the best deployed head anyway, with s=2 behaviorally free
+    # at 1.8x the eval throughput.
+    head_offsets: tuple[int, ...] = (1, 2, 3, 4)
     # PER-AUXILIARY-HEAD multiplier. Total auxiliary scalar weight is this times the number of aux heads;
     # use lambda_total / n_aux to implement primary + lambda_total * mean(auxiliary heads).
     aux_loss_weight: float = 1.0
@@ -343,7 +345,7 @@ class TrainConfig:
     shuffle_block_size: int = 2000
     # Each replay deserialized off disk yields this many non-overlapping windows, amortizing the
     # whole-replay read (the disk bottleneck) over K samples. Train only; val stays 1/replay so its
-    # loss stays comparable across runs. Two windows of L_ctx + L_chunk = 1037 frames use 19.7% of
+    # loss stays comparable across runs. Two windows of L_ctx + L_chunk = 1028 frames use 19.5% of
     # every replay read (simulated over the index frame counts, of which 7.23% of the context
     # positions are left padding that no head scores) — still about twice 020's 10% at L_ctx 256.
     # K stops at 2 because of the OTHER side of the trade: the AWR weights renormalize to mean 1

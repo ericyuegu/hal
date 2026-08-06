@@ -139,6 +139,16 @@ def test_geometry_defaults_are_the_swa_long_context_base() -> None:
     assert (cfg.data_root, cfg.mds_schema_version) == ("data/processed/ranked-anonymized-1/mds-v6", 6)
 
 
+def test_head_offsets_are_contiguous_so_chunked_execution_is_possible() -> None:
+    """Striding needs the heads 1..s from one forward. 012's (1,5,9,13) has no offset-2 head, so
+    every execution horizon above 1 is refused with it."""
+    cfg = exp022.TrainConfig()
+    assert cfg.head_offsets == (1, 2, 3, 4)
+    assert exp022._exec_horizon_offsets(cfg.head_offsets, 2) == (1, 2)
+    with pytest.raises(ValueError, match="contiguous prefix"):
+        exp022._exec_horizon_offsets((1, 5, 9, 13), 2)
+
+
 def test_the_loader_gets_the_micro_batch() -> None:
     kwargs = exp022._loader_kwargs(exp022.TrainConfig(), _stats())
     assert kwargs["batch_size"] == 64
