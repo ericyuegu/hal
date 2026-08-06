@@ -87,6 +87,11 @@ def subset_mds(src: Path, out: Path, *, every: int = 4) -> None:
         n_shards, n_samples = _subset_split(src, out, split, every)
         logger.info(f"{split}: {n_shards} shards, {n_samples} rows")
 
+    if (src / "manifest.jsonl").is_file():
+        logger.warning(
+            "manifest.jsonl is not carried over: dropped shards renumber the rows, so every "
+            "Stage3Annotation.mds_row_idx would address the wrong row. Join through the source dataset."
+        )
     stats = src / "stats.json"
     if stats.is_file():
         _hardlink(stats, out / "stats.json")

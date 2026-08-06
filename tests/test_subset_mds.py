@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from streaming import MDSWriter
 from streaming import StreamingDataset
+from streaming.base.compression import decompress
 
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
@@ -107,6 +108,26 @@ def test_subset_every_one_keeps_everything(tmp_path: Path) -> None:
 
     for split in ("train", "val"):
         assert _basenames(out, split) == _basenames(src, split)
+
+
+def test_subset_links_both_forms_when_a_shard_is_on_disk_twice(tmp_path: Path) -> None:
+    """A shard the reader already decompressed sits on disk raw AND zipped. Both
+    files are linked and the index entry keeps its compression, so the subset
+    reads exactly like the source."""
+    src = _build(tmp_path / "mds", {"train": 8})
+    info = _shards(src, "train")[0]
+    zipped = (src / "train" / info["zip_data"]["basename"]).read_bytes()
+    (src / "train" / info["raw_data"]["basename"]).write_bytes(decompress(info["compression"], zipped))
+    out = tmp_path / "sub2"
+
+    subset_mds(src, out, every=2)
+
+    kept = _shards(out, "train")[0]
+    assert kept["compression"] == info["compression"]
+    assert (out / "train" / kept["raw_data"]["basename"]).is_file()
+    assert (out / "train" / kept["zip_data"]["basename"]).is_file()
+    ds = StreamingDataset(local=str(out / "train"), batch_size=1, shuffle=False)
+    assert np.array_equal(ds[0]["frame"], _sample(_kept_rows(src, "train", 2)[0])["frame"])
 
 
 def test_subset_refuses_an_existing_out(tmp_path: Path) -> None:

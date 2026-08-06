@@ -7,6 +7,7 @@ consumer training uses.
 
 import dataclasses
 import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -18,13 +19,16 @@ from hal.data.index import PlayerEntry
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import Split
 from hal.data.index import Stage3Annotation
+from hal.data.index import read_jsonl
 from hal.data.index import write_jsonl
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
+from hal.data.schema import check_schema_version
 from hal.data.schema import rank_from_player_name
 from hal.scripts.upgrade_mds import SRC_SCHEMA_VERSION
+from hal.scripts.upgrade_mds import _with_ranks as upgrade_mds_row
 from hal.scripts.upgrade_mds import upgrade_mds
 
 RANK_COLUMNS = ("p1_rank", "p2_rank")
@@ -170,6 +174,102 @@ def test_rank_columns_follow_port_order_not_manifest_order(tmp_path: Path) -> No
     assert np.all(sample["p2_rank"] == Rank.MASTER)
 
 
+def test_manifest_row_order_does_not_matter(tmp_path: Path) -> None:
+    """``materialize`` appends manifest rows in worker-completion order, so the
+    file is already shuffled against ``mds_row_idx``. The join reads the key."""
+    rows = _ranked_rows()
+    src = _build_v6(tmp_path / "v6", rows)
+    shuffled = [e for entries in rows.values() for e in entries]
+    random.Random(7).shuffle(shuffled)
+    write_jsonl(src / "manifest.jsonl", shuffled)
+    out = tmp_path / "v7"
+
+    upgrade_mds(src, out)
+
+    for split, entries in rows.items():
+        for sample, entry in zip(_read(out, split), entries, strict=True):
+            expected = [rank_from_player_name(p.name) for p in sorted(entry.players, key=lambda p: p.port)]
+            for column, rank in zip(RANK_COLUMNS, expected, strict=True):
+                assert np.all(sample[column] == int(rank)), f"{split} {entry.path} {column}"
+
+
+def test_duplicate_row_idx_raises(tmp_path: Path) -> None:
+    """Two entries on one row make the tier of that row ambiguous."""
+    rows = _ranked_rows(n_train=4, n_val=1)
+    src = _build_v6(tmp_path / "v6", rows)
+    entries = [e for entries in rows.values() for e in entries]
+    assert entries[3].annotation is not None
+    duplicate = dataclasses.replace(
+        entries[3], path="data/raw/duplicate.slp", annotation=dataclasses.replace(entries[3].annotation, mds_row_idx=1)
+    )
+    write_jsonl(src / "manifest.jsonl", entries + [duplicate])
+
+    with pytest.raises(ValueError, match="two entries claim"):
+        upgrade_mds(src, tmp_path / "v7")
+
+
+def test_a_hole_in_the_row_indices_raises(tmp_path: Path) -> None:
+    """One dropped middle row keeps the count plausible but shifts every tier
+    after it, so the contiguity check must catch it."""
+    rows = _ranked_rows(n_train=5, n_val=2)
+    src = _build_v6(tmp_path / "v6", rows)
+    kept = [
+        e
+        for entries in rows.values()
+        for e in entries
+        if e.annotation is not None and not (e.annotation.split == "train" and e.annotation.mds_row_idx == 2)
+    ]
+    write_jsonl(src / "manifest.jsonl", kept)
+
+    with pytest.raises(ValueError, match="contiguous"):
+        upgrade_mds(src, tmp_path / "v7")
+
+
+def test_a_split_the_manifest_ignores_raises(tmp_path: Path) -> None:
+    """Upgrading only the annotated splits would write a dataset that is
+    silently smaller than the source."""
+    rows = _ranked_rows(n_train=4, n_val=2)
+    src = _build_v6(tmp_path / "v6", rows)
+    write_jsonl(src / "manifest.jsonl", [e for e in rows["train"]])
+
+    with pytest.raises(ValueError, match="does not annotate"):
+        upgrade_mds(src, tmp_path / "v7")
+
+
+def test_a_bad_manifest_aborts_before_any_shard_is_written(tmp_path: Path) -> None:
+    """The unranked row is the last one, so a late check would abort with most
+    of the dataset already on disk."""
+    rows = _ranked_rows()
+    rows["val"][-1] = _entry(len(rows["val"]) - 1, "val", ("Platinum Player", "ZAIN"))
+    src = _build_v6(tmp_path / "v6", rows)
+    out = tmp_path / "v7"
+
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        upgrade_mds(src, out)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("corruption", ["column", "rank"])
+def test_verification_catches_a_bad_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str) -> None:
+    """The post-write comparison is the last guard on a silent mislabel, so it
+    must fail on a changed column and on a swapped pair of tiers."""
+    src = _build_v6(tmp_path / "v6", _ranked_rows())
+    write_row = upgrade_mds_row
+
+    def corrupt(sample: dict, ranks: tuple[Rank, ...]) -> dict:
+        if int(sample["frame"][0]) != 5 * N_FRAMES:
+            return write_row(sample, ranks)
+        if corruption == "rank":
+            return write_row(sample, tuple(reversed(ranks)))
+        row = write_row(sample, ranks)
+        row["p2_position_x"] = row["p2_position_x"] + np.float32(1.0)
+        return row
+
+    monkeypatch.setattr("hal.scripts.upgrade_mds._with_ranks", corrupt)
+    with pytest.raises(ValueError, match="changed|manifest tier"):
+        upgrade_mds(src, tmp_path / "v7", verify_rows=10_000)
+
+
 def test_unknown_player_name_raises(tmp_path: Path) -> None:
     rows = _ranked_rows(n_train=4, n_val=1)
     rows["train"][2] = _entry(2, "train", ("ZAIN", "Master Player"))
@@ -196,9 +296,9 @@ def test_row_count_mismatch_raises(tmp_path: Path) -> None:
     row-by-row join, so the upgrade refuses it instead of shifting the tiers."""
     rows = _ranked_rows(n_train=6, n_val=2)
     src = _build_v6(tmp_path / "v6", rows)
-    write_jsonl(src / "manifest.jsonl", [e for entries in rows.values() for e in entries][:-3])
+    write_jsonl(src / "manifest.jsonl", rows["train"][:-1] + rows["val"])
 
-    with pytest.raises(ValueError, match="contiguous|manifest rows"):
+    with pytest.raises(ValueError, match="manifest rows"):
         upgrade_mds(src, tmp_path / "v7")
 
 
@@ -225,6 +325,22 @@ def test_missing_manifest_raises(tmp_path: Path) -> None:
     (src / "manifest.jsonl").unlink()
     with pytest.raises(FileNotFoundError):
         upgrade_mds(src, tmp_path / "v7")
+
+
+def test_the_upgraded_root_passes_both_version_guards(tmp_path: Path) -> None:
+    """The two readers a consumer meets — the row scalar and the manifest — must
+    accept the new root, and reject the source root they came from."""
+    rows = _ranked_rows(n_train=4, n_val=1)
+    src = _build_v6(tmp_path / "v6", rows)
+    out = tmp_path / "v7"
+    upgrade_mds(src, out)
+
+    check_schema_version(_read(out, "train")[0])
+    assert len(list(read_jsonl(out / "manifest.jsonl"))) == 5
+    with pytest.raises(ValueError, match="schema_version"):
+        check_schema_version(_read(src, "train")[0])
+    with pytest.raises(ValueError, match="schema_version"):
+        list(read_jsonl(src / "manifest.jsonl"))
 
 
 def test_manifest_and_stats_are_restamped(tmp_path: Path) -> None:

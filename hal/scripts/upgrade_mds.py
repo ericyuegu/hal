@@ -250,8 +250,9 @@ def _verify_row(src_row: dict[str, Any], out_row: dict[str, Any], ranks: tuple[R
     if out_row["schema_version"] != SCHEMA_VERSION:
         raise ValueError(f"{where}: schema_version={out_row['schema_version']!r} != {SCHEMA_VERSION}")
     added = {f"{prefix}_rank" for prefix in PLAYER_PREFIXES}
-    if set(out_row) - set(src_row) != added:
-        raise ValueError(f"{where}: added columns {sorted(set(out_row) - set(src_row))} != {sorted(added)}")
+    if set(out_row) != set(src_row) | added:
+        # Both directions: an added column that is not a rank column, and a v6 column that is gone.
+        raise ValueError(f"{where}: column set differs by {sorted(set(out_row) ^ (set(src_row) | added))}")
     for prefix, rank in zip(PLAYER_PREFIXES, ranks, strict=True):
         column = out_row[f"{prefix}_rank"]
         if column.dtype != np.uint8 or column.shape != src_row["frame"].shape:
@@ -352,10 +353,16 @@ def upgrade_mds(
         raise FileNotFoundError(f"{manifest} not found; the upgrade joins ranks through the manifest")
 
     ranks = ranks_by_split_row(manifest, require_ranked=require_ranked)
-    splits = [s for s in ranks if (src / s / "index.json").is_file()]
+    splits = sorted(d.name for d in src.iterdir() if (d / "index.json").is_file())
     missing = sorted(set(ranks) - set(splits))
     if missing:
         raise FileNotFoundError(f"manifest annotates splits {missing} but {src} has no shards for them")
+    unannotated = sorted(set(splits) - set(ranks))
+    if unannotated:
+        raise ValueError(
+            f"{src} holds splits {unannotated} that the manifest does not annotate. The upgrade would drop "
+            "them and write a dataset that is silently smaller than the source; repair the manifest first."
+        )
 
     scratch.mkdir(parents=True, exist_ok=True)
     _check_scratch_room(src, splits, scratch)

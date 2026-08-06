@@ -421,8 +421,9 @@ def read_jsonl(path: Path, *, verify_schema_version: bool = True) -> Iterator[Re
             if verify_schema_version and entry.schema_version != SCHEMA_VERSION:
                 raise ValueError(
                     f"index {path} entry schema_version={entry.schema_version} != "
-                    f"SCHEMA_VERSION={SCHEMA_VERSION}. Rebuild the index "
-                    f"(`python -m hal.scripts.build_index ...`); a stale index silently "
-                    f"miscasts the normalized character ids."
+                    f"SCHEMA_VERSION={SCHEMA_VERSION}. Rebuild an index.jsonl "
+                    f"(`python -m hal.scripts.build_index ...`), or upgrade an MDS dataset and its "
+                    f"manifest.jsonl (`python -m hal.scripts.upgrade_mds --src <mds> --out <mds>`). "
+                    f"A stale index reads the wrong column set into the current code."
                 )
             yield entry
