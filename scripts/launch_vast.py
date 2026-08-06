@@ -112,7 +112,9 @@ def value_metric(offer: dict, *, disk: int, data_gb: float, upload_gb: float, ru
     return amortized_dph(offer, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours) / offer["dlperf"]
 
 
-def build_query(max_price: float, disk: int, min_vram: int, min_ram: int, min_dlperf: float) -> str:
+def build_query(
+    max_price: float, disk: int, min_vram: int, min_ram: int, min_dlperf: float, max_compute_cap: int
+) -> str:
     # dph_total<max_price is a safe coarse prefilter: effective_dph >= dph_total, so any
     # offer clearing the effective cap also clears this. The real (disk-inclusive) cap is
     # enforced client-side in search(), since storage_cost*disk isn't expressible here.
@@ -121,6 +123,8 @@ def build_query(max_price: float, disk: int, min_vram: int, min_ram: int, min_dl
         q.append(f"gpu_ram>={min_vram}")
     if min_ram > 0:  # vast `cpu_ram` query is in GB (per-instance share); 0 = no RAM floor
         q.append(f"cpu_ram>={min_ram}")
+    if max_compute_cap > 0:  # vast `compute_cap` is sm as an int (sm_86 -> 860); 0 = no ceiling
+        q.append(f"compute_cap<={max_compute_cap}")
     return " ".join(q)
 
 
@@ -133,6 +137,7 @@ def search(
     min_vram: int,
     min_ram: int,
     min_dlperf: float,
+    max_compute_cap: int,
     data_gb: float,
     upload_gb: float,
     run_hours: float,
@@ -140,7 +145,9 @@ def search(
     """Offers whose *effective* $/hr (GPU + provisioned disk) clears --max-price, ranked by the
     value metric (eff$/dlperf/hr, transfers folded in) — best bang-for-buck first."""
     offers = vast.search_offers(
-        query=build_query(max_price, disk, min_vram, min_ram, min_dlperf), order=ORDER, limit=limit
+        query=build_query(max_price, disk, min_vram, min_ram, min_dlperf, max_compute_cap),
+        order=ORDER,
+        limit=limit,
     )
     qualifying = [o for o in offers if effective_dph(o, disk) <= max_price]
     qualifying.sort(
@@ -225,6 +232,7 @@ def queue(
     min_vram: int,
     min_ram: int,
     min_dlperf: float,
+    max_compute_cap: int,
     data_gb: float,
     upload_gb: float,
     run_hours: float,
@@ -240,6 +248,7 @@ def queue(
             min_vram=min_vram,
             min_ram=min_ram,
             min_dlperf=min_dlperf,
+            max_compute_cap=max_compute_cap,
             data_gb=data_gb,
             upload_gb=upload_gb,
             run_hours=run_hours,
@@ -467,6 +476,11 @@ class Args:
     """Minimum raw DLPerf score (vast `dlperf`). A floor on absolute throughput — the $/perf
     ranking alone can pick a slow-but-cheap card; raise this to force a faster GPU regardless
     of value. Distinct from the dlperf_usd>70 perf-per-dollar filter."""
+    max_compute_cap: int = 0
+    """Maximum CUDA compute capability as vast's `compute_cap` int (sm_89 -> 890); 0 = no
+    ceiling. Use to exclude architectures the training stack is not validated on — the
+    FlexAttention + torch.compile path hung at the first forward on sm_120 (Blackwell,
+    RTX 5090) on two independent hosts (2026-08-06) while sm_86 runs fine."""
     limit: int = 10
     """How many offers to fetch/print."""
     poll_interval_s: int = 30
@@ -500,6 +514,7 @@ def main(args: Args) -> None:
         min_vram=args.min_vram,
         min_ram=args.min_ram,
         min_dlperf=args.min_dlperf,
+        max_compute_cap=args.max_compute_cap,
         data_gb=args.data_gb,
         upload_gb=args.upload_gb,
         run_hours=args.run_hours,
