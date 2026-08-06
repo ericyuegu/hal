@@ -148,6 +148,18 @@ HELPLESS_ACTIONS: Final[frozenset[int]] = frozenset(
 
 GROUND_JUMP_ACTIONS: Final[frozenset[int]] = frozenset([Action.JUMPING_FORWARD.value, Action.JUMPING_BACKWARD.value])
 
+# Shield is up: the raise (GuardOn), the hold (Guard), shield stun (GuardSetOff)
+# and a reflect (GuardReflect). SHIELD_RELEASE (GuardOff) is the drop animation —
+# the shield is already gone — so it stays out, and a broken shield is hitstun.
+SHIELD_ACTIONS: Final[frozenset[int]] = frozenset(
+    [
+        Action.SHIELD_START.value,
+        Action.SHIELD.value,
+        Action.SHIELD_STUN.value,
+        Action.SHIELD_REFLECT.value,
+    ]
+)
+
 # Fox/Falco shine (character-specific ids).
 SHINE_ACTIONS: Final[frozenset[int]] = frozenset(
     [
@@ -278,6 +290,7 @@ class Movement:
     dash_dances: int
     ledge_grabs: int
     idle_frac: float
+    shield_frac: float
     jump_rise_mean: float
 
 
@@ -585,9 +598,22 @@ def _idle_frac(p: PlayerBehaviorFrames, active: np.ndarray) -> float:
     return float((long_idle & active).sum() / denom)
 
 
+def _shield_frac(p: PlayerBehaviorFrames, active: np.ndarray) -> float:
+    """Fraction of active frames with the shield up.
+
+    Every frame counts, with no minimum run: one long hold and many short ones
+    are the same amount of time not spent playing. Passivity shows up here and
+    in ``idle_frac`` together, which is why both share the ``active``
+    denominator."""
+    denom = int(active.sum())
+    if not denom:
+        return 0.0
+    return float((in_set(p.action, SHIELD_ACTIONS) & active).sum() / denom)
+
+
 def movement(p: PlayerBehaviorFrames, active: np.ndarray) -> Movement:
-    """Movement-quality event counts over the whole replay, plus the idle
-    fraction (the one rate whose denominator is ``active``)."""
+    """Movement-quality event counts over the whole replay, plus the idle and
+    shield fractions (the rates whose denominator is ``active``)."""
     jump_wd, air_wd = _wavedash_onsets(p)
     full, short, rise = _jump_events(p)
     waveshines = 0
@@ -607,6 +633,7 @@ def movement(p: PlayerBehaviorFrames, active: np.ndarray) -> Movement:
         dash_dances=_dash_dances(p),
         ledge_grabs=len(onsets(p.action == Action.EDGE_CATCHING.value)),
         idle_frac=_idle_frac(p, active),
+        shield_frac=_shield_frac(p, active),
         jump_rise_mean=rise,
     )
 

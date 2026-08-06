@@ -397,6 +397,35 @@ def test_idle_frac_needs_a_neutral_stick_and_no_buttons() -> None:
     assert movement(p, active_mask(p, opp, make_frames(p, opp))).idle_frac == 0.0
 
 
+def test_shield_frac_counts_every_guard_state_over_active_frames() -> None:
+    """The four shield-up states all count, with no minimum run: shielding for
+    one frame at a time is the same time not spent playing."""
+    action = [Action.SHIELD_START.value, Action.SHIELD.value, Action.SHIELD_STUN.value, Action.SHIELD_REFLECT.value]
+    action += _standing(16)
+    p = make_player(1, action)
+    opp = make_player(2, _standing(len(action)))
+    assert movement(p, active_mask(p, opp, make_frames(p, opp))).shield_frac == pytest.approx(4 / 20)
+
+
+def test_shield_frac_excludes_the_release_and_the_dead_frames() -> None:
+    """SHIELD_RELEASE is the drop animation — the shield is already gone. Death
+    and respawn frames leave the denominator, exactly as they do for idle_frac."""
+    action = [Action.SHIELD.value] * 10 + [Action.SHIELD_RELEASE.value] * 10
+    p = make_player(1, action)
+    opp = make_player(2, _standing(len(action)))
+    assert movement(p, active_mask(p, opp, make_frames(p, opp))).shield_frac == pytest.approx(0.5)
+
+    action = [Action.SHIELD.value] * 10 + [Action.DEAD_DOWN.value] * 10
+    p = make_player(1, action)
+    assert movement(p, active_mask(p, opp, make_frames(p, opp))).shield_frac == pytest.approx(1.0)
+
+
+def test_shield_frac_is_zero_without_active_frames() -> None:
+    p = make_player(1, [Action.SHIELD.value] * 10)
+    opp = make_player(2, [Action.DEAD_DOWN.value] * 10)  # no frame is active
+    assert movement(p, active_mask(p, opp, make_frames(p, opp))).shield_frac == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Openings
 # ---------------------------------------------------------------------------
@@ -487,5 +516,6 @@ def test_behavior_frames_on_fixture(tmp_path: Path) -> None:
 
     mv = movement(p, active)
     assert 0.0 <= mv.idle_frac <= 1.0
+    assert 0.0 <= mv.shield_frac <= 1.0
     assert mv.full_hops >= 0 and mv.short_hops >= 0
     assert openings(p, opp).count >= 0

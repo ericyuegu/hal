@@ -191,6 +191,7 @@ class MovementRates:
     dash_dances_per_min: float
     ledge_grabs_per_min: float
     idle_frac: float
+    shield_frac: float
     jump_rise_mean: float
 
 
@@ -373,6 +374,7 @@ def _movement_rates(p: PlayerBehaviorFrames, active: np.ndarray, minutes: float)
         dash_dances_per_min=_per_minute(mv.dash_dances, minutes),
         ledge_grabs_per_min=_per_minute(mv.ledge_grabs, minutes),
         idle_frac=mv.idle_frac,
+        shield_frac=mv.shield_frac,
         jump_rise_mean=mv.jump_rise_mean,
     )
 
