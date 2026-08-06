@@ -239,6 +239,34 @@ def test_incremental_decode_matches_the_full_forward_under_a_window() -> None:
     torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
+def test_the_decode_cast_leaves_the_quantization_grids_in_fp32() -> None:
+    """fp16 weights are a speed choice, but the stick/trigger grids are the decode's OUTPUT scale:
+    a stored value must reproduce its exact byte through the pipe, and an fp32->fp16->fp32 round trip
+    moves a centre by 2e-4."""
+    model = exp022.GPT(_tiny_cfg())
+    before = model.main_centers.clone()
+
+    exp022._halve_for_decode(model)
+
+    assert next(model.parameters()).dtype == torch.float16
+    for name in ("main_centers", "c_centers", "trig_centers"):
+        assert getattr(model, name).dtype == torch.float32, name
+    assert torch.equal(model.main_centers, before)
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_the_policy_wires_the_incremental_seams_together(incremental: bool) -> None:
+    """Both callbacks or neither: an incremental decoder that is not fed every frame would decode
+    from a state several frames stale as soon as the execution horizon passes 1."""
+    cfg = _tiny_cfg(attn_window=8, eval_incremental_kv=incremental, exec_horizon=2)
+    policy = exp022.make_policy(exp022.GPT(cfg).eval(), _stats(), cfg, device="cpu")
+
+    assert (policy.encode_frame is not None) == incremental
+    assert (policy.predict_incremental is not None) == incremental
+    assert policy.s == 2
+    assert policy.float_dtype == torch.float32  # an fp32 model must not be handed an fp16 context
+
+
 def test_020_checkpoints_are_refused() -> None:
     """020 stores the trunk at ``blocks.*``. Loading it here would silently mismatch the stack."""
     (_, model020), (_, model022) = _paired_models()

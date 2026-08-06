@@ -25,8 +25,11 @@ What changed against 020
 * Sliding-window attention. ``attn_window`` (128 frames) replaces the full-context mask. The trunk
   runs FlexAttention where it compiles and the dense mask where it does not; ``require_flex`` makes
   a cloud run fail instead of training about 4x slower on the fallback. A trained window also makes
-  incremental decode exact, so ``eval_incremental_kv`` is now a legal option (and is rejected at
-  full attention).
+  incremental decode exact, so ``eval_incremental_kv`` is on by default (and is rejected at full
+  attention).
+* A faster closed loop. Decode runs on fp16 weights, at ``high`` matmul precision, over a rolling KV
+  cache fed one frame at a time — the profiler put 79% of a rollout frame in the policy and 59% in
+  the trunk forward alone. See ``_load_ckpt`` and ``make_policy``.
 * Geometry. ``L_ctx`` 256 -> 1024 with the token count per step held near 020's: ``batch_size`` is
   now the EFFECTIVE batch (128) and ``grad_accum_steps`` splits it into micro-batches of 64. Under
   a window the step cost is nearly flat in ``L_ctx``, and a longer window turns more of each
@@ -314,9 +317,16 @@ class TrainConfig:
     eval_overlap_training: bool = False
     # Incremental (rolling-KV) closed-loop decode. With a trained attn_window the cache holds
     # exactly that window and RoPE is relative, so the decode is exact; at full attention the cache
-    # drops history the full forward keeps, and validate_config rejects the combination. Off until
-    # the rollout profiling of Part 2 says it pays.
-    eval_incremental_kv: bool = False
+    # drops history the full forward keeps, and validate_config rejects the combination (a
+    # full-context arm must pass --cfg.no-eval-incremental-kv, so the two can never disagree in
+    # silence). On because the one-token forward measured 2.0x the full recompute at L_ctx 256, and
+    # the saving grows with the context.
+    eval_incremental_kv: bool = True
+    # Cast the model's float parameters to fp16 for closed-loop decode. The decode is launch-bound,
+    # not precision-bound: fp16 weights + fp16 context measured 1.7x the fp32 forward, and the
+    # sampled action is unchanged (the stick/trigger centers and every logit stay fp32). Autocast is
+    # NOT the same thing and measured SLOWER — this casts the weights once, at load.
+    eval_fp16: bool = True
     # If an eval is still running at the next boundary, the trainer waits up to this bound and
     # then kills the worker.
     eval_timeout_seconds: float = 2700.0
@@ -733,7 +743,11 @@ class GPT(nn.Module):
         parts: list[Tensor] = [features[f"{prefix}_{feat}"][..., None] for feat in FLOAT_FEATURES]
         for feat in FLOAT_FEATURES:
             mk = f"{prefix}_{feat}_mask"
-            parts.append(features[mk][..., None] if mk in features else torch.zeros(B, L, 1, device=device))
+            # An absent sidecar reads as zeros, in the dtype of the block it is concatenated with
+            # (fp16 under the eval cast, fp32 in training).
+            parts.append(
+                features[mk][..., None] if mk in features else torch.zeros(B, L, 1, device=device, dtype=ref.dtype)
+            )
         for name, (vocab, _) in CAT_FEATURES.items():
             parts.append(self.cat_embeds[name](features[f"{prefix}_{name}"].clamp(0, vocab - 1)))
         return torch.cat(parts, dim=-1)
@@ -998,6 +1012,36 @@ def decode_chunk(
     Same per-group sampling + hygiene as ``decode``; ``offsets == (1,)`` is byte-identical to ``decode``."""
     group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
+    return chunk_from_hidden(
+        model,
+        h,
+        offsets,
+        group_temps=group_temps,
+        btn_support_min=btn_support_min,
+        min_p=min_p,
+        click_trigger_fix=click_trigger_fix,
+        argmax=argmax,
+        gen=gen,
+    )
+
+
+@torch.no_grad()
+def chunk_from_hidden(
+    model: GPT,
+    h: Float[Tensor, "B d_model"],
+    offsets: tuple[int, ...],
+    *,
+    group_temps: tuple[float, ...],
+    btn_support_min: int = 0,
+    min_p: float = 0.0,
+    click_trigger_fix: bool = False,
+    argmax: bool = False,
+    gen: torch.Generator | None = None,
+) -> Float[Tensor, "B s d_action"]:
+    """The head + sampling half of a chunked decode, from a hidden state the caller already has.
+
+    Split out because the incremental decoder produces that hidden state one frame at a time, in its
+    own forward, and must not run the backbone a second time to sample from it."""
     actions: list[Tensor] = []
     for o in offsets:
         logits = model.heads[model.head_offsets.index(o)](h).float()  # [B, A_VOCAB]
@@ -1070,7 +1114,8 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
     if cfg.eval_incremental_kv and cfg.attn_window == 0:
         raise ValueError(
             "eval_incremental_kv needs attn_window > 0: at full attention the rolling KV cache drops "
-            "history the full forward keeps, so the decode is silently wrong past L_ctx frames"
+            "history the full forward keeps, so the decode is silently wrong past L_ctx frames. A "
+            "full-context arm must say so: pass --cfg.no-eval-incremental-kv"
         )
     if cfg.final_h2h_reference_run is not None:
         if not cfg.final_h2h_reference_run:
@@ -1244,10 +1289,10 @@ def make_policy(
     model_device = next(model.parameters()).device
     gen = None if decode_seed is None else torch.Generator(device=model_device).manual_seed(decode_seed)
 
-    # Per-slot incremental state. Entries are kept separately because instant-restart boundaries
-    # occur at different frames; callbacks batch together slots with the same absolute position.
-    kv_cache: dict[int, list[tuple[torch.Tensor, torch.Tensor] | None]] = {}
-    kv_position: dict[int, int] = {}
+    # Per-slot incremental state: the rolling KV cache and the hidden state of that slot's newest
+    # frame. Slots are kept apart because instant-restart boundaries land on different frames.
+    kv_cache: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = {}
+    hidden: dict[int, torch.Tensor] = {}
 
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
@@ -1278,69 +1323,81 @@ def make_policy(
         )
         return chunk.cpu().numpy()
 
+    n_layers = len(model.trunk.blocks)
+
     @torch.no_grad()
-    def predict_incremental(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        assert committed is None, "receding-horizon policy does not condition on a committed prefix"
+    def encode_frame(ctx: Context) -> None:
+        """Take this frame into every live slot's KV cache and keep the hidden state it produces.
+
+        Called EVERY frame, so the cache never misses one while a chunk is being executed. Slots are
+        batched by cache LENGTH, not by absolute frame: the cache is a rolling window and the trunk
+        re-applies RoPE over its own positions, so two slots holding the same number of frames share
+        one forward. Every slot saturates at ``attn_window``, so a wave settles into one forward per
+        frame however far apart its matches drift."""
         if ctx.slot_ids is None or ctx.reset is None:
             raise ValueError("incremental closed-loop decode requires slot_ids and reset metadata")
-        n = ctx.slot_ids.numel()
-        out = torch.empty((n, s, A_DIM), device=model_device, dtype=torch.float32)
-        ids = ctx.slot_ids.detach().cpu().tolist()
-        resets = ctx.reset.detach().cpu().tolist()
-        groups: dict[int, list[int]] = {}
-        for i, (sid, reset) in enumerate(zip(ids, resets, strict=True)):
-            sid = int(sid)
+        ids = [int(sid) for sid in ctx.slot_ids.tolist()]
+        for sid, reset in zip(ids, ctx.reset.tolist(), strict=True):
             if reset:
                 kv_cache.pop(sid, None)
-                kv_position.pop(sid, None)
-            groups.setdefault(kv_position.get(sid, 0), []).append(i)
-        for position, rows in groups.items():
-            row_idx = torch.tensor(rows, device=model_device, dtype=torch.long)
-            features = {k: v.index_select(0, row_idx) for k, v in ctx.features.items()}
-            # All rows in a group have the same position and therefore the same cache length.
-            past_batch: list[tuple[torch.Tensor, torch.Tensor] | None] = []
-            n_layers = len(model.trunk.blocks)
-            for layer in range(n_layers):
-                vals = [kv_cache.get(int(ids[r]), [None] * n_layers)[layer] for r in rows]
-                if vals[0] is None:
-                    past_batch.append(None)
-                else:
-                    assert all(v is not None for v in vals)
-                    past_batch.append(
-                        (
-                            torch.cat([v[0] for v in vals if v is not None], 0),
-                            torch.cat([v[1] for v in vals if v is not None], 0),
-                        )
+                hidden.pop(sid, None)
+        groups: dict[int, list[int]] = {}
+        for row, sid in enumerate(ids):
+            cached = kv_cache.get(sid)
+            groups.setdefault(0 if cached is None else cached[0][0].size(2), []).append(row)
+        for rows in groups.values():
+            index = torch.tensor(rows, device=model_device, dtype=torch.long)
+            features = {name: value.index_select(0, index) for name, value in ctx.features.items()}
+            caches = [kv_cache.get(ids[row]) for row in rows]
+            past: list[tuple[torch.Tensor, torch.Tensor] | None] = (
+                [None] * n_layers
+                if caches[0] is None
+                else [
+                    (
+                        torch.cat([c[layer][0] for c in caches if c is not None], 0),
+                        torch.cat([c[layer][1] for c in caches if c is not None], 0),
                     )
-            h, new = model.forward_incremental(features, past_batch)
-            for j, r in enumerate(rows):
-                sid = int(ids[r])
-                kv_cache[sid] = [(k[j : j + 1], v[j : j + 1]) for k, v in new]
-                kv_position[sid] = position + 1
-            # Incremental mode currently supports the same offset-1 deployment contract as s=1.
-            if s != 1:
-                raise ValueError("incremental decode currently requires exec_horizon=1")
-            logits = model.heads[model.primary_head_idx](h).float()
-            out[row_idx, 0] = _sample_action_from_logits(
-                model,
-                logits,
-                group_temps=settings.temps or (settings.temp,) * N_GROUPS,
-                btn_support_min=settings.btn_support_min,
-                min_p=settings.min_p,
-                click_trigger_fix=settings.click_trigger_fix,
-                gen=gen,
+                    for layer in range(n_layers)
+                ]
             )
-        return out.cpu().numpy()
+            h, new = model.forward_incremental(features, past)
+            for j, row in enumerate(rows):
+                kv_cache[ids[row]] = [(k[j : j + 1], v[j : j + 1]) for k, v in new]
+                hidden[ids[row]] = h[j]
 
+    @torch.no_grad()
+    def predict_incremental(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
+        """Sample a chunk from the hidden states ``encode_frame`` already computed — heads only, no
+        second backbone forward. The heads 1..s all read the same state, so an execution horizon
+        above 1 costs one extra head per frame it covers."""
+        assert committed is None, "receding-horizon policy does not condition on a committed prefix"
+        if ctx.slot_ids is None:
+            raise ValueError("incremental closed-loop decode requires slot_ids metadata")
+        h = torch.stack([hidden[int(sid)] for sid in ctx.slot_ids.tolist()])
+        chunk = chunk_from_hidden(
+            model,
+            h,
+            offsets,
+            group_temps=settings.temps or (settings.temp,) * N_GROUPS,
+            btn_support_min=settings.btn_support_min,
+            min_p=settings.min_p,
+            click_trigger_fix=settings.click_trigger_fix,
+            gen=gen,
+        )
+        return chunk.cpu().numpy()
+
+    incremental = cfg.eval_incremental_kv
     return RecedingHorizon(
         predict_chunk=predict_chunk,
-        predict_incremental=predict_incremental if cfg.eval_incremental_kv else None,
+        predict_incremental=predict_incremental if incremental else None,
+        encode_frame=encode_frame if incremental else None,
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=s,
         s=s,
         d=0,
         device=device,
+        float_dtype=next(model.parameters()).dtype,
     )
 
 
@@ -2337,8 +2394,13 @@ def _cfg_from_state(saved: dict) -> TrainConfig:
 
 
 def _load_ckpt(ckpt_path: str) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
+    """The one door every eval path (``--eval``, the async eval worker, ``hal.scripts.h2h``) loads a
+    checkpoint through, so the decode-speed settings live here and no entry point can forget them."""
+    # train() sets this per step; eval never did, and the default ("highest") costs the closed-loop
+    # forward 1.09x for precision the sampler throws away.
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     cfg = _cfg_from_state(state["cfg"])
+    torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     embedded_counts = "button_combo_counts" in state["model"]
     button_combo_counts = None if embedded_counts else _load_button_combo_counts(cfg)
     validate_config(cfg, has_button_combo_counts=embedded_counts or button_combo_counts is not None)
@@ -2347,8 +2409,23 @@ def _load_ckpt(ckpt_path: str) -> tuple[GPT, TrainConfig, dict[str, FeatureStats
         model.button_combo_counts.copy_(button_combo_counts.to(DEVICE))
     _load_model_state(model, state["model"])
     model.eval()
+    if cfg.eval_fp16 and DEVICE == "cuda":
+        _halve_for_decode(model)
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
     return model, cfg, stats, state
+
+
+def _halve_for_decode(model: GPT) -> None:
+    """Cast the model's float parameters to fp16, and put the quantization grids back to fp32.
+
+    The grids are the decode's OUTPUT scale: a stick center sits on the 1/80 grid and every stored
+    value must reproduce its exact byte through the pipe, which fp16's ~5e-4 of relative slack
+    cannot promise. The trunk and the heads have no such contract — their logits are cast back to
+    fp32 before the softmax."""
+    grids = {name: getattr(model, name) for name in ("main_centers", "c_centers", "trig_centers")}
+    model.half()
+    for name, grid in grids.items():
+        setattr(model, name, grid)  # the ORIGINAL tensor: a fp32->fp16->fp32 round trip loses 2e-4
 
 
 def eval_ckpt(
