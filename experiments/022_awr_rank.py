@@ -284,14 +284,14 @@ class TrainConfig:
     max_steps: int = 16384
     amp_dtype: str = "bfloat16"  # "bfloat16" | "float32"
     allow_tf32: bool = True
-    # torch.compile the model's forward for training. About 40% of the step's GPU time is unfused
+    # torch.compile the model's forward for TRAINING. About 40% of the step's GPU time is unfused
     # elementwise work and autocast casts, against 26% in the matmuls, which is what a fused graph
-    # takes back: measured 846 -> 525 ms per step (1.61x) at this geometry on a 3060, with a loss
-    # curve that matches eager to bf16 noise over 20 steps. OFF because it is not yet stable — the
-    # first VALIDATION forward, a shape the training graph has not seen, dies with a CUDA illegal
-    # memory access (nested compile around FlexAttention). Turn it on only for a run with
-    # val_every=0, or after that interaction is fixed.
-    compile_trunk: bool = False
+    # takes back: measured 406 -> 231 ms per step (1.76x) at this geometry on a 3060, over a 30-step
+    # bench whose loss trajectory tracks eager to 1e-6 relative. A compiled graph that then meets a
+    # validation or gradient-diagnostic shape dies inside FlexAttention with a CUDA illegal memory
+    # access, so every non-training forward runs eager — see ``_evaluation_mode``, which is the one
+    # door they all go through.
+    compile_trunk: bool = True
     # eval cadence
     val_every: int = 1024
     # 128 batches x 64 windows = 8,192 val replays (val draws one window per replay), the sample
@@ -1544,13 +1544,22 @@ def _gradient_cosine(a: tuple[Tensor, ...], b: tuple[Tensor, ...], norm_a: Tenso
 
 @contextlib.contextmanager
 def _evaluation_mode(model: nn.Module) -> Iterator[None]:
-    """Temporarily enter eval mode and restore the exact prior mode on every exit."""
+    """Temporarily enter eval mode, on the UNCOMPILED forward, and restore both on every exit.
+
+    Every non-training forward in this file goes through here, and ``compile_trunk`` installs the
+    compiled forward as an INSTANCE attribute, so removing that attribute for the duration falls
+    back to the class method. Validation and the gradient diagnostic each carry their own batch
+    shape, and a compiled graph that meets one of them dies inside FlexAttention with a CUDA illegal
+    memory access. Training keeps the compiled graph — and the same one, so its cache survives."""
     was_training = model.training
+    compiled = model.__dict__.pop("forward", None)
     model.eval()
     try:
         yield
     finally:
         model.train(was_training)
+        if compiled is not None:
+            model.forward = compiled
 
 
 def gradient_diagnostics(model: GPT, batch: AWRBatch, cfg: TrainConfig) -> dict[str, float]:

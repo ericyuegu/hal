@@ -14,6 +14,7 @@ fork changed.
    eval altogether.
 """
 
+import copy
 import importlib.util
 import inspect
 from pathlib import Path
@@ -209,6 +210,20 @@ def test_vectorized_returns_reproduce_020s_python_scan(gamma: float) -> None:
     np.testing.assert_array_equal(got, want)
 
 
+@pytest.mark.parametrize("reward", [[], [0.0], [1.0, float("nan"), 2.0, 3.0]], ids=["empty", "one", "nan"])
+def test_vectorized_returns_keep_020s_degenerate_cases(reward: list[float]) -> None:
+    """A torn replay can arrive with no frames, and a NaN must poison the same tail in both. These
+    are the shapes a C recurrence is most likely to answer differently from a Python loop."""
+    x = np.asarray(reward, dtype=np.float32)
+
+    got = exp022.discounted_returns(x, 0.9)
+    want = exp020.discounted_returns(x, 0.9)
+
+    assert got.shape == want.shape
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(want))
+    np.testing.assert_array_equal(got[~np.isnan(got)], want[~np.isnan(want)])
+
+
 def test_trunk_swap_keeps_020_init_draws() -> None:
     """Same seed, same weights: only the state-dict key names moved under a ``trunk.`` prefix."""
     (_, model020), (_, model022) = _paired_models()
@@ -268,6 +283,180 @@ def test_the_decode_cast_leaves_the_quantization_grids_in_fp32() -> None:
     for name in ("main_centers", "c_centers", "trig_centers"):
         assert getattr(model, name).dtype == torch.float32, name
     assert torch.equal(model.main_centers, before)
+    assert model.button_combo_counts.dtype == torch.int64  # an integer buffer the cast must not reach
+
+
+def test_the_decode_cast_moves_no_action_the_dequantizer_can_produce() -> None:
+    """The named-grid check above states the rule; this one holds it for whatever grid gets added
+    next. Every reachable group index must dequantize to the SAME action before and after the cast —
+    that is the whole contract the fp32 grids exist for, stated on the output instead of the buffer
+    list."""
+    model = exp022.GPT(_tiny_cfg())
+    reference = copy.deepcopy(model)
+    n_trig = model.trig_centers.shape[0]
+    idx = torch.stack(
+        torch.meshgrid(
+            torch.arange(4),
+            torch.arange(model.main_centers.shape[0]),
+            torch.arange(model.c_centers.shape[0]),
+            torch.arange(n_trig * n_trig),
+            indexing="ij",
+        ),
+        dim=-1,
+    ).reshape(-1, 4)
+
+    exp022._halve_for_decode(model)
+
+    assert torch.equal(exp022._dequantize(model, idx), exp022._dequantize(reference, idx))
+
+
+def test_validation_runs_eager_while_training_stays_compiled() -> None:
+    """``compile_trunk`` installs the compiled forward as an instance attribute. A compiled graph
+    that then meets a validation or gradient-diagnostic shape dies inside FlexAttention with a CUDA
+    illegal memory access, so ``_evaluation_mode`` — the one door every non-training forward goes
+    through — takes that attribute off for the duration and puts the SAME object back, keeping the
+    graph cache."""
+    model = exp022.GPT(_tiny_cfg())
+    eager = model.forward
+
+    def wrapper(*args, **kwargs):  # what torch.compile leaves on the instance
+        return eager(*args, **kwargs)
+
+    model.forward = wrapper
+    model.train()
+
+    with exp022._evaluation_mode(model):
+        assert model.forward is not wrapper
+        assert not model.training
+
+    assert model.forward is wrapper
+    assert model.training
+
+
+def test_compiling_the_bound_method_leaves_the_checkpoint_keys_alone() -> None:
+    """The knob compiles the BOUND METHOD and not the module, so no trunk key gains an ``_orig_mod``
+    prefix and resume still finds the weights where it left them."""
+    assert exp022.TrainConfig().compile_trunk is True
+    model = exp022.GPT(_tiny_cfg())
+    keys = set(model.state_dict())
+
+    model.forward = lambda *args, **kwargs: None
+
+    assert set(model.state_dict()) == keys
+    assert not any("_orig_mod" in key for key in keys)
+
+
+def _incremental_policy(attn_window: int = 8, L_ctx: int = 32, exec_horizon: int = 1):
+    cfg = _tiny_cfg(
+        L_ctx=L_ctx, attn_window=attn_window, eval_incremental_kv=True, exec_horizon=exec_horizon, head_offsets=(1, 2)
+    )
+    torch.manual_seed(3)
+    model = exp022.GPT(cfg).eval()
+    return cfg, model, exp022.make_policy(model, _stats(), cfg, device="cpu")
+
+
+def _one_frame(features: dict[str, torch.Tensor], rows: list[int], t: int, slot_ids: list[int], reset: list[bool]):
+    """The ``Context`` ``RecedingHorizon`` hands an incremental decoder: ONE frame per live slot."""
+    return Context(
+        features={name: value[rows, t : t + 1] for name, value in features.items()},
+        ctx_pad=torch.zeros(len(rows), dtype=torch.long),
+        slot_ids=torch.tensor(slot_ids, dtype=torch.long),
+        reset=torch.tensor(reset, dtype=torch.bool),
+    )
+
+
+def _closure_dict(policy, value_type: type) -> dict:
+    """The per-slot ``kv_cache`` / ``hidden`` state, read out of the policy closure. Nothing else
+    exposes it, and these tests are about exactly that state."""
+    return next(
+        cell.cell_contents
+        for cell in policy.encode_frame.__wrapped__.__closure__
+        if isinstance(cell.cell_contents, dict)
+        and cell.cell_contents
+        and all(isinstance(value, value_type) for value in cell.cell_contents.values())
+    )
+
+
+def _cache_lengths(policy) -> dict[int, int]:
+    return {sid: entry[0][0].size(2) for sid, entry in _closure_dict(policy, list).items()}
+
+
+def test_an_instant_restart_drops_that_slots_cache_and_only_that_slots() -> None:
+    """The reset flag and the KV cache must move on the SAME frame, or the first frames of a new
+    match attend to the last frames of the old one. A wave restarts asynchronously, so the slot that
+    did not restart must keep every frame it had."""
+    _, _, policy = _incremental_policy(attn_window=8)
+    features = _features(2, 20, torch.Generator().manual_seed(4))
+    restart_at = 12
+
+    lengths = []
+    for t in range(20):
+        rows, ids = ([0], [10]) if t < 5 else ([0, 1], [10, 11])
+        reset = [t == 0 or t == restart_at] if t < 5 else [t == restart_at, t == 5]
+        policy.encode_frame(_one_frame(features, rows, t, ids, reset))
+        lengths.append(_cache_lengths(policy))
+
+    # Slot 10 alone: it fills, saturates at the window, and starts again from 1 on the restart frame.
+    assert [x[10] for x in lengths] == [1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8, 8, 1, 2, 3, 4, 5, 6, 7, 8]
+    # Slot 11 joins five frames later and is untouched by the other slot's restart.
+    assert [x[11] for x in lengths[5:]] == [1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8, 8, 8, 8, 8]
+
+
+def test_slots_at_different_cache_lengths_decode_as_if_they_were_alone() -> None:
+    """``encode_frame`` batches slots by cache LENGTH, so a wave whose matches drift apart runs
+    several forwards a frame. Each slot's hidden state must be the one it would get on its own —
+    including across the frame where a restart moves one slot into a different group."""
+    _, _, policy = _incremental_policy(attn_window=8)
+    features = _features(2, 14, torch.Generator().manual_seed(4))
+    restart_at = 9
+
+    for t in range(14):
+        rows, ids = ([0], [10]) if t < 3 else ([0, 1], [10, 11])
+        reset = [t == 0] if t < 3 else [t == restart_at, t == 3]
+        policy.encode_frame(_one_frame(features, rows, t, ids, reset))
+
+    got = _closure_dict(policy, torch.Tensor)
+
+    # The same two slots, each encoded alone, from its own first frame.
+    for row, sid, first in ((0, 10, restart_at), (1, 11, 3)):
+        alone = _incremental_policy(attn_window=8)[2]
+        for t in range(first, 14):
+            alone.encode_frame(_one_frame(features, [row], t, [sid], [t == first]))
+        torch.testing.assert_close(got[sid], _closure_dict(alone, torch.Tensor)[sid], rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("k", [1, 2, 8, 9, 32])
+def test_a_re_warming_slot_decodes_like_the_padded_full_forward_it_replaces(k: int) -> None:
+    """Straight after a restart the cache holds FEWER frames than the window and no padding at all,
+    where training left-padded the window and hid the prefix with ``ctx_pad``. If the two disagreed,
+    every frame right after a match boundary would be decoded off-distribution. The pad frames here
+    carry loud garbage, so any attention that reaches them moves the answer."""
+    cfg, model, policy = _incremental_policy(attn_window=8, L_ctx=32)
+    features = _features(1, cfg.L_ctx, torch.Generator().manual_seed(4))
+    garbage = _features(1, cfg.L_ctx, torch.Generator().manual_seed(99))
+
+    for t in range(k):
+        policy.encode_frame(_one_frame(features, [0], t, [10], [t == 0]))
+    got = _closure_dict(policy, torch.Tensor)[10]
+
+    padded = {
+        name: torch.cat([garbage[name][:, : cfg.L_ctx - k] * 50, value[:, :k]], dim=1)
+        if value.is_floating_point()
+        else torch.cat([garbage[name][:, : cfg.L_ctx - k], value[:, :k]], dim=1)
+        for name, value in features.items()
+    }
+    want = model(padded, torch.tensor([cfg.L_ctx - k]))[0, -1]
+
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+
+
+def test_the_cached_path_still_refuses_a_multi_token_call() -> None:
+    """The cached attention applies no mask, so two tokens in one call would see each other."""
+    _, model, _ = _incremental_policy(attn_window=8)
+    features = _features(1, 2, torch.Generator().manual_seed(4))
+
+    with pytest.raises(ValueError, match="one token"):
+        model.forward_incremental(features, [None] * 2)
 
 
 @pytest.mark.parametrize("incremental", [True, False])
