@@ -478,9 +478,19 @@ class Args:
     of value. Distinct from the dlperf_usd>70 perf-per-dollar filter."""
     max_compute_cap: int = 0
     """Maximum CUDA compute capability as vast's `compute_cap` int (sm_89 -> 890); 0 = no
-    ceiling. Use to exclude architectures the training stack is not validated on — the
-    FlexAttention + torch.compile path hung at the first forward on sm_120 (Blackwell,
-    RTX 5090) on two independent hosts (2026-08-06) while sm_86 runs fine."""
+    ceiling. Use to exclude architectures the training stack is not validated on.
+
+    On sm_120 (Blackwell, RTX 5090) the FlexAttention + torch.compile stack is NOT the fault.
+    ``notebooks/probe_sm120.py`` walks the block-mask build, the compiled flex forward and
+    backward, and a compiled bf16 trunk step at the 022 geometry; all stages pass on a 5090 in
+    34 s, with the compile-thread count, an eager mask build and the aot_eager backend giving
+    the same result. A full training start stalls instead, just after "[val] cached", at 0% GPU.
+    On a box that failed loudly rather than stalling, the cause was inductor's subprocess
+    compile pool: ``InductorError: SubprocException: OSError [Errno 28] No space left on
+    device`` writing /tmp/torchinductor_root. A compile subprocess that dies without reporting
+    leaves ``async_compile._wait_futures`` blocked forever, which is the silent stall. That
+    probe box ran --disk 40, so the disk pressure was self-inflicted, and an sm_120 run with
+    production disk is still unmeasured. Lift the cap once one such run trains steps."""
     limit: int = 10
     """How many offers to fetch/print."""
     poll_interval_s: int = 30
