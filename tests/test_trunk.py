@@ -233,6 +233,71 @@ def test_incremental_rejects_decoding_past_a_full_context() -> None:
         trunk.forward_incremental(x, past)
 
 
+@pytest.mark.parametrize("k", [1, 2, 7, 8, 9, 16, 48])
+def test_a_short_cache_decodes_like_a_left_padded_full_forward(k: int) -> None:
+    """A slot that just re-warmed after an instant restart decodes from a cache HOLDING FEWER frames
+    than the window, with no padding in it at all. Training instead left-pads the window and hides
+    the prefix with ``ctx_pad``. The two must agree, or the frames right after a match boundary
+    would be decoded off-distribution: the pad keys carry loud garbage here, so any attention that
+    reads them moves the answer."""
+    attn_window, L = 8, 48
+    cfg = _cfg(L_ctx=L, attn_window=attn_window)
+    trunk = _trunk(cfg, prefer_flex=False, device="cpu")
+
+    torch.manual_seed(17)
+    real = torch.randn(2, k, cfg.d_model)
+    padding = torch.randn(2, L - k, cfg.d_model) * 50.0
+    want = trunk(torch.cat([padding, real], dim=1), torch.full((2,), L - k, dtype=torch.long))[:, -1]
+
+    past: list = [None] * cfg.n_layers
+    for t in range(k):
+        h, past = trunk.forward_incremental(real[:, t : t + 1], past)
+
+    assert all(kv[0].size(2) == min(k, attn_window) for kv in past)
+    torch.testing.assert_close(h[:, -1], want, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("length", [128, 1024])
+def test_the_rotary_table_survives_a_whole_module_cast_to_fp16(length: int) -> None:
+    """The table is a lookup, not a weight. Read straight from an fp16 ``inv_freq`` — what the eval
+    decode cast leaves behind — the position multiplies its 4e-4 of slack into a phase error of
+    2e-2 over a 128-frame window and 3.9e-1 over 1024. Rounding the finished table costs 2.4e-4."""
+    rotary = _trunk(_cfg(), prefer_flex=False, device="cpu").blocks[0].attn.rotary
+    want, _ = rotary.at(length, torch.device("cpu"))
+
+    got, _ = rotary.half().at(length, torch.device("cpu"))
+
+    assert got.dtype == torch.float16
+    assert (got.float() - want).abs().max() < 1e-3
+
+
+def test_the_rotary_table_is_bit_identical_at_fp32() -> None:
+    """The fp32 path must read the registered buffer, not a rebuild of it: a recomputed frequency
+    can differ by an ulp across devices, and every 016-to-021 checkpoint was trained on the buffer."""
+    rotary = _trunk(_cfg(), prefer_flex=False, device="cpu").blocks[0].attn.rotary
+    length = 64
+
+    cos, sin = rotary.at(length, torch.device("cpu"))
+
+    freqs = torch.outer(torch.arange(length).float(), rotary.inv_freq)
+    assert torch.equal(cos, freqs.cos()[None, :, None, :])
+    assert torch.equal(sin, freqs.sin()[None, :, None, :])
+
+
+def test_the_trunk_refuses_a_ctx_pad_that_would_broadcast() -> None:
+    """The one shape the annotations cannot catch by failing: a ctx_pad of the wrong length does not
+    raise downstream, it broadcasts one sample's cold-start prefix over the whole batch."""
+    trunk = _trunk(_cfg(), prefer_flex=False, device="cpu")
+    x = torch.randn(4, _GEOM["L_ctx"], _GEOM["d_model"])
+
+    with pytest.raises(ValueError, match="ctx_pad"):
+        trunk(x, torch.zeros(1, dtype=torch.long))
+    with pytest.raises(ValueError, match="ctx_pad"):
+        trunk(x, torch.zeros(4, 1, dtype=torch.long))
+    with pytest.raises(ValueError, match="ctx_pad"):
+        trunk(x[0], torch.zeros(4, dtype=torch.long))
+
+
 def test_the_flex_probe_reads_the_same_under_no_grad() -> None:
     """Every eval and h2h worker runs its first forward under ``torch.no_grad()``. The probe does a
     backward, so without its own ``enable_grad`` it raises there, reads that as "no flex", and caches

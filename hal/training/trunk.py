@@ -21,11 +21,13 @@ the attention output NaN.
 Parameter creation order is the order in 016 to 021. A seeded build therefore draws the same
 initial weights as those files do. ``tests/test_trunk.py`` pins this.
 
-Shapes are annotated here but NOT checked at runtime. Two measurements decided that: a
-``jaxtyped`` call costs 58 us on this box, and the per-op helpers run four times per layer, which
-is 1.9 ms of a 7.0 ms one-token decode; and dynamo cannot trace a beartype wrapper, so a checked
-forward cannot be ``torch.compile``d (measured 1.65x on the training step). The contract is held by
-``tests/test_trunk.py``, which drives every path against a reference.
+Shapes are annotated here but NOT checked at runtime by ``jaxtyped``. Two measurements decided
+that: a ``jaxtyped`` call costs 58 us on this box, and the per-op helpers run four times per layer,
+which is 1.9 ms of a 7.0 ms one-token decode; and dynamo cannot trace a beartype wrapper, so a
+checked forward cannot be ``torch.compile``d (measured 1.65x on the training step). :meth:`Trunk
+.forward` keeps ONE hand-written guard instead, at the per-step boundary, for the one wrong shape
+that broadcasts rather than raising. The rest of the contract is held by ``tests/test_trunk.py``,
+which drives every path against a reference.
 """
 
 import functools
@@ -92,6 +94,8 @@ class Rotary(nn.Module):
 
     def __init__(self, dim: int, base: int = 10000) -> None:
         super().__init__()
+        self.dim = dim
+        self.base = base
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
         self.cache_key = None
@@ -104,21 +108,33 @@ class Rotary(nn.Module):
         Float[Tensor, "1 L 1 half_dim"],
         Float[Tensor, "1 L 1 half_dim"],
     ]:
-        seq_len = x.shape[1]
-        key = (seq_len, x.device, self.inv_freq.dtype)
-        if key != self.cache_key:
-            self.cache_key = key
-            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-            freqs = torch.outer(t, self.inv_freq)
-            self.cos_cached = freqs.cos()
-            self.sin_cached = freqs.sin()
-        assert self.cos_cached is not None and self.sin_cached is not None
-        return self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
+        return self.at(x.shape[1], x.device)
 
-    def at(self, positions: Tensor) -> tuple[Tensor, Tensor]:
-        """RoPE factors for absolute positions used by incremental decoding."""
-        freqs = torch.outer(positions.to(self.inv_freq), self.inv_freq)
-        return freqs.cos()[None, :, None, :], freqs.sin()[None, :, None, :]
+    def at(self, length: int, device: torch.device) -> tuple[Tensor, Tensor]:
+        """RoPE factors for absolute positions ``0..length-1``, in the module's dtype.
+
+        The full forward and incremental decode both want exactly this, so they share one cache:
+        past the warm-up a decode holds the window's length frame after frame and rebuilds nothing.
+
+        The angles are ALWAYS built at fp32, from the integer geometry rather than from the
+        ``inv_freq`` buffer, because this table is a lookup and not a weight. A whole-module cast to
+        fp16 (what an eval decode cast leaves behind) puts 4e-4 of relative slack on a frequency,
+        which the position multiplies into a phase error of 2e-2 over a 128-frame window and 3.9e-1
+        over 1024 — against the 2.4e-4 that rounding the finished table costs. An fp16 position
+        counter also stops being exact past 2048 frames. The buffer stays registered, and stays the
+        source whenever it is still fp32, so neither the checkpoint keys nor the fp32 arithmetic
+        move."""
+        key = (length, device, self.inv_freq.dtype)
+        if key != self.cache_key:
+            inv_freq = self.inv_freq
+            if inv_freq.dtype != torch.float32:
+                inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))
+            freqs = torch.outer(torch.arange(length, device=device, dtype=torch.float32), inv_freq)
+            self.cache_key = key
+            self.cos_cached = freqs.cos().to(self.inv_freq.dtype)[None, :, None, :]
+            self.sin_cached = freqs.sin().to(self.inv_freq.dtype)[None, :, None, :]
+        assert self.cos_cached is not None and self.sin_cached is not None
+        return self.cos_cached, self.sin_cached
 
 
 def apply_rotary_emb(
@@ -236,8 +252,7 @@ class CausalSelfAttention(nn.Module):
         if k.size(2) > max_cache:
             k = k[:, :, -max_cache:]
             v = v[:, :, -max_cache:]
-        positions = torch.arange(k.size(2), device=x.device)
-        cos, sin = self.rotary.at(positions)
+        cos, sin = self.rotary.at(k.size(2), x.device)
         q = apply_rotary_emb(q, cos[:, -L:], sin[:, -L:])
         k_rot = apply_rotary_emb(k.transpose(1, 2), cos, sin).transpose(1, 2)
         y = F.scaled_dot_product_attention(q.transpose(1, 2), k_rot, v)
@@ -314,6 +329,14 @@ class Trunk(nn.Module):
         return dense_mask(ctx_pad, L, self.attn_window)
 
     def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:
+        # The one runtime shape check on the trunk's input path, at the per-STEP boundary. A ctx_pad
+        # of the wrong length does not raise further down, it BROADCASTS — one sample's cold-start
+        # prefix silently masks every sample. 0.3 us, and dynamo traces it, which a jaxtyped wrapper
+        # is not (it raises on the traced tensor, so a checked forward cannot be compiled).
+        if x.ndim != 3 or ctx_pad.shape != x.shape[:1]:
+            raise ValueError(
+                f"trunk takes x [B, L, d_model] and ctx_pad [B]; got {tuple(x.shape)}, {tuple(ctx_pad.shape)}"
+            )
         mask = self._mask(ctx_pad, x.size(1))
         for block in self.blocks:
             x = block(x, mask)
