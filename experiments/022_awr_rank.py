@@ -286,7 +286,10 @@ class TrainConfig:
     val_n_batches: int = 128
     # Exact per-head shared-trunk gradient Gram matrix on this many examples from the first frozen val
     # batch, computed only at validation cadence. Keeps the diagnostic observational and bounded-cost.
-    gradient_diagnostic_batch_size: int = 64
+    # It retains one backward graph per head, so its cost follows examples x L_ctx: 16 windows of
+    # 1024 frames is the 16,384 scored positions 020 measured at 64 x 256, and 64 of them OOMs a
+    # 12 GiB card.
+    gradient_diagnostic_batch_size: int = 16
     # Validation-only rarity threshold. The metric is emitted only when the checkpoint embeds validated
     # full-dataset button counts; it never falls back to the old reference-sample table.
     diagnostic_rare_button_count: int = 100
@@ -1648,7 +1651,9 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
     rare_mask = model.button_combo_counts < cfg.diagnostic_rare_button_count
     unseen_mask = model.button_combo_counts == 0
     combo_bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS, device=model.main_centers.device))
-    for awr_batch in val_cache:
+    device = next(model.parameters()).device
+    for cached in val_cache:
+        awr_batch = cached.to(device)  # the cache is in host memory; one batch is on the device
         batch = awr_batch.batch
         ctx = batch.context
         h, h_ablated = _hidden_pair(model, ctx)
@@ -2044,7 +2049,10 @@ def train(
 
     print("[val] building cached val set…", flush=True)
     val_t0 = time.monotonic()
-    val_cache = [b.to(DEVICE) for b in itertools.islice(val_loader, cfg.val_n_batches)]
+    # The cache stays in host memory and each batch moves to the device inside the val loop: 128
+    # batches of 64 x 1024 frames are 2.7 GiB of observations, which would sit on the GPU for the
+    # whole run and buy nothing.
+    val_cache = list(itertools.islice(val_loader, cfg.val_n_batches))
     if not val_cache:
         raise RuntimeError("val loader yielded zero batches")
     print(
@@ -2082,7 +2090,7 @@ def train(
         vm, weights = val_metrics(model, val_cache, cfg)
         out: dict[str, object] = {f"val/{k}": v for k, v in vm.items()}
         out["val/awr_weights"] = wandb.Histogram(weights.detach().cpu().numpy())
-        out.update(gradient_diagnostics(model, val_cache[0], cfg))
+        out.update(gradient_diagnostics(model, val_cache[0].to(DEVICE), cfg))
         return out
 
     def _log_eval(step: int, metrics: dict[str, float]) -> None:
