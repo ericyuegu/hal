@@ -208,16 +208,16 @@ def test_reward_defaults_are_the_tuned_table() -> None:
 
 
 def test_geometry_defaults_are_the_swa_long_context_base() -> None:
-    """131,072 tokens per step, as 020 had, but four times the context under a 128-frame window."""
+    """131,072 tokens per step, as 020 had: one forward, no accumulation, 8x the context."""
     cfg = exp022.TrainConfig()
-    assert (cfg.L_ctx, cfg.batch_size, cfg.grad_accum_steps) == (1024, 128, 2)
+    assert (cfg.L_ctx, cfg.batch_size, cfg.grad_accum_steps) == (2048, 64, 1)
     assert exp022._micro_batch(cfg) == 64
     assert cfg.batch_size * cfg.L_ctx == 131072
     assert cfg.attn_window == 128
     assert cfg.require_flex is False
-    assert cfg.windows_per_replay == 2  # 32 distinct replays per micro-batch for the AWR rescale
+    assert cfg.windows_per_replay == 2  # 32 distinct replays per step for the AWR rescale
     assert cfg.val_n_batches == 128  # x 64 windows = 020's 8,192-replay val set
-    assert (cfg.data_root, cfg.mds_schema_version) == ("data/processed/ranked-anonymized-1/mds-v6", 6)
+    assert (cfg.data_root, cfg.mds_schema_version) == ("data/processed/ranked-anonymized-1/mds-v7", 7)
 
 
 def test_head_offsets_are_contiguous_so_chunked_execution_is_possible() -> None:

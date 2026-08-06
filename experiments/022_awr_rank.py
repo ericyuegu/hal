@@ -310,16 +310,18 @@ class TrainConfig:
     exec_horizon: int = 1
     # Reproducible training RNG and transformer context geometry.
     seed: int = 0
-    # 4x 020's context. Under a 128-frame window the measured step time rises 2% from L_ctx 256 to
+    # 8x 020's context. Under a 128-frame window the measured step time rises 2% from L_ctx 256 to
     # 2048 at a fixed token count per step, and a longer window turns more of each whole-replay
-    # disk read into training tokens.
-    L_ctx: int = 1024
+    # disk read into training tokens (K=2 windows x 2061 frames = ~40% of a median replay).
+    L_ctx: int = 2048
     # THE EFFECTIVE batch (020's field was the micro-batch). One optimizer step sees batch_size
     # samples, fed as grad_accum_steps micro-batches of batch_size / grad_accum_steps; the two must
-    # divide. 128 x 1024 = 131,072 tokens per step, matching 020's 512 x 256, and micro-batch 64 at
-    # L_ctx 1024 is the largest power of two that fits the 3060's 12 GiB (5.94 GiB peak).
-    batch_size: int = 128
-    grad_accum_steps: int = 2
+    # divide. The default is ONE forward per step: no accumulation, so the AWR mean-1 weight
+    # rescale sees the whole step's samples (accumulation biases the rank-weighted tier mixture,
+    # measured -0.4% at accum 2). 64 x 2048 = 131,072 tokens per step, matching 020's 512 x 256;
+    # ~11.8 GiB peak, so it needs a 16 GiB card (the 3060 needs batch 32 or L_ctx 1024).
+    batch_size: int = 64
+    grad_accum_steps: int = 1
     # Two LRs: Muon for the blocks' hidden matrices, AdamW for the input proj / head / embeddings / biases.
     muon_lr: float = 0.02
     adam_lr: float = 8.5e-4
@@ -400,10 +402,10 @@ class TrainConfig:
     # checkpointing
     ckpt_every: int = 2048
     # data
-    data_root: str = "data/processed/ranked-anonymized-1/mds-v6"
+    data_root: str = "data/processed/ranked-anonymized-1/mds-v7"
     # MDS materialization this run reads. The dataloader's per-row guard rejects any other version
     # — never silent.
-    mds_schema_version: int = 6
+    mds_schema_version: int = 7
     # Optional versioned JSON artifact containing full-dataset button-combo counts. Required when
     # decode_btn_support_min > 0; the 012 614-replay reference sample is not authoritative support.
     button_combo_counts_path: str | None = None
