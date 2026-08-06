@@ -338,10 +338,10 @@ class TrainConfig:
     # Each replay deserialized off disk yields this many non-overlapping windows, amortizing the
     # whole-replay read (the disk bottleneck) over K samples. Train only; val stays 1/replay so its
     # loss stays comparable across runs. The ranked replays have a median of 10.3k frames, so four
-    # windows of L_ctx + L_chunk = 1037 frames use ~43% of every replay read (measured over the
-    # index), against ~11% at 020's L_ctx 256. Raising K further buys little: the sampler already
-    # caps K at what fits without overlap, and a micro-batch of 64 then holds only 16 distinct
-    # replays, so same-replay correlation inside a batch rises.
+    # windows of L_ctx + L_chunk = 1037 frames use 39% of every replay read (simulated over the
+    # index frame counts), against 10% at 020's L_ctx 256. Raising K further buys little: the
+    # sampler already caps K at what fits without overlap, and a micro-batch of 64 then holds only
+    # 16 distinct replays, so same-replay correlation inside a batch rises.
     windows_per_replay: int = 4
     val_split: str = "val"
     num_workers: int = 16

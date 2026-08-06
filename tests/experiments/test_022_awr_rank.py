@@ -14,6 +14,7 @@ fork changed.
 """
 
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,32 @@ def test_reward_tag_follows_the_flags() -> None:
 
 
 # --- only the trunk and the objective's weights moved ------------------------
+
+# The reward -> return -> weight -> objective chain the fork must NOT touch. 020's tests pin the
+# behavior of 020's copies, so nothing else would notice 022 drifting away from them.
+_AWR_MACHINERY = (
+    "stock_loss_events",
+    "match_point_events",
+    "damage_taken",
+    "frame_reward",
+    "discounted_returns",
+    "replay_returns",
+    "collate_awr_batch",
+    "_attach_returns",
+    "awr_weights",
+    "action_loss",
+    "group_nll",
+    "_multi_offset_targets",
+    "_offset_objective",
+    "_offset_total_bits",
+)
+
+
+@pytest.mark.parametrize("name", _AWR_MACHINERY)
+def test_the_awr_machinery_is_020s_line_for_line(name: str) -> None:
+    """022 changed the trunk, the geometry, the rewards and the val block. The machinery that turns
+    a reward into a per-frame weight is 020's, so an edit to it is a defect until this test says so."""
+    assert inspect.getsource(getattr(exp022, name)) == inspect.getsource(getattr(exp020, name))
 
 
 def test_trunk_swap_keeps_020_init_draws() -> None:
