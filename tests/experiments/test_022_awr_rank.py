@@ -43,6 +43,7 @@ from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
+from hal.training import scoring
 from hal.training.dataloader import WindowDataset
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
@@ -332,7 +333,7 @@ def test_the_awr_machinery_is_020s_line_for_line(name: str) -> None:
 
 @pytest.mark.parametrize("name", sorted(_UNPINNED_FROM_020))
 def test_the_unpinned_functions_are_the_ones_rank_and_iql_needed(name: str) -> None:
-    """The other half of the pin: these five diverge from 020 on purpose (``_UNPINNED_FROM_020`` says
+    """The other half of the pin: these six diverge from 020 on purpose (``_UNPINNED_FROM_020`` says
     what each one gained). If one ever matches 020's source again, the feature went missing."""
     assert inspect.getsource(getattr(exp022, name)) != inspect.getsource(getattr(exp020, name)), (
         f"{name} is 020's again, so it lost: {_UNPINNED_FROM_020[name]}"
@@ -650,6 +651,43 @@ def test_closed_loop_decode_runs_the_chain() -> None:
         h = model(ctx.features, ctx.ctx_pad)[:, -1]
     want = exp022._dequantize(model, _walk_the_chain(model.heads[model.primary_head_idx], h))
     torch.testing.assert_close(action[:, 0], want, rtol=0, atol=0)
+
+
+def test_button_support_mask_forces_the_only_supported_combo() -> None:
+    """The support floor moved from a slice of one joint logit vector into the chain's buttons step.
+    A floor that leaves exactly one combo alive must still be respected, sampled and greedy alike."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model)
+    combo = 0b0100_0011  # A + B + the digital Z bit: several bits set, so it is not the zero combo
+    model.button_combo_counts.fill_(0)
+    model.button_combo_counts[combo] = 1000
+    expected = scoring.combo_to_buttons(torch.tensor(combo))
+    ctx = Context(features=_features(8, cfg.L_ctx, torch.Generator().manual_seed(23)), ctx_pad=torch.zeros(8).long())
+
+    for kwargs in ({"gen": torch.Generator().manual_seed(24)}, {"argmax": True}):
+        action = exp022.decode(model, ctx, btn_support_min=1000, **kwargs)
+        torch.testing.assert_close(action[..., exp022._N_CONT :], expected.expand(8, 1, -1), rtol=0, atol=0)
+
+
+def test_click_trigger_fix_holds_on_the_chains_output() -> None:
+    """When the drawn combo sets the digital L/R bit, the analog trigger must read fully pressed —
+    the chain draws the trigger BEFORE the combo, so only this post-hoc fix can keep the two agreed."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model)
+    l_bit, r_bit = exp022._BUTTON_L_CH - exp022._N_CONT, exp022._BUTTON_R_CH - exp022._N_CONT
+    model.button_combo_counts.fill_(0)
+    model.button_combo_counts[(1 << l_bit) | (1 << r_bit)] = 1000
+    ctx = Context(features=_features(8, cfg.L_ctx, torch.Generator().manual_seed(25)), ctx_pad=torch.zeros(8).long())
+
+    action = exp022.decode(
+        model, ctx, btn_support_min=1000, click_trigger_fix=True, gen=torch.Generator().manual_seed(26)
+    )
+
+    assert torch.all(action[..., exp022._BUTTON_L_CH] > 0.5) and torch.all(action[..., exp022._BUTTON_R_CH] > 0.5)
+    assert torch.all(action[..., exp022._TRIGGER_L_CH] == 1.0)
+    assert torch.all(action[..., exp022._TRIGGER_R_CH] == 1.0)
 
 
 def test_the_incremental_head_path_runs_the_same_chain() -> None:
@@ -1011,6 +1049,37 @@ def test_val_metrics_reproduce_020_numbers(n_batches: int, tolerance: float) -> 
         assert value == pytest.approx(expected, rel=tolerance, abs=tolerance), key
     # The weights are a property of the pooled val set (the mean-1 rescale), so they stay exact.
     torch.testing.assert_close(got_weights, want_weights, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("trigger_l", "trigger_r", "want_l_zero", "want_r_zero"),
+    [(1.0, 1.0, True, True), (1.0, 0.0, True, False), (0.0, 1.0, False, True), (0.0, 0.0, False, False)],
+    ids=["both-full", "left-full", "right-full", "both-released"],
+)
+def test_click_trigger_invalid_mass_reads_the_true_trigger(
+    trigger_l: float, trigger_r: float, want_l_zero: bool, want_r_zero: bool
+) -> None:
+    """The replacement 020 has no counterpart for. The click mass is gated by the GROUND-TRUTH trigger
+    id of the same frame, not by the head's own trigger marginal, so holding a shoulder full for the
+    whole window drives THAT side to exactly 0.0 — a number 020's product of two marginals could only
+    reach if the head predicted a full trigger with probability 1. Holding one side and releasing the
+    other also pins the L/R halves of the joint trigger class apart (``// n_trig`` against ``%``)."""
+    (_, model022) = _paired_models()[1]
+    cfg022 = exp022.TrainConfig(batch_size=4, grad_accum_steps=1, attn_window=0, **_PAIRED, **_PAIRED_AWR)
+    cache = _val_cache(cfg022)[2]
+    for awr_batch in cache:
+        for channel, value in (("trigger_l", trigger_l), ("trigger_r", trigger_r)):
+            awr_batch.batch.context.features[f"ego_{channel}"].fill_(value)
+        awr_batch.batch.target[..., exp022._TRIGGER_L_CH] = trigger_l
+        awr_batch.batch.target[..., exp022._TRIGGER_R_CH] = trigger_r
+
+    metrics, _ = exp022.val_metrics(model022, cache, cfg022)
+
+    assert (metrics["click_trigger_invalid_l_mass"] == 0.0) is want_l_zero
+    assert (metrics["click_trigger_invalid_r_mass"] == 0.0) is want_r_zero
+    assert metrics["click_trigger_invalid_mass"] == pytest.approx(
+        0.5 * (metrics["click_trigger_invalid_l_mass"] + metrics["click_trigger_invalid_r_mass"])
+    )
 
 
 def test_val_metrics_hold_no_per_frame_state_across_batches() -> None:
