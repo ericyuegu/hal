@@ -8,6 +8,8 @@ a whole replay to emit each window, so more tokens per read means fewer reads fo
 This bench answers one question per sequence length: the largest micro-batch that fits in VRAM, and
 what one step of that shape costs. The model is the 022 shape - the 374-wide input projection, the
 d256/L8/h4 trunk, four action heads and the value head - under bf16 autocast, the way training runs.
+The step is a forward and a backward only: there is no optimizer step and no data loading, so the
+tokens per second below is an upper bound on the training rate.
 
 Run it cell by cell, or `uv run notebooks/bench_seq_len.py`.
 """

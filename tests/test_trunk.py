@@ -19,9 +19,9 @@ import torch.nn as nn
 
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
-from hal.training.trunk import block_mask
 from hal.training.trunk import dense_mask
 from hal.training.trunk import flex_is_usable
+from hal.training.trunk import flex_mask_mod
 
 _REPO = Path(__file__).resolve().parent.parent
 _EXP_DIR = _REPO / "experiments"
@@ -129,13 +129,13 @@ def test_dense_mask_matches_double_loop(attn_window: int) -> None:
         (64, 4096, [0, 3, 63, 64]),  # window larger than L
     ],
 )
-def test_block_mask_matches_dense_mask(L: int, attn_window: int, pads: list[int]) -> None:
-    """The FlexAttention rule must equal the dense reference element by element. The mask builds on
-    any box, so this covers the edge cases that the CUDA-only kernel tests cannot reach."""
+def test_flex_mask_mod_matches_dense_mask(L: int, attn_window: int, pads: list[int]) -> None:
+    """The FlexAttention rule must equal the dense reference element by element. The rule runs on any
+    box, so this covers the edge cases that the CUDA-only kernel tests cannot reach."""
     ctx_pad = torch.tensor(pads)
     idx = torch.arange(L)
     b, q, kv = torch.meshgrid(torch.arange(len(pads)), idx, idx, indexing="ij")
-    flex = block_mask(ctx_pad, L, attn_window).mask_mod(b, torch.zeros_like(b), q, kv)
+    flex = flex_mask_mod(ctx_pad, attn_window)(b, torch.zeros_like(b), q, kv)
 
     assert torch.equal(flex[:, None], dense_mask(ctx_pad, L, attn_window))
 
@@ -208,6 +208,41 @@ def test_incremental_matches_full_forward_under_swa(prefer_flex: bool) -> None:
     assert all(kv[0].size(2) == attn_window for kv in past)
 
     torch.testing.assert_close(h[:, -1], want, rtol=1e-5, atol=1e-5)
+
+
+def test_incremental_rejects_a_chunk() -> None:
+    """The cached attention has no mask inside the given chunk, so more than one token is refused."""
+    trunk = _trunk(_cfg(attn_window=16), prefer_flex=False, device="cpu")
+    x = torch.randn(2, 3, _GEOM["d_model"])
+
+    with pytest.raises(ValueError, match="one token"):
+        trunk.forward_incremental(x, [None] * len(trunk.blocks))
+
+
+def test_incremental_rejects_decoding_past_a_full_context() -> None:
+    """At full attention the cache is the whole context, so one more frame would drop history the
+    full forward keeps. The trunk refuses rather than answer with a quietly wrong hidden state."""
+    L = 8
+    trunk = _trunk(_cfg(L_ctx=L, attn_window=0), prefer_flex=False, device="cpu")
+    x = torch.randn(2, 1, _GEOM["d_model"])
+
+    past: list = [None] * len(trunk.blocks)
+    for _ in range(L):
+        _, past = trunk.forward_incremental(x, past)
+    with pytest.raises(ValueError, match="passed the 8-frame context"):
+        trunk.forward_incremental(x, past)
+
+
+@pytest.mark.skipif(flex_is_usable("cpu"), reason="the fallback needs a device without FlexAttention")
+def test_require_flex_refuses_the_dense_fallback() -> None:
+    """A cloud run can demand the fast kernel. On a box without it the trunk raises; it never trains
+    4x slower without saying so."""
+    with pytest.raises(ValueError, match="require_flex"):
+        Trunk(_cfg(require_flex=True), prefer_flex=False)
+
+    trunk = Trunk(_cfg(require_flex=True))  # CPU has no FlexAttention backward
+    with pytest.raises(RuntimeError, match="require_flex"):
+        trunk(torch.randn(2, _GEOM["L_ctx"], _GEOM["d_model"]), torch.zeros(2, dtype=torch.long))
 
 
 def test_config_rejects_impossible_geometry() -> None:

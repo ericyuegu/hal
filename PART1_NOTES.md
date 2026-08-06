@@ -30,6 +30,9 @@ attention applies no mask, so a chunk would let its tokens see each other.
 
 The attention path resolves at the first forward: FlexAttention when it compiles on the box, the
 dense SDPA mask when it does not. `Trunk.attn_path` reports which one, and the choice is logged.
+Set `TrunkConfig.require_flex=True` in the 022 cloud entrypoint (CUDA only): the probe failure then
+raises instead of training about 4x slower on the fallback. Leave it false on the dev box, where the
+CPU has no FlexAttention backward.
 Note that the checkpoint keys gain a `trunk.` prefix (`trunk.blocks.0.attn.c_attn.weight`), which is
 fine for a new experiment but means 020 checkpoints cannot be loaded into 022.
 
@@ -37,7 +40,10 @@ Config check to add in `validate_config`: reject `eval_incremental_kv=True` with
 With a window the rolling cache holds exactly the trained window and RoPE is relative, so
 incremental decode is exact (`tests/test_trunk.py::test_incremental_matches_full_forward_under_swa`
 pins this); without a window it silently drops history. 020's comment at `020:292-294` says the
-same and can be replaced by the check.
+same and can be replaced by the check. The trunk now enforces the invariant itself as well: at
+`attn_window == 0` it raises as soon as the decode passes `L_ctx` frames, so a consumer that forgets
+the config check gets an error instead of a hidden state that is off by about 9e-2. The config check
+is still worth having, because it fails at startup instead of `L_ctx` frames into the first match.
 
 ## Fix 1 — save `final.pt` before the final closed-loop eval
 
@@ -98,15 +104,17 @@ power of two whose token count still divides the 131,072-token step budget (020'
 
 | L_ctx | micro-batch | peak VRAM | step s | tokens/micro-step | tokens/s | accum for 131k | full-attn step s | SWA speed-up |
 |---|---|---|---|---|---|---|---|---|
-| 256 | 256 | 5.94 GiB | 0.368 | 65,536 | 178,173 | 2 | 0.367 | 1.00x |
-| 512 | 128 | 5.94 GiB | 0.373 | 65,536 | 175,870 | 2 | 0.381 | 1.02x |
-| 1024 | 64 | 5.94 GiB | 0.378 | 65,536 | 173,433 | 2 | 0.409 | 1.08x |
-| 2048 | 32 | 5.94 GiB | 0.387 | 65,536 | 169,199 | 2 | 0.466 | 1.21x |
+| 256 | 256 | 5.94 GiB | 0.366 | 65,536 | 179,097 | 2 | 0.365 | 1.00x |
+| 512 | 128 | 5.94 GiB | 0.369 | 65,536 | 177,539 | 2 | 0.384 | 1.04x |
+| 1024 | 64 | 5.94 GiB | 0.371 | 65,536 | 176,526 | 2 | 0.404 | 1.09x |
+| 2048 | 32 | 5.94 GiB | 0.374 | 65,536 | 175,024 | 2 | 0.456 | 1.22x |
 
 Readings:
 
-- At a fixed token count per micro-step, VRAM does not move at all and step time rises 5% from
+- At a fixed token count per micro-step, VRAM does not move at all and step time rises 2% from
   L=256 to L=2048. Under a 128-frame window, sequence length is close to free.
+- The step is forward plus backward only, with no optimizer step and no loader, so tokens per second
+  is an upper bound.
 - The attention block is a small part of the step at d256/L8 (the MLP dominates), so the SWA
   speed-up over full attention is only 1.21x at L=2048. The reason to take SWA is not this number:
   it is that SWA keeps the cost flat as L grows, and it makes incremental decode exact.

@@ -23,6 +23,7 @@ initial weights as those files do. ``tests/test_trunk.py`` pins this.
 """
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -39,8 +40,16 @@ from torch.nn.attention.flex_attention import BlockMask
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.nn.attention.flex_attention import flex_attention
 
-# Compilation is lazy, so this costs nothing until the first FlexAttention call.
+# One compiled kernel per (batch, sequence) shape. The default limit is 8, and a run that passes it
+# drops back to eager without a word: measured 4.7x slower and 2x the VRAM, while the reported path
+# still says "flex".
+torch._dynamo.config.cache_size_limit = 64
+
+# Compilation is lazy, so both of these cost nothing until the first FlexAttention call. The mask
+# build is compiled too: in eager it walks the whole [B, L, L] index grid once per forward, which
+# measures 6.6 ms at B=64/L=1024 and 13.2 ms at B=32/L=2048, against 0.3 ms compiled.
 _flex_attention = torch.compile(flex_attention, dynamic=False)
+_create_block_mask = torch.compile(create_block_mask, dynamic=False)
 
 AttnMask = Bool[Tensor, "B 1 L L"] | BlockMask
 
@@ -54,6 +63,9 @@ class TrunkConfig:
     n_heads: int
     L_ctx: int
     attn_window: int = 0  # frames of look-back; 0 = full context
+    # Fail instead of falling back to the dense path. A cloud run wants the fast kernel or an error,
+    # not a quiet 4x slowdown; a dev box without it still wants to run.
+    require_flex: bool = False
 
     def __post_init__(self) -> None:
         if self.n_heads <= 0 or self.d_model % self.n_heads != 0:
@@ -138,9 +150,9 @@ def dense_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> Bool[Ten
     return (keep[None] & (key_real[:, None, :] | diag[None]))[:, None]
 
 
-def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMask:
-    """The FlexAttention form of :func:`dense_mask`. FlexAttention drops whole masked blocks, so the
-    cost of a window grows with the window and not with the sequence length."""
+def flex_mask_mod(ctx_pad: Int[Tensor, " B"], attn_window: int) -> Callable[..., Tensor]:
+    """:func:`dense_mask`'s rule, written the way FlexAttention wants it: one predicate over index
+    tensors. The tests compare it with the dense mask element by element."""
 
     def mask_mod(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
         keep = (kv <= q) & (kv >= ctx_pad[b])
@@ -148,7 +160,14 @@ def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMas
             keep = keep & (q - kv < attn_window)
         return keep | (kv == q)
 
-    return create_block_mask(mask_mod, ctx_pad.shape[0], None, L, L, device=ctx_pad.device)
+    return mask_mod
+
+
+def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMask:
+    """The FlexAttention form of :func:`dense_mask`. FlexAttention drops whole masked blocks, so the
+    cost of a window grows with the window and not with the sequence length."""
+    mask_mod = flex_mask_mod(ctx_pad, attn_window)
+    return _create_block_mask(mask_mod, ctx_pad.shape[0], None, L, L, device=ctx_pad.device)
 
 
 @functools.cache
@@ -263,12 +282,15 @@ class Trunk(nn.Module):
 
     def __init__(self, cfg: TrunkConfig, *, prefer_flex: bool = True) -> None:
         super().__init__()
+        if cfg.require_flex and not prefer_flex:
+            raise ValueError("require_flex asks for the flex path and prefer_flex=False forbids it")
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
         self.attn_window = cfg.attn_window
         # With a trained window the cache holds exactly the training window, so incremental decode
         # matches the full forward. Without one it holds the whole context.
         self.max_cache = cfg.attn_window if cfg.attn_window > 0 else cfg.L_ctx
         self.prefer_flex = prefer_flex
+        self.require_flex = cfg.require_flex
         self._use_flex: bool | None = None
 
     @property
@@ -282,6 +304,8 @@ class Trunk(nn.Module):
     def _mask(self, ctx_pad: Int[Tensor, " B"], L: int) -> AttnMask:
         if self._use_flex is None:
             self._use_flex = self.prefer_flex and flex_is_usable(ctx_pad.device.type)
+            if self.require_flex and not self._use_flex:
+                raise RuntimeError(f"require_flex is set, but FlexAttention does not run on {ctx_pad.device.type}")
             logger.info(f"trunk attention: {'flex' if self._use_flex else 'dense'} path, window={self.attn_window}")
         if self._use_flex:
             return block_mask(ctx_pad, L, self.attn_window)
@@ -302,9 +326,19 @@ class Trunk(nn.Module):
 
         The cached attention applies no mask, so every query sees the whole cache. That is correct
         for a single token and wrong for a chunk, where the tokens would also see each other. A
-        chunk prefill needs its own mask; add it here when a caller needs one."""
+        chunk prefill needs its own mask; add it here when a caller needs one.
+
+        Without a window, the cache holds ``L_ctx`` frames and the model was trained to read all of
+        them, so a longer decode would drop history that the full forward keeps. That is a silent
+        error of about 9e-2 in the hidden state, so it raises here instead."""
         if x.size(1) != 1:
             raise ValueError(f"incremental decode takes one token, got L={x.size(1)}")
+        cached = 0 if past[0] is None else past[0][0].size(2)
+        if self.attn_window == 0 and cached + 1 > self.max_cache:
+            raise ValueError(
+                f"incremental decode passed the {self.max_cache}-frame context at full attention: "
+                "the cache would drop history the full forward keeps. Train with attn_window > 0."
+            )
         new_past: list[tuple[Tensor, Tensor]] = []
         for block, old in zip(self.blocks, past, strict=True):
             x, kv = block.forward_incremental(x, old, self.max_cache)
