@@ -10,6 +10,8 @@ See CLAUDE.md (Controller data model) for the logical-only
 controller representation, mask sentinels, and naming.
 """
 
+from enum import IntEnum
+
 import numpy as np
 from numpy.typing import DTypeLike
 
@@ -24,6 +26,12 @@ from hal.wire import item_column
 # or to the extraction semantics that produce them. Consumers verify the
 # version matches before reading; mismatch is a hard error.
 #
+# 7: add the per-player ``p{1,2}_rank`` columns — the ranked-ladder tier of each
+#    player, a per-replay constant broadcast across frames like ``stage`` and
+#    ``p{1,2}_character``. The value is the ``Rank`` IntEnum, read from the slp
+#    start block's netplay name ("Platinum Player" / "Diamond Player" /
+#    "Master Player"). Any other name is ``Rank.UNKNOWN`` (0), so a non-ranked
+#    corpus reads loud instead of silently claiming a tier.
 # 6: widen the per-frame post block and add global item (projectile) slots.
 #    (a) per-player: the ``velocities`` block (5 channels), ``misc_as``,
 #    ``state_age``, the 5 raw ``state_flags`` bytes, ``l_cancel``, ``ground``,
@@ -62,7 +70,39 @@ from hal.wire import item_column
 # 2: add raw_analog_cstick_x/y columns (slp >= 3.17) for bit-exact c-stick
 #    replay.
 # 1: initial introduction of the version field.
-SCHEMA_VERSION: int = 6
+SCHEMA_VERSION: int = 7
+
+
+class Rank(IntEnum):
+    """Ranked-ladder tier of one player, as stored in ``p{1,2}_rank``.
+
+    ``UNKNOWN`` is 0 so an unread or non-ranked tier is loud (a consumer that
+    weights by rank raises on it) instead of quietly reading as the lowest tier.
+    """
+
+    UNKNOWN = 0
+    PLATINUM = 1
+    DIAMOND = 2
+    MASTER = 3
+
+
+# The three netplay display names the ranked-anonymized corpus carries, one per
+# tier. Anonymization replaces the player's real display name with these exact
+# strings, so the match is exact: a real netplay name that merely CONTAINS
+# "master" is a name, not a tier.
+_RANK_BY_PLAYER_NAME: dict[str, Rank] = {
+    "Platinum Player": Rank.PLATINUM,
+    "Diamond Player": Rank.DIAMOND,
+    "Master Player": Rank.MASTER,
+}
+
+
+def rank_from_player_name(name: str | None) -> Rank:
+    """Netplay display name -> ``Rank``. Anything unrecognized is ``UNKNOWN``."""
+    if name is None:
+        return Rank.UNKNOWN
+    return _RANK_BY_PLAYER_NAME.get(name, Rank.UNKNOWN)
+
 
 # Storage dtype per ``wire.POST_FIELD_SUFFIXES`` entry. Every suffix must appear
 # here; ``_gamestate_columns`` iterates the wire tuple and raises at import on a
@@ -159,20 +199,22 @@ def _nana_columns(prefix: str) -> dict[str, DTypeLike]:
     return {f"{prefix}_nana_{k.removeprefix(prefix + '_')}": v for k, v in _gamestate_columns(prefix).items()}
 
 
-# ``stage`` + ``p{1,2}_character`` are per-replay constants broadcast across frames
-# (not in peppi's per-frame post block) — see extract.broadcast and SCHEMA_VERSION 5.
-# Both are libmelee enum values: ``stage`` via slp_stage_to_libmelee, ``p{1,2}_character``
-# the libmelee ``Character`` value via slp_character_to_libmelee. ``item{k}_*`` is global
-# per-frame state, hence no player prefix.
+# ``stage``, ``p{1,2}_character`` and ``p{1,2}_rank`` are per-replay constants broadcast
+# across frames (not in peppi's per-frame post block) — see extract.broadcast and
+# SCHEMA_VERSION 5/7. ``stage`` and ``p{1,2}_character`` are libmelee enum values (via
+# slp_stage_to_libmelee / slp_character_to_libmelee); ``p{1,2}_rank`` is the ``Rank``
+# enum. ``item{k}_*`` is global per-frame state, hence no player prefix.
 MDS_PER_FRAME_DTYPES: dict[str, DTypeLike] = {
     "frame": np.int32,
     "stage": np.int32,
     **_item_columns(),
     "p1_character": np.int32,
+    "p1_rank": np.uint8,
     **_gamestate_columns("p1"),
     **_controller_columns("p1"),
     **_nana_columns("p1"),
     "p2_character": np.int32,
+    "p2_rank": np.uint8,
     **_gamestate_columns("p2"),
     **_controller_columns("p2"),
     **_nana_columns("p2"),

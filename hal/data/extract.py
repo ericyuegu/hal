@@ -16,6 +16,7 @@ spawn ids alive on a frame fill the ``item{k}_*`` slots, the rest are masked.
 See CLAUDE.md (Controller data model, Per-frame schema).
 """
 
+from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 
@@ -30,6 +31,7 @@ from peppi_py.frame import Post
 from peppi_py.game import Game
 
 from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.data.schema import rank_from_player_name
 from hal.wire import BUTTON_BITS
 from hal.wire import GAME_START_FRAME
 from hal.wire import ITEM_FIELD_PATHS
@@ -170,6 +172,23 @@ def _unpack_buttons(physical: Any, length: int) -> dict[str, np.ndarray]:
     return {b: ((bits & mask) != 0).astype(np.int32) for b, mask in BUTTON_BITS.items()}
 
 
+def netplay_name(start_player: Any, metadata_players: Mapping[str, Any]) -> str | None:
+    """Netplay display name of one start-block player, or None if it has none.
+
+    ``metadata.players`` (keyed by the 0-indexed port as a string) wins. Anonymized
+    .slps ship empty metadata but still carry ``netplay.name`` on the start block,
+    hence the fallback. Shared with ``index.extract_index_entry`` so the name that
+    lands in ``p{1,2}_rank`` is the same one the index records.
+    """
+    names = (metadata_players.get(str(int(start_player.port))) or {}).get("names") or {}
+    netplay = getattr(start_player, "netplay", None)
+    return names.get("netplay") or (getattr(netplay, "name", "") or None)
+
+
+def _metadata_players(g: Game) -> Mapping[str, Any]:
+    return (g.metadata or {}).get("players") or {}
+
+
 def _peppi_idx_by_libmelee_port(g: Game) -> dict[int, int]:
     """Map libmelee port (1..4) to peppi's port-array index (0..3)."""
     return {peppi_port_to_libmelee(pl.port): i for i, pl in enumerate(g.start.players)}
@@ -267,16 +286,23 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         **_item_arrays(g.frames, keep_idx),
     }
 
+    metadata_players = _metadata_players(g)
     for prefix, port in zip(PLAYER_PREFIXES, occupied_libmelee_ports, strict=True):
         peppi_idx = peppi_idx_by_libmelee_port[port]
         port_data = g.frames.ports[peppi_idx]
-        slp_character = int(g.start.players[peppi_idx].character)
+        start_player = g.start.players[peppi_idx]
+        slp_character = int(start_player.character)
         try:
             character = slp_character_to_libmelee(slp_character).value
         except ValueError:
             logger.debug(f"{replay_path}: unknown external character id {slp_character}; dropping replay")
             return None
         sample[f"{prefix}_character"] = np.full(out_length, character, dtype=np.int32)
+        # Ranked tier, broadcast per frame (SCHEMA_VERSION 7). Unrecognized or absent
+        # netplay names store Rank.UNKNOWN — a non-ranked corpus is then visibly untiered
+        # rather than silently labeled.
+        rank = rank_from_player_name(netplay_name(start_player, metadata_players))
+        sample[f"{prefix}_rank"] = np.full(out_length, int(rank), dtype=np.uint8)
         sample.update(_extract_player(port_data.leader, prefix, keep_idx, raw_length))
         sample.update(_extract_nana(port_data.follower, prefix, keep_idx, raw_length))
 

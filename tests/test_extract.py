@@ -9,7 +9,10 @@ import pytest
 from hal.data.extract import _list_to_np
 from hal.data.extract import _unpack_buttons
 from hal.data.extract import extract_replay
+from hal.data.index import extract_index_entry
 from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.data.schema import Rank
+from hal.data.schema import rank_from_player_name
 from hal.paths import DEV_ARCHIVE_PATH
 from hal.wire import BUTTON_BITS
 from hal.wire import ITEM_FIELD_SUFFIXES
@@ -93,6 +96,7 @@ def test_schema_gamestate_fields_match_post_suffixes() -> None:
     POST_FIELD_SUFFIXES entry — no schema field without a wire counterpart."""
     from hal.wire import POST_FIELD_SUFFIXES
 
+    broadcast = {"p1_character", "p1_rank"}  # per-replay constants, not post fields
     p1_gamestate = {
         col.removeprefix("p1_")
         for col in MDS_PER_FRAME_DTYPES
@@ -101,7 +105,7 @@ def test_schema_gamestate_fields_match_post_suffixes() -> None:
         and "_button_" not in col
         and "stick" not in col
         and not col.endswith(("_trigger_l", "_trigger_r"))
-        and col != "p1_character"  # per-replay constant, not a post field
+        and col not in broadcast
     }
     assert p1_gamestate == set(POST_FIELD_SUFFIXES)
 
@@ -286,6 +290,55 @@ def test_extract_matches_canonical_flatten_column_for_column(dev_slp: str, dev_s
             if float(online) != float(offline):
                 mismatches.append(f"frame {frame['id']} {col}: online {online} != offline {offline}")
     assert not mismatches, f"{len(mismatches)} online/offline mismatches:\n" + "\n".join(mismatches[:10])
+
+
+def test_rank_from_player_name_maps_the_three_ladder_names() -> None:
+    assert rank_from_player_name("Platinum Player") == Rank.PLATINUM
+    assert rank_from_player_name("Diamond Player") == Rank.DIAMOND
+    assert rank_from_player_name("Master Player") == Rank.MASTER
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        None,
+        "",
+        "Master Player 2",  # a real display name that CONTAINS a ladder name
+        "master player",  # anonymization writes exactly one casing
+        " Master Player",
+        "Gold Player",  # a tier the corpus does not carry
+    ],
+)
+def test_rank_from_player_name_is_exact_match_only(name: str | None) -> None:
+    """Substring or case-folded matching would label real netplay names with a
+    tier they never earned, so the three names match exactly and nothing else."""
+    assert rank_from_player_name(name) == Rank.UNKNOWN
+
+
+def test_extract_replay_broadcasts_rank_per_frame(dev_sample: dict[str, np.ndarray]) -> None:
+    """The rank columns are per-replay constants, one value per frame."""
+    frame_len = dev_sample["frame"].shape[0]
+    for col in ("p1_rank", "p2_rank"):
+        column = dev_sample[col]
+        assert column.dtype == np.uint8
+        assert column.shape == (frame_len,)
+        assert len(np.unique(column)) == 1, f"{col} is not constant across the replay"
+        assert int(column[0]) in set(Rank)
+
+
+def test_extract_rank_agrees_with_the_index_entry(dev_slp: str, dev_sample: dict[str, np.ndarray]) -> None:
+    """The MDS columns and ``PlayerEntry.name`` read the same netplay name.
+
+    ``upgrade_mds`` joins v6 shards to ranks through the index/manifest, so the
+    two readers must agree; the dev fixture is not from the ranked ladder, so
+    both must land on UNKNOWN.
+    """
+    entry = extract_index_entry(Path(dev_slp), compute_sha1=False, with_stats=False)
+    assert entry is not None
+    players = sorted(entry.players, key=lambda p: p.port)
+    for col, player in zip(("p1_rank", "p2_rank"), players, strict=True):
+        assert int(dev_sample[col][0]) == rank_from_player_name(player.name)
+    assert all(int(dev_sample[col][0]) == Rank.UNKNOWN for col in ("p1_rank", "p2_rank"))
 
 
 def test_schema_controller_block_is_logical_only() -> None:

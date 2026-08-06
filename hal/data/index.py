@@ -35,6 +35,7 @@ from loguru import logger
 from peppi_py.game import EndMethod
 
 from hal.data.archive import parse_archive_member_path
+from hal.data.extract import netplay_name
 from hal.data.replay_stats import ReplayStats
 from hal.data.replay_stats import compute_replay_stats
 from hal.data.schema import SCHEMA_VERSION
@@ -308,6 +309,9 @@ def extract_index_entry(
         # Anonymized .slps have empty metadata but still carry netplay.name
         # (e.g. "Diamond Player") and netplay.code on the start block.
         netplay = getattr(sp, "netplay", None)
+        # The display name goes through the shared reader so ``PlayerEntry.name``
+        # and the ``p{1,2}_rank`` MDS columns can never disagree on the tier.
+        name = netplay_name(sp, md_players)
         try:
             character = slp_character_to_libmelee(int(sp.character)).value
         except ValueError:
@@ -322,7 +326,7 @@ def extract_index_entry(
                 costume=int(sp.costume),
                 player_type=_narrow_player_type(type_name),
                 code=names.get("code") or (getattr(netplay, "code", "") or None),
-                name=names.get("netplay") or (getattr(netplay, "name", "") or None),
+                name=name,
             )
         )
     players.sort(key=lambda p: p.port)
