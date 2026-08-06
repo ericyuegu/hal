@@ -20,6 +20,12 @@ the attention output NaN.
 
 Parameter creation order is the order in 016 to 021. A seeded build therefore draws the same
 initial weights as those files do. ``tests/test_trunk.py`` pins this.
+
+Shapes are annotated here but NOT checked at runtime. Two measurements decided that: a
+``jaxtyped`` call costs 58 us on this box, and the per-op helpers run four times per layer, which
+is 1.9 ms of a 7.0 ms one-token decode; and dynamo cannot trace a beartype wrapper, so a checked
+forward cannot be ``torch.compile``d (measured 1.65x on the training step). The contract is held by
+``tests/test_trunk.py``, which drives every path against a reference.
 """
 
 import functools
@@ -29,11 +35,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
 from jaxtyping import Int
-from jaxtyping import jaxtyped
 from loguru import logger
 from torch import Tensor
 from torch.nn.attention.flex_attention import BlockMask
@@ -94,7 +98,6 @@ class Rotary(nn.Module):
         self.cos_cached = None
         self.sin_cached = None
 
-    @jaxtyped(typechecker=beartype)
     def forward(
         self, x: Float[Tensor, "B L n_heads head_dim"]
     ) -> tuple[
@@ -118,7 +121,6 @@ class Rotary(nn.Module):
         return freqs.cos()[None, :, None, :], freqs.sin()[None, :, None, :]
 
 
-@jaxtyped(typechecker=beartype)
 def apply_rotary_emb(
     x: Float[Tensor, "B L n_heads head_dim"],
     cos: Float[Tensor, "1 L 1 half_dim"],
@@ -129,14 +131,12 @@ def apply_rotary_emb(
     return torch.cat([x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos], 3)
 
 
-@jaxtyped(typechecker=beartype)
 def rmsnorm(x0: Float[Tensor, "... d"], eps: float = 1e-6) -> Float[Tensor, "... d"]:
     x = x0.float()
     x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
     return x.type_as(x0)
 
 
-@jaxtyped(typechecker=beartype)
 def dense_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> Bool[Tensor, "B 1 L L"]:
     """The bool attention mask for ``scaled_dot_product_attention``: causal, inside the window, and
     clear of each sample's left-padded cold-start prefix. A padded query keeps its diagonal, so its
@@ -200,7 +200,6 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.rotary = Rotary(self.head_dim)
 
-    @jaxtyped(typechecker=beartype)
     def forward(self, x: Float[Tensor, "B L d_model"], mask: AttnMask) -> Float[Tensor, "B L d_model"]:
         B, L, _ = x.shape
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
@@ -252,7 +251,6 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(cfg.d_model, 4 * cfg.d_model, bias=False)
         self.c_proj = nn.Linear(4 * cfg.d_model, cfg.d_model, bias=False)
 
-    @jaxtyped(typechecker=beartype)
     def forward(self, x: Float[Tensor, "B L d_model"]) -> Float[Tensor, "B L d_model"]:
         return self.c_proj(F.gelu(self.c_fc(x)))
 
@@ -264,7 +262,6 @@ class Block(nn.Module):
         self.mlp = MLP(cfg)
         self.attn_scale = 1 / (2 * cfg.n_layers) ** 0.5
 
-    @jaxtyped(typechecker=beartype)
     def forward(self, x: Float[Tensor, "B L d_model"], mask: AttnMask) -> Float[Tensor, "B L d_model"]:
         x = x + self.attn_scale * self.attn(rmsnorm(x), mask)
         x = x + self.mlp(rmsnorm(x))
@@ -316,7 +313,6 @@ class Trunk(nn.Module):
             return block_mask(ctx_pad, L, self.attn_window)
         return dense_mask(ctx_pad, L, self.attn_window)
 
-    @jaxtyped(typechecker=beartype)
     def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:
         mask = self._mask(ctx_pad, x.size(1))
         for block in self.blocks:
