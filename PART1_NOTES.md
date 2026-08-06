@@ -123,6 +123,14 @@ L=2048 buys more I/O relief for 5% more step time, but a 2048-frame window plus 
 to cut into short replays; keep it as the fallback if the loader is still the bottleneck after
 Part 2. Set `windows_per_replay` to match the chosen L.
 
+## One trap for the 022 tests
+
+The experiment train loops call `torch.set_float32_matmul_precision("high")`, which stays set for the
+whole pytest process. Under TF32 the FlexAttention and SDPA kernels differ by about 6e-4, so a
+path-comparison test passes alone and fails in the full suite. `tests/test_trunk.py` pins
+`"highest"` for the duration of each test and restores the previous value. Any 022 test that
+compares two kernels must do the same.
+
 ## Attention path on this box
 
 - CUDA (RTX 3060): FlexAttention compiles and runs. It is the active path.
