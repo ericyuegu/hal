@@ -78,7 +78,25 @@ cd /
 rm -rf /opt/hal
 # Public repo clones anonymously; the ${GITHUB_TOKEN:+…@} prefix injects auth only
 # if a token was set (private repo/image). Safe under `set -u`.
-git clone --quiet "https://${GITHUB_TOKEN:+${GITHUB_TOKEN}@}github.com/ericyuegu/hal.git" /opt/hal
+# github.com is reachable from a vast host only most of the time — during a github edge
+# incident the connect times out after ~2 minutes and one blip burns the whole (billed)
+# boot. Retry a few times, then fail loud.
+clone_url="https://${GITHUB_TOKEN:+${GITHUB_TOKEN}@}github.com/ericyuegu/hal.git"
+cloned=0
+for attempt in 1 2 3; do
+  if git clone --quiet "$clone_url" /opt/hal; then
+    cloned=1
+    break
+  fi
+  log "clone attempt ${attempt} failed (github.com unreachable); retrying in 30s"
+  rm -rf /opt/hal
+  sleep 30
+done
+if [ "$cloned" -ne 1 ]; then
+  log "FATAL: cannot clone hal after 3 attempts — github.com unreachable from this host"
+  teardown stop "git clone failed (github.com unreachable)"
+  exit 1
+fi
 cd /opt/hal
 git checkout --quiet "$HAL_GIT_SHA"
 uv sync --locked
