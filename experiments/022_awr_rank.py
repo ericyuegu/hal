@@ -85,6 +85,7 @@ from jaxtyping import Bool
 from jaxtyping import Float
 from jaxtyping import Int
 from jaxtyping import jaxtyped
+from scipy.signal import lfilter
 from streaming import StreamingDataset
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
@@ -532,11 +533,15 @@ def discounted_returns(reward: np.ndarray, gamma: float) -> np.ndarray:
 
     Run on the full replay before windowing: at gamma=0.999 the discount half-life (~693 frames)
     is longer than a whole train window, so a return summed inside the window would be truncated
-    toward zero exactly where the credit lives."""
-    tail = itertools.accumulate(
-        np.asarray(reward, dtype=np.float32)[::-1].tolist(), lambda carry, r: r + gamma * carry
-    )
-    return np.fromiter(tail, dtype=np.float32, count=len(reward))[::-1].copy()
+    toward zero exactly where the credit lives.
+
+    The scan is a one-pole IIR filter on the reversed reward — ``y[n] = x[n] + gamma*y[n-1]`` — so
+    ``lfilter`` runs it in C. 020 ran the same recurrence as a Python ``accumulate`` over every
+    frame of the replay, which profiling put at 39% of a dataloader worker's time (a replay is
+    ~10.7k frames and each yields at most two windows). The filter carries the same double-precision
+    accumulation in the same order, so the values are the ones the loop produced."""
+    tail = lfilter([1.0], [1.0, -gamma], np.asarray(reward, dtype=np.float64)[::-1])
+    return tail[::-1].astype(np.float32)
 
 
 def replay_returns(

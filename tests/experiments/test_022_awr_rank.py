@@ -18,6 +18,7 @@ import importlib.util
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -173,7 +174,6 @@ _AWR_MACHINERY = (
     "match_point_events",
     "damage_taken",
     "frame_reward",
-    "discounted_returns",
     "replay_returns",
     "collate_awr_batch",
     "_attach_returns",
@@ -191,6 +191,22 @@ def test_the_awr_machinery_is_020s_line_for_line(name: str) -> None:
     """022 changed the trunk, the geometry, the rewards and the val block. The machinery that turns
     a reward into a per-frame weight is 020's, so an edit to it is a defect until this test says so."""
     assert inspect.getsource(getattr(exp022, name)) == inspect.getsource(getattr(exp020, name))
+
+
+@pytest.mark.parametrize("gamma", [0.0, 0.5, 0.9, 0.99827, 1.0])
+def test_vectorized_returns_reproduce_020s_python_scan(gamma: float) -> None:
+    """The only piece of the return chain that changed: 020 scans in Python, 022 runs the same
+    recurrence through ``lfilter``. Same values, on a replay-length reward with real stock events —
+    otherwise the reward is unchanged and the return moved."""
+    rng = np.random.default_rng(0)
+    reward = rng.normal(scale=0.01, size=10_700).astype(np.float32)
+    reward[[900, 3400, 5000, 9999]] = [-1.0, 1.0, -1.5, 1.5]
+
+    got = exp022.discounted_returns(reward, gamma)
+    want = exp020.discounted_returns(reward, gamma)
+
+    assert got.dtype == want.dtype == np.float32
+    np.testing.assert_array_equal(got, want)
 
 
 def test_trunk_swap_keeps_020_init_draws() -> None:
