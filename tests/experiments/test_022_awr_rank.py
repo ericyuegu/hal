@@ -910,6 +910,28 @@ def test_a_padded_window_still_reads_its_true_tier_through_the_collate() -> None
     torch.testing.assert_close(batch.rank_weight, torch.full((len(windows),), 2.0))
 
 
+def test_the_logged_tier_mix_is_the_datasets_tier_mix() -> None:
+    """Mirror lobbies (both ports one tier), so the coin flip cannot change a window's tier: four
+    platinum, two diamond and two master replays must read back as 0.5 / 0.25 / 0.25 of the scored
+    positions, with the master frames carrying four times the weight of the platinum ones."""
+    lobbies = [Rank.PLATINUM] * 4 + [Rank.DIAMOND] * 2 + [Rank.MASTER] * 2
+    windows = [
+        window
+        for seed, tier in enumerate(lobbies)
+        for window in _windows([_mds_replay(120, (tier, tier))], L_ctx=16, K=1, seed=seed)
+    ]
+    assert len(windows) == len(lobbies)
+
+    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=16, rank_weights=_RANK_ARM)
+    valid = torch.ones(len(windows), 16, dtype=torch.bool)
+    weight, _ = exp022.awr_weights(None, beta=0.8, weight_max=5.0, rank_weight=batch.valid_rank_weights(valid))
+    stats = exp022.rank_stats(batch.valid_ranks(valid), weight)
+
+    assert (stats["rank_frac_platinum"], stats["rank_frac_diamond"], stats["rank_frac_master"]) == (0.5, 0.25, 0.25)
+    assert stats["rank_unknown_frac"] == 0.0
+    assert stats["rank_weight_mean_master"] / stats["rank_weight_mean_platinum"] == pytest.approx(4.0, rel=1e-6)
+
+
 def test_the_tier_never_reaches_the_model_as_a_feature() -> None:
     """The tier rides the same columns as gamestate, so this pins that ``preprocess`` drops it. A
     model that could read its demonstrator's rank would learn to condition on it and then meet
