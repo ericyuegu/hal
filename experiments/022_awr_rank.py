@@ -267,11 +267,11 @@ class TrainConfig:
     require_flex: bool = False
     # Multi-token (multi-frame) auxiliary output heads: one independent head per future-frame offset;
     # head o predicts the action o frames ahead. MUST contain 1 — per-frame closed-loop decode reads
-    # only the offset-1 head. Contiguous, because chunked execution (exec_horizon s) runs the heads
-    # 1..s from one forward and 012's spread-out (1,5,9,13) has no offset-2 head to stride with;
-    # experiment 015 measured (1,2,3,4) as the best deployed head anyway, with s=2 behaviorally free
-    # at 1.8x the eval throughput.
-    head_offsets: tuple[int, ...] = (1, 2, 3, 4)
+    # only the offset-1 head. Spread offsets (1,5,9,13) keep the long-horizon auxiliary supervision
+    # the 016-021 line trained with. Chunked execution (exec_horizon s > 1) needs the contiguous
+    # prefix 1..s instead — but s=2 measured no throughput gain on top of the incremental decoder,
+    # so the long-horizon aux signal wins.
+    head_offsets: tuple[int, ...] = (1, 5, 9, 13)
     # PER-AUXILIARY-HEAD multiplier. Total auxiliary scalar weight is this times the number of aux heads;
     # use lambda_total / n_aux to implement primary + lambda_total * mean(auxiliary heads).
     aux_loss_weight: float = 1.0
