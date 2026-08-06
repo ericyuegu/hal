@@ -116,6 +116,35 @@ export DISPLAY=:99
 log "preflight: asserting CUDA is available"
 uv run python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_available() is False — host driver too old for the CUDA-13 image'"
 
+# Preflight: torch.compile builds Triton kernels in a subprocess pool that writes to
+# TORCHINDUCTOR_CACHE_DIR / TRITON_CACHE_DIR, which default to /tmp — a small tmpfs on many
+# hosts. A compile worker killed mid-write (OSError Errno 28, no space left) never reports
+# back and async_compile._wait_futures then blocks forever: the run stalls silently at 0% GPU
+# with no traceback. Put both caches on the provisioned container disk (the filesystem that
+# also holds /opt/hal and the streamed shards), then prove the dirs are writable and have
+# room, so an undersized box aborts loudly here instead of hanging after "[val] cached".
+# /opt/hal-cache, not /opt/hal/*: the clone above wipes /opt/hal on every boot.
+export TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor
+export TRITON_CACHE_DIR=/opt/hal-cache/triton
+log "preflight: compile caches -> /opt/hal-cache"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
+for d in "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"; do
+  if ! touch "$d/.write-test" 2>/dev/null; then
+    log "FATAL: compile cache ${d} is not writable — inductor would fall back to a full pool stall; aborting"
+    teardown stop "compile cache unwritable (${d})"
+    exit 1
+  fi
+  rm -f "$d/.write-test"
+done
+df -h /opt/hal-cache | while IFS= read -r line; do log "df: ${line}"; done
+cache_free_gb=$(df -BG --output=avail /opt/hal-cache | awk 'NR==2 {gsub("G",""); print $1}')
+log "compile-cache free = ${cache_free_gb}GB"
+if [ "${cache_free_gb:-0}" -lt 10 ]; then
+  log "FATAL: /opt/hal-cache has ${cache_free_gb}GB free (< 10GB) — a compile worker dying mid-write stalls the run at 0% GPU; aborting"
+  teardown stop "insufficient compile-cache disk (${cache_free_gb}GB)"
+  exit 1
+fi
+
 # DataLoader workers pass tensor-storage handles to the main process over a unix socket
 # via file descriptors; num_workers * prefetch_factor in-flight batches can exceed the
 # container's default open-fd soft limit (often 1024), crashing mid-run with
