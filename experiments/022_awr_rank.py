@@ -2,10 +2,11 @@
 
 020 showed the AWR machinery runs but the policy played too passively, and its reward knobs put
 87% of the weight mass on which segment of a match a window came from. This fork keeps 020's
-objective and changes four things: the trunk is the SHARED one (``hal.training.trunk``) with
-sliding-window attention, the sequence geometry is four times longer, the reward knobs come
-from the reward explorer's tuned table (``notebooks/awr_explorer.py``), and two new axes ride the
-same weighting — the demonstrator's ranked tier and an IQL expectile critic.
+objective and changes five things: the trunk is the SHARED one (``hal.training.trunk``) with
+sliding-window attention, the sequence geometry is four times longer, the action head is 019's
+within-frame chain, the reward knobs come from the reward explorer's tuned table
+(``notebooks/awr_explorer.py``), and two new axes ride the same weighting — the demonstrator's
+ranked tier and an IQL expectile critic.
 
 The objective (unchanged from 020):
 
@@ -35,6 +36,17 @@ What changed against 020
   now the EFFECTIVE batch (128) and ``grad_accum_steps`` splits it into micro-batches of 64. Under
   a window the step cost is nearly flat in ``L_ctx``, and a longer window turns more of each
   whole-replay disk read into training tokens.
+* Factored action heads (019's, which tested lean-positive against the independent joint head).
+  Each offset head keeps one projection per group and predicts the four groups as a CHAIN in
+  ``chain_order``; every non-terminal group feeds its class back into the running hidden state
+  through a zero-initialized table:
+
+      h_0 = h;   logits[g_i] = proj[g_i](h_i);   h_{i+1} = h_i + emb[g_i](id[g_i])
+
+  Training teacher-forces the ancestors with the ground-truth ids of the SAME target frame, so the
+  summed per-group NLL is the chain rule — the joint NLL of that frame, in 020's units. The AWR
+  weight multiplies that per-position sum exactly as before. Decode runs the same chain on its own
+  draws. The per-group NLLs alone are now conditionals and do NOT compare with a joint-head run.
 * Reward knobs. Dense damage shaping, a moderate beta and a low weight cap (see ``TrainConfig``).
 * Rank weighting. ``awr_rank_weights`` multiplies a window's weight by the EGO player's ranked tier
   (schema v7's ``p{1,2}_rank``) before the mean-1 rescale, so ``(1, 2, 4)`` moves master frames from
@@ -51,12 +63,14 @@ What changed against 020
   either uninformative or inverted against closed-loop play. What is left is a kill switch or a
   tracked hypothesis.
 
-Checkpoints. The trunk moved into a submodule, so the state-dict keys gained a ``trunk.`` prefix:
-020 checkpoints do not load here and are rejected with that message.
+Checkpoints. The trunk moved into a submodule, so the state-dict keys gained a ``trunk.`` prefix,
+and the heads moved to ``heads.{i}.proj.{group}`` / ``heads.{i}.emb.{group}``: 020 checkpoints do
+not load here and are rejected with that message.
 
 Run:
     uv run experiments/022_awr_rank.py
     uv run experiments/022_awr_rank.py --cfg.no-awr-enabled       # the BC control arm
+    uv run experiments/022_awr_rank.py --cfg.chain-order buttons main_stick c_stick triggers
     # The rank arm. The tier column arrived with v7, so it needs BOTH v7 flags; validate_config says so.
     uv run experiments/022_awr_rank.py --cfg.awr-rank-weights 1.0 2.0 4.0 \
         --cfg.data-root data/processed/ranked-anonymized-1/mds-v7 --cfg.mds-schema-version 7
@@ -155,7 +169,9 @@ _N_BUTTONS = A_DIM - _N_CONT
 # Per-frame input: all four players' gamestate concatenated in the feature dim.
 _PLAYER_PREFIXES: tuple[str, ...] = ("ego", "ego_nana", "opp_nana", "opp")
 
-# Output groups (fixed order) + their discrete vocab sizes from the scoring discretizers.
+# Output groups (fixed order; the canonical order of every per-group tensor and of the class-index
+# columns quantize_groups emits) + their discrete vocab sizes from the scoring discretizers.
+# cfg.chain_order permutes only the ORDER OF PREDICTION inside a frame.
 _GROUP_NAMES: tuple[str, ...] = ("buttons", "main_stick", "c_stick", "triggers")
 _GROUP_VOCABS: tuple[int, ...] = (
     scoring.N_BUTTON_COMBOS,  # 256
@@ -165,8 +181,7 @@ _GROUP_VOCABS: tuple[int, ...] = (
 )
 N_GROUPS = len(_GROUP_NAMES)
 _BUTTONS_G, _MAIN_G, _C_G, _TRIG_G = range(N_GROUPS)
-_GROUP_OFFSETS: tuple[int, ...] = tuple(itertools.accumulate((0,) + _GROUP_VOCABS))[:N_GROUPS]  # (0,256,321,330)
-A_VOCAB = sum(_GROUP_VOCABS)  # 355
+_GROUP_INDEX: dict[str, int] = {name: g for g, name in enumerate(_GROUP_NAMES)}
 
 _BUTTON_COUNTS_VERSION = 1
 
@@ -272,6 +287,13 @@ class TrainConfig:
     # prefix 1..s instead — but s=2 measured no throughput gain on top of the incremental decoder,
     # so the long-horizon aux signal wins.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
+    # Within-frame chain order (019's settled default). Every offset head predicts the four action
+    # groups in this order, each non-terminal group conditioning the rest through a zero-initialized
+    # table, so a fresh model is exactly the independent joint head 020 deployed. Must be a
+    # permutation of _GROUP_NAMES. The order is a play knob, not the studied axis: the default puts
+    # the cheap near-deterministic groups first and buttons last, so the button combo sees every
+    # stick/trigger ancestor.
+    chain_order: tuple[str, str, str, str] = ("c_stick", "triggers", "main_stick", "buttons")
     # PER-AUXILIARY-HEAD multiplier. Total auxiliary scalar weight is this times the number of aux heads;
     # use lambda_total / n_aux to implement primary + lambda_total * mean(auxiliary heads).
     aux_loss_weight: float = 1.0
@@ -428,9 +450,13 @@ class TrainConfig:
 
 
 def _model_tag(cfg: TrainConfig) -> str:
+    """The architecture, for the run name. The ``chain`` token (019's) is what tells a factored-head
+    run from a joint-head one, and spells the order it used, so ``_reward_tag`` — the WEIGHTING spec,
+    which lands in the same run name — never repeats it."""
     offs = ".".join(str(o) for o in cfg.head_offsets)
+    chain = "".join(name[0] for name in cfg.chain_order)  # c_stick,triggers,main_stick,buttons -> ctmb
     awr = f"-awr{cfg.awr_beta:g}" if cfg.awr_enabled else "-bc"
-    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-o{offs}{awr}"
+    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-o{offs}-chain{chain}{awr}"
 
 
 def _reward_tag(cfg: TrainConfig) -> str:
@@ -946,16 +972,104 @@ def critic_parts(
     raise ValueError(f"unknown awr_critic {critic!r}")
 
 
+def validate_chain_order(chain_order: tuple[str, ...]) -> tuple[str, ...]:
+    """The prediction order must be a permutation of the four groups — every group predicted exactly
+    once. Rejects a wrong length, a duplicate and an unknown name in one check."""
+    chain = tuple(chain_order)
+    if sorted(chain) != sorted(_GROUP_NAMES):
+        raise ValueError(f"chain_order must be a permutation of {_GROUP_NAMES}, got {chain}")
+    return chain
+
+
+class FactoredHead(nn.Module):
+    """One future-frame offset's action head, factorized WITHIN the frame (019's).
+
+    Each group keeps its own projection (so the projections hold exactly the parameters of 020's one
+    355-wide joint head). The groups are emitted in ``chain_order``; every non-terminal group feeds
+    its chosen class back into the running hidden state through its own conditioning table:
+
+        h_0 = h;   logits[g_i] = proj[g_i](h_i);   h_{i+1} = h_i + emb[g_i](id[g_i])
+
+    The tables are zero-initialized, so at initialization ``logits_tf`` does not depend on the
+    ancestors at all and this head IS the independent joint head. ``logits_tf`` teacher-forces the
+    ancestors (training / validation); ``sample`` runs the same chain on its own draws (deploy)."""
+
+    def __init__(self, d_model: int, chain_order: tuple[str, ...]) -> None:
+        super().__init__()
+        self.chain_order = validate_chain_order(chain_order)
+        conditioning = set(self.chain_order[:-1])  # the terminal group conditions nothing
+        # Built in _GROUP_NAMES order so the state-dict key order does not depend on chain_order.
+        self.proj = nn.ModuleDict(
+            {name: nn.Linear(d_model, _GROUP_VOCABS[_GROUP_INDEX[name]]) for name in _GROUP_NAMES}
+        )
+        self.emb = nn.ModuleDict(
+            {
+                name: nn.Embedding(_GROUP_VOCABS[_GROUP_INDEX[name]], d_model)
+                for name in _GROUP_NAMES
+                if name in conditioning
+            }
+        )
+        for table in self.emb.values():
+            nn.init.zeros_(table.weight)
+
+    def logits_tf(self, h: Tensor, gt_idx: Tensor) -> dict[str, Tensor]:
+        """Teacher-forced per-group logits ``{group: [..., vocab_g]}`` from hidden ``h`` ``[..., d_model]``
+        and the GROUND-TRUTH class ids ``gt_idx`` ``[..., N_GROUPS]`` at the SAME target frame. Summing the
+        four cross-entropies is then the chain rule, i.e. the joint NLL of that frame's action."""
+        out: dict[str, Tensor] = {}
+        x = h
+        for i, name in enumerate(self.chain_order):
+            out[name] = self.proj[name](x)
+            if i + 1 < len(self.chain_order):
+                x = x + self.emb[name](gt_idx[..., _GROUP_INDEX[name]])
+        return out
+
+    def sample(
+        self,
+        h: Tensor,
+        *,
+        group_temps: tuple[float, ...],
+        btn_dead: Tensor | None,
+        min_p: float,
+        argmax: bool,
+        gen: torch.Generator | None,
+    ) -> Int[Tensor, "B n_groups"]:
+        """Run the chain forward on its OWN draws: per group, support-mask (buttons only) → temperature
+        → min-p → multinomial, then condition the remaining groups on the id just drawn. Returns class
+        ids in ``_GROUP_NAMES`` order. ``argmax`` makes each step greedy — a greedy walk of the chain,
+        NOT the joint mode — and deployed play never asks for it (greedy decode collapses the
+        closed-loop policy to doing nothing)."""
+        picks: dict[str, Tensor] = {}
+        x = h
+        for i, name in enumerate(self.chain_order):
+            lg = self.proj[name](x).float()
+            if btn_dead is not None and name == "buttons":
+                lg = lg.masked_fill(btn_dead, float("-inf"))
+            if argmax:
+                pick = lg.argmax(-1)
+            else:
+                probs = F.softmax(lg / group_temps[_GROUP_INDEX[name]], dim=-1)
+                if min_p > 0:
+                    probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                pick = torch.multinomial(probs, 1, generator=gen).squeeze(-1)
+            picks[name] = pick
+            if i + 1 < len(self.chain_order):
+                x = x + self.emb[name](pick)
+        return torch.stack([picks[name] for name in _GROUP_NAMES], dim=-1)
+
+
 class GPT(nn.Module):
     """Causal GPT over per-frame tokens with multi-token auxiliary heads. ``hidden[i]`` (causal) feeds
-    one independent head per offset in ``cfg.head_offsets``; head ``o`` predicts the action ``o`` frames
-    ahead via a joint ``A_VOCAB`` logit vector (the concatenation of the four group vocabs). Closed-loop
+    one independent ``FactoredHead`` per offset in ``cfg.head_offsets``; head ``o`` predicts the action
+    ``o`` frames ahead as a within-frame chain over the four groups (see ``FactoredHead``). Closed-loop
     decode uses only the offset-1 head (``primary_head_idx``); the rest are an auxiliary training signal.
 
     The block stack is ``hal.training.trunk.Trunk`` — the shared module, with sliding-window
     attention. Parameter creation order is 020's (embeddings, input projection, trunk, action heads,
-    value head), so a seeded build draws the same weights; only the state-dict KEY names moved under
-    a ``trunk.`` prefix.
+    value head), so everything drawn BEFORE the heads matches a seeded 020 build; the heads
+    themselves draw one projection per group instead of one joint matrix, so they (and the value
+    head after them) take different draws from the same seed.
 
     ``value_head`` is the one architectural addition over a plain BC model: one scalar per frame off
     the same trunk hidden state, trained to the discounted return so the AWR advantage has a
@@ -980,6 +1094,7 @@ class GPT(nn.Module):
             raise ValueError(f"head_offsets must contain 1 (closed-loop next-frame decode), got {offs}")
         self.head_offsets = offs
         self.primary_head_idx = offs.index(1)
+        self.chain_order = validate_chain_order(cfg.chain_order)
 
         # Gamestate categoricals: one table per feature name, shared across the four players.
         self.cat_embeds = nn.ModuleDict(
@@ -1001,8 +1116,9 @@ class GPT(nn.Module):
                 require_flex=cfg.require_flex,
             )
         )
-        # One independent joint head per future-frame offset (order matches self.head_offsets).
-        self.heads = nn.ModuleList([nn.Linear(cfg.d_model, A_VOCAB) for _ in offs])
+        # One factorized head per future-frame offset (order matches self.head_offsets); every offset
+        # runs the SAME chain, so the auxiliary heads train the conditioning the deployed head uses.
+        self.heads = nn.ModuleList([FactoredHead(cfg.d_model, self.chain_order) for _ in offs])
         # V(s) for the AWR advantage. Last, so the trunk and the action heads keep their draws.
         self.value_head = nn.Linear(cfg.d_model, 1)
 
@@ -1086,14 +1202,14 @@ def _multi_offset_targets(ctx: Context, target: Tensor, offsets: tuple[int, ...]
     return targets, valid
 
 
-def group_nll(logits: Tensor, tgt_idx: Tensor, valid: Tensor) -> dict[str, Tensor]:
+def group_nll(logits: dict[str, Tensor], tgt_idx: Tensor, valid: Tensor) -> dict[str, Tensor]:
     """Per-group categorical NLL (nats) over the VALID positions only. Returns ``{name: [n_valid]}``
-    1D tensors (same ordering across groups) so callers reduce once for exact sample weighting."""
+    1D tensors (same ordering across groups) so callers reduce once for exact sample weighting.
+    With teacher-forced ``logits`` these are CONDITIONALS whose sum is the joint NLL of the frame."""
     flat_valid = valid.reshape(-1)
     out: dict[str, Tensor] = {}
     for g, name in enumerate(_GROUP_NAMES):
-        lo = _GROUP_OFFSETS[g]
-        lg = logits[..., lo : lo + _GROUP_VOCABS[g]].reshape(-1, _GROUP_VOCABS[g])[flat_valid]
+        lg = logits[name].reshape(-1, logits[name].shape[-1])[flat_valid]
         out[name] = F.cross_entropy(lg, tgt_idx[..., g].reshape(-1)[flat_valid], reduction="none")
     return out
 
@@ -1125,6 +1241,8 @@ def action_loss(model: GPT, batch: TrainBatch, *, value_detach: bool = False) ->
     each head offset; one shared backbone forward, one head each. ``a_full = [history | target]`` is quantized
     ONCE ([B, L_ctx+max_off, n_groups]) and its per-frame boundary mask computed once, both sliced per offset:
     for head ``o`` position ``i``'s target frame is ``i+o`` and it is a transition iff ``q[i+o] != q[i+o-1]``.
+    That same quantized slice is ALSO the teacher-forcing input: the chain's ancestors are the ground-truth
+    ids of the very frame being predicted, so summing the four group NLLs is the chain rule for the joint.
     The value head reads the SAME hidden state, so the AWR baseline costs one 256->1 matmul and no second
     forward; when ``awr_enabled`` is false nothing consumes it and it takes no gradient."""
     ctx = batch.context
@@ -1145,8 +1263,8 @@ def action_loss(model: GPT, batch: TrainBatch, *, value_detach: bool = False) ->
     nll: dict[tuple[int, str], Tensor] = {}
     trans: dict[tuple[int, str], Tensor] = {}
     for hi, o in enumerate(model.head_offsets):
-        logits = model.heads[hi](h).float()  # [B, L_ctx, A_VOCAB]
         tgt_idx = q_full[:, o : o + L_ctx]  # target frame i+o
+        logits = {name: lg.float() for name, lg in model.heads[hi].logits_tf(h, tgt_idx).items()}
         bnd_o = bnd_full[:, o - 1 : o - 1 + L_ctx]  # transition at i iff q[i+o] != q[i+o-1]
         gnll = group_nll(logits, tgt_idx, valid)
         for g, name in enumerate(_GROUP_NAMES):
@@ -1201,9 +1319,10 @@ def _resolve_decode_args(
     return group_temps
 
 
-def _sample_action_from_logits(
+def _sample_action(
     model: GPT,
-    logits: Tensor,
+    head: FactoredHead,
+    h: Tensor,
     *,
     group_temps: tuple[float, ...],
     btn_support_min: int,
@@ -1212,27 +1331,12 @@ def _sample_action_from_logits(
     argmax: bool,
     gen: torch.Generator | None,
 ) -> Float[Tensor, "B d_action"]:
-    """Sample one action vector from a single head's ``[B, A_VOCAB]`` joint logits, applying the decode
-    hygiene in order support-mask -> per-group temperature -> min-p -> per-group sample (or ``argmax``),
-    then dequantize + the click=>trigger fix. Shared by the offset-1 ``decode`` and the chunked
-    ``decode_chunk`` so the per-group sampler never forks between the two deploy paths."""
-    if btn_support_min >= 1:
-        dead = _btn_support_dead(model, btn_support_min, logits.device)
-        logits = logits.clone()
-        logits[:, : scoring.N_BUTTON_COMBOS].masked_fill_(dead, float("-inf"))
-    picks: list[Tensor] = []
-    for g in range(N_GROUPS):
-        lo = _GROUP_OFFSETS[g]
-        lg = logits[:, lo : lo + _GROUP_VOCABS[g]]
-        if argmax:
-            picks.append(lg.argmax(-1))
-            continue
-        probs = F.softmax(lg / group_temps[g], dim=-1)
-        if min_p > 0:
-            probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
-            probs = probs / probs.sum(dim=-1, keepdim=True)
-        picks.append(torch.multinomial(probs, 1, generator=gen).squeeze(-1))
-    idx = torch.stack(picks, dim=-1)  # [B, N_GROUPS]
+    """Sample one action vector by running ``head``'s chain over the hidden state ``[B, d_model]``: per
+    group, support-mask -> temperature -> min-p -> multinomial (or ``argmax``), each draw conditioning the
+    groups after it. Then dequantize + the click=>trigger fix. Shared by the offset-1 ``decode`` and the
+    chunked ``chunk_from_hidden`` so the sampler never forks between the deploy paths."""
+    dead = _btn_support_dead(model, btn_support_min, h.device) if btn_support_min >= 1 else None
+    idx = head.sample(h, group_temps=group_temps, btn_dead=dead, min_p=min_p, argmax=argmax, gen=gen)
     a = _dequantize(model, idx)  # [B, A_DIM]
     if click_trigger_fix:
         a[..., _TRIGGER_L_CH] = torch.where(a[..., _BUTTON_L_CH] > 0.5, 1.0, a[..., _TRIGGER_L_CH])
@@ -1254,20 +1358,21 @@ def decode(
     gen: torch.Generator | None = None,
 ) -> Float[Tensor, "B 1 d_action"]:
     """One next-frame action per sample from the LAST context position, in raw action ranges, via the
-    offset-1 (primary) head only. Each group's logit slice is sampled (per-group ``temp``-scaled softmax,
-    optional min-p nucleus) or taken greedily (``argmax``) independently. Decode-time
-    hygiene applied in order support-mask -> per-group temperature -> min-p -> sample: ``btn_support_min``
-    >= 1 masks button combos with fewer than that many train frames to -inf; ``temps`` overrides ``temp``
-    per group (buttons, main_stick, c_stick, triggers); ``min_p`` > 0 keeps only classes with
-    ``p >= min_p * p_max`` then renormalizes; ``click_trigger_fix`` forces trigger_l/r to 1.0 wherever the
-    sampled combo sets the digital L/R bit. ``argmax`` ignores ``temps``/``min_p`` but respects the mask.
-    The value head takes no part: this is the plain BC sampler."""
+    offset-1 (primary) head only. The four groups are drawn as a CHAIN in ``chain_order`` — each group is
+    sampled (per-group ``temp``-scaled softmax, optional min-p nucleus) and then conditions the groups
+    after it. Decode-time hygiene applied in order support-mask -> per-group temperature -> min-p ->
+    sample: ``btn_support_min`` >= 1 masks button combos with fewer than that many train frames to -inf;
+    ``temps`` overrides ``temp`` per group (buttons, main_stick, c_stick, triggers); ``min_p`` > 0 keeps
+    only classes with ``p >= min_p * p_max`` then renormalizes; ``click_trigger_fix`` forces trigger_l/r
+    to 1.0 wherever the sampled combo sets the digital L/R bit. ``argmax`` walks the chain greedily,
+    ignoring ``temps``/``min_p`` but respecting the mask. The value head takes no part: this is the plain
+    BC sampler."""
     group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
-    logits = model.heads[model.primary_head_idx](h).float()  # [B, A_VOCAB]
-    a = _sample_action_from_logits(
+    a = _sample_action(
         model,
-        logits,
+        model.heads[model.primary_head_idx],
+        h,
         group_temps=group_temps,
         btn_support_min=btn_support_min,
         min_p=min_p,
@@ -1295,7 +1400,8 @@ def decode_chunk(
     """Chunked receding-horizon decode: from ONE backbone forward's last hidden state, sample the action at
     each offset in ``offsets`` (the contiguous execution horizon 1..s) via that offset's own head, stacked in
     offset order → ``[B, s, A_DIM]``. One forward per s frames — the deploy-time saving of chunked execution.
-    Same per-group sampling + hygiene as ``decode``; ``offsets == (1,)`` is byte-identical to ``decode``."""
+    Each offset runs its own within-frame chain; the chain is never carried ACROSS offsets (each head is a
+    marginal over its own frame). Same sampling + hygiene as ``decode``; ``offsets == (1,)`` matches it."""
     group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
     return chunk_from_hidden(
@@ -1330,11 +1436,11 @@ def chunk_from_hidden(
     own forward, and must not run the backbone a second time to sample from it."""
     actions: list[Tensor] = []
     for o in offsets:
-        logits = model.heads[model.head_offsets.index(o)](h).float()  # [B, A_VOCAB]
         actions.append(
-            _sample_action_from_logits(
+            _sample_action(
                 model,
-                logits,
+                model.heads[model.head_offsets.index(o)],
+                h,
                 group_temps=group_temps,
                 btn_support_min=btn_support_min,
                 min_p=min_p,
@@ -1448,6 +1554,7 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         raise ValueError(f"transition_loss_weight must be finite and > 0, got {cfg.transition_loss_weight!r}")
     if not math.isfinite(cfg.history_dropout_p) or not 0.0 <= cfg.history_dropout_p <= 1.0:
         raise ValueError(f"history_dropout_p must be in [0, 1], got {cfg.history_dropout_p!r}")
+    validate_chain_order(cfg.chain_order)
     if not isinstance(cfg.awr_enabled, bool):
         raise ValueError(f"awr_enabled must be a bool, got {cfg.awr_enabled!r}")
     if not math.isfinite(cfg.awr_gamma) or not 0.0 < cfg.awr_gamma <= 1.0:
@@ -1932,15 +2039,15 @@ def _bool_mean(values: Tensor) -> float:
     return values.float().mean().item() if values.numel() else 0.0
 
 
-def _group_kl_bits(logits_p: Tensor, logits_q: Tensor) -> Tensor:
-    """Summed-over-groups KL(p‖q) in bits per position: for each group's logit slice, p=softmax(p_slice),
-    q=softmax(q_slice); ``[..., A_VOCAB]`` logits → ``[...]`` bits summed over the four group softmaxes."""
-    total = torch.zeros(logits_p.shape[:-1], device=logits_p.device)
-    for g in range(N_GROUPS):
-        lo = _GROUP_OFFSETS[g]
-        sl = slice(lo, lo + _GROUP_VOCABS[g])
-        logp = F.log_softmax(logits_p[..., sl], dim=-1)
-        logq = F.log_softmax(logits_q[..., sl], dim=-1)
+def _group_kl_bits(logits_p: dict[str, Tensor], logits_q: dict[str, Tensor]) -> Tensor:
+    """Summed-over-groups KL(p‖q) in bits per position. Both sides must be teacher-forced on the SAME
+    ancestor ids, so this is the sum of the four CONDITIONAL KLs along that one ground-truth path — the
+    joint KL restricted to it, not a marginal-by-marginal comparison."""
+    first = logits_p[_GROUP_NAMES[0]]
+    total = torch.zeros(first.shape[:-1], device=first.device)
+    for name in _GROUP_NAMES:
+        logp = F.log_softmax(logits_p[name], dim=-1)
+        logq = F.log_softmax(logits_q[name], dim=-1)
         total = total + (logp.exp() * (logp - logq)).sum(-1)
     return total / _LN2
 
@@ -2002,6 +2109,10 @@ def val_metrics(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -> tupl
     guards against and a mean alone hides it. Every NLL is UNWEIGHTED — AWR touches the backprop
     objective only — and the weights here are a diagnostic.
 
+    Every per-group number reads a CHAIN CONDITIONAL, teacher-forced on the ground-truth ancestors of
+    the same target frame; only ``loss`` and the ``nll_off{o}`` totals (the chain-rule joint) compare
+    with a joint-head run.
+
     022 drops the metrics a ten-run correlation study found uninformative or inverted against
     closed-loop play: reconstruction accuracy, prediction persistence and flip-back rates, the
     dataset-constant transition and multipress rates, and the chance-level stick-side change F1 and
@@ -2040,14 +2151,18 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
         comps: dict[tuple[int, str], Tensor] = {}
         ablated: dict[str, Tensor] = {}
         for hi, o in enumerate(model.head_offsets):
-            logits = model.heads[hi](h).float()
             tgt_idx = _quantize(model, targets[o])
+            logits = {name: lg.float() for name, lg in model.heads[hi].logits_tf(h, tgt_idx).items()}
             comps.update({(o, name): c for name, c in group_nll(logits, tgt_idx, valid).items()})
             if o != 1:
                 continue
             # The deployed head drives the button / transition / ablation stats.
             true_change = scoring.transition_mask(torch.cat([cur_idx, tgt_idx[:, -1:]], dim=1))  # [B,L_ctx,n_grp]
-            ablated_logits = model.heads[model.primary_head_idx](h_ablated).float()
+            # Same teacher-forced ancestors on both sides, so the ablation compares like with like.
+            ablated_logits = {
+                name: lg.float()
+                for name, lg in model.heads[model.primary_head_idx].logits_tf(h_ablated, tgt_idx).items()
+            }
             kl_bits = _group_kl_bits(logits, ablated_logits).reshape(-1)[flat_valid]  # KL(full ‖ ablated), bits
             acc.add("ablate_hist_kl", kl_bits.mean().item(), n_valid)
             ablated = group_nll(ablated_logits, tgt_idx, valid)
@@ -2055,8 +2170,7 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
                 trans = true_change[..., g].reshape(-1)[flat_valid]
                 acc.add(f"nll_{name}_trans", _masked_mean_bits(comps[(1, name)], trans), int(trans.sum()))
                 acc.add(f"nll_{name}_hold", _masked_mean_bits(comps[(1, name)], ~trans), int((~trans).sum()))
-            btn_slice = slice(_GROUP_OFFSETS[_BUTTONS_G], _GROUP_OFFSETS[_BUTTONS_G] + scoring.N_BUTTON_COMBOS)
-            btn_logits = logits[..., btn_slice]
+            btn_logits = logits["buttons"]
             combo_probs = F.softmax(btn_logits.reshape(-1, scoring.N_BUTTON_COMBOS)[flat_valid], dim=-1)
             onehot = F.one_hot(tgt_idx[..., _BUTTONS_G].reshape(-1)[flat_valid], scoring.N_BUTTON_COMBOS).to(
                 combo_probs.dtype
@@ -2074,18 +2188,18 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
             if counts_available:
                 acc.add("btn_rare_mass", combo_probs[:, rare_mask].sum(-1).mean().item(), n_valid)
                 acc.add("btn_unseen_mass", combo_probs[:, unseen_mask].sum(-1).mean().item(), n_valid)
-            trig_lo = _GROUP_OFFSETS[_TRIG_G]
+            # Impossible-joint mass, now read as a CONDITIONAL: how much probability the buttons
+            # conditional still puts on an L/R click when the ground-truth trigger of the SAME frame is
+            # not full. A joint head could only multiply two independent marginals; here the buttons
+            # conditional has already seen the true trigger id (default chain order), so a nonzero value
+            # is a real contradiction. A chain order that puts buttons BEFORE triggers makes this weaker
+            # (the buttons conditional no longer sees them) — read it beside cfg.chain_order.
             n_trig = model.trig_centers.shape[0]
-            trig_probs = F.softmax(
-                logits[..., trig_lo : trig_lo + _GROUP_VOCABS[_TRIG_G]].reshape(-1, _GROUP_VOCABS[_TRIG_G])[
-                    flat_valid
-                ],
-                dim=-1,
-            ).reshape(-1, n_trig, n_trig)
-            trigger_l_full = trig_probs[:, -1, :].sum(-1)
-            trigger_r_full = trig_probs[:, :, -1].sum(-1)
-            invalid_l = marginal_btn_probs[:, _BUTTON_L_CH - _N_CONT] * (1.0 - trigger_l_full)
-            invalid_r = marginal_btn_probs[:, _BUTTON_R_CH - _N_CONT] * (1.0 - trigger_r_full)
+            gt_trig = tgt_idx[..., _TRIG_G].reshape(-1)[flat_valid]
+            l_not_full = (gt_trig // n_trig != n_trig - 1).to(marginal_btn_probs.dtype)
+            r_not_full = (gt_trig % n_trig != n_trig - 1).to(marginal_btn_probs.dtype)
+            invalid_l = marginal_btn_probs[:, _BUTTON_L_CH - _N_CONT] * l_not_full
+            invalid_r = marginal_btn_probs[:, _BUTTON_R_CH - _N_CONT] * r_not_full
             acc.add("click_trigger_invalid_l_mass", invalid_l.mean().item(), n_valid)
             acc.add("click_trigger_invalid_r_mass", invalid_r.mean().item(), n_valid)
         primary = nll_breakdown({name: comps[(1, name)] for name in _GROUP_NAMES})

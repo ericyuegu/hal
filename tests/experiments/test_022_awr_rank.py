@@ -1,9 +1,10 @@
-"""022 forks 020 onto the shared sliding-window trunk, retunes the reward and prunes the val block.
-020's own tests still pin the return, the window threading and the weights; these tests pin what the
-fork changed.
+"""022 forks 020 onto the shared sliding-window trunk, takes 019's factored head, retunes the reward
+and prunes the val block. 020's own tests still pin the return, the window threading and the weights;
+these tests pin what the fork changed.
 
-1. Nothing moved that should not. With the window off, the BC arm's objective is 020's plain mean
-   NLL on the same batch, and the trunk swap draws the same weights under the same seed.
+1. Nothing moved that should not. With the window off and the conditioning tables at their zero
+   init, the BC arm's objective is 020's plain mean NLL on the same batch, and everything drawn
+   before the heads draws the same weights under the same seed.
 2. The defaults are the tuned recipe: the reward explorer's table, plus the SWA-128 long-context
    geometry.
 3. Validation costs two trunk forwards per batch, not five, holds no per-frame tensor across
@@ -18,6 +19,8 @@ fork changed.
 7. The IQL expectile critic: tau=0.5 is half the MSE, a true-return V leaves no residual at any tau,
    tau=0.9 puts 9x the gradient on a positive residual, the bootstrap is detached, and the last
    position (no successor state) is out of the loss.
+8. 019's chain inside the frame: the zero-init identity, causal teacher forcing, the chain rule under
+   the AWR weight, and a decode — full, incremental and fp16 — that walks the same chain.
 """
 
 import copy
@@ -25,6 +28,7 @@ import importlib.util
 import inspect
 import math
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -182,14 +186,36 @@ def _write_tiny_mds(root: Path, lobbies: Sequence[tuple[Rank, Rank]], *, frames:
     return root
 
 
+def _transplant_output_heads(model020, model022) -> None:
+    """Give 022's factored heads 020's joint head, one group row block at a time, and its value head.
+
+    A 020 head is one ``Linear(d_model, 355)`` whose output is read as four independent group slices;
+    a 022 head is one ``Linear`` per group plus zero-initialized conditioning tables. The slices ARE
+    those projections, so this copy makes the two heads the same function while the tables are zero —
+    which is the zero-init identity every paired comparison below rests on. Four smaller matrices
+    cannot draw the same numbers as one big one under a shared seed, so the identity is established
+    by construction here instead of by the RNG (the value head, drawn after them, moves with them)."""
+    with torch.no_grad():
+        for head020, head022 in zip(model020.heads, model022.heads, strict=True):
+            lo = 0
+            for name, vocab in zip(_GROUPS, exp022._GROUP_VOCABS, strict=True):
+                head022.proj[name].weight.copy_(head020.weight[lo : lo + vocab])
+                head022.proj[name].bias.copy_(head020.bias[lo : lo + vocab])
+                lo += vocab
+        model022.value_head.weight.copy_(model020.value_head.weight)
+        model022.value_head.bias.copy_(model020.value_head.bias)
+
+
 def _paired_models(seed: int = 7):
-    """The same weights in both modules: 020's inline trunk and 022's shared trunk at window 0."""
+    """The same weights in both modules: 020's inline trunk and 022's shared trunk at window 0, and
+    020's joint head transplanted into 022's factored one (see ``_transplant_output_heads``)."""
     cfg020 = exp020.TrainConfig(batch_size=4, **_PAIRED, **_PAIRED_AWR)
     cfg022 = exp022.TrainConfig(batch_size=4, grad_accum_steps=1, attn_window=0, **_PAIRED, **_PAIRED_AWR)
     torch.manual_seed(seed)
     model020 = exp020.GPT(cfg020).eval()
     torch.manual_seed(seed)
     model022 = exp022.GPT(cfg022).eval()
+    _transplant_output_heads(model020, model022)
     return (cfg020, model020), (cfg022, model022)
 
 
@@ -278,7 +304,6 @@ _AWR_MACHINERY = (
     "match_point_events",
     "damage_taken",
     "frame_reward",
-    "group_nll",
     "_multi_offset_targets",
     "_offset_objective",
     "_offset_total_bits",
@@ -292,7 +317,8 @@ _UNPINNED_FROM_020 = {
     "collate_awr_batch": "stacks the reward and the ego tier, and takes the rank multipliers",
     "_attach_returns": "passes cfg.awr_rank_weights down to that collate",
     "awr_weights": "takes a rank multiplier, and an advantage of None for the rank-only BC path",
-    "action_loss": "keeps V as a [B, L_ctx] grid, because the TD target reads the NEXT column",
+    "action_loss": "keeps V as a [B, L_ctx] grid, and teacher-forces 019's within-frame chain",
+    "group_nll": "reads the chain's per-group logits dict, not one joint vector's slices",
 }
 
 
@@ -344,20 +370,28 @@ def test_vectorized_returns_keep_020s_degenerate_cases(reward: list[float]) -> N
 
 
 def test_trunk_swap_keeps_020_init_draws() -> None:
-    """Same seed, same weights: only the state-dict key names moved under a ``trunk.`` prefix."""
+    """Same seed, same weights up to the heads: only the key names moved under a ``trunk.`` prefix.
+
+    The output heads are where the two builds part. 020 draws one ``Linear(d_model, 355)`` per offset;
+    022 draws one projection per group plus the conditioning tables, so those draws — and the value
+    head's, which follow them in the same RNG stream — cannot match. Everything created BEFORE them
+    (embeddings, input projection, trunk) still must, or the fork moved something it did not mean to."""
     (_, model020), (_, model022) = _paired_models()
     state020, state022 = model020.state_dict(), model022.state_dict()
 
     renamed = {
         k.replace("blocks.", "trunk.blocks.", 1) if k.startswith("blocks.") else k: v for k, v in state020.items()
     }
-    assert set(renamed) == set(state022)
-    for key, value in renamed.items():
-        assert torch.equal(state022[key], value), key
+    shared = {k for k in renamed if not k.startswith(("heads.", "value_head."))}
+    assert shared == {k for k in state022 if not k.startswith(("heads.", "value_head."))}
+    assert any(k.startswith("trunk.blocks.") for k in shared)
+    for key in shared:
+        assert torch.equal(state022[key], renamed[key]), key
 
 
 def test_bc_arm_objective_equals_020_unweighted() -> None:
-    """The control arm: with AWR off and the window off, 022 backpropagates 020's objective."""
+    """The control arm: with AWR off, the window off and the conditioning tables still zero, 022
+    backpropagates 020's objective — the chain adds nothing at step 0."""
     (cfg020, model020), (cfg022, model022) = _paired_models()
     inner, returns = _batch(cfg022.L_ctx, max(cfg022.head_offsets))
 
@@ -369,6 +403,325 @@ def test_bc_arm_objective_equals_020_unweighted() -> None:
     assert obj022.item() == pytest.approx(obj020.item(), rel=0, abs=1e-6)
     torch.testing.assert_close(parts022.value, parts020.value, rtol=0, atol=1e-6)
     assert returns.shape == (4, cfg022.L_ctx)
+
+
+# --- 019's factored head -----------------------------------------------------
+
+
+def _factored_model(cfg=None, seed: int = 7):
+    torch.manual_seed(seed)
+    return exp022.GPT(_tiny_cfg() if cfg is None else cfg).eval()
+
+
+def _gt_idx(shape: tuple[int, ...], seed: int) -> torch.Tensor:
+    """Valid class ids per group, in ``_GROUP_NAMES`` order."""
+    gen = torch.Generator().manual_seed(seed)
+    cols = [torch.randint(0, vocab, shape, generator=gen) for vocab in exp022._GROUP_VOCABS]
+    return torch.stack(cols, dim=-1)
+
+
+def _randomize_conditioning(model, *, scale: float = 1.0, seed: int = 11) -> None:
+    """Zero-init is the whole point at step 0; every later test needs a TRAINED-looking chain."""
+    gen = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for head in model.heads:
+            for table in head.emb.values():
+                table.weight.copy_(torch.randn(table.weight.shape, generator=gen) * scale)
+
+
+def test_head_keys_and_size_match_the_factored_design() -> None:
+    """One projection per group — the same parameters as 020's one 355-wide joint head — plus a
+    conditioning table for every group except the last one in the chain."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    expected = {f"heads.0.proj.{g}.{p}" for g in _GROUPS for p in ("weight", "bias")}
+    expected |= {f"heads.0.emb.{g}.weight" for g in cfg.chain_order[:-1]}
+    assert {k for k in model.state_dict() if k.startswith("heads.0.")} == expected
+
+    (_, model020), (_, model022) = _paired_models()
+    assert sum(p.numel() for p in model022.heads[0].proj.parameters()) == sum(
+        p.numel() for p in model020.heads[0].parameters()
+    )
+    assert sum(p.numel() for p in model.heads[0].emb.parameters()) == 99 * cfg.d_model  # 9 + 25 + 65
+
+
+def test_zero_init_head_is_020s_independent_head() -> None:
+    """THE zero-init identity. A same-seed bitwise comparison against a fresh 020 model is not
+    available: 020 draws one ``Linear(d_model, 355)`` per offset where 022 draws four smaller ones,
+    so the RNG stream diverges at the first head and never realigns. The property underneath it is
+    pinned directly instead — the conditioning tables are all zero, the teacher-forced logits ignore
+    ``gt_idx`` entirely, and each group is exactly its own projection of ``h`` — and
+    ``_transplant_output_heads`` then makes the offset-1 logits of the two models the same function,
+    which ``test_bc_arm_objective_equals_020_unweighted`` scores on a real batch."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    head = model.heads[model.primary_head_idx]
+
+    assert set(head.emb) == set(cfg.chain_order[:-1])
+    for name, table in head.emb.items():
+        assert torch.count_nonzero(table.weight) == 0, name
+
+    h = torch.randn(3, 5, cfg.d_model, generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        first = head.logits_tf(h, _gt_idx((3, 5), seed=2))
+        second = head.logits_tf(h, _gt_idx((3, 5), seed=3))
+    for name in _GROUPS:
+        torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
+        torch.testing.assert_close(first[name], head.proj[name](h), rtol=0, atol=0)
+
+
+def test_zero_init_offset_one_logits_equal_the_joint_heads() -> None:
+    """The same identity read against 020 itself: on one input, the transplanted chain's offset-1
+    logits are 020's joint logit vector, group slice by group slice. Not bitwise — four GEMMs are
+    not one 355-wide GEMM — but far inside any difference training could exploit."""
+    (_, model020), (cfg022, model022) = _paired_models()
+    features = _features(2, cfg022.L_ctx, torch.Generator().manual_seed(21))
+    ctx_pad = torch.zeros(2, dtype=torch.long)
+
+    with torch.no_grad():
+        h = model022(features, ctx_pad)
+        torch.testing.assert_close(h, model020(features, ctx_pad), rtol=0, atol=0)
+        want = model020.heads[model020.primary_head_idx](h)
+        got = model022.heads[model022.primary_head_idx].logits_tf(h, _gt_idx((2, cfg022.L_ctx), seed=22))
+
+    lo = 0
+    for name, vocab in zip(_GROUPS, exp022._GROUP_VOCABS, strict=True):
+        torch.testing.assert_close(got[name], want[..., lo : lo + vocab], rtol=0, atol=1e-6)
+        lo += vocab
+
+
+def test_perturbing_an_ancestor_moves_only_its_descendants() -> None:
+    """Group order in the chain is causal: changing a ground-truth id must leave every group
+    predicted BEFORE it bit-identical and move every group predicted after it."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model)
+    head = model.heads[0]
+    h = torch.randn(2, 3, cfg.d_model, generator=torch.Generator().manual_seed(6))
+    base_idx = _gt_idx((2, 3), seed=7)
+    with torch.no_grad():
+        base = head.logits_tf(h, base_idx)
+        for position, name in enumerate(cfg.chain_order[:-1]):
+            g = exp022._GROUP_INDEX[name]
+            moved = base_idx.clone()
+            moved[..., g] = (moved[..., g] + 1) % exp022._GROUP_VOCABS[g]
+            other = head.logits_tf(h, moved)
+            for ancestor in cfg.chain_order[: position + 1]:
+                torch.testing.assert_close(base[ancestor], other[ancestor], rtol=0, atol=0)
+            for descendant in cfg.chain_order[position + 1 :]:
+                assert not torch.equal(base[descendant], other[descendant]), f"{descendant} ignored {name}"
+
+
+def test_summed_conditional_nll_is_the_chain_rule_joint() -> None:
+    """The comparability claim the AWR weighting rides on: summing the four conditional NLLs (nats)
+    reproduces −log of the joint probability obtained by walking the chain by hand, so the weight
+    multiplies one frame's JOINT log-likelihood."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model, scale=0.7)
+    head = model.heads[0]
+    h = torch.randn(1, cfg.d_model, generator=torch.Generator().manual_seed(8))
+    idx = head.sample(
+        h, group_temps=(1.0,) * 4, btn_dead=None, min_p=0.0, argmax=False, gen=torch.Generator().manual_seed(9)
+    )
+    with torch.no_grad():
+        logits = head.logits_tf(h, idx)
+        summed = sum(
+            torch.nn.functional.cross_entropy(logits[name], idx[..., exp022._GROUP_INDEX[name]]) for name in _GROUPS
+        ).item()
+        # Explicit product of conditionals along the path the sampler actually took.
+        x, joint = h, 1.0
+        for position, name in enumerate(head.chain_order):
+            probs = torch.softmax(head.proj[name](x), dim=-1)
+            joint *= float(probs[0, int(idx[0, exp022._GROUP_INDEX[name]])])
+            if position + 1 < len(head.chain_order):
+                x = x + head.emb[name](idx[..., exp022._GROUP_INDEX[name]])
+    assert summed == pytest.approx(-math.log(joint), rel=1e-5)
+
+
+def test_group_nll_over_a_batch_is_the_same_chain_rule() -> None:
+    """``action_loss`` reduces per group; the objective sums those. Their total per position must be
+    the joint NLL of the target frame, computed independently from the teacher-forced chain."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model, scale=0.5)
+    inner, _ = _batch(cfg.L_ctx, max(cfg.head_offsets))
+
+    parts = exp022.action_loss(model, inner)
+    ctx = inner.context
+    with torch.no_grad():
+        h = model(ctx.features, ctx.ctx_pad)
+        a_full = torch.cat([exp022.stack_actions(ctx.features), inner.target], dim=1)
+        q_full = exp022._quantize(model, a_full)
+        tgt_idx = q_full[:, 1 : 1 + cfg.L_ctx]  # the offset-1 head's target frame
+        logits = model.heads[model.primary_head_idx].logits_tf(h, tgt_idx)
+        log_joint = sum(
+            torch.log_softmax(logits[name], dim=-1).gather(-1, tgt_idx[..., [exp022._GROUP_INDEX[name]]]).squeeze(-1)
+            for name in _GROUPS
+        )
+    want = -log_joint.reshape(-1)[parts.valid.reshape(-1)]
+    got = sum(parts.nll[(1, name)] for name in _GROUPS)
+    torch.testing.assert_close(got, want, rtol=1e-6, atol=1e-6)
+
+
+def test_the_awr_weight_still_multiplies_one_frames_joint_nll() -> None:
+    """The weighting composes with the chain untouched: the objective is a self-normalized weighted
+    AVERAGE of per-position joint NLLs. A constant weight is the plain mean, rescaling every weight
+    changes nothing, and a hand-computed sum(w·nll)/sum(w) per (offset, group) reproduces it."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model, scale=0.5)
+    parts = exp022.action_loss(model, _batch(cfg.L_ctx, max(cfg.head_offsets))[0])
+    n_valid = int(parts.valid.sum())
+    weight = torch.rand(n_valid, generator=torch.Generator().manual_seed(15)) + 0.1
+
+    def obj(sample_weight):
+        return exp022.objective(parts.nll, parts.transition, cfg.aux_loss_weight, 1.0, sample_weight)
+
+    torch.testing.assert_close(obj(torch.full((n_valid,), 3.0)), obj(None), rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(obj(weight * 7.0), obj(weight), rtol=1e-6, atol=1e-6)
+    want = sum(
+        (1.0 if o == 1 else cfg.aux_loss_weight) * (weight * nll).sum() / weight.sum()
+        for (o, _), nll in parts.nll.items()
+    )
+    torch.testing.assert_close(obj(weight), want, rtol=1e-6, atol=1e-6)
+    assert not torch.isclose(obj(weight), obj(None), rtol=1e-4, atol=1e-4), "the weights did nothing"
+
+
+# --- decoding the chain ------------------------------------------------------
+
+
+def _sharpen(model, *, factor: float = 60.0) -> None:
+    """Scale every projection so each conditional is effectively one-hot, which makes a sampled draw
+    predictable from the chain itself."""
+    with torch.no_grad():
+        for head in model.heads:
+            for layer in head.proj.values():
+                layer.weight.mul_(factor)
+
+
+def _walk_the_chain(head, h: torch.Tensor) -> torch.Tensor:
+    """The ids a greedy walk of the chain produces from ``h``, in ``_GROUP_NAMES`` order."""
+    picks = {}
+    x = h
+    with torch.no_grad():
+        for position, name in enumerate(head.chain_order):
+            picks[name] = head.proj[name](x).argmax(-1)
+            if position + 1 < len(head.chain_order):
+                x = x + head.emb[name](picks[name])
+    return torch.stack([picks[name] for name in _GROUPS], dim=-1)
+
+
+def test_sampled_ancestors_condition_the_groups_after_them() -> None:
+    """Chain-order sampling: with one-hot conditionals the draw is exactly the hand-walked chain,
+    and the descendants of the first group differ from what the hidden state alone would give — so
+    the conditioning, not just the ordering, moved the later distributions."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model, scale=1.0)
+    _sharpen(model)
+    head = model.heads[model.primary_head_idx]
+    h = torch.randn(4, cfg.d_model, generator=torch.Generator().manual_seed(10))
+
+    drawn = head.sample(
+        h, group_temps=(1.0,) * 4, btn_dead=None, min_p=0.0, argmax=False, gen=torch.Generator().manual_seed(12)
+    )
+
+    torch.testing.assert_close(drawn, _walk_the_chain(head, h), rtol=0, atol=0)
+    # An independent head would have read every group straight off the hidden state.
+    tail = head.chain_order[-1]
+    with torch.no_grad():
+        unconditioned = head.proj[tail](h).argmax(-1)
+    assert not torch.equal(unconditioned, drawn[..., exp022._GROUP_INDEX[tail]])
+
+
+def test_closed_loop_decode_runs_the_chain() -> None:
+    """The deployed sampler: ``decode`` dequantizes exactly the ids the chain produces from the last
+    context position, so closed-loop play uses the conditioning the objective trained."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model)
+    _sharpen(model)
+    ctx = Context(features=_features(2, cfg.L_ctx, torch.Generator().manual_seed(16)), ctx_pad=torch.zeros(2).long())
+
+    action = exp022.decode(model, ctx, gen=torch.Generator().manual_seed(17))
+
+    with torch.no_grad():
+        h = model(ctx.features, ctx.ctx_pad)[:, -1]
+    want = exp022._dequantize(model, _walk_the_chain(model.heads[model.primary_head_idx], h))
+    torch.testing.assert_close(action[:, 0], want, rtol=0, atol=0)
+
+
+def test_the_incremental_head_path_runs_the_same_chain() -> None:
+    """``chunk_from_hidden`` is what the rolling-KV policy samples through — no second backbone
+    forward — so it must walk the chain exactly as ``decode`` does."""
+    cfg = _tiny_cfg(attn_window=8)
+    model = _factored_model(cfg)
+    _randomize_conditioning(model)
+    _sharpen(model)
+    h = torch.randn(3, cfg.d_model, generator=torch.Generator().manual_seed(18))
+
+    chunk = exp022.chunk_from_hidden(model, h, (1,), group_temps=(1.0,) * 4, gen=torch.Generator().manual_seed(19))
+
+    want = exp022._dequantize(model, _walk_the_chain(model.heads[model.primary_head_idx], h))
+    torch.testing.assert_close(chunk[:, 0], want, rtol=0, atol=0)
+
+
+def test_the_fp16_decode_cast_keeps_the_chain_running() -> None:
+    """fp16 weights are the deploy default. The conditioning tables are cast with everything else and
+    every logit is taken back to fp32 inside the chain, so the sampled ids are the fp32 ones."""
+    cfg = _tiny_cfg()
+    model = _factored_model(cfg)
+    _randomize_conditioning(model)
+    _sharpen(model)
+    ctx = Context(features=_features(2, cfg.L_ctx, torch.Generator().manual_seed(20)), ctx_pad=torch.zeros(2).long())
+    before = exp022.decode(model, ctx, gen=torch.Generator().manual_seed(17))
+
+    exp022._halve_for_decode(model)
+    half_ctx = Context(
+        features={k: v.half() if v.is_floating_point() else v for k, v in ctx.features.items()}, ctx_pad=ctx.ctx_pad
+    )
+    after = exp022.decode(model, half_ctx, gen=torch.Generator().manual_seed(17))
+
+    assert model.heads[0].emb[cfg.chain_order[0]].weight.dtype == torch.float16
+    assert after.dtype == torch.float32  # the dequantizer's fp32 grids define the output scale
+    torch.testing.assert_close(after, before, rtol=0, atol=0)
+
+
+# --- the chain's configuration ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "chain_order",
+    [
+        ("c_stick", "triggers", "main_stick"),  # too short
+        ("buttons", "buttons", "main_stick", "c_stick"),  # duplicate
+        ("c_stick", "triggers", "main_stick", "shoulder"),  # unknown group
+    ],
+)
+def test_validate_config_rejects_a_bad_chain_order(chain_order: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="permutation"):
+        exp022.validate_config(_tiny_cfg(chain_order=chain_order), has_button_combo_counts=False)
+
+
+def test_model_rejects_a_bad_chain_order_too() -> None:
+    """The model never trusts a validated config to have run first."""
+    with pytest.raises(ValueError, match="permutation"):
+        exp022.GPT(_tiny_cfg(chain_order=("buttons", "main_stick", "c_stick", "c_stick")))
+
+
+def test_the_chain_order_is_019s_default_and_reaches_the_run_name() -> None:
+    """019's settled order, and the run name says which head trained. The chain token lives in the
+    model tag only: both tags land in the same run name, so a second copy in the reward tag would
+    print the order twice."""
+    cfg = exp022.TrainConfig()
+    assert cfg.chain_order == ("c_stick", "triggers", "main_stick", "buttons")
+    assert "-chainctmb" in exp022._model_tag(cfg)
+    assert "chain" in exp022._model_tag(replace(cfg, chain_order=("buttons", "triggers", "main_stick", "c_stick")))
+    assert exp022._model_tag(cfg) != exp022._model_tag(
+        replace(cfg, chain_order=("buttons", "triggers", "main_stick", "c_stick"))
+    )
+    assert "chain" not in exp022._reward_tag(cfg)
 
 
 def test_incremental_decode_matches_the_full_forward_under_a_window() -> None:
@@ -615,20 +968,33 @@ _NEW_VAL_METRICS = frozenset(
     | {f"rank_{stat}_{tier.name.lower()}" for stat in ("frac", "weight_mean") for tier in exp022._RANK_TIERS}
 )
 
+# The val numbers the chain redefines. 020 multiplies two independent marginals — P(click) times
+# P(trigger not full) — which the chain cannot mean: the buttons conditional has ALREADY seen the
+# true trigger id of that frame, so the honest read is P(click) against the GROUND-TRUTH trigger.
+# ``test_click_trigger_invalid_mass_reads_the_true_trigger`` pins the replacement.
+_CHAIN_CHANGED_VAL_METRICS = frozenset(
+    {"click_trigger_invalid_l_mass", "click_trigger_invalid_r_mass", "click_trigger_invalid_mass"}
+)
+
 
 @pytest.mark.parametrize(
     ("n_batches", "tolerance"),
-    [(1, 0.0), (3, 1e-5)],
-    ids=["one-batch-bitwise", "three-batches-pooled"],
+    [(1, 1e-6), (3, 1e-5)],
+    ids=["one-batch", "three-batches-pooled"],
 )
 def test_val_metrics_reproduce_020_numbers(n_batches: int, tolerance: float) -> None:
     """020 runs the trunk five times per val batch and concatenates a per-frame tensor for every
     metric; 022 runs it twice and folds each batch into a count-weighted mean, so a 128-batch pass
-    holds no per-frame state. On one batch that is the same arithmetic, bit for bit. Several batches
-    pool the same positions in a different order. A float32 sum over 65k of them carries about 1e-7
-    of relative slack, and the ablation metrics subtract two nearly equal means, which turns that
-    into ~1e-6 absolute — hence the tolerance. The batches pad by 1, 65 and 129 frames, so a fold
-    that ignored the counts would land far outside it."""
+    holds no per-frame state. On one batch that is the same arithmetic. Several batches pool the same
+    positions in a different order. A float32 sum over 65k of them carries about 1e-7 of relative
+    slack, and the ablation metrics subtract two nearly equal means, which turns that into ~1e-6
+    absolute — hence the wider tolerance there. The batches pad by 1, 65 and 129 frames, so a fold
+    that ignored the counts would land far outside either.
+
+    The heads are 020's joint head transplanted into the chain (``_transplant_output_heads``), whose
+    conditioning tables are still zero, so every conditional here IS 020's marginal — except the three
+    numbers the chain redefines. It is no longer BITWISE: four group projections are four GEMMs where
+    020 has one 355-wide GEMM, which moves the last bits of a logit (~2e-7 relative on a per-group NLL)."""
     (cfg020, model020), (cfg022, model022) = _paired_models()
     batches, cache020, cache022 = _val_cache(cfg022, n_batches)
 
@@ -639,13 +1005,10 @@ def test_val_metrics_reproduce_020_numbers(n_batches: int, tolerance: float) -> 
     assert set(got) - _NEW_VAL_METRICS <= set(want) | set(want_awr)
     assert set(got) >= _NEW_VAL_METRICS
     for key, value in got.items():
-        if key in _NEW_VAL_METRICS:
+        if key in _NEW_VAL_METRICS or key in _CHAIN_CHANGED_VAL_METRICS:
             continue
         expected = want_awr[key] if key in want_awr else want[key]
-        if tolerance == 0.0:
-            assert value == expected, key
-        else:
-            assert value == pytest.approx(expected, rel=tolerance, abs=tolerance), key
+        assert value == pytest.approx(expected, rel=tolerance, abs=tolerance), key
     # The weights are a property of the pooled val set (the mean-1 rescale), so they stay exact.
     torch.testing.assert_close(got_weights, want_weights, rtol=0, atol=0)
 
