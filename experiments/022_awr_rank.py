@@ -284,6 +284,14 @@ class TrainConfig:
     max_steps: int = 16384
     amp_dtype: str = "bfloat16"  # "bfloat16" | "float32"
     allow_tf32: bool = True
+    # torch.compile the model's forward for training. About 40% of the step's GPU time is unfused
+    # elementwise work and autocast casts, against 26% in the matmuls, which is what a fused graph
+    # takes back: measured 846 -> 525 ms per step (1.61x) at this geometry on a 3060, with a loss
+    # curve that matches eager to bf16 noise over 20 steps. OFF because it is not yet stable — the
+    # first VALIDATION forward, a shape the training graph has not seen, dies with a CUDA illegal
+    # memory access (nested compile around FlexAttention). Turn it on only for a run with
+    # val_every=0, or after that interaction is fixed.
+    compile_trunk: bool = False
     # eval cadence
     val_every: int = 1024
     # 128 batches x 64 windows = 8,192 val replays (val draws one window per replay), the sample
@@ -2073,6 +2081,10 @@ def train(
     model = GPT(cfg).to(DEVICE)
     if button_combo_counts is not None:
         model.button_combo_counts.copy_(button_combo_counts.to(DEVICE))
+    if cfg.compile_trunk:
+        # The BOUND method, not the module: reassigning ``model.trunk`` would rename every trunk key
+        # in the state dict (``trunk._orig_mod.blocks…``) and break resume and eval.
+        model.forward = torch.compile(model.forward, dynamic=False)
     n_params = sum(p.numel() for p in model.parameters())
     if wandb.run is not None:
         wandb.run.summary["model/num_params"] = n_params
