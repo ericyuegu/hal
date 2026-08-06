@@ -829,28 +829,38 @@ def awr_weights(
     return weight, {"ess": ess, "weight_max_frac": clipped.mean().item()}
 
 
-def rank_stats(rank: Int[Tensor, " n_valid"], weight: Float[Tensor, " n_valid"] | None) -> dict[str, float]:
-    """Per-tier share of the scored positions, and the mean objective weight each tier carries.
+def rank_totals(rank: Int[Tensor, " n_valid"], weight: Float[Tensor, " n_valid"] | None) -> Float[Tensor, "2 n_rank"]:
+    """Per-tier ``(position count, summed objective weight)`` — two reductions, no host copy.
 
-    ``weight`` is the FINAL (rescaled) weight, so under rank-only weighting the three means are
-    exactly the configured ratio and under AWR + rank they drift from it by however much tier
-    correlates with advantage — that drift is the signal, not a defect. ``None`` is the unweighted
-    arm, where every tier reads 1. ``rank_unknown_frac`` must be 0 on a v7 dataset; it is 1 on v6,
-    which carries no tier at all.
-
-    Two reductions over the position vector and one host copy, so this can run every step."""
-    n = rank.numel()
+    Totals rather than means so a step's micro-batches ADD: a tier that a micro-batch happened not
+    to draw then contributes nothing, instead of a zero mean that would drag the step's number down.
+    ``weight=None`` is the unweighted arm, where every position weighs 1."""
     idx = rank.long()
     counts = torch.bincount(idx, minlength=len(Rank)).float()
-    per_position = counts.new_ones(n) if weight is None else weight.to(counts.dtype)
-    sums = counts.new_zeros(len(Rank)).scatter_add_(0, idx, per_position)
-    count, total = torch.stack([counts, sums]).tolist()  # one host copy
+    per_position = counts.new_ones(rank.numel()) if weight is None else weight.to(counts.dtype)
+    return torch.stack([counts, counts.new_zeros(len(Rank)).scatter_add_(0, idx, per_position)])
+
+
+def rank_stats_from_totals(totals: Float[Tensor, "2 n_rank"]) -> dict[str, float]:
+    """The logged tier block, from one host copy of ``rank_totals``.
+
+    ``rank_weight_mean_*`` is the mean of the FINAL (rescaled) weight, so under rank-only weighting
+    the three means sit exactly in the configured ratio, and under AWR + rank they drift from it by
+    however much tier correlates with advantage — that drift is the signal, not a defect.
+    ``rank_unknown_frac`` must be 0 on a v7 dataset; it is 1 on v6, which carries no tier at all."""
+    count, total = totals.tolist()
+    n = sum(count)
     out = {"rank_unknown_frac": count[Rank.UNKNOWN] / n if n else 0.0}
     for tier in _RANK_TIERS:
         name = tier.name.lower()
         out[f"rank_frac_{name}"] = count[tier] / n if n else 0.0
         out[f"rank_weight_mean_{name}"] = total[tier] / count[tier] if count[tier] else 0.0
     return out
+
+
+def rank_stats(rank: Int[Tensor, " n_valid"], weight: Float[Tensor, " n_valid"] | None) -> dict[str, float]:
+    """``rank_stats_from_totals`` over one batch, for the val pass and the tests."""
+    return rank_stats_from_totals(rank_totals(rank, weight))
 
 
 def expectile_td(
@@ -2586,7 +2596,7 @@ def train(
             comps_acc: dict[tuple[int, str], list[Tensor]] = {}
             obj_acc: Tensor | None = None
             awr_acc: dict[str, float] = {"value_loss": 0.0, "ess": 0.0, "weight_max_frac": 0.0}
-            rank_acc: dict[str, float] = {}
+            rank_acc: Tensor | None = None
             for _ in range(cfg.grad_accum_steps):
                 try:
                     batch = next(it).to(DEVICE)
@@ -2637,8 +2647,8 @@ def train(
                     awr_acc["weight_max_frac"] += awr_stats["weight_max_frac"] / cfg.grad_accum_steps
                 if cfg.awr_enabled:
                     awr_acc["value_loss"] += value_loss.item() / cfg.grad_accum_steps
-                for key, value in rank_stats(batch.valid_ranks(parts.valid), weight).items():
-                    rank_acc[key] = rank_acc.get(key, 0.0) + value / cfg.grad_accum_steps
+                totals = rank_totals(batch.valid_ranks(parts.valid), weight)
+                rank_acc = totals if rank_acc is None else rank_acc + totals
                 for k, v in parts.nll.items():
                     comps_acc.setdefault(k, []).append(v.detach())
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))  # measure only
@@ -2646,7 +2656,7 @@ def train(
             sched.step()
             if DEVICE == "cuda":
                 torch.cuda.synchronize()
-        assert obj_acc is not None  # grad_accum_steps >= 1
+        assert obj_acc is not None and rank_acc is not None  # grad_accum_steps >= 1
         objective_bits = (obj_acc / cfg.grad_accum_steps).item() / _LN2  # the actual backprop objective, bits
         comps_cat = {k: torch.cat(v) for k, v in comps_acc.items()}
         primary = nll_breakdown({name: comps_cat[(1, name)] for name in _GROUP_NAMES})
@@ -2667,10 +2677,10 @@ def train(
             "train/value_loss": awr_acc["value_loss"],  # V's MSE to the return (native units, not bits)
             "train/awr_ess": awr_acc["ess"],  # 1.0 = uniform weights; small = a few frames own the batch
             "train/awr_weight_max_frac": awr_acc["weight_max_frac"],
-            # Tier mix and what each tier's frames are worth to the objective. Under rank-only
-            # weighting the three means are exactly the configured ratio; under AWR + rank they drift
-            # by however much tier correlates with advantage.
-            **{f"train/{key}": value for key, value in rank_acc.items()},
+            # Tier mix and what each tier's frames are worth to the objective, pooled over the step's
+            # micro-batches. Under rank-only weighting the three means are the configured ratio;
+            # under AWR + rank they drift by however much tier correlates with advantage.
+            **{f"train/{key}": value for key, value in rank_stats_from_totals(rank_acc).items()},
             "lr/muon": next(g["lr"] for g in opt.param_groups if g["use_muon"]),
             "lr/adam": next(g["lr"] for g in opt.param_groups if not g["use_muon"]),
             "train/gnorm": grad_norm.item(),

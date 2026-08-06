@@ -23,15 +23,23 @@ fork changed.
 import copy
 import importlib.util
 import inspect
+import math
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from melee import Character
+from melee import Stage
+from streaming import MDSWriter
 
 from hal.data.feature_stats import FeatureStats
+from hal.data.schema import MDS_COLUMNS
+from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
+from hal.training.dataloader import WindowDataset
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import CAT_FEATURES
@@ -135,6 +143,45 @@ def _awr_batch(cfg, seed: int = 0, batch: int = 4, ranks: Sequence[int] | None =
     )
 
 
+_P1_MARKER, _P2_MARKER = 11.0, 22.0
+
+
+def _mds_replay(frames: int, ranks: tuple[Rank, Rank] = (Rank.MASTER, Rank.PLATINUM)) -> dict[str, np.ndarray]:
+    """One full synthetic v7 MDS row: every schema column, so hal's real sampler and collate run.
+
+    The two ports carry different constant percents, so a window can report which one the sampler
+    made ego — the trick 020's tests use, and the only way to check that a tier follows the coin
+    flip. Percent is inert here: damage shaping is off in these tests."""
+    sample = {name: np.zeros(frames, dtype=dtype) for name, dtype in MDS_PER_FRAME_DTYPES.items()}
+    sample["frame"] = np.arange(frames, dtype=np.int32)
+    sample["stage"] = np.full(frames, Stage.FINAL_DESTINATION.value, dtype=np.int32)
+    for port, tier in zip(("p1", "p2"), ranks, strict=True):
+        sample[f"{port}_stock"] = np.full(frames, 4, dtype=np.int32)
+        sample[f"{port}_character"] = np.full(frames, int(Character.FOX.value), dtype=np.int32)
+        sample[f"{port}_rank"] = np.full(frames, int(tier), dtype=np.uint8)
+    sample["p1_percent"] = np.full(frames, _P1_MARKER, dtype=np.float32)
+    sample["p2_percent"] = np.full(frames, _P2_MARKER, dtype=np.float32)
+    sample["schema_version"] = SCHEMA_VERSION
+    return sample
+
+
+def _windows(replays: list[dict], *, L_ctx: int, L_chunk: int = 2, gamma: float = 0.9, K: int = 4, seed: int = 0):
+    """Drive hal's real sampler (ego coin flip, windowing, left padding, relabel) over in-memory
+    return-labeled replays."""
+    labeled = exp022.ReturnLabeledReplays(replays, gamma=gamma, damage_shaping=0.0, win_reward=0.0)
+    sampler = WindowDataset(labeled, L_ctx, L_chunk, seed=seed, windows_per_replay=K, schema_version=SCHEMA_VERSION)
+    return list(sampler)
+
+
+def _write_tiny_mds(root: Path, lobbies: Sequence[tuple[Rank, Rank]], *, frames: int = 240) -> Path:
+    """A tiny v7 dataset on disk (one row per lobby), read back by the real StreamingDataset."""
+    root.mkdir(parents=True, exist_ok=True)
+    with MDSWriter(out=str(root / "train"), columns=MDS_COLUMNS, compression="zstd", exist_ok=False) as writer:
+        for ranks in lobbies:
+            writer.write(_mds_replay(frames, ranks))
+    return root
+
+
 def _paired_models(seed: int = 7):
     """The same weights in both modules: 020's inline trunk and 022's shared trunk at window 0."""
     cfg020 = exp020.TrainConfig(batch_size=4, **_PAIRED, **_PAIRED_AWR)
@@ -196,6 +243,29 @@ def test_reward_tag_follows_the_flags() -> None:
     assert exp022._reward_tag(exp022.TrainConfig(attn_window=0)).endswith("-swafull")
     assert "b0.3" in exp022._reward_tag(exp022.TrainConfig(awr_beta=0.3))
     assert exp022._reward_tag(exp022.TrainConfig(awr_value_detach_trunk=True)).endswith("-vdetach-swa128")
+
+
+def test_rank_and_critic_default_to_off() -> None:
+    """The 022 base is 020's weighting on a new trunk. Both new axes are opt-in, so arm 2 (the plain
+    AWR arm) can run on v6 data that has no tier column at all."""
+    cfg = exp022.TrainConfig()
+    assert cfg.awr_rank_weights == (1.0, 1.0, 1.0)
+    assert exp022.rank_weighting_on(cfg.awr_rank_weights) is False
+    assert cfg.awr_critic == "mc"
+    assert cfg.awr_expectile_tau == 0.8
+
+
+def test_reward_tag_spells_out_the_rank_and_critic_arms() -> None:
+    """The two arms of this flight must be readable in the run name, and only when they are on."""
+    rank = exp022.TrainConfig(awr_rank_weights=(1.0, 2.0, 4.0))
+    iql = exp022.TrainConfig(awr_critic="expectile", awr_expectile_tau=0.8)
+    assert exp022._reward_tag(rank) == "g99827-b0.8-w5-d0.01-win0.5-rank1-2-4-swa128"
+    assert exp022._reward_tag(iql) == "g99827-b0.8-w5-d0.01-win0.5-iql0.8-swa128"
+    # Rank weighting is not an AWR knob, so it survives the BC arm; the critic is and does not.
+    assert exp022._reward_tag(exp022.TrainConfig(awr_enabled=False, awr_rank_weights=(1.0, 2.0, 4.0))) == (
+        "bc-rank1-2-4-swa128"
+    )
+    assert "iql" not in exp022._reward_tag(exp022.TrainConfig(awr_expectile_tau=0.9))
 
 
 # --- only the trunk and the objective's weights moved ------------------------
@@ -648,15 +718,364 @@ def test_validate_config_rejects_an_indivisible_effective_batch() -> None:
         exp022.validate_config(_tiny_cfg(batch_size=6, grad_accum_steps=4), has_button_combo_counts=False)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("awr_rank_weights", (1.0, 0.0, 4.0), "awr_rank_weights"),
+        ("awr_rank_weights", (1.0, 2.0, float("inf")), "awr_rank_weights"),
+        ("awr_rank_weights", (1.0, 2.0), "one multiplier per tier"),
+        ("awr_expectile_tau", 0.0, "awr_expectile_tau"),
+        ("awr_expectile_tau", 1.0, "awr_expectile_tau"),
+        ("awr_critic", "td", "awr_critic"),
+    ],
+)
+def test_validate_config_rejects_bad_rank_and_critic_knobs(field: str, value, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        exp022.validate_config(_tiny_cfg(**{field: value}), has_button_combo_counts=False)
+
+
+def test_rank_weighting_demands_a_v7_dataset() -> None:
+    """The tier column arrived with v7. Without this the run would die on its first collated batch,
+    minutes into a cloud boot, instead of before W&B init."""
+    with pytest.raises(ValueError, match="v7 materialization"):
+        exp022.validate_config(
+            _tiny_cfg(awr_rank_weights=(1.0, 2.0, 4.0), mds_schema_version=6), has_button_combo_counts=False
+        )
+    exp022.validate_config(
+        _tiny_cfg(awr_rank_weights=(1.0, 2.0, 4.0), mds_schema_version=7), has_button_combo_counts=False
+    )
+    # With the multipliers off, 022 never reads the column, so v6 data is fine.
+    exp022.validate_config(_tiny_cfg(mds_schema_version=6), has_button_combo_counts=False)
+
+
+# --- rank weighting ----------------------------------------------------------
+
+_RANK_ARM: tuple[float, float, float] = (1.0, 2.0, 4.0)
+# Measured ego-slot frequencies on ranked-anonymized-1 (116,149 replays).
+_EGO_TIER_FREQUENCIES: dict[Rank, float] = {Rank.PLATINUM: 0.428, Rank.DIAMOND: 0.258, Rank.MASTER: 0.314}
+
+
+def _rank_window(tier: Rank, *, frames: int = 8, pad: int = 0) -> dict:
+    """The two columns ``_ego_rank_weights`` reads, with the first ``pad`` frames zero-filled — the
+    left padding hal writes when a window starts before its episode does."""
+    rank = np.full(frames, int(tier), dtype=np.uint8)
+    rank[:pad] = 0
+    return {"frame": np.arange(frames, dtype=np.int32), "ego_rank": rank}
+
+
+def test_the_tier_is_read_from_the_last_frame_not_the_first() -> None:
+    """A cold-start window's FIRST frames are zero-filled padding, which reads as UNKNOWN. The last
+    frame is always a real frame of the replay, so that is the one the collate asks."""
+    windows = [_rank_window(Rank.MASTER, pad=6), _rank_window(Rank.DIAMOND, pad=0)]
+
+    rank, weight = exp022._ego_rank_weights(windows, _RANK_ARM)
+
+    np.testing.assert_array_equal(rank, [int(Rank.MASTER), int(Rank.DIAMOND)])
+    np.testing.assert_allclose(weight, [4.0, 2.0])
+
+
+def test_an_unknown_tier_raises_only_when_the_multipliers_are_on() -> None:
+    """Weighting an UNKNOWN frame would silently price it as platinum — a 4x error in the data
+    mixture. With the multipliers off nothing reads the tier, so the same window is fine."""
+    windows = [_rank_window(Rank.MASTER), _rank_window(Rank.UNKNOWN)]
+
+    with pytest.raises(ValueError, match="UNKNOWN ego rank"):
+        exp022._ego_rank_weights(windows, _RANK_ARM)
+
+    rank, weight = exp022._ego_rank_weights(windows, (1.0, 1.0, 1.0))
+    np.testing.assert_allclose(weight, [1.0, 1.0])
+    assert rank[1] == int(Rank.UNKNOWN)
+
+
+def test_a_v6_window_without_the_column_trains_only_with_the_multipliers_off() -> None:
+    """022 must still train on the v6 materialization (arms 1 and 2 do), and must never guess a tier
+    it was told to weight by."""
+    windows = [_rank_window(Rank.MASTER)]
+    for window in windows:
+        del window["ego_rank"]
+
+    rank, weight = exp022._ego_rank_weights(windows, (1.0, 1.0, 1.0))
+    np.testing.assert_array_equal(rank, [int(Rank.UNKNOWN)])
+    np.testing.assert_allclose(weight, [1.0])
+
+    with pytest.raises(ValueError, match="does not carry"):
+        exp022._ego_rank_weights(windows, _RANK_ARM)
+
+
+def test_the_multiplier_survives_the_mean_one_rescale_exactly() -> None:
+    """The whole design rests on this: every batch mixes all three tiers, so dividing by the batch
+    mean cannot change their ratio. At the corpus tier frequencies the rank-only weights come out
+    0.455 / 0.909 / 1.818 with ESS 0.747 — the numbers the plan promises."""
+    counts = {tier: round(10_000 * frequency) for tier, frequency in _EGO_TIER_FREQUENCIES.items()}
+    rank = torch.cat([torch.full((n,), int(tier), dtype=torch.uint8) for tier, n in counts.items()])
+    table = torch.tensor((1.0, *_RANK_ARM))
+    rank_weight = table[rank.long()]
+
+    weight, stats = exp022.awr_weights(None, beta=0.8, weight_max=5.0, rank_weight=rank_weight)
+
+    assert weight.mean().item() == pytest.approx(1.0, rel=1e-6)
+    means = exp022.rank_stats(rank, weight)
+    assert means["rank_weight_mean_platinum"] == pytest.approx(0.455, abs=5e-4)
+    assert means["rank_weight_mean_diamond"] == pytest.approx(0.909, abs=5e-4)
+    assert means["rank_weight_mean_master"] == pytest.approx(1.818, abs=5e-4)
+    # The ratio is exact in the math; the slack is the float32 sum over 10,000 positions.
+    assert means["rank_weight_mean_master"] / means["rank_weight_mean_platinum"] == pytest.approx(4.0, rel=1e-4)
+    assert stats["ess"] == pytest.approx(0.7465, abs=5e-4)  # 4.84 / 6.484, the plan's 0.747 rounded
+    assert means["rank_unknown_frac"] == 0.0
+    assert means["rank_frac_platinum"] == pytest.approx(0.428, abs=1e-3)
+
+
+def test_the_clip_composes_with_the_multiplier() -> None:
+    """The cap bounds what ONE lucky trajectory can inject; the tier is a deliberate mixture shift,
+    not luck. So the clip lands on the advantage term and a master frame may reach 4 * w_max."""
+    advantage = torch.tensor([10.0, 10.0])
+    rank_weight = torch.tensor([1.0, 4.0])
+
+    weight, stats = exp022.awr_weights(advantage, beta=1.0, weight_max=5.0, rank_weight=rank_weight)
+
+    raw = torch.tensor([5.0, 20.0])
+    torch.testing.assert_close(weight, raw / raw.mean())
+    assert stats["weight_max_frac"] == 1.0  # both positions sit on the cap BEFORE the multiplier
+
+
+def test_rank_only_weighting_needs_no_advantage() -> None:
+    """A rank-weighted BC arm has no critic at all, so ``advantage=None`` is the whole path — and
+    with neither input there is nothing to weight by, which is a bug, not a default."""
+    weight, stats = exp022.awr_weights(None, beta=0.8, weight_max=5.0, rank_weight=torch.tensor([1.0, 2.0, 1.0]))
+
+    torch.testing.assert_close(weight, torch.tensor([0.75, 1.5, 0.75]))
+    assert stats["weight_max_frac"] == 0.0
+    with pytest.raises(ValueError, match="neither"):
+        exp022.awr_weights(None, beta=0.8, weight_max=5.0)
+
+
+def test_rank_stats_report_the_mix_and_the_unweighted_arm() -> None:
+    rank = torch.tensor([1, 1, 2, 3], dtype=torch.uint8)
+
+    stats = exp022.rank_stats(rank, None)
+
+    assert stats["rank_frac_platinum"] == 0.5
+    assert stats["rank_frac_diamond"] == 0.25
+    assert stats["rank_frac_master"] == 0.25
+    assert stats["rank_unknown_frac"] == 0.0
+    assert {stats[f"rank_weight_mean_{t}"] for t in ("platinum", "diamond", "master")} == {1.0}
+    # A tier nobody drew reports 0, not a division by zero.
+    assert exp022.rank_stats(torch.ones(4, dtype=torch.uint8), None)["rank_weight_mean_master"] == 0.0
+
+
+def test_the_rank_weight_broadcasts_to_that_samples_positions() -> None:
+    """The tier is per sample and the objective weight is per position, so the batch has to expand
+    one into the other under the same validity mask the NLLs use."""
+    cfg = _tiny_cfg(awr_rank_weights=_RANK_ARM)
+    batch = _awr_batch(cfg, ranks=[Rank.PLATINUM, Rank.MASTER, Rank.DIAMOND, Rank.MASTER])
+    valid = torch.arange(cfg.L_ctx)[None, :] >= torch.tensor([0, 1, 2, 3])[:, None]
+
+    weights = batch.valid_rank_weights(valid)
+    ranks = batch.valid_ranks(valid)
+
+    assert weights.shape == ranks.shape == (int(valid.sum()),)
+    torch.testing.assert_close(weights[: cfg.L_ctx], torch.ones(cfg.L_ctx))  # sample 0: platinum
+    assert set(ranks[cfg.L_ctx : 2 * cfg.L_ctx - 1].tolist()) == {int(Rank.MASTER)}
+    torch.testing.assert_close(weights[cfg.L_ctx : 2 * cfg.L_ctx - 1], torch.full((cfg.L_ctx - 1,), 4.0))
+
+
+def test_the_tier_follows_the_ego_coin_flip_on_both_outcomes() -> None:
+    """One Master(p1) vs Platinum(p2) replay through hal's real sampler. The coin flip renames
+    p{1,2}_rank to ego/opp for free, so every window's tier must be the one its ego marker names —
+    on BOTH outcomes, or half the corpus would be weighted as its opponent."""
+    replay = _mds_replay(400, (Rank.MASTER, Rank.PLATINUM))
+    windows = _windows([replay], L_ctx=16, K=16)
+    assert len(windows) >= 8
+
+    seen = set()
+    for window in windows:
+        pad = int(window["ctx_pad"])
+        ego_is_p1 = float(window["ego_percent"][pad]) == _P1_MARKER
+        expected = Rank.MASTER if ego_is_p1 else Rank.PLATINUM
+        assert int(window[exp022.EGO_RANK_COLUMN][-1]) == int(expected)
+        assert int(window["opp_rank"][-1]) == int(Rank.PLATINUM if ego_is_p1 else Rank.MASTER)
+        seen.add(expected)
+    assert seen == {Rank.MASTER, Rank.PLATINUM}, "the coin flip never landed on both ports"
+
+
+def test_a_padded_window_still_reads_its_true_tier_through_the_collate() -> None:
+    """End to end over the real sampler: a 20-frame replay yields cold-start windows whose first
+    frames are padding, and the collated batch must still carry Diamond for every one of them."""
+    windows = _windows([_mds_replay(20, (Rank.DIAMOND, Rank.DIAMOND))], L_ctx=16, K=4, seed=3)
+    assert any(int(window["ctx_pad"]) > 0 for window in windows), "expected a cold-start window"
+
+    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=16, rank_weights=_RANK_ARM)
+
+    assert batch.rank.tolist() == [int(Rank.DIAMOND)] * len(windows)
+    torch.testing.assert_close(batch.rank_weight, torch.full((len(windows),), 2.0))
+
+
+def test_the_tier_never_reaches_the_model_as_a_feature() -> None:
+    """The tier rides the same columns as gamestate, so this pins that ``preprocess`` drops it. A
+    model that could read its demonstrator's rank would learn to condition on it and then meet
+    nothing at deploy time."""
+    windows = _windows([_mds_replay(60)], L_ctx=8, K=2, seed=1)
+
+    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=8, rank_weights=_RANK_ARM)
+
+    features = batch.batch.context.features
+    assert not [name for name in features if "rank" in name or "awr_" in name]
+    assert batch.rank.numel() == len(windows)
+
+
+def test_the_collated_arrays_satisfy_the_td_identity() -> None:
+    """Reward and return leave the labeler as two ordinary columns and are shifted by the same
+    frame, so ``returns[t] = rewards[t] + gamma * returns[t+1]`` survives windowing and padding.
+    Everything the expectile critic computes rests on that."""
+    gamma = 0.9
+    replay = _mds_replay(200)
+    replay["p2_stock"][120:] = 3  # a real event, so the columns are not all zeros
+    windows = _windows([replay], L_ctx=16, gamma=gamma, K=4, seed=5)
+
+    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=16)
+
+    torch.testing.assert_close(
+        batch.returns[:, :-1], batch.rewards[:, :-1] + gamma * batch.returns[:, 1:], rtol=0, atol=1e-6
+    )
+
+
+def test_rank_weighted_bc_never_touches_the_value_head() -> None:
+    """The bc-rank arm: the tier reweights the imitation loss and nothing fits a value function, so
+    the value head must take no gradient at all."""
+    cfg = _tiny_cfg(awr_enabled=False, awr_rank_weights=_RANK_ARM)
+    model = exp022.GPT(cfg)
+    batch = _awr_batch(cfg, ranks=[Rank.MASTER, Rank.PLATINUM, Rank.DIAMOND, Rank.MASTER])
+    parts = exp022.action_loss(model, batch.batch)
+
+    weight, _ = exp022.awr_weights(
+        None, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max, rank_weight=batch.valid_rank_weights(parts.valid)
+    )
+    weighted = exp022.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight, weight)
+    plain = exp022.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight)
+    weighted.backward()
+
+    assert weighted.item() != plain.item()  # the tiers really did re-weight the loss
+    assert model.value_head.weight.grad is None
+    assert torch.count_nonzero(model.ctx_proj.weight.grad) > 0
+
+
+# --- the IQL expectile critic ------------------------------------------------
+
+
+def _value_grid(batch: int = 3, L_ctx: int = 6, seed: int = 0) -> torch.Tensor:
+    return torch.randn(batch, L_ctx, generator=torch.Generator().manual_seed(seed))
+
+
+def test_expectile_at_one_half_is_half_the_mean_squared_error() -> None:
+    """tau=0.5 is the symmetric case, and then the expectile loss is exactly half of what a plain
+    TD regression would report — the anchor every other tau is read against."""
+    value, rewards = _value_grid(), _value_grid(seed=1)
+    valid = torch.ones_like(value, dtype=torch.bool)
+
+    residual, td_valid, loss = exp022.expectile_td(value, rewards, valid, gamma=0.9, tau=0.5)
+
+    assert loss.item() == pytest.approx(0.5 * residual[td_valid].pow(2).mean().item(), rel=1e-6)
+
+
+def test_a_true_return_value_leaves_no_residual_at_any_tau() -> None:
+    """The alignment identity. The collate shifts the reward and the return by the same frame, so
+    ``G_t = r_t + gamma * G_{t+1}`` holds position by position; a V that equals the return therefore
+    has to make the TD residual exactly zero. A one-frame slip in either column breaks this."""
+    cfg = _tiny_cfg(L_ctx=32)
+    batch = _awr_batch(cfg)
+    valid = torch.ones_like(batch.returns, dtype=torch.bool)
+
+    for tau in (0.1, 0.5, 0.9):
+        residual, td_valid, loss = exp022.expectile_td(
+            batch.returns, batch.rewards, valid, gamma=cfg.awr_gamma, tau=tau
+        )
+        assert residual[td_valid].abs().max().item() == pytest.approx(0.0, abs=1e-6)
+        assert loss.item() == pytest.approx(0.0, abs=1e-12)
+
+
+def test_tau_puts_nine_times_the_gradient_on_a_positive_residual() -> None:
+    """tau=0.9 is what makes this a MAX-like critic rather than a mean: a return above the current V
+    pulls nine times as hard as an equal one below it."""
+    valid = torch.ones(1, 2, dtype=torch.bool)
+    rewards = torch.zeros(1, 2)
+    gradients = []
+    for sign in (+1.0, -1.0):
+        value = torch.tensor([[0.0, sign]], requires_grad=True)  # target = gamma * V(s_1), residual = +-gamma
+        _, _, loss = exp022.expectile_td(value, rewards, valid, gamma=1.0, tau=0.9)
+        loss.backward()
+        assert value.grad is not None
+        gradients.append(abs(value.grad[0, 0].item()))
+
+    assert gradients[0] / gradients[1] == pytest.approx(9.0, rel=1e-6)
+
+
+def test_the_bootstrap_target_is_detached() -> None:
+    """``V(s_{t+1})`` is the TARGET. If it took gradient, the loss could be minimized by dragging the
+    target down to meet the estimate — the divergence mode detached targets exist to prevent."""
+    valid = torch.ones(1, 3, dtype=torch.bool)
+    value = torch.zeros(1, 3, requires_grad=True)
+    rewards = torch.tensor([[1.0, 1.0, 1.0]])
+
+    _, _, loss = exp022.expectile_td(value, rewards, valid, gamma=0.9, tau=0.8)
+    loss.backward()
+
+    assert value.grad is not None
+    # Only positions 0 and 1 are scored, and each moves only through its OWN V(s_t).
+    torch.testing.assert_close(value.grad[0, 2], torch.tensor(0.0))
+    assert value.grad[0, 0].item() < 0.0 and value.grad[0, 1].item() < 0.0
+
+
+def test_the_last_position_has_no_successor_and_is_left_out() -> None:
+    """No ``s_{t+1}`` exists for the final context frame, so it is out of the TD loss and its
+    residual is 0 — the neutral weight, for the one position in L_ctx the objective still scores."""
+    value, rewards = _value_grid(), _value_grid(seed=2)
+    valid = torch.arange(6)[None, :] >= torch.tensor([0, 2, 5])[:, None]
+
+    residual, td_valid, _ = exp022.expectile_td(value, rewards, valid, gamma=0.9, tau=0.8)
+
+    torch.testing.assert_close(residual[:, -1], torch.zeros(3))
+    assert not td_valid[:, -1].any()
+    np.testing.assert_array_equal(td_valid.numpy(), valid.numpy() & np.array([[True] * 5 + [False]]))
+
+
+@pytest.mark.parametrize("critic", ["mc", "expectile"])
+def test_both_critics_report_both_diagnostics_and_a_detached_advantage(critic: str) -> None:
+    """An arm's numbers are worth nothing if the other arm does not log them too, so every run
+    reports value_mse AND the TD pair whichever critic trains V."""
+    cfg = _tiny_cfg(L_ctx=32, awr_critic=critic)
+    model = exp022.GPT(cfg)
+    batch = _awr_batch(cfg)
+    parts = exp022.action_loss(model, batch.batch)
+
+    got = exp022.critic_parts(
+        parts.value_grid, batch, parts.valid, critic=critic, gamma=cfg.awr_gamma, tau=cfg.awr_expectile_tau
+    )
+
+    assert set(got.stats) == {"value_mse", "td_residual_mean", "td_expectile_loss"}
+    assert all(math.isfinite(value.item()) for value in got.stats.values())
+    assert not got.advantage.requires_grad
+    assert got.advantage.shape == parts.value.shape
+    assert got.loss.requires_grad  # V still trains
+    torch.testing.assert_close(got.loss, got.stats["value_mse" if critic == "mc" else "td_expectile_loss"])
+
+
+def test_the_mc_advantage_is_020s_return_minus_value() -> None:
+    """The default critic must be bit-identical to what 020 deployed."""
+    cfg = _tiny_cfg(L_ctx=32)
+    model = exp022.GPT(cfg)
+    batch = _awr_batch(cfg)
+    parts = exp022.action_loss(model, batch.batch)
+
+    got = exp022.critic_parts(parts.value_grid, batch, parts.valid, critic="mc", gamma=cfg.awr_gamma, tau=0.8)
+
+    torch.testing.assert_close(got.advantage, batch.valid_returns(parts.valid) - parts.value.detach(), rtol=0, atol=0)
+
+
 # --- end to end on real data -------------------------------------------------
 
 
-@pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS not materialized")
-@pytest.mark.parametrize("awr_enabled", [False, True], ids=["bc", "awr"])
-def test_mini_train_saves_final_before_a_skipped_eval(tmp_path, monkeypatch, capsys, awr_enabled: bool) -> None:
-    """Four real steps per arm over the dev MDS at a small window: the loader labels returns, the
-    micro-batch/accumulation split runs, ``final.pt`` lands, and a zero matchup count means the
-    closed-loop eval never starts. On CPU the trunk falls back to the dense mask — the same math."""
+def _isolate_run(tmp_path, monkeypatch) -> None:
+    """Run the trainer under tmp with W&B offline and R2 pointed at a dead port."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("WANDB_MODE", "offline")
     monkeypatch.setenv("WANDB_SILENT", "true")
@@ -670,7 +1089,10 @@ def test_mini_train_saves_final_before_a_skipped_eval(tmp_path, monkeypatch, cap
 
     monkeypatch.setattr(exp022, "eval_vs_cpu", _no_dolphin)
 
-    cfg = exp022.TrainConfig(
+
+def _mini_cfg(**kwargs):
+    """The 4-step CPU training recipe every end-to-end test here runs."""
+    defaults = dict(
         d_model=32,
         n_layers=2,
         n_heads=2,
@@ -689,11 +1111,47 @@ def test_mini_train_saves_final_before_a_skipped_eval(tmp_path, monkeypatch, cap
         ckpt_every=0,
         num_workers=0,
         windows_per_replay=2,
-        awr_enabled=awr_enabled,
-        data_root=str(_DEV_MDS),
         val_split="train",
-        mds_schema_version=5,
     )
+    return exp022.TrainConfig(**{**defaults, **kwargs})
+
+
+class _WandbSpy:
+    """A stand-in for the ``wandb`` module that keeps every logged payload and forwards the rest.
+
+    The experiment's own module attribute is what gets replaced, so the real ``wandb`` module is
+    never mutated: ``wandb.init`` REBINDS ``wandb.log`` to the live run's method, and patching that
+    attribute would both lose the spy and leave a dead pre-init stub behind for the next test."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.logs: list[dict] = []
+
+    def log(self, payload: dict, *args, **kwargs):
+        self.logs.append(payload)
+        return self._real.log(payload, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def _logged_steps(monkeypatch) -> list[dict]:
+    """Every ``wandb.log`` payload the run emits, so a test reads the numbers the dashboard would
+    show instead of re-deriving them."""
+    spy = _WandbSpy(exp022.wandb)
+    monkeypatch.setattr(exp022, "wandb", spy)
+    return spy.logs
+
+
+@pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS not materialized")
+@pytest.mark.parametrize("awr_enabled", [False, True], ids=["bc", "awr"])
+def test_mini_train_saves_final_before_a_skipped_eval(tmp_path, monkeypatch, capsys, awr_enabled: bool) -> None:
+    """Four real steps per arm over the dev MDS at a small window: the loader labels returns, the
+    micro-batch/accumulation split runs, ``final.pt`` lands, and a zero matchup count means the
+    closed-loop eval never starts. On CPU the trunk falls back to the dense mask — the same math."""
+    _isolate_run(tmp_path, monkeypatch)
+
+    cfg = _mini_cfg(awr_enabled=awr_enabled, data_root=str(_DEV_MDS), mds_schema_version=5)
     exp022.train(cfg, _stats(), comment="pytest")
 
     out = capsys.readouterr().out
@@ -702,3 +1160,88 @@ def test_mini_train_saves_final_before_a_skipped_eval(tmp_path, monkeypatch, cap
     runs = list((tmp_path / "runs").iterdir())
     assert len(runs) == 1
     assert (runs[0] / "final.pt").is_file()
+
+
+# Mirror lobbies (both ports the same tier) so the ego coin flip cannot change a window's tier, plus
+# one mixed lobby to prove the mixed case survives the same run.
+_TINY_LOBBIES: tuple[tuple[Rank, Rank], ...] = (
+    (Rank.PLATINUM, Rank.PLATINUM),
+    (Rank.DIAMOND, Rank.DIAMOND),
+    (Rank.MASTER, Rank.MASTER),
+    (Rank.MASTER, Rank.PLATINUM),
+    (Rank.PLATINUM, Rank.PLATINUM),
+    (Rank.MASTER, Rank.MASTER),
+)
+
+
+@pytest.mark.parametrize("awr_enabled", [True, False], ids=["awr-rank", "bc-rank"])
+def test_mini_train_on_v7_data_weights_by_tier(tmp_path, monkeypatch, awr_enabled: bool) -> None:
+    """Both rank arms, four real steps each on a tiny v7 dataset: the tier reaches the objective,
+    nothing reads as UNKNOWN, and under rank-only weighting (the bc-rank arm) each tier's mean
+    weight is exactly its multiplier times one constant — the 1:2:4 mixture shift, measured on the
+    numbers W&B would show. The awr-rank arm drifts off that ratio by design, so it only has to
+    stay finite."""
+    _isolate_run(tmp_path, monkeypatch)
+    logged = _logged_steps(monkeypatch)
+    root = _write_tiny_mds(tmp_path / "mds", _TINY_LOBBIES)
+
+    cfg = _mini_cfg(
+        data_root=str(root),
+        mds_schema_version=SCHEMA_VERSION,
+        awr_enabled=awr_enabled,
+        awr_rank_weights=_RANK_ARM,
+        grad_accum_steps=1,  # one rescale per step, so the ratio below is exact
+    )
+    exp022.train(cfg, _stats(), comment="pytest")
+
+    steps = [log for log in logged if "train/rank_unknown_frac" in log]
+    assert len(steps) == cfg.max_steps
+    tiers = dict(zip(("platinum", "diamond", "master"), _RANK_ARM, strict=True))
+    for log in steps:
+        assert log["train/rank_unknown_frac"] == 0.0
+        assert sum(log[f"train/rank_frac_{tier}"] for tier in tiers) == pytest.approx(1.0)
+        drawn = [tier for tier in tiers if log[f"train/rank_frac_{tier}"] > 0]
+        assert drawn, "no tier reached the objective"
+        if not awr_enabled:
+            scaled = [log[f"train/rank_weight_mean_{tier}"] / tiers[tier] for tier in drawn]
+            assert max(scaled) == pytest.approx(min(scaled), rel=1e-5)
+    assert all(math.isfinite(log["train/rank_weight_mean_master"]) for log in steps)
+    val = [log for log in logged if "val/rank_unknown_frac" in log]
+    assert val and all(log["val/rank_unknown_frac"] == 0.0 for log in val)
+
+
+def test_mini_train_with_the_expectile_critic(tmp_path, monkeypatch, capsys) -> None:
+    """The awr-iql arm end to end: the reward column survives the loader, the TD critic trains, and
+    both critics' diagnostics reach the log."""
+    _isolate_run(tmp_path, monkeypatch)
+    logged = _logged_steps(monkeypatch)
+    root = _write_tiny_mds(tmp_path / "mds", _TINY_LOBBIES)
+
+    cfg = _mini_cfg(data_root=str(root), mds_schema_version=SCHEMA_VERSION, awr_critic="expectile")
+    exp022.train(cfg, _stats(), comment="pytest")
+
+    assert "closed-loop eval skipped" in capsys.readouterr().out
+    val = [log for log in logged if "val/td_expectile_loss" in log]
+    assert val
+    for log in val:
+        assert log["val/td_expectile_loss"] >= 0.0
+        assert math.isfinite(log["val/td_residual_mean"])
+        assert math.isfinite(log["val/value_mse"])  # the OTHER critic's number, so the arms compare
+    assert all(math.isfinite(log["train/value_loss"]) for log in logged if "train/value_loss" in log)
+
+
+def test_an_unknown_tier_stops_a_rank_weighted_run(tmp_path, monkeypatch) -> None:
+    """A dataset with an unranked lobby cannot be weighted by tier, and the run must say so rather
+    than price those frames as platinum."""
+    _isolate_run(tmp_path, monkeypatch)
+    root = _write_tiny_mds(tmp_path / "mds", ((Rank.MASTER, Rank.MASTER), (Rank.UNKNOWN, Rank.UNKNOWN)))
+
+    cfg = _mini_cfg(
+        data_root=str(root),
+        mds_schema_version=SCHEMA_VERSION,
+        awr_rank_weights=_RANK_ARM,
+        val_every=0,
+        max_steps=8,
+    )
+    with pytest.raises(ValueError, match="UNKNOWN ego rank"):
+        exp022.train(cfg, _stats(), comment="pytest")
