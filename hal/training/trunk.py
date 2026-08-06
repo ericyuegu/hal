@@ -1,11 +1,12 @@
 """The shared transformer trunk: rotary pre-norm blocks with causal attention.
 
-Experiments 016 to 021 each carry a byte-identical copy of this stack. Those files stay frozen,
-because ``hal.scripts.h2h`` rebuilds old checkpoints from them. New experiments import this module.
+Experiments 016, 019, 020 and 021 each carry a byte-identical copy of this stack, and 017 and 018
+carry a variant with the same parameter creation order. Those files stay frozen, because
+``hal.scripts.h2h`` rebuilds old checkpoints from them. New experiments import this module.
 
 The trunk adds sliding-window attention (SWA) to that stack. ``TrunkConfig.attn_window`` gives the
-number of frames a query can look back, and ``0`` keeps the full context. Two implementations make
-the same mask:
+number of frames a query can attend to, its own frame included, and ``0`` keeps the full context.
+Two implementations make the same mask:
 
 * The FlexAttention path builds a :class:`BlockMask` and runs a sparsity-aware kernel, so a window
   skips the masked blocks instead of computing and then discarding them.
@@ -153,8 +154,8 @@ def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMas
 @functools.cache
 def flex_is_usable(device_type: str) -> bool:
     """Whether FlexAttention compiles on this box. Triton, the driver and the GPU all take part, so
-    we run one small call and look, instead of reading the versions. The call includes a backward,
-    because the forward alone runs on CPU but the backward does not."""
+    the probe is one small call, not a version comparison. The call includes a backward, because the
+    forward alone runs on CPU but the backward does not."""
     try:
         q, k, v = (torch.zeros(1, 1, 128, 16, device=device_type, requires_grad=True) for _ in range(3))
         pad = torch.zeros(1, dtype=torch.long, device=device_type)

@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
+from hal.training.trunk import block_mask
 from hal.training.trunk import dense_mask
 from hal.training.trunk import flex_is_usable
 
@@ -118,11 +119,33 @@ def test_dense_mask_matches_double_loop(attn_window: int) -> None:
     assert mask.any(-1).all(), "every query row must keep at least one key"
 
 
+@pytest.mark.parametrize(
+    "L, attn_window, pads",
+    [
+        (256, 128, [127, 128, 129, 255]),  # each side of the 128-wide flex block boundary
+        (200, 128, [0, 127, 128, 200]),  # L is not a multiple of the flex block size
+        (48, 8, [0, 1, 47, 48]),  # L is smaller than one flex block
+        (64, 1, [0, 5, 63, 64]),  # window 1: the diagonal only
+        (64, 4096, [0, 3, 63, 64]),  # window larger than L
+    ],
+)
+def test_block_mask_matches_dense_mask(L: int, attn_window: int, pads: list[int]) -> None:
+    """The FlexAttention rule must equal the dense reference element by element. The mask builds on
+    any box, so this covers the edge cases that the CUDA-only kernel tests cannot reach."""
+    ctx_pad = torch.tensor(pads)
+    idx = torch.arange(L)
+    b, q, kv = torch.meshgrid(torch.arange(len(pads)), idx, idx, indexing="ij")
+    flex = block_mask(ctx_pad, L, attn_window).mask_mod(b, torch.zeros_like(b), q, kv)
+
+    assert torch.equal(flex[:, None], dense_mask(ctx_pad, L, attn_window))
+
+
 @requires_flex
-@pytest.mark.parametrize("attn_window", [0, 128])
+@pytest.mark.parametrize("attn_window", [0, 1, 8, 128])
 def test_flex_matches_dense(attn_window: int) -> None:
     """The FlexAttention kernel must reproduce the dense reference under mixed padding, including a
-    row with no padding and a row that is padding all through."""
+    row with no padding and a row that is padding all through. Windows below the 128-wide flex block
+    make most blocks empty, and window 1 leaves only the diagonal."""
     L = 256
     cfg = _cfg(L_ctx=L, attn_window=attn_window)
     flex = _trunk(cfg, prefer_flex=True, device="cuda")

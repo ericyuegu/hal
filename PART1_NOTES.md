@@ -23,7 +23,10 @@ self.trunk = Trunk(TrunkConfig(cfg.d_model, cfg.n_layers, cfg.n_heads, cfg.L_ctx
 
 The `Trunk` builds the mask itself, so `GPT.forward` becomes `self.trunk(self._context_tokens(f), ctx_pad)`
 and `GPT.forward_incremental` becomes `self.trunk.forward_incremental(x, past)` (drop 020's unused
-`position` argument; `max_cache` now lives on the trunk and is `attn_window or L_ctx`).
+`position` argument; `max_cache` now lives on the trunk and is `attn_window or L_ctx`). Two call-site
+details: the trunk returns `[B, L, d_model]`, so 022 keeps 020's `[:, -1]` at the caller; and 022 must
+keep 020's one-token guard (`020:863-864`), because the trunk's incremental attention has no causal
+mask inside the given chunk and is therefore only correct for `L == 1`.
 
 The attention path resolves at the first forward: FlexAttention when it compiles on the box, the
 dense SDPA mask when it does not. `Trunk.attn_path` reports which one, and the choice is logged.
