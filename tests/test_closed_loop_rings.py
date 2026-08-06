@@ -319,6 +319,61 @@ def test_ring_context_matches_the_window_builder_incrementally() -> None:
     _assert_identical(new, reference, min_replans=350)
 
 
+def test_encode_frame_takes_every_frame_while_a_chunk_executes() -> None:
+    """An incremental decoder's cache must not skip the frames between replans, or a chunked
+    execution horizon would decode from a state several frames stale. ``encode_frame`` runs every
+    frame for every live slot; the replan callback still runs every ``s``."""
+    s = 4
+    encoded: list[tuple[int, list[int], list[bool]]] = []
+    replanned: list[int] = []
+
+    def encode_frame(ctx):
+        assert ctx.slot_ids is not None and ctx.reset is not None
+        assert next(iter(ctx.features.values())).shape[1] == 1  # one frame, not a window
+        encoded.append((at, [int(v) for v in ctx.slot_ids], [bool(v) for v in ctx.reset]))
+
+    def predict_incremental(ctx, committed):
+        replanned.append(at)
+        assert ctx.reset is not None and not any(bool(v) for v in ctx.reset), "encode_frame consumes the reset"
+        return np.zeros((ctx.batch, s, A_DIM), dtype=np.float32)
+
+    slots = [Slot(0, EGO_PORT), Slot(0, OPP_PORT)]
+    policy = RecedingHorizon(
+        predict_chunk=predict_incremental,
+        predict_incremental=predict_incremental,
+        encode_frame=encode_frame,
+        stats=_stats(False, False),
+        L_ctx=L_CTX,
+        L_chunk=s,
+        s=s,
+        d=0,
+        device="cpu",
+    )
+    ids = _frame_ids(40, 30)
+    for at, fid in enumerate(ids):
+        policy(at, {sl: _obs(at, fid, v6=False, follower=False) for sl in slots})
+
+    assert [frame for frame, _, _ in encoded] == list(range(len(ids)))
+    assert all(len(slot_ids) == len(slots) for _, slot_ids, _ in encoded)
+    # Replans at the restart (frame 40) and every s frames from each fresh start.
+    assert replanned == sorted(set(range(0, 40, s)) | set(range(40, len(ids), s)))
+    assert [frame for frame, _, resets in encoded if any(resets)] == [0, 40]
+
+
+def test_encode_frame_without_an_incremental_decoder_is_refused() -> None:
+    with pytest.raises(ValueError, match="predict_incremental"):
+        RecedingHorizon(
+            predict_chunk=lambda ctx, committed: np.zeros((ctx.batch, 1, A_DIM), dtype=np.float32),
+            encode_frame=lambda ctx: None,
+            stats=_stats(False, False),
+            L_ctx=L_CTX,
+            L_chunk=1,
+            s=1,
+            d=0,
+            device="cpu",
+        )
+
+
 def test_context_pad_tracks_the_refilling_context() -> None:
     """``ctx_pad`` counts the not-yet-observed prefix, and an instant restart re-opens it."""
     pads: list[int] = []

@@ -81,6 +81,11 @@ from hal.training.features import derive_spatial
 # ``d == 0`` or at bootstrap).
 PredictChunk = Callable[[Context, np.ndarray | None], np.ndarray]
 
+# Feed ONE frame of every live slot to a model that keeps its own per-slot KV cache. Called every
+# frame, before any replan, so the cache never misses a frame while a chunk is being executed —
+# that is what lets an incremental decoder run with an execution horizon above 1.
+EncodeFrame = Callable[[Context], None]
+
 _PORT_TO_PREFIX: dict[int, Literal["p1", "p2"]] = {1: "p1", 2: "p2"}
 
 # A frame lands in two raw scratch rows, one per dtype. Which row a column takes is
@@ -540,6 +545,10 @@ class RecedingHorizon:
     refilling prefix). Its old pending chunk is discarded and it replans immediately;
     unrelated boots keep their current chunks.
 
+    With an incremental decoder the model, not this class, holds the history: ``encode_frame`` takes
+    every frame into its KV cache and ``predict_incremental`` reads the state that cache already
+    carries, so a chunk still costs one forward per frame but each forward is a single token.
+
     Construct fresh per eval wave (rolling state must not leak across waves).
     """
 
@@ -554,6 +563,13 @@ class RecedingHorizon:
     # passed to this callback; it owns a device-resident KV cache. Full-context behavior remains
     # the default for all existing policies.
     predict_incremental: PredictChunk | None = None
+    # Optional per-frame ingestion for that cache. Without it the cache only ever sees the frames a
+    # replan lands on, so the decoder is limited to s=1; with it every frame reaches the cache and
+    # the replan callback reads a state that is already up to date.
+    encode_frame: EncodeFrame | None = None
+    # dtype the packed float context arrives in. fp16 halves the launch-bound decode matmuls; the
+    # model's float parameters must be cast to match.
+    float_dtype: torch.dtype = torch.float32
     # The model's column routing beyond the built-in feature tables (schema v6 and later).
     # Must be the SAME object the train loader collates with, or the closed-loop token
     # would differ from the trained one.
@@ -565,10 +581,15 @@ class RecedingHorizon:
             raise ValueError(f"execution horizon s={self.s} must satisfy 0 < s <= L_chunk={self.L_chunk}")
         if not 0 <= self.d <= self.L_chunk - self.s:
             raise ValueError(f"inference delay d={self.d} must satisfy 0 <= d <= L_chunk - s={self.L_chunk - self.s}")
+        if self.encode_frame is not None and self.predict_incremental is None:
+            raise ValueError("encode_frame feeds an incremental decoder, so predict_incremental must be set too")
 
     def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]:
         live = list(obs)
         self._ingest(live, obs)
+        # Every frame reaches the KV cache, whether or not it is a replan boundary.
+        if self.encode_frame is not None:
+            self.encode_frame(self._context(live))
         # No neutral-hold warm-up: the policy acts from frame 0. The still-empty context
         # prefix is hidden from attention via ctx_pad (see _replan), so the model sees
         # only real frames and the context fills with REAL gameplay rather than frames
@@ -662,9 +683,13 @@ class RecedingHorizon:
             floats[layout.dpos_mask_row, :, 0] = 1.0
         return _Windows(layout=layout, floats=floats, cats=cats, emitted=floats[n_value:].any(axis=(1, 2)))
 
-    def _replan(self, live: list[Slot], committed: np.ndarray | None) -> None:
-        """One batched forward over every live slot. ``live`` order is fixed by
-        the caller and reused to scatter the per-slot chunks back."""
+    def _context(self, live: list[Slot]) -> Context:
+        """Stack ``live``'s newest context rows into one device-resident batch.
+
+        An incremental decoder keeps the history in its own KV cache, so its batch is the current
+        frame alone; everything else carries the whole ``L_ctx`` window. Building the batch consumes
+        each slot's reset flag: the model is told about a match boundary exactly once, on the first
+        context built after it."""
         incremental = self.predict_incremental is not None
         windows = self._stack_windows(live, 1 if incremental else self.L_ctx)
         layout = windows.layout
@@ -673,7 +698,7 @@ class RecedingHorizon:
         # device; the rings already hold the batch packed, so this copies contiguous
         # memory rather than gathering it.
         n_value = len(layout.value_names)
-        packed = torch.from_numpy(windows.floats).to(self.device)
+        packed = torch.from_numpy(windows.floats).to(self.device, self.float_dtype)
         feats: dict[str, torch.Tensor] = dict(zip(layout.value_names, packed[:n_value].unbind(0), strict=True))
         feats.update({layout.mask_names[k]: packed[n_value + k] for k in np.flatnonzero(windows.emitted)})
         if layout.cat_names:
@@ -692,9 +717,15 @@ class RecedingHorizon:
             slot_ids=torch.tensor([sl.match * 8 + sl.port for sl in live], dtype=torch.long, device=self.device),
             reset=torch.tensor([self._slots[sl].reset_pending for sl in live], dtype=torch.bool, device=self.device),
         )
-        plans = (self.predict_incremental or self.predict_chunk)(ctx, committed)
         for sl in live:
             self._slots[sl].reset_pending = False
+        return ctx
+
+    def _replan(self, live: list[Slot], committed: np.ndarray | None) -> None:
+        """One batched forward over every live slot. ``live`` order is fixed by
+        the caller and reused to scatter the per-slot chunks back."""
+        ctx = self._context(live)
+        plans = (self.predict_incremental or self.predict_chunk)(ctx, committed)
         expected = (len(live), self.L_chunk)
         if plans.ndim != 3 or plans.shape[:2] != expected:
             raise ValueError(
