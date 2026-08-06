@@ -67,6 +67,7 @@ SUMMARY_METRICS: Final[tuple[str, ...]] = (
     "dash_dances_per_min",
     "ledge_grabs_per_min",
     "idle_frac",
+    "shield_frac",
 )
 
 
