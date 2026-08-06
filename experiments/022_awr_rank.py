@@ -2,9 +2,10 @@
 
 020 showed the AWR machinery runs but the policy played too passively, and its reward knobs put
 87% of the weight mass on which segment of a match a window came from. This fork keeps 020's
-objective and changes three things: the trunk is the SHARED one (``hal.training.trunk``) with
-sliding-window attention, the sequence geometry is four times longer, and the reward knobs come
-from the reward explorer's tuned table (``notebooks/awr_explorer.py``).
+objective and changes four things: the trunk is the SHARED one (``hal.training.trunk``) with
+sliding-window attention, the sequence geometry is four times longer, the reward knobs come
+from the reward explorer's tuned table (``notebooks/awr_explorer.py``), and two new axes ride the
+same weighting — the demonstrator's ranked tier and an IQL expectile critic.
 
 The objective (unchanged from 020):
 
@@ -35,6 +36,13 @@ What changed against 020
   a window the step cost is nearly flat in ``L_ctx``, and a longer window turns more of each
   whole-replay disk read into training tokens.
 * Reward knobs. Dense damage shaping, a moderate beta and a low weight cap (see ``TrainConfig``).
+* Rank weighting. ``awr_rank_weights`` multiplies a window's weight by the EGO player's ranked tier
+  (schema v7's ``p{1,2}_rank``) before the mean-1 rescale, so ``(1, 2, 4)`` moves master frames from
+  31% to 57% of the gradient mass. It is a property of the weighting, not of the critic: with
+  ``awr_enabled=False`` it gives rank-weighted BC, with no value head in the loop at all.
+* An optional IQL critic. ``awr_critic="expectile"`` fits V by a TD expectile loss and takes the
+  residual as the advantage, instead of regressing on the Monte-Carlo return (which carries the
+  opponent's luck). Both critics log both sets of diagnostics, so the arms compare.
 * Two fixes: ``final.pt`` is saved BEFORE the closed-loop eval, and validation runs two trunk
   forwards per batch instead of five.
 * A leaner ``val/*`` block. A correlation study over ten comparable runs found the dropped metrics
@@ -47,6 +55,8 @@ Checkpoints. The trunk moved into a submodule, so the state-dict keys gained a `
 Run:
     uv run experiments/022_awr_rank.py
     uv run experiments/022_awr_rank.py --cfg.no-awr-enabled       # the BC control arm
+    uv run experiments/022_awr_rank.py --cfg.awr-rank-weights 1.0 2.0 4.0   # the rank arm (v7 data)
+    uv run experiments/022_awr_rank.py --cfg.awr-critic expectile --cfg.awr-expectile-tau 0.8
     uv run experiments/022_awr_rank.py --audit-returns --cfg.data-root data/processed/dev/mds
     uv run experiments/022_awr_rank.py --eval <ckpt> --eval-temp 0.7
 """
@@ -74,6 +84,7 @@ from dataclasses import field
 from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -94,6 +105,7 @@ from torch.utils.data import DataLoader
 import wandb
 from hal import streams
 from hal.data.feature_stats import FeatureStats
+from hal.data.schema import Rank
 from hal.data.schema import check_schema_version
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
@@ -153,13 +165,23 @@ A_VOCAB = sum(_GROUP_VOCABS)  # 355
 
 _BUTTON_COUNTS_VERSION = 1
 
-# Per-frame return columns. They are named like every other per-player MDS column so that
-# ``dataloader.relabel_ego`` renames them to ego/opp for free; ``EGO_RETURN_COLUMN`` is what the
-# collate reads. ``features._classify`` does not recognize the suffix, so they never reach the model
-# as an input feature — they are a TARGET for the value head.
+# Per-frame return and reward columns. They are named like every other per-player MDS column so that
+# ``dataloader.relabel_ego`` renames them to ego/opp for free; ``EGO_RETURN_COLUMN`` and
+# ``EGO_REWARD_COLUMN`` are what the collate reads. ``features._classify`` does not recognize either
+# suffix, so they never reach the model as an input feature — the return is a TARGET for the value
+# head and the reward is the TD critic's ``r``.
 _RETURN_SUFFIX = "awr_return"
+_REWARD_SUFFIX = "awr_reward"
 _PORT_RETURN_COLUMNS: tuple[str, ...] = tuple(f"{port}_{_RETURN_SUFFIX}" for port in ("p1", "p2"))
 EGO_RETURN_COLUMN = f"ego_{_RETURN_SUFFIX}"
+EGO_REWARD_COLUMN = f"ego_{_REWARD_SUFFIX}"
+# The ego's ranked tier, one uint8 per frame. v6 shards do not carry it; rank weighting is what
+# makes it mandatory (see ``validate_config`` and ``_ego_rank_weights``).
+EGO_RANK_COLUMN = "ego_rank"
+_RANK_TIERS: tuple[Rank, ...] = (Rank.PLATINUM, Rank.DIAMOND, Rank.MASTER)
+_RANK_WEIGHTS_OFF: tuple[float, float, float] = (1.0, 1.0, 1.0)
+# The materialization that first carries p{1,2}_rank; rank weighting refuses anything older.
+_RANK_MDS_VERSION = 7
 
 # Action-vector channels for the click=>trigger hygiene fix (digital L/R click => analog trigger = 1.0).
 _TRIGGER_L_CH = ACTION_CHANNELS.index("trigger_l")
@@ -205,6 +227,23 @@ class TrainConfig:
     # Extra reward on the MATCH-DECIDING stock event (the drop that empties a player's stock count),
     # in stock units, on top of the ordinary +-1. 0.5 makes closing a game out worth 1.5 stocks.
     awr_win_reward: float = 0.5
+    # Per-tier multiplier on the EGO player's frames, for (platinum, diamond, master). It scales the
+    # raw weight BEFORE the mean-1 rescale, and every batch mixes all three tiers, so the ratio
+    # survives the rescale exactly. (1, 1, 1) is off and needs no rank column at all; the rank arm
+    # passes (1, 2, 4), which moves master frames from 31% to 57% of the gradient mass — a deliberate
+    # data-mixture shift, not a tie-break. With any other setting an UNKNOWN tier raises, and the
+    # dataset must be v7 (the version that carries p{1,2}_rank).
+    awr_rank_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    # Which critic produces the advantage. "mc" regresses V on the Monte-Carlo return (020's).
+    # "expectile" is IQL's: V is fit by an expectile TD loss, so the target is a one-step bootstrap
+    # rather than a whole sampled future, and tau > 0.5 leans toward the good outcomes instead of
+    # averaging in the opponent's luck. The advantage is then the TD residual.
+    awr_critic: Literal["mc", "expectile"] = "mc"
+    # Expectile of the TD loss: |tau - 1[u < 0]| * u^2. 0.5 is plain MSE (a mean); 0.8 puts 4x the
+    # gradient on residuals above the current V, which approximates a max over the actions taken from
+    # that state. The mean shift it puts into the weights is removed exactly by the mean-1 rescale,
+    # so awr_beta does not need a retune.
+    awr_expectile_tau: float = 0.8
     # GPT backbone
     d_model: int = 256
     n_layers: int = 8
@@ -384,22 +423,28 @@ def _model_tag(cfg: TrainConfig) -> str:
 
 
 def _reward_tag(cfg: TrainConfig) -> str:
-    """The full weighting spec, for the run name: ``g99827-b0.8-w5-d0.01-win0.5-swa128``.
+    """The full weighting spec, for the run name: ``g99827-b0.8-w5-d0.01-win0.5-rank1-2-4-iql0.8-swa128``.
 
     ``main`` appends it to the comment, so a hand-typed comment can never disagree with the flags
     the run actually used. Gamma drops its ``0.`` (the digits are the identity); every other number
-    is printed as written. A knob appears only when it is on, so the rank weights and the expectile
-    critic will spell themselves out when they land, and no run name carries a placeholder."""
+    is printed as written. A knob appears only when it is on: a default run name carries no ``rank``
+    and no ``iql`` token, so two arms can never share a name."""
     window = f"swa{cfg.attn_window}" if cfg.attn_window else "swafull"
+    rank = (
+        "-rank" + "-".join(f"{w:g}" for w in cfg.awr_rank_weights) if rank_weighting_on(cfg.awr_rank_weights) else ""
+    )
     if not cfg.awr_enabled:
-        return f"bc-{window}"
+        # Rank weighting is a property of the objective's weighting, not of the critic, so a BC arm
+        # can carry it — and then has to say so.
+        return f"bc{rank}-{window}"
     gamma = f"{cfg.awr_gamma:g}".removeprefix("0.")
+    critic = f"-iql{cfg.awr_expectile_tau:g}" if cfg.awr_critic == "expectile" else ""
     # The value MSE also trains the trunk unless this is set, which is a second axis against the BC
     # arm, so the run name has to say which of the two arms it is.
     detach = "-vdetach" if cfg.awr_value_detach_trunk else ""
     return (
         f"g{gamma}-b{cfg.awr_beta:g}-w{cfg.awr_weight_max:g}"
-        f"-d{cfg.awr_damage_shaping:g}-win{cfg.awr_win_reward:g}{detach}-{window}"
+        f"-d{cfg.awr_damage_shaping:g}-win{cfg.awr_win_reward:g}{rank}{critic}{detach}-{window}"
     )
 
 
@@ -555,17 +600,22 @@ def discounted_returns(reward: np.ndarray, gamma: float) -> np.ndarray:
 def replay_returns(
     sample: dict[str, np.ndarray], *, gamma: float, damage_shaping: float, win_reward: float
 ) -> dict[str, np.ndarray]:
-    """Both ports' return columns for one replay row, keyed ``p{1,2}_awr_return``.
+    """Both ports' return AND reward columns for one replay row, keyed ``p{1,2}_awr_{return,reward}``.
 
     Named per port rather than per role because the sampler picks the ego port AFTER windowing:
-    ``dataloader.relabel_ego`` then renames the right one to ``ego_awr_return`` with no AWR-specific
-    code, exactly as it does for every gamestate column."""
-    return {
-        f"{port}_{_RETURN_SUFFIX}": discounted_returns(
-            frame_reward(sample, ego=port, opp=other, damage_shaping=damage_shaping, win_reward=win_reward), gamma
-        )
-        for port, other in (("p1", "p2"), ("p2", "p1"))
-    }
+    ``dataloader.relabel_ego`` then renames the right ones to ``ego_awr_*`` with no AWR-specific
+    code, exactly as it does for every gamestate column.
+
+    020 emitted the return alone. The TD critic needs the ``r`` the return was built from, and the
+    scan already has it, so both leave here as ordinary per-frame columns. They travel through the
+    same windowing and padding, which is what makes ``G_t = r_t + gamma * G_{t+1}`` hold position by
+    position on the collated arrays — the identity the expectile residual is defined against."""
+    out: dict[str, np.ndarray] = {}
+    for port, other in (("p1", "p2"), ("p2", "p1")):
+        reward = frame_reward(sample, ego=port, opp=other, damage_shaping=damage_shaping, win_reward=win_reward)
+        out[f"{port}_{_REWARD_SUFFIX}"] = reward.astype(np.float32)
+        out[f"{port}_{_RETURN_SUFFIX}"] = discounted_returns(reward, gamma)
+    return out
 
 
 class ReturnLabeledReplays:
@@ -600,40 +650,119 @@ class ReturnLabeledReplays:
 
 @dataclass(frozen=True, slots=True)
 class AWRBatch:
-    """One ``TrainBatch`` plus the ego's discounted return, aligned to the PREDICTED frame.
+    """One ``TrainBatch`` plus the ego's per-frame reward, discounted return and ranked tier.
 
-    ``TrainBatch`` is the shared, frozen train/eval contract, so the extra target composes with it
+    ``TrainBatch`` is the shared, frozen train/eval contract, so the extra targets compose with it
     instead of extending it. ``returns[b, t]`` is ``G_{t+1}`` — the return from the frame the
     offset-1 head at context position ``t`` predicts. The value head trains to the same target, so
     ``V(s_t)`` estimates the expected outcome of the action about to be chosen and the advantage
     ``G_{t+1} - V(s_t)`` never includes a reward that landed before that action could act. (With
-    sparse stock rewards the one-frame shift is cosmetic; with dense damage shaping it is real.)"""
+    sparse stock rewards the one-frame shift is cosmetic; with dense damage shaping it is real.)
+
+    ``rewards`` is shifted by the same one frame, so ``returns[t] = rewards[t] + gamma *
+    returns[t+1]`` holds exactly on these arrays — the identity the expectile TD residual rests on.
+    ``rank``/``rank_weight`` are per SAMPLE, not per frame: a window comes from one replay, so its
+    ego tier is one value (read from the window's LAST frame, which is never padding)."""
 
     batch: TrainBatch
-    returns: Tensor  # [B, L_ctx] float32
+    returns: Tensor  # [B, L_ctx] float32, G_{t+1}
+    rewards: Tensor  # [B, L_ctx] float32, r_{t+1}
+    rank: Tensor  # [B] uint8, the Rank of the ego player
+    rank_weight: Tensor  # [B] float32, that tier's multiplier (all ones when rank weighting is off)
 
     def to(self, device: str | torch.device) -> AWRBatch:
-        return AWRBatch(batch=self.batch.to(device), returns=self.returns.to(device, non_blocking=True))
+        return AWRBatch(
+            batch=self.batch.to(device),
+            returns=self.returns.to(device, non_blocking=True),
+            rewards=self.rewards.to(device, non_blocking=True),
+            rank=self.rank.to(device, non_blocking=True),
+            rank_weight=self.rank_weight.to(device, non_blocking=True),
+        )
 
     def pin_memory(self) -> AWRBatch:
-        return AWRBatch(batch=self.batch.pin_memory(), returns=self.returns.pin_memory())
+        return AWRBatch(
+            batch=self.batch.pin_memory(),
+            returns=self.returns.pin_memory(),
+            rewards=self.rewards.pin_memory(),
+            rank=self.rank.pin_memory(),
+            rank_weight=self.rank_weight.pin_memory(),
+        )
 
     def valid_returns(self, valid: Bool[Tensor, "B L_ctx"]) -> Float[Tensor, " n_valid"]:
         """``G_t`` flattened by the SAME validity mask the per-position NLLs use, so returns,
         value predictions, weights and NLLs are elementwise aligned."""
         return self.returns.reshape(-1)[valid.reshape(-1)]
 
+    def valid_rank_weights(self, valid: Bool[Tensor, "B L_ctx"]) -> Float[Tensor, " n_valid"]:
+        """The per-sample multiplier broadcast to that sample's scored positions."""
+        return self.rank_weight[:, None].expand_as(valid).reshape(-1)[valid.reshape(-1)]
 
-def collate_awr_batch(windows: list[dict], *, stats: dict[str, FeatureStats], L_ctx: int) -> AWRBatch:
+    def valid_ranks(self, valid: Bool[Tensor, "B L_ctx"]) -> Int[Tensor, " n_valid"]:
+        """The per-sample tier broadcast the same way, so a per-tier statistic over positions is
+        aligned with the weights it describes."""
+        return self.rank[:, None].expand_as(valid).reshape(-1)[valid.reshape(-1)]
+
+
+def rank_weighting_on(rank_weights: tuple[float, float, float]) -> bool:
+    """Whether the tier multipliers do anything. Off means 022 never reads the rank column, so the
+    experiment still trains on a v6 materialization that has none."""
+    return tuple(rank_weights) != _RANK_WEIGHTS_OFF
+
+
+def _ego_rank_weights(windows: list[dict], rank_weights: tuple[float, float, float]) -> tuple[np.ndarray, np.ndarray]:
+    """``(tier, multiplier)`` per window, read from the LAST frame of the ego rank column.
+
+    The FIRST frame can be zero-filled left padding, which reads as ``Rank.UNKNOWN``; the last frame
+    is always a real frame of the replay. With the multipliers off, a missing column (v6 data) and an
+    UNKNOWN tier are both fine and weigh 1. With them on, either one is a silent 4x error in the data
+    mixture, so both raise."""
+    weighting = rank_weighting_on(rank_weights)
+    if EGO_RANK_COLUMN not in windows[0]:
+        if weighting:
+            raise ValueError(
+                f"awr_rank_weights={rank_weights} needs the {EGO_RANK_COLUMN!r} column, which this "
+                "dataset does not carry; rank weighting requires a v7 materialization"
+            )
+        return np.zeros(len(windows), dtype=np.uint8), np.ones(len(windows), dtype=np.float32)
+    rank = np.array([window[EGO_RANK_COLUMN][-1] for window in windows], dtype=np.uint8)
+    if weighting and not rank.all():
+        row = int(np.flatnonzero(rank == Rank.UNKNOWN)[0])
+        frames = windows[row]["frame"]
+        raise ValueError(
+            f"window {row} of this batch (frames {int(frames[0])}..{int(frames[-1])}) has an UNKNOWN "
+            f"ego rank, and awr_rank_weights={rank_weights} would weight it as if it were platinum"
+        )
+    # Index 0 is UNKNOWN, which only survives with the multipliers off, where every tier weighs 1.
+    table = np.array((1.0, *rank_weights), dtype=np.float32)
+    return rank, table[rank]
+
+
+def collate_awr_batch(
+    windows: list[dict],
+    *,
+    stats: dict[str, FeatureStats],
+    L_ctx: int,
+    rank_weights: tuple[float, float, float] = _RANK_WEIGHTS_OFF,
+) -> AWRBatch:
     """Worker-side collate: hal's ``collate_train_batch`` builds the observation/action batch and the
-    ego return column is stacked beside it, sliced to the PREDICTED frames (``1 .. L_ctx``): position
-    ``t``'s return is ``G_{t+1}``, see :class:`AWRBatch`. The window always extends ``VAL_L_CHUNK``
-    target frames past the context, so the shifted slice never runs off the end. The return columns
-    stay in the window dicts hal collates: ``features._classify`` does not recognize the suffix, so
-    ``preprocess`` drops them and they can never reach the model as an input feature."""
-    returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, 1 : L_ctx + 1]
+    ego reward/return/rank columns are stacked beside it. The reward and return are sliced to the
+    PREDICTED frames (``1 .. L_ctx``): position ``t`` carries ``r_{t+1}`` and ``G_{t+1}``, see
+    :class:`AWRBatch`. The window always extends ``VAL_L_CHUNK`` target frames past the context, so
+    the shifted slice never runs off the end. All three stay in the window dicts hal collates:
+    ``features._classify`` does not recognize their names, so ``preprocess`` drops them and they can
+    never reach the model as an input feature."""
+    shifted = slice(1, L_ctx + 1)
+    returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, shifted]
+    rewards = np.stack([window[EGO_REWARD_COLUMN] for window in windows])[:, shifted]
+    rank, rank_weight = _ego_rank_weights(windows, rank_weights)
     batch = collate_train_batch(windows, stats=stats, L_ctx=L_ctx)
-    return AWRBatch(batch=batch, returns=torch.from_numpy(np.ascontiguousarray(returns)))
+    return AWRBatch(
+        batch=batch,
+        returns=torch.from_numpy(np.ascontiguousarray(returns)),
+        rewards=torch.from_numpy(np.ascontiguousarray(rewards)),
+        rank=torch.from_numpy(rank),
+        rank_weight=torch.from_numpy(rank_weight),
+    )
 
 
 def _attach_returns(loader: DataLoader, cfg: TrainConfig, stats: dict[str, FeatureStats]) -> DataLoader:
@@ -652,14 +781,20 @@ def _attach_returns(loader: DataLoader, cfg: TrainConfig, stats: dict[str, Featu
         damage_shaping=cfg.awr_damage_shaping,
         win_reward=cfg.awr_win_reward,
     )
-    loader.collate_fn = functools.partial(collate_awr_batch, stats=stats, L_ctx=cfg.L_ctx)
+    loader.collate_fn = functools.partial(
+        collate_awr_batch, stats=stats, L_ctx=cfg.L_ctx, rank_weights=cfg.awr_rank_weights
+    )
     return loader
 
 
 def awr_weights(
-    advantage: Float[Tensor, " n_valid"], *, beta: float, weight_max: float
+    advantage: Float[Tensor, " n_valid"] | None,
+    *,
+    beta: float,
+    weight_max: float,
+    rank_weight: Float[Tensor, " n_valid"] | None = None,
 ) -> tuple[Float[Tensor, " n_valid"], dict[str, float]]:
-    """``w = clip(exp(A / beta), w_max)``, rescaled so the batch mean is 1.
+    """``w = clip(exp(A / beta), w_max) * rank``, rescaled so the batch mean is 1.
 
     The mean-1 rescale is cosmetic for the objective — ``_weighted_mean`` divides by ``sum(w)``,
     so the loss is batch-relative (self-normalized) with or without it. The self-normalization is
@@ -668,16 +803,126 @@ def awr_weights(
     The weights are pure data — the advantage must arrive detached, so no gradient can flow into the
     value head through the policy loss. Reported alongside: the effective sample size fraction
     ``(sum w)^2 / (N * sum w^2)`` (1.0 = uniform weighting, small = a few frames own the batch) and
-    the fraction of positions sitting at the clip."""
-    if advantage.requires_grad:
-        raise ValueError("AWR weights must be built from a DETACHED advantage; the policy loss never trains V")
-    raw = torch.exp(advantage / beta).clamp(max=weight_max)
+    the fraction of positions sitting at the clip.
+
+    ``advantage=None`` is the pure rank path: the raw weight is 1 everywhere and only the tier
+    multiplier tilts it, so a rank-weighted BC arm needs no value head and no critic. The clip is on
+    the advantage term ALONE, before the multiplier — a master frame may reach ``4 * w_max`` — and
+    the clip fraction reports that term, not the product."""
+    if advantage is None:
+        if rank_weight is None:
+            raise ValueError("awr_weights needs an advantage, a rank weight, or both; it was given neither")
+        raw = torch.ones_like(rank_weight)
+        clipped = torch.zeros_like(rank_weight)
+    else:
+        if advantage.requires_grad:
+            raise ValueError("AWR weights must be built from a DETACHED advantage; the policy loss never trains V")
+        raw = torch.exp(advantage / beta).clamp(max=weight_max)
+        clipped = (raw >= weight_max).float()
+    if rank_weight is not None:
+        raw = raw * rank_weight
     weight = raw / raw.mean().clamp_min(torch.finfo(raw.dtype).tiny)
     n = weight.numel()
     if n == 0:
         return weight, {"ess": 0.0, "weight_max_frac": 0.0}
     ess = (weight.sum().pow(2) / (n * weight.pow(2).sum())).item()
-    return weight, {"ess": ess, "weight_max_frac": (raw >= weight_max).float().mean().item()}
+    return weight, {"ess": ess, "weight_max_frac": clipped.mean().item()}
+
+
+def rank_stats(rank: Int[Tensor, " n_valid"], weight: Float[Tensor, " n_valid"] | None) -> dict[str, float]:
+    """Per-tier share of the scored positions, and the mean objective weight each tier carries.
+
+    ``weight`` is the FINAL (rescaled) weight, so under rank-only weighting the three means are
+    exactly the configured ratio and under AWR + rank they drift from it by however much tier
+    correlates with advantage — that drift is the signal, not a defect. ``None`` is the unweighted
+    arm, where every tier reads 1. ``rank_unknown_frac`` must be 0 on a v7 dataset; it is 1 on v6,
+    which carries no tier at all.
+
+    Two reductions over the position vector and one host copy, so this can run every step."""
+    n = rank.numel()
+    idx = rank.long()
+    counts = torch.bincount(idx, minlength=len(Rank)).float()
+    per_position = counts.new_ones(n) if weight is None else weight.to(counts.dtype)
+    sums = counts.new_zeros(len(Rank)).scatter_add_(0, idx, per_position)
+    count, total = torch.stack([counts, sums]).tolist()  # one host copy
+    out = {"rank_unknown_frac": count[Rank.UNKNOWN] / n if n else 0.0}
+    for tier in _RANK_TIERS:
+        name = tier.name.lower()
+        out[f"rank_frac_{name}"] = count[tier] / n if n else 0.0
+        out[f"rank_weight_mean_{name}"] = total[tier] / count[tier] if count[tier] else 0.0
+    return out
+
+
+def expectile_td(
+    value_grid: Float[Tensor, "B L_ctx"],
+    rewards: Float[Tensor, "B L_ctx"],
+    valid: Bool[Tensor, "B L_ctx"],
+    *,
+    gamma: float,
+    tau: float,
+) -> tuple[Float[Tensor, "B L_ctx"], Bool[Tensor, "B L_ctx"], Tensor]:
+    """IQL's expectile TD residual ``u`` and its loss over one batch's value grid.
+
+    ``u_t = r_{t+1} + gamma * V(s_{t+1}).detach() - V(s_t)``, in the collate's indexing where
+    position ``t`` already carries the reward and return of the frame it predicts. The bootstrap is
+    detached, so the loss pulls ``V(s_t)`` toward the target and never drags the target down to meet
+    it. The loss is ``|tau - 1[u < 0]| * u^2``: at ``tau = 0.5`` exactly half the squared error, and
+    above it a residual above the current V weighs ``tau / (1 - tau)`` times one below — an
+    approximate max over the actions seen from that state, instead of the Monte-Carlo mean that
+    averages in the opponent's luck.
+
+    The last column has no successor state, so it is excluded from the loss and its residual is 0 —
+    which is the neutral weight after ``exp(0)``, for the one position in ``L_ctx`` the objective
+    still scores. ``valid`` is a prefix mask (``t >= ctx_pad``), so dropping its last column leaves
+    exactly the positions where both ``t`` and ``t + 1`` are real."""
+    target = rewards[:, :-1] + gamma * value_grid[:, 1:].detach()
+    residual = F.pad(target - value_grid[:, :-1], (0, 1))
+    td_valid = valid.clone()
+    td_valid[:, -1] = False
+    asymmetry = torch.where(residual < 0, 1.0 - tau, tau)
+    return residual, td_valid, (asymmetry * residual.pow(2))[td_valid].mean()
+
+
+@dataclass(frozen=True, slots=True)
+class CriticParts:
+    """What one batch's critic produced: the DETACHED advantage the weights are built from, the loss
+    that fits V, and the diagnostics of BOTH critics so the arms stay comparable in W&B."""
+
+    advantage: Float[Tensor, " n_valid"]
+    loss: Tensor
+    stats: dict[str, Tensor]
+
+
+def critic_parts(
+    value_grid: Float[Tensor, "B L_ctx"],
+    batch: AWRBatch,
+    valid: Bool[Tensor, "B L_ctx"],
+    *,
+    critic: str,
+    gamma: float,
+    tau: float,
+) -> CriticParts:
+    """Fit V and score the demonstrated frames, under the configured critic.
+
+    ``mc`` regresses V on the sampled return and takes ``G_{t+1} - V(s_t)`` as the advantage (020's).
+    ``expectile`` fits V by the expectile TD loss and takes the residual. Both report ``value_mse``,
+    ``td_residual_mean`` and ``td_expectile_loss``: the numbers are elementwise cheap next to the
+    backbone, and an arm's diagnostics are worth nothing if the other arm does not log them too."""
+    flat_valid = valid.reshape(-1)
+    value = value_grid.reshape(-1)[flat_valid]
+    returns = batch.valid_returns(valid)
+    value_mse = F.mse_loss(value, returns)
+    residual, td_valid, td_loss = expectile_td(value_grid, batch.rewards, valid, gamma=gamma, tau=tau)
+    stats = {
+        "value_mse": value_mse.detach(),
+        "td_residual_mean": residual[td_valid].mean().detach(),
+        "td_expectile_loss": td_loss.detach(),
+    }
+    if critic == "mc":
+        return CriticParts(advantage=(returns - value).detach(), loss=value_mse, stats=stats)
+    if critic == "expectile":
+        return CriticParts(advantage=residual.reshape(-1)[flat_valid].detach(), loss=td_loss, stats=stats)
+    raise ValueError(f"unknown awr_critic {critic!r}")
 
 
 class GPT(nn.Module):
@@ -837,14 +1082,21 @@ class LossParts:
     """One backbone forward's per-position pieces, all flattened by the SAME validity mask.
 
     ``nll`` and ``transition`` are keyed ``(offset, group_name)`` → ``[n_valid]`` (nats; bool);
-    ``value`` is ``V(s_t)`` at those same positions; ``valid`` is the ``[B, L_ctx]`` mask that
-    produced the flattening, so a caller can align any other per-position quantity (the AWR
-    returns) with them."""
+    ``valid`` is the ``[B, L_ctx]`` mask that produced the flattening, so a caller can align any
+    other per-position quantity (the AWR returns) with them.
+
+    ``value_grid`` keeps ``V`` in its ``[B, L_ctx]`` shape, because the TD critic reads ``V(s_{t+1})``
+    — the next COLUMN, which a flattened vector cannot name. ``value`` is that grid under the shared
+    mask, derived rather than stored so the two can never disagree."""
 
     nll: dict[tuple[int, str], Tensor]
     transition: dict[tuple[int, str], Tensor]
-    value: Float[Tensor, " n_valid"]
+    value_grid: Float[Tensor, "B L_ctx"]
     valid: Bool[Tensor, "B L_ctx"]
+
+    @property
+    def value(self) -> Float[Tensor, " n_valid"]:
+        return self.value_grid.reshape(-1)[self.valid.reshape(-1)]
 
 
 def action_loss(model: GPT, batch: TrainBatch, *, value_detach: bool = False) -> LossParts:
@@ -880,8 +1132,8 @@ def action_loss(model: GPT, batch: TrainBatch, *, value_detach: bool = False) ->
             nll[(o, name)] = gnll[name]
             trans[(o, name)] = bnd_o[..., g].reshape(-1)[flat_valid]
     value_in = h.detach() if value_detach else h
-    value = model.value_head(value_in).float().reshape(-1)[flat_valid]  # [n_valid] V(s_i)
-    return LossParts(nll=nll, transition=trans, value=value, valid=valid)
+    value_grid = model.value_head(value_in).float().squeeze(-1)  # [B, L_ctx] V(s_i)
+    return LossParts(nll=nll, transition=trans, value_grid=value_grid, valid=valid)
 
 
 def _btn_support_dead(model: GPT, min_count: int, device: torch.device) -> Tensor:
@@ -1187,6 +1439,22 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         value = getattr(cfg, name)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be finite and >= 0, got {value!r}")
+    if cfg.awr_critic not in ("mc", "expectile"):
+        raise ValueError(f"awr_critic must be 'mc' or 'expectile', got {cfg.awr_critic!r}")
+    if not math.isfinite(cfg.awr_expectile_tau) or not 0.0 < cfg.awr_expectile_tau < 1.0:
+        raise ValueError(f"awr_expectile_tau must be in (0, 1), got {cfg.awr_expectile_tau!r}")
+    weights = tuple(cfg.awr_rank_weights)
+    if len(weights) != len(_RANK_TIERS):
+        raise ValueError(f"awr_rank_weights needs one multiplier per tier {tuple(t.name for t in _RANK_TIERS)}")
+    if any(not math.isfinite(w) or w <= 0 for w in weights):
+        raise ValueError(f"awr_rank_weights must all be finite and > 0, got {weights}")
+    if rank_weighting_on(weights) and cfg.mds_schema_version < _RANK_MDS_VERSION:
+        # The tier column arrived with v7. Catch it here: the alternative is a run that dies on the
+        # first collated batch, minutes into a cloud boot, with the loader's own error.
+        raise ValueError(
+            f"awr_rank_weights={weights} needs a v{_RANK_MDS_VERSION} materialization "
+            f"(mds_schema_version={cfg.mds_schema_version} carries no rank column)"
+        )
     if not isinstance(cfg.warmup_steps, int) or isinstance(cfg.warmup_steps, bool) or cfg.warmup_steps < 0:
         raise ValueError(f"warmup_steps must be a non-negative integer, got {cfg.warmup_steps!r}")
     if cfg.warmup_steps > cfg.max_steps:
@@ -1530,6 +1798,9 @@ def _slice_batch(batch: AWRBatch, n: int) -> AWRBatch:
             target=inner.target[:n],
         ),
         returns=batch.returns[:n],
+        rewards=batch.rewards[:n],
+        rank=batch.rank[:n],
+        rank_weight=batch.rank_weight[:n],
     )
 
 
@@ -1728,6 +1999,9 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
     btn_true_change: list[Tensor] = []
     values: list[Tensor] = []
     returns: list[Tensor] = []
+    advantages: list[Tensor] = []
+    rank_weights: list[Tensor] = []
+    ranks: list[Tensor] = []
     counts_available = bool((model.button_combo_counts >= 0).all())
     rare_mask = model.button_combo_counts < cfg.diagnostic_rare_button_count
     unseen_mask = model.button_combo_counts == 0
@@ -1809,8 +2083,23 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
             acc.add(f"ablate_hist_dnll_{name}", d, n_valid)
             ablate_total += d
         acc.add("ablate_hist_dnll", ablate_total, n_valid)
-        values.append(model.value_head(h).float().reshape(-1)[flat_valid])
+        value_grid = model.value_head(h).float().squeeze(-1)
+        critic = critic_parts(
+            value_grid,
+            awr_batch,
+            valid,
+            critic=cfg.awr_critic,
+            gamma=cfg.awr_gamma,
+            tau=cfg.awr_expectile_tau,
+        )
+        acc.add("td_residual_mean", critic.stats["td_residual_mean"].item(), n_valid)
+        acc.add("td_expectile_loss", critic.stats["td_expectile_loss"].item(), n_valid)
+        values.append(value_grid.reshape(-1)[flat_valid])
         returns.append(awr_batch.valid_returns(valid))
+        # The advantage is a diagnostic here even for a BC arm: it says what the weighting WOULD do.
+        advantages.append(critic.advantage)
+        rank_weights.append(awr_batch.valid_rank_weights(valid))
+        ranks.append(awr_batch.valid_ranks(valid))
 
     out = acc.means()
     out["btn_counts_available"] = float(counts_available)
@@ -1822,7 +2111,13 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
     out["changeF1_buttons"] = scoring.change_event_prf(torch.cat(btn_pred_change), torch.cat(btn_true_change))[2]
     value = torch.cat(values)
     target = torch.cat(returns)
-    weight, stats = awr_weights(target - value, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max)
+    rank_on = rank_weighting_on(cfg.awr_rank_weights)
+    weight, stats = awr_weights(
+        torch.cat(advantages),
+        beta=cfg.awr_beta,
+        weight_max=cfg.awr_weight_max,
+        rank_weight=torch.cat(rank_weights) if rank_on else None,
+    )
     out.update(
         {
             "value_mse": F.mse_loss(value, target).item(),
@@ -1831,6 +2126,7 @@ def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -
             "return_std": target.std().item(),
             "awr_ess": stats["ess"],
             "awr_weight_max_frac": stats["weight_max_frac"],
+            **rank_stats(torch.cat(ranks), weight),
         }
     )
     return out, weight
@@ -2282,6 +2578,7 @@ def train(
 
     model.train()
     it = iter(train_loader)
+    rank_on = rank_weighting_on(cfg.awr_rank_weights)
     run_t0 = time.monotonic()
     for step in range(start_step, cfg.max_steps):
         with profile("step") as sw:
@@ -2289,6 +2586,7 @@ def train(
             comps_acc: dict[tuple[int, str], list[Tensor]] = {}
             obj_acc: Tensor | None = None
             awr_acc: dict[str, float] = {"value_loss": 0.0, "ess": 0.0, "weight_max_frac": 0.0}
+            rank_acc: dict[str, float] = {}
             for _ in range(cfg.grad_accum_steps):
                 try:
                     batch = next(it).to(DEVICE)
@@ -2298,15 +2596,32 @@ def train(
                 with autocast:
                     parts = action_loss(model, batch.batch, value_detach=cfg.awr_value_detach_trunk)
                     # AWR: score the demonstrated frames by their outcome. The advantage is detached, so
-                    # the policy loss never trains V; the value MSE reaches the shared trunk unless
-                    # awr_value_detach_trunk closes that path too.
+                    # the policy loss never trains V; the value loss reaches the shared trunk unless
+                    # awr_value_detach_trunk closes that path too. Rank weighting is a property of the
+                    # weighting and not of the critic, so it also runs on its own (weighted BC): then
+                    # there is no advantage, no value loss and no gradient into the value head at all.
+                    rank_weight = batch.valid_rank_weights(parts.valid) if rank_on else None
                     weight: Tensor | None = None
-                    value_loss = torch.zeros((), device=parts.value.device)
+                    value_loss = torch.zeros((), device=parts.value_grid.device)
                     if cfg.awr_enabled:
-                        returns = batch.valid_returns(parts.valid)
-                        value_loss = F.mse_loss(parts.value, returns)
+                        critic = critic_parts(
+                            parts.value_grid,
+                            batch,
+                            parts.valid,
+                            critic=cfg.awr_critic,
+                            gamma=cfg.awr_gamma,
+                            tau=cfg.awr_expectile_tau,
+                        )
+                        value_loss = critic.loss
                         weight, awr_stats = awr_weights(
-                            returns - parts.value.detach(), beta=cfg.awr_beta, weight_max=cfg.awr_weight_max
+                            critic.advantage,
+                            beta=cfg.awr_beta,
+                            weight_max=cfg.awr_weight_max,
+                            rank_weight=rank_weight,
+                        )
+                    elif rank_weight is not None:
+                        weight, awr_stats = awr_weights(
+                            None, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max, rank_weight=rank_weight
                         )
                     obj = objective(
                         parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight, weight
@@ -2315,10 +2630,15 @@ def train(
                     loss = total / cfg.grad_accum_steps
                 loss.backward()
                 obj_acc = obj.detach() if obj_acc is None else obj_acc + obj.detach()
-                if cfg.awr_enabled:
-                    awr_acc["value_loss"] += value_loss.item() / cfg.grad_accum_steps
+                if weight is None:
+                    awr_acc["ess"] += 1.0 / cfg.grad_accum_steps  # unweighted: every position counts once
+                else:
                     awr_acc["ess"] += awr_stats["ess"] / cfg.grad_accum_steps
                     awr_acc["weight_max_frac"] += awr_stats["weight_max_frac"] / cfg.grad_accum_steps
+                if cfg.awr_enabled:
+                    awr_acc["value_loss"] += value_loss.item() / cfg.grad_accum_steps
+                for key, value in rank_stats(batch.valid_ranks(parts.valid), weight).items():
+                    rank_acc[key] = rank_acc.get(key, 0.0) + value / cfg.grad_accum_steps
                 for k, v in parts.nll.items():
                     comps_acc.setdefault(k, []).append(v.detach())
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))  # measure only
@@ -2347,6 +2667,10 @@ def train(
             "train/value_loss": awr_acc["value_loss"],  # V's MSE to the return (native units, not bits)
             "train/awr_ess": awr_acc["ess"],  # 1.0 = uniform weights; small = a few frames own the batch
             "train/awr_weight_max_frac": awr_acc["weight_max_frac"],
+            # Tier mix and what each tier's frames are worth to the objective. Under rank-only
+            # weighting the three means are exactly the configured ratio; under AWR + rank they drift
+            # by however much tier correlates with advantage.
+            **{f"train/{key}": value for key, value in rank_acc.items()},
             "lr/muon": next(g["lr"] for g in opt.param_groups if g["use_muon"]),
             "lr/adam": next(g["lr"] for g in opt.param_groups if not g["use_muon"]),
             "train/gnorm": grad_norm.item(),
@@ -2603,11 +2927,10 @@ def return_audit(cfg: TrainConfig, *, split: str, betas: tuple[float, ...] = _AU
     for sample in mds:
         check_schema_version(sample, expected=cfg.mds_schema_version)
         # One row per (replay, port): the ego is drawn per window at train time, so both are real targets.
-        per_replay.extend(
-            replay_returns(
-                sample, gamma=cfg.awr_gamma, damage_shaping=cfg.awr_damage_shaping, win_reward=cfg.awr_win_reward
-            ).values()
+        columns = replay_returns(
+            sample, gamma=cfg.awr_gamma, damage_shaping=cfg.awr_damage_shaping, win_reward=cfg.awr_win_reward
         )
+        per_replay.extend(columns[name] for name in _PORT_RETURN_COLUMNS)
     if not per_replay:
         raise RuntimeError(f"no replays under {root}")
     returns = np.concatenate(per_replay)

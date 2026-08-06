@@ -12,11 +12,18 @@ fork changed.
    an effective batch that does not divide into micro-batches.
 5. ``final.pt`` is written before the closed-loop eval, and ``final_eval_n_matchups=0`` skips that
    eval altogether.
+6. Rank weighting: the tier is read from the window's last frame, it follows the ego coin flip, an
+   UNKNOWN tier raises only when the multipliers are on, the 1:2:4 ratio survives the mean-1 rescale
+   exactly, and the tier never reaches the model as a feature.
+7. The IQL expectile critic: tau=0.5 is half the MSE, a true-return V leaves no residual at any tau,
+   tau=0.9 puts 9x the gradient on a positive residual, the bootstrap is detached, and the last
+   position (no successor state) is out of the loss.
 """
 
 import copy
 import importlib.util
 import inspect
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +31,7 @@ import pytest
 import torch
 
 from hal.data.feature_stats import FeatureStats
+from hal.data.schema import Rank
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import CAT_FEATURES
@@ -103,6 +111,30 @@ def _batch(L_ctx: int, max_offset: int, batch: int = 4, seed: int = 0) -> tuple[
     return TrainBatch(context=ctx, target=target), torch.randn(batch, L_ctx, generator=gen)
 
 
+def _rewards_from_returns(returns: torch.Tensor, gamma: float) -> torch.Tensor:
+    """The reward column these returns came from: ``r_t = G_t - gamma * G_{t+1}``, the exact inverse
+    of the discounted scan. A synthetic batch built this way satisfies the collate's identity
+    ``returns[t] = rewards[t] + gamma * returns[t+1]``, which is what the TD critic is defined
+    against. The last column has no successor, so its reward is its return (an episode end)."""
+    rewards = returns.clone()
+    rewards[:, :-1] -= gamma * returns[:, 1:]
+    return rewards
+
+
+def _awr_batch(cfg, seed: int = 0, batch: int = 4, ranks: Sequence[int] | None = None) -> exp022.AWRBatch:
+    """A synthetic 022 batch: 020's inner batch plus a coherent reward/return pair and a tier."""
+    inner, returns = _batch(cfg.L_ctx, max(cfg.head_offsets), batch=batch, seed=seed)
+    rank = torch.tensor([int(Rank.PLATINUM)] * batch if ranks is None else list(ranks), dtype=torch.uint8)
+    table = torch.tensor((1.0, *cfg.awr_rank_weights), dtype=torch.float32)
+    return exp022.AWRBatch(
+        batch=inner,
+        returns=returns,
+        rewards=_rewards_from_returns(returns, cfg.awr_gamma),
+        rank=rank,
+        rank_weight=table[rank.long()],
+    )
+
+
 def _paired_models(seed: int = 7):
     """The same weights in both modules: 020's inline trunk and 022's shared trunk at window 0."""
     cfg020 = exp020.TrainConfig(batch_size=4, **_PAIRED, **_PAIRED_AWR)
@@ -175,23 +207,39 @@ _AWR_MACHINERY = (
     "match_point_events",
     "damage_taken",
     "frame_reward",
-    "replay_returns",
-    "collate_awr_batch",
-    "_attach_returns",
-    "awr_weights",
-    "action_loss",
     "group_nll",
     "_multi_offset_targets",
     "_offset_objective",
     "_offset_total_bits",
 )
 
+# What the rank and IQL work deliberately took OUT of the pin above, and why. Each entry names a
+# behavior change the tests below pin directly; the assertion here only stops one from being
+# reverted to 020's text by accident, which would silently drop the feature the reason names.
+_UNPINNED_FROM_020 = {
+    "replay_returns": "emits the per-frame reward beside the return, so the TD critic has its r",
+    "collate_awr_batch": "stacks the reward and the ego tier, and takes the rank multipliers",
+    "_attach_returns": "passes cfg.awr_rank_weights down to that collate",
+    "awr_weights": "takes a rank multiplier, and an advantage of None for the rank-only BC path",
+    "action_loss": "keeps V as a [B, L_ctx] grid, because the TD target reads the NEXT column",
+}
+
 
 @pytest.mark.parametrize("name", _AWR_MACHINERY)
 def test_the_awr_machinery_is_020s_line_for_line(name: str) -> None:
-    """022 changed the trunk, the geometry, the rewards and the val block. The machinery that turns
-    a reward into a per-frame weight is 020's, so an edit to it is a defect until this test says so."""
+    """022 changed the trunk, the geometry, the rewards, the val block, the rank weighting and the
+    critic. The reward-to-return chain under all of that is still 020's, so an edit to it is a
+    defect until this test says so."""
     assert inspect.getsource(getattr(exp022, name)) == inspect.getsource(getattr(exp020, name))
+
+
+@pytest.mark.parametrize("name", sorted(_UNPINNED_FROM_020))
+def test_the_unpinned_functions_are_the_ones_rank_and_iql_needed(name: str) -> None:
+    """The other half of the pin: these five diverge from 020 on purpose (``_UNPINNED_FROM_020`` says
+    what each one gained). If one ever matches 020's source again, the feature went missing."""
+    assert inspect.getsource(getattr(exp022, name)) != inspect.getsource(getattr(exp020, name)), (
+        f"{name} is 020's again, so it lost: {_UNPINNED_FROM_020[name]}"
+    )
 
 
 @pytest.mark.parametrize("gamma", [0.0, 0.5, 0.9, 0.99827, 1.0])
@@ -483,11 +531,18 @@ def test_020_checkpoints_are_refused() -> None:
 
 
 def _val_cache(cfg022, n_batches: int = 2):
-    inner = [_batch(cfg022.L_ctx, max(cfg022.head_offsets), seed=seed) for seed in range(n_batches)]
-    batches = [b for b, _ in inner]
-    cache020 = [exp020.AWRBatch(batch=b, returns=r) for b, r in inner]
-    cache022 = [exp022.AWRBatch(batch=b, returns=r) for b, r in inner]
+    cache022 = [_awr_batch(cfg022, seed=seed) for seed in range(n_batches)]
+    batches = [b.batch for b in cache022]
+    cache020 = [exp020.AWRBatch(batch=b.batch, returns=b.returns) for b in cache022]
     return batches, cache020, cache022
+
+
+# The val numbers 022 reports that 020 has no counterpart for: the TD critic's diagnostics (logged by
+# both critics, so the arms compare) and the tier block.
+_NEW_VAL_METRICS = frozenset(
+    {"td_residual_mean", "td_expectile_loss", "rank_unknown_frac"}
+    | {f"rank_{stat}_{tier.name.lower()}" for stat in ("frac", "weight_mean") for tier in exp022._RANK_TIERS}
+)
 
 
 @pytest.mark.parametrize(
@@ -510,8 +565,11 @@ def test_val_metrics_reproduce_020_numbers(n_batches: int, tolerance: float) -> 
     want_awr, want_weights = exp020.awr_val_metrics(model020, cache020, cfg020)
     got, got_weights = exp022.val_metrics(model022, cache022, cfg022)
 
-    assert set(got) <= set(want) | set(want_awr)
+    assert set(got) - _NEW_VAL_METRICS <= set(want) | set(want_awr)
+    assert set(got) >= _NEW_VAL_METRICS
     for key, value in got.items():
+        if key in _NEW_VAL_METRICS:
+            continue
         expected = want_awr[key] if key in want_awr else want[key]
         if tolerance == 0.0:
             assert value == expected, key
