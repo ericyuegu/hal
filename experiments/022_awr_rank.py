@@ -310,17 +310,17 @@ class TrainConfig:
     exec_horizon: int = 1
     # Reproducible training RNG and transformer context geometry.
     seed: int = 0
-    # 8x 020's context. Under a 128-frame window the measured step time rises 2% from L_ctx 256 to
-    # 2048 at a fixed token count per step, and a longer window turns more of each whole-replay
-    # disk read into training tokens (K=2 windows x 2061 frames = ~40% of a median replay).
-    L_ctx: int = 2048
+    # 2x 020's context under a 128-frame window. Longer L is near-free in step time but costs
+    # batch diversity at a fixed token budget; L_ctx 512 keeps 128 distinct replays per step
+    # (K=2), the same pool 020's weight normalization saw.
+    L_ctx: int = 512
     # THE EFFECTIVE batch (020's field was the micro-batch). One optimizer step sees batch_size
     # samples, fed as grad_accum_steps micro-batches of batch_size / grad_accum_steps; the two must
     # divide. The default is ONE forward per step: no accumulation, so the AWR mean-1 weight
     # rescale sees the whole step's samples (accumulation biases the rank-weighted tier mixture,
-    # measured -0.4% at accum 2). 64 x 2048 = 131,072 tokens per step, matching 020's 512 x 256;
-    # ~11.8 GiB peak, so it needs a 16 GiB card (the 3060 needs batch 32 or L_ctx 1024).
-    batch_size: int = 64
+    # measured -0.4% at accum 2). 256 x 512 = 131,072 tokens per step, matching 020's 512 x 256;
+    # ~11.8 GiB peak in one forward, so it needs a 16 GiB card (the 3060 halves batch_size).
+    batch_size: int = 256
     grad_accum_steps: int = 1
     # Two LRs: Muon for the blocks' hidden matrices, AdamW for the input proj / head / embeddings / biases.
     muon_lr: float = 0.02
@@ -347,7 +347,7 @@ class TrainConfig:
     # 128 batches x 64 windows = 8,192 val replays (val draws one window per replay), the sample
     # size 020 validated on. A narrower val set widens the confidence interval on val NLL, and these
     # metrics are kill switches: a noisy one either fires late or fires for nothing.
-    val_n_batches: int = 128
+    val_n_batches: int = 32
     # Exact per-head shared-trunk gradient Gram matrix on this many examples from the first frozen val
     # batch, computed only at validation cadence. Keeps the diagnostic observational and bounded-cost.
     # It retains one backward graph per head, so its cost follows examples x L_ctx: 16 windows of
