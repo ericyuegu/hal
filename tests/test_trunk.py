@@ -33,6 +33,17 @@ requires_flex = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def exact_fp32_matmuls():
+    """Compare the paths at full fp32. Another test in the session can turn on TF32 matmuls for the
+    whole process (the experiment train loops do), and TF32 keeps only 10 mantissa bits, so the two
+    kernels then differ by about 6e-4 for reasons that have nothing to do with the mask."""
+    before = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    yield
+    torch.set_float32_matmul_precision(before)
+
+
 def _load_experiment(filename: str):
     spec = importlib.util.spec_from_file_location(filename.split(".")[0], _EXP_DIR / filename)
     mod = importlib.util.module_from_spec(spec)
