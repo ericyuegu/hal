@@ -42,7 +42,9 @@ What changed against 020
   ``awr_enabled=False`` it gives rank-weighted BC, with no value head in the loop at all.
 * An optional IQL critic. ``awr_critic="expectile"`` fits V by a TD expectile loss and takes the
   residual as the advantage, instead of regressing on the Monte-Carlo return (which carries the
-  opponent's luck). Both critics log both sets of diagnostics, so the arms compare.
+  opponent's luck). Both critics log both sets of diagnostics, so the arms compare. A one-step
+  residual is ``sqrt(1 - gamma^2)`` times the size of the Monte-Carlo advantage, so this arm needs
+  its own ``awr_beta`` (see ``awr_expectile_tau``) or its weights come out uniform.
 * Two fixes: ``final.pt`` is saved BEFORE the closed-loop eval, and validation runs two trunk
   forwards per batch instead of five.
 * A leaner ``val/*`` block. A correlation study over ten comparable runs found the dropped metrics
@@ -55,8 +57,11 @@ Checkpoints. The trunk moved into a submodule, so the state-dict keys gained a `
 Run:
     uv run experiments/022_awr_rank.py
     uv run experiments/022_awr_rank.py --cfg.no-awr-enabled       # the BC control arm
-    uv run experiments/022_awr_rank.py --cfg.awr-rank-weights 1.0 2.0 4.0   # the rank arm (v7 data)
-    uv run experiments/022_awr_rank.py --cfg.awr-critic expectile --cfg.awr-expectile-tau 0.8
+    # The rank arm. The tier column arrived with v7, so it needs BOTH v7 flags; validate_config says so.
+    uv run experiments/022_awr_rank.py --cfg.awr-rank-weights 1.0 2.0 4.0 \
+        --cfg.data-root data/processed/ranked-anonymized-1/mds-v7 --cfg.mds-schema-version 7
+    # The IQL arm. Its advantage is ~17x smaller than the MC one, so beta scales with it.
+    uv run experiments/022_awr_rank.py --cfg.awr-critic expectile --cfg.awr-expectile-tau 0.8 --cfg.awr-beta 0.05
     uv run experiments/022_awr_rank.py --audit-returns --cfg.data-root data/processed/dev/mds
     uv run experiments/022_awr_rank.py --eval <ckpt> --eval-temp 0.7
 """
@@ -241,8 +246,12 @@ class TrainConfig:
     awr_critic: Literal["mc", "expectile"] = "mc"
     # Expectile of the TD loss: |tau - 1[u < 0]| * u^2. 0.5 is plain MSE (a mean); 0.8 puts 4x the
     # gradient on residuals above the current V, which approximates a max over the actions taken from
-    # that state. The mean shift it puts into the weights is removed exactly by the mean-1 rescale,
-    # so awr_beta does not need a retune.
+    # that state. The mean shift tau puts into the weights is removed exactly by the mean-1 rescale.
+    # The SCALE is a different matter and awr_beta DOES need a retune for this critic: the MC
+    # advantage is the sum of the future one-step residuals, which are martingale differences, so
+    # sigma(u) = sigma(A) * sqrt(1 - gamma^2) — a factor 17 at gamma=0.99827, set by gamma alone.
+    # At awr_beta=0.8 the expectile weights come out near-uniform (ESS ~0.99) and the arm is BC with
+    # a value head. Match 020's audited dose with awr_beta ~ 0.8 * sqrt(1 - gamma^2) ~ 0.05.
     awr_expectile_tau: float = 0.8
     # GPT backbone
     d_model: int = 256
@@ -2674,7 +2683,9 @@ def train(
             **{f"train/nll_{name}": primary[name] for name in _GROUP_NAMES},
             "train/aux_loss": aux_loss,  # mean total bits/frame over the auxiliary (offset != 1) heads
             "train/objective": objective_bits,  # the weighted policy objective actually backpropagated, bits
-            "train/value_loss": awr_acc["value_loss"],  # V's MSE to the return (native units, not bits)
+            # The configured critic's loss in native units, not bits: V's MSE to the return under
+            # "mc", the expectile TD loss under "expectile". Comparable only within a critic.
+            "train/value_loss": awr_acc["value_loss"],
             "train/awr_ess": awr_acc["ess"],  # 1.0 = uniform weights; small = a few frames own the batch
             "train/awr_weight_max_frac": awr_acc["weight_max_frac"],
             # Tier mix and what each tier's frames are worth to the objective, pooled over the step's
@@ -2694,10 +2705,12 @@ def train(
             print(f"[model] attention path: {model.trunk.attn_path}, window={cfg.attn_window}", flush=True)
         if step < 20 or step % 50 == 0:
             # ESS rides the console line: a weight distribution collapsing onto a few frames is the
-            # failure mode of this experiment, and it must be visible in train.log without W&B.
-            awr_note = (
-                f" ess {awr_acc['ess']:.3f} v_mse {awr_acc['value_loss']:.4f}" if cfg.awr_enabled else " (awr off)"
-            )
+            # failure mode of this experiment, and it must be visible in train.log without W&B. It
+            # is 1.0 on an unweighted arm and a real number on a rank-weighted BC arm, so it prints
+            # either way; ``v_loss`` is the configured critic's loss, MSE or expectile.
+            awr_note = f" ess {awr_acc['ess']:.3f}"
+            if cfg.awr_enabled:
+                awr_note += f" v_loss {awr_acc['value_loss']:.4f}"
             print(
                 f"[t+{time.monotonic() - run_t0:.0f}s] step {step}: loss {primary['total']:.4f}{awr_note} "
                 f"step_dt={sw.elapsed * 1000:.0f}ms ({sps:.1f} samples/s)",
