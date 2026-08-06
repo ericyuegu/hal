@@ -4,9 +4,10 @@ fork changed.
 
 1. Nothing moved that should not. With the window off, the BC arm's objective is 020's plain mean
    NLL on the same batch, and the trunk swap draws the same weights under the same seed.
-2. The defaults are the tuned recipe: the reward table Eric read off the explorer, plus the
-   SWA-128 long-context geometry.
-3. Validation costs two trunk forwards, not five, and every surviving number is bitwise 020's.
+2. The defaults are the tuned recipe: the reward explorer's table, plus the SWA-128 long-context
+   geometry.
+3. Validation costs two trunk forwards per batch, not five, holds no per-frame tensor across
+   batches, and still reports 020's numbers.
 4. The new config states are checked: a negative window, incremental decode at full attention, and
    an effective batch that does not divide into micro-batches.
 5. ``final.pt`` is written before the closed-loop eval, and ``final_eval_n_matchups=0`` skips that
@@ -89,9 +90,13 @@ def _features(batch: int, length: int, gen: torch.Generator) -> dict[str, torch.
 
 
 def _batch(L_ctx: int, max_offset: int, batch: int = 4, seed: int = 0) -> tuple[TrainBatch, torch.Tensor]:
-    """One ``TrainBatch`` plus the ego return column, ready to wrap in either module's ``AWRBatch``."""
+    """One ``TrainBatch`` plus the ego return column, ready to wrap in either module's ``AWRBatch``.
+
+    The padding depends on the seed, so a val cache of several batches scores a different number of
+    positions in each. A pooled mean that forgot to weight by those counts then reads wrong."""
     gen = torch.Generator().manual_seed(seed)
-    ctx = Context(features=_features(batch, L_ctx, gen), ctx_pad=torch.tensor([0, 1] * (batch // 2)))
+    pad = torch.tensor([0, 1 + 64 * seed] * (batch // 2))
+    ctx = Context(features=_features(batch, L_ctx, gen), ctx_pad=pad)
     target = torch.rand(batch, max_offset, A_DIM, generator=gen) * 2 - 1
     return TrainBatch(context=ctx, target=target), torch.randn(batch, L_ctx, generator=gen)
 
@@ -111,7 +116,7 @@ def _paired_models(seed: int = 7):
 
 
 def test_reward_defaults_are_the_tuned_table() -> None:
-    """The values Eric read off the reward explorer; the audit puts ESS ~0.70 and ~0% on the clip."""
+    """The reward explorer's tuned table; the audit puts ESS ~0.70 and ~0% on the clip."""
     cfg = exp022.TrainConfig()
     assert cfg.awr_enabled is True
     assert cfg.awr_gamma == 0.99827
@@ -129,7 +134,8 @@ def test_geometry_defaults_are_the_swa_long_context_base() -> None:
     assert cfg.batch_size * cfg.L_ctx == 131072
     assert cfg.attn_window == 128
     assert cfg.require_flex is False
-    assert cfg.windows_per_replay == 4
+    assert cfg.windows_per_replay == 2  # 32 distinct replays per micro-batch for the AWR rescale
+    assert cfg.val_n_batches == 128  # x 64 windows = 020's 8,192-replay val set
     assert (cfg.data_root, cfg.mds_schema_version) == ("data/processed/ranked-anonymized-1/mds-v6", 6)
 
 
@@ -139,10 +145,13 @@ def test_the_loader_gets_the_micro_batch() -> None:
 
 
 def test_reward_tag_follows_the_flags() -> None:
-    assert exp022._reward_tag(exp022.TrainConfig()) == "g99827-b0.8-w5-d0.01-win0.5-rank111-mc-swa128"
+    """Every knob that changes the objective must be readable in the run name, and a knob that is
+    off must leave no token behind."""
+    assert exp022._reward_tag(exp022.TrainConfig()) == "g99827-b0.8-w5-d0.01-win0.5-swa128"
     assert exp022._reward_tag(exp022.TrainConfig(awr_enabled=False)) == "bc-swa128"
     assert exp022._reward_tag(exp022.TrainConfig(attn_window=0)).endswith("-swafull")
     assert "b0.3" in exp022._reward_tag(exp022.TrainConfig(awr_beta=0.3))
+    assert exp022._reward_tag(exp022.TrainConfig(awr_value_detach_trunk=True)).endswith("-vdetach-swa128")
 
 
 # --- only the trunk and the objective's weights moved ------------------------
@@ -238,32 +247,61 @@ def _val_cache(cfg022, n_batches: int = 2):
     return batches, cache020, cache022
 
 
-def test_shared_hidden_states_reproduce_020_val_numbers_bitwise() -> None:
-    """020 runs the trunk five times per val batch; 022 runs it twice and passes the states down.
-    Every metric 022 still logs must come out with exactly the same bits."""
+@pytest.mark.parametrize(
+    ("n_batches", "tolerance"),
+    [(1, 0.0), (3, 1e-5)],
+    ids=["one-batch-bitwise", "three-batches-pooled"],
+)
+def test_val_metrics_reproduce_020_numbers(n_batches: int, tolerance: float) -> None:
+    """020 runs the trunk five times per val batch and concatenates a per-frame tensor for every
+    metric; 022 runs it twice and folds each batch into a count-weighted mean, so a 128-batch pass
+    holds no per-frame state. On one batch that is the same arithmetic, bit for bit. Several batches
+    pool the same positions in a different order. A float32 sum over 65k of them carries about 1e-7
+    of relative slack, and the ablation metrics subtract two nearly equal means, which turns that
+    into ~1e-6 absolute — hence the tolerance. The batches pad by 1, 65 and 129 frames, so a fold
+    that ignored the counts would land far outside it."""
     (cfg020, model020), (cfg022, model022) = _paired_models()
-    batches, cache020, cache022 = _val_cache(cfg022)
+    batches, cache020, cache022 = _val_cache(cfg022, n_batches)
 
     want = exp020.val_metrics(model020, batches, cfg020)
     want_awr, want_weights = exp020.awr_val_metrics(model020, cache020, cfg020)
+    got, got_weights = exp022.val_metrics(model022, cache022, cfg022)
 
-    hidden = exp022.val_hidden(model022, batches)
-    got = exp022.val_metrics(model022, batches, cfg022, hidden)
-    got_awr, got_weights = exp022.awr_val_metrics(model022, cache022, cfg022, hidden)
-
-    assert set(got) <= set(want)
+    assert set(got) <= set(want) | set(want_awr)
     for key, value in got.items():
-        assert value == want[key], key
-    assert got_awr == want_awr
+        expected = want_awr[key] if key in want_awr else want[key]
+        if tolerance == 0.0:
+            assert value == expected, key
+        else:
+            assert value == pytest.approx(expected, rel=tolerance, abs=tolerance), key
+    # The weights are a property of the pooled val set (the mean-1 rescale), so they stay exact.
     torch.testing.assert_close(got_weights, want_weights, rtol=0, atol=0)
+
+
+def test_val_metrics_hold_no_per_frame_state_across_batches() -> None:
+    """The reason for the restructure: at 128 batches of 64 x 1024 frames, one retained per-frame
+    tensor per metric is gigabytes of VRAM. Only the change masks and the weight inputs survive a
+    batch, so ten batches must cost about as much retained memory as one."""
+    (_, model022) = _paired_models()[1]
+    cfg022 = exp022.TrainConfig(batch_size=4, grad_accum_steps=1, attn_window=0, **_PAIRED, **_PAIRED_AWR)
+
+    accumulator = exp022._MeanAccumulator()
+    accumulator.add("mean", 2.0, 3)
+    accumulator.add("mean", 6.0, 1)
+    accumulator.add("empty", 0.0, 0)
+    assert accumulator.means() == {"mean": 3.0, "empty": 0.0}
+
+    cache = _val_cache(cfg022, 3)[2]
+    _, weights = exp022.val_metrics(model022, cache, cfg022)
+    scored = sum(int((cfg022.L_ctx - b.batch.context.ctx_pad).sum()) for b in cache)
+    assert weights.numel() == scored  # one weight per scored position, over every batch
 
 
 def test_val_block_drops_the_uninformative_metrics() -> None:
     """The correlation study found these either uninformative or inverted against closed-loop play."""
     (_, model022) = _paired_models()[1]
     cfg022 = exp022.TrainConfig(batch_size=4, grad_accum_steps=1, attn_window=0, **_PAIRED, **_PAIRED_AWR)
-    batches, _, _ = _val_cache(cfg022)
-    metrics = exp022.val_metrics(model022, batches, cfg022, exp022.val_hidden(model022, batches))
+    metrics, _ = exp022.val_metrics(model022, _val_cache(cfg022)[2], cfg022)
 
     assert not [k for k in metrics if k.startswith(("recon_", "pred_persistence_", "pred_flipback_", "trans_rate_"))]
     assert "btn_multipress" not in metrics

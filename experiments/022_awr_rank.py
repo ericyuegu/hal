@@ -3,8 +3,8 @@
 020 showed the AWR machinery runs but the policy played too passively, and its reward knobs put
 87% of the weight mass on which segment of a match a window came from. This fork keeps 020's
 objective and changes three things: the trunk is the SHARED one (``hal.training.trunk``) with
-sliding-window attention, the sequence geometry is four times longer, and the reward knobs are the
-ones Eric tuned in the reward explorer.
+sliding-window attention, the sequence geometry is four times longer, and the reward knobs come
+from the reward explorer's tuned table (``notebooks/awr_explorer.py``).
 
 The objective (unchanged from 020):
 
@@ -280,7 +280,10 @@ class TrainConfig:
     allow_tf32: bool = True
     # eval cadence
     val_every: int = 1024
-    val_n_batches: int = 16
+    # 128 batches x 64 windows = 8,192 val replays (val draws one window per replay), the sample
+    # size 020 validated on. A narrower val set widens the confidence interval on val NLL, and these
+    # metrics are kill switches: a noisy one either fires late or fires for nothing.
+    val_n_batches: int = 128
     # Exact per-head shared-trunk gradient Gram matrix on this many examples from the first frozen val
     # batch, computed only at validation cadence. Keeps the diagnostic observational and bounded-cost.
     gradient_diagnostic_batch_size: int = 64
@@ -337,12 +340,14 @@ class TrainConfig:
     shuffle_block_size: int = 2000
     # Each replay deserialized off disk yields this many non-overlapping windows, amortizing the
     # whole-replay read (the disk bottleneck) over K samples. Train only; val stays 1/replay so its
-    # loss stays comparable across runs. The ranked replays have a median of 10.3k frames, so four
-    # windows of L_ctx + L_chunk = 1037 frames use 39% of every replay read (simulated over the
-    # index frame counts), against 10% at 020's L_ctx 256. Raising K further buys little: the
-    # sampler already caps K at what fits without overlap, and a micro-batch of 64 then holds only
-    # 16 distinct replays, so same-replay correlation inside a batch rises.
-    windows_per_replay: int = 4
+    # loss stays comparable across runs. Two windows of L_ctx + L_chunk = 1037 frames use 19.7% of
+    # every replay read (simulated over the index frame counts, of which 7.23% of the context
+    # positions are left padding that no head scores) — still about twice 020's 10% at L_ctx 256.
+    # K stops at 2 because of the OTHER side of the trade: the AWR weights renormalize to mean 1
+    # inside each micro-batch, so K windows per replay leave 64/K distinct replays to normalize
+    # against. K=2 keeps 32; K=4 would leave 16, against 020's 128 — a between-window confound that
+    # the AWR arms would carry and the BC arm would not.
+    windows_per_replay: int = 2
     val_split: str = "val"
     num_workers: int = 16
     prefetch_factor: int = 4
@@ -355,19 +360,22 @@ def _model_tag(cfg: TrainConfig) -> str:
 
 
 def _reward_tag(cfg: TrainConfig) -> str:
-    """The full weighting spec, for the run name: ``g99827-b0.8-w5-d0.01-win0.5-rank111-mc-swa128``.
+    """The full weighting spec, for the run name: ``g99827-b0.8-w5-d0.01-win0.5-swa128``.
 
     ``main`` appends it to the comment, so a hand-typed comment can never disagree with the flags
     the run actually used. Gamma drops its ``0.`` (the digits are the identity); every other number
-    is printed as written. ``rank`` and the critic name are constant until the rank feature and the
-    expectile critic land, and are here now so run names stay comparable across that change."""
+    is printed as written. A knob appears only when it is on, so the rank weights and the expectile
+    critic will spell themselves out when they land, and no run name carries a placeholder."""
     window = f"swa{cfg.attn_window}" if cfg.attn_window else "swafull"
     if not cfg.awr_enabled:
         return f"bc-{window}"
     gamma = f"{cfg.awr_gamma:g}".removeprefix("0.")
+    # The value MSE also trains the trunk unless this is set, which is a second axis against the BC
+    # arm, so the run name has to say which of the two arms it is.
+    detach = "-vdetach" if cfg.awr_value_detach_trunk else ""
     return (
         f"g{gamma}-b{cfg.awr_beta:g}-w{cfg.awr_weight_max:g}"
-        f"-d{cfg.awr_damage_shaping:g}-win{cfg.awr_win_reward:g}-rank111-mc-{window}"
+        f"-d{cfg.awr_damage_shaping:g}-win{cfg.awr_win_reward:g}{detach}-{window}"
     )
 
 
@@ -1350,8 +1358,9 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     """Muon for the transformer blocks' hidden weight matrices (attn + MLP); AdamW for everything
     else — input projection, output head, embeddings, biases — split by weight-decay eligibility.
     Exactly two LRs (``cfg.muon_lr`` / ``cfg.adam_lr``); the partition asserts full coverage so no
-    parameter can silently escape an optimizer."""
-    muon_params = [p for p in model.trunk.parameters() if p.ndim >= 2]
+    parameter can silently escape an optimizer. The Muon sweep names the trunk's BLOCKS, not the
+    trunk, so a parameter added beside the block stack later lands in AdamW and not silently here."""
+    muon_params = [p for p in model.trunk.blocks.parameters() if p.ndim >= 2]
     muon_ids = {id(p) for p in muon_params}
     embed_ids = {id(p) for m in (model.cat_embeds, model.char_emb, model.stage_emb) for p in m.parameters()}
     # Optionally exclude the output-head weights from weight decay (cfg.head_weight_decay=False). The
@@ -1543,11 +1552,8 @@ def _masked_mean_bits(nats: Tensor, mask: Tensor) -> float:
     return (nats[mask].mean().item() / _LN2) if bool(mask.any()) else 0.0
 
 
-def _bool_mean(parts: list[Tensor]) -> float:
-    values = torch.cat(parts)
-    if values.numel() == 0:
-        return 0.0
-    return values.float().mean().item()
+def _bool_mean(values: Tensor) -> float:
+    return values.float().mean().item() if values.numel() else 0.0
 
 
 def _group_kl_bits(logits_p: Tensor, logits_q: Tensor) -> Tensor:
@@ -1563,98 +1569,130 @@ def _group_kl_bits(logits_p: Tensor, logits_q: Tensor) -> Tensor:
     return total / _LN2
 
 
-Hidden = list[tuple[Tensor, Tensor]]
+def _pooled_mean(parts: list[tuple[float, int]]) -> float:
+    """The count-weighted mean of per-batch ``(mean, count)`` pairs — the mean over the pooled
+    positions, up to summation order. One batch needs no combination at all, so its own number is
+    returned untouched: multiplying by a count and dividing it out again would only round it."""
+    if len(parts) == 1:
+        return parts[0][0]
+    count = sum(count for _, count in parts)
+    return sum(value * count for value, count in parts) / count if count else 0.0
+
+
+class _MeanAccumulator:
+    """Validation metrics, collected one batch at a time.
+
+    A 128-batch pass over 1024-frame windows scores 8.4M positions, so holding a per-position tensor
+    for every metric until the end of the pass would cost gigabytes of VRAM. Each batch instead
+    reports its own mean and the number of positions behind it, and nothing per-frame survives the
+    loop iteration."""
+
+    def __init__(self) -> None:
+        self._parts: dict[str, list[tuple[float, int]]] = {}
+
+    def add(self, key: str, value: float, count: int) -> None:
+        """``value`` is this batch's mean over ``count`` positions. A count of 0 registers the key
+        (the metric exists; its subset was empty in this batch) and moves the pooled mean nowhere."""
+        self._parts.setdefault(key, []).append((value, count))
+
+    def update(self, values: dict[str, float], count: int) -> None:
+        for key, value in values.items():
+            self.add(key, value, count)
+
+    def means(self) -> dict[str, float]:
+        return {key: _pooled_mean(parts) for key, parts in self._parts.items()}
+
+
+def _hidden_pair(model: GPT, ctx: Context) -> tuple[Tensor, Tensor]:
+    """The only two distinct trunk forwards a val batch needs: the state, and its history-ablated
+    twin (the copycat probe, with the ego's own controller history zeroed). Both metric families
+    read the pair inside one loop iteration, so a pass costs two forwards per batch, not five."""
+    ablated_features = dict(ctx.features)
+    for ch in ACTION_CHANNELS:
+        ablated_features[f"ego_{ch}"] = torch.zeros_like(ablated_features[f"ego_{ch}"])
+    return model(ctx.features, ctx.ctx_pad), model(ablated_features, ctx.ctx_pad)
 
 
 @torch.no_grad()
-def val_hidden(model: GPT, val_cache: list[TrainBatch]) -> Hidden:
-    """Per val batch, the trunk state and its history-ablated twin ``(h, h_ablated)``.
+def val_metrics(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -> tuple[dict[str, float], Tensor]:
+    """Every validation number, in one pass over the frozen val batches, plus the pooled AWR weights.
 
-    These are the only two distinct trunk forwards validation needs, and every metric below is a
-    function of them, so they are computed once here and passed down. ``h_ablated`` is the copycat
-    probe: the same forward with the ego's own controller history zeroed."""
-    with _evaluation_mode(model):
-        out: Hidden = []
-        for batch in val_cache:
-            ctx = batch.context
-            ablated_features = dict(ctx.features)
-            for ch in ACTION_CHANNELS:
-                ablated_features[f"ego_{ch}"] = torch.zeros_like(ablated_features[f"ego_{ch}"])
-            out.append((model(ctx.features, ctx.ctx_pad), model(ablated_features, ctx.ctx_pad)))
-    return out
-
-
-@torch.no_grad()
-def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig, hidden: Hidden) -> dict[str, float]:
-    """Dense multi-token proper-scoring metrics over the cached val batches. Per-offset NLL (``nll_off{o}``)
-    tracks how predictability decays with horizon. The offset-1 (deployed) head additionally drives button
-    proper-scoring, transition-vs-hold NLL splits, the button change-event F1 and change rate, and the
-    copycat history-ablation probe. Every number here is UNWEIGHTED — AWR touches the backprop objective
-    only. Per-element tensors are concatenated then reduced once (exactly sample-weighted).
+    Dense multi-token proper scoring: per-offset NLL (``nll_off{o}``) tracks how predictability decays
+    with horizon, and the offset-1 (deployed) head additionally drives button proper scoring,
+    transition-vs-hold NLL splits, the button change-event F1 and change rate, and the copycat
+    history-ablation probe. The AWR block adds how well the value head fits the return and what the
+    weights it implies look like; the caller logs those weights as a histogram, because a collapsed
+    distribution (a spike at the clip, everything else at zero) is the failure mode ``awr_beta``
+    guards against and a mean alone hides it. Every NLL is UNWEIGHTED — AWR touches the backprop
+    objective only — and the weights here are a diagnostic.
 
     022 drops the metrics a ten-run correlation study found uninformative or inverted against
     closed-loop play: reconstruction accuracy, prediction persistence and flip-back rates, the
     dataset-constant transition and multipress rates, and the chance-level stick-side change F1 and
     Brier scores."""
     with _evaluation_mode(model):
-        return _val_metrics_eval(model, val_cache, cfg, hidden)
+        return _val_metrics_eval(model, val_cache, cfg)
 
 
-def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig, hidden: Hidden) -> dict[str, float]:
-    comps_cat: dict[tuple[int, str], list[Tensor]] = {}
-    ablated_cat: dict[str, list[Tensor]] = {}
-    trans_cat: dict[str, list[Tensor]] = {}
-    btn_brier: list[Tensor] = []
+def _val_metrics_eval(model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig) -> tuple[dict[str, float], Tensor]:
+    acc = _MeanAccumulator()
+    # The two exceptions to scalar accumulation, both small. The tolerant change F1 matches events
+    # with +-1 frame of slack, so it needs the frames themselves ([B, L_ctx] bools); the weight
+    # histogram and the ESS are properties of the pooled weight vector, which the mean-1 rescale
+    # inside ``awr_weights`` defines over the whole val set.
     btn_pred_change: list[Tensor] = []
-    btn_pred_change_valid: list[Tensor] = []
     btn_true_change: list[Tensor] = []
-    kl_bits: list[Tensor] = []
-    btn_probs: list[Tensor] = []
-    btn_tgts: list[Tensor] = []
-    rare_mass: list[Tensor] = []
-    unseen_mass: list[Tensor] = []
-    click_trigger_invalid_l: list[Tensor] = []
-    click_trigger_invalid_r: list[Tensor] = []
+    values: list[Tensor] = []
+    returns: list[Tensor] = []
     counts_available = bool((model.button_combo_counts >= 0).all())
     rare_mask = model.button_combo_counts < cfg.diagnostic_rare_button_count
     unseen_mask = model.button_combo_counts == 0
     combo_bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS, device=model.main_centers.device))
-    for batch, (h, h_ablated) in zip(val_cache, hidden, strict=True):
+    for awr_batch in val_cache:
+        batch = awr_batch.batch
         ctx = batch.context
+        h, h_ablated = _hidden_pair(model, ctx)
         targets, valid = _multi_offset_targets(ctx, batch.target[:, : max(model.head_offsets)], model.head_offsets)
         flat_valid = valid.reshape(-1)
+        n_valid = int(flat_valid.sum())
         cur_idx = _quantize(model, stack_actions(ctx.features))  # [B, L_ctx, n_groups] current frames
+        comps: dict[tuple[int, str], Tensor] = {}
+        ablated: dict[str, Tensor] = {}
         for hi, o in enumerate(model.head_offsets):
             logits = model.heads[hi](h).float()
             tgt_idx = _quantize(model, targets[o])
-            for name, c in group_nll(logits, tgt_idx, valid).items():
-                comps_cat.setdefault((o, name), []).append(c)
+            comps.update({(o, name): c for name, c in group_nll(logits, tgt_idx, valid).items()})
             if o != 1:
                 continue
             # The deployed head drives the button / transition / ablation stats.
             true_change = scoring.transition_mask(torch.cat([cur_idx, tgt_idx[:, -1:]], dim=1))  # [B,L_ctx,n_grp]
             ablated_logits = model.heads[model.primary_head_idx](h_ablated).float()
-            kl_bits.append(_group_kl_bits(logits, ablated_logits).reshape(-1)[flat_valid])
-            for name, c in group_nll(ablated_logits, tgt_idx, valid).items():
-                ablated_cat.setdefault(name, []).append(c)
+            kl_bits = _group_kl_bits(logits, ablated_logits).reshape(-1)[flat_valid]  # KL(full ‖ ablated), bits
+            acc.add("ablate_hist_kl", kl_bits.mean().item(), n_valid)
+            ablated = group_nll(ablated_logits, tgt_idx, valid)
             for g, name in enumerate(_GROUP_NAMES):
-                trans_cat.setdefault(name, []).append(true_change[..., g].reshape(-1)[flat_valid])
+                trans = true_change[..., g].reshape(-1)[flat_valid]
+                acc.add(f"nll_{name}_trans", _masked_mean_bits(comps[(1, name)], trans), int(trans.sum()))
+                acc.add(f"nll_{name}_hold", _masked_mean_bits(comps[(1, name)], ~trans), int((~trans).sum()))
             btn_slice = slice(_GROUP_OFFSETS[_BUTTONS_G], _GROUP_OFFSETS[_BUTTONS_G] + scoring.N_BUTTON_COMBOS)
             btn_logits = logits[..., btn_slice]
             combo_probs = F.softmax(btn_logits.reshape(-1, scoring.N_BUTTON_COMBOS)[flat_valid], dim=-1)
             onehot = F.one_hot(tgt_idx[..., _BUTTONS_G].reshape(-1)[flat_valid], scoring.N_BUTTON_COMBOS).to(
                 combo_probs.dtype
             )
-            btn_brier.append((combo_probs - onehot).pow(2).sum(-1))
+            acc.add("brier_buttons", (combo_probs - onehot).pow(2).sum(-1).mean().item(), n_valid)
             pred_change = (btn_logits.argmax(-1) != cur_idx[..., _BUTTONS_G]) & valid
             btn_pred_change.append(pred_change)
-            btn_pred_change_valid.append(pred_change.reshape(-1)[flat_valid])
             btn_true_change.append(true_change[..., _BUTTONS_G] & valid)
+            acc.add("pred_change_rate_buttons", _bool_mean(pred_change.reshape(-1)[flat_valid]), n_valid)
             marginal_btn_probs = combo_probs @ combo_bits.to(combo_probs.dtype)
-            btn_probs.append(marginal_btn_probs)
+            tgt_btn = _dequantize(model, tgt_idx)[..., _N_CONT:].reshape(-1, _N_BUTTONS)[flat_valid]
+            logloss, brier = scoring.bernoulli_scores_from_probs(marginal_btn_probs, tgt_btn)
+            acc.add("btn_logloss", logloss.item(), n_valid)
+            acc.add("btn_brier", brier.item(), n_valid)
             if counts_available:
-                rare_mass.append(combo_probs[:, rare_mask].sum(-1))
-                unseen_mass.append(combo_probs[:, unseen_mask].sum(-1))
+                acc.add("btn_rare_mass", combo_probs[:, rare_mask].sum(-1).mean().item(), n_valid)
+                acc.add("btn_unseen_mass", combo_probs[:, unseen_mask].sum(-1).mean().item(), n_valid)
             trig_lo = _GROUP_OFFSETS[_TRIG_G]
             n_trig = model.trig_centers.shape[0]
             trig_probs = F.softmax(
@@ -1665,71 +1703,42 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig,
             ).reshape(-1, n_trig, n_trig)
             trigger_l_full = trig_probs[:, -1, :].sum(-1)
             trigger_r_full = trig_probs[:, :, -1].sum(-1)
-            click_trigger_invalid_l.append(marginal_btn_probs[:, _BUTTON_L_CH - _N_CONT] * (1.0 - trigger_l_full))
-            click_trigger_invalid_r.append(marginal_btn_probs[:, _BUTTON_R_CH - _N_CONT] * (1.0 - trigger_r_full))
-            btn_tgts.append(_dequantize(model, tgt_idx)[..., _N_CONT:].reshape(-1, _N_BUTTONS)[flat_valid])
-    comps = {k: torch.cat(v) for k, v in comps_cat.items()}
-    ablated = {k: torch.cat(v) for k, v in ablated_cat.items()}
-    primary = nll_breakdown({name: comps[(1, name)] for name in _GROUP_NAMES})
-    logloss, brier = scoring.bernoulli_scores_from_probs(torch.cat(btn_probs), torch.cat(btn_tgts))
-    out = {
-        "loss": primary["total"],  # offset-1 total bits/frame (deployed policy); per-group below
-        **{f"nll_{name}": primary[name] for name in _GROUP_NAMES},
-        "cont_discrete_bits": (
-            comps[(1, "main_stick")].mean() + comps[(1, "c_stick")].mean() + comps[(1, "triggers")].mean()
-        ).item()
-        / _LN2,
-        "btn_logloss": logloss.item(),
-        "btn_brier": brier.item(),
-        "btn_counts_available": float(counts_available),
-        "click_trigger_invalid_l_mass": torch.cat(click_trigger_invalid_l).mean().item(),
-        "click_trigger_invalid_r_mass": torch.cat(click_trigger_invalid_r).mean().item(),
-        "ablate_hist_kl": torch.cat(kl_bits).mean().item(),  # KL(full ‖ history-ablated), bits
-        "brier_buttons": torch.cat(btn_brier).mean().item(),
-        "pred_change_rate_buttons": _bool_mean(btn_pred_change_valid),
-        "changeF1_buttons": scoring.change_event_prf(torch.cat(btn_pred_change), torch.cat(btn_true_change))[2],
-        **{f"nll_off{o}": _offset_total_bits(comps, o) for o in model.head_offsets},
-    }
+            invalid_l = marginal_btn_probs[:, _BUTTON_L_CH - _N_CONT] * (1.0 - trigger_l_full)
+            invalid_r = marginal_btn_probs[:, _BUTTON_R_CH - _N_CONT] * (1.0 - trigger_r_full)
+            acc.add("click_trigger_invalid_l_mass", invalid_l.mean().item(), n_valid)
+            acc.add("click_trigger_invalid_r_mass", invalid_r.mean().item(), n_valid)
+        primary = nll_breakdown({name: comps[(1, name)] for name in _GROUP_NAMES})
+        acc.add("loss", primary["total"], n_valid)  # offset-1 total bits/frame (deployed policy)
+        acc.update({f"nll_{name}": primary[name] for name in _GROUP_NAMES}, n_valid)
+        acc.add(
+            "cont_discrete_bits",
+            (comps[(1, "main_stick")].mean() + comps[(1, "c_stick")].mean() + comps[(1, "triggers")].mean()).item()
+            / _LN2,
+            n_valid,
+        )
+        acc.update({f"nll_off{o}": _offset_total_bits(comps, o) for o in model.head_offsets}, n_valid)
+        ablate_total = 0.0
+        for name in _GROUP_NAMES:
+            d = (ablated[name].mean() - comps[(1, name)].mean()).item() / _LN2  # positive ⇒ history helps
+            acc.add(f"ablate_hist_dnll_{name}", d, n_valid)
+            ablate_total += d
+        acc.add("ablate_hist_dnll", ablate_total, n_valid)
+        values.append(model.value_head(h).float().reshape(-1)[flat_valid])
+        returns.append(awr_batch.valid_returns(valid))
+
+    out = acc.means()
+    out["btn_counts_available"] = float(counts_available)
+    if counts_available:
+        out["btn_rare_count_threshold"] = float(cfg.diagnostic_rare_button_count)
     out["click_trigger_invalid_mass"] = 0.5 * (
         out["click_trigger_invalid_l_mass"] + out["click_trigger_invalid_r_mass"]
     )
-    if counts_available:
-        out["btn_rare_mass"] = torch.cat(rare_mass).mean().item()
-        out["btn_unseen_mass"] = torch.cat(unseen_mass).mean().item()
-        out["btn_rare_count_threshold"] = float(cfg.diagnostic_rare_button_count)
-    ablate_total = 0.0
-    for name in _GROUP_NAMES:
-        trans = torch.cat(trans_cat[name])
-        out[f"nll_{name}_trans"] = _masked_mean_bits(comps[(1, name)], trans)
-        out[f"nll_{name}_hold"] = _masked_mean_bits(comps[(1, name)], ~trans)
-        d = (ablated[name].mean() - comps[(1, name)].mean()).item() / _LN2  # positive ⇒ history helps
-        out[f"ablate_hist_dnll_{name}"] = d
-        ablate_total += d
-    out["ablate_hist_dnll"] = ablate_total
-    return out
-
-
-@torch.no_grad()
-def awr_val_metrics(
-    model: GPT, val_cache: list[AWRBatch], cfg: TrainConfig, hidden: Hidden
-) -> tuple[dict[str, float], Tensor]:
-    """The AWR-side diagnostics on the FROZEN val batches: how well the value head fits the return, and
-    what the weights it implies would look like. Returns the flat metric dict plus the pooled per-position
-    weights, which the caller logs as a histogram — a collapsed weight distribution (a spike at the clip,
-    everything else at zero) is the failure mode ``awr_beta`` guards against, and a mean/std alone hides it.
-    The weights here are DIAGNOSTIC: val NLL itself stays unweighted."""
-    with _evaluation_mode(model):
-        values: list[Tensor] = []
-        returns: list[Tensor] = []
-        for batch, (h, _) in zip(val_cache, hidden, strict=True):
-            ctx = batch.batch.context
-            valid = torch.arange(h.shape[1], device=h.device)[None, :] >= ctx.ctx_pad[:, None]
-            values.append(model.value_head(h).float().reshape(-1)[valid.reshape(-1)])
-            returns.append(batch.valid_returns(valid))
-        value = torch.cat(values)
-        target = torch.cat(returns)
-        weight, stats = awr_weights(target - value, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max)
-        out = {
+    out["changeF1_buttons"] = scoring.change_event_prf(torch.cat(btn_pred_change), torch.cat(btn_true_change))[2]
+    value = torch.cat(values)
+    target = torch.cat(returns)
+    weight, stats = awr_weights(target - value, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max)
+    out.update(
+        {
             "value_mse": F.mse_loss(value, target).item(),
             "value_mean": value.mean().item(),
             "return_mean": target.mean().item(),
@@ -1737,6 +1746,7 @@ def awr_val_metrics(
             "awr_ess": stats["ess"],
             "awr_weight_max_frac": stats["weight_max_frac"],
         }
+    )
     return out, weight
 
 
@@ -2066,16 +2076,11 @@ def train(
         return metrics
 
     def _val_log_dict() -> dict[str, object]:
-        """Flat ``val/*`` metric dict (one W&B section). Merged into the per-step log; no wandb.log here.
-        Every NLL is computed on the plain ``TrainBatch`` inside each ``AWRBatch``; the AWR block adds
-        value-head fit plus the weight histogram. The two trunk forwards per batch are shared by both
-        blocks, so a val pass costs two forwards and not five."""
-        batches = [b.batch for b in val_cache]
-        hidden = val_hidden(model, batches)
-        vm = val_metrics(model, batches, cfg, hidden)
+        """Flat ``val/*`` metric dict (one W&B section). Merged into the per-step log; no wandb.log
+        here. One pass over the frozen val batches produces the NLL block and the AWR block
+        together, at two trunk forwards per batch."""
+        vm, weights = val_metrics(model, val_cache, cfg)
         out: dict[str, object] = {f"val/{k}": v for k, v in vm.items()}
-        awr_vm, weights = awr_val_metrics(model, val_cache, cfg, hidden)
-        out.update({f"val/{k}": v for k, v in awr_vm.items()})
         out["val/awr_weights"] = wandb.Histogram(weights.detach().cpu().numpy())
         out.update(gradient_diagnostics(model, val_cache[0], cfg))
         return out
