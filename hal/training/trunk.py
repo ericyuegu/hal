@@ -298,7 +298,13 @@ class Trunk(nn.Module):
     def forward_incremental(
         self, x: Tensor, past: list[tuple[Tensor, Tensor] | None]
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
-        """Encode the current token(s) against per-layer rolling KV state."""
+        """Encode ONE new token against per-layer rolling KV state.
+
+        The cached attention applies no mask, so every query sees the whole cache. That is correct
+        for a single token and wrong for a chunk, where the tokens would also see each other. A
+        chunk prefill needs its own mask; add it here when a caller needs one."""
+        if x.size(1) != 1:
+            raise ValueError(f"incremental decode takes one token, got L={x.size(1)}")
         new_past: list[tuple[Tensor, Tensor]] = []
         for block, old in zip(self.blocks, past, strict=True):
             x, kv = block.forward_incremental(x, old, self.max_cache)
