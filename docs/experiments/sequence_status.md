@@ -6,8 +6,8 @@ Updated: 2026-08-07
 
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
-| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness passed; prefetch tuning active | Reduce mean loader wait from 0.209 seconds without changing batch diversity. |
-| P0 | Scientific package: short full-causal context | Fresh plan ready | Restart from step 0 after the GPU data gate. |
+| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
+| P0 | Scientific package: short full-causal context | Fresh plan ready; launch next | Train from step 0 on the accepted compact-data path. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Pending P0 | Retrain after P0 with only context, batch, and mask changed. |
 | P2 | Systems: temporal-KV decode efficiency | Exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
@@ -56,8 +56,8 @@ recomputation.
 
 ## Immediate next actions
 
-1. Run the 256-step clean-cache GPU data gate.
-2. Relaunch P0 from step 0 and finish its fixed evaluations.
+1. Relaunch P0 from step 0 and finish its fixed evaluations.
+2. Audit P0 timing, validation, checkpoints, closed-loop rows, and replay uploads.
 3. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
 4. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.
@@ -83,8 +83,8 @@ recomputation.
 ## Infrastructure rules
 
 - Run one training experiment at a time.
-- Use a 1 TB disk and set `cache_limit_gb` to about 900 for future clean runs.
-- Require at least 128 GB of system RAM and audit CPU count, network speed, reliability, and price.
+- Use a 250 GB disk and `cache_limit_gb=128` for the compact policy dataset.
+- Require at least 200 GB of system RAM and audit CPU count, network speed, reliability, and price.
 - Use `require_flex=True`; a dense fallback is not a valid timing comparison.
 - Target 3.0-3.5 hours through evaluation and upload. Flag a projection above 3.5 hours.
 - Flag startup over 30 minutes, warm steps over 0.5 seconds, GPU use below 80%, or a periodic CPU

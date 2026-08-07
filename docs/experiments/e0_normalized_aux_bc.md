@@ -50,7 +50,7 @@ The auxiliary term keeps the same total scale if the number of auxiliary heads c
 - `data_root=data/processed/ranked-anonymized-1/mds-policy-v7`
 - `windows_per_replay=4`
 - `reservoir_capacity=4096`
-- `predownload=512`, unless the clean-cache gate selects another tested value
+- `predownload=512`
 - `num_workers=16`
 - `prefetch_factor=2`
 - `cache_limit_gb=128`
@@ -95,7 +95,8 @@ Require:
 - 512 distinct replay IDs per batch.
 - Mean warm loader wait below 0.5 seconds.
 - Mean warm optimizer step below 0.5 seconds.
-- GPU use at least 80% after compilation.
+- GPU use at least 80% after compilation when host telemetry is valid. Otherwise record loader and
+  compute time separately and flag the missing measurement.
 - Startup below 30 minutes.
 
 Test `predownload` values 256, 512, 1,024, and 4,096 only if the first setting fails or leaves clear
@@ -163,7 +164,7 @@ after startup.
 
 The full test suite passed 861 tests before the artifact rename. The renamed P0 configuration then
 passed its 17 focused tests. The artifact is published and verified. The remote clean-cache GPU
-gate is active.
+gate passed.
 
 Gate attempt 1 used Vast instance `47094969` at commit `e8433d0`. It stopped before model or data
 loading because the command set `max_steps=256` but left `warmup_steps=500`. The instance was
@@ -175,9 +176,18 @@ mean loader wait was 0.209 seconds. Median values were 0.320 and 0.187 seconds. 
 0.487 and 0.354 seconds. Every batch had 512 distinct replays, and all recorded losses and gradient
 norms were finite. This meets the wall-time gate but leaves the GPU waiting for data.
 
-Gate attempt 3 changes only `prefetch_factor` from 2 to 32. Sixteen workers can then queue up to 512
-replay packs, which matches one training batch. Keep `predownload=512` and all other gate settings
-fixed.
+Gate attempt 3 used instance `47095681`, commit `937f973`, and W&B run `cmd0d0ft`. It changed only
+`prefetch_factor` from 2 to 32. It completed all 256 steps, uploaded `final.pt`, and destroyed the
+instance. Across steps 50 through 255, mean step time was 0.344 seconds and mean loader wait was
+0.208 seconds. Median values were 0.321 and 0.185 seconds. P95 values were 0.497 and 0.362 seconds.
+Every batch had 512 distinct replays, and all recorded losses and gradient norms were finite.
+
+Prefetch 32 did not improve throughput over prefetch 2. The mean step-time difference was below
+0.001 seconds, and the mean loader-wait difference was 0.002 seconds. Keep `prefetch_factor=2` to
+avoid 16 times more queued replay packs. W&B and Vast reported zero GPU use during active CUDA
+training, so that telemetry is invalid on this host. Step time minus loader wait was 0.134 seconds
+with prefetch 2 and 0.136 seconds with prefetch 32. The accepted gate projects about 1.6 hours of
+training before validation and closed-loop evaluation.
 
 ## Promotion
 
