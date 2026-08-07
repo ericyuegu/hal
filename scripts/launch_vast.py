@@ -178,7 +178,7 @@ def print_offers(offers: list[dict], *, disk: int, data_gb: float, upload_gb: fl
         logger.warning("No offers clear --max-price once disk storage is counted. Raise it or shrink --disk.")
         return
     logger.info(
-        f"{len(offers)} offer(s) within effective $/hr cap, best value first (disk={disk}GB, {run_hours:.0f}h run):"
+        f"{len(offers)} offer(s) within effective $/hr cap, best value first (disk={disk}GB, {run_hours:g}h run):"
     )
     header = (
         f"{'id':>10}  {'gpu':16} {'gpu$/hr':>8} {'disk$/hr':>8} {'eff$/hr':>8} "
@@ -606,7 +606,7 @@ def main(args: Args) -> None:
     ul = upload_cost(offer, args.upload_gb)
     logger.info(
         f"one-time transfer ≈ ${dl + ul:.2f} (↓${dl:.2f} {args.data_gb:.0f}GB MDS+ISO, "
-        f"↑${ul:.2f} {args.upload_gb:.0f}GB ckpts); amortized over {args.run_hours:.0f}h in the ranking"
+        f"↑${ul:.2f} {args.upload_gb:.0f}GB ckpts); amortized over {args.run_hours:g}h in the ranking"
     )
     logger.info(f"booting: clone -> uv sync -> fetch -> train. Watch W&B + `vastai logs {iid}` for progress.")
     logger.info(f"peek:  {vast.ssh_url(id=iid) or f'vastai ssh-url {iid}'}  (tail /opt/hal/train.log)")
