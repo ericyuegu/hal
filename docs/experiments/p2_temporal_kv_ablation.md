@@ -20,7 +20,8 @@ budget, and concurrency fixed. Change only the decode path.
 
 The comparison is valid only for the P1 geometry. With eight layers and an attention window of 128,
 the newest output has a receptive field of 1,017 frames. This is smaller than the 1,024-frame raw
-context. The cache must be rejected when the receptive field reaches or exceeds the raw context.
+context. The cache must be rejected when the receptive field exceeds the raw context. Equality is
+safe because the oldest contributing raw frame is still present.
 
 ## Files to change
 
