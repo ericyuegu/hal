@@ -1,6 +1,6 @@
 # E0: normalized auxiliary BC baseline
 
-Status: design audit
+Status: implementation verified; launch pending
 
 Owner: Codex with a focused implementation agent
 
@@ -133,12 +133,17 @@ Use the existing fixed protocol:
 
 Primary results:
 
-- Win rate against the level-9 CPU.
-- Mean stock difference.
-- Paired uncertainty intervals.
+- Stocks taken and lost per active minute against the level-9 CPU.
+- Damage dealt and taken per active minute.
+- Seeded bootstrap intervals over matches.
 
-Also record action entropy, no-op rate, transition rate, and any repeated-action failure pattern that
-is visible in replays.
+The CPU evaluator does not retain enough outcome state to report an exact game win rate. Do not call
+a stock lead at the frame limit a win. Mirrored head-to-head evaluation reports win rate and paired
+stock difference for E1 and later challengers.
+
+Offline validation records predicted transition rate and persistence. Inspect final replays for
+no-op or repeated-action failures. The current CPU evaluator does not log action entropy or no-op
+rate, so do not claim those metrics for E0.
 
 ## Head-to-head policy
 
@@ -182,6 +187,26 @@ Runtime checks:
 Use enough system RAM for the streaming dataset. Prior runs showed that low RAM can make the same GPU
 about 3.5 times slower. The offer audit must include RAM and download speed, not only GPU type.
 
+Planned launch command:
+
+```bash
+uv run scripts/launch_vast.py \
+  --max-price 1.10 \
+  --disk 500 \
+  --min-vram 24 \
+  --min-ram 128 \
+  --min-dlperf 35 \
+  --min-compute-cap 890 \
+  --max-compute-cap 890 \
+  --run-hours 3.5 \
+  -- uv run experiments/023_mtp_heads.py \
+  --cfg.require-flex \
+  --comment e0-normalized-aux-bc
+```
+
+This selects an RTX 4090 class host. Search first. Do not rent a host that fails the RAM, download,
+or effective-price audit. Record any command change before launch.
+
 ## Promotion rule
 
 E0 is a baseline, so completion does not require beating a historical model. Completion requires:
@@ -207,6 +232,23 @@ E1 starts only after this document contains the final run name and E0 checkpoint
   that incremental cache.
 - The local 020 and 022 timing records suggest that 16,384 steps should fit the requested budget on
   a healthy 4090 or 5090, but RAM and page-cache performance can dominate GPU speed.
+- `experiments/023_mtp_heads.py` now uses the current shared trunk, compiled training path,
+  incremental evaluation path, checkpoint flow, and optional final head-to-head flow from 022.
+- E0 uses four independent `Linear(256, 355)` output heads. Each 355-way vector is sliced into the
+  four action-group logits. The model has no value head or action-conditioning parameters.
+- The E0 objective has no sample-weight input. It is plain transition-aware behavior cloning:
+  offset 1 plus `aux_loss_weight` times the mean loss over every other offset.
+- The train loader and validation loader return `TrainBatch` directly. E0 does not compute returns,
+  advantages, critic metrics, rank weights, or weight histograms.
+- Validation now reports per-group accuracy, transition accuracy, hold accuracy, transition NLL,
+  hold NLL, and per-offset NLL.
+- `tests/experiments/test_023_mtp_heads.py` has 12 focused tests. They cover defaults, output shape,
+  offset alignment, fixed-total loss scaling, transition weighting, the lack of sample weights, one
+  forward/backward optimizer step, and a real one-step `train()` run over the local dev MDS. The
+  end-to-end test checks `final.pt` and rejects value, critic, rank, or advantage log keys.
+- Ruff, Python compilation, and all 12 focused tests pass.
+- Commit `3066fcd` supplies the exact incremental-context check, finite-difference fix, and Vast
+  compile preflight used by E0. Its focused suite passed before the E0 launch review.
 
 ## Training findings
 
