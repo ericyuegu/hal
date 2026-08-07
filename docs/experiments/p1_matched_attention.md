@@ -75,6 +75,10 @@ enforces zero overlap between adjacent batches inside one iterator epoch, but it
 when the trainer starts the next epoch. The live metric will expose any rare boundary overlap instead
 of claiming a stronger invariant than the code provides.
 
+Also add validation NLL and accuracy for every action group at every future offset. P0 logged only
+total future-head NLL and primary-head group accuracy. This is evaluation-only. Rescore the frozen
+P0 checkpoint on the same validation cache so the P1 comparison has symmetric diagnostics.
+
 This startup change is now implemented. Creating the training iterator starts worker prefetch, then
 one background thread builds the fixed validation cache while step 0 performs the real compiled
 forward and update. There is no warmup batch or extra forward. Training logs the exact number of

@@ -1385,6 +1385,14 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
             tgt_idx = _quantize(model, targets[o])
             logits = {name: lg.float() for name, lg in model.heads[hi].logits(h).items()}
             comps.update({(o, name): c for name, c in group_nll(logits, tgt_idx, valid).items()})
+            group_predictions: dict[str, Tensor] = {}
+            group_targets: dict[str, Tensor] = {}
+            for g, name in enumerate(_GROUP_NAMES):
+                predicted = logits[name].argmax(-1).reshape(-1)[flat_valid]
+                target_group = tgt_idx[..., g].reshape(-1)[flat_valid]
+                group_predictions[name] = predicted
+                group_targets[name] = target_group
+                acc.add(f"acc_off{o}_{name}", _bool_mean(predicted == target_group), n_valid)
             if o != 1:
                 continue
             # The deployed head drives the button / transition / ablation stats.
@@ -1397,8 +1405,8 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
             ablated = group_nll(ablated_logits, tgt_idx, valid)
             for g, name in enumerate(_GROUP_NAMES):
                 trans = true_change[..., g].reshape(-1)[flat_valid]
-                predicted = logits[name].argmax(-1).reshape(-1)[flat_valid]
-                target_group = tgt_idx[..., g].reshape(-1)[flat_valid]
+                predicted = group_predictions[name]
+                target_group = group_targets[name]
                 correct = predicted == target_group
                 predicted_change = predicted != cur_idx[..., g].reshape(-1)[flat_valid]
                 acc.add(f"acc_{name}", _bool_mean(correct), n_valid)
@@ -1434,7 +1442,10 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
             / _LN2,
             n_valid,
         )
-        acc.update({f"nll_off{o}": _offset_total_bits(comps, o) for o in model.head_offsets}, n_valid)
+        for o in model.head_offsets:
+            acc.add(f"nll_off{o}", _offset_total_bits(comps, o), n_valid)
+            for name in _GROUP_NAMES:
+                acc.add(f"nll_off{o}_{name}", comps[(o, name)].mean().item() / _LN2, n_valid)
         ablate_total = 0.0
         for name in _GROUP_NAMES:
             d = (ablated[name].mean() - comps[(1, name)].mean()).item() / _LN2  # positive ⇒ history helps

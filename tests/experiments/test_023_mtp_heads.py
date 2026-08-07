@@ -499,21 +499,7 @@ def test_one_training_step_uses_only_plain_behavior_cloning() -> None:
         compile_trunk=False,
         eval_incremental_kv=False,
     )
-    gen = torch.Generator().manual_seed(7)
-    features = {}
-    for prefix in exp._PLAYER_PREFIXES:
-        for name in FLOAT_FEATURES:
-            features[f"{prefix}_{name}"] = torch.randn(2, cfg.L_ctx, generator=gen)
-        for name, (vocab, _) in CAT_FEATURES.items():
-            features[f"{prefix}_{name}"] = torch.randint(0, vocab, (2, cfg.L_ctx), generator=gen)
-    for channel in ACTION_CHANNELS:
-        features[f"ego_{channel}"] = torch.rand(2, cfg.L_ctx, generator=gen)
-    for name in ("ego_character", "opp_character", "stage"):
-        features[name] = torch.randint(0, 26, (2, cfg.L_ctx), generator=gen)
-    batch = TrainBatch(
-        context=Context(features=features, ctx_pad=torch.tensor([0, 1])),
-        target=torch.rand(2, 2, A_DIM, generator=gen),
-    )
+    batch = _random_batch(cfg)
     model = exp.GPT(cfg)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     before = model.heads[0].proj.weight.detach().clone()
@@ -529,6 +515,46 @@ def test_one_training_step_uses_only_plain_behavior_cloning() -> None:
     source = inspect.getsource(exp.train).lower()
     for stale_name in ("awr", "rank_weight", "value_head", "critic", "batch.batch"):
         assert stale_name not in source
+
+
+def _random_batch(cfg, *, batch_size: int = 2) -> TrainBatch:
+    gen = torch.Generator().manual_seed(7)
+    features = {}
+    for prefix in exp._PLAYER_PREFIXES:
+        for name in FLOAT_FEATURES:
+            features[f"{prefix}_{name}"] = torch.randn(batch_size, cfg.L_ctx, generator=gen)
+        for name, (vocab, _) in CAT_FEATURES.items():
+            features[f"{prefix}_{name}"] = torch.randint(0, vocab, (batch_size, cfg.L_ctx), generator=gen)
+    for channel in ACTION_CHANNELS:
+        features[f"ego_{channel}"] = torch.rand(batch_size, cfg.L_ctx, generator=gen)
+    for name in ("ego_character", "opp_character", "stage"):
+        features[name] = torch.randint(0, 26, (batch_size, cfg.L_ctx), generator=gen)
+    return TrainBatch(
+        context=Context(features=features, ctx_pad=torch.arange(batch_size)),
+        target=torch.rand(batch_size, max(cfg.head_offsets), A_DIM, generator=gen),
+    )
+
+
+def test_validation_reports_each_group_at_each_offset() -> None:
+    cfg = exp.TrainConfig(
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        L_ctx=8,
+        attn_window=0,
+        head_offsets=(1, 2),
+        batch_size=2,
+        compile_trunk=False,
+        eval_incremental_kv=False,
+    )
+
+    metrics = exp.val_metrics(exp.GPT(cfg), [_random_batch(cfg)], cfg)
+
+    for offset in cfg.head_offsets:
+        assert f"nll_off{offset}" in metrics
+        for group in exp._GROUP_NAMES:
+            assert f"nll_off{offset}_{group}" in metrics
+            assert f"acc_off{offset}_{group}" in metrics
 
 
 class _FakeRun:
