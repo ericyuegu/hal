@@ -5,6 +5,7 @@ from collections.abc import Iterator
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
 from hal.data.schema import SCHEMA_VERSION
 from hal.training.dataloader import ReplayPack
@@ -26,6 +27,18 @@ def test_loader_generator_does_not_change_process_rng() -> None:
 
     assert torch.equal(torch.random.get_rng_state(), before)
     assert generator.initial_seed() == 7
+
+
+def test_data_loader_iteration_uses_only_its_private_rng() -> None:
+    train = DataLoader(range(4), batch_size=2, generator=_loader_generator(7))
+    val = DataLoader(range(4), batch_size=2, generator=_loader_generator(8))
+    torch.manual_seed(123)
+    before = torch.random.get_rng_state()
+
+    list(train)
+    list(val)
+
+    assert torch.equal(torch.random.get_rng_state(), before)
 
 
 def _fake_mds(n_samples: int = 6, length: int = 60) -> list[dict[str, np.ndarray]]:
