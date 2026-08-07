@@ -103,9 +103,14 @@ Audit the final command against the selected P0 configuration before launch. Ver
 
 The current configuration parser and validator accept this P1 geometry. It resolves to
 `gpt-d256-L8-h4-Lc1024-a1024-swa128-recompute-o1.5.9.13-linear` and processes 131,072 tokens per
-step. The focused 023 suite passed 18 tests. The shared attention and closed-loop rolling-context
+step. The focused 023 suite passed 20 tests. The shared attention and closed-loop rolling-context
 suites passed 38 tests and skipped six GPU-only cases on the local CPU host. This check does not
 replace the clean-host runtime gate.
+
+The final evaluator must apply the same configured decode dtype as periodic checkpoint workers.
+The challenger and reference sides of H2H must also use the same actual dtype. Match-row and H2H
+protocol data must record that dtype. This gate was added after finding that the old in-process final
+path kept the live FP32 training weights while checkpoint-loaded policies used FP16.
 
 ## Evaluation
 

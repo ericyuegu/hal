@@ -1431,6 +1431,7 @@ class EvalProtocol:
     decode_btn_support_min: int
     decode_min_p: float
     decode_click_trigger_fix: bool
+    model_dtype: str
 
 
 def _eval_protocol(
@@ -1439,6 +1440,7 @@ def _eval_protocol(
     settings: DecodeSettings,
     exec_horizon: int,
     default_n_matchups: int,
+    model_dtype: str,
     n_matchups: int | None = None,
     max_frames: int | None = None,
     seed: int | None = None,
@@ -1461,6 +1463,7 @@ def _eval_protocol(
         decode_btn_support_min=settings.btn_support_min,
         decode_min_p=settings.min_p,
         decode_click_trigger_fix=settings.click_trigger_fix,
+        model_dtype=model_dtype,
     )
 
 
@@ -1468,7 +1471,7 @@ def _write_match_rows(path: Path, rows: list[MatchRow], protocol: EvalProtocol) 
     """Atomically persist exact trajectory-derived rows plus pairing protocol."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol": asdict(protocol),
         "rows": [row.as_dict() for row in rows],
     }
@@ -1518,6 +1521,7 @@ def eval_vs_cpu(
         settings=settings,
         exec_horizon=cfg.exec_horizon,
         default_n_matchups=cfg.eval_n_matchups,
+        model_dtype=str(next(model.parameters()).dtype),
         n_matchups=n_matchups,
         max_frames=max_frames,
         seed=eval_seed,
@@ -1600,6 +1604,23 @@ def _final_h2h(
             experiment=cfg.final_h2h_reference_experiment,
         )
     )
+    self_dtype = str(next(model.parameters()).dtype)
+    if ref_protocol["model_dtype"] != self_dtype:
+        raise RuntimeError(
+            f"h2h decode dtype mismatch: {cfg.final_h2h_self_label} uses {self_dtype}, "
+            f"but {cfg.final_h2h_reference_label} uses {ref_protocol['model_dtype']}"
+        )
+    self_protocol = {
+        "name": cfg.final_h2h_self_label,
+        "experiment": str(Path(__file__)),
+        "checkpoint": str(run_dir / "final.pt"),
+        "step": cfg.max_steps,
+        "L_ctx": cfg.L_ctx,
+        "model_dtype": self_dtype,
+        "decode_settings": asdict(_decode_settings(model, cfg)),
+        "exec_horizon": cfg.exec_horizon,
+        "head_offsets": list(cfg.head_offsets),
+    }
 
     def build_self(seed: int) -> RecedingHorizon:
         return make_policy(model, stats, cfg, decode_seed=seed)
@@ -1621,7 +1642,12 @@ def _final_h2h(
                 max_frames=cfg.eval_max_frames,
                 max_parallel=_eval_max_parallel(cfg, cfg.final_h2h_n_configs),
                 seed=cfg.eval_seed,
-                meta={"reference": ref_protocol},
+                meta={
+                    "models": {
+                        cfg.final_h2h_self_label: self_protocol,
+                        cfg.final_h2h_reference_label: ref_protocol,
+                    }
+                },
                 on_orientation_done=upload_orientation,
             )
     finally:
@@ -1970,6 +1996,9 @@ def train(
     # Save BEFORE the closed-loop eval. A box that cannot boot Dolphin (the H100's glibc is older
     # than the build's floor) otherwise crashes at the finish line and the weights are lost.
     _save("final.pt", cfg.max_steps)
+    # Periodic and manual evaluation load the saved checkpoint through _load_ckpt, which applies
+    # the configured decode dtype. Match that protocol for the live final evaluator and H2H model.
+    _prepare_final_decode_model(model, cfg)
     if cfg.final_eval_n_matchups > 0:
         _log_eval(cfg.max_steps, _eval_and_upload("final", n_matchups=cfg.final_eval_n_matchups))
     else:
@@ -2038,6 +2067,11 @@ def _halve_for_decode(model: GPT) -> None:
         setattr(model, name, grid)  # the ORIGINAL tensor: a fp32->fp16->fp32 round trip loses 2e-4
 
 
+def _prepare_final_decode_model(model: GPT, cfg: TrainConfig) -> None:
+    if cfg.eval_fp16 and DEVICE == "cuda":
+        _halve_for_decode(model)
+
+
 def eval_ckpt(
     ckpt_path: str,
     *,
@@ -2074,6 +2108,7 @@ def eval_ckpt(
         settings=settings,
         exec_horizon=exec_horizon,
         default_n_matchups=cfg.final_eval_n_matchups,
+        model_dtype=str(next(model.parameters()).dtype),
         n_matchups=eval_n_matchups,
         max_frames=eval_max_frames,
         seed=eval_seed,

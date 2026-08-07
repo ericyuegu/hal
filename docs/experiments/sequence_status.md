@@ -62,7 +62,9 @@ recomputation.
 ## Immediate next actions
 
 1. Finish the active P0 run and its fixed evaluations.
-2. Audit P0 timing, validation, checkpoints, closed-loop rows, and replay uploads.
+2. Audit P0 timing, validation, checkpoints, closed-loop rows, and replay uploads. Reevaluate
+   `final.pt` through the standard FP16 checkpoint loader because the launched in-process final path
+   keeps the live model in FP32.
 3. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
 4. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.

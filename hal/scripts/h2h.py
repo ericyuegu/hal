@@ -125,6 +125,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
         "family": args.family,
         "step": int(state["step"]),
         "L_ctx": cfg.L_ctx,
+        "model_dtype": str(next(model.parameters()).dtype),
     }
 
     if args.family == "rle_token":

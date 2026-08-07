@@ -221,6 +221,12 @@ full-schedule win rate.
 At step 5,120, NLL at offsets 1, 5, 9, and 13 was 1.103, 2.822, 3.594, and 4.078. Button log loss
 was 0.0325. The recorded gradient norm was finite, and the batch contained 512 distinct replays.
 
+The launch commit applies FP16 when an evaluation worker loads a checkpoint, but its synchronous
+final evaluator uses the live FP32 training model. This precision mismatch was found after launch.
+Keep the in-run final result as a diagnostic. After `final.pt` uploads, run the official 96-boot
+final evaluation by loading that checkpoint through the FP16 decode path. Record the model dtype in
+the new evaluation artifact. Do not resume or alter the active training process.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train

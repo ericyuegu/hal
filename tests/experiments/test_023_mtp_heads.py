@@ -1,5 +1,6 @@
 import importlib.util
 import inspect
+import json
 from dataclasses import asdict
 from pathlib import Path
 
@@ -154,6 +155,36 @@ def test_run_tag_names_attention_and_decode_mode() -> None:
     swa = exp.TrainConfig(attn_window=128, eval_incremental_kv=True)
     assert "-full-recompute-" in exp._model_tag(baseline)
     assert "-swa128-kv-" in exp._model_tag(swa)
+
+
+def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
+    cfg = exp.TrainConfig()
+    protocol = exp._eval_protocol(
+        cfg,
+        settings=exp.DecodeSettings(1.0, None, 0, 0.0, False),
+        exec_horizon=1,
+        default_n_matchups=3,
+        model_dtype="torch.float16",
+    )
+    path = tmp_path / "match_rows.json"
+    exp._write_match_rows(path, [], protocol)
+
+    payload = json.loads(path.read_text())
+    assert payload["schema_version"] == 2
+    assert payload["protocol"]["model_dtype"] == "torch.float16"
+
+
+def test_final_decode_uses_the_checkpoint_decode_dtype(monkeypatch) -> None:
+    cfg = exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16, eval_fp16=True)
+    model = exp.GPT(cfg)
+    monkeypatch.setattr(exp, "DEVICE", "cuda")
+
+    exp._prepare_final_decode_model(model, cfg)
+
+    assert {parameter.dtype for parameter in model.parameters()} == {torch.float16}
+    assert model.main_centers.dtype == torch.float32
+    assert model.c_centers.dtype == torch.float32
+    assert model.trig_centers.dtype == torch.float32
 
 
 def test_heads_are_independent_linear_projections() -> None:
