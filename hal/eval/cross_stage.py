@@ -146,7 +146,7 @@ def vs_cpu_metrics(
     default). Stocks/damage are reported as **per-active-minute rates**, pooled
     frame-weighted over every non-crashed match (``sum(metric) / sum(active_minutes)``)
     so the numbers are comparable across runs regardless of how many episodes ran or
-    how long each lasted. ``crashed`` is the fraction of scheduled results whose Session failed.
+    how long each lasted. ``crashed`` is the fraction of scheduled boots that produced no game.
     A countdown-only tail fragment is recorded as ``zero_active`` but is not a completed match and
     does not enter rates or confidence intervals.
 
@@ -162,10 +162,12 @@ def vs_cpu_metrics(
     (``<rate>_ci_lo`` / ``<rate>_ci_hi``); ``bootstrap_resamples <= 0`` collapses the
     CI to the point estimate.
     """
+    boot_ids = {boot_index for _, boot_index, _ in result}
+    completed_boot_ids = {boot_index for _, boot_index, summary in result if summary is not None}
     all_summaries = [s for _, _, s in result if s is not None]
     summaries = [s for s in all_summaries if _active_frames(s.frames) > 0]
     zero_active = len(all_summaries) - len(summaries)
-    crashed = (len(result) - len(all_summaries)) / len(result) if result else 1.0
+    crashed = len(boot_ids - completed_boot_ids) / len(boot_ids) if boot_ids else 1.0
     if not summaries:
         if not all_summaries:
             return {"crashed": crashed}

@@ -157,11 +157,18 @@ def test_all_crashed_returns_minimal_dict() -> None:
     assert vs_cpu_metrics([(Stage.BATTLEFIELD, 0, None), (Stage.BATTLEFIELD, 1, None)]) == {"crashed": 1.0}
 
 
-def test_crashed_fraction_counts_none_rows() -> None:
+def test_crashed_fraction_counts_failed_boots() -> None:
     good = _summary(_ONE_ACTIVE_MINUTE, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
-    m = vs_cpu_metrics([(Stage.BATTLEFIELD, 0, good), (Stage.BATTLEFIELD, 1, None)], bootstrap_resamples=50)
+    m = vs_cpu_metrics(
+        [
+            (Stage.BATTLEFIELD, 0, good),
+            (Stage.BATTLEFIELD, 0, good),
+            (Stage.BATTLEFIELD, 1, None),
+        ],
+        bootstrap_resamples=50,
+    )
     assert m["crashed"] == pytest.approx(0.5)
-    assert m["matches"] == 1.0
+    assert m["matches"] == 2.0
 
 
 def test_countdown_only_fragment_is_not_a_completed_match() -> None:

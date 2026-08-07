@@ -250,6 +250,12 @@ The run-based evaluation path downloads the checkpoint, writes to
 `manual_evals/p0-final-fp16`, logs labeled metrics without renaming the W&B run, uploads all rows
 and replays to the source run, and drains those uploads before the instance exits.
 
+The preflight audit found that the old crash-rate reduction divided failed boots by flattened game
+rows. Instant restart can produce several games from one successful boot, so that denominator was
+wrong when any boot failed. The official evaluator counts unique scheduled boots and has a
+multi-game regression test. Existing P0 periodic sweeps reported zero failures, so their metrics do
+not change.
+
 The command passed a no-rent launcher dry run at commit `b422724`. The current qualifying offer was
 an RTX 4090 with 1,008 GB RAM, 100 GB disk, DLPerf 125.5, and effective price $1.382 per hour. Select
 the offer again at launch; market state may change.
