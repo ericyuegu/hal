@@ -1,7 +1,7 @@
 """Tests for the closed-loop eval reductions (``hal.eval.cross_stage``).
 
 These exercise the pure post-processing — active-frame accounting, per-match row
-construction, bootstrap CIs, and paired cross-checkpoint deltas — on synthetic
+construction, bootstrap CIs, and matched cross-checkpoint deltas — on synthetic
 trajectories / summaries / rows. No emulator, no model: the sweep functions that
 boot Dolphin are covered elsewhere; here we pin the statistics they feed.
 """
@@ -17,7 +17,7 @@ from hal.eval.cross_stage import PREGAME_FRAMES
 from hal.eval.cross_stage import STARTING_STOCKS
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import match_rows
-from hal.eval.cross_stage import paired_vs_cpu_deltas
+from hal.eval.cross_stage import matched_vs_cpu_deltas
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.match_summary import MatchSummary
@@ -332,10 +332,10 @@ def test_combined_prior_sweep_reuses_identical_boots_for_summaries_and_rows(monk
     assert result[0][2] is not None and result[0][2].frames == rows[0].total_frames == 3
 
 
-# --------------------------------------------------------------- paired comparison
+# --------------------------------------------------------------- matched comparison
 
 
-def _paired_runs(
+def _matched_runs(
     per_boot_dmg: list[tuple[float, float]],
 ) -> tuple[list[MatchRow], list[MatchRow]]:
     """One match per boot; run A / B damage_dealt from ``per_boot_dmg`` (active = 1min
@@ -347,42 +347,42 @@ def _paired_runs(
     return rows_a, rows_b
 
 
-def test_paired_delta_recovers_known_delta_and_excludes_zero() -> None:
+def test_matched_delta_recovers_known_delta_and_excludes_zero() -> None:
     per_boot = [(50.0 + (i % 5), 28.0 + (i % 3)) for i in range(40)]
-    rows_a, rows_b = _paired_runs(per_boot)
+    rows_a, rows_b = _matched_runs(per_boot)
     expected = float(np.mean([da - db for da, db in per_boot]))
 
-    out = paired_vs_cpu_deltas(rows_a, rows_b, bootstrap_resamples=1000, seed=0)
+    out = matched_vs_cpu_deltas(rows_a, rows_b, bootstrap_resamples=1000, seed=0)
 
-    assert out["n_pairs"] == 40.0
-    assert out["pairing_rate"] == pytest.approx(1.0)
+    assert out["n_boots"] == 40.0
+    assert out["matching_rate"] == pytest.approx(1.0)
     assert out["damage_dealt_per_min_delta_mean"] == pytest.approx(expected)
     # A is uniformly ahead by >= 20 dmg/min, so the CI is entirely positive.
     assert out["damage_dealt_per_min_delta_ci_lo"] > 0.0
     assert out["damage_dealt_per_min_delta_ci_hi"] > 0.0
 
 
-def test_paired_delta_null_case_includes_zero() -> None:
-    rows_a, rows_b = _paired_runs([(40.0 + (i % 7), 40.0 + (i % 7)) for i in range(30)])
-    out = paired_vs_cpu_deltas(rows_a, rows_b, bootstrap_resamples=500, seed=0)
+def test_matched_delta_null_case_includes_zero() -> None:
+    rows_a, rows_b = _matched_runs([(40.0 + (i % 7), 40.0 + (i % 7)) for i in range(30)])
+    out = matched_vs_cpu_deltas(rows_a, rows_b, bootstrap_resamples=500, seed=0)
     assert out["damage_dealt_per_min_delta_mean"] == pytest.approx(0.0)
     assert out["damage_dealt_per_min_delta_ci_lo"] <= 0.0 <= out["damage_dealt_per_min_delta_ci_hi"]
 
 
-def test_paired_unequal_boot_counts_pair_by_shorter() -> None:
-    # boot 0: A has 3 matches, B has 2 -> 2 pairs; boot 1: A has 2, B has 3 -> 2 pairs.
+def test_matched_delta_pools_all_games_within_each_boot() -> None:
     rows_a = [_row(boot_index=0, match_ordinal=k, damage_dealt=10.0) for k in range(3)] + [
         _row(boot_index=1, match_ordinal=k, damage_dealt=10.0) for k in range(2)
     ]
     rows_b = [_row(boot_index=0, match_ordinal=k, damage_dealt=10.0) for k in range(2)] + [
         _row(boot_index=1, match_ordinal=k, damage_dealt=10.0) for k in range(3)
     ]
-    out = paired_vs_cpu_deltas(rows_a, rows_b, bootstrap_resamples=100, seed=0)
-    assert out["n_pairs"] == 4.0
-    assert out["pairing_rate"] == pytest.approx(2 * 4 / (5 + 5))  # 0.8
+    out = matched_vs_cpu_deltas(rows_a, rows_b, bootstrap_resamples=100, seed=0)
+    assert out["n_boots"] == 2.0
+    assert out["matching_rate"] == 1.0
+    assert out["damage_dealt_per_min_delta_mean"] == 0.0
 
 
-def test_paired_raises_on_matchup_mismatch() -> None:
+def test_matched_raises_on_matchup_mismatch() -> None:
     rows_a = [_row(boot_index=0, match_ordinal=0, ego_character=int(Character.FOX.value))]
     rows_b = [
         _row(
@@ -393,16 +393,16 @@ def test_paired_raises_on_matchup_mismatch() -> None:
         )
     ]
     with pytest.raises(ValueError, match="matchup differs"):
-        paired_vs_cpu_deltas(rows_a, rows_b)
+        matched_vs_cpu_deltas(rows_a, rows_b)
 
 
-def test_paired_raises_when_pairing_rate_below_half() -> None:
+def test_matched_raises_when_matching_rate_below_half() -> None:
     rows_a = [_row(boot_index=i, match_ordinal=0) for i in range(4)]
     rows_b = [_row(boot_index=i, match_ordinal=0) for i in range(10, 14)]  # disjoint boots
-    with pytest.raises(ValueError, match="pairing_rate"):
-        paired_vs_cpu_deltas(rows_a, rows_b)
+    with pytest.raises(ValueError, match="matching_rate"):
+        matched_vs_cpu_deltas(rows_a, rows_b)
 
 
-def test_paired_deltas_are_deterministic() -> None:
-    rows_a, rows_b = _paired_runs([(50.0 + (i % 4), 30.0 + (i % 6)) for i in range(25)])
-    assert paired_vs_cpu_deltas(rows_a, rows_b, seed=5) == paired_vs_cpu_deltas(rows_a, rows_b, seed=5)
+def test_matched_deltas_are_deterministic() -> None:
+    rows_a, rows_b = _matched_runs([(50.0 + (i % 4), 30.0 + (i % 6)) for i in range(25)])
+    assert matched_vs_cpu_deltas(rows_a, rows_b, seed=5) == matched_vs_cpu_deltas(rows_a, rows_b, seed=5)

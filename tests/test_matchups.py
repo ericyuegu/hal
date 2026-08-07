@@ -92,11 +92,10 @@ def test_orientation_alternates_so_model_plays_both_sides() -> None:
     assert (Character.FALCO, Character.FOX) in fox_falco
 
 
-def test_schedule_shared_across_parallelism_for_paired_eval() -> None:
+def test_schedule_is_prefix_stable_for_matched_eval() -> None:
     """Two checkpoints evaluated at different parallelism (different ``n``) still agree
-    boot-for-boot on the common prefix. This is the invariant ``paired_vs_cpu_deltas``
-    leans on: boot ``i`` is the SAME matchup in both runs, so per-match rows align by
-    ``(boot index, matchup)`` without any shared RNG."""
+    boot-for-boot on the common prefix. This lets matched analysis block on the same
+    character pair. It does not share stage or game randomness."""
     small = matchups_for(12)
     big = matchups_for(37)
     assert small == big[: len(small)]

@@ -49,6 +49,7 @@ from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.h2h import run_h2h
+from hal.eval.harness import DEFAULT_START_RETRIES
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
@@ -1462,6 +1463,7 @@ class EvalProtocol:
     stage_policy: str
     completion_policy: str
     active_frame_policy: str
+    start_retries: int
     exec_horizon: int
     decode_temp: float
     decode_temps: tuple[float, float, float, float] | None
@@ -1506,6 +1508,7 @@ def _eval_protocol(
         stage_policy="battlefield_then_random_legal",
         completion_policy="finish_in_flight_wave",
         active_frame_policy="frame_id_gte_0_exclude_zero_active",
+        start_retries=DEFAULT_START_RETRIES,
         exec_horizon=exec_horizon,
         decode_temp=settings.temp,
         decode_temps=settings.temps,
@@ -1546,6 +1549,7 @@ def _run_eval_sweep(
         cpu_level=protocol.cpu_level,
         ego_port=protocol.ego_port,
         seed_stage=melee.Stage(protocol.seed_stage),
+        start_retries=protocol.start_retries,
     )
     if rows_path is not None:
         _write_match_rows(rows_path, rows, protocol)

@@ -21,9 +21,9 @@ Reductions and per-match views:
   bootstrap CIs (the frozen active-frame protocol; see its docstring).
 - ``match_rows`` / ``sweep_vs_cpu_prior_rows`` — one ``MatchRow`` per completed
   match (characters, boot index, ordinal, active frames, damage, stocks), the
-  currency for paired cross-checkpoint comparison.
-- ``paired_vs_cpu_deltas`` — common-random-numbers delta of two runs' rows,
-  aligned by (boot index, matchup) under the same CPU-selectable prior schedule.
+  source for matched-boot diagnostics.
+- ``matched_vs_cpu_deltas`` — a character-matched delta that treats each boot as
+  one cluster. It is not a common-random-numbers estimate.
 """
 
 from collections.abc import Callable
@@ -37,6 +37,7 @@ from typing import Literal
 import melee
 import numpy as np
 
+from hal.eval.harness import DEFAULT_START_RETRIES
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import run_matches_vec
 from hal.eval.match_summary import MatchSummary
@@ -387,12 +388,20 @@ def _drive_prior(
     ego_port: Literal[1, 2],
     seed_stage: melee.Stage,
     max_frames: int,
+    start_retries: int,
 ) -> tuple[list[VecMatch], list[list[Trajectory]]]:
     """Drive the prior-distribution instant-restart sweep, returning the boot matches
     and their per-boot trajectory lists (aligned). Shared by the pooled-metric and
     per-row entry points so both see the identical schedule and boots."""
     matches = _prior_vec_matches(n_matchups, cpu_level=cpu_level, ego_port=ego_port, seed_stage=seed_stage)
-    boots = run_matches_vec(session_cfg, matches, policy_factory, max_frames=max_frames, max_parallel=max_parallel)
+    boots = run_matches_vec(
+        session_cfg,
+        matches,
+        policy_factory,
+        max_frames=max_frames,
+        max_parallel=max_parallel,
+        start_retries=start_retries,
+    )
     return matches, boots
 
 
@@ -406,6 +415,7 @@ def sweep_vs_cpu_prior(
     ego_port: Literal[1, 2] = 1,
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
+    start_retries: int = DEFAULT_START_RETRIES,
 ) -> SweepResult:
     """Prior-distribution vs-CPU sweep for instant-restart sessions.
 
@@ -427,6 +437,7 @@ def sweep_vs_cpu_prior(
         ego_port=ego_port,
         seed_stage=seed_stage,
         max_frames=max_frames,
+        start_retries=start_retries,
     )
     return _prior_sweep_result(boots, seed_stage)
 
@@ -452,6 +463,7 @@ def sweep_vs_cpu_prior_with_rows(
     ego_port: Literal[1, 2] = 1,
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
+    start_retries: int = DEFAULT_START_RETRIES,
 ) -> tuple[SweepResult, list[MatchRow]]:
     """Run the prior sweep once and retain both pooled-metric input and exact rows.
 
@@ -468,6 +480,7 @@ def sweep_vs_cpu_prior_with_rows(
         ego_port=ego_port,
         seed_stage=seed_stage,
         max_frames=max_frames,
+        start_retries=start_retries,
     )
     return _prior_sweep_result(boots, seed_stage), match_rows(boots, matches, ego_port=ego_port)
 
@@ -482,6 +495,7 @@ def sweep_vs_cpu_prior_rows(
     ego_port: Literal[1, 2] = 1,
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
+    start_retries: int = DEFAULT_START_RETRIES,
 ) -> list[MatchRow]:
     """Same instant-restart prior sweep as ``sweep_vs_cpu_prior``, but returns one
     ``MatchRow`` per completed match (characters, boot index, ordinal, active frames,
@@ -489,8 +503,7 @@ def sweep_vs_cpu_prior_rows(
 
     The matchup schedule is ``matchups_for(n_matchups)`` — deterministic and
     prefix-stable — so two checkpoints evaluated at the same ``n_matchups`` share the
-    boot→matchup mapping and their row lists can be paired boot-for-boot with
-    ``paired_vs_cpu_deltas`` (common-random-numbers over matchup difficulty)."""
+    boot-to-matchup mapping. Later restart stages and game randomness are not shared."""
     matches, boots = _drive_prior(
         policy_factory,
         session_cfg=session_cfg,
@@ -500,6 +513,7 @@ def sweep_vs_cpu_prior_rows(
         ego_port=ego_port,
         seed_stage=seed_stage,
         max_frames=max_frames,
+        start_retries=start_retries,
     )
     return match_rows(boots, matches, ego_port=ego_port)
 
@@ -528,39 +542,31 @@ def _match_numerator(row: MatchRow, rate_key: str) -> float:
     }[rate_key]
 
 
-def _match_rate(row: MatchRow, rate_key: str) -> float:
-    """Per-active-minute rate for one match (caller guarantees active_frames > 0)."""
-    return _match_numerator(row, rate_key) / (row.active_frames / FRAMES_PER_MINUTE)
+def _boot_rate(rows: Sequence[MatchRow], rate_key: str) -> float:
+    active = [row for row in rows if row.active_frames > 0]
+    numerator = sum(_match_numerator(row, rate_key) for row in active)
+    minutes = sum(row.active_frames for row in active) / FRAMES_PER_MINUTE
+    return numerator / minutes
 
 
-def paired_vs_cpu_deltas(
+def matched_vs_cpu_deltas(
     rows_a: Sequence[MatchRow],
     rows_b: Sequence[MatchRow],
     *,
     bootstrap_resamples: int = _BOOTSTRAP_RESAMPLES,
     seed: int = 0,
 ) -> dict[str, float]:
-    """Paired (common-random-numbers) per-metric delta of run A minus run B.
+    """Return a character-matched boot-level delta of run A minus run B.
 
-    Both row lists must come from ``sweep_vs_cpu_prior_rows`` under the **same**
-    ``matchups_for`` schedule (equal ``n_matchups``, or one a prefix of the other —
-    ``matchups_for`` is prefix-stable, so boot ``i`` is the same matchup in both). Rows
-    are aligned by ``(boot_index, match_ordinal)``: for each boot present in both runs
-    this asserts the matchups agree (the schedule check) and pairs matches up to the
-    shorter boot's count — honestly dropping the tail when one run played more matches
-    on a boot. Each pair shares the matchup (characters); stages may differ, since
-    instant-restart randomizes them independently per run.
-
-    Returns the per-metric mean paired delta (``<rate>_delta_mean``) and a seeded 95%
-    bootstrap CI over pairs (``<rate>_delta_ci_lo`` / ``_ci_hi``), plus ``n_pairs``,
-    ``n_pairs_rated`` (pairs with active frames on both sides, used for the rates),
-    ``n_rows_a`` / ``n_rows_b``, and ``pairing_rate`` (fraction of all rows that found
-    a partner, ``2 * n_pairs / (len_a + len_b)``). **Raises** if the pairing rate is
-    under 0.5 — that signals mismatched schedules rather than an honest comparison."""
+    Boot ``i`` must use the same character pair in both runs. Active games from one
+    boot are pooled into one rate. The bootstrap samples boots, so games from one
+    Dolphin process stay in one cluster. Restart stages and game randomness differ
+    across runs. This is a blocked diagnostic, not a common-random-numbers estimate.
+    """
     by_boot_a = _rows_by_boot(rows_a)
     by_boot_b = _rows_by_boot(rows_b)
-    pairs: list[tuple[MatchRow, MatchRow]] = []
-    for boot_index in sorted(by_boot_a.keys() & by_boot_b.keys()):
+    shared_boots = sorted(by_boot_a.keys() & by_boot_b.keys())
+    for boot_index in shared_boots:
         boot_a, boot_b = by_boot_a[boot_index], by_boot_b[boot_index]
         matchup_a = (boot_a[0].ego_character, boot_a[0].opp_character)
         matchup_b = (boot_b[0].ego_character, boot_b[0].opp_character)
@@ -569,31 +575,33 @@ def paired_vs_cpu_deltas(
                 f"boot {boot_index} matchup differs between runs ({matchup_a} vs {matchup_b}); "
                 "the two runs did not use the same matchups_for schedule"
             )
-        # strict=False is deliberate: pair up to the shorter boot's match count and
-        # drop the tail when one run played more matches on this boot.
-        pairs.extend(zip(boot_a, boot_b, strict=False))
 
-    total_rows = len(rows_a) + len(rows_b)
-    pairing_rate = (2 * len(pairs) / total_rows) if total_rows > 0 else 0.0
-    if pairing_rate < 0.5:
+    total_boots = len(by_boot_a) + len(by_boot_b)
+    matching_rate = (2 * len(shared_boots) / total_boots) if total_boots else 0.0
+    if matching_rate < 0.5:
         raise ValueError(
-            f"paired_vs_cpu_deltas: paired only {len(pairs)} of {len(rows_a)}/{len(rows_b)} rows "
-            f"(pairing_rate {pairing_rate:.2f} < 0.5); runs likely used different matchup schedules, "
-            f"or one run crashed away most of its boots"
+            f"matched_vs_cpu_deltas: matched {len(shared_boots)} of "
+            f"{len(by_boot_a)}/{len(by_boot_b)} boots "
+            f"(matching_rate {matching_rate:.2f} < 0.5); schedules likely differ"
         )
 
     out: dict[str, float] = {
-        "pairing_rate": pairing_rate,
-        "n_pairs": float(len(pairs)),
+        "matching_rate": matching_rate,
+        "n_boots": float(len(shared_boots)),
         "n_rows_a": float(len(rows_a)),
         "n_rows_b": float(len(rows_b)),
     }
-    rated = [(a, b) for a, b in pairs if a.active_frames > 0 and b.active_frames > 0]
-    out["n_pairs_rated"] = float(len(rated))
+    rated = [
+        (by_boot_a[index], by_boot_b[index])
+        for index in shared_boots
+        if any(row.active_frames > 0 for row in by_boot_a[index])
+        and any(row.active_frames > 0 for row in by_boot_b[index])
+    ]
+    out["n_boots_rated"] = float(len(rated))
     idx = _resample_index(np.random.default_rng(seed), len(rated), bootstrap_resamples)
     for key in _RATE_KEYS:
-        deltas = np.array([_match_rate(a, key) - _match_rate(b, key) for a, b in rated], dtype=np.float64)
-        point = float(deltas.mean()) if len(deltas) > 0 else 0.0
+        deltas = np.array([_boot_rate(a, key) - _boot_rate(b, key) for a, b in rated], dtype=np.float64)
+        point = float(deltas.mean()) if len(deltas) else 0.0
         lo, hi = _mean_ci(deltas, idx, point)
         out[f"{key}_delta_mean"] = point
         out[f"{key}_delta_ci_lo"] = lo

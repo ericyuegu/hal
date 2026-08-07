@@ -109,6 +109,8 @@ the exact CPU evaluation protocol checks added at commit `c4ae635`.
 - Save match rows, replay files, worker logs, and explicit decode protocols.
 - Report separate CPU estimates and uncertainty intervals. Later instant-restart stages are random,
   so boot-and-ordinal row alignment is only a diagnostic, not a paired causal estimate.
+- If a character-matched CPU diagnostic is useful, pool games within each boot and bootstrap boots.
+  Do not bootstrap flattened games from one Dolphin process as independent samples.
 - Report paired stock differences for mirrored H2H configurations.
 - The CPU protocol does not report full game win rate. Label terminal-game results as a subset.
 - Treat H2H as sensitive but possibly non-transitive. Do not hide a CPU regression behind H2H.

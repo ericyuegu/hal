@@ -33,6 +33,8 @@ from hal.sim.vec import BatchPolicy
 from hal.sim.vec import VecMatch
 from hal.sim.vec import drive_vec
 
+DEFAULT_START_RETRIES = 2
+
 
 def usable_cpus() -> int:
     """CPUs this process may actually run on — the ceiling for concurrent Dolphin boots.
@@ -182,7 +184,7 @@ def run_matches_vec(
     max_frames: int,
     max_parallel: int,
     base_slippi_port: int = 51441,
-    start_retries: int = 2,
+    start_retries: int = DEFAULT_START_RETRIES,
 ) -> list[list[Trajectory]]:
     """Run ``matches`` (boots) concurrently in waves of up to ``max_parallel``
     Sessions, each frame batched through a single ``BatchPolicy`` call (see
