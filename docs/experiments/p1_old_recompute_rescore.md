@@ -70,3 +70,8 @@ The launch command passed a search-only preflight at commit `eb5eca7`. Two RTX 4
 the fixed bounds. The best offer had 252 GB RAM, DLPerf 125.6, and an effective price of
 $0.829/hour with the 100 GB disk. The recompute, rolling-context, and experiment tests passed:
 69 passed and 6 hardware-only tests skipped.
+
+The official rescore launched on Vast instance `47110149` at commit `6e97103`. The selected RTX
+4090 host has 252 GB RAM, DLPerf 125.5, and a 100 GB disk at $0.725/hour effective. Provisioning
+took about 5 minutes 17 seconds. The evaluator uses the exact command above and is the only active
+experiment job.
