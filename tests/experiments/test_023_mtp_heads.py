@@ -187,6 +187,60 @@ def test_final_decode_uses_the_checkpoint_decode_dtype(monkeypatch) -> None:
     assert model.trig_centers.dtype == torch.float32
 
 
+def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    calls = {}
+
+    def fake_download(run_name, dest_dir, *, name):
+        calls["download"] = (run_name, dest_dir, name)
+        dest_dir.mkdir(parents=True)
+        path = dest_dir / name
+        path.touch()
+        return path
+
+    def fake_eval(checkpoint, **kwargs):
+        calls["eval"] = (checkpoint, kwargs)
+        output = Path(kwargs["eval_output_dir"])
+        output.mkdir(parents=True)
+        (output / "match_rows.json").write_text("{}")
+        return {}
+
+    class Uploader:
+        def __init__(self, run_name):
+            calls["uploader_run"] = run_name
+
+        def upload_tree(self, root, *, base, pattern="*"):
+            calls["upload"] = (root, base, pattern)
+            return 1
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setattr(exp, "download_latest", fake_download)
+    monkeypatch.setattr(exp, "eval_ckpt", fake_eval)
+    monkeypatch.setattr(exp, "BackgroundUploader", Uploader)
+    exp.main(
+        exp.Args(
+            eval_run="p0-run",
+            wandb_run_id="wandb-id",
+            wandb_label="p0-final-fp16",
+            eval_n_matchups=96,
+        )
+    )
+
+    run_dir = (tmp_path / "runs" / "p0-run").resolve()
+    output_dir = run_dir / "manual_evals" / "p0-final-fp16"
+    assert calls["download"] == ("p0-run", Path("runs/p0-run/manual_checkpoints"), "final.pt")
+    checkpoint, kwargs = calls["eval"]
+    assert checkpoint == Path("runs/p0-run/manual_checkpoints/final.pt").as_posix()
+    assert kwargs["eval_output_dir"] == str(output_dir)
+    assert kwargs["eval_n_matchups"] == 96
+    assert kwargs["wandb_label"] == "p0-final-fp16"
+    assert calls["upload"] == (output_dir, run_dir, "*")
+    assert calls["uploader_run"] == "p0-run"
+    assert calls["closed"] is True
+
+
 def test_heads_are_independent_linear_projections() -> None:
     cfg = exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16, attn_window=8)
     model = exp.GPT(cfg)

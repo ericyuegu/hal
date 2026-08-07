@@ -2075,6 +2075,7 @@ def _prepare_final_decode_model(model: GPT, cfg: TrainConfig) -> None:
 def eval_ckpt(
     ckpt_path: str,
     *,
+    eval_output_dir: str | None = None,
     eval_exec_horizon: int | None = None,
     decode_temp: float | None = None,
     decode_temps: tuple[float, float, float, float] | None = None,
@@ -2088,7 +2089,7 @@ def eval_ckpt(
     wandb_project: str = "hal",
     wandb_entity: str | None = None,
     wandb_label: str | None = None,
-) -> None:
+) -> dict[str, float]:
     """Load a checkpoint and run the prior-distribution vs-CPU sweep, printing the pooled metrics. Each
     override (execution horizon, temp, per-group temps, button-support floor, min-p, click=>trigger fix)
     replaces the trained cfg for this eval only (test-time sweep); ``None`` keeps the trained value."""
@@ -2120,7 +2121,11 @@ def eval_ckpt(
         f"min_p={settings.min_p}  click_trigger_fix={settings.click_trigger_fix}",
         flush=True,
     )
-    replay_dir = Path(ckpt_path).resolve().parent / "eval_replays"
+    replay_dir = (
+        Path(eval_output_dir).resolve()
+        if eval_output_dir is not None
+        else Path(ckpt_path).resolve().parent / "eval_replays"
+    )
     replay_dir.mkdir(parents=True, exist_ok=True)
     policy_index = itertools.count()
 
@@ -2155,7 +2160,6 @@ def eval_ckpt(
             entity=wandb_entity,
             id=wandb_run_id,
             resume="allow",
-            name=wandb_label,
             config={
                 "manual_eval_checkpoint": str(Path(ckpt_path).resolve()),
                 "manual_eval_label": wandb_label or "",
@@ -2168,17 +2172,23 @@ def eval_ckpt(
             for key, value in asdict(protocol).items()
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
+        labeled_log = (
+            {f"eval_manual/{wandb_label}/{key}": value for key, value in metrics.items()} if wandb_label else {}
+        )
         wandb.log(
             {
                 **{f"eval/{key}": value for key, value in metrics.items()},
+                **labeled_log,
                 **protocol_log,
                 "global_step": state["step"],
             }
         )
         run.summary["eval/last_checkpoint"] = str(Path(ckpt_path).resolve())
         run.summary["eval/last_label"] = wandb_label or "manual"
+        run.summary["eval/model_dtype"] = protocol.model_dtype
         wandb.finish()
     print(f"  {metrics}", flush=True)
+    return metrics
 
 
 # %%
@@ -2210,6 +2220,9 @@ class Args:
 
     cfg: TrainConfig = field(default_factory=TrainConfig)
     eval: str | None = None  # ckpt path; closed-loop eval instead of train
+    eval_run: str | None = None  # R2 run name; download eval_checkpoint_name, evaluate, and upload evidence
+    eval_checkpoint_name: str = "final.pt"
+    eval_output_dir: str | None = None
     eval_exec_horizon: int | None = None  # override execution horizon s for --eval (chunked decode; 1=per-frame)
     eval_temp: float | None = None  # override decode temperature for --eval
     eval_temps: tuple[float, float, float, float] | None = None  # per-group temps (buttons, main, c, triggers)
@@ -2237,23 +2250,64 @@ def main(args: Args) -> None:
         assert args.eval_worker_result is not None and args.eval_worker_replay is not None
         run_eval_worker(args.eval_worker, args.eval_worker_step, args.eval_worker_result, args.eval_worker_replay)
         return
-    if args.eval is not None:
-        eval_ckpt(
-            args.eval,
-            eval_exec_horizon=args.eval_exec_horizon,
-            decode_temp=args.eval_temp,
-            decode_temps=args.eval_temps,
-            decode_btn_support_min=args.eval_btn_support_min,
-            decode_min_p=args.eval_min_p,
-            decode_click_trigger_fix=args.eval_click_trigger_fix,
-            eval_n_matchups=args.eval_n_matchups,
-            eval_max_frames=args.eval_max_frames,
-            eval_seed=args.eval_seed,
-            wandb_run_id=args.wandb_run_id,
-            wandb_project=args.wandb_project,
-            wandb_entity=args.wandb_entity,
-            wandb_label=args.wandb_label,
-        )
+    if args.eval is not None and args.eval_run is not None:
+        raise SystemExit("pass one of --eval or --eval-run, not both")
+    if args.eval is not None or args.eval_run is not None:
+        eval_path = args.eval
+        output_dir = args.eval_output_dir
+        eval_label = args.wandb_label
+        uploader: BackgroundUploader | None = None
+        upload_base: Path | None = None
+        if args.eval_run is not None:
+            if Path(args.eval_run).name != args.eval_run:
+                raise SystemExit("--eval-run must be one run-name path segment")
+            if Path(args.eval_checkpoint_name).name != args.eval_checkpoint_name:
+                raise SystemExit("--eval-checkpoint-name must be one file name")
+            label = eval_label or f"manual-{Path(args.eval_checkpoint_name).stem}"
+            if Path(label).name != label:
+                raise SystemExit("--wandb-label must be one path segment with --eval-run")
+            run_dir = Path("runs") / args.eval_run
+            checkpoint = download_latest(
+                args.eval_run,
+                run_dir / "manual_checkpoints",
+                name=args.eval_checkpoint_name,
+            )
+            if checkpoint is None:
+                raise SystemExit(f"no {args.eval_checkpoint_name} for run {args.eval_run!r}")
+            eval_path = str(checkpoint)
+            output_path = Path(output_dir) if output_dir is not None else run_dir / "manual_evals" / label
+            output_path = output_path.resolve()
+            upload_base = run_dir.resolve()
+            if not output_path.is_relative_to(upload_base):
+                raise SystemExit("--eval-output-dir must be inside runs/<eval-run> so evidence can upload")
+            output_dir = str(output_path)
+            eval_label = label
+            uploader = BackgroundUploader(args.eval_run)
+        assert eval_path is not None
+        try:
+            eval_ckpt(
+                eval_path,
+                eval_output_dir=output_dir,
+                eval_exec_horizon=args.eval_exec_horizon,
+                decode_temp=args.eval_temp,
+                decode_temps=args.eval_temps,
+                decode_btn_support_min=args.eval_btn_support_min,
+                decode_min_p=args.eval_min_p,
+                decode_click_trigger_fix=args.eval_click_trigger_fix,
+                eval_n_matchups=args.eval_n_matchups,
+                eval_max_frames=args.eval_max_frames,
+                eval_seed=args.eval_seed,
+                wandb_run_id=args.wandb_run_id,
+                wandb_project=args.wandb_project,
+                wandb_entity=args.wandb_entity,
+                wandb_label=eval_label,
+            )
+        finally:
+            if uploader is not None:
+                assert output_dir is not None and upload_base is not None
+                count = uploader.upload_tree(Path(output_dir), base=upload_base)
+                print(f"[eval] queued {count} evidence files for R2", flush=True)
+                uploader.close()
         return
     if args.resume is not None:
         state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)

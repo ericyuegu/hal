@@ -227,6 +227,24 @@ Keep the in-run final result as a diagnostic. After `final.pt` uploads, run the 
 final evaluation by loading that checkpoint through the FP16 decode path. Record the model dtype in
 the new evaluation artifact. Do not resume or alter the active training process.
 
+After `final.pt` is verified, launch the corrected evaluation from the current experiment commit:
+
+```text
+uv run scripts/launch_vast.py \
+  --max-price 1.50 --disk 100 --min-vram 24 --min-ram 200 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 1 --upload-gb 2 --run-hours 0.75 -- \
+  uv run experiments/023_mtp_heads.py \
+  --eval-run \
+  260807-164825_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-linear_ranked-anon-1_e0-normalized-aux-bc \
+  --eval-checkpoint-name final.pt --eval-n-matchups 96 --eval-seed 0 \
+  --wandb-run-id obx3o3az --wandb-label p0-final-fp16
+```
+
+The run-based evaluation path downloads the checkpoint, writes to
+`manual_evals/p0-final-fp16`, logs labeled metrics without renaming the W&B run, uploads all rows
+and replays to the source run, and drains those uploads before the instance exits.
+
 At step 8,192, NLL at offsets 1, 5, 9, and 13 was 1.074, 2.764, 3.522, and 4.002. Button log loss
 was 0.0318. The 56,705,941-byte `step_008192.pt` object was verified directly in R2.
 

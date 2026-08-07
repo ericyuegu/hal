@@ -74,16 +74,14 @@ The checkpoint path and output paths are placeholders until P1 finishes. The pla
 
 ```text
 uv run experiments/023_mtp_heads.py \
-  --eval runs/P1_RUN/final.pt \
+  --eval-run P1_RUN --eval-checkpoint-name final.pt \
   --no-eval-incremental-kv \
-  --eval-output-dir runs/P1_RUN/eval_p2_recompute \
   --eval-n-matchups 96 --eval-seed 0 \
   --wandb-run-id P1_WANDB_ID --wandb-label p2-recompute
 
 uv run experiments/023_mtp_heads.py \
-  --eval runs/P1_RUN/final.pt \
+  --eval-run P1_RUN --eval-checkpoint-name final.pt \
   --eval-incremental-kv \
-  --eval-output-dir runs/P1_RUN/eval_p2_kv \
   --eval-n-matchups 96 --eval-seed 0 \
   --wandb-run-id P1_WANDB_ID --wandb-label p2-kv
 ```
