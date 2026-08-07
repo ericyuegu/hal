@@ -112,6 +112,9 @@ feed that sample to the next depth. Freeze the sampling seed and number of examp
 cross-entropy gap from teacher forcing. This diagnostic measures exposure to model-generated
 history. It is not the joint NLL of the observed sparse action sequence.
 
+Use a dedicated generator that resets from the declared diagnostic seed on every validation pass.
+Do not consume the process-wide training RNG or the live decode generator.
+
 Closed-loop execution samples offset 1 only. It must not compute offsets 5, 9, or 13 unless an
 explicit diagnostic requests them.
 
@@ -151,6 +154,7 @@ alignment, optimizer, or total auxiliary weight.
     has learned.
 18. Assert E3-C and E3-T have identical parameter names, shapes, optimizer ownership, and forward
     call counts.
+19. Assert rollout-conditioned validation leaves process-wide CPU and CUDA RNG states unchanged.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 

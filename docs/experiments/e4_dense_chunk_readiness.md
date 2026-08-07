@@ -81,6 +81,8 @@ E3 predicts different time offsets.
 11. With the same replay and sampler seed, assert E3 and E4 receive byte-identical windows, replay
     IDs, context padding, and 13-frame target chunks before the loss slices its offsets.
 12. Reject `sample_chunk_length < max(head_offsets)`.
+13. Assert dense rollout diagnostics use the dedicated validation generator and leave training RNG
+    state unchanged.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 

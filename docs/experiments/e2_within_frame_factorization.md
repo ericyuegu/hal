@@ -147,6 +147,7 @@ or a missing target must not supply a condition or a loss.
 13. Save and reload each order. Check mode, order, dimensions, logits, and sampled decode.
 14. Assert every new parameter belongs to AdamW exactly once and never to Muon.
 15. Run the small end-to-end training test in both E2 orders.
+16. Assert rollout-conditioned validation leaves process-wide CPU and CUDA RNG states unchanged.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -190,6 +191,10 @@ closed-loop decode time.
 The rollout-conditioned metric is stochastic. It is an exposure-bias diagnostic, not the joint NLL
 of the observed action. Freeze its seed and sample count. Do not compare runs that use different
 rollout draws.
+
+Use a dedicated `torch.Generator` for this diagnostic. Recreate or reset it from the declared
+diagnostic seed for each validation pass. Do not consume the process-wide Torch RNG or the live
+closed-loop decode generator. Validation must leave training RNG state byte-identical.
 
 ## Closed-loop evaluation
 
