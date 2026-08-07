@@ -92,7 +92,7 @@ uv run scripts/launch_vast.py \
   --max-price 1.50 --disk 80 --min-vram 24 --min-ram 200 \
   --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
   --data-gb 0 --upload-gb 1 --run-hours 1.5 -- \
-  bash -lc '
+  bash -c '
     set -euo pipefail
     p1_run=260807-220243_023_mtp_heads_gpt-d256-L8-h4-Lc1024-a1024-swa128-recompute-o1.5.9.13-linear_ranked-anon-1_p1-matched-swa-recompute
     uv run experiments/023_mtp_heads.py \
