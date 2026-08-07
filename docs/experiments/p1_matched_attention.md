@@ -197,6 +197,10 @@ RTX 4090 with 1,008 GB RAM, 250 GB disk, DLPerf 125.3, and effective price $1.45
 At commit `c4ae635`, the gate command still encoded every planned flag. No RTX 4090 offer met the
 $1.50 effective hourly cap with 250 GB disk at 11:53 PDT. No instance was rented.
 
+At commit `47540cc`, the gate command passed another no-rent audit. Three RTX 4090 offers met the
+bounds. The best had 252 GB RAM, DLPerf 125.6, a 250 GB disk, and an effective price of
+$0.781/hour. P1-old remained the only rented experiment job.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
