@@ -135,6 +135,9 @@ critic results.
     state.
 14. Reject source checkpoints that are not dense `(1,2,3,4)` temporal policies.
 15. Run a small end-to-end critic job with finite train and validation outputs.
+16. Assert each state-only ablation receives the exact target and valid mask used by its matched Q
+    head.
+17. Build policy-sample support thresholds from logged validation chunks without reading Q values.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
@@ -166,15 +169,20 @@ Then test whether Q uses actions:
 - Shuffle frame order within the logged chunk.
 - Replace one frame and one action group at a time with an in-support alternative.
 - Zero or mask all action embeddings.
-- Compare Q error with a state-only V baseline.
+- Compare Q error with a state-only predictor trained on the same `y_t^H` target.
 
-Fit a state-only Q ablation with matched optimizer and data. The chunk critic must improve held-out
-prediction enough to exceed seed noise. Sensitivity alone is not enough; arbitrary sensitivity can
-also be wrong.
+Fit one state-only `Q_H^{state}(s_t)` ablation for each horizon. Match its target, optimizer, data,
+training steps, and output-head capacity to the chunk critic. The V probe trained on Monte Carlo
+returns is not this control because it has a different target. The chunk critic must improve
+held-out prediction enough to exceed seed noise. Sensitivity alone is not enough; arbitrary
+sensitivity can also be wrong.
 
-Finally sample chunks from the frozen E4 policy. Report their behavior-model log likelihood,
-Q value, V value, advantage, and ensemble disagreement. Separate in-support and low-support samples.
-Do not use low-support values for E7 weights.
+Finally sample chunks from the frozen E4 policy. At each held-out state, compare the sampled chunk's
+teacher-forced log likelihood with the logged chunk's likelihood under the same frozen policy.
+Define support thresholds from the held-out logged distribution before inspecting Q values. Report
+relative likelihood, Q value, V value, advantage, and ensemble disagreement. A high likelihood
+under the sampling policy alone does not prove data support. Separate in-support and low-support
+samples. Do not use low-support values for E7 weights.
 
 ## Gate
 
