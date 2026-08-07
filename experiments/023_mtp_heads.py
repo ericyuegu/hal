@@ -1962,7 +1962,9 @@ def train(
         )
         n = uploader.upload_tree(sub, base=ckpt_dir, pattern="*.slp")
         uploader.upload(rows_path, key=str(rows_path.relative_to(ckpt_dir)))
-        print(f"[eval] queued {n} .slp + matchup rows for R2 ({step_tag})", flush=True)
+        metrics_path = sub / "metrics.json"
+        uploader.upload(metrics_path, key=str(metrics_path.relative_to(ckpt_dir)))
+        print(f"[eval] queued {n} .slp + rows + metrics for R2 ({step_tag})", flush=True)
         return metrics
 
     def _val_log_dict() -> dict[str, object]:
