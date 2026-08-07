@@ -112,8 +112,8 @@ class TrainConfig:
     d_model: int = 256
     n_layers: int = 8
     n_heads: int = 4
-    # Frames visible to each attention layer. Zero means full attention.
-    attn_window: int = 128
+    # Zero uses full causal attention. Positive values enable the SWA ablation.
+    attn_window: int = 0
     # Fail instead of using the slower dense attention path.
     require_flex: bool = False
     # Offset 1 is deployed. Other offsets are auxiliary targets.
@@ -148,7 +148,6 @@ class TrainConfig:
     # Replan after this many contiguous output heads. One means per-frame control.
     exec_horizon: int = 1
     seed: int = 0
-    # This must exceed 1 + n_layers * (attn_window - 1) for exact incremental decode.
     L_ctx: int = 1024
     # Effective batch size. The default processes 131,072 tokens in one forward pass.
     batch_size: int = 128
@@ -174,7 +173,7 @@ class TrainConfig:
     compile_trunk: bool = True
     # eval cadence
     val_every: int = 1024
-    # 32 batches of 128 windows score 4,096 validation replays.
+    # Maximum validation batches. The current v7 validation split is smaller than this cap.
     val_n_batches: int = 32
     # Examples used for per-head shared-trunk gradient comparisons.
     gradient_diagnostic_batch_size: int = 16
@@ -197,13 +196,8 @@ class TrainConfig:
     # Set true only when the evaluator has an actually separate GPU (or intentionally accepts
     # same-device contention).
     eval_overlap_training: bool = False
-    # Incremental (rolling-KV) closed-loop decode. With a trained attn_window the cache holds
-    # exactly that window and RoPE is relative, so the decode is exact; at full attention the cache
-    # drops history the full forward keeps, and validate_config rejects the combination (a
-    # full-context arm must pass --cfg.no-eval-incremental-kv, so the two can never disagree in
-    # silence). On because the one-token forward measured 2.0x the full recompute at L_ctx 256, and
-    # the saving grows with the context.
-    eval_incremental_kv: bool = True
+    # Opt-in decode ablation for SWA models. Full causal attention must rebuild the raw window.
+    eval_incremental_kv: bool = False
     # Cast the model's float parameters to fp16 for closed-loop decode. The decode is launch-bound,
     # not precision-bound: fp16 weights + fp16 context measured 1.7x the fp32 forward, and the
     # sampled action is unchanged (the stick/trigger centers and every logit stay fp32). Autocast is
@@ -242,9 +236,10 @@ class TrainConfig:
 
 
 def _model_tag(cfg: TrainConfig) -> str:
-    """Return the architecture part of the run name."""
     offs = ".".join(str(o) for o in cfg.head_offsets)
-    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-o{offs}-linear"
+    attention = "full" if cfg.attn_window == 0 else f"swa{cfg.attn_window}"
+    decode = "kv" if cfg.eval_incremental_kv else "recompute"
+    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-{attention}-{decode}-o{offs}-linear"
 
 
 def _micro_batch(cfg: TrainConfig) -> int:
@@ -1691,9 +1686,6 @@ def train(
 
     print("[val] building cached val set…", flush=True)
     val_t0 = time.monotonic()
-    # The cache stays in host memory and each batch moves to the device inside the val loop: 128
-    # batches of 64 x 1024 frames are 2.7 GiB of observations, which would sit on the GPU for the
-    # whole run and buy nothing.
     val_cache = list(itertools.islice(val_loader, cfg.val_n_batches))
     if not val_cache:
         raise RuntimeError("val loader yielded zero batches")

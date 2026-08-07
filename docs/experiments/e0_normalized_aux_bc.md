@@ -1,6 +1,6 @@
 # E0: normalized auxiliary BC baseline
 
-Status: implementation verified; launch pending
+Status: exploratory SWA run active; full-attention baseline pending
 
 Owner: Codex with a focused implementation agent
 
@@ -29,13 +29,13 @@ Use one 022-derived experiment file for E0, E1, and E2. A model-mode field will 
 independent-MLP, and factored-MLP arms. This avoids copying the training and evaluation harness for
 each head ablation.
 
-Fork the current 022 training and evaluation path after its concurrent SWA and closed-loop fixes are
+Fork the current 022 training and evaluation path after its closed-loop fixes are
 committed. Keep:
 
-- The shared sliding-window trunk.
+- The shared causal transformer trunk.
 - V7 observation features and data.
 - Compiled training and eager evaluation.
-- Incremental fp16 closed-loop decode.
+- Full-window fp16 closed-loop decode.
 - Checkpoint upload and resume support.
 - Fixed CPU-opponent evaluation and replay artifacts.
 - Optional final mirrored head-to-head evaluation.
@@ -79,7 +79,7 @@ Planned defaults:
 - `d_model = 256`
 - `n_layers = 8`
 - `n_heads = 4`
-- `attn_window = 128`
+- `attn_window = 0`
 - `L_ctx = 1024`
 - `batch_size = 128`
 - `grad_accum_steps = 1`
@@ -96,9 +96,8 @@ Planned defaults:
 - `windows_per_replay = 2`
 - `seed = 0`
 
-`L_ctx = 1024` is required by the current eight-layer, 128-frame SWA incremental decoder. The
-effective receptive field is 1017 frames, and the raw rolling context must extend beyond its left
-edge.
+`L_ctx = 1024` is the fixed raw rolling context. Training recomputes all transformer layers from
+that window. Closed-loop inference must do the same.
 
 The step token budget is 131,072. Do not change it to fit a specific GPU without recording the
 change here.
@@ -116,9 +115,9 @@ Required offline metrics:
 - Primary-to-auxiliary gradient cosine and sign conflict.
 - Training step time and samples per second.
 
-The default `val_n_batches = 32` with batch 128 gives 4,096 validation replays. This is half the
-replay count used by the old batch-256 setup, but each replay contributes twice the context length.
-Keep 32 for E0 to control wall time. Revisit only if the observed NLL confidence interval is too wide.
+`val_n_batches = 32` is a safety cap. The v7 validation split contains 1,192 replays in four shards,
+so E0 caches all 1,192 replays in ten batches. Keep this exact split and one window per replay for
+E1 and E2.
 
 ## Closed-loop evaluation
 
@@ -201,6 +200,8 @@ uv run scripts/launch_vast.py \
   --run-hours 3.5 \
   -- uv run experiments/023_mtp_heads.py \
   --cfg.require-flex \
+  --cfg.attn-window 0 \
+  --cfg.no-eval-incremental-kv \
   --comment e0-normalized-aux-bc
 ```
 
@@ -216,6 +217,22 @@ Search audit on 2026-08-06:
 - Vast reported 128 GB decimal system RAM, displayed by the launcher as 126 GiB.
 - The cheaper top result had DLPerf 96.7 and reliability 0.980. Raising `min_dlperf` to 110 avoids
   that host and reduces runtime and interruption risk.
+
+Launch record:
+
+- Commit: `89fa0aa0ec1a5303cd1ef5fc240da81b6c25baa9`.
+- Instance: `47034073`; offer: `46211613`.
+- W&B run: `19sowpt8`.
+- GPU: RTX 4090; DLPerf: 125.68; warm utilization: 98%.
+- Effective rate: $0.679 per hour, including 500 GB disk.
+- Image provisioning took about four minutes.
+- Fixture and emulator staging took about 18 seconds after the repository checkout.
+- Validation caching took 12.5 seconds for the full 1,192-replay split.
+- Cold compile affected steps 0 and 1. Warm steps are about 0.13 to 0.19 seconds.
+
+This run used `attn_window=128` and temporal KV decoding. It is retained as exploratory SWA+KV
+evidence, not as the E0 reference. The E0 reference must use full causal attention and full-window
+recomputation. Reevaluate the SWA checkpoint without KV before attributing any result to SWA.
 
 ## Promotion rule
 
@@ -237,9 +254,8 @@ E1 starts only after this document contains the final run name and E0 checkpoint
 - 021 adds v6 features but still contains the old summed auxiliary objective.
 - 022 contains the current v7, shared-trunk, compiled training, incremental evaluation, checkpoint,
   and head-to-head paths. It is the correct infrastructure source, but its factored head is not E0.
-- Use `L_ctx = 1024`, not the previously run 512-frame geometry. With eight 128-frame SWA layers,
-  the cached receptive field reaches 1,017 frames. A 512-frame rolling input cannot be equivalent to
-  that incremental cache.
+- Use a fixed raw rolling context of `L_ctx = 1024`. Rebuild all 1,024 frames in every transformer
+  layer during training and closed-loop inference.
 - The local 020 and 022 timing records suggest that 16,384 steps should fit the requested budget on
   a healthy 4090 or 5090, but RAM and page-cache performance can dominate GPU speed.
 - `experiments/023_mtp_heads.py` now uses the current shared trunk, compiled training path,
@@ -270,4 +286,11 @@ Pending.
 
 ## Throughput and infrastructure findings
 
-Pending.
+- Warm optimizer steps are usually 0.13 to 0.19 seconds. The first live utilization sample was 98%.
+- The 500 GB disk reached 92% use with about 463 GB of materialized MDS shards. The 440 GB streaming
+  cache then evicted and fetched shards while training continued.
+- A 75-second loader stall occurred between steps 1,700 and 1,750. No validation or checkpoint ran
+  during that interval. Remote shard completion also stopped for the same minute.
+- If the stall repeats every 1,700 steps, it adds about 11 to 12 minutes. This remains within the E0
+  budget, but a 1 TB disk should be audited for E1 so the roughly 800 GB materialized dataset can
+  remain cached.

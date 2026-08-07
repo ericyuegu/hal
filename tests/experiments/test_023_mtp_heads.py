@@ -48,7 +48,8 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.head_offsets == (1, 5, 9, 13)
     assert cfg.aux_loss_weight == 1.0
     assert (cfg.d_model, cfg.n_layers, cfg.n_heads) == (256, 8, 4)
-    assert (cfg.attn_window, cfg.L_ctx, cfg.batch_size) == (128, 1024, 128)
+    assert (cfg.attn_window, cfg.L_ctx, cfg.batch_size) == (0, 1024, 128)
+    assert cfg.eval_incremental_kv is False
     assert cfg.batch_size * cfg.L_ctx == 131072
     assert (cfg.max_steps, cfg.warmup_steps) == (2**14, 500)
     assert (cfg.muon_lr, cfg.adam_lr, cfg.weight_decay) == (0.02, 8.5e-4, 0.01)
@@ -60,6 +61,13 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.eval_max_frames == 7200
     assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-v7"
     assert cfg.mds_schema_version == 7
+
+
+def test_run_tag_names_attention_and_decode_mode() -> None:
+    baseline = exp.TrainConfig()
+    swa = exp.TrainConfig(attn_window=128, eval_incremental_kv=True)
+    assert "-full-recompute-" in exp._model_tag(baseline)
+    assert "-swa128-kv-" in exp._model_tag(swa)
 
 
 def test_heads_are_independent_linear_projections() -> None:
