@@ -219,6 +219,11 @@ host has 252 GB RAM, DLPerf 125.5, and a 250 GB disk at $0.808/hour effective. T
 ready in 22 seconds. The command matches the first gate, except the run comment is
 `p1-matched-swa-recompute-gate-r2` so its evidence cannot be confused with the failed run.
 
+The full-run command passed a no-rent audit at commit `d899415`. The payload uses full recomputation,
+the P0 final checkpoint for H2H, 64 mirrored H2H configurations, and every planned data setting.
+Three RTX 4090 offers met the bounds. The best had 252 GB RAM, DLPerf 125.6, a 250 GB disk, and an
+effective price of $0.781/hour. Select the offer again only after the replacement gate passes.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
