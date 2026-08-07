@@ -10,7 +10,7 @@ Updated: 2026-08-07
 | P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; healthy through the step-5,120 validation | Complete 16,384 steps and retain all final evidence. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
-| P2 | Systems: temporal-KV decode efficiency | Exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
+| P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
@@ -73,6 +73,7 @@ recomputation.
    configuration into the E1 launch audit.
 
 The fresh matched-P1 plan is `docs/experiments/p1_matched_attention.md`.
+The P2 decode plan is `docs/experiments/p2_temporal_kv_ablation.md`.
 
 ## Evaluation rules
 
