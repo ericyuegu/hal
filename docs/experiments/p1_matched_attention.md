@@ -158,6 +158,10 @@ The 256-step gate command passed another no-rent launcher audit at commit `dadb0
 offer was an RTX 4090 with 1,008 GB RAM, 250 GB disk, DLPerf 125.3, and effective price $1.451 per
 hour. The encoded command preserved all planned gate fields.
 
+After the concurrent-startup implementation, the same gate command passed a no-rent audit at commit
+`1647cc2`. The encoded SHA and every experiment flag were correct. The selected offer remained the
+RTX 4090 with 1,008 GB RAM, 250 GB disk, DLPerf 125.3, and effective price $1.451 per hour.
+
 ## Evaluation
 
 - Use the same 32 periodic and 96 final CPU matchups as P0.
