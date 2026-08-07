@@ -319,6 +319,32 @@ values for `metrics.json`, the worker result, and the worker log are
 `57088ebd3bf2ceb5f894ea286a3e3f1d`, `7b1390403e2252afb0923937188e305c`, and
 `66a3f817cdac725b5008b133d3fbe918`.
 
+At the third audit, the run had reached step 14,615. All tracked values remained finite. Every batch
+still contained 128 distinct replays, and the step-3,506 boundary remained the only adjacent replay
+reuse. Over the latest 500 steps, median step time was 0.253 seconds, median loader wait was 0.102
+seconds, and median throughput was 506.9 samples per second.
+
+The loader pauses for about 9 seconds at each epoch boundary. The stalls occurred at steps 3,506,
+7,012, 10,518, and 14,024, each after 448,768 emitted windows. This is deterministic epoch startup,
+not a random I/O failure. It costs about 36 seconds over the full run. A future continuous-epoch
+iterator could hide it, but it is not worth changing the active experiment.
+
+At step 12,288, validation NLL at offsets 1, 5, 9, and 13 was 1.027, 2.630, 3.350, and 3.816 bits
+per frame. By step 14,336 it reached 1.015, 2.601, 3.312, and 3.776. The step-12,288 CPU evaluation
+finished in 553 seconds. It completed all 32 boots, produced 42 active matches and no zero-active
+tail, and reported no crash. Stocks taken and lost per active minute were 0.751 and 1.470. Damage
+dealt and taken were 124.3 and 124.7.
+
+P0 at step 12,288 reported 0.813 stocks taken and 1.372 lost per active minute. Its intervals overlap
+P1's intervals on both rates, so the difference is not resolved by these small independent sweeps.
+P1 remains slightly worse on the point estimates. The final CPU sweep and paired H2H remain the
+decision evidence.
+
+The 56,706,005-byte step-12,288 checkpoint is present in R2. R2 also contains 43 replay files, the
+match rows, and the metrics. The recovered metrics, worker result, and worker log have verified MD5
+values `cc6a1bc628725bc630b6d91f8e9ecdad`, `7c6ab44f763b2b9c4ea6958f47fdb070`, and
+`f0f467c8623afba02e08bdc46fa164bc`.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
