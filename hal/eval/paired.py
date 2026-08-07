@@ -251,9 +251,9 @@ def summarize_paired(records: Sequence[MatchRecord], *, focal_model: str) -> Pai
         raise ValueError("no completed matches to summarize")
     opponent_model = opponent_of(rows, focal_model)
 
-    stock_leads = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model == focal_model)
-    stock_deficits = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model == opponent_model)
-    stock_ties = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model is None)
+    stock_leads = sum(1 for r in rows if r.outcome is not None and r.outcome.stock_leader_model == focal_model)
+    stock_deficits = sum(1 for r in rows if r.outcome is not None and r.outcome.stock_leader_model == opponent_model)
+    stock_ties = sum(1 for r in rows if r.outcome is not None and r.outcome.stock_leader_model is None)
     decided = sum(1 for r in rows if r.outcome is not None and r.outcome.decided)
     non_tied = stock_leads + stock_deficits
     lead_low, lead_high = wilson_ci(stock_leads, non_tied)

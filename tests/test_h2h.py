@@ -191,33 +191,33 @@ def test_match_record_outcome_invariants(tmp_path):
     assert outcome.damage_taken_port_1 == pytest.approx(61.0)
     assert outcome.damage_dealt_port_2 == pytest.approx(outcome.damage_taken_port_1)
     assert outcome.damage_dealt_port_1 == pytest.approx(outcome.damage_taken_port_2)
-    # The winner follows the stocks, and maps back to the model on that port.
-    assert outcome.winner_port == 1
-    assert outcome.winner_model == spec.model_port_1 == "alpha"
+    # The stock leader maps back to the model on that port.
+    assert outcome.stock_leader_port == 1
+    assert outcome.stock_leader_model == spec.model_port_1 == "alpha"
     assert outcome.decided is True
     assert outcome.hit_frame_budget is False
     assert record.boot_index == record.config_id == spec.config.config_id
 
 
-def test_match_record_mirror_gives_the_win_to_the_other_model(tmp_path):
+def test_match_record_mirror_gives_the_stock_lead_to_the_other_model(tmp_path):
     traj = _trajectory(frames=200, damage_port_1=10.0, damage_port_2=20.0, stocks_left={1: 3, 2: 0})
 
     forward = match_record(_spec(0), traj, tmp_path / "a", max_frames=7200, verify_inputs=False)
     mirror = match_record(_spec(1), traj, tmp_path / "b", max_frames=7200, verify_inputs=False)
 
     assert forward.outcome is not None and mirror.outcome is not None
-    assert forward.outcome.winner_model == "alpha"
-    assert mirror.outcome.winner_model == "beta"
+    assert forward.outcome.stock_leader_model == "alpha"
+    assert mirror.outcome.stock_leader_model == "beta"
 
 
-def test_match_record_stock_tie_has_no_winner(tmp_path):
+def test_match_record_stock_tie_has_no_leader(tmp_path):
     traj = _trajectory(frames=7200, damage_port_1=50.0, damage_port_2=50.0, stocks_left={1: 2, 2: 2})
 
     record = match_record(_spec(), traj, tmp_path / "boot_000", max_frames=7200, verify_inputs=False)
 
     assert record.outcome is not None
-    assert record.outcome.winner_port is None
-    assert record.outcome.winner_model is None
+    assert record.outcome.stock_leader_port is None
+    assert record.outcome.stock_leader_model is None
     assert record.outcome.decided is False
     assert record.outcome.hit_frame_budget is True
 
@@ -240,6 +240,20 @@ def test_match_record_round_trips_through_json(tmp_path):
     )
     path = tmp_path / "matches.jsonl"
     path.write_text(json.dumps(record.as_dict()) + "\n")
+
+    assert load_records(path) == [record]
+
+
+def test_match_record_loads_old_winner_field_names(tmp_path):
+    traj = _trajectory(frames=300, damage_port_1=5.0, damage_port_2=8.0, stocks_left={1: 0, 2: 1})
+    record = match_record(_spec(), traj, tmp_path / "boot_000", max_frames=7200, verify_inputs=False)
+    old = record.as_dict()
+    outcome = old["outcome"]
+    assert outcome is not None
+    outcome["winner_port"] = outcome.pop("stock_leader_port")
+    outcome["winner_model"] = outcome.pop("stock_leader_model")
+    path = tmp_path / "matches.jsonl"
+    path.write_text(json.dumps(old) + "\n")
 
     assert load_records(path) == [record]
 
@@ -424,8 +438,8 @@ def test_run_h2h_writes_records_replays_and_meta(tmp_path, monkeypatch):
     assert len(records) == 6
     assert [r.orientation for r in records] == [0, 0, 0, 1, 1, 1]
     assert [r.config_id for r in records] == [0, 1, 2, 0, 1, 2]
-    # Every match won by port 1, so each model wins exactly its own orientation.
-    assert {r.outcome.winner_model for r in records if r.outcome} == {"alpha", "beta"}
+    # Port 1 leads every match, so each model leads exactly its own orientation.
+    assert {r.outcome.stock_leader_model for r in records if r.outcome} == {"alpha", "beta"}
     # The orientations use disjoint decode seeds.
     assert seeds == [[5, 6], [100_005, 100_006]]
 

@@ -118,9 +118,9 @@ def _record(
 ) -> MatchRecord:
     """One synthetic record. Orientation 0 puts alpha on port 1; orientation 1 mirrors it."""
     model_port_1, model_port_2 = ("alpha", "beta") if orientation == 0 else ("beta", "alpha")
-    winner_port: int | None = None
+    stock_leader_port: int | None = None
     if stocks_lost_port_1 != stocks_lost_port_2:
-        winner_port = 1 if stocks_lost_port_1 < stocks_lost_port_2 else 2
+        stock_leader_port = 1 if stocks_lost_port_1 < stocks_lost_port_2 else 2
     outcome = (
         MatchOutcome(
             total_frames=active_frames + 123,
@@ -135,8 +135,10 @@ def _record(
             damage_dealt_port_2=damage_dealt_port_2,
             decided=max(stocks_lost_port_1, stocks_lost_port_2) >= 4,
             hit_frame_budget=False,
-            winner_port=winner_port,
-            winner_model=None if winner_port is None else (model_port_1 if winner_port == 1 else model_port_2),
+            stock_leader_port=stock_leader_port,
+            stock_leader_model=(
+                None if stock_leader_port is None else (model_port_1 if stock_leader_port == 1 else model_port_2)
+            ),
         )
         if ran
         else None

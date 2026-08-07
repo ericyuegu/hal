@@ -496,9 +496,8 @@ class MatchOutcome:
     damage_dealt_port_2: float
     decided: bool  # a port reached zero stocks, so the match ended on a knockout
     hit_frame_budget: bool
-    # These fields name the stock leader. They name the game winner only when ``decided`` is true.
-    winner_port: int | None  # None on a stock tie at the budget
-    winner_model: str | None
+    stock_leader_port: int | None  # None on a stock tie at the budget
+    stock_leader_model: str | None
 
     def stocks_lost(self, port: int) -> int:
         return self.stocks_lost_port_1 if port == 1 else self.stocks_lost_port_2
@@ -560,6 +559,10 @@ class MatchRecord:
     def from_dict(cls, data: Mapping[str, Any]) -> MatchRecord:
         """Rebuild from a persisted row (round-trips ``as_dict``)."""
         outcome = data["outcome"]
+        if outcome is not None and "winner_port" in outcome:
+            outcome = dict(outcome)
+            outcome["stock_leader_port"] = outcome.pop("winner_port")
+            outcome["stock_leader_model"] = outcome.pop("winner_model")
         stats = {
             f"input_stats_port_{port}": (
                 None
@@ -656,9 +659,9 @@ def match_record(
         summary = summarize_trajectory(traj)
         stocks_left = {1: summary.p1_stocks_left, 2: summary.p2_stocks_left}
         damage_taken = {1: summary.p1_damage_taken, 2: summary.p2_damage_taken}
-        winner_port: int | None = None
+        stock_leader_port: int | None = None
         if stocks_left[1] != stocks_left[2]:
-            winner_port = 1 if stocks_left[1] > stocks_left[2] else 2
+            stock_leader_port = 1 if stocks_left[1] > stocks_left[2] else 2
         outcome = MatchOutcome(
             total_frames=len(traj),
             active_frames=int((traj.frame_id >= 0).sum()),
@@ -672,8 +675,8 @@ def match_record(
             damage_dealt_port_2=damage_taken[1],
             decided=min(stocks_left.values()) <= 0,
             hit_frame_budget=len(traj) >= max_frames - 1,
-            winner_port=winner_port,
-            winner_model=None if winner_port is None else spec.model_on_port(winner_port),
+            stock_leader_port=stock_leader_port,
+            stock_leader_model=None if stock_leader_port is None else spec.model_on_port(stock_leader_port),
         )
     return MatchRecord(
         match_id=spec.match_id,
