@@ -2496,9 +2496,14 @@ def run_checkpoint_decode_parity(
         )
         del model
         torch.cuda.empty_cache()
+    checkpoint_path = Path(ckpt_path)
+    with checkpoint_path.open("rb") as checkpoint_file:
+        checkpoint_sha256 = hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
     payload = {
         "schema_version": 1,
-        "checkpoint": str(Path(ckpt_path).resolve()),
+        "checkpoint": str(checkpoint_path.resolve()),
+        "checkpoint_bytes": checkpoint_path.stat().st_size,
+        "checkpoint_sha256": checkpoint_sha256,
         "step": int(state["step"]),
         "wandb_id": state.get("wandb_id"),
         "config": {

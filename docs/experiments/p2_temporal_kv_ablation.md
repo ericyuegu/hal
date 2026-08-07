@@ -118,9 +118,10 @@ full-context sampled actions. Each evaluation writes these values to `metrics.js
 evaluator wall time because Dolphin boot and emulation time dominate that number.
 
 The parity mode downloads a named run checkpoint, checks FP32 and FP16 full-versus-KV behavior,
-writes `manual_evals/p2-parity/decode_parity.json`, uploads it even when a numerical gate fails, and
-returns a failing process status on any nonfinite value, tolerance failure, or sampled-action
-mismatch. A CPU test covers rolling eviction and asynchronous reset schedules with a small model.
+writes `manual_evals/p2-parity/decode_parity.json`, and records the checkpoint size and SHA-256. It
+uploads the record even when a numerical gate fails and returns a failing process status on any
+nonfinite value, tolerance failure, or sampled-action mismatch. A CPU test covers rolling eviction
+and asynchronous reset schedules with a small model.
 
 The focused CPU suite passes 134 tests and skips six GPU-only tests. The FP32 and FP16 GPU parity
 gate remains blocked on the final P1 checkpoint.
