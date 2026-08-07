@@ -447,6 +447,44 @@ def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, mo
     assert calls["closed"] is True
 
 
+def test_periodic_eval_upload_keeps_metrics_result_and_log(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    replay_dir = run_dir / "replays" / "step_004096"
+    replay_dir.mkdir(parents=True)
+    paths = (
+        replay_dir / "match_rows.json",
+        replay_dir / "metrics.json",
+        run_dir / "eval_results" / "step_004096.json",
+        run_dir / "eval_logs" / "step_004096.log",
+    )
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+
+    class Uploader:
+        def __init__(self) -> None:
+            self.files = []
+
+        def upload_tree(self, root, *, base, pattern):
+            assert (root, base, pattern) == (replay_dir, run_dir, "*.slp")
+            return 47
+
+        def upload(self, path, *, key):
+            self.files.append((path, key))
+
+    uploader = Uploader()
+    counts = exp._queue_periodic_eval_evidence(
+        uploader,
+        run_dir=run_dir,
+        replay_dir=replay_dir,
+        result_path=paths[2],
+        log_path=paths[3],
+    )
+
+    assert counts == (47, 4)
+    assert uploader.files == [(path, str(path.relative_to(run_dir))) for path in paths]
+
+
 def test_heads_are_independent_linear_projections() -> None:
     cfg = exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16, attn_window=8)
     model = exp.GPT(cfg)

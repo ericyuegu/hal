@@ -255,6 +255,25 @@ became ready in 7 minutes 24 seconds. No other Vast experiment job was active. T
 uses full recomputation, the verified P0 final checkpoint for H2H, and 64 mirrored H2H
 configurations.
 
+At the first 30-minute audit, W&B run `46zi7fgo` had reached step 4,764. All logged loss,
+objective, gradient, and timing values were finite. Every batch had 128 distinct replays. One replay
+was reused at step 3,506, exactly when the loader ended an epoch after 448,768 emitted windows; no
+other adjacent reuse occurred. Over the latest 500 steps, median step time was 0.256 seconds and
+median loader wait was 0.103 seconds. The loader still consumed about 40% of step time, but the
+total step was faster than the gate.
+
+The step-4,096 evaluation finished in 500 seconds. All 32 boots succeeded, producing 47 active
+matches and one zero-active tail. Stocks taken and lost per active minute were 0.609 and 1.635.
+Damage dealt and taken per active minute were 106.8 and 137.8. This is weak early policy evidence,
+not a stopping rule. R2 contains both 56.7 MB step checkpoints, the match rows, and replay files.
+
+This audit found an evidence-retention bug in the launch commit: periodic evaluation uploaded
+replays and `match_rows.json`, but left `metrics.json`, the worker result, and the worker log on the
+temporary instance. The current branch now queues all four evidence types, including partial files
+after a worker failure. The focused 023 suite passes 37 tests. The active run still uses its launch
+commit, so recover its local periodic files before the instance is destroyed when possible. W&B
+retains the complete numeric metrics.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.

@@ -1794,6 +1794,29 @@ def _write_match_rows(path: Path, rows: list[MatchRow], protocol: EvalProtocol) 
     tmp.replace(path)
 
 
+def _queue_periodic_eval_evidence(
+    uploader: BackgroundUploader,
+    *,
+    run_dir: Path,
+    replay_dir: Path,
+    result_path: Path,
+    log_path: Path,
+) -> tuple[int, int]:
+    replay_count = uploader.upload_tree(replay_dir, base=run_dir, pattern="*.slp")
+    evidence = (
+        replay_dir / "match_rows.json",
+        replay_dir / "metrics.json",
+        result_path,
+        log_path,
+    )
+    evidence_count = 0
+    for path in evidence:
+        if path.is_file():
+            uploader.upload(path, key=str(path.relative_to(run_dir)))
+            evidence_count += 1
+    return replay_count, evidence_count
+
+
 def _run_eval_sweep(
     policy_factory: Callable[[], RecedingHorizon],
     *,
@@ -2210,29 +2233,35 @@ def train(
             except subprocess.TimeoutExpired:
                 pass
         rc = proc.poll()
+        timed_out = False
         if rc is None:
             if not wait and (time.monotonic() - pending_eval["t0"]) <= cfg.eval_timeout_seconds:
                 return  # still running, within budget — re-check next iteration
             proc.kill()
             proc.wait()
+            rc = proc.returncode
+            timed_out = True
             print(
                 f"[eval] step {pending_eval['step']} timed out (>{cfg.eval_timeout_seconds:.0f}s); "
                 f"killed. see {pending_eval['log']}",
                 flush=True,
             )
-        else:
-            step, result = pending_eval["step"], pending_eval["result"]
-            if rc == 0 and result.is_file():
-                data = json.loads(result.read_text())
-                _log_eval(data["step"], data["metrics"])
-                n = uploader.upload_tree(pending_eval["replay"], base=ckpt_dir, pattern="*.slp")
-                rows_path = pending_eval["replay"] / "match_rows.json"
-                if rows_path.is_file():
-                    uploader.upload(rows_path, key=str(rows_path.relative_to(ckpt_dir)))
-                print(f"[eval] queued {n} .slp + matchup rows for R2 (step {step})", flush=True)
-            else:
-                print(f"[eval] worker for step {step} failed (rc={rc}); see {pending_eval['log']}", flush=True)
         pending_eval["log_f"].close()
+        step, result = pending_eval["step"], pending_eval["result"]
+        replay = pending_eval["replay"]
+        if not timed_out and rc == 0 and result.is_file():
+            data = json.loads(result.read_text())
+            _log_eval(data["step"], data["metrics"])
+        elif not timed_out:
+            print(f"[eval] worker for step {step} failed (rc={rc}); see {pending_eval['log']}", flush=True)
+        n, uploaded = _queue_periodic_eval_evidence(
+            uploader,
+            run_dir=ckpt_dir,
+            replay_dir=replay,
+            result_path=result,
+            log_path=pending_eval["log"],
+        )
+        print(f"[eval] queued {n} .slp + {uploaded} evidence files for R2 (step {step})", flush=True)
         pending_eval = None
 
     def _launch_eval(step: int) -> None:
