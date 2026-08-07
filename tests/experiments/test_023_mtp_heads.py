@@ -63,7 +63,7 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.windows_per_replay == 4
     assert cfg.reservoir_capacity == 4096
     assert cfg.predownload == 512
-    assert cfg.val_n_batches == 32
+    assert cfg.val_n_samples == 1192
     assert cfg.gradient_diagnostic_batch_size == 64
     assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (4096, 32, 96)
     assert cfg.eval_max_frames == 7200
@@ -103,6 +103,16 @@ def test_old_checkpoint_config_keeps_512_action_rows() -> None:
     assert cfg.action_vocab == 512
     assert not cfg.compact_data
     assert exp.GPT(cfg).cat_embeds["action"].num_embeddings == 512
+
+
+def test_old_validation_batch_cap_loads_the_fixed_sample_default() -> None:
+    saved = asdict(exp.TrainConfig())
+    saved.pop("val_n_samples")
+    saved["val_n_batches"] = 32
+
+    cfg = exp._cfg_from_state(saved)
+
+    assert cfg.val_n_samples == 1192
 
 
 def test_misc_action_state_is_not_a_model_feature() -> None:
@@ -150,7 +160,11 @@ def test_finite_gradient_norm_rejects_nonfinite_gradient() -> None:
 def test_data_loading_starts_train_prefetch_without_consuming_a_batch() -> None:
     events = []
     train_batch = object()
-    val_batch = object()
+    val_batch = TrainBatch(
+        context=Context(features={}, ctx_pad=torch.zeros(1, dtype=torch.long)),
+        target=torch.zeros(1, 1, A_DIM),
+        replay_ids=("val-0",),
+    )
 
     class TrainIterator:
         def __iter__(self):
@@ -179,6 +193,26 @@ def test_data_loading_starts_train_prefetch_without_consuming_a_batch() -> None:
     assert cached == [val_batch]
     assert finished_at >= started_at
     assert next(train_iterator) is train_batch
+
+
+def test_validation_cache_takes_an_exact_sample_count() -> None:
+    def batch(start: int, size: int) -> TrainBatch:
+        return TrainBatch(
+            context=Context(
+                features={"x": torch.arange(start, start + size)[:, None]},
+                ctx_pad=torch.zeros(size, dtype=torch.long),
+            ),
+            target=torch.zeros(size, 1, A_DIM),
+            replay_ids=tuple(f"val-{i}" for i in range(start, start + size)),
+        )
+
+    _, pool, future, _ = exp._start_data_loading([], [batch(0, 3), batch(3, 3)], 5)
+    cached, _ = future.result(timeout=2)
+    pool.shutdown()
+
+    assert [item.target.shape[0] for item in cached] == [3, 2]
+    assert [replay for item in cached for replay in item.replay_ids] == [f"val-{i}" for i in range(5)]
+    assert torch.cat([item.context.features["x"] for item in cached]).flatten().tolist() == list(range(5))
 
 
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
@@ -805,7 +839,7 @@ def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatc
         warmup_steps=0,
         compile_trunk=False,
         val_every=0,
-        val_n_batches=1,
+        val_n_samples=4,
         gradient_diagnostic_batch_size=2,
         eval_every=0,
         final_eval_n_matchups=0,

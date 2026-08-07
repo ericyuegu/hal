@@ -267,6 +267,18 @@ matches and one zero-active tail. Stocks taken and lost per active minute were 0
 Damage dealt and taken per active minute were 106.8 and 137.8. This is weak early policy evidence,
 not a stopping rule. R2 contains both 56.7 MB step checkpoints, the match rows, and replay files.
 
+At the same training step, P1 had slightly lower validation NLL than P0 at every offset. P1 versus
+P0 was 1.105 versus 1.115 bits at offset 1, 2.817 versus 2.851 at offset 5, 3.584 versus 3.626 at
+offset 9, and 4.069 versus 4.115 at offset 13. Most of the primary difference came from main stick:
+0.691 versus 0.700 bits. P1's training NLL was higher, 1.130 versus 1.086 bits. These small offline
+differences do not override the weak early closed-loop result.
+
+The comparison uses the same complete validation split. P1's startup log records 10 batches and
+1,192 samples. P0's 512-sample batch geometry also exhausts that 1,192-sample split before its
+32-batch cap. The current branch replaces the batch-count cap with an exact `val_n_samples=1192`
+contract. This keeps validation coverage fixed if the training batch changes and fails if the
+pinned split is unexpectedly short.
+
 This audit found an evidence-retention bug in the launch commit: periodic evaluation uploaded
 replays and `match_rows.json`, but left `metrics.json`, the worker result, and the worker log on the
 temporary instance. The current branch now queues all four evidence types, including partial files

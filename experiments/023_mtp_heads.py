@@ -188,8 +188,8 @@ class TrainConfig:
     compile_trunk: bool = True
     # eval cadence
     val_every: int = 1024
-    # Maximum validation batches. The current v7 validation split is smaller than this cap.
-    val_n_batches: int = 32
+    # Fixed validation examples. This must not change with the training batch geometry.
+    val_n_samples: int = 1192
     # Examples used for per-head shared-trunk gradient comparisons.
     gradient_diagnostic_batch_size: int = 64
     # Validation-only rarity threshold. The metric is emitted only when the checkpoint embeds validated
@@ -747,7 +747,7 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         "stage_vocab": cfg.stage_vocab,
         "stage_dim": cfg.stage_dim,
         "action_vocab": cfg.action_vocab,
-        "val_n_batches": cfg.val_n_batches,
+        "val_n_samples": cfg.val_n_samples,
         "gradient_diagnostic_batch_size": cfg.gradient_diagnostic_batch_size,
         "diagnostic_rare_button_count": cfg.diagnostic_rare_button_count,
         "eval_n_matchups": cfg.eval_n_matchups,
@@ -1438,6 +1438,7 @@ def _slice_batch(batch: TrainBatch, n: int) -> TrainBatch:
             ctx_pad=batch.context.ctx_pad[:n],
         ),
         target=batch.target[:n],
+        replay_ids=None if batch.replay_ids is None else batch.replay_ids[:n],
     )
 
 
@@ -1938,7 +1939,7 @@ def _loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
 def _start_data_loading(
     train_loader: Iterable[TrainBatch],
     val_loader: Iterable[TrainBatch],
-    val_n_batches: int,
+    val_n_samples: int,
 ) -> tuple[
     Iterator[TrainBatch],
     concurrent.futures.ThreadPoolExecutor,
@@ -1950,7 +1951,22 @@ def _start_data_loading(
     val_started_at = time.monotonic()
 
     def read_validation() -> tuple[list[TrainBatch], float]:
-        return list(itertools.islice(val_loader, val_n_batches)), time.monotonic()
+        batches: list[TrainBatch] = []
+        samples = 0
+        for batch in val_loader:
+            batch_size = batch.target.shape[0]
+            if batch_size <= 0:
+                raise RuntimeError("validation loader yielded an empty batch")
+            remaining = val_n_samples - samples
+            if remaining <= 0:
+                break
+            batches.append(batch if batch_size <= remaining else _slice_batch(batch, remaining))
+            samples += min(batch_size, remaining)
+            if samples == val_n_samples:
+                break
+        if samples != val_n_samples:
+            raise RuntimeError(f"validation loader yielded {samples} samples, expected {val_n_samples}")
+        return batches, time.monotonic()
 
     future = pool.submit(read_validation)
     return train_iterator, pool, future, val_started_at
@@ -2138,7 +2154,7 @@ def train(
 
     print("[val] building cached val set while training prefetch starts…", flush=True)
     train_iter_t0 = time.monotonic()
-    it, val_pool, val_future, val_started_at = _start_data_loading(train_loader, val_loader, cfg.val_n_batches)
+    it, val_pool, val_future, val_started_at = _start_data_loading(train_loader, val_loader, cfg.val_n_samples)
     train_iterator_s = val_started_at - train_iter_t0
     val_cache: list[TrainBatch] | None = None
 

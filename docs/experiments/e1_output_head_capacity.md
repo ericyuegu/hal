@@ -165,6 +165,9 @@ Run focused tests, Ruff, Python compilation, and `git diff --check` before launc
 
 Use the same frozen validation split as E0. Log:
 
+The pinned v7 split has 1,192 samples. Cache exactly those 1,192 samples, independent of training
+batch size.
+
 - Total and per-group offset-1 NLL.
 - Per-group argmax accuracy and exact four-group frame accuracy.
 - Hold and transition NLL and accuracy for every group.
