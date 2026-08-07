@@ -35,6 +35,11 @@ Keep all other P0 fields fixed, including:
 Both arms process 131,072 frame tokens per optimizer step. P0 has 16,842,752 causal attention
 edges per layer and step. P1 has about 15,736,832 local attention edges per layer and step.
 
+`windows_per_replay=4` does not put four windows from one replay in the same batch. The loader packs
+four non-overlapping windows for later use. The reservoir emits at most one of them per batch and
+keeps that replay out of the next batch. P0 must therefore report 512 distinct replays per step and
+P1 must report 128 when gradient accumulation is one.
+
 ## Files
 
 - Add this plan before implementation.
@@ -63,6 +68,12 @@ random generator by default. A validation iterator created on another thread cou
 model randomness. Update `hal/training/dataloader.py` so every loader owns a private generator
 seeded from its existing loader seed. Add a test proving loader setup does not change the process
 Torch RNG. Do not launch the concurrent path without this isolation.
+
+Before the P1 gate, update `experiments/023_mtp_heads.py` to log how many replay IDs overlap the
+previous optimizer step. This is measurement only and must not change sampling. The reservoir
+enforces zero overlap between adjacent batches inside one iterator epoch, but its cooldown resets
+when the trainer starts the next epoch. The live metric will expose any rare boundary overlap instead
+of claiming a stronger invariant than the code provides.
 
 This startup change is now implemented. Creating the training iterator starts worker prefetch, then
 one background thread builds the fixed validation cache while step 0 performs the real compiled

@@ -1176,6 +1176,12 @@ def _finite_gradient_norm(model: nn.Module, objective_value: Tensor, step: int) 
         raise FloatingPointError(f"step {step}: gradients are not finite; optimizer step was skipped") from error
 
 
+def _replay_overlap(previous: frozenset[str] | None, current: set[str]) -> int | None:
+    if previous is None or not current:
+        return None
+    return len(previous.intersection(current))
+
+
 def _slice_batch(batch: TrainBatch, n: int) -> TrainBatch:
     return TrainBatch(
         context=Context(
@@ -1977,6 +1983,7 @@ def train(
     model.train()
     run_t0 = time.monotonic()
     train_batches_seen = 0
+    previous_step_replay_ids: frozenset[str] | None = None
     for step in range(start_step, cfg.max_steps):
         _resolve_val_cache(wait=False)
         with profile("step") as sw:
@@ -2050,6 +2057,10 @@ def train(
         }
         if replay_ids:
             log["data/distinct_replays"] = len(replay_ids)
+            replay_overlap = _replay_overlap(previous_step_replay_ids, replay_ids)
+            if replay_overlap is not None:
+                log["data/replays_reused_from_previous_step"] = replay_overlap
+            previous_step_replay_ids = frozenset(replay_ids)
         if finished_epoch_stats is not None:
             log.update({f"data/epoch_{name}": value for name, value in finished_epoch_stats.items()})
         if step == start_step:

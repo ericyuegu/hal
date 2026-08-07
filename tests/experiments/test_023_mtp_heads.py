@@ -129,6 +129,14 @@ def test_finite_gradient_norm_rejects_nonfinite_loss() -> None:
         exp._finite_gradient_norm(model, torch.tensor(float("nan")), step=4)
 
 
+def test_replay_overlap_is_unknown_for_the_first_step() -> None:
+    assert exp._replay_overlap(None, {"a", "b"}) is None
+
+
+def test_replay_overlap_counts_reused_ids() -> None:
+    assert exp._replay_overlap(frozenset({"a", "b"}), {"b", "c"}) == 1
+
+
 def test_finite_gradient_norm_rejects_nonfinite_gradient() -> None:
     model = torch.nn.Linear(2, 1)
     objective = model(torch.ones(1, 2)).sum()
