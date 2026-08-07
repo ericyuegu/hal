@@ -53,8 +53,7 @@ FLOAT_FEATURES: tuple[str, ...] = (
     "hitlag_left",
 )
 
-# (vocab_size, embed_dim) per categorical feature. action vocab rounded up
-# from libmelee's ~395 to a safe power-of-two-ish.
+# Default categorical table sizes. New experiments can widen the action table.
 CAT_FEATURES: dict[str, tuple[int, int]] = {
     "action": (512, 64),
     "stock": (5, 2),
@@ -94,6 +93,14 @@ class ExtraColumns:
         both = sorted(set(self.floats) & set(self.cats))
         if both:
             raise ValueError(f"{both} declared as both a float and a categorical column")
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureProjection:
+    """Raw, ego-relative columns needed by one model."""
+
+    columns: frozenset[str]
+    derive_spatial: bool = True
 
 
 # Schema v6's additions to the per-player post block, less the ones no model reads yet
@@ -152,6 +159,16 @@ ACTION_CHANNELS: tuple[str, ...] = (
     "button_d_up",
 )
 assert len(ACTION_CHANNELS) == A_DIM
+
+BASE_PLAYER_PREFIXES: Final[tuple[str, ...]] = ("ego", "ego_nana", "opp_nana", "opp")
+BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
+    columns=frozenset(
+        {"stage", "ego_character", "opp_character"}
+        | {f"{prefix}_{name}" for prefix in BASE_PLAYER_PREFIXES for name in (*FLOAT_FEATURES, *CAT_FEATURES)}
+        | {f"ego_{channel}" for channel in ACTION_CHANNELS}
+    ),
+    derive_spatial=False,
+)
 
 _BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "d_up")
 
@@ -435,12 +452,19 @@ class TrainBatch:
 
     context: Context
     target: Tensor  # [B, L_chunk, d_action]
+    replay_ids: tuple[str, ...] | None = None
 
     def to(self, device: str | torch.device) -> TrainBatch:
-        return TrainBatch(context=self.context.to(device), target=self.target.to(device, non_blocking=True))
+        return TrainBatch(
+            context=self.context.to(device),
+            target=self.target.to(device, non_blocking=True),
+            replay_ids=self.replay_ids,
+        )
 
     def pin_memory(self) -> TrainBatch:
-        return TrainBatch(context=self.context.pin_memory(), target=self.target.pin_memory())
+        return TrainBatch(
+            context=self.context.pin_memory(), target=self.target.pin_memory(), replay_ids=self.replay_ids
+        )
 
 
 # %%
@@ -509,6 +533,7 @@ def preprocess(
     feature_stats: dict[str, FeatureStats],
     *,
     extra: ExtraColumns | None = None,
+    projection: FeatureProjection | None = None,
 ) -> dict[str, Tensor]:
     """Tokenizer-style per-feature sanitization + per-float mask sidecars.
 
@@ -531,6 +556,8 @@ def preprocess(
     routing = _NO_EXTRA if extra is None else extra
     out: dict[str, Tensor] = {}
     for name, arr in batch.items():
+        if projection is not None and name not in projection.columns:
+            continue
         kind = _classify(name, routing)
         if kind == "drop":
             continue
@@ -554,7 +581,7 @@ def preprocess(
         out[name] = torch.from_numpy(np.ascontiguousarray(x))
         if kind == "float" and mask.any():
             out[f"{name}_mask"] = torch.from_numpy(np.ascontiguousarray(mask.astype(np.float32)))
-    if _SPATIAL_GATE in batch:
+    if _SPATIAL_GATE in batch and (projection is None or projection.derive_spatial):
         for name, value in derive_spatial(batch).items():
             out[name] = torch.from_numpy(np.ascontiguousarray(value))
     return out

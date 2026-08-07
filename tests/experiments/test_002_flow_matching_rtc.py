@@ -118,8 +118,8 @@ def test_context_pairs_each_gamestate_with_the_action_that_produced_it():
     real_build = policy._stack_windows
     real_push = policy._push_ego
 
-    def spy_build(live, length):
-        windows = real_build(live, length)
+    def spy_build(live, length, **kwargs):
+        windows = real_build(live, length, **kwargs)
         captured.append({k: v.copy() for k, v in _named(windows).items()})
         return windows
 
@@ -219,8 +219,8 @@ def test_buffers_reset_at_instant_restart_match_boundary():
         ctx_pads.append(int(ctx.ctx_pad[0]))
         return real_predict(ctx, committed)
 
-    def spy_build(live, length):
-        windows = real_build(live, length)
+    def spy_build(live, length, **kwargs):
+        windows = real_build(live, length, **kwargs)
         batches.append({k: v.copy() for k, v in _named(windows).items()})
         return windows
 

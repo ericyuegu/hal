@@ -55,9 +55,12 @@ from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import VAL_L_CHUNK
 from hal.training.dataloader import make_loader
+from hal.training.dataloader import make_replay_reservoir_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
+from hal.training.features import BASE_ACTION_PROJECTION
+from hal.training.features import BASE_PLAYER_PREFIXES
 from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import Context
@@ -79,7 +82,8 @@ _N_CONT = 6
 _N_BUTTONS = A_DIM - _N_CONT
 
 # Per-frame input: all four players' gamestate concatenated in the feature dim.
-_PLAYER_PREFIXES: tuple[str, ...] = ("ego", "ego_nana", "opp_nana", "opp")
+_PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
+_INPUT_PROJECTION = BASE_ACTION_PROJECTION
 
 # Output groups (fixed order; the canonical order of every per-group tensor and of the class-index
 # columns quantize_groups emits) + their discrete vocab sizes from the scoring discretizers.
@@ -131,6 +135,8 @@ class TrainConfig:
     char_dim: int = 12
     stage_vocab: int = 32
     stage_dim: int = 4
+    # Ranked v7 contains action states through 525. Older checkpoints used 512 rows.
+    action_vocab: int = 1024
     # closed-loop sampling temperature. Greedy argmax collapses the policy to a do-nothing fixed
     # point in closed loop, so deployed play always samples.
     decode_temp: float = 1.0
@@ -219,27 +225,33 @@ class TrainConfig:
     # checkpointing
     ckpt_every: int = 2048
     # data
-    data_root: str = "data/processed/ranked-anonymized-1/mds-v7"
+    data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v2"
+    compact_data: bool = True
     # MDS materialization this run reads. The dataloader's per-row guard rejects any other version
     # — never silent.
     mds_schema_version: int = 7
     # Full-dataset button counts used by decode support masking.
     button_combo_counts_path: str | None = None
     # Streaming dataset cache and shuffle geometry.
-    cache_limit_gb: int = 900
+    cache_limit_gb: int = 128
     shuffle_block_size: int = 2000
-    # Two training windows amortize each replay read. Validation uses one.
-    windows_per_replay: int = 2
+    predownload: int = 512
+    # Each replay supplies four windows, but no batch contains the same replay twice.
+    windows_per_replay: int = 4
+    reservoir_capacity: int = 4096
     val_split: str = "val"
     num_workers: int = 16
-    prefetch_factor: int = 4
+    prefetch_factor: int = 2
 
 
 def _model_tag(cfg: TrainConfig) -> str:
     offs = ".".join(str(o) for o in cfg.head_offsets)
     attention = "full" if cfg.attn_window == 0 else f"swa{cfg.attn_window}"
     decode = "kv" if cfg.eval_incremental_kv else "recompute"
-    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-{attention}-{decode}-o{offs}-linear"
+    return (
+        f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-a{cfg.action_vocab}-"
+        f"{attention}-{decode}-o{offs}-linear"
+    )
 
 
 def _micro_batch(cfg: TrainConfig) -> int:
@@ -385,8 +397,9 @@ class GPT(nn.Module):
         self.primary_head_idx = offs.index(1)
 
         # Gamestate categoricals: one table per feature name, shared across the four players.
+        self.cat_specs = {**CAT_FEATURES, "action": (cfg.action_vocab, CAT_FEATURES["action"][1])}
         self.cat_embeds = nn.ModuleDict(
-            {name: nn.Embedding(vocab, dim) for name, (vocab, dim) in CAT_FEATURES.items()}
+            {name: nn.Embedding(vocab, dim) for name, (vocab, dim) in self.cat_specs.items()}
         )
         self.char_emb = nn.Embedding(cfg.char_vocab, cfg.char_dim)
         self.stage_emb = nn.Embedding(cfg.stage_vocab, cfg.stage_dim)
@@ -427,7 +440,7 @@ class GPT(nn.Module):
             parts.append(
                 features[mk][..., None] if mk in features else torch.zeros(B, L, 1, device=device, dtype=ref.dtype)
             )
-        for name, (vocab, _) in CAT_FEATURES.items():
+        for name, (vocab, _) in self.cat_specs.items():
             parts.append(self.cat_embeds[name](features[f"{prefix}_{name}"].clamp(0, vocab - 1)))
         return torch.cat(parts, dim=-1)
 
@@ -724,12 +737,15 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         "char_dim": cfg.char_dim,
         "stage_vocab": cfg.stage_vocab,
         "stage_dim": cfg.stage_dim,
+        "action_vocab": cfg.action_vocab,
         "val_n_batches": cfg.val_n_batches,
         "gradient_diagnostic_batch_size": cfg.gradient_diagnostic_batch_size,
         "diagnostic_rare_button_count": cfg.diagnostic_rare_button_count,
         "eval_n_matchups": cfg.eval_n_matchups,
         "eval_max_frames": cfg.eval_max_frames,
         "windows_per_replay": cfg.windows_per_replay,
+        "predownload": cfg.predownload,
+        "reservoir_capacity": cfg.reservoir_capacity,
         "shuffle_block_size": cfg.shuffle_block_size,
         "prefetch_factor": cfg.prefetch_factor,
         "cache_limit_gb": cfg.cache_limit_gb,
@@ -742,6 +758,11 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         raise ValueError(
             f"batch_size={cfg.batch_size} is the EFFECTIVE batch and must divide into "
             f"grad_accum_steps={cfg.grad_accum_steps} equal micro-batches"
+        )
+    if cfg.compact_data and cfg.reservoir_capacity < 2 * _micro_batch(cfg):
+        raise ValueError(
+            f"reservoir_capacity={cfg.reservoir_capacity} must be at least twice the micro-batch "
+            f"size {_micro_batch(cfg)} to enforce one-batch replay cooldown"
         )
     if not isinstance(cfg.attn_window, int) or isinstance(cfg.attn_window, bool) or cfg.attn_window < 0:
         raise ValueError(f"attn_window must be a non-negative integer (0 = full context), got {cfg.attn_window!r}")
@@ -1027,6 +1048,7 @@ def make_policy(
         d=0,
         device=device,
         float_dtype=next(model.parameters()).dtype,
+        projection=_INPUT_PROJECTION,
     )
 
 
@@ -1541,6 +1563,7 @@ def _loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
         batch_size=_micro_batch(cfg),
         seed=cfg.seed,
         schema_version=cfg.mds_schema_version,
+        projection=_INPUT_PROJECTION,
     )
 
 
@@ -1663,18 +1686,35 @@ def train(
         flush=True,
     )
     loader_kwargs = _loader_kwargs(cfg, stats)
-    train_loader = make_loader(
-        split="train",
-        num_workers=cfg.num_workers,
-        prefetch_factor=cfg.prefetch_factor,
-        windows_per_replay=cfg.windows_per_replay,
-        **loader_kwargs,
-    )
+    if cfg.compact_data:
+        train_loader = make_replay_reservoir_loader(
+            split="train",
+            num_workers=cfg.num_workers,
+            prefetch_factor=cfg.prefetch_factor,
+            predownload=cfg.predownload,
+            windows_per_replay=cfg.windows_per_replay,
+            reservoir_capacity=cfg.reservoir_capacity,
+            **loader_kwargs,
+        )
+    else:
+        train_loader = make_loader(
+            split="train",
+            num_workers=cfg.num_workers,
+            prefetch_factor=cfg.prefetch_factor,
+            predownload=cfg.predownload,
+            windows_per_replay=cfg.windows_per_replay,
+            **loader_kwargs,
+        )
     # Val uses the FROZEN wider chunk (VAL_L_CHUNK) so its window geometry — hence its NLL — is
     # comparable across experiments regardless of the train-time L_chunk. This makes val loss NOT
     # comparable to pre-freeze 012 runs; that break is the intended freeze. The val path slices the
     # wider target back to max(head_offsets) frames.
-    val_loader = make_loader(split=cfg.val_split, num_workers=0, **{**loader_kwargs, "L_chunk": VAL_L_CHUNK})
+    val_loader = make_loader(
+        split=cfg.val_split,
+        num_workers=0,
+        compact=cfg.compact_data,
+        **{**loader_kwargs, "L_chunk": VAL_L_CHUNK},
+    )
 
     opt = make_optimizer(model, cfg)
     sched = LambdaLR(opt, lr_schedule(cfg))
@@ -1835,12 +1875,21 @@ def train(
             opt.zero_grad()
             comps_acc: dict[tuple[int, str], list[Tensor]] = {}
             obj_acc: Tensor | None = None
+            loader_wait = 0.0
+            replay_ids: set[str] = set()
+            finished_epoch_stats: dict[str, int] | None = None
             for _ in range(cfg.grad_accum_steps):
+                wait_start = time.monotonic()
                 try:
-                    batch = next(it).to(DEVICE)
+                    batch = next(it)
                 except StopIteration:
+                    finished_epoch_stats = getattr(train_loader, "last_epoch_stats", None)
                     it = iter(train_loader)
-                    batch = next(it).to(DEVICE)
+                    batch = next(it)
+                loader_wait += time.monotonic() - wait_start
+                if batch.replay_ids is not None:
+                    replay_ids.update(batch.replay_ids)
+                batch = batch.to(DEVICE)
                 with autocast:
                     parts = action_loss(model, batch)
                     obj = objective(
@@ -1881,8 +1930,13 @@ def train(
             "lr/adam": next(g["lr"] for g in opt.param_groups if not g["use_muon"]),
             "train/gnorm": grad_norm.item(),
             "throughput/step_s": sw.elapsed,
+            "throughput/loader_wait_s": loader_wait,
             "throughput/samples_per_s": sps,
         }
+        if replay_ids:
+            log["data/distinct_replays"] = len(replay_ids)
+        if finished_epoch_stats is not None:
+            log.update({f"data/epoch_{name}": value for name, value in finished_epoch_stats.items()})
         if step == start_step:
             # The trunk resolves flex-vs-dense at its first forward, so the answer exists only now.
             if wandb.run is not None:
@@ -1942,7 +1996,11 @@ def _cfg_from_state(saved: dict) -> TrainConfig:
     dropped = sorted(set(saved) - known)
     if dropped:
         print(f"[ckpt] dropping {len(dropped)} stale cfg key(s) not on current TrainConfig: {dropped}", flush=True)
-    return TrainConfig(**{k: v for k, v in saved.items() if k in known})
+    values = {k: v for k, v in saved.items() if k in known}
+    # Older checkpoints used the 512-row table.
+    values.setdefault("action_vocab", 512)
+    values.setdefault("compact_data", False)
+    return TrainConfig(**values)
 
 
 def _load_ckpt(ckpt_path: str) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:

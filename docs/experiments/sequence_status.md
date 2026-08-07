@@ -1,12 +1,12 @@
 # Action-model experiment status
 
-Updated: 2026-08-06
+Updated: 2026-08-07
 
 ## Systems prelude
 
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
-| P0 | Scientific package: short full-causal context | Pending | Train `L_ctx=256`, batch 512, full recompute on v7 with normalized auxiliary BC. |
+| P0 | Scientific package: short full-causal context | Stopped at step 1,024 | Fix the data bottleneck, then restart from step 0. |
 | P1 | Scientific package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P2 | Systems: exact temporal-KV decode efficiency | Exploratory final evidence available | Pass parity tests, then compare the same P1 checkpoint with P1 full recompute. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
@@ -53,12 +53,12 @@ recomputation.
 
 ## Immediate next actions
 
-1. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
-2. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
+1. Complete the correctness and throughput gates in `data_pipeline.md`.
+2. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
+3. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.
-3. Evaluate the final P1 checkpoint with full recomputation over the final 96 CPU matchups.
-4. Test the P0 defaults: full causal `L_ctx=256`, batch 512, full recomputation, and a 900 GB cache.
-5. Launch P0 on a clean 1 TB Vast disk with about 900 GB of streaming cache.
+4. Evaluate the final P1 checkpoint with full recomputation over the final 96 CPU matchups.
+5. Relaunch P0 from step 0 with the accepted data path.
 6. Evaluate P0 over the same 96 CPU matchups.
 7. Run P1 and P2 against P0 over 64 mirrored configurations each.
 8. Choose the practical attention package, declare the E0 reference, and copy its exact fixed

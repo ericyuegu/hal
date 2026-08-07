@@ -68,6 +68,7 @@ from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import SPATIAL_COLUMNS
 from hal.training.features import Context
 from hal.training.features import ExtraColumns
+from hal.training.features import FeatureProjection
 from hal.training.features import _classify
 from hal.training.features import _float_transform
 from hal.training.features import _is_masked
@@ -257,7 +258,13 @@ def _getter(names: list[str]) -> Callable[[dict], tuple] | None:
     return itemgetter(*names)
 
 
-def _build_layout(flat: dict, ego_prefix: str, stats: dict[str, FeatureStats], extra: ExtraColumns | None) -> _Layout:
+def _build_layout(
+    flat: dict,
+    ego_prefix: str,
+    stats: dict[str, FeatureStats],
+    extra: ExtraColumns | None,
+    projection: FeatureProjection | None = None,
+) -> _Layout:
     """Resolve one slot's routing from its first observed frame.
 
     Column dtypes and the surviving key set come from that frame, the same rule the
@@ -270,6 +277,8 @@ def _build_layout(flat: dict, ego_prefix: str, stats: dict[str, FeatureStats], e
         if key == "frame":
             continue
         name = _model_name(key, ego_prefix)
+        if projection is not None and name not in projection.columns:
+            continue
         kind = _classify(name, routing)
         if kind == "derived":
             raise ValueError(
@@ -322,7 +331,7 @@ def _build_layout(flat: dict, ego_prefix: str, stats: dict[str, FeatureStats], e
     spatial_sources: tuple[tuple[int, int], ...] = ()
     dpos_rows = np.empty(0, dtype=np.intp)
     dpos_mask_row = -1
-    if _SPATIAL_GATE in flat:
+    if _SPATIAL_GATE in flat and (projection is None or projection.derive_spatial):
         row_index = _row_indices(ordered)
         located = {name: (src, row_index[at]) for at, (name, src, _) in enumerate(ordered)}
         missing = [name for name in _SPATIAL_INPUTS if name not in located]
@@ -574,6 +583,7 @@ class RecedingHorizon:
     # Must be the SAME object the train loader collates with, or the closed-loop token
     # would differ from the trained one.
     extra: ExtraColumns | None = None
+    projection: FeatureProjection | None = None
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -642,7 +652,10 @@ class RecedingHorizon:
             st.last_id = fid
             flat = flatten_canonical_frame(obs[slot])
             if st.rings is None:
-                st.rings = _Rings(_build_layout(flat, _PORT_TO_PREFIX[slot.port], self.stats, self.extra), self.L_ctx)
+                st.rings = _Rings(
+                    _build_layout(flat, _PORT_TO_PREFIX[slot.port], self.stats, self.extra, self.projection),
+                    self.L_ctx,
+                )
             st.rings.gather(flat, NEUTRAL_ACTION if st.last_action is None else st.last_action)
             gathered.append(st.rings)
         if gathered and gathered[0].layout.spatial_at is not None:

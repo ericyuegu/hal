@@ -1,5 +1,6 @@
 import importlib.util
 import inspect
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 import torch
 
 from hal.data.feature_stats import FeatureStats
+from hal.training.dataloader import make_loader
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import CAT_FEATURES
@@ -57,19 +59,79 @@ def test_defaults_match_the_e0_plan() -> None:
     assert (cfg.muon_lr, cfg.adam_lr, cfg.weight_decay) == (0.02, 8.5e-4, 0.01)
     assert cfg.amp_dtype == "bfloat16"
     assert cfg.compile_trunk is True
-    assert cfg.windows_per_replay == 2
+    assert cfg.windows_per_replay == 4
+    assert cfg.reservoir_capacity == 4096
+    assert cfg.predownload == 512
     assert cfg.val_n_batches == 32
     assert cfg.gradient_diagnostic_batch_size == 64
     assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (4096, 32, 96)
     assert cfg.eval_max_frames == 7200
-    assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-v7"
+    assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-policy-v2"
+    assert cfg.compact_data
+    assert cfg.action_vocab == 1024
     assert cfg.mds_schema_version == 7
-    assert cfg.cache_limit_gb == 900
+    assert cfg.cache_limit_gb == 128
+
+
+def test_compact_config_requires_cooldown_capacity() -> None:
+    cfg = exp.TrainConfig(batch_size=8, reservoir_capacity=8)
+    with pytest.raises(ValueError, match="twice the micro-batch"):
+        exp.validate_config(cfg, has_button_combo_counts=True)
+
+
+def test_old_checkpoint_config_keeps_512_action_rows() -> None:
+    saved = asdict(exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16))
+    saved.pop("action_vocab")
+    saved.pop("compact_data")
+    cfg = exp._cfg_from_state(saved)
+    assert cfg.action_vocab == 512
+    assert not cfg.compact_data
+    assert exp.GPT(cfg).cat_embeds["action"].num_embeddings == 512
 
 
 def test_misc_action_state_is_not_a_model_feature() -> None:
     batch = {"ego_misc_as": np.array([float("nan"), 3.0], dtype=np.float32)}
     assert preprocess(batch, {}) == {}
+
+
+@pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
+def test_input_projection_preserves_every_consumed_tensor_and_loss() -> None:
+    kwargs = dict(
+        data_root=str(_DEV_MDS),
+        split="train",
+        stats=_stats(),
+        L_ctx=32,
+        L_chunk=2,
+        batch_size=2,
+        seed=3,
+        num_workers=0,
+        windows_per_replay=1,
+        schema_version=5,
+    )
+    full = next(iter(make_loader(**kwargs)))
+    projected = next(iter(make_loader(**kwargs, projection=exp._INPUT_PROJECTION)))
+
+    assert projected.context.ctx_pad.equal(full.context.ctx_pad)
+    assert projected.target.equal(full.target)
+    assert set(projected.context.features) < set(full.context.features)
+    for name, value in projected.context.features.items():
+        assert value.equal(full.context.features[name]), name
+
+    cfg = exp.TrainConfig(
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        L_ctx=32,
+        attn_window=0,
+        head_offsets=(1, 2),
+        batch_size=2,
+        compile_trunk=False,
+    )
+    model = exp.GPT(cfg).eval()
+    full_parts = exp.action_loss(model, full)
+    projected_parts = exp.action_loss(model, projected)
+    for key in full_parts.nll:
+        torch.testing.assert_close(projected_parts.nll[key], full_parts.nll[key])
 
 
 def test_run_tag_names_attention_and_decode_mode() -> None:
@@ -281,6 +343,7 @@ def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatc
         final_eval_n_matchups=0,
         ckpt_every=0,
         data_root=str(_DEV_MDS),
+        compact_data=False,
         mds_schema_version=5,
         num_workers=0,
         windows_per_replay=2,

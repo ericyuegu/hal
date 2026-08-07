@@ -23,9 +23,11 @@ from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
+from hal.training.features import BASE_ACTION_PROJECTION
 from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import V6_PLAYER_COLUMNS
 from hal.training.features import ExtraColumns
+from hal.training.features import FeatureProjection
 from hal.training.features import preprocess
 
 STAGE = int(melee.Stage.FINAL_DESTINATION.value)
@@ -74,11 +76,12 @@ def _reference_features(
     L_ctx: int,
     stats: dict[str, FeatureStats],
     extra: ExtraColumns | None,
+    projection: FeatureProjection | None = None,
 ) -> dict[str, torch.Tensor]:
     """The replaced ``_build_stacked_batch`` + ``preprocess`` + dtype packing."""
     per_slot = [_reference_window(s.flat_hist, s.ego_hist, s.prefix, L_ctx) for s in batch]
     stacked = {k: np.concatenate([d[k] for d in per_slot], axis=0) for k in per_slot[0]}
-    preprocessed = preprocess(stacked, stats, extra=extra)
+    preprocessed = preprocess(stacked, stats, extra=extra, projection=projection)
     float_items = [(k, v) for k, v in preprocessed.items() if v.dtype.is_floating_point]
     int_items = [(k, v) for k, v in preprocessed.items() if not v.dtype.is_floating_point]
     feats: dict[str, torch.Tensor] = {}
@@ -219,6 +222,7 @@ def _drive(
     follower: bool,
     incremental: bool = False,
     degenerate: bool = False,
+    projection: FeatureProjection | None = None,
 ) -> tuple[list[tuple[list[int], dict[str, torch.Tensor]]], list[tuple[list[int], dict[str, torch.Tensor]]]]:
     """Run the ring policy over the stream, then replay the reference builder on the
     same frames and the same executed actions. Returns the two capture lists."""
@@ -247,6 +251,7 @@ def _drive(
         device="cpu",
         predict_incremental=predict_chunk if incremental else None,
         extra=extra,
+        projection=projection,
     )
     real_push = policy._push_ego
 
@@ -267,7 +272,7 @@ def _drive(
             if frame != at:
                 continue
             batch = [ref_slots[i] for i in slot_ids]
-            features = _reference_features(batch, L_CTX, stats, extra)
+            features = _reference_features(batch, L_CTX, stats, extra, projection)
             if incremental:
                 # Keep the newest row's finite differences from the full rolling context.
                 features = {name: value[:, -1:] for name, value in features.items()}
@@ -319,6 +324,19 @@ def test_ring_context_matches_the_window_builder_incrementally() -> None:
         ports=(EGO_PORT, OPP_PORT), frame_ids=_frame_ids(190, 160), s=1, d=0, v6=True, follower=True, incremental=True
     )
     _assert_identical(new, reference, min_replans=350)
+
+
+def test_projected_ring_context_matches_projected_window_builder() -> None:
+    new, reference = _drive(
+        ports=(EGO_PORT, OPP_PORT),
+        frame_ids=_frame_ids(90, 80),
+        s=1,
+        d=0,
+        v6=True,
+        follower=True,
+        projection=BASE_ACTION_PROJECTION,
+    )
+    _assert_identical(new, reference, min_replans=170)
 
 
 def test_encode_frame_takes_every_frame_while_a_chunk_executes() -> None:

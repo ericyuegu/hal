@@ -90,7 +90,7 @@ def _check_prereqs() -> None:
 
 
 def _pick_safe_entry():
-    for entry in read_jsonl(DEV_MDS_DIR / "manifest.jsonl"):
+    for entry in read_jsonl(DEV_MDS_DIR / "manifest.jsonl", verify_schema_version=False):
         if (
             entry.stage in _RNG_STABLE_STAGES
             and not any(p.character in _EXCLUDED_FIXTURE_CHARACTERS for p in entry.players)

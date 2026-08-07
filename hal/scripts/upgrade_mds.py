@@ -21,8 +21,6 @@ Usage:
 import dataclasses
 import json
 import shutil
-from collections.abc import Iterator
-from contextlib import contextmanager
 from itertools import groupby
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -32,14 +30,13 @@ import numpy as np
 import tyro
 from loguru import logger
 from streaming import MDSWriter
-from streaming.base.compression import decompress
-from streaming.base.format import reader_from_json
-from streaming.base.format.base.reader import Reader
 from tqdm import tqdm
 
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
 from hal.data.index import write_jsonl
+from hal.data.mds import open_shard
+from hal.data.mds import read_shard_index
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
@@ -114,40 +111,6 @@ def ranks_by_split_row(manifest: Path, *, require_ranked: bool = True) -> dict[s
     return out
 
 
-def _shard_index(root: Path, split: str) -> list[dict[str, Any]]:
-    index = root / split / "index.json"
-    if not index.is_file():
-        raise FileNotFoundError(f"{index} not found")
-    return json.loads(index.read_text())["shards"]
-
-
-@contextmanager
-def _shard_reader(root: Path, split: str, info: dict[str, Any], scratch: Path) -> Iterator[Reader]:
-    """Random-access reader over one shard.
-
-    ``MDSReader`` only reads the uncompressed ``.mds``, so a shard that is on
-    disk compressed-only is decompressed for the duration and removed after —
-    one shard's worth of scratch at a time, never the dataset's. Each open gets
-    its own scratch directory: source and destination shards share basenames, so
-    a shared one would have them overwrite each other.
-    """
-    raw_basename = info["raw_data"]["basename"]
-    if (root / split / raw_basename).is_file():
-        yield reader_from_json(str(root), split, info)
-        return
-
-    zip_data = info.get("zip_data")
-    if zip_data is None:
-        raise FileNotFoundError(f"{root / split / raw_basename} is missing and the shard has no compressed copy")
-    with TemporaryDirectory(dir=scratch) as tmp_root:
-        tmp_dir = Path(tmp_root) / split
-        tmp_dir.mkdir(parents=True)
-        (tmp_dir / raw_basename).write_bytes(
-            decompress(info["compression"], (root / split / zip_data["basename"]).read_bytes())
-        )
-        yield reader_from_json(tmp_root, split, info)
-
-
 def _with_ranks(sample: dict[str, Any], ranks: tuple[Rank, ...]) -> dict[str, Any]:
     """One v6 row -> the v7 row: every column verbatim, plus the broadcast ranks."""
     if sample.get("schema_version") != SRC_SCHEMA_VERSION:
@@ -161,7 +124,7 @@ def _with_ranks(sample: dict[str, Any], ranks: tuple[Rank, ...]) -> dict[str, An
 
 
 def _upgrade_split(src: Path, out: Path, split: str, ranks: list[tuple[Rank, ...]], scratch: Path) -> None:
-    shards = _shard_index(src, split)
+    shards = read_shard_index(src, split)
     expected = sum(int(s["samples"]) for s in shards)
     if expected != len(ranks):
         raise ValueError(f"{split}: {expected} shard rows but {len(ranks)} manifest rows")
@@ -177,7 +140,7 @@ def _upgrade_split(src: Path, out: Path, split: str, ranks: list[tuple[Rank, ...
     try:
         with tqdm(total=expected, desc=f"upgrade {split}", unit="replay") as bar:
             for info in shards:
-                with _shard_reader(src, split, info, scratch) as reader:
+                with open_shard(src, split, info, scratch) as reader:
                     for sample in reader:
                         writer.write(_with_ranks(sample, ranks[row]))
                         row += 1
@@ -185,7 +148,7 @@ def _upgrade_split(src: Path, out: Path, split: str, ranks: list[tuple[Rank, ...
     finally:
         writer.finish()
 
-    written = sum(int(s["samples"]) for s in _shard_index(out, split))
+    written = sum(int(s["samples"]) for s in read_shard_index(out, split))
     if written != expected:
         raise ValueError(f"{split}: wrote {written} rows, expected {expected}")
 
@@ -216,8 +179,8 @@ def _verify_split(
     Every column the two versions share must be bit-identical, the rank columns
     must hold the manifest's tier, and the row version must be the new one.
     """
-    src_shards = _shard_index(src, split)
-    out_shards = _shard_index(out, split)
+    src_shards = read_shard_index(src, split)
+    out_shards = read_shard_index(out, split)
     src_offsets = _row_offsets(src_shards)
     out_offsets = _row_offsets(out_shards)
 
@@ -229,12 +192,12 @@ def _verify_split(
         samples = int(src_shards[shard_id]["samples"])
         local = sorted(int(i) for i in rng.choice(samples, size=min(per_shard, samples), replace=False))
         rows = [(int(src_offsets[shard_id]) + i, i) for i in local]
-        with _shard_reader(src, split, src_shards[shard_id], scratch) as src_reader:
+        with open_shard(src, split, src_shards[shard_id], scratch) as src_reader:
             # Rows ascend, so do the out shards holding them: one decompress each.
             for out_shard_id, group in groupby(
                 rows, key=lambda r: int(np.searchsorted(out_offsets, r[0], "right") - 1)
             ):
-                with _shard_reader(out, split, out_shards[out_shard_id], scratch) as out_reader:
+                with open_shard(out, split, out_shards[out_shard_id], scratch) as out_reader:
                     for row, local_idx in group:
                         _verify_row(
                             src_reader[local_idx],
@@ -314,7 +277,7 @@ def _check_scratch_room(src: Path, splits: list[str], scratch: Path) -> None:
     tmpfs scratch that is too small would otherwise fail hours in, with the
     write pass already done.
     """
-    largest = max(int(s["raw_data"]["bytes"]) for split in splits for s in _shard_index(src, split))
+    largest = max(int(s["raw_data"]["bytes"]) for split in splits for s in read_shard_index(src, split))
     free = shutil.disk_usage(scratch).free
     if free < 2 * largest:
         raise OSError(

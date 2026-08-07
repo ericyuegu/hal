@@ -26,7 +26,7 @@ from hal.data.feature_stats import FeatureStats
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.closed_loop import RecedingHorizon
-from hal.training.dataloader import WindowDataset
+from hal.training.dataloader import _make_window
 from hal.training.dataloader import collate_train_batch
 from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
@@ -124,12 +124,18 @@ def _mds_sample(n_frames: int) -> dict[str, np.ndarray]:
 def _train_context(sample: dict[str, np.ndarray], last_frame: int) -> tuple[dict[str, torch.Tensor], int]:
     """The train-path context whose newest real frame is ``last_frame``: the production
     ``WindowDataset`` left-pad + ``collate_train_batch``. Returns ``(features, ctx_pad)``."""
-    sampler = WindowDataset([], L_CTX, 1, seed=0)
     start = last_frame + 1 - L_CTX
     pad = max(0, -start)
-    window = sampler._padded_window(sample, start, pad)
+    window = _make_window(
+        sample,
+        ego_prefix=f"p{EGO_PORT}",
+        start=start,
+        pad=pad,
+        length=L_CTX + 1,
+        projection=None,
+    )
     window["ctx_pad"] = np.int64(min(pad, L_CTX))
-    batch = collate_train_batch([relabel_ego(window, f"p{EGO_PORT}")], stats=_stats(), L_ctx=L_CTX)
+    batch = collate_train_batch([window], stats=_stats(), L_ctx=L_CTX)
     return batch.context.features, int(batch.context.ctx_pad[0])
 
 
