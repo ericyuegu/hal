@@ -271,6 +271,12 @@ The corrected step-8,192 result is:
 Compared with step 4,096, both stock rates and damage rates improved. This is one periodic sample,
 not a checkpoint-selection rule. Continue to the declared final evaluation.
 
+At step 11,264, NLL at offsets 1, 5, 9, and 13 was 1.050, 2.703, 3.446, and 3.923. Button log
+loss was 0.0311. W&B remained live through step 11,530. The latest history row had 512 distinct
+replays and a finite gradient norm. Most logged steps remained near 0.33 to 0.38 seconds. One step
+took 1.24 seconds, followed by normal timing, so there is no sustained loader regression. The
+56,699,580-byte `latest.pt` saved at step 10,240 uploaded successfully.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
