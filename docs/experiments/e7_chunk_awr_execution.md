@@ -98,6 +98,11 @@ This is when future heads should receive advantage weights: only when they are f
 that the critic scores and the evaluator commits to. An unused future prediction remains an
 auxiliary BC target.
 
+Apply the E6 chunk-interruption mask to the executed joint term. If control is interrupted before H
+actions can execute, do not train that row as an H-step macro-action. Macro-BC and macro-AWR use the
+same mask. An interruption on the Hth transition remains valid. Auxiliary offsets outside the H-step
+macro-action keep their ordinary BC masks.
+
 Freeze the complete E6 critic package, including its E4 state encoder, Q heads, V head, action
 encoder, and buffers. Recompute critic state features from the raw context with that frozen encoder.
 Do not feed the fine-tuning actor's changing hidden state into Q or V. The actor cannot change the
@@ -165,6 +170,8 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 18. Run small macro-BC and macro-AWR jobs with finite losses, gradients, weights, and parameters.
 19. Reject macro-AWR with `grad_accum_steps != 1` in the first arms.
 20. Assert every frozen critic parameter and buffer remains byte-identical through training.
+21. Assert a control interruption before H removes the macro-action row in both macro-BC and
+    macro-AWR, while an interruption on the Hth transition keeps it.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.

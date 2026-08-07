@@ -116,6 +116,12 @@ terminal state. Set the bootstrap term to zero after a true terminal transition.
 Use an EMA target update declared before launch. Record its coefficient. Do not tune it from final
 critic results.
 
+Use the same chunk-interruption rule as E7 execution. Exclude a training row when the controlled
+player loses control, either player loses a stock, or the game enters a reset before all H planned
+actions can execute. An event on the Hth transition is allowed because the full chunk has executed.
+A true game terminal on that last transition keeps the rewards and sets the bootstrap to zero.
+Record the excluded fraction by horizon and reason.
+
 ## Value warm-up
 
 Do not train Q against a random target value. First run 2,048 value-only updates on the frozen E4
@@ -141,6 +147,8 @@ gate fails, stop before any Q update and revise the critic plan.
 9. Assert Q2 cannot read actions 3 or 4.
 10. Assert Q and V targets are detached and finite.
 11. Assert terminal transitions remove the bootstrap term.
+    Assert a control interruption before H masks the whole Q row, while an interruption on the Hth
+    transition keeps the row.
 12. Assert critic parameters appear in their optimizer exactly once and actor parameters do not.
 13. Save and reload critic geometry, horizons, reward settings, source-policy identity, and EMA
     state.
@@ -152,6 +160,7 @@ gate fails, stop before any Q update and revise the critic plan.
 18. Assert Q and both state-only controls remain byte-identical during the 2,048-step V warm-up.
 19. Assert `V_target` is an exact copy of warmed V at Q step 0, then follows the declared EMA rule.
 20. Check resume immediately before and after the phase boundary.
+21. Assert the E6 interruption mask is byte-identical to the mask E7 uses for the same logged rows.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 

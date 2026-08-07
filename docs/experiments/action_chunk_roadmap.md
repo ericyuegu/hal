@@ -231,6 +231,10 @@ keeps the critic, actor, and deployed macro-action aligned.
 The frozen chunk critic must use its own frozen E4 state encoder. It must not read the fine-tuning
 actor's changing hidden state.
 
+Train Q and the macro actor only on chunks that can execute all H actions under the evaluator's
+queue-interruption rule. A stock loss for either player or a loss of control before H ends
+invalidates that macro-action.
+
 Receding-horizon execution with a plan longer than the executed prefix is a later experiment. It
 requires either a critic for the executed prefix or a learned dynamics model for the unexecuted tail.
 
