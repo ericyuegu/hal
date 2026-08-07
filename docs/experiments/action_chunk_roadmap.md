@@ -97,7 +97,7 @@ c_g=[E(a_{<g})],
 \]
 
 \[
-u_g=\mathrm{SiLU}(W_h\,\mathrm{RMSNorm}(h)+W_{c,g}c_g),
+u_g=\mathrm{SiLU}(W_hh+W_{c,g}c_g),
 \]
 
 \[
@@ -107,7 +107,8 @@ u_g=\mathrm{SiLU}(W_h\,\mathrm{RMSNorm}(h)+W_{c,g}c_g),
 with `W_2` and `W_c` initialized to zero. Keeping `W_h` and `W_c` as separate modules lets the
 model reuse `W_h h`; it does not change the algebra above. This keeps the independent-head function
 at initialization and gives the MLP a nonlinear interaction between state and action condition. Do
-not add a direct condition-to-logit bypass unless it is an explicit ablation.
+not add a direct condition-to-logit bypass unless it is an explicit ablation. `h` is already the
+trunk's final normalized output, so the head does not normalize it again.
 
 ### Chain order
 

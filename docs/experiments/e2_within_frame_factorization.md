@@ -72,8 +72,10 @@ groups in the selected chain order. Concatenation is along the feature dimension
 Compute one shared state preactivation:
 
 \[
-v(h)=W_h\operatorname{RMSNorm}(h).
+v(h)=W_hh.
 \]
+
+`h` is already the trunk's final RMS-normalized output. Do not normalize it again inside the head.
 
 For offset `o` and group `g`:
 

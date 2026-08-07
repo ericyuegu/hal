@@ -49,8 +49,10 @@ Keep E0's `Linear(d_model, 355)` projection at every offset. It supplies one cla
 each action group. Add one shared state projection:
 
 \[
-u(h)=\operatorname{SiLU}\left(W_h\,\operatorname{RMSNorm}(h)\right).
+u(h)=\operatorname{SiLU}\left(W_hh\right).
 \]
+
+`h` is already the trunk's final RMS-normalized output. Do not normalize it again inside the head.
 
 For offset `o` and group `g`, add a logit residual:
 
