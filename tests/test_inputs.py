@@ -10,6 +10,7 @@ import math
 
 import melee
 import numpy as np
+import pytest
 
 from hal.sim.inputs import ControllerInputsValue
 from hal.sim.inputs import MdsControllerView
@@ -114,3 +115,17 @@ def test_apply_inputs_converts_logical_to_wire_and_dispatches_buttons() -> None:
     assert set(sink.pressed) == {melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_L}
     # Every non-pressed button is explicitly released (no stale carry-over).
     assert len(sink.pressed) + len(sink.released) == len(BUTTON_BITS)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_apply_inputs_rejects_nonfinite_analog_values(value: float) -> None:
+    sink = _RecordingSink()
+    src = ControllerInputsValue(value, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+
+    with pytest.raises(ValueError, match="controller input main_x must be finite"):
+        apply_inputs(sink, src)  # type: ignore[arg-type]
+
+    assert not sink.tilts
+    assert not sink.shoulders
+    assert not sink.pressed
+    assert not sink.released

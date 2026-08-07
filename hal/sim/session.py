@@ -473,9 +473,7 @@ class Session:
 
     @staticmethod
     def _canonical(gamestate: melee.GameState) -> dict:
-        """``to_canonical_dict`` plus the live ``stage`` (libmelee value). The canonical
-        per-frame dict mirrors peppi and carries no stage, but instant-restart hops
-        stages mid-session, so the driver needs the *current* one to condition on."""
+        """Add the live stage because canonical frames do not include it."""
         d = gamestate.to_canonical_dict()
         d["stage"] = int(gamestate.stage.value)
         return d

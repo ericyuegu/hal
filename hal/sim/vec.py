@@ -198,8 +198,8 @@ def drive_vec(
                 try:
                     frame, in_game = fut.result()
                     fid = _frame_id(frame, last_id[i])
-                except Exception as e:
-                    logger.warning(f"drive_vec: boot {i} step crashed: {e!r}")
+                except Exception:
+                    logger.exception(f"drive_vec: boot {i} step crashed")
                     seg[i] = []  # drop the partial match; keep matches already completed
                     done[i] = True
                     continue

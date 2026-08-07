@@ -53,6 +53,7 @@ def test_navigate_to_live_returns_on_live_menu() -> None:
     )
     s._step_blocking = lambda: next(seq)  # type: ignore[method-assign]
     s._drive_menus = lambda gamestate: None  # type: ignore[method-assign]
+    s._validate_live_characters = lambda gamestate: None  # type: ignore[method-assign]
 
     # _navigate_to_live returns the canonical dict augmented with the live stage.
     assert s._navigate_to_live() == {"menu": melee.Menu.IN_GAME, "stage": int(melee.Stage.FINAL_DESTINATION.value)}

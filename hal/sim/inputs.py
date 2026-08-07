@@ -12,6 +12,7 @@ in libmelee own the wire conversion; the Controller is constructed with
 See CLAUDE.md (Controller data model).
 """
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 from typing import Protocol
@@ -30,6 +31,7 @@ from hal.wire import slp_button_to_melee
 _BUTTON_DISPATCH: tuple[tuple[int, melee.enums.Button], ...] = tuple(
     (bit, slp_button_to_melee(name)) for name, bit in BUTTON_BITS.items()
 )
+_ANALOG_NAMES = ("main_x", "main_y", "c_x", "c_y", "trigger_l", "trigger_r")
 
 
 @runtime_checkable
@@ -132,18 +134,23 @@ def apply_inputs(controller: melee.Controller, src: ControllerInputs) -> None:
     not call ``flush()`` here. The button loop unconditionally presses or
     releases every button so we don't carry stale state from a previous source.
     """
+    analog = (src.main_x, src.main_y, src.c_x, src.c_y, src.trigger_l, src.trigger_r)
+    for name, value in zip(_ANALOG_NAMES, analog, strict=True):
+        if not math.isfinite(value):
+            raise ValueError(f"controller input {name} must be finite, got {value!r}")
+
     controller.tilt_analog(
         melee.enums.Button.BUTTON_MAIN,
-        melee.controller.fix_analog_stick_signed(src.main_x),
-        melee.controller.fix_analog_stick_signed(src.main_y),
+        melee.controller.fix_analog_stick_signed(analog[0]),
+        melee.controller.fix_analog_stick_signed(analog[1]),
     )
     controller.tilt_analog(
         melee.enums.Button.BUTTON_C,
-        melee.controller.fix_analog_stick_signed(src.c_x),
-        melee.controller.fix_analog_stick_signed(src.c_y),
+        melee.controller.fix_analog_stick_signed(analog[2]),
+        melee.controller.fix_analog_stick_signed(analog[3]),
     )
-    controller.press_shoulder(melee.enums.Button.BUTTON_L, melee.controller.fix_analog_trigger(src.trigger_l))
-    controller.press_shoulder(melee.enums.Button.BUTTON_R, melee.controller.fix_analog_trigger(src.trigger_r))
+    controller.press_shoulder(melee.enums.Button.BUTTON_L, melee.controller.fix_analog_trigger(analog[4]))
+    controller.press_shoulder(melee.enums.Button.BUTTON_R, melee.controller.fix_analog_trigger(analog[5]))
 
     buttons = src.buttons
     for bit, button in _BUTTON_DISPATCH:
