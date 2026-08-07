@@ -58,6 +58,19 @@ before final validation, and does not add a training batch. Record startup phase
 gate. If concurrent reads make warm loader wait or total startup worse, revert this systems change
 before the full P1 run.
 
+The concurrency audit found that PyTorch `DataLoader` iterator creation uses the process-wide Torch
+random generator by default. A validation iterator created on another thread could then race with
+model randomness. Update `hal/training/dataloader.py` so every loader owns a private generator
+seeded from its existing loader seed. Add a test proving loader setup does not change the process
+Torch RNG. Do not launch the concurrent path without this isolation.
+
+This startup change is now implemented. Creating the training iterator starts worker prefetch, then
+one background thread builds the fixed validation cache while step 0 performs the real compiled
+forward and update. There is no warmup batch or extra forward. Training logs the exact number of
+consumed batches. The cache task is checked each step, and validation blocks on it only if needed.
+The focused suite passes 29 tests; static checking adds no new errors. The Vast P1 gate must still
+measure whether the overlap improves wall time under real R2 and GPU load.
+
 ## Correctness gate
 
 Before the full run:
