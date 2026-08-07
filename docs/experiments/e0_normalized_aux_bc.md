@@ -306,9 +306,30 @@ took 1.24 seconds, followed by normal timing, so there is no sustained loader re
 56,699,580-byte `latest.pt` saved at step 10,240 uploaded successfully.
 
 At step 12,288, NLL at offsets 1, 5, 9, and 13 was 1.042, 2.684, 3.422, and 3.896. Button log
-loss was 0.0309. W&B was live through history step 12,306 with 512 distinct replays and a finite
-gradient norm. Both `latest.pt` and the 12,288 evaluation checkpoint uploaded successfully. The
-third 32-boot periodic evaluation then started; its result is pending.
+loss was 0.0309. The batch had 512 distinct replays and a finite gradient norm. Both `latest.pt`
+and the 12,288 evaluation checkpoint uploaded successfully. The third 32-boot periodic evaluation
+completed with zero crashes. Stocks taken and lost per active minute were 0.813 and 1.372.
+
+P0 finished all 16,384 steps. W&B run `obx3o3az` is `finished` with 8,801 seconds of runtime. Final
+validation NLL at offsets 1, 5, 9, and 13 was 1.029, 2.650, 3.379, and 3.851 bits per frame. Button
+log loss was 0.0305. The primary-to-weighted-auxiliary gradient cosine was 0.313; the auxiliary
+gradient norm was 3.18 times the primary norm, with a 0.347 sign-conflict fraction.
+
+R2 contains `final.pt` at 56,698,679 bytes. Its SHA-256 is
+`5d12d010fa3acd1ec07bd86a8e85d2cbb84c584a77b9b79e90dc6fcf03c32e4b`. It records step 16,384,
+W&B ID `obx3o3az`, the exact P0 model and data configuration, FP16 evaluation, full attention, and
+no temporal KV cache.
+
+The old in-process FP32 final sweep completed all 96 boots and uploaded 126 replay files plus rows.
+It produced 118 active games and two countdown-only tails. Its diagnostic point estimates were
+0.842 stocks taken/min, 1.364 stocks lost/min, 135.5 damage dealt/min, and 116.8 damage taken/min.
+Dead frames were 2.13%. Mean stock difference was -0.831. Of 25 games that reached a terminal stock
+state, the policy won 3 and lost 22. These are not the declared FP16 result.
+
+The official evaluation launched on Vast instance `47107185` at commit `9ace1f8`. It uses an RTX
+4090 with 251 GB RAM and a 100 GB disk at $0.719/hour effective. It loads the verified checkpoint in
+FP16, rebuilds the full 256-frame context, runs 96 character-pair boots, uses boot-clustered
+intervals, and writes the label `p0-final-fp16`.
 
 ## Promotion
 
