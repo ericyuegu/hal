@@ -195,6 +195,11 @@ effective price of $1.428 per hour. The run uses prefetch 2 and the complete def
 checkpoint, periodic evaluation, and final evaluation schedule. Startup passed CUDA, disk, fixed
 validation, compilation, full-attention, and first-batch checks.
 
+At step 1,024, primary action NLL was 1.219 bits per frame and button log loss was 0.0353. NLL at
+offsets 1, 5, 9, and 13 was 1.219, 3.073, 3.898, and 4.397. Every batch through this boundary had
+512 distinct replays, and all recorded losses and gradients were finite. The boundary completed
+430 seconds after training startup, including compilation and validation.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
