@@ -149,6 +149,10 @@ The current focused CPU suite passes 83 tests. It covers the experiment entry po
 trunk, and closed-loop rolling rings. The FP32 and FP16 GPU parity gate remains blocked on the final
 P1 checkpoint.
 
+After the H2H artifact fields were clarified, the complete repository suite passed 892 tests at
+commit `d062eb4`. The change does not affect P2 inference, but the full pass checks checkpoint,
+evaluation, and artifact compatibility around it.
+
 ## Decision
 
 Keep full recomputation as the default. Promote temporal KV only if the correctness gate passes,

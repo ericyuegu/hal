@@ -113,11 +113,16 @@ Current training runs reject a nonfinite objective or gradient norm before `opt.
 names the step and leaves the last uploaded checkpoint unchanged. P0 launched before this guard was
 added; its complete finite loss and gradient history was checked separately.
 
-Before the next launch, the complete suite passed 877 tests outside the restricted sandbox,
+Before the next launch, the complete suite passed 892 tests outside the restricted sandbox,
 including real Dolphin integration tests. Six old 020/022 mini-training tests now use a no-op
 uploader because they test model training and deliberately configure a dead R2 endpoint. Separate
 checkpoint tests cover queue draining and production upload failure propagation. This run includes
 the exact CPU evaluation protocol checks added at commit `c4ae635`.
+
+The latest run completed in 136 seconds at commit `d062eb4`. A first sandboxed attempt failed when
+W&B offline mode could not open its local socket, then exhausted the 1,024-file process limit during
+the cascade. The normal unsandboxed run with the project file limit passed all 892 tests. This was a
+test-host restriction, not a model or evaluator failure.
 
 ## Evaluation rules
 
