@@ -48,7 +48,7 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.head_offsets == (1, 5, 9, 13)
     assert cfg.aux_loss_weight == 1.0
     assert (cfg.d_model, cfg.n_layers, cfg.n_heads) == (256, 8, 4)
-    assert (cfg.attn_window, cfg.L_ctx, cfg.batch_size) == (0, 1024, 128)
+    assert (cfg.attn_window, cfg.L_ctx, cfg.batch_size) == (0, 256, 512)
     assert cfg.eval_incremental_kv is False
     assert cfg.batch_size * cfg.L_ctx == 131072
     assert (cfg.max_steps, cfg.warmup_steps) == (2**14, 500)
@@ -57,10 +57,12 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.compile_trunk is True
     assert cfg.windows_per_replay == 2
     assert cfg.val_n_batches == 32
+    assert cfg.gradient_diagnostic_batch_size == 64
     assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (4096, 32, 96)
     assert cfg.eval_max_frames == 7200
     assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-v7"
     assert cfg.mds_schema_version == 7
+    assert cfg.cache_limit_gb == 900
 
 
 def test_run_tag_names_attention_and_decode_mode() -> None:

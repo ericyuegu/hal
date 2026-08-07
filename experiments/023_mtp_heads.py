@@ -148,9 +148,9 @@ class TrainConfig:
     # Replan after this many contiguous output heads. One means per-frame control.
     exec_horizon: int = 1
     seed: int = 0
-    L_ctx: int = 1024
+    L_ctx: int = 256
     # Effective batch size. The default processes 131,072 tokens in one forward pass.
-    batch_size: int = 128
+    batch_size: int = 512
     grad_accum_steps: int = 1
     # Muon trains block matrices. AdamW trains the other parameters.
     muon_lr: float = 0.02
@@ -176,7 +176,7 @@ class TrainConfig:
     # Maximum validation batches. The current v7 validation split is smaller than this cap.
     val_n_batches: int = 32
     # Examples used for per-head shared-trunk gradient comparisons.
-    gradient_diagnostic_batch_size: int = 16
+    gradient_diagnostic_batch_size: int = 64
     # Validation-only rarity threshold. The metric is emitted only when the checkpoint embeds validated
     # full-dataset button counts; it never falls back to the old reference-sample table.
     diagnostic_rare_button_count: int = 100
@@ -226,7 +226,7 @@ class TrainConfig:
     # Full-dataset button counts used by decode support masking.
     button_combo_counts_path: str | None = None
     # Streaming dataset cache and shuffle geometry.
-    cache_limit_gb: int = 440
+    cache_limit_gb: int = 900
     shuffle_block_size: int = 2000
     # Two training windows amortize each replay read. Validation uses one.
     windows_per_replay: int = 2

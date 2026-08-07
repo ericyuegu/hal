@@ -7,8 +7,8 @@ Updated: 2026-08-06
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
 | P0 | Scientific package: short full-causal context | Pending | Train `L_ctx=256`, batch 512, full recompute on v7 with normalized auxiliary BC. |
-| P1 | Scientific package: long context, SWA128, smaller batch | Checkpoint training in progress | Reevaluate the current checkpoint with full recomputation. |
-| P2 | Systems: exact temporal-KV decode efficiency | Exploratory evidence at step 12,288 | Pass parity tests, then compare the same P1 checkpoint with P1 full recompute. |
+| P1 | Scientific package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
+| P2 | Systems: exact temporal-KV decode efficiency | Exploratory final evidence available | Pass parity tests, then compare the same P1 checkpoint with P1 full recompute. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
@@ -53,12 +53,11 @@ recomputation.
 
 ## Immediate next actions
 
-1. Let `19sowpt8` finish and retain its final checkpoint, W&B history, rows, replays, and timing.
+1. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
 2. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.
 3. Evaluate the final P1 checkpoint with full recomputation over the final 96 CPU matchups.
-4. Change and test experiment 023 defaults from the temporary full-1024 setting to P0: full causal
-   `L_ctx=256`, batch 512, and full recomputation.
+4. Test the P0 defaults: full causal `L_ctx=256`, batch 512, full recomputation, and a 900 GB cache.
 5. Launch P0 on a clean 1 TB Vast disk with about 900 GB of streaming cache.
 6. Evaluate P0 over the same 96 CPU matchups.
 7. Run P1 and P2 against P0 over 64 mirrored configurations each.

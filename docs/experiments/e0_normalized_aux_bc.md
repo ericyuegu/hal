@@ -80,8 +80,8 @@ Planned defaults:
 - `n_layers = 8`
 - `n_heads = 4`
 - `attn_window = 0`
-- `L_ctx = 1024`
-- `batch_size = 128`
+- `L_ctx = 256`
+- `batch_size = 512`
 - `grad_accum_steps = 1`
 - `head_offsets = (1, 5, 9, 13)`
 - `max_steps = 16384`
@@ -96,8 +96,8 @@ Planned defaults:
 - `windows_per_replay = 2`
 - `seed = 0`
 
-`L_ctx = 1024` is the fixed raw rolling context. Training recomputes all transformer layers from
-that window. Closed-loop inference must do the same.
+P0 uses a fixed 256-frame raw rolling context. Training and closed-loop inference recompute every
+transformer layer from that window.
 
 The step token budget is 131,072. Do not change it to fit a specific GPU without recording the
 change here.
@@ -191,7 +191,7 @@ Planned launch command:
 ```bash
 uv run scripts/launch_vast.py \
   --max-price 1.10 \
-  --disk 500 \
+  --disk 1000 \
   --min-vram 24 \
   --min-ram 128 \
   --min-dlperf 110 \
@@ -202,6 +202,7 @@ uv run scripts/launch_vast.py \
   --cfg.require-flex \
   --cfg.attn-window 0 \
   --cfg.no-eval-incremental-kv \
+  --cfg.cache-limit-gb 900 \
   --comment e0-normalized-aux-bc
 ```
 
@@ -254,8 +255,8 @@ E1 starts only after this document contains the final run name and E0 checkpoint
 - 021 adds v6 features but still contains the old summed auxiliary objective.
 - 022 contains the current v7, shared-trunk, compiled training, incremental evaluation, checkpoint,
   and head-to-head paths. It is the correct infrastructure source, but its factored head is not E0.
-- Use a fixed raw rolling context of `L_ctx = 1024`. Rebuild all 1,024 frames in every transformer
-  layer during training and closed-loop inference.
+- P0 uses `L_ctx = 256` and batch 512. Rebuild all 256 frames in every transformer layer during
+  training and closed-loop inference.
 - The local 020 and 022 timing records suggest that 16,384 steps should fit the requested budget on
   a healthy 4090 or 5090, but RAM and page-cache performance can dominate GPU speed.
 - `experiments/023_mtp_heads.py` now uses the current shared trunk, compiled training path,
