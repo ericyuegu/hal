@@ -206,7 +206,7 @@ After the CPU evaluation, run head-to-head against the final E0 checkpoint:
 - Use self label `023-e1-state-mlp` and reference label `023-e0`.
 - Run 64 mirrored configurations, two games per configuration, for 128 games total.
 - Keep `eval_max_frames=7200` and `eval_seed=0`.
-- Report non-tied win rate, per-game stock difference, paired per-configuration stock difference,
+- Report non-tied stock-lead rate, per-game stock difference, paired per-configuration stock difference,
   confidence intervals, stage results, and character results.
 
 Head-to-head is sensitive and can be non-transitive. It does not replace the CPU result.

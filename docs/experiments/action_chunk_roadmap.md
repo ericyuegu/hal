@@ -5,8 +5,8 @@
 Build a coherent action-chunk policy in small, testable steps. At every step, the probability model,
 critic, and execution protocol must describe the same decision.
 
-Closed-loop win rate and stock difference are the main results. Offline metrics explain the result.
-They do not replace it.
+Closed-loop stock-lead rate and stock difference are the main results. Offline metrics explain the
+result. They do not replace it.
 
 ## Terms
 
@@ -39,7 +39,7 @@ complete executable chunk. A chunk requires dense offsets such as `(1, 2, 3, 4)`
 - Use the same data, optimizer, training examples, CPU character schedule, and decode settings across an
   ablation.
 - Run at least three paired seeds. Use five for a final claim.
-- Report paired uncertainty intervals for win rate and stock difference.
+- Report paired uncertainty intervals for stock-lead rate and stock difference.
 - Report parameter count, training time, and inference latency.
 - Compare fixed-data and fixed-compute budgets when an architecture adds material work.
 - Keep rank weighting off for this sequence.
@@ -67,7 +67,7 @@ Required metrics:
 - Hold and transition NLL and accuracy.
 - Predicted transition rate and persistence.
 - Auxiliary-to-primary trunk gradient norm and cosine.
-- Closed-loop win rate and stock difference.
+- Closed-loop stock-lead rate and stock difference.
 
 ## E1: output-head capacity control
 

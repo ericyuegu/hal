@@ -197,8 +197,8 @@ Run the standard 32-boot periodic and 96-boot final CPU protocol. Instant restar
 completed games than boots. Save all rows and replay files.
 
 For E2-S, run 64 mirrored H2H configurations against E1. For E2-I, run the same H2H schedule against
-E2-S. Report non-tied win rate, stock difference, confidence intervals, ties, crashes, stage slices,
-and character slices. CPU and H2H results both matter.
+E2-S. Report non-tied stock-lead rate, stock difference, confidence intervals, ties, crashes, stage
+slices, and character slices. CPU and H2H results both matter.
 
 Target 3.0 to 3.5 hours per training arm through evaluation and upload. Flag startup over 30
 minutes, warm steps over 0.5 seconds, a slowdown over 25% from E1, or a projected total over 3.5

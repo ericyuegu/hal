@@ -285,6 +285,6 @@ def test_format_table_reports_both_views():
     table = summarize_paired(records, focal_model="alpha").format_table()
 
     assert "alpha vs beta" in table
-    assert "win rate over non-tied" in table
+    assert "stock-lead rate over non-tied" in table
     assert "paired configs" in table
     assert "-- by stage --" in table

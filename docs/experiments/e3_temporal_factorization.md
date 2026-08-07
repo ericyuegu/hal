@@ -158,7 +158,7 @@ gradient interaction, parameter counts, memory, and throughput.
 
 Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurations against E2-S.
 Save rows and replays. Report stocks, damage, dead frames, terminal results, CPU rate differences,
-H2H stock difference, non-tied win rate, confidence intervals, ties, and crashes.
+H2H stock difference, non-tied stock-lead rate, confidence intervals, ties, and crashes.
 
 Target 3.0 to 3.5 hours through evaluation and upload on an RTX 4090. Flag startup over 30 minutes,
 warm steps over 0.5 seconds, a slowdown over 25% from E2, a periodic evaluation over 25 minutes, or

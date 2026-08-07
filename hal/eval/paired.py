@@ -116,8 +116,9 @@ class PairedSummary:
     """Everything the head-to-head summary table shows, from the focal model's side.
 
     Differentials are focal minus opponent, so a positive number favors the focal model.
-    ``win_rate`` excludes stock ties, which are the matches that reached the frame budget
-    with both ports on equal stocks.
+    ``win_rate`` is the retained data-field name. It is a stock-lead rate, not a game-win
+    rate: a model ahead on stocks when the frame budget ends counts as ahead. Stock ties
+    are excluded. ``decided_by_knockout`` reports matches that actually ended.
     """
 
     focal_model: str
@@ -152,9 +153,9 @@ class PairedSummary:
         """Human-readable summary, one block per view."""
         lines = [
             f"=== {self.focal_model} vs {self.opponent_model}  ({self.matches} matches) ===",
-            f"wins {self.wins}  losses {self.losses}  stock-ties {self.stock_ties}"
+            f"stock leads {self.wins}  stock deficits {self.losses}  stock ties {self.stock_ties}"
             f"   (knockout-decided before budget: {self.decided_by_knockout})",
-            f"win rate over non-tied: {self.win_rate:.3f}"
+            f"stock-lead rate over non-tied: {self.win_rate:.3f}"
             f"  95% CI [{self.win_rate_ci_low:.3f}, {self.win_rate_ci_high:.3f}]"
             f"  binomial p={self.win_rate_p_value:.3f}",
             f"stock diff /match:          {self.mean_stock_diff_per_match:+.3f}"

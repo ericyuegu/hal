@@ -321,7 +321,7 @@ values for `metrics.json`, the worker result, and the worker log are
 - Save checkpoints, match rows, replay files, worker logs, and decode protocol.
 - Report per-offset and per-group NLL and accuracy, transition metrics, gradient interaction,
   stocks, damage, dead frames, terminal results, crashes, and wall time.
-- Report paired H2H stock difference, non-tied win rate, confidence intervals, and ties.
+- Report paired H2H stock difference, non-tied stock-lead rate, confidence intervals, and ties.
 
 Report the two CPU sweeps with separate uncertainty intervals. Do not call boot-and-ordinal row
 alignment paired evidence because later instant-restart stages are random.

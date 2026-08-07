@@ -180,7 +180,7 @@ Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurat
 matched BC reference. Save checkpoints, match rows, replays, H2H records, and the return audit.
 
 Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
-difference, non-tied win rate, confidence intervals, and ties. Also report value and weight metrics
+difference, non-tied stock-lead rate, confidence intervals, and ties. Also report value and weight metrics
 through training.
 
 Use one RTX 4090 experiment at a time. Target 3.0 to 3.5 hours through evaluation and upload. Flag
