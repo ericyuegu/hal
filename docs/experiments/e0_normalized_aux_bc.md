@@ -195,7 +195,7 @@ uv run scripts/launch_vast.py \
   --disk 500 \
   --min-vram 24 \
   --min-ram 128 \
-  --min-dlperf 35 \
+  --min-dlperf 110 \
   --min-compute-cap 890 \
   --max-compute-cap 890 \
   --run-hours 3.5 \
@@ -206,6 +206,16 @@ uv run scripts/launch_vast.py \
 
 This selects an RTX 4090 class host. Search first. Do not rent a host that fails the RAM, download,
 or effective-price audit. Record any command change before launch.
+
+Search audit on 2026-08-06:
+
+- Selected class: RTX 4090, DLPerf 125.7.
+- Effective rate with 500 GB disk: $0.679 per hour.
+- Download speed: 1,778 Mbit/s.
+- Reliability: 0.997.
+- Vast reported 128 GB decimal system RAM, displayed by the launcher as 126 GiB.
+- The cheaper top result had DLPerf 96.7 and reliability 0.980. Raising `min_dlperf` to 110 avoids
+  that host and reduces runtime and interruption risk.
 
 ## Promotion rule
 
