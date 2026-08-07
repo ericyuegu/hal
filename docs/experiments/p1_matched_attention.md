@@ -73,6 +73,11 @@ with model randomness. The focused trainer, loader, and upload suite passes 47 t
 adds no new errors. The Vast P1 gate must still measure whether the overlap improves wall time under
 real R2 and GPU load.
 
+Startup timing now records the worker-prefetch iterator setup, the background cache task's actual
+start-to-finish duration, compiled step-0 wall time, and step-0 loader wait in W&B summary fields.
+The cache task records its own finish time, so a long compile cannot inflate the reported cache
+duration. The expanded focused suite passes 48 tests.
+
 ## Correctness gate
 
 Before the full run:

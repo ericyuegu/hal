@@ -162,13 +162,14 @@ def test_data_loading_starts_train_prefetch_without_consuming_a_batch() -> None:
             events.append("val_iter")
             yield val_batch
 
-    train_iterator, pool, future = exp._start_data_loading(TrainLoader(), ValLoader(), 1)
-    cached = future.result(timeout=2)
+    train_iterator, pool, future, started_at = exp._start_data_loading(TrainLoader(), ValLoader(), 1)
+    cached, finished_at = future.result(timeout=2)
     pool.shutdown()
 
     assert events[0] == "train_iter"
     assert "train_next" not in events
     assert cached == [val_batch]
+    assert finished_at >= started_at
     assert next(train_iterator) is train_batch
 
 

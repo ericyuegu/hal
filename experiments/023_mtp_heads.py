@@ -1599,12 +1599,18 @@ def _start_data_loading(
 ) -> tuple[
     Iterator[TrainBatch],
     concurrent.futures.ThreadPoolExecutor,
-    concurrent.futures.Future[list[TrainBatch]],
+    concurrent.futures.Future[tuple[list[TrainBatch], float]],
+    float,
 ]:
     train_iterator = iter(train_loader)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="val-cache")
-    future = pool.submit(lambda: list(itertools.islice(val_loader, val_n_batches)))
-    return train_iterator, pool, future
+    val_started_at = time.monotonic()
+
+    def read_validation() -> tuple[list[TrainBatch], float]:
+        return list(itertools.islice(val_loader, val_n_batches)), time.monotonic()
+
+    future = pool.submit(read_validation)
+    return train_iterator, pool, future, val_started_at
 
 
 def _fetch_h2h_reference(cfg: TrainConfig, run_dir: Path) -> Path:
@@ -1788,8 +1794,9 @@ def train(
         print(f"[resume] {run_name}: continuing from step {start_step}", flush=True)
 
     print("[val] building cached val set while training prefetch starts…", flush=True)
-    val_t0 = time.monotonic()
-    it, val_pool, val_future = _start_data_loading(train_loader, val_loader, cfg.val_n_batches)
+    train_iter_t0 = time.monotonic()
+    it, val_pool, val_future, val_started_at = _start_data_loading(train_loader, val_loader, cfg.val_n_batches)
+    train_iterator_s = val_started_at - train_iter_t0
     val_cache: list[TrainBatch] | None = None
 
     def _resolve_val_cache(*, wait: bool) -> list[TrainBatch] | None:
@@ -1799,16 +1806,20 @@ def train(
         if not wait and not val_future.done():
             return None
         try:
-            val_cache = val_future.result()
+            val_cache, finished_at = val_future.result()
         finally:
             val_pool.shutdown(wait=False)
         if not val_cache:
             raise RuntimeError("val loader yielded zero batches")
+        val_cache_s = finished_at - val_started_at
         print(
             f"[val] cached {len(val_cache)} batches "
-            f"({sum(b.target.shape[0] for b in val_cache)} samples) in {time.monotonic() - val_t0:.1f}s",
+            f"({sum(b.target.shape[0] for b in val_cache)} samples) in {val_cache_s:.1f}s",
             flush=True,
         )
+        if wandb.run is not None:
+            wandb.run.summary["startup/train_iterator_s"] = train_iterator_s
+            wandb.run.summary["startup/val_cache_s"] = val_cache_s
         return val_cache
 
     def _wandb_id() -> str | None:
@@ -2027,6 +2038,8 @@ def train(
             # The trunk resolves flex-vs-dense at its first forward, so the answer exists only now.
             if wandb.run is not None:
                 wandb.run.summary["model/attn_path"] = model.trunk.attn_path
+                wandb.run.summary["startup/compiled_step0_s"] = sw.elapsed
+                wandb.run.summary["startup/step0_loader_wait_s"] = loader_wait
             print(f"[model] attention path: {model.trunk.attn_path}, window={cfg.attn_window}", flush=True)
         if step < 20 or step % 50 == 0:
             print(
