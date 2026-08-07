@@ -46,6 +46,18 @@ edges per layer and step. P1 has about 15,736,832 local attention edges per laye
 The intended core arm is configuration-only. Do not add a new model file merely to encode three
 flags.
 
+One systems-only trainer change is planned before the P1 gate. In `experiments/023_mtp_heads.py`,
+start the training iterator before building the fixed validation cache, build that cache on one
+background thread, and begin the real step-0 forward while the cache builds. This overlaps training
+data prefetch, validation reads, and lazy `torch.compile` work. It must use the normal step-0 batch;
+do not add a warmup forward or advance any random generator. Poll the cache task each step so an
+early cache failure stops training promptly. Wait for it before the first validation use.
+
+Update `tests/experiments/test_023_mtp_heads.py` to prove the cache starts before step 0, completes
+before final validation, and does not add a training batch. Record startup phase timing in the P1
+gate. If concurrent reads make warm loader wait or total startup worse, revert this systems change
+before the full P1 run.
+
 ## Correctness gate
 
 Before the full run:
