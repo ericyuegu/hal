@@ -200,6 +200,10 @@ offsets 1, 5, 9, and 13 was 1.219, 3.073, 3.898, and 4.397. Every batch through 
 512 distinct replays, and all recorded losses and gradients were finite. The boundary completed
 430 seconds after training startup, including compilation and validation.
 
+At step 2,048, NLL at offsets 1, 5, 9, and 13 was 1.172, 2.948, 3.743, and 4.235. Button log loss
+was 0.0339. The 56,699,580-byte `latest.pt` checkpoint was saved, uploaded, and verified directly
+in R2. The decoded compact cache reached 72 GB while the full instance disk was 31% used.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
