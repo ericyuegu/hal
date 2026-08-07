@@ -6,7 +6,7 @@ Updated: 2026-08-07
 
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
-| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Artifact published and verified | Pass the 256-step clean-cache GPU gate. |
+| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness passed; prefetch tuning active | Reduce mean loader wait from 0.209 seconds without changing batch diversity. |
 | P0 | Scientific package: short full-causal context | Fresh plan ready | Restart from step 0 after the GPU data gate. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Pending P0 | Retrain after P0 with only context, batch, and mask changed. |

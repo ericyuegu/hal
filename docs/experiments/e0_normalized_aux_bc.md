@@ -169,6 +169,16 @@ Gate attempt 1 used Vast instance `47094969` at commit `e8433d0`. It stopped bef
 loading because the command set `max_steps=256` but left `warmup_steps=500`. The instance was
 destroyed. Attempt 2 sets `warmup_steps=32`.
 
+Gate attempt 2 used instance `47095279`, commit `be31fcc`, and W&B run `xhyznlzb`. It completed all
+256 steps and uploaded `final.pt`. Across steps 50 through 255, mean step time was 0.343 seconds and
+mean loader wait was 0.209 seconds. Median values were 0.320 and 0.187 seconds. P95 values were
+0.487 and 0.354 seconds. Every batch had 512 distinct replays, and all recorded losses and gradient
+norms were finite. This meets the wall-time gate but leaves the GPU waiting for data.
+
+Gate attempt 3 changes only `prefetch_factor` from 2 to 32. Sixteen workers can then queue up to 512
+replay packs, which matches one training batch. Keep `predownload=512` and all other gate settings
+fixed.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
