@@ -57,8 +57,11 @@ is no temporal conditioning between offsets in E2. The offset-5 prediction does 
 the offset-1 action.
 
 During training, use the true earlier group classes from the same target frame. During validation,
-report the joint teacher-forced likelihood and a separate rollout-conditioned diagnostic. During
-closed-loop decode, sample each group and feed that sample to the later groups.
+report the joint teacher-forced likelihood and a separate ancestor-sampled diagnostic. For that
+diagnostic, sample the earlier groups, then score the true current-group target under the resulting
+conditional distribution. Report its NLL and argmax accuracy. Also sample the complete frame once
+and report its sampled exact-frame accuracy. During closed-loop decode, sample each group and feed
+that sample to the later groups.
 
 ## Head design
 
@@ -69,6 +72,8 @@ head_mode: Literal["linear", "state_mlp", "factored_mlp"] = "linear"
 action_mlp_ratio: int = 2
 action_condition_dim: int = 32
 action_group_order: tuple[str, ...] = ("c_stick", "triggers", "buttons", "main_stick")
+factorization_diag_seed: int = 0
+factorization_diag_samples: int = 1
 ```
 
 Share one embedding table for each action group across offsets. Each table maps its discrete class
@@ -147,7 +152,9 @@ or a missing target must not supply a condition or a loss.
 13. Save and reload each order. Check mode, order, dimensions, logits, and sampled decode.
 14. Assert every new parameter belongs to AdamW exactly once and never to Muon.
 15. Run the small end-to-end training test in both E2 orders.
-16. Assert rollout-conditioned validation leaves process-wide CPU and CUDA RNG states unchanged.
+16. Assert ancestor-sampled validation leaves process-wide CPU and CUDA RNG states unchanged.
+17. Assert it samples only earlier groups before scoring the current target, and assert its NLL is
+    the cross-entropy of that conditional distribution rather than the loss on a sampled class.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -159,6 +166,8 @@ Copy the selected E0 package and E1 configuration exactly. E2 may change only:
 - `head_mode=factored_mlp`
 - `action_condition_dim=32`
 - `action_group_order`
+- `factorization_diag_seed=0`
+- `factorization_diag_samples=1`
 - Run labels and H2H reference fields.
 
 Keep `action_mlp_ratio=2`, offsets `(1,5,9,13)`, the normalized auxiliary loss, 16,384 steps, seed
@@ -179,8 +188,8 @@ add about 51.5 billion forward MACs per 131,072-frame step because the condition
 For every offset and group, log:
 
 - Teacher-forced NLL and argmax accuracy.
-- Cross-entropy and sampled accuracy when earlier groups are sampled from the model.
-- The gap between teacher-forced and rollout-conditioned cross-entropy.
+- NLL and argmax accuracy when earlier groups are sampled from the model.
+- The gap between teacher-forced and ancestor-sampled NLL.
 - Hold and transition NLL and accuracy.
 - Predicted transition rate, persistence, and change-event F1.
 
@@ -188,13 +197,15 @@ Also log exact-frame accuracy, each head's trunk-gradient norm, primary-to-auxil
 condition-branch norms, embedding norms, parameter counts, step time, loader wait, peak memory, and
 closed-loop decode time.
 
-The rollout-conditioned metric is stochastic. It is an exposure-bias diagnostic, not the joint NLL
-of the observed action. Freeze its seed and sample count. Do not compare runs that use different
-rollout draws.
+The ancestor-sampled metric is stochastic. It is an exposure-bias diagnostic, not the joint NLL of
+the observed action. Use one ancestor rollout per validation frame with seed 0. Do not compare runs
+that use different rollout draws. One rollout is enough because the fixed validation set contains
+many valid frames; record its size with every metric.
 
-Use a dedicated `torch.Generator` for this diagnostic. Recreate or reset it from the declared
-diagnostic seed for each validation pass. Do not consume the process-wide Torch RNG or the live
-closed-loop decode generator. Validation must leave training RNG state byte-identical.
+Use a dedicated `torch.Generator` for this diagnostic. Recreate it from
+`factorization_diag_seed` for each validation pass and draw `factorization_diag_samples` ancestor
+rollouts per frame. Do not consume the process-wide Torch RNG or the live closed-loop decode
+generator. Validation must leave training RNG state byte-identical.
 
 ## Closed-loop evaluation
 

@@ -39,9 +39,11 @@ Run two matched arms:
 - E3-C is the capacity control. Every temporal depth receives one learned null-action vector.
 - E3-T is the treatment. Every temporal depth receives the true previous action during training.
 
-Both arms contain and execute the same modules. They have the same parameter count and compute.
-E3-C shows what the recurrent state and depth path can do without previous-action information.
-Compare E3-T directly with E3-C. A comparison with E2 alone cannot isolate temporal conditioning.
+Both arms contain the same modules and use the same temporal state path. They have the same
+parameter count. Do not claim exact compute matching: the compiler may remove E3-C's discarded
+action-embedding result. Measure warm step time for both arms. E3-C shows what the recurrent state
+and depth path can do without previous-action information. Compare E3-T directly with E3-C. A
+comparison with E2 alone cannot isolate temporal conditioning.
 
 ## Files to change
 
@@ -86,8 +88,10 @@ Give both arms the same action embedding tables and one learned null-action vect
 width as a concatenated complete-action embedding. E3-C always selects the null vector. E3-T
 selects the target or sampled previous action. Do not remove unused tables from E3-C; that would
 break the parameter-matched control. E3-C performs the same embedding lookups, then replaces their
-result with the null vector before the temporal affine layer. This keeps the measured forward path
-matched while preventing previous-action information from reaching the logits.
+result with the null vector before the temporal affine layer. This keeps input validation and the
+source-level path matched while preventing previous-action information from reaching the logits.
+The compiler may remove the discarded lookup, so verify actual timing instead of assuming equal
+compute.
 
 The offset-1 path must not call the temporal module. This avoids giving the deployed head an extra
 state-only capacity path. E3 can affect it only through the shared trunk gradients from better or
@@ -108,12 +112,15 @@ teacher-forced path. Apply the same valid-frame mask to the previous action, tem
 current loss.
 
 For rollout-conditioned validation, sample the complete within-frame action at each depth, then
-feed that sample to the next depth. Freeze the sampling seed and number of examples. Report the
-cross-entropy gap from teacher forcing. This diagnostic measures exposure to model-generated
-history. It is not the joint NLL of the observed sparse action sequence.
+feed that sample to the next depth. Use one rollout per valid validation frame with seed 0. Score
+the true action at each later depth under the resulting conditional distribution, and report NLL
+and argmax accuracy. Report the NLL gap from teacher forcing. This diagnostic measures exposure to
+model-generated history. It is not the joint NLL of the observed sparse action sequence.
 
-Use a dedicated generator that resets from the declared diagnostic seed on every validation pass.
-Do not consume the process-wide training RNG or the live decode generator.
+Use configuration fields `temporal_diag_seed=0` and `temporal_diag_samples=1`. Use a dedicated
+generator that resets from the declared diagnostic seed on every validation pass. Do not consume
+the process-wide training RNG or the live decode generator. Record the number of valid frames with
+every diagnostic.
 
 Closed-loop execution samples offset 1 only. It must not compute offsets 5, 9, or 13 unless an
 explicit diagnostic requests them.
@@ -155,6 +162,8 @@ alignment, optimizer, or total auxiliary weight.
 18. Assert E3-C and E3-T have identical parameter names, shapes, optimizer ownership, and forward
     call counts.
 19. Assert rollout-conditioned validation leaves process-wide CPU and CUDA RNG states unchanged.
+20. Assert rollout-conditioned NLL scores the true current action after sampling only the earlier
+    temporal actions. It must not use the sampled current action as a loss target.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
@@ -165,6 +174,7 @@ Copy the selected E2-S configuration. Run E3-C first and E3-T second. Change onl
 - Temporal mode from independent to sparse autoregressive MLP.
 - Temporal condition source: null for E3-C and previous action for E3-T.
 - Temporal MLP ratio and depth embeddings.
+- Temporal diagnostic seed 0 and one rollout per valid frame.
 - Run labels and H2H reference.
 
 Keep the selected attention package, within-frame group order, offsets, loss weights, 16,384 steps,
