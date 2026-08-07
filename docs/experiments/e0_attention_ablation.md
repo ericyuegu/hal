@@ -1,155 +1,184 @@
-# E0 attention and decode ablation
+# E0 attention and decode prelude
 
-Status: planned
+Status: P1/P2 exploratory run active; P0 pending
 
 ## Question
 
-The current E0 run changes two things relative to the older full-attention policy:
+Choose a practical attention and decode package before E0 becomes the reference for E1-E7.
 
-- It trains with 128-frame sliding-window attention.
-- It evaluates with a temporal KV cache.
+This is not a pure attention-mask study. P0 and P1 change context length, batch size, and attention
+mask together. They keep the token budget and approximate attention work per optimizer step close.
+P1 and P2 then isolate decode implementation by using one checkpoint.
 
-This ablation separates the learned attention mask from the decode implementation. The new E0
-reference is full causal attention with full-context recomputation.
+## Valid packages
 
-## Arms
+### P0: short full causal reference
 
-### A0: full causal reference
+- `L_ctx=256`
+- `batch_size=512`
+- `attn_window=0`
+- Full rolling-window recomputation in closed loop
+- `eval_incremental_kv=False`
 
-- Train with `L_ctx=1024` and `attn_window=0`.
-- Evaluate by rebuilding the complete rolling 1,024-frame context at every policy step.
-- Set `eval_incremental_kv=False`.
+P0 is the candidate E0 reference. It uses the established short-context full-causal package while
+keeping the new normalized auxiliary BC objective and v7 data.
 
-A0 is the new E0 reference for later model ablations.
+### P1: long SWA with full recomputation
 
-### A1: sliding-window attention
+- `L_ctx=1024`
+- `batch_size=128`
+- `attn_window=128`
+- Full rolling-window recomputation in closed loop
+- `eval_incremental_kv=False` for this evaluation
 
-- Train with `L_ctx=1024` and `attn_window=128`.
-- Evaluate by rebuilding the complete rolling 1,024-frame context at every policy step.
-- Set `eval_incremental_kv=False` for this evaluation.
+Use the current SWA checkpoint. Do not retrain it for P1. Its saved training configuration remains
+unchanged; the full-recompute evaluation override must be recorded separately.
 
-A1 differs from A0 only in the trained attention mask.
+### P2: long SWA with temporal KV
 
-### A2: exact temporal KV decode
+- Use the exact P1 checkpoint.
+- `L_ctx=1024`
+- `attn_window=128`
+- `eval_incremental_kv=True`
+- Feed every observed frame into the cache.
+- Reset each slot at every match boundary.
 
-- Use the exact A1 checkpoint. Do not retrain it.
-- Evaluate with `attn_window=128` and `eval_incremental_kv=True`.
-- Feed every observed frame into the cache, including frames between policy replans.
-- Reset each slot's cache at every match boundary.
+P2 differs from P1 only in decode implementation. It is not a training arm.
 
-A2 differs from A1 only in how the same checkpoint is evaluated. A2 is a decode ablation, not a
-training arm.
+## What P0 versus P1 controls
 
-## Invalid arm
-
-Do not run full causal attention with a rolling `L_ctx`-length KV cache after the context buffer
-rolls.
-
-Before the first 1,024 frames, a full causal cache can match a growing full-context forward. After
-the buffer rolls, it cannot match recomputation. Cached hidden states in later layers still contain
-information from frames that the rolling full-context input has removed. Trimming old keys and
-values does not remove that information from the retained hidden states.
-
-The full-causal A0 policy must use full recomputation. Code must continue to reject incremental
-full-attention decode when adding one more frame would evict history.
-
-SWA is different. Each layer can read at most 128 frames, and eight layers have a maximum temporal
-receptive field of:
+Both packages process 131,072 frame tokens per optimizer step:
 
 \[
-1 + 8(128 - 1) = 1017\text{ frames}.
+512\times256=128\times1024=131072.
 \]
 
-This fits inside `L_ctx=1024`. A per-layer 128-frame cache can therefore match a full recomputation
-over the rolling input when relative rotary positions and resets are correct.
+They also expose about 16 million causal attention edges per layer and step.
 
-## Fixed-data comparison
+For P0:
 
-The primary A0 versus A1 comparison uses fixed data and fixed geometry:
+\[
+512\times\frac{256\times257}{2}=16{,}842{,}752.
+\]
 
-- The same v7 dataset and validation split.
-- The same sampled windows in the same order.
-- `L_ctx=1024`, `batch_size=128`, and 131,072 frame tokens per optimizer step.
-- The same seed, initialization, parameters, optimizer, learning-rate schedule, and 16,384 steps.
-- The same output heads, offsets, objective, decode distribution, and evaluation matchups.
-- The same compiled FlexAttention training path.
+For P1, including the shorter windows during the first 127 positions:
 
-Only `attn_window` changes. The two models have the same parameter count. A0 does more attention
-work per step because it permits every causal edge. This is intentional: the primary comparison
-asks what the attention mask does at equal data exposure and model geometry.
+\[
+128\times\left(\frac{128\times129}{2}+896\times128\right)
+=15{,}736{,}832.
+\]
 
-Do not call this a compute-matched comparison.
+This makes P0 and P1 similar in token count and attention-edge count. It does not make them the
+same geometry. They differ in:
 
-If a compute-matched study is later useful, write a separate plan before running it. For example,
-give A1 more optimizer steps until its measured training FLOPs or GPU time matches A0. That study
-changes data exposure and schedule length, so it cannot replace the fixed-data result. Do not
-quietly reduce A0 batch size or context length to make it faster.
+- 512 shorter samples versus 128 longer samples per step.
+- Full causal attention versus a 128-frame layer window.
+- Context boundaries and the number of distinct replay windows in one batch.
+- Effective temporal receptive field.
+
+Call this a practical package comparison. Do not claim that it isolates the mask, context length,
+or batch diversity.
+
+Keep the dataset, seed, number of steps, objective, optimizer, model width and depth, output heads,
+decode distribution, and evaluation schedule fixed. Use the same data-stream rules, but do not claim
+that the two geometries contain identical training windows.
+
+## Optional I1 pure-mask study
+
+Run I1 only if P0 versus P1 leaves an important mask question unresolved.
+
+- `L_ctx=256`
+- `batch_size=512`
+- `attn_window=32`
+- First evaluate with full recomputation.
+- Reevaluate the same checkpoint with exact temporal KV after the parity gate.
+
+Eight 32-frame layers have a maximum receptive field of:
+
+\[
+1+8(32-1)=249,
+\]
+
+which fits inside 256 frames. P0 versus I1 changes only the attention mask when every other training
+and evaluation field is fixed. It is the affordable pure-mask arm. It is not required before E1 if
+the practical P0/P1 decision is clear.
+
+A later compute-matched study must have its own plan. Giving one arm more steps changes data
+exposure and schedule length. Do not mix that result into the fixed-step package comparison.
+
+## Invalid package
+
+Do not use full causal attention with a rolling KV cache after the input buffer rolls.
+
+Before frame 256, a growing full-causal cache can match P0 recomputation. After eviction, retained
+later-layer states still contain information from removed frames. Trimming old keys and values does
+not remove that information. P0 must use full recomputation, and code must reject its first invalid
+cache eviction.
+
+SWA is different. P1/P2 has a maximum eight-layer receptive field of:
+
+\[
+1+8(128-1)=1017,
+\]
+
+which fits inside 1,024 frames. A per-layer 128-frame cache can match rolling full recomputation when
+relative rotary positions, frame ingestion, and resets are correct.
 
 ## Fixed model and objective
 
-Use the linear E0 head and normalized auxiliary BC objective:
+Use the linear independent heads and normalized auxiliary BC:
 
 \[
 L=L_1+\frac{L_5+L_9+L_{13}}{3}.
 \]
 
-Keep:
+Keep these fields fixed across trained arms unless listed in the package definition:
 
 - `d_model=256`, `n_layers=8`, `n_heads=4`.
-- `head_offsets=(1,5,9,13)` and `aux_loss_weight=1.0`.
-- `transition_loss_weight=1.0` and `history_dropout_p=0.0`.
-- `max_steps=16384`, `warmup_steps=500`, and `seed=0`.
-- `muon_lr=0.02`, `adam_lr=8.5e-4`, and `weight_decay=0.01`.
-- BF16 training, TF32 enabled, and compiled training.
-- `data/processed/ranked-anonymized-1/mds-v7`, schema 7, and two windows per replay.
-- Per-frame execution with sampling temperature 1 and no decode filters or repairs.
+- `head_offsets=(1,5,9,13)`, `aux_loss_weight=1.0`.
+- `transition_loss_weight=1.0`, `history_dropout_p=0.0`.
+- `max_steps=16384`, `warmup_steps=500`, `seed=0`.
+- `muon_lr=0.02`, `adam_lr=8.5e-4`, `weight_decay=0.01`.
+- BF16 training, TF32 enabled, compiled training, and `require_flex=True` on Vast.
+- `data/processed/ranked-anonymized-1/mds-v7`, schema 7.
+- Per-frame execution, temperature 1, and no decode filters or repairs.
 - No AWR, value head, rank weight, action-group conditioning, or temporal action conditioning.
 
-Use `require_flex=True` on Vast. A dense fallback is not a valid timing comparison.
+Use `windows_per_replay=2` in clean P0 and P1 runs so it does not add another package difference.
 
 ## Intended code work
 
-Before launching A0 or reporting A1/A2:
+- Add a manual checkpoint-evaluation override for `eval_incremental_kv` in
+  `experiments/023_mtp_heads.py` if one does not already exist.
+- Test that the override changes only decode and is written into the evaluation protocol.
+- Use existing trunk and closed-loop code unless parity tests prove it wrong.
+- Record any shared-code change here before making it.
+- Preserve the saved checkpoint configuration. Do not rewrite it to describe a manual evaluation.
 
-- Update `experiments/023_mtp_heads.py` only if manual checkpoint evaluation cannot override
-  `eval_incremental_kv` while preserving every saved model field.
-- Update `tests/experiments/test_023_mtp_heads.py` with the decode override and protocol-record tests.
-- Use existing shared trunk and closed-loop cache code unless a parity test proves that it is wrong.
-- Record any required shared-code change in this file before making it.
-- Update this file with commands, commits, checkpoints, W&B IDs, timing, and results.
+## P2 parity gate
 
-The saved checkpoint configuration remains the training record. A manual A1 reevaluation of a
-checkpoint trained with incremental evaluation enabled must log the explicit full-recompute
-override in its protocol and W&B record.
+P2 may run only after these tests pass on the evaluation GPU and precision:
 
-## Parity gate for A2
+1. Compare the newest hidden state from P1 full recomputation and P2 at cold start and at frames
+   127, 128, 129, 1,016, 1,017, 1,024, and later.
+2. Continue for more than two complete 1,024-frame contexts. Compare P2 with the last token from
+   each current rolling-window recomputation.
+3. Test no padding, heavy left padding, and a slot that has just restarted.
+4. Test mixed batches with different cache lengths and reset times.
+5. Compare every offset and action-group logit.
+6. Test FP32 and the exact FP16 evaluation cast. Derive tolerances from measured error.
+7. Compare sampled actions over the frozen validation set with fixed random seeds. Require zero
+   mismatches before closed-loop evaluation.
+8. Confirm that every observed frame enters the cache, including frames between replans.
+9. Confirm that reset removes keys, values, and the saved newest hidden state for one slot.
+10. Confirm that full-causal incremental decode raises before invalid eviction.
+11. Confirm that P1 and P2 load identical tensors and record different decode protocols.
 
-A2 may run only after all tests below pass on the exact evaluation device and precision.
+Run the focused trunk, closed-loop ring, and 023 experiment suites before P2.
 
-1. Compare the newest hidden state from full A1 recomputation with temporal KV decode during cold
-   start, at 127, 128, 129, 1,016, 1,017, 1,024, and later frames.
-2. Continue for more than two full context lengths. At each step, compare temporal KV output with
-   the last token from the current rolling 1,024-frame recomputation.
-3. Test no left padding, heavy left padding, and a slot that has just restarted.
-4. Test a mixed batch whose slots have different cache lengths and reset on different frames.
-5. Compare every offset and action-group logit, not only the trunk state.
-6. Test FP32 and the exact FP16 evaluation cast. Set tolerances from measured error. Do not loosen
-   them only to pass.
-7. With fixed random seeds, compare sampled actions on the full frozen validation set. Report the
-   mismatch count. The required count is zero before closed-loop evaluation.
-8. Confirm that every observed frame enters the cache even when `exec_horizon>1`, although this
-   ablation deploys `exec_horizon=1`.
-9. Confirm that a match reset removes both cached keys and values and the cached newest hidden
-   state for that slot.
-10. Confirm that full causal incremental decode raises before its first invalid eviction.
-11. Confirm that manual A1 and A2 evaluations load identical model tensors and differ only in the
-    decode path recorded in the evaluation protocol.
+## Metrics
 
-Also run the full focused trunk, closed-loop ring, and 023 experiment test suites before A2.
-
-## Offline metrics
-
-For A0 and A1, report at equal optimizer steps:
+For P0 and P1 at equal optimizer steps, report:
 
 - Training objective and offset-1 NLL.
 - Validation total and per-group offset-1 NLL.
@@ -157,103 +186,106 @@ For A0 and A1, report at equal optimizer steps:
 - Hold and transition NLL and accuracy.
 - Predicted transition rate, persistence, and change-event F1.
 - NLL at offsets 1, 5, 9, and 13.
-- Primary and auxiliary trunk-gradient norms, cosine, norm ratio, and sign conflict.
-- Parameter count and peak GPU memory.
-- Median step time, samples per second, tokens per second, compile time, and validation time.
+- Primary and auxiliary trunk-gradient norms, cosine, ratio, and sign conflict.
+- Parameter count, peak GPU memory, compile time, median and p95 step time, samples per second, and
+  tokens per second.
 
-A2 has no new training or offline model score. Its validation logits should match A1 within the
-parity tolerance. Report maximum and percentile absolute logit error, probability error, and sampled
-action mismatches.
+P2 has no new training score. Report P1/P2 maximum and percentile hidden-state, logit, and
+probability error, plus sampled-action mismatch count.
+
+For each decode path, report:
+
+- Model forward time per observed frame at real evaluation batch sizes.
+- End-to-end emulator steps and active frames per second.
+- Wall time for 32 and 96 CPU matchups and 128 H2H games.
+- GPU memory used by weights and caches.
+- Live slots and cache-length groups per forward.
+- Context-build, transfer, trunk, head-sampling, and emulator time when profiling can separate them.
+
+Use the same host for a direct latency claim. Otherwise report hardware facts and call the result
+descriptive.
 
 ## Closed-loop evaluation
 
-Evaluate all three protocols against the same level-9 CPU schedule:
+Use the same level-9 CPU schedule:
 
-- Periodic checks use 32 fixed matchups.
-- Final checks use 96 fixed matchups.
-- Use `eval_max_frames=7200` and `eval_seed=0`.
-- Keep matchup order, policy seed, temperature, frame budget, and concurrency fixed.
-- Save `match_rows.json`, replays, worker logs, and the complete decode protocol.
+- 32 fixed matchups at periodic checks.
+- 96 fixed matchups for each final comparison.
+- `eval_max_frames=7200`, `eval_seed=0`, and identical decode seeds.
+- Save match rows, replays, worker logs, and the full protocol.
 
-For A0 and A1, report stocks and damage taken and dealt per active minute, bootstrap intervals,
-crash rate, and paired deltas from aligned CPU rows.
+Report stocks and damage taken and dealt per active minute, bootstrap intervals, crashes, completed
+matches, and paired deltas from aligned CPU rows. The CPU protocol does not report full game win
+rate. Label any result from terminal games as a terminal subset.
 
-For A1 and A2, use the same checkpoint. Any policy difference is a decode-parity warning, not a
-model improvement. Compare aligned action traces when rows or outcomes differ.
+After P0 exists, run:
 
-Run final head-to-head evaluation as follows:
+- P1 full recompute against P0 over 64 mirrored configurations, or 128 games.
+- P2 temporal KV against P0 over the same configurations and seeds.
 
-- A1 full recompute against A0: 64 mirrored configurations, or 128 games.
-- A2 temporal KV against A0: the same 64 mirrored configurations and seeds.
-- Report non-tied win rate, per-game stock difference, paired per-configuration stock difference,
-  confidence intervals, stage results, and character results.
+Report non-tied win rate, per-game and paired per-configuration stock difference, confidence
+intervals, stage results, and character results. P1 and P2 are one learned policy. A difference
+between them is a decode warning, not a model gain.
 
-A1 and A2 should give the same policy result within numerical and emulator repeatability. Do not
-run A1 against A2 as the main H2H result because they are the same learned policy.
+## Infrastructure
 
-## Latency and throughput
+Use a 1 TB Vast disk for all future clean runs and set `cache_limit_gb` to about 900. The current
+500 GB disk reached 92% use while about 463 GB of an approximately 800 GB materialized dataset was
+present. Its 440 GB cache had to evict and refetch shards.
 
-Measure training and evaluation separately.
+Keep at least 128 GB of system RAM, one experiment at a time, checkpoint uploads every 2,048 steps,
+and the 3.0-3.5 hour target. Flag startup over 30 minutes, sustained steps over 0.5 seconds, GPU use
+below 80% after warmup, a 32-match evaluation over 25 minutes, or a projected total over 3.5 hours.
 
-For A0 and A1 training, record:
+Record provisioning, downloads, validation caching, compilation, training, evaluation, H2H,
+uploads, GPU, CPU count, RAM, disk use, and network speed.
 
-- Warm median and p95 optimizer-step time.
-- GPU utilization, peak memory, and attention kernel path.
-- Validation and checkpoint overhead.
-- Total wall time through final upload.
+## Current P1/P2 evidence
 
-For each decode protocol, record:
+Retain Vast instance `47034073`, W&B run `19sowpt8`, and its uploaded artifacts.
 
-- Model forward milliseconds per observed frame at batch sizes seen in evaluation.
-- End-to-end emulator steps per second and active frames per second.
-- CPU evaluation wall time for 32 and 96 matchups.
-- H2H wall time for 128 games.
-- GPU memory used by model state and KV caches.
-- Number of live slots and cache-length groups per forward.
-- Time spent building contexts, copying tensors, running the trunk, sampling heads, and running the
-  emulator when profiling can separate them.
+At step 8,192:
 
-Use identical host hardware for a direct latency claim. If hosts differ, report raw hardware facts
-and treat the comparison as descriptive.
+- Validation action NLL was 1.063 bits per frame; button log loss was 0.032.
+- The P2 CPU evaluation took 316 seconds and produced 43 matches with no crashes.
+- Stocks taken per minute were 0.672, 95% CI `[0.576, 0.769]`.
+- Stocks lost per minute were 1.551, 95% CI `[1.320, 1.792]`.
+- Damage dealt per minute was 119.5, 95% CI `[110.0, 129.8]`.
+- Damage taken per minute was 129.2, 95% CI `[122.1, 136.7]`.
+- Dead-frame fraction was 0.0230.
+- Derived mean stock difference was -1.279.
+- Eleven games ended before the frame limit; none were wins. This is the terminal subset, not a
+  full-schedule win rate.
+- `latest.pt` and `step_008192.pt` uploaded. Forty-six replays and the match rows were uploading.
 
-## Current Vast run
+The result was broadly flat against step 4,096. Treat it as exploratory P2 evidence.
 
-Retain Vast instance `47034073` and W&B run `19sowpt8` as exploratory evidence.
+At step 12,288, validation action NLL was 1.027 bits per frame. The P2 CPU evaluation took 326
+seconds and produced 42 matches with no crashes. Stocks taken and lost per minute were 0.911 and
+1.502. Damage dealt and taken per minute were 134.3 and 119.0. Derived mean stock difference was
+-0.881. Ten games ended before the frame limit and one was a win. This was the strongest periodic
+snapshot so far, but the small, mostly truncated sample does not establish a policy result.
 
-That run trains the A1 architecture: `L_ctx=1024` with `attn_window=128`. Its current closed-loop
-path is A2 temporal KV decode. Keep its checkpoint, W&B history, match rows, replays, host facts, and
-timing.
-
-It cannot be the new E0 reference because it is not A0. Its closed-loop result also cannot be called
-the A1 full-recompute result until the exact same checkpoint is reevaluated with
-`eval_incremental_kv=False`. After that reevaluation exists, the checkpoint can supply both valid A1
-and A2 evidence without retraining.
-
-Do not overwrite the original run configuration. Log the A1 reevaluation as a separate manual
-evaluation record with its override and source checkpoint.
+The run trains P1 (`L_ctx=1024`, SWA128) but evaluates with P2 temporal KV. It cannot be the P0
+reference. It also cannot supply a P1 closed-loop result until its exact checkpoint is reevaluated
+with full recomputation. Log that reevaluation as a separate manual record and preserve the original
+run configuration.
 
 ## Decision rules
 
-The ablation is invalid if data windows, initialization, training steps, objective, decode sampling,
-or evaluation schedules drift between A0 and A1.
+- P1 beats P0 in CPU and H2H results: use the long-SWA package.
+- P1 matches P0 within uncertainty and is materially better in throughput or memory: prefer P1 for
+  efficiency and report no measured policy gain.
+- P1 loses to P0: use P0 as E0. P2 speed does not excuse a policy regression.
+- P2 matches P1 actions and policy results and is faster end to end: enable temporal KV for P1.
+- P2 changes sampled validation actions or closed-loop results beyond repeatability: fix decode
+  parity before using its speed result.
+- P2 is not faster end to end: keep P1 full recomputation.
+- CPU and H2H disagree: call the result inconclusive and inspect paired rows and replays.
 
-Interpret valid results as follows:
-
-- A1 beats A0 in CPU and H2H results: keep SWA128 as the learned attention architecture.
-- A1 matches A0 within uncertainty and is materially faster or smaller in memory: prefer SWA128 for
-  efficiency, while reporting no measured policy gain.
-- A1 loses to A0: restore full causal attention as the E0 reference. Temporal KV speed does not
-  excuse a policy regression.
-- A2 matches A1 policy results and is faster: enable temporal KV for SWA128 evaluation.
-- A2 changes sampled validation actions or closed-loop results beyond repeatability: treat this as a
-  correctness failure. Fix parity before using its speed result.
-- A2 is not faster end to end: keep full recomputation. Kernel speed alone is not enough.
-- CPU and H2H disagree: call the policy result inconclusive and inspect paired rows and replays.
-
-Do not select an attention arm from NLL or throughput alone. The main policy decision uses the final
-CPU and mirrored H2H evidence. Repeat the chosen comparison over at least three paired seeds before
-making a final claim.
+Do not select a package from NLL or kernel time alone. Repeat the chosen comparison for at least
+three paired seeds before making a final claim.
 
 ## Results
 
-Pending.
+Pending P0 and P1 full-recompute evaluation.
