@@ -214,6 +214,11 @@ semaphores. The fix adds `hal/data/streaming_compat.py`, loads it from
 `tests/test_dataloader.py`. The focused loader suite passes 20 tests. Relaunch the same gate after
 committing this compatibility fix; do not treat instance `47112838` as speed or stability evidence.
 
+The replacement gate launched on Vast instance `47115519` from commit `0d60273be3`. The RTX 4090
+host has 252 GB RAM, DLPerf 125.5, and a 250 GB disk at $0.808/hour effective. The container became
+ready in 22 seconds. The command matches the first gate, except the run comment is
+`p1-matched-swa-recompute-gate-r2` so its evidence cannot be confused with the failed run.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
