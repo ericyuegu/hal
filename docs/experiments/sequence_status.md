@@ -29,7 +29,7 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Fresh primary-only plan ready; blocked on policy selection | Weight only the action whose state advantage is defined; preserve auxiliary BC. |
 | E6 | Chunk-conditioned value validity | Fresh critic plan ready; blocked on E4/E5 infrastructure | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
-| E7 | Macro-action optimization and execution | Planned | Use one chunk advantage on the joint likelihood and execute the same `H=2`, then `H=4`, action. |
+| E7 | Macro-action optimization and execution | Fresh matched-control plan ready; blocked on E6 | Use one chunk advantage on the joint likelihood and execute the same `H=2`, then `H=4`, action. |
 
 ## Current evidence
 
@@ -79,6 +79,7 @@ The E3 temporal plan is `docs/experiments/e3_temporal_factorization.md`.
 The E4 dense-chunk plan is `docs/experiments/e4_dense_chunk_readiness.md`.
 The E5 AWR plan is `docs/experiments/e5_primary_awr.md`.
 The E6 critic plan is `docs/experiments/e6_chunk_critic.md`.
+The E7 macro-action plan is `docs/experiments/e7_chunk_awr_execution.md`.
 
 ## Evaluation rules
 
