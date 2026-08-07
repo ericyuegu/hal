@@ -227,6 +227,28 @@ Keep the in-run final result as a diagnostic. After `final.pt` uploads, run the 
 final evaluation by loading that checkpoint through the FP16 decode path. Record the model dtype in
 the new evaluation artifact. Do not resume or alter the active training process.
 
+At step 8,192, NLL at offsets 1, 5, 9, and 13 was 1.074, 2.764, 3.522, and 4.002. Button log loss
+was 0.0318. The 56,705,941-byte `step_008192.pt` object was verified directly in R2.
+
+The second periodic evaluation took about 7.8 minutes. All 32 boots succeeded. Instant restart
+produced 36 games with active play and two countdown-only tail fragments after a prior game ended
+near the frame budget. The launched metric code counted those fragments as matches. A corrected
+offline reduction keeps their raw rows but excludes them from rates and confidence intervals.
+
+The corrected step-8,192 result is:
+
+- Stocks taken per active minute: 0.893, 95% CI `[0.764, 1.028]`.
+- Stocks lost per active minute: 1.323, 95% CI `[1.138, 1.530]`.
+- Damage dealt per active minute: 131.1, 95% CI `[120.5, 141.8]`.
+- Damage taken per active minute: 122.4, 95% CI `[114.8, 129.8]`.
+- Dead frames: 1.92% across games with active play.
+- Mean stock difference: -0.750 across 36 active games.
+- Six games reached a terminal stock state; the policy won none.
+- Crashed boots: zero.
+
+Compared with step 4,096, both stock rates and damage rates improved. This is one periodic sample,
+not a checkpoint-selection rule. Continue to the declared final evaluation.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train

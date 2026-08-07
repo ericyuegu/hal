@@ -7,7 +7,7 @@ Updated: 2026-08-07
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
-| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; healthy through the step-5,120 validation | Complete 16,384 steps and retain all final evidence. |
+| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; healthy through the step-8,192 evaluation | Complete 16,384 steps and retain all final evidence. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
@@ -33,10 +33,11 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 
 ## Current evidence
 
-P0 is the active matched baseline. At step 5,120, validation NLL at offsets 1, 5, 9, and 13 was
-1.103, 2.822, 3.594, and 4.078 bits per frame. Button log loss was 0.0325. The first periodic CPU
-evaluation completed all 32 scheduled boots and produced 47 games through instant restart, with no
-crashes. The run is finite and continues to use 512 distinct replays in every recorded batch.
+P0 is the active matched baseline. At step 8,192, validation NLL at offsets 1, 5, 9, and 13 was
+1.074, 2.764, 3.522, and 4.002 bits per frame. Button log loss was 0.0318. The periodic CPU
+evaluation completed all 32 scheduled boots, produced 36 games with active play, and had no crashes.
+Stocks taken and lost per active minute were 0.893 and 1.323. The run is finite and continues to use
+512 distinct replays in every recorded batch.
 
 Vast instance `47034073` and W&B run `19sowpt8` train the P1 architecture and use the P2 decode
 path. Keep this as exploratory evidence, not the E0 reference.

@@ -146,8 +146,9 @@ def vs_cpu_metrics(
     default). Stocks/damage are reported as **per-active-minute rates**, pooled
     frame-weighted over every non-crashed match (``sum(metric) / sum(active_minutes)``)
     so the numbers are comparable across runs regardless of how many episodes ran or
-    how long each lasted. ``crashed`` is the fraction of matches whose Session failed;
-    an all-crashed (or zero-frame) sweep reports only ``{"crashed": 1.0}``.
+    how long each lasted. ``crashed`` is the fraction of scheduled results whose Session failed.
+    A countdown-only tail fragment is recorded as ``zero_active`` but is not a completed match and
+    does not enter rates or confidence intervals.
 
     Protocol freeze (see ``PREGAME_FRAMES``): the denominator counts only **active**
     frames (canonical id >= 0). Each match's ``PREGAME_FRAMES`` pre-GO countdown frames
@@ -161,10 +162,15 @@ def vs_cpu_metrics(
     (``<rate>_ci_lo`` / ``<rate>_ci_hi``); ``bootstrap_resamples <= 0`` collapses the
     CI to the point estimate.
     """
-    summaries = [s for _, _, s in result if s is not None]
+    all_summaries = [s for _, _, s in result if s is not None]
+    summaries = [s for s in all_summaries if _active_frames(s.frames) > 0]
+    zero_active = len(all_summaries) - len(summaries)
+    crashed = (len(result) - len(all_summaries)) / len(result) if result else 1.0
+    if not summaries:
+        if not all_summaries:
+            return {"crashed": crashed}
+        return {"matches": 0.0, "zero_active": float(zero_active), "crashed": crashed}
     total_frames = sum(s.frames for s in summaries)
-    if not summaries or total_frames == 0:
-        return {"crashed": 1.0}
 
     total = np.array([s.frames for s in summaries], dtype=np.float64)
     active = np.array([_active_frames(s.frames) for s in summaries], dtype=np.float64)
@@ -188,7 +194,8 @@ def vs_cpu_metrics(
     out["dead_frame_frac"] = float((total - active).sum() / total.sum())
     out["frames"] = total_frames / len(summaries)  # mean episode length (incl. countdown), a diagnostic
     out["matches"] = float(len(summaries))  # completed matches pooled (many per boot under instant-restart)
-    out["crashed"] = (len(result) - len(summaries)) / len(result)
+    out["zero_active"] = float(zero_active)
+    out["crashed"] = crashed
     return out
 
 

@@ -164,14 +164,22 @@ def test_crashed_fraction_counts_none_rows() -> None:
     assert m["matches"] == 1.0
 
 
-def test_countdown_only_match_clamps_active_to_zero() -> None:
-    """A budget-cut partial that never reached GO has 0 active frames: rates go to 0
-    and the whole segment counts as dead."""
+def test_countdown_only_fragment_is_not_a_completed_match() -> None:
     partial = _summary(PREGAME_FRAMES - 73, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
     m = vs_cpu_metrics([(Stage.BATTLEFIELD, 0, partial)], bootstrap_resamples=50)
-    assert m["dead_frame_frac"] == pytest.approx(1.0)
-    for key in ("damage_dealt_per_min", "damage_taken_per_min", "stocks_taken_per_min", "stocks_lost_per_min"):
-        assert m[key] == 0.0
+    assert m == {"matches": 0.0, "zero_active": 1.0, "crashed": 0.0}
+
+
+def test_countdown_only_fragment_does_not_change_rates_or_intervals() -> None:
+    complete = _summary(_ONE_ACTIVE_MINUTE, p1_left=3, p2_left=2, p1_dmg=10.0, p2_dmg=20.0)
+    partial = _summary(PREGAME_FRAMES - 1, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
+    baseline = vs_cpu_metrics([(Stage.BATTLEFIELD, 0, complete)], bootstrap_resamples=100, seed=3)
+    with_partial = vs_cpu_metrics(
+        [(Stage.BATTLEFIELD, 0, complete), (Stage.BATTLEFIELD, 1, partial)],
+        bootstrap_resamples=100,
+        seed=3,
+    )
+    assert with_partial == {**baseline, "zero_active": 1.0}
 
 
 def test_bootstrap_ci_brackets_point_estimate() -> None:
