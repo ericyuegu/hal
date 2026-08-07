@@ -572,6 +572,21 @@ def test_mini_train_on_dev_mds(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     monkeypatch.setattr(exp020, "eval_vs_cpu", lambda *a, **k: {})  # no Dolphin in a unit test
 
+    class Uploader:
+        def __init__(self, _run_name: str) -> None:
+            pass
+
+        def upload(self, *args, **kwargs) -> None:
+            pass
+
+        def upload_tree(self, *args, **kwargs) -> int:
+            return 0
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(exp020, "BackgroundUploader", Uploader)
+
     cfg = exp020.TrainConfig(
         d_model=32,
         n_layers=2,

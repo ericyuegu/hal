@@ -1533,7 +1533,21 @@ def _isolate_run(tmp_path, monkeypatch) -> None:
     def _no_dolphin(*args, **kwargs):
         raise AssertionError("the closed-loop eval must not run when final_eval_n_matchups is 0")
 
+    class Uploader:
+        def __init__(self, _run_name: str) -> None:
+            pass
+
+        def upload(self, *args, **kwargs) -> None:
+            pass
+
+        def upload_tree(self, *args, **kwargs) -> int:
+            return 0
+
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(exp022, "eval_vs_cpu", _no_dolphin)
+    monkeypatch.setattr(exp022, "BackgroundUploader", Uploader)
 
 
 def _mini_cfg(**kwargs):

@@ -94,6 +94,11 @@ error names the step and leaves the last uploaded checkpoint unchanged. The acti
 not contain this later guard, so its live loss and gradient history remain part of every status
 check.
 
+Before the next launch, the complete suite passed 875 tests outside the restricted sandbox,
+including real Dolphin integration tests. Six old 020/022 mini-training tests now use a no-op
+uploader because they test model training and deliberately configure a dead R2 endpoint. Separate
+checkpoint tests cover queue draining and production upload failure propagation.
+
 ## Evaluation rules
 
 - Closed-loop policy results decide promotion. Offline NLL and accuracy explain results.
