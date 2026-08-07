@@ -2,9 +2,12 @@
 and train windows must still vary across epochs given a fixed seed."""
 
 from collections.abc import Iterator
+from multiprocessing import resource_tracker
+from unittest.mock import patch
 
 import numpy as np
 import torch
+from streaming.base.shared.memory import SharedMemory
 from torch.utils.data import DataLoader
 
 from hal.data.schema import SCHEMA_VERSION
@@ -17,6 +20,16 @@ from hal.training.dataloader import _stable_replay_rng
 
 L_CTX, L_CHUNK = 6, 4
 _L = L_CTX + L_CHUNK
+
+
+def test_streaming_resource_tracker_forwards_without_extra_self() -> None:
+    memory = object.__new__(SharedMemory)
+    with patch.object(resource_tracker._resource_tracker, "register") as register:
+        memory.fix_register("/semaphore", "semaphore")
+    register.assert_called_once_with("/semaphore", "semaphore")
+    with patch.object(resource_tracker._resource_tracker, "unregister") as unregister:
+        memory.fix_unregister("/semaphore", "semaphore")
+    unregister.assert_called_once_with("/semaphore", "semaphore")
 
 
 def test_loader_generator_does_not_change_process_rng() -> None:

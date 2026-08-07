@@ -206,6 +206,14 @@ commit `3e9bae8`. The RTX 4090 host has 252 GB RAM, DLPerf 125.5, and a 250 GB d
 $0.808/hour effective. The container became ready in 33 seconds. No other experiment job was
 active.
 
+That gate failed before the first batch. W&B run `b92jh5zw` contains only the parameter count. The
+failure was in Mosaic Streaming 0.13.0, not the model: its shared-memory wrapper forwarded an extra
+`self` argument to Python 3.14's bound resource-tracker method while the loader created worker
+semaphores. The fix adds `hal/data/streaming_compat.py`, loads it from
+`hal/training/dataloader.py`, and tests the exact forwarding signature in
+`tests/test_dataloader.py`. The focused loader suite passes 20 tests. Relaunch the same gate after
+committing this compatibility fix; do not treat instance `47112838` as speed or stability evidence.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.

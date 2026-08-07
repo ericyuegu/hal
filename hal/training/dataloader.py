@@ -29,12 +29,15 @@ from hal.data.policy_schema import decode_policy_replay
 from hal.data.policy_schema import decode_policy_replay_slices
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
+from hal.data.streaming_compat import patch_streaming_resource_tracker
 from hal.training.features import Context
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 from hal.training.features import preprocess
 from hal.training.features import stack_actions
+
+patch_streaming_resource_tracker()
 
 # Frozen val-window geometry shared by every experiment: the val loader is always built with this
 # ``L_chunk`` so val windows — hence val NLLs — are comparable across experiments regardless of each
