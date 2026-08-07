@@ -119,6 +119,10 @@ order, exact run name, W&B ID, seeds, and 96-boot counts. Two RTX 4090 offers me
 limits. The best had 252 GB RAM, DLPerf 125.7, an 80 GB disk, and an effective price of $0.824 per
 hour. Search again after P1 finishes; this audit did not rent a box.
 
+The command passed again at commit `6d247bc`. The encoded payload kept the same order and fields.
+One RTX 4090 offer met the limits. It had 252 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective
+price of $0.824 per hour. No instance was rented.
+
 ## Implementation status
 
 The manual evaluator now accepts `--eval-decode checkpoint`, `recompute`, or `kv`. The override does
@@ -141,8 +145,9 @@ nonfinite value, tolerance failure, or sampled-action mismatch. A CPU test cover
 and asynchronous reset schedules with a small model. Each precision result also records synchronized
 wall time and comparisons per second, so the gate's own cost is visible.
 
-The focused CPU suite passes 134 tests and skips six GPU-only tests. The FP32 and FP16 GPU parity
-gate remains blocked on the final P1 checkpoint.
+The current focused CPU suite passes 83 tests. It covers the experiment entry point, transformer
+trunk, and closed-loop rolling rings. The FP32 and FP16 GPU parity gate remains blocked on the final
+P1 checkpoint.
 
 ## Decision
 
