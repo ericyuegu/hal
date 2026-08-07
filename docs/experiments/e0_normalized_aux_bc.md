@@ -218,6 +218,9 @@ lost per active minute were 1.795, 95% CI `[1.565, 2.043]`. Damage dealt per act
 Fifteen games reached a terminal stock state; the policy won none. This is a terminal subset, not a
 full-schedule win rate.
 
+At step 5,120, NLL at offsets 1, 5, 9, and 13 was 1.103, 2.822, 3.594, and 4.078. Button log loss
+was 0.0325. The recorded gradient norm was finite, and the batch contained 512 distinct replays.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train

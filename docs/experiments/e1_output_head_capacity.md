@@ -1,9 +1,10 @@
 # E1: output-head capacity control
 
-Status: blocked on E0 completion
+Status: blocked on the P0/P1/P2 package decision
 
-The final E0 checkpoint ID and measured E0 wall time are pending. Do not implement or launch E1
-until E0 reaches step 16,384, uploads `final.pt`, and completes its final CPU evaluation.
+The final E0 reference and measured wall time are pending. Finish P0, matched P1, and the planned P2
+decode comparison before choosing that reference. Do not implement or launch E1 until the selected
+reference reaches step 16,384, uploads `final.pt`, and completes its final CPU and H2H evaluation.
 
 ## Question
 

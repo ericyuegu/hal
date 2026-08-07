@@ -7,7 +7,7 @@ Updated: 2026-08-07
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
-| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; first CPU evaluation passed | Complete 16,384 steps and retain all final evidence. |
+| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; healthy through the step-5,120 validation | Complete 16,384 steps and retain all final evidence. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
 | P2 | Systems: temporal-KV decode efficiency | Exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
@@ -33,6 +33,11 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 
 ## Current evidence
 
+P0 is the active matched baseline. At step 5,120, validation NLL at offsets 1, 5, 9, and 13 was
+1.103, 2.822, 3.594, and 4.078 bits per frame. Button log loss was 0.0325. The first periodic CPU
+evaluation completed all 32 scheduled boots and produced 47 games through instant restart, with no
+crashes. The run is finite and continues to use 512 distinct replays in every recorded batch.
+
 Vast instance `47034073` and W&B run `19sowpt8` train the P1 architecture and use the P2 decode
 path. Keep this as exploratory evidence, not the E0 reference.
 
@@ -56,7 +61,7 @@ recomputation.
 
 ## Immediate next actions
 
-1. Relaunch P0 from step 0 and finish its fixed evaluations.
+1. Finish the active P0 run and its fixed evaluations.
 2. Audit P0 timing, validation, checkpoints, closed-loop rows, and replay uploads.
 3. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
 4. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
