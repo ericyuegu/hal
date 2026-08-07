@@ -249,6 +249,11 @@ The command passed a no-rent launcher dry run at commit `b422724`. The current q
 an RTX 4090 with 1,008 GB RAM, 100 GB disk, DLPerf 125.5, and effective price $1.382 per hour. Select
 the offer again at launch; market state may change.
 
+The command passed another no-rent audit at commit `31e151d`, after the run-based evaluator and
+decode-mode changes. It still requests `final.pt`, 96 boots, seed 0, W&B run `obx3o3az`, and label
+`p0-final-fp16`. The selected offer was an RTX 4090 with 1,008 GB RAM, 100 GB disk, DLPerf 125.3,
+and effective price $1.382 per hour.
+
 At step 8,192, NLL at offsets 1, 5, 9, and 13 was 1.074, 2.764, 3.522, and 4.002. Button log loss
 was 0.0318. The 56,705,941-byte `step_008192.pt` object was verified directly in R2.
 
