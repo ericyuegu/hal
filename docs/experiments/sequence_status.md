@@ -6,14 +6,17 @@ Updated: 2026-08-07
 
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
-| P0 | Scientific package: short full-causal context | Stopped at step 1,024 | Fix the data bottleneck, then restart from step 0. |
-| P1 | Scientific package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
-| P2 | Systems: exact temporal-KV decode efficiency | Exploratory final evidence available | Pass parity tests, then compare the same P1 checkpoint with P1 full recompute. |
+| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Local gates passed; artifact upload active | Pass the 256-step clean-cache GPU gate. |
+| P0 | Scientific package: short full-causal context | Fresh plan ready | Restart from step 0 after the GPU data gate. |
+| P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
+| P1-match | Attention package at matched data and action vocabulary | Pending P0 | Retrain after P0 with only context, batch, and mask changed. |
+| P2 | Systems: temporal-KV decode efficiency | Exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
-P0 and P1 both process 131,072 tokens and about 16 million attention edges per layer and step. They
-differ in context, batch, and mask. This is a practical package comparison, not pure mask isolation.
+P0 and P1-match both process 131,072 tokens and about 16 million attention edges per layer and
+step. They differ in context, batch, and mask. This is a practical package comparison, not pure
+mask isolation. P1-old also differs in sampler and action vocabulary, so it is exploratory only.
 
 ## Scientific sequence
 
@@ -53,15 +56,16 @@ recomputation.
 
 ## Immediate next actions
 
-1. Complete the correctness and throughput gates in `data_pipeline.md`.
-2. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
-3. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
+1. Finish the `mds-policy-v7` upload and verify remote counts and bytes.
+2. Run the 256-step clean-cache GPU data gate.
+3. Relaunch P0 from step 0 and finish its fixed evaluations.
+4. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
+5. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.
-4. Evaluate the final P1 checkpoint with full recomputation over the final 96 CPU matchups.
-5. Relaunch P0 from step 0 with the accepted data path.
-6. Evaluate P0 over the same 96 CPU matchups.
-7. Run P1 and P2 against P0 over 64 mirrored configurations each.
-8. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
+6. Evaluate P1-old with full recomputation over 96 CPU matchups.
+7. Train P1-match on the accepted data path and action vocabulary.
+8. Compare P0, P1-match full recomputation, and P1-match temporal KV.
+9. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
    configuration into the E1 launch audit.
 
 ## Evaluation rules

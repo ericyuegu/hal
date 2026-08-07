@@ -1,300 +1,168 @@
-# E0: normalized auxiliary BC baseline
+# P0 and E0: normalized auxiliary MTP baseline
 
-Status: exploratory SWA run active; full-attention baseline pending
-
-Owner: Codex with a focused implementation agent
-
-Starting commit: `41692c3`
+Updated: 2026-08-07
 
 ## Question
 
-What is the closed-loop performance of a plain `(1, 5, 9, 13)` MTP policy when the three discarded
-heads have one fixed total loss weight?
+What does a plain action policy gain from sparse future-action prediction when the auxiliary loss
+has one fixed total weight?
 
-E0 is the reference for E1 and E2. It does not use AWR, rank weights, action-group conditioning, or
-temporal conditioning.
+P0 is the systems package used to train E0. E0 is the scientific baseline for later head and AWR
+experiments.
 
-The raw v7 schema stores `misc_as` for replay fidelity. E0 and later experiments in this sequence
-must not route it into the model. Its meaning depends on the current action state.
+## Model
 
-## Intended files
+- Standard causal transformer.
+- Raw rolling context of 256 frames.
+- Full attention over that context.
+- Full transformer recomputation during training and closed-loop inference.
+- Independent linear action heads at offsets 1, 5, 9, and 13.
+- Only offset 1 is executed.
+- No AWR, critic, rank weight, temporal conditioning, or within-frame conditioning.
 
-- Add `experiments/023_mtp_heads.py`.
-- Add `tests/experiments/test_023_mtp_heads.py`.
-- Update this file with implementation, launch, W&B, and evaluation findings.
-- Do not change historical experiment files 020, 021, or 022 for E0.
-- Do not change shared training or evaluation code unless a failing parity test proves that E0 needs
-  a shared fix. Record any such change here before making it.
-
-## Lineage
-
-Use one 022-derived experiment file for E0, E1, and E2. A model-mode field will identify the linear,
-independent-MLP, and factored-MLP arms. This avoids copying the training and evaluation harness for
-each head ablation.
-
-Fork the current 022 training and evaluation path after its closed-loop fixes are
-committed. Keep:
-
-- The shared causal transformer trunk.
-- V7 observation features and data.
-- Compiled training and eager evaluation.
-- Full-window fp16 closed-loop decode.
-- Checkpoint upload and resume support.
-- Fixed CPU-opponent evaluation and replay artifacts.
-- Optional final mirrored head-to-head evaluation.
-
-Remove:
-
-- Return and reward labeling used only by AWR.
-- The value head and critic losses.
-- AWR and rank sample weights.
-- Within-frame autoregressive conditioning.
-- Factored-head MLPs.
-
-E0 uses one linear projection at each offset. Its four slices are independent categorical groups.
-This matches the naive MTP probability model. E1 and E2 will add their head modes in later audited
-commits.
-
-## Core objective
-
-Use offsets `(1, 5, 9, 13)` and:
+The loss is:
 
 \[
-L=L_1+\lambda_{aux}\frac{L_5+L_9+L_{13}}{3}.
+L=L_1+\frac{L_5+L_9+L_{13}}{3}.
 \]
 
-Set `aux_loss_weight = 1.0`. The old per-head value of `1.0` gave total auxiliary weight `3.0` and is
-not the same experiment.
+The auxiliary term keeps the same total scale if the number of auxiliary heads changes.
 
-The objective must have tests for:
+## Fixed configuration
 
-- No auxiliary heads.
-- One auxiliary head.
-- Three auxiliary heads.
-- Invariance of total auxiliary scale to the number of heads.
-- Transition weighting without advantage weighting.
-- Exact equality between the configured loss and a hand calculation.
+- `d_model=256`
+- `n_layers=8`
+- `n_heads=4`
+- `attn_window=0`
+- `L_ctx=256`
+- `batch_size=512`
+- `grad_accum_steps=1`
+- `head_offsets=(1,5,9,13)`
+- `aux_loss_weight=1.0`
+- `max_steps=16384`
+- `warmup_steps=500`
+- `muon_lr=0.02`
+- `adam_lr=8.5e-4`
+- `weight_decay=0.01`
+- `amp_dtype=bfloat16`
+- `compile_trunk=True`
+- `action_vocab=1024`
+- `data_root=data/processed/ranked-anonymized-1/mds-policy-v7`
+- `windows_per_replay=4`
+- `reservoir_capacity=4096`
+- `predownload=512`, unless the clean-cache gate selects another tested value
+- `num_workers=16`
+- `prefetch_factor=2`
+- `cache_limit_gb=128`
+- `seed=0`
 
-## Model and training configuration
+The effective token count is 131,072 frames per optimizer step. Do not reduce the batch size to
+solve a data problem.
 
-Planned defaults:
+## Data invariants
 
-- `d_model = 256`
-- `n_layers = 8`
-- `n_heads = 4`
-- `attn_window = 0`
-- `L_ctx = 256`
-- `batch_size = 512`
-- `grad_accum_steps = 1`
-- `head_offsets = (1, 5, 9, 13)`
-- `max_steps = 16384`
-- `warmup_steps = 500`
-- `muon_lr = 0.02`
-- `adam_lr = 8.5e-4`
-- `weight_decay = 0.01`
-- `amp_dtype = bfloat16`
-- `compile_trunk = True`
-- `data_root = data/processed/ranked-anonymized-1/mds-v7`
-- `mds_schema_version = 7`
-- `windows_per_replay = 2`
-- `seed = 0`
+- Every training batch must contain 512 distinct replay IDs.
+- A replay cannot appear in adjacent batches.
+- Window sampling depends only on seed, epoch, and stable replay ID.
+- The model does not read `misc_as`.
+- Compact decoding must reproduce every consumed source value exactly.
+- Validation examples stay fixed.
 
-P0 uses a fixed 256-frame raw rolling context. Training and closed-loop inference recompute every
-transformer layer from that window.
+The compact artifact is a policy projection of canonical MDS v7. Each row records source schema 7
+and compact policy layout 2.
 
-The step token budget is 131,072. Do not change it to fit a specific GPU without recording the
-change here.
+## Files
 
-## Validation metrics
+- `experiments/023_mtp_heads.py`: model, loss, training, and evaluation.
+- `hal/data/policy_schema.py`: exact compact replay format.
+- `hal/training/dataloader.py`: replay packs and central reservoir.
+- `hal/training/features.py`: early feature projection.
+- `scripts/bench_dataloader.py`: repeatable loader measurements.
+- `tests/experiments/test_023_mtp_heads.py`: experiment invariants.
+- `tests/test_policy_schema.py`: storage exactness.
+- `tests/test_dataloader.py`: sampling and reservoir behavior.
 
-Required offline metrics:
+## Clean-cache GPU gate
 
-- Total and per-group offset-1 NLL in bits per frame.
-- Per-group argmax accuracy.
-- Hold and transition NLL and accuracy.
-- Predicted transition rate and persistence.
-- Per-offset auxiliary NLL.
-- Primary and auxiliary trunk-gradient norms.
-- Primary-to-auxiliary gradient cosine and sign conflict.
-- Training step time and samples per second.
+Run 256 steps on a fresh RTX 4090 instance before the full run.
 
-`val_n_batches = 32` is a safety cap. The v7 validation split contains 1,192 replays in four shards,
-so E0 caches all 1,192 replays in ten batches. Keep this exact split and one window per replay for
-E1 and E2.
+Require:
 
-## Closed-loop evaluation
+- No nonfinite values.
+- 512 distinct replay IDs per batch.
+- Mean warm loader wait below 0.5 seconds.
+- Mean warm optimizer step below 0.5 seconds.
+- GPU use at least 80% after compilation.
+- Startup below 30 minutes.
 
-Use the existing fixed protocol:
+Test `predownload` values 256, 512, 1,024, and 4,096 only if the first setting fails or leaves clear
+download stalls. Keep the reservoir at 4,096.
 
-- Periodic CPU-opponent evaluation every 4,096 steps.
-- 32 fixed matchups for periodic evaluation.
-- 96 fixed matchups at the final checkpoint.
-- `eval_max_frames = 7200`.
-- `eval_seed = 0`.
-- Save match rows and replays.
+Use a 250 GB disk, at least 200 GB RAM, 24 GB VRAM, and an RTX 4090. The compact data path no longer
+needs the old 1 TB disk.
 
-Primary results:
+## Full launch
 
-- Stocks taken and lost per active minute against the level-9 CPU.
-- Damage dealt and taken per active minute.
-- Seeded bootstrap intervals over matches.
+Start from step 0. Do not resume the stopped P0 run.
 
-The CPU evaluator does not retain enough outcome state to report an exact game win rate. Do not call
-a stock lead at the frame limit a win. Mirrored head-to-head evaluation reports win rate and paired
-stock difference for E1 and later challengers.
-
-Offline validation records predicted transition rate and persistence. Inspect final replays for
-no-op or repeated-action failures. The current CPU evaluator does not log action entropy or no-op
-rate, so do not claim those metrics for E0.
-
-## Head-to-head policy
-
-E0 becomes the head-to-head reference for E1 and E2. E0 itself does not need an in-process
-head-to-head run unless a same-geometry unnormalized checkpoint is available.
-
-For each challenger:
-
-- Run 64 mirrored configurations against E0.
-- Use the same matchup and policy seeds in both orientations.
-- Report paired stock difference and win rate.
-- Keep the 96-matchup CPU evaluation as the common external reference.
-- Treat head-to-head as sensitive but potentially non-transitive. Do not hide a CPU regression behind
-  one favorable direct matchup.
-
-If a suitable old unnormalized checkpoint is found, E0 may run a secondary head-to-head comparison
-against it. The comparison must be labeled historical if its data, geometry, or training length
-differs.
-
-## Vast launch and runtime budget
-
-Run one experiment at a time.
-
-Require at least 64 GB of system RAM and prefer 128 GB or more. Prefer a validated RTX 4090 until the
-concurrent RTX 5090 compile-cache and smoke-probe changes are
-committed and pass a production start. A 5090 is allowed after that gate.
-
-Target total wall time: 3.0 to 3.5 hours, including final evaluation and uploads.
-
-Runtime checks:
-
-- Flag startup longer than 30 minutes.
-- Flag sustained training step time above 0.5 seconds.
-- Flag GPU utilization below 80% after caches are warm.
-- Flag any periodic CPU evaluation longer than 25 minutes.
-- After the first periodic evaluation, project the final wall time. Notify the user if it exceeds
-  3.5 hours.
-- Record dataset download time, compile time, median step time, validation time, closed-loop time,
-  upload time, GPU model, CPU count, RAM, and disk throughput when visible.
-
-Use enough system RAM for the streaming dataset. Prior runs showed that low RAM can make the same GPU
-about 3.5 times slower. The offer audit must include RAM and download speed, not only GPU type.
-
-Planned launch command:
-
-```bash
+```text
 uv run scripts/launch_vast.py \
-  --max-price 1.10 \
-  --disk 1000 \
-  --min-vram 24 \
-  --min-ram 128 \
-  --min-dlperf 110 \
-  --min-compute-cap 890 \
-  --max-compute-cap 890 \
-  --run-hours 3.5 \
-  -- uv run experiments/023_mtp_heads.py \
-  --cfg.require-flex \
-  --cfg.attn-window 0 \
-  --cfg.no-eval-incremental-kv \
-  --cfg.cache-limit-gb 900 \
+  --max-price 1.10 --disk 250 --min-vram 24 --min-ram 200 \
+  --min-dlperf 110 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 15 --upload-gb 1 --run-hours 3.5 -- \
+  uv run experiments/023_mtp_heads.py \
+  --cfg.require-flex --cfg.attn-window 0 --cfg.no-eval-incremental-kv \
+  --cfg.cache-limit-gb 128 --cfg.predownload 512 --cfg.reservoir-capacity 4096 \
   --comment e0-normalized-aux-bc
 ```
 
-This selects an RTX 4090 class host. Search first. Do not rent a host that fails the RAM, download,
-or effective-price audit. Record any command change before launch.
+Record the exact offer, instance, commit, W&B run, command, startup phases, step timing, loader wait,
+GPU use, RAM, disk use, and upload time.
 
-Search audit on 2026-08-06:
+## Evaluation
 
-- Selected class: RTX 4090, DLPerf 125.7.
-- Effective rate with 500 GB disk: $0.679 per hour.
-- Download speed: 1,778 Mbit/s.
-- Reliability: 0.997.
-- Vast reported 128 GB decimal system RAM, displayed by the launcher as 126 GiB.
-- The cheaper top result had DLPerf 96.7 and reliability 0.980. Raising `min_dlperf` to 110 avoids
-  that host and reduces runtime and interruption risk.
+- Validate every 1,024 steps.
+- Run 32 fixed CPU matchups every 4,096 steps.
+- Run 96 fixed CPU matchups at the final checkpoint.
+- Use `eval_max_frames=7200` and `eval_seed=0`.
+- Save checkpoints every 2,048 steps.
+- Save match rows and replay files.
 
-Launch record:
+Report primary and per-offset NLL, group accuracy, transition metrics, gradient interaction, stocks
+and damage per active minute, dead-frame rate, terminal-game results, crashes, and wall time.
 
-- Commit: `89fa0aa0ec1a5303cd1ef5fc240da81b6c25baa9`.
-- Instance: `47034073`; offer: `46211613`.
-- W&B run: `19sowpt8`.
-- GPU: RTX 4090; DLPerf: 125.68; warm utilization: 98%.
-- Effective rate: $0.679 per hour, including 500 GB disk.
-- Image provisioning took about four minutes.
-- Fixture and emulator staging took about 18 seconds after the repository checkout.
-- Validation caching took 12.5 seconds for the full 1,192-replay split.
-- Cold compile affected steps 0 and 1. Warm steps are about 0.13 to 0.19 seconds.
+Closed-loop results decide promotion. Lower auxiliary NLL alone is not a policy improvement.
 
-This run used `attn_window=128` and temporal KV decoding. It is retained as exploratory SWA+KV
-evidence, not as the E0 reference. The E0 reference must use full causal attention and full-window
-recomputation. Reevaluate the SWA checkpoint without KV before attributing any result to SWA.
+## Runtime rules
 
-## Promotion rule
+Target 3.0 to 3.5 hours through final evaluation and upload.
 
-E0 is a baseline, so completion does not require beating a historical model. Completion requires:
+Flag:
 
-- All tests pass.
-- The objective is confirmed as fixed-total auxiliary BC.
-- Training reaches step 16,384.
-- The final checkpoint and replay evidence upload successfully.
-- The final CPU evaluation completes.
-- Runtime and throughput are recorded here.
+- Startup over 30 minutes.
+- Warm steps over 0.5 seconds.
+- GPU use below 80%.
+- A periodic CPU evaluation over 25 minutes.
+- A step-4,096 projection above 3.5 hours.
 
-E1 starts only after this document contains the final run name and E0 checkpoint reference.
+Do not let the instance destroy itself until `final.pt`, evaluation rows, replays, and logs are in
+the project store.
 
-## Implementation findings
+## Current state
 
-- 020 is the clean independent-head ancestor, but it uses the older full-attention trunk, v5 data,
-  and context geometry. A raw 020 rerun would not be a durable base for E1-E7.
-- 021 adds v6 features but still contains the old summed auxiliary objective.
-- 022 contains the current v7, shared-trunk, compiled training, incremental evaluation, checkpoint,
-  and head-to-head paths. It is the correct infrastructure source, but its factored head is not E0.
-- P0 uses `L_ctx = 256` and batch 512. Rebuild all 256 frames in every transformer layer during
-  training and closed-loop inference.
-- The local 020 and 022 timing records suggest that 16,384 steps should fit the requested budget on
-  a healthy 4090 or 5090, but RAM and page-cache performance can dominate GPU speed.
-- `experiments/023_mtp_heads.py` now uses the current shared trunk, compiled training path,
-  incremental evaluation path, checkpoint flow, and optional final head-to-head flow from 022.
-- E0 uses four independent `Linear(256, 355)` output heads. Each 355-way vector is sliced into the
-  four action-group logits. The model has no value head or action-conditioning parameters.
-- The E0 objective has no sample-weight input. It is plain transition-aware behavior cloning:
-  offset 1 plus `aux_loss_weight` times the mean loss over every other offset.
-- The train loader and validation loader return `TrainBatch` directly. E0 does not compute returns,
-  advantages, critic metrics, rank weights, or weight histograms.
-- Validation now reports per-group accuracy, transition accuracy, hold accuracy, transition NLL,
-  hold NLL, and per-offset NLL.
-- `tests/experiments/test_023_mtp_heads.py` has 12 focused tests. They cover defaults, output shape,
-  offset alignment, fixed-total loss scaling, transition weighting, the lack of sample weights, one
-  forward/backward optimizer step, and a real one-step `train()` run over the local dev MDS. The
-  end-to-end test checks `final.pt` and rejects value, critic, rank, or advantage log keys.
-- Ruff, Python compilation, and all 12 focused tests pass.
-- Commit `3066fcd` supplies the exact incremental-context check, finite-difference fix, and Vast
-  compile preflight used by E0. Its focused suite passed before the E0 launch review.
+The first P0 attempt stopped at step 1,024 because the old data path projected to 7.2 hours. Its
+validation values were finite. It is not an E0 result.
 
-## Training findings
+The compact pipeline passes the full 114,768-replay audit. It reduces decoded training arrays from
+802.47 GB to 76.19 GB and compressed storage from 29.82 GB to 13.34 GB. The local full-artifact
+reservoir benchmark produced 512 distinct replays per batch and a 0.072-second mean loader wait
+after startup.
 
-Pending.
+The full test suite passed 861 tests before the artifact rename. The renamed P0 configuration then
+passed its 17 focused tests. The remote clean-cache GPU gate is pending artifact publication.
 
-## Evaluation findings
+## Promotion
 
-Pending.
-
-## Throughput and infrastructure findings
-
-- Warm optimizer steps are usually 0.13 to 0.19 seconds. The first live utilization sample was 98%.
-- The 500 GB disk reached 92% use with about 463 GB of materialized MDS shards. The 440 GB streaming
-  cache then evicted and fetched shards while training continued.
-- A 75-second loader stall occurred between steps 1,700 and 1,750. No validation or checkpoint ran
-  during that interval. Remote shard completion also stopped for the same minute.
-- If the stall repeats every 1,700 steps, it adds about 11 to 12 minutes. This remains within the E0
-  budget, but a 1 TB disk should be audited for E1 so the roughly 800 GB materialized dataset can
-  remain cached.
+E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
+the matched P1 attention arm on the same compact data path and action vocabulary. The old P1 run is
+exploratory because it used the old sampler and a 512-entry action-state table.
