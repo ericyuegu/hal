@@ -103,7 +103,9 @@ Audit the final command against the selected P0 configuration before launch. Ver
 
 The current configuration parser and validator accept this P1 geometry. It resolves to
 `gpt-d256-L8-h4-Lc1024-a1024-swa128-recompute-o1.5.9.13-linear` and processes 131,072 tokens per
-step. This check does not replace the clean-host runtime gate.
+step. The focused 023 suite passed 18 tests. The shared attention and closed-loop rolling-context
+suites passed 38 tests and skipped six GPU-only cases on the local CPU host. This check does not
+replace the clean-host runtime gate.
 
 ## Evaluation
 
