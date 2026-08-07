@@ -233,6 +233,31 @@ def test_incremental_rejects_decoding_past_a_full_context() -> None:
         trunk.forward_incremental(x, past)
 
 
+def test_incremental_rejects_an_swa_receptive_field_wider_than_the_rolling_context() -> None:
+    trunk = _trunk(_cfg(L_ctx=16, n_layers=2, attn_window=9), prefer_flex=False, device="cpu")
+
+    with pytest.raises(ValueError, match="receptive field.*exceeds L_ctx"):
+        trunk.forward_incremental(torch.randn(2, 1, _GEOM["d_model"]), [None] * 2)
+
+
+def test_incremental_matches_the_rolling_full_forward_after_left_edge_eviction() -> None:
+    L_ctx, attn_window, n_layers = 17, 5, 4  # receptive field = 17 exactly
+    trunk = _trunk(
+        _cfg(L_ctx=L_ctx, attn_window=attn_window, n_layers=n_layers),
+        prefer_flex=False,
+        device="cpu",
+    )
+    x = torch.randn(2, 2 * L_ctx + 3, _GEOM["d_model"], generator=torch.Generator().manual_seed(41))
+    past: list = [None] * n_layers
+
+    for t in range(x.size(1)):
+        incremental, past = trunk.forward_incremental(x[:, t : t + 1], past)
+        start = max(0, t + 1 - L_ctx)
+        window = x[:, start : t + 1]
+        full = trunk(window, torch.zeros(2, dtype=torch.long))
+        torch.testing.assert_close(incremental[:, -1], full[:, -1], rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.parametrize("k", [1, 2, 7, 8, 9, 16, 48])
 def test_a_short_cache_decodes_like_a_left_padded_full_forward(k: int) -> None:
     """A slot that just re-warmed after an instant restart decodes from a cache HOLDING FEWER frames

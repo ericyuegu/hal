@@ -113,7 +113,13 @@ def value_metric(offer: dict, *, disk: int, data_gb: float, upload_gb: float, ru
 
 
 def build_query(
-    max_price: float, disk: int, min_vram: int, min_ram: int, min_dlperf: float, max_compute_cap: int
+    max_price: float,
+    disk: int,
+    min_vram: int,
+    min_ram: int,
+    min_dlperf: float,
+    min_compute_cap: int,
+    max_compute_cap: int,
 ) -> str:
     # dph_total<max_price is a safe coarse prefilter: effective_dph >= dph_total, so any
     # offer clearing the effective cap also clears this. The real (disk-inclusive) cap is
@@ -123,7 +129,9 @@ def build_query(
         q.append(f"gpu_ram>={min_vram}")
     if min_ram > 0:  # vast `cpu_ram` query is in GB (per-instance share); 0 = no RAM floor
         q.append(f"cpu_ram>={min_ram}")
-    if max_compute_cap > 0:  # vast `compute_cap` is sm as an int (sm_86 -> 860); 0 = no ceiling
+    if min_compute_cap > 0:  # vast `compute_cap` is sm as an int (sm_120 -> 1200); 0 = no floor
+        q.append(f"compute_cap>={min_compute_cap}")
+    if max_compute_cap > 0:  # 0 = no ceiling
         q.append(f"compute_cap<={max_compute_cap}")
     return " ".join(q)
 
@@ -137,6 +145,7 @@ def search(
     min_vram: int,
     min_ram: int,
     min_dlperf: float,
+    min_compute_cap: int,
     max_compute_cap: int,
     data_gb: float,
     upload_gb: float,
@@ -145,7 +154,15 @@ def search(
     """Offers whose *effective* $/hr (GPU + provisioned disk) clears --max-price, ranked by the
     value metric (eff$/dlperf/hr, transfers folded in) — best bang-for-buck first."""
     offers = vast.search_offers(
-        query=build_query(max_price, disk, min_vram, min_ram, min_dlperf, max_compute_cap),
+        query=build_query(
+            max_price,
+            disk,
+            min_vram,
+            min_ram,
+            min_dlperf,
+            min_compute_cap,
+            max_compute_cap,
+        ),
         order=ORDER,
         limit=limit,
     )
@@ -232,6 +249,7 @@ def queue(
     min_vram: int,
     min_ram: int,
     min_dlperf: float,
+    min_compute_cap: int,
     max_compute_cap: int,
     data_gb: float,
     upload_gb: float,
@@ -248,6 +266,7 @@ def queue(
             min_vram=min_vram,
             min_ram=min_ram,
             min_dlperf=min_dlperf,
+            min_compute_cap=min_compute_cap,
             max_compute_cap=max_compute_cap,
             data_gb=data_gb,
             upload_gb=upload_gb,
@@ -476,6 +495,8 @@ class Args:
     """Minimum raw DLPerf score (vast `dlperf`). A floor on absolute throughput — the $/perf
     ranking alone can pick a slow-but-cheap card; raise this to force a faster GPU regardless
     of value. Distinct from the dlperf_usd>70 perf-per-dollar filter."""
+    min_compute_cap: int = 0
+    """Minimum CUDA compute capability as Vast's integer, such as 1200 for sm_120. Zero disables it."""
     max_compute_cap: int = 0
     """Maximum CUDA compute capability as vast's `compute_cap` int (sm_89 -> 890); 0 = no
     ceiling. Use to exclude architectures the training stack is not validated on.
@@ -524,6 +545,7 @@ def main(args: Args) -> None:
         min_vram=args.min_vram,
         min_ram=args.min_ram,
         min_dlperf=args.min_dlperf,
+        min_compute_cap=args.min_compute_cap,
         max_compute_cap=args.max_compute_cap,
         data_gb=args.data_gb,
         upload_gb=args.upload_gb,

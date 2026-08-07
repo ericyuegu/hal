@@ -69,7 +69,15 @@ def _stats() -> dict[str, FeatureStats]:
 
 def _tiny_cfg(**kwargs):
     defaults = dict(
-        d_model=64, n_layers=2, n_heads=2, L_ctx=16, head_offsets=(1, 2), batch_size=2, max_steps=8, warmup_steps=2
+        d_model=64,
+        n_layers=2,
+        n_heads=2,
+        L_ctx=16,
+        attn_window=8,
+        head_offsets=(1, 2),
+        batch_size=2,
+        max_steps=8,
+        warmup_steps=2,
     )
     return exp022.TrainConfig(**{**defaults, **kwargs})
 
@@ -205,10 +213,10 @@ def test_reward_defaults_are_the_tuned_table() -> None:
 
 
 def test_geometry_defaults_are_the_swa_long_context_base() -> None:
-    """131,072 tokens per step, as 020 had: one forward, no accumulation, 2x the context."""
+    """The raw context covers all eight layers' effective SWA receptive field."""
     cfg = exp022.TrainConfig()
-    assert (cfg.L_ctx, cfg.batch_size, cfg.grad_accum_steps) == (512, 256, 1)
-    assert exp022._micro_batch(cfg) == 256
+    assert (cfg.L_ctx, cfg.batch_size, cfg.grad_accum_steps) == (1024, 128, 1)
+    assert exp022._micro_batch(cfg) == 128
     assert cfg.batch_size * cfg.L_ctx == 131072
     assert cfg.attn_window == 128
     assert cfg.require_flex is False
@@ -230,7 +238,7 @@ def test_spread_head_offsets_refuse_chunked_execution() -> None:
 
 def test_the_loader_gets_the_micro_batch() -> None:
     kwargs = exp022._loader_kwargs(exp022.TrainConfig(), _stats())
-    assert kwargs["batch_size"] == 256
+    assert kwargs["batch_size"] == 128
 
 
 def test_reward_tag_follows_the_flags() -> None:
@@ -1103,6 +1111,23 @@ def test_validate_config_rejects_incremental_decode_at_full_attention() -> None:
     with pytest.raises(ValueError, match="eval_incremental_kv"):
         exp022.validate_config(_tiny_cfg(attn_window=0, eval_incremental_kv=True), has_button_combo_counts=False)
     exp022.validate_config(_tiny_cfg(attn_window=8, eval_incremental_kv=True), has_button_combo_counts=False)
+
+
+def test_validate_config_rejects_incremental_swa_reaching_the_raw_context_boundary() -> None:
+    with pytest.raises(ValueError, match="receptive field.*reaches or exceeds L_ctx"):
+        exp022.validate_config(
+            _tiny_cfg(L_ctx=16, n_layers=2, attn_window=9, eval_incremental_kv=True),
+            has_button_combo_counts=False,
+        )
+    with pytest.raises(ValueError, match="receptive field.*reaches or exceeds L_ctx"):
+        exp022.validate_config(
+            _tiny_cfg(L_ctx=17, n_layers=2, attn_window=9, eval_incremental_kv=True),
+            has_button_combo_counts=False,
+        )
+    exp022.validate_config(
+        _tiny_cfg(L_ctx=18, n_layers=2, attn_window=9, eval_incremental_kv=True),
+        has_button_combo_counts=False,
+    )
 
 
 def test_validate_config_rejects_an_indivisible_effective_batch() -> None:

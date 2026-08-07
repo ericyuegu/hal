@@ -117,12 +117,6 @@ if [ "${shm_mb:-0}" -lt 1024 ]; then
   exit 1
 fi
 
-# Datasets/fixtures from R2 (sha-pinned, idempotent); stats.json sits outside the
-# streamed shards so pull it up front. Shards stream lazily during training.
-log "fetching fixtures + dataset stats"
-uv run fetch
-uv run python -c "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"
-
 # Headless GL context for the closed-loop Dolphin eval.
 pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &)
 export DISPLAY=:99
@@ -132,21 +126,19 @@ export DISPLAY=:99
 # trainer's `DEVICE = "cuda" if is_available() else "cpu"` then silently runs ~100x slower on
 # CPU and never self-stops. Assert here so a slipped-through box trips the boot trap -> stop.
 log "preflight: asserting CUDA is available"
-uv run python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_available() is False — host driver too old for the CUDA-13 image'"
+gpu_cap=$(uv run python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_available() is False — host driver too old for the CUDA-13 image'; print(''.join(map(str, torch.cuda.get_device_capability())))")
+log "CUDA compute capability = sm_${gpu_cap}"
 
-# Preflight: torch.compile builds Triton kernels in a subprocess pool that writes to
-# TORCHINDUCTOR_CACHE_DIR / TRITON_CACHE_DIR, which default to /tmp — a small tmpfs on many
-# hosts. A compile worker killed mid-write (OSError Errno 28, no space left) never reports
-# back and async_compile._wait_futures then blocks forever: the run stalls silently at 0% GPU
-# with no traceback. Put both caches on the provisioned container disk (the filesystem that
-# also holds /opt/hal and the streamed shards), then prove the dirs are writable and have
-# room, so an undersized box aborts loudly here instead of hanging after "[val] cached".
-# /opt/hal-cache, not /opt/hal/*: the clone above wipes /opt/hal on every boot.
+# Put compile files on the provisioned disk. A full /tmp can kill a compile worker and leave the
+# parent process waiting forever.
 export TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor
 export TRITON_CACHE_DIR=/opt/hal-cache/triton
+export CUDA_CACHE_PATH=/opt/hal-cache/cuda
+# Inductor also writes temporary files outside its persistent cache.
+export TMPDIR=/opt/hal-cache/tmp
 log "preflight: compile caches -> /opt/hal-cache"
-mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
-for d in "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"; do
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH" "$TMPDIR"
+for d in "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH" "$TMPDIR"; do
   if ! touch "$d/.write-test" 2>/dev/null; then
     log "FATAL: compile cache ${d} is not writable — inductor would fall back to a full pool stall; aborting"
     teardown stop "compile cache unwritable (${d})"
@@ -154,6 +146,12 @@ for d in "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"; do
   fi
   rm -f "$d/.write-test"
 done
+# Use one compile worker on Blackwell to limit cold-start disk use.
+if [ "$gpu_cap" = 120 ]; then
+  export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
+  log "sm_120: TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS}"
+fi
+uv run python -c "import os, tempfile; from torch._inductor.codecache import cache_dir; assert cache_dir() == os.environ['TORCHINDUCTOR_CACHE_DIR']; assert tempfile.gettempdir() == os.environ['TMPDIR']; print('[on-start] python compile cache:', cache_dir(), 'temp:', tempfile.gettempdir())"
 df -h /opt/hal-cache | while IFS= read -r line; do log "df: ${line}"; done
 cache_free_gb=$(df -BG --output=avail /opt/hal-cache | awk 'NR==2 {gsub("G",""); print $1}')
 log "compile-cache free = ${cache_free_gb}GB"
@@ -162,6 +160,17 @@ if [ "${cache_free_gb:-0}" -lt 10 ]; then
   teardown stop "insufficient compile-cache disk (${cache_free_gb}GB)"
   exit 1
 fi
+
+# Test the Blackwell compile path before downloading the dataset.
+if [ "$gpu_cap" = 120 ] && [ "${HAL_SKIP_SM120_PROBE:-0}" != 1 ]; then
+  log "sm_120: running compile smoke probe (600s hard timeout)"
+  timeout 600 uv run notebooks/probe_sm120.py
+fi
+
+# Pull data only after the GPU and compiler checks pass.
+log "fetching fixtures + dataset stats"
+uv run fetch
+uv run python -c "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"
 
 # DataLoader workers pass tensor-storage handles to the main process over a unix socket
 # via file descriptors; num_workers * prefetch_factor in-flight batches can exceed the

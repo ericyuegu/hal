@@ -656,7 +656,7 @@ class RecedingHorizon:
     def _push_ego(self, slot: Slot, a: np.ndarray) -> None:
         self._slots[slot].last_action = np.asarray(a, dtype=np.float32)
 
-    def _stack_windows(self, live: list[Slot], length: int) -> _Windows:
+    def _stack_windows(self, live: list[Slot], length: int, *, truncate_left_edge: bool = True) -> _Windows:
         """Stack every live slot's newest ``length`` context rows into one batch.
 
         Each slot contributes ONE contiguous ring slice per ring — that is what the
@@ -678,7 +678,8 @@ class RecedingHorizon:
             floats[:n_value, j] = ring.values[:, at]
             floats[n_value:, j] = ring.masks[:, at]
             cats[:, j] = ring.cats[:, at]
-        if layout.dpos_mask_row >= 0:
+        # A full window has lost the first row's predecessor. An incremental token has not.
+        if truncate_left_edge and layout.dpos_mask_row >= 0:
             floats[layout.dpos_rows, :, 0] = 0.0
             floats[layout.dpos_mask_row, :, 0] = 1.0
         return _Windows(layout=layout, floats=floats, cats=cats, emitted=floats[n_value:].any(axis=(1, 2)))
@@ -691,7 +692,11 @@ class RecedingHorizon:
         each slot's reset flag: the model is told about a match boundary exactly once, on the first
         context built after it."""
         incremental = self.predict_incremental is not None
-        windows = self._stack_windows(live, 1 if incremental else self.L_ctx)
+        windows = self._stack_windows(
+            live,
+            1 if incremental else self.L_ctx,
+            truncate_left_edge=not incremental,
+        )
         layout = windows.layout
         # One host→device transfer per dtype. Moving ~73 feature tensors independently
         # makes CUDA scheduling/allocator overhead dominate when a trainer shares the

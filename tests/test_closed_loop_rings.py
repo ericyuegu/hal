@@ -267,8 +267,11 @@ def _drive(
             if frame != at:
                 continue
             batch = [ref_slots[i] for i in slot_ids]
-            view = [b.newest() for b in batch] if incremental else batch
-            reference.append((slot_ids, _reference_features(view, 1 if incremental else L_CTX, stats, extra)))
+            features = _reference_features(batch, L_CTX, stats, extra)
+            if incremental:
+                # Keep the newest row's finite differences from the full rolling context.
+                features = {name: value[:, -1:] for name, value in features.items()}
+            reference.append((slot_ids, features))
         for frame, port, a in executed:
             if frame == at:
                 ref_slots[port].act(a)
@@ -312,7 +315,6 @@ def test_ring_context_matches_the_window_builder(v6, follower, s, d, ports, dege
 
 
 def test_ring_context_matches_the_window_builder_incrementally() -> None:
-    """An incremental decoder gets a one-frame token; the ring reads it as a length-1 window."""
     new, reference = _drive(
         ports=(EGO_PORT, OPP_PORT), frame_ids=_frame_ids(190, 160), s=1, d=0, v6=True, follower=True, incremental=True
     )

@@ -303,6 +303,7 @@ class Trunk(nn.Module):
             raise ValueError("require_flex asks for the flex path and prefer_flex=False forbids it")
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
         self.attn_window = cfg.attn_window
+        self.L_ctx = cfg.L_ctx
         # With a trained window the cache holds exactly the training window, so incremental decode
         # matches the full forward. Without one it holds the whole context.
         self.max_cache = cfg.attn_window if cfg.attn_window > 0 else cfg.L_ctx
@@ -357,6 +358,16 @@ class Trunk(nn.Module):
         error of about 9e-2 in the hidden state, so it raises here instead."""
         if x.size(1) != 1:
             raise ValueError(f"incremental decode takes one token, got L={x.size(1)}")
+        # Cached hidden states span 1 + n_layers * (window - 1) raw tokens. They must not retain
+        # tokens that the full rolling window has dropped.
+        if self.attn_window > 0:
+            receptive_field = 1 + len(self.blocks) * (self.attn_window - 1)
+            if receptive_field > self.L_ctx:
+                raise ValueError(
+                    "incremental SWA receptive field is not equivalent to the training rolling window: "
+                    f"1 + n_layers * (attn_window - 1) = {receptive_field} exceeds L_ctx={self.L_ctx}. "
+                    "Increase L_ctx, reduce attn_window/layers, or disable incremental decode."
+                )
         cached = 0 if past[0] is None else past[0][0].size(2)
         if self.attn_window == 0 and cached + 1 > self.max_cache:
             raise ValueError(

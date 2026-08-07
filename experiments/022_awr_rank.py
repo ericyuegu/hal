@@ -252,17 +252,15 @@ class TrainConfig:
     exec_horizon: int = 1
     # Reproducible training RNG and transformer context geometry.
     seed: int = 0
-    # 2x 020's context under a 128-frame window. Longer L is near-free in step time but costs
-    # batch diversity at a fixed token budget; L_ctx 512 keeps 128 distinct replays per step
-    # (K=2), the same pool 020's weight normalization saw.
-    L_ctx: int = 512
-    # THE EFFECTIVE batch (020's field was the micro-batch). One optimizer step sees batch_size
+    # This must exceed the stacked sliding-window receptive field for exact incremental decode.
+    L_ctx: int = 1024
+    # Effective batch size. One optimizer step sees batch_size
     # samples, fed as grad_accum_steps micro-batches of batch_size / grad_accum_steps; the two must
     # divide. The default is ONE forward per step: no accumulation, so the AWR mean-1 weight
     # rescale sees the whole step's samples (accumulation biases the rank-weighted tier mixture,
-    # measured -0.4% at accum 2). 256 x 512 = 131,072 tokens per step, matching 020's 512 x 256;
+    # measured -0.4% at accum 2). 128 x 1024 = 131,072 tokens per step, matching 020's 512 x 256;
     # ~11.8 GiB peak in one forward, so it needs a 16 GiB card (the 3060 halves batch_size).
-    batch_size: int = 256
+    batch_size: int = 128
     grad_accum_steps: int = 1
     # Two LRs: Muon for the blocks' hidden matrices, AdamW for the input proj / head / embeddings / biases.
     muon_lr: float = 0.02
@@ -1448,6 +1446,15 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
             "history the full forward keeps, so the decode is silently wrong past L_ctx frames. A "
             "full-context arm must say so: pass --cfg.no-eval-incremental-kv"
         )
+    if cfg.eval_incremental_kv and cfg.attn_window > 0:
+        receptive_field = 1 + cfg.n_layers * (cfg.attn_window - 1)
+        # Use one extra row because the oldest full-window row has no finite-difference predecessor.
+        if receptive_field >= cfg.L_ctx:
+            raise ValueError(
+                "eval_incremental_kv receptive field is not equivalent to the training rolling window: "
+                f"1 + n_layers * (attn_window - 1) = {receptive_field} reaches or exceeds L_ctx={cfg.L_ctx}. "
+                "Increase L_ctx, reduce attn_window/layers, or pass --cfg.no-eval-incremental-kv."
+            )
     if cfg.final_h2h_reference_run is not None:
         if not cfg.final_h2h_reference_run:
             raise ValueError("final_h2h_reference_run must be a run name or None, not an empty string")
