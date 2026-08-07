@@ -7,8 +7,8 @@ Updated: 2026-08-07
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
-| P0 | Scientific package: short full-causal context | Training complete; final checkpoint and live evidence verified | Finish official FP16 evaluation on instance `47107185`. |
-| P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
+| P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
+| P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete; rescore preflight passed | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
@@ -25,7 +25,7 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Code and tests ready; reference pending attention choice | Finish the selected package, final 96-match CPU evaluation, checkpoint, and evidence upload. |
 | E1 | Head capacity: zero-init state-only residual MLP | Auditable plan ready; blocked on E0 | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
 | E2 | Within-frame conditional factorization and group order | Fresh two-arm plan ready; blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
-| E3 | Temporal joint modeling and teacher-forcing exposure bias | Fresh sparse-joint plan ready; blocked on E2 | Show coherent teacher-forced and free-running sparse future predictions without harming control. |
+| E3 | Temporal joint modeling and teacher-forcing exposure bias | Fresh sparse-joint plan ready; blocked on E2 | Show coherent teacher-forced and rollout-conditioned sparse predictions without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Fresh primary-only plan ready; blocked on policy selection | Weight only the action whose state advantage is defined; preserve auxiliary BC. |
 | E6 | Chunk-conditioned value validity | Fresh critic plan ready; blocked on E4/E5 infrastructure | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
@@ -36,7 +36,11 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 P0 completed all 16,384 steps in W&B run `obx3o3az`. Final validation NLL at offsets 1, 5, 9, and
 13 was 1.029, 2.650, 3.379, and 3.851 bits per frame. Button log loss was 0.0305. The verified
 56,698,679-byte final checkpoint has SHA-256 `5d12d010fa3acd1ec07bd86a8e85d2cbb84c584a77b9b79e90dc6fcf03c32e4b`.
-The official FP16 full-recompute evaluation is running on Vast instance `47107185`.
+The official FP16 full-recompute evaluation completed on Vast instance `47107185`. All 96 boots
+succeeded. It produced 118 active games and two countdown-only tails. Stocks taken and lost per
+active minute were 0.777 and 1.468. Damage dealt and taken per active minute were 129.6 and 116.4.
+The official rows and 122 replay files are in R2 under `manual_evals/p0-final-fp16`; labeled metrics
+are in W&B run `obx3o3az`.
 
 Vast instance `47034073` and W&B run `19sowpt8` train the P1 architecture and use the P2 decode
 path. Keep this as exploratory evidence, not the E0 reference.

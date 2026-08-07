@@ -353,6 +353,27 @@ The official evaluation launched on Vast instance `47107185` at commit `9ace1f8`
 FP16, rebuilds the full 256-frame context, runs 96 character-pair boots, uses boot-clustered
 intervals, and writes the label `p0-final-fp16`.
 
+The official evaluation completed and the instance destroyed itself after upload. W&B records
+`torch.float16`, full recomputation, 96 boots, no boot crashes, 118 active games, and two
+countdown-only tails. The declared result is:
+
+- Stocks taken per active minute: 0.777, 95% CI `[0.707, 0.846]`.
+- Stocks lost per active minute: 1.468, 95% CI `[1.361, 1.576]`.
+- Damage dealt per active minute: 129.6, 95% CI `[122.6, 135.9]`.
+- Damage taken per active minute: 116.4, 95% CI `[111.8, 121.1]`.
+- Dead frames: 2.10% across games with active play.
+- Mean stock difference: -1.102 across 118 active games.
+- Twenty-four games reached a terminal stock state; the policy won none.
+
+R2 contains `match_rows.json` and 122 replay files, 230.98 MiB in total. The manifest has 120 rows:
+118 active games and two countdown-only tails. Two 61,396-byte files from boots 8 and 40 have no
+match row. Both boots produced a separate active game and count as successful boots. Keep the two
+unmatched files as diagnostic artifacts; do not count them as completed games.
+
+The first replay began about 41 seconds after the host became ready. The final manifest uploaded
+about nine minutes after readiness and about 22 minutes after launch. This is below the 25-minute
+evaluation warning and the 30-minute startup warning.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
