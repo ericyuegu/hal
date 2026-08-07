@@ -77,9 +77,9 @@ _RATE_KEYS: tuple[str, ...] = (
     "damage_taken_per_min",
 )
 # Bootstrap resamples for the 95% CIs. Enough to stabilize the 2.5/97.5 percentiles
-# at the ~80-200 matches a sweep produces; overridable per call, seeded for
+# at the ~32-96 boots a sweep schedules; overridable per call, seeded for
 # determinism (byte-identical CIs across runs/boxes).
-_BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_RESAMPLES = 2000
 
 # Seed stage for the one menu navigation an instant-restart boot makes before the
 # Gecko code takes over with random legal stages. Battlefield's cursor target sits
@@ -135,10 +135,19 @@ def _mean_ci(values: np.ndarray, idx: np.ndarray | None, point: float) -> tuple[
     return float(lo), float(hi)
 
 
+def _summary_numerator(summary: MatchSummary, rate_key: str) -> float:
+    return {
+        "stocks_taken_per_min": float(STARTING_STOCKS - summary.p2_stocks_left),
+        "stocks_lost_per_min": float(STARTING_STOCKS - summary.p1_stocks_left),
+        "damage_dealt_per_min": summary.p2_damage_taken,
+        "damage_taken_per_min": summary.p1_damage_taken,
+    }[rate_key]
+
+
 def vs_cpu_metrics(
     result: SweepResult,
     *,
-    bootstrap_resamples: int = _BOOTSTRAP_RESAMPLES,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
     seed: int = 0,
 ) -> dict[str, float]:
     """Reduce a ``sweep_vs_cpu`` grid to a flat metric dict for logging.
@@ -159,14 +168,17 @@ def vs_cpu_metrics(
     that differed across eval styles (e.g. instant-restart's many short matches carry
     proportionally more countdown). ``dead_frame_frac`` reports the excluded fraction.
 
-    Each rate also carries a seeded 95% bootstrap CI over matches
+    Each rate also carries a seeded 95% cluster-bootstrap CI over boots
     (``<rate>_ci_lo`` / ``<rate>_ci_hi``); ``bootstrap_resamples <= 0`` collapses the
     CI to the point estimate.
     """
     boot_ids = {(stage, boot_index) for stage, boot_index, _ in result}
     completed_boot_ids = {(stage, boot_index) for stage, boot_index, summary in result if summary is not None}
     all_summaries = [s for _, _, s in result if s is not None]
-    summaries = [s for s in all_summaries if _active_frames(s.frames) > 0]
+    active_rows = [
+        (stage, boot_index, s) for stage, boot_index, s in result if s is not None and _active_frames(s.frames) > 0
+    ]
+    summaries = [summary for _, _, summary in active_rows]
     zero_active = len(all_summaries) - len(summaries)
     crashed = len(boot_ids - completed_boot_ids) / len(boot_ids) if boot_ids else 1.0
     if not summaries:
@@ -178,25 +190,35 @@ def vs_cpu_metrics(
     total = np.array([s.frames for s in summaries], dtype=np.float64)
     active = np.array([_active_frames(s.frames) for s in summaries], dtype=np.float64)
     active_minutes = active / FRAMES_PER_MINUTE
-    numerators: dict[str, np.ndarray] = {
-        "stocks_taken_per_min": np.array([STARTING_STOCKS - s.p2_stocks_left for s in summaries], dtype=np.float64),
-        "stocks_lost_per_min": np.array([STARTING_STOCKS - s.p1_stocks_left for s in summaries], dtype=np.float64),
-        "damage_dealt_per_min": np.array([s.p2_damage_taken for s in summaries], dtype=np.float64),
-        "damage_taken_per_min": np.array([s.p1_damage_taken for s in summaries], dtype=np.float64),
+    numerators = {
+        key: np.array([_summary_numerator(summary, key) for summary in summaries], dtype=np.float64)
+        for key in _RATE_KEYS
     }
 
     total_active_minutes = float(active_minutes.sum())
-    idx = _resample_index(np.random.default_rng(seed), len(summaries), bootstrap_resamples)
+    by_boot: dict[tuple[melee.Stage, int], list[MatchSummary]] = {}
+    for stage, boot_index, summary in active_rows:
+        by_boot.setdefault((stage, boot_index), []).append(summary)
+    boot_active_minutes = np.array(
+        [sum(_active_frames(summary.frames) for summary in boot) / FRAMES_PER_MINUTE for boot in by_boot.values()],
+        dtype=np.float64,
+    )
+    idx = _resample_index(np.random.default_rng(seed), len(by_boot), bootstrap_resamples)
     out: dict[str, float] = {}
     for key in _RATE_KEYS:
         point = float(numerators[key].sum() / total_active_minutes) if total_active_minutes > 0.0 else 0.0
-        lo, hi = _ratio_ci(numerators[key], active_minutes, idx, point)
+        boot_numerators = np.array(
+            [sum(_summary_numerator(summary, key) for summary in boot) for boot in by_boot.values()],
+            dtype=np.float64,
+        )
+        lo, hi = _ratio_ci(boot_numerators, boot_active_minutes, idx, point)
         out[key] = point
         out[f"{key}_ci_lo"] = lo
         out[f"{key}_ci_hi"] = hi
     out["dead_frame_frac"] = float((total - active).sum() / total.sum())
     out["frames"] = total_frames / len(summaries)  # mean episode length (incl. countdown), a diagnostic
     out["matches"] = float(len(summaries))  # completed matches pooled (many per boot under instant-restart)
+    out["boots"] = float(len(by_boot))
     out["zero_active"] = float(zero_active)
     out["crashed"] = crashed
     return out
@@ -553,7 +575,7 @@ def matched_vs_cpu_deltas(
     rows_a: Sequence[MatchRow],
     rows_b: Sequence[MatchRow],
     *,
-    bootstrap_resamples: int = _BOOTSTRAP_RESAMPLES,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
     seed: int = 0,
 ) -> dict[str, float]:
     """Return a character-matched boot-level delta of run A minus run B.

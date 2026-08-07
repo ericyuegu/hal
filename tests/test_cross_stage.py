@@ -213,6 +213,20 @@ def test_bootstrap_ci_brackets_point_estimate() -> None:
         assert m[f"{key}_ci_lo"] <= m[f"{key}_ci_hi"]
 
 
+def test_bootstrap_resamples_boots_not_games() -> None:
+    high = _summary(_ONE_ACTIVE_MINUTE, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=100.0)
+    low = _summary(_ONE_ACTIVE_MINUTE, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
+    result = [(Stage.BATTLEFIELD, 0, high) for _ in range(10)] + [(Stage.BATTLEFIELD, 1, low)]
+
+    metrics = vs_cpu_metrics(result, bootstrap_resamples=2000, seed=0)
+
+    assert metrics["boots"] == 2.0
+    assert metrics["matches"] == 11.0
+    assert metrics["damage_dealt_per_min"] == pytest.approx(1000.0 / 11.0)
+    assert metrics["damage_dealt_per_min_ci_lo"] == 0.0
+    assert metrics["damage_dealt_per_min_ci_hi"] == 100.0
+
+
 def test_bootstrap_ci_is_wider_with_fewer_matches() -> None:
     """Same per-match distribution, 8x more matches -> a tighter CI (~1/sqrt(n))."""
 

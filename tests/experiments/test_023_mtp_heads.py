@@ -252,6 +252,7 @@ def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
     assert payload["protocol"]["stage_policy"] == "battlefield_then_random_legal"
     assert payload["protocol"]["completion_policy"] == "finish_in_flight_wave"
     assert payload["protocol"]["active_frame_policy"] == "frame_id_gte_0_exclude_zero_active"
+    assert payload["protocol"]["uncertainty_policy"] == "bootstrap_boots_2000"
     assert payload["protocol"]["start_retries"] == 2
 
 

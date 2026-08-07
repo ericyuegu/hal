@@ -44,6 +44,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import wandb
 from hal import streams
 from hal.data.feature_stats import FeatureStats
+from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
@@ -1463,6 +1464,7 @@ class EvalProtocol:
     stage_policy: str
     completion_policy: str
     active_frame_policy: str
+    uncertainty_policy: str
     start_retries: int
     exec_horizon: int
     decode_temp: float
@@ -1508,6 +1510,7 @@ def _eval_protocol(
         stage_policy="battlefield_then_random_legal",
         completion_policy="finish_in_flight_wave",
         active_frame_policy="frame_id_gte_0_exclude_zero_active",
+        uncertainty_policy=f"bootstrap_boots_{BOOTSTRAP_RESAMPLES}",
         start_retries=DEFAULT_START_RETRIES,
         exec_horizon=exec_horizon,
         decode_temp=settings.temp,

@@ -256,6 +256,11 @@ wrong when any boot failed. The official evaluator counts unique scheduled boots
 multi-game regression test. Existing P0 periodic sweeps reported zero failures, so their metrics do
 not change.
 
+The old confidence intervals also resampled flattened games. Games from one instant-restart boot
+share a Dolphin process and are not independent. The official evaluator keeps the pooled point
+estimate but resamples whole boots. Treat the earlier periodic intervals as optimistic diagnostics;
+their point estimates remain valid.
+
 The command passed a no-rent launcher dry run at commit `b422724`. The current qualifying offer was
 an RTX 4090 with 1,008 GB RAM, 100 GB disk, DLPerf 125.5, and effective price $1.382 per hour. Select
 the offer again at launch; market state may change.
