@@ -35,11 +35,10 @@ def test_empty_and_negative() -> None:
         raise AssertionError("expected ValueError for n<0")
 
 
-def test_vs_cpu_schedule_skips_unselectable_cpu_sheik_and_is_prefix_stable() -> None:
+def test_vs_cpu_schedule_skips_sheik_and_is_prefix_stable() -> None:
     big = matchups_for_vs_cpu(200)
     assert len(big) == 200
-    assert all(opp is not Character.SHEIK for _, opp in big)
-    assert any(ego is Character.SHEIK for ego, _ in big)
+    assert all(Character.SHEIK not in matchup for matchup in big)
     for n in (0, 1, 12, 37, 96):
         assert matchups_for_vs_cpu(n) == big[:n]
     try:
