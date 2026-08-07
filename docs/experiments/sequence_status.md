@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | Gate preflight passed | Run the 256-step systems gate. |
+| P1-match | Attention package at matched data and action vocabulary | Replacement 256-step systems gate running | Verify correctness and projected wall time before the full run. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -72,17 +72,14 @@ recomputation.
 
 ## Immediate next actions
 
-1. Finish the official P0 FP16 evaluation.
-2. Audit P0 timing, validation, checkpoints, closed-loop rows, replay uploads, and W&B records.
-3. Evaluate P1-old with full recomputation over 96 CPU character-pair boots and record its final
-   checkpoint, old KV evidence, new rows, replays, and timing.
-4. Run the matched-P1 systems gate, then train P1-match on the accepted compact data path and action
+1. Finish the matched-P1 systems gate, then train P1-match on the accepted compact data path and action
    vocabulary.
-5. Evaluate P1-match with full recomputation.
-6. Pass the P1/P2 FP32 and FP16 parity gate on that checkpoint, including long rolling contexts,
+2. Evaluate P1-match with full recomputation.
+3. Pass the P1/P2 FP32 and FP16 parity gate on that checkpoint, including long rolling contexts,
    mixed resets, logits, and fixed-seed sampled actions.
-7. Run the P2 temporal-KV evaluation and compare P0, P1-match recomputation, and P1-match KV.
-8. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
+4. Add and test the missing P2 decode timing counters.
+5. Run the P2 temporal-KV evaluation and compare P0, P1-match recomputation, and P1-match KV.
+6. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
    configuration into the E1 launch audit.
 
 The fresh matched-P1 plan is `docs/experiments/p1_matched_attention.md`.

@@ -102,6 +102,11 @@ The focused CPU test suite passes: 89 passed and 6 GPU-only tests skipped. Stati
 only the existing PyTorch module-typing warnings. The FP32 and FP16 GPU parity gate remains blocked
 on the final P1 checkpoint.
 
+The implementation audit on 2026-08-07 found that policy calls, decoded frames, model forwards,
+model-forward time, and per-frame latency are not yet recorded. Add these counters and focused
+tests before running either P2 arm. Do not infer decode speed from total evaluator wall time because
+Dolphin boot and emulation time dominate that number.
+
 ## Decision
 
 Keep full recomputation as the default. Promote temporal KV only if the correctness gate passes,
