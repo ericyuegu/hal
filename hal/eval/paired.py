@@ -116,22 +116,22 @@ class PairedSummary:
     """Everything the head-to-head summary table shows, from the focal model's side.
 
     Differentials are focal minus opponent, so a positive number favors the focal model.
-    ``win_rate`` is the retained data-field name. It is a stock-lead rate, not a game-win
-    rate: a model ahead on stocks when the frame budget ends counts as ahead. Stock ties
-    are excluded. ``decided_by_knockout`` reports matches that actually ended.
+    A model ahead on stocks when the frame budget ends counts as a stock leader, not a game
+    winner. Stock ties are excluded from ``stock_lead_rate``. ``decided_by_knockout``
+    reports matches that actually ended.
     """
 
     focal_model: str
     opponent_model: str
     matches: int
-    wins: int
-    losses: int
+    stock_leads: int
+    stock_deficits: int
     stock_ties: int
     decided_by_knockout: int
-    win_rate: float
-    win_rate_ci_low: float
-    win_rate_ci_high: float
-    win_rate_p_value: float
+    stock_lead_rate: float
+    stock_lead_rate_ci_low: float
+    stock_lead_rate_ci_high: float
+    stock_lead_rate_p_value: float
     mean_stock_diff_per_match: float
     stock_diff_ci_low: float
     stock_diff_ci_high: float
@@ -153,11 +153,11 @@ class PairedSummary:
         """Human-readable summary, one block per view."""
         lines = [
             f"=== {self.focal_model} vs {self.opponent_model}  ({self.matches} matches) ===",
-            f"stock leads {self.wins}  stock deficits {self.losses}  stock ties {self.stock_ties}"
+            f"stock leads {self.stock_leads}  stock deficits {self.stock_deficits}  stock ties {self.stock_ties}"
             f"   (knockout-decided before budget: {self.decided_by_knockout})",
-            f"stock-lead rate over non-tied: {self.win_rate:.3f}"
-            f"  95% CI [{self.win_rate_ci_low:.3f}, {self.win_rate_ci_high:.3f}]"
-            f"  binomial p={self.win_rate_p_value:.3f}",
+            f"stock-lead rate over non-tied: {self.stock_lead_rate:.3f}"
+            f"  95% CI [{self.stock_lead_rate_ci_low:.3f}, {self.stock_lead_rate_ci_high:.3f}]"
+            f"  binomial p={self.stock_lead_rate_p_value:.3f}",
             f"stock diff /match:          {self.mean_stock_diff_per_match:+.3f}"
             f"  95% CI [{self.stock_diff_ci_low:+.3f}, {self.stock_diff_ci_high:+.3f}]",
             f"damage diff /active-minute: {self.mean_damage_diff_per_active_minute:+.2f}"
@@ -251,12 +251,12 @@ def summarize_paired(records: Sequence[MatchRecord], *, focal_model: str) -> Pai
         raise ValueError("no completed matches to summarize")
     opponent_model = opponent_of(rows, focal_model)
 
-    wins = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model == focal_model)
-    losses = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model == opponent_model)
+    stock_leads = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model == focal_model)
+    stock_deficits = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model == opponent_model)
     stock_ties = sum(1 for r in rows if r.outcome is not None and r.outcome.winner_model is None)
     decided = sum(1 for r in rows if r.outcome is not None and r.outcome.decided)
-    decisive = wins + losses
-    win_low, win_high = wilson_ci(wins, decisive)
+    non_tied = stock_leads + stock_deficits
+    lead_low, lead_high = wilson_ci(stock_leads, non_tied)
 
     stock_diffs = [stock_diff(r, focal_model) for r in rows]
     damage_diffs = [d for d in (damage_diff_per_active_minute(r, focal_model) for r in rows) if d is not None]
@@ -277,14 +277,14 @@ def summarize_paired(records: Sequence[MatchRecord], *, focal_model: str) -> Pai
         focal_model=focal_model,
         opponent_model=opponent_model,
         matches=len(rows),
-        wins=wins,
-        losses=losses,
+        stock_leads=stock_leads,
+        stock_deficits=stock_deficits,
         stock_ties=stock_ties,
         decided_by_knockout=decided,
-        win_rate=wins / decisive if decisive else float("nan"),
-        win_rate_ci_low=win_low,
-        win_rate_ci_high=win_high,
-        win_rate_p_value=binomial_two_sided_p(wins, decisive),
+        stock_lead_rate=stock_leads / non_tied if non_tied else float("nan"),
+        stock_lead_rate_ci_low=lead_low,
+        stock_lead_rate_ci_high=lead_high,
+        stock_lead_rate_p_value=binomial_two_sided_p(stock_leads, non_tied),
         mean_stock_diff_per_match=stock_mean,
         stock_diff_ci_low=stock_low,
         stock_diff_ci_high=stock_high,

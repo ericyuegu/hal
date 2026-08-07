@@ -237,9 +237,9 @@ def test_summarize_paired_over_a_mirrored_sweep():
 
     assert (summary.focal_model, summary.opponent_model) == ("alpha", "beta")
     assert summary.matches == 7  # one record never ran
-    assert (summary.wins, summary.losses, summary.stock_ties) == (4, 1, 2)
-    assert summary.win_rate == pytest.approx(4 / 5)
-    assert summary.win_rate_p_value == pytest.approx(binomial_two_sided_p(4, 5))
+    assert (summary.stock_leads, summary.stock_deficits, summary.stock_ties) == (4, 1, 2)
+    assert summary.stock_lead_rate == pytest.approx(4 / 5)
+    assert summary.stock_lead_rate_p_value == pytest.approx(binomial_two_sided_p(4, 5))
     assert summary.decided_by_knockout == 5
     # Per-config sums: 0 -> +6, 1 -> 0, 2 -> 0. Config 3 is unpaired.
     assert summary.paired_configs == 3
@@ -263,7 +263,7 @@ def test_summarize_paired_is_antisymmetric():
     alpha = summarize_paired(records, focal_model="alpha")
     beta = summarize_paired(records, focal_model="beta")
 
-    assert alpha.wins == beta.losses == 2
+    assert alpha.stock_leads == beta.stock_deficits == 2
     assert alpha.mean_stock_diff_per_match == pytest.approx(-beta.mean_stock_diff_per_match)
     assert alpha.mean_config_stock_diff == pytest.approx(-beta.mean_config_stock_diff)
 

@@ -496,6 +496,7 @@ class MatchOutcome:
     damage_dealt_port_2: float
     decided: bool  # a port reached zero stocks, so the match ended on a knockout
     hit_frame_budget: bool
+    # These fields name the stock leader. They name the game winner only when ``decided`` is true.
     winner_port: int | None  # None on a stock tie at the budget
     winner_model: str | None
 
