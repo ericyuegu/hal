@@ -177,6 +177,9 @@ Train the value head for a fixed warm-up while the actor remains exact BC. Give 
 separate optimizer and gradient clip so its gradients cannot change the BC actor update. Activate
 AWR only after the held-out value and weight gate passes.
 
+Normalize clipped exponential weights with `logsumexp` in FP32. Dividing underflowed raw
+exponentials by their mean can produce `0/0`.
+
 ## E6: chunk critic validation
 
 The current critic proves that return labeling, value fitting, and AWR weighting run end to end. It

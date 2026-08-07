@@ -61,7 +61,8 @@ A_H(s_t,\mathbf a_t^H)=Q_H(s_t,\mathbf a_t^H)-V(s_t).
 
 Compute a detached, clipped exponential weight with the same finite implementation as E5. Choose
 `beta_H` from the frozen E6 validation audit before E7. Normalize valid weights to mean one within
-the effective batch and report raw and normalized statistics.
+the effective batch with the same FP32 `logsumexp` calculation. Do not divide underflowed raw
+exponentials by their mean. Report raw and normalized statistics.
 
 Require `grad_accum_steps=1` in the first H2 and H4 arms so normalization covers the whole optimizer
 batch. Report ESS over valid chunks and over replay-window mean weights. Require both ratios to pass
@@ -159,6 +160,7 @@ discard the queued chunk immediately. Never execute actions from the previous ga
    Assert low behavior likelihood alone does not trigger the fallback.
 10. Assert disagreement gating happens before effective-batch weight normalization.
     Check chunk-level and replay-window ESS by hand.
+    Check that all-large-negative advantages still produce finite mean-one weights.
 11. Assert teacher forcing uses logged earlier actions and free-running decode uses sampled earlier
    actions.
 12. Assert an H-frame queue causes one policy inference followed by exactly H controller outputs.

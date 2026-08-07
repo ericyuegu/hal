@@ -117,14 +117,31 @@ A_t=G_{t+1}-V(s_t),
 \tilde w_t=\min\left(5,\exp(A_t/0.8)\right).
 \]
 
-Compute the exponential in FP32 as `exp(clamp(A / beta, max=log(weight_max)))`. Reject nonfinite
-advantages before exponentiation.
+Compute the clipped log weight in FP32:
+
+\[
+q_t=\min(A_t/\beta,\log w_{max}).
+\]
+
+Reject nonfinite advantages before this operation. Do not exponentiate all raw weights and divide by
+their arithmetic mean; sufficiently negative FP32 values can all underflow to zero.
 
 Normalize valid weights to mean one within the effective batch:
 
 \[
 w_t=\frac{\tilde w_t}{\operatorname{mean}(\tilde w)}.
 \]
+
+Implement the same value stably over the N valid rows:
+
+\[
+\log \bar w=\operatorname{logsumexp}(q)-\log N,
+\qquad
+w_t=\exp(q_t-\log \bar w).
+\]
+
+Require `N > 0` and check that normalized weights are finite with mean one. Raw weights may be
+materialized only for diagnostics; they are not the normalization denominator.
 
 This normalization is an optimizer control, not part of the probability factorization. It preserves
 relative example weights while keeping the actor gradient scale close to BC. Without it, a change in
@@ -184,6 +201,8 @@ weights.
 12. Check clipping before exponentiation, mean normalization, effective sample size, and all finite
     edge cases.
     Check both frame-level and window-level ESS by hand.
+    Include an all-large-negative-advantage case and prove it returns finite mean-one weights rather
+    than `0/0`.
 13. Reject NaN or infinite return, value, advantage, raw weight, normalized weight, loss, gradient,
     and parameter values with a useful error.
 14. Check the step-2,048 activation boundary and resume it on the same global step.
