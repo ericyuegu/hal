@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -71,6 +72,34 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.action_vocab == 1024
     assert cfg.mds_schema_version == 7
     assert cfg.cache_limit_gb == 128
+
+
+def test_manual_eval_can_disable_checkpoint_kv_decode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = exp.TrainConfig(attn_window=32, eval_incremental_kv=True, eval_n_matchups=1, final_eval_n_matchups=1)
+    model = SimpleNamespace(head_offsets=cfg.head_offsets)
+    seen: dict[str, bool] = {}
+
+    monkeypatch.setattr(exp, "_load_ckpt", lambda _: (model, cfg, {}, {"step": 1}))
+    monkeypatch.setattr(exp, "_exec_horizon_offsets", lambda *_: None)
+    monkeypatch.setattr(
+        exp, "_decode_settings", lambda *_args, **_kwargs: exp.DecodeSettings(1.0, None, 0, 0.0, False)
+    )
+
+    def run_eval(factory, *, protocol, replay_dir, rows_path):
+        del protocol, replay_dir, rows_path
+        factory()
+        return {}
+
+    def capture_factory(model_arg, stats_arg, cfg_arg, **kwargs):
+        del model_arg, stats_arg, kwargs
+        seen["incremental_kv"] = cfg_arg.eval_incremental_kv
+        return None
+
+    monkeypatch.setattr(exp, "make_policy", capture_factory)
+    monkeypatch.setattr(exp, "_run_eval_sweep", run_eval)
+    monkeypatch.chdir(tmp_path)
+    exp.eval_ckpt("checkpoint.pt", eval_recompute=True, eval_n_matchups=1, eval_max_frames=1)
+    assert seen["incremental_kv"] is False
 
 
 def test_compact_config_requires_cooldown_capacity() -> None:

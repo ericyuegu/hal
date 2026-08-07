@@ -2041,6 +2041,7 @@ def _halve_for_decode(model: GPT) -> None:
 def eval_ckpt(
     ckpt_path: str,
     *,
+    eval_recompute: bool = False,
     eval_exec_horizon: int | None = None,
     decode_temp: float | None = None,
     decode_temps: tuple[float, float, float, float] | None = None,
@@ -2059,6 +2060,8 @@ def eval_ckpt(
     override (execution horizon, temp, per-group temps, button-support floor, min-p, click=>trigger fix)
     replaces the trained cfg for this eval only (test-time sweep); ``None`` keeps the trained value."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
+    if eval_recompute:
+        cfg = replace(cfg, eval_incremental_kv=False)
     exec_horizon = cfg.exec_horizon if eval_exec_horizon is None else eval_exec_horizon
     settings = _decode_settings(
         model,
@@ -2081,6 +2084,7 @@ def eval_ckpt(
     _exec_horizon_offsets(model.head_offsets, exec_horizon)
     print(
         f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  exec_horizon={exec_horizon}  "
+        f"incremental_kv={cfg.eval_incremental_kv}  "
         f"temp={settings.temp}  temps={settings.temps}  btn_support_min={settings.btn_support_min}  "
         f"min_p={settings.min_p}  click_trigger_fix={settings.click_trigger_fix}",
         flush=True,
@@ -2175,6 +2179,7 @@ class Args:
 
     cfg: TrainConfig = field(default_factory=TrainConfig)
     eval: str | None = None  # ckpt path; closed-loop eval instead of train
+    eval_recompute: bool = False  # rebuild the raw rolling window even if the checkpoint used temporal KV
     eval_exec_horizon: int | None = None  # override execution horizon s for --eval (chunked decode; 1=per-frame)
     eval_temp: float | None = None  # override decode temperature for --eval
     eval_temps: tuple[float, float, float, float] | None = None  # per-group temps (buttons, main, c, triggers)
@@ -2205,6 +2210,7 @@ def main(args: Args) -> None:
     if args.eval is not None:
         eval_ckpt(
             args.eval,
+            eval_recompute=args.eval_recompute,
             eval_exec_horizon=args.eval_exec_horizon,
             decode_temp=args.eval_temp,
             decode_temps=args.eval_temps,
