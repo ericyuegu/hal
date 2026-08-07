@@ -1,84 +1,4 @@
-"""Advantage-weighted regression on a sliding-window trunk, forked from experiment 020.
-
-020 showed the AWR machinery runs but the policy played too passively, and its reward knobs put
-87% of the weight mass on which segment of a match a window came from. This fork keeps 020's
-objective and changes five things: the trunk is the SHARED one (``hal.training.trunk``) with
-sliding-window attention, the sequence geometry is four times longer, the action head is 019's
-within-frame chain, the reward knobs come from the reward explorer's tuned table
-(``notebooks/awr_explorer.py``), and two new axes ride the same weighting — the demonstrator's
-ranked tier and an IQL expectile critic.
-
-The objective (unchanged from 020):
-
-    r_t = -1 on an ego stock loss, +1 on an opponent stock loss   (+ damage / match-win shaping)
-    G_t = sum_k gamma^k r_{t+k}                                    (reverse scan, FULL replay)
-    A_t = G_{t+1} - V(s_t)          (V = a value head on the trunk; the return starts at the PREDICTED
-                                     frame, so a reward that landed before the action could act is
-                                     never part of the action's credit)
-    w_t = clip(exp(A_t / beta), w_max),  rescaled to mean 1 over the batch
-    loss = sum over heads/groups of  weighted_mean(w_t, per-frame NLL)  +  value MSE
-
-``awr_enabled=False`` gives the plain mean NLL, so the AWR arm is one flag. That BC arm on this
-trunk and this geometry is the control every other arm is measured against; do NOT compare 022
-numbers with 020 or 016 runs, because the geometry moved.
-
-What changed against 020
-
-* Sliding-window attention. ``attn_window`` (128 frames) replaces the full-context mask. The trunk
-  runs FlexAttention where it compiles and the dense mask where it does not; ``require_flex`` makes
-  a cloud run fail instead of training about 4x slower on the fallback. A trained window also makes
-  incremental decode exact, so ``eval_incremental_kv`` is on by default (and is rejected at full
-  attention).
-* A faster closed loop. Decode runs on fp16 weights, at ``high`` matmul precision, over a rolling KV
-  cache fed one frame at a time — the profiler put 79% of a rollout frame in the policy and 59% in
-  the trunk forward alone. See ``_load_ckpt`` and ``make_policy``.
-* Geometry. ``L_ctx`` 256 -> 1024 with the token count per step held near 020's: ``batch_size`` is
-  now the EFFECTIVE batch (128) and ``grad_accum_steps`` splits it into micro-batches of 64. Under
-  a window the step cost is nearly flat in ``L_ctx``, and a longer window turns more of each
-  whole-replay disk read into training tokens.
-* Factored action heads (019's, which tested lean-positive against the independent joint head).
-  Each offset head keeps one projection per group and predicts the four groups as a CHAIN in
-  ``chain_order``; every non-terminal group feeds its class back into the running hidden state
-  through a zero-initialized table:
-
-      h_0 = h;   logits[g_i] = proj[g_i](h_i);   h_{i+1} = h_i + emb[g_i](id[g_i])
-
-  Training teacher-forces the ancestors with the ground-truth ids of the SAME target frame, so the
-  summed per-group NLL is the chain rule — the joint NLL of that frame, in 020's units. The AWR
-  weight multiplies that per-position sum exactly as before. Decode runs the same chain on its own
-  draws. The per-group NLLs alone are now conditionals and do NOT compare with a joint-head run.
-* Reward knobs. Dense damage shaping, a moderate beta and a low weight cap (see ``TrainConfig``).
-* Rank weighting. ``awr_rank_weights`` multiplies a window's weight by the EGO player's ranked tier
-  (schema v7's ``p{1,2}_rank``) before the mean-1 rescale, so ``(1, 2, 4)`` moves master frames from
-  31% to 57% of the gradient mass. It is a property of the weighting, not of the critic: with
-  ``awr_enabled=False`` it gives rank-weighted BC, with no value head in the loop at all.
-* An optional IQL critic. ``awr_critic="expectile"`` fits V by a TD expectile loss and takes the
-  residual as the advantage, instead of regressing on the Monte-Carlo return (which carries the
-  opponent's luck). Both critics log both sets of diagnostics, so the arms compare. A one-step
-  residual is ``sqrt(1 - gamma^2)`` times the size of the Monte-Carlo advantage, so this arm needs
-  its own ``awr_beta`` (see ``awr_expectile_tau``) or its weights come out uniform.
-* Two fixes: ``final.pt`` is saved BEFORE the closed-loop eval, and validation runs two trunk
-  forwards per batch instead of five.
-* A leaner ``val/*`` block. A correlation study over ten comparable runs found the dropped metrics
-  either uninformative or inverted against closed-loop play. What is left is a kill switch or a
-  tracked hypothesis.
-
-Checkpoints. The trunk moved into a submodule, so the state-dict keys gained a ``trunk.`` prefix,
-and the heads moved to ``heads.{i}.proj.{group}`` / ``heads.{i}.emb.{group}``: 020 checkpoints do
-not load here and are rejected with that message.
-
-Run:
-    uv run experiments/022_awr_rank.py
-    uv run experiments/022_awr_rank.py --cfg.no-awr-enabled       # the BC control arm
-    uv run experiments/022_awr_rank.py --cfg.chain-order buttons main_stick c_stick triggers
-    # The rank arm. The tier column arrived with v7, so it needs BOTH v7 flags; validate_config says so.
-    uv run experiments/022_awr_rank.py --cfg.awr-rank-weights 1.0 2.0 4.0 \
-        --cfg.data-root data/processed/ranked-anonymized-1/mds-v7 --cfg.mds-schema-version 7
-    # The IQL arm. Its advantage is ~17x smaller than the MC one, so beta scales with it.
-    uv run experiments/022_awr_rank.py --cfg.awr-critic expectile --cfg.awr-expectile-tau 0.8 --cfg.awr-beta 0.05
-    uv run experiments/022_awr_rank.py --audit-returns --cfg.data-root data/processed/dev/mds
-    uv run experiments/022_awr_rank.py --eval <ckpt> --eval-temp 0.7
-"""
+"""Train a factored action policy with optional AWR and rank weights."""
 
 # %%
 import os
@@ -157,6 +77,7 @@ from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
+from hal.training.trunk import rmsnorm
 from hal.wire import mask_value
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -213,7 +134,7 @@ _BUTTON_R_CH = ACTION_CHANNELS.index("button_r")
 # %%
 @dataclass
 class TrainConfig:
-    # THE studied axis: weight each frame's imitation loss by how well that frame turned out.
+    # Weight each deployed action loss by how well that frame turned out.
     # False gives the plain mean NLL and no value loss — the BC control arm is this one flag.
     # Everything below tunes the weighting, never the architecture.
     awr_enabled: bool = True
@@ -287,15 +208,14 @@ class TrainConfig:
     # prefix 1..s instead — but s=2 measured no throughput gain on top of the incremental decoder,
     # so the long-horizon aux signal wins.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
-    # Within-frame chain order (019's settled default). Every offset head predicts the four action
-    # groups in this order, each non-terminal group conditioning the rest through a zero-initialized
-    # table, so a fresh model is exactly the independent joint head 020 deployed. Must be a
-    # permutation of _GROUP_NAMES. The order is a play knob, not the studied axis: the default puts
-    # the cheap near-deterministic groups first and buttons last, so the button combo sees every
-    # stick/trigger ancestor.
+    # Each group reads the embeddings of all earlier groups. The zero-initialized projections make
+    # a new model match independent heads.
     chain_order: tuple[str, str, str, str] = ("c_stick", "triggers", "main_stick", "buttons")
-    # PER-AUXILIARY-HEAD multiplier. Total auxiliary scalar weight is this times the number of aux heads;
-    # use lambda_total / n_aux to implement primary + lambda_total * mean(auxiliary heads).
+    # Each prior action group is embedded at this width. Descendant heads concatenate these vectors.
+    action_cond_dim: int = 32
+    # Width multiplier for the residual MLP inside each conditional group head.
+    action_mlp_ratio: int = 2
+    # Total weight of the mean auxiliary-head loss. This stays fixed if head_offsets changes.
     aux_loss_weight: float = 1.0
     # Per-sample ego-history input dropout (train only): with probability p, zero a sample's ego
     # controller-history slice of the context token so the trunk cannot lean on copying its own recent
@@ -450,13 +370,14 @@ class TrainConfig:
 
 
 def _model_tag(cfg: TrainConfig) -> str:
-    """The architecture, for the run name. The ``chain`` token (019's) is what tells a factored-head
-    run from a joint-head one, and spells the order it used, so ``_reward_tag`` — the WEIGHTING spec,
-    which lands in the same run name — never repeats it."""
+    """Return the architecture part of the run name."""
     offs = ".".join(str(o) for o in cfg.head_offsets)
     chain = "".join(name[0] for name in cfg.chain_order)  # c_stick,triggers,main_stick,buttons -> ctmb
     awr = f"-awr{cfg.awr_beta:g}" if cfg.awr_enabled else "-bc"
-    return f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-o{offs}-chain{chain}{awr}"
+    return (
+        f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-o{offs}"
+        f"-chain{chain}-c{cfg.action_cond_dim}m{cfg.action_mlp_ratio}{awr}"
+    )
 
 
 def _reward_tag(cfg: TrainConfig) -> str:
@@ -981,47 +902,60 @@ def validate_chain_order(chain_order: tuple[str, ...]) -> tuple[str, ...]:
     return chain
 
 
+class ResidualMLP(nn.Module):
+    def __init__(self, d_model: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.up = nn.Linear(d_model, hidden_dim)
+        self.down = nn.Linear(hidden_dim, d_model)
+        nn.init.zeros_(self.down.weight)
+        nn.init.zeros_(self.down.bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x + self.down(F.silu(self.up(rmsnorm(x))))
+
+
 class FactoredHead(nn.Module):
-    """One future-frame offset's action head, factorized WITHIN the frame (019's).
+    """Predict action groups in order."""
 
-    Each group keeps its own projection (so the projections hold exactly the parameters of 020's one
-    355-wide joint head). The groups are emitted in ``chain_order``; every non-terminal group feeds
-    its chosen class back into the running hidden state through its own conditioning table:
-
-        h_0 = h;   logits[g_i] = proj[g_i](h_i);   h_{i+1} = h_i + emb[g_i](id[g_i])
-
-    The tables are zero-initialized, so at initialization ``logits_tf`` does not depend on the
-    ancestors at all and this head IS the independent joint head. ``logits_tf`` teacher-forces the
-    ancestors (training / validation); ``sample`` runs the same chain on its own draws (deploy)."""
-
-    def __init__(self, d_model: int, chain_order: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        d_model: int,
+        chain_order: tuple[str, ...],
+        *,
+        cond_dim: int,
+        mlp_ratio: int,
+    ) -> None:
         super().__init__()
         self.chain_order = validate_chain_order(chain_order)
-        conditioning = set(self.chain_order[:-1])  # the terminal group conditions nothing
-        # Built in _GROUP_NAMES order so the state-dict key order does not depend on chain_order.
+        self.position = {name: position for position, name in enumerate(self.chain_order)}
         self.proj = nn.ModuleDict(
             {name: nn.Linear(d_model, _GROUP_VOCABS[_GROUP_INDEX[name]]) for name in _GROUP_NAMES}
         )
         self.emb = nn.ModuleDict(
-            {
-                name: nn.Embedding(_GROUP_VOCABS[_GROUP_INDEX[name]], d_model)
-                for name in _GROUP_NAMES
-                if name in conditioning
-            }
+            {name: nn.Embedding(_GROUP_VOCABS[_GROUP_INDEX[name]], cond_dim) for name in self.chain_order[:-1]}
         )
-        for table in self.emb.values():
-            nn.init.zeros_(table.weight)
+        self.cond_proj = nn.ModuleDict()
+        for position, name in enumerate(self.chain_order[1:], start=1):
+            layer = nn.Linear(position * cond_dim, d_model, bias=False)
+            nn.init.zeros_(layer.weight)
+            self.cond_proj[name] = layer
+        self.mlp = nn.ModuleDict({name: ResidualMLP(d_model, mlp_ratio * d_model) for name in _GROUP_NAMES})
+
+    def group_logits(self, h: Tensor, name: str, ancestors: dict[str, Tensor]) -> Tensor:
+        x = h
+        if ancestors:
+            ancestor_names = self.chain_order[: self.position[name]]
+            condition = torch.cat([self.emb[group](ancestors[group]) for group in ancestor_names], dim=-1)
+            x = x + self.cond_proj[name](condition)
+        return self.proj[name](self.mlp[name](x))
 
     def logits_tf(self, h: Tensor, gt_idx: Tensor) -> dict[str, Tensor]:
-        """Teacher-forced per-group logits ``{group: [..., vocab_g]}`` from hidden ``h`` ``[..., d_model]``
-        and the GROUND-TRUTH class ids ``gt_idx`` ``[..., N_GROUPS]`` at the SAME target frame. Summing the
-        four cross-entropies is then the chain rule, i.e. the joint NLL of that frame's action."""
+        """Return logits conditioned on the true earlier groups."""
         out: dict[str, Tensor] = {}
-        x = h
-        for i, name in enumerate(self.chain_order):
-            out[name] = self.proj[name](x)
-            if i + 1 < len(self.chain_order):
-                x = x + self.emb[name](gt_idx[..., _GROUP_INDEX[name]])
+        ancestors: dict[str, Tensor] = {}
+        for name in self.chain_order:
+            out[name] = self.group_logits(h, name, ancestors)
+            ancestors[name] = gt_idx[..., _GROUP_INDEX[name]]
         return out
 
     def sample(
@@ -1034,15 +968,10 @@ class FactoredHead(nn.Module):
         argmax: bool,
         gen: torch.Generator | None,
     ) -> Int[Tensor, "B n_groups"]:
-        """Run the chain forward on its OWN draws: per group, support-mask (buttons only) → temperature
-        → min-p → multinomial, then condition the remaining groups on the id just drawn. Returns class
-        ids in ``_GROUP_NAMES`` order. ``argmax`` makes each step greedy — a greedy walk of the chain,
-        NOT the joint mode — and deployed play never asks for it (greedy decode collapses the
-        closed-loop policy to doing nothing)."""
+        """Sample each group and condition later groups on the sample."""
         picks: dict[str, Tensor] = {}
-        x = h
-        for i, name in enumerate(self.chain_order):
-            lg = self.proj[name](x).float()
+        for name in self.chain_order:
+            lg = self.group_logits(h, name, picks).float()
             if btn_dead is not None and name == "buttons":
                 lg = lg.masked_fill(btn_dead, float("-inf"))
             if argmax:
@@ -1054,8 +983,6 @@ class FactoredHead(nn.Module):
                     probs = probs / probs.sum(dim=-1, keepdim=True)
                 pick = torch.multinomial(probs, 1, generator=gen).squeeze(-1)
             picks[name] = pick
-            if i + 1 < len(self.chain_order):
-                x = x + self.emb[name](pick)
         return torch.stack([picks[name] for name in _GROUP_NAMES], dim=-1)
 
 
@@ -1118,7 +1045,17 @@ class GPT(nn.Module):
         )
         # One factorized head per future-frame offset (order matches self.head_offsets); every offset
         # runs the SAME chain, so the auxiliary heads train the conditioning the deployed head uses.
-        self.heads = nn.ModuleList([FactoredHead(cfg.d_model, self.chain_order) for _ in offs])
+        self.heads = nn.ModuleList(
+            [
+                FactoredHead(
+                    cfg.d_model,
+                    self.chain_order,
+                    cond_dim=cfg.action_cond_dim,
+                    mlp_ratio=cfg.action_mlp_ratio,
+                )
+                for _ in offs
+            ]
+        )
         # V(s) for the AWR advantage. Last, so the trunk and the action heads keep their draws.
         self.value_head = nn.Linear(cfg.d_model, 1)
 
@@ -1482,6 +1419,8 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         "char_dim": cfg.char_dim,
         "stage_vocab": cfg.stage_vocab,
         "stage_dim": cfg.stage_dim,
+        "action_cond_dim": cfg.action_cond_dim,
+        "action_mlp_ratio": cfg.action_mlp_ratio,
         "val_n_batches": cfg.val_n_batches,
         "gradient_diagnostic_batch_size": cfg.gradient_diagnostic_batch_size,
         "diagnostic_rare_button_count": cfg.diagnostic_rare_button_count,
@@ -1887,11 +1826,19 @@ def _offset_objective(
     trans: dict[tuple[int, str], Tensor],
     offset: int,
     transition_weight: float,
+    sample_weight: Tensor | None = None,
 ) -> Tensor:
-    """One head's unscaled sum-over-groups objective in nats. Deliberately AWR-free: it feeds the
-    gradient diagnostics, which ask how the horizons pull on the shared trunk."""
+    """Return one offset's action loss."""
     return torch.stack(
-        [_weighted_mean(nll[(offset, name)], trans[(offset, name)], transition_weight) for name in _GROUP_NAMES]
+        [
+            _weighted_mean(
+                nll[(offset, name)],
+                trans[(offset, name)],
+                transition_weight,
+                sample_weight,
+            )
+            for name in _GROUP_NAMES
+        ]
     ).sum()
 
 
@@ -1901,17 +1848,30 @@ def objective(
     aux_weight: float,
     transition_weight: float,
     sample_weight: Tensor | None = None,
+    aux_sample_weight: Tensor | None = None,
 ) -> Tensor:
-    """Weighted-sum multi-token training objective (nats): the offset-1 (primary) head's per-group NLL at
-    weight 1, every auxiliary head (offset != 1) at ``aux_weight``; within each (offset, group) the per-group
-    reduction upweights transition targets by ``transition_weight`` (1.0 = plain mean) and scales each
-    position by the AWR weight ``sample_weight`` (None = the plain BC objective). The AWR weight applies to
-    EVERY head and group: it says which FRAMES are worth imitating, not which parts of the controller."""
-    terms = [
-        (1.0 if o == 1 else aux_weight) * _weighted_mean(c, trans[(o, name)], transition_weight, sample_weight)
-        for (o, name), c in nll.items()
-    ]
-    return torch.stack(terms).sum()
+    """Return primary AWR plus a fixed-total auxiliary BC loss.
+
+    Rank weights may apply to both terms because they define the data mixture. Advantage weights
+    apply only to the primary policy term.
+    """
+    primary = _offset_objective(nll, trans, 1, transition_weight, sample_weight)
+    aux_offsets = sorted({offset for offset, _ in nll if offset != 1})
+    if not aux_offsets or aux_weight == 0.0:
+        return primary
+    auxiliary = torch.stack(
+        [
+            _offset_objective(
+                nll,
+                trans,
+                offset,
+                transition_weight,
+                aux_sample_weight,
+            )
+            for offset in aux_offsets
+        ]
+    ).mean()
+    return primary + aux_weight * auxiliary
 
 
 def _slice_batch(batch: AWRBatch, n: int) -> AWRBatch:
@@ -2006,10 +1966,11 @@ def _gradient_diagnostics_eval(model: GPT, batch: AWRBatch, cfg: TrainConfig) ->
 
     aux_offsets = tuple(offset for offset in model.head_offsets if offset != 1)
     if aux_offsets:
-        # This is the direction the CURRENT objective applies, not a mean-head convention:
-        # aux_loss_weight * sum_o g_o. Its norm ratio makes objective-scale domination visible.
+        # This is the auxiliary direction used by the current objective.
         weighted_aux = tuple(
-            cfg.aux_loss_weight * sum((gradients[offset][pi] for offset in aux_offsets), start=torch.zeros_like(p))
+            cfg.aux_loss_weight
+            * sum((gradients[offset][pi] for offset in aux_offsets), start=torch.zeros_like(p))
+            / len(aux_offsets)
             for pi, p in enumerate(trunk)
         )
         aux_norm = _gradient_dot(weighted_aux, weighted_aux).sqrt()
@@ -2737,7 +2698,15 @@ def train(
                     # there is no advantage, no value loss and no gradient into the value head at all.
                     rank_weight = batch.valid_rank_weights(parts.valid) if rank_on else None
                     weight: Tensor | None = None
+                    aux_sample_weight: Tensor | None = None
                     value_loss = torch.zeros((), device=parts.value_grid.device)
+                    if rank_weight is not None:
+                        aux_sample_weight, _ = awr_weights(
+                            None,
+                            beta=cfg.awr_beta,
+                            weight_max=cfg.awr_weight_max,
+                            rank_weight=rank_weight,
+                        )
                     if cfg.awr_enabled:
                         critic = critic_parts(
                             parts.value_grid,
@@ -2755,11 +2724,20 @@ def train(
                             rank_weight=rank_weight,
                         )
                     elif rank_weight is not None:
-                        weight, awr_stats = awr_weights(
-                            None, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max, rank_weight=rank_weight
+                        weight = aux_sample_weight
+                        _, awr_stats = awr_weights(
+                            None,
+                            beta=cfg.awr_beta,
+                            weight_max=cfg.awr_weight_max,
+                            rank_weight=rank_weight,
                         )
                     obj = objective(
-                        parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight, weight
+                        parts.nll,
+                        parts.transition,
+                        cfg.aux_loss_weight,
+                        cfg.transition_loss_weight,
+                        weight,
+                        aux_sample_weight,
                     )
                     total = obj + cfg.awr_value_loss_weight * value_loss if cfg.awr_enabled else obj
                     loss = total / cfg.grad_accum_steps

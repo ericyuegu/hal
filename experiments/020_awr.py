@@ -1,52 +1,4 @@
-"""Advantage-weighted regression (AWR), forked from experiment 016.
-
-Observation assembly, backbone, action heads, optimizer, evaluation machinery and
-decode hygiene are the DEPLOYED 016-base recipe (``spatial_features`` off, so the
-token is 374 wide, and the four action groups stay INDEPENDENT so 020-vs-016
-isolates one axis: 019 owns the head factorization). The studied axis here is WHICH
-FRAMES the imitation loss listens to.
-
-The idea. Plain behavior cloning fits every human frame equally, winning and losing
-alike, so the policy's ceiling is the average of the data. AWR keeps the same
-maximum-likelihood objective and reweights it by how well the demonstrated frame
-turned out:
-
-    r_t = -1 on an ego stock loss, +1 on an opponent stock loss   (+ optional damage / match-win shaping)
-    G_t = sum_k gamma^k r_{t+k}                                    (reverse scan, FULL replay)
-    A_t = G_{t+1} - V(s_t)          (V = a value head on the trunk; the return starts at the PREDICTED
-                                     frame, so a reward that landed before the action could act is
-                                     never part of the action's credit)
-    w_t = clip(exp(A_t / beta), w_max),  rescaled to mean 1 over the batch
-    loss = sum over heads/groups of  weighted_mean(w_t, per-frame NLL)  +  value MSE
-
-Frames on the way to taking a stock get upweighted; frames on the way to losing one
-get downweighted. ``awr_enabled=False`` restores the exact 016-base objective (the
-plain mean NLL), so the arm is a single flag.
-
-The return is computed over the WHOLE replay before windowing. A train window is
-~270 frames and gamma=0.999 has a ~700-frame half-life, so a return summed inside
-the window would be truncation-biased toward zero exactly where it matters. The one
-place a whole replay exists is the row the sampler reads, so the returns are labeled
-onto that row as two ordinary per-frame columns (``p1_awr_return`` /
-``p2_awr_return``) and then travel through hal's window/pad/ego-relabel path like any
-other column. See :class:`ReturnLabeledReplays`.
-
-What stays comparable. Only the BACKPROP objective is weighted: the logged
-``train/loss`` and every validation metric are unweighted, so val NLL compares
-directly with 016 and 019. The value head is ignored at decode — the deployed policy
-is byte-identical to 016's sampler.
-
-Beta. ``awr_beta`` sets how sharply the weights separate; the effective sample size
-``train/awr_ess`` is the diagnostic (weights informative but not collapsed onto a few
-frames). Pick it from the offline return audit before launching:
-
-    uv run experiments/020_awr.py --audit-returns --cfg.data-root data/processed/dev/mds
-
-Run:
-    uv run experiments/020_awr.py
-    uv run experiments/020_awr.py --cfg.no-awr-enabled          # the 016-base objective arm
-    uv run experiments/020_awr.py --eval <ckpt> --eval-temp 0.7
-"""
+"""Train independent action heads with advantage-weighted regression."""
 
 # %%
 import os
@@ -165,9 +117,7 @@ _BUTTON_R_CH = ACTION_CHANNELS.index("button_r")
 # %%
 @dataclass
 class TrainConfig:
-    # THE studied axis: weight each frame's imitation loss by how well that frame turned out.
-    # False restores the 016-base objective EXACTLY (plain mean NLL, no value loss) — the arm is
-    # this one flag. Everything below tunes the weighting, never the architecture.
+    # Weight the deployed action loss by estimated advantage. False uses plain BC and no value loss.
     awr_enabled: bool = True
     # Return discount. 0.999 gives a ~693-frame (11.5 s) half-life: long enough to credit the
     # exchange that led to a stock, short enough that the whole match is not one flat number.
@@ -208,8 +158,7 @@ class TrainConfig:
     # head, so the far-horizon heads are a training-only signal. The spread-out default is inherited
     # from 012; the planned ablations compare it with next-only and contiguous alternatives.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
-    # PER-AUXILIARY-HEAD multiplier. Total auxiliary scalar weight is this times the number of aux heads;
-    # use lambda_total / n_aux to implement primary + lambda_total * mean(auxiliary heads).
+    # Total weight of the mean auxiliary-head loss. This stays fixed if head_offsets changes.
     aux_loss_weight: float = 1.0
     # Per-sample ego-history input dropout (train only): with probability p, zero a sample's ego
     # controller-history slice of the context token so the trunk cannot lean on copying its own recent
@@ -1500,11 +1449,19 @@ def _offset_objective(
     trans: dict[tuple[int, str], Tensor],
     offset: int,
     transition_weight: float,
+    sample_weight: Tensor | None = None,
 ) -> Tensor:
-    """One head's unscaled sum-over-groups objective in nats. Deliberately AWR-free: it feeds the
-    gradient diagnostics, which ask how the horizons pull on the shared trunk."""
+    """Return one offset's action loss."""
     return torch.stack(
-        [_weighted_mean(nll[(offset, name)], trans[(offset, name)], transition_weight) for name in _GROUP_NAMES]
+        [
+            _weighted_mean(
+                nll[(offset, name)],
+                trans[(offset, name)],
+                transition_weight,
+                sample_weight,
+            )
+            for name in _GROUP_NAMES
+        ]
     ).sum()
 
 
@@ -1515,16 +1472,15 @@ def objective(
     transition_weight: float,
     sample_weight: Tensor | None = None,
 ) -> Tensor:
-    """Weighted-sum multi-token training objective (nats): the offset-1 (primary) head's per-group NLL at
-    weight 1, every auxiliary head (offset != 1) at ``aux_weight``; within each (offset, group) the per-group
-    reduction upweights transition targets by ``transition_weight`` (1.0 = plain mean) and scales each
-    position by the AWR weight ``sample_weight`` (None = the 016-base objective). The AWR weight applies to
-    EVERY head and group: it says which FRAMES are worth imitating, not which parts of the controller."""
-    terms = [
-        (1.0 if o == 1 else aux_weight) * _weighted_mean(c, trans[(o, name)], transition_weight, sample_weight)
-        for (o, name), c in nll.items()
-    ]
-    return torch.stack(terms).sum()
+    """Return primary AWR plus a fixed-total auxiliary BC loss."""
+    primary = _offset_objective(nll, trans, 1, transition_weight, sample_weight)
+    aux_offsets = sorted({offset for offset, _ in nll if offset != 1})
+    if not aux_offsets or aux_weight == 0.0:
+        return primary
+    auxiliary = torch.stack(
+        [_offset_objective(nll, trans, offset, transition_weight) for offset in aux_offsets]
+    ).mean()
+    return primary + aux_weight * auxiliary
 
 
 def _slice_batch(batch: AWRBatch, n: int) -> AWRBatch:
@@ -1607,10 +1563,11 @@ def _gradient_diagnostics_eval(model: GPT, batch: AWRBatch, cfg: TrainConfig) ->
 
     aux_offsets = tuple(offset for offset in model.head_offsets if offset != 1)
     if aux_offsets:
-        # This is the direction the CURRENT objective applies, not a mean-head convention:
-        # aux_loss_weight * sum_o g_o. Its norm ratio makes objective-scale domination visible.
+        # This is the auxiliary direction used by the current objective.
         weighted_aux = tuple(
-            cfg.aux_loss_weight * sum((gradients[offset][pi] for offset in aux_offsets), start=torch.zeros_like(p))
+            cfg.aux_loss_weight
+            * sum((gradients[offset][pi] for offset in aux_offsets), start=torch.zeros_like(p))
+            / len(aux_offsets)
             for pi, p in enumerate(trunk)
         )
         aux_norm = _gradient_dot(weighted_aux, weighted_aux).sqrt()

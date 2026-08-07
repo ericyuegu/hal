@@ -167,16 +167,17 @@ def test_value_head_shape_and_placement() -> None:
 
 
 def test_awr_disabled_objective_is_the_unweighted_mean_nll() -> None:
-    """The comparability arm: with the flag off the objective is bitwise 016's plain mean."""
     cfg = _tiny_cfg(exp020, awr_enabled=False)
     model = _model(cfg)
     batch = _awr_batch(cfg)
     parts = exp020.action_loss(model, batch.batch)
     obj = exp020.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight)
-    expected = torch.stack(
-        [(1.0 if o == 1 else cfg.aux_loss_weight) * c.mean() for (o, _), c in parts.nll.items()]
-    ).sum()
-    assert obj.item() == expected.item()
+    primary = sum(parts.nll[(1, name)].mean() for name in _GROUPS)
+    aux_offsets = sorted({offset for offset, _ in parts.nll if offset != 1})
+    auxiliary = torch.stack(
+        [sum(parts.nll[(offset, name)].mean() for name in _GROUPS) for offset in aux_offsets]
+    ).mean()
+    torch.testing.assert_close(obj, primary + cfg.aux_loss_weight * auxiliary)
 
 
 def test_awr_weight_changes_the_objective_but_not_the_reported_nll() -> None:
@@ -190,6 +191,14 @@ def test_awr_weight_changes_the_objective_but_not_the_reported_nll() -> None:
     plain = exp020.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight)
     weighted = exp020.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight, weight)
     assert weighted.item() != plain.item()
+    expected = sum((weight * parts.nll[(1, name)]).sum() / weight.sum() for name in _GROUPS)
+    aux_offsets = sorted({offset for offset, _ in parts.nll if offset != 1})
+    expected = (
+        expected
+        + cfg.aux_loss_weight
+        * torch.stack([sum(parts.nll[(offset, name)].mean() for name in _GROUPS) for offset in aux_offsets]).mean()
+    )
+    torch.testing.assert_close(weighted, expected)
     # The logged number is the unweighted one, so it stays comparable to 016 whatever beta does.
     assert exp020.nll_breakdown({name: parts.nll[(1, name)] for name in _GROUPS})["total"] == pytest.approx(
         sum(parts.nll[(1, name)].mean().item() for name in _GROUPS) / math.log(2.0)
