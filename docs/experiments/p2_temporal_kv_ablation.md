@@ -36,7 +36,7 @@ Do not change the model weights, attention mask, training loss, loader, or check
 
 ## Correctness gate
 
-Run this gate before any Dolphin sweep:
+Run this gate before any closed-loop sweep:
 
 1. Load the same P1 checkpoint twice, once per decode path.
 2. Check FP32 logits before and after the raw buffer first rolls.
@@ -75,19 +75,30 @@ The checkpoint path and output paths are placeholders until P1 finishes. The pla
 ```text
 uv run experiments/023_mtp_heads.py \
   --eval-run P1_RUN --eval-checkpoint-name final.pt \
-  --no-eval-incremental-kv \
+  --eval-decode recompute \
   --eval-n-matchups 96 --eval-seed 0 \
   --wandb-run-id P1_WANDB_ID --wandb-label p2-recompute
 
 uv run experiments/023_mtp_heads.py \
   --eval-run P1_RUN --eval-checkpoint-name final.pt \
-  --eval-incremental-kv \
+  --eval-decode kv \
   --eval-n-matchups 96 --eval-seed 0 \
   --wandb-run-id P1_WANDB_ID --wandb-label p2-kv
 ```
 
 Run both arms on the same retained Vast instance when possible. Do not include model download or
 one-time process startup in model-forward latency.
+
+## Implementation status
+
+The manual evaluator now accepts `--eval-decode checkpoint`, `recompute`, or `kv`. The override does
+not modify the saved checkpoint configuration. It validates the requested decode mode against the
+checkpoint attention geometry and records the selected mode in the evaluation protocol and H2H
+metadata.
+
+The focused CPU test suite passes: 89 passed and 6 GPU-only tests skipped. Static checking reports
+only the existing PyTorch module-typing warnings. The FP32 and FP16 GPU parity gate remains blocked
+on the final P1 checkpoint.
 
 ## Decision
 

@@ -172,6 +172,59 @@ def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["schema_version"] == 2
     assert payload["protocol"]["model_dtype"] == "torch.float16"
+    assert payload["protocol"]["eval_incremental_kv"] is False
+
+
+def test_manual_eval_overrides_checkpoint_incremental_mode(tmp_path, monkeypatch) -> None:
+    cfg = exp.TrainConfig(
+        d_model=32,
+        n_layers=2,
+        n_heads=2,
+        L_ctx=32,
+        attn_window=8,
+        eval_incremental_kv=False,
+        eval_fp16=False,
+    )
+    model = exp.GPT(cfg).eval()
+    seen = {}
+
+    monkeypatch.setattr(exp, "_load_ckpt", lambda _path: (model, cfg, _stats(), {"step": 7}))
+
+    def fake_make_policy(_model, _stats_arg, eval_cfg, **_kwargs):
+        seen["cfg"] = eval_cfg
+        return object()
+
+    def fake_sweep(factory, *, protocol, **_kwargs):
+        factory()
+        seen["protocol"] = protocol
+        return {}
+
+    monkeypatch.setattr(exp, "make_policy", fake_make_policy)
+    monkeypatch.setattr(exp, "_run_eval_sweep", fake_sweep)
+    exp.eval_ckpt(
+        "checkpoint.pt",
+        eval_output_dir=str(tmp_path),
+        eval_incremental_kv=True,
+        eval_n_matchups=1,
+    )
+
+    assert seen["cfg"].eval_incremental_kv is True
+    assert seen["protocol"].eval_incremental_kv is True
+    assert cfg.eval_incremental_kv is False
+
+
+def test_manual_eval_rejects_incremental_override_for_full_attention(tmp_path, monkeypatch) -> None:
+    cfg = exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16, attn_window=0, eval_fp16=False)
+    model = exp.GPT(cfg).eval()
+    monkeypatch.setattr(exp, "_load_ckpt", lambda _path: (model, cfg, _stats(), {"step": 7}))
+
+    with pytest.raises(ValueError, match="needs attn_window > 0"):
+        exp.eval_ckpt(
+            "checkpoint.pt",
+            eval_output_dir=str(tmp_path),
+            eval_incremental_kv=True,
+            eval_n_matchups=1,
+        )
 
 
 def test_final_decode_uses_the_checkpoint_decode_dtype(monkeypatch) -> None:
@@ -221,23 +274,25 @@ def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, mo
     monkeypatch.setattr(exp, "BackgroundUploader", Uploader)
     exp.main(
         exp.Args(
-            eval_run="p0-run",
+            eval_run="p1-run",
             wandb_run_id="wandb-id",
-            wandb_label="p0-final-fp16",
+            wandb_label="p2-kv",
             eval_n_matchups=96,
+            eval_decode="kv",
         )
     )
 
-    run_dir = (tmp_path / "runs" / "p0-run").resolve()
-    output_dir = run_dir / "manual_evals" / "p0-final-fp16"
-    assert calls["download"] == ("p0-run", Path("runs/p0-run/manual_checkpoints"), "final.pt")
+    run_dir = (tmp_path / "runs" / "p1-run").resolve()
+    output_dir = run_dir / "manual_evals" / "p2-kv"
+    assert calls["download"] == ("p1-run", Path("runs/p1-run/manual_checkpoints"), "final.pt")
     checkpoint, kwargs = calls["eval"]
-    assert checkpoint == Path("runs/p0-run/manual_checkpoints/final.pt").as_posix()
+    assert checkpoint == Path("runs/p1-run/manual_checkpoints/final.pt").as_posix()
     assert kwargs["eval_output_dir"] == str(output_dir)
     assert kwargs["eval_n_matchups"] == 96
-    assert kwargs["wandb_label"] == "p0-final-fp16"
+    assert kwargs["eval_incremental_kv"] is True
+    assert kwargs["wandb_label"] == "p2-kv"
     assert calls["upload"] == (output_dir, run_dir, "*")
-    assert calls["uploader_run"] == "p0-run"
+    assert calls["uploader_run"] == "p1-run"
     assert calls["closed"] is True
 
 

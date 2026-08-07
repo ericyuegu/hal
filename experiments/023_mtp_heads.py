@@ -23,6 +23,7 @@ from dataclasses import field
 from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -766,25 +767,7 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         )
     if not isinstance(cfg.attn_window, int) or isinstance(cfg.attn_window, bool) or cfg.attn_window < 0:
         raise ValueError(f"attn_window must be a non-negative integer (0 = full context), got {cfg.attn_window!r}")
-    if cfg.eval_incremental_kv and cfg.attn_window == 0:
-        raise ValueError(
-            "eval_incremental_kv needs attn_window > 0: at full attention the rolling KV cache drops "
-            "history the full forward keeps, so the decode is silently wrong past L_ctx frames. A "
-            "full-context arm must say so: pass --cfg.no-eval-incremental-kv"
-        )
-    if cfg.eval_incremental_kv and cfg.attn_window > 0:
-        receptive_field = 1 + cfg.n_layers * (cfg.attn_window - 1)
-        # Strict inequality is intentional. The full rolling-window builder masks finite
-        # differences at its oldest retained row because that row's predecessor was truncated;
-        # the streaming token originally saw that predecessor. If the receptive field lands
-        # exactly on the left edge, that one boundary-feature difference can still reach the
-        # newest output. One extra raw row puts the truncation boundary out of reach.
-        if receptive_field >= cfg.L_ctx:
-            raise ValueError(
-                "eval_incremental_kv receptive field is not equivalent to the training rolling window: "
-                f"1 + n_layers * (attn_window - 1) = {receptive_field} reaches or exceeds L_ctx={cfg.L_ctx}. "
-                "Increase L_ctx, reduce attn_window/layers, or pass --cfg.no-eval-incremental-kv."
-            )
+    _validate_incremental_decode(cfg)
     if cfg.final_h2h_reference_run is not None:
         if not cfg.final_h2h_reference_run:
             raise ValueError("final_h2h_reference_run must be a run name or None, not an empty string")
@@ -861,6 +844,28 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
             "decode_btn_support_min > 0 requires button_combo_counts_path for a fresh run or embedded "
             "dataset-scoped counts in a resumed checkpoint"
         )
+
+
+def _validate_incremental_decode(cfg: TrainConfig) -> None:
+    if cfg.eval_incremental_kv and cfg.attn_window == 0:
+        raise ValueError(
+            "eval_incremental_kv needs attn_window > 0: at full attention the rolling KV cache drops "
+            "history the full forward keeps, so the decode is silently wrong past L_ctx frames. A "
+            "full-context arm must say so: pass --cfg.no-eval-incremental-kv"
+        )
+    if cfg.eval_incremental_kv and cfg.attn_window > 0:
+        receptive_field = 1 + cfg.n_layers * (cfg.attn_window - 1)
+        # Strict inequality is intentional. The full rolling-window builder masks finite
+        # differences at its oldest retained row because that row's predecessor was truncated;
+        # the streaming token originally saw that predecessor. If the receptive field lands
+        # exactly on the left edge, that one boundary-feature difference can still reach the
+        # newest output. One extra raw row puts the truncation boundary out of reach.
+        if receptive_field >= cfg.L_ctx:
+            raise ValueError(
+                "eval_incremental_kv receptive field is not equivalent to the training rolling window: "
+                f"1 + n_layers * (attn_window - 1) = {receptive_field} reaches or exceeds L_ctx={cfg.L_ctx}. "
+                "Increase L_ctx, reduce attn_window/layers, or pass --cfg.no-eval-incremental-kv."
+            )
 
 
 def _load_model_state(model: GPT, state_dict: dict[str, Tensor]) -> None:
@@ -1432,6 +1437,7 @@ class EvalProtocol:
     decode_min_p: float
     decode_click_trigger_fix: bool
     model_dtype: str
+    eval_incremental_kv: bool
 
 
 def _eval_protocol(
@@ -1464,6 +1470,7 @@ def _eval_protocol(
         decode_min_p=settings.min_p,
         decode_click_trigger_fix=settings.click_trigger_fix,
         model_dtype=model_dtype,
+        eval_incremental_kv=cfg.eval_incremental_kv,
     )
 
 
@@ -1617,6 +1624,7 @@ def _final_h2h(
         "step": cfg.max_steps,
         "L_ctx": cfg.L_ctx,
         "model_dtype": self_dtype,
+        "eval_incremental_kv": cfg.eval_incremental_kv,
         "decode_settings": asdict(_decode_settings(model, cfg)),
         "exec_horizon": cfg.exec_horizon,
         "head_offsets": list(cfg.head_offsets),
@@ -2076,6 +2084,7 @@ def eval_ckpt(
     ckpt_path: str,
     *,
     eval_output_dir: str | None = None,
+    eval_incremental_kv: bool | None = None,
     eval_exec_horizon: int | None = None,
     decode_temp: float | None = None,
     decode_temps: tuple[float, float, float, float] | None = None,
@@ -2090,10 +2099,11 @@ def eval_ckpt(
     wandb_entity: str | None = None,
     wandb_label: str | None = None,
 ) -> dict[str, float]:
-    """Load a checkpoint and run the prior-distribution vs-CPU sweep, printing the pooled metrics. Each
-    override (execution horizon, temp, per-group temps, button-support floor, min-p, click=>trigger fix)
-    replaces the trained cfg for this eval only (test-time sweep); ``None`` keeps the trained value."""
+    """Load a checkpoint and run the closed-loop evaluation."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
+    if eval_incremental_kv is not None:
+        cfg = replace(cfg, eval_incremental_kv=eval_incremental_kv)
+        _validate_incremental_decode(cfg)
     exec_horizon = cfg.exec_horizon if eval_exec_horizon is None else eval_exec_horizon
     settings = _decode_settings(
         model,
@@ -2117,6 +2127,7 @@ def eval_ckpt(
     _exec_horizon_offsets(model.head_offsets, exec_horizon)
     print(
         f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  exec_horizon={exec_horizon}  "
+        f"incremental_kv={cfg.eval_incremental_kv}  "
         f"temp={settings.temp}  temps={settings.temps}  btn_support_min={settings.btn_support_min}  "
         f"min_p={settings.min_p}  click_trigger_fix={settings.click_trigger_fix}",
         flush=True,
@@ -2223,6 +2234,7 @@ class Args:
     eval_run: str | None = None  # R2 run name; download eval_checkpoint_name, evaluate, and upload evidence
     eval_checkpoint_name: str = "final.pt"
     eval_output_dir: str | None = None
+    eval_decode: Literal["checkpoint", "recompute", "kv"] = "checkpoint"
     eval_exec_horizon: int | None = None  # override execution horizon s for --eval (chunked decode; 1=per-frame)
     eval_temp: float | None = None  # override decode temperature for --eval
     eval_temps: tuple[float, float, float, float] | None = None  # per-group temps (buttons, main, c, triggers)
@@ -2253,6 +2265,7 @@ def main(args: Args) -> None:
     if args.eval is not None and args.eval_run is not None:
         raise SystemExit("pass one of --eval or --eval-run, not both")
     if args.eval is not None or args.eval_run is not None:
+        eval_incremental_kv = None if args.eval_decode == "checkpoint" else args.eval_decode == "kv"
         eval_path = args.eval
         output_dir = args.eval_output_dir
         eval_label = args.wandb_label
@@ -2288,6 +2301,7 @@ def main(args: Args) -> None:
             eval_ckpt(
                 eval_path,
                 eval_output_dir=output_dir,
+                eval_incremental_kv=eval_incremental_kv,
                 eval_exec_horizon=args.eval_exec_horizon,
                 decode_temp=args.eval_temp,
                 decode_temps=args.eval_temps,
