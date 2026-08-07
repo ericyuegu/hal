@@ -113,10 +113,11 @@ The 80 GB disk holds the image, ISO, checkpoint, compile cache, and both evaluat
 not download the training dataset. Do not include model download or one-time process startup in
 model-forward latency.
 
-The complete command passed a no-rent launcher audit at commit `c0606a7`. The encoded payload kept
-the parity, recompute, and KV order, exact run name, W&B ID, seeds, and 96-boot counts. Two RTX 4090
-offers met the hardware limits. The best had 252 GB RAM, DLPerf 125.7, an 80 GB disk, and an
-effective price of $0.824 per hour. Search again after P1 finishes; this audit did not rent a box.
+The complete command passed a no-rent launcher audit at commit `977ecf4`. It uses a non-login shell
+so the startup environment stays intact. The encoded payload kept the parity, recompute, and KV
+order, exact run name, W&B ID, seeds, and 96-boot counts. Two RTX 4090 offers met the hardware
+limits. The best had 252 GB RAM, DLPerf 125.7, an 80 GB disk, and an effective price of $0.824 per
+hour. Search again after P1 finishes; this audit did not rent a box.
 
 ## Implementation status
 
