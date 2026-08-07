@@ -86,6 +86,9 @@ and compact policy layout 2.
 
 Run 256 steps on a fresh RTX 4090 instance before the full run.
 
+Use `warmup_steps=32`, disable periodic and final closed-loop evaluation, and keep one final
+validation batch. The gate is a systems run, not a model result.
+
 Require:
 
 - No nonfinite values.
@@ -159,7 +162,12 @@ reservoir benchmark produced 512 distinct replays per batch and a 0.072-second m
 after startup.
 
 The full test suite passed 861 tests before the artifact rename. The renamed P0 configuration then
-passed its 17 focused tests. The remote clean-cache GPU gate is pending artifact publication.
+passed its 17 focused tests. The artifact is published and verified. The remote clean-cache GPU
+gate is active.
+
+Gate attempt 1 used Vast instance `47094969` at commit `e8433d0`. It stopped before model or data
+loading because the command set `max_steps=256` but left `warmup_steps=500`. The instance was
+destroyed. Attempt 2 sets `warmup_steps=32`.
 
 ## Promotion
 
