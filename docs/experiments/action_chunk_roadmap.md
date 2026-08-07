@@ -149,6 +149,10 @@ exposure bias.
 
 Change the temporal offsets to `(1, 2, 3, 4)`. Continue to execute only offset 1.
 
+Keep the sampler's target-read horizon at 13 so E3 and E4 use identical replay windows and RNG
+draws. E4 reads the extra targets but does not score them. Changing the farthest scored head must
+not change the data distribution.
+
 Prior runs found dense MTP slightly worse in closed loop. Treat this as a known negative result and a
 necessary control, not as a presumed policy improvement. The purpose is to obtain a complete short
 action sequence that can later be executed and scored as one chunk.

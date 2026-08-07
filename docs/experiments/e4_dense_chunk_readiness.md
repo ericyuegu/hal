@@ -19,14 +19,21 @@ tests.
 
 ## Files to change
 
-- Prefer a configuration-only change in `experiments/023_mtp_heads.py`.
-- Add tests to `tests/experiments/test_023_mtp_heads.py` only if dense offsets expose a missing
-  invariant or metric.
+- `experiments/023_mtp_heads.py`: separate the sampled target horizon from the farthest scored head.
+  Keep the sampled horizon at 13 and score only offsets `(1,2,3,4)` in E4.
+- `tests/experiments/test_023_mtp_heads.py`: prove E3 and E4 select the same replay windows and data
+  order for the same seed, and reject a sampled horizon shorter than the farthest head.
 - Update this file with the exact command, reference, run IDs, timing, metrics, artifacts, and
   decision.
 
 Do not create a new experiment file only to change offsets. Do not change the transformer, temporal
-module, within-frame factorization, loader, optimizer, or evaluator.
+module, within-frame factorization, selected data windows, optimizer, or evaluator.
+
+The loader currently uses `max(head_offsets)` as its sampled target horizon. That value affects the
+valid chunk-start range and the sampler RNG. Using 4 for E4 and 13 for E3 would silently change the
+training examples. Add a field such as `sample_chunk_length=13`, require it to be at least
+`max(head_offsets)`, and pass it to the loader. E0 through E3 already use 13, so this field preserves
+their behavior. E4 reads the same 13 target frames but ignores frames 5 through 13.
 
 ## Probability model
 
@@ -71,6 +78,9 @@ E3 predicts different time offsets.
 8. Assert requesting a four-frame execution horizon remains a separate explicit setting.
 9. Save and reload dense offsets, temporal mode, group order, and decode settings.
 10. Run the small end-to-end train test with dense offsets and finite losses.
+11. With the same replay and sampler seed, assert E3 and E4 receive byte-identical windows, replay
+    IDs, context padding, and 13-frame target chunks before the loss slices its offsets.
+12. Reject `sample_chunk_length < max(head_offsets)`.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
@@ -84,6 +94,8 @@ Copy the selected E3 configuration exactly. Change only:
 Keep execution horizon 1, 16,384 steps, seed 0, 131,072 frames per step, attention package,
 within-frame order, temporal MLP, normalized auxiliary weight, compact data, replay sampler,
 optimizer, schedule, decode temperature, and evaluation protocol fixed.
+
+Keep `sample_chunk_length=13`. It is part of the matched data contract, not an E4 treatment.
 
 Use the same RTX 4090 class, at least 200 GB system RAM, and 250 GB disk. Target 3.0 to 3.5 hours
 through evaluation and upload.
