@@ -26,8 +26,8 @@ predecessor has left the window, while the cached row originally saw that predec
 
 ## Files to change
 
-- `experiments/023_mtp_heads.py`: add a manual-evaluation override for `eval_incremental_kv`, add a
-  separate output directory for each manual evaluation, and record decode timing and protocol.
+- `experiments/023_mtp_heads.py`: add a manual-evaluation override for `eval_incremental_kv`, a
+  checkpoint parity mode, separate output directories, and decode timing and protocol records.
 - `tests/experiments/test_023_mtp_heads.py`: test the override, invalid geometry rejection, output
   separation, and protocol logging.
 - `tests/test_trunk.py`: keep exact full-versus-incremental trunk checks across left-edge eviction.
@@ -51,6 +51,12 @@ Run this gate before any closed-loop sweep:
 
 Use exact equality for sampled action bytes. Set explicit numerical tolerances for logits and report
 the largest observed error. Stop P2 if sampled actions differ.
+
+The checkpoint gate uses three deterministic model-valid feature streams with different reset
+times. It runs for `2 * L_ctx + 17` frames, so every slot crosses repeated raw-window eviction. It
+compares every frame in FP32 with `atol=rtol=1e-4` and in FP16 with `atol=rtol=5e-3`. These values
+are fixed before the final P1 checkpoint exists. The existing ring tests separately prove that raw
+online observations build the same model inputs as training windows.
 
 ## Evaluation
 
@@ -76,6 +82,10 @@ warning, not evidence that the systems optimization improved the policy.
 The checkpoint path and output paths are placeholders until P1 finishes. The planned interface is:
 
 ```text
+uv run experiments/023_mtp_heads.py \
+  --parity-run P1_RUN --parity-checkpoint-name final.pt \
+  --parity-frames 2065 --parity-slots 3 --parity-seed 0
+
 uv run experiments/023_mtp_heads.py \
   --eval-run P1_RUN --eval-checkpoint-name final.pt \
   --eval-decode recompute \
@@ -107,7 +117,12 @@ full-context sampled actions. Each evaluation writes these values to `metrics.js
 `match_rows.json`, and also returns them for W&B logging. Do not infer decode speed from total
 evaluator wall time because Dolphin boot and emulation time dominate that number.
 
-The focused CPU suite passes 132 tests and skips six GPU-only tests. The FP32 and FP16 GPU parity
+The parity mode downloads a named run checkpoint, checks FP32 and FP16 full-versus-KV behavior,
+writes `manual_evals/p2-parity/decode_parity.json`, uploads it even when a numerical gate fails, and
+returns a failing process status on any nonfinite value, tolerance failure, or sampled-action
+mismatch. A CPU test covers rolling eviction and asynchronous reset schedules with a small model.
+
+The focused CPU suite passes 134 tests and skips six GPU-only tests. The FP32 and FP16 GPU parity
 gate remains blocked on the final P1 checkpoint.
 
 ## Decision

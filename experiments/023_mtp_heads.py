@@ -952,6 +952,196 @@ class DecodeTelemetry:
         }
 
 
+def _parity_feature_stream(
+    model: GPT,
+    cfg: TrainConfig,
+    *,
+    slots: int,
+    frames: int,
+    seed: int,
+    device: torch.device,
+) -> dict[str, Tensor]:
+    gen = torch.Generator().manual_seed(seed)
+    stream: dict[str, Tensor] = {}
+    for prefix in _PLAYER_PREFIXES:
+        for name in FLOAT_FEATURES:
+            stream[f"{prefix}_{name}"] = torch.randn(slots, frames, generator=gen)
+            stream[f"{prefix}_{name}_mask"] = torch.randint(0, 2, (slots, frames), generator=gen).float()
+        for name, (vocab, _) in model.cat_specs.items():
+            stream[f"{prefix}_{name}"] = torch.randint(0, vocab, (slots, frames), generator=gen)
+    for channel, name in enumerate(ACTION_CHANNELS):
+        if channel < 4:
+            values = 2 * torch.rand(slots, frames, generator=gen) - 1
+        elif channel < _N_CONT:
+            values = torch.rand(slots, frames, generator=gen)
+        else:
+            values = torch.randint(0, 2, (slots, frames), generator=gen).float()
+        stream[f"ego_{name}"] = values
+    stream["ego_character"] = torch.randint(0, cfg.char_vocab, (slots, frames), generator=gen)
+    stream["opp_character"] = torch.randint(0, cfg.char_vocab, (slots, frames), generator=gen)
+    stream["stage"] = torch.randint(0, cfg.stage_vocab, (slots, frames), generator=gen)
+    float_dtype = next(model.parameters()).dtype
+    return {
+        name: value.to(device=device, dtype=float_dtype if value.is_floating_point() else None)
+        for name, value in stream.items()
+    }
+
+
+def _rolling_parity_context(
+    stream: dict[str, Tensor],
+    *,
+    frame: int,
+    segment_starts: Tensor,
+    L_ctx: int,
+) -> Context:
+    slots = segment_starts.numel()
+    lengths = torch.clamp(frame + 1 - segment_starts, max=L_ctx)
+    positions = torch.arange(L_ctx, device=segment_starts.device)
+    valid = positions[None, :] >= L_ctx - lengths[:, None]
+    source = frame + 1 - lengths[:, None] + positions[None, :] - (L_ctx - lengths[:, None])
+    source = source.clamp_min(0)
+    features = {}
+    for name, values in stream.items():
+        selected = values.gather(1, source)
+        features[name] = torch.where(valid, selected, torch.zeros((), dtype=selected.dtype, device=selected.device))
+    return Context(features=features, ctx_pad=L_ctx - lengths)
+
+
+@torch.no_grad()
+def checkpoint_decode_parity(
+    model: GPT,
+    cfg: TrainConfig,
+    *,
+    frames: int,
+    slots: int,
+    seed: int,
+    atol: float,
+    rtol: float,
+) -> dict[str, object]:
+    if frames <= cfg.L_ctx:
+        raise ValueError(f"parity frames={frames} must exceed L_ctx={cfg.L_ctx}")
+    if slots < 2:
+        raise ValueError(f"parity slots must be at least 2, got {slots}")
+    _validate_incremental_decode(replace(cfg, eval_incremental_kv=True))
+    model.eval()
+    device = next(model.parameters()).device
+    stream = _parity_feature_stream(model, cfg, slots=slots, frames=frames, seed=seed, device=device)
+    reset_frames = {
+        slot: tuple(point for point in (0, cfg.L_ctx // 2 + 3 * slot, cfg.L_ctx + 5 + 7 * slot) if point < frames)
+        for slot in range(slots)
+    }
+    segment_starts = torch.zeros(slots, dtype=torch.long, device=device)
+    caches: list[list[tuple[Tensor, Tensor]] | None] = [None] * slots
+    full_gen = torch.Generator(device=device).manual_seed(seed + 1)
+    incremental_gen = torch.Generator(device=device).manual_seed(seed + 1)
+    group_temps = (cfg.decode_temp,) * N_GROUPS if cfg.decode_temps is None else cfg.decode_temps
+    hidden_max_abs = 0.0
+    hidden_max_rel = 0.0
+    logit_max_abs = {name: 0.0 for name in _GROUP_NAMES}
+    probability_max_abs = {name: 0.0 for name in _GROUP_NAMES}
+    hidden_failures = 0
+    logit_failures = {name: 0 for name in _GROUP_NAMES}
+    probability_failures = {name: 0 for name in _GROUP_NAMES}
+    sampled_action_mismatches = 0
+    finite = True
+    for frame in range(frames):
+        resetting = [slot for slot, points in reset_frames.items() if frame in points]
+        for slot in resetting:
+            segment_starts[slot] = frame
+            caches[slot] = None
+        full_ctx = _rolling_parity_context(
+            stream,
+            frame=frame,
+            segment_starts=segment_starts,
+            L_ctx=cfg.L_ctx,
+        )
+        full_hidden = model(full_ctx.features, full_ctx.ctx_pad)[:, -1]
+        incremental_hidden = torch.empty_like(full_hidden)
+        groups: dict[int, list[int]] = {}
+        for slot, cache in enumerate(caches):
+            length = 0 if cache is None else cache[0][0].size(2)
+            groups.setdefault(length, []).append(slot)
+        for rows in groups.values():
+            index = torch.tensor(rows, device=device, dtype=torch.long)
+            current = {name: values.index_select(0, index)[:, frame : frame + 1] for name, values in stream.items()}
+            group_caches = [caches[row] for row in rows]
+            past: list[tuple[Tensor, Tensor] | None] = (
+                [None] * len(model.trunk.blocks)
+                if group_caches[0] is None
+                else [
+                    (
+                        torch.cat([cache[layer][0] for cache in group_caches if cache is not None], 0),
+                        torch.cat([cache[layer][1] for cache in group_caches if cache is not None], 0),
+                    )
+                    for layer in range(len(model.trunk.blocks))
+                ]
+            )
+            hidden, new = model.forward_incremental(current, past)
+            incremental_hidden.index_copy_(0, index, hidden)
+            for local, slot in enumerate(rows):
+                caches[slot] = [(key[local : local + 1], value[local : local + 1]) for key, value in new]
+        hidden_delta = (full_hidden.float() - incremental_hidden.float()).abs()
+        hidden_scale = full_hidden.float().abs().clamp_min(atol)
+        hidden_max_abs = max(hidden_max_abs, float(hidden_delta.max()))
+        hidden_max_rel = max(hidden_max_rel, float((hidden_delta / hidden_scale).max()))
+        finite &= bool(torch.isfinite(full_hidden).all() and torch.isfinite(incremental_hidden).all())
+        hidden_failures += int(not torch.allclose(full_hidden, incremental_hidden, atol=atol, rtol=rtol))
+        full_logits = model.heads[model.primary_head_idx].logits(full_hidden)
+        incremental_logits = model.heads[model.primary_head_idx].logits(incremental_hidden)
+        for name in _GROUP_NAMES:
+            lhs = full_logits[name].float()
+            rhs = incremental_logits[name].float()
+            logit_max_abs[name] = max(logit_max_abs[name], float((lhs - rhs).abs().max()))
+            logit_failures[name] += int(not torch.allclose(lhs, rhs, atol=atol, rtol=rtol))
+            lhs_probability = F.softmax(lhs / group_temps[_GROUP_NAMES.index(name)], dim=-1)
+            rhs_probability = F.softmax(rhs / group_temps[_GROUP_NAMES.index(name)], dim=-1)
+            probability_max_abs[name] = max(
+                probability_max_abs[name], float((lhs_probability - rhs_probability).abs().max())
+            )
+            probability_failures[name] += int(
+                not torch.allclose(lhs_probability, rhs_probability, atol=atol, rtol=rtol)
+            )
+            finite &= bool(torch.isfinite(lhs_probability).all() and torch.isfinite(rhs_probability).all())
+        sample_kwargs = dict(
+            group_temps=group_temps,
+            btn_dead=None,
+            min_p=cfg.decode_min_p,
+            argmax=False,
+        )
+        full_sample = model.heads[model.primary_head_idx].sample(full_hidden, gen=full_gen, **sample_kwargs)
+        incremental_sample = model.heads[model.primary_head_idx].sample(
+            incremental_hidden, gen=incremental_gen, **sample_kwargs
+        )
+        sampled_action_mismatches += int((full_sample != incremental_sample).any(dim=1).sum())
+    passed = bool(
+        finite
+        and hidden_failures == 0
+        and not any(logit_failures.values())
+        and not any(probability_failures.values())
+        and sampled_action_mismatches == 0
+    )
+    return {
+        "passed": passed,
+        "dtype": str(next(model.parameters()).dtype),
+        "frames": frames,
+        "slots": slots,
+        "comparisons": frames * slots,
+        "seed": seed,
+        "atol": atol,
+        "rtol": rtol,
+        "reset_frames": {str(slot): list(points) for slot, points in reset_frames.items()},
+        "finite": finite,
+        "hidden_max_abs": hidden_max_abs,
+        "hidden_max_rel": hidden_max_rel,
+        "hidden_failure_frames": hidden_failures,
+        "logit_max_abs": logit_max_abs,
+        "logit_failure_frames": logit_failures,
+        "probability_max_abs": probability_max_abs,
+        "probability_failure_frames": probability_failures,
+        "sampled_action_mismatches": sampled_action_mismatches,
+    }
+
+
 def _decode_settings(
     model: GPT,
     cfg: TrainConfig,
@@ -2273,6 +2463,66 @@ def _prepare_final_decode_model(model: GPT, cfg: TrainConfig) -> None:
         _halve_for_decode(model)
 
 
+def run_checkpoint_decode_parity(
+    ckpt_path: str,
+    *,
+    output_path: str,
+    frames: int | None,
+    slots: int,
+    seed: int,
+) -> dict[str, object]:
+    if DEVICE != "cuda":
+        raise RuntimeError("checkpoint decode parity requires CUDA")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg = _cfg_from_state(state["cfg"])
+    _validate_incremental_decode(replace(cfg, eval_incremental_kv=True))
+    torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
+    n_frames = 2 * cfg.L_ctx + 17 if frames is None else frames
+    tolerances = {"float32": (1e-4, 1e-4), "float16": (5e-3, 5e-3)}
+    results = {}
+    for name, (atol, rtol) in tolerances.items():
+        model = GPT(cfg).to(DEVICE)
+        _load_model_state(model, state["model"])
+        if name == "float16":
+            _halve_for_decode(model)
+        results[name] = checkpoint_decode_parity(
+            model,
+            cfg,
+            frames=n_frames,
+            slots=slots,
+            seed=seed,
+            atol=atol,
+            rtol=rtol,
+        )
+        del model
+        torch.cuda.empty_cache()
+    payload = {
+        "schema_version": 1,
+        "checkpoint": str(Path(ckpt_path).resolve()),
+        "step": int(state["step"]),
+        "wandb_id": state.get("wandb_id"),
+        "config": {
+            "d_model": cfg.d_model,
+            "n_layers": cfg.n_layers,
+            "n_heads": cfg.n_heads,
+            "L_ctx": cfg.L_ctx,
+            "attn_window": cfg.attn_window,
+            "head_offsets": list(cfg.head_offsets),
+        },
+        "results": results,
+        "passed": all(bool(result["passed"]) for result in results.values()),
+    }
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_suffix(output.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True))
+    tmp.replace(output)
+    print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+    if not payload["passed"]:
+        raise RuntimeError(f"checkpoint decode parity failed; evidence written to {output}")
+    return payload
+
+
 def eval_ckpt(
     ckpt_path: str,
     *,
@@ -2444,6 +2694,13 @@ class Args:
     wandb_project: str = "hal"
     wandb_entity: str | None = None
     wandb_label: str | None = None
+    parity: str | None = None
+    parity_run: str | None = None
+    parity_checkpoint_name: str = "final.pt"
+    parity_output: str | None = None
+    parity_frames: int | None = None
+    parity_slots: int = 3
+    parity_seed: int = 0
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
     # internal: one-shot async-eval worker (the trainer spawns this; not for manual use).
@@ -2458,8 +2715,58 @@ def main(args: Args) -> None:
         assert args.eval_worker_result is not None and args.eval_worker_replay is not None
         run_eval_worker(args.eval_worker, args.eval_worker_step, args.eval_worker_result, args.eval_worker_replay)
         return
-    if args.eval is not None and args.eval_run is not None:
-        raise SystemExit("pass one of --eval or --eval-run, not both")
+    selected_modes = sum(
+        value is not None for value in (args.eval, args.eval_run, args.parity, args.parity_run, args.resume)
+    )
+    if selected_modes > 1:
+        raise SystemExit("pass only one of --eval, --eval-run, --parity, --parity-run, or --resume")
+    if args.parity is not None or args.parity_run is not None:
+        parity_path = args.parity
+        parity_output = args.parity_output
+        uploader = None
+        upload_base = None
+        if args.parity_run is not None:
+            if Path(args.parity_run).name != args.parity_run:
+                raise SystemExit("--parity-run must be one run-name path segment")
+            if Path(args.parity_checkpoint_name).name != args.parity_checkpoint_name:
+                raise SystemExit("--parity-checkpoint-name must be one file name")
+            run_dir = Path("runs") / args.parity_run
+            checkpoint = download_latest(
+                args.parity_run,
+                run_dir / "manual_checkpoints",
+                name=args.parity_checkpoint_name,
+            )
+            if checkpoint is None:
+                raise SystemExit(f"no {args.parity_checkpoint_name} for run {args.parity_run!r}")
+            parity_path = str(checkpoint)
+            output = (
+                Path(parity_output)
+                if parity_output is not None
+                else run_dir / "manual_evals" / "p2-parity" / "decode_parity.json"
+            )
+            parity_output = str(output.resolve())
+            upload_base = run_dir.resolve()
+            if not Path(parity_output).is_relative_to(upload_base):
+                raise SystemExit("--parity-output must be inside runs/<parity-run> so evidence can upload")
+            uploader = BackgroundUploader(args.parity_run)
+        assert parity_path is not None
+        output = parity_output or str(Path(parity_path).resolve().with_name("decode_parity.json"))
+        try:
+            run_checkpoint_decode_parity(
+                parity_path,
+                output_path=output,
+                frames=args.parity_frames,
+                slots=args.parity_slots,
+                seed=args.parity_seed,
+            )
+        finally:
+            if uploader is not None:
+                assert upload_base is not None
+                output_path = Path(output)
+                if output_path.exists():
+                    uploader.upload(output_path, key=str(output_path.relative_to(upload_base)))
+                uploader.close()
+        return
     if args.eval is not None or args.eval_run is not None:
         eval_incremental_kv = None if args.eval_decode == "checkpoint" else args.eval_decode == "kv"
         eval_path = args.eval

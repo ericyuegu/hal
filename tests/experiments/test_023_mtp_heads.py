@@ -605,6 +605,79 @@ def test_policy_telemetry_does_not_change_full_decode() -> None:
     assert metrics["decode_model_rows"] == 2
 
 
+def test_checkpoint_decode_parity_covers_rolls_and_mixed_resets() -> None:
+    cfg = exp.TrainConfig(
+        d_model=32,
+        n_layers=2,
+        n_heads=2,
+        L_ctx=16,
+        attn_window=4,
+        head_offsets=(1, 2),
+        batch_size=2,
+        compile_trunk=False,
+        require_flex=False,
+    )
+
+    result = exp.checkpoint_decode_parity(
+        exp.GPT(cfg),
+        cfg,
+        frames=37,
+        slots=3,
+        seed=5,
+        atol=1e-4,
+        rtol=1e-4,
+    )
+
+    assert result["passed"]
+    assert result["comparisons"] == 111
+    assert result["sampled_action_mismatches"] == 0
+    assert result["reset_frames"] == {"0": [0, 8, 21], "1": [0, 11, 28], "2": [0, 14, 35]}
+
+
+def test_parity_run_downloads_checkpoint_and_uploads_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    calls = {}
+
+    def fake_download(run_name, dest_dir, *, name):
+        calls["download"] = (run_name, dest_dir, name)
+        dest_dir.mkdir(parents=True)
+        path = dest_dir / name
+        path.touch()
+        return path
+
+    def fake_parity(checkpoint, **kwargs):
+        calls["parity"] = (checkpoint, kwargs)
+        output = Path(kwargs["output_path"])
+        output.parent.mkdir(parents=True)
+        output.write_text("{}")
+        return {"passed": True}
+
+    class Uploader:
+        def __init__(self, run_name):
+            calls["uploader_run"] = run_name
+
+        def upload(self, path, *, key):
+            calls["upload"] = (path, key)
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setattr(exp, "download_latest", fake_download)
+    monkeypatch.setattr(exp, "run_checkpoint_decode_parity", fake_parity)
+    monkeypatch.setattr(exp, "BackgroundUploader", Uploader)
+    exp.main(exp.Args(parity_run="p1-run", parity_frames=99, parity_slots=4, parity_seed=7))
+
+    checkpoint, kwargs = calls["parity"]
+    run_dir = (tmp_path / "runs" / "p1-run").resolve()
+    output = run_dir / "manual_evals" / "p2-parity" / "decode_parity.json"
+    assert calls["download"] == ("p1-run", Path("runs/p1-run/manual_checkpoints"), "final.pt")
+    assert checkpoint == Path("runs/p1-run/manual_checkpoints/final.pt").as_posix()
+    assert kwargs == {"output_path": str(output), "frames": 99, "slots": 4, "seed": 7}
+    assert calls["upload"] == (output, "manual_evals/p2-parity/decode_parity.json")
+    assert calls["uploader_run"] == "p1-run"
+    assert calls["closed"] is True
+
+
 def test_validation_reports_each_group_at_each_offset() -> None:
     cfg = exp.TrainConfig(
         d_model=32,
