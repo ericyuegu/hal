@@ -63,6 +63,22 @@ Before the full run:
 Use a 250 GB disk, at least 200 GB RAM, and compute capability exactly 8.9. Flag a projected total
 above 3.5 hours.
 
+```text
+uv run scripts/launch_vast.py \
+  --max-price 1.50 --disk 250 --min-vram 24 --min-ram 200 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 15 --upload-gb 1 --run-hours 0.5 -- \
+  uv run experiments/023_mtp_heads.py \
+  --cfg.require-flex --cfg.L-ctx 1024 --cfg.batch-size 128 \
+  --cfg.attn-window 128 --cfg.no-eval-incremental-kv \
+  --cfg.max-steps 256 --cfg.warmup-steps 32 \
+  --cfg.val-every 0 --cfg.eval-every 0 --cfg.ckpt-every 0 \
+  --cfg.final-eval-n-matchups 0 \
+  --cfg.cache-limit-gb 128 --cfg.predownload 512 \
+  --cfg.reservoir-capacity 4096 --cfg.prefetch-factor 2 \
+  --comment p1-matched-swa-recompute-gate
+```
+
 ## Full launch shape
 
 ```text
@@ -75,11 +91,19 @@ uv run scripts/launch_vast.py \
   --cfg.attn-window 128 --cfg.no-eval-incremental-kv \
   --cfg.cache-limit-gb 128 --cfg.predownload 512 \
   --cfg.reservoir-capacity 4096 --cfg.prefetch-factor 2 \
+  --cfg.final-h2h-reference-run \
+  260807-164825_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-linear_ranked-anon-1_e0-normalized-aux-bc \
+  --cfg.final-h2h-reference-label p0 --cfg.final-h2h-self-label p1 \
+  --cfg.final-h2h-n-configs 64 \
   --comment p1-matched-swa-recompute
 ```
 
-Audit the final command against the selected P0 configuration before launch. Add the P0 reference
-run to the final H2H fields after P0 artifacts are verified.
+Audit the final command against the selected P0 configuration before launch. Verify the P0
+`final.pt` object before using this command.
+
+The current configuration parser and validator accept this P1 geometry. It resolves to
+`gpt-d256-L8-h4-Lc1024-a1024-swa128-recompute-o1.5.9.13-linear` and processes 131,072 tokens per
+step. This check does not replace the clean-host runtime gate.
 
 ## Evaluation
 

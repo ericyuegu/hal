@@ -73,6 +73,21 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.cache_limit_gb == 128
 
 
+def test_matched_p1_geometry_keeps_tokens_and_attention_work_close() -> None:
+    p0 = exp.TrainConfig()
+    p1 = exp.TrainConfig(L_ctx=1024, batch_size=128, attn_window=128)
+
+    exp.validate_config(p1, has_button_combo_counts=False)
+    assert p1.batch_size * p1.L_ctx == p0.batch_size * p0.L_ctx == 131072
+
+    p0_edges = p0.batch_size * p0.L_ctx * (p0.L_ctx + 1) // 2
+    p1_edges_per_sample = sum(min(position + 1, p1.attn_window) for position in range(p1.L_ctx))
+    p1_edges = p1.batch_size * p1_edges_per_sample
+    assert (p0_edges, p1_edges) == (16_842_752, 15_736_832)
+    assert p1_edges / p0_edges == pytest.approx(0.93434, rel=1e-5)
+    assert not p1.eval_incremental_kv
+
+
 def test_compact_config_requires_cooldown_capacity() -> None:
     cfg = exp.TrainConfig(batch_size=8, reservoir_capacity=8)
     with pytest.raises(ValueError, match="twice the micro-batch"):
