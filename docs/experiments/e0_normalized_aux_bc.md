@@ -282,6 +282,11 @@ replays and a finite gradient norm. Most logged steps remained near 0.33 to 0.38
 took 1.24 seconds, followed by normal timing, so there is no sustained loader regression. The
 56,699,580-byte `latest.pt` saved at step 10,240 uploaded successfully.
 
+At step 12,288, NLL at offsets 1, 5, 9, and 13 was 1.042, 2.684, 3.422, and 3.896. Button log
+loss was 0.0309. W&B was live through history step 12,306 with 512 distinct replays and a finite
+gradient norm. Both `latest.pt` and the 12,288 evaluation checkpoint uploaded successfully. The
+third 32-boot periodic evaluation then started; its result is pending.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train

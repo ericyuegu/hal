@@ -7,7 +7,7 @@ Updated: 2026-08-07
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
-| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; healthy through step 11,530 | Complete 16,384 steps and retain all final evidence. |
+| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; step-12,288 evaluation is running | Complete 16,384 steps and retain all final evidence. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
@@ -33,8 +33,8 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 
 ## Current evidence
 
-P0 is the active matched baseline. At step 11,264, validation NLL at offsets 1, 5, 9, and 13 was
-1.050, 2.703, 3.446, and 3.923 bits per frame. Button log loss was 0.0311. The step-8,192 CPU
+P0 is the active matched baseline. At step 12,288, validation NLL at offsets 1, 5, 9, and 13 was
+1.042, 2.684, 3.422, and 3.896 bits per frame. Button log loss was 0.0309. The step-8,192 CPU
 evaluation completed all 32 scheduled boots, produced 36 games with active play, and had no crashes.
 Stocks taken and lost per active minute were 0.893 and 1.323. The run is finite and continues to use
 512 distinct replays in every recorded batch.
