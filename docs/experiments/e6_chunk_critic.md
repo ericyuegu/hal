@@ -116,6 +116,17 @@ terminal state. Set the bootstrap term to zero after a true terminal transition.
 Use an EMA target update declared before launch. Record its coefficient. Do not tune it from final
 critic results.
 
+## Value warm-up
+
+Do not train Q against a random target value. First run 2,048 value-only updates on the frozen E4
+states and Monte Carlo returns. Do not update Q or its state-only controls during this phase. Require
+finite held-out predictions and positive held-out return correlation. Then copy the warmed V weights
+into `V_target` and begin the Q phase.
+
+Continue updating V and its EMA target during Q training. Log the phase and global Q step
+separately. A resumed run must not repeat or skip the target-network initialization. If the value
+gate fails, stop before any Q update and revise the critic plan.
+
 ## Required tests
 
 1. Use unique synthetic frame IDs to check `s_t`, actions `t+1:t+H`, rewards `t+1:t+H`, and
@@ -138,14 +149,18 @@ critic results.
 16. Assert each state-only ablation receives the exact target and valid mask used by its matched Q
     head.
 17. Build policy-sample support thresholds from logged validation chunks without reading Q values.
+18. Assert Q and both state-only controls remain byte-identical during the 2,048-step V warm-up.
+19. Assert `V_target` is an exact copy of warmed V at Q step 0, then follows the declared EMA rule.
+20. Check resume immediately before and after the phase boundary.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
 ## Training protocol
 
-Use replay-level train and validation splits. Use 16,384 critic optimizer steps for the main probe
-and the same compact replay mixing unless a measured systems limit requires a documented change.
-The actor remains frozen, so this is not a policy data-budget comparison.
+Use replay-level train and validation splits. Run 2,048 V-only warm-up steps, followed by 16,384 Q
+optimizer steps for the main probes and matched state-only controls. Keep the same compact replay
+mixing unless a measured systems limit requires a documented change. The actor remains frozen, so
+this is not a policy data-budget comparison.
 
 Train at least three critic seeds before passing the gate. One run may contain several bootstrap
 heads, but report both within-run ensemble disagreement and across-seed stability.

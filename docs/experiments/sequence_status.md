@@ -32,7 +32,7 @@ Decode speed alone cannot select the policy package.
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Primary-only plan with a fixed critic warm-up ready; blocked on policy selection | Pass the value gate, then weight only the action whose advantage is defined. |
-| E6 | Chunk-conditioned value validity | Fresh critic plan ready; blocked on E4/E5 infrastructure | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
+| E6 | Chunk-conditioned value validity | Critic plan with value warm-up ready; blocked on E4/E5 infrastructure | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
 | E7 | Macro-action optimization and execution | Fresh matched-control plan ready; blocked on E6 | Use one chunk advantage on the joint likelihood and execute the same `H=2`, then `H=4`, action. |
 
 ## Current evidence

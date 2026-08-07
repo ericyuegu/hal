@@ -196,6 +196,9 @@ y_t=\sum_{k=1}^{H}\gamma^{k-1} r_{t+k}+\gamma^H V(s_{t+H}).
 Use logged actions during critic training. Do not train only on policy logits or policy-generated
 chunks.
 
+Warm V on Monte Carlo returns before using it in a Q target. Initialize the EMA target from the
+warmed V probe; an EMA copy of a random value network is not a valid startup target.
+
 Required checks:
 
 - Held-out Bellman error and value calibration.
