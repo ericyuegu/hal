@@ -51,8 +51,8 @@ is no temporal conditioning between offsets in E2. The offset-5 prediction does 
 the offset-1 action.
 
 During training, use the true earlier group classes from the same target frame. During validation,
-report both teacher-forced and ancestrally sampled results. During closed-loop decode, sample each
-group and feed that sample to the later groups.
+report the joint teacher-forced likelihood and a separate rollout-conditioned diagnostic. During
+closed-loop decode, sample each group and feed that sample to the later groups.
 
 ## Head design
 
@@ -89,6 +89,11 @@ z_{o,g}=h+r_{o,g},
 The first group has no condition and uses the same state-only branch as E1. Initialize `W_2`, its
 bias, and every `W_c` to zero. Create the trunk, base classifiers, normalization, `W_h`, and `W_2`
 in the same order as E1 so their same-seed values match. Create conditioning tensors afterward.
+
+Implement `W_h` and `W_c` as column blocks of one affine layer over
+`concat(RMSNorm(h), c)`. Do not run separate projections and add their outputs. The split notation
+only states how to copy the E1 state columns and zero the new condition columns. This gives the
+same function with less code and one matrix multiplication.
 
 This gives exact initial E1 logits. The first update can train `W_2`. Later updates can train `W_c`
 and the embeddings. Do not add a separate linear condition bypass. `W_c` is already the condition
@@ -155,8 +160,8 @@ separate capacity control before making a factorization claim.
 For every offset and group, log:
 
 - Teacher-forced NLL and argmax accuracy.
-- Ancestral NLL and sampled accuracy.
-- The teacher-forced to ancestral gap.
+- Cross-entropy and sampled accuracy when earlier groups are sampled from the model.
+- The gap between teacher-forced and rollout-conditioned cross-entropy.
 - Hold and transition NLL and accuracy.
 - Predicted transition rate, persistence, and change-event F1.
 
@@ -164,8 +169,9 @@ Also log exact-frame accuracy, each head's trunk-gradient norm, primary-to-auxil
 condition-branch norms, embedding norms, parameter counts, step time, loader wait, peak memory, and
 closed-loop decode time.
 
-The ancestral metric is stochastic. Freeze its seed and sample count. Do not compare runs that use
-different ancestral draws.
+The rollout-conditioned metric is stochastic. It is an exposure-bias diagnostic, not the joint NLL
+of the observed action. Freeze its seed and sample count. Do not compare runs that use different
+rollout draws.
 
 ## Closed-loop evaluation
 
