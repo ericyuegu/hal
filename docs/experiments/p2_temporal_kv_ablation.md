@@ -79,28 +79,39 @@ warning, not evidence that the systems optimization improved the policy.
 
 ## Commands
 
-The checkpoint path and output paths are placeholders until P1 finishes. The planned interface is:
+The source run is
+`260807-220243_023_mtp_heads_gpt-d256-L8-h4-Lc1024-a1024-swa128-recompute-o1.5.9.13-linear_ranked-anon-1_p1-matched-swa-recompute`.
+Its W&B ID is `46zi7fgo`. Do not launch P2 until its final checkpoint and final P1 evidence are
+verified in R2.
+
+Run parity and both evaluation arms in one job so the GPU, CPU, emulator setup, and local checkpoint
+stay fixed:
 
 ```text
-uv run experiments/023_mtp_heads.py \
-  --parity-run P1_RUN --parity-checkpoint-name final.pt \
-  --parity-frames 2065 --parity-slots 3 --parity-seed 0
-
-uv run experiments/023_mtp_heads.py \
-  --eval-run P1_RUN --eval-checkpoint-name final.pt \
-  --eval-decode recompute \
-  --eval-n-matchups 96 --eval-seed 0 \
-  --wandb-run-id P1_WANDB_ID --wandb-label p2-recompute
-
-uv run experiments/023_mtp_heads.py \
-  --eval-run P1_RUN --eval-checkpoint-name final.pt \
-  --eval-decode kv \
-  --eval-n-matchups 96 --eval-seed 0 \
-  --wandb-run-id P1_WANDB_ID --wandb-label p2-kv
+uv run scripts/launch_vast.py \
+  --max-price 1.50 --disk 80 --min-vram 24 --min-ram 200 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 0 --upload-gb 1 --run-hours 1.5 -- \
+  bash -lc '
+    set -euo pipefail
+    p1_run=260807-220243_023_mtp_heads_gpt-d256-L8-h4-Lc1024-a1024-swa128-recompute-o1.5.9.13-linear_ranked-anon-1_p1-matched-swa-recompute
+    uv run experiments/023_mtp_heads.py \
+      --parity-run "$p1_run" --parity-checkpoint-name final.pt \
+      --parity-frames 2065 --parity-slots 3 --parity-seed 0
+    uv run experiments/023_mtp_heads.py \
+      --eval-run "$p1_run" --eval-checkpoint-name final.pt \
+      --eval-decode recompute --eval-n-matchups 96 --eval-seed 0 \
+      --wandb-run-id 46zi7fgo --wandb-label p2-recompute
+    uv run experiments/023_mtp_heads.py \
+      --eval-run "$p1_run" --eval-checkpoint-name final.pt \
+      --eval-decode kv --eval-n-matchups 96 --eval-seed 0 \
+      --wandb-run-id 46zi7fgo --wandb-label p2-kv
+  '
 ```
 
-Run both arms on the same retained Vast instance when possible. Do not include model download or
-one-time process startup in model-forward latency.
+The 80 GB disk holds the image, ISO, checkpoint, compile cache, and both evaluation outputs. P2 does
+not download the training dataset. Do not include model download or one-time process startup in
+model-forward latency.
 
 ## Implementation status
 
