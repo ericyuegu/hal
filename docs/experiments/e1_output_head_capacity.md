@@ -118,35 +118,19 @@ The loss, target alignment, reduction, and decode distribution must not depend o
 
 ## Fixed run configuration
 
-Copy the final E0 checkpoint configuration. Only these fields may differ:
+Copy the selected E0 configuration exactly. Do not copy the old P1 geometry from an exploratory
+checkpoint. Only these fields may differ:
 
-- Head mode and MLP ratio.
+- `head_mode=state_mlp`
+- `action_mlp_ratio=2`
 - Run comment and model tag.
-- Head-to-head self label and E0 reference run.
+- Head-to-head labels and E0 reference run.
 
-Expected fixed values are:
-
-- Model: `d_model=256`, `n_layers=8`, `n_heads=4`, `attn_window=0`.
-- Context: `L_ctx=1024`, `batch_size=128`, `grad_accum_steps=1`.
-- Training: `max_steps=16384`, `warmup_steps=500`, `seed=0`.
-- Optimizer: `muon_lr=0.02`, `adam_lr=8.5e-4`, `weight_decay=0.01`,
-  `head_weight_decay=True`.
-- Numeric path: `amp_dtype=bfloat16`, `allow_tf32=True`, `compile_trunk=True`.
-- Input regularization: `history_dropout_p=0.0`.
-- Data: `data/processed/ranked-anonymized-1/mds-v7`, schema 7,
-  `windows_per_replay=2`.
-- Loader: `shuffle_block_size=2000`, `num_workers=16`, `prefetch_factor=4`.
-- Validation: `val_every=1024`, `val_n_batches=32`,
-  `gradient_diagnostic_batch_size=16`.
-- Checkpoints: `ckpt_every=2048`.
-- Decode: temperature 1, no per-group override, no support mask, no min-p filter, no click repair,
-  `exec_horizon=1`, full-window recomputation, fp16 evaluation enabled.
-- CPU evaluation: every 4,096 steps with 32 matchups, then 96 final matchups,
-  `eval_max_frames=7200`, `eval_seed=0`.
-- Evaluation and training do not overlap on one GPU.
-
-The token budget is 131,072 frames per optimizer step. Use `require_flex=True` on Vast. If final E0
-used a different value, record and resolve the difference before launch.
+In particular, keep the selected E0 transformer, context, batch, attention, optimizer, step count,
+seed, compact data, replay sampler, action vocabulary, validation, decode, and evaluation settings.
+The expected data path is `data/processed/ranked-anonymized-1/mds-policy-v7`, with four windows per
+replay and a 4,096-replay reservoir. Keep 131,072 frames per optimizer step and use
+`require_flex=True` on Vast.
 
 ## Required tests
 
@@ -237,10 +221,8 @@ uploads, and shutdown. Use one Vast experiment at a time.
 - Record CPU count, RAM, GPU model, peak GPU memory, disk throughput, and download speed when
   available.
 
-Use at least 64 GB of system RAM and prefer 128 GB. Do not accept a faster GPU on a low-RAM host if
-it makes the streaming loader slower. E0 showed eviction and download stalls with a 440 GB cache on
-a 500 GB disk. Audit a 1 TB disk for E1 so the materialized training shards can remain cached. Record
-the storage cost and compare the stall time with E0.
+Use the same RTX 4090 host class as E0, at least 200 GB of system RAM, and a 250 GB disk. Record the
+storage cost and compare loader wait with E0.
 
 ## Evidence to retain
 
