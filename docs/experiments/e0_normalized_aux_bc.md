@@ -14,6 +14,9 @@ heads have one fixed total loss weight?
 E0 is the reference for E1 and E2. It does not use AWR, rank weights, action-group conditioning, or
 temporal conditioning.
 
+The raw v7 schema stores `misc_as` for replay fidelity. E0 and later experiments in this sequence
+must not route it into the model. Its meaning depends on the current action state.
+
 ## Intended files
 
 - Add `experiments/023_mtp_heads.py`.

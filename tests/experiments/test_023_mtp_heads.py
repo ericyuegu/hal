@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -12,6 +13,7 @@ from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import Context
 from hal.training.features import TrainBatch
+from hal.training.features import preprocess
 
 _EXPERIMENT = Path(__file__).resolve().parents[2] / "experiments" / "023_mtp_heads.py"
 _DEV_MDS = _EXPERIMENT.parents[1] / "data" / "processed" / "dev" / "mds"
@@ -63,6 +65,11 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-v7"
     assert cfg.mds_schema_version == 7
     assert cfg.cache_limit_gb == 900
+
+
+def test_misc_action_state_is_not_a_model_feature() -> None:
+    batch = {"ego_misc_as": np.array([float("nan"), 3.0], dtype=np.float32)}
+    assert preprocess(batch, {}) == {}
 
 
 def test_run_tag_names_attention_and_decode_mode() -> None:
