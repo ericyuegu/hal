@@ -89,6 +89,11 @@ upload queue. Vast will stop that instance for recovery instead of destroying th
 This applies to the official P0 evaluation and later runs. The active P0 trainer uses its older
 launch commit, so its final objects still require direct remote verification before teardown.
 
+Future training runs also reject a nonfinite objective or gradient norm before `opt.step()`. The
+error names the step and leaves the last uploaded checkpoint unchanged. The active P0 trainer does
+not contain this later guard, so its live loss and gradient history remain part of every status
+check.
+
 ## Evaluation rules
 
 - Closed-loop policy results decide promotion. Offline NLL and accuracy explain results.

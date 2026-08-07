@@ -110,6 +110,35 @@ def test_misc_action_state_is_not_a_model_feature() -> None:
     assert preprocess(batch, {}) == {}
 
 
+def test_finite_gradient_norm_accepts_a_finite_update() -> None:
+    model = torch.nn.Linear(2, 1)
+    objective = model(torch.ones(1, 2)).sum()
+    objective.backward()
+
+    norm = exp._finite_gradient_norm(model, objective.detach(), step=4)
+
+    assert torch.isfinite(norm)
+
+
+def test_finite_gradient_norm_rejects_nonfinite_loss() -> None:
+    model = torch.nn.Linear(2, 1)
+    objective = model(torch.ones(1, 2)).sum()
+    objective.backward()
+
+    with pytest.raises(FloatingPointError, match="step 4: loss is not finite"):
+        exp._finite_gradient_norm(model, torch.tensor(float("nan")), step=4)
+
+
+def test_finite_gradient_norm_rejects_nonfinite_gradient() -> None:
+    model = torch.nn.Linear(2, 1)
+    objective = model(torch.ones(1, 2)).sum()
+    objective.backward()
+    model.weight.grad[0, 0] = float("nan")
+
+    with pytest.raises(FloatingPointError, match="step 4: gradients are not finite"):
+        exp._finite_gradient_norm(model, objective.detach(), step=4)
+
+
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
 def test_input_projection_preserves_every_consumed_tensor_and_loss() -> None:
     kwargs = dict(

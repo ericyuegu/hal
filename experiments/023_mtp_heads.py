@@ -1158,6 +1158,19 @@ def objective(
     return primary + aux_weight * auxiliary
 
 
+def _finite_gradient_norm(model: nn.Module, objective_value: Tensor, step: int) -> Tensor:
+    if not bool(torch.isfinite(objective_value).item()):
+        raise FloatingPointError(f"step {step}: loss is not finite; optimizer step was skipped")
+    try:
+        return torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            float("inf"),
+            error_if_nonfinite=True,
+        )
+    except RuntimeError as error:
+        raise FloatingPointError(f"step {step}: gradients are not finite; optimizer step was skipped") from error
+
+
 def _slice_batch(batch: TrainBatch, n: int) -> TrainBatch:
     return TrainBatch(
         context=Context(
@@ -1937,12 +1950,12 @@ def train(
                 obj_acc = obj.detach() if obj_acc is None else obj_acc + obj.detach()
                 for k, v in parts.nll.items():
                     comps_acc.setdefault(k, []).append(v.detach())
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))  # measure only
+            assert obj_acc is not None
+            grad_norm = _finite_gradient_norm(model, obj_acc / cfg.grad_accum_steps, step)
             opt.step()
             sched.step()
             if DEVICE == "cuda":
                 torch.cuda.synchronize()
-        assert obj_acc is not None
         objective_bits = (obj_acc / cfg.grad_accum_steps).item() / _LN2  # the actual backprop objective, bits
         comps_cat = {k: torch.cat(v) for k, v in comps_acc.items()}
         primary = nll_breakdown({name: comps_cat[(1, name)] for name in _GROUP_NAMES})
