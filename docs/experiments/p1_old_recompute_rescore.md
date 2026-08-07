@@ -65,3 +65,8 @@ but use separate uncertainty intervals. Random restart stages prevent a paired c
 ## Results
 
 Pending the official P0 evaluation. Run one evaluation job at a time.
+
+The launch command passed a search-only preflight at commit `eb5eca7`. Two RTX 4090 offers met
+the fixed bounds. The best offer had 252 GB RAM, DLPerf 125.6, and an effective price of
+$0.829/hour with the 100 GB disk. The recompute, rolling-context, and experiment tests passed:
+69 passed and 6 hardware-only tests skipped.
