@@ -98,6 +98,28 @@ is the valid closed-loop result for that checkpoint.
 6. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
    configuration into the E1 launch audit.
 
+## Remaining run units
+
+Run these units one at a time. A named stage can contain more than one unit:
+
+1. P2 checkpoint parity, recompute evaluation, and KV evaluation in one evaluation-only job.
+2. E1 state-only MLP screening run.
+3. E2-S stable-prefix factorization run.
+4. E2-I intent-first factorization run.
+5. E3-C null-condition capacity-control run.
+6. E3-T previous-action temporal-conditioning run.
+7. E4 dense-offset chunk-readiness run.
+8. E5 2,048-step value gate, then its primary-only AWR screening run if the gate passes.
+9. E6 chunk-critic runs for three seeds. Each includes value warm-up, Q2, Q4, and matched state-only
+   controls.
+10. E7-H2 execution-only evaluation, macro-BC training, and macro-AWR training. Run the paired H2H
+    comparison only after both training arms finish.
+11. E7-H4 repeats the execution-only, macro-BC, and macro-AWR units only if H2 passes.
+
+The first screening run at E1 through E5 does not support a final architecture claim. A promoted
+result needs the predeclared multi-seed confirmation. Do not start confirmation seeds while a later
+screening stage is still needed to answer the next design question.
+
 The fresh matched-P1 plan is `docs/experiments/p1_matched_attention.md`.
 The exploratory P1 recompute rescore plan is `docs/experiments/p1_old_recompute_rescore.md`.
 The P2 decode plan is `docs/experiments/p2_temporal_kv_ablation.md`.
