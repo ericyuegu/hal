@@ -255,6 +255,10 @@ decode-mode changes. It still requests `final.pt`, 96 boots, seed 0, W&B run `ob
 `p0-final-fp16`. The selected offer was an RTX 4090 with 1,008 GB RAM, 100 GB disk, DLPerf 125.3,
 and effective price $1.382 per hour.
 
+At commit `9fb536b`, the explicit `--eval-decode recompute` command encoded correctly, but no current
+offer met the $1.50 effective hourly cap with 100 GB disk. Recheck the market after `final.pt`
+appears. Waiting for an offer does not rent an instance.
+
 At step 8,192, NLL at offsets 1, 5, 9, and 13 was 1.074, 2.764, 3.522, and 4.002. Button log loss
 was 0.0318. The 56,705,941-byte `step_008192.pt` object was verified directly in R2.
 
