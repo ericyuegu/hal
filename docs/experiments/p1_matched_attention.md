@@ -115,7 +115,9 @@ Before the full run:
 1. Load the final P0 checkpoint and retain its exact CPU and H2H schedules.
 2. Run 256 P1 steps on a clean RTX 4090 host.
 3. Confirm FlexAttention reports `window=128`.
-4. Confirm each batch has 128 distinct replay IDs and no adjacent replay reuse.
+4. Confirm each batch has 128 distinct replay IDs and zero adjacent replay reuse inside an iterator
+   epoch. Record any reuse on the first batch after an epoch boundary; do not claim the cooldown
+   spans that boundary.
 5. Confirm all losses, gradients, and parameters stay finite.
 6. Confirm training consumes 131,072 frame tokens per optimizer step.
 7. Confirm closed-loop decode rebuilds the newest 1,024 raw frames through every layer.
