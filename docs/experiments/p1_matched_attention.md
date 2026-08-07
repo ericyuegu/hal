@@ -302,6 +302,12 @@ minute were 0.687 and 1.518. Damage dealt and taken per active minute were 126.6
 rates improved from step 4,096, but they remained weak and did not change the predeclared final-step
 rule.
 
+At the same step, P0 reported 0.893 stocks taken and 1.323 lost per active minute. P1 therefore
+trailed P0 on both stock rates at this checkpoint. The separate 95% intervals overlap: P0 versus P1
+was `[0.755, 1.029]` versus `[0.560, 0.800]` for stocks taken and `[1.130, 1.533]` versus
+`[1.355, 1.697]` for stocks lost. These are independent small sweeps, not a paired test. Damage was
+closer: P0 dealt 131.1 and took 122.4 per active minute, while P1 dealt 126.6 and took 122.8.
+
 One boot first loaded Zelda when the schedule requested Sheik. The evaluator recorded that failed
 start and retried it. The final metrics still contain 32 completed boots. The recovered log contains
 the mismatch and the successful retry, so this behavior is auditable.
