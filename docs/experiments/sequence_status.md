@@ -94,13 +94,12 @@ The E7 macro-action plan is `docs/experiments/e7_chunk_awr_execution.md`.
 
 The current branch treats any failed R2 upload as a failed process after draining the complete
 upload queue. Vast will stop that instance for recovery instead of destroying the only local copy.
-This applies to the official P0 evaluation and later runs. The active P0 trainer uses its older
-launch commit, so its final objects still require direct remote verification before teardown.
+This applied to the official P0 evaluation and applies to later runs. P0's final objects have been
+verified in R2.
 
-Future training runs also reject a nonfinite objective or gradient norm before `opt.step()`. The
-error names the step and leaves the last uploaded checkpoint unchanged. The active P0 trainer does
-not contain this later guard, so its live loss and gradient history remain part of every status
-check.
+Current training runs reject a nonfinite objective or gradient norm before `opt.step()`. The error
+names the step and leaves the last uploaded checkpoint unchanged. P0 launched before this guard was
+added; its complete finite loss and gradient history was checked separately.
 
 Before the next launch, the complete suite passed 877 tests outside the restricted sandbox,
 including real Dolphin integration tests. Six old 020/022 mini-training tests now use a no-op
