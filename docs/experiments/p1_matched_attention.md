@@ -89,6 +89,21 @@ start-to-finish duration, compiled step-0 wall time, and step-0 loader wait in W
 The cache task records its own finish time, so a long compile cannot inflate the reported cache
 duration. The expanded focused suite passes 48 tests.
 
+The audit from P0 launch commit `f3eeaf3` to the planned P1 code found no change to model
+initialization, replay selection, window selection, targets, loss, or finite optimizer updates.
+Later code adds:
+
+- A private seeded generator for each PyTorch loader. This removes process-global seed draws but
+  does not change the replay or window RNGs.
+- Concurrent train prefetch, validation caching, and the real step-0 compile.
+- A fail-fast check for nonfinite loss or gradients.
+- Replay-overlap, startup, dtype, upload, and evaluation-protocol evidence.
+
+P0 has `history_dropout_p=0`, and its train forward has no other random operation. Removing loader
+draws from the global Torch RNG therefore cannot change finite training updates. The consumed-batch
+counter proves that startup overlap does not skip or duplicate a batch. Treat any P1 gate mismatch
+in the first batch, initial logits, or consumed count as a failed matched-control audit.
+
 ## Correctness gate
 
 Before the full run:
