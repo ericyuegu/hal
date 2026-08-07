@@ -289,6 +289,30 @@ container-copy path and uploaded to their intended R2 keys. Their verified MD5 v
 `30194d3c89fc514bea1ba8d2e72bf1b5`. Repeat this recovery for later periodic evaluations. W&B also
 retains the complete numeric metrics.
 
+At the second audit, the run had reached step 9,743. All tracked numerical values remained finite,
+and every batch still contained 128 distinct replays. The step-3,506 epoch boundary remained the
+only adjacent replay reuse. Over the latest 500 steps, median step time was 0.257 seconds, median
+loader wait was 0.105 seconds, and median throughput was 498.2 samples per second. The run remained
+within the 3.5-hour budget.
+
+The step-8,192 validation NLL at offsets 1, 5, 9, and 13 was 1.062, 2.715, 3.457, and 3.935 bits per
+frame. Its CPU evaluation finished in 570 seconds. It completed all 32 requested boots, produced 41
+active matches and one zero-active tail, and reported no crash. Stocks taken and lost per active
+minute were 0.687 and 1.518. Damage dealt and taken per active minute were 126.6 and 122.8. These
+rates improved from step 4,096, but they remained weak and did not change the predeclared final-step
+rule.
+
+One boot first loaded Zelda when the schedule requested Sheik. The evaluator recorded that failed
+start and retried it. The final metrics still contain 32 completed boots. The recovered log contains
+the mismatch and the successful retry, so this behavior is auditable.
+
+The step-8,192 checkpoint is present in R2 and is 56,706,005 bytes. R2 also contains 43 replay files,
+the match rows, and the metrics. The three files affected by the launch commit's retention bug were
+recovered from the live instance and uploaded under the canonical `runs/` prefix. The verified MD5
+values for `metrics.json`, the worker result, and the worker log are
+`57088ebd3bf2ceb5f894ea286a3e3f1d`, `7b1390403e2252afb0923937188e305c`, and
+`66a3f817cdac725b5008b133d3fbe918`.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.

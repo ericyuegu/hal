@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | Full 16,384-step run active; first interval healthy | Check step 8,192 and its evidence at the next 30-minute interval. |
+| P1-match | Attention package at matched data and action vocabulary | Full 16,384-step run active; step 8,192 evidence verified | Continue to the final checkpoint and evaluations. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -57,12 +57,13 @@ Every logged batch had 128 distinct replays and zero adjacent reuse. All numeric
 Median warm step time was 0.296 seconds, which projects full training to about 81 minutes. The
 verified gate checkpoint is in R2. The full matched-P1 run is approved.
 
-The active matched-P1 run is W&B `46zi7fgo` on Vast instance `47117879`. At the first 30-minute
-audit it had reached step 4,764 with finite metrics, 128 distinct replays per batch, and one expected
-epoch-boundary replay reuse. Median recent step time was 0.256 seconds and median loader wait was
-0.103 seconds. The step-4,096 CPU evaluation completed 32 boots without a crash, but its early policy
-rates were weak: 0.609 stocks taken and 1.635 lost per active minute. Continue to the predeclared
-final step.
+The active matched-P1 run is W&B `46zi7fgo` on Vast instance `47117879`. At the second audit it had
+reached step 9,743 with finite metrics, 128 distinct replays per batch, and only one adjacent replay
+reuse at an epoch boundary. Median recent step time was 0.257 seconds and median loader wait was
+0.105 seconds. The step-8,192 CPU evaluation completed all 32 requested boots without a crash. It
+reported 0.687 stocks taken and 1.518 lost per active minute. This improved from step 4,096 but
+remained weak, so the run continues to its predeclared final step. The recovered step-8,192 result,
+metrics, and worker log have verified R2 hashes.
 
 The exploratory P1-old run reported this periodic snapshot at step 12,288:
 
