@@ -150,6 +150,10 @@ W&B offline mode could not open its local socket, then exhausted the 1,024-file 
 the cascade. The normal unsandboxed run with the project file limit passed all 892 tests. This was a
 test-host restriction, not a model or evaluator failure.
 
+The complete suite passed again at commit `16c3e46`: 892 tests in 135 seconds. The focused P2 suite
+passed 77 tests and skipped six GPU-only tests, and Ruff passed. The skipped cases require the final
+P1 checkpoint and run as the P2 GPU parity gate before either decode sweep.
+
 ## Evaluation rules
 
 - Closed-loop policy results decide promotion. Offline NLL and accuracy explain results.

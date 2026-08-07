@@ -153,6 +153,11 @@ After the H2H artifact fields were clarified, the complete repository suite pass
 commit `d062eb4`. The change does not affect P2 inference, but the full pass checks checkpoint,
 evaluation, and artifact compatibility around it.
 
+At commit `16c3e46`, the focused P2 suite passed 77 tests and skipped six GPU-only tests. The
+complete repository suite passed 892 tests in 135 seconds. Ruff also passed on the P2 experiment,
+rolling-context code, H2H analysis, and their focused tests. The remaining GPU-only check is the
+planned parity gate on the final P1 checkpoint.
+
 ## Decision
 
 Keep full recomputation as the default. Promote temporal KV only if the correctness gate passes,
