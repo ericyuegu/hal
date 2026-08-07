@@ -1025,6 +1025,9 @@ def checkpoint_decode_parity(
     _validate_incremental_decode(replace(cfg, eval_incremental_kv=True))
     model.eval()
     device = next(model.parameters()).device
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started_at = time.perf_counter()
     stream = _parity_feature_stream(model, cfg, slots=slots, frames=frames, seed=seed, device=device)
     reset_frames = {
         slot: tuple(point for point in (0, cfg.L_ctx // 2 + 3 * slot, cfg.L_ctx + 5 + 7 * slot) if point < frames)
@@ -1113,6 +1116,10 @@ def checkpoint_decode_parity(
             incremental_hidden, gen=incremental_gen, **sample_kwargs
         )
         sampled_action_mismatches += int((full_sample != incremental_sample).any(dim=1).sum())
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    wall_seconds = time.perf_counter() - started_at
+    comparisons = frames * slots
     passed = bool(
         finite
         and hidden_failures == 0
@@ -1125,7 +1132,9 @@ def checkpoint_decode_parity(
         "dtype": str(next(model.parameters()).dtype),
         "frames": frames,
         "slots": slots,
-        "comparisons": frames * slots,
+        "comparisons": comparisons,
+        "wall_seconds": wall_seconds,
+        "comparisons_per_second": comparisons / wall_seconds,
         "seed": seed,
         "atol": atol,
         "rtol": rtol,
