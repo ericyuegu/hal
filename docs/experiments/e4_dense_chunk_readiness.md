@@ -38,7 +38,7 @@ p(a_{t+1:t+4}\mid s_t)
 \]
 
 Each frame action uses the selected E2 within-frame group factorization. Training uses the true
-previous frame action. Free-running validation uses the model's previous sampled action.
+previous frame action. Rollout-conditioned validation uses the model's previous sampled action.
 
 The offset-1 head remains the deployed policy and must not depend on future targets or temporal
 modules. The temporal chain begins only after offset 1.
@@ -93,14 +93,18 @@ through evaluation and upload.
 Dense controller streams contain many holds. Report metrics that cannot be won by copying the last
 action:
 
-- Teacher-forced and free-running NLL by frame offset and group.
+- Teacher-forced NLL by frame offset and group.
+- Rollout-conditioned cross-entropy by frame offset and group.
 - Exact full-action accuracy by offset.
 - Hold and transition accuracy by offset and group.
 - Change-event precision, recall, and F1.
 - Free-running four-frame sequence exact match.
 - Action-run length and transition rate in targets and samples.
 - Performance of a copy-the-previous-action baseline on the same validation rows.
-- Exposure gap from teacher forcing to free running.
+- Cross-entropy gap from teacher forcing to rollout conditioning.
+
+Rollout-conditioned cross-entropy measures exposure to sampled history. Do not report it as the
+joint NLL of the observed chunk.
 
 Also report primary NLL, trunk-gradient interaction, parameter counts, training time, loader wait,
 memory, and inference time for sampling all four planned frames. Sampling all four is a diagnostic;
