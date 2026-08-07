@@ -57,7 +57,7 @@ Every logged batch had 128 distinct replays and zero adjacent reuse. All numeric
 Median warm step time was 0.296 seconds, which projects full training to about 81 minutes. The
 verified gate checkpoint is in R2. The full matched-P1 run is approved.
 
-At step 12,288:
+The exploratory P1-old run reported this periodic snapshot at step 12,288:
 
 - Validation action NLL: 1.027 bits per frame.
 - Button log loss: 0.031.
@@ -71,9 +71,9 @@ At step 12,288:
 - Terminal subset: 10 games and one win. This is not a full-schedule win rate.
 - The step checkpoint, 44 replays, and match rows were queued for upload.
 
-This was the strongest periodic snapshot so far, but most matchups reached the frame limit and the
-sample is small. P1 has no closed-loop result until the same checkpoint is reevaluated with full
-recomputation.
+This was its strongest periodic snapshot, but most matchups reached the frame limit and the sample
+is small. It is not evidence for the active matched-P1 run. The P1-old full-recompute rescore above
+is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
