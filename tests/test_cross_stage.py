@@ -171,6 +171,16 @@ def test_crashed_fraction_counts_failed_boots() -> None:
     assert m["matches"] == 2.0
 
 
+def test_crashed_fraction_keeps_same_replica_on_different_stages_separate() -> None:
+    good = _summary(_ONE_ACTIVE_MINUTE, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
+    m = vs_cpu_metrics(
+        [(Stage.BATTLEFIELD, 0, good), (Stage.FINAL_DESTINATION, 0, None)],
+        bootstrap_resamples=0,
+    )
+
+    assert m["crashed"] == 0.5
+
+
 def test_countdown_only_fragment_is_not_a_completed_match() -> None:
     partial = _summary(PREGAME_FRAMES - 73, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
     m = vs_cpu_metrics([(Stage.BATTLEFIELD, 0, partial)], bootstrap_resamples=50)

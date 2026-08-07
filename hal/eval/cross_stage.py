@@ -162,8 +162,8 @@ def vs_cpu_metrics(
     (``<rate>_ci_lo`` / ``<rate>_ci_hi``); ``bootstrap_resamples <= 0`` collapses the
     CI to the point estimate.
     """
-    boot_ids = {boot_index for _, boot_index, _ in result}
-    completed_boot_ids = {boot_index for _, boot_index, summary in result if summary is not None}
+    boot_ids = {(stage, boot_index) for stage, boot_index, _ in result}
+    completed_boot_ids = {(stage, boot_index) for stage, boot_index, summary in result if summary is not None}
     all_summaries = [s for _, _, s in result if s is not None]
     summaries = [s for s in all_summaries if _active_frames(s.frames) > 0]
     zero_active = len(all_summaries) - len(summaries)
