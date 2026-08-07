@@ -271,7 +271,10 @@ This audit found an evidence-retention bug in the launch commit: periodic evalua
 replays and `match_rows.json`, but left `metrics.json`, the worker result, and the worker log on the
 temporary instance. The current branch now queues all four evidence types, including partial files
 after a worker failure. The focused 023 suite passes 37 tests. The active run still uses its launch
-commit, so recover its local periodic files before the instance is destroyed when possible. W&B
+commit. Its step-4,096 `metrics.json`, worker result, and worker log were recovered through Vast's
+container-copy path and uploaded to their intended R2 keys. Their verified MD5 values are
+`3d1586f01faf4d69dbec76317aec3cbf`, `d3196b1466b4c08bffa6252fc16b1086`, and
+`30194d3c89fc514bea1ba8d2e72bf1b5`. Repeat this recovery for later periodic evaluations. W&B also
 retains the complete numeric metrics.
 
 ## Evaluation
