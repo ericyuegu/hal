@@ -360,6 +360,19 @@ alignment paired evidence because later instant-restart stages are random.
 
 Closed-loop CPU and H2H results decide promotion. NLL or throughput alone cannot select P1.
 
+## Reference selection rule
+
+Keep P0 as the downstream E0 reference unless P1 passes all of these screening checks:
+
+- No new crash or artifact failure.
+- Final CPU stocks taken minus stocks lost per active minute is better than P0's point estimate.
+- Paired H2H mean stock difference per configuration is positive.
+- The H2H config sign test has more P1-ahead configs than P1-behind configs.
+
+Report all intervals and ties even when these point-estimate gates pass. One seed is not enough for a
+general architecture claim. If CPU and H2H disagree, keep P0 and call P1 inconclusive. P2 decode
+speed cannot override a policy-quality loss.
+
 ## Interpretation
 
 If P1 wins, the result supports the long-context local-attention package. It does not prove that

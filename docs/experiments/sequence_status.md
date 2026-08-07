@@ -18,6 +18,10 @@ P0 and P1-match both process 131,072 tokens and about 16 million attention edges
 step. They differ in context, batch, and mask. This is a practical package comparison, not pure
 mask isolation. P1-old also differs in sampler and action vocabulary, so it is exploratory only.
 
+P0 remains the downstream default. P1 must improve final CPU stock differential and have positive
+paired H2H stock difference with more ahead than behind configurations. Mixed evidence keeps P0.
+Decode speed alone cannot select the policy package.
+
 ## Scientific sequence
 
 | Experiment | Axis | Status | Required result before the next stage |
