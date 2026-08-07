@@ -1,0 +1,103 @@
+# P1: matched long-context SWA package
+
+Updated: 2026-08-07
+
+## Question
+
+Does a longer raw context with local attention improve policy quality when token count, approximate
+attention work, data path, model, loss, optimizer, and evaluation stay matched to P0?
+
+This is a package comparison. It does not isolate one variable. P1 changes context length, batch
+size, and attention mask together.
+
+## Reference
+
+Use the completed P0 final checkpoint and evaluation rows as the reference. Do not use the old P1
+run `19sowpt8` as matched evidence. That run used the old sampler and a 512-entry action-state
+table.
+
+## Only training changes from P0
+
+- `L_ctx`: 256 to 1,024.
+- `batch_size`: 512 to 128.
+- `attn_window`: full causal to 128 frames per layer.
+
+Keep all other P0 fields fixed, including:
+
+- Compact `mds-policy-v7` data and action vocabulary 1,024.
+- Four sampled windows per replay and reservoir capacity 4,096.
+- Prefetch 2, predownload 512, and 16 workers.
+- Linear independent heads at offsets 1, 5, 9, and 13.
+- `L_1 + (L_5 + L_9 + L_13) / 3` with no AWR.
+- Seed 0, 16,384 steps, optimizer, schedule, checkpoints, and evaluation seeds.
+- Full rolling-window recomputation during closed-loop evaluation.
+
+Both arms process 131,072 frame tokens per optimizer step. P0 has 16,842,752 causal attention
+edges per layer and step. P1 has about 15,736,832 local attention edges per layer and step.
+
+## Files
+
+- Add this plan before implementation.
+- Use `experiments/023_mtp_heads.py` for training and evaluation.
+- Reuse the compact replay code without schema or sampling changes.
+- Add or change tests only if the configuration exposes a missing invariant.
+- If a code change is needed, list the exact file and reason here before launch.
+
+The intended core arm is configuration-only. Do not add a new model file merely to encode three
+flags.
+
+## Correctness gate
+
+Before the full run:
+
+1. Load the final P0 checkpoint and retain its exact CPU and H2H schedules.
+2. Run 256 P1 steps on a clean RTX 4090 host.
+3. Confirm FlexAttention reports `window=128`.
+4. Confirm each batch has 128 distinct replay IDs and no adjacent replay reuse.
+5. Confirm all losses, gradients, and parameters stay finite.
+6. Confirm training consumes 131,072 frame tokens per optimizer step.
+7. Confirm closed-loop decode rebuilds the newest 1,024 raw frames through every layer.
+8. Reject any run with temporal KV enabled.
+9. Record compile, validation-cache, loader, compute, RAM, VRAM, disk, and startup timing.
+
+Use a 250 GB disk, at least 200 GB RAM, and compute capability exactly 8.9. Flag a projected total
+above 3.5 hours.
+
+## Full launch shape
+
+```text
+uv run scripts/launch_vast.py \
+  --max-price 1.50 --disk 250 --min-vram 24 --min-ram 200 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 15 --upload-gb 1 --run-hours 3.5 -- \
+  uv run experiments/023_mtp_heads.py \
+  --cfg.require-flex --cfg.L-ctx 1024 --cfg.batch-size 128 \
+  --cfg.attn-window 128 --cfg.no-eval-incremental-kv \
+  --cfg.cache-limit-gb 128 --cfg.predownload 512 \
+  --cfg.reservoir-capacity 4096 --cfg.prefetch-factor 2 \
+  --comment p1-matched-swa-recompute
+```
+
+Audit the final command against the selected P0 configuration before launch. Add the P0 reference
+run to the final H2H fields after P0 artifacts are verified.
+
+## Evaluation
+
+- Use the same 32 periodic and 96 final CPU matchups as P0.
+- Run 64 mirrored H2H configurations, or 128 games, against P0.
+- Keep frame limits, matchup seeds, decode seeds, temperature, and concurrency fixed.
+- Save checkpoints, match rows, replay files, worker logs, and decode protocol.
+- Report per-offset and per-group NLL and accuracy, transition metrics, gradient interaction,
+  stocks, damage, dead frames, terminal results, crashes, and wall time.
+- Report paired H2H stock difference, non-tied win rate, confidence intervals, and ties.
+
+Closed-loop CPU and H2H results decide promotion. NLL or throughput alone cannot select P1.
+
+## Interpretation
+
+If P1 wins, the result supports the long-context local-attention package. It does not prove that
+SWA alone caused the gain. If the package decision remains important and unclear, run the separate
+I1 mask isolation at context 256 and batch 512.
+
+Temporal KV decoding is a later systems ablation on the same P1 checkpoint. It must first pass
+long-roll, mixed-reset, logit, probability, and fixed-seed sampled-action parity tests.
