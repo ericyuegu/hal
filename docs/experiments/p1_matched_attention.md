@@ -68,8 +68,10 @@ This startup change is now implemented. Creating the training iterator starts wo
 one background thread builds the fixed validation cache while step 0 performs the real compiled
 forward and update. There is no warmup batch or extra forward. Training logs the exact number of
 consumed batches. The cache task is checked each step, and validation blocks on it only if needed.
-The focused suite passes 29 tests; static checking adds no new errors. The Vast P1 gate must still
-measure whether the overlap improves wall time under real R2 and GPU load.
+Train and validation loaders use separate seeded Torch generators, so iterator creation cannot race
+with model randomness. The focused trainer, loader, and upload suite passes 47 tests; static checking
+adds no new errors. The Vast P1 gate must still measure whether the overlap improves wall time under
+real R2 and GPU load.
 
 ## Correctness gate
 

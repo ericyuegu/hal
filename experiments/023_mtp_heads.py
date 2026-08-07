@@ -6,6 +6,7 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
+import concurrent.futures
 import contextlib
 import functools
 import itertools
@@ -1591,6 +1592,21 @@ def _loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
     )
 
 
+def _start_data_loading(
+    train_loader: Iterable[TrainBatch],
+    val_loader: Iterable[TrainBatch],
+    val_n_batches: int,
+) -> tuple[
+    Iterator[TrainBatch],
+    concurrent.futures.ThreadPoolExecutor,
+    concurrent.futures.Future[list[TrainBatch]],
+]:
+    train_iterator = iter(train_loader)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="val-cache")
+    future = pool.submit(lambda: list(itertools.islice(val_loader, val_n_batches)))
+    return train_iterator, pool, future
+
+
 def _fetch_h2h_reference(cfg: TrainConfig, run_dir: Path) -> Path:
     """Download the reference final.pt at train START, so a bad reference fails in
     minute one, not after the full training run."""
@@ -1771,16 +1787,29 @@ def train(
         sched.load_state_dict(resume_state["sched"])
         print(f"[resume] {run_name}: continuing from step {start_step}", flush=True)
 
-    print("[val] building cached val set…", flush=True)
+    print("[val] building cached val set while training prefetch starts…", flush=True)
     val_t0 = time.monotonic()
-    val_cache = list(itertools.islice(val_loader, cfg.val_n_batches))
-    if not val_cache:
-        raise RuntimeError("val loader yielded zero batches")
-    print(
-        f"[val] cached {len(val_cache)} batches "
-        f"({sum(b.target.shape[0] for b in val_cache)} samples) in {time.monotonic() - val_t0:.1f}s",
-        flush=True,
-    )
+    it, val_pool, val_future = _start_data_loading(train_loader, val_loader, cfg.val_n_batches)
+    val_cache: list[TrainBatch] | None = None
+
+    def _resolve_val_cache(*, wait: bool) -> list[TrainBatch] | None:
+        nonlocal val_cache
+        if val_cache is not None:
+            return val_cache
+        if not wait and not val_future.done():
+            return None
+        try:
+            val_cache = val_future.result()
+        finally:
+            val_pool.shutdown(wait=False)
+        if not val_cache:
+            raise RuntimeError("val loader yielded zero batches")
+        print(
+            f"[val] cached {len(val_cache)} batches "
+            f"({sum(b.target.shape[0] for b in val_cache)} samples) in {time.monotonic() - val_t0:.1f}s",
+            flush=True,
+        )
+        return val_cache
 
     def _wandb_id() -> str | None:
         return wandb.run.id if wandb.run is not None else None
@@ -1807,9 +1836,11 @@ def train(
     def _val_log_dict() -> dict[str, object]:
         """Flat ``val/*`` metric dict (one W&B section). Merged into the per-step log; no wandb.log
         here. One pass uses two trunk forwards per batch."""
-        vm = val_metrics(model, val_cache, cfg)
+        cache = _resolve_val_cache(wait=True)
+        assert cache is not None
+        vm = val_metrics(model, cache, cfg)
         out: dict[str, object] = {f"val/{k}": v for k, v in vm.items()}
-        out.update(gradient_diagnostics(model, val_cache[0].to(DEVICE), cfg))
+        out.update(gradient_diagnostics(model, cache[0].to(DEVICE), cfg))
         return out
 
     def _log_eval(step: int, metrics: dict[str, float]) -> None:
@@ -1915,9 +1946,10 @@ def train(
             _drain_eval(wait=True)
 
     model.train()
-    it = iter(train_loader)
     run_t0 = time.monotonic()
+    train_batches_seen = 0
     for step in range(start_step, cfg.max_steps):
+        _resolve_val_cache(wait=False)
         with profile("step") as sw:
             opt.zero_grad()
             comps_acc: dict[tuple[int, str], list[Tensor]] = {}
@@ -1933,6 +1965,7 @@ def train(
                     finished_epoch_stats = getattr(train_loader, "last_epoch_stats", None)
                     it = iter(train_loader)
                     batch = next(it)
+                train_batches_seen += 1
                 loader_wait += time.monotonic() - wait_start
                 if batch.replay_ids is not None:
                     replay_ids.update(batch.replay_ids)
@@ -1963,6 +1996,11 @@ def train(
         aux_loss = (
             sum(_offset_total_bits(comps_cat, o) for o in aux_offsets) / len(aux_offsets) if aux_offsets else 0.0
         )
+        expected_batches = (step - start_step + 1) * cfg.grad_accum_steps
+        if train_batches_seen != expected_batches:
+            raise RuntimeError(
+                f"step {step}: consumed {train_batches_seen} train batches, expected {expected_batches}"
+            )
         sps = cfg.batch_size / sw.elapsed  # batch_size is the effective batch: one step's samples
         samples = (step + 1) * cfg.batch_size
         log: dict[str, object] = {
@@ -1979,6 +2017,7 @@ def train(
             "throughput/step_s": sw.elapsed,
             "throughput/loader_wait_s": loader_wait,
             "throughput/samples_per_s": sps,
+            "data/train_batches_seen": train_batches_seen,
         }
         if replay_ids:
             log["data/distinct_replays"] = len(replay_ids)

@@ -46,6 +46,10 @@ from hal.training.features import stack_actions
 VAL_L_CHUNK = 16
 
 
+def _loader_generator(seed: int) -> torch.Generator:
+    return torch.Generator().manual_seed(seed)
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayPack:
     replay_id: str
@@ -571,6 +575,7 @@ def make_loader(
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=pin_memory,
+        generator=_loader_generator(seed),
     )
 
 
@@ -625,6 +630,7 @@ def make_replay_reservoir_loader(
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=False,
+        generator=_loader_generator(seed),
     )
     return ReservoirLoader(
         pack_loader,

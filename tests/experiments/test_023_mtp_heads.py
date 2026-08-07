@@ -139,6 +139,39 @@ def test_finite_gradient_norm_rejects_nonfinite_gradient() -> None:
         exp._finite_gradient_norm(model, objective.detach(), step=4)
 
 
+def test_data_loading_starts_train_prefetch_without_consuming_a_batch() -> None:
+    events = []
+    train_batch = object()
+    val_batch = object()
+
+    class TrainIterator:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            events.append("train_next")
+            return train_batch
+
+    class TrainLoader:
+        def __iter__(self):
+            events.append("train_iter")
+            return TrainIterator()
+
+    class ValLoader:
+        def __iter__(self):
+            events.append("val_iter")
+            yield val_batch
+
+    train_iterator, pool, future = exp._start_data_loading(TrainLoader(), ValLoader(), 1)
+    cached = future.result(timeout=2)
+    pool.shutdown()
+
+    assert events[0] == "train_iter"
+    assert "train_next" not in events
+    assert cached == [val_batch]
+    assert next(train_iterator) is train_batch
+
+
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
 def test_input_projection_preserves_every_consumed_tensor_and_loss() -> None:
     kwargs = dict(
@@ -544,5 +577,6 @@ def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatc
     assert len(runs) == 1
     assert (runs[0] / "final.pt").is_file()
     logged_keys = {key.lower() for payload in spy.logs for key in payload}
+    assert max(payload.get("data/train_batches_seen", 0) for payload in spy.logs) == 1
     for stale_name in ("awr", "rank", "value", "critic"):
         assert not any(stale_name in key for key in logged_keys)
