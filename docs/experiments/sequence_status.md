@@ -6,7 +6,7 @@ Updated: 2026-08-07
 
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
-| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Local gates passed; artifact upload active | Pass the 256-step clean-cache GPU gate. |
+| D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Artifact published and verified | Pass the 256-step clean-cache GPU gate. |
 | P0 | Scientific package: short full-causal context | Fresh plan ready | Restart from step 0 after the GPU data gate. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Pending P0 | Retrain after P0 with only context, batch, and mask changed. |
@@ -56,16 +56,15 @@ recomputation.
 
 ## Immediate next actions
 
-1. Finish the `mds-policy-v7` upload and verify remote counts and bytes.
-2. Run the 256-step clean-cache GPU data gate.
-3. Relaunch P0 from step 0 and finish its fixed evaluations.
-4. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
-5. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
+1. Run the 256-step clean-cache GPU data gate.
+2. Relaunch P0 from step 0 and finish its fixed evaluations.
+3. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
+4. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.
-6. Evaluate P1-old with full recomputation over 96 CPU matchups.
-7. Train P1-match on the accepted data path and action vocabulary.
-8. Compare P0, P1-match full recomputation, and P1-match temporal KV.
-9. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
+5. Evaluate P1-old with full recomputation over 96 CPU matchups.
+6. Train P1-match on the accepted data path and action vocabulary.
+7. Compare P0, P1-match full recomputation, and P1-match temporal KV.
+8. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
    configuration into the E1 launch audit.
 
 ## Evaluation rules
