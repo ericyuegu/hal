@@ -189,6 +189,12 @@ training, so that telemetry is invalid on this host. Step time minus loader wait
 with prefetch 2 and 0.136 seconds with prefetch 32. The accepted gate projects about 1.6 hours of
 training before validation and closed-loop evaluation.
 
+The full P0 run started from step 0 on Vast instance `47096112`, commit `f3eeaf3`, and W&B run
+`obx3o3az`. The selected offer is an RTX 4090 with 409 GB RAM, 250 GB disk, DLPerf 125.6, and an
+effective price of $1.428 per hour. The run uses prefetch 2 and the complete default validation,
+checkpoint, periodic evaluation, and final evaluation schedule. Startup passed CUDA, disk, fixed
+validation, compilation, full-attention, and first-batch checks.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
