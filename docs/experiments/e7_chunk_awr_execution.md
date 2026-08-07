@@ -63,6 +63,11 @@ Compute a detached, clipped exponential weight with the same finite implementati
 `beta_H` from the frozen E6 validation audit before E7. Normalize valid weights to mean one within
 the effective batch and report raw and normalized statistics.
 
+Apply the E6 support rule before normalization. For a logged chunk below the declared support
+threshold, ignore its Q advantage and set its raw weight to one. Keep its macro-BC loss. Do not drop
+the row, because that would change the behavior-data distribution. Log the low-support fraction and
+the effective sample size both before and after this fallback.
+
 The joint chunk NLL is:
 
 \[
@@ -132,15 +137,17 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 6. Assert Q2 receives only actions 1 and 2; Q4 receives actions 1 through 4.
 7. Assert Q, V, advantages, and weights are detached and frozen.
 8. Reject critic and actor checkpoint identity or horizon mismatches.
-9. Assert teacher forcing uses logged earlier actions and free-running decode uses sampled earlier
+9. Assert a low-support logged chunk receives raw weight one and remains in the macro-BC loss.
+10. Assert support gating happens before effective-batch weight normalization.
+11. Assert teacher forcing uses logged earlier actions and free-running decode uses sampled earlier
    actions.
-10. Assert an H-frame queue causes one policy inference followed by exactly H controller outputs.
-11. Assert all intervening raw states and executed actions enter the next rebuilt context.
-12. Assert match end, slot reset, death/reset state, and rejected boot clear every queued action.
-13. Assert mixed vector slots can sit at different chunk phases without sharing state.
-14. Run longer than `L_ctx` and confirm rebuilt contexts contain no dropped raw frame information.
-15. Save and reload horizon, objective, critic identity, reward settings, and decode protocol.
-16. Run small macro-BC and macro-AWR jobs with finite losses, gradients, weights, and parameters.
+12. Assert an H-frame queue causes one policy inference followed by exactly H controller outputs.
+13. Assert all intervening raw states and executed actions enter the next rebuilt context.
+14. Assert match end, slot reset, death/reset state, and rejected boot clear every queued action.
+15. Assert mixed vector slots can sit at different chunk phases without sharing state.
+16. Run longer than `L_ctx` and confirm rebuilt contexts contain no dropped raw frame information.
+17. Save and reload horizon, objective, critic identity, reward settings, and decode protocol.
+18. Run small macro-BC and macro-AWR jobs with finite losses, gradients, weights, and parameters.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
