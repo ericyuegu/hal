@@ -73,10 +73,10 @@ RANKED_ANONYMIZED_1_V7: Final[StreamSource] = StreamSource(
     local=Path("data/processed/ranked-anonymized-1/mds-v7"),
 )
 
-RANKED_ANONYMIZED_1_POLICY_V2: Final[StreamSource] = StreamSource(
-    name="ranked-anonymized-1-policy-v2",
-    remote="s3://hal/processed/ranked-anonymized-1/mds-policy-v2",
-    local=Path("data/processed/ranked-anonymized-1/mds-policy-v2"),
+RANKED_ANONYMIZED_1_POLICY_V7: Final[StreamSource] = StreamSource(
+    name="ranked-anonymized-1-policy-v7",
+    remote="s3://hal/processed/ranked-anonymized-1/mds-policy-v7",
+    local=Path("data/processed/ranked-anonymized-1/mds-policy-v7"),
 )
 
 # v5 and v6 stay registered: the frozen experiments still read them.
@@ -84,7 +84,7 @@ ALL: Final[tuple[StreamSource, ...]] = (
     RANKED_ANONYMIZED_1,
     RANKED_ANONYMIZED_1_V6,
     RANKED_ANONYMIZED_1_V7,
-    RANKED_ANONYMIZED_1_POLICY_V2,
+    RANKED_ANONYMIZED_1_POLICY_V7,
 )
 BY_NAME: Final[dict[str, StreamSource]] = {s.name: s for s in ALL}
 # Reverse map: local cache root (string) -> remote URI. Lets the dataloader turn

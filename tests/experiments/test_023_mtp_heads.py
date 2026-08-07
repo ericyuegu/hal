@@ -66,7 +66,7 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.gradient_diagnostic_batch_size == 64
     assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (4096, 32, 96)
     assert cfg.eval_max_frames == 7200
-    assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-policy-v2"
+    assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-policy-v7"
     assert cfg.compact_data
     assert cfg.action_vocab == 1024
     assert cfg.mds_schema_version == 7

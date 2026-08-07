@@ -225,7 +225,7 @@ class TrainConfig:
     # checkpointing
     ckpt_every: int = 2048
     # data
-    data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v2"
+    data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
     compact_data: bool = True
     # MDS materialization this run reads. The dataloader's per-row guard rejects any other version
     # — never silent.

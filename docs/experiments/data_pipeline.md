@@ -119,6 +119,9 @@ The `exp/data-pipeline` branch now has:
 - Early feature projection in training and closed-loop evaluation.
 - W&B metrics for loader wait, replay diversity, and dropped epoch-tail windows.
 
+The artifact is named `mds-policy-v7`. It is a policy projection of canonical MDS v7, not a new
+canonical v8 schema. Each row records source schema 7 and compact policy layout 2.
+
 The full audit passed all 114,768 ranked replays and about 1.23 billion frames. The compact train
 arrays use 76.19 GB instead of 802.47 GB, a 10.53x reduction. The complete compact artifact has 291
 compressed shards and uses 13.34 GB. The v7 artifact uses 29.82 GB compressed.
