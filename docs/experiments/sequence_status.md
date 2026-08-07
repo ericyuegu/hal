@@ -75,6 +75,7 @@ recomputation.
    configuration into the E1 launch audit.
 
 The fresh matched-P1 plan is `docs/experiments/p1_matched_attention.md`.
+The exploratory P1 recompute rescore plan is `docs/experiments/p1_old_recompute_rescore.md`.
 The P2 decode plan is `docs/experiments/p2_temporal_kv_ablation.md`.
 The E2 factorization plan is `docs/experiments/e2_within_frame_factorization.md`.
 The E3 temporal plan is `docs/experiments/e3_temporal_factorization.md`.
