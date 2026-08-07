@@ -84,6 +84,11 @@ The E5 AWR plan is `docs/experiments/e5_primary_awr.md`.
 The E6 critic plan is `docs/experiments/e6_chunk_critic.md`.
 The E7 macro-action plan is `docs/experiments/e7_chunk_awr_execution.md`.
 
+The current branch treats any failed R2 upload as a failed process after draining the complete
+upload queue. Vast will stop that instance for recovery instead of destroying the only local copy.
+This applies to the official P0 evaluation and later runs. The active P0 trainer uses its older
+launch commit, so its final objects still require direct remote verification before teardown.
+
 ## Evaluation rules
 
 - Closed-loop policy results decide promotion. Offline NLL and accuracy explain results.

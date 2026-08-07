@@ -18,6 +18,7 @@ from typing import Any
 from typing import Final
 
 import torch
+from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
@@ -57,7 +58,7 @@ class BackgroundUploader:
                 try:
                     self._client.upload_file(str(local), self._bucket, key)
                     logger.info(f"[ckpt] uploaded {rel_key or local.name} -> r2://{self._bucket}/{key}")
-                except (OSError, BotoCoreError, ClientError) as e:
+                except (OSError, BotoCoreError, ClientError, S3UploadFailedError) as e:
                     self._failures += 1
                     logger.error(f"[ckpt] upload failed for {local.name}: {e}")
             finally:
@@ -80,11 +81,11 @@ class BackgroundUploader:
         return len(files)
 
     def close(self) -> None:
-        """Drain the queue and join the worker. Warns if any upload failed."""
+        """Drain the queue and fail if any upload failed."""
         self._queue.put(_SENTINEL)
         self._thread.join()
         if self._failures:
-            logger.warning(f"[ckpt] {self._failures} checkpoint upload(s) failed this run")
+            raise RuntimeError(f"{self._failures} R2 upload(s) failed")
 
 
 def save_checkpoint(
