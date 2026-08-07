@@ -262,6 +262,9 @@ At commit `9fb536b`, the explicit `--eval-decode recompute` command encoded corr
 offer met the $1.50 effective hourly cap with 100 GB disk. Recheck the market after `final.pt`
 appears. Waiting for an offer does not rent an instance.
 
+At commit `c4ae635`, the command still encoded correctly after the protocol audit. No RTX 4090
+offer met the $1.50 effective hourly cap with 100 GB disk at 11:53 PDT.
+
 At step 8,192, NLL at offsets 1, 5, 9, and 13 was 1.074, 2.764, 3.522, and 4.002. Button log loss
 was 0.0318. The 56,705,941-byte `step_008192.pt` object was verified directly in R2.
 

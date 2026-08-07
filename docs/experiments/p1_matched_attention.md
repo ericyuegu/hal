@@ -162,6 +162,9 @@ After the concurrent-startup implementation, the same gate command passed a no-r
 `1647cc2`. The encoded SHA and every experiment flag were correct. The selected offer remained the
 RTX 4090 with 1,008 GB RAM, 250 GB disk, DLPerf 125.3, and effective price $1.451 per hour.
 
+At commit `c4ae635`, the gate command still encoded every planned flag. No RTX 4090 offer met the
+$1.50 effective hourly cap with 250 GB disk at 11:53 PDT. No instance was rented.
+
 ## Evaluation
 
 - Use the same 32 periodic and 96 final CPU matchups as P0.
