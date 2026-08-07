@@ -201,6 +201,11 @@ At commit `47540cc`, the gate command passed another no-rent audit. Three RTX 40
 bounds. The best had 252 GB RAM, DLPerf 125.6, a 250 GB disk, and an effective price of
 $0.781/hour. P1-old remained the only rented experiment job.
 
+The 256-step gate launched from branch `exp/p1-matched-attention` on Vast instance `47112838` at
+commit `3e9bae8`. The RTX 4090 host has 252 GB RAM, DLPerf 125.5, and a 250 GB disk at
+$0.808/hour effective. The container became ready in 33 seconds. No other experiment job was
+active.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
