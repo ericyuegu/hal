@@ -155,9 +155,12 @@ below the 3.5-hour end-to-end limit. Replay decode and replacement remain the ma
 
 ## Startup overlap
 
-Train prefetch, validation caching, and Torch compilation are still sequential in experiment 023.
-Overlap them only after the loader is correct. Add separate timers and keep one serial control run.
-Concurrent reads can increase disk pressure, so total startup time is the deciding measure.
+Experiment 023 now starts the training iterator first, builds the fixed validation cache on one
+background thread, and compiles the real step-0 forward at the same time. The two loaders use
+private Torch generators, so concurrent iterator creation cannot change model initialization or
+replay sampling. The trainer records iterator startup, validation-cache duration, step-0 time, and
+loader wait. The matched-P1 gate remains the real systems test because concurrent reads can still
+increase disk pressure.
 
 ## Stopped P0 evidence
 
