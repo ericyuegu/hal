@@ -236,6 +236,33 @@ def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
     assert payload["schema_version"] == 2
     assert payload["protocol"]["model_dtype"] == "torch.float16"
     assert payload["protocol"]["eval_incremental_kv"] is False
+    assert payload["protocol"]["cpu_level"] == 9
+    assert payload["protocol"]["ego_port"] == 1
+    assert payload["protocol"]["seed_stage"] == int(exp.PRIOR_SWEEP_SEED_STAGE.value)
+    assert len(payload["protocol"]["matchup_schedule_sha256"]) == 64
+
+
+def test_eval_sweep_uses_recorded_cpu_protocol(monkeypatch) -> None:
+    cfg = exp.TrainConfig()
+    protocol = exp._eval_protocol(
+        cfg,
+        settings=exp.DecodeSettings(1.0, None, 0, 0.0, False),
+        exec_horizon=1,
+        default_n_matchups=3,
+        model_dtype="torch.float16",
+    )
+    seen = {}
+
+    def fake_sweep(_factory, **kwargs):
+        seen.update(kwargs)
+        return [], []
+
+    monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", fake_sweep)
+    exp._run_eval_sweep(lambda: object(), protocol=protocol, replay_dir=None, rows_path=None)
+
+    assert seen["cpu_level"] == protocol.cpu_level
+    assert seen["ego_port"] == protocol.ego_port
+    assert int(seen["seed_stage"].value) == protocol.seed_stage
 
 
 def test_manual_eval_overrides_checkpoint_incremental_mode(tmp_path, monkeypatch) -> None:

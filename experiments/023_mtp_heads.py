@@ -9,6 +9,7 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 import concurrent.futures
 import contextlib
 import functools
+import hashlib
 import itertools
 import json
 import math
@@ -26,6 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
+import melee
 import numpy as np
 import torch
 import torch.nn as nn
@@ -42,12 +44,14 @@ from torch.optim.lr_scheduler import LambdaLR
 import wandb
 from hal import streams
 from hal.data.feature_stats import FeatureStats
+from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.h2h import run_h2h
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import usable_cpus
+from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.paired import summarize_paired
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
@@ -1444,6 +1448,10 @@ class EvalProtocol:
     max_parallel: int
     max_frames: int
     seed: int
+    cpu_level: int
+    ego_port: int
+    seed_stage: int
+    matchup_schedule_sha256: str
     exec_horizon: int
     decode_temp: float
     decode_temps: tuple[float, float, float, float] | None
@@ -1472,11 +1480,18 @@ def _eval_protocol(
         raise ValueError(f"n_matchups must be > 0, got {n}")
     if frames <= 0:
         raise ValueError(f"max_frames must be > 0, got {frames}")
+    matchups = matchups_for_vs_cpu(n)
+    schedule = [[int(ego.value), int(opp.value)] for ego, opp in matchups]
+    schedule_sha256 = hashlib.sha256(json.dumps(schedule, separators=(",", ":")).encode()).hexdigest()
     return EvalProtocol(
         n_matchups=n,
         max_parallel=_eval_max_parallel(cfg, n),
         max_frames=frames,
         seed=resolved_seed,
+        cpu_level=9,
+        ego_port=1,
+        seed_stage=int(PRIOR_SWEEP_SEED_STAGE.value),
+        matchup_schedule_sha256=schedule_sha256,
         exec_horizon=exec_horizon,
         decode_temp=settings.temp,
         decode_temps=settings.temps,
@@ -1514,6 +1529,9 @@ def _run_eval_sweep(
         n_matchups=protocol.n_matchups,
         max_parallel=protocol.max_parallel,
         max_frames=protocol.max_frames,
+        cpu_level=protocol.cpu_level,
+        ego_port=protocol.ego_port,
+        seed_stage=melee.Stage(protocol.seed_stage),
     )
     if rows_path is not None:
         _write_match_rows(rows_path, rows, protocol)
