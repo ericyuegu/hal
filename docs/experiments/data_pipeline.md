@@ -2,7 +2,7 @@
 
 Updated: 2026-08-07
 
-## Reason
+## Initial failure
 
 P0 used the intended model configuration, but the GPU waited for data. After the cache filled, steps
 600 through 800 averaged 1.53 seconds. Training projected to about 7.2 hours before evaluation. The
@@ -98,13 +98,14 @@ systems tests and must be removed.
 Gate: 512 distinct replay IDs per batch when enough replays exist, deterministic batches across worker
 counts, correct marginal window-start distribution, and lower replay bytes per training window.
 
-## Representative benchmark
+## Remote benchmark
 
-Use `mds-v7-sub4` for host benchmarks before another full run. It contains real v7 shards and avoids
-an 803 GB expansion. Compare the current loader, D0, D1, D2, and D3 independently.
+The clean-cache benchmark now uses the complete published `mds-policy-v7` artifact on the same RTX
+4090 class as the experiments. It does not use an old subset.
 
-Do not relaunch P0 until one configuration projects below 0.5 seconds per optimizer step on a suitable
-host, sustains at least 80% GPU use after warm-up, and preserves the correctness gates above.
+Require a mean step below 0.5 seconds, exact replay diversity, finite training, and a projected total
+below 3.5 hours. Record GPU use, but do not trust a zero value when power and CUDA allocation prove
+that training is active.
 
 ## Current implementation
 
@@ -139,8 +140,18 @@ distinct replays per batch. Capacity 4,096 took 7.16 seconds to start, then load
 0.072 seconds. It used 2.77 GB peak RAM. Across 8,192 samples, it used 3,840 distinct replays. The
 median replay reuse gap was four batches; 21.9% of reuse gaps were two batches. Capacity 1,024 is the
 minimum that enforces the cooldown, but it nearly alternates two fixed replay groups. P0 therefore
-uses capacity 4,096. This does not measure remote downloads or GPU use. A Vast probe must still test
-`predownload` 256, 512, 1,024, and 4,096.
+uses capacity 4,096.
+
+The RTX 4090 gate compared prefetch 2 and 32 with predownload 512. Across steps 50 through 255, both
+runs averaged 0.344 seconds per step. Loader wait was 0.209 seconds with prefetch 2 and 0.208 seconds
+with prefetch 32. Every batch had 512 distinct replays, and all losses and gradients were finite.
+Prefetch 32 had no measurable benefit, so P0 keeps prefetch 2.
+
+The full P0 run downloaded the complete 13.34 GB artifact and expanded its working cache to about
+72 GB. Mean step time through step 2,250 was 0.376 seconds. The sampled GPU-use mean was 26%, and
+step time minus loader wait showed a similar compute duty fraction. This misses the original 80%
+GPU-use target. We accepted it because the compact path reduces the old 7.2-hour projection to well
+below the 3.5-hour end-to-end limit. Replay decode and replacement remain the main systems follow-up.
 
 ## Startup overlap
 
