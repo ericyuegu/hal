@@ -315,6 +315,28 @@ validation NLL at offsets 1, 5, 9, and 13 was 1.029, 2.650, 3.379, and 3.851 bit
 log loss was 0.0305. The primary-to-weighted-auxiliary gradient cosine was 0.313; the auxiliary
 gradient norm was 3.18 times the primary norm, with a 0.347 sign-conflict fraction.
 
+The frozen checkpoint was rescored on the same 32 validation batches after adding per-offset group
+metrics. The local CPU rescore used dense SDPA because FlexAttention is unavailable on CPU. Its
+total NLL differed from the original GPU values by less than 0.00004 bits at every offset.
+
+| Offset | Buttons accuracy | Main-stick accuracy | C-stick accuracy | Trigger accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.942 | 0.876 | 0.990 | 0.982 |
+| 5 | 0.845 | 0.691 | 0.968 | 0.950 |
+| 9 | 0.803 | 0.611 | 0.961 | 0.927 |
+| 13 | 0.776 | 0.564 | 0.957 | 0.912 |
+
+| Offset | Buttons NLL | Main-stick NLL | C-stick NLL | Trigger NLL |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.242 | 0.646 | 0.050 | 0.090 |
+| 5 | 0.608 | 1.650 | 0.146 | 0.245 |
+| 9 | 0.799 | 2.046 | 0.190 | 0.344 |
+| 13 | 0.933 | 2.285 | 0.223 | 0.410 |
+
+The main stick loses the most predictive accuracy with horizon and contributes most of the future
+NLL. C-stick accuracy stays high because its marginal distribution is low entropy; accuracy alone
+therefore overstates useful future prediction.
+
 R2 contains `final.pt` at 56,698,679 bytes. Its SHA-256 is
 `5d12d010fa3acd1ec07bd86a8e85d2cbb84c584a77b9b79e90dc6fcf03c32e4b`. It records step 16,384,
 W&B ID `obx3o3az`, the exact P0 model and data configuration, FP16 evaluation, full attention, and
