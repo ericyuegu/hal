@@ -75,3 +75,28 @@ The official rescore launched on Vast instance `47110149` at commit `6e97103`. T
 4090 host has 252 GB RAM, DLPerf 125.5, and a 100 GB disk at $0.725/hour effective. Provisioning
 took about 5 minutes 17 seconds. The evaluator uses the exact command above and is the only active
 experiment job.
+
+The rescore completed and the instance destroyed itself after upload. The protocol records FP16,
+full recomputation, 96 scheduled boots, 96 concurrent slots, no boot crashes, and 120 active games.
+The result is:
+
+- Stocks taken per active minute: 0.798, 95% CI `[0.713, 0.883]`.
+- Stocks lost per active minute: 1.405, 95% CI `[1.281, 1.534]`.
+- Damage dealt per active minute: 132.5, 95% CI `[125.4, 139.3]`.
+- Damage taken per active minute: 116.1, 95% CI `[112.0, 120.0]`.
+- Dead frames: 2.14%.
+- Mean stock difference: -0.950.
+- Twenty-four games reached a terminal stock state; the policy won none.
+
+R2 contains the row manifest and 125 replay files, 231.01 MiB in total. The manifest has 120 active
+rows and no countdown-only row. Five 61,396-byte replay files have no match row. Keep them as
+unmatched diagnostic artifacts and do not count them as games.
+
+The first replay began about 52 seconds after host readiness. The last replay ended about 22
+minutes later, and the manifest uploaded about 25 minutes after readiness. This reaches the
+25-minute evaluation warning threshold.
+
+The checkpoint's old KV final point estimates were 0.804 stocks taken/min, 1.480 stocks lost/min,
+129.2 damage dealt/min, and 117.7 damage taken/min. The recompute estimates are close. This does not
+prove decode parity: the runs used independent game randomness, different concurrency, and
+different evaluator versions. The matched P1 checkpoint remains the required P2 comparison.

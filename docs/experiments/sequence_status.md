@@ -8,8 +8,8 @@ Updated: 2026-08-07
 | --- | --- | --- | --- |
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
-| P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete; rescore preflight passed | Reevaluate the final checkpoint with full recomputation. |
-| P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
+| P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
+| P1-match | Attention package at matched data and action vocabulary | Gate preflight passed | Run the 256-step systems gate. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -44,6 +44,13 @@ are in W&B run `obx3o3az`.
 
 Vast instance `47034073` and W&B run `19sowpt8` train the P1 architecture and use the P2 decode
 path. Keep this as exploratory evidence, not the E0 reference.
+
+The P1-old FP16 full-recompute rescore completed on Vast instance `47110149`. All 96 boots
+succeeded and produced 120 active games. Stocks taken and lost per active minute were 0.798 and
+1.405. Damage dealt and taken per active minute were 132.5 and 116.1. The complete rows and 125
+replay files are in `manual_evals/p1-old-final-recompute-fp16`. The sweep reached the 25-minute
+evaluation warning. It used 96 concurrent boots, so it is not a matched decode comparison with P0
+or the historical KV evaluation.
 
 At step 12,288:
 
