@@ -112,6 +112,11 @@ The challenger and reference sides of H2H must also use the same actual dtype. M
 protocol data must record that dtype. This gate was added after finding that the old in-process final
 path kept the live FP32 training weights while checkpoint-loaded policies used FP16.
 
+Both the 256-step gate and full launch command passed no-rent launcher dry runs at commit `b422724`.
+All flags, including the P0 H2H reference, were encoded correctly. The current qualifying offer was
+an RTX 4090 with 1,008 GB RAM, 250 GB disk, DLPerf 125.5, and effective price $1.451 per hour. Select
+the offer again when each run launches.
+
 ## Evaluation
 
 - Use the same 32 periodic and 96 final CPU matchups as P0.

@@ -245,6 +245,10 @@ The run-based evaluation path downloads the checkpoint, writes to
 `manual_evals/p0-final-fp16`, logs labeled metrics without renaming the W&B run, uploads all rows
 and replays to the source run, and drains those uploads before the instance exits.
 
+The command passed a no-rent launcher dry run at commit `b422724`. The current qualifying offer was
+an RTX 4090 with 1,008 GB RAM, 100 GB disk, DLPerf 125.5, and effective price $1.382 per hour. Select
+the offer again at launch; market state may change.
+
 At step 8,192, NLL at offsets 1, 5, 9, and 13 was 1.074, 2.764, 3.522, and 4.002. Button log loss
 was 0.0318. The 56,705,941-byte `step_008192.pt` object was verified directly in R2.
 
