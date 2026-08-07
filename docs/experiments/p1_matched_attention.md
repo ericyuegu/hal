@@ -122,6 +122,10 @@ changes from P0: `L_ctx` 256 to 1,024, batch size 512 to 128, and attention wind
 arms process 131,072 frames per step. Their per-layer attention-edge counts are 16,842,752 and
 15,736,832. P1 temporal KV decoding is false. Repeat the launcher dry run at the final launch commit.
 
+The 256-step gate command passed another no-rent launcher audit at commit `dadb0df`. The selected
+offer was an RTX 4090 with 1,008 GB RAM, 250 GB disk, DLPerf 125.3, and effective price $1.451 per
+hour. The encoded command preserved all planned gate fields.
+
 ## Evaluation
 
 - Use the same 32 periodic and 96 final CPU matchups as P0.
