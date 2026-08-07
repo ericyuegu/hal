@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | 256-step systems gate passed | Launch the full 16,384-step run. |
+| P1-match | Attention package at matched data and action vocabulary | Full 16,384-step run active | Audit the first 30-minute interval, then monitor every 30 minutes. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |

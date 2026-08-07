@@ -249,6 +249,12 @@ per frame. This is a 256-step systems result, not a policy comparison. R2 contai
 `final.pt`; its SHA-256 is `028658c9aec8ac082392af16fc0c47d83e089ded8826e2589197df4f3e19d115`.
 The checkpoint records step 256, W&B ID `6ydiy4kq`, action vocabulary 1,024, and temporal KV off.
 
+The full 16,384-step run launched on Vast instance `47117879` from commit `a7a1f6b9a2`. The RTX
+4090 host has 252 GB RAM, DLPerf 125.6, and a 250 GB disk at $0.781/hour effective. The container
+became ready in 7 minutes 24 seconds. No other Vast experiment job was active. The launch command
+uses full recomputation, the verified P0 final checkpoint for H2H, and 64 mirrored H2H
+configurations.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
