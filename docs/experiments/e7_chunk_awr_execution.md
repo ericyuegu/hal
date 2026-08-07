@@ -63,6 +63,10 @@ Compute a detached, clipped exponential weight with the same finite implementati
 `beta_H` from the frozen E6 validation audit before E7. Normalize valid weights to mean one within
 the effective batch and report raw and normalized statistics.
 
+Require `grad_accum_steps=1` in the first H2 and H4 arms so normalization covers the whole optimizer
+batch. Report ESS over valid chunks and over replay-window mean weights. Require both ratios to pass
+the E6 threshold; chunk rows within one replay window are not independent.
+
 Apply the E6 critic-disagreement rule before normalization. If a logged chunk exceeds the declared
 held-out disagreement threshold, ignore its Q advantage and set its raw weight to one. Keep its
 macro-BC loss. Do not drop the row, because that would change the behavior-data distribution. Low
@@ -141,6 +145,7 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 9. Assert a high-disagreement logged chunk receives raw weight one and remains in the macro-BC loss.
    Assert low behavior likelihood alone does not trigger the fallback.
 10. Assert disagreement gating happens before effective-batch weight normalization.
+    Check chunk-level and replay-window ESS by hand.
 11. Assert teacher forcing uses logged earlier actions and free-running decode uses sampled earlier
    actions.
 12. Assert an H-frame queue causes one policy inference followed by exactly H controller outputs.
@@ -150,6 +155,7 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 16. Run longer than `L_ctx` and confirm rebuilt contexts contain no dropped raw frame information.
 17. Save and reload horizon, objective, critic identity, reward settings, and decode protocol.
 18. Run small macro-BC and macro-AWR jobs with finite losses, gradients, weights, and parameters.
+19. Reject macro-AWR with `grad_accum_steps != 1` in the first arms.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -173,7 +179,7 @@ Report:
 
 - Stocks, damage, dead frames, terminal results, crashes, and CPU rate differences.
 - H2H stock difference, non-tied stock-lead rate, confidence intervals, and ties.
-- Raw and normalized weight distributions, clip fraction, and effective sample size.
+- Raw and normalized weight distributions, clip fraction, chunk ESS, and replay-window ESS.
 - Policy calls, committed frames, interrupted chunks, and queue clears.
 - Mean, median, and p95 inference time per decision and per executed frame.
 - Action transition rates and divergence between teacher-forced and free-running chunks.

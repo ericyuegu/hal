@@ -100,9 +100,9 @@ this fixed warm-up. Start AWR at step 2,048 and keep training the value head so 
 changing detached policy representation.
 
 Use a 2,048-step gate before the full run. Require finite held-out predictions, positive held-out
-return correlation, normalized effective sample size of at least 0.2, and no more than 20% of raw
-weights at the clip. If the gate fails, stop and revise the critic plan. Do not move the activation
-step after looking at closed-loop results.
+return correlation, both normalized ESS ratios of at least 0.2, and no more than 20% of raw weights
+at the clip. If the gate fails, stop and revise the critic plan. Do not move the activation step
+after looking at closed-loop results.
 
 Log an explicit `awr/active` field. Save the warm-up step in the checkpoint. A resumed run must
 activate weighting at the same global step.
@@ -130,6 +130,15 @@ This normalization is an optimizer control, not part of the probability factoriz
 relative example weights while keeping the actor gradient scale close to BC. Without it, a change in
 mean weight also changes the effective learning rate. Log raw and normalized weights so a later
 unnormalized sensitivity test remains possible.
+
+The first arm requires `grad_accum_steps=1`. Normalize across every valid frame in that optimizer
+batch, not once per replay window. If a later arm uses gradient accumulation, it must collect all
+microbatch weights before normalization; separate microbatch means are a different objective.
+
+Report ESS over valid frames and over replay windows. For the window-level value, first average raw
+weights within each window, then compute ESS across those window means. Frames from one replay are
+correlated, so frame ESS alone is too optimistic. Require both normalized ESS ratios to be at least
+0.2 at the warm-up gate.
 
 Use one `w_t` for the sum of all four conditional group losses at offset 1. Do not compute one
 advantage per controller group.
@@ -174,6 +183,7 @@ weights.
 11. Assert value loss trains the value head but not the policy trunk when detach is enabled.
 12. Check clipping before exponentiation, mean normalization, effective sample size, and all finite
     edge cases.
+    Check both frame-level and window-level ESS by hand.
 13. Reject NaN or infinite return, value, advantage, raw weight, normalized weight, loss, gradient,
     and parameter values with a useful error.
 14. Check the step-2,048 activation boundary and resume it on the same global step.
@@ -181,6 +191,7 @@ weights.
 16. Assert the value head is in its separate AdamW optimizer exactly once and never in the policy
     AdamW or Muon optimizer. Assert policy and value gradients are clipped separately.
 17. Run the small end-to-end train test with AWR on and off.
+18. Reject AWR with `grad_accum_steps != 1` in the first arm.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -193,13 +204,13 @@ Before the full run, scan a fixed replay sample and record:
 - Return and advantage quantiles.
 - Value MSE, bias, correlation, and calibration by return bin.
 - Raw and normalized weight quantiles.
-- Effective sample size and fraction at the clip.
+- Frame-level and window-level effective sample size, plus fraction at the clip.
 - Weight statistics by character, stage, rank tier, action transition, and reward proximity.
 - Loader wait and decoded bytes added by return annotation.
 
 Use `beta=0.8` and `weight_max=5` for the declared first arm. Do not tune them from closed-loop
-results. Stop if normalized effective sample size is below 0.2 or more than 20% of raw weights hit
-the clip; record a new plan before changing the dose.
+results. Stop if either normalized ESS ratio is below 0.2 or more than 20% of raw weights hit the
+clip; record a new plan before changing the dose.
 
 ## Fixed configuration and evaluation
 
