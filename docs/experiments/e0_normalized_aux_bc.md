@@ -211,6 +211,13 @@ Both succeeded on the existing fresh-session retry. All 32 scheduled boots produ
 giving 47 games and zero crashes. The evaluation took about 8.1 minutes including retries, scoring,
 and uploads. No schedule change is needed.
 
+At this checkpoint, stocks taken per active minute were 0.673, 95% CI `[0.556, 0.784]`. Stocks
+lost per active minute were 1.795, 95% CI `[1.565, 2.043]`. Damage dealt per active minute was
+116.8, 95% CI `[108.2, 125.0]`. Damage taken per active minute was 125.0, 95% CI
+`[118.1, 132.7]`. Dead frames were 2.51%. Mean stock difference across the 47 rows was -1.489.
+Fifteen games reached a terminal stock state; the policy won none. This is a terminal subset, not a
+full-schedule win rate.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
