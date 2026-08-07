@@ -130,8 +130,9 @@ GPU use, RAM, disk use, and upload time.
 - Run 96 fixed CPU matchups at the final checkpoint.
 - Use `eval_max_frames=7200` and `eval_seed=0`.
 - Record CPU level, ego port, seed stage, the exact matchup-schedule digest, model dtype, and decode
-  mode in every match-row artifact. The seed controls policy sampling and bootstrap resampling. It
-  does not control the random stages chosen after instant restart.
+  mode in every match-row artifact. Also record instant-restart, stage, in-flight completion, and
+  active-frame rules. The seed controls policy sampling and bootstrap resampling. It does not
+  control the random stages chosen after instant restart.
 - Save checkpoints every 2,048 steps.
 - Save match rows and replay files.
 

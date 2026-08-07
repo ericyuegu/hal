@@ -1458,6 +1458,10 @@ class EvalProtocol:
     ego_port: int
     seed_stage: int
     matchup_schedule_sha256: str
+    instant_match_restart: bool
+    stage_policy: str
+    completion_policy: str
+    active_frame_policy: str
     exec_horizon: int
     decode_temp: float
     decode_temps: tuple[float, float, float, float] | None
@@ -1498,6 +1502,10 @@ def _eval_protocol(
         ego_port=1,
         seed_stage=int(PRIOR_SWEEP_SEED_STAGE.value),
         matchup_schedule_sha256=schedule_sha256,
+        instant_match_restart=True,
+        stage_policy="battlefield_then_random_legal",
+        completion_policy="finish_in_flight_wave",
+        active_frame_policy="frame_id_gte_0_exclude_zero_active",
         exec_horizon=exec_horizon,
         decode_temp=settings.temp,
         decode_temps=settings.temps,
@@ -1531,7 +1539,7 @@ def _run_eval_sweep(
 ) -> dict[str, float]:
     results, rows = sweep_vs_cpu_prior_with_rows(
         policy_factory,
-        session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+        session_cfg=default_session_cfg(replay_dir, instant_match_restart=protocol.instant_match_restart),
         n_matchups=protocol.n_matchups,
         max_parallel=protocol.max_parallel,
         max_frames=protocol.max_frames,

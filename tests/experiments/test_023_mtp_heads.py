@@ -248,6 +248,10 @@ def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
     assert payload["protocol"]["ego_port"] == 1
     assert payload["protocol"]["seed_stage"] == int(exp.PRIOR_SWEEP_SEED_STAGE.value)
     assert len(payload["protocol"]["matchup_schedule_sha256"]) == 64
+    assert payload["protocol"]["instant_match_restart"] is True
+    assert payload["protocol"]["stage_policy"] == "battlefield_then_random_legal"
+    assert payload["protocol"]["completion_policy"] == "finish_in_flight_wave"
+    assert payload["protocol"]["active_frame_policy"] == "frame_id_gte_0_exclude_zero_active"
 
 
 def test_eval_sweep_uses_recorded_cpu_protocol(monkeypatch) -> None:
@@ -271,6 +275,7 @@ def test_eval_sweep_uses_recorded_cpu_protocol(monkeypatch) -> None:
     assert seen["cpu_level"] == protocol.cpu_level
     assert seen["ego_port"] == protocol.ego_port
     assert int(seen["seed_stage"].value) == protocol.seed_stage
+    assert seen["session_cfg"].instant_match_restart is protocol.instant_match_restart
 
 
 def test_manual_eval_overrides_checkpoint_incremental_mode(tmp_path, monkeypatch) -> None:
