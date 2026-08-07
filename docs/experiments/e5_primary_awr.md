@@ -86,6 +86,27 @@ also detached. The policy cannot reduce its loss by changing `V`.
 Use `lambda_V=1.0`. Log value loss separately from the policy objective. Do not call this critic
 `Q`; it does not read an action.
 
+Give the value head its own AdamW optimizer, scheduler, and gradient clip. Use the declared output
+head AdamW hyperparameters and schedule, but do not add value parameters to the policy optimizer.
+Clip policy and value gradients separately. Otherwise a large value gradient can scale down the
+policy gradient through one global clip even though `h_t` is detached. The policy optimizer's
+parameter list and state must remain byte-for-byte equal to the matched BC arm during warm-up.
+
+## Critic warm-up
+
+Do not use a random value estimate in an actor weight. For steps 0 through 2,047, train the value
+head but set every actor weight to one. The actor therefore uses the matched BC objective during
+this fixed warm-up. Start AWR at step 2,048 and keep training the value head so it can track the
+changing detached policy representation.
+
+Use a 2,048-step gate before the full run. Require finite held-out predictions, positive held-out
+return correlation, normalized effective sample size of at least 0.2, and no more than 20% of raw
+weights at the clip. If the gate fails, stop and revise the critic plan. Do not move the activation
+step after looking at closed-loop results.
+
+Log an explicit `awr/active` field. Save the warm-up step in the checkpoint. A resumed run must
+activate weighting at the same global step.
+
 ## Actor weight
 
 Define:
@@ -126,6 +147,9 @@ L=\operatorname{mean}(w_t L_{1,t})
 The auxiliary losses remain unweighted BC. Their fixed mean keeps total auxiliary scale independent
 of the number of heads. This normalization is also an experimental control; it is not an AWR rule.
 
+Before step 2,048, replace `w_t` with one in this objective. Do not skip value training during that
+period.
+
 Keep transition loss weight 1.0. Do not apply rank, trajectory, chunk, or future-head advantage
 weights.
 
@@ -136,20 +160,27 @@ weights.
 2. Assert the action at offset 1 pairs with `G_{t+1}`, not `G_t` or `G_{t+2}`.
 3. Assert returns are computed over the full replay before windowing.
 4. Assert padding and invalid targets receive no value, actor, or auxiliary loss.
-5. With AWR off, reproduce the selected BC objective exactly and leave the value head gradient-free.
-6. With zero advantages, reproduce BC primary loss and mean-one weights exactly.
-7. Assert only offset-1 losses receive AWR weights. Perturb weights and show auxiliary losses do not
+5. With the whole AWR package off, reproduce the selected BC objective exactly and leave the value
+   head gradient-free.
+6. During critic warm-up, reproduce the BC actor objective exactly while the value head receives a
+   finite, nonzero gradient.
+   After one update, assert exact policy-parameter and policy-optimizer-state equality with a
+   same-seed BC model on the same batch.
+7. With zero advantages, reproduce BC primary loss and mean-one weights exactly.
+8. Assert only offset-1 losses receive AWR weights. Perturb weights and show auxiliary losses do not
    change.
-8. Assert the same weight multiplies buttons, main stick, C-stick, and triggers for one frame.
-9. Assert advantages and weights are detached from both actor and value parameters.
-10. Assert value loss trains the value head but not the policy trunk when detach is enabled.
-11. Check clipping before exponentiation, mean normalization, effective sample size, and all finite
+9. Assert the same weight multiplies buttons, main stick, C-stick, and triggers for one frame.
+10. Assert advantages and weights are detached from both actor and value parameters.
+11. Assert value loss trains the value head but not the policy trunk when detach is enabled.
+12. Check clipping before exponentiation, mean normalization, effective sample size, and all finite
     edge cases.
-12. Reject NaN or infinite return, value, advantage, raw weight, normalized weight, loss, gradient,
+13. Reject NaN or infinite return, value, advantage, raw weight, normalized weight, loss, gradient,
     and parameter values with a useful error.
-13. Check save and reload of reward, AWR, critic, and detach settings.
-14. Assert the value head is in AdamW exactly once and never in Muon.
-15. Run the small end-to-end train test with AWR on and off.
+14. Check the step-2,048 activation boundary and resume it on the same global step.
+15. Check save and reload of reward, AWR, critic, warm-up, and detach settings.
+16. Assert the value head is in its separate AdamW optimizer exactly once and never in the policy
+    AdamW or Muon optimizer. Assert policy and value gradients are clipped separately.
+17. Run the small end-to-end train test with AWR on and off.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -180,8 +211,8 @@ Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurat
 matched BC reference. Save checkpoints, match rows, replays, H2H records, and the return audit.
 
 Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
-difference, non-tied stock-lead rate, confidence intervals, and ties. Also report value and weight metrics
-through training.
+difference, non-tied stock-lead rate, confidence intervals, and ties. Also report value and weight
+metrics through training.
 
 Use one RTX 4090 experiment at a time. Target 3.0 to 3.5 hours through evaluation and upload. Flag
 startup over 30 minutes, warm steps over 0.5 seconds, a slowdown over 25% from the reference, a

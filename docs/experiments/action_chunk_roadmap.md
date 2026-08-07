@@ -132,8 +132,12 @@ closed-loop play.
 Replace the independent future heads with sequential MTP modules over `(1, 5, 9, 13)`.
 
 Each module reads the previous hidden prediction and the teacher-forced previous target action. At
-decode, it reads its own previous sample. Share action embeddings and output heads. Start with a
-shared temporal module across depths unless profiling shows a clear reason not to.
+decode, it reads its own previous sample. Reuse the action embeddings, but keep separate offset
+classifiers in the first arm. Start with a shared temporal module across depths unless profiling
+shows a clear reason not to.
+
+Run a parameter- and compute-matched null-action control before the action-conditioned arm. This
+separates the added recurrent state/depth capacity from information in the previous action.
 
 Keep execution at one frame. Keep AWR off. This experiment asks whether a coherent sparse future
 model improves representation and primary control.
@@ -165,6 +169,10 @@ apply to auxiliary marginals.
 Run this on the best E2-style policy first. Then test the temporally factorized model if E3 earned a
 clear continuation.
 
+Train the value head for a fixed warm-up while the actor remains exact BC. Give the value head a
+separate optimizer and gradient clip so its gradients cannot change the BC actor update. Activate
+AWR only after the held-out value and weight gate passes.
+
 ## E6: chunk critic validation
 
 The current critic proves that return labeling, value fitting, and AWR weighting run end to end. It
@@ -172,13 +180,13 @@ does not prove that a chunk-conditioned action value works. The current critic i
 critic is:
 
 \[
-Q_H(s_t,a_{t:t+H-1}).
+Q_H(s_t,a_{t+1:t+H}).
 \]
 
 Train it first as a read-only probe on logged dense chunks:
 
 \[
-y_t=\sum_{k=0}^{H-1}\gamma^k r_{t+k}+\gamma^H V(s_{t+H}).
+y_t=\sum_{k=1}^{H}\gamma^{k-1} r_{t+k}+\gamma^H V(s_{t+H}).
 \]
 
 Use logged actions during critic training. Do not train only on policy logits or policy-generated

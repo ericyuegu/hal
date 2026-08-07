@@ -28,10 +28,20 @@ passes. A tiny transformer is a later capacity ablation if the MLP result is pro
 
 Adopt the important DeepSeek-style MTP rule: each later module receives the true previous target
 action during training. At free-running evaluation, it receives its own previous sampled action.
+This rule applies to E3-T below. E3-C uses a learned null action in both paths.
 
 Do not share the action classifiers across offsets in the first arm. Weight sharing is not required
 for a valid joint factorization and would add another experimental axis. Keep the selected E2 heads
 and change only their temporal input state.
+
+Run two matched arms:
+
+- E3-C is the capacity control. Every temporal depth receives one learned null-action vector.
+- E3-T is the treatment. Every temporal depth receives the true previous action during training.
+
+Both arms contain and execute the same modules. They have the same parameter count and compute.
+E3-C shows what the recurrent state and depth path can do without previous-action information.
+Compare E3-T directly with E3-C. A comparison with E2 alone cannot isolate temporal conditioning.
 
 ## Files to change
 
@@ -71,6 +81,13 @@ initialization and diagnostics; it does not require two matrix multiplications.
 Use hidden width `2 * d_model`. Initialize `W_2`, its bias, and `W_a` to zero. Create all E2 model
 parts before the temporal module. At initialization, every `z_k` equals `h`, so same-seed E2 and E3
 logits must match exactly at every offset.
+
+Give both arms the same action embedding tables and one learned null-action vector with the same
+width as a concatenated complete-action embedding. E3-C always selects the null vector. E3-T
+selects the target or sampled previous action. Do not remove unused tables from E3-C; that would
+break the parameter-matched control. E3-C performs the same embedding lookups, then replaces their
+result with the null vector before the temporal affine layer. This keeps the measured forward path
+matched while preventing previous-action information from reaching the logits.
 
 The offset-1 path must not call the temporal module. This avoids giving the deployed head an extra
 state-only capacity path. E3 can affect it only through the shared trunk gradients from better or
@@ -130,14 +147,19 @@ alignment, optimizer, or total auxiliary weight.
 14. Save and reload the temporal mode, dimensions, group order, logits, and samples.
 15. Every new parameter appears in AdamW exactly once and never in Muon.
 16. Run the small end-to-end training test and confirm finite metrics and `final.pt`.
+17. Assert E3-C logits do not change when previous target actions change after the temporal module
+    has learned.
+18. Assert E3-C and E3-T have identical parameter names, shapes, optimizer ownership, and forward
+    call counts.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
 ## Fixed configuration
 
-Copy the selected E2-S configuration. Change only:
+Copy the selected E2-S configuration. Run E3-C first and E3-T second. Change only:
 
 - Temporal mode from independent to sparse autoregressive MLP.
+- Temporal condition source: null for E3-C and previous action for E3-T.
 - Temporal MLP ratio and depth embeddings.
 - Run labels and H2H reference.
 
@@ -156,9 +178,11 @@ rollout-conditioned cross-entropy and accuracy for the same targets. Also log ex
 accuracy, exposure gaps, transition metrics, temporal-module norms and gradients, shared-trunk
 gradient interaction, parameter counts, memory, and throughput.
 
-Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurations against E2-S.
-Save rows and replays. Report stocks, damage, dead frames, terminal results, CPU rate differences,
-H2H stock difference, non-tied stock-lead rate, confidence intervals, ties, and crashes.
+Run the standard periodic and final CPU protocol. Compare E3-C with E2-S to measure the added
+temporal module. Compare E3-T with E3-C to measure previous-action conditioning. Run 64 mirrored H2H
+configurations for both direct comparisons. Save rows and replays. Report stocks, damage, dead
+frames, terminal results, CPU rate differences, H2H stock difference, non-tied stock-lead rate,
+confidence intervals, ties, and crashes.
 
 Target 3.0 to 3.5 hours through evaluation and upload on an RTX 4090. Flag startup over 30 minutes,
 warm steps over 0.5 seconds, a slowdown over 25% from E2, a periodic evaluation over 25 minutes, or
@@ -166,6 +190,8 @@ a projected total over 3.5 hours.
 
 ## Decision
 
+- Attribute a gain to temporal conditioning only if E3-T beats E3-C. An E3-C gain over E2 is a
+  capacity or recurrent-state result.
 - Continue if rollout-conditioned sparse predictions are coherent and closed-loop play does not
   regress.
 - A small teacher-forced gain with a large rollout-conditioned cross-entropy increase is evidence

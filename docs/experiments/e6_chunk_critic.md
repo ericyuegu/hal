@@ -182,7 +182,12 @@ teacher-forced log likelihood with the logged chunk's likelihood under the same 
 Define support thresholds from the held-out logged distribution before inspecting Q values. Report
 relative likelihood, Q value, V value, advantage, and ensemble disagreement. A high likelihood
 under the sampling policy alone does not prove data support. Separate in-support and low-support
-samples. Do not use low-support values for E7 weights.
+policy samples. Do not use their Q values to justify open-loop execution.
+
+Also predeclare a critic-disagreement threshold from held-out logged chunks. Behavior likelihood
+and critic disagreement answer different questions. Low policy likelihood does not make an observed
+logged chunk counterfactual. E7 may use a logged chunk's advantage when critic disagreement stays
+inside the declared held-out range.
 
 ## Gate
 

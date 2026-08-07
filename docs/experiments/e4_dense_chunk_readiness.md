@@ -116,8 +116,8 @@ Run the standard 32-boot periodic and 96-boot final CPU protocol with execution 
 mirrored H2H configurations against E3. Save all match rows and replays.
 
 Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
-difference, non-tied stock-lead rate, confidence intervals, and ties. A closed-loop regression is allowed
-as a scientific result, but it must be explicit.
+difference, non-tied stock-lead rate, confidence intervals, and ties. A closed-loop regression is
+allowed as a scientific result, but it must be explicit.
 
 Flag startup over 30 minutes, warm steps over 0.5 seconds, a slowdown over 25% from E3, a periodic
 evaluation over 25 minutes, or a projected total over 3.5 hours.
