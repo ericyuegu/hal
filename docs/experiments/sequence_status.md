@@ -61,16 +61,16 @@ recomputation.
 
 ## Immediate next actions
 
-1. Finish the active P0 run and its fixed evaluations.
-2. Audit P0 timing, validation, checkpoints, closed-loop rows, and replay uploads. Reevaluate
-   `final.pt` through the standard FP16 checkpoint loader because the launched in-process final path
-   keeps the live model in FP32.
-3. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
-4. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
-   and fixed-seed sampled actions.
-5. Evaluate P1-old with full recomputation over 96 CPU character-pair boots.
-6. Train P1-match on the accepted data path and action vocabulary.
-7. Compare P0, P1-match full recomputation, and P1-match temporal KV.
+1. Finish the official P0 FP16 evaluation.
+2. Audit P0 timing, validation, checkpoints, closed-loop rows, replay uploads, and W&B records.
+3. Evaluate P1-old with full recomputation over 96 CPU character-pair boots and record its final
+   checkpoint, old KV evidence, new rows, replays, and timing.
+4. Run the matched-P1 systems gate, then train P1-match on the accepted compact data path and action
+   vocabulary.
+5. Evaluate P1-match with full recomputation.
+6. Pass the P1/P2 FP32 and FP16 parity gate on that checkpoint, including long rolling contexts,
+   mixed resets, logits, and fixed-seed sampled actions.
+7. Run the P2 temporal-KV evaluation and compare P0, P1-match recomputation, and P1-match KV.
 8. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
    configuration into the E1 launch audit.
 
