@@ -321,16 +321,19 @@ def matchups_for(n: int) -> list[tuple[Character, Character]]:
 
 
 def matchups_for_vs_cpu(n: int) -> list[tuple[Character, Character]]:
-    """Return a prefix-stable schedule that can start against the CPU."""
+    """Prefix-stable prior schedule restricted to CPU-selectable opponents.
+
+    Local VS mode has no independent Sheik portrait, and controller input for a
+    CPU slot cannot hold A through stage loading; libmelee therefore cannot force
+    a CPU opponent to start as Sheik. Filter those orientations rather than
+    crashing or silently recording Zelda under a Sheik label. Model-controlled
+    ego Sheik remains supported.
+    """
     if n < 0:
         raise ValueError(f"n must be >= 0, got {n}")
     out: list[tuple[Character, Character]] = []
     requested = max(1, n)
     while len(out) < n:
-        out = [
-            (ego, opp)
-            for ego, opp in matchups_for(requested)
-            if ego is not Character.SHEIK and opp is not Character.SHEIK
-        ]
+        out = [(ego, opp) for ego, opp in matchups_for(requested) if opp is not Character.SHEIK]
         requested *= 2
     return out[:n]

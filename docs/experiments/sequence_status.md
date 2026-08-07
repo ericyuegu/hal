@@ -7,7 +7,7 @@ Updated: 2026-08-07
 | Stage | Axis | Status | Next gate |
 | --- | --- | --- | --- |
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
-| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az` | Complete 16,384 steps and retain all evaluation evidence. |
+| P0 | Scientific package: short full-causal context | Training on Vast instance `47096112`, W&B `obx3o3az`; first CPU evaluation passed | Complete 16,384 steps and retain all final evidence. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Training complete | Reevaluate the final checkpoint with full recomputation. |
 | P1-match | Attention package at matched data and action vocabulary | Fresh plan ready; pending P0 | Retrain after P0 with only context, batch, and mask changed. |
 | P2 | Systems: temporal-KV decode efficiency | Exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |

@@ -204,6 +204,13 @@ At step 2,048, NLL at offsets 1, 5, 9, and 13 was 1.172, 2.948, 3.743, and 4.235
 was 0.0339. The 56,699,580-byte `latest.pt` checkpoint was saved, uploaded, and verified directly
 in R2. The decoded compact cache reached 72 GB while the full instance disk was 31% used.
 
+At step 4,096, primary action NLL was 1.115 and button log loss was 0.033. The 56,705,941-byte
+`step_004096.pt` checkpoint was uploaded and verified directly in R2. The first periodic evaluator
+used full recomputation. Two model-controlled Sheik boots first appeared as Zelda and were rejected.
+Both succeeded on the existing fresh-session retry. All 32 scheduled boots produced trajectories,
+giving 47 games and zero crashes. The evaluation took about 8.1 minutes including retries, scoring,
+and uploads. No schedule change is needed.
+
 ## Promotion
 
 E0 is valid only if it reaches step 16,384 and retains the complete final evidence. After E0, train
