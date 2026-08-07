@@ -224,6 +224,31 @@ the P0 final checkpoint for H2H, 64 mirrored H2H configurations, and every plann
 Three RTX 4090 offers met the bounds. The best had 252 GB RAM, DLPerf 125.6, a 250 GB disk, and an
 effective price of $0.781/hour. Select the offer again only after the replacement gate passes.
 
+The replacement gate passed. W&B run `6ydiy4kq` finished normally in 178 seconds, and Vast removed
+instance `47115519` after success. The run used FlexAttention with window 128 and full-recompute
+evaluation mode. It consumed exactly 256 batches of 128 replays, or 131,072 frames per step. Every
+logged batch had 128 distinct replay IDs. Adjacent replay reuse was zero; the gate did not reach an
+epoch boundary, so it provides no boundary-reuse sample.
+
+All logged losses, objectives, gradient norms, step times, and loader waits were finite. All 60
+floating checkpoint tensors were finite. Over steps 100 through 255, median step time was 0.296
+seconds, mean was 0.312 seconds, p95 was 0.386 seconds, and the maximum was 0.979 seconds. Median
+loader wait was 0.138 seconds and mean loader wait was 0.150 seconds. Median throughput was 432.9
+samples/s, or about 443,000 frame tokens/s. Step 0 took 54.7 seconds, including compilation, and
+waited 19.2 seconds for its batch. The validation cache finished in 9.0 seconds while that work ran.
+
+The 11 W&B system samples are too sparse for a utilization claim on this short run. Sampled GPU use
+averaged 7.9% and peaked at 53%, while allocated VRAM reached 12.0 GB and power reached 214 W. The
+trainer process reached 8.4 GB RAM, and disk use reached 16.6 GB. The low GPU sample must still be
+reported, but the measured step time projects 16,384 training steps to about 81 minutes. The prior
+25-minute P1 recompute sweep and the planned periodic and H2H work leave the full run below the
+3.5-hour gate.
+
+The gate's final validation NLL at offsets 1, 5, 9, and 13 was 1.543, 3.677, 4.553, and 5.053 bits
+per frame. This is a 256-step systems result, not a policy comparison. R2 contains the 56,698,679-byte
+`final.pt`; its SHA-256 is `028658c9aec8ac082392af16fc0c47d83e089ded8826e2589197df4f3e19d115`.
+The checkpoint records step 256, W&B ID `6ydiy4kq`, action vocabulary 1,024, and temporal KV off.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.

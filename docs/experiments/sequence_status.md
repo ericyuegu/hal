@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | Replacement 256-step systems gate running | Verify correctness and projected wall time before the full run. |
+| P1-match | Attention package at matched data and action vocabulary | 256-step systems gate passed | Launch the full 16,384-step run. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -52,6 +52,11 @@ replay files are in `manual_evals/p1-old-final-recompute-fp16`. The sweep reache
 evaluation warning. It used 96 concurrent boots, so it is not a matched decode comparison with P0
 or the historical KV evaluation.
 
+The matched-P1 replacement gate completed on Vast instance `47115519` and W&B run `6ydiy4kq`.
+Every logged batch had 128 distinct replays and zero adjacent reuse. All numerical checks passed.
+Median warm step time was 0.296 seconds, which projects full training to about 81 minutes. The
+verified gate checkpoint is in R2. The full matched-P1 run is approved.
+
 At step 12,288:
 
 - Validation action NLL: 1.027 bits per frame.
@@ -72,8 +77,7 @@ recomputation.
 
 ## Immediate next actions
 
-1. Finish the matched-P1 systems gate, then train P1-match on the accepted compact data path and action
-   vocabulary.
+1. Train P1-match for 16,384 steps on the accepted compact data path and action vocabulary.
 2. Evaluate P1-match with full recomputation.
 3. Pass the P1/P2 FP32 and FP16 parity gate on that checkpoint, including long rolling contexts,
    mixed resets, logits, and fixed-seed sampled actions.
