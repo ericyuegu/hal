@@ -455,5 +455,6 @@ def test_run_h2h_writes_records_replays_and_meta(tmp_path, monkeypatch):
 
     assert load_records(tmp_path / "matches.jsonl") == records
     meta = json.loads((tmp_path / "meta.json").read_text())
+    assert meta["record_schema_version"] == 2
     assert meta["model_a"] == "alpha" and meta["n_matches"] == 6
     assert meta["matches_completed"] == 6 and meta["matches_failed"] == 0

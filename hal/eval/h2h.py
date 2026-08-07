@@ -80,6 +80,8 @@ PolicyBuilder = Callable[[int], BatchPolicy]
 DEFAULT_MAX_FRAMES: Final[int] = 7200
 # libmelee's stage-select cursor navigation is flaky under concurrent fast-forward load.
 DEFAULT_START_RETRIES: Final[int] = 3
+# Version 2 names stock leaders directly. ``MatchRecord.from_dict`` still reads version 1 fields.
+MATCH_RECORD_SCHEMA_VERSION: Final[int] = 2
 # Stick magnitude that counts as "the policy moved this stick". Melee's dead-band gate is
 # 0.2875 per axis, so 0.3 is just outside it and reads as deliberate motion.
 _STICK_ACTIVE_MAGNITUDE: Final[float] = 0.3
@@ -799,6 +801,7 @@ def run_h2h(
     parallel = max_parallel or usable_cpus()
 
     run_meta: dict[str, Any] = {
+        "record_schema_version": MATCH_RECORD_SCHEMA_VERSION,
         "model_a": name_a,
         "model_b": name_b,
         "n_configs": n_configs,
