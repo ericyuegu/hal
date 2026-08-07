@@ -228,6 +228,9 @@ L_{actor}=-w_H\sum_{k=1}^{H}\sum_g
 Start with `H = 2`, then test `H = 4`. Execute all `H` actions before selecting the next chunk. This
 keeps the critic, actor, and deployed macro-action aligned.
 
+The frozen chunk critic must use its own frozen E4 state encoder. It must not read the fine-tuning
+actor's changing hidden state.
+
 Receding-horizon execution with a plan longer than the executed prefix is a later experiment. It
 requires either a critic for the executed prefix or a learned dynamics model for the unexecuted tail.
 

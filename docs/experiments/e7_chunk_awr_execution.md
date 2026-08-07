@@ -98,9 +98,15 @@ This is when future heads should receive advantage weights: only when they are f
 that the critic scores and the evaluator commits to. An unused future prediction remains an
 auxiliary BC target.
 
-Freeze the E6 Q and V networks. The actor cannot change the critic or backpropagate through the
-weight. Reject a checkpoint whose horizon, reward settings, action factorization, or source actor
-does not match.
+Freeze the complete E6 critic package, including its E4 state encoder, Q heads, V head, action
+encoder, and buffers. Recompute critic state features from the raw context with that frozen encoder.
+Do not feed the fine-tuning actor's changing hidden state into Q or V. The actor cannot change the
+critic or backpropagate through the weight. Reject a checkpoint whose horizon, reward settings,
+action factorization, or source actor does not match.
+
+This adds one frozen state-encoder forward during training. Record its time and memory separately.
+Do not share activations with the actor merely to improve throughput; that changes the weight as the
+actor learns.
 
 ## Training protocol
 
@@ -141,6 +147,8 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 5. Assert division by H gives equal per-frame scale for constant losses.
 6. Assert Q2 receives only actions 1 and 2; Q4 receives actions 1 through 4.
 7. Assert Q, V, advantages, and weights are detached and frozen.
+   Change the actor trunk while holding raw input fixed and assert critic features, Q, V, and weights
+   remain exactly unchanged.
 8. Reject critic and actor checkpoint identity or horizon mismatches.
 9. Assert a high-disagreement logged chunk receives raw weight one and remains in the macro-BC loss.
    Assert low behavior likelihood alone does not trigger the fallback.
@@ -156,6 +164,7 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 17. Save and reload horizon, objective, critic identity, reward settings, and decode protocol.
 18. Run small macro-BC and macro-AWR jobs with finite losses, gradients, weights, and parameters.
 19. Reject macro-AWR with `grad_accum_steps != 1` in the first arms.
+20. Assert every frozen critic parameter and buffer remains byte-identical through training.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
