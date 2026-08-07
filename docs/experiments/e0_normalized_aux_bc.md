@@ -108,7 +108,7 @@ Start from step 0. Do not resume the stopped P0 run.
 ```text
 uv run scripts/launch_vast.py \
   --max-price 1.10 --disk 250 --min-vram 24 --min-ram 200 \
-  --min-dlperf 110 --min-compute-cap 890 --max-compute-cap 890 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
   --data-gb 15 --upload-gb 1 --run-hours 3.5 -- \
   uv run experiments/023_mtp_heads.py \
   --cfg.require-flex --cfg.attn-window 0 --cfg.no-eval-incremental-kv \
