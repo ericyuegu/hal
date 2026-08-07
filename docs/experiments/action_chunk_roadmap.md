@@ -71,8 +71,8 @@ Required metrics:
 
 ## E1: output-head capacity control
 
-Add a zero-output residual MLP to every independent group head. Do not condition one action group on
-another.
+Add one shared state MLP and a zero-initialized logit-residual output for every group and offset. Do
+not condition one action group on another.
 
 This isolates extra nonlinear capacity from action factorization. Match the E2 parameter count as
 closely as practical. Keep the trunk, targets, loss, and execution unchanged.
@@ -84,26 +84,30 @@ E1 must start as the same function as E0. Test this directly.
 Condition each group on the true earlier groups during training and on sampled earlier groups during
 decode.
 
-The separate linear conditioning projection in the current prototype is not required if the full MLP
-reads the concatenated condition. In that case, its first layer can absorb the projection:
+The state and condition projections form one affine preactivation:
 
 \[
 W_h h + W_c c = W[h;c].
 \]
 
-Prefer one zero-output residual branch:
+Compute the state projection once, then reuse it across groups and offsets:
 
 \[
 c_g=[E(a_{<g})],
 \]
 
 \[
-z_g=h+W_{2,g}\,\mathrm{SiLU}(W_{h,g}\,\mathrm{RMSNorm}(h)+W_{c,g}c_g),
+u_g=\mathrm{SiLU}(W_h\,\mathrm{RMSNorm}(h)+W_{c,g}c_g),
 \]
 
-with `W_2` initialized to zero. This keeps the independent-head function at initialization and gives
-the MLP a nonlinear interaction between state and action condition. Keep a separate direct `W_c c`
-path only if a linear conditional bypass is an intentional ablation.
+\[
+\ell_{o,g}=W_{o,g}h+b_{o,g}+W_{2,o,g}u_g,
+\]
+
+with `W_2` and `W_c` initialized to zero. Keeping `W_h` and `W_c` as separate modules lets the
+model reuse `W_h h`; it does not change the algebra above. This keeps the independent-head function
+at initialization and gives the MLP a nonlinear interaction between state and action condition. Do
+not add a direct condition-to-logit bypass unless it is an explicit ablation.
 
 ### Chain order
 

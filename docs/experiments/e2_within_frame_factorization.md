@@ -69,6 +69,12 @@ Share one embedding table for each action group across offsets. Each table maps 
 to a 32-dimensional vector. For each predicted group, concatenate the embeddings of all earlier
 groups in the selected chain order. Concatenation is along the feature dimension.
 
+Compute one shared state preactivation:
+
+\[
+v(h)=W_h\operatorname{RMSNorm}(h).
+\]
+
 For offset `o` and group `g`:
 
 \[
@@ -76,28 +82,26 @@ c_{o,g}=\operatorname{concat}_{j<g}E_j(a_{t+o,j}),
 \]
 
 \[
-r_{o,g}=W_{2,o,g}\operatorname{SiLU}
-\left(W_{h,o,g}\operatorname{RMSNorm}(h)+W_{c,o,g}c_{o,g}\right),
+u_{o,g}=\operatorname{SiLU}\left(v(h)+W_{c,g}c_{o,g}\right),
 \]
 
 \[
-z_{o,g}=h+r_{o,g},
-\qquad
-\ell_{o,g}=W_{o,g}z_{o,g}+b_{o,g}.
+\ell_{o,g}=W_{o,g}h+b_{o,g}+W_{2,o,g}u_{o,g}.
 \]
 
-The first group has no condition and uses the same state-only branch as E1. Initialize `W_2`, its
-bias, and every `W_c` to zero. Create the trunk, base classifiers, normalization, `W_h`, and `W_2`
-in the same order as E1 so their same-seed values match. Create conditioning tensors afterward.
+The first group has no condition and uses the E1 state path. Share `W_h` across all groups and
+offsets. Share each group's `W_c` across offsets; its input values still differ by target offset.
+Initialize `W_2`, its bias, and every `W_c` to zero. Create the trunk, base classifiers, `W_h`, and
+`W_2` in the same order as E1 so their same-seed values match. Create conditioning tensors
+afterward.
 
-Implement `W_h` and `W_c` as column blocks of one affine layer over
-`concat(RMSNorm(h), c)`. Do not run separate projections and add their outputs. The split notation
-only states how to copy the E1 state columns and zero the new condition columns. This gives the
-same function with less code and one matrix multiplication.
+`W_h h + W_c c` is algebraically one affine map over `concat(h, c)`. Keep the two projections
+separate here so the expensive `W_h h` result is computed once and reused across every group and
+offset. This is parameter sharing, not an additive logit bypass.
 
-This gives exact initial E1 logits. The first update can train `W_2`. Later updates can train `W_c`
-and the embeddings. Do not add a separate linear condition bypass. `W_c` is already the condition
-block of the MLP affine map.
+This gives exact initial E1 logits. The first update can train `W_2`. The next update can train
+`W_c`; embeddings receive gradients after `W_c` leaves zero. Do not add a separate linear condition
+bypass.
 
 All MLP, embedding, and classifier parameters use AdamW. They must not enter Muon.
 
@@ -121,9 +125,10 @@ or a missing target must not supply a condition or a loss.
 2. Check all action class indices against the correct group vocabulary before embedding lookup.
 3. Construct same-seed E1 and E2 models. Assert exact shared parameters and exact logits at
    initialization for both chain orders.
-4. Assert every `W_2`, `W_2` bias, and `W_c` is zero. Assert `W_h` is not zero.
+4. Assert every `W_2`, `W_2` bias, and `W_c` is zero. Assert the shared `W_h` is not zero.
 5. Confirm the first backward pass gives finite nonzero `W_2` gradients.
-6. Confirm later backward passes give finite nonzero `W_c` and embedding gradients.
+6. Confirm the second backward pass gives finite nonzero `W_c` gradients. Confirm a later backward
+   pass gives finite nonzero embedding gradients.
 7. Change only an earlier teacher-forced group. The first-group logits must stay fixed, and at least
    one valid later-group logit must change after conditioning has learned.
 8. Assert teacher forcing uses target classes, never predicted argmax classes.
@@ -154,6 +159,11 @@ checkpoint cadence, decode temperature, and CPU protocol fixed.
 Report exact total, trunk, classifier, state-MLP, condition, and embedding parameter counts. If E2
 has more than 5% more total parameters or is more than 10% slower per training step than E1, plan a
 separate capacity control before making a factorization claim.
+
+At the planned dimensions, the shared conditioning projections add 98,304 parameters and the four
+embedding tables add 11,360. With the current 6,818,482-parameter linear model, the projected totals
+are 7,678,526 for E1 and 7,788,190 for E2. E2 is 1.43% larger than E1. Its conditioning projections
+add about 51.5 billion forward MACs per 131,072-frame step because the conditions differ by offset.
 
 ## Offline records
 
