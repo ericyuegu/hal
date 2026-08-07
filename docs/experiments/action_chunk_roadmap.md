@@ -36,7 +36,7 @@ complete executable chunk. A chunk requires dense offsets such as `(1, 2, 3, 4)`
 
 ## Fixed evaluation rules
 
-- Use the same data, optimizer, training examples, matchup seeds, and decode settings across an
+- Use the same data, optimizer, training examples, CPU character schedule, and decode settings across an
   ablation.
 - Run at least three paired seeds. Use five for a final claim.
 - Report paired uncertainty intervals for win rate and stock difference.

@@ -64,9 +64,10 @@ Write each arm to its own directory. Save:
 - Median, p95, and mean model time per decoded frame.
 - Peak CPU RAM, VRAM, and GPU use when the host reports them correctly.
 
-The policy metrics should match within paired sampling noise. Report stocks, damage, dead frames,
-terminal results, crashes, and paired row deltas. A large policy difference is a correctness warning,
-not evidence that the systems optimization improved the policy.
+The policy metrics should match within independent sampling noise. Report stocks, damage, dead
+frames, terminal results, and crashes for each arm. Do not treat boot-and-ordinal row alignment as a
+paired estimate because later restart stages are random. A large policy difference is a correctness
+warning, not evidence that the systems optimization improved the policy.
 
 ## Commands
 

@@ -126,8 +126,8 @@ GPU use, RAM, disk use, and upload time.
 ## Evaluation
 
 - Validate every 1,024 steps.
-- Run 32 fixed CPU matchups every 4,096 steps.
-- Run 96 fixed CPU matchups at the final checkpoint.
+- Run 32 deterministic character-pair boots every 4,096 steps.
+- Run 96 deterministic character-pair boots at the final checkpoint.
 - Use `eval_max_frames=7200` and `eval_seed=0`.
 - Record CPU level, ego port, seed stage, the exact matchup-schedule digest, model dtype, and decode
   mode in every match-row artifact. Also record instant-restart, stage, in-flight completion, and

@@ -111,7 +111,7 @@ the live CPU evaluator still executes one.
 Run the standard 32-boot periodic and 96-boot final CPU protocol with execution horizon 1. Run 64
 mirrored H2H configurations against E3. Save all match rows and replays.
 
-Report stocks, damage, dead frames, terminal results, crashes, paired CPU deltas, H2H stock
+Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
 difference, non-tied win rate, confidence intervals, and ties. A closed-loop regression is allowed
 as a scientific result, but it must be explicit.
 

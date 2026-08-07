@@ -162,7 +162,7 @@ weight audits, and H2H records.
 
 Report:
 
-- Stocks, damage, dead frames, terminal results, crashes, and paired CPU deltas.
+- Stocks, damage, dead frames, terminal results, crashes, and CPU rate differences.
 - H2H stock difference, non-tied win rate, confidence intervals, and ties.
 - Raw and normalized weight distributions, clip fraction, and effective sample size.
 - Policy calls, committed frames, interrupted chunks, and queue clears.

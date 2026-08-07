@@ -187,7 +187,7 @@ Report:
 - Stocks taken and lost per active minute.
 - Damage dealt and taken per active minute.
 - Seeded bootstrap intervals.
-- Paired E1-minus-E0 deltas from aligned CPU match rows.
+- E1-minus-E0 differences between the separately estimated CPU rates.
 - Crash rate and completed-match count.
 
 The CPU protocol does not report game win rate. Do not infer a win from a stock lead at the frame
@@ -258,13 +258,13 @@ The E1 run is invalid if:
 
 Interpret a valid run as follows:
 
-- Clear H2H and paired CPU improvement: nonlinear head capacity matters. E2 must beat E1, not only
+- Clear H2H and CPU improvement: nonlinear head capacity matters. E2 must beat E1, not only
   E0, to support a factorization claim.
 - Better offline metrics but no closed-loop gain: capacity improves fitting but not control. Keep
   E1 as the required E2 control.
 - Closed-loop regression: the MLP is harmful at this scale or optimization setting. Do not tune E1
   after seeing E2. E2 must beat both E0 and E1 without an unacceptable latency cost.
-- Conflicting CPU and H2H results: call the result inconclusive. Inspect paired rows and replays, and
+- Conflicting CPU and H2H results: call the result inconclusive. Inspect rows and replays, and
   run more predeclared seeds before promotion.
 
 Do not promote E1 as the new policy baseline from NLL alone. E2 planning may begin while E1 trains,

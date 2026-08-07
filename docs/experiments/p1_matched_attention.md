@@ -178,13 +178,16 @@ $1.50 effective hourly cap with 250 GB disk at 11:53 PDT. No instance was rented
 
 ## Evaluation
 
-- Use the same 32 periodic and 96 final CPU matchups as P0.
+- Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
 - Run 64 mirrored H2H configurations, or 128 games, against P0.
 - Keep frame limits, matchup seeds, decode seeds, temperature, and concurrency fixed.
 - Save checkpoints, match rows, replay files, worker logs, and decode protocol.
 - Report per-offset and per-group NLL and accuracy, transition metrics, gradient interaction,
   stocks, damage, dead frames, terminal results, crashes, and wall time.
 - Report paired H2H stock difference, non-tied win rate, confidence intervals, and ties.
+
+Report the two CPU sweeps with separate uncertainty intervals. Do not call boot-and-ordinal row
+alignment paired evidence because later instant-restart stages are random.
 
 Closed-loop CPU and H2H results decide promotion. NLL or throughput alone cannot select P1.
 

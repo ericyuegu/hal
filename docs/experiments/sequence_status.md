@@ -69,7 +69,7 @@ recomputation.
 3. Record the final `19sowpt8` checkpoint, W&B history, rows, replays, and timing.
 4. Pass the P1/P2 FP32 and FP16 parity gate, including long rolling contexts, mixed resets, logits,
    and fixed-seed sampled actions.
-5. Evaluate P1-old with full recomputation over 96 CPU matchups.
+5. Evaluate P1-old with full recomputation over 96 CPU character-pair boots.
 6. Train P1-match on the accepted data path and action vocabulary.
 7. Compare P0, P1-match full recomputation, and P1-match temporal KV.
 8. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
@@ -103,11 +103,13 @@ the exact CPU evaluation protocol checks added at commit `c4ae635`.
 ## Evaluation rules
 
 - Closed-loop policy results decide promotion. Offline NLL and accuracy explain results.
-- Use 32 fixed CPU matchups for periodic checks and 96 for final comparisons.
+- Use 32 deterministic character-pair CPU boots for periodic checks and 96 for final comparisons.
 - Use 64 mirrored H2H configurations, or 128 games, for each challenger against its reference.
-- Keep matchup seeds, decode seeds, temperature, frame budget, and concurrency rules fixed.
+- Keep character schedules, decode seeds, temperature, frame budget, and concurrency rules fixed.
 - Save match rows, replay files, worker logs, and explicit decode protocols.
-- Report paired stock differences and uncertainty intervals.
+- Report separate CPU estimates and uncertainty intervals. Later instant-restart stages are random,
+  so boot-and-ordinal row alignment is only a diagnostic, not a paired causal estimate.
+- Report paired stock differences for mirrored H2H configurations.
 - The CPU protocol does not report full game win rate. Label terminal-game results as a subset.
 - Treat H2H as sensitive but possibly non-transitive. Do not hide a CPU regression behind H2H.
 - Use at least three paired training seeds for a claim. Use five for a final result.

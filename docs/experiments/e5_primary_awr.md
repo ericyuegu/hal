@@ -179,7 +179,7 @@ auxiliary scale, compact data, replay mixing, optimizer, schedule, decode, and e
 Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurations against the
 matched BC reference. Save checkpoints, match rows, replays, H2H records, and the return audit.
 
-Report stocks, damage, dead frames, terminal results, crashes, paired CPU deltas, H2H stock
+Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
 difference, non-tied win rate, confidence intervals, and ties. Also report value and weight metrics
 through training.
 

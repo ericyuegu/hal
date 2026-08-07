@@ -149,7 +149,7 @@ Also log exact-action accuracy, exposure gaps, transition metrics, temporal-modu
 gradients, shared-trunk gradient interaction, parameter counts, memory, and throughput.
 
 Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurations against E2-S.
-Save rows and replays. Report stocks, damage, dead frames, terminal results, paired deltas, H2H stock
+Save rows and replays. Report stocks, damage, dead frames, terminal results, CPU rate differences, H2H stock
 difference, non-tied win rate, confidence intervals, ties, and crashes.
 
 Target 3.0 to 3.5 hours through evaluation and upload on an RTX 4090. Flag startup over 30 minutes,
