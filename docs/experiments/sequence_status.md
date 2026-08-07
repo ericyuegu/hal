@@ -25,7 +25,7 @@ mask isolation. P1-old also differs in sampler and action vocabulary, so it is e
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Code and tests ready; reference pending attention choice | Finish the selected package, final 96-match CPU evaluation, checkpoint, and evidence upload. |
 | E1 | Head capacity: zero-init state-only residual MLP | Auditable plan ready; blocked on E0 | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
 | E2 | Within-frame conditional factorization and group order | Fresh two-arm plan ready; blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
-| E3 | Temporal joint modeling and teacher-forcing exposure bias | Planned | Show coherent teacher-forced and free-running sparse future predictions without harming control. |
+| E3 | Temporal joint modeling and teacher-forcing exposure bias | Fresh sparse-joint plan ready; blocked on E2 | Show coherent teacher-forced and free-running sparse future predictions without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Planned; prior dense result was slightly worse | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Planned | Weight only the action whose state advantage is defined; preserve auxiliary BC. |
 | E6 | Chunk-conditioned value validity | Planned | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
@@ -75,6 +75,7 @@ recomputation.
 The fresh matched-P1 plan is `docs/experiments/p1_matched_attention.md`.
 The P2 decode plan is `docs/experiments/p2_temporal_kv_ablation.md`.
 The E2 factorization plan is `docs/experiments/e2_within_frame_factorization.md`.
+The E3 temporal plan is `docs/experiments/e3_temporal_factorization.md`.
 
 ## Evaluation rules
 
