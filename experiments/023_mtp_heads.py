@@ -26,6 +26,7 @@ from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
+from typing import TypeVar
 
 import melee
 import numpy as np
@@ -899,6 +900,58 @@ class DecodeSettings:
     click_trigger_fix: bool
 
 
+_T = TypeVar("_T")
+
+
+@dataclass
+class DecodeTelemetry:
+    policy_calls: int = 0
+    slot_frames: int = 0
+    model_forwards: int = 0
+    model_rows: int = 0
+    _cpu_forward_seconds: list[float] = field(default_factory=list)
+    _cuda_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = field(default_factory=list)
+
+    def record_policy_call(self, slots: int) -> None:
+        self.policy_calls += 1
+        self.slot_frames += slots
+
+    def model_forward(self, fn: Callable[[], _T], *, rows: int, device: torch.device) -> _T:
+        self.model_forwards += 1
+        self.model_rows += rows
+        if device.type == "cuda":
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            result = fn()
+            end.record()
+            self._cuda_events.append((start, end))
+            return result
+        started_at = time.perf_counter()
+        result = fn()
+        self._cpu_forward_seconds.append(time.perf_counter() - started_at)
+        return result
+
+    def metrics(self) -> dict[str, float]:
+        forward_seconds = list(self._cpu_forward_seconds)
+        if self._cuda_events:
+            torch.cuda.synchronize()
+            forward_seconds.extend(start.elapsed_time(end) / 1_000 for start, end in self._cuda_events)
+        latency_ms = np.asarray(forward_seconds, dtype=np.float64) * 1_000
+        total_seconds = float(latency_ms.sum() / 1_000)
+        return {
+            "decode_policy_calls": float(self.policy_calls),
+            "decode_slot_frames": float(self.slot_frames),
+            "decode_model_forwards": float(self.model_forwards),
+            "decode_model_rows": float(self.model_rows),
+            "decode_model_forward_seconds": total_seconds,
+            "decode_model_forward_mean_ms": float(latency_ms.mean()) if latency_ms.size else 0.0,
+            "decode_model_forward_median_ms": float(np.median(latency_ms)) if latency_ms.size else 0.0,
+            "decode_model_forward_p95_ms": float(np.quantile(latency_ms, 0.95)) if latency_ms.size else 0.0,
+            "decode_model_forward_ms_per_row": (1_000 * total_seconds / self.model_rows if self.model_rows else 0.0),
+        }
+
+
 def _decode_settings(
     model: GPT,
     cfg: TrainConfig,
@@ -935,6 +988,7 @@ def make_policy(
     decode_min_p: float | None = None,
     decode_click_trigger_fix: bool | None = None,
     decode_seed: int | None = None,
+    telemetry: DecodeTelemetry | None = None,
 ) -> RecedingHorizon:
     """Build one closed-loop policy with optional decode overrides."""
     s = cfg.exec_horizon if exec_horizon is None else exec_horizon
@@ -959,29 +1013,22 @@ def make_policy(
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         assert committed is None, "receding-horizon policy does not condition on a committed prefix"
-        chunk = (
-            decode(
-                model,
-                ctx,
-                temp=settings.temp,
-                temps=settings.temps,
-                btn_support_min=settings.btn_support_min,
-                min_p=settings.min_p,
-                click_trigger_fix=settings.click_trigger_fix,
-                gen=gen,
-            )
-            if s == 1
-            else decode_chunk(
-                model,
-                ctx,
-                offsets,
-                temp=settings.temp,
-                temps=settings.temps,
-                btn_support_min=settings.btn_support_min,
-                min_p=settings.min_p,
-                click_trigger_fix=settings.click_trigger_fix,
-                gen=gen,
-            )
+        run = functools.partial(model, ctx.features, ctx.ctx_pad)
+        hidden_states = (
+            run()
+            if telemetry is None
+            else telemetry.model_forward(run, rows=ctx.ctx_pad.shape[0], device=model_device)
+        )
+        h = hidden_states[:, -1]
+        chunk = chunk_from_hidden(
+            model,
+            h,
+            offsets,
+            group_temps=settings.temps or (settings.temp,) * N_GROUPS,
+            btn_support_min=settings.btn_support_min,
+            min_p=settings.min_p,
+            click_trigger_fix=settings.click_trigger_fix,
+            gen=gen,
         )
         return chunk.cpu().numpy()
 
@@ -1022,7 +1069,8 @@ def make_policy(
                     for layer in range(n_layers)
                 ]
             )
-            h, new = model.forward_incremental(features, past)
+            run = functools.partial(model.forward_incremental, features, past)
+            h, new = run() if telemetry is None else telemetry.model_forward(run, rows=len(rows), device=model_device)
             for j, row in enumerate(rows):
                 kv_cache[ids[row]] = [(k[j : j + 1], v[j : j + 1]) for k, v in new]
                 hidden[ids[row]] = h[j]
@@ -1553,9 +1601,21 @@ def _run_eval_sweep(
     protocol: EvalProtocol,
     replay_dir: Path | None,
     rows_path: Path | None,
+    telemetry: DecodeTelemetry | None = None,
 ) -> dict[str, float]:
+    def tracked_factory() -> Callable:
+        policy = policy_factory()
+
+        def tracked(frame_index: int, obs: dict) -> dict:
+            if telemetry is not None:
+                telemetry.record_policy_call(len(obs))
+            return policy(frame_index, obs)
+
+        return tracked
+
+    started_at = time.perf_counter()
     results, rows = sweep_vs_cpu_prior_with_rows(
-        policy_factory,
+        tracked_factory,
         session_cfg=default_session_cfg(replay_dir, instant_match_restart=protocol.instant_match_restart),
         n_matchups=protocol.n_matchups,
         max_parallel=protocol.max_parallel,
@@ -1565,9 +1625,17 @@ def _run_eval_sweep(
         seed_stage=melee.Stage(protocol.seed_stage),
         start_retries=protocol.start_retries,
     )
+    metrics = vs_cpu_metrics(results, seed=protocol.seed)
+    metrics["eval_wall_seconds"] = time.perf_counter() - started_at
+    if telemetry is not None:
+        metrics.update(telemetry.metrics())
     if rows_path is not None:
         _write_match_rows(rows_path, rows, protocol)
-    return vs_cpu_metrics(results, seed=protocol.seed)
+        metrics_path = rows_path.with_name("metrics.json")
+        tmp = metrics_path.with_suffix(metrics_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(metrics, sort_keys=True))
+        tmp.replace(metrics_path)
+    return metrics
 
 
 def eval_vs_cpu(
@@ -1598,6 +1666,7 @@ def eval_vs_cpu(
         seed=eval_seed,
     )
     policy_index = itertools.count()
+    telemetry = DecodeTelemetry()
 
     def policy_factory() -> RecedingHorizon:
         return make_policy(
@@ -1611,6 +1680,7 @@ def eval_vs_cpu(
             decode_min_p=settings.min_p,
             decode_click_trigger_fix=settings.click_trigger_fix,
             decode_seed=protocol.seed + next(policy_index),
+            telemetry=telemetry,
         )
 
     with _evaluation_mode(model):
@@ -1619,6 +1689,7 @@ def eval_vs_cpu(
             protocol=protocol,
             replay_dir=replay_dir,
             rows_path=rows_path,
+            telemetry=telemetry,
         )
 
 
@@ -2259,6 +2330,7 @@ def eval_ckpt(
     )
     replay_dir.mkdir(parents=True, exist_ok=True)
     policy_index = itertools.count()
+    telemetry = DecodeTelemetry()
 
     def policy_factory() -> RecedingHorizon:
         return make_policy(
@@ -2272,6 +2344,7 @@ def eval_ckpt(
             decode_min_p=settings.min_p,
             decode_click_trigger_fix=settings.click_trigger_fix,
             decode_seed=protocol.seed + next(policy_index),
+            telemetry=telemetry,
         )
 
     print(
@@ -2284,6 +2357,7 @@ def eval_ckpt(
         protocol=protocol,
         replay_dir=replay_dir,
         rows_path=replay_dir / "match_rows.json",
+        telemetry=telemetry,
     )
     if wandb_run_id is not None:
         run = wandb.init(

@@ -77,7 +77,7 @@ recomputation.
 2. Evaluate P1-match with full recomputation.
 3. Pass the P1/P2 FP32 and FP16 parity gate on that checkpoint, including long rolling contexts,
    mixed resets, logits, and fixed-seed sampled actions.
-4. Add and test the missing P2 decode timing counters.
+4. Verify P2's CUDA-event timing counters during the GPU parity gate.
 5. Run the P2 temporal-KV evaluation and compare P0, P1-match recomputation, and P1-match KV.
 6. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
    configuration into the E1 launch audit.

@@ -281,6 +281,51 @@ def test_eval_sweep_uses_recorded_cpu_protocol(monkeypatch) -> None:
     assert seen["start_retries"] == protocol.start_retries
 
 
+def test_eval_sweep_records_decode_telemetry(tmp_path, monkeypatch) -> None:
+    cfg = exp.TrainConfig()
+    protocol = exp._eval_protocol(
+        cfg,
+        settings=exp.DecodeSettings(1.0, None, 0, 0.0, False),
+        exec_horizon=1,
+        default_n_matchups=1,
+        model_dtype="torch.float16",
+    )
+    telemetry = exp.DecodeTelemetry()
+
+    def fake_sweep(factory, **_kwargs):
+        policy = factory()
+        policy(0, {"a": object(), "b": object()})
+        return [], []
+
+    monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", fake_sweep)
+    metrics = exp._run_eval_sweep(
+        lambda: lambda _frame_index, _obs: {},
+        protocol=protocol,
+        replay_dir=None,
+        rows_path=tmp_path / "match_rows.json",
+        telemetry=telemetry,
+    )
+
+    assert metrics["decode_policy_calls"] == 1
+    assert metrics["decode_slot_frames"] == 2
+    assert metrics["decode_model_forwards"] == 0
+    assert metrics["eval_wall_seconds"] >= 0
+    assert json.loads((tmp_path / "metrics.json").read_text()) == metrics
+
+
+def test_decode_telemetry_measures_cpu_model_forwards() -> None:
+    telemetry = exp.DecodeTelemetry()
+
+    result = telemetry.model_forward(lambda: torch.ones(2), rows=2, device=torch.device("cpu"))
+    metrics = telemetry.metrics()
+
+    assert torch.equal(result, torch.ones(2))
+    assert metrics["decode_model_forwards"] == 1
+    assert metrics["decode_model_rows"] == 2
+    assert metrics["decode_model_forward_seconds"] >= 0
+    assert metrics["decode_model_forward_ms_per_row"] >= 0
+
+
 def test_manual_eval_overrides_checkpoint_incremental_mode(tmp_path, monkeypatch) -> None:
     cfg = exp.TrainConfig(
         d_model=32,
@@ -533,6 +578,31 @@ def _random_batch(cfg, *, batch_size: int = 2) -> TrainBatch:
         context=Context(features=features, ctx_pad=torch.arange(batch_size)),
         target=torch.rand(batch_size, max(cfg.head_offsets), A_DIM, generator=gen),
     )
+
+
+def test_policy_telemetry_does_not_change_full_decode() -> None:
+    cfg = exp.TrainConfig(
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        L_ctx=8,
+        attn_window=0,
+        head_offsets=(1, 2),
+        batch_size=2,
+        compile_trunk=False,
+    )
+    model = exp.GPT(cfg).eval()
+    ctx = _random_batch(cfg).context
+    expected = exp.decode(model, ctx, gen=torch.Generator().manual_seed(11)).numpy()
+    telemetry = exp.DecodeTelemetry()
+    policy = exp.make_policy(model, _stats(), cfg, device="cpu", decode_seed=11, telemetry=telemetry)
+
+    actual = policy.predict_chunk(ctx, None)
+
+    np.testing.assert_array_equal(actual, expected)
+    metrics = telemetry.metrics()
+    assert metrics["decode_model_forwards"] == 1
+    assert metrics["decode_model_rows"] == 2
 
 
 def test_validation_reports_each_group_at_each_offset() -> None:

@@ -20,8 +20,9 @@ budget, and concurrency fixed. Change only the decode path.
 
 The comparison is valid only for the P1 geometry. With eight layers and an attention window of 128,
 the newest output has a receptive field of 1,017 frames. This is smaller than the 1,024-frame raw
-context. The cache must be rejected when the receptive field exceeds the raw context. Equality is
-safe because the oldest contributing raw frame is still present.
+context. Reject the cache when the receptive field reaches or exceeds the raw context. Equality is
+not safe: the full rolling-window path masks the oldest row's finite differences because their
+predecessor has left the window, while the cached row originally saw that predecessor.
 
 ## Files to change
 
@@ -62,7 +63,7 @@ Write each arm to its own directory. Save:
 - Complete protocol data, including `eval_incremental_kv`.
 - Total wall time and emulator boot time.
 - Policy calls, frames decoded, model forwards, and model-forward wall time.
-- Median, p95, and mean model time per decoded frame.
+- Median, p95, and mean time per backbone-forward call, plus total time per forward batch row.
 - Peak CPU RAM, VRAM, and GPU use when the host reports them correctly.
 
 The policy metrics should match within independent sampling noise. Report stocks, damage, dead
@@ -98,14 +99,16 @@ not modify the saved checkpoint configuration. It validates the requested decode
 checkpoint attention geometry and records the selected mode in the evaluation protocol and H2H
 metadata.
 
-The focused CPU test suite passes: 89 passed and 6 GPU-only tests skipped. Static checking reports
-only the existing PyTorch module-typing warnings. The FP32 and FP16 GPU parity gate remains blocked
-on the final P1 checkpoint.
+The evaluator now records policy calls, active slot-frames, backbone-forward calls, forward batch
+rows, total backbone time, mean/median/p95 forward latency, time per forward row, and total sweep
+wall time. CUDA timing uses events, so it does not add a synchronization after every forward. CPU
+timing uses the monotonic performance clock. A parity test proves that telemetry does not change
+full-context sampled actions. Each evaluation writes these values to `metrics.json` next to
+`match_rows.json`, and also returns them for W&B logging. Do not infer decode speed from total
+evaluator wall time because Dolphin boot and emulation time dominate that number.
 
-The implementation audit on 2026-08-07 found that policy calls, decoded frames, model forwards,
-model-forward time, and per-frame latency are not yet recorded. Add these counters and focused
-tests before running either P2 arm. Do not infer decode speed from total evaluator wall time because
-Dolphin boot and emulation time dominate that number.
+The focused CPU suite passes 132 tests and skips six GPU-only tests. The FP32 and FP16 GPU parity
+gate remains blocked on the final P1 checkpoint.
 
 ## Decision
 
