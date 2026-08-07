@@ -237,7 +237,8 @@ uv run scripts/launch_vast.py \
   uv run experiments/023_mtp_heads.py \
   --eval-run \
   260807-164825_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-linear_ranked-anon-1_e0-normalized-aux-bc \
-  --eval-checkpoint-name final.pt --eval-n-matchups 96 --eval-seed 0 \
+  --eval-checkpoint-name final.pt --eval-decode recompute \
+  --eval-n-matchups 96 --eval-seed 0 \
   --wandb-run-id obx3o3az --wandb-label p0-final-fp16
 ```
 
