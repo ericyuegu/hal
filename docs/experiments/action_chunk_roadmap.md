@@ -117,7 +117,7 @@ ancestor errors do.
 
 Use two predeclared orders:
 
-1. Stable-prefix order: `c_stick, triggers, main_stick, buttons`.
+1. Stable-prefix order: `c_stick, triggers, buttons, main_stick`.
 2. Intent-first order: `main_stick, buttons, triggers, c_stick`.
 
 The stable-prefix order is the main arm. Its early groups should be easier to sample correctly, so it

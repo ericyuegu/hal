@@ -16,11 +16,17 @@ probability factorization by conditioning each action group on earlier groups fr
 
 Run two chain orders, one at a time:
 
-- E2-S, stable prefix: `c_stick, triggers, main_stick, buttons`.
+- E2-S, stable prefix: `c_stick, triggers, buttons, main_stick`.
 - E2-I, intent first: `main_stick, buttons, triggers, c_stick`.
 
 E2-S is the main factorization arm. E2-I tests group order. Do not select the order from
 teacher-forced NLL alone.
+
+The E2-S order is fixed from the completed P0 offset-1 validation metrics, before E2 training. NLL
+in bits per frame was 0.050 for c-stick, 0.090 for triggers, 0.242 for buttons, and 0.646 for main
+stick. Predicted transition rates had the same order: 0.0062, 0.0174, 0.0271, and 0.1136. E2-S
+therefore puts the lower-entropy, more persistent groups first. This also lets the main-stick
+distribution condition on button intent. The source is W&B run `obx3o3az`.
 
 The first run of each arm uses seed 0. Treat it as screening evidence. Use at least three matched
 training seeds before making an architecture claim.
@@ -62,7 +68,7 @@ Use these planned configuration fields:
 head_mode: Literal["linear", "state_mlp", "factored_mlp"] = "linear"
 action_mlp_ratio: int = 2
 action_condition_dim: int = 32
-action_group_order: tuple[str, ...] = ("c_stick", "triggers", "main_stick", "buttons")
+action_group_order: tuple[str, ...] = ("c_stick", "triggers", "buttons", "main_stick")
 ```
 
 Share one embedding table for each action group across offsets. Each table maps its discrete class
