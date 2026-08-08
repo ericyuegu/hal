@@ -89,8 +89,9 @@ blocks. Each block has four attention heads, head width 32, a 256-wide SiLU MLP,
 dropout. Apply a final RMSNorm and use the last action token as the chunk vector.
 
 Concatenate that 128-wide chunk vector with `RMSNorm(h_t)`. Give each horizon its own
-`Linear(d_model + 128, 512)`, SiLU, and `Linear(512, 1)` Q head. Share only the action encoder
-between horizons.
+`Linear(d_model + 128, 512)`, SiLU, and `Linear(512, 1)` Q head. Do not share the action encoder or
+Q head across horizons. This keeps Q2 structurally independent of frames 3 and 4 and prevents Q4
+gradients or clipping from changing the Q2 fit.
 
 Concatenation is important: the critic must receive state and action information in distinct feature
 columns before the nonlinear MLP. Do not reduce the chunk to an additive sum of group embeddings.
@@ -113,15 +114,16 @@ y_t^H=\sum_{k=1}^{H}\gamma^{k-1}r_{t+k}
 +\gamma^H V_{target}(s_{t+H}).
 \]
 
-Fit Q with Huber loss and V with Huber loss to the Monte Carlo return. Detach all targets. Keep the
-direct Monte Carlo return as an independent calibration label.
+Fit Q with Huber loss and V with Huber loss to the Monte Carlo return. Use Huber delta 1.0 for both.
+Detach all targets. Keep the direct Monte Carlo return as an independent calibration label.
 
 Use the E5 reward settings and `gamma=0.99827`. Apply one mask that requires valid `s_t`, all H
 actions and rewards, and valid `s_{t+H}`. Never bootstrap across padding, a replay boundary, or a
 terminal state. Set the bootstrap term to zero after a true terminal transition.
 
-Use an EMA target update declared before launch. Record its coefficient. Do not tune it from final
-critic results.
+After the value warm-up, update the target after each online V update with
+`target = 0.995 * target + 0.005 * online`. Record `target_tau=0.005` in the checkpoint and logs. Do
+not tune it from final critic results.
 
 Use the same chunk-interruption rule as E7 execution. Exclude a training row when the controlled
 player loses control, either player loses a stock, or the game enters a reset before all H planned
@@ -139,6 +141,13 @@ into `V_target` and begin the Q phase.
 Continue updating V and its EMA target during Q training. Log the phase and global Q step
 separately. A resumed run must not repeat or skip the target-network initialization. If the value
 gate fails, stop before any Q update and revise the critic plan.
+
+Use one AdamW optimizer for V and one each for Q2, Q4, the Q2 state-only control, and the Q4
+state-only control. Use learning rate `3e-4`, betas `(0.9, 0.95)`, epsilon `1e-8`, weight decay
+`0.01`, and gradient-norm clip `1.0`. Clip each optimizer's parameters separately. The V schedule
+spans all 18,432 updates: 500 linear warm-up steps, then cosine decay to 1% of the base rate. Start
+the four Q-phase optimizers and their matching 500-step warm-ups only after V passes its gate. Their
+cosine schedules span the 16,384 Q updates. Save and restore every optimizer and scheduler state.
 
 ## Required tests
 
@@ -169,6 +178,8 @@ gate fails, stop before any Q update and revise the critic plan.
 19. Assert `V_target` is an exact copy of warmed V at Q step 0, then follows the declared EMA rule.
 20. Check resume immediately before and after the phase boundary.
 21. Assert the E6 interruption mask is byte-identical to the mask E7 uses for the same logged rows.
+22. Check Huber delta 1.0 by hand. Assert all five optimizers own disjoint parameters, clip
+    separately, and resume their independent schedules at the exact saved steps.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
@@ -179,8 +190,9 @@ optimizer steps for the main probes and matched state-only controls. Keep the sa
 mixing unless a measured systems limit requires a documented change. The actor remains frozen, so
 this is not a policy data-budget comparison.
 
-Train at least three critic seeds before passing the gate. One run may contain several bootstrap
-heads, but report both within-run ensemble disagreement and across-seed stability.
+Train three critic seeds as separate runs before passing the gate. Use those three models as the
+critic ensemble for disagreement. Do not add bootstrap heads in the first experiment; that would
+change the probe and optimizer geometry inside a seed.
 
 Use a 256-step GPU gate first. Measure the cost of rebuilding `s_t`, `s_{t+2}`, and `s_{t+4}`. If
 the projected run exceeds 3.5 hours, report it before launch. A larger critic batch is allowed only
