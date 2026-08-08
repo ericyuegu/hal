@@ -27,6 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 from typing import TypeVar
+from typing import cast
 
 import melee
 import numpy as np
@@ -53,7 +54,6 @@ from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.h2h import run_h2h
 from hal.eval.harness import DEFAULT_START_RETRIES
 from hal.eval.harness import default_session_cfg
-from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.paired import summarize_paired
 from hal.training import scoring
@@ -131,6 +131,8 @@ class TrainConfig:
     require_flex: bool = False
     # Offset 1 is deployed. Other offsets are auxiliary targets.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
+    head_mode: Literal["linear", "state_mlp"] = "linear"
+    action_mlp_ratio: int = 2
     # Total weight of the mean auxiliary-head loss. This stays fixed if head_offsets changes.
     aux_loss_weight: float = 1.0
     # Drop the complete ego action history for a training sample.
@@ -202,10 +204,8 @@ class TrainConfig:
     eval_n_matchups: int = 32
     final_eval_n_matchups: int = 96
     eval_seed: int = 0
-    # Closed-loop eval parallelism scales with the box: max_parallel = round(this * cpu_count).
-    # Each parallel slot is one Dolphin boot that (via instant-restart) plays many prior-sampled
-    # matches back-to-back. Profile {0.5, 1, 2, 4} for the best eval throughput vs trainer impact.
-    eval_parallel_per_cpu: float = 1.0
+    # Maximum concurrent Dolphin boots. Matchup count is a separate fixed sample size.
+    eval_max_parallel: int = 32
     # Closed-loop eval runs in a background subprocess. By default the trainer waits for that
     # subprocess before resuming, so evaluator and trainer never contend for the same CUDA device.
     # Set true only when the evaluator has an actually separate GPU (or intentionally accepts
@@ -257,9 +257,10 @@ def _model_tag(cfg: TrainConfig) -> str:
     offs = ".".join(str(o) for o in cfg.head_offsets)
     attention = "full" if cfg.attn_window == 0 else f"swa{cfg.attn_window}"
     decode = "kv" if cfg.eval_incremental_kv else "recompute"
+    head = "linear" if cfg.head_mode == "linear" else f"state-mlp-r{cfg.action_mlp_ratio}"
     return (
         f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-a{cfg.action_vocab}-"
-        f"{attention}-{decode}-o{offs}-linear"
+        f"{attention}-{decode}-o{offs}-{head}"
     )
 
 
@@ -271,7 +272,7 @@ def _micro_batch(cfg: TrainConfig) -> int:
 
 def _eval_max_parallel(cfg: TrainConfig, n_matchups: int) -> int:
     """Concurrent Dolphin boots per wave; never changes the fixed statistical sample size."""
-    return min(n_matchups, max(1, round(cfg.eval_parallel_per_cpu * usable_cpus())))
+    return min(n_matchups, cfg.eval_max_parallel)
 
 
 def _load_button_combo_counts(cfg: TrainConfig) -> Tensor | None:
@@ -354,37 +355,34 @@ class IndependentHead(nn.Module):
             for name, start, vocab in zip(_GROUP_NAMES, _GROUP_OFFSETS, _GROUP_VOCABS, strict=True)
         }
 
-    def sample(
-        self,
-        h: Tensor,
-        *,
-        group_temps: tuple[float, ...],
-        btn_dead: Tensor | None,
-        min_p: float,
-        argmax: bool,
-        gen: torch.Generator | None,
-    ) -> Int[Tensor, "B n_groups"]:
-        """Sample each action group from its own logit slice."""
-        logits = self.logits(h)
-        picks: list[Tensor] = []
-        for g, name in enumerate(_GROUP_NAMES):
-            lg = logits[name].float()
-            if btn_dead is not None and name == "buttons":
-                lg = lg.masked_fill(btn_dead, float("-inf"))
-            if argmax:
-                pick = lg.argmax(-1)
-            else:
-                probs = F.softmax(lg / group_temps[g], dim=-1)
-                if min_p > 0:
-                    probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
-                    probs = probs / probs.sum(dim=-1, keepdim=True)
-                pick = torch.multinomial(probs, 1, generator=gen).squeeze(-1)
-            picks.append(pick)
-        return torch.stack(picks, dim=-1)
+
+class StateMLPAdapter(nn.Module):
+    def __init__(self, d_model: int, ratio: int, n_output_heads: int) -> None:
+        super().__init__()
+        hidden = ratio * d_model
+        self.state_proj = nn.Linear(d_model, hidden)
+        self.residual_projs = nn.ModuleList(
+            [
+                nn.ModuleDict({name: nn.Linear(hidden, vocab) for name, vocab in zip(_GROUP_NAMES, _GROUP_VOCABS)})
+                for _ in range(n_output_heads)
+            ]
+        )
+        for output_head in self.residual_projs:
+            for module in cast(nn.ModuleDict, output_head).values():
+                projection = cast(nn.Linear, module)
+                nn.init.zeros_(projection.weight)
+                nn.init.zeros_(projection.bias)
+
+    def features(self, h: Tensor) -> Tensor:
+        return F.silu(self.state_proj(h))
+
+    def add(self, head_index: int, base: dict[str, Tensor], features: Tensor) -> dict[str, Tensor]:
+        output_head = cast(nn.ModuleDict, self.residual_projs[head_index])
+        return {name: logits + cast(nn.Linear, output_head[name])(features) for name, logits in base.items()}
 
 
 class GPT(nn.Module):
-    """Causal frame model with one independent linear head per offset."""
+    """Causal frame model with one output head per offset."""
 
     def __init__(self, cfg: TrainConfig) -> None:
         super().__init__()
@@ -427,6 +425,9 @@ class GPT(nn.Module):
             )
         )
         self.heads = nn.ModuleList([IndependentHead(cfg.d_model) for _ in offs])
+        self.head_adapter = (
+            StateMLPAdapter(cfg.d_model, cfg.action_mlp_ratio, len(offs)) if cfg.head_mode == "state_mlp" else None
+        )
 
         # Stick/trigger center grids (registered so they move with .to() and serialize).
         self.register_buffer("main_centers", scoring.STICK_CLUSTER_CENTERS_MAIN.clone())
@@ -436,6 +437,23 @@ class GPT(nn.Module):
         # buffer then travels with checkpoints so later eval never depends on a mutable sidecar file.
         self.register_buffer("button_combo_counts", torch.full((scoring.N_BUTTON_COMBOS,), -1, dtype=torch.long))
         self._btn_support_dead_cache: dict[tuple[int, torch.device], Tensor] = {}
+
+    def group_logits(self, h: Tensor, head_index: int) -> dict[str, Tensor]:
+        base = cast(IndependentHead, self.heads[head_index]).logits(h)
+        if self.head_adapter is None:
+            return base
+        return self.head_adapter.add(head_index, base, self.head_adapter.features(h))
+
+    def base_and_group_logits(self, h: Tensor) -> tuple[list[dict[str, Tensor]], list[dict[str, Tensor]]]:
+        base = [cast(IndependentHead, head).logits(h) for head in self.heads]
+        if self.head_adapter is None:
+            return base, base
+        features = self.head_adapter.features(h)
+        logits = [self.head_adapter.add(index, values, features) for index, values in enumerate(base)]
+        return base, logits
+
+    def all_group_logits(self, h: Tensor) -> list[dict[str, Tensor]]:
+        return self.base_and_group_logits(h)[1]
 
     def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
         ref = features[f"{prefix}_position_x"]
@@ -540,9 +558,10 @@ def action_loss(model: GPT, batch: TrainBatch) -> LossParts:
     bnd_full = scoring.transition_mask(q_full)  # [B, L_ctx + max_off - 1, n_groups]; pos t = (q[t+1] != q[t])
     nll: dict[tuple[int, str], Tensor] = {}
     trans: dict[tuple[int, str], Tensor] = {}
+    all_logits = model.all_group_logits(h)
     for hi, o in enumerate(model.head_offsets):
         tgt_idx = q_full[:, o : o + L_ctx]  # target frame i+o
-        logits = {name: lg.float() for name, lg in model.heads[hi].logits(h).items()}
+        logits = {name: lg.float() for name, lg in all_logits[hi].items()}
         bnd_o = bnd_full[:, o - 1 : o - 1 + L_ctx]  # transition at i iff q[i+o] != q[i+o-1]
         gnll = group_nll(logits, tgt_idx, valid)
         for g, name in enumerate(_GROUP_NAMES):
@@ -595,9 +614,35 @@ def _resolve_decode_args(
     return group_temps
 
 
+def _sample_group_indices(
+    logits: dict[str, Tensor],
+    *,
+    group_temps: tuple[float, ...],
+    btn_dead: Tensor | None,
+    min_p: float,
+    argmax: bool,
+    gen: torch.Generator | None,
+) -> Int[Tensor, "B n_groups"]:
+    picks: list[Tensor] = []
+    for group, name in enumerate(_GROUP_NAMES):
+        group_logits = logits[name].float()
+        if btn_dead is not None and name == "buttons":
+            group_logits = group_logits.masked_fill(btn_dead, float("-inf"))
+        if argmax:
+            pick = group_logits.argmax(-1)
+        else:
+            probs = F.softmax(group_logits / group_temps[group], dim=-1)
+            if min_p > 0:
+                probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+            pick = torch.multinomial(probs, 1, generator=gen).squeeze(-1)
+        picks.append(pick)
+    return torch.stack(picks, dim=-1)
+
+
 def _sample_action(
     model: GPT,
-    head: IndependentHead,
+    head_index: int,
     h: Tensor,
     *,
     group_temps: tuple[float, ...],
@@ -607,9 +652,15 @@ def _sample_action(
     argmax: bool,
     gen: torch.Generator | None,
 ) -> Float[Tensor, "B d_action"]:
-    """Sample one action vector from an independent joint output head."""
     dead = _btn_support_dead(model, btn_support_min, h.device) if btn_support_min >= 1 else None
-    idx = head.sample(h, group_temps=group_temps, btn_dead=dead, min_p=min_p, argmax=argmax, gen=gen)
+    idx = _sample_group_indices(
+        model.group_logits(h, head_index),
+        group_temps=group_temps,
+        btn_dead=dead,
+        min_p=min_p,
+        argmax=argmax,
+        gen=gen,
+    )
     a = _dequantize(model, idx)  # [B, A_DIM]
     if click_trigger_fix:
         a[..., _TRIGGER_L_CH] = torch.where(a[..., _BUTTON_L_CH] > 0.5, 1.0, a[..., _TRIGGER_L_CH])
@@ -635,7 +686,7 @@ def decode(
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
     a = _sample_action(
         model,
-        model.heads[model.primary_head_idx],
+        model.primary_head_idx,
         h,
         group_temps=group_temps,
         btn_support_min=btn_support_min,
@@ -703,7 +754,7 @@ def chunk_from_hidden(
         actions.append(
             _sample_action(
                 model,
-                model.heads[model.head_offsets.index(o)],
+                model.head_offsets.index(o),
                 h,
                 group_temps=group_temps,
                 btn_support_min=btn_support_min,
@@ -747,10 +798,12 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         "stage_vocab": cfg.stage_vocab,
         "stage_dim": cfg.stage_dim,
         "action_vocab": cfg.action_vocab,
+        "action_mlp_ratio": cfg.action_mlp_ratio,
         "val_n_samples": cfg.val_n_samples,
         "gradient_diagnostic_batch_size": cfg.gradient_diagnostic_batch_size,
         "diagnostic_rare_button_count": cfg.diagnostic_rare_button_count,
         "eval_n_matchups": cfg.eval_n_matchups,
+        "eval_max_parallel": cfg.eval_max_parallel,
         "eval_max_frames": cfg.eval_max_frames,
         "windows_per_replay": cfg.windows_per_replay,
         "predownload": cfg.predownload,
@@ -788,6 +841,8 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
             raise ValueError(f"final_h2h_reference_experiment does not exist: {exp}")
     if cfg.d_model % cfg.n_heads != 0:
         raise ValueError(f"d_model={cfg.d_model} must be divisible by n_heads={cfg.n_heads}")
+    if cfg.head_mode not in ("linear", "state_mlp"):
+        raise ValueError(f"head_mode must be 'linear' or 'state_mlp', got {cfg.head_mode!r}")
     head_dim = cfg.d_model // cfg.n_heads
     if head_dim % 2:
         raise ValueError(f"rotary attention head_dim=d_model/n_heads={head_dim} must be even")
@@ -811,7 +866,6 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
     finite_positive = {
         "muon_lr": cfg.muon_lr,
         "adam_lr": cfg.adam_lr,
-        "eval_parallel_per_cpu": cfg.eval_parallel_per_cpu,
         "eval_timeout_seconds": cfg.eval_timeout_seconds,
     }
     for name, value in finite_positive.items():
@@ -1093,8 +1147,8 @@ def checkpoint_decode_parity(
         hidden_max_rel = max(hidden_max_rel, float((hidden_delta / hidden_scale).max()))
         finite &= bool(torch.isfinite(full_hidden).all() and torch.isfinite(incremental_hidden).all())
         hidden_failures += int(not torch.allclose(full_hidden, incremental_hidden, atol=atol, rtol=rtol))
-        full_logits = model.heads[model.primary_head_idx].logits(full_hidden)
-        incremental_logits = model.heads[model.primary_head_idx].logits(incremental_hidden)
+        full_logits = model.group_logits(full_hidden, model.primary_head_idx)
+        incremental_logits = model.group_logits(incremental_hidden, model.primary_head_idx)
         for name in _GROUP_NAMES:
             lhs = full_logits[name].float()
             rhs = incremental_logits[name].float()
@@ -1109,15 +1163,21 @@ def checkpoint_decode_parity(
                 not torch.allclose(lhs_probability, rhs_probability, atol=atol, rtol=rtol)
             )
             finite &= bool(torch.isfinite(lhs_probability).all() and torch.isfinite(rhs_probability).all())
-        sample_kwargs = dict(
+        full_sample = _sample_group_indices(
+            full_logits,
             group_temps=group_temps,
             btn_dead=None,
             min_p=cfg.decode_min_p,
             argmax=False,
+            gen=full_gen,
         )
-        full_sample = model.heads[model.primary_head_idx].sample(full_hidden, gen=full_gen, **sample_kwargs)
-        incremental_sample = model.heads[model.primary_head_idx].sample(
-            incremental_hidden, gen=incremental_gen, **sample_kwargs
+        incremental_sample = _sample_group_indices(
+            incremental_logits,
+            group_temps=group_temps,
+            btn_dead=None,
+            min_p=cfg.decode_min_p,
+            argmax=False,
+            gen=incremental_gen,
         )
         sampled_action_mismatches += int((full_sample != incremental_sample).any(dim=1).sum())
     if device.type == "cuda":
@@ -1330,6 +1390,28 @@ def lr_schedule(cfg: TrainConfig):
     return fn
 
 
+def _output_head_parameters(model: GPT) -> tuple[nn.Parameter, ...]:
+    modules: tuple[nn.Module, ...] = (
+        (model.heads,) if model.head_adapter is None else (model.heads, model.head_adapter)
+    )
+    return tuple(parameter for module in modules for parameter in module.parameters())
+
+
+def parameter_counts(model: GPT) -> dict[str, int]:
+    adapter = model.head_adapter
+    counts = {
+        "total": sum(parameter.numel() for parameter in model.parameters()),
+        "trunk": sum(parameter.numel() for parameter in model.trunk.parameters()),
+        "classifier": sum(parameter.numel() for parameter in model.heads.parameters()),
+        "state_projection": 0,
+        "residual_output": 0,
+    }
+    if adapter is not None:
+        counts["state_projection"] = sum(parameter.numel() for parameter in adapter.state_proj.parameters())
+        counts["residual_output"] = sum(parameter.numel() for parameter in adapter.residual_projs.parameters())
+    return counts
+
+
 def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     """Muon for the transformer blocks' hidden weight matrices (attn + MLP); AdamW for everything
     else — input projection, output head, embeddings, biases — split by weight-decay eligibility.
@@ -1340,7 +1422,7 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     muon_ids = {id(p) for p in muon_params}
     embed_ids = {id(p) for m in (model.cat_embeds, model.char_emb, model.stage_emb) for p in m.parameters()}
     # Optionally exclude output-head weights from weight decay.
-    head_ids = set() if cfg.head_weight_decay else {id(p) for p in model.heads.parameters()}
+    head_ids = set() if cfg.head_weight_decay else {id(p) for p in _output_head_parameters(model)}
 
     decay: list[nn.Parameter] = []
     no_decay: list[nn.Parameter] = []
@@ -1429,6 +1511,13 @@ def _finite_gradient_norm(model: nn.Module, objective_value: Tensor, step: int) 
         raise FloatingPointError(f"step {step}: gradients are not finite; optimizer step was skipped") from error
 
 
+def _parameter_gradient_norm(parameters: Iterable[nn.Parameter]) -> float:
+    norms = [parameter.grad.detach().float().norm() for parameter in parameters if parameter.grad is not None]
+    if not norms:
+        return 0.0
+    return torch.stack(norms).norm().item()
+
+
 def _replay_overlap(previous: frozenset[str] | None, current: set[str]) -> int | None:
     if previous is None or not current:
         return None
@@ -1510,7 +1599,7 @@ def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) 
             for gradient in torch.autograd.grad(
                 losses[offset],
                 representation,
-                retain_graph=i + 1 < len(model.head_offsets),
+                retain_graph=model.head_adapter is not None or i + 1 < len(model.head_offsets),
             )
         )
 
@@ -1541,6 +1630,18 @@ def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) 
         )
         comparable = sum(int(((p != 0) & (a != 0)).sum()) for p, a in zip(primary, weighted_aux))
         out["grad/sign_conflict_frac_1_weighted_aux"] = conflicting / comparable if comparable else 0.0
+    if model.head_adapter is not None:
+        auxiliary = torch.stack([losses[offset] for offset in aux_offsets]).mean() if aux_offsets else 0.0
+        total = losses[1] + cfg.aux_loss_weight * auxiliary
+        state_parameters = tuple(model.head_adapter.state_proj.parameters())
+        residual_parameters = tuple(model.head_adapter.residual_projs.parameters())
+        adapter_parameters = state_parameters + residual_parameters
+        adapter_gradients = tuple(gradient.detach() for gradient in torch.autograd.grad(total, adapter_parameters))
+        split = len(state_parameters)
+        state_gradients = adapter_gradients[:split]
+        residual_gradients = adapter_gradients[split:]
+        out["grad/state_mlp_state_norm"] = _gradient_dot(state_gradients, state_gradients).sqrt().item()
+        out["grad/state_mlp_residual_norm"] = _gradient_dot(residual_gradients, residual_gradients).sqrt().item()
     return out
 
 
@@ -1640,9 +1741,10 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
         cur_idx = _quantize(model, stack_actions(ctx.features))  # [B, L_ctx, n_groups] current frames
         comps: dict[tuple[int, str], Tensor] = {}
         ablated: dict[str, Tensor] = {}
+        base_logits, all_logits = model.base_and_group_logits(h)
         for hi, o in enumerate(model.head_offsets):
             tgt_idx = _quantize(model, targets[o])
-            logits = {name: lg.float() for name, lg in model.heads[hi].logits(h).items()}
+            logits = {name: lg.float() for name, lg in all_logits[hi].items()}
             comps.update({(o, name): c for name, c in group_nll(logits, tgt_idx, valid).items()})
             group_predictions: dict[str, Tensor] = {}
             group_targets: dict[str, Tensor] = {}
@@ -1652,12 +1754,18 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
                 group_predictions[name] = predicted
                 group_targets[name] = target_group
                 acc.add(f"acc_off{o}_{name}", _bool_mean(predicted == target_group), n_valid)
+                if model.head_adapter is not None:
+                    base = base_logits[hi][name].float().reshape(-1, _GROUP_VOCABS[g])[flat_valid]
+                    residual = logits[name].reshape(-1, _GROUP_VOCABS[g])[flat_valid] - base
+                    n_logits = base.numel()
+                    acc.add(f"_base_sq_off{o}_{name}", base.square().mean().item(), n_logits)
+                    acc.add(f"_residual_sq_off{o}_{name}", residual.square().mean().item(), n_logits)
             if o != 1:
                 continue
             # The deployed head drives the button / transition / ablation stats.
             true_change = scoring.transition_mask(torch.cat([cur_idx, tgt_idx[:, -1:]], dim=1))  # [B,L_ctx,n_grp]
             ablated_logits = {
-                name: lg.float() for name, lg in model.heads[model.primary_head_idx].logits(h_ablated).items()
+                name: lg.float() for name, lg in model.group_logits(h_ablated, model.primary_head_idx).items()
             }
             kl_bits = _group_kl_bits(logits, ablated_logits).reshape(-1)[flat_valid]  # KL(full ‖ ablated), bits
             acc.add("ablate_hist_kl", kl_bits.mean().item(), n_valid)
@@ -1713,6 +1821,14 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
         acc.add("ablate_hist_dnll", ablate_total, n_valid)
 
     out = acc.means()
+    if model.head_adapter is not None:
+        for offset in model.head_offsets:
+            for name in _GROUP_NAMES:
+                base_sq = out.pop(f"_base_sq_off{offset}_{name}")
+                residual_sq = out.pop(f"_residual_sq_off{offset}_{name}")
+                out[f"residual_logit_rms_ratio_off{offset}_{name}"] = math.sqrt(residual_sq) / max(
+                    math.sqrt(base_sq), 1e-30
+                )
     out["btn_counts_available"] = float(counts_available)
     if counts_available:
         out["btn_rare_count_threshold"] = float(cfg.diagnostic_rare_button_count)
@@ -2120,9 +2236,12 @@ def train(
         # The BOUND method, not the module: reassigning ``model.trunk`` would rename every trunk key
         # in the state dict (``trunk._orig_mod.blocks…``) and break resume and eval.
         model.forward = torch.compile(model.forward, dynamic=False)
-    n_params = sum(p.numel() for p in model.parameters())
+    counts = parameter_counts(model)
+    n_params = counts["total"]
     if wandb.run is not None:
         wandb.run.summary["model/num_params"] = n_params
+        for name, count in counts.items():
+            wandb.run.summary[f"model/num_params_{name}"] = count
     print(
         f"[model] {_model_tag(cfg)}  num_params={n_params / 1e6:.2f}M  "
         f"batch={cfg.batch_size} (micro {_micro_batch(cfg)} x accum {cfg.grad_accum_steps})",
@@ -2379,6 +2498,16 @@ def train(
                     comps_acc.setdefault(k, []).append(v.detach())
             assert obj_acc is not None
             grad_norm = _finite_gradient_norm(model, obj_acc / cfg.grad_accum_steps, step)
+            adapter_gradient_log: dict[str, float] = {}
+            if model.head_adapter is not None:
+                adapter_gradient_log = {
+                    "train/gnorm_state_projection": _parameter_gradient_norm(
+                        model.head_adapter.state_proj.parameters()
+                    ),
+                    "train/gnorm_residual_output": _parameter_gradient_norm(
+                        model.head_adapter.residual_projs.parameters()
+                    ),
+                }
             opt.step()
             sched.step()
             if DEVICE == "cuda":
@@ -2411,8 +2540,13 @@ def train(
             "throughput/step_s": sw.elapsed,
             "throughput/loader_wait_s": loader_wait,
             "throughput/samples_per_s": sps,
+            "throughput/tokens_per_s": sps * cfg.L_ctx,
             "data/train_batches_seen": train_batches_seen,
+            **adapter_gradient_log,
         }
+        if DEVICE == "cuda":
+            log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
+            log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
         if replay_ids:
             log["data/distinct_replays"] = len(replay_ids)
             replay_overlap = _replay_overlap(previous_step_replay_ids, replay_ids)
@@ -2475,12 +2609,7 @@ def train(
 
 # %%
 def _cfg_from_state(saved: dict) -> TrainConfig:
-    """Rebuild a ``TrainConfig`` from a checkpoint's saved cfg dict, tolerating
-    schema drift in *eval/host* knobs across code versions: keys no longer on
-    ``TrainConfig`` (e.g. the old ``eval_max_parallel``/``eval_replicas``, replaced
-    by ``eval_parallel_per_cpu``) are dropped and new fields take their defaults, so
-    past checkpoints still load. Model-identity fields (``d_model``, ``head_offsets``,
-    …) are unaffected — they're always present and reconstruct exactly."""
+    """Load known configuration fields and ignore removed host settings."""
     known = {f.name for f in fields(TrainConfig)}
     dropped = sorted(set(saved) - known)
     if dropped:
@@ -2764,7 +2893,7 @@ class Args:
     eval_min_p: float | None = None  # min-p nucleus: keep classes with p >= min_p * p_max
     eval_click_trigger_fix: bool | None = None  # force trigger_l/r to 1.0 on a digital L/R click
     eval_n_matchups: int | None = None  # manual --eval override; default is cfg.final_eval_n_matchups (96)
-    eval_max_parallel: int | None = None  # manual --eval override; default scales with host CPU count
+    eval_max_parallel: int | None = None  # manual --eval override; default is saved in the checkpoint
     eval_max_frames: int | None = None  # manual --eval override; default is checkpoint cfg.eval_max_frames
     eval_seed: int | None = None  # manual --eval sampling/bootstrap seed override
     wandb_run_id: str | None = None  # resume an existing run and log this manual eval to it

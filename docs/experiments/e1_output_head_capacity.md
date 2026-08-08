@@ -1,10 +1,10 @@
 # E1: output-head capacity control
 
-Status: reference selected; implementation waits for P2 to finish
+Status: local implementation complete; GPU gate waits for P2
 
 P0 is the E0 reference. P1 did not pass its paired head-to-head gate, so P2 cannot change this
-scientific choice. P2 only tests decode systems on the P1 checkpoint. Do not launch E1 while P2 is
-running.
+scientific choice. P2 only tests decode systems on the P1 checkpoint. E1 code preparation may
+overlap P2, but the E1 GPU gate and training run must wait until P2 exits.
 
 The fixed E0 checkpoint is:
 
@@ -45,12 +45,14 @@ failing test proves that a shared fix is required. Record that need here before 
 
 ## Model change
 
-Add a mode field with stable values such as:
+E1 adds these fields:
 
 ```python
-head_mode: Literal["linear", "state_mlp", "factored_mlp"] = "linear"
+head_mode: Literal["linear", "state_mlp"] = "linear"
 action_mlp_ratio: int = 2
 ```
+
+E2 will add `factored_mlp` after E1 is frozen.
 
 E0 remains `linear`. E1 uses `state_mlp`. The run name and checkpoint configuration must include the
 mode and MLP ratio.
@@ -187,10 +189,9 @@ P0's saved configuration predates `val_n_samples` and stores `val_n_batches=32`.
 correctly drops that stale host-era field and uses `val_n_samples=1192`. This preserves the frozen
 v7 split. It is not an allowed treatment change.
 
-Use exactly 32 concurrent Dolphin boots for periodic and final CPU sweeps. Add a saved training
-configuration field for this limit before E1 launches. The same field must control both the
-background evaluator and the final in-process evaluator. P0 used 32 boots. Host CPU count must not
-silently change this protocol.
+Use exactly 32 concurrent Dolphin boots for periodic and final CPU sweeps. The saved
+`eval_max_parallel=32` field controls the background, final, and H2H evaluators. P0 used 32 boots.
+Host CPU count cannot change this protocol.
 
 ## Required tests
 
@@ -336,4 +337,37 @@ but E2 may not launch until E1 evidence is complete.
 
 ## Results
 
-Pending implementation and launch.
+Local implementation is complete on `exp/e1-output-head-capacity`.
+
+- `StateMLPAdapter.state_proj` is the shared `256 -> 512` projection.
+- `StateMLPAdapter.residual_projs` contains one zero-initialized projection for each offset and
+  action group.
+- Training computes the shared state feature once for all offsets.
+- Training, validation, full-window decode, chunk decode, and KV parity use the same model-level
+  logit path.
+- One sampler handles support masks, temperature, min-p, trigger repair, and random generators for
+  both head modes.
+- The adapter adds 131,584 state-projection parameters and 728,460 residual-output parameters. The
+  total increase is 860,044 parameters, from 6,818,482 to 7,678,526.
+- Validation records the residual-to-base logit RMS ratio for every group and offset. Gradient
+  diagnostics record state-projection and residual-output norms.
+- W&B records exact parameter groups, token throughput, and peak allocated and reserved GPU memory.
+- Old host-scaled evaluation settings map to the fixed 32-boot limit.
+
+Correctness evidence:
+
+- Same-seed E0 and E1 trunks, input modules, and classifiers are exactly equal.
+- Initial logits, objectives, and sampled actions are exactly equal.
+- Every residual output starts at zero and receives a finite nonzero gradient on the first update.
+- The shared state projection has zero gradient on the first update, as expected, and a finite
+  nonzero gradient on the second update.
+- Both head-weight-decay modes place all adapter parameters in AdamW exactly once and never in
+  Muon.
+- A saved E1 state round-trips exactly.
+- The real P0 `final.pt` loads as linear with 6,818,482 parameters, no adapter,
+  `eval_max_parallel=32`, and step 16,384.
+- Focused experiment tests: 54 passed.
+- Full repository suite: 910 passed in 134.64 seconds.
+
+GPU compilation, memory, throughput, training, validation, CPU evaluation, and H2H results are
+pending.

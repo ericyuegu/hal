@@ -66,6 +66,7 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.val_n_samples == 1192
     assert cfg.gradient_diagnostic_batch_size == 64
     assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (4096, 32, 96)
+    assert cfg.eval_max_parallel == 32
     assert cfg.eval_max_frames == 7200
     assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-policy-v7"
     assert cfg.compact_data
@@ -124,6 +125,23 @@ def test_old_validation_batch_cap_loads_the_fixed_sample_default() -> None:
     cfg = exp._cfg_from_state(saved)
 
     assert cfg.val_n_samples == 1192
+
+
+def test_old_host_scaled_eval_config_loads_the_fixed_parallel_default() -> None:
+    saved = asdict(exp.TrainConfig())
+    saved.pop("eval_max_parallel")
+    saved["eval_parallel_per_cpu"] = 1.0
+
+    cfg = exp._cfg_from_state(saved)
+
+    assert cfg.eval_max_parallel == 32
+
+
+def test_eval_parallelism_is_capped_by_config_and_sample_count() -> None:
+    cfg = exp.TrainConfig(eval_max_parallel=32)
+
+    assert exp._eval_max_parallel(cfg, 96) == 32
+    assert exp._eval_max_parallel(cfg, 12) == 12
 
 
 def test_misc_action_state_is_not_a_model_feature() -> None:
@@ -574,6 +592,168 @@ def test_heads_are_independent_linear_projections() -> None:
     assert model.heads[0].proj(h).shape == (2, 3, exp.A_VOCAB)
 
 
+def _small_head_cfg(*, head_mode: str):
+    return exp.TrainConfig(
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        L_ctx=8,
+        attn_window=0,
+        head_offsets=(1, 2),
+        batch_size=2,
+        compile_trunk=False,
+        head_mode=head_mode,
+        action_mlp_ratio=2,
+    )
+
+
+def test_state_mlp_starts_as_the_exact_linear_model() -> None:
+    linear_cfg = _small_head_cfg(head_mode="linear")
+    mlp_cfg = _small_head_cfg(head_mode="state_mlp")
+    torch.manual_seed(23)
+    linear = exp.GPT(linear_cfg).eval()
+    torch.manual_seed(23)
+    mlp = exp.GPT(mlp_cfg).eval()
+
+    linear_state = linear.state_dict()
+    mlp_state = mlp.state_dict()
+    for name, value in linear_state.items():
+        torch.testing.assert_close(value, mlp_state[name], rtol=0, atol=0)
+
+    assert mlp.head_adapter is not None
+    assert torch.count_nonzero(mlp.head_adapter.state_proj.weight) > 0
+    for output_head in mlp.head_adapter.residual_projs:
+        for projection in output_head.values():
+            assert torch.count_nonzero(projection.weight) == 0
+            assert torch.count_nonzero(projection.bias) == 0
+
+    batch = _random_batch(linear_cfg)
+    with torch.no_grad():
+        linear_hidden = linear(batch.context.features, batch.context.ctx_pad)
+        mlp_hidden = mlp(batch.context.features, batch.context.ctx_pad)
+        torch.testing.assert_close(linear_hidden, mlp_hidden, rtol=0, atol=0)
+        for linear_logits, mlp_logits in zip(
+            linear.all_group_logits(linear_hidden), mlp.all_group_logits(mlp_hidden), strict=True
+        ):
+            for name in exp._GROUP_NAMES:
+                torch.testing.assert_close(linear_logits[name], mlp_logits[name], rtol=0, atol=0)
+
+        linear_action = exp.decode(linear, batch.context, gen=torch.Generator().manual_seed(31))
+        mlp_action = exp.decode(mlp, batch.context, gen=torch.Generator().manual_seed(31))
+        torch.testing.assert_close(linear_action, mlp_action, rtol=0, atol=0)
+
+    linear_parts = exp.action_loss(linear, batch)
+    mlp_parts = exp.action_loss(mlp, batch)
+    linear_loss = exp.objective(linear_parts.nll, linear_parts.transition, 1.0, 1.0)
+    mlp_loss = exp.objective(mlp_parts.nll, mlp_parts.transition, 1.0, 1.0)
+    torch.testing.assert_close(linear_loss, mlp_loss, rtol=0, atol=0)
+
+
+def test_state_mlp_zero_output_initialization_does_not_kill_learning() -> None:
+    cfg = _small_head_cfg(head_mode="state_mlp")
+    model = exp.GPT(cfg)
+    assert model.head_adapter is not None
+    batch = _random_batch(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    with torch.no_grad():
+        before = {
+            name: value.detach().clone()
+            for name, value in model.all_group_logits(model(batch.context.features, batch.context.ctx_pad))[0].items()
+        }
+
+    first_parts = exp.action_loss(model, batch)
+    first_loss = exp.objective(first_parts.nll, first_parts.transition, 1.0, 1.0)
+    first_loss.backward()
+    for output_head in model.head_adapter.residual_projs:
+        for projection in output_head.values():
+            assert projection.weight.grad is not None
+            assert torch.isfinite(projection.weight.grad).all()
+            assert torch.count_nonzero(projection.weight.grad) > 0
+    assert model.head_adapter.state_proj.weight.grad is not None
+    assert torch.count_nonzero(model.head_adapter.state_proj.weight.grad) == 0
+
+    optimizer.step()
+    optimizer.zero_grad()
+    with torch.no_grad():
+        after = model.all_group_logits(model(batch.context.features, batch.context.ctx_pad))[0]
+    assert any(not torch.equal(before[name], after[name]) for name in exp._GROUP_NAMES)
+
+    second_parts = exp.action_loss(model, batch)
+    second_loss = exp.objective(second_parts.nll, second_parts.transition, 1.0, 1.0)
+    second_loss.backward()
+
+    state_grad = model.head_adapter.state_proj.weight.grad
+    assert state_grad is not None
+    assert torch.isfinite(state_grad).all()
+    assert torch.count_nonzero(state_grad) > 0
+
+
+@pytest.mark.parametrize("head_weight_decay", [False, True])
+def test_state_mlp_parameters_use_the_output_head_adamw_partition(head_weight_decay: bool) -> None:
+    cfg = _small_head_cfg(head_mode="state_mlp")
+    cfg.head_weight_decay = head_weight_decay
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    memberships = {id(parameter): group for group in optimizer.param_groups for parameter in group["params"]}
+
+    assert len(memberships) == sum(1 for _ in model.parameters())
+    for parameter in exp._output_head_parameters(model):
+        group = memberships[id(parameter)]
+        assert group["use_muon"] is False
+        expected_decay = cfg.weight_decay if head_weight_decay and parameter.ndim >= 2 else 0.0
+        assert group["weight_decay"] == expected_decay
+
+
+def test_state_mlp_checkpoint_round_trip() -> None:
+    cfg = _small_head_cfg(head_mode="state_mlp")
+    model = exp.GPT(cfg).eval()
+    batch = _random_batch(cfg)
+    with torch.no_grad():
+        expected = model.all_group_logits(model(batch.context.features, batch.context.ctx_pad))
+
+    loaded_cfg = exp._cfg_from_state(asdict(cfg))
+    loaded = exp.GPT(loaded_cfg).eval()
+    exp._load_model_state(loaded, model.state_dict())
+    with torch.no_grad():
+        actual = loaded.all_group_logits(loaded(batch.context.features, batch.context.ctx_pad))
+
+    assert loaded_cfg.head_mode == "state_mlp"
+    assert loaded_cfg.action_mlp_ratio == 2
+    for expected_head, actual_head in zip(expected, actual, strict=True):
+        for name in exp._GROUP_NAMES:
+            torch.testing.assert_close(expected_head[name], actual_head[name], rtol=0, atol=0)
+
+
+def test_old_checkpoint_without_head_fields_loads_as_linear() -> None:
+    cfg = _small_head_cfg(head_mode="linear")
+    model = exp.GPT(cfg).eval()
+    saved_cfg = asdict(cfg)
+    saved_cfg.pop("head_mode")
+    saved_cfg.pop("action_mlp_ratio")
+
+    loaded_cfg = exp._cfg_from_state(saved_cfg)
+    loaded = exp.GPT(loaded_cfg).eval()
+    exp._load_model_state(loaded, model.state_dict())
+
+    assert loaded_cfg.head_mode == "linear"
+    assert loaded.head_adapter is None
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, loaded.state_dict()[name], rtol=0, atol=0)
+
+
+def test_state_mlp_parameter_counts_match_the_plan() -> None:
+    linear = exp.GPT(exp.TrainConfig(head_mode="linear"))
+    mlp = exp.GPT(exp.TrainConfig(head_mode="state_mlp", action_mlp_ratio=2))
+    linear_counts = exp.parameter_counts(linear)
+    mlp_counts = exp.parameter_counts(mlp)
+
+    assert mlp_counts["state_projection"] == 131_584
+    assert mlp_counts["residual_output"] == 728_460
+    assert mlp_counts["total"] - linear_counts["total"] == 860_044
+    assert mlp_counts["trunk"] == linear_counts["trunk"]
+    assert mlp_counts["classifier"] == linear_counts["classifier"]
+
+
 def test_no_auxiliary_head_returns_the_primary_loss() -> None:
     nll, transition = _loss_inputs({1: 2.0})
     actual = exp.objective(nll, transition, aux_weight=1.0, transition_weight=1.0)
@@ -811,6 +991,21 @@ def test_validation_reports_each_group_at_each_offset() -> None:
             assert f"acc_off{offset}_{group}" in metrics
 
 
+def test_state_mlp_validation_reports_residual_and_gradient_norms() -> None:
+    cfg = _small_head_cfg(head_mode="state_mlp")
+    model = exp.GPT(cfg)
+    batch = _random_batch(cfg)
+
+    metrics = exp.val_metrics(model, [batch], cfg)
+    gradients = exp.gradient_diagnostics(model, batch, cfg)
+
+    for offset in cfg.head_offsets:
+        for group in exp._GROUP_NAMES:
+            assert metrics[f"residual_logit_rms_ratio_off{offset}_{group}"] == 0.0
+    assert gradients["grad/state_mlp_state_norm"] == 0.0
+    assert gradients["grad/state_mlp_residual_norm"] > 0.0
+
+
 class _FakeRun:
     id = "test-run"
 
@@ -849,7 +1044,8 @@ class _Uploader:
 
 
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
-def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("head_mode", ["linear", "state_mlp"])
+def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatch, capsys, head_mode) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("WANDB_MODE", "offline")
     monkeypatch.setenv("WANDB_SILENT", "true")
@@ -890,6 +1086,7 @@ def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatc
         windows_per_replay=2,
         val_split="train",
         eval_incremental_kv=False,
+        head_mode=head_mode,
     )
 
     exp.train(cfg, _stats(), comment="pytest")
