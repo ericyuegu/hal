@@ -148,9 +148,8 @@ nonfinite value, tolerance failure, or sampled-action mismatch. A CPU test cover
 and asynchronous reset schedules with a small model. Each precision result also records synchronized
 wall time and comparisons per second, so the gate's own cost is visible.
 
-The current focused CPU suite passes 83 tests. It covers the experiment entry point, transformer
-trunk, and closed-loop rolling rings. The FP32 and FP16 GPU parity gate remains blocked on the final
-P1 checkpoint.
+An early focused CPU suite passed 83 tests. It covered the experiment entry point, transformer
+trunk, and closed-loop rolling rings. The later sections replace its pending GPU status.
 
 After the H2H artifact fields were clarified, the complete repository suite passed 892 tests at
 commit `d062eb4`. The change does not affect P2 inference, but the full pass checks checkpoint,
@@ -211,4 +210,50 @@ rented. Repeat this check after committing this record, then launch from that un
 The final no-rent check passed at pushed commit `335b7e7`. It preserved the same payload and found
 three qualifying RTX 4090 offers. P2 launched from that exact commit on Vast instance `47129969`.
 The selected host has 252 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective price of $0.824 per
-hour. Vast reported the instance ready at 18:01 PDT. This is the only active experiment job.
+hour. Vast reported the instance ready at 18:01 PDT.
+
+## First parity result
+
+The strict parity gate failed before either closed-loop arm ran. All outputs were finite. The saved
+record is `manual_evals/p2-parity/decode_parity.json` under the P1 run. Its SHA-256 is
+`4bc514a79dde89c011c387ad19065bb05778c6613c5501cf734bf0a46278d424`.
+
+The test used the final P1 checkpoint, 2,065 frames, three slots, and 6,195 comparisons per dtype.
+
+- FP32: maximum hidden error `0.02022`, maximum group-logit error `0.08052`, and 14 sampled-action
+  mismatches.
+- FP16: maximum hidden error `0.03174`, maximum group-logit error `0.09961`, and 32 sampled-action
+  mismatches.
+
+The command stopped before the recompute and KV sweeps. The artifact was verified in R2, then
+instance `47129969` was destroyed.
+
+The first test compared two kernels as well as two decode methods. Full recomputation used
+FlexAttention, while incremental decoding used dense scaled-dot-product attention. A local CPU
+check forced both trained-P1 paths through dense attention. Across 256 frames, its maximum hidden
+difference was `3.48e-5`; the last-frame difference was `1.87e-5`. This is much smaller than the
+GPU result but still exceeds `1e-5`.
+
+The diagnostic rerun compares these paths at fixed frames:
+
+1. Full FlexAttention recomputation.
+2. Full dense-attention recomputation.
+3. Incremental dense-attention KV decoding.
+
+This separates kernel drift from cache drift before and after the raw window rolls. Record schema 2
+keeps strict failure as the default. A report-only flag lets the rejected KV arm finish its systems
+measurements. It does not turn the failed parity result into a pass or permit KV promotion.
+
+The diagnostic implementation is commit `96fc1f4`. The focused experiment, trunk, and rolling-ring
+suite passed 81 tests and skipped six CUDA-only tests. The full suite passed 899 tests in 134.49
+seconds. Ruff, type checking, Python compilation, and whitespace checks passed.
+
+The report-only payload passed a no-rent check at `96fc1f4`. The final no-rent check passed at
+pushed commit `4bc0f1e`. The payload writes schema 2 under `manual_evals/p2-parity-v2`, then runs
+recomputation before KV. Both sweeps request 96 matchups, use at most 32 concurrent boots, and use
+seed 0.
+
+P2 launched from exact commit `4bc0f1e` on Vast instance `47132921`. The RTX 4090 host has 251 GB
+RAM, an 80 GB disk, DLPerf 125.6, and an effective price of $0.714 per hour. The image pull retried
+for about 13 minutes. Vast reported the instance ready at 18:56:56 PDT, below the 30-minute startup
+warning. This is the only active experiment job.
