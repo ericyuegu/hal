@@ -150,13 +150,13 @@ def test_projection_failure_does_not_publish_partial_output(tmp_path: Path, monk
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
 def test_projected_mds_preserves_model_values(tmp_path) -> None:
     out = tmp_path / "policy"
-    project_policy_mds(_DEV_MDS, out, splits=("train",), scratch=tmp_path, max_rows=4)
+    project_policy_mds(_DEV_MDS, out, splits=("train",), scratch=tmp_path, max_rows=68)
     assert list((out / "train").glob("*.mds.zstd"))
     assert not list((out / "train").glob("*.mds"))
 
     source = StreamingDataset(local=str(_DEV_MDS / "train"), batch_size=1, shuffle=False)
     compact = StreamingDataset(local=str(out / "train"), batch_size=1, shuffle=False)
-    assert len(compact) == 4
+    assert len(compact) == 68
     for row in range(2):
         assert compact[row]["policy_schema_version"] == POLICY_SCHEMA_VERSION
         decoded = decode_policy_replay(compact[row])
@@ -220,7 +220,7 @@ def test_projected_mds_preserves_model_values(tmp_path) -> None:
 
     plain_reservoir, plain_batches = reservoir_batches(False)
     prefetched_reservoir, prefetched_batches = reservoir_batches(True)
-    assert len(plain_batches) == len(prefetched_batches) == 2
+    assert len(plain_batches) == len(prefetched_batches) == 34
     for plain, prefetched in zip(plain_batches, prefetched_batches, strict=True):
         assert plain.replay_ids == prefetched.replay_ids
         assert plain.context.ctx_pad.equal(prefetched.context.ctx_pad)
@@ -231,6 +231,6 @@ def test_projected_mds_preserves_model_values(tmp_path) -> None:
     for batch in prefetched_batches:
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 2
-    expected_stats = {"emitted_windows": 4, "dropped_windows": 0, "dropped_replays": 0}
+    expected_stats = {"emitted_windows": 68, "dropped_windows": 0, "dropped_replays": 0}
     assert plain_reservoir.last_epoch_stats == expected_stats
     assert prefetched_reservoir.last_epoch_stats == expected_stats
