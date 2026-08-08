@@ -410,6 +410,9 @@ Correctness evidence:
 - Full repository suite: 915 passed in 134.62 seconds.
 - Ruff, the type error gate, Python compilation, and `git diff --check` passed. The type checker
   still reports existing warnings but no errors.
+- The exact launch command passed a no-rent audit at pushed commit `a3c6b4b`. It kept the 250 GB
+  disk request, encoded the complete training command, and found three qualifying RTX 4090 offers.
+  Their effective prices were $0.781, $0.808, and $0.871 per hour.
 
 GPU compilation, memory, throughput, training, validation, CPU evaluation, and H2H results are
 pending.
