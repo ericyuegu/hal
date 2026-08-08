@@ -704,6 +704,49 @@ def test_state_mlp_starts_as_the_exact_linear_model() -> None:
     torch.testing.assert_close(linear_loss, mlp_loss, rtol=0, atol=0)
 
 
+def test_chunk_logits_compute_the_shared_state_mlp_once() -> None:
+    cfg = _small_head_cfg(head_mode="state_mlp")
+    model = exp.GPT(cfg).eval()
+    assert model.head_adapter is not None
+    hidden = torch.randn(3, cfg.d_model)
+    calls = 0
+
+    def count_call(_module, _args, _output) -> None:
+        nonlocal calls
+        calls += 1
+
+    handle = model.head_adapter.state_proj.register_forward_hook(count_call)
+    actual = exp.chunk_from_hidden(
+        model,
+        hidden,
+        cfg.head_offsets,
+        group_temps=(1.0,) * exp.N_GROUPS,
+        argmax=True,
+    )
+    handle.remove()
+
+    expected = torch.stack(
+        [
+            exp._sample_action(
+                model,
+                head_index,
+                hidden,
+                group_temps=(1.0,) * exp.N_GROUPS,
+                btn_support_min=0,
+                min_p=0.0,
+                click_trigger_fix=False,
+                argmax=True,
+                gen=None,
+            )
+            for head_index in range(len(cfg.head_offsets))
+        ],
+        dim=1,
+    )
+
+    assert calls == 1
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_state_mlp_zero_output_initialization_does_not_kill_learning() -> None:
     cfg = _small_head_cfg(head_mode="state_mlp")
     model = exp.GPT(cfg)

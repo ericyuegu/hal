@@ -113,8 +113,8 @@ became ready at 18:56:56 PDT after a 13-minute image pull. No other experiment i
 E1's state-only residual MLP is implemented on `exp/e1-output-head-capacity`. It adds 860,044
 parameters and starts with exact E0 logits, objectives, and sampled actions. Tests cover its first-
 and second-update gradient path, optimizer ownership, checkpoint compatibility, and the pinned P0
-checkpoint SHA-256. The focused suite passed 59 tests; the full repository suite passed 915 tests
-in 134.62 seconds. Its 250 GB launch payload passed a no-rent audit and found three qualifying RTX
+checkpoint SHA-256. The focused suite passed 60 tests; the full repository suite passed 916 tests
+in 134.73 seconds. Its 250 GB launch payload passed a no-rent audit and found three qualifying RTX
 4090 offers. P2 evidence must be merged and the final exact-SHA audit repeated before E1 rents one.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks

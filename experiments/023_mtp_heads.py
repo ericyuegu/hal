@@ -409,10 +409,17 @@ class GPT(nn.Module):
         self._btn_support_dead_cache: dict[tuple[int, torch.device], Tensor] = {}
 
     def group_logits(self, h: Tensor, head_index: int) -> dict[str, Tensor]:
-        base = cast(IndependentHead, self.heads[head_index]).logits(h)
+        return self.group_logits_many(h, (head_index,))[0]
+
+    def group_logits_many(self, h: Tensor, head_indices: tuple[int, ...]) -> list[dict[str, Tensor]]:
+        base = [cast(IndependentHead, self.heads[index]).logits(h) for index in head_indices]
         if self.head_adapter is None:
             return base
-        return self.head_adapter.add(head_index, base, self.head_adapter.features(h))
+        features = self.head_adapter.features(h)
+        return [
+            self.head_adapter.add(head_index, values, features)
+            for head_index, values in zip(head_indices, base, strict=True)
+        ]
 
     def base_and_group_logits(self, h: Tensor) -> tuple[list[dict[str, Tensor]], list[dict[str, Tensor]]]:
         base = [cast(IndependentHead, head).logits(h) for head in self.heads]
@@ -443,10 +450,7 @@ class GPT(nn.Module):
 
     def _context_tokens(self, features: dict[str, Tensor]) -> Float[Tensor, "B L_ctx d_model"]:
         parts = [self._per_player_features(features, p) for p in _PLAYER_PREFIXES]
-        # Ego controller history slice, assembled into a FRESH tensor (never mutating `features`, so the
-        # targets built from stack_actions(features) stay intact). Per-sample history dropout (train only):
-        # draw a Bernoulli keep-mask via the module RNG (probability history_dropout_p of dropping) and zero
-        # the whole slice for dropped samples, forcing the trunk off copying its own recent inputs.
+        # Build a new controller-history tensor so target features stay unchanged.
         ego_hist = torch.cat([features[f"ego_{ch}"][..., None] for ch in ACTION_CHANNELS], dim=-1)
         if self.training and self.history_dropout_p > 0.0:
             keep = (torch.rand(ego_hist.shape[0], device=ego_hist.device) >= self.history_dropout_p).to(ego_hist.dtype)
@@ -458,7 +462,6 @@ class GPT(nn.Module):
         return self.ctx_proj(torch.cat(parts, dim=-1))
 
     def forward(self, features: dict[str, Tensor], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L_ctx d_model"]:
-        """Backbone hidden (one rmsnorm'd vector per frame); callers apply the per-offset heads."""
         return self.trunk(self._context_tokens(features), ctx_pad)
 
     @torch.no_grad()
@@ -467,8 +470,6 @@ class GPT(nn.Module):
         features: dict[str, Tensor],
         past: list[tuple[Tensor, Tensor] | None],
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
-        """Encode one current token using per-layer rolling KV state. The trunk answers with the
-        whole (one-token) sequence, so the last position is taken here."""
         h, new_past = self.trunk.forward_incremental(self._context_tokens(features), past)
         return h[:, -1], new_past
 
@@ -622,9 +623,33 @@ def _sample_action(
     argmax: bool,
     gen: torch.Generator | None,
 ) -> Float[Tensor, "B d_action"]:
-    dead = _btn_support_dead(model, btn_support_min, h.device) if btn_support_min >= 1 else None
-    idx = _sample_group_indices(
+    return _sample_action_from_logits(
+        model,
         model.group_logits(h, head_index),
+        group_temps=group_temps,
+        btn_support_min=btn_support_min,
+        min_p=min_p,
+        click_trigger_fix=click_trigger_fix,
+        argmax=argmax,
+        gen=gen,
+    )
+
+
+def _sample_action_from_logits(
+    model: GPT,
+    logits: dict[str, Tensor],
+    *,
+    group_temps: tuple[float, ...],
+    btn_support_min: int,
+    min_p: float,
+    click_trigger_fix: bool,
+    argmax: bool,
+    gen: torch.Generator | None,
+) -> Float[Tensor, "B d_action"]:
+    device = next(iter(logits.values())).device
+    dead = _btn_support_dead(model, btn_support_min, device) if btn_support_min >= 1 else None
+    idx = _sample_group_indices(
+        logits,
         group_temps=group_temps,
         btn_dead=dead,
         min_p=min_p,
@@ -651,7 +676,6 @@ def decode(
     argmax: bool = False,
     gen: torch.Generator | None = None,
 ) -> Float[Tensor, "B 1 d_action"]:
-    """Sample the next action from the offset-1 head."""
     group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
     a = _sample_action(
@@ -682,11 +706,7 @@ def decode_chunk(
     argmax: bool = False,
     gen: torch.Generator | None = None,
 ) -> Float[Tensor, "B s d_action"]:
-    """Chunked receding-horizon decode: from ONE backbone forward's last hidden state, sample the action at
-    each offset in ``offsets`` (the contiguous execution horizon 1..s) via that offset's own head, stacked in
-    offset order → ``[B, s, A_DIM]``. One forward per s frames — the deploy-time saving of chunked execution.
-    Each offset uses an independent head. The offsets do not condition on each other. The sampling
-    options match ``decode``."""
+    """Sample the requested offset heads after one backbone forward."""
     group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
     return chunk_from_hidden(
@@ -715,17 +735,15 @@ def chunk_from_hidden(
     argmax: bool = False,
     gen: torch.Generator | None = None,
 ) -> Float[Tensor, "B s d_action"]:
-    """The head + sampling half of a chunked decode, from a hidden state the caller already has.
-
-    Split out because the incremental decoder produces that hidden state one frame at a time, in its
-    own forward, and must not run the backbone a second time to sample from it."""
+    """Sample requested offset heads from an existing hidden state."""
+    head_indices = tuple(model.head_offsets.index(offset) for offset in offsets)
+    logits_by_head = model.group_logits_many(h, head_indices)
     actions: list[Tensor] = []
-    for o in offsets:
+    for logits in logits_by_head:
         actions.append(
-            _sample_action(
+            _sample_action_from_logits(
                 model,
-                model.head_offsets.index(o),
-                h,
+                logits,
                 group_temps=group_temps,
                 btn_support_min=btn_support_min,
                 min_p=min_p,
@@ -738,8 +756,6 @@ def chunk_from_hidden(
 
 
 def _exec_horizon_offsets(head_offsets: tuple[int, ...], s: int) -> tuple[int, ...]:
-    """The contiguous execution-horizon offsets ``(1, ..., s)`` decoded per chunk. Fails loud if ``s < 1`` or
-    ``head_offsets`` is missing any of them (e.g. offsets (1,5,9,13) with s=2 has no offset-2 head)."""
     if s < 1:
         raise ValueError(f"exec_horizon must be >= 1, got {s}")
     required = tuple(range(1, s + 1))
@@ -753,7 +769,6 @@ def _exec_horizon_offsets(head_offsets: tuple[int, ...], s: int) -> tuple[int, .
 
 
 def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
-    """Fail before W&B, loader construction, or Dolphin startup on invalid experiment geometry."""
     positive_ints = {
         "d_model": cfg.d_model,
         "n_layers": cfg.n_layers,

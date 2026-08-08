@@ -381,6 +381,8 @@ Local implementation is complete on `exp/e1-output-head-capacity`.
 - `StateMLPAdapter.residual_projs` contains one zero-initialized projection for each offset and
   action group.
 - Training computes the shared state feature once for all offsets.
+- Multi-offset decode also computes the shared state feature once, then applies only the requested
+  output heads.
 - Training, validation, full-window decode, chunk decode, and KV parity use the same model-level
   logit path.
 - One sampler handles support masks, temperature, min-p, trigger repair, and random generators for
@@ -406,8 +408,8 @@ Correctness evidence:
   `eval_max_parallel=32`, and step 16,384.
 - E1 checks the downloaded P0 checkpoint against the audited SHA-256 before compilation or data
   loading. Tests cover the matching, mismatching, malformed, and missing-run cases.
-- Focused experiment tests: 59 passed in 8.93 seconds.
-- Full repository suite: 915 passed in 134.62 seconds.
+- Focused experiment tests: 60 passed in 8.45 seconds.
+- Full repository suite: 916 passed in 134.73 seconds.
 - Ruff, the type error gate, Python compilation, and `git diff --check` passed. The type checker
   still reports existing warnings but no errors.
 - The exact launch command passed a no-rent audit at pushed commit `a3c6b4b`. It kept the 250 GB
