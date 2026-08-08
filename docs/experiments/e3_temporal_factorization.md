@@ -61,9 +61,9 @@ Do not edit historical experiment files or shared data code.
 Let `h` be the transformer state for the current raw context. The offset-1 head reads `h` directly.
 It is the deployed policy and remains structurally identical to E2.
 
-For each later depth `k`, embed the complete previous action by concatenating the four selected E2
-group embeddings. Reuse the selected E2 embedding tables; do not create a second temporal copy of
-the action vocabulary. Then compute:
+For each later depth `k`, embed the complete previous action by concatenating four group
+embeddings. Reuse E2's ancestor tables. E2 omits its final group's unused table, so add that one
+table after all E2 model parts. Do not create a second copy of any existing table. Then compute:
 
 \[
 u_k=W_h\operatorname{RMSNorm}(z_{k-1})+W_aE(a_{o_{k-1}})+e_k,
@@ -85,13 +85,13 @@ Use hidden width `2 * d_model`. Initialize `W_2`, its bias, and `W_a` to zero. C
 parts before the temporal module. At initialization, every `z_k` equals `h`, so same-seed E2 and E3
 logits must match exactly at every offset.
 
-Both arms keep the selected E2 action embedding tables and add one learned null-action vector with
-the same width as a concatenated complete-action embedding. E3-C always selects the null vector.
-E3-T selects the target or sampled previous action. E3-C performs the same temporal embedding
-lookups, then replaces their result with the null vector before the temporal affine layer. This
-keeps input validation and the source-level path matched while preventing previous-action
-information from reaching the logits. The compiler may remove the discarded lookup, so verify
-actual timing instead of assuming equal compute.
+Both arms add the missing final-group table and one learned null-action vector with the same width
+as a concatenated complete-action embedding. Their parameter names and shapes must match. E3-C
+always selects the null vector. E3-T selects the target or sampled previous action. E3-C performs
+the same temporal embedding lookups, then replaces their result with the null vector before the
+temporal affine layer. The missing table is intentionally inactive in E3-C because it is part of
+the matched treatment capacity. The compiler may remove the discarded lookup, so measure timing
+instead of assuming equal compute.
 
 The offset-1 path must not call the temporal module. This avoids giving the deployed head an extra
 state-only capacity path. E3 can affect it only through the shared trunk gradients from better or
@@ -165,6 +165,8 @@ alignment, optimizer, or total auxiliary weight.
     unchanged. Assert it uses exactly one independent diagnostic stream per named action group.
 20. Assert rollout-conditioned NLL scores the true current action after sampling only the earlier
     temporal actions. It must not use the sampled current action as a loss target.
+21. Assert E3 adds only E2's missing final-group table, creates it after all E2 parameters, and uses
+    all four tables in E3-T's complete-action encoder.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
