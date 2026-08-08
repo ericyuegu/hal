@@ -201,3 +201,9 @@ geometry. Neither P2 arm can change the E0 selection.
 The P1 source run and its repaired H2H package are complete. W&B is finished, the source Vast
 instance is gone, and Rclone verified all 134 audited files. P2 may proceed after one fresh no-rent
 launcher check at the exact pushed commit.
+
+The complete command passed a fresh no-rent check at commit `cface89`. The encoded payload kept
+parity first, recompute second, KV third, the correct P1 run and W&B IDs, 2,065 parity frames, three
+slots, 96 boots per evaluation, and 32 concurrent boots. Three RTX 4090 offers qualified. The best
+had 252 GB RAM, DLPerf 125.6, 80 GB disk, and an effective price of $0.824 per hour. No instance was
+rented. Repeat this check after committing this record, then launch from that unchanged SHA.

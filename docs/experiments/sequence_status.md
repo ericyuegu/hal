@@ -95,6 +95,10 @@ final-frame trims, 256 input-stat blocks, and a passing input tripwire. Rclone f
 files and zero differences. W&B is finished, and the P1 Vast instance destroyed itself. P2 is no
 longer blocked on P1 evidence.
 
+P2's full command passed a no-rent launcher check at commit `cface89`. The best qualifying RTX 4090
+offer had 252 GB RAM, DLPerf 125.6, and an effective price of $0.824 per hour. The command preserved
+the parity, 32-way recompute, and 32-way KV order. A final exact-SHA check remains before rent.
+
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
 same step. The recovered result, metrics, and worker log have verified R2 hashes.
