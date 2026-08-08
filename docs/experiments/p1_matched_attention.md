@@ -412,6 +412,46 @@ objects and upload the audited records separately.
 Record schema 3 adds `replay_trimmed`. Old records load it as false. New records set it only when
 the collector removes an incomplete final frame, so the repair is visible in the saved evidence.
 
+Both H2H orientations finished. All 128 games completed, all 64 configurations have both
+orientations, and no match failed. Orientation times were 1,157 and 1,214 seconds. The launch
+records contain 32 directly readable replays and 96 budget-cut replays that need the final-frame
+repair. All 128 identities were stamped. The original `meta.json` SHA-256 is
+`6b2972c7d7f7f2e39b2d7b9d1826e7a7aa60d5604e57938fadb41104a21f4bad`; the original
+`matches.jsonl` SHA-256 is
+`b99274727b7fc73c27d9db5673850cf8990922899a21c46b191819ba6ec0d1de`.
+
+The corrected outcome summary from P1's side is:
+
+- 45 stock leads, 48 stock deficits, and 35 stock ties.
+- Non-tied stock-lead rate 0.484, 95% CI `[0.385, 0.584]`.
+- Mean stock difference -0.031 per game, 95% CI `[-0.293, +0.230]`.
+- Mean damage difference -8.76 per active minute, 95% CI `[-16.03, -1.48]`.
+- 28 games ended by knockout; 100 reached the frame budget.
+- 24 paired configurations favored P1, 21 favored P0, and 19 tied; sign-test `p=0.766`.
+- Mean summed stock difference per paired configuration -0.062, 95% CI
+  `[-0.518, +0.393]`.
+
+P1 fails the predeclared promotion rule because its mean paired-config stock difference is not
+positive. The sign count passes, but it cannot override the negative paired mean. The CPU point
+estimate was only 0.012 better under mismatched concurrency, and the blocked CPU intervals were
+wide. Keep P0 as E0. P2 remains useful as a decode systems ablation on the P1 checkpoint; its speed
+cannot change this policy decision.
+
+The separate repaired package is in R2 under `h2h_final_audited`. It contains 128 schema-3 records,
+128 replays, the launch records and metadata, a replay manifest, and an audit record. Ninety-six
+replays had one incomplete final frame removed; 32 were unchanged. All 256 port input-stat blocks
+are present, every saved model identity matches, no policy pressed START, and no policy was
+constant. The audited outcome summary is byte-for-byte equivalent in its reported values to the
+launch outcome summary. Key SHA-256 values are:
+
+- Audited `matches.jsonl`: `ff14e1243811bcf1b867d311dcfdf1e1f16a0f888e66d22639f09f2f560364cf`.
+- Replay manifest: `65f411d7feda12243b4403ee00e9fea0f8c62b3a5f6838164cbcdf05ca8c3347`.
+- `audit.json`: `ce7377758cdf9fecc5bdeb1589f4bd8910d1000d77645bd4605c70bcb2ec1209`.
+- Audited `meta.json`: `ff257064170dbb6a465390535bf5678c49e5c3a716f47b68680bb461cb180375`.
+
+Rclone verified 134 matching files and zero differences against the local audit copy. W&B finished
+with 10,172 seconds of runtime, and Vast instance `47117879` destroyed itself. P1 is complete.
+
 ## Reference selection rule
 
 Keep P0 as the downstream E0 reference unless P1 passes all of these screening checks:

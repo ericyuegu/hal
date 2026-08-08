@@ -192,3 +192,12 @@ the extra stateful decode path.
 
 If P1 loses to P0, retain P2 as a systems result. Do not let decode speed select the scientific E0
 reference.
+
+P1 did not pass its policy promotion gate. Its 128-game mirrored H2H mean was -0.031 stocks per
+game, and the mean summed difference over 64 paired configurations was -0.062. P0 remains E0. P2
+still runs because it measures the cost and correctness of temporal KV decoding on the P1 SWA
+geometry. Neither P2 arm can change the E0 selection.
+
+The P1 source run and its repaired H2H package are complete. W&B is finished, the source Vast
+instance is gone, and Rclone verified all 134 audited files. P2 may proceed after one fresh no-rent
+launcher check at the exact pushed commit.

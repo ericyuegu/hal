@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | Training and final CPU complete; H2H active | Verify H2H, then repeat CPU at P0's 32-way concurrency in P2. |
+| P1-match | Attention package at matched data and action vocabulary | Complete; paired result does not promote P1; audited evidence verified | Keep P0 as E0. Use P1 only for the P2 systems ablation. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -83,6 +83,17 @@ orientations; the original launch records and replays will be preserved.
 
 H2H record schema 3 now stores the repair decision in `replay_trimmed` instead of leaving it only
 in process logs.
+
+The complete P1 H2H outcome has 128 of 128 games and 64 mirrored pairs. P1 had 45 stock leads, 48
+deficits, and 35 ties. Its mean stock difference was -0.031 per game. The paired configuration
+mean was -0.062; signs were 24 ahead, 21 behind, and 19 tied. Damage difference was -8.76 per active
+minute, with a 95% interval below zero. P1 therefore fails the required positive paired-mean gate.
+P0 is the selected E0 reference.
+
+The repaired package is complete under `h2h_final_audited`: 128 records, 128 replays, 96 declared
+final-frame trims, 256 input-stat blocks, and a passing input tripwire. Rclone found 134 matching
+files and zero differences. W&B is finished, and the P1 Vast instance destroyed itself. P2 is no
+longer blocked on P1 evidence.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
