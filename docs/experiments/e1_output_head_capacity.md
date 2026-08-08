@@ -1,10 +1,20 @@
 # E1: output-head capacity control
 
-Status: blocked on the P0/P1/P2 package decision
+Status: reference selected; implementation waits for P2 to finish
 
-The final E0 reference and measured wall time are pending. Finish P0, matched P1, and the planned P2
-decode comparison before choosing that reference. Do not implement or launch E1 until the selected
-reference reaches step 16,384, uploads `final.pt`, and completes its final CPU and H2H evaluation.
+P0 is the E0 reference. P1 did not pass its paired head-to-head gate, so P2 cannot change this
+scientific choice. P2 only tests decode systems on the P1 checkpoint. Do not launch E1 while P2 is
+running.
+
+The fixed E0 checkpoint is:
+
+- Run: `260807-164825_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-linear_ranked-anon-1_e0-normalized-aux-bc`
+- W&B ID: `obx3o3az`
+- Step: 16,384
+- `final.pt` SHA-256: `5d12d010fa3acd1ec07bd86a8e85d2cbb84c584a77b9b79e90dc6fcf03c32e4b`
+
+The checkpoint, final CPU rows, and replays are verified. E1 must record this identity before launch
+and must not replace it after seeing E1 results.
 
 ## Question
 
@@ -143,8 +153,7 @@ The loss, target alignment, reduction, and decode distribution must not depend o
 
 ## Fixed run configuration
 
-Copy the selected E0 configuration exactly. Do not copy the old P1 geometry from an exploratory
-checkpoint. Only these fields may differ:
+Copy P0 exactly. Do not copy P1 geometry. Only these fields may differ:
 
 - `head_mode=state_mlp`
 - `action_mlp_ratio=2`
@@ -156,6 +165,32 @@ seed, compact data, replay sampler, action vocabulary, validation, decode, and e
 The expected data path is `data/processed/ranked-anonymized-1/mds-policy-v7`, with four windows per
 replay and a 4,096-replay reservoir. Keep 131,072 frames per optimizer step and use
 `require_flex=True` on Vast.
+
+The inherited settings are:
+
+- Model: `d_model=256`, `n_layers=8`, `n_heads=4`, `L_ctx=256`, `action_vocab=1024`, full causal
+  attention, and full-window recomputation.
+- Objective: offsets `(1, 5, 9, 13)`, normalized auxiliary weight `1.0`, and transition weight
+  `1.0`.
+- Optimization: batch size `512`, one accumulation step, Muon learning rate `0.02`, AdamW learning
+  rate `8.5e-4`, weight decay `0.01`, head weight decay enabled, 500 warmup steps, and 16,384 total
+  steps.
+- Data: v7 compact policy data, `windows_per_replay=4`, `reservoir_capacity=4096`,
+  `shuffle_block_size=2000`, `predownload=512`, `cache_limit_gb=128`, `num_workers=16`, and
+  `prefetch_factor=2`.
+- Validation: every 1,024 steps on the fixed 1,192-example split.
+- Closed loop: periodic 32-match sweeps, final 96-match sweep, seed `0`, 7,200 frames per boot,
+  FP16 decode, execution horizon `1`, and full recomputation.
+- Training seed: `0`.
+
+P0's saved configuration predates `val_n_samples` and stores `val_n_batches=32`. The current loader
+correctly drops that stale host-era field and uses `val_n_samples=1192`. This preserves the frozen
+v7 split. It is not an allowed treatment change.
+
+Use exactly 32 concurrent Dolphin boots for periodic and final CPU sweeps. Add a saved training
+configuration field for this limit before E1 launches. The same field must control both the
+background evaluator and the final in-process evaluator. P0 used 32 boots. Host CPU count must not
+silently change this protocol.
 
 ## Required tests
 
@@ -301,4 +336,4 @@ but E2 may not launch until E1 evidence is complete.
 
 ## Results
 
-Pending E0 completion.
+Pending implementation and launch.
