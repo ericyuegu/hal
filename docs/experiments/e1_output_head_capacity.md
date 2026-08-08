@@ -456,5 +456,15 @@ gate now passes; the first E2 GPU steps will measure the live wait reduction.
 Disk use was 76 of 250 GB. Step 8,192's checkpoint, 40 replays, rows, metrics, result, and worker
 log uploaded to R2. The measured run still projects below the 3.5-hour limit.
 
+At step 12,288, validation action NLL was 1.041 bits per frame and button log loss was 0.031. P0
+reported 1.042 at the same step, so the offline losses are equal for practical purposes. The CPU
+sweep finished in 164 seconds with no crash. It produced 39 active games and two zero-active tails.
+Stocks taken and lost per active minute were 0.735 and 1.597. Damage dealt and taken per active
+minute were 129.5 and 112.5. P0's same-step stock rates were 0.813 and 1.372. This third unpaired
+sample is also weaker for E1, but the final paired H2H test remains the decision gate.
+
+E1 reached step 16,384 and entered final evaluation without an error. The GPU was idle while the
+CPU workers ran, and disk use remained 76 of 250 GB.
+
 Training continues. Final validation, CPU evaluation, H2H, artifact verification, cost, and the
 decision are pending.

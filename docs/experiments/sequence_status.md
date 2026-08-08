@@ -35,10 +35,12 @@ Decode speed alone cannot select the policy package.
 | E6 | Chunk-conditioned value validity | Critic plan with value warm-up ready; blocked on E4/E5 infrastructure | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
 | E7 | Macro-action optimization and execution | Fresh matched-control plan ready; blocked on E6 | Use one chunk advantage on the joint likelihood and execute the same `H=2`, then `H=4`, action. |
 
-E1 reached step 9,600 without an error. At step 8,192, validation action NLL was 1.071 bits per
-frame. The 32-boot CPU sweep completed in 166 seconds with no crash. Stocks taken and lost per
-active minute were 0.670 and 1.388. This point is weaker than P0 at the same step and is not a final
-decision. The checkpoint and complete periodic evidence uploaded to R2.
+E1 reached step 16,384 and entered final evaluation without an error. At step 12,288, validation
+action NLL was 1.041 bits per frame, effectively equal to P0's 1.042. The 32-boot CPU sweep
+completed in 164 seconds with no crash. Stocks taken and lost per active minute were 0.735 and
+1.597, compared with P0's same-step 0.813 and 1.372. This is the third weak unpaired E1 sample, but
+the declared final paired H2H test remains the decision gate. Step 12,288's complete evidence
+uploaded to R2.
 
 E1 also exposed a systems limit. Median loader wait was 0.136 seconds in a 0.281-second median step,
 while the host was mostly idle and showed no disk-read wait. The E2 plan now includes a one-batch
