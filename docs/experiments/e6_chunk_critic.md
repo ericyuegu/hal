@@ -97,11 +97,15 @@ gradients or clipping from changing the Q2 fit.
 Concatenation is important: the critic must receive state and action information in distinct feature
 columns before the nonlinear MLP. Do not reduce the chunk to an additive sum of group embeddings.
 
-Fit one state-only control for each horizon. Replace the chunk vector with a learned
-horizon-specific 128-wide null vector, then use a head with the exact same shape as its Q head. The
-control has no access to action classes. Record action-encoder, Q-head, state-control, and total
-parameter counts separately. Verify that changing any valid action group can change the
-corresponding Q output after training while leaving its state-only control unchanged.
+Fit one state-only control for each horizon. Give it its own action encoder and Q head with names,
+shapes, initialization rules, optimizer, schedule, and update count matched to its Q arm. Replace
+every action-group index with a fixed learned null index before the control encoder. Include that
+null index in both the Q and control embedding tables so their parameter counts match exactly. The
+Q arm never uses it on a valid logged chunk. The control therefore computes a trainable constant
+chunk representation but has no access to action classes. Record action-encoder, Q-head, control,
+and total parameter counts separately. Verify exact Q/control parameter-count and tensor-shape
+parity. Verify that changing any valid action group can change Q after training while leaving its
+state-only control unchanged.
 
 Train a separate scalar `V(s_t)` probe on Monte Carlo `G_{t+1}`. The Q and V probes read the same
 frozen state representation.
@@ -162,7 +166,8 @@ cosine schedules span the 16,384 Q updates. Save and restore every optimizer and
 5. Assert no actor parameter or buffer changes during critic optimization.
 6. Assert Q receives all action frames and all four groups through concatenated feature columns.
 7. Change one action group at one time. Confirm the critic input changes at the intended token only.
-   Confirm the matched state-only output does not change.
+   Confirm the matched state-only encoder still receives only its fixed null indices and its output
+   does not change.
 8. Shuffle temporal order while preserving the action multiset. Confirm the encoded chunk changes.
 9. Assert Q2 cannot read actions 3 or 4.
 10. Assert Q and V targets are detached and finite.
@@ -175,7 +180,8 @@ cosine schedules span the 16,384 Q updates. Save and restore every optimizer and
 14. Reject source checkpoints that are not dense `(1,2,3,4)` temporal policies.
 15. Run a small end-to-end critic job with finite train and validation outputs.
 16. Assert each state-only ablation receives the exact target and valid mask used by its matched Q
-    head.
+    head. Assert its encoder and head parameter names, shapes, counts, optimizer settings, schedule,
+    and update count match that Q arm.
 17. Build policy-sample support thresholds from logged validation chunks without reading Q values.
 18. Assert Q and both state-only controls remain byte-identical during the 2,048-step V warm-up.
 19. Assert `V_target` is an exact copy of warmed V at Q step 0, then follows the declared EMA rule.
@@ -183,6 +189,8 @@ cosine schedules span the 16,384 Q updates. Save and restore every optimizer and
 21. Assert the E6 interruption mask is byte-identical to the mask E7 uses for the same logged rows.
 22. Check Huber delta 1.0 by hand. Assert all five optimizers own disjoint parameters, clip
     separately, and resume their independent schedules at the exact saved steps.
+23. Check every fixed beta-table row by hand, including disagreement fallback, both ESS values,
+    clip fraction, selection boundaries, and the no-passing-beta case. Save and verify its hash.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
@@ -241,6 +249,12 @@ and critic disagreement answer different questions. Low policy likelihood does n
 observed logged chunk counterfactual. E7 may use a logged chunk's advantage only when both
 disagreements stay inside their declared held-out ranges.
 
+On held-out logged chunks, apply the declared disagreement fallback and build the complete weight
+table for `beta` values `(0.2, 0.4, 0.8, 1.6, 3.2)` with raw `weight_max=5`. For each horizon and
+beta, record frame-level and replay-level normalized ESS, raw clip fraction, fallback fraction, and
+normalized maximum. Save this table before E7. E7 must consume it without recomputing thresholds or
+choosing a new grid.
+
 ## Gate
 
 E6 passes only if:
@@ -261,8 +275,10 @@ E6 passes only if:
   target range expanded by one target interquartile range on each side.
 - At most 10% of in-support policy chunks exceed either logged-chunk 95th-percentile disagreement
   threshold.
-- Advantages and proposed weights are finite. Both frame-level and replay-level normalized ESS
-  ratios are at least 0.2, and no more than 20% of raw proposed weights hit their cap.
+- Advantages and every entry in the fixed beta table are finite. At least one beta for each horizon
+  has both frame-level and replay-level normalized ESS ratios of at least 0.2 and no more than 20%
+  of raw weights at the cap. If no beta passes for a horizon, that horizon cannot enter E7
+  macro-AWR.
 
 If Q ignores actions, fails calibration, or extrapolates on policy samples, do not train chunk AWR.
 Record E6 as a negative result. Closed-loop execution without a trusted chunk critic may still be a

@@ -67,12 +67,12 @@ A_{H,i}(s_t,\mathbf a_t^H)=Q_{H,i}(s_t,\mathbf a_t^H)-V_i(s_t),
 
 Use the mean advantage in the actor weight. Do not mix a Q from one seed with a V from another seed.
 
-Compute a detached, clipped exponential weight with the same finite implementation as E5. Choose
-`beta_H` from the frozen E6 validation audit before E7. Test `beta` values
-`(0.2, 0.4, 0.8, 1.6, 3.2)` with raw `weight_max=5`. After the disagreement fallback, choose the
-smallest beta for which both normalized ESS ratios are at least 0.2 and no more than 20% of raw
-weights hit the cap. If no value passes, do not train macro-AWR. Select H2 and H4 separately and
-save the complete selection table before either actor run.
+Compute a detached, clipped exponential weight with the same finite implementation as E5. Read the
+frozen E6 table for `beta` values `(0.2, 0.4, 0.8, 1.6, 3.2)` and raw `weight_max=5`. After the
+disagreement fallback, choose the smallest beta for which both normalized ESS ratios are at least
+0.2 and no more than 20% of raw weights hit the cap. If no value passed E6, do not train macro-AWR.
+Select H2 and H4 separately. Verify the E6 table hash before either actor run; do not recompute the
+thresholds or change the beta grid in E7.
 
 Normalize valid weights to mean one within the effective batch with the same FP32 `logsumexp`
 calculation. Do not divide underflowed raw exponentials by their mean. Report raw and normalized
@@ -202,7 +202,8 @@ and the next call replans normally. This is the same boundary used by E6's logge
 21. Assert a stock change or frame reset before H removes the macro-action row in both macro-BC and
     macro-AWR, while the same event on the Hth transition keeps it.
 22. Test the fixed beta grid and selection rule, including the exact ESS and clip boundaries and
-    the no-passing-beta failure. Assert H2 and H4 select independently.
+    the no-passing-beta failure. Assert H2 and H4 select independently. Reject a missing or
+    wrong-hash E6 selection table.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
