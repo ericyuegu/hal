@@ -392,12 +392,17 @@ W&B run `43ppjdxc` is
 `260808-045924_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-factored-mlp-r2-c32-c.triggers.buttons.main_ranked-anon-1_e2-stable`.
 Startup verified `sm_89`, the 250 GB compile cache, compact policy v7 stats, the exact E1 checkpoint
 SHA-256, 7.79 million model parameters, and concurrent validation-cache and training-prefetch
-startup. Compilation, first-step timing, and peak GPU memory are pending.
+startup. Peak GPU memory is pending.
+
+The startup gate reached step 0 without an error. It used the required Flex path with full causal
+attention (`window=0`). Compilation plus the first update took 43.2 seconds. The validation cache
+built three batches with 1,192 samples in 16.3 seconds while training prefetch was active. Warm-step
+timing, loader wait, GPU use, memory, and the 3.5-hour projection remain pending.
 
 The same argument list passes the experiment's Tyro parser and `validate_config`. It resolves to
 `factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
 steps.
 
 E1's final checkpoint, CPU sweep, H2H record, and decision are verified. E1 did not promote. The
-uploader regression gate passes. The GPU compile, memory, throughput, and exact E1-reference launch
-audit remain pending before E2-S launches.
+uploader regression gate and exact launch audit pass. E2-S is running. Warm throughput, GPU memory,
+training, evaluation, and artifact closure remain pending.
