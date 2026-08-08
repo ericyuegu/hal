@@ -114,7 +114,8 @@ The `exp/data-pipeline` branch now has:
 - A compact replay schema that keeps only P0 inputs and targets.
 - Exact packing for controller values, buttons, state values, and missing data.
 - A path-based 128-bit replay ID. The old 32-bit manifest ID has three collisions.
-- A central replay reservoir with one replay per batch and a one-batch cooldown.
+- A central replay reservoir with at most one window from each replay in a batch and a one-batch
+  cooldown before that replay can return.
 - Stable window sampling based on the seed, epoch, and replay ID.
 - Slice decoding. Workers decode only the selected windows, not the full replay.
 - Early feature projection in training and closed-loop evaluation.
