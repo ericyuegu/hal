@@ -378,6 +378,12 @@ policy. Three offers qualified at effective prices of $0.781, $0.808, and $0.871
 audit used marked placeholders for the E1 run and hash. Repeat it with the verified values before
 renting a machine.
 
+The exact no-rent audit passed at pushed commit `db7ddc3`. It encoded the verified E1 run and
+checkpoint SHA-256, complete E2-S command, 250 GB disk, 3.5-hour estimate, RTX 4090 limit, compact
+policy v7 defaults, and one-at-a-time policy. Three offers qualified at effective prices of $0.781,
+$0.808, and $0.871 per hour. Commit this record, then repeat the audit and launch from the unchanged
+final SHA.
+
 The same argument list passes the experiment's Tyro parser and `validate_config`. It resolves to
 `factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
 steps.
