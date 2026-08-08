@@ -415,6 +415,10 @@ Correctness evidence:
 - The exact launch command passed a no-rent audit at pushed commit `a3c6b4b`. It kept the 250 GB
   disk request, encoded the complete training command, and found three qualifying RTX 4090 offers.
   Their effective prices were $0.781, $0.808, and $0.871 per hour.
+- After P2 closed, the complete command passed another no-rent audit at pushed commit `9987ed5`.
+  It kept the 250 GB disk and every declared E1 and P0-reference field. Four RTX 4090 offers
+  qualified; the best effective price was $0.755 per hour. Commit this record, then repeat the audit
+  and launch from the unchanged final SHA.
 
 GPU compilation, memory, throughput, training, validation, CPU evaluation, and H2H results are
 pending.
