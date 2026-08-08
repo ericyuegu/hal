@@ -45,6 +45,17 @@ action_mlp_ratio: int = 2
 E0 remains `linear`. E1 uses `state_mlp`. The run name and checkpoint configuration must include the
 mode and MLP ratio.
 
+Keep `model.heads` as the existing `IndependentHead` list. It owns the unchanged base projections
+and keeps old 023 checkpoint keys stable. Add one optional adapter module after that list. In linear
+mode, do not create adapter parameters. In state-MLP mode, the adapter owns the shared state
+projection and every group-and-offset residual projection.
+
+Add one model-level group-logit path and make training, validation, parity, and decode call it.
+Linear mode must return the existing head logits without another operation. State-MLP mode adds its
+residual. E2 will extend the same path with teacher-forced or sampled earlier groups. Do not keep a
+second sampling implementation inside the adapter; one ancestral sampler must apply support masks,
+temperature, min-p, trigger repair, and RNG handling for every head mode.
+
 Keep E0's `Linear(d_model, 355)` projection at every offset. It supplies one classifier slice for
 each action group. Add one shared state projection:
 
