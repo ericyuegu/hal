@@ -1,6 +1,6 @@
 # E2: within-frame action factorization
 
-Status: blocked on E1 evidence
+Status: local implementation complete; GPU gate blocked on E1 evidence
 
 Updated: 2026-08-07
 
@@ -83,9 +83,10 @@ factorization_diag_seed: int = 0
 factorization_diag_samples: int = 1
 ```
 
-Share one embedding table for each action group across offsets. Each table maps its discrete class
-to a 32-dimensional vector. For each predicted group, concatenate the embeddings of all earlier
-groups in the selected chain order. Concatenation is along the feature dimension.
+Share one embedding table for each group that can be an ancestor. The final group has no consumer,
+so it has no dead embedding table. Each table maps its discrete class to a 32-dimensional vector.
+For each predicted group, concatenate the embeddings of all earlier groups in the selected chain
+order. Concatenation is along the feature dimension.
 
 Compute one shared state preactivation:
 
@@ -194,10 +195,12 @@ Report exact total, trunk, classifier, state-MLP, condition, and embedding param
 has more than 5% more total parameters or is more than 10% slower per training step than E1, plan a
 separate capacity control before making a factorization claim.
 
-At the planned dimensions, the shared conditioning projections add 98,304 parameters and the four
-embedding tables add 11,360. With the current 6,818,482-parameter linear model, the projected totals
-are 7,678,526 for E1 and 7,788,190 for E2. E2 is 1.43% larger than E1. Its conditioning projections
-add about 51.5 billion forward MACs per 131,072-frame step because the conditions differ by offset.
+At the planned dimensions, the shared conditioning projections add 98,304 parameters. E2-S adds
+9,280 ancestor-embedding parameters, for 7,786,110 total. E2-I adds 11,072, for 7,787,902 total.
+The arms differ by 1,792 parameters, or 0.023% of the model. Keeping an unused final-group table
+would make the nominal counts equal but would not equalize effective capacity. Both arms remain
+less than 1.43% larger than E1's 7,678,526 parameters. The conditioning projections add about 51.5
+billion forward MACs per 131,072-frame step because the conditions differ by offset.
 
 ## Offline records
 
@@ -252,4 +255,38 @@ head is fixed.
 
 ## Results
 
-Pending E1 completion.
+The implementation is complete on `exp/e2-within-frame-factorization`. It changes only
+`experiments/023_mtp_heads.py`, its focused test file, and experiment records.
+
+Implemented behavior:
+
+- `factored_mlp` keeps E1's base classifiers, shared state projection, and zero-initialized
+  residual outputs.
+- Each later group receives the feature-axis concatenation of earlier target-group embeddings in
+  training and earlier sampled-group embeddings in decode.
+- The shared state projection is computed once. Each group's zero-initialized condition projection
+  is shared across offsets.
+- Teacher-forced validation reports the existing NLL and accuracy. Dedicated group generators
+  report ancestor-sampled NLL, accuracy, exposure gap, and exact-frame accuracy without changing
+  process RNG state.
+- Closed-loop sampling uses deterministic streams keyed by seed, stable slot, reset generation,
+  and named group. Reordering groups or resetting one slot does not reassign another stream's draw.
+- E2-S has 7,786,110 parameters. E2-I has 7,787,902. The 1,792-parameter difference comes from
+  removing each order's unused final-group embedding table.
+
+Local evidence:
+
+- Same-seed E1 and both E2 orders have exact shared parameters and exact initial logits.
+- Keyed sampled actions and every stream counter also match E1 exactly at initialization.
+- Residual outputs receive gradients on update one, condition projections on update two, and
+  action embeddings on update three.
+- Tests cover target conditioning, ancestral order, class bounds, reset isolation, checkpoint
+  round trips, optimizer ownership, private validation RNG, both training orders, and exact counts.
+- Focused experiment suite: 77 passed in 9.88 seconds.
+- Full repository suite: 933 passed in 134.81 seconds.
+- Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
+  reports existing warnings and no errors.
+
+The GPU compile, memory, throughput, E1-reference hash, launch command, and no-rent audit remain
+pending. Do not launch E2-S until E1's final checkpoint, CPU sweep, H2H record, and decision are
+verified.

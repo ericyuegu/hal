@@ -1,6 +1,6 @@
 # E1: output-head capacity control
 
-Status: local implementation complete; GPU gate waits for P2
+Status: active on Vast instance `47136334`, W&B `q3aojgfm`
 
 P0 is the E0 reference. P1 did not pass its paired head-to-head gate, so P2 cannot change this
 scientific choice. P2 only tests decode systems on the P1 checkpoint. E1 code preparation may

@@ -28,7 +28,7 @@ Decode speed alone cannot select the policy package.
 | --- | --- | --- | --- |
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Complete; P0 is the fixed reference | Keep its checkpoint, data, objective, and evaluation protocol fixed. |
 | E1 | Head capacity: zero-init state-only residual MLP | Active on Vast instance `47136334`, W&B `q3aojgfm` | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
-| E2 | Within-frame conditional factorization and group order | Fresh two-arm plan ready; blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
+| E2 | Within-frame conditional factorization and group order | Local implementation and tests complete; GPU gate blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Primary-only plan with a fixed critic warm-up ready; blocked on policy selection | Pass the value gate, then weight only the action whose advantage is defined. |
@@ -131,10 +131,6 @@ effective price of $0.755 per hour. It became ready in 43 seconds. W&B run `q3ao
 state-MLP configuration. Startup verified the source SHA, `sm_89`, P0 checkpoint hash, parameter
 count, and concurrent validation-cache and training-prefetch start. No other experiment is active.
 
-The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
-taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
-same step. The recovered result, metrics, and worker log have verified R2 hashes.
-
 The exploratory P1-old run reported this periodic snapshot at step 12,288:
 
 - Validation action NLL: 1.027 bits per frame.
@@ -155,9 +151,9 @@ is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
-1. Check E1 compilation, memory, throughput, and numerical health at startup.
-2. Continue through step 16,384, final CPU evaluation, and H2H if no declared gate fails.
-3. Verify E1's checkpoint, rows, replays, W&B history, R2 files, cost, and final decision.
+1. Continue E1 through step 16,384, final CPU evaluation, and H2H if no declared gate fails.
+2. Verify E1's checkpoint, rows, replays, W&B history, R2 files, cost, and final decision.
+3. Audit E2-S's final launch SHA and command, then run its GPU gate only after E1 is complete.
 
 ## Remaining run units
 

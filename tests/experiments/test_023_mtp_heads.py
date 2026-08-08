@@ -662,6 +662,359 @@ def _small_head_cfg(*, head_mode: str):
     )
 
 
+def _factored_cfg(order=("c_stick", "triggers", "buttons", "main_stick")):
+    cfg = _small_head_cfg(head_mode="factored_mlp")
+    cfg.action_group_order = order
+    cfg.action_condition_dim = 8
+    return cfg
+
+
+def _target_indices(model, batch):
+    actions = torch.cat([exp.stack_actions(batch.context.features), batch.target], dim=1)
+    quantized = exp._quantize(model, actions)
+    length = actions.shape[1] - batch.target.shape[1]
+    return tuple(quantized[:, offset : offset + length] for offset in model.head_offsets)
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("buttons", "main_stick", "c_stick"),
+        ("buttons", "buttons", "c_stick", "triggers"),
+        ("buttons", "main_stick", "c_stick", "unknown"),
+    ],
+)
+def test_factored_group_order_must_be_a_permutation(order) -> None:
+    cfg = _factored_cfg(order)
+    with pytest.raises(ValueError, match="action_group_order must be a permutation"):
+        exp.validate_config(cfg, has_button_combo_counts=True)
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("c_stick", "triggers", "buttons", "main_stick"),
+        ("main_stick", "buttons", "triggers", "c_stick"),
+    ],
+)
+def test_factored_mlp_starts_as_the_exact_state_mlp(order) -> None:
+    state_cfg = _small_head_cfg(head_mode="state_mlp")
+    factored_cfg = _factored_cfg(order)
+    torch.manual_seed(41)
+    state_model = exp.GPT(state_cfg).eval()
+    torch.manual_seed(41)
+    factored_model = exp.GPT(factored_cfg).eval()
+    batch = _random_batch(state_cfg)
+    targets = _target_indices(factored_model, batch)
+
+    for name, value in state_model.state_dict().items():
+        torch.testing.assert_close(value, factored_model.state_dict()[name], rtol=0, atol=0)
+    adapter = factored_model.head_adapter
+    assert isinstance(adapter, exp.FactoredMLPAdapter)
+    assert torch.count_nonzero(adapter.state_proj.weight) > 0
+    for projection in adapter.condition_projs.values():
+        assert torch.count_nonzero(projection.weight) == 0
+    for output_head in adapter.residual_projs:
+        for projection in output_head.values():
+            assert torch.count_nonzero(projection.weight) == 0
+            assert torch.count_nonzero(projection.bias) == 0
+
+    with torch.no_grad():
+        state_hidden = state_model(batch.context.features, batch.context.ctx_pad)
+        factored_hidden = factored_model(batch.context.features, batch.context.ctx_pad)
+        state_logits = state_model.all_group_logits(state_hidden)
+        factored_logits = factored_model.all_group_logits(factored_hidden, targets)
+    for state_head, factored_head in zip(state_logits, factored_logits, strict=True):
+        for name in exp._GROUP_NAMES:
+            torch.testing.assert_close(state_head[name], factored_head[name], rtol=0, atol=0)
+
+
+def test_factored_embeddings_reject_an_out_of_range_class() -> None:
+    cfg = _factored_cfg(("buttons", "main_stick", "c_stick", "triggers"))
+    model = exp.GPT(cfg)
+    batch = _random_batch(cfg)
+    hidden = model(batch.context.features, batch.context.ctx_pad)
+    targets = list(_target_indices(model, batch))
+    targets[0] = targets[0].clone()
+    targets[0][..., exp._BUTTONS_G] = exp._GROUP_VOCABS[exp._BUTTONS_G]
+
+    with pytest.raises(AssertionError, match="buttons class index is out of range"):
+        model.all_group_logits(hidden, tuple(targets))
+
+
+def test_factored_gradient_path_opens_in_three_updates() -> None:
+    cfg = _factored_cfg()
+    model = exp.GPT(cfg)
+    adapter = model.head_adapter
+    assert isinstance(adapter, exp.FactoredMLPAdapter)
+    batch = _random_batch(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+
+    def backward() -> None:
+        parts = exp.action_loss(model, batch)
+        exp.objective(parts.nll, parts.transition, 1.0, 1.0).backward()
+
+    backward()
+    assert exp._parameter_gradient_norm(adapter.residual_projs.parameters()) > 0
+    assert exp._parameter_gradient_norm(adapter.condition_projs.parameters()) == 0
+    assert exp._parameter_gradient_norm(adapter.action_embeddings.parameters()) == 0
+    optimizer.step()
+    optimizer.zero_grad()
+
+    backward()
+    assert exp._parameter_gradient_norm(adapter.condition_projs.parameters()) > 0
+    assert exp._parameter_gradient_norm(adapter.action_embeddings.parameters()) == 0
+    optimizer.step()
+    optimizer.zero_grad()
+
+    backward()
+    assert exp._parameter_gradient_norm(adapter.action_embeddings.parameters()) > 0
+
+
+def test_factored_teacher_forcing_changes_only_later_groups() -> None:
+    cfg = _factored_cfg(("buttons", "main_stick", "c_stick", "triggers"))
+    model = exp.GPT(cfg).eval()
+    adapter = model.head_adapter
+    assert isinstance(adapter, exp.FactoredMLPAdapter)
+    for projection in adapter.condition_projs.values():
+        torch.nn.init.constant_(projection.weight, 0.2)
+    for output_head in adapter.residual_projs:
+        for projection in output_head.values():
+            torch.nn.init.constant_(projection.weight, 0.1)
+    batch = _random_batch(cfg)
+    hidden = model(batch.context.features, batch.context.ctx_pad)
+    targets = list(_target_indices(model, batch))
+    changed = [value.clone() for value in targets]
+    changed[0][..., exp._BUTTONS_G] = (changed[0][..., exp._BUTTONS_G] + 1) % exp._GROUP_VOCABS[exp._BUTTONS_G]
+
+    original_logits = model.all_group_logits(hidden, tuple(targets))[0]
+    changed_logits = model.all_group_logits(hidden, tuple(changed))[0]
+
+    torch.testing.assert_close(original_logits["buttons"], changed_logits["buttons"], rtol=0, atol=0)
+    assert not torch.equal(original_logits["main_stick"], changed_logits["main_stick"])
+
+
+def test_factored_ancestral_decode_uses_the_declared_order(monkeypatch) -> None:
+    cfg = _factored_cfg(("main_stick", "buttons", "triggers", "c_stick"))
+    model = exp.GPT(cfg).eval()
+    adapter = model.head_adapter
+    assert isinstance(adapter, exp.FactoredMLPAdapter)
+    calls = []
+    original = adapter.group_logits
+
+    def record(head_index, group, base, state_preactivation, prefix, embedded_prefix=None):
+        calls.append((group, tuple(prefix)))
+        return original(head_index, group, base, state_preactivation, prefix, embedded_prefix)
+
+    monkeypatch.setattr(adapter, "group_logits", record)
+    exp.chunk_from_hidden(
+        model,
+        torch.randn(2, cfg.d_model),
+        (1,),
+        group_temps=(1.0,) * exp.N_GROUPS,
+        argmax=True,
+    )
+
+    assert calls == [
+        ("main_stick", ()),
+        ("buttons", ("main_stick",)),
+        ("triggers", ("main_stick", "buttons")),
+        ("c_stick", ("main_stick", "buttons", "triggers")),
+    ]
+
+
+def test_slot_group_streams_are_order_invariant_and_reset_local() -> None:
+    ids = torch.tensor([11, 22])
+    first = Context(
+        features={}, ctx_pad=torch.zeros(2, dtype=torch.long), slot_ids=ids, reset=torch.tensor([True, True])
+    )
+    no_reset = Context(
+        features={}, ctx_pad=torch.zeros(2, dtype=torch.long), slot_ids=ids, reset=torch.tensor([False, False])
+    )
+    reset_one = Context(
+        features={}, ctx_pad=torch.zeros(2, dtype=torch.long), slot_ids=ids, reset=torch.tensor([True, False])
+    )
+    left = exp.SlotGroupRandom(7)
+    right = exp.SlotGroupRandom(7)
+    left.begin(first)
+    right.begin(first)
+    left_draws = {name: left.uniforms(name) for name in exp._GROUP_NAMES}
+    right_draws = {name: right.uniforms(name) for name in reversed(exp._GROUP_NAMES)}
+    for name in exp._GROUP_NAMES:
+        torch.testing.assert_close(left_draws[name], right_draws[name], rtol=0, atol=0)
+    assert left.state() == right.state()
+
+    left.begin(reset_one)
+    right.begin(no_reset)
+    for name in exp._GROUP_NAMES:
+        left_next = left.uniforms(name)
+        right_next = right.uniforms(name)
+        torch.testing.assert_close(left_next[1], right_next[1], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("c_stick", "triggers", "buttons", "main_stick"),
+        ("main_stick", "buttons", "triggers", "c_stick"),
+    ],
+)
+def test_keyed_sampling_matches_e1_at_factored_initialization(order) -> None:
+    state_cfg = _small_head_cfg(head_mode="state_mlp")
+    factored_cfg = _factored_cfg(order)
+    torch.manual_seed(53)
+    state_model = exp.GPT(state_cfg).eval()
+    torch.manual_seed(53)
+    factored_model = exp.GPT(factored_cfg).eval()
+    hidden = torch.randn(3, state_cfg.d_model)
+    ctx = Context(
+        features={},
+        ctx_pad=torch.zeros(3, dtype=torch.long),
+        slot_ids=torch.tensor([4, 9, 17]),
+        reset=torch.tensor([True, True, True]),
+    )
+    state_streams = exp.SlotGroupRandom(29)
+    factored_streams = exp.SlotGroupRandom(29)
+
+    for call in range(12):
+        state_streams.begin(ctx)
+        factored_streams.begin(ctx)
+        state_action = exp.chunk_from_hidden(
+            state_model,
+            hidden,
+            (1,),
+            group_temps=(1.0,) * exp.N_GROUPS,
+            uniforms=state_streams.uniforms,
+        )
+        factored_action = exp.chunk_from_hidden(
+            factored_model,
+            hidden,
+            (1,),
+            group_temps=(1.0,) * exp.N_GROUPS,
+            uniforms=factored_streams.uniforms,
+        )
+        torch.testing.assert_close(state_action, factored_action, rtol=0, atol=0)
+        assert state_streams.state() == factored_streams.state()
+        if call == 0:
+            ctx = Context(
+                features={},
+                ctx_pad=ctx.ctx_pad,
+                slot_ids=ctx.slot_ids,
+                reset=torch.tensor([False, False, False]),
+            )
+
+
+def test_factored_validation_uses_private_rng_and_reports_ancestor_metrics() -> None:
+    cfg = _factored_cfg()
+    model = exp.GPT(cfg)
+    batch = _random_batch(cfg)
+    torch.manual_seed(101)
+    before = torch.random.get_rng_state().clone()
+    cuda_before = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+    metrics = exp.val_metrics(model, [batch], cfg)
+    gradients = exp.gradient_diagnostics(model, batch, cfg)
+
+    torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
+    if cuda_before is not None:
+        for actual, expected in zip(torch.cuda.get_rng_state_all(), cuda_before, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert gradients["grad/state_mlp_residual_norm"] > 0
+    assert gradients["grad/factored_condition_norm"] == 0
+    assert gradients["grad/factored_embedding_norm"] == 0
+    model.eval()
+    with torch.no_grad():
+        hidden = model(batch.context.features, batch.context.ctx_pad)
+        _, valid = exp._multi_offset_targets(batch.context, batch.target, cfg.head_offsets)
+        hidden_valid = hidden.reshape(-1, hidden.shape[-1])[valid.reshape(-1)]
+        full_actions = torch.cat([exp.stack_actions(batch.context.features), batch.target], dim=1)
+        target = exp._quantize(model, full_actions)[:, 1 : 1 + cfg.L_ctx]
+        target_valid = target.reshape(-1, exp.N_GROUPS)[valid.reshape(-1)]
+        ancestor_logits, _ = exp._ancestor_sampled_logits(
+            model,
+            hidden_valid,
+            model.primary_head_idx,
+            exp._factorization_generators(cfg.factorization_diag_seed, hidden.device),
+        )
+    for group, name in enumerate(exp._GROUP_NAMES):
+        expected_nll = (
+            torch.nn.functional.cross_entropy(ancestor_logits[name], target_valid[:, group]).item() / exp._LN2
+        )
+        assert metrics[f"ancestor_nll_off1_{name}"] == pytest.approx(expected_nll)
+    for offset in cfg.head_offsets:
+        assert f"ancestor_exact_frame_acc_off{offset}" in metrics
+        for name in exp._GROUP_NAMES:
+            assert f"ancestor_nll_off{offset}_{name}" in metrics
+            assert f"ancestor_acc_off{offset}_{name}" in metrics
+            assert metrics[f"ancestor_nll_gap_off{offset}_{name}"] == pytest.approx(
+                metrics[f"ancestor_nll_off{offset}_{name}"] - metrics[f"nll_off{offset}_{name}"]
+            )
+
+
+@pytest.mark.parametrize(
+    ("order", "embedding_count", "total"),
+    [
+        (("c_stick", "triggers", "buttons", "main_stick"), 9_280, 7_786_110),
+        (("main_stick", "buttons", "triggers", "c_stick"), 11_072, 7_787_902),
+    ],
+)
+def test_factored_parameter_counts_match_the_plan(order, embedding_count, total) -> None:
+    e1 = exp.GPT(exp.TrainConfig(head_mode="state_mlp", action_mlp_ratio=2))
+    e2 = exp.GPT(
+        exp.TrainConfig(
+            head_mode="factored_mlp",
+            action_mlp_ratio=2,
+            action_condition_dim=32,
+            action_group_order=order,
+        )
+    )
+    counts = exp.parameter_counts(e2)
+
+    assert counts["condition_projection"] == 98_304
+    assert counts["action_embedding"] == embedding_count
+    assert counts["total"] - exp.parameter_counts(e1)["total"] == 98_304 + embedding_count
+    assert counts["total"] == total
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("c_stick", "triggers", "buttons", "main_stick"),
+        ("main_stick", "buttons", "triggers", "c_stick"),
+    ],
+)
+def test_factored_checkpoint_and_training_step(order) -> None:
+    cfg = _factored_cfg(order)
+    model = exp.GPT(cfg)
+    batch = _random_batch(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    memberships = {id(parameter): group for group in optimizer.param_groups for parameter in group["params"]}
+    adapter = model.head_adapter
+    assert isinstance(adapter, exp.FactoredMLPAdapter)
+    for parameter in (*adapter.condition_projs.parameters(), *adapter.action_embeddings.parameters()):
+        assert memberships[id(parameter)]["use_muon"] is False
+
+    parts = exp.action_loss(model, batch)
+    loss = exp.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight)
+    loss.backward()
+    optimizer.step()
+    assert torch.isfinite(loss)
+
+    saved = model.state_dict()
+    loaded_cfg = exp._cfg_from_state(asdict(cfg))
+    loaded = exp.GPT(loaded_cfg)
+    exp._load_model_state(loaded, saved)
+    targets = _target_indices(model, batch)
+    with torch.no_grad():
+        expected = model.all_group_logits(model(batch.context.features, batch.context.ctx_pad), targets)
+        actual = loaded.all_group_logits(loaded(batch.context.features, batch.context.ctx_pad), targets)
+    assert loaded_cfg.action_group_order == order
+    assert loaded_cfg.action_condition_dim == cfg.action_condition_dim
+    for expected_head, actual_head in zip(expected, actual, strict=True):
+        for name in exp._GROUP_NAMES:
+            torch.testing.assert_close(actual_head[name], expected_head[name], rtol=0, atol=0)
+
+
 def test_state_mlp_starts_as_the_exact_linear_model() -> None:
     linear_cfg = _small_head_cfg(head_mode="linear")
     mlp_cfg = _small_head_cfg(head_mode="state_mlp")
@@ -1084,9 +1437,17 @@ def test_validation_reports_each_group_at_each_offset() -> None:
 
     for offset in cfg.head_offsets:
         assert f"nll_off{offset}" in metrics
+        assert f"exact_frame_acc_off{offset}" in metrics
         for group in exp._GROUP_NAMES:
             assert f"nll_off{offset}_{group}" in metrics
             assert f"acc_off{offset}_{group}" in metrics
+            assert f"nll_off{offset}_{group}_trans" in metrics
+            assert f"nll_off{offset}_{group}_hold" in metrics
+            assert f"acc_off{offset}_{group}_trans" in metrics
+            assert f"acc_off{offset}_{group}_hold" in metrics
+            assert f"pred_change_rate_off{offset}_{group}" in metrics
+            assert f"pred_persistence_off{offset}_{group}" in metrics
+            assert f"changeF1_off{offset}_{group}" in metrics
 
 
 def test_state_mlp_validation_reports_residual_and_gradient_norms() -> None:

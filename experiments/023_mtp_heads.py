@@ -131,8 +131,12 @@ class TrainConfig:
     require_flex: bool = False
     # Offset 1 is deployed. Other offsets are auxiliary targets.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
-    head_mode: Literal["linear", "state_mlp"] = "linear"
+    head_mode: Literal["linear", "state_mlp", "factored_mlp"] = "linear"
     action_mlp_ratio: int = 2
+    action_condition_dim: int = 32
+    action_group_order: tuple[str, ...] = ("c_stick", "triggers", "buttons", "main_stick")
+    factorization_diag_seed: int = 0
+    factorization_diag_samples: int = 1
     # Total weight of the mean auxiliary-head loss. This stays fixed if head_offsets changes.
     aux_loss_weight: float = 1.0
     # Drop the complete ego action history for a training sample.
@@ -231,7 +235,13 @@ def _model_tag(cfg: TrainConfig) -> str:
     offs = ".".join(str(o) for o in cfg.head_offsets)
     attention = "full" if cfg.attn_window == 0 else f"swa{cfg.attn_window}"
     decode = "kv" if cfg.eval_incremental_kv else "recompute"
-    head = "linear" if cfg.head_mode == "linear" else f"state-mlp-r{cfg.action_mlp_ratio}"
+    if cfg.head_mode == "linear":
+        head = "linear"
+    elif cfg.head_mode == "state_mlp":
+        head = f"state-mlp-r{cfg.action_mlp_ratio}"
+    else:
+        order = ".".join(name.replace("_stick", "") for name in cfg.action_group_order)
+        head = f"factored-mlp-r{cfg.action_mlp_ratio}-c{cfg.action_condition_dim}-{order}"
     return (
         f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-a{cfg.action_vocab}-"
         f"{attention}-{decode}-o{offs}-{head}"
@@ -347,12 +357,117 @@ class StateMLPAdapter(nn.Module):
                 nn.init.zeros_(projection.weight)
                 nn.init.zeros_(projection.bias)
 
+    def preactivation(self, h: Tensor) -> Tensor:
+        return self.state_proj(h)
+
     def features(self, h: Tensor) -> Tensor:
-        return F.silu(self.state_proj(h))
+        return F.silu(self.preactivation(h))
 
     def add(self, head_index: int, base: dict[str, Tensor], features: Tensor) -> dict[str, Tensor]:
         output_head = cast(nn.ModuleDict, self.residual_projs[head_index])
         return {name: logits + cast(nn.Linear, output_head[name])(features) for name, logits in base.items()}
+
+
+class FactoredMLPAdapter(StateMLPAdapter):
+    def __init__(
+        self,
+        d_model: int,
+        ratio: int,
+        n_output_heads: int,
+        condition_dim: int,
+        group_order: tuple[str, ...],
+    ) -> None:
+        super().__init__(d_model, ratio, n_output_heads)
+        hidden = ratio * d_model
+        self.group_order = group_order
+        self.condition_dim = condition_dim
+        self.action_embeddings = nn.ModuleDict(
+            {name: nn.Embedding(_GROUP_VOCABS[_GROUP_INDEX[name]], condition_dim) for name in group_order[:-1]}
+        )
+        self.condition_projs = nn.ModuleDict(
+            {
+                name: nn.Linear(position * condition_dim, hidden, bias=False)
+                for position, name in enumerate(group_order)
+                if position > 0
+            }
+        )
+        for projection in self.condition_projs.values():
+            nn.init.zeros_(cast(nn.Linear, projection).weight)
+
+    @staticmethod
+    def _check_indices(name: str, indices: Tensor) -> None:
+        vocab = _GROUP_VOCABS[_GROUP_INDEX[name]]
+        valid = (indices >= 0).all() & (indices < vocab).all()
+        message = f"{name} class index is out of range"
+        if indices.device.type == "cuda":
+            torch._assert_async(valid, message)
+        else:
+            torch._assert(valid, message)
+
+    def _condition(
+        self,
+        group: str,
+        prefix: dict[str, Tensor],
+        embedded_prefix: dict[str, Tensor] | None,
+    ) -> Tensor | None:
+        position = self.group_order.index(group)
+        earlier = self.group_order[:position]
+        if tuple(prefix) != tuple(earlier):
+            raise ValueError(f"{group} needs prefix {earlier}, got {tuple(prefix)}")
+        if not earlier:
+            return None
+        if embedded_prefix is None:
+            for name in earlier:
+                self._check_indices(name, prefix[name])
+            embedded_prefix = {name: self.action_embeddings[name](prefix[name]) for name in earlier}
+        if tuple(embedded_prefix) != tuple(earlier):
+            raise ValueError(f"{group} needs embedded prefix {earlier}, got {tuple(embedded_prefix)}")
+        return torch.cat([embedded_prefix[name] for name in earlier], dim=-1)
+
+    def group_logits(
+        self,
+        head_index: int,
+        group: str,
+        base: Tensor,
+        state_preactivation: Tensor,
+        prefix: dict[str, Tensor],
+        embedded_prefix: dict[str, Tensor] | None = None,
+    ) -> Tensor:
+        condition = self._condition(group, prefix, embedded_prefix)
+        preactivation = state_preactivation
+        if condition is not None:
+            preactivation = preactivation + self.condition_projs[group](condition)
+        projection = cast(nn.Linear, cast(nn.ModuleDict, self.residual_projs[head_index])[group])
+        return base + projection(F.silu(preactivation))
+
+    def teacher_forced(
+        self,
+        head_index: int,
+        base: dict[str, Tensor],
+        state_preactivation: Tensor,
+        target_indices: Tensor,
+    ) -> dict[str, Tensor]:
+        if target_indices.shape[-1] != N_GROUPS:
+            raise ValueError(f"expected {N_GROUPS} action groups, got shape {tuple(target_indices.shape)}")
+        target_by_name = {name: target_indices[..., _GROUP_INDEX[name]] for name in self.group_order}
+        for name, indices in target_by_name.items():
+            self._check_indices(name, indices)
+        prefix: dict[str, Tensor] = {}
+        embedded_prefix: dict[str, Tensor] = {}
+        logits: dict[str, Tensor] = {}
+        for name in self.group_order:
+            logits[name] = self.group_logits(
+                head_index,
+                name,
+                base[name],
+                state_preactivation,
+                prefix,
+                embedded_prefix,
+            )
+            prefix[name] = target_by_name[name]
+            if name != self.group_order[-1]:
+                embedded_prefix[name] = self.action_embeddings[name](prefix[name])
+        return logits
 
 
 class GPT(nn.Module):
@@ -397,9 +512,18 @@ class GPT(nn.Module):
             )
         )
         self.heads = nn.ModuleList([IndependentHead(cfg.d_model) for _ in offs])
-        self.head_adapter = (
-            StateMLPAdapter(cfg.d_model, cfg.action_mlp_ratio, len(offs)) if cfg.head_mode == "state_mlp" else None
-        )
+        if cfg.head_mode == "linear":
+            self.head_adapter = None
+        elif cfg.head_mode == "state_mlp":
+            self.head_adapter = StateMLPAdapter(cfg.d_model, cfg.action_mlp_ratio, len(offs))
+        else:
+            self.head_adapter = FactoredMLPAdapter(
+                cfg.d_model,
+                cfg.action_mlp_ratio,
+                len(offs),
+                cfg.action_condition_dim,
+                cfg.action_group_order,
+            )
 
         self.register_buffer("main_centers", scoring.STICK_CLUSTER_CENTERS_MAIN.clone())
         self.register_buffer("c_centers", scoring.STICK_CLUSTER_CENTERS_C.clone())
@@ -408,29 +532,56 @@ class GPT(nn.Module):
         self.register_buffer("button_combo_counts", torch.full((scoring.N_BUTTON_COMBOS,), -1, dtype=torch.long))
         self._btn_support_dead_cache: dict[tuple[int, torch.device], Tensor] = {}
 
-    def group_logits(self, h: Tensor, head_index: int) -> dict[str, Tensor]:
-        return self.group_logits_many(h, (head_index,))[0]
+    def group_logits(self, h: Tensor, head_index: int, target_indices: Tensor | None = None) -> dict[str, Tensor]:
+        targets = None if target_indices is None else (target_indices,)
+        return self.group_logits_many(h, (head_index,), targets)[0]
 
-    def group_logits_many(self, h: Tensor, head_indices: tuple[int, ...]) -> list[dict[str, Tensor]]:
+    def group_logits_many(
+        self,
+        h: Tensor,
+        head_indices: tuple[int, ...],
+        target_indices: tuple[Tensor, ...] | None = None,
+    ) -> list[dict[str, Tensor]]:
         base = [cast(IndependentHead, self.heads[index]).logits(h) for index in head_indices]
         if self.head_adapter is None:
             return base
-        features = self.head_adapter.features(h)
+        preactivation = self.head_adapter.preactivation(h)
+        if isinstance(self.head_adapter, FactoredMLPAdapter):
+            if target_indices is None or len(target_indices) != len(head_indices):
+                raise ValueError("factored logits need one target-index tensor per output head")
+            return [
+                self.head_adapter.teacher_forced(head_index, values, preactivation, targets)
+                for head_index, values, targets in zip(head_indices, base, target_indices, strict=True)
+            ]
+        features = F.silu(preactivation)
         return [
             self.head_adapter.add(head_index, values, features)
             for head_index, values in zip(head_indices, base, strict=True)
         ]
 
-    def base_and_group_logits(self, h: Tensor) -> tuple[list[dict[str, Tensor]], list[dict[str, Tensor]]]:
+    def base_and_group_logits(
+        self,
+        h: Tensor,
+        target_indices: tuple[Tensor, ...] | None = None,
+    ) -> tuple[list[dict[str, Tensor]], list[dict[str, Tensor]]]:
         base = [cast(IndependentHead, head).logits(h) for head in self.heads]
         if self.head_adapter is None:
             return base, base
-        features = self.head_adapter.features(h)
+        preactivation = self.head_adapter.preactivation(h)
+        if isinstance(self.head_adapter, FactoredMLPAdapter):
+            if target_indices is None or len(target_indices) != len(base):
+                raise ValueError("factored logits need one target-index tensor per output head")
+            logits = [
+                self.head_adapter.teacher_forced(index, values, preactivation, targets)
+                for index, (values, targets) in enumerate(zip(base, target_indices, strict=True))
+            ]
+            return base, logits
+        features = F.silu(preactivation)
         logits = [self.head_adapter.add(index, values, features) for index, values in enumerate(base)]
         return base, logits
 
-    def all_group_logits(self, h: Tensor) -> list[dict[str, Tensor]]:
-        return self.base_and_group_logits(h)[1]
+    def all_group_logits(self, h: Tensor, target_indices: tuple[Tensor, ...] | None = None) -> list[dict[str, Tensor]]:
+        return self.base_and_group_logits(h, target_indices)[1]
 
     def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
         ref = features[f"{prefix}_position_x"]
@@ -529,9 +680,10 @@ def action_loss(model: GPT, batch: TrainBatch) -> LossParts:
     bnd_full = scoring.transition_mask(q_full)  # [B, L_ctx + max_off - 1, n_groups]; pos t = (q[t+1] != q[t])
     nll: dict[tuple[int, str], Tensor] = {}
     trans: dict[tuple[int, str], Tensor] = {}
-    all_logits = model.all_group_logits(h)
+    target_indices = tuple(q_full[:, o : o + L_ctx] for o in model.head_offsets)
+    all_logits = model.all_group_logits(h, target_indices)
     for hi, o in enumerate(model.head_offsets):
-        tgt_idx = q_full[:, o : o + L_ctx]  # target frame i+o
+        tgt_idx = target_indices[hi]
         logits = {name: lg.float() for name, lg in all_logits[hi].items()}
         bnd_o = bnd_full[:, o - 1 : o - 1 + L_ctx]  # transition at i iff q[i+o] != q[i+o-1]
         gnll = group_nll(logits, tgt_idx, valid)
@@ -593,22 +745,46 @@ def _sample_group_indices(
     min_p: float,
     argmax: bool,
     gen: torch.Generator | None,
+    uniforms: Callable[[str], Tensor] | None = None,
 ) -> Int[Tensor, "B n_groups"]:
     picks: list[Tensor] = []
     for group, name in enumerate(_GROUP_NAMES):
         group_logits = logits[name].float()
         if btn_dead is not None and name == "buttons":
             group_logits = group_logits.masked_fill(btn_dead, float("-inf"))
-        if argmax:
-            pick = group_logits.argmax(-1)
-        else:
-            probs = F.softmax(group_logits / group_temps[group], dim=-1)
-            if min_p > 0:
-                probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
-                probs = probs / probs.sum(dim=-1, keepdim=True)
-            pick = torch.multinomial(probs, 1, generator=gen).squeeze(-1)
+        pick = _sample_categorical(
+            group_logits,
+            temperature=group_temps[group],
+            min_p=min_p,
+            argmax=argmax,
+            gen=gen,
+            uniform=None if uniforms is None else uniforms(name),
+        )
         picks.append(pick)
     return torch.stack(picks, dim=-1)
+
+
+def _sample_categorical(
+    logits: Tensor,
+    *,
+    temperature: float,
+    min_p: float,
+    argmax: bool,
+    gen: torch.Generator | None,
+    uniform: Tensor | None = None,
+) -> Tensor:
+    if argmax:
+        return logits.argmax(-1)
+    probs = F.softmax(logits / temperature, dim=-1)
+    if min_p > 0:
+        probs = probs * (probs >= min_p * probs.amax(dim=-1, keepdim=True))
+        probs = probs / probs.sum(dim=-1, keepdim=True)
+    if uniform is None:
+        return torch.multinomial(probs, 1, generator=gen).squeeze(-1)
+    if uniform.shape != probs.shape[:-1]:
+        raise ValueError(f"uniform shape {tuple(uniform.shape)} does not match logits {tuple(probs.shape)}")
+    uniform = uniform.to(device=probs.device, dtype=probs.dtype)
+    return (probs.cumsum(-1) < uniform.unsqueeze(-1)).sum(-1).clamp_max(probs.shape[-1] - 1)
 
 
 def _sample_action(
@@ -623,6 +799,19 @@ def _sample_action(
     argmax: bool,
     gen: torch.Generator | None,
 ) -> Float[Tensor, "B d_action"]:
+    if isinstance(model.head_adapter, FactoredMLPAdapter):
+        offset = model.head_offsets[head_index]
+        return chunk_from_hidden(
+            model,
+            h,
+            (offset,),
+            group_temps=group_temps,
+            btn_support_min=btn_support_min,
+            min_p=min_p,
+            click_trigger_fix=click_trigger_fix,
+            argmax=argmax,
+            gen=gen,
+        )[:, 0]
     return _sample_action_from_logits(
         model,
         model.group_logits(h, head_index),
@@ -645,6 +834,7 @@ def _sample_action_from_logits(
     click_trigger_fix: bool,
     argmax: bool,
     gen: torch.Generator | None,
+    uniforms: Callable[[str], Tensor] | None = None,
 ) -> Float[Tensor, "B d_action"]:
     device = next(iter(logits.values())).device
     dead = _btn_support_dead(model, btn_support_min, device) if btn_support_min >= 1 else None
@@ -655,12 +845,9 @@ def _sample_action_from_logits(
         min_p=min_p,
         argmax=argmax,
         gen=gen,
+        uniforms=uniforms,
     )
-    a = _dequantize(model, idx)  # [B, A_DIM]
-    if click_trigger_fix:
-        a[..., _TRIGGER_L_CH] = torch.where(a[..., _BUTTON_L_CH] > 0.5, 1.0, a[..., _TRIGGER_L_CH])
-        a[..., _TRIGGER_R_CH] = torch.where(a[..., _BUTTON_R_CH] > 0.5, 1.0, a[..., _TRIGGER_R_CH])
-    return a
+    return _indices_to_action(model, idx, click_trigger_fix)
 
 
 @torch.no_grad()
@@ -678,10 +865,10 @@ def decode(
 ) -> Float[Tensor, "B 1 d_action"]:
     group_temps = _resolve_decode_args(temp, temps, btn_support_min, min_p, argmax)
     h = model(ctx.features, ctx.ctx_pad)[:, -1]  # [B, d_model]
-    a = _sample_action(
+    a = chunk_from_hidden(
         model,
-        model.primary_head_idx,
         h,
+        (1,),
         group_temps=group_temps,
         btn_support_min=btn_support_min,
         min_p=min_p,
@@ -689,7 +876,7 @@ def decode(
         argmax=argmax,
         gen=gen,
     )
-    return a[:, None, :]  # [B, 1, A_DIM]
+    return a
 
 
 @torch.no_grad()
@@ -734,9 +921,47 @@ def chunk_from_hidden(
     click_trigger_fix: bool = False,
     argmax: bool = False,
     gen: torch.Generator | None = None,
+    uniforms: Callable[[str], Tensor] | None = None,
 ) -> Float[Tensor, "B s d_action"]:
     """Sample requested offset heads from an existing hidden state."""
     head_indices = tuple(model.head_offsets.index(offset) for offset in offsets)
+    if isinstance(model.head_adapter, FactoredMLPAdapter):
+        base_by_head = [cast(IndependentHead, model.heads[index]).logits(h) for index in head_indices]
+        state_preactivation = model.head_adapter.preactivation(h)
+        dead = _btn_support_dead(model, btn_support_min, h.device) if btn_support_min >= 1 else None
+        sampled_actions: list[Tensor] = []
+        for head_index, base in zip(head_indices, base_by_head, strict=True):
+            prefix: dict[str, Tensor] = {}
+            embedded_prefix: dict[str, Tensor] = {}
+            picks: dict[str, Tensor] = {}
+            for name in model.head_adapter.group_order:
+                logits = model.head_adapter.group_logits(
+                    head_index,
+                    name,
+                    base[name],
+                    state_preactivation,
+                    prefix,
+                    embedded_prefix,
+                ).float()
+                if dead is not None and name == "buttons":
+                    logits = logits.masked_fill(dead, float("-inf"))
+                group = _GROUP_INDEX[name]
+                pick = _sample_categorical(
+                    logits,
+                    temperature=group_temps[group],
+                    min_p=min_p,
+                    argmax=argmax,
+                    gen=gen,
+                    uniform=None if uniforms is None else uniforms(name),
+                )
+                prefix[name] = pick
+                if name != model.head_adapter.group_order[-1]:
+                    embedded_prefix[name] = model.head_adapter.action_embeddings[name](pick)
+                picks[name] = pick
+            indices = torch.stack([picks[name] for name in _GROUP_NAMES], dim=-1)
+            sampled_actions.append(_indices_to_action(model, indices, click_trigger_fix))
+        return torch.stack(sampled_actions, dim=1)
+
     logits_by_head = model.group_logits_many(h, head_indices)
     actions: list[Tensor] = []
     for logits in logits_by_head:
@@ -750,9 +975,26 @@ def chunk_from_hidden(
                 click_trigger_fix=click_trigger_fix,
                 argmax=argmax,
                 gen=gen,
+                uniforms=uniforms,
             )
         )
     return torch.stack(actions, dim=1)  # [B, s, A_DIM]
+
+
+def _indices_to_action(model: GPT, indices: Tensor, click_trigger_fix: bool) -> Tensor:
+    action = _dequantize(model, indices)
+    if click_trigger_fix:
+        action[..., _TRIGGER_L_CH] = torch.where(
+            action[..., _BUTTON_L_CH] > 0.5,
+            1.0,
+            action[..., _TRIGGER_L_CH],
+        )
+        action[..., _TRIGGER_R_CH] = torch.where(
+            action[..., _BUTTON_R_CH] > 0.5,
+            1.0,
+            action[..., _TRIGGER_R_CH],
+        )
+    return action
 
 
 def _exec_horizon_offsets(head_offsets: tuple[int, ...], s: int) -> tuple[int, ...]:
@@ -784,6 +1026,8 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         "stage_dim": cfg.stage_dim,
         "action_vocab": cfg.action_vocab,
         "action_mlp_ratio": cfg.action_mlp_ratio,
+        "action_condition_dim": cfg.action_condition_dim,
+        "factorization_diag_samples": cfg.factorization_diag_samples,
         "val_n_samples": cfg.val_n_samples,
         "gradient_diagnostic_batch_size": cfg.gradient_diagnostic_batch_size,
         "diagnostic_rare_button_count": cfg.diagnostic_rare_button_count,
@@ -833,8 +1077,11 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         raise ValueError("final_h2h_reference_sha256 requires final_h2h_reference_run")
     if cfg.d_model % cfg.n_heads != 0:
         raise ValueError(f"d_model={cfg.d_model} must be divisible by n_heads={cfg.n_heads}")
-    if cfg.head_mode not in ("linear", "state_mlp"):
-        raise ValueError(f"head_mode must be 'linear' or 'state_mlp', got {cfg.head_mode!r}")
+    if cfg.head_mode not in ("linear", "state_mlp", "factored_mlp"):
+        raise ValueError(f"head_mode must be 'linear', 'state_mlp', or 'factored_mlp', got {cfg.head_mode!r}")
+    order = tuple(cfg.action_group_order)
+    if len(order) != N_GROUPS or set(order) != set(_GROUP_NAMES):
+        raise ValueError(f"action_group_order must be a permutation of {_GROUP_NAMES}, got {order}")
     head_dim = cfg.d_model // cfg.n_heads
     if head_dim % 2:
         raise ValueError(f"rotary attention head_dim=d_model/n_heads={head_dim} must be even")
@@ -876,7 +1123,7 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         value = getattr(cfg, name)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
-    for name in ("seed", "eval_seed"):
+    for name in ("seed", "eval_seed", "factorization_diag_seed"):
         value = getattr(cfg, name)
         if not isinstance(value, int) or isinstance(value, bool):
             raise ValueError(f"{name} must be an integer, got {value!r}")
@@ -1230,6 +1477,68 @@ def _decode_settings(
     return settings
 
 
+_UINT64_MASK = (1 << 64) - 1
+
+
+def _splitmix64(value: int) -> int:
+    value = (value + 0x9E3779B97F4A7C15) & _UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return value ^ (value >> 31)
+
+
+class SlotGroupRandom:
+    def __init__(self, seed: int) -> None:
+        self.seed = seed & _UINT64_MASK
+        self.generations: dict[int, int] = {}
+        self.counters: dict[tuple[int, int, str], int] = {}
+        self.slot_ids: tuple[int, ...] = ()
+        self.device = torch.device("cpu")
+
+    def begin(self, ctx: Context) -> None:
+        if ctx.slot_ids is None:
+            raise ValueError("slot-keyed sampling needs slot_ids")
+        slot_ids = tuple(int(value) for value in ctx.slot_ids.tolist())
+        if len(set(slot_ids)) != len(slot_ids):
+            raise ValueError(f"slot_ids must be unique, got {slot_ids}")
+        resets = (False,) * len(slot_ids) if ctx.reset is None else tuple(bool(value) for value in ctx.reset.tolist())
+        for slot_id, reset in zip(slot_ids, resets, strict=True):
+            if slot_id not in self.generations:
+                self.generations[slot_id] = 0
+            elif reset:
+                self.generations[slot_id] += 1
+            generation = self.generations[slot_id]
+            if reset or not any(key[0] == slot_id and key[1] == generation for key in self.counters):
+                for group in _GROUP_NAMES:
+                    self.counters[(slot_id, generation, group)] = 0
+        self.slot_ids = slot_ids
+        self.device = ctx.slot_ids.device
+
+    def uniforms(self, group: str) -> Tensor:
+        if group not in _GROUP_INDEX:
+            raise ValueError(f"unknown action group {group!r}")
+        if not self.slot_ids:
+            raise RuntimeError("begin must be called before sampling")
+        values: list[float] = []
+        group_key = _splitmix64(_GROUP_INDEX[group] + 1)
+        for slot_id in self.slot_ids:
+            generation = self.generations[slot_id]
+            key = (slot_id, generation, group)
+            counter = self.counters[key]
+            mixed = self.seed
+            mixed ^= _splitmix64(slot_id & _UINT64_MASK)
+            mixed ^= _splitmix64(generation)
+            mixed ^= group_key
+            mixed ^= _splitmix64(counter)
+            random_bits = _splitmix64(mixed)
+            values.append(((random_bits >> 11) + 0.5) / (1 << 53))
+            self.counters[key] = counter + 1
+        return torch.tensor(values, device=self.device)
+
+    def state(self) -> tuple[tuple[int, int, str, int], ...]:
+        return tuple(sorted((*key, count) for key, count in self.counters.items()))
+
+
 def make_policy(
     model: GPT,
     stats: dict[str, FeatureStats],
@@ -1259,6 +1568,7 @@ def make_policy(
     )
     model_device = next(model.parameters()).device
     gen = None if decode_seed is None else torch.Generator(device=model_device).manual_seed(decode_seed)
+    streams = None if decode_seed is None else SlotGroupRandom(decode_seed)
 
     # Per-slot incremental state: the rolling KV cache and the hidden state of that slot's newest
     # frame. Slots are kept apart because instant-restart boundaries land on different frames.
@@ -1275,6 +1585,10 @@ def make_policy(
             else telemetry.model_forward(run, rows=ctx.ctx_pad.shape[0], device=model_device)
         )
         h = hidden_states[:, -1]
+        keyed_uniforms = None
+        if streams is not None and ctx.slot_ids is not None:
+            streams.begin(ctx)
+            keyed_uniforms = streams.uniforms
         chunk = chunk_from_hidden(
             model,
             h,
@@ -1283,7 +1597,8 @@ def make_policy(
             btn_support_min=settings.btn_support_min,
             min_p=settings.min_p,
             click_trigger_fix=settings.click_trigger_fix,
-            gen=gen,
+            gen=gen if keyed_uniforms is None else None,
+            uniforms=keyed_uniforms,
         )
         return chunk.cpu().numpy()
 
@@ -1301,6 +1616,8 @@ def make_policy(
         if ctx.slot_ids is None or ctx.reset is None:
             raise ValueError("incremental closed-loop decode requires slot_ids and reset metadata")
         ids = [int(sid) for sid in ctx.slot_ids.tolist()]
+        if streams is not None:
+            streams.begin(ctx)
         for sid, reset in zip(ids, ctx.reset.tolist(), strict=True):
             if reset:
                 kv_cache.pop(sid, None)
@@ -1339,6 +1656,10 @@ def make_policy(
         if ctx.slot_ids is None:
             raise ValueError("incremental closed-loop decode requires slot_ids metadata")
         h = torch.stack([hidden[int(sid)] for sid in ctx.slot_ids.tolist()])
+        keyed_uniforms = None
+        if streams is not None:
+            streams.begin(ctx)
+            keyed_uniforms = streams.uniforms
         chunk = chunk_from_hidden(
             model,
             h,
@@ -1347,7 +1668,8 @@ def make_policy(
             btn_support_min=settings.btn_support_min,
             min_p=settings.min_p,
             click_trigger_fix=settings.click_trigger_fix,
-            gen=gen,
+            gen=gen if keyed_uniforms is None else None,
+            uniforms=keyed_uniforms,
         )
         return chunk.cpu().numpy()
 
@@ -1395,10 +1717,15 @@ def parameter_counts(model: GPT) -> dict[str, int]:
         "classifier": sum(parameter.numel() for parameter in model.heads.parameters()),
         "state_projection": 0,
         "residual_output": 0,
+        "condition_projection": 0,
+        "action_embedding": 0,
     }
     if adapter is not None:
         counts["state_projection"] = sum(parameter.numel() for parameter in adapter.state_proj.parameters())
         counts["residual_output"] = sum(parameter.numel() for parameter in adapter.residual_projs.parameters())
+    if isinstance(adapter, FactoredMLPAdapter):
+        counts["condition_projection"] = sum(parameter.numel() for parameter in adapter.condition_projs.parameters())
+        counts["action_embedding"] = sum(parameter.numel() for parameter in adapter.action_embeddings.parameters())
     return counts
 
 
@@ -1502,6 +1829,11 @@ def _parameter_gradient_norm(parameters: Iterable[nn.Parameter]) -> float:
     if not norms:
         return 0.0
     return torch.stack(norms).norm().item()
+
+
+def _parameter_norm(parameters: Iterable[nn.Parameter]) -> float:
+    values = [parameter.detach().float().norm() for parameter in parameters]
+    return torch.stack(values).norm().item() if values else 0.0
 
 
 def _replay_overlap(previous: frozenset[str] | None, current: set[str]) -> int | None:
@@ -1621,13 +1953,39 @@ def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) 
         total = losses[1] + cfg.aux_loss_weight * auxiliary
         state_parameters = tuple(model.head_adapter.state_proj.parameters())
         residual_parameters = tuple(model.head_adapter.residual_projs.parameters())
-        adapter_parameters = state_parameters + residual_parameters
+        condition_parameters: tuple[nn.Parameter, ...] = ()
+        embedding_parameters: tuple[nn.Parameter, ...] = ()
+        if isinstance(model.head_adapter, FactoredMLPAdapter):
+            condition_parameters = tuple(model.head_adapter.condition_projs.parameters())
+            embedding_parameters = tuple(model.head_adapter.action_embeddings.parameters())
+        adapter_parameters = state_parameters + residual_parameters + condition_parameters + embedding_parameters
         adapter_gradients = tuple(gradient.detach() for gradient in torch.autograd.grad(total, adapter_parameters))
-        split = len(state_parameters)
-        state_gradients = adapter_gradients[:split]
-        residual_gradients = adapter_gradients[split:]
+        state_end = len(state_parameters)
+        residual_end = state_end + len(residual_parameters)
+        condition_end = residual_end + len(condition_parameters)
+        state_gradients = adapter_gradients[:state_end]
+        residual_gradients = adapter_gradients[state_end:residual_end]
         out["grad/state_mlp_state_norm"] = _gradient_dot(state_gradients, state_gradients).sqrt().item()
         out["grad/state_mlp_residual_norm"] = _gradient_dot(residual_gradients, residual_gradients).sqrt().item()
+        if isinstance(model.head_adapter, FactoredMLPAdapter):
+            condition_gradients = adapter_gradients[residual_end:condition_end]
+            embedding_gradients = adapter_gradients[condition_end:]
+            out["grad/factored_condition_norm"] = (
+                _gradient_dot(
+                    condition_gradients,
+                    condition_gradients,
+                )
+                .sqrt()
+                .item()
+            )
+            out["grad/factored_embedding_norm"] = (
+                _gradient_dot(
+                    embedding_gradients,
+                    embedding_gradients,
+                )
+                .sqrt()
+                .item()
+            )
     return out
 
 
@@ -1654,6 +2012,54 @@ def _group_kl_bits(logits_p: dict[str, Tensor], logits_q: dict[str, Tensor]) -> 
         logq = F.log_softmax(logits_q[name], dim=-1)
         total = total + (logp.exp() * (logp - logq)).sum(-1)
     return total / _LN2
+
+
+def _factorization_generators(seed: int, device: torch.device) -> dict[str, torch.Generator]:
+    return {
+        name: torch.Generator(device=device).manual_seed(
+            _splitmix64((seed & _UINT64_MASK) ^ _splitmix64(_GROUP_INDEX[name] + 1)) % (2**63 - 1)
+        )
+        for name in _GROUP_NAMES
+    }
+
+
+def _ancestor_sampled_logits(
+    model: GPT,
+    hidden: Tensor,
+    head_index: int,
+    generators: dict[str, torch.Generator],
+) -> tuple[dict[str, Tensor], Tensor]:
+    adapter = model.head_adapter
+    if not isinstance(adapter, FactoredMLPAdapter):
+        raise ValueError("ancestor sampling needs a factored MLP head")
+    base = cast(IndependentHead, model.heads[head_index]).logits(hidden)
+    state_preactivation = adapter.preactivation(hidden)
+    prefix: dict[str, Tensor] = {}
+    embedded_prefix: dict[str, Tensor] = {}
+    logits: dict[str, Tensor] = {}
+    picks: dict[str, Tensor] = {}
+    for name in adapter.group_order:
+        group_logits = adapter.group_logits(
+            head_index,
+            name,
+            base[name],
+            state_preactivation,
+            prefix,
+            embedded_prefix,
+        ).float()
+        pick = _sample_categorical(
+            group_logits,
+            temperature=1.0,
+            min_p=0.0,
+            argmax=False,
+            gen=generators[name],
+        )
+        logits[name] = group_logits
+        prefix[name] = pick
+        if name != adapter.group_order[-1]:
+            embedded_prefix[name] = adapter.action_embeddings[name](pick)
+        picks[name] = pick
+    return logits, torch.stack([picks[name] for name in _GROUP_NAMES], dim=-1)
 
 
 def _pooled_mean(parts: list[tuple[float, int]]) -> float:
@@ -1709,27 +2115,35 @@ def val_metrics(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> di
 
 def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig) -> dict[str, float]:
     acc = _MeanAccumulator()
-    # Change F1 needs the full frame masks because it allows one frame of timing error.
-    btn_pred_change: list[Tensor] = []
-    btn_true_change: list[Tensor] = []
+    change_predictions: dict[tuple[int, str], list[Tensor]] = {}
+    change_targets: dict[tuple[int, str], list[Tensor]] = {}
     counts_available = bool((model.button_combo_counts >= 0).all())
     rare_mask = model.button_combo_counts < cfg.diagnostic_rare_button_count
     unseen_mask = model.button_combo_counts == 0
     combo_bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS, device=model.main_centers.device))
     device = next(model.parameters()).device
+    factorization_generators = (
+        _factorization_generators(cfg.factorization_diag_seed, device)
+        if isinstance(model.head_adapter, FactoredMLPAdapter)
+        else None
+    )
     for cached in val_cache:
         batch = cached.to(device)
         ctx = batch.context
         h, h_ablated = _hidden_pair(model, ctx)
-        targets, valid = _multi_offset_targets(ctx, batch.target[:, : max(model.head_offsets)], model.head_offsets)
+        _, valid = _multi_offset_targets(ctx, batch.target[:, : max(model.head_offsets)], model.head_offsets)
         flat_valid = valid.reshape(-1)
         n_valid = int(flat_valid.sum())
-        cur_idx = _quantize(model, stack_actions(ctx.features))  # [B, L_ctx, n_groups] current frames
+        full_actions = torch.cat([stack_actions(ctx.features), batch.target], dim=1)
+        full_indices = _quantize(model, full_actions)
+        context_length = full_actions.shape[1] - batch.target.shape[1]
+        cur_idx = full_indices[:, :context_length]
         comps: dict[tuple[int, str], Tensor] = {}
         ablated: dict[str, Tensor] = {}
-        base_logits, all_logits = model.base_and_group_logits(h)
+        target_indices = tuple(full_indices[:, offset : offset + context_length] for offset in model.head_offsets)
+        base_logits, all_logits = model.base_and_group_logits(h, target_indices)
         for hi, o in enumerate(model.head_offsets):
-            tgt_idx = _quantize(model, targets[o])
+            tgt_idx = target_indices[hi]
             logits = {name: lg.float() for name, lg in all_logits[hi].items()}
             comps.update({(o, name): c for name, c in group_nll(logits, tgt_idx, valid).items()})
             group_predictions: dict[str, Tensor] = {}
@@ -1746,12 +2160,53 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
                     n_logits = base.numel()
                     acc.add(f"_base_sq_off{o}_{name}", base.square().mean().item(), n_logits)
                     acc.add(f"_residual_sq_off{o}_{name}", residual.square().mean().item(), n_logits)
+            predicted_frame = torch.stack(
+                [group_predictions[name] for name in _GROUP_NAMES],
+                dim=-1,
+            )
+            target_frame = torch.stack([group_targets[name] for name in _GROUP_NAMES], dim=-1)
+            acc.add(
+                f"exact_frame_acc_off{o}", (predicted_frame == target_frame).all(-1).float().mean().item(), n_valid
+            )
+            previous_idx = full_indices[:, o - 1 : o - 1 + context_length]
+            true_change = tgt_idx != previous_idx
+            for g, name in enumerate(_GROUP_NAMES):
+                trans = true_change[..., g].reshape(-1)[flat_valid]
+                predicted = group_predictions[name]
+                target_group = group_targets[name]
+                correct = predicted == target_group
+                predicted_change_full = all_logits[hi][name].argmax(-1) != previous_idx[..., g]
+                predicted_change = predicted_change_full.reshape(-1)[flat_valid]
+                acc.add(f"pred_change_rate_off{o}_{name}", _bool_mean(predicted_change), n_valid)
+                acc.add(f"pred_persistence_off{o}_{name}", _bool_mean(~predicted_change), n_valid)
+                acc.add(f"nll_off{o}_{name}_trans", _masked_mean_bits(comps[(o, name)], trans), int(trans.sum()))
+                acc.add(f"nll_off{o}_{name}_hold", _masked_mean_bits(comps[(o, name)], ~trans), int((~trans).sum()))
+                acc.add(f"acc_off{o}_{name}_trans", _bool_mean(correct[trans]), int(trans.sum()))
+                acc.add(f"acc_off{o}_{name}_hold", _bool_mean(correct[~trans]), int((~trans).sum()))
+                key = (o, name)
+                change_predictions.setdefault(key, []).append(predicted_change_full & valid)
+                change_targets.setdefault(key, []).append(true_change[..., g] & valid)
+            if factorization_generators is not None:
+                hidden_valid = h.reshape(-1, h.shape[-1])[flat_valid]
+                target_valid = tgt_idx.reshape(-1, N_GROUPS)[flat_valid]
+                for _ in range(cfg.factorization_diag_samples):
+                    ancestor_logits, sampled = _ancestor_sampled_logits(
+                        model,
+                        hidden_valid,
+                        hi,
+                        factorization_generators,
+                    )
+                    for g, name in enumerate(_GROUP_NAMES):
+                        ancestor_nll = F.cross_entropy(ancestor_logits[name], target_valid[:, g])
+                        ancestor_acc = (ancestor_logits[name].argmax(-1) == target_valid[:, g]).float().mean()
+                        acc.add(f"ancestor_nll_off{o}_{name}", ancestor_nll.item() / _LN2, n_valid)
+                        acc.add(f"ancestor_acc_off{o}_{name}", ancestor_acc.item(), n_valid)
+                    exact = (sampled == target_valid).all(-1).float().mean().item()
+                    acc.add(f"ancestor_exact_frame_acc_off{o}", exact, n_valid)
             if o != 1:
                 continue
-            # The deployed head drives the button / transition / ablation stats.
-            true_change = scoring.transition_mask(torch.cat([cur_idx, tgt_idx[:, -1:]], dim=1))  # [B,L_ctx,n_grp]
             ablated_logits = {
-                name: lg.float() for name, lg in model.group_logits(h_ablated, model.primary_head_idx).items()
+                name: lg.float() for name, lg in model.group_logits(h_ablated, model.primary_head_idx, tgt_idx).items()
             }
             kl_bits = _group_kl_bits(logits, ablated_logits).reshape(-1)[flat_valid]  # KL(full ‖ ablated), bits
             acc.add("ablate_hist_kl", kl_bits.mean().item(), n_valid)
@@ -1775,9 +2230,6 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
                 combo_probs.dtype
             )
             acc.add("brier_buttons", (combo_probs - onehot).pow(2).sum(-1).mean().item(), n_valid)
-            pred_change = (btn_logits.argmax(-1) != cur_idx[..., _BUTTONS_G]) & valid
-            btn_pred_change.append(pred_change)
-            btn_true_change.append(true_change[..., _BUTTONS_G] & valid)
             marginal_btn_probs = combo_probs @ combo_bits.to(combo_probs.dtype)
             tgt_btn = _dequantize(model, tgt_idx)[..., _N_CONT:].reshape(-1, _N_BUTTONS)[flat_valid]
             logloss, brier = scoring.bernoulli_scores_from_probs(marginal_btn_probs, tgt_btn)
@@ -1815,10 +2267,25 @@ def _val_metrics_eval(model: GPT, val_cache: list[TrainBatch], cfg: TrainConfig)
                 out[f"residual_logit_rms_ratio_off{offset}_{name}"] = math.sqrt(residual_sq) / max(
                     math.sqrt(base_sq), 1e-30
                 )
+    if factorization_generators is not None:
+        out["factorization_diag_seed"] = float(cfg.factorization_diag_seed)
+        out["factorization_diag_samples"] = float(cfg.factorization_diag_samples)
+        for offset in model.head_offsets:
+            for name in _GROUP_NAMES:
+                out[f"ancestor_nll_gap_off{offset}_{name}"] = (
+                    out[f"ancestor_nll_off{offset}_{name}"] - out[f"nll_off{offset}_{name}"]
+                )
     out["btn_counts_available"] = float(counts_available)
     if counts_available:
         out["btn_rare_count_threshold"] = float(cfg.diagnostic_rare_button_count)
-    out["changeF1_buttons"] = scoring.change_event_prf(torch.cat(btn_pred_change), torch.cat(btn_true_change))[2]
+    for offset in model.head_offsets:
+        for name in _GROUP_NAMES:
+            key = (offset, name)
+            out[f"changeF1_off{offset}_{name}"] = scoring.change_event_prf(
+                torch.cat(change_predictions[key]),
+                torch.cat(change_targets[key]),
+            )[2]
+    out["changeF1_buttons"] = out["changeF1_off1_buttons"]
     return out
 
 
@@ -2500,6 +2967,23 @@ def train(
                         model.head_adapter.residual_projs.parameters()
                     ),
                 }
+                if isinstance(model.head_adapter, FactoredMLPAdapter):
+                    adapter_gradient_log.update(
+                        {
+                            "train/gnorm_condition_projection": _parameter_gradient_norm(
+                                model.head_adapter.condition_projs.parameters()
+                            ),
+                            "train/gnorm_action_embedding": _parameter_gradient_norm(
+                                model.head_adapter.action_embeddings.parameters()
+                            ),
+                            "train/norm_condition_projection": _parameter_norm(
+                                model.head_adapter.condition_projs.parameters()
+                            ),
+                            "train/norm_action_embedding": _parameter_norm(
+                                model.head_adapter.action_embeddings.parameters()
+                            ),
+                        }
+                    )
             opt.step()
             sched.step()
             if DEVICE == "cuda":
@@ -2607,6 +3091,9 @@ def _cfg_from_state(saved: dict) -> TrainConfig:
     if dropped:
         print(f"[ckpt] dropping {len(dropped)} stale cfg key(s) not on current TrainConfig: {dropped}", flush=True)
     values = {k: v for k, v in saved.items() if k in known}
+    for name in ("head_offsets", "action_group_order", "decode_temps"):
+        if values.get(name) is not None:
+            values[name] = tuple(values[name])
     # Older checkpoints used the 512-row table.
     values.setdefault("action_vocab", 512)
     values.setdefault("compact_data", False)
