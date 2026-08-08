@@ -2,7 +2,7 @@
 
 Status: blocked on the E6 critic gate
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 ## Question
 
@@ -44,6 +44,9 @@ is not the weight-one version of a joint chunk likelihood.
 - `hal/training/chunks.py`: reuse the exact E6 interruption predicates.
 - `hal/training/closed_loop.py`: add an optional per-slot interruption callback that clears only
   the pending chunk and replan clock while keeping the observed rolling context.
+- `hal/scripts/h2h.py`: add a receding-horizon execution override so the same checkpoint can be
+  compared at H1 and H without editing its saved configuration. Record the resolved horizon in
+  H2H metadata.
 - `tests/experiments/test_023_mtp_heads.py`: test joint likelihood, weight scope, critic alignment,
   queue behavior, reset behavior, checkpoint identity, and end-to-end training.
 - `tests/test_closed_loop_rings.py`: test raw rolling contexts after multi-frame commitment and
@@ -96,19 +99,27 @@ The joint chunk NLL is:
 \log p(a_{t+k,g}\mid s_t,a_{t+1:t+k-1},a_{t+k,<g}).
 \]
 
-One chunk weight multiplies every temporal and within-frame factor in this sum. Divide by H in the
-implemented loss to keep gradient scale per executed frame stable across H. This division is one
-constant for a fixed horizon, so it does not change the optimum.
+One chunk weight multiplies every temporal and within-frame factor in this sum. Report `ell_H / H`
+as the NLL-per-executed-frame diagnostic. In the training objective, give every one of the four
+predicted frames coefficient `0.5`. E4's coefficients sum to 2, so this keeps the total head-loss
+scale and each frame's coefficient fixed for H2 and H4.
 
 For `H=2` with four dense output frames:
 
 \[
-L=\operatorname{mean}(w_H\ell_H/H)+\operatorname{mean}(L_3,L_4).
+L=0.5\operatorname{mean}(w_H\ell_H)+0.5\operatorname{mean}(L_3+L_4).
 \]
 
 Offsets 3 and 4 are still auxiliary predictions, so they remain unweighted BC. For `H=4`, all four
-predictions belong to the executed macro-action and receive the one chunk weight; there is no future
-auxiliary term.
+predictions belong to the executed macro-action and receive the one chunk weight:
+
+\[
+L=0.5\operatorname{mean}(w_H\ell_H).
+\]
+
+There is no future auxiliary term. With unit weights and no interruption, H2 and H4 therefore have
+the same equal-head macro-BC objective. The horizon-specific interruption mask can still remove
+different rows.
 
 This is when future heads should receive advantage weights: only when they are factors of the action
 that the critic scores and the evaluator commits to. An unused future prediction remains an
@@ -179,7 +190,8 @@ and the next call replans normally. This is the same boundary used by E6's logge
 2. Assert one scalar chunk weight multiplies every included term.
 3. Assert H2 leaves offsets 3 and 4 unweighted and H4 leaves no auxiliary head.
 4. With weights one, macro-AWR equals macro-BC exactly.
-5. Assert division by H gives equal per-frame scale for constant losses.
+5. Assert every predicted frame has coefficient `0.5` and the four coefficients sum to 2 for both
+   horizons. With unit weights and no interruption, assert H2 and H4 macro-BC losses are equal.
 6. Assert Q2 receives only actions 1 and 2; Q4 receives actions 1 through 4.
 7. Assert Q, V, advantages, and weights are detached and frozen.
    Change the actor trunk while holding raw input fixed and assert critic features, Q, V, and weights
@@ -214,6 +226,9 @@ and the next call replans normally. This is the same boundary used by E6's logge
     chunk must advance that slot's streams H times. An interruption must discard queued actions
     without rewinding those streams. A slot reset must increment only that slot's generation and
     create its fresh substreams from the declared policy seed.
+24. Load one checkpoint on both H2H sides with different execution overrides. Assert the weights
+    and decode settings stay equal, the resolved horizons differ as requested, and metadata records
+    both values. Reject an override that the checkpoint's dense heads cannot execute.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -223,6 +238,7 @@ gate.
 For H2:
 
 1. Evaluate the frozen E4 actor with H1 and H2 execution using the same checkpoint.
+   Run 64 mirrored H2H configurations between these two execution modes.
 2. Train and evaluate macro-BC H2.
 3. Train and evaluate macro-AWR H2.
 4. Run 64 mirrored H2H configurations for macro-AWR H2 against macro-BC H2.
@@ -230,7 +246,7 @@ For H2:
 Proceed to H4 only if H2 has no queue or reset failure, passes both ESS gates and the raw clip gate,
 and the execution-only H2 point estimate for stocks taken minus stocks lost per active minute is no
 more than 0.25 below the same frozen actor at H1. This is a safety gate, not an improvement claim.
-Repeat the same execution-only, macro-BC, macro-AWR, and H2H sequence.
+Repeat the same execution-only, execution-mode H2H, macro-BC, macro-AWR, and treatment H2H sequence.
 
 Request 32 periodic matchups and 96 final matchups. Limit both sweeps to 32 concurrent Dolphin
 boots. Save all rows, replays, critic and weight audits, and H2H records.
@@ -239,6 +255,7 @@ Report:
 
 - Stocks, damage, dead frames, terminal results, crashes, and CPU rate differences.
 - H2H stock difference, non-tied stock-lead rate, confidence intervals, and ties.
+- Direct commitment deltas from H versus H1 on the same frozen checkpoint.
 - Raw and normalized weight distributions, clip fraction, chunk ESS, and replay-window ESS.
 - Policy calls, committed frames, interrupted chunks, and queue clears.
 - Mean, median, and p95 inference time per decision and per executed frame.
