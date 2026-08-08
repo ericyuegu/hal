@@ -160,6 +160,13 @@ complete repository suite passed 892 tests in 135 seconds. Ruff also passed on t
 rolling-context code, H2H analysis, and their focused tests. The remaining GPU-only check is the
 planned parity gate on the final P1 checkpoint.
 
+The parity audit found that every synthetic slot reset near the raw-window boundary. That covered
+only a short run of post-eviction frames despite the intended repeated-eviction claim. Commit
+`1d95e4f` keeps slot 0 continuous for all `2 * L_ctx + 17` frames, resets slot 1 once, and resets
+slot 2 twice. This gives slot 0 more than `L_ctx` consecutive evictions while retaining mixed reset
+and cache-length coverage. The corrected focused suite passed 78 tests and skipped the six GPU-only
+cases. The complete repository suite passed 893 tests in 136 seconds.
+
 ## Decision
 
 Keep full recomputation as the default. Promote temporal KV only if the correctness gate passes,

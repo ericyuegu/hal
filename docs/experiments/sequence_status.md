@@ -158,6 +158,11 @@ The complete suite passed again at commit `16c3e46`: 892 tests in 135 seconds. T
 passed 77 tests and skipped six GPU-only tests, and Ruff passed. The skipped cases require the final
 P1 checkpoint and run as the P2 GPU parity gate before either decode sweep.
 
+At commit `1d95e4f`, P2's synthetic parity schedule was corrected so one slot stays continuous
+through more than 1,024 raw-window evictions while two other slots test asynchronous resets. The
+focused suite passed 78 tests and skipped six GPU-only cases. The complete suite passed 893 tests in
+136 seconds.
+
 ## Evaluation rules
 
 - Closed-loop policy results decide promotion. Offline NLL and accuracy explain results.
