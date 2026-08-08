@@ -852,6 +852,23 @@ def test_slot_group_streams_are_order_invariant_and_reset_local() -> None:
         torch.testing.assert_close(left_next[1], right_next[1], rtol=0, atol=0)
 
 
+def test_selecting_incremental_slots_does_not_repeat_a_reset() -> None:
+    ctx = Context(
+        features={},
+        ctx_pad=torch.zeros(1, dtype=torch.long),
+        slot_ids=torch.tensor([11]),
+        reset=torch.tensor([True]),
+    )
+    streams = exp.SlotGroupRandom(7)
+
+    streams.begin(ctx)
+    generation = streams.generations[11]
+    streams.select(ctx)
+
+    assert streams.generations[11] == generation
+    assert streams.state() == tuple((11, generation, name, 0) for name in sorted(exp._GROUP_NAMES))
+
+
 @pytest.mark.parametrize(
     "order",
     [

@@ -1520,6 +1520,18 @@ class SlotGroupRandom:
         self.slot_ids = slot_ids
         self.device = ctx.slot_ids.device
 
+    def select(self, ctx: Context) -> None:
+        if ctx.slot_ids is None:
+            raise ValueError("slot-keyed sampling needs slot_ids")
+        slot_ids = tuple(int(value) for value in ctx.slot_ids.tolist())
+        if len(set(slot_ids)) != len(slot_ids):
+            raise ValueError(f"slot_ids must be unique, got {slot_ids}")
+        missing = [slot_id for slot_id in slot_ids if slot_id not in self.generations]
+        if missing:
+            raise ValueError(f"slot IDs were not observed before sampling: {missing}")
+        self.slot_ids = slot_ids
+        self.device = ctx.slot_ids.device
+
     def uniforms(self, group: str) -> Tensor:
         if group not in _GROUP_INDEX:
             raise ValueError(f"unknown action group {group!r}")
@@ -1664,7 +1676,7 @@ def make_policy(
         h = torch.stack([hidden[int(sid)] for sid in ctx.slot_ids.tolist()])
         keyed_uniforms = None
         if streams is not None:
-            streams.begin(ctx)
+            streams.select(ctx)
             keyed_uniforms = streams.uniforms
         chunk = chunk_from_hidden(
             model,

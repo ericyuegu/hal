@@ -317,9 +317,12 @@ Local evidence:
   action embeddings on update three.
 - Tests cover target conditioning, ancestral order, class bounds, reset isolation, checkpoint
   round trips, optimizer ownership, private validation RNG, both training orders, and exact counts.
+- The incremental KV ablation now observes a reset once in the encoder and only selects the same
+  slot in the sampler. It no longer advances a slot generation twice on one reset frame. Full
+  recomputation did not have this bug.
 - Both E2 orders complete the real dev-MDS end-to-end training path and save `final.pt`.
-- Focused experiment suite: 79 passed in 10.21 seconds.
-- Full repository suite: 935 passed in 136.05 seconds.
+- Focused experiment suite: 80 passed in 8.12 seconds.
+- Full repository suite: 936 passed in 135.54 seconds.
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 
