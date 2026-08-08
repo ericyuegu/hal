@@ -139,25 +139,16 @@ class TrainConfig:
     history_dropout_p: float = 0.0
     # Weight action transitions inside each group loss. One disables this weighting.
     transition_loss_weight: float = 1.0
-    # Matchup conditioning (schema v4). char/stage embeddings are indexed by the RAW libmelee id
-    # (characters 0-26 dense; stages sparse in 0-26), so the vocab must exceed the max id, not the
-    # number of included categories; out-of-range ids clamp to the last row.
+    # Character and stage embeddings use raw libmelee IDs.
     char_vocab: int = 32
     char_dim: int = 12
     stage_vocab: int = 32
     stage_dim: int = 4
     # Ranked v7 contains action states through 525. Older checkpoints used 512 rows.
     action_vocab: int = 1024
-    # closed-loop sampling temperature. Greedy argmax collapses the policy to a do-nothing fixed
-    # point in closed loop, so deployed play always samples.
+    # Closed-loop sampling temperature.
     decode_temp: float = 1.0
-    # Decode-time hygiene (all default to current behavior). decode_temps overrides the single decode_temp
-    # per group in _GROUP_NAMES order (buttons, main_stick, c_stick, triggers); None -> decode_temp for all.
-    # decode_btn_support_min >= 1 masks button combos with fewer than that many train frames
-    # according to the configured dataset-scoped count artifact to -inf before softmax/argmax.
-    # decode_min_p > 0 keeps only classes with
-    # p >= decode_min_p * p_max per group, then renormalizes. decode_click_trigger_fix forces trigger_l/r to
-    # 1.0 wherever the sampled combo sets the digital L/R bit (the only train-supported click joint).
+    # Group order: buttons, main stick, C-stick, triggers.
     decode_temps: tuple[float, float, float, float] | None = None
     decode_btn_support_min: int = 0
     decode_min_p: float = 0.0
@@ -180,13 +171,7 @@ class TrainConfig:
     max_steps: int = 16384
     amp_dtype: str = "bfloat16"  # "bfloat16" | "float32"
     allow_tf32: bool = True
-    # torch.compile the model's forward for TRAINING. About 40% of the step's GPU time is unfused
-    # elementwise work and autocast casts, against 26% in the matmuls, which is what a fused graph
-    # takes back: measured 406 -> 231 ms per step (1.76x) at this geometry on a 3060, over a 30-step
-    # bench whose loss trajectory tracks eager to 1e-6 relative. A compiled graph that then meets a
-    # validation or gradient-diagnostic shape dies inside FlexAttention with a CUDA illegal memory
-    # access, so every non-training forward runs eager — see ``_evaluation_mode``, which is the one
-    # door they all go through.
+    # Compile training forwards. Validation and diagnostics run eagerly.
     compile_trunk: bool = True
     # eval cadence
     val_every: int = 1024
@@ -194,8 +179,7 @@ class TrainConfig:
     val_n_samples: int = 1192
     # Examples used for per-head shared-trunk gradient comparisons.
     gradient_diagnostic_batch_size: int = 64
-    # Validation-only rarity threshold. The metric is emitted only when the checkpoint embeds validated
-    # full-dataset button counts; it never falls back to the old reference-sample table.
+    # Validation-only rarity threshold for buttons.
     diagnostic_rare_button_count: int = 100
     # Closed-loop evaluation cadence and per-boot frame budget.
     eval_every: int = 4096
@@ -206,17 +190,11 @@ class TrainConfig:
     eval_seed: int = 0
     # Maximum concurrent Dolphin boots. Matchup count is a separate fixed sample size.
     eval_max_parallel: int = 32
-    # Closed-loop eval runs in a background subprocess. By default the trainer waits for that
-    # subprocess before resuming, so evaluator and trainer never contend for the same CUDA device.
-    # Set true only when the evaluator has an actually separate GPU (or intentionally accepts
-    # same-device contention).
+    # Overlap evaluation only when it has a separate GPU.
     eval_overlap_training: bool = False
     # Opt-in decode ablation for SWA models. Full causal attention must rebuild the raw window.
     eval_incremental_kv: bool = False
-    # Cast the model's float parameters to fp16 for closed-loop decode. The decode is launch-bound,
-    # not precision-bound: fp16 weights + fp16 context measured 1.7x the fp32 forward, and the
-    # sampled action is unchanged (the stick/trigger centers and every logit stay fp32). Autocast is
-    # NOT the same thing and measured SLOWER — this casts the weights once, at load.
+    # Cast floating model parameters to FP16 once when closed-loop evaluation loads them.
     eval_fp16: bool = True
     # If an eval is still running at the next boundary, the trainer waits up to this bound and
     # then kills the worker.
@@ -233,8 +211,7 @@ class TrainConfig:
     # data
     data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
     compact_data: bool = True
-    # MDS materialization this run reads. The dataloader's per-row guard rejects any other version
-    # — never silent.
+    # The loader rejects rows from another MDS schema.
     mds_schema_version: int = 7
     # Full-dataset button counts used by decode support masking.
     button_combo_counts_path: str | None = None
@@ -379,8 +356,6 @@ class StateMLPAdapter(nn.Module):
 
 
 class GPT(nn.Module):
-    """Causal frame model with one output head per offset."""
-
     def __init__(self, cfg: TrainConfig) -> None:
         super().__init__()
         if not cfg.decode_temp > 0:
@@ -400,15 +375,15 @@ class GPT(nn.Module):
         self.head_offsets = offs
         self.primary_head_idx = offs.index(1)
 
-        # Gamestate categoricals: one table per feature name, shared across the four players.
+        # Share one embedding table for each game-state feature across players.
         self.cat_specs = {**CAT_FEATURES, "action": (cfg.action_vocab, CAT_FEATURES["action"][1])}
         self.cat_embeds = nn.ModuleDict(
             {name: nn.Embedding(vocab, dim) for name, (vocab, dim) in self.cat_specs.items()}
         )
         self.char_emb = nn.Embedding(cfg.char_vocab, cfg.char_dim)
         self.stage_emb = nn.Embedding(cfg.stage_vocab, cfg.stage_dim)
-        per_player = len(FLOAT_FEATURES) * 2 + sum(dim for _, dim in CAT_FEATURES.values())  # float+mask+cat
-        d_in = len(_PLAYER_PREFIXES) * per_player + A_DIM + 2 * cfg.char_dim + cfg.stage_dim  # 374
+        per_player = len(FLOAT_FEATURES) * 2 + sum(dim for _, dim in CAT_FEATURES.values())
+        d_in = len(_PLAYER_PREFIXES) * per_player + A_DIM + 2 * cfg.char_dim + cfg.stage_dim
 
         self.ctx_proj = nn.Linear(d_in, cfg.d_model)
         self.trunk = Trunk(
@@ -426,12 +401,10 @@ class GPT(nn.Module):
             StateMLPAdapter(cfg.d_model, cfg.action_mlp_ratio, len(offs)) if cfg.head_mode == "state_mlp" else None
         )
 
-        # Stick/trigger center grids (registered so they move with .to() and serialize).
         self.register_buffer("main_centers", scoring.STICK_CLUSTER_CENTERS_MAIN.clone())
         self.register_buffer("c_centers", scoring.STICK_CLUSTER_CENTERS_C.clone())
         self.register_buffer("trig_centers", scoring.TRIGGER_CENTERS.clone())
-        # -1 means unavailable. A validated full-dataset artifact populates this at train start, and the
-        # buffer then travels with checkpoints so later eval never depends on a mutable sidecar file.
+        # A negative count means the full-dataset count is unavailable.
         self.register_buffer("button_combo_counts", torch.full((scoring.N_BUTTON_COMBOS,), -1, dtype=torch.long))
         self._btn_support_dead_cache: dict[tuple[int, torch.device], Tensor] = {}
 
@@ -1381,8 +1354,6 @@ def make_policy(
 
 # %%
 def lr_schedule(cfg: TrainConfig):
-    """Linear warmup → cosine to a small floor. The returned multiplier scales every param group's
-    base lr uniformly, so the Muon and AdamW groups share one schedule shape."""
     floor = 0.01
 
     def fn(step: int) -> float:
@@ -1417,11 +1388,7 @@ def parameter_counts(model: GPT) -> dict[str, int]:
 
 
 def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
-    """Muon for the transformer blocks' hidden weight matrices (attn + MLP); AdamW for everything
-    else — input projection, output head, embeddings, biases — split by weight-decay eligibility.
-    Exactly two LRs (``cfg.muon_lr`` / ``cfg.adam_lr``); the partition asserts full coverage so no
-    parameter can silently escape an optimizer. The Muon sweep names the trunk's BLOCKS, not the
-    trunk, so a parameter added beside the block stack later lands in AdamW and not silently here."""
+    """Use Muon for transformer matrices and AdamW for all other parameters."""
     muon_params = [p for p in model.trunk.blocks.parameters() if p.ndim >= 2]
     muon_ids = {id(p) for p in muon_params}
     embed_ids = {id(p) for m in (model.cat_embeds, model.char_emb, model.stage_emb) for p in m.parameters()}
