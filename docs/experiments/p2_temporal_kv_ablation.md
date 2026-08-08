@@ -254,3 +254,14 @@ This separates Flex-versus-dense numerical drift from cache-specific drift befor
 window rolls. The record schema is version 2. Strict failure remains the default. A report-only flag
 allows the already-disqualified KV arm to finish its closed-loop speed and behavior measurements;
 it does not turn a failed parity result into a pass or permit KV promotion.
+
+The diagnostic implementation is commit `96fc1f4`. The focused experiment, trunk, and rolling-ring
+suite passed 81 tests and skipped six CUDA-only tests. The complete repository suite passed 899
+tests in 134.49 seconds. Ruff, type checking, Python compilation, and whitespace checks passed.
+
+The full report-only payload passed a no-rent Vast check at `96fc1f4`. It keeps the first parity
+artifact and writes schema 2 under `manual_evals/p2-parity-v2`. It then runs recomputation before KV,
+with 96 requested matchups, at most 32 concurrent boots, seed 0, and the original W&B ID. Four RTX
+4090 offers qualified. The best had 251 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective price
+of $0.714 per hour. No instance was rented. Commit this record, repeat the exact-SHA check, and then
+launch without changing the payload.
