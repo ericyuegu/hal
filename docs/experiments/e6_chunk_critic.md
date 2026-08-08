@@ -54,6 +54,7 @@ advantages.
 - `hal/training/returns.py`: reuse E5 reward and return labels.
 - `hal/training/dataloader.py`: expose current and shifted rolling contexts without violating the
   fixed raw-window semantics.
+- Add `hal/training/chunks.py`: define the shared offline and online chunk-interruption rule.
 - `tests/experiments/test_023_mtp_heads.py`: test chunk and reward alignment, future contexts,
   targets, frozen parameters, critic conditioning, and checkpoint loading.
 - Add shared loader tests for shifted contexts.
@@ -125,11 +126,13 @@ After the value warm-up, update the target after each online V update with
 `target = 0.995 * target + 0.005 * online`. Record `target_tau=0.005` in the checkpoint and logs. Do
 not tune it from final critic results.
 
-Use the same chunk-interruption rule as E7 execution. Exclude a training row when the controlled
-player loses control, either player loses a stock, or the game enters a reset before all H planned
-actions can execute. An event on the Hth transition is allowed because the full chunk has executed.
-A true game terminal on that last transition keeps the rewards and sets the bootstrap to zero.
-Record the excluded fraction by horizon and reason.
+Use the same chunk-interruption rule as E7 execution. Exclude a training row when either player's
+stock count changes, the canonical frame ID resets, the slot ends, or the boot is rejected before
+all H planned actions can execute. Do not treat hitstun, shield stun, an attack animation, or another
+ordinary unactionable state as an interruption; the controller still emits and executes inputs on
+those frames. An event on the Hth transition is allowed because the full chunk has executed. A true
+game terminal on that last transition keeps the rewards and sets the bootstrap to zero. Record the
+excluded fraction by horizon and reason.
 
 ## Value warm-up
 
@@ -164,8 +167,8 @@ cosine schedules span the 16,384 Q updates. Save and restore every optimizer and
 9. Assert Q2 cannot read actions 3 or 4.
 10. Assert Q and V targets are detached and finite.
 11. Assert terminal transitions remove the bootstrap term.
-    Assert a control interruption before H masks the whole Q row, while an interruption on the Hth
-    transition keeps the row.
+    Assert a stock change or frame reset before H masks the whole Q row, while the same event on the
+    Hth transition keeps the row. Assert ordinary hitstun does not mask it.
 12. Assert critic parameters appear in their optimizer exactly once and actor parameters do not.
 13. Save and reload critic geometry, horizons, reward settings, source-policy identity, and EMA
     state.

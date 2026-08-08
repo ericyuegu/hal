@@ -197,6 +197,9 @@ weights.
    return by hand.
 2. Assert the action at offset 1 pairs with `G_{t+1}`, not `G_t` or `G_{t+2}`.
 3. Assert returns are computed over the full replay before windowing.
+   With the same replay and sampler seed, assert the BC and return-labeled paths produce
+   byte-identical replay IDs, window starts, context padding, model features, action targets, and
+   batch order. The return label must be the only added tensor.
 4. Assert padding and invalid targets receive no value, actor, or auxiliary loss.
 5. With the whole AWR package off, reproduce the selected BC objective exactly and leave the value
    head gradient-free.
@@ -239,6 +242,10 @@ Before the full run, scan a fixed replay sample and record:
 - Frame-level and window-level effective sample size, plus fraction at the clip.
 - Weight statistics by character, stage, rank tier, action transition, and reward proximity.
 - Loader wait and decoded bytes added by return annotation.
+
+Also hash the first 32 BC and return-labeled training batches after removing only the return tensor.
+Require matching hashes before the value gate. This proves the warm-up comparison did not change
+sampled policy data.
 
 Use `beta=0.8` and `weight_max=5` for the declared first arm. Do not tune them from closed-loop
 results. Stop if either normalized ESS ratio is below 0.2 or more than 20% of raw weights hit the

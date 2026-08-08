@@ -41,6 +41,9 @@ is not the weight-one version of a joint chunk likelihood.
 
 - `experiments/023_mtp_heads.py`: add macro-BC and macro-AWR objectives, frozen E6 critic loading,
   chunk-weight diagnostics, and explicit H-frame execution.
+- `hal/training/chunks.py`: reuse the exact E6 interruption predicates.
+- `hal/training/closed_loop.py`: add an optional per-slot interruption callback that clears only
+  the pending chunk and replan clock while keeping the observed rolling context.
 - `tests/experiments/test_023_mtp_heads.py`: test joint likelihood, weight scope, critic alignment,
   queue behavior, reset behavior, checkpoint identity, and end-to-end training.
 - `tests/test_closed_loop_rings.py`: test raw rolling contexts after multi-frame commitment and
@@ -154,8 +157,14 @@ Do not use temporal KV. Do not reuse contextualized states after the raw buffer 
 in-paint an old plan into the next inference. Plan carry-over and shorter receding horizons are later
 experiments.
 
-If a game ends, a slot resets, a player is not controllable, or the evaluator rejects a boot,
-discard the queued chunk immediately. Never execute actions from the previous game or slot.
+If either player's stock count changes, the frame ID resets, a slot ends, or the evaluator rejects a
+boot, discard the queued chunk immediately. Keep ordinary hitstun, shield stun, and action animation
+frames; inputs still execute on those frames. Never execute actions from the previous game or slot.
+
+The online callback must inspect the new observation before selecting that frame's controller
+output. If action `k < H` caused an interruption visible in the new observation, clear actions
+`k+1:H` and replan from that observation. If action H caused it, the completed chunk remains valid
+and the next call replans normally. This is the same boundary used by E6's logged mask.
 
 ## Required tests
 
@@ -180,7 +189,8 @@ discard the queued chunk immediately. Never execute actions from the previous ga
    actions.
 12. Assert an H-frame queue causes one policy inference followed by exactly H controller outputs.
 13. Assert all intervening raw states and executed actions enter the next rebuilt context.
-14. Assert match end, slot reset, death/reset state, and rejected boot clear every queued action.
+14. Assert a stock change, frame reset, slot end, and rejected boot clear every queued action.
+    Assert ordinary hitstun does not clear it.
 15. Assert mixed vector slots can sit at different chunk phases without sharing state.
 16. Run longer than `L_ctx` and confirm rebuilt contexts contain no dropped raw frame information.
 17. Save and reload horizon, objective, critic identity, reward settings, and decode protocol.
@@ -189,8 +199,8 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 20. Assert every frozen critic parameter and buffer remains byte-identical through training.
     Assert the three source-encoder hashes match and only one encoder forward is used per actor
     batch.
-21. Assert a control interruption before H removes the macro-action row in both macro-BC and
-    macro-AWR, while an interruption on the Hth transition keeps it.
+21. Assert a stock change or frame reset before H removes the macro-action row in both macro-BC and
+    macro-AWR, while the same event on the Hth transition keeps it.
 22. Test the fixed beta grid and selection rule, including the exact ESS and clip boundaries and
     the no-passing-beta failure. Assert H2 and H4 select independently.
 
