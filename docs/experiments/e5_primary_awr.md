@@ -143,6 +143,11 @@ w_t=\exp(q_t-\log \bar w).
 Require `N > 0` and check that normalized weights are finite with mean one. Raw weights may be
 materialized only for diagnostics; they are not the normalization denominator.
 
+`weight_max=5` caps the raw pre-normalization weight. It does not cap the final normalized weight.
+When the raw mean is below one, normalization can make the largest `w_t` exceed 5. Report the raw
+clip fraction and the normalized maximum as separate values. Do not apply a second clip after
+normalization; that would change the declared relative weights and their mean.
+
 This normalization is an optimizer control, not part of the probability factorization. It preserves
 relative example weights while keeping the actor gradient scale close to BC. Without it, a change in
 mean weight also changes the effective learning rate. Log raw and normalized weights so a later
@@ -202,7 +207,8 @@ weights.
     edge cases.
     Check both frame-level and window-level ESS by hand.
     Include an all-large-negative-advantage case and prove it returns finite mean-one weights rather
-    than `0/0`.
+    than `0/0`. Include a case where a normalized weight exceeds the raw cap and prove no second
+    clip is applied.
 13. Reject NaN or infinite return, value, advantage, raw weight, normalized weight, loss, gradient,
     and parameter values with a useful error.
 14. Check the step-2,048 activation boundary and resume it on the same global step.

@@ -82,17 +82,24 @@ parameters and buffers remain byte-identical through critic training.
 Quantize each chunk action into the same four canonical controller groups as the policy. Give the
 critic its own action embeddings. Do not reuse trainable actor embeddings.
 
-For each action frame, concatenate the four group embeddings along the feature dimension. Project
-that vector to `d_q`, add a temporal position embedding, and pass the `H` action tokens through two
-small causal mixer blocks. Concatenate the pooled chunk vector with `RMSNorm(h_t)`, then use a
-two-layer MLP to produce scalar `Q_H`.
+Use a 32-wide embedding for each action group. For each action frame, concatenate the four group
+embeddings along the feature dimension and project the resulting 128 features to `d_q=128`. Add a
+learned four-position embedding. Pass the `H` action tokens through two pre-norm causal transformer
+blocks. Each block has four attention heads, head width 32, a 256-wide SiLU MLP, RMSNorm, and no
+dropout. Apply a final RMSNorm and use the last action token as the chunk vector.
+
+Concatenate that 128-wide chunk vector with `RMSNorm(h_t)`. Give each horizon its own
+`Linear(d_model + 128, 512)`, SiLU, and `Linear(512, 1)` Q head. Share only the action encoder
+between horizons.
 
 Concatenation is important: the critic must receive state and action information in distinct feature
 columns before the nonlinear MLP. Do not reduce the chunk to an additive sum of group embeddings.
 
-Use separate final heads for `Q_2` and `Q_4`. A shared action encoder is allowed. Record exact
-parameter counts and verify that changing any valid action group can change the corresponding Q
-output after training.
+Fit one state-only control for each horizon. Replace the chunk vector with a learned
+horizon-specific 128-wide null vector, then use a head with the exact same shape as its Q head. The
+control has no access to action classes. Record action-encoder, Q-head, state-control, and total
+parameter counts separately. Verify that changing any valid action group can change the
+corresponding Q output after training while leaving its state-only control unchanged.
 
 Train a separate scalar `V(s_t)` probe on Monte Carlo `G_{t+1}`. The Q and V probes read the same
 frozen state representation.
@@ -143,6 +150,7 @@ gate fails, stop before any Q update and revise the critic plan.
 5. Assert no actor parameter or buffer changes during critic optimization.
 6. Assert Q receives all action frames and all four groups through concatenated feature columns.
 7. Change one action group at one time. Confirm the critic input changes at the intended token only.
+   Confirm the matched state-only output does not change.
 8. Shuffle temporal order while preserving the action multiset. Confirm the encoded chunk changes.
 9. Assert Q2 cannot read actions 3 or 4.
 10. Assert Q and V targets are detached and finite.
@@ -203,25 +211,42 @@ sensitivity can also be wrong.
 
 Finally sample chunks from the frozen E4 policy. At each held-out state, compare the sampled chunk's
 teacher-forced log likelihood with the logged chunk's likelihood under the same frozen policy.
-Define support thresholds from the held-out logged distribution before inspecting Q values. Report
-relative likelihood, Q value, V value, advantage, and ensemble disagreement. A high likelihood
-under the sampling policy alone does not prove data support. Separate in-support and low-support
-policy samples. Do not use their Q values to justify open-loop execution.
+For each horizon, divide chunk log likelihood by `4H` so it is measured per action group. Define the
+support threshold as the fifth percentile of this value over held-out logged chunks. Compute and
+save that threshold before joining the likelihood rows with Q outputs. Report relative likelihood,
+Q value, V value, advantage, and ensemble disagreement. A high likelihood under the sampling policy
+alone does not prove data support. Separate in-support and low-support policy samples. Do not use
+their Q values to justify open-loop execution.
 
-Also predeclare a critic-disagreement threshold from held-out logged chunks. Behavior likelihood
-and critic disagreement answer different questions. Low policy likelihood does not make an observed
-logged chunk counterfactual. E7 may use a logged chunk's advantage when critic disagreement stays
-inside the declared held-out range.
+For each horizon, define critic disagreement as the population standard deviation of Q across the
+three critic seeds. Set its threshold to the 95th percentile on held-out logged chunks. Save this
+threshold before evaluating policy-sampled chunks. Behavior likelihood and critic disagreement
+answer different questions. Low policy likelihood does not make an observed logged chunk
+counterfactual. E7 may use a logged chunk's advantage when critic disagreement stays inside the
+declared held-out range.
 
 ## Gate
 
 E6 passes only if:
 
-- Q improves over the state-only ablation on held-out logged chunks.
-- Calibration and ranking are stable across seeds.
-- Temporal and single-action perturbations have nontrivial, bounded effects.
-- Policy-sampled in-support chunks have controlled ensemble disagreement.
-- Advantages and proposed weights remain finite with a useful effective sample size.
+- For both horizons, every seed has lower held-out MSE than its matched state-only control, and a
+  replay-level paired bootstrap has a 95% interval strictly below zero for
+  `MSE(Q) - MSE(state-only)`. Resample replays, keep all rows and all three seed predictions for a
+  selected replay together, then average across seeds. Do not treat three predictions of the same
+  row as independent samples.
+- Every seed has positive Pearson and Spearman correlation with its held-out target. Each pair of
+  critic seeds has Spearman correlation of at least 0.8 on held-out logged chunks. For each seed,
+  the linear calibration slope is between 0.5 and 1.5 and absolute mean bias is at most 10% of the
+  held-out target standard deviation.
+- Replacing a logged chunk with another held-out chunk increases MSE, with a replay-level paired
+  95% bootstrap interval strictly above zero. Temporal shuffling must do the same for Q4. Report Q2
+  temporal shuffling, but do not gate on it because a two-frame swap can be close to symmetric.
+- No more than 1% of in-support single-group perturbations produce a Q value outside the held-out
+  target range expanded by one target interquartile range on each side.
+- At most 10% of in-support policy chunks exceed the logged-chunk 95th-percentile disagreement
+  threshold.
+- Advantages and proposed weights are finite. Both frame-level and replay-level normalized ESS
+  ratios are at least 0.2, and no more than 20% of raw proposed weights hit their cap.
 
 If Q ignores actions, fails calibration, or extrapolates on policy samples, do not train chunk AWR.
 Record E6 as a negative result. Closed-loop execution without a trusted chunk critic may still be a
