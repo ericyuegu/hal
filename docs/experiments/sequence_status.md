@@ -147,7 +147,8 @@ Run these units one at a time. A named stage can contain more than one unit:
 5. E3-C null-condition capacity-control run.
 6. E3-T previous-action temporal-conditioning run.
 7. E4 dense-offset chunk-readiness run.
-8. E5 2,048-step value gate, then its primary-only AWR screening run if the gate passes.
+8. E5 primary-only AWR run. It pauses after update 2,047 for its value gate, then continues in the
+   same 16,384-step process only if the gate passes.
 9. E6 chunk-critic runs for three seeds. Each includes value warm-up, Q2, Q4, and matched state-only
    controls.
 10. E7-H2 execution-only evaluation, macro-BC training, and macro-AWR training. Run the paired H2H

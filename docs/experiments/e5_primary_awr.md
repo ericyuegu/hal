@@ -106,10 +106,13 @@ head but set every actor weight to one. The actor therefore uses the matched BC 
 this fixed warm-up. Start AWR at step 2,048 and keep training the value head so it can track the
 changing detached policy representation.
 
-Use a 2,048-step gate before the full run. Require finite held-out predictions, positive held-out
-return correlation, both normalized ESS ratios of at least 0.2, and no more than 20% of raw weights
-at the clip. If the gate fails, stop and revise the critic plan. Do not move the activation step
-after looking at closed-loop results.
+Run the gate inside the 16,384-step candidate process after update 2,047 and before update 2,048.
+Configure the optimizer and scheduler for all 16,384 steps from process start. Do not train a
+shortened 2,048-step job and then restart or resume it. Require finite held-out predictions,
+positive held-out return correlation, both normalized ESS ratios of at least 0.2, and no more than
+20% of raw weights at the clip. If the gate passes, the same process performs its first weighted
+actor update at step 2,048. If it fails, upload the gate evidence and stop. Do not move the
+activation step after looking at closed-loop results.
 
 Log an explicit `awr/active` field. Save the warm-up step in the checkpoint. A resumed run must
 activate weighting at the same global step.
@@ -221,7 +224,9 @@ weights.
     clip is applied.
 13. Reject NaN or infinite return, value, advantage, raw weight, normalized weight, loss, gradient,
     and parameter values with a useful error.
-14. Check the step-2,048 activation boundary and resume it on the same global step.
+14. Check that the gate runs after the step-2,047 update and before the step-2,048 batch. Check that
+    the optimizer and scheduler were configured for 16,384 steps from process start. A passing gate
+    must continue without rebuilding the loader, optimizer, scheduler, or model.
 15. Check save and reload of reward, AWR, critic, warm-up, and detach settings.
 16. Assert the value head is in its separate AdamW optimizer exactly once and never in the policy
     AdamW or Muon optimizer. Assert policy and value gradients are clipped separately.
@@ -250,6 +255,9 @@ sampled policy data.
 Use `beta=0.8` and `weight_max=5` for the declared first arm. Do not tune them from closed-loop
 results. Stop if either normalized ESS ratio is below 0.2 or more than 20% of raw weights hit the
 clip; record a new plan before changing the dose.
+
+The gate is not a separate experiment run. Give it its own W&B step fields and R2 artifact inside
+the E5 run. Upload the artifact before the pass or fail decision can terminate the process.
 
 ## Fixed configuration and evaluation
 
