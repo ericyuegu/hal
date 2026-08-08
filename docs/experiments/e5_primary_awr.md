@@ -2,7 +2,7 @@
 
 Status: blocked on the policy architecture decision after E4
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 ## Question
 
@@ -67,9 +67,10 @@ Compute rewards and returns from the complete replay before window sampling. The
 the same start, padding, ego relabeling, and valid-position mask as the action targets. Never compute
 a return only inside a sampled window.
 
-Audit how many replays end in a terminal stock state. If a replay is truncated, do not silently
-treat its missing tail as a terminal zero. Record the fraction and predeclare its mask or exclusion
-before training.
+Audit how many replays end in a terminal stock state. A truncated replay has an unknown return
+tail. Keep its policy rows in the same sampled data stream, use actor weight 1, and mask its value
+loss. Do not treat the missing tail as zero and do not remove the replay from BC. Record eligible
+and truncated replay and frame counts.
 
 The compact policy artifact already stores the stock and percent columns needed for this reward.
 Derive returns while reading. Do not create another large materialized dataset unless a measured
@@ -85,6 +86,8 @@ Fit it to the Monte Carlo return:
 \[
 L_V=\operatorname{mean}\left(V(s_t)-G_{t+1}\right)^2.
 \]
+
+Take this mean over eligible terminal-replay rows only.
 
 Use `stop_gradient(h_t)` as the value-head input in the first E5 arm. This lets the critic learn but
 prevents value regression from becoming an extra policy representation loss. The actor weight is
@@ -136,13 +139,13 @@ q_t=\min(A_t/\beta,\log w_{max}).
 Reject nonfinite advantages before this operation. Do not exponentiate all raw weights and divide by
 their arithmetic mean; sufficiently negative FP32 values can all underflow to zero.
 
-Normalize valid weights to mean one within the effective batch:
+Normalize eligible weights to mean one within the effective batch:
 
 \[
 w_t=\frac{\tilde w_t}{\operatorname{mean}(\tilde w)}.
 \]
 
-Implement the same value stably over the N valid rows:
+Implement the same value stably over the `N` eligible rows:
 
 \[
 \log \bar w=\operatorname{logsumexp}(q)-\log N,
@@ -150,8 +153,11 @@ Implement the same value stably over the N valid rows:
 w_t=\exp(q_t-\log \bar w).
 \]
 
-Require `N > 0` and check that normalized weights are finite with mean one. Raw weights may be
-materialized only for diagnostics; they are not the normalization denominator.
+When `N > 0`, check that normalized eligible weights are finite with mean one. Assign weight 1 to
+truncated rows. If a batch has no eligible row, use weight 1 for every actor row and skip its value
+update. Raw weights may be materialized only for diagnostics; they are not the normalization
+denominator. Because eligible and truncated rows each have mean weight one, the complete actor
+batch also has mean weight one.
 
 `weight_max=5` caps the raw pre-normalization weight. It does not cap the final normalized weight.
 When the raw mean is below one, normalization can make the largest `w_t` exceed 5. Report the raw
@@ -167,10 +173,11 @@ The first arm requires `grad_accum_steps=1`. Normalize across every valid frame 
 batch, not once per replay window. If a later arm uses gradient accumulation, it must collect all
 microbatch weights before normalization; separate microbatch means are a different objective.
 
-Report ESS over valid frames and over replay windows. For the window-level value, first average raw
-weights within each window, then compute ESS across those window means. Frames from one replay are
-correlated, so frame ESS alone is too optimistic. Require both normalized ESS ratios to be at least
-0.2 at the warm-up gate.
+Report ESS over eligible frames and eligible replay windows. For the window-level value, first
+average raw weights within each eligible window, then compute ESS across those window means. Do not
+let unit-weight truncated rows inflate either gate statistic. Frames from one replay are correlated,
+so frame ESS alone is too optimistic. Require both normalized ESS ratios to be at least 0.2 at the
+warm-up gate.
 
 Use one `w_t` for the sum of all four conditional group losses at offset 1. Do not compute one
 advantage per controller group.
@@ -198,12 +205,15 @@ weights.
 
 1. Use a synthetic replay with stock and damage events. Check every reward index and discounted
    return by hand.
+   Swap ego and opponent ports and assert that every reward and return changes sign.
 2. Assert the action at offset 1 pairs with `G_{t+1}`, not `G_t` or `G_{t+2}`.
 3. Assert returns are computed over the full replay before windowing.
    With the same replay and sampler seed, assert the BC and return-labeled paths produce
    byte-identical replay IDs, window starts, context padding, model features, action targets, and
    batch order. The return label must be the only added tensor.
 4. Assert padding and invalid targets receive no value, actor, or auxiliary loss.
+   Assert truncated rows keep unit actor weight, receive ordinary BC, and receive no value loss.
+   Assert an all-truncated batch is finite and does not update the value head.
 5. With the whole AWR package off, reproduce the selected BC objective exactly and leave the value
    head gradient-free.
 6. During critic warm-up, reproduce the BC actor objective exactly while the value head receives a
