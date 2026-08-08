@@ -187,6 +187,41 @@ Keep `action_mlp_ratio=2`, offsets `(1,5,9,13)`, the normalized auxiliary loss, 
 0, 131,072 frames per step, compact policy v7, the replay reservoir, optimizer, schedule,
 checkpoint cadence, decode temperature, and CPU protocol fixed.
 
+## Planned launches
+
+Fill the reference run and hash only from the verified final checkpoint. Then run a no-rent audit
+from the pushed, clean branch. E2-S uses:
+
+```bash
+e1_run=<verified E1 run name>
+e1_sha=<verified E1 final.pt SHA-256>
+
+uv run scripts/launch_vast.py \
+  --max-price 1.1 --disk 250 --min-vram 24 --min-ram 200 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 13.34 --upload-gb 2 --run-hours 3.5 -- \
+  uv run experiments/023_mtp_heads.py \
+    --cfg.head-mode factored_mlp \
+    --cfg.action-mlp-ratio 2 \
+    --cfg.action-condition-dim 32 \
+    --cfg.action-group-order c_stick triggers buttons main_stick \
+    --cfg.factorization-diag-seed 0 \
+    --cfg.factorization-diag-samples 1 \
+    --cfg.require-flex \
+    --cfg.eval-max-parallel 32 \
+    --cfg.final-h2h-reference-run "$e1_run" \
+    --cfg.final-h2h-reference-sha256 "$e1_sha" \
+    --cfg.final-h2h-reference-experiment experiments/023_mtp_heads.py \
+    --cfg.final-h2h-reference-label 023-e1-state-mlp \
+    --cfg.final-h2h-self-label 023-e2-stable \
+    --cfg.final-h2h-n-configs 64 \
+    --comment e2-stable
+```
+
+E2-I uses the same launcher fields. It changes the order to `main_stick buttons triggers c_stick`,
+uses the verified E2-S run and hash as its reference, and uses labels `023-e2-stable` and
+`023-e2-intent`. Do not launch both arms together.
+
 The slot-and-group-keyed decode streams are shared evaluation infrastructure for this comparison,
 not an E2 treatment. Load the E1 reference through the same sampler during H2H. Report that its
 random stream mapping differs from its historical single-stream evaluation.

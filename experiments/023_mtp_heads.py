@@ -131,11 +131,17 @@ class TrainConfig:
     require_flex: bool = False
     # Offset 1 is deployed. Other offsets are auxiliary targets.
     head_offsets: tuple[int, ...] = (1, 5, 9, 13)
+    # Select independent linear, state-only MLP, or within-frame factored outputs.
     head_mode: Literal["linear", "state_mlp", "factored_mlp"] = "linear"
+    # Set the MLP width as a multiple of d_model.
     action_mlp_ratio: int = 2
+    # Set the feature width of each ancestor action embedding.
     action_condition_dim: int = 32
+    # List the within-frame conditional order.
     action_group_order: tuple[str, ...] = ("c_stick", "triggers", "buttons", "main_stick")
+    # Use private random streams for ancestor-sampled validation.
     factorization_diag_seed: int = 0
+    # Set the number of ancestor samples per validation frame.
     factorization_diag_samples: int = 1
     # Total weight of the mean auxiliary-head loss. This stays fixed if head_offsets changes.
     aux_loss_weight: float = 1.0
