@@ -463,8 +463,8 @@ Stocks taken and lost per active minute were 0.735 and 1.597. Damage dealt and t
 minute were 129.5 and 112.5. P0's same-step stock rates were 0.813 and 1.372. This third unpaired
 sample is also weaker for E1, but the final paired H2H test remains the decision gate.
 
-E1 reached step 16,384 and entered final evaluation without an error. The GPU was idle while the
-CPU workers ran, and disk use remained 76 of 250 GB.
+E1 reached step 15,400 without an error. Disk use remained 76 of 250 GB. Final training and
+evaluation are still pending.
 
 Training continues. Final validation, CPU evaluation, H2H, artifact verification, cost, and the
 decision are pending.
