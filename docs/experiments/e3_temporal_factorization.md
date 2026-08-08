@@ -117,10 +117,10 @@ the true action at each later depth under the resulting conditional distribution
 and argmax accuracy. Report the NLL gap from teacher forcing. This diagnostic measures exposure to
 model-generated history. It is not the joint NLL of the observed sparse action sequence.
 
-Use configuration fields `temporal_diag_seed=0` and `temporal_diag_samples=1`. Use a dedicated
-generator that resets from the declared diagnostic seed on every validation pass. Do not consume
-the process-wide training RNG or the live decode generator. Record the number of valid frames with
-every diagnostic.
+Use configuration fields `temporal_diag_seed=0` and `temporal_diag_samples=1`. Derive one diagnostic
+stream per named action group from the declared seed. Reset all four streams on every validation
+pass. A group keeps its stream across temporal depths. Do not consume the process-wide training RNG
+or the live decode streams. Record the number of valid frames with every diagnostic.
 
 Closed-loop execution samples offset 1 only. It must not compute offsets 5, 9, or 13 unless an
 explicit diagnostic requests them.
@@ -161,7 +161,8 @@ alignment, optimizer, or total auxiliary weight.
     has learned.
 18. Assert E3-C and E3-T have identical parameter names, shapes, optimizer ownership, and forward
     call counts.
-19. Assert rollout-conditioned validation leaves process-wide CPU and CUDA RNG states unchanged.
+19. Assert rollout-conditioned validation leaves process-wide CPU, CUDA, and live decode RNG states
+    unchanged. Assert it uses exactly one independent diagnostic stream per named action group.
 20. Assert rollout-conditioned NLL scores the true current action after sampling only the earlier
     temporal actions. It must not use the sampled current action as a loss target.
 
@@ -180,6 +181,10 @@ Copy the selected E2-S configuration. Run E3-C first and E3-T second. Change onl
 Keep the selected attention package, within-frame group order, offsets, loss weights, 16,384 steps,
 seed 0, 131,072 frames per step, compact data, replay mixing, optimizer, schedule, decode, and CPU
 protocol fixed.
+
+Keep E2's group-keyed live decode streams. E3 may advance a group's stream at later sparse depths
+only during an explicit sparse-rollout diagnostic. Normal closed-loop play computes offset 1 only
+and advances each live group stream once per policy frame.
 
 Report exact parameter counts and warm step time. If total parameters rise by more than 5% or warm
 training time rises by more than 10% from E2, add a temporal capacity control before claiming that
