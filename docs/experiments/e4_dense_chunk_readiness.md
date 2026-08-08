@@ -126,8 +126,9 @@ the live CPU evaluator still executes one.
 
 ## Closed-loop evaluation
 
-Run the standard 32-boot periodic and 96-boot final CPU protocol with execution horizon 1. Run 64
-mirrored H2H configurations against E3. Save all match rows and replays.
+Request 32 periodic matchups and 96 final matchups, with at most 32 concurrent Dolphin boots and
+execution horizon 1. Run 64 mirrored H2H configurations against E3. Save all match rows and
+replays.
 
 Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
 difference, non-tied stock-lead rate, confidence intervals, and ties. A closed-loop regression is

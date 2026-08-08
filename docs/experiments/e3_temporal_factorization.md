@@ -192,10 +192,11 @@ rollout-conditioned cross-entropy and accuracy for the same targets. Also log ex
 accuracy, exposure gaps, transition metrics, temporal-module norms and gradients, shared-trunk
 gradient interaction, parameter counts, memory, and throughput.
 
-Run the standard periodic and final CPU protocol. Compare E3-C with E2-S to measure the added
-temporal module. Compare E3-T with E3-C to measure previous-action conditioning. Run 64 mirrored H2H
-configurations for both direct comparisons. Save rows and replays. Report stocks, damage, dead
-frames, terminal results, CPU rate differences, H2H stock difference, non-tied stock-lead rate,
+Request 32 periodic matchups and 96 final matchups. Limit both sweeps to 32 concurrent Dolphin
+boots. Compare E3-C with E2-S to measure the added temporal module. Compare E3-T with E3-C to
+measure previous-action conditioning. Run 64 mirrored H2H configurations for both direct
+comparisons. Save rows and replays. Report stocks, damage, dead frames, terminal results, CPU rate
+differences, H2H stock difference, non-tied stock-lead rate,
 confidence intervals, ties, and crashes.
 
 Target 3.0 to 3.5 hours through evaluation and upload on an RTX 4090. Flag startup over 30 minutes,

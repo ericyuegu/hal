@@ -221,8 +221,8 @@ and the execution-only H2 point estimate for stocks taken minus stocks lost per 
 more than 0.25 below the same frozen actor at H1. This is a safety gate, not an improvement claim.
 Repeat the same execution-only, macro-BC, macro-AWR, and H2H sequence.
 
-Use the standard 32-boot periodic and 96-boot final CPU protocol. Save all rows, replays, critic and
-weight audits, and H2H records.
+Request 32 periodic matchups and 96 final matchups. Limit both sweeps to 32 concurrent Dolphin
+boots. Save all rows, replays, critic and weight audits, and H2H records.
 
 Report:
 

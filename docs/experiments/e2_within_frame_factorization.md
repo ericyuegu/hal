@@ -209,8 +209,9 @@ generator. Validation must leave training RNG state byte-identical.
 
 ## Closed-loop evaluation
 
-Run the standard 32-boot periodic and 96-boot final CPU protocol. Instant restart may produce more
-completed games than boots. Save all rows and replay files.
+Request 32 periodic matchups and 96 final matchups. Limit both sweeps to 32 concurrent Dolphin
+boots. Instant restart may produce more completed games than requested matchups. Save all rows and
+replay files.
 
 For E2-S, run 64 mirrored H2H configurations against E1. For E2-I, run the same H2H schedule against
 E2-S. Report non-tied stock-lead rate, stock difference, confidence intervals, ties, crashes, stage

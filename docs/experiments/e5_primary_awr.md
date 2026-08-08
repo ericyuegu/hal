@@ -257,8 +257,9 @@ Copy the selected reference exactly. Change only AWR, value-head, run-label, and
 fields. Keep 16,384 steps, seed 0, 131,072 frames per step, attention, action architecture, offsets,
 auxiliary scale, compact data, replay mixing, optimizer, schedule, decode, and evaluation fixed.
 
-Run the standard periodic and final CPU protocol. Run 64 mirrored H2H configurations against the
-matched BC reference. Save checkpoints, match rows, replays, H2H records, and the return audit.
+Request 32 periodic matchups and 96 final matchups. Limit both sweeps to 32 concurrent Dolphin
+boots. Run 64 mirrored H2H configurations against the matched BC reference. Save checkpoints,
+match rows, replays, H2H records, and the return audit.
 
 Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
 difference, non-tied stock-lead rate, confidence intervals, and ties. Also report value and weight
