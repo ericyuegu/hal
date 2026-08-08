@@ -659,6 +659,7 @@ def test_periodic_eval_upload_keeps_metrics_result_and_log(tmp_path) -> None:
 
         def upload(self, path, *, key):
             self.files.append((path, key))
+            return True
 
     uploader = Uploader()
     counts = exp._queue_periodic_eval_evidence(

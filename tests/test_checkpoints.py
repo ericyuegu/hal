@@ -47,3 +47,66 @@ def test_uploader_close_fails_after_draining_queue(tmp_path: Path, monkeypatch: 
         uploader.close()
 
     assert [Path(local).name for local, _, _ in client.uploaded] == ["a.pt", "b.pt"]
+
+
+def test_uploader_skips_unchanged_file_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    uploader = _uploader(monkeypatch, client)
+    path = tmp_path / "match.slp"
+    path.write_bytes(b"replay")
+
+    assert uploader.upload(path, key="replays/match.slp")
+    assert not uploader.upload(path, key="replays/match.slp")
+    uploader.close()
+
+    assert len(client.uploaded) == 1
+
+
+def test_uploader_queues_changed_file_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    uploader = _uploader(monkeypatch, client)
+    path = tmp_path / "matches.jsonl"
+    path.write_bytes(b"first")
+    assert uploader.upload(path)
+
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"second")
+    replacement.replace(path)
+    assert uploader.upload(path)
+    uploader.close()
+
+    assert len(client.uploaded) == 2
+
+
+def test_uploader_treats_remote_keys_as_distinct(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    uploader = _uploader(monkeypatch, client)
+    path = tmp_path / "match.slp"
+    path.write_bytes(b"replay")
+
+    assert uploader.upload(path, key="orientation_0/match.slp")
+    assert uploader.upload(path, key="orientation_1/match.slp")
+    uploader.close()
+
+    assert len(client.uploaded) == 2
+
+
+def test_upload_tree_only_queues_new_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    uploader = _uploader(monkeypatch, client)
+    root = tmp_path / "h2h"
+    first = root / "orientation_0" / "match.slp"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"first")
+
+    assert uploader.upload_tree(root, base=tmp_path) == 1
+    assert uploader.upload_tree(root, base=tmp_path) == 0
+
+    second = root / "orientation_1" / "match.slp"
+    second.parent.mkdir(parents=True)
+    second.write_bytes(b"second")
+    assert uploader.upload_tree(root, base=tmp_path) == 1
+    assert uploader.upload_tree(root, base=tmp_path) == 0
+    uploader.close()
+
+    assert len(client.uploaded) == 2

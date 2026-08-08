@@ -1,15 +1,4 @@
-"""Background checkpoint sync to R2.
-
-Training writes checkpoints to a local run dir and hands each file to a
-``BackgroundUploader`` that PUTs it to ``r2://<bucket>/<prefix>/<run>/<file>``
-off the hot path (a daemon worker drains a queue), so a slow upload never
-stalls a training step. ``download_latest`` pulls the newest checkpoint back to
-resume after a preemption.
-
-Checkpoints are mutable run *outputs* — unlike the immutable, sha-pinned
-*inputs* in ``hal.fixtures`` — so they deliberately bypass the ``Fixture`` /
-``fetch`` machinery. Both share one R2 client (``hal.r2``).
-"""
+"""Upload checkpoints and evaluation files to R2."""
 
 import queue
 import threading
@@ -42,6 +31,8 @@ class BackgroundUploader:
         self._bucket = r2.bucket()
         self._client = r2.client()
         self._queue: queue.Queue = queue.Queue()
+        self._queued_versions: set[tuple[str, int, int, int, int, int]] = set()
+        self._queue_lock = threading.Lock()
         self._failures = 0
         self._thread = threading.Thread(target=self._drain, name=f"r2-upload-{run_name}", daemon=True)
         self._thread.start()
@@ -64,21 +55,22 @@ class BackgroundUploader:
             finally:
                 self._queue.task_done()
 
-    def upload(self, path: Path, *, key: str | None = None) -> None:
-        """Enqueue ``path`` for upload. Returns immediately (non-blocking). ``key`` is
-        the object path under ``<prefix>/<run>/`` — defaults to the basename; pass a
-        relative path (e.g. ``replays/step_000050/match_000/g.slp``) to mirror a tree
-        instead of flattening to basenames that could collide."""
-        self._queue.put((str(path), key))
+    def upload(self, path: Path, *, key: str | None = None) -> bool:
+        """Queue a file unless the same version is already queued."""
+        stat = path.stat()
+        rel_key = key or path.name
+        version = (rel_key, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        with self._queue_lock:
+            if version in self._queued_versions:
+                return False
+            self._queued_versions.add(version)
+            self._queue.put((str(path), key))
+        return True
 
     def upload_tree(self, root: Path, *, base: Path, pattern: str = "*") -> int:
-        """Enqueue every file under ``root`` matching ``pattern``, keyed by its path
-        relative to ``base`` (mirroring the tree under ``<prefix>/<run>/``). Returns
-        the count enqueued. Used to ship eval ``.slp`` recordings to R2."""
+        """Queue matching files and return the number of new file versions."""
         files = [p for p in sorted(root.rglob(pattern)) if p.is_file()]
-        for p in files:
-            self.upload(p, key=str(p.relative_to(base)))
-        return len(files)
+        return sum(self.upload(p, key=str(p.relative_to(base))) for p in files)
 
     def close(self) -> None:
         """Drain the queue and fail if any upload failed."""

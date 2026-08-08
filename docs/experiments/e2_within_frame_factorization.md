@@ -1,6 +1,6 @@
 # E2: within-frame action factorization
 
-Status: local implementation complete; GPU gate blocked on E1 evidence
+Status: local implementation complete; final launch audit pending
 
 Updated: 2026-08-08
 
@@ -347,6 +347,8 @@ Implemented behavior:
 - Final H2H now requires equal context length, decode dtype, KV mode, temperatures, and sampling
   filters. It fails before the sweep if either checkpoint differs. Execution horizon and head
   offsets may differ because later chunk experiments change them on purpose.
+- Repeated H2H tree scans now queue only new or changed file versions. This keeps the recovery
+  upload after each orientation without sending completed replay files two or three times.
 - E2-S has 7,786,110 parameters. E2-I has 7,787,902. The 1,792-parameter difference comes from
   removing each order's unused final-group embedding table.
 
@@ -367,9 +369,9 @@ Local evidence:
 - The prefetch gate compares 32 constructed complete-batch hashes and 34 batches from a real compact
   MDS. It checks exact replay IDs, tensors, batch order, epoch statistics, RNG state, overlap,
   exhaustion, errors, and early close.
-- Full repository suite: 945 passed in 136.37 seconds. The prior attempt had one unrelated Dolphin
-  round-trip divergence at frame 84. The isolated test passed on retry, followed by the clean full
-  run.
+- Full repository suite after the uploader change: 949 passed in 137.08 seconds. An earlier run
+  stalled in the final real-Dolphin test after 925 passes. That test passed alone in 7.85 seconds,
+  and the clean full rerun passed.
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 
@@ -383,5 +385,6 @@ The same argument list passes the experiment's Tyro parser and `validate_config`
 `factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
 steps.
 
-The GPU compile, memory, throughput, E1-reference hash, and final no-rent audit remain pending. Do
-not launch E2-S until E1's final checkpoint, CPU sweep, H2H record, and decision are verified.
+E1's final checkpoint, CPU sweep, H2H record, and decision are verified. E1 did not promote. The
+uploader regression gate passes. The GPU compile, memory, throughput, and exact E1-reference launch
+audit remain pending before E2-S launches.

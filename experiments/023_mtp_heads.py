@@ -2420,8 +2420,7 @@ def _queue_periodic_eval_evidence(
     evidence_count = 0
     for path in evidence:
         if path.is_file():
-            uploader.upload(path, key=str(path.relative_to(run_dir)))
-            evidence_count += 1
+            evidence_count += uploader.upload(path, key=str(path.relative_to(run_dir)))
     return replay_count, evidence_count
 
 
@@ -2614,11 +2613,7 @@ def _final_h2h(
     uploader: BackgroundUploader,
     ref_ckpt: Path,
 ) -> None:
-    """Mirrored h2h vs the reference run, in-process after training.
-
-    Records and replays land in ``run_dir/h2h_final``. Evidence uploads after EACH
-    orientation and again in the ``finally`` block, so a kill mid-sweep costs at most
-    one orientation and a tripwire raise costs nothing."""
+    """Run mirrored H2H and upload each completed orientation."""
     from hal.scripts.h2h import ModelArgs
     from hal.scripts.h2h import load_policy_builder
 

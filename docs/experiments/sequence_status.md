@@ -28,7 +28,7 @@ Decode speed alone cannot select the policy package.
 | --- | --- | --- | --- |
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Complete; P0 is the fixed reference | Keep its checkpoint, data, objective, and evaluation protocol fixed. |
 | E1 | Head capacity: zero-init state-only residual MLP | Complete; did not replace P0 | Keep E1 as E2's capacity control and P0 as the deployed baseline. |
-| E2 | Within-frame conditional factorization and group order | Local implementation and tests complete; final launch audit pending | Beat the E1 capacity control in closed loop and avoid regression against P0. |
+| E2 | Within-frame conditional factorization and group order | Local implementation and uploader gate complete; final launch audit pending | Beat the E1 capacity control in closed loop and avoid regression against P0. |
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Primary-only plan with a fixed critic warm-up ready; blocked on policy selection | Pass the value gate, then weight only the action whose advantage is defined. |
@@ -48,8 +48,14 @@ background-prefetch gate with exact data-order and RNG parity. It does not chang
 reservoir or scientific sample stream. The local gate passes, including 32 constructed batch hashes,
 34 real compact-MDS batches, controlled overlap, errors, and early close. Final H2H also rejects
 unmatched context length, decode dtype, KV mode, temperature, or sampling filters. The clean
-complete repository gate is 945 tests. E2's first GPU steps still need to measure the live wait
+complete repository gate is 949 tests. E2's first GPU steps still need to measure the live wait
 reduction.
+
+E1 also exposed duplicate H2H uploads. Recovery scans run after each orientation and at final
+cleanup. The shared uploader now skips the same unchanged local file version while still sending a
+mutable result file again after it changes. This removes duplicate replay transfers without
+weakening recovery. The focused gate passed 115 tests. The complete repository gate passed 949
+tests in 137.08 seconds.
 
 ## Current evidence
 
