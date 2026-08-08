@@ -27,7 +27,7 @@ Decode speed alone cannot select the policy package.
 | Experiment | Axis | Status | Required result before the next stage |
 | --- | --- | --- | --- |
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Complete; P0 is the fixed reference | Keep its checkpoint, data, objective, and evaluation protocol fixed. |
-| E1 | Head capacity: zero-init state-only residual MLP | Local implementation and launch audit complete; GPU gate waits for P2 | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
+| E1 | Head capacity: zero-init state-only residual MLP | Active on Vast instance `47136334`, W&B `q3aojgfm` | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
 | E2 | Within-frame conditional factorization and group order | Fresh two-arm plan ready; blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
@@ -123,7 +123,13 @@ parameters and starts with exact E0 logits, objectives, and sampled actions. Tes
 and second-update gradient path, optimizer ownership, checkpoint compatibility, and the pinned P0
 checkpoint SHA-256. The focused suite passed 60 tests; the full repository suite passed 916 tests
 in 134.73 seconds. Its 250 GB launch payload passed a no-rent audit and found three qualifying RTX
-4090 offers. P2 evidence must be merged and the final exact-SHA audit repeated before E1 rents one.
+4090 offers.
+
+The final E1 no-rent audit passed at pushed commit `bba9b87`, then E1 launched from that unchanged
+SHA on Vast instance `47136334`. Its RTX 4090 host has 251 GB RAM, 250 GB disk, DLPerf 125.6, and an
+effective price of $0.755 per hour. It became ready in 43 seconds. W&B run `q3aojgfm` has the correct
+state-MLP configuration. Startup verified the source SHA, `sm_89`, P0 checkpoint hash, parameter
+count, and concurrent validation-cache and training-prefetch start. No other experiment is active.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
@@ -149,10 +155,9 @@ is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
-1. Repeat E1's exact-SHA no-rent audit after this final P2 record.
-2. Launch E1 on one RTX 4090 with 250 GB disk.
-3. Check compilation, memory, throughput, and numerical health at the start of the same run. Stop
-   only if a declared gate fails; otherwise continue through step 16,384 and evaluation.
+1. Check E1 compilation, memory, throughput, and numerical health at startup.
+2. Continue through step 16,384, final CPU evaluation, and H2H if no declared gate fails.
+3. Verify E1's checkpoint, rows, replays, W&B history, R2 files, cost, and final decision.
 
 ## Remaining run units
 

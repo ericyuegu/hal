@@ -419,6 +419,13 @@ Correctness evidence:
   It kept the 250 GB disk and every declared E1 and P0-reference field. Four RTX 4090 offers
   qualified; the best effective price was $0.755 per hour. Commit this record, then repeat the audit
   and launch from the unchanged final SHA.
+- The final no-rent audit passed at pushed commit `bba9b87`. E1 launched from that unchanged SHA on
+  Vast instance `47136334`. The selected RTX 4090 host has 251 GB RAM, 250 GB disk, DLPerf 125.6,
+  and an effective price of $0.755 per hour. It became ready in 43 seconds. W&B run `q3aojgfm` is
+  `260808-023741_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-state-mlp-r2_ranked-anon-1_e1-state-mlp`.
+  Startup verified `sm_89`, the exact source SHA, the 250 GB compile cache, the complete command,
+  the P0 reference SHA-256, 7,678,526 model parameters, and concurrent validation-cache and training
+  prefetch startup. No other Vast experiment is active.
 
 GPU compilation, memory, throughput, training, validation, CPU evaluation, and H2H results are
 pending.
