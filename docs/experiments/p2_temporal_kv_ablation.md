@@ -256,4 +256,51 @@ seed 0.
 P2 launched from exact commit `4bc0f1e` on Vast instance `47132921`. The RTX 4090 host has 251 GB
 RAM, an 80 GB disk, DLPerf 125.6, and an effective price of $0.714 per hour. The image pull retried
 for about 13 minutes. Vast reported the instance ready at 18:56:56 PDT, below the 30-minute startup
-warning. This is the only active experiment job.
+warning.
+
+## Final result
+
+The diagnostic job completed and destroyed its instance. Vast reports no active instances. The
+final R2 upload was at 19:21:17 PDT, 38 minutes after rental. The billing upper bound through the
+first confirmed absence of the instance is below $0.56.
+
+The schema-2 parity record is complete, finite, and failed as expected. It uses the verified P1
+checkpoint SHA-256
+`8e9b04c91aa76d1ba49a910c82f1328bc1b0dc3ce7dabf3e9018cb556d964148` at step 16,384.
+
+- FP32: maximum hidden error `0.02022`, maximum main-stick logit error `0.08052`, and 14 sampled
+  action mismatches in 6,195 slot-frames (`0.226%`).
+- FP16: maximum hidden error `0.03174`, maximum main-stick logit error `0.09961`, and 32 sampled
+  action mismatches in 6,195 slot-frames (`0.517%`).
+
+The fixed-frame diagnostics show two sources of numerical drift. Flex versus full dense attention
+differs, and full dense recomputation versus incremental dense decoding also differs from frame 0.
+The latter therefore cannot be explained only by cache rollover. At frame 1 in FP32, the maximum
+logit errors were `0.01500` for Flex versus dense and `0.00629` for dense versus incremental. At the
+raw-window boundary, frame 1,024, they were `0.01058` and `0.00437`. Both sources matter. The saved
+fixed frames do not identify which source produced the single worst all-frame error.
+
+The closed-loop protocols are equal except for `eval_incremental_kv`. Both used FP16, seed 0, 96
+boots, a 32-boot limit, 7,200 frames, and execution horizon 1. Neither arm crashed.
+
+| Metric | Recompute | KV | KV minus recompute |
+| --- | ---: | ---: | ---: |
+| Model time per row | 0.390 ms | 0.146 ms | 2.67x faster |
+| Total model-forward time | 269.3 s | 100.8 s | 2.67x faster |
+| Evaluation wall time | 672.0 s | 507.2 s | 1.32x faster |
+| Stocks taken per active minute | 0.755 | 0.708 | -0.047 |
+| Stocks lost per active minute | 1.376 | 1.422 | +0.048 |
+
+The character-matched diagnostic pooled games within each boot and compared all 96 boots. KV minus
+recompute was `-0.094` net stocks per active minute, with a 95% boot-bootstrap interval of
+`[-0.269, 0.077]`. The interval includes zero, but the point estimate favors recomputation.
+
+The R2 parity JSON SHA-256 is
+`9c755bcdb10f8c98edd71be98b7dabbea45cd6e310ff01812aab03bfb20ef9b4`. The recompute package has
+119 files and 241,209,037 bytes: two JSON files and 117 replays. The KV package has 125 files and
+241,971,110 bytes: two JSON files and 123 replays. The row files contain 113 and 118 rows; one and
+two rows have zero active frames and are excluded from the reported match rates. W&B run
+`46zi7fgo` is finished and contains both labeled metric sets.
+
+P2 does not promote temporal KV. Full rolling-window recomputation remains the required decode path
+for later experiments. KV is a useful speed measurement, not a valid policy implementation.

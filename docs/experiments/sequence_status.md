@@ -10,7 +10,7 @@ Updated: 2026-08-07
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
 | P1-match | Attention package at matched data and action vocabulary | Complete; paired result does not promote P1; audited evidence verified | Keep P0 as E0. Use P1 only for the P2 systems ablation. |
-| P2 | Systems: temporal-KV decode efficiency | Diagnostic rerun active on instance `47132921` | Keep recomputation. Measure the rejected KV arm only as a systems ablation. |
+| P2 | Systems: temporal-KV decode efficiency | Complete; parity failed and both closed-loop arms are verified | Keep full rolling-window recomputation. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
@@ -108,7 +108,15 @@ destroyed after verification.
 
 The P2 diagnostic rerun launched from exact commit `4bc0f1e` on Vast instance `47132921`. Its RTX
 4090 host has 251 GB RAM, an 80 GB disk, DLPerf 125.6, and an effective price of $0.714 per hour. It
-became ready at 18:56:56 PDT after a 13-minute image pull. No other experiment instance is active.
+became ready at 18:56:56 PDT after a 13-minute image pull.
+
+P2 completed and destroyed its instance. The schema-2 parity record is finite but failed: 14 FP32
+and 32 FP16 sampled-action mismatches in 6,195 slot-frames. Fixed-frame diagnostics show drift from
+both Flex versus dense attention and dense recomputation versus incremental decoding. KV reduced
+model time per row from 0.390 ms to 0.146 ms, but wall time only fell from 672 to 507 seconds. The
+boot-matched KV-minus-recompute net-stock delta was `-0.094` per active minute, with 95% interval
+`[-0.269, 0.077]`. R2 contains the parity record, 231 JSON rows including 228 active rows, and 240
+replays. W&B contains both labeled metric sets. No Vast instance is active.
 
 E1's state-only residual MLP is implemented on `exp/e1-output-head-capacity`. It adds 860,044
 parameters and starts with exact E0 logits, objectives, and sampled actions. Tests cover its first-
@@ -141,12 +149,10 @@ is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
-1. Finish P2's Flex, dense-recompute, and dense-KV diagnostic record.
-2. Finish the 32-way recompute and rejected-KV closed-loop arms.
-3. Verify and record P2 artifacts, cost, and timing, then destroy its instance.
-4. Merge the P2 evidence into the E1 branch and repeat E1's exact-SHA no-rent audit.
-5. Run E1's GPU compilation, memory, and throughput gate, then continue the same approved launch if
-   it passes.
+1. Repeat E1's exact-SHA no-rent audit after this final P2 record.
+2. Launch E1 on one RTX 4090 with 250 GB disk.
+3. Check compilation, memory, throughput, and numerical health at the start of the same run. Stop
+   only if a declared gate fails; otherwise continue through step 16,384 and evaluation.
 
 ## Remaining run units
 
