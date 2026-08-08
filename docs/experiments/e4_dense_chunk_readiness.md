@@ -81,8 +81,8 @@ E3 predicts different time offsets.
 11. With the same replay and sampler seed, assert E3 and E4 receive byte-identical windows, replay
     IDs, context padding, and 13-frame target chunks before the loss slices its offsets.
 12. Reject `sample_chunk_length < max(head_offsets)`.
-13. Assert dense rollout diagnostics use the dedicated validation generator and leave training RNG
-    state unchanged.
+13. Assert dense rollout diagnostics use E3's four group-keyed validation streams and leave
+    process-wide CPU, CUDA, and live decode RNG states unchanged.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before launch.
 
@@ -98,6 +98,10 @@ within-frame order, temporal MLP, normalized auxiliary weight, compact data, rep
 optimizer, schedule, decode temperature, and evaluation protocol fixed.
 
 Keep `sample_chunk_length=13`. It is part of the matched data contract, not an E4 treatment.
+
+Keep E3's random-stream contract. Each named action group has one diagnostic stream that continues
+across offsets 1 through 4. Changing from sparse to dense offsets must not change which stream a
+group uses.
 
 Use the same RTX 4090 class, at least 200 GB system RAM, and 250 GB disk. Target 3.0 to 3.5 hours
 through evaluation and upload.
