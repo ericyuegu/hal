@@ -37,12 +37,42 @@ training seeds before making an architecture claim.
   validation, action embeddings, teacher-forced training, ancestral decode, and diagnostics.
 - `tests/experiments/test_023_mtp_heads.py`: test initialization, conditioning, order, gradients,
   objective alignment, decode, checkpoint loading, and optimizer ownership.
+- `hal/training/dataloader.py`: add an optional one-batch background prefetcher after the replay
+  reservoir.
+- `tests/test_dataloader.py`: prove that prefetch keeps exact batch order, replay IDs, tensors,
+  epoch statistics, errors, and random-number state.
 - `docs/experiments/e1_output_head_capacity.md`: record the shared E1 implementation and exact
   parameter counts.
 - This file: record the final code, commands, run IDs, timing, metrics, artifacts, and decision.
 
 Do not edit historical experiment files. Do not change the transformer, replay sampler, target
 offsets, loss scale, or evaluation protocol.
+
+## Batch-prefetch systems gate
+
+E1 measured a median loader wait of 0.136 seconds inside a 0.281-second median training step. The
+wait did not fall after the cache warmed. The host was mostly idle and had no sampled disk-read
+wait. `ReservoirLoader` selects one window from each replay, then preprocesses and stacks the full
+512-window batch in the training process. This serial work is the likely gap.
+
+Add one optional background batch slot after the reservoir. It must consume the same iterator in
+the same order. It may prepare only the next complete batch while the GPU trains on the current
+batch. It must not add another shuffle stage, change the reservoir, call a random function, or
+prepare two batches out of order.
+
+Before enabling it on Vast:
+
+1. Compare at least 32 batches with prefetch off and on. Hash replay IDs, every context tensor,
+   padding, targets, and batch order. Require exact equality.
+2. Check that CPU and CUDA random-number states do not change.
+3. Check normal exhaustion, loader exceptions, early close, and epoch statistics.
+4. Use a controlled producer test to prove that one batch can be prepared while the consumer is
+   busy. Do not use a loose wall-time assertion as the only test.
+5. Run the focused and complete test suites.
+
+This is a systems change, not an E2 treatment. If the hashes match, E2 may use it because the model
+receives the same data in the same order. Report model time and loader wait separately because E1
+did not have this overlap. If parity fails, keep the E1 loader path.
 
 ## Probability model
 

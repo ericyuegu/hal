@@ -437,5 +437,23 @@ active matches plus one zero-active tail. Stocks taken and lost per active minut
 1.534. This early closed-loop point is weak and is not a final decision. R2 received the checkpoint,
 44 replays, rows, metrics, result, and worker log.
 
+The second routine check found a healthy run at step 9,600. At step 8,192, validation action NLL
+was 1.071 bits per frame and button log loss was 0.032. P0 reported 1.074 at the same step, so this
+offline difference is too small to decide anything. The 32-boot CPU sweep took 166 seconds with no
+crash and no zero-active boot. It produced 39 active games. Stocks taken and lost per active minute
+were 0.670 and 1.388. Damage dealt and taken per active minute were 119.4 and 125.5. P0's same-step
+stock rates were 0.893 and 1.323, so E1's current closed-loop point is weaker. The samples are small
+and their intervals overlap. Wait for the declared final CPU and H2H results.
+
+Across steps 8,500 through 9,500, median step time was 0.281 seconds and median loader wait was
+0.136 seconds. The same medians near step 500 were 0.275 and 0.131 seconds. An eight-second GPU
+sample was bursty and below the 80% utilization warning. The host was 91% to 94% CPU-idle, had no
+sampled disk-read wait, and held about 165 GB in the page cache. This points to serial batch
+assembly or queue scheduling, not raw disk saturation. The run stays unchanged. E2 will test a
+one-batch background prefetcher with exact batch-order and RNG parity before launch.
+
+Disk use was 76 of 250 GB. Step 8,192's checkpoint, 40 replays, rows, metrics, result, and worker
+log uploaded to R2. The measured run still projects below the 3.5-hour limit.
+
 Training continues. Final validation, CPU evaluation, H2H, artifact verification, cost, and the
 decision are pending.
