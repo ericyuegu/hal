@@ -363,7 +363,7 @@ verified.
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
 - Run 64 mirrored H2H configurations, or 128 games, against P0.
 - Keep frame limits, matchup seeds, decode seeds, temperature, and concurrency fixed.
-- Save checkpoints, match rows, replay files, worker logs, and decode protocol.
+- Save checkpoints, match rows, replay files, periodic worker logs, and decode protocol.
 - Report per-offset and per-group NLL and accuracy, transition metrics, gradient interaction,
   stocks, damage, dead frames, terminal results, crashes, and wall time.
 - Report paired H2H stock difference, non-tied stock-lead rate, confidence intervals, and ties.
@@ -372,6 +372,11 @@ Report the two CPU sweeps with separate uncertainty intervals. Do not call boot-
 alignment paired evidence because later instant-restart stages are random.
 
 Closed-loop CPU and H2H results decide promotion. NLL or throughput alone cannot select P1.
+
+Periodic CPU sweeps run in worker processes and retain `eval_results/step_*.json` and
+`eval_logs/step_*.log`. The final CPU sweep runs in the training process. Its complete artifact is
+`replays/final/metrics.json`, `replays/final/match_rows.json`, and the replay files, with the same
+metrics also logged to W&B and stdout. It does not create a separate final worker result or log.
 
 ## Reference selection rule
 

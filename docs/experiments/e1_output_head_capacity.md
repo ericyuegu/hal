@@ -267,7 +267,8 @@ R2 and the run directory must retain:
 - `latest.pt`, step checkpoints, and `final.pt`.
 - Final CPU `match_rows.json` and replay files.
 - Head-to-head `meta.json`, `matches.jsonl`, and replay files for both orientations.
-- Evaluation worker logs and result JSON files.
+- Periodic evaluation worker logs and result JSON files. The in-process final sweep instead retains
+  `replays/final/metrics.json` with its rows and replays.
 
 Record the final E0 checkpoint reference before launch. Verify that E1 fetched it at startup. Do not
 allow the Vast instance to destroy itself until the final checkpoint and evaluation evidence have
