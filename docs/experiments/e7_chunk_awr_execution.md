@@ -153,6 +153,12 @@ At a decision boundary:
 5. Observe every intervening emulator state and append it to the raw rolling buffer.
 6. After H frames, discard the plan and rebuild the newest raw window again.
 
+Use the E2 slot-and-group-keyed decode streams. Sampling an H-frame plan advances each named group's
+stream for that slot exactly H times. Chain order and activity in other slots must not change that
+mapping. If an interruption discards queued actions, do not rewind their random draws: the
+macro-policy already sampled the complete chunk at its decision boundary. Record planned, executed,
+and discarded actions separately.
+
 Do not use temporal KV. Do not reuse contextualized states after the raw buffer rolls. Do not
 in-paint an old plan into the next inference. Plan carry-over and shorter receding horizons are later
 experiments.
@@ -204,6 +210,10 @@ and the next call replans normally. This is the same boundary used by E6's logge
 22. Test the fixed beta grid and selection rule, including the exact ESS and clip boundaries and
     the no-passing-beta failure. Assert H2 and H4 select independently. Reject a missing or
     wrong-hash E6 selection table.
+23. Assert H1, H2, and H4 assign random draws to the same slot-and-group streams. A planned H-frame
+    chunk must advance that slot's streams H times. An interruption must discard queued actions
+    without rewinding those streams. A slot reset must increment only that slot's generation and
+    create its fresh substreams from the declared policy seed.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.

@@ -182,9 +182,9 @@ Keep the selected attention package, within-frame group order, offsets, loss wei
 seed 0, 131,072 frames per step, compact data, replay mixing, optimizer, schedule, decode, and CPU
 protocol fixed.
 
-Keep E2's group-keyed live decode streams. E3 may advance a group's stream at later sparse depths
-only during an explicit sparse-rollout diagnostic. Normal closed-loop play computes offset 1 only
-and advances each live group stream once per policy frame.
+Keep E2's slot-and-group-keyed live decode streams. E3 may advance a diagnostic group's stream at
+later sparse depths only during an explicit sparse-rollout diagnostic. Normal closed-loop play
+computes offset 1 only and advances each live slot-and-group stream once per policy frame.
 
 Report exact parameter counts and warm step time. If total parameters rise by more than 5% or warm
 training time rises by more than 10% from E2, add a temporal capacity control before claiming that

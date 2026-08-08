@@ -63,11 +63,12 @@ conditional distribution. Report its NLL and argmax accuracy. Also sample the co
 and report its sampled exact-frame accuracy. During closed-loop decode, sample each group and feed
 that sample to the later groups.
 
-Use one random-number stream per named action group. Derive all four streams from the decode seed
-with a fixed mapping that does not depend on chain order. E1, E2-S, and E2-I must use the same
-mapping during their direct comparisons. A single shared stream is invalid here: changing the call
-order would assign different random draws to different groups before the model learned any
-conditioning.
+Use one live random-number stream per vector slot and named action group. Derive each stream from
+the policy seed, stable slot index, slot generation, and group name with a fixed mapping that does
+not depend on chain order. Increment the slot generation on reset; resetting one slot must not
+change another slot's streams. E1, E2-S, and E2-I must use the same mapping during their direct
+comparisons. A single shared stream is invalid here: chain order or one slot ending would reassign
+random draws before the model learned any conditioning.
 
 ## Head design
 
@@ -152,9 +153,9 @@ or a missing target must not supply a condition or a loss.
    one valid later-group logit must change after conditioning has learned.
 8. Assert teacher forcing uses target classes, never predicted argmax classes.
 9. Assert ancestral decode uses sampled classes in the declared order.
-10. Use the same seed and group-keyed random streams at initialization. E1 and both E2 orders must
-    sample identical complete action bytes for many consecutive calls. Check each stream state
-    after every call.
+10. Use the same seed and slot-and-group-keyed random streams at initialization. E1 and both E2
+    orders must sample identical complete action bytes for many consecutive calls. Check each
+    stream state after every call.
 11. Assert the four conditional losses sum to the logged joint frame NLL.
 12. Assert auxiliary normalization remains one fixed mean across offsets 5, 9, and 13.
 13. Save and reload each order. Check mode, order, dimensions, logits, and sampled decode.
@@ -164,7 +165,8 @@ or a missing target must not supply a condition or a loss.
 17. Assert it samples only earlier groups before scoring the current target, and assert its NLL is
     the cross-entropy of that conditional distribution rather than the loss on a sampled class.
 18. Assert that reordering the chain does not reassign a random draw from one named group to
-    another. Reject missing, extra, or shared group streams.
+    another. Reject missing, extra, or shared group streams. Reset one vector slot and prove that
+    every other slot produces the same later samples as an unreset control.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -184,9 +186,9 @@ Keep `action_mlp_ratio=2`, offsets `(1,5,9,13)`, the normalized auxiliary loss, 
 0, 131,072 frames per step, compact policy v7, the replay reservoir, optimizer, schedule,
 checkpoint cadence, decode temperature, and CPU protocol fixed.
 
-The group-keyed decode streams are shared evaluation infrastructure for this comparison, not an E2
-treatment. Load the E1 reference through the same sampler during H2H. Report that its random stream
-mapping differs from its historical single-stream evaluation.
+The slot-and-group-keyed decode streams are shared evaluation infrastructure for this comparison,
+not an E2 treatment. Load the E1 reference through the same sampler during H2H. Report that its
+random stream mapping differs from its historical single-stream evaluation.
 
 Report exact total, trunk, classifier, state-MLP, condition, and embedding parameter counts. If E2
 has more than 5% more total parameters or is more than 10% slower per training step than E1, plan a
@@ -216,10 +218,10 @@ the observed action. Use one ancestor rollout per validation frame with seed 0. 
 that use different rollout draws. One rollout is enough because the fixed validation set contains
 many valid frames; record its size with every metric.
 
-Use a dedicated `torch.Generator` for this diagnostic. Recreate it from
+Use one dedicated diagnostic generator per named action group. Recreate all four from
 `factorization_diag_seed` for each validation pass and draw `factorization_diag_samples` ancestor
-rollouts per frame. Do not consume the process-wide Torch RNG or the live closed-loop decode
-generator. Validation must leave training RNG state byte-identical.
+rollouts per frame. Do not consume the process-wide Torch RNG or any live closed-loop decode
+stream. Validation must leave training RNG state byte-identical.
 
 ## Closed-loop evaluation
 
@@ -229,8 +231,8 @@ replay files.
 
 For E2-S, run 64 mirrored H2H configurations against E1. For E2-I, run the same H2H schedule against
 E2-S. Report non-tied stock-lead rate, stock difference, confidence intervals, ties, crashes, stage
-slices, and character slices. Expand each policy's existing decode seed into its four group streams.
-The two players keep their existing distinct seeds. CPU and H2H results both matter.
+slices, and character slices. Expand each policy's existing decode seed into its slot-and-group
+streams. The two players keep their existing distinct seeds. CPU and H2H results both matter.
 
 Target 3.0 to 3.5 hours per training arm through evaluation and upload. Flag startup over 30
 minutes, warm steps over 0.5 seconds, a slowdown over 25% from E1, or a projected total over 3.5
