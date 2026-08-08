@@ -400,6 +400,15 @@ game evidence. The final `metrics.json` SHA-256 is
 `match_rows.json` SHA-256 is
 `81b0e68869bc002c1ed7547c8e0749999df44eee23d1bce5a39cd120eb57e63d`.
 
+The first H2H orientation completed all 64 games and uploaded 64 identity-stamped replays. Eighteen
+games ended by knockout and 46 reached the frame budget. Forty-five records were marked
+`unreadable`: a budget-cut replay can end after one port's final event and before the other port's
+event, so peppi rejects the unequal columns. The old input tripwire silently skipped those missing
+statistics. A saved example became readable after removing only its incomplete final frame; both
+ports then had hundreds of distinct actions and no START press. The H2H result remains provisional
+until both orientations finish and every replay passes this repair-and-audit step. Keep the original
+objects and upload the audited records separately.
+
 ## Reference selection rule
 
 Keep P0 as the downstream E0 reference unless P1 passes all of these screening checks:

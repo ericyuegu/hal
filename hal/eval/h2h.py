@@ -55,6 +55,7 @@ import numpy as np
 from loguru import logger
 
 from hal.data.extract import extract_replay
+from hal.data.slp_finalize import trim_to_last_frame
 from hal.eval.cross_stage import STARTING_STOCKS
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import default_session_cfg
@@ -594,6 +595,11 @@ def check_input_stats(records: Sequence[MatchRecord]) -> None:
         for port in (1, 2):
             stats = record.input_stats_of_port(port)
             if stats is None:
+                if record.outcome is not None:
+                    problems.append(
+                        f"{record.match_id} port {port} ({record.model_on_port(port)}): "
+                        f"input statistics are missing; replay status is {record.replay_status}"
+                    )
                 continue
             model = record.model_on_port(port)
             if stats.button_start_frac != 0.0:
@@ -653,6 +659,9 @@ def match_record(
     stats: dict[int, PortInputStats] | None = None
     if replay is not None and verify_inputs:
         stats = replay_input_stats(replay)
+        if stats is None and trim_to_last_frame(replay):
+            logger.info(f"match_record: trimmed a torn final frame from {replay}")
+            stats = replay_input_stats(replay)
         if stats is None:
             replay_status = "unreadable"
 

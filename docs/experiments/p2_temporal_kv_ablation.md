@@ -175,6 +175,12 @@ recompute arm the clean P1 CPU rerun needed for reference selection. The
 `test_023_mtp_heads.py` suite passed 43 tests. The complete suite passed 896 tests in 135 seconds
 outside the restricted sandbox, including W&B offline and Dolphin integration tests. Ruff passed.
 
+The P1 H2H audit exposed a separate replay-evidence bug. Budget-cut replays can end with one torn
+frame and make peppi reject the port arrays. Future H2H collection now trims that incomplete frame,
+retries the parser, and fails if a completed game still lacks input statistics. The repair preserves
+all complete frames and the stamped model identity. The focused H2H, finalization, and paired suites
+passed 63 tests. The complete repository suite passed 898 tests in 135 seconds.
+
 ## Decision
 
 Keep full recomputation as the default. Promote temporal KV only if the correctness gate passes,

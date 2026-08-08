@@ -293,6 +293,51 @@ def test_check_input_stats_rejects_a_dead_policy():
         check_input_stats([_record_with_stats(dead, healthy)])
 
 
+def test_check_input_stats_rejects_missing_stats_from_a_completed_match(tmp_path):
+    record = match_record(
+        _spec(),
+        _trajectory(frames=300, damage_port_1=5.0, damage_port_2=8.0, stocks_left={1: 3, 2: 2}),
+        tmp_path / "boot_000",
+        max_frames=7200,
+        verify_inputs=False,
+    )
+
+    with pytest.raises(ValueError, match="input statistics are missing"):
+        check_input_stats([record])
+
+
+def test_match_record_repairs_a_torn_final_frame(tmp_path, monkeypatch):
+    boot = tmp_path / "boot_000"
+    boot.mkdir()
+    (boot / "Game.slp").write_bytes(b"test replay")
+    healthy = {
+        1: PortInputStats(0.5, 0.05, 0.3, 0.0, 500),
+        2: PortInputStats(0.5, 0.05, 0.3, 0.0, 500),
+    }
+    calls = 0
+
+    def fake_stats(_path):
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else healthy
+
+    monkeypatch.setattr("hal.eval.h2h.replay_input_stats", fake_stats)
+    monkeypatch.setattr("hal.eval.h2h.trim_to_last_frame", lambda _path: True)
+
+    record = match_record(
+        _spec(),
+        _trajectory(frames=300, damage_port_1=5.0, damage_port_2=8.0, stocks_left={1: 3, 2: 2}),
+        boot,
+        max_frames=7200,
+        stamp_identity=False,
+    )
+
+    assert calls == 2
+    assert record.replay_status == "ok"
+    assert record.input_stats_port_1 == healthy[1]
+    assert record.input_stats_port_2 == healthy[2]
+
+
 # ---------------------------------------------------------------------------
 # Replay identity stamping
 # ---------------------------------------------------------------------------
@@ -433,6 +478,7 @@ def test_run_h2h_writes_records_replays_and_meta(tmp_path, monkeypatch):
         max_frames=7200,
         max_parallel=2,
         seed=5,
+        verify_inputs=False,
     )
 
     assert len(records) == 6

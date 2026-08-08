@@ -75,6 +75,12 @@ official P0 sweep is concurrency: P1 used 96 concurrent boots and P0 used 32. Th
 therefore not promotion evidence. P2 now pins both decode arms to 32 concurrent boots, so its
 recompute arm will provide the matched P1 rerun. The paired H2H sweep remains active.
 
+The first P1 H2H orientation completed 64 of 64 games. Its audit found 45 budget-cut replays with a
+torn final frame, which made input-stat parsing fail. The files are recoverable by removing only
+that incomplete frame. Future H2H runs now repair this case and fail on any remaining missing input
+statistics. P1 promotion remains gated on a separate audited record file covering both
+orientations; the original launch records and replays will be preserved.
+
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
 same step. The recovered result, metrics, and worker log have verified R2 hashes.
