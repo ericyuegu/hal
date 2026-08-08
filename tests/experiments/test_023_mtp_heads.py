@@ -993,6 +993,8 @@ def test_factored_checkpoint_and_training_step(order) -> None:
     assert isinstance(adapter, exp.FactoredMLPAdapter)
     for parameter in (*adapter.condition_projs.parameters(), *adapter.action_embeddings.parameters()):
         assert memberships[id(parameter)]["use_muon"] is False
+    assigned = [id(parameter) for group in optimizer.param_groups for parameter in group["params"]]
+    assert len(assigned) == len(set(assigned)) == sum(1 for _ in model.parameters())
 
     parts = exp.action_loss(model, batch)
     loss = exp.objective(parts.nll, parts.transition, cfg.aux_loss_weight, cfg.transition_loss_weight)
@@ -1438,6 +1440,9 @@ def test_validation_reports_each_group_at_each_offset() -> None:
     for offset in cfg.head_offsets:
         assert f"nll_off{offset}" in metrics
         assert f"exact_frame_acc_off{offset}" in metrics
+        assert metrics[f"nll_off{offset}"] == pytest.approx(
+            sum(metrics[f"nll_off{offset}_{group}"] for group in exp._GROUP_NAMES)
+        )
         for group in exp._GROUP_NAMES:
             assert f"nll_off{offset}_{group}" in metrics
             assert f"acc_off{offset}_{group}" in metrics
@@ -1503,8 +1508,22 @@ class _Uploader:
 
 
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS is not available")
-@pytest.mark.parametrize("head_mode", ["linear", "state_mlp"])
-def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatch, capsys, head_mode) -> None:
+@pytest.mark.parametrize(
+    ("head_mode", "group_order"),
+    [
+        ("linear", exp.TrainConfig().action_group_order),
+        ("state_mlp", exp.TrainConfig().action_group_order),
+        ("factored_mlp", ("c_stick", "triggers", "buttons", "main_stick")),
+        ("factored_mlp", ("main_stick", "buttons", "triggers", "c_stick")),
+    ],
+)
+def test_train_runs_end_to_end_without_value_or_weight_logs(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    head_mode,
+    group_order,
+) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("WANDB_MODE", "offline")
     monkeypatch.setenv("WANDB_SILENT", "true")
@@ -1546,6 +1565,7 @@ def test_train_runs_end_to_end_without_value_or_weight_logs(tmp_path, monkeypatc
         val_split="train",
         eval_incremental_kv=False,
         head_mode=head_mode,
+        action_group_order=group_order,
     )
 
     exp.train(cfg, _stats(), comment="pytest")

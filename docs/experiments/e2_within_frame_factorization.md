@@ -317,8 +317,9 @@ Local evidence:
   action embeddings on update three.
 - Tests cover target conditioning, ancestral order, class bounds, reset isolation, checkpoint
   round trips, optimizer ownership, private validation RNG, both training orders, and exact counts.
-- Focused experiment suite: 77 passed in 9.88 seconds.
-- Full repository suite: 933 passed in 134.81 seconds.
+- Both E2 orders complete the real dev-MDS end-to-end training path and save `final.pt`.
+- Focused experiment suite: 79 passed in 10.21 seconds.
+- Full repository suite: 935 passed in 136.05 seconds.
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 
