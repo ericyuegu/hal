@@ -378,6 +378,12 @@ Periodic CPU sweeps run in worker processes and retain `eval_results/step_*.json
 `replays/final/metrics.json`, `replays/final/match_rows.json`, and the replay files, with the same
 metrics also logged to W&B and stdout. It does not create a separate final worker result or log.
 
+The active launch SHA predates the H2H field rename. In its `matches.jsonl`, `winner_port` and
+`winner_model` mean the model ahead on stocks at the frame budget; they do not mean a completed-game
+winner. The current `MatchRecord.from_dict` maps those fields to `stock_leader_port` and
+`stock_leader_model`. Recompute the final table with the current loader and report actual knockouts
+through `decided_by_knockout`. Treat any old W&B `wins` field as stock leads.
+
 ## Reference selection rule
 
 Keep P0 as the downstream E0 reference unless P1 passes all of these screening checks:
