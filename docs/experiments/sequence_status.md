@@ -27,20 +27,20 @@ Decode speed alone cannot select the policy package.
 | Experiment | Axis | Status | Required result before the next stage |
 | --- | --- | --- | --- |
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Complete; P0 is the fixed reference | Keep its checkpoint, data, objective, and evaluation protocol fixed. |
-| E1 | Head capacity: zero-init state-only residual MLP | Active on Vast instance `47136334`, W&B `q3aojgfm` | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
-| E2 | Within-frame conditional factorization and group order | Local implementation and tests complete; GPU gate blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
+| E1 | Head capacity: zero-init state-only residual MLP | Complete; did not replace P0 | Keep E1 as E2's capacity control and P0 as the deployed baseline. |
+| E2 | Within-frame conditional factorization and group order | Local implementation and tests complete; final launch audit pending | Beat the E1 capacity control in closed loop and avoid regression against P0. |
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Primary-only plan with a fixed critic warm-up ready; blocked on policy selection | Pass the value gate, then weight only the action whose advantage is defined. |
 | E6 | Chunk-conditioned value validity | Critic plan with value warm-up ready; blocked on E4/E5 infrastructure | Pass held-out calibration, ranking, perturbation, and policy-sample checks for `Q(s, chunk)`. |
 | E7 | Macro-action optimization and execution | Fresh matched-control plan ready; blocked on E6 | Use one chunk advantage on the joint likelihood and execute the same `H=2`, then `H=4`, action. |
 
-E1 reached step 15,400 without an error. At step 12,288, validation action NLL was 1.041 bits per
-frame, effectively equal to P0's 1.042. The 32-boot CPU sweep
-completed in 164 seconds with no crash. Stocks taken and lost per active minute were 0.735 and
-1.597, compared with P0's same-step 0.813 and 1.372. This is the third weak unpaired E1 sample, but
-the declared final paired H2H test remains the decision gate. Step 12,288's complete evidence
-uploaded to R2.
+E1 completed all 16,384 steps. Final validation action NLL was 1.026 bits per frame, compared with
+P0's 1.029. Its 96-boot CPU sweep had no crash and produced 126 active games. Stocks taken and lost
+per active minute were 0.805 and 1.385. The 64-pair H2H result was negative: E1 was ahead on 20
+configurations, behind on 33, and even on 11, with -0.391 mean stock difference per paired
+configuration. E1 did not promote. Its verified final checkpoint SHA-256 is
+`c175aa53f1d0f4ff80157b26a51c67cf55c4577ded656b60b97d12e10d8a560f`.
 
 E1 also exposed a systems limit. Median loader wait was 0.136 seconds in a 0.281-second median step,
 while the host was mostly idle and showed no disk-read wait. The E2 plan now includes a one-batch
@@ -174,9 +174,9 @@ is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
-1. Continue E1 through step 16,384, final CPU evaluation, and H2H if no declared gate fails.
-2. Verify E1's checkpoint, rows, replays, W&B history, R2 files, cost, and final decision.
-3. Audit E2-S's final launch SHA and command, then run its GPU gate only after E1 is complete.
+1. Finish E1's uploader and R2 closure audit.
+2. Fill E2-S's reference with the verified E1 run and checkpoint SHA-256.
+3. Repeat the no-rent audit from the final pushed SHA, then launch E2-S alone.
 
 ## Remaining run units
 

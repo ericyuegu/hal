@@ -1,6 +1,6 @@
 # E1: output-head capacity control
 
-Status: active on Vast instance `47136334`, W&B `q3aojgfm`
+Status: complete; E1 did not replace P0
 
 P0 is the E0 reference. P1 did not pass its paired head-to-head gate, so P2 cannot change this
 scientific choice. P2 only tests decode systems on the P1 checkpoint. E1 code preparation may
@@ -466,5 +466,29 @@ sample is also weaker for E1, but the final paired H2H test remains the decision
 E1 reached step 15,400 without an error. Disk use remained 76 of 250 GB. Final training and
 evaluation are still pending.
 
-Training continues. Final validation, CPU evaluation, H2H, artifact verification, cost, and the
-decision are pending.
+E1 completed all 16,384 steps. Final validation NLL at offsets 1, 5, 9, and 13 was 1.026, 2.642,
+3.366, and 3.835 bits per frame. Button log loss was 0.0305. P0 reported 1.029, 2.650, 3.379, and
+3.851 with the same button log loss. The MLP gives only a small offline improvement.
+
+The final CPU sweep completed 96 boots without a crash. It produced 126 active games and one
+zero-active tail, stored in 127 rows and 133 replay files. Stocks taken and lost per active minute
+were 0.805 and 1.385. Damage dealt and taken per active minute were 130.9 and 116.8. P0's official
+rates were 0.777 and 1.468, so the E1 CPU point estimate is slightly better. The intervals overlap.
+
+The paired H2H sweep completed all 128 games and 64 mirrored configurations without a failure. E1
+had 39 stock leads, 54 deficits, and 35 ties. Its non-tied stock-lead rate was 0.419 with 95% CI
+`[0.324, 0.521]`. Mean stock difference was -0.195 per match with CI `[-0.456, 0.066]`. E1 was
+ahead on 20 paired configurations, behind on 33, and even on 11. Mean stock difference over both
+orientations was -0.391 per configuration with CI `[-0.895, 0.114]`. Mean damage difference was
+-5.38 per active minute with CI `[-12.69, 1.94]`. Both sides used context 256, FP16, full-window
+recomputation, execution horizon 1, temperature 1, and no sampling filter.
+
+The 67,046,815-byte final checkpoint records step 16,384, `state_mlp`, ratio 2, full attention,
+full-window recomputation, offsets `(1,5,9,13)`, and compact policy v7. Its SHA-256 is
+`c175aa53f1d0f4ff80157b26a51c67cf55c4577ded656b60b97d12e10d8a560f`. The checkpoint and final
+CPU evidence reached R2. The complete H2H package contains 128 records and 128 replays; its final
+upload verification is recorded below when the uploader closes.
+
+Decision: do not promote E1. Its small offline and unpaired CPU gains do not outweigh the negative
+paired H2H point estimates. P0 remains the deployed baseline. E1 remains the required capacity
+control for E2-S because E2 must isolate action conditioning from added MLP capacity.
