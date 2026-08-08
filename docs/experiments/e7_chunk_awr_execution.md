@@ -60,9 +60,16 @@ A_H(s_t,\mathbf a_t^H)=Q_H(s_t,\mathbf a_t^H)-V(s_t).
 \]
 
 Compute a detached, clipped exponential weight with the same finite implementation as E5. Choose
-`beta_H` from the frozen E6 validation audit before E7. Normalize valid weights to mean one within
-the effective batch with the same FP32 `logsumexp` calculation. Do not divide underflowed raw
-exponentials by their mean. Report raw and normalized statistics.
+`beta_H` from the frozen E6 validation audit before E7. Test `beta` values
+`(0.2, 0.4, 0.8, 1.6, 3.2)` with raw `weight_max=5`. After the disagreement fallback, choose the
+smallest beta for which both normalized ESS ratios are at least 0.2 and no more than 20% of raw
+weights hit the cap. If no value passes, do not train macro-AWR. Select H2 and H4 separately and
+save the complete selection table before either actor run.
+
+Normalize valid weights to mean one within the effective batch with the same FP32 `logsumexp`
+calculation. Do not divide underflowed raw exponentials by their mean. Report raw and normalized
+statistics. The cap applies before normalization; the final normalized maximum can exceed 5. Do
+not clip it again.
 
 Require `grad_accum_steps=1` in the first H2 and H4 arms so normalization covers the whole optimizer
 batch. Report ESS over valid chunks and over replay-window mean weights. Require both ratios to pass
@@ -174,6 +181,8 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 20. Assert every frozen critic parameter and buffer remains byte-identical through training.
 21. Assert a control interruption before H removes the macro-action row in both macro-BC and
     macro-AWR, while an interruption on the Hth transition keeps it.
+22. Test the fixed beta grid and selection rule, including the exact ESS and clip boundaries and
+    the no-passing-beta failure. Assert H2 and H4 select independently.
 
 Run focused tests, Ruff, type checking, Python compilation, and `git diff --check` before the GPU
 gate.
@@ -187,8 +196,10 @@ For H2:
 3. Train and evaluate macro-AWR H2.
 4. Run 64 mirrored H2H configurations for macro-AWR H2 against macro-BC H2.
 
-Proceed to H4 only if H2 has no queue or reset failure, a useful critic weight distribution, and no
-large closed-loop collapse. Repeat the same execution-only, macro-BC, macro-AWR, and H2H sequence.
+Proceed to H4 only if H2 has no queue or reset failure, passes both ESS gates and the raw clip gate,
+and the execution-only H2 point estimate for stocks taken minus stocks lost per active minute is no
+more than 0.25 below the same frozen actor at H1. This is a safety gate, not an improvement claim.
+Repeat the same execution-only, macro-BC, macro-AWR, and H2H sequence.
 
 Use the standard 32-boot periodic and 96-boot final CPU protocol. Save all rows, replays, critic and
 weight audits, and H2H records.
@@ -214,6 +225,12 @@ macro-BC arm, a periodic evaluation over 25 minutes, or a projected total over 3
 - Do not credit chunking for a policy gain caused only by extra fine-tuning.
 - A good H2 result does not imply H4 will work.
 - If the critic gate fails or weights collapse, do not launch macro-AWR.
+
+Promote macro-AWR at a fixed horizon only if it has no new crash or artifact failure, its final CPU
+point estimate for stocks taken minus stocks lost per active minute is better than macro-BC, its
+paired H2H mean stock difference per configuration is positive, and more configurations favor
+macro-AWR than macro-BC. Report all intervals and ties. Mixed evidence is inconclusive and keeps
+macro-BC as the result for that horizon.
 
 A model that predicts four actions but executes only one is not a chunk policy. A model that uses a
 trajectory return as one weight for every decision is not this chunk-AWR experiment.
