@@ -200,6 +200,40 @@ def test_config_rejects_an_h2h_sha_without_a_reference_run() -> None:
         exp.validate_config(cfg, has_button_combo_counts=False)
 
 
+def test_h2h_protocol_gate_accepts_matching_decode_settings() -> None:
+    protocol = {
+        "L_ctx": 256,
+        "model_dtype": "torch.float16",
+        "eval_incremental_kv": False,
+        "decode_settings": {"temp": 1.0, "min_p": 0.0},
+    }
+
+    exp._require_matched_h2h_protocol(protocol, dict(protocol))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("L_ctx", 128),
+        ("model_dtype", "torch.float32"),
+        ("eval_incremental_kv", True),
+        ("decode_settings", {"temp": 0.9, "min_p": 0.0}),
+    ],
+)
+def test_h2h_protocol_gate_rejects_a_decode_mismatch(field: str, value: object) -> None:
+    challenger = {
+        "L_ctx": 256,
+        "model_dtype": "torch.float16",
+        "eval_incremental_kv": False,
+        "decode_settings": {"temp": 1.0, "min_p": 0.0},
+    }
+    reference = dict(challenger)
+    reference[field] = value
+
+    with pytest.raises(RuntimeError, match=field):
+        exp._require_matched_h2h_protocol(challenger, reference)
+
+
 def test_eval_parallelism_is_capped_by_config_and_sample_count() -> None:
     cfg = exp.TrainConfig(eval_max_parallel=32)
 

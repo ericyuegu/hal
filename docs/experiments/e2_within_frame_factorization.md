@@ -344,6 +344,9 @@ Implemented behavior:
   process RNG state.
 - Closed-loop sampling uses deterministic streams keyed by seed, stable slot, reset generation,
   and named group. Reordering groups or resetting one slot does not reassign another stream's draw.
+- Final H2H now requires equal context length, decode dtype, KV mode, temperatures, and sampling
+  filters. It fails before the sweep if either checkpoint differs. Execution horizon and head
+  offsets may differ because later chunk experiments change them on purpose.
 - E2-S has 7,786,110 parameters. E2-I has 7,787,902. The 1,792-parameter difference comes from
   removing each order's unused final-group embedding table.
 
@@ -359,12 +362,14 @@ Local evidence:
   slot in the sampler. It no longer advances a slot generation twice on one reset frame. Full
   recomputation did not have this bug.
 - Both E2 orders complete the real dev-MDS end-to-end training path and save `final.pt`.
-- Focused experiment suite: 81 passed in 8.50 seconds.
+- Focused experiment suite: 86 passed in 12.59 seconds.
 - Dataloader and compact-projection suites: 28 passed in 6.07 seconds.
 - The prefetch gate compares 32 constructed complete-batch hashes and 34 batches from a real compact
   MDS. It checks exact replay IDs, tensors, batch order, epoch statistics, RNG state, overlap,
   exhaustion, errors, and early close.
-- Full repository suite: 940 passed in 137.61 seconds.
+- Full repository suite: 945 passed in 136.37 seconds. The prior attempt had one unrelated Dolphin
+  round-trip divergence at frame 84. The isolated test passed on retry, followed by the clean full
+  run.
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 

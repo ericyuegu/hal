@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -2594,6 +2595,17 @@ def _fetch_h2h_reference(cfg: TrainConfig, run_dir: Path) -> Path:
     return ref_ckpt
 
 
+def _require_matched_h2h_protocol(self_protocol: Mapping[str, object], ref_protocol: Mapping[str, object]) -> None:
+    fields = ("L_ctx", "model_dtype", "eval_incremental_kv", "decode_settings")
+    mismatches = {
+        field: (self_protocol.get(field), ref_protocol.get(field))
+        for field in fields
+        if self_protocol.get(field) != ref_protocol.get(field)
+    }
+    if mismatches:
+        raise RuntimeError(f"h2h protocol mismatch (challenger, reference): {mismatches}")
+
+
 def _final_h2h(
     cfg: TrainConfig,
     model: GPT,
@@ -2618,11 +2630,6 @@ def _final_h2h(
         )
     )
     self_dtype = str(next(model.parameters()).dtype)
-    if ref_protocol["model_dtype"] != self_dtype:
-        raise RuntimeError(
-            f"h2h decode dtype mismatch: {cfg.final_h2h_self_label} uses {self_dtype}, "
-            f"but {cfg.final_h2h_reference_label} uses {ref_protocol['model_dtype']}"
-        )
     self_protocol = {
         "name": cfg.final_h2h_self_label,
         "experiment": str(Path(__file__)),
@@ -2635,6 +2642,7 @@ def _final_h2h(
         "exec_horizon": cfg.exec_horizon,
         "head_offsets": list(cfg.head_offsets),
     }
+    _require_matched_h2h_protocol(self_protocol, ref_protocol)
 
     def build_self(seed: int) -> RecedingHorizon:
         return make_policy(model, stats, cfg, decode_seed=seed)
