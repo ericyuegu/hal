@@ -384,6 +384,11 @@ policy v7 defaults, and one-at-a-time policy. Three offers qualified at effectiv
 $0.808, and $0.871 per hour. Commit this record, then repeat the audit and launch from the unchanged
 final SHA.
 
+The final unchanged-SHA audit passed at pushed commit `f520ea8`. No other Vast instance was active.
+E2-S launched on Vast instance `47144794` from that SHA. The selected RTX 4090 offer has 252 GB
+system RAM, 250 GB disk, DLPerf 125.6, reliability 0.997, and an effective price of $0.781 per
+hour. The instance became ready in 43 seconds and will destroy itself only after a successful run.
+
 The same argument list passes the experiment's Tyro parser and `validate_config`. It resolves to
 `factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
 steps.
