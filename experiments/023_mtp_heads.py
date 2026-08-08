@@ -1029,10 +1029,14 @@ def checkpoint_decode_parity(
         torch.cuda.synchronize(device)
     started_at = time.perf_counter()
     stream = _parity_feature_stream(model, cfg, slots=slots, frames=frames, seed=seed, device=device)
-    reset_frames = {
-        slot: tuple(point for point in (0, cfg.L_ctx // 2 + 3 * slot, cfg.L_ctx + 5 + 7 * slot) if point < frames)
-        for slot in range(slots)
-    }
+    reset_frames = {}
+    for slot in range(slots):
+        points = [0]
+        if slot >= 1:
+            points.append(cfg.L_ctx // 2 + 3 * slot)
+        if slot >= 2:
+            points.append(cfg.L_ctx + 5 + 7 * slot)
+        reset_frames[slot] = tuple(point for point in points if point < frames)
     segment_starts = torch.zeros(slots, dtype=torch.long, device=device)
     caches: list[list[tuple[Tensor, Tensor]] | None] = [None] * slots
     full_gen = torch.Generator(device=device).manual_seed(seed + 1)

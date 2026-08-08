@@ -714,7 +714,7 @@ def test_checkpoint_decode_parity_covers_rolls_and_mixed_resets() -> None:
     assert result["passed"]
     assert result["comparisons"] == 111
     assert result["sampled_action_mismatches"] == 0
-    assert result["reset_frames"] == {"0": [0, 8, 21], "1": [0, 11, 28], "2": [0, 14, 35]}
+    assert result["reset_frames"] == {"0": [0], "1": [0, 11], "2": [0, 14, 35]}
 
 
 def test_parity_run_downloads_checkpoint_and_uploads_evidence(tmp_path, monkeypatch) -> None:

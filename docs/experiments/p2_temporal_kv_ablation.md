@@ -52,11 +52,13 @@ Run this gate before any closed-loop sweep:
 Use exact equality for sampled action bytes. Set explicit numerical tolerances for logits and report
 the largest observed error. Stop P2 if sampled actions differ.
 
-The checkpoint gate uses three deterministic model-valid feature streams with different reset
-times. It runs for `2 * L_ctx + 17` frames, so every slot crosses repeated raw-window eviction. It
-compares every frame in FP32 with `atol=rtol=1e-4` and in FP16 with `atol=rtol=5e-3`. These values
-are fixed before the final P1 checkpoint exists. The existing ring tests separately prove that raw
-online observations build the same model inputs as training windows.
+The checkpoint gate uses three deterministic model-valid feature streams. Slot 0 has no mid-run
+reset, slot 1 resets once, and slot 2 resets twice. It runs for `2 * L_ctx + 17` frames. Slot 0
+therefore crosses more than `L_ctx` consecutive raw-window evictions, while the other slots test
+asynchronous cold starts and mixed cache lengths. It compares every frame in FP32 with
+`atol=rtol=1e-4` and in FP16 with `atol=rtol=5e-3`. These values were fixed before the final P1
+checkpoint existed. The existing ring tests separately prove that raw online observations build
+the same model inputs as training windows.
 
 ## Evaluation
 
