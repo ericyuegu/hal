@@ -131,6 +131,13 @@ effective price of $0.755 per hour. It became ready in 43 seconds. W&B run `q3ao
 state-MLP configuration. Startup verified the source SHA, `sm_89`, P0 checkpoint hash, parameter
 count, and concurrent validation-cache and training-prefetch start. No other experiment is active.
 
+The first routine check found E1 healthy at step 4,350. Warm steps were usually 0.27 to 0.30
+seconds, GPU memory use was 12.0 of 49.1 GiB, and no numerical failure appeared. Step-4,096
+validation NLL was 1.109 bits per frame. Its 32-boot CPU sweep finished in 166 seconds with no
+crash, 41 active matches, 0.639 stocks taken, and 1.534 stocks lost per active minute. The early
+control point is weak but does not decide the final gate. Its checkpoint, 44 replays, rows, metrics,
+result, and worker log uploaded to R2.
+
 The exploratory P1-old run reported this periodic snapshot at step 12,288:
 
 - Validation action NLL: 1.027 bits per frame.

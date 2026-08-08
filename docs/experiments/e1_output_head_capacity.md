@@ -427,5 +427,15 @@ Correctness evidence:
   the P0 reference SHA-256, 7,678,526 model parameters, and concurrent validation-cache and training
   prefetch startup. No other Vast experiment is active.
 
-GPU compilation, memory, throughput, training, validation, CPU evaluation, and H2H results are
-pending.
+The first routine check found a healthy run at step 4,350. Warm training steps are usually 0.27 to
+0.30 seconds. The largest observed step was 0.72 seconds; it was isolated rather than sustained.
+The GPU used 12.0 of 49.1 GiB and was 74% active during the check.
+
+At step 4,096, validation action NLL was 1.109 bits per frame and button log loss was 0.033. The
+periodic CPU sweep finished in 166 seconds. All 32 boots completed without a crash and produced 41
+active matches plus one zero-active tail. Stocks taken and lost per active minute were 0.639 and
+1.534. This early closed-loop point is weak and is not a final decision. R2 received the checkpoint,
+44 replays, rows, metrics, result, and worker log.
+
+Training continues. Final validation, CPU evaluation, H2H, artifact verification, cost, and the
+decision are pending.
