@@ -374,5 +374,9 @@ policy. Three offers qualified at effective prices of $0.781, $0.808, and $0.871
 audit used marked placeholders for the E1 run and hash. Repeat it with the verified values before
 renting a machine.
 
+The same argument list passes the experiment's Tyro parser and `validate_config`. It resolves to
+`factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
+steps.
+
 The GPU compile, memory, throughput, E1-reference hash, and final no-rent audit remain pending. Do
 not launch E2-S until E1's final checkpoint, CPU sweep, H2H record, and decision are verified.
