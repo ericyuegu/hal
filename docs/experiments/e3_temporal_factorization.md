@@ -62,7 +62,8 @@ Let `h` be the transformer state for the current raw context. The offset-1 head 
 It is the deployed policy and remains structurally identical to E2.
 
 For each later depth `k`, embed the complete previous action by concatenating the four selected E2
-group embeddings. Then compute:
+group embeddings. Reuse the selected E2 embedding tables; do not create a second temporal copy of
+the action vocabulary. Then compute:
 
 \[
 u_k=W_h\operatorname{RMSNorm}(z_{k-1})+W_aE(a_{o_{k-1}})+e_k,
@@ -84,14 +85,13 @@ Use hidden width `2 * d_model`. Initialize `W_2`, its bias, and `W_a` to zero. C
 parts before the temporal module. At initialization, every `z_k` equals `h`, so same-seed E2 and E3
 logits must match exactly at every offset.
 
-Give both arms the same action embedding tables and one learned null-action vector with the same
-width as a concatenated complete-action embedding. E3-C always selects the null vector. E3-T
-selects the target or sampled previous action. Do not remove unused tables from E3-C; that would
-break the parameter-matched control. E3-C performs the same embedding lookups, then replaces their
-result with the null vector before the temporal affine layer. This keeps input validation and the
-source-level path matched while preventing previous-action information from reaching the logits.
-The compiler may remove the discarded lookup, so verify actual timing instead of assuming equal
-compute.
+Both arms keep the selected E2 action embedding tables and add one learned null-action vector with
+the same width as a concatenated complete-action embedding. E3-C always selects the null vector.
+E3-T selects the target or sampled previous action. E3-C performs the same temporal embedding
+lookups, then replaces their result with the null vector before the temporal affine layer. This
+keeps input validation and the source-level path matched while preventing previous-action
+information from reaching the logits. The compiler may remove the discarded lookup, so verify
+actual timing instead of assuming equal compute.
 
 The offset-1 path must not call the temporal module. This avoids giving the deployed head an extra
 state-only capacity path. E3 can affect it only through the shared trunk gradients from better or

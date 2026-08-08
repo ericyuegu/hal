@@ -48,13 +48,20 @@ For state `s_t`, the deployed head predicts action `a_{t+1}`. Its return must st
 G_{t+1}=r_{t+1}+\gamma r_{t+2}+\gamma^2r_{t+3}+\cdots.
 \]
 
-Use the existing audited reward units:
+Use these declared reward units:
 
 - `+1` when the opponent loses a stock.
 - `-1` when ego loses a stock.
 - `+0.01` per point of damage dealt and `-0.01` per point taken.
 - `+0.5` or `-0.5` on the stock event that decides the game.
 - `gamma=0.99827`.
+
+The old 020 tests audit stock drops, percent resets, terminal-stock detection, full-replay returns,
+and the one-frame target shift. They do not validate this combined dose: 020 defaulted to stock-only
+reward, no terminal bonus, and `gamma=0.999`. Treat E5's settings as a new fixed treatment. Here,
+100 percentage points have the same immediate magnitude as one stock, the deciding stock is worth
+1.5 stocks, and the discount half-life is about 400 frames, or 6.7 seconds. Audit the combined
+return distribution before the value warm-up.
 
 Compute rewards and returns from the complete replay before window sampling. Then slice them with
 the same start, padding, ego relabeling, and valid-position mask as the action targets. Never compute
