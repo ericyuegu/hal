@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | Full run active through step 14,615; step 12,288 evidence verified | Continue to the final checkpoint and evaluations. |
+| P1-match | Attention package at matched data and action vocabulary | Training and final checkpoint complete; final CPU and H2H active | Verify both evaluation packages before P2. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -61,13 +61,17 @@ Every logged batch had 128 distinct replays and zero adjacent reuse. All numeric
 Median warm step time was 0.296 seconds, which projects full training to about 81 minutes. The
 verified gate checkpoint is in R2. The full matched-P1 run is approved.
 
-The active matched-P1 run is W&B `46zi7fgo` on Vast instance `47117879`. At the third audit it had
-reached step 14,615 with finite metrics and 128 distinct replays per batch. Median recent step time
-was 0.253 seconds and median loader wait was 0.102 seconds. The loader has one repeatable 9-second
-stall at each epoch boundary, which costs about 36 seconds over the run. The step-12,288 CPU
-evaluation completed all 32 boots without a crash. It reported 0.751 stocks taken and 1.470 lost per
-active minute. These point estimates remain slightly worse than P0 at the same step. The recovered
-step-12,288 result, metrics, and worker log have verified R2 hashes.
+The matched-P1 run is W&B `46zi7fgo` on Vast instance `47117879`. Training completed all 16,384
+batches with finite metrics and 128 distinct replays per batch. Final validation NLL at offsets 1,
+5, 9, and 13 was 1.011, 2.590, 3.297, and 3.761 bits per frame. The loader had one repeatable
+9-second stall at each epoch boundary, which cost about 36 seconds over the run. The verified
+56,698,807-byte final checkpoint has SHA-256
+`8e9b04c91aa76d1ba49a910c82f1328bc1b0dc3ce7dabf3e9018cb556d964148`; every floating model and
+optimizer tensor is finite. The final CPU and H2H evaluations are still active.
+
+The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
+taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
+same step. The recovered result, metrics, and worker log have verified R2 hashes.
 
 The exploratory P1-old run reported this periodic snapshot at step 12,288:
 

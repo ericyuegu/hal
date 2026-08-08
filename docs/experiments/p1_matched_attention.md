@@ -345,6 +345,19 @@ match rows, and the metrics. The recovered metrics, worker result, and worker lo
 values `cc6a1bc628725bc630b6d91f8e9ecdad`, `7c6ab44f763b2b9c4ea6958f47fdb070`, and
 `f0f467c8623afba02e08bdc46fa164bc`.
 
+Training completed all 16,384 batches. Every logged batch contained 128 distinct replays, and the
+only adjacent replay reuse remained the one replay at the first epoch boundary. All logged losses,
+objectives, gradients, and timing values were finite. Final validation NLL at offsets 1, 5, 9, and
+13 was 1.011, 2.590, 3.297, and 3.761 bits per frame.
+
+The final checkpoint is present in R2. It is 56,698,807 bytes and has SHA-256
+`8e9b04c91aa76d1ba49a910c82f1328bc1b0dc3ce7dabf3e9018cb556d964148`. It records step 16,384,
+W&B ID `46zi7fgo`, context 1,024, SWA window 128, action vocabulary 1,024, execution horizon 1,
+FP16 evaluation, and temporal KV off. All 60 floating model tensors and all 66 floating optimizer
+tensors are finite. At this audit, the final CPU and H2H directories had not uploaded yet, and the
+Vast instance and W&B run were still active. Do not launch P2 until both packages are complete and
+verified.
+
 ## Evaluation
 
 - Use the same deterministic 32 periodic and 96 final CPU character-pair boots as P0.
