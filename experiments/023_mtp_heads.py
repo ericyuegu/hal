@@ -1007,6 +1007,19 @@ def _rolling_parity_context(
     return Context(features=features, ctx_pad=L_ctx - lengths)
 
 
+def _parity_delta(lhs: Tensor, rhs: Tensor, *, atol: float, rtol: float) -> dict[str, object]:
+    lhs = lhs.float()
+    rhs = rhs.float()
+    delta = (lhs - rhs).abs()
+    scale = lhs.abs().clamp_min(atol)
+    return {
+        "finite": bool(torch.isfinite(lhs).all() and torch.isfinite(rhs).all()),
+        "max_abs": float(delta.max()),
+        "max_rel": float((delta / scale).max()),
+        "allclose": bool(torch.allclose(lhs, rhs, atol=atol, rtol=rtol)),
+    }
+
+
 @torch.no_grad()
 def checkpoint_decode_parity(
     model: GPT,
@@ -1017,6 +1030,7 @@ def checkpoint_decode_parity(
     seed: int,
     atol: float,
     rtol: float,
+    dense_reference: GPT | None = None,
 ) -> dict[str, object]:
     if frames <= cfg.L_ctx:
         raise ValueError(f"parity frames={frames} must exceed L_ctx={cfg.L_ctx}")
@@ -1024,6 +1038,8 @@ def checkpoint_decode_parity(
         raise ValueError(f"parity slots must be at least 2, got {slots}")
     _validate_incremental_decode(replace(cfg, eval_incremental_kv=True))
     model.eval()
+    if dense_reference is not None:
+        dense_reference.eval()
     device = next(model.parameters()).device
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -1050,6 +1066,12 @@ def checkpoint_decode_parity(
     logit_failures = {name: 0 for name in _GROUP_NAMES}
     probability_failures = {name: 0 for name in _GROUP_NAMES}
     sampled_action_mismatches = 0
+    diagnostic_frames = {
+        frame
+        for frame in (0, 1, cfg.attn_window - 1, cfg.attn_window, cfg.L_ctx - 1, cfg.L_ctx, frames - 1)
+        if 0 <= frame < frames
+    }
+    kernel_diagnostics: dict[str, object] = {}
     finite = True
     for frame in range(frames):
         resetting = [slot for slot, points in reset_frames.items() if frame in points]
@@ -1095,6 +1117,47 @@ def checkpoint_decode_parity(
         hidden_failures += int(not torch.allclose(full_hidden, incremental_hidden, atol=atol, rtol=rtol))
         full_logits = model.heads[model.primary_head_idx].logits(full_hidden)
         incremental_logits = model.heads[model.primary_head_idx].logits(incremental_hidden)
+        if dense_reference is not None and frame in diagnostic_frames:
+            dense_hidden = dense_reference(full_ctx.features, full_ctx.ctx_pad)[:, -1]
+            dense_logits = dense_reference.heads[dense_reference.primary_head_idx].logits(dense_hidden)
+            flex_dense_logits = {
+                name: _parity_delta(full_logits[name], dense_logits[name], atol=atol, rtol=rtol)
+                for name in _GROUP_NAMES
+            }
+            dense_kv_logits = {
+                name: _parity_delta(dense_logits[name], incremental_logits[name], atol=atol, rtol=rtol)
+                for name in _GROUP_NAMES
+            }
+            flex_dense_probs = {
+                name: _parity_delta(
+                    F.softmax(full_logits[name].float() / group_temps[group], dim=-1),
+                    F.softmax(dense_logits[name].float() / group_temps[group], dim=-1),
+                    atol=atol,
+                    rtol=rtol,
+                )
+                for group, name in enumerate(_GROUP_NAMES)
+            }
+            dense_kv_probs = {
+                name: _parity_delta(
+                    F.softmax(dense_logits[name].float() / group_temps[group], dim=-1),
+                    F.softmax(incremental_logits[name].float() / group_temps[group], dim=-1),
+                    atol=atol,
+                    rtol=rtol,
+                )
+                for group, name in enumerate(_GROUP_NAMES)
+            }
+            kernel_diagnostics[str(frame)] = {
+                "full_flex_vs_full_dense": {
+                    "hidden": _parity_delta(full_hidden, dense_hidden, atol=atol, rtol=rtol),
+                    "logits": flex_dense_logits,
+                    "probabilities": flex_dense_probs,
+                },
+                "full_dense_vs_incremental": {
+                    "hidden": _parity_delta(dense_hidden, incremental_hidden, atol=atol, rtol=rtol),
+                    "logits": dense_kv_logits,
+                    "probabilities": dense_kv_probs,
+                },
+            }
         for name in _GROUP_NAMES:
             lhs = full_logits[name].float()
             rhs = incremental_logits[name].float()
@@ -1152,6 +1215,7 @@ def checkpoint_decode_parity(
         "probability_max_abs": probability_max_abs,
         "probability_failure_frames": probability_failures,
         "sampled_action_mismatches": sampled_action_mismatches,
+        "kernel_diagnostics": kernel_diagnostics,
     }
 
 
@@ -2539,6 +2603,7 @@ def run_checkpoint_decode_parity(
     frames: int | None,
     slots: int,
     seed: int,
+    require_pass: bool = True,
 ) -> dict[str, object]:
     if DEVICE != "cuda":
         raise RuntimeError("checkpoint decode parity requires CUDA")
@@ -2551,9 +2616,14 @@ def run_checkpoint_decode_parity(
     results = {}
     for name, (atol, rtol) in tolerances.items():
         model = GPT(cfg).to(DEVICE)
+        dense_reference = GPT(cfg).to(DEVICE)
         _load_model_state(model, state["model"])
+        _load_model_state(dense_reference, state["model"])
+        dense_reference.trunk.prefer_flex = False
+        dense_reference.trunk.require_flex = False
         if name == "float16":
             _halve_for_decode(model)
+            _halve_for_decode(dense_reference)
         results[name] = checkpoint_decode_parity(
             model,
             cfg,
@@ -2562,14 +2632,15 @@ def run_checkpoint_decode_parity(
             seed=seed,
             atol=atol,
             rtol=rtol,
+            dense_reference=dense_reference,
         )
-        del model
+        del model, dense_reference
         torch.cuda.empty_cache()
     checkpoint_path = Path(ckpt_path)
     with checkpoint_path.open("rb") as checkpoint_file:
         checkpoint_sha256 = hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "checkpoint": str(checkpoint_path.resolve()),
         "checkpoint_bytes": checkpoint_path.stat().st_size,
         "checkpoint_sha256": checkpoint_sha256,
@@ -2585,6 +2656,7 @@ def run_checkpoint_decode_parity(
         },
         "results": results,
         "passed": all(bool(result["passed"]) for result in results.values()),
+        "require_pass": require_pass,
     }
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -2592,7 +2664,7 @@ def run_checkpoint_decode_parity(
     tmp.write_text(json.dumps(payload, sort_keys=True))
     tmp.replace(output)
     print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
-    if not payload["passed"]:
+    if require_pass and not payload["passed"]:
         raise RuntimeError(f"checkpoint decode parity failed; evidence written to {output}")
     return payload
 
@@ -2778,6 +2850,7 @@ class Args:
     parity_frames: int | None = None
     parity_slots: int = 3
     parity_seed: int = 0
+    parity_require_pass: bool = True
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
     # internal: one-shot async-eval worker (the trainer spawns this; not for manual use).
@@ -2835,6 +2908,7 @@ def main(args: Args) -> None:
                 frames=args.parity_frames,
                 slots=args.parity_slots,
                 seed=args.parity_seed,
+                require_pass=args.parity_require_pass,
             )
         finally:
             if uploader is not None:

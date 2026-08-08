@@ -2,6 +2,8 @@
 
 Updated: 2026-08-07
 
+Status: strict parity failed; diagnostic rerun pending
+
 ## Question
 
 How much closed-loop inference time does temporal KV caching save for the matched P1 model, and is
@@ -50,7 +52,9 @@ Run this gate before any closed-loop sweep:
 8. Require finite outputs and no stale state after a slot reset.
 
 Use exact equality for sampled action bytes. Set explicit numerical tolerances for logits and report
-the largest observed error. Stop P2 if sampled actions differ.
+the largest observed error. If sampled actions differ, reject KV equivalence and promotion. A
+report-only closed-loop sweep may still measure speed and behavioral drift after the failed record
+is saved.
 
 The checkpoint gate uses three deterministic model-valid feature streams. Slot 0 has no mid-run
 reset, slot 1 resets once, and slot 2 resets twice. It runs for `2 * L_ctx + 17` frames. Slot 0
@@ -62,8 +66,9 @@ the same model inputs as training windows.
 
 ## Evaluation
 
-Run P2-R first and P2-K second with 96 scheduled boots each. Instant restart may produce more than
-96 completed games. The retry code reruns failed boots only.
+Run P2-R first and P2-K second with 96 requested matchups and at most 32 concurrent boots in each
+arm. Instant restart may produce more than 96 completed games. The retry code reruns failed boots
+only.
 
 Write each arm to its own directory. Save:
 
@@ -212,3 +217,40 @@ The final no-rent check passed at pushed commit `335b7e7`. It preserved the same
 three qualifying RTX 4090 offers. P2 launched from that exact commit on Vast instance `47129969`.
 The selected host has 252 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective price of $0.824 per
 hour. Vast reported the instance ready at 18:01 PDT. This is the only active experiment job.
+
+## First parity result
+
+The strict parity gate failed before either closed-loop arm ran. This was a model result, not an
+infrastructure or finite-value failure. The artifact is at
+`manual_evals/p2-parity/decode_parity.json` under the P1 run. Its SHA-256 is
+`4bc514a79dde89c011c387ad19065bb05778c6613c5501cf734bf0a46278d424`.
+
+The test used the final P1 checkpoint, 2,065 frames, three slots, and 6,195 comparisons per dtype.
+All values were finite.
+
+- FP32: maximum hidden error `0.02022`, maximum group-logit error `0.08052`, 14 sampled-action
+  mismatches, and failure at the `1e-4` tolerance.
+- FP16: maximum hidden error `0.03174`, maximum group-logit error `0.09961`, 32 sampled-action
+  mismatches, and failure at the `5e-3` tolerance.
+
+The original command used `set -e`, so it stopped after uploading the failed gate. The recompute
+and KV closed-loop sweeps did not start. The instance stopped at 18:03 PDT. We verified the parity
+artifact in R2 and then destroyed instance `47129969`; its disk is not billing.
+
+The first result compares two kernels as well as two decode methods: full recomputation uses
+FlexAttention, while incremental decoding uses dense scaled-dot-product attention. A CPU check with
+the trained P1 trunk forced both paths through dense attention. Across a 256-frame sequence, the
+maximum hidden difference was `3.48e-5`, and the last-frame difference was `1.87e-5`. This is much
+smaller than the GPU result, but it still exceeds `1e-5`. It does not prove that the GPU error comes
+only from the kernel change.
+
+The next parity record will compare three paths at fixed frames:
+
+1. Full FlexAttention recomputation.
+2. Full dense-attention recomputation.
+3. Incremental dense-attention KV decoding.
+
+This separates Flex-versus-dense numerical drift from cache-specific drift before and after the raw
+window rolls. The record schema is version 2. Strict failure remains the default. A report-only flag
+allows the already-disqualified KV arm to finish its closed-loop speed and behavior measurements;
+it does not turn a failed parity result into a pass or permit KV promotion.

@@ -729,20 +729,29 @@ def test_checkpoint_decode_parity_covers_rolls_and_mixed_resets() -> None:
         require_flex=False,
     )
 
+    model = exp.GPT(cfg)
+    dense_reference = exp.GPT(cfg)
+    dense_reference.load_state_dict(model.state_dict())
+    dense_reference.trunk.prefer_flex = False
     result = exp.checkpoint_decode_parity(
-        exp.GPT(cfg),
+        model,
         cfg,
         frames=37,
         slots=3,
         seed=5,
         atol=1e-4,
         rtol=1e-4,
+        dense_reference=dense_reference,
     )
 
     assert result["passed"]
     assert result["comparisons"] == 111
     assert result["sampled_action_mismatches"] == 0
     assert result["reset_frames"] == {"0": [0], "1": [0, 11], "2": [0, 14, 35]}
+    assert set(result["kernel_diagnostics"]) == {"0", "1", "3", "4", "15", "16", "36"}
+    for frame in result["kernel_diagnostics"].values():
+        assert frame["full_flex_vs_full_dense"]["hidden"]["allclose"]
+        assert frame["full_dense_vs_incremental"]["hidden"]["allclose"]
 
 
 def test_parity_run_downloads_checkpoint_and_uploads_evidence(tmp_path, monkeypatch) -> None:
@@ -776,14 +785,22 @@ def test_parity_run_downloads_checkpoint_and_uploads_evidence(tmp_path, monkeypa
     monkeypatch.setattr(exp, "download_latest", fake_download)
     monkeypatch.setattr(exp, "run_checkpoint_decode_parity", fake_parity)
     monkeypatch.setattr(exp, "BackgroundUploader", Uploader)
-    exp.main(exp.Args(parity_run="p1-run", parity_frames=99, parity_slots=4, parity_seed=7))
+    exp.main(
+        exp.Args(
+            parity_run="p1-run",
+            parity_frames=99,
+            parity_slots=4,
+            parity_seed=7,
+            parity_require_pass=False,
+        )
+    )
 
     checkpoint, kwargs = calls["parity"]
     run_dir = (tmp_path / "runs" / "p1-run").resolve()
     output = run_dir / "manual_evals" / "p2-parity" / "decode_parity.json"
     assert calls["download"] == ("p1-run", Path("runs/p1-run/manual_checkpoints"), "final.pt")
     assert checkpoint == Path("runs/p1-run/manual_checkpoints/final.pt").as_posix()
-    assert kwargs == {"output_path": str(output), "frames": 99, "slots": 4, "seed": 7}
+    assert kwargs == {"output_path": str(output), "frames": 99, "slots": 4, "seed": 7, "require_pass": False}
     assert calls["upload"] == (output, "manual_evals/p2-parity/decode_parity.json")
     assert calls["uploader_run"] == "p1-run"
     assert calls["closed"] is True

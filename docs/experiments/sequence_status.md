@@ -10,7 +10,7 @@ Updated: 2026-08-07
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
 | P1-match | Attention package at matched data and action vocabulary | Complete; paired result does not promote P1; audited evidence verified | Keep P0 as E0. Use P1 only for the P2 systems ablation. |
-| P2 | Systems: temporal-KV decode efficiency | Active on Vast instance `47129969` at launch commit `335b7e7` | Pass parity, then compare 32-way KV and recomputation on the same P1 checkpoint. |
+| P2 | Systems: temporal-KV decode efficiency | Strict parity failed; kernel-isolation rerun pending | Keep recomputation. Measure the failed KV arm only as a systems ablation. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
@@ -26,8 +26,8 @@ Decode speed alone cannot select the policy package.
 
 | Experiment | Axis | Status | Required result before the next stage |
 | --- | --- | --- | --- |
-| E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Code and tests ready; reference pending attention choice | Finish the selected package, final 96-match CPU evaluation, checkpoint, and evidence upload. |
-| E1 | Head capacity: zero-init state-only residual MLP | Auditable plan ready; blocked on E0 | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
+| E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Complete; P0 is the fixed reference | Keep its checkpoint, data, objective, and evaluation protocol fixed. |
+| E1 | Head capacity: zero-init state-only residual MLP | Local implementation complete; GPU gate waits for P2 | Same-seed E0 equality, live gradients, final CPU evaluation, and H2H against E0. |
 | E2 | Within-frame conditional factorization and group order | Fresh two-arm plan ready; blocked on E1 | Beat the E1 capacity control in closed loop or give a clear diagnostic gain without a policy loss. |
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
@@ -67,13 +67,13 @@ batches with finite metrics and 128 distinct replays per batch. Final validation
 9-second stall at each epoch boundary, which cost about 36 seconds over the run. The verified
 56,698,807-byte final checkpoint has SHA-256
 `8e9b04c91aa76d1ba49a910c82f1328bc1b0dc3ce7dabf3e9018cb556d964148`; every floating model and
-optimizer tensor is finite. The final CPU evaluation is complete, and H2H remains active.
+optimizer tensor is finite. The final CPU and H2H evaluations are complete.
 
 The final P1 CPU sweep completed all 96 boots with no crash and produced 122 active games. Stocks
 taken and lost per active minute were 0.781 and 1.461. Its only saved protocol difference from the
 official P0 sweep is concurrency: P1 used 96 concurrent boots and P0 used 32. The tiny point gain is
-therefore not promotion evidence. P2 now pins both decode arms to 32 concurrent boots, so its
-recompute arm will provide the matched P1 rerun. The paired H2H sweep remains active.
+therefore not promotion evidence. P2 pins both decode arms to 32 concurrent boots, so its
+recompute arm will provide a matched systems comparison.
 
 The first P1 H2H orientation completed 64 of 64 games. Its audit found 45 budget-cut replays with a
 torn final frame, which made input-stat parsing fail. The files are recoverable by removing only
@@ -101,7 +101,13 @@ the parity, 32-way recompute, and 32-way KV order.
 
 The final exact-SHA check passed at `335b7e7`, and P2 launched on Vast instance `47129969`. The
 selected RTX 4090 host has 252 GB RAM, an 80 GB disk, DLPerf 125.6, and an effective price of $0.824
-per hour. The instance became ready at 18:01 PDT. No other experiment instance is active.
+per hour. The instance became ready at 18:01 PDT.
+
+The strict P2 parity gate failed with finite values. FP32 had 14 sampled-action mismatches in 6,195
+comparisons; FP16 had 32. The maximum group-logit errors were `0.08052` and `0.09961`. The command
+stopped before either closed-loop arm. The failed record is verified in R2 with SHA-256
+`4bc514a79dde89c011c387ad19065bb05778c6613c5501cf734bf0a46278d424`. Instance `47129969` was
+destroyed after verification. No experiment instance is active.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
@@ -127,20 +133,18 @@ is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
-1. Train P1-match for 16,384 steps on the accepted compact data path and action vocabulary.
-2. Evaluate P1-match with full recomputation.
-3. Pass the P1/P2 FP32 and FP16 parity gate on that checkpoint, including long rolling contexts,
-   mixed resets, logits, and fixed-seed sampled actions.
-4. Verify P2's CUDA-event timing counters during the GPU parity gate.
-5. Run the P2 temporal-KV evaluation and compare P0, P1-match recomputation, and P1-match KV.
-6. Choose the practical attention package, declare the E0 reference, and copy its exact fixed
-   configuration into the E1 launch audit.
+1. Rerun P2 parity with full Flex, full dense, and incremental dense measurements at fixed frames.
+2. Run the recompute and failed-KV closed-loop arms at 32-way concurrency. Treat KV as a diagnostic,
+   not a candidate for promotion.
+3. Finalize P2 evidence and destroy its instance.
+4. Run the E1 GPU compilation, memory, and throughput gate.
+5. Launch E1 only after that gate passes.
 
 ## Remaining run units
 
 Run these units one at a time. A named stage can contain more than one unit:
 
-1. P2 checkpoint parity, recompute evaluation, and KV evaluation in one evaluation-only job.
+1. P2 diagnostic parity, recompute evaluation, and failed-KV evaluation in one evaluation-only job.
 2. E1 state-only MLP screening run.
 3. E2-S stable-prefix factorization run.
 4. E2-I intent-first factorization run.
