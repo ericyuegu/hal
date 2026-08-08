@@ -2,11 +2,11 @@
 
 Status: blocked on E3 evidence
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 ## Question
 
-Can the selected temporal model produce a coherent dense four-frame action sequence without harming
+Can the action-conditioned temporal model produce a coherent dense four-frame action sequence without harming
 the one-frame closed-loop policy?
 
 E4 changes sparse offsets `(1,5,9,13)` to dense offsets `(1,2,3,4)`. It still executes only offset
@@ -46,6 +46,11 @@ p(a_{t+1:t+4}\mid s_t)
 
 Each frame action uses the selected E2 within-frame group factorization. Training uses the true
 previous frame action. Rollout-conditioned validation uses the model's previous sampled action.
+
+E4 must inherit E3-T. E3-C is a capacity control and does not condition on earlier actions, so it
+cannot be the parent of the stated joint chunk model. If E3-T fails its correctness or exposure
+gate, stop before E4. If it is correct but does not improve one-frame play, E4 may continue as a
+chunk-readiness experiment without promoting E3-T as the deployed one-frame policy.
 
 The offset-1 head remains the deployed policy and must not depend on future targets or temporal
 modules. The temporal chain begins only after offset 1.
@@ -88,7 +93,7 @@ Run focused tests, Ruff, type checking, Python compilation, and `git diff --chec
 
 ## Fixed configuration
 
-Copy the selected E3 configuration exactly. Change only:
+Copy the verified E3-T configuration exactly. Change only:
 
 - `head_offsets=(1,2,3,4)`
 - Run and H2H labels.
@@ -131,8 +136,8 @@ the live CPU evaluator still executes one.
 ## Closed-loop evaluation
 
 Request 32 periodic matchups and 96 final matchups, with at most 32 concurrent Dolphin boots and
-execution horizon 1. Run 64 mirrored H2H configurations against E3. Save all match rows and
-replays.
+execution horizon 1. Run 64 mirrored H2H configurations against sparse E3-T. Save all match rows
+and replays.
 
 Report stocks, damage, dead frames, terminal results, crashes, CPU rate differences, H2H stock
 difference, non-tied stock-lead rate, confidence intervals, and ties. A closed-loop regression is
