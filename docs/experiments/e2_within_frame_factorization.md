@@ -2,7 +2,7 @@
 
 Status: local implementation complete; GPU gate blocked on E1 evidence
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 ## Question
 
@@ -327,8 +327,9 @@ head is fixed.
 
 ## Results
 
-The implementation is complete on `exp/e2-within-frame-factorization`. It changes only
-`experiments/023_mtp_heads.py`, its focused test file, and experiment records.
+The implementation is complete on `exp/e2-within-frame-factorization`. It changes
+`experiments/023_mtp_heads.py`, its focused test file, the shared replay loader, loader tests, and
+experiment records.
 
 Implemented behavior:
 
