@@ -265,3 +265,10 @@ with 96 requested matchups, at most 32 concurrent boots, seed 0, and the origina
 4090 offers qualified. The best had 251 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective price
 of $0.714 per hour. No instance was rented. Commit this record, repeat the exact-SHA check, and then
 launch without changing the payload.
+
+The final no-rent check passed at pushed commit `4bc0f1e`. It preserved the schema-2 output path,
+report-only flag, command order, P1 checkpoint and W&B IDs, seeds, matchup counts, and 32-boot
+limit. Four RTX 4090 offers qualified. P2 then launched from that exact commit on Vast instance
+`47132921`. The selected host has 251 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective price of
+$0.714 per hour. The image pull retried for about 13 minutes. Vast reported the instance ready at
+18:56:56 PDT, below the 30-minute startup warning. This is the only active experiment job.

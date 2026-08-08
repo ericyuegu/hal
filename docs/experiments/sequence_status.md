@@ -10,7 +10,7 @@ Updated: 2026-08-07
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
 | P1-match | Attention package at matched data and action vocabulary | Complete; paired result does not promote P1; audited evidence verified | Keep P0 as E0. Use P1 only for the P2 systems ablation. |
-| P2 | Systems: temporal-KV decode efficiency | Strict parity failed; kernel-isolation rerun pending | Keep recomputation. Measure the failed KV arm only as a systems ablation. |
+| P2 | Systems: temporal-KV decode efficiency | Diagnostic rerun active on instance `47132921` | Keep recomputation. Measure the failed KV arm only as a systems ablation. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
@@ -107,7 +107,12 @@ The strict P2 parity gate failed with finite values. FP32 had 14 sampled-action 
 comparisons; FP16 had 32. The maximum group-logit errors were `0.08052` and `0.09961`. The command
 stopped before either closed-loop arm. The failed record is verified in R2 with SHA-256
 `4bc514a79dde89c011c387ad19065bb05778c6613c5501cf734bf0a46278d424`. Instance `47129969` was
-destroyed after verification. No experiment instance is active.
+destroyed after verification.
+
+The P2 diagnostic rerun launched from exact commit `4bc0f1e` on Vast instance `47132921`. Its
+RTX 4090 host has 251 GB RAM, an 80 GB disk, DLPerf 125.6, and an effective price of $0.714 per
+hour. It became ready at 18:56:56 PDT after a 13-minute image pull. No other experiment instance is
+active.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
