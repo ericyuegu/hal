@@ -230,12 +230,13 @@ Q value, V value, advantage, and ensemble disagreement. A high likelihood under 
 alone does not prove data support. Separate in-support and low-support policy samples. Do not use
 their Q values to justify open-loop execution.
 
-For each horizon, define critic disagreement as the population standard deviation of Q across the
-three critic seeds. Set its threshold to the 95th percentile on held-out logged chunks. Save this
-threshold before evaluating policy-sampled chunks. Behavior likelihood and critic disagreement
-answer different questions. Low policy likelihood does not make an observed logged chunk
-counterfactual. E7 may use a logged chunk's advantage when critic disagreement stays inside the
-declared held-out range.
+For each horizon and seed, keep its trained Q paired with the V that supplied its target. Define
+`A_i = Q_i - V_i`. Measure both Q disagreement and advantage disagreement as the population
+standard deviation across the three seeds. Set each threshold to its 95th percentile on held-out
+logged chunks. Save both thresholds before evaluating policy-sampled chunks. Behavior likelihood
+and critic disagreement answer different questions. Low policy likelihood does not make an
+observed logged chunk counterfactual. E7 may use a logged chunk's advantage only when both
+disagreements stay inside their declared held-out ranges.
 
 ## Gate
 
@@ -255,7 +256,7 @@ E6 passes only if:
   temporal shuffling, but do not gate on it because a two-frame swap can be close to symmetric.
 - No more than 1% of in-support single-group perturbations produce a Q value outside the held-out
   target range expanded by one target interquartile range on each side.
-- At most 10% of in-support policy chunks exceed the logged-chunk 95th-percentile disagreement
+- At most 10% of in-support policy chunks exceed either logged-chunk 95th-percentile disagreement
   threshold.
 - Advantages and proposed weights are finite. Both frame-level and replay-level normalized ESS
   ratios are at least 0.2, and no more than 20% of raw proposed weights hit their cap.

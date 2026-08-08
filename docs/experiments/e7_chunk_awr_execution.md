@@ -53,11 +53,16 @@ schedule after seeing E7 results.
 
 ## Actor objective
 
-For logged dense chunk `a_{t+1:t+H}`, use the frozen E6 probes:
+For logged dense chunk `a_{t+1:t+H}`, keep each frozen E6 Q paired with the V from the same critic
+seed:
 
 \[
-A_H(s_t,\mathbf a_t^H)=Q_H(s_t,\mathbf a_t^H)-V(s_t).
+A_{H,i}(s_t,\mathbf a_t^H)=Q_{H,i}(s_t,\mathbf a_t^H)-V_i(s_t),
+\qquad
+\bar A_H=\frac{1}{3}\sum_{i=1}^{3} A_{H,i}.
 \]
+
+Use the mean advantage in the actor weight. Do not mix a Q from one seed with a V from another seed.
 
 Compute a detached, clipped exponential weight with the same finite implementation as E5. Choose
 `beta_H` from the frozen E6 validation audit before E7. Test `beta` values
@@ -75,11 +80,11 @@ Require `grad_accum_steps=1` in the first H2 and H4 arms so normalization covers
 batch. Report ESS over valid chunks and over replay-window mean weights. Require both ratios to pass
 the E6 threshold; chunk rows within one replay window are not independent.
 
-Apply the E6 critic-disagreement rule before normalization. If a logged chunk exceeds the declared
-held-out disagreement threshold, ignore its Q advantage and set its raw weight to one. Keep its
+Apply the E6 disagreement rules before normalization. If a logged chunk exceeds either its Q or
+advantage disagreement threshold, ignore its advantage and set its raw weight to one. Keep its
 macro-BC loss. Do not drop the row, because that would change the behavior-data distribution. Low
 behavior-policy likelihood alone is not a reason to discard an observed chunk. Log likelihood,
-disagreement, the fallback fraction, and effective sample size before and after the fallback.
+both disagreements, the fallback fraction, and effective sample size before and after the fallback.
 
 The joint chunk NLL is:
 
@@ -111,8 +116,10 @@ actions can execute, do not train that row as an H-step macro-action. Macro-BC a
 same mask. An interruption on the Hth transition remains valid. Auxiliary offsets outside the H-step
 macro-action keep their ordinary BC masks.
 
-Freeze the complete E6 critic package, including its E4 state encoder, Q heads, V head, action
-encoder, and buffers. Recompute critic state features from the raw context with that frozen encoder.
+Freeze the complete three-seed E6 critic package, including its E4 state encoder, Q heads, V heads,
+action encoders, and buffers. The three source encoders must have identical state hashes. Recompute
+critic state features once from the raw context with one verified frozen encoder, then feed the same
+features to all three Q/V pairs.
 Do not feed the fine-tuning actor's changing hidden state into Q or V. The actor cannot change the
 critic or backpropagate through the weight. Reject a checkpoint whose horizon, reward settings,
 action factorization, or source actor does not match.
@@ -163,8 +170,9 @@ discard the queued chunk immediately. Never execute actions from the previous ga
    Change the actor trunk while holding raw input fixed and assert critic features, Q, V, and weights
    remain exactly unchanged.
 8. Reject critic and actor checkpoint identity or horizon mismatches.
-9. Assert a high-disagreement logged chunk receives raw weight one and remains in the macro-BC loss.
-   Assert low behavior likelihood alone does not trigger the fallback.
+9. Compute three hand-written Q/V pairs and check the exact paired mean advantage. Assert a logged
+   chunk with high Q disagreement or high advantage disagreement receives raw weight one and
+   remains in the macro-BC loss. Assert low behavior likelihood alone does not trigger the fallback.
 10. Assert disagreement gating happens before effective-batch weight normalization.
     Check chunk-level and replay-window ESS by hand.
     Check that all-large-negative advantages still produce finite mean-one weights.
@@ -179,6 +187,8 @@ discard the queued chunk immediately. Never execute actions from the previous ga
 18. Run small macro-BC and macro-AWR jobs with finite losses, gradients, weights, and parameters.
 19. Reject macro-AWR with `grad_accum_steps != 1` in the first arms.
 20. Assert every frozen critic parameter and buffer remains byte-identical through training.
+    Assert the three source-encoder hashes match and only one encoder forward is used per actor
+    batch.
 21. Assert a control interruption before H removes the macro-action row in both macro-BC and
     macro-AWR, while an interruption on the Hth transition keeps it.
 22. Test the fixed beta grid and selection rule, including the exact ESS and clip boundaries and
