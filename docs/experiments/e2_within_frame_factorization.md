@@ -368,6 +368,11 @@ Local evidence:
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 
-The GPU compile, memory, throughput, E1-reference hash, launch command, and no-rent audit remain
-pending. Do not launch E2-S until E1's final checkpoint, CPU sweep, H2H record, and decision are
-verified.
+A provisional no-rent audit passed at pushed commit `1bdd2db`. It preserved the 250 GB disk,
+3.5-hour estimate, RTX 4090 compute-capability limit, complete E2-S command, and one-at-a-time
+policy. Three offers qualified at effective prices of $0.781, $0.808, and $0.871 per hour. This
+audit used marked placeholders for the E1 run and hash. Repeat it with the verified values before
+renting a machine.
+
+The GPU compile, memory, throughput, E1-reference hash, and final no-rent audit remain pending. Do
+not launch E2-S until E1's final checkpoint, CPU sweep, H2H record, and decision are verified.
