@@ -77,10 +77,11 @@ disagreement fallback, choose the smallest beta for which both normalized ESS ra
 Select H2 and H4 separately. Verify the E6 table hash before either actor run; do not recompute the
 thresholds or change the beta grid in E7.
 
-Normalize valid weights to mean one within the effective batch with the same FP32 `logsumexp`
-calculation. Do not divide underflowed raw exponentials by their mean. Report raw and normalized
-statistics. The cap applies before normalization; the final normalized maximum can exceed 5. Do
-not clip it again.
+Normalize return-eligible weights to mean one within the effective batch with the same FP32
+`logsumexp` calculation. Give truncated-replay rows weight 1 after this normalization. They remain
+in macro-BC but do not enter advantage, disagreement, clip, or ESS statistics. Do not divide
+underflowed raw exponentials by their mean. Report raw and normalized statistics. The cap applies
+before normalization; the final normalized maximum can exceed 5. Do not clip it again.
 
 Require `grad_accum_steps=1` in the first H2 and H4 arms so normalization covers the whole optimizer
 batch. Report ESS over valid chunks and over replay-window mean weights. Require both ratios to pass
@@ -203,6 +204,8 @@ and the next call replans normally. This is the same boundary used by E6's logge
 10. Assert disagreement gating happens before effective-batch weight normalization.
     Check chunk-level and replay-window ESS by hand.
     Check that all-large-negative advantages still produce finite mean-one weights.
+    Assert truncated-replay chunks keep unit weight and macro-BC loss but enter no advantage or ESS
+    statistic.
 11. Assert teacher forcing uses logged earlier actions and free-running decode uses sampled earlier
    actions.
 12. Assert an H-frame queue causes one policy inference followed by exactly H controller outputs.
