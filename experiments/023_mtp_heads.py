@@ -1053,6 +1053,8 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
     for name, value in positive_ints.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    if not isinstance(cfg.train_batch_prefetch, bool):
+        raise ValueError(f"train_batch_prefetch must be a boolean, got {cfg.train_batch_prefetch!r}")
     if cfg.batch_size % cfg.grad_accum_steps:
         raise ValueError(
             f"batch_size={cfg.batch_size} is the EFFECTIVE batch and must divide into "

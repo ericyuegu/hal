@@ -44,7 +44,7 @@ E1 also exposed a systems limit. Median loader wait was 0.136 seconds in a 0.281
 while the host was mostly idle and showed no disk-read wait. The E2 plan now includes a one-batch
 background-prefetch gate with exact data-order and RNG parity. It does not change the replay
 reservoir or scientific sample stream. The local gate passes, including 32 constructed batch hashes,
-34 real compact-MDS batches, controlled overlap, errors, early close, and the complete 939-test
+34 real compact-MDS batches, controlled overlap, errors, early close, and the complete 940-test
 repository suite. E2's first GPU steps still need to measure the live wait reduction.
 
 ## Current evidence

@@ -108,6 +108,14 @@ def test_compact_config_requires_cooldown_capacity() -> None:
         exp.validate_config(cfg, has_button_combo_counts=True)
 
 
+def test_config_rejects_a_non_boolean_train_batch_prefetch() -> None:
+    cfg = exp.TrainConfig()
+    cfg.train_batch_prefetch = 1  # type: ignore[invalid-assignment]
+
+    with pytest.raises(ValueError, match="train_batch_prefetch must be a boolean"):
+        exp.validate_config(cfg, has_button_combo_counts=True)
+
+
 def test_old_checkpoint_config_keeps_512_action_rows() -> None:
     saved = asdict(exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16))
     saved.pop("action_vocab")

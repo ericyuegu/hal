@@ -358,12 +358,12 @@ Local evidence:
   slot in the sampler. It no longer advances a slot generation twice on one reset frame. Full
   recomputation did not have this bug.
 - Both E2 orders complete the real dev-MDS end-to-end training path and save `final.pt`.
-- Focused experiment suite: 80 passed in 8.28 seconds.
+- Focused experiment suite: 81 passed in 8.50 seconds.
 - Dataloader and compact-projection suites: 28 passed in 6.07 seconds.
 - The prefetch gate compares 32 constructed complete-batch hashes and 34 batches from a real compact
   MDS. It checks exact replay IDs, tensors, batch order, epoch statistics, RNG state, overlap,
   exhaustion, errors, and early close.
-- Full repository suite: 939 passed in 135.78 seconds.
+- Full repository suite: 940 passed in 137.61 seconds.
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 
