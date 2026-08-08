@@ -89,6 +89,17 @@ def test_matched_p1_geometry_keeps_tokens_and_attention_work_close() -> None:
     assert not p1.eval_incremental_kv
 
 
+def test_gradient_diagnostics_select_only_the_shared_representation() -> None:
+    model = exp.GPT(exp.TrainConfig(d_model=32, n_layers=2, n_heads=2))
+    selected = {id(parameter) for parameter in exp._representation_parameters(model)}
+    names = {name for name, parameter in model.named_parameters() if id(parameter) in selected}
+    expected_prefixes = ("cat_embeds.", "char_emb.", "stage_emb.", "ctx_proj.", "trunk.")
+
+    assert names
+    assert names == {name for name, _ in model.named_parameters() if name.startswith(expected_prefixes)}
+    assert not any(name.startswith("heads.") for name in names)
+
+
 def test_compact_config_requires_cooldown_capacity() -> None:
     cfg = exp.TrainConfig(batch_size=8, reservoir_capacity=8)
     with pytest.raises(ValueError, match="twice the micro-batch"):

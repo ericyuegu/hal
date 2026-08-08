@@ -1483,6 +1483,14 @@ def gradient_diagnostics(model: GPT, batch: TrainBatch, cfg: TrainConfig) -> dic
         return _gradient_diagnostics_eval(model, batch, cfg)
 
 
+def _representation_parameters(model: GPT) -> tuple[nn.Parameter, ...]:
+    modules = (model.cat_embeds, model.char_emb, model.stage_emb, model.ctx_proj, model.trunk)
+    parameters = tuple(parameter for module in modules for parameter in module.parameters())
+    if len({id(parameter) for parameter in parameters}) != len(parameters):
+        raise RuntimeError("shared representation contains a parameter more than once")
+    return parameters
+
+
 def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) -> dict[str, float]:
     diagnostic_batch = _slice_batch(batch, min(cfg.gradient_diagnostic_batch_size, batch.context.batch))
     parts = action_loss(model, diagnostic_batch)
@@ -1490,15 +1498,14 @@ def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) 
         offset: _offset_objective(parts.nll, parts.transition, offset, cfg.transition_loss_weight)
         for offset in model.head_offsets
     }
-    # Exclude output heads. This measures what each horizon asks of the shared trunk.
-    trunk = tuple(parameter for name, parameter in model.named_parameters() if not name.startswith("heads."))
+    representation = _representation_parameters(model)
     gradients: dict[int, tuple[Tensor, ...]] = {}
     for i, offset in enumerate(model.head_offsets):
         gradients[offset] = tuple(
             gradient.detach()
             for gradient in torch.autograd.grad(
                 losses[offset],
-                trunk,
+                representation,
                 retain_graph=i + 1 < len(model.head_offsets),
             )
         )
@@ -1518,7 +1525,7 @@ def _gradient_diagnostics_eval(model: GPT, batch: TrainBatch, cfg: TrainConfig) 
             cfg.aux_loss_weight
             * sum((gradients[offset][pi] for offset in aux_offsets), start=torch.zeros_like(p))
             / len(aux_offsets)
-            for pi, p in enumerate(trunk)
+            for pi, p in enumerate(representation)
         )
         aux_norm = _gradient_dot(weighted_aux, weighted_aux).sqrt()
         primary = gradients[1]

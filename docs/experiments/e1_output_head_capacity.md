@@ -79,6 +79,16 @@ It is not a separate logit bypass.
 All new head parameters use the existing output-head AdamW path. Do not route them into the trunk's
 Muon group.
 
+The current optimizer identifies no-decay head parameters only through `model.heads`. If the shared
+state projection or residual modules live beside that container, extend the explicit head-parameter
+set to include them. Do not rely on a name prefix. Test both values of `head_weight_decay` so an
+adapter cannot silently receive the wrong decay rule.
+
+Gradient diagnostics must select the shared input encoder and transformer explicitly. They must not
+define the representation as “every parameter outside `model.heads`,” because that would silently
+include the new adapter and later value or critic modules. The shared selector now names
+`cat_embeds`, `char_emb`, `stage_emb`, `ctx_proj`, and `trunk` directly.
+
 ## Parameter matching to E2
 
 Use the same `W_h`, hidden width, and group-and-offset `W_2` projections in E1 and E2. The ratio is
@@ -153,6 +163,7 @@ replay and a 4,096-replay reservoir. Keep 131,072 frames per optimizer step and 
 7. Assert that E1 logits change after its residual branch learns.
 8. Assert exact E0/E1 objective equality when given equal logits and targets.
 9. Assert all new parameters appear once in the AdamW partition and never in the Muon partition.
+   Check that `head_weight_decay=False` also places every new head weight in the no-decay group.
 10. Load an E0 checkpoint after the new mode field exists. It must resolve to `linear` and reproduce
     the E0 policy.
 11. Save and reload E1. Assert mode, MLP ratio, logits, and decode settings round-trip.
