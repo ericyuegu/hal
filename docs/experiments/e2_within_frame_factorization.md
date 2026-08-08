@@ -388,6 +388,11 @@ The final unchanged-SHA audit passed at pushed commit `f520ea8`. No other Vast i
 E2-S launched on Vast instance `47144794` from that SHA. The selected RTX 4090 offer has 252 GB
 system RAM, 250 GB disk, DLPerf 125.6, reliability 0.997, and an effective price of $0.781 per
 hour. The instance became ready in 43 seconds and will destroy itself only after a successful run.
+W&B run `43ppjdxc` is
+`260808-045924_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-factored-mlp-r2-c32-c.triggers.buttons.main_ranked-anon-1_e2-stable`.
+Startup verified `sm_89`, the 250 GB compile cache, compact policy v7 stats, the exact E1 checkpoint
+SHA-256, 7.79 million model parameters, and concurrent validation-cache and training-prefetch
+startup. Compilation, first-step timing, and peak GPU memory are pending.
 
 The same argument list passes the experiment's Tyro parser and `validate_config`. It resolves to
 `factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
