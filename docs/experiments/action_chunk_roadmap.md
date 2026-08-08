@@ -127,6 +127,9 @@ but an early stick or button error can corrupt the rest of the chain.
 Do not select an order from teacher-forced NLL alone. Also measure free-running ancestral accuracy and
 closed-loop play.
 
+Use independent live random streams for each vector slot and named action group. Chain order and a
+reset in one slot must not reassign another slot's random draws.
+
 ## E3: temporally factorized sparse MTP
 
 Replace the independent future heads with sequential MTP modules over `(1, 5, 9, 13)`.
@@ -136,8 +139,9 @@ decode, it reads its own previous sample. Reuse the action embeddings, but keep 
 classifiers in the first arm. Start with a shared temporal module across depths unless profiling
 shows a clear reason not to.
 
-Run a parameter- and compute-matched null-action control before the action-conditioned arm. This
-separates the added recurrent state/depth capacity from information in the previous action.
+Run a parameter-matched null-action control before the action-conditioned arm. This separates the
+added recurrent state and depth capacity from information in the previous action. Measure both arm
+times; compiler behavior means source-level parity does not prove compute parity.
 
 Keep execution at one frame. Keep AWR off. This experiment asks whether a coherent sparse future
 model improves representation and primary control.
@@ -167,8 +171,7 @@ Apply advantage weights only to the deployed offset-1 action:
 L=w_t L_1+\lambda_{aux}\,\mathrm{mean}(L_{aux})+\lambda_V L_V.
 \]
 
-Rank weights may affect all terms because they change the data mixture. Advantage weights do not
-apply to auxiliary marginals.
+Advantage weights do not apply to auxiliary marginals.
 
 Run this on the best E2-style policy first. Then test the temporally factorized model if E3 earned a
 clear continuation.
@@ -210,8 +213,10 @@ Required checks:
 - Sensitivity to replacing one action in a chunk.
 - Value estimates for policy samples compared with logged chunks.
 - Stability across seeds.
+- Improvement over an exact-shape state-only control for each horizon.
+- A frozen beta and effective-sample-size table for E7.
 
-This can be a short validation stage, but it cannot be skipped.
+Run three critic seeds. This validation stage cannot be skipped.
 
 ## E7: chunk AWR and chunk execution
 
@@ -235,8 +240,9 @@ The frozen chunk critic must use its own frozen E4 state encoder. It must not re
 actor's changing hidden state.
 
 Train Q and the macro actor only on chunks that can execute all H actions under the evaluator's
-queue-interruption rule. A stock loss for either player or a loss of control before H ends
-invalidates that macro-action.
+queue-interruption rule. A stock change, frame reset, slot end, or rejected boot before action H
+invalidates that row. An event on action H remains valid. Ordinary hitstun, shield stun, or an
+attack animation does not interrupt controller inputs.
 
 Receding-horizon execution with a plan longer than the executed prefix is a later experiment. It
 requires either a critic for the executed prefix or a learned dynamics model for the unexecuted tail.
@@ -266,10 +272,10 @@ to interpret and gives a cleaner semi-Markov baseline.
 
 ## Decision gates
 
-- Continue from E1 to E2 only if the conditioning result beats the capacity control in closed loop or
-  gives a clear diagnostic gain without a closed-loop loss.
-- Continue from E3 to dense chunks only if free-running temporal predictions are coherent enough to
-  execute.
+- Continue from E2 to E3 only if within-frame conditioning beats the E1 capacity control in closed
+  loop or gives a clear diagnostic gain without a closed-loop loss.
+- E4 may follow a negative E3 result if the temporal implementation is correct. Do not execute
+  chunks unless their free-running predictions pass the later chunk-readiness gate.
 - Let E4 remain a negative representation result if closed-loop play is worse. Its chunk can still be
   used for E6 and E7.
 - Do not optimize the actor against the chunk critic until E6 passes its perturbation and calibration
