@@ -229,9 +229,6 @@ Fill the reference run and hash only from the verified final checkpoint. Then ru
 from the pushed, clean branch. E2-S uses:
 
 ```bash
-e1_run=<verified E1 run name>
-e1_sha=<verified E1 final.pt SHA-256>
-
 uv run scripts/launch_vast.py \
   --max-price 1.1 --disk 250 --min-vram 24 --min-ram 200 \
   --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
@@ -246,8 +243,8 @@ uv run scripts/launch_vast.py \
     --cfg.train-batch-prefetch \
     --cfg.require-flex \
     --cfg.eval-max-parallel 32 \
-    --cfg.final-h2h-reference-run "$e1_run" \
-    --cfg.final-h2h-reference-sha256 "$e1_sha" \
+    --cfg.final-h2h-reference-run 260808-023741_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-state-mlp-r2_ranked-anon-1_e1-state-mlp \
+    --cfg.final-h2h-reference-sha256 c175aa53f1d0f4ff80157b26a51c67cf55c4577ded656b60b97d12e10d8a560f \
     --cfg.final-h2h-reference-experiment experiments/023_mtp_heads.py \
     --cfg.final-h2h-reference-label 023-e1-state-mlp \
     --cfg.final-h2h-self-label 023-e2-stable \
