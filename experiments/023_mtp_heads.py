@@ -221,12 +221,9 @@ class TrainConfig:
     # If an eval is still running at the next boundary, the trainer waits up to this bound and
     # then kills the worker.
     eval_timeout_seconds: float = 2700.0
-    # Final in-process mirrored h2h vs a reference run. The cloud box can self-destruct after
-    # training, so the sweep runs inside train() and its records/replays upload before exit.
-    # None disables the sweep.
-    # The reference is the BC arm of THIS experiment: the geometry moved, so no older run is a
-    # valid control.
+    # Run the final mirrored H2H before the cloud instance exits. None disables it.
     final_h2h_reference_run: str | None = None
+    final_h2h_reference_sha256: str | None = None
     final_h2h_reference_experiment: str = "experiments/023_mtp_heads.py"
     final_h2h_reference_label: str = "023-e0"
     final_h2h_self_label: str = "023-challenger"
@@ -836,9 +833,16 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
             raise ValueError(f"final_h2h_n_configs must be >= 1, got {cfg.final_h2h_n_configs}")
         if cfg.final_h2h_self_label == cfg.final_h2h_reference_label:
             raise ValueError(f"h2h labels must differ, got {cfg.final_h2h_self_label!r} twice")
+        expected_sha = cfg.final_h2h_reference_sha256
+        if expected_sha is not None and (
+            len(expected_sha) != 64 or any(character not in "0123456789abcdef" for character in expected_sha.lower())
+        ):
+            raise ValueError("final_h2h_reference_sha256 must be a 64-character hexadecimal digest or None")
         exp = cfg.final_h2h_reference_experiment
         if exp.endswith(".py") and not Path(exp).exists():
             raise ValueError(f"final_h2h_reference_experiment does not exist: {exp}")
+    elif cfg.final_h2h_reference_sha256 is not None:
+        raise ValueError("final_h2h_reference_sha256 requires final_h2h_reference_run")
     if cfg.d_model % cfg.n_heads != 0:
         raise ValueError(f"d_model={cfg.d_model} must be divisible by n_heads={cfg.n_heads}")
     if cfg.head_mode not in ("linear", "state_mlp"):
@@ -2110,6 +2114,12 @@ def _fetch_h2h_reference(cfg: TrainConfig, run_dir: Path) -> Path:
     ref_ckpt = download_latest(cfg.final_h2h_reference_run, run_dir / "h2h_reference", name="final.pt")
     if ref_ckpt is None:
         raise RuntimeError(f"no final.pt on R2 for reference run {cfg.final_h2h_reference_run!r}")
+    with ref_ckpt.open("rb") as checkpoint_file:
+        actual_sha = hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
+    expected_sha = cfg.final_h2h_reference_sha256
+    if expected_sha is not None and actual_sha != expected_sha.lower():
+        raise RuntimeError(f"reference checkpoint SHA-256 mismatch: expected {expected_sha.lower()}, got {actual_sha}")
+    print(f"[h2h] reference checkpoint SHA-256: {actual_sha}", flush=True)
     return ref_ckpt
 
 

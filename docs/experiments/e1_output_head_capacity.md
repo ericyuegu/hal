@@ -193,6 +193,44 @@ Use exactly 32 concurrent Dolphin boots for periodic and final CPU sweeps. The s
 `eval_max_parallel=32` field controls the background, final, and H2H evaluators. P0 used 32 boots.
 Host CPU count cannot change this protocol.
 
+## Planned launch
+
+The launch command is:
+
+```bash
+p0_run=260807-164825_023_mtp_heads_gpt-d256-L8-h4-Lc256-a1024-full-recompute-o1.5.9.13-linear_ranked-anon-1_e0-normalized-aux-bc
+p0_sha=5d12d010fa3acd1ec07bd86a8e85d2cbb84c584a77b9b79e90dc6fcf03c32e4b
+
+uv run scripts/launch_vast.py \
+  --max-price 1.1 --disk 250 --min-vram 24 --min-ram 200 \
+  --min-dlperf 120 --min-compute-cap 890 --max-compute-cap 890 \
+  --data-gb 13.34 --upload-gb 2 --run-hours 3.5 -- \
+  uv run experiments/023_mtp_heads.py \
+    --cfg.head-mode state_mlp \
+    --cfg.action-mlp-ratio 2 \
+    --cfg.require-flex \
+    --cfg.eval-max-parallel 32 \
+    --cfg.final-h2h-reference-run "$p0_run" \
+    --cfg.final-h2h-reference-sha256 "$p0_sha" \
+    --cfg.final-h2h-reference-experiment experiments/023_mtp_heads.py \
+    --cfg.final-h2h-reference-label 023-e0 \
+    --cfg.final-h2h-self-label 023-e1-state-mlp \
+    --cfg.final-h2h-n-configs 64 \
+    --comment e1-state-mlp
+```
+
+The 250 GB disk leaves room for the 128 GB cache limit, the 13.34 GB compact dataset, compile
+files, the image, the ISO, checkpoints, and replays. Do not reduce it from the audited command.
+
+The current code default has `require_flex=False`, while P0 used `True`. The launch therefore passes
+`--cfg.require-flex` explicitly. After old configuration fields are normalized, the launch differs
+from P0 only in `head_mode`, the H2H reference run, and the H2H self label. The MLP ratio, fixed
+evaluation concurrency, H2H schedule, reference experiment, and reference label already equal their
+planned values, but the command keeps them explicit for auditability.
+
+E1 downloads the P0 checkpoint before training and verifies its SHA-256. A missing or different
+checkpoint stops the run before model compilation or data loading.
+
 ## Required tests
 
 1. Construct same-seed E0 and E1 models. Assert exact equality for the trunk, input projection,
@@ -366,8 +404,12 @@ Correctness evidence:
 - A saved E1 state round-trips exactly.
 - The real P0 `final.pt` loads as linear with 6,818,482 parameters, no adapter,
   `eval_max_parallel=32`, and step 16,384.
-- Focused experiment tests: 54 passed.
-- Full repository suite: 910 passed in 134.64 seconds.
+- E1 checks the downloaded P0 checkpoint against the audited SHA-256 before compilation or data
+  loading. Tests cover the matching, mismatching, malformed, and missing-run cases.
+- Focused experiment tests: 59 passed in 8.93 seconds.
+- Full repository suite: 915 passed in 134.62 seconds.
+- Ruff, the type error gate, Python compilation, and `git diff --check` passed. The type checker
+  still reports existing warnings but no errors.
 
 GPU compilation, memory, throughput, training, validation, CPU evaluation, and H2H results are
 pending.

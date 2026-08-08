@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -135,6 +136,60 @@ def test_old_host_scaled_eval_config_loads_the_fixed_parallel_default() -> None:
     cfg = exp._cfg_from_state(saved)
 
     assert cfg.eval_max_parallel == 32
+
+
+def test_h2h_reference_download_checks_the_pinned_sha256(tmp_path, monkeypatch) -> None:
+    payload = b"fixed P0 checkpoint"
+    expected = hashlib.sha256(payload).hexdigest()
+
+    def fake_download(run_name, dest_dir, *, name):
+        assert (run_name, name) == ("p0-run", "final.pt")
+        dest_dir.mkdir(parents=True)
+        checkpoint = dest_dir / name
+        checkpoint.write_bytes(payload)
+        return checkpoint
+
+    monkeypatch.setattr(exp, "download_latest", fake_download)
+    cfg = exp.TrainConfig(
+        final_h2h_reference_run="p0-run",
+        final_h2h_reference_sha256=expected,
+    )
+
+    checkpoint = exp._fetch_h2h_reference(cfg, tmp_path)
+
+    assert checkpoint.read_bytes() == payload
+
+
+def test_h2h_reference_download_rejects_the_wrong_sha256(tmp_path, monkeypatch) -> None:
+    def fake_download(run_name, dest_dir, *, name):
+        dest_dir.mkdir(parents=True)
+        checkpoint = dest_dir / name
+        checkpoint.write_bytes(b"wrong checkpoint")
+        return checkpoint
+
+    monkeypatch.setattr(exp, "download_latest", fake_download)
+    cfg = exp.TrainConfig(
+        final_h2h_reference_run="p0-run",
+        final_h2h_reference_sha256="0" * 64,
+    )
+
+    with pytest.raises(RuntimeError, match="reference checkpoint SHA-256 mismatch"):
+        exp._fetch_h2h_reference(cfg, tmp_path)
+
+
+@pytest.mark.parametrize("digest", ["0" * 63, "z" * 64])
+def test_config_rejects_an_invalid_h2h_reference_sha256(digest: str) -> None:
+    cfg = exp.TrainConfig(final_h2h_reference_run="p0-run", final_h2h_reference_sha256=digest)
+
+    with pytest.raises(ValueError, match="64-character hexadecimal"):
+        exp.validate_config(cfg, has_button_combo_counts=False)
+
+
+def test_config_rejects_an_h2h_sha_without_a_reference_run() -> None:
+    cfg = exp.TrainConfig(final_h2h_reference_sha256="0" * 64)
+
+    with pytest.raises(ValueError, match="requires final_h2h_reference_run"):
+        exp.validate_config(cfg, has_button_combo_counts=False)
 
 
 def test_eval_parallelism_is_capped_by_config_and_sample_count() -> None:
