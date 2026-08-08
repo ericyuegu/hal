@@ -2,7 +2,7 @@
 
 Status: blocked on E4 and E5 infrastructure
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 ## Question
 
@@ -104,7 +104,8 @@ null index in both the Q and control embedding tables so their parameter counts 
 Q arm never uses it on a valid logged chunk. The control therefore computes a trainable constant
 chunk representation but has no access to action classes. Record action-encoder, Q-head, control,
 and total parameter counts separately. Verify exact Q/control parameter-count and tensor-shape
-parity. Verify that changing any valid action group can change Q after training while leaving its
+parity. Initialize each Q/control pair from one byte-identical template before either optimizer
+step. Verify that changing any valid action group can change Q after training while leaving its
 state-only control unchanged.
 
 Train a separate scalar `V(s_t)` probe on Monte Carlo `G_{t+1}`. The Q and V probes read the same
@@ -125,6 +126,10 @@ Detach all targets. Keep the direct Monte Carlo return as an independent calibra
 Use the E5 reward settings and `gamma=0.99827`. Apply one mask that requires valid `s_t`, all H
 actions and rewards, and valid `s_{t+H}`. Never bootstrap across padding, a replay boundary, or a
 terminal state. Set the bootstrap term to zero after a true terminal transition.
+
+Inherit E5's return-eligibility rule. A truncated replay has an unknown tail and supplies neither a
+V nor Q row. Do not treat its missing tail as zero. Record eligible and truncated replay and frame
+counts before critic training.
 
 After the value warm-up, update the target after each online V update with
 `target = 0.995 * target + 0.005 * online`. Record `target_tau=0.005` in the checkpoint and logs. Do
@@ -181,7 +186,8 @@ cosine schedules span the 16,384 Q updates. Save and restore every optimizer and
 15. Run a small end-to-end critic job with finite train and validation outputs.
 16. Assert each state-only ablation receives the exact target and valid mask used by its matched Q
     head. Assert its encoder and head parameter names, shapes, counts, optimizer settings, schedule,
-    and update count match that Q arm.
+    and update count match that Q arm. Before training, assert each Q/control state dictionary is
+    byte-identical.
 17. Build policy-sample support thresholds from logged validation chunks without reading Q values.
 18. Assert Q and both state-only controls remain byte-identical during the 2,048-step V warm-up.
 19. Assert `V_target` is an exact copy of warmed V at Q step 0, then follows the declared EMA rule.
@@ -201,9 +207,9 @@ optimizer steps for the main probes and matched state-only controls. Keep the sa
 mixing unless a measured systems limit requires a documented change. The actor remains frozen, so
 this is not a policy data-budget comparison.
 
-Train three critic seeds as separate runs before passing the gate. Use those three models as the
-critic ensemble for disagreement. Do not add bootstrap heads in the first experiment; that would
-change the probe and optimizer geometry inside a seed.
+Train three critic seeds as separate, one-at-a-time runs before passing the gate. Use those three
+models as the critic ensemble for disagreement. Do not add bootstrap heads in the first experiment;
+that would change the probe and optimizer geometry inside a seed.
 
 Use a 256-step GPU gate first. Measure the cost of rebuilding `s_t`, `s_{t+2}`, and `s_{t+4}`. If
 the projected run exceeds 3.5 hours, report it before launch. A larger critic batch is allowed only
