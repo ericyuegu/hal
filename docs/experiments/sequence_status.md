@@ -9,7 +9,7 @@ Updated: 2026-08-07
 | D0-D3 | Systems: storage width, reads per replay, prefetch, and replay mixing | Correctness and clean-cache GPU gate passed | Keep prefetch 2; prefetch 32 had no measurable benefit. |
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
-| P1-match | Attention package at matched data and action vocabulary | Training and final checkpoint complete; final CPU and H2H active | Verify both evaluation packages before P2. |
+| P1-match | Attention package at matched data and action vocabulary | Training and final CPU complete; H2H active | Verify H2H, then repeat CPU at P0's 32-way concurrency in P2. |
 | P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
@@ -67,7 +67,13 @@ batches with finite metrics and 128 distinct replays per batch. Final validation
 9-second stall at each epoch boundary, which cost about 36 seconds over the run. The verified
 56,698,807-byte final checkpoint has SHA-256
 `8e9b04c91aa76d1ba49a910c82f1328bc1b0dc3ce7dabf3e9018cb556d964148`; every floating model and
-optimizer tensor is finite. The final CPU and H2H evaluations are still active.
+optimizer tensor is finite. The final CPU evaluation is complete, and H2H remains active.
+
+The final P1 CPU sweep completed all 96 boots with no crash and produced 122 active games. Stocks
+taken and lost per active minute were 0.781 and 1.461. Its only saved protocol difference from the
+official P0 sweep is concurrency: P1 used 96 concurrent boots and P0 used 32. The tiny point gain is
+therefore not promotion evidence. P2 now pins both decode arms to 32 concurrent boots, so its
+recompute arm will provide the matched P1 rerun. The paired H2H sweep remains active.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the

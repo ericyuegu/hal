@@ -1754,6 +1754,7 @@ def _eval_protocol(
     default_n_matchups: int,
     model_dtype: str,
     n_matchups: int | None = None,
+    max_parallel: int | None = None,
     max_frames: int | None = None,
     seed: int | None = None,
 ) -> EvalProtocol:
@@ -1762,6 +1763,9 @@ def _eval_protocol(
     resolved_seed = cfg.eval_seed if seed is None else seed
     if n <= 0:
         raise ValueError(f"n_matchups must be > 0, got {n}")
+    parallel = _eval_max_parallel(cfg, n) if max_parallel is None else max_parallel
+    if not 1 <= parallel <= n:
+        raise ValueError(f"max_parallel must be in 1..{n}, got {parallel}")
     if frames <= 0:
         raise ValueError(f"max_frames must be > 0, got {frames}")
     matchups = matchups_for_vs_cpu(n)
@@ -1769,7 +1773,7 @@ def _eval_protocol(
     schedule_sha256 = hashlib.sha256(json.dumps(schedule, separators=(",", ":")).encode()).hexdigest()
     return EvalProtocol(
         n_matchups=n,
-        max_parallel=_eval_max_parallel(cfg, n),
+        max_parallel=parallel,
         max_frames=frames,
         seed=resolved_seed,
         cpu_level=9,
@@ -2605,6 +2609,7 @@ def eval_ckpt(
     decode_min_p: float | None = None,
     decode_click_trigger_fix: bool | None = None,
     eval_n_matchups: int | None = None,
+    eval_max_parallel: int | None = None,
     eval_max_frames: int | None = None,
     eval_seed: int | None = None,
     wandb_run_id: str | None = None,
@@ -2634,6 +2639,7 @@ def eval_ckpt(
         default_n_matchups=cfg.final_eval_n_matchups,
         model_dtype=str(next(model.parameters()).dtype),
         n_matchups=eval_n_matchups,
+        max_parallel=eval_max_parallel,
         max_frames=eval_max_frames,
         seed=eval_seed,
     )
@@ -2758,6 +2764,7 @@ class Args:
     eval_min_p: float | None = None  # min-p nucleus: keep classes with p >= min_p * p_max
     eval_click_trigger_fix: bool | None = None  # force trigger_l/r to 1.0 on a digital L/R click
     eval_n_matchups: int | None = None  # manual --eval override; default is cfg.final_eval_n_matchups (96)
+    eval_max_parallel: int | None = None  # manual --eval override; default scales with host CPU count
     eval_max_frames: int | None = None  # manual --eval override; default is checkpoint cfg.eval_max_frames
     eval_seed: int | None = None  # manual --eval sampling/bootstrap seed override
     wandb_run_id: str | None = None  # resume an existing run and log this manual eval to it
@@ -2882,6 +2889,7 @@ def main(args: Args) -> None:
                 decode_min_p=args.eval_min_p,
                 decode_click_trigger_fix=args.eval_click_trigger_fix,
                 eval_n_matchups=args.eval_n_matchups,
+                eval_max_parallel=args.eval_max_parallel,
                 eval_max_frames=args.eval_max_frames,
                 eval_seed=args.eval_seed,
                 wandb_run_id=args.wandb_run_id,

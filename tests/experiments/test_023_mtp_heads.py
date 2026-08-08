@@ -301,6 +301,32 @@ def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
     assert payload["protocol"]["start_retries"] == 2
 
 
+def test_eval_protocol_accepts_fixed_parallelism() -> None:
+    protocol = exp._eval_protocol(
+        exp.TrainConfig(),
+        settings=exp.DecodeSettings(1.0, None, 0, 0.0, False),
+        exec_horizon=1,
+        default_n_matchups=96,
+        model_dtype="torch.float16",
+        max_parallel=32,
+    )
+
+    assert protocol.max_parallel == 32
+
+
+@pytest.mark.parametrize("max_parallel", [0, 4])
+def test_eval_protocol_rejects_invalid_fixed_parallelism(max_parallel) -> None:
+    with pytest.raises(ValueError, match="max_parallel must be in"):
+        exp._eval_protocol(
+            exp.TrainConfig(),
+            settings=exp.DecodeSettings(1.0, None, 0, 0.0, False),
+            exec_horizon=1,
+            default_n_matchups=3,
+            model_dtype="torch.float16",
+            max_parallel=max_parallel,
+        )
+
+
 def test_eval_sweep_uses_recorded_cpu_protocol(monkeypatch) -> None:
     cfg = exp.TrainConfig()
     protocol = exp._eval_protocol(
@@ -474,6 +500,7 @@ def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, mo
             wandb_run_id="wandb-id",
             wandb_label="p2-kv",
             eval_n_matchups=96,
+            eval_max_parallel=32,
             eval_decode="kv",
         )
     )
@@ -485,6 +512,7 @@ def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, mo
     assert checkpoint == Path("runs/p1-run/manual_checkpoints/final.pt").as_posix()
     assert kwargs["eval_output_dir"] == str(output_dir)
     assert kwargs["eval_n_matchups"] == 96
+    assert kwargs["eval_max_parallel"] == 32
     assert kwargs["eval_incremental_kv"] is True
     assert kwargs["wandb_label"] == "p2-kv"
     assert calls["upload"] == (output_dir, run_dir, "*")

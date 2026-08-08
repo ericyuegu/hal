@@ -102,18 +102,19 @@ uv run scripts/launch_vast.py \
       --parity-frames 2065 --parity-slots 3 --parity-seed 0
     uv run experiments/023_mtp_heads.py \
       --eval-run "$p1_run" --eval-checkpoint-name final.pt \
-      --eval-decode recompute --eval-n-matchups 96 --eval-seed 0 \
+      --eval-decode recompute --eval-n-matchups 96 --eval-max-parallel 32 --eval-seed 0 \
       --wandb-run-id 46zi7fgo --wandb-label p2-recompute
     uv run experiments/023_mtp_heads.py \
       --eval-run "$p1_run" --eval-checkpoint-name final.pt \
-      --eval-decode kv --eval-n-matchups 96 --eval-seed 0 \
+      --eval-decode kv --eval-n-matchups 96 --eval-max-parallel 32 --eval-seed 0 \
       --wandb-run-id 46zi7fgo --wandb-label p2-kv
   '
 ```
 
-The 80 GB disk holds the image, ISO, checkpoint, compile cache, and both evaluation outputs. P2 does
-not download the training dataset. Do not include model download or one-time process startup in
-model-forward latency.
+Both arms use 32 concurrent boots. This matches the official P0 evaluation and removes host CPU
+count as a policy comparison variable. The 80 GB disk holds the image, ISO, checkpoint, compile
+cache, and both evaluation outputs. P2 does not download the training dataset. Do not include model
+download or one-time process startup in model-forward latency.
 
 The complete command passed a no-rent launcher audit at commit `977ecf4`. It uses a non-login shell
 so the startup environment stays intact. The encoded payload kept the parity, recompute, and KV
@@ -166,6 +167,13 @@ only a short run of post-eviction frames despite the intended repeated-eviction 
 slot 2 twice. This gives slot 0 more than `L_ctx` consecutive evictions while retaining mixed reset
 and cache-length coverage. The corrected focused suite passed 78 tests and skipped the six GPU-only
 cases. The complete repository suite passed 893 tests in 136 seconds.
+
+The P1 artifact audit found that its in-process final sweep used 96 concurrent boots while the P0
+reference used 32. The manual evaluator now accepts `--eval-max-parallel`, validates it against the
+requested boot count, and records it in the protocol. Both P2 arms are pinned to 32. This makes the
+recompute arm the clean P1 CPU rerun needed for reference selection. The
+`test_023_mtp_heads.py` suite passed 43 tests. The complete suite passed 896 tests in 135 seconds
+outside the restricted sandbox, including W&B offline and Dolphin integration tests. Ruff passed.
 
 ## Decision
 

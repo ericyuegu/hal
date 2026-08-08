@@ -384,6 +384,22 @@ winner. The current `MatchRecord.from_dict` maps those fields to `stock_leader_p
 `stock_leader_model`. Recompute the final table with the current loader and report actual knockouts
 through `decided_by_knockout`. Treat any old W&B `wins` field as stock leads.
 
+The in-process final CPU sweep used 96 concurrent boots. The official P0 sweep used 32, despite the
+plan requiring fixed concurrency. Its 96 boots and 122 active games completed with no crash. Stocks
+taken and lost per active minute were 0.781 and 1.461, for a -0.680 difference. This is only 0.012
+better than P0 and is not a clean promotion result because concurrency differs. P2 will repeat P1
+full recomputation with 32 concurrent boots before the reference decision.
+
+The saved manifest is internally sound. All 122 rows have active play, all `(boot, match ordinal)`
+pairs are unique, and all 96 scheduled boots are present. Damage and stock fields are finite. The
+P0 and P1 manifests have the same schedule and protocol values except `max_parallel`. A blocked
+diagnostic over the shared character-pair boots gives P1 minus P0 stock-take rate `+0.005`, 95% CI
+`[-0.096, +0.120]`, and stock-loss rate `+0.000`, 95% CI `[-0.157, +0.162]`. This is not paired
+game evidence. The final `metrics.json` SHA-256 is
+`eac575fc8ea8d14ccbc63095cf72d37557d620a3da5a5dff50a8f5b52b376dcc`; the final
+`match_rows.json` SHA-256 is
+`81b0e68869bc002c1ed7547c8e0749999df44eee23d1bce5a39cd120eb57e63d`.
+
 ## Reference selection rule
 
 Keep P0 as the downstream E0 reference unless P1 passes all of these screening checks:
