@@ -1,6 +1,6 @@
 # E2: within-frame action factorization
 
-Status: local implementation complete; final launch audit pending
+Status: implementation complete; E2-S canceled after step 2,300; restart required
 
 Updated: 2026-08-08
 
@@ -399,10 +399,22 @@ attention (`window=0`). Compilation plus the first update took 43.2 seconds. The
 built three batches with 1,192 samples in 16.3 seconds while training prefetch was active. Warm-step
 timing, loader wait, GPU use, memory, and the 3.5-hour projection remain pending.
 
+The user canceled the experiment before its first planned routine check. The last observed update
+was step 2,300. The step-2,048 checkpoint reached R2 before cancellation. Validation at step 2,048
+was finite: action NLL was 1.134 bits per frame and button log loss was 0.032. Logged step times near
+the stop ranged from 0.362 to 0.596 seconds and were usually about 0.4 to 0.46 seconds. This is
+materially slower than E1's 0.281-second median and must be measured again before making a systems
+or factorization claim. Loader wait, peak memory, final validation, CPU evaluation, H2H, and final
+checkpoint do not exist for this run.
+
+Vast instance `47144794` was destroyed on 2026-08-07 at the user's request. No Vast instance remains
+active. The uploaded step-2,048 checkpoint and W&B history are partial debugging evidence only.
+They must not be used to select E2-S or launch E2-I. Restart E2-S from step 0 when the flight resumes.
+
 The same argument list passes the experiment's Tyro parser and `validate_config`. It resolves to
 `factored_mlp`, the stable-prefix group order, batch prefetch enabled, Flex required, and 16,384
 steps.
 
 E1's final checkpoint, CPU sweep, H2H record, and decision are verified. E1 did not promote. The
-uploader regression gate and exact launch audit pass. E2-S is running. Warm throughput, GPU memory,
-training, evaluation, and artifact closure remain pending.
+uploader regression gate and exact launch audit pass. E2-S was canceled before completion. Its
+full training, evaluation, and artifact gates remain pending.

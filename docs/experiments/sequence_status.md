@@ -28,7 +28,7 @@ Decode speed alone cannot select the policy package.
 | --- | --- | --- | --- |
 | E0 | Loss scaling: offset 1 plus one fixed-total auxiliary BC mean | Complete; P0 is the fixed reference | Keep its checkpoint, data, objective, and evaluation protocol fixed. |
 | E1 | Head capacity: zero-init state-only residual MLP | Complete; did not replace P0 | Keep E1 as E2's capacity control and P0 as the deployed baseline. |
-| E2 | Within-frame conditional factorization and group order | Local implementation and uploader gate complete; final launch audit pending | Beat the E1 capacity control in closed loop and avoid regression against P0. |
+| E2 | Within-frame conditional factorization and group order | Implemented; E2-S canceled after step 2,300 and must restart | Beat the E1 capacity control in closed loop and avoid regression against P0. |
 | E3 | Temporal joint modeling and teacher-forcing exposure bias | Matched null-condition and action-condition plans ready; blocked on E2 | Beat the null-condition capacity control without harming control. |
 | E4 | Dense temporal resolution and chunk readiness | Fresh bridge plan ready; blocked on E3 | Produce a correct dense `(1,2,3,4)` joint action sequence. A policy gain is not assumed. |
 | E5 | Action-aligned AWR on the deployed primary policy | Primary-only plan with a fixed critic warm-up ready; blocked on policy selection | Pass the value gate, then weight only the action whose advantage is defined. |
@@ -180,9 +180,13 @@ is the valid closed-loop result for that checkpoint.
 
 ## Immediate next actions
 
-1. Finish E1's uploader and R2 closure audit.
-2. Fill E2-S's reference with the verified E1 run and checkpoint SHA-256.
-3. Repeat the no-rent audit from the final pushed SHA, then launch E2-S alone.
+1. Keep the experiment flight paused. No Vast instance is active.
+2. When work resumes, restart E2-S from step 0 with the pinned E1 reference. Do not resume from the
+   partial checkpoint and do not launch E2-I first.
+3. Measure warm compute time and loader wait separately. The canceled run's roughly 0.4 to 0.46
+   second steps were materially slower than E1's 0.281-second median.
+4. Complete E2-S training, final CPU evaluation, paired H2H, upload closure, and decision before
+   launching E2-I.
 
 ## Remaining run units
 
