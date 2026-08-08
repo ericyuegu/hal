@@ -207,3 +207,8 @@ parity first, recompute second, KV third, the correct P1 run and W&B IDs, 2,065 
 slots, 96 boots per evaluation, and 32 concurrent boots. Three RTX 4090 offers qualified. The best
 had 252 GB RAM, DLPerf 125.6, 80 GB disk, and an effective price of $0.824 per hour. No instance was
 rented. Repeat this check after committing this record, then launch from that unchanged SHA.
+
+The final no-rent check passed at pushed commit `335b7e7`. It preserved the same payload and found
+three qualifying RTX 4090 offers. P2 launched from that exact commit on Vast instance `47129969`.
+The selected host has 252 GB RAM, DLPerf 125.6, an 80 GB disk, and an effective price of $0.824 per
+hour. Vast reported the instance ready at 18:01 PDT. This is the only active experiment job.

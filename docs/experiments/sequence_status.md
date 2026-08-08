@@ -10,7 +10,7 @@ Updated: 2026-08-07
 | P0 | Scientific package: short full-causal context | Complete; final checkpoint and official FP16 evidence verified | Use as the short-context reference. |
 | P1-old | Exploratory package: long context, SWA128, smaller batch | Complete; FP16 recompute rescore verified | Keep as exploratory decode evidence. |
 | P1-match | Attention package at matched data and action vocabulary | Complete; paired result does not promote P1; audited evidence verified | Keep P0 as E0. Use P1 only for the P2 systems ablation. |
-| P2 | Systems: temporal-KV decode efficiency | Fresh evaluation-only plan ready; exploratory evidence available | Compare KV and full recomputation on the same P1 checkpoint. |
+| P2 | Systems: temporal-KV decode efficiency | Active on Vast instance `47129969` at launch commit `335b7e7` | Pass parity, then compare 32-way KV and recomputation on the same P1 checkpoint. |
 | I1 | Optional scientific isolation: full causal versus SWA32 at fixed 256/512 geometry | Deferred | Run only if P0 versus P1 leaves the mask question unresolved. |
 | Compute match | Optional systems and scaling study | Deferred | Write a separate plan before changing steps or data exposure. |
 
@@ -97,7 +97,11 @@ longer blocked on P1 evidence.
 
 P2's full command passed a no-rent launcher check at commit `cface89`. The best qualifying RTX 4090
 offer had 252 GB RAM, DLPerf 125.6, and an effective price of $0.824 per hour. The command preserved
-the parity, 32-way recompute, and 32-way KV order. A final exact-SHA check remains before rent.
+the parity, 32-way recompute, and 32-way KV order.
+
+The final exact-SHA check passed at `335b7e7`, and P2 launched on Vast instance `47129969`. The
+selected RTX 4090 host has 252 GB RAM, an 80 GB disk, DLPerf 125.6, and an effective price of $0.824
+per hour. The instance became ready at 18:01 PDT. No other experiment instance is active.
 
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
