@@ -235,6 +235,8 @@ class TrainConfig:
     val_split: str = "val"
     num_workers: int = 16
     prefetch_factor: int = 2
+    # Prepare one complete training batch while the GPU trains on the current batch.
+    train_batch_prefetch: bool = True
 
 
 def _model_tag(cfg: TrainConfig) -> str:
@@ -2733,6 +2735,7 @@ def train(
             predownload=cfg.predownload,
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
+            batch_prefetch=cfg.train_batch_prefetch,
             **loader_kwargs,
         )
     else:
@@ -3077,6 +3080,9 @@ def train(
         if cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0:
             _launch_eval(step)
 
+    close_train_iterator = getattr(it, "close", None)
+    if close_train_iterator is not None:
+        close_train_iterator()
     _drain_eval(wait=True)  # finish the last async eval before the final pass
     vm_final = _val_log_dict()
     wandb.log({**vm_final, "global_step": cfg.max_steps})

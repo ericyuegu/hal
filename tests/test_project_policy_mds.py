@@ -200,22 +200,37 @@ def test_projected_mds_preserves_model_values(tmp_path) -> None:
     for name, value in projected.context.features.items():
         assert value.equal(full.context.features[name]), name
 
-    reservoir = make_replay_reservoir_loader(
-        data_root=str(out),
-        split="train",
-        stats=stats,
-        L_ctx=32,
-        L_chunk=2,
-        batch_size=2,
-        seed=0,
-        reservoir_capacity=4,
-        num_workers=0,
-        windows_per_replay=1,
-        schema_version=5,
-    )
-    batches = list(reservoir)
-    assert len(batches) == 2
-    for batch in batches:
+    def reservoir_batches(batch_prefetch: bool):
+        reservoir = make_replay_reservoir_loader(
+            data_root=str(out),
+            split="train",
+            stats=stats,
+            L_ctx=32,
+            L_chunk=2,
+            batch_size=2,
+            seed=0,
+            reservoir_capacity=4,
+            num_workers=0,
+            windows_per_replay=1,
+            batch_prefetch=batch_prefetch,
+            schema_version=5,
+        )
+        batches = list(reservoir)
+        return reservoir, batches
+
+    plain_reservoir, plain_batches = reservoir_batches(False)
+    prefetched_reservoir, prefetched_batches = reservoir_batches(True)
+    assert len(plain_batches) == len(prefetched_batches) == 2
+    for plain, prefetched in zip(plain_batches, prefetched_batches, strict=True):
+        assert plain.replay_ids == prefetched.replay_ids
+        assert plain.context.ctx_pad.equal(prefetched.context.ctx_pad)
+        assert plain.target.equal(prefetched.target)
+        assert plain.context.features.keys() == prefetched.context.features.keys()
+        for name in plain.context.features:
+            assert plain.context.features[name].equal(prefetched.context.features[name]), name
+    for batch in prefetched_batches:
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 2
-    assert reservoir.last_epoch_stats == {"emitted_windows": 4, "dropped_windows": 0, "dropped_replays": 0}
+    expected_stats = {"emitted_windows": 4, "dropped_windows": 0, "dropped_replays": 0}
+    assert plain_reservoir.last_epoch_stats == expected_stats
+    assert prefetched_reservoir.last_epoch_stats == expected_stats

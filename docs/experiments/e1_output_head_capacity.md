@@ -450,7 +450,8 @@ Across steps 8,500 through 9,500, median step time was 0.281 seconds and median 
 sample was bursty and below the 80% utilization warning. The host was 91% to 94% CPU-idle, had no
 sampled disk-read wait, and held about 165 GB in the page cache. This points to serial batch
 assembly or queue scheduling, not raw disk saturation. The run stays unchanged. E2 will test a
-one-batch background prefetcher with exact batch-order and RNG parity before launch.
+one-batch background prefetcher with exact batch-order and RNG parity before launch. The local
+gate now passes; the first E2 GPU steps will measure the live wait reduction.
 
 Disk use was 76 of 250 GB. Step 8,192's checkpoint, 40 replays, rows, metrics, result, and worker
 log uploaded to R2. The measured run still projects below the 3.5-hour limit.

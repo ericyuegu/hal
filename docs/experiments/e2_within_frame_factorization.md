@@ -74,6 +74,11 @@ This is a systems change, not an E2 treatment. If the hashes match, E2 may use i
 receives the same data in the same order. Report model time and loader wait separately because E1
 did not have this overlap. If parity fails, keep the E1 loader path.
 
+The local gate passes. `OneBatchPrefetch` owns one ordered future. `ReservoirLoader` creates its
+DataLoader workers on the main thread, then lets the background thread preprocess only the next
+complete batch. Normal completion, early close, and a source error stop the worker cleanly. The
+training loop closes the iterator before final evaluation.
+
 ## Probability model
 
 For chain position `g` at offset `o`, model:
@@ -211,6 +216,7 @@ Copy the selected E0 package and E1 configuration exactly. E2 may change only:
 - `action_group_order`
 - `factorization_diag_seed=0`
 - `factorization_diag_samples=1`
+- `train_batch_prefetch=True`, after the exact systems gate above.
 - Run labels and H2H reference fields.
 
 Keep `action_mlp_ratio=2`, offsets `(1,5,9,13)`, the normalized auxiliary loss, 16,384 steps, seed
@@ -237,6 +243,7 @@ uv run scripts/launch_vast.py \
     --cfg.action-group-order c_stick triggers buttons main_stick \
     --cfg.factorization-diag-seed 0 \
     --cfg.factorization-diag-samples 1 \
+    --cfg.train-batch-prefetch \
     --cfg.require-flex \
     --cfg.eval-max-parallel 32 \
     --cfg.final-h2h-reference-run "$e1_run" \
@@ -351,8 +358,11 @@ Local evidence:
   slot in the sampler. It no longer advances a slot generation twice on one reset frame. Full
   recomputation did not have this bug.
 - Both E2 orders complete the real dev-MDS end-to-end training path and save `final.pt`.
-- Focused experiment suite: 80 passed in 8.12 seconds.
-- Full repository suite: 936 passed in 135.54 seconds.
+- Focused experiment suite: 80 passed in 8.28 seconds.
+- Dataloader and compact-projection suites: 28 passed in 5.47 seconds.
+- The prefetch gate compares 32 complete batch hashes and checks exact replay IDs, tensors, batch
+  order, epoch statistics, RNG state, overlap, exhaustion, errors, and early close.
+- Full repository suite: 939 passed in 135.78 seconds.
 - Ruff, the type error gate, Python compilation, and `git diff --check` pass. The type checker
   reports existing warnings and no errors.
 

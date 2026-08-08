@@ -1,8 +1,7 @@
-"""WindowDataset determinism — the val set must be reproducible across runs,
-and train windows must still vary across epochs given a fixed seed."""
-
+import hashlib
 from collections.abc import Iterator
 from multiprocessing import resource_tracker
+from threading import Event
 from unittest.mock import patch
 
 import numpy as np
@@ -11,12 +10,15 @@ from streaming.base.shared.memory import SharedMemory
 from torch.utils.data import DataLoader
 
 from hal.data.schema import SCHEMA_VERSION
+from hal.training.dataloader import OneBatchPrefetch
 from hal.training.dataloader import ReplayPack
 from hal.training.dataloader import ReplayReservoir
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
 from hal.training.dataloader import _stable_replay_rng
+from hal.training.features import Context
+from hal.training.features import TrainBatch
 
 L_CTX, L_CHUNK = 6, 4
 _L = L_CTX + L_CHUNK
@@ -52,6 +54,104 @@ def test_data_loader_iteration_uses_only_its_private_rng() -> None:
     list(val)
 
     assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def _train_batch(index: int) -> TrainBatch:
+    return TrainBatch(
+        context=Context(
+            features={
+                "float": torch.tensor([[index + 0.25]], dtype=torch.float32),
+                "int": torch.tensor([[index]], dtype=torch.int64),
+            },
+            ctx_pad=torch.tensor([index % 3]),
+        ),
+        target=torch.full((1, 2, 14), float(index)),
+        replay_ids=(f"replay-{index}",),
+    )
+
+
+def _batch_digest(batch: TrainBatch) -> bytes:
+    parts = ["\0".join(batch.replay_ids or ()).encode()]
+    tensors = [batch.context.ctx_pad, batch.target]
+    tensors.extend(batch.context.features[name] for name in sorted(batch.context.features))
+    for tensor in tensors:
+        parts.extend((str(tensor.dtype).encode(), str(tuple(tensor.shape)).encode(), tensor.numpy().tobytes()))
+    return hashlib.sha256(b"\0".join(parts)).digest()
+
+
+def test_one_batch_prefetch_preserves_32_complete_batches_and_rng() -> None:
+    expected = tuple(_train_batch(index) for index in range(32))
+    torch.manual_seed(123)
+    cpu_before = torch.random.get_rng_state().clone()
+    cuda_before = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+    actual = tuple(OneBatchPrefetch(iter(expected)))
+
+    assert [_batch_digest(batch) for batch in actual] == [_batch_digest(batch) for batch in expected]
+    assert torch.equal(torch.random.get_rng_state(), cpu_before)
+    if cuda_before is not None:
+        for actual_state, expected_state in zip(torch.cuda.get_rng_state_all(), cuda_before, strict=True):
+            assert torch.equal(actual_state, expected_state)
+
+
+def test_one_batch_prefetch_overlaps_the_next_item() -> None:
+    started = Event()
+    release = Event()
+
+    def source() -> Iterator[int]:
+        yield 1
+        started.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("the test did not release the producer")
+        yield 2
+
+    prefetch = OneBatchPrefetch(source())
+    assert next(prefetch) == 1
+    assert started.wait(timeout=1)
+    release.set()
+    assert next(prefetch) == 2
+    with np.testing.assert_raises(StopIteration):
+        next(prefetch)
+
+
+def test_one_batch_prefetch_propagates_errors_and_closes_early() -> None:
+    started = Event()
+    release = Event()
+    closed = Event()
+
+    def source() -> Iterator[int]:
+        try:
+            yield 1
+            started.set()
+            if not release.wait(timeout=2):
+                raise TimeoutError("the test did not release the producer")
+            yield 2
+            raise RuntimeError("source failed")
+        finally:
+            closed.set()
+
+    prefetch = OneBatchPrefetch(source())
+    assert next(prefetch) == 1
+    assert started.wait(timeout=1)
+    release.set()
+    prefetch.close()
+    assert closed.wait(timeout=1)
+    with np.testing.assert_raises(StopIteration):
+        next(prefetch)
+
+    failed = OneBatchPrefetch(iter([1]))
+    assert next(failed) == 1
+    with np.testing.assert_raises(StopIteration):
+        next(failed)
+
+    def error_source() -> Iterator[int]:
+        yield 1
+        raise RuntimeError("source failed")
+
+    failed = OneBatchPrefetch(error_source())
+    assert next(failed) == 1
+    with np.testing.assert_raises_regex(RuntimeError, "source failed"):
+        next(failed)
 
 
 def _fake_mds(n_samples: int = 6, length: int = 60) -> list[dict[str, np.ndarray]]:

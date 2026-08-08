@@ -1,18 +1,13 @@
-"""MDS dataloader primitives shared across experiments.
+"""MDS loaders shared by training experiments."""
 
-Lives outside the experiment file so that forked / forkserver-spawned
-DataLoader workers can re-import ``WindowDataset`` and the collate path
-without re-running experiment-level module code. Keeping this file
-side-effect-free is what makes that work — and is also why the per-feature
-``preprocess`` runs here in the worker (emitting a ready-to-use ``TrainBatch``)
-rather than on the training hot path.
-"""
-
+import contextlib
 import functools
 import hashlib
 from collections import deque
 from collections.abc import Iterable
 from collections.abc import Iterator
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,6 +42,50 @@ patch_streaming_resource_tracker()
 # incomparable. Wide enough to cover multi-frame target horizons (e.g. 012's farthest auxiliary head);
 # each experiment slices the target down to the frames it scores.
 VAL_L_CHUNK = 16
+
+
+def _next_item[T](source: Iterator[T]) -> T:
+    return next(source)
+
+
+class OneBatchPrefetch[T](Iterator[T]):
+    def __init__(self, source: Iterator[T]) -> None:
+        self._source = source
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="train-batch")
+        self._future: Future[Any] | None = self._pool.submit(_next_item, source)
+        self._closed = False
+
+    def __iter__(self) -> OneBatchPrefetch[T]:
+        return self
+
+    def __next__(self) -> T:
+        if self._closed or self._future is None:
+            raise StopIteration
+        future = self._future
+        try:
+            item = future.result()
+        except BaseException:
+            self.close(wait=False)
+            raise
+        self._future = self._pool.submit(_next_item, self._source)
+        return item
+
+    def close(self, *, wait: bool = True) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        future = self._future
+        self._future = None
+        if wait and future is not None:
+            with contextlib.suppress(BaseException):
+                future.result()
+        elif future is not None:
+            future.cancel()
+        self._pool.shutdown(wait=wait, cancel_futures=True)
+        if wait or future is None or future.done():
+            close = getattr(self._source, "close", None)
+            if close is not None:
+                close()
 
 
 def _loader_generator(seed: int) -> torch.Generator:
@@ -259,6 +298,7 @@ class ReservoirLoader:
         seed: int,
         extra: ExtraColumns | None,
         projection: FeatureProjection | None,
+        batch_prefetch: bool,
     ) -> None:
         self._pack_loader = pack_loader
         self._stats = stats
@@ -268,6 +308,7 @@ class ReservoirLoader:
         self._seed = seed
         self._extra = extra
         self._projection = projection
+        self._batch_prefetch = batch_prefetch
         self._epoch = 0
         self.last_epoch_stats: dict[str, int] | None = None
 
@@ -279,6 +320,10 @@ class ReservoirLoader:
             seed=self._seed + self._epoch,
         )
         self._epoch += 1
+        batches = self._batches(reservoir)
+        return OneBatchPrefetch(batches) if self._batch_prefetch else batches
+
+    def _batches(self, reservoir: ReplayReservoir) -> Iterator[TrainBatch]:
         try:
             for item in reservoir:
                 batch = collate_train_batch(
@@ -599,6 +644,7 @@ def make_replay_reservoir_loader(
     prefetch_factor: int = 2,
     predownload: int = 512,
     windows_per_replay: int = 4,
+    batch_prefetch: bool = False,
     schema_version: int = SCHEMA_VERSION,
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
@@ -644,4 +690,5 @@ def make_replay_reservoir_loader(
         seed=seed,
         extra=extra,
         projection=projection,
+        batch_prefetch=batch_prefetch,
     )
