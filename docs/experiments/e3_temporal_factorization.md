@@ -2,7 +2,7 @@
 
 Status: blocked on E2 evidence
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 ## Question
 
@@ -172,7 +172,8 @@ Run focused tests, Ruff, type checking, Python compilation, and `git diff --chec
 
 ## Fixed configuration
 
-Copy the selected E2-S configuration. Run E3-C first and E3-T second. Change only:
+Copy the selected E2 configuration and group order. This may be E2-S or E2-I. Run E3-C first and
+E3-T second. Change only:
 
 - Temporal mode from independent to sparse autoregressive MLP.
 - Temporal condition source: null for E3-C and previous action for E3-T.
@@ -188,9 +189,9 @@ Keep E2's slot-and-group-keyed live decode streams. E3 may advance a diagnostic 
 later sparse depths only during an explicit sparse-rollout diagnostic. Normal closed-loop play
 computes offset 1 only and advances each live slot-and-group stream once per policy frame.
 
-Report exact parameter counts and warm step time. If total parameters rise by more than 5% or warm
-training time rises by more than 10% from E2, add a temporal capacity control before claiming that
-conditioning caused the result.
+Report exact parameter counts and warm step time. E3-C is the parameter-matched temporal capacity
+control. If total parameters rise by more than 5% or warm training time rises by more than 10% from
+E2, flag the cost. Attribute conditioning only from E3-T versus E3-C.
 
 ## Evaluation
 
@@ -200,8 +201,8 @@ accuracy, exposure gaps, transition metrics, temporal-module norms and gradients
 gradient interaction, parameter counts, memory, and throughput.
 
 Request 32 periodic matchups and 96 final matchups. Limit both sweeps to 32 concurrent Dolphin
-boots. Compare E3-C with E2-S to measure the added temporal module. Compare E3-T with E3-C to
-measure previous-action conditioning. Run 64 mirrored H2H configurations for both direct
+boots. Compare E3-C with the selected E2 policy to measure the added temporal module. Compare E3-T
+with E3-C to measure previous-action conditioning. Run 64 mirrored H2H configurations for both direct
 comparisons. Save rows and replays. Report stocks, damage, dead frames, terminal results, CPU rate
 differences, H2H stock difference, non-tied stock-lead rate,
 confidence intervals, ties, and crashes.
