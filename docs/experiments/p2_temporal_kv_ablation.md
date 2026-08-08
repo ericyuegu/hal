@@ -181,6 +181,9 @@ retries the parser, and fails if a completed game still lacks input statistics. 
 all complete frames and the stamped model identity. The focused H2H, finalization, and paired suites
 passed 63 tests. The complete repository suite passed 898 tests in 135 seconds.
 
+H2H record schema 3 stores `replay_trimmed` per game. Older records load this field as false.
+After the schema change, 64 focused tests and all 899 repository tests passed.
+
 ## Decision
 
 Keep full recomputation as the default. Promote temporal KV only if the correctness gate passes,

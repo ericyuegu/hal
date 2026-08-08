@@ -82,7 +82,7 @@ DEFAULT_MAX_FRAMES: Final[int] = 7200
 # libmelee's stage-select cursor navigation is flaky under concurrent fast-forward load.
 DEFAULT_START_RETRIES: Final[int] = 3
 # Version 2 names stock leaders directly. ``MatchRecord.from_dict`` still reads version 1 fields.
-MATCH_RECORD_SCHEMA_VERSION: Final[int] = 2
+MATCH_RECORD_SCHEMA_VERSION: Final[int] = 3
 # Stick magnitude that counts as "the policy moved this stick". Melee's dead-band gate is
 # 0.2875 per axis, so 0.3 is just outside it and reads as deliberate motion.
 _STICK_ACTIVE_MAGNITUDE: Final[float] = 0.3
@@ -538,6 +538,7 @@ class MatchRecord:
     outcome: MatchOutcome | None
     input_stats_port_1: PortInputStats | None
     input_stats_port_2: PortInputStats | None
+    replay_trimmed: bool = False
 
     def model_on_port(self, port: int) -> str:
         return self.model_port_1 if port == 1 else self.model_port_2
@@ -561,7 +562,9 @@ class MatchRecord:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MatchRecord:
         """Rebuild from a persisted row (round-trips ``as_dict``)."""
-        outcome = data["outcome"]
+        values = dict(data)
+        values.setdefault("replay_trimmed", False)
+        outcome = values["outcome"]
         if outcome is not None and "winner_port" in outcome:
             outcome = dict(outcome)
             outcome["stock_leader_port"] = outcome.pop("winner_port")
@@ -569,13 +572,13 @@ class MatchRecord:
         stats = {
             f"input_stats_port_{port}": (
                 None
-                if data[f"input_stats_port_{port}"] is None
-                else PortInputStats(**data[f"input_stats_port_{port}"])
+                if values[f"input_stats_port_{port}"] is None
+                else PortInputStats(**values[f"input_stats_port_{port}"])
             )
             for port in (1, 2)
         }
         return cls(
-            **{k: v for k, v in data.items() if k not in {"outcome", "input_stats_port_1", "input_stats_port_2"}},
+            **{k: v for k, v in values.items() if k not in {"outcome", "input_stats_port_1", "input_stats_port_2"}},
             outcome=None if outcome is None else MatchOutcome(**outcome),
             **stats,
         )
@@ -657,9 +660,11 @@ def match_record(
             # a bad replay must cost its own record only, never the rest of the sweep.
             logger.warning(f"match_record: cannot stamp identities into {replay}: {error}")
     stats: dict[int, PortInputStats] | None = None
+    replay_trimmed = False
     if replay is not None and verify_inputs:
         stats = replay_input_stats(replay)
         if stats is None and trim_to_last_frame(replay):
+            replay_trimmed = True
             logger.info(f"match_record: trimmed a torn final frame from {replay}")
             stats = replay_input_stats(replay)
         if stats is None:
@@ -704,6 +709,7 @@ def match_record(
         character_id_port_2=int(spec.config.character_port_2.value),
         replay_path=None if replay is None else str(replay),
         replay_status=replay_status,
+        replay_trimmed=replay_trimmed,
         identity_stamped=stamped,
         outcome=outcome,
         input_stats_port_1=None if stats is None else stats[1],

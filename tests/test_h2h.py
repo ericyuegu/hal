@@ -228,6 +228,7 @@ def test_match_record_for_a_boot_that_never_started(tmp_path):
     assert record.outcome is None
     assert record.replay_path is None
     assert record.replay_status == "missing"
+    assert record.replay_trimmed is False
     assert record.identity_stamped is False
 
 
@@ -252,6 +253,16 @@ def test_match_record_loads_old_winner_field_names(tmp_path):
     assert outcome is not None
     outcome["winner_port"] = outcome.pop("stock_leader_port")
     outcome["winner_model"] = outcome.pop("stock_leader_model")
+    path = tmp_path / "matches.jsonl"
+    path.write_text(json.dumps(old) + "\n")
+
+    assert load_records(path) == [record]
+
+
+def test_match_record_loads_old_rows_without_replay_trimmed(tmp_path):
+    record = match_record(_spec(), None, tmp_path / "boot_000", max_frames=7200, verify_inputs=False)
+    old = record.as_dict()
+    old.pop("replay_trimmed")
     path = tmp_path / "matches.jsonl"
     path.write_text(json.dumps(old) + "\n")
 
@@ -334,6 +345,7 @@ def test_match_record_repairs_a_torn_final_frame(tmp_path, monkeypatch):
 
     assert calls == 2
     assert record.replay_status == "ok"
+    assert record.replay_trimmed is True
     assert record.input_stats_port_1 == healthy[1]
     assert record.input_stats_port_2 == healthy[2]
 
@@ -501,6 +513,6 @@ def test_run_h2h_writes_records_replays_and_meta(tmp_path, monkeypatch):
 
     assert load_records(tmp_path / "matches.jsonl") == records
     meta = json.loads((tmp_path / "meta.json").read_text())
-    assert meta["record_schema_version"] == 2
+    assert meta["record_schema_version"] == 3
     assert meta["model_a"] == "alpha" and meta["n_matches"] == 6
     assert meta["matches_completed"] == 6 and meta["matches_failed"] == 0

@@ -409,6 +409,9 @@ ports then had hundreds of distinct actions and no START press. The H2H result r
 until both orientations finish and every replay passes this repair-and-audit step. Keep the original
 objects and upload the audited records separately.
 
+Record schema 3 adds `replay_trimmed`. Old records load it as false. New records set it only when
+the collector removes an incomplete final frame, so the repair is visible in the saved evidence.
+
 ## Reference selection rule
 
 Keep P0 as the downstream E0 reference unless P1 passes all of these screening checks:

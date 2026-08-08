@@ -81,6 +81,9 @@ that incomplete frame. Future H2H runs now repair this case and fail on any rema
 statistics. P1 promotion remains gated on a separate audited record file covering both
 orientations; the original launch records and replays will be preserved.
 
+H2H record schema 3 now stores the repair decision in `replay_trimmed` instead of leaving it only
+in process logs.
+
 The step-12,288 CPU evaluation completed all 32 boots without a crash. It reported 0.751 stocks
 taken and 1.470 lost per active minute. These point estimates remain slightly worse than P0 at the
 same step. The recovered result, metrics, and worker log have verified R2 hashes.
