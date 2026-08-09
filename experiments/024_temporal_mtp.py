@@ -16,6 +16,7 @@ import contextlib
 import itertools
 import math
 import time
+from collections.abc import Callable
 from collections.abc import Iterable
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -672,8 +673,12 @@ def eval_vs_cpu(
     *,
     n_matchups: int,
     replay_dir: Path,
+    eager_forward: Callable | None = None,
 ) -> dict[str, float]:
     was_training = model.training
+    compiled_forward = model.forward
+    if eager_forward is not None:
+        model.forward = eager_forward
     model.eval()
     policies = itertools.count()
     try:
@@ -685,6 +690,7 @@ def eval_vs_cpu(
             max_frames=cfg.eval_max_frames,
         )
     finally:
+        model.forward = compiled_forward
         model.train(was_training)
     return vs_cpu_metrics(result)
 
@@ -717,6 +723,7 @@ def train(
         else contextlib.nullcontext()
     )
     model = GPT(cfg).to(DEVICE)
+    eager_forward = model.forward
     if cfg.compile_trunk and DEVICE == "cuda":
         model.forward = torch.compile(model.forward, dynamic=False)
     optimizer = make_optimizer(model, cfg)
@@ -796,7 +803,12 @@ def train(
                     flush=True,
                 )
             if cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0:
-                values = val_metrics(model, val_cache)
+                compiled_forward = model.forward
+                model.forward = eager_forward
+                try:
+                    values = val_metrics(model, val_cache)
+                finally:
+                    model.forward = compiled_forward
                 wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
                 print(f"[val] step {step}: {values}", flush=True)
             if cfg.ckpt_every > 0 and step > 0 and step % cfg.ckpt_every == 0:
@@ -817,10 +829,16 @@ def train(
                     cfg,
                     n_matchups=cfg.eval_n_matchups,
                     replay_dir=replay_dir / f"step_{step:06d}",
+                    eager_forward=eager_forward,
                 )
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
 
-        final_val = val_metrics(model, val_cache)
+        compiled_forward = model.forward
+        model.forward = eager_forward
+        try:
+            final_val = val_metrics(model, val_cache)
+        finally:
+            model.forward = compiled_forward
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
         final_eval = eval_vs_cpu(
             model,
@@ -828,6 +846,7 @@ def train(
             cfg,
             n_matchups=cfg.final_eval_n_matchups,
             replay_dir=replay_dir / "final",
+            eager_forward=eager_forward,
         )
         wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
         save_checkpoint(
