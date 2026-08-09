@@ -177,6 +177,14 @@ def test_temporal_attention_rejects_an_unsafe_cuda_launch_chunk() -> None:
         exp024.validate_config(_tiny_cfg(exp024, temporal_attn_chunk_sequences=65_536))
 
 
+@pytest.mark.parametrize("value", [True, 1.5, -1])
+def test_temporal_config_rejects_invalid_prefetch_batches(value: object) -> None:
+    cfg = _tiny_cfg(exp024)
+    cfg.prefetch_batches = value  # type: ignore[invalid-assignment]
+    with pytest.raises(ValueError, match="prefetch_batches"):
+        exp024.validate_config(cfg)
+
+
 def test_temporal_chain_uses_previous_teacher_forced_frame() -> None:
     cfg = _tiny_cfg(exp024)
     model = exp024.GPT(cfg).eval()

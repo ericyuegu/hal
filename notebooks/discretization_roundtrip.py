@@ -14,7 +14,7 @@ Paired-replay design (controls for emulator build drift):
       QUANT  = dequantize(quantize(RAW)) built from hal/training/scoring.py primitives
                (buttons pass through exactly; only the 6 analog stick/trigger channels snap).
     Both are fixed input sequences fed through the round-trip ControllerSource path
-    (hal/sim: MdsControllerSource -> drive -> Trajectory), identical to tests/test_roundtrip.
+    (hal/sim: MDSControllerSource -> drive -> Trajectory), identical to tests/test_roundtrip.
 
     Determinism guard: Melee cannot be seeded through stock Dolphin (diff's seed tripwire),
     so we run RAW twice and audit the floor per replay. Empirically raw-vs-raw is bit-exact
@@ -61,7 +61,7 @@ from hal.sim.loop import drive
 from hal.sim.session import ReplayMatchup
 from hal.sim.session import Session
 from hal.sim.sources import ControllerSource
-from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import MDSControllerSource
 from hal.sim.trajectory import Trajectory
 from hal.training.scoring import STICK_CLUSTER_CENTERS_C
 from hal.training.scoring import STICK_CLUSTER_CENTERS_MAIN
@@ -316,8 +316,8 @@ print(
 # --- ROLLOUT pass: paired raw / raw / quant through the emulator --------------------------
 def make_sources(row: dict[str, np.ndarray]) -> dict[int, ControllerSource]:
     return {
-        1: MdsControllerSource(columns=row, port_prefix="p1"),
-        2: MdsControllerSource(columns=row, port_prefix="p2"),
+        1: MDSControllerSource(columns=row, port_prefix="p1"),
+        2: MDSControllerSource(columns=row, port_prefix="p2"),
     }
 
 

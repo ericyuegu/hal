@@ -15,15 +15,15 @@ from hal.data.policy_schema import decode_policy_replay
 from hal.scripts import project_policy_mds as project_module
 from hal.scripts.project_policy_mds import _replay_ids
 from hal.scripts.project_policy_mds import project_policy_mds
-from hal.training.dataloader import PolicyReplayPackDataset
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _make_window
-from hal.training.dataloader import _stable_replay_rng
 from hal.training.dataloader import collate_train_batch
-from hal.training.dataloader import make_replay_reservoir_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import FeatureProjection
+from hal.training.replay_reservoir import PolicyReplayPackDataset
+from hal.training.replay_reservoir import _stable_replay_rng
+from hal.training.replay_reservoir import make_reservoir_loader
 
 _DEV_MDS = Path(__file__).resolve().parents[1] / "data" / "processed" / "dev" / "mds"
 _RANKED_MANIFEST = (
@@ -200,8 +200,8 @@ def test_projected_mds_preserves_model_values(tmp_path) -> None:
     for name, value in projected.context.features.items():
         assert value.equal(full.context.features[name]), name
 
-    def reservoir_batches(batch_prefetch: bool):
-        reservoir = make_replay_reservoir_loader(
+    def reservoir_batches(prefetch_batches: int):
+        reservoir = make_reservoir_loader(
             data_root=str(out),
             split="train",
             stats=stats,
@@ -212,14 +212,14 @@ def test_projected_mds_preserves_model_values(tmp_path) -> None:
             reservoir_capacity=4,
             num_workers=0,
             windows_per_replay=1,
-            batch_prefetch=batch_prefetch,
+            prefetch_batches=prefetch_batches,
             schema_version=5,
         )
         batches = list(reservoir)
         return reservoir, batches
 
-    plain_reservoir, plain_batches = reservoir_batches(False)
-    prefetched_reservoir, prefetched_batches = reservoir_batches(True)
+    plain_reservoir, plain_batches = reservoir_batches(0)
+    prefetched_reservoir, prefetched_batches = reservoir_batches(1)
     assert len(plain_batches) == len(prefetched_batches) == 34
     for plain, prefetched in zip(plain_batches, prefetched_batches, strict=True):
         assert plain.replay_ids == prefetched.replay_ids

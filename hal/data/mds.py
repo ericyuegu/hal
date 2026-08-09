@@ -11,6 +11,10 @@ from streaming.base.compression import decompress
 from streaming.base.format import reader_from_json
 from streaming.base.format.base.reader import Reader
 
+# Full replay MDS shards use a 2 GiB uncompressed size limit. Compression makes
+# stored shards much smaller while this limit keeps writer output consistent.
+FULL_MDS_SHARD_SIZE_LIMIT = 1 << 31
+
 
 def read_shard_index(root: Path, split: str) -> list[dict[str, Any]]:
     path = root / split / "index.json"

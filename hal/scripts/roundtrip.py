@@ -1,6 +1,6 @@
 """CLI: replay an MDS row through Dolphin and compare gamestate to truth.
 
-Compose ``Session`` + ``MdsControllerSource`` (per port) + ``drive`` + ``diff``
+Compose ``Session`` + ``MDSControllerSource`` (per port) + ``drive`` + ``diff``
 for one round-trip validation run. Truth is the original .slp re-read via
 peppi-py (``Trajectory.from_slp``); the live capture comes from libmelee.
 
@@ -29,7 +29,7 @@ from hal.sim.session import ReplayMatchup
 from hal.sim.session import Session
 from hal.sim.sources import ControllerSource
 from hal.sim.sources import InternalControllerSource
-from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import MDSControllerSource
 from hal.sim.trajectory import Trajectory
 
 
@@ -105,7 +105,7 @@ def roundtrip(
 
     sources: dict[int, ControllerSource] = {}
     for port, prefix in matchup.port_to_mds_prefix.items():
-        sources[port] = MdsControllerSource(columns=sample, port_prefix=prefix)
+        sources[port] = MDSControllerSource(columns=sample, port_prefix=prefix)
     for player in matchup.players:
         sources.setdefault(player.port, InternalControllerSource())
 

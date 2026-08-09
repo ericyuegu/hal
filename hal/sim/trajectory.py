@@ -3,7 +3,7 @@
 A ``Trajectory`` is the comparison currency: ``diff`` consumes two of them
 without caring which side came from where. We keep only post-frame data here
 — pre-frame controller features live in ``ControllerInputs`` /
-``MdsControllerSource`` and are not duplicated.
+``MDSControllerSource`` and are not duplicated.
 
 Layout: ``post[libmelee_port][field]`` is a 1D ndarray of length N. Field
 names are the MDS column suffixes from ``hal.wire.POST_FIELD_SUFFIXES``, and
@@ -16,6 +16,8 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import numpy as np
 import peppi_py
@@ -157,7 +159,7 @@ def _peppi_post_field(post: Post, field: str, n: int) -> np.ndarray:
     """
     raw: object = post
     for step in post_field_path(field):
-        raw = getattr(raw, step, None) if isinstance(step, str) else raw[step]
+        raw = getattr(raw, step, None) if isinstance(step, str) else cast(Any, raw)[step]
         if raw is None:
             return np.full(n, np.nan, dtype=np.float32)
     return np.asarray(raw)

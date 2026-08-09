@@ -65,7 +65,6 @@ from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import VAL_L_CHUNK
 from hal.training.dataloader import make_loader
-from hal.training.dataloader import make_replay_reservoir_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
@@ -77,6 +76,7 @@ from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
+from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
@@ -203,8 +203,6 @@ class TrainConfig:
     eval_max_parallel: int = 32
     # Overlap evaluation only when it has a separate GPU.
     eval_overlap_training: bool = False
-    # Opt-in decode ablation for SWA models. Full causal attention must rebuild the raw window.
-    eval_incremental_kv: bool = False
     # Cast floating model parameters to FP16 once when closed-loop evaluation loads them.
     eval_fp16: bool = True
     # If an eval is still running at the next boundary, the trainer waits up to this bound and
@@ -236,14 +234,13 @@ class TrainConfig:
     val_split: str = "val"
     num_workers: int = 16
     prefetch_factor: int = 2
-    # Prepare one complete training batch while the GPU trains on the current batch.
-    train_batch_prefetch: bool = True
+    # Prepare this many complete batches while the GPU trains.
+    prefetch_batches: int = 1
 
 
 def _model_tag(cfg: TrainConfig) -> str:
     offs = ".".join(str(o) for o in cfg.head_offsets)
     attention = "full" if cfg.attn_window == 0 else f"swa{cfg.attn_window}"
-    decode = "kv" if cfg.eval_incremental_kv else "recompute"
     if cfg.head_mode == "linear":
         head = "linear"
     elif cfg.head_mode == "state_mlp":
@@ -253,7 +250,7 @@ def _model_tag(cfg: TrainConfig) -> str:
         head = f"factored-mlp-r{cfg.action_mlp_ratio}-c{cfg.action_condition_dim}-{order}"
     return (
         f"gpt-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-a{cfg.action_vocab}-"
-        f"{attention}-{decode}-o{offs}-{head}"
+        f"{attention}-recompute-o{offs}-{head}"
     )
 
 
@@ -623,15 +620,6 @@ class GPT(nn.Module):
 
     def forward(self, features: dict[str, Tensor], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L_ctx d_model"]:
         return self.trunk(self._context_tokens(features), ctx_pad)
-
-    @torch.no_grad()
-    def forward_incremental(
-        self,
-        features: dict[str, Tensor],
-        past: list[tuple[Tensor, Tensor] | None],
-    ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
-        h, new_past = self.trunk.forward_incremental(self._context_tokens(features), past)
-        return h[:, -1], new_past
 
 
 # %%
@@ -1054,8 +1042,10 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
     for name, value in positive_ints.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    if not isinstance(cfg.train_batch_prefetch, bool):
-        raise ValueError(f"train_batch_prefetch must be a boolean, got {cfg.train_batch_prefetch!r}")
+    if not isinstance(cfg.prefetch_batches, int) or isinstance(cfg.prefetch_batches, bool):
+        raise ValueError(f"prefetch_batches must be an integer, got {cfg.prefetch_batches!r}")
+    if cfg.prefetch_batches < 0:
+        raise ValueError(f"prefetch_batches must be non-negative, got {cfg.prefetch_batches}")
     if cfg.batch_size % cfg.grad_accum_steps:
         raise ValueError(
             f"batch_size={cfg.batch_size} is the EFFECTIVE batch and must divide into "
@@ -1068,7 +1058,6 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         )
     if not isinstance(cfg.attn_window, int) or isinstance(cfg.attn_window, bool) or cfg.attn_window < 0:
         raise ValueError(f"attn_window must be a non-negative integer (0 = full context), got {cfg.attn_window!r}")
-    _validate_incremental_decode(cfg)
     if cfg.final_h2h_reference_run is not None:
         if not cfg.final_h2h_reference_run:
             raise ValueError("final_h2h_reference_run must be a run name or None, not an empty string")
@@ -1158,28 +1147,6 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
         )
 
 
-def _validate_incremental_decode(cfg: TrainConfig) -> None:
-    if cfg.eval_incremental_kv and cfg.attn_window == 0:
-        raise ValueError(
-            "eval_incremental_kv needs attn_window > 0: at full attention the rolling KV cache drops "
-            "history the full forward keeps, so the decode is silently wrong past L_ctx frames. A "
-            "full-context arm must say so: pass --cfg.no-eval-incremental-kv"
-        )
-    if cfg.eval_incremental_kv and cfg.attn_window > 0:
-        receptive_field = 1 + cfg.n_layers * (cfg.attn_window - 1)
-        # Strict inequality is intentional. The full rolling-window builder masks finite
-        # differences at its oldest retained row because that row's predecessor was truncated;
-        # the streaming token originally saw that predecessor. If the receptive field lands
-        # exactly on the left edge, that one boundary-feature difference can still reach the
-        # newest output. One extra raw row puts the truncation boundary out of reach.
-        if receptive_field >= cfg.L_ctx:
-            raise ValueError(
-                "eval_incremental_kv receptive field is not equivalent to the training rolling window: "
-                f"1 + n_layers * (attn_window - 1) = {receptive_field} reaches or exceeds L_ctx={cfg.L_ctx}. "
-                "Increase L_ctx, reduce attn_window/layers, or pass --cfg.no-eval-incremental-kv."
-            )
-
-
 def _load_model_state(model: GPT, state_dict: dict[str, Tensor]) -> None:
     """Load an E0 checkpoint and allow an older missing count buffer."""
     if any(key.startswith("blocks.") for key in state_dict):
@@ -1254,215 +1221,6 @@ class DecodeTelemetry:
             "decode_model_forward_p95_ms": float(np.quantile(latency_ms, 0.95)) if latency_ms.size else 0.0,
             "decode_model_forward_ms_per_row": (1_000 * total_seconds / self.model_rows if self.model_rows else 0.0),
         }
-
-
-def _parity_feature_stream(
-    model: GPT,
-    cfg: TrainConfig,
-    *,
-    slots: int,
-    frames: int,
-    seed: int,
-    device: torch.device,
-) -> dict[str, Tensor]:
-    gen = torch.Generator().manual_seed(seed)
-    stream: dict[str, Tensor] = {}
-    for prefix in _PLAYER_PREFIXES:
-        for name in FLOAT_FEATURES:
-            stream[f"{prefix}_{name}"] = torch.randn(slots, frames, generator=gen)
-            stream[f"{prefix}_{name}_mask"] = torch.randint(0, 2, (slots, frames), generator=gen).float()
-        for name, (vocab, _) in model.cat_specs.items():
-            stream[f"{prefix}_{name}"] = torch.randint(0, vocab, (slots, frames), generator=gen)
-    for channel, name in enumerate(ACTION_CHANNELS):
-        if channel < 4:
-            values = 2 * torch.rand(slots, frames, generator=gen) - 1
-        elif channel < _N_CONT:
-            values = torch.rand(slots, frames, generator=gen)
-        else:
-            values = torch.randint(0, 2, (slots, frames), generator=gen).float()
-        stream[f"ego_{name}"] = values
-    stream["ego_character"] = torch.randint(0, cfg.char_vocab, (slots, frames), generator=gen)
-    stream["opp_character"] = torch.randint(0, cfg.char_vocab, (slots, frames), generator=gen)
-    stream["stage"] = torch.randint(0, cfg.stage_vocab, (slots, frames), generator=gen)
-    float_dtype = next(model.parameters()).dtype
-    return {
-        name: value.to(device=device, dtype=float_dtype if value.is_floating_point() else None)
-        for name, value in stream.items()
-    }
-
-
-def _rolling_parity_context(
-    stream: dict[str, Tensor],
-    *,
-    frame: int,
-    segment_starts: Tensor,
-    L_ctx: int,
-) -> Context:
-    slots = segment_starts.numel()
-    lengths = torch.clamp(frame + 1 - segment_starts, max=L_ctx)
-    positions = torch.arange(L_ctx, device=segment_starts.device)
-    valid = positions[None, :] >= L_ctx - lengths[:, None]
-    source = frame + 1 - lengths[:, None] + positions[None, :] - (L_ctx - lengths[:, None])
-    source = source.clamp_min(0)
-    features = {}
-    for name, values in stream.items():
-        selected = values.gather(1, source)
-        features[name] = torch.where(valid, selected, torch.zeros((), dtype=selected.dtype, device=selected.device))
-    return Context(features=features, ctx_pad=L_ctx - lengths)
-
-
-@torch.no_grad()
-def checkpoint_decode_parity(
-    model: GPT,
-    cfg: TrainConfig,
-    *,
-    frames: int,
-    slots: int,
-    seed: int,
-    atol: float,
-    rtol: float,
-) -> dict[str, object]:
-    if frames <= cfg.L_ctx:
-        raise ValueError(f"parity frames={frames} must exceed L_ctx={cfg.L_ctx}")
-    if slots < 2:
-        raise ValueError(f"parity slots must be at least 2, got {slots}")
-    _validate_incremental_decode(replace(cfg, eval_incremental_kv=True))
-    model.eval()
-    device = next(model.parameters()).device
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    started_at = time.perf_counter()
-    stream = _parity_feature_stream(model, cfg, slots=slots, frames=frames, seed=seed, device=device)
-    reset_frames = {}
-    for slot in range(slots):
-        points = [0]
-        if slot >= 1:
-            points.append(cfg.L_ctx // 2 + 3 * slot)
-        if slot >= 2:
-            points.append(cfg.L_ctx + 5 + 7 * slot)
-        reset_frames[slot] = tuple(point for point in points if point < frames)
-    segment_starts = torch.zeros(slots, dtype=torch.long, device=device)
-    caches: list[list[tuple[Tensor, Tensor]] | None] = [None] * slots
-    full_gen = torch.Generator(device=device).manual_seed(seed + 1)
-    incremental_gen = torch.Generator(device=device).manual_seed(seed + 1)
-    group_temps = (cfg.decode_temp,) * N_GROUPS if cfg.decode_temps is None else cfg.decode_temps
-    hidden_max_abs = 0.0
-    hidden_max_rel = 0.0
-    logit_max_abs = {name: 0.0 for name in _GROUP_NAMES}
-    probability_max_abs = {name: 0.0 for name in _GROUP_NAMES}
-    hidden_failures = 0
-    logit_failures = {name: 0 for name in _GROUP_NAMES}
-    probability_failures = {name: 0 for name in _GROUP_NAMES}
-    sampled_action_mismatches = 0
-    finite = True
-    for frame in range(frames):
-        resetting = [slot for slot, points in reset_frames.items() if frame in points]
-        for slot in resetting:
-            segment_starts[slot] = frame
-            caches[slot] = None
-        full_ctx = _rolling_parity_context(
-            stream,
-            frame=frame,
-            segment_starts=segment_starts,
-            L_ctx=cfg.L_ctx,
-        )
-        full_hidden = model(full_ctx.features, full_ctx.ctx_pad)[:, -1]
-        incremental_hidden = torch.empty_like(full_hidden)
-        groups: dict[int, list[int]] = {}
-        for slot, cache in enumerate(caches):
-            length = 0 if cache is None else cache[0][0].size(2)
-            groups.setdefault(length, []).append(slot)
-        for rows in groups.values():
-            index = torch.tensor(rows, device=device, dtype=torch.long)
-            current = {name: values.index_select(0, index)[:, frame : frame + 1] for name, values in stream.items()}
-            group_caches = [caches[row] for row in rows]
-            past: list[tuple[Tensor, Tensor] | None] = (
-                [None] * len(model.trunk.blocks)
-                if group_caches[0] is None
-                else [
-                    (
-                        torch.cat([cache[layer][0] for cache in group_caches if cache is not None], 0),
-                        torch.cat([cache[layer][1] for cache in group_caches if cache is not None], 0),
-                    )
-                    for layer in range(len(model.trunk.blocks))
-                ]
-            )
-            hidden, new = model.forward_incremental(current, past)
-            incremental_hidden.index_copy_(0, index, hidden)
-            for local, slot in enumerate(rows):
-                caches[slot] = [(key[local : local + 1], value[local : local + 1]) for key, value in new]
-        hidden_delta = (full_hidden.float() - incremental_hidden.float()).abs()
-        hidden_scale = full_hidden.float().abs().clamp_min(atol)
-        hidden_max_abs = max(hidden_max_abs, float(hidden_delta.max()))
-        hidden_max_rel = max(hidden_max_rel, float((hidden_delta / hidden_scale).max()))
-        finite &= bool(torch.isfinite(full_hidden).all() and torch.isfinite(incremental_hidden).all())
-        hidden_failures += int(not torch.allclose(full_hidden, incremental_hidden, atol=atol, rtol=rtol))
-        full_logits = model.group_logits(full_hidden, model.primary_head_idx)
-        incremental_logits = model.group_logits(incremental_hidden, model.primary_head_idx)
-        for name in _GROUP_NAMES:
-            lhs = full_logits[name].float()
-            rhs = incremental_logits[name].float()
-            logit_max_abs[name] = max(logit_max_abs[name], float((lhs - rhs).abs().max()))
-            logit_failures[name] += int(not torch.allclose(lhs, rhs, atol=atol, rtol=rtol))
-            lhs_probability = F.softmax(lhs / group_temps[_GROUP_NAMES.index(name)], dim=-1)
-            rhs_probability = F.softmax(rhs / group_temps[_GROUP_NAMES.index(name)], dim=-1)
-            probability_max_abs[name] = max(
-                probability_max_abs[name], float((lhs_probability - rhs_probability).abs().max())
-            )
-            probability_failures[name] += int(
-                not torch.allclose(lhs_probability, rhs_probability, atol=atol, rtol=rtol)
-            )
-            finite &= bool(torch.isfinite(lhs_probability).all() and torch.isfinite(rhs_probability).all())
-        full_sample = _sample_group_indices(
-            full_logits,
-            group_temps=group_temps,
-            btn_dead=None,
-            min_p=cfg.decode_min_p,
-            argmax=False,
-            gen=full_gen,
-        )
-        incremental_sample = _sample_group_indices(
-            incremental_logits,
-            group_temps=group_temps,
-            btn_dead=None,
-            min_p=cfg.decode_min_p,
-            argmax=False,
-            gen=incremental_gen,
-        )
-        sampled_action_mismatches += int((full_sample != incremental_sample).any(dim=1).sum())
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    wall_seconds = time.perf_counter() - started_at
-    comparisons = frames * slots
-    passed = bool(
-        finite
-        and hidden_failures == 0
-        and not any(logit_failures.values())
-        and not any(probability_failures.values())
-        and sampled_action_mismatches == 0
-    )
-    return {
-        "passed": passed,
-        "dtype": str(next(model.parameters()).dtype),
-        "frames": frames,
-        "slots": slots,
-        "comparisons": comparisons,
-        "wall_seconds": wall_seconds,
-        "comparisons_per_second": comparisons / wall_seconds,
-        "seed": seed,
-        "atol": atol,
-        "rtol": rtol,
-        "reset_frames": {str(slot): list(points) for slot, points in reset_frames.items()},
-        "finite": finite,
-        "hidden_max_abs": hidden_max_abs,
-        "hidden_max_rel": hidden_max_rel,
-        "hidden_failure_frames": hidden_failures,
-        "logit_max_abs": logit_max_abs,
-        "logit_failure_frames": logit_failures,
-        "probability_max_abs": probability_max_abs,
-        "probability_failure_frames": probability_failures,
-        "sampled_action_mismatches": sampled_action_mismatches,
-    }
 
 
 def _decode_settings(
@@ -1593,11 +1351,6 @@ def make_policy(
     gen = None if decode_seed is None else torch.Generator(device=model_device).manual_seed(decode_seed)
     streams = None if decode_seed is None else SlotGroupRandom(decode_seed)
 
-    # Per-slot incremental state: the rolling KV cache and the hidden state of that slot's newest
-    # frame. Slots are kept apart because instant-restart boundaries land on different frames.
-    kv_cache: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = {}
-    hidden: dict[int, torch.Tensor] = {}
-
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         assert committed is None, "receding-horizon policy does not condition on a committed prefix"
@@ -1625,82 +1378,8 @@ def make_policy(
         )
         return chunk.cpu().numpy()
 
-    n_layers = len(model.trunk.blocks)
-
-    @torch.no_grad()
-    def encode_frame(ctx: Context) -> None:
-        """Take this frame into every live slot's KV cache and keep the hidden state it produces.
-
-        Called EVERY frame, so the cache never misses one while a chunk is being executed. Slots are
-        batched by cache LENGTH, not by absolute frame: the cache is a rolling window and the trunk
-        re-applies RoPE over its own positions, so two slots holding the same number of frames share
-        one forward. Every slot saturates at ``attn_window``, so a wave settles into one forward per
-        frame however far apart its matches drift."""
-        if ctx.slot_ids is None or ctx.reset is None:
-            raise ValueError("incremental closed-loop decode requires slot_ids and reset metadata")
-        ids = [int(sid) for sid in ctx.slot_ids.tolist()]
-        if streams is not None:
-            streams.begin(ctx)
-        for sid, reset in zip(ids, ctx.reset.tolist(), strict=True):
-            if reset:
-                kv_cache.pop(sid, None)
-                hidden.pop(sid, None)
-        groups: dict[int, list[int]] = {}
-        for row, sid in enumerate(ids):
-            cached = kv_cache.get(sid)
-            groups.setdefault(0 if cached is None else cached[0][0].size(2), []).append(row)
-        for rows in groups.values():
-            index = torch.tensor(rows, device=model_device, dtype=torch.long)
-            features = {name: value.index_select(0, index) for name, value in ctx.features.items()}
-            caches = [kv_cache.get(ids[row]) for row in rows]
-            past: list[tuple[torch.Tensor, torch.Tensor] | None] = (
-                [None] * n_layers
-                if caches[0] is None
-                else [
-                    (
-                        torch.cat([c[layer][0] for c in caches if c is not None], 0),
-                        torch.cat([c[layer][1] for c in caches if c is not None], 0),
-                    )
-                    for layer in range(n_layers)
-                ]
-            )
-            run = functools.partial(model.forward_incremental, features, past)
-            h, new = run() if telemetry is None else telemetry.model_forward(run, rows=len(rows), device=model_device)
-            for j, row in enumerate(rows):
-                kv_cache[ids[row]] = [(k[j : j + 1], v[j : j + 1]) for k, v in new]
-                hidden[ids[row]] = h[j]
-
-    @torch.no_grad()
-    def predict_incremental(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        """Sample a chunk from the hidden states ``encode_frame`` already computed — heads only, no
-        second backbone forward. The heads 1..s all read the same state, so an execution horizon
-        above 1 costs one extra head per frame it covers."""
-        assert committed is None, "receding-horizon policy does not condition on a committed prefix"
-        if ctx.slot_ids is None:
-            raise ValueError("incremental closed-loop decode requires slot_ids metadata")
-        h = torch.stack([hidden[int(sid)] for sid in ctx.slot_ids.tolist()])
-        keyed_uniforms = None
-        if streams is not None:
-            streams.select(ctx)
-            keyed_uniforms = streams.uniforms
-        chunk = chunk_from_hidden(
-            model,
-            h,
-            offsets,
-            group_temps=settings.temps or (settings.temp,) * N_GROUPS,
-            btn_support_min=settings.btn_support_min,
-            min_p=settings.min_p,
-            click_trigger_fix=settings.click_trigger_fix,
-            gen=gen if keyed_uniforms is None else None,
-            uniforms=keyed_uniforms,
-        )
-        return chunk.cpu().numpy()
-
-    incremental = cfg.eval_incremental_kv
     return RecedingHorizon(
         predict_chunk=predict_chunk,
-        predict_incremental=predict_incremental if incremental else None,
-        encode_frame=encode_frame if incremental else None,
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=s,
@@ -2335,7 +2014,6 @@ class EvalProtocol:
     decode_min_p: float
     decode_click_trigger_fix: bool
     model_dtype: str
-    eval_incremental_kv: bool
 
 
 def _eval_protocol(
@@ -2385,7 +2063,6 @@ def _eval_protocol(
         decode_min_p=settings.min_p,
         decode_click_trigger_fix=settings.click_trigger_fix,
         model_dtype=model_dtype,
-        eval_incremental_kv=cfg.eval_incremental_kv,
     )
 
 
@@ -2595,7 +2272,7 @@ def _fetch_h2h_reference(cfg: TrainConfig, run_dir: Path) -> Path:
 
 
 def _require_matched_h2h_protocol(self_protocol: Mapping[str, object], ref_protocol: Mapping[str, object]) -> None:
-    fields = ("L_ctx", "model_dtype", "eval_incremental_kv", "decode_settings")
+    fields = ("L_ctx", "model_dtype", "decode_settings")
     mismatches = {
         field: (self_protocol.get(field), ref_protocol.get(field))
         for field in fields
@@ -2632,7 +2309,6 @@ def _final_h2h(
         "step": cfg.max_steps,
         "L_ctx": cfg.L_ctx,
         "model_dtype": self_dtype,
-        "eval_incremental_kv": cfg.eval_incremental_kv,
         "decode_settings": asdict(_decode_settings(model, cfg)),
         "exec_horizon": cfg.exec_horizon,
         "head_offsets": list(cfg.head_offsets),
@@ -2733,14 +2409,14 @@ def train(
     )
     loader_kwargs = _loader_kwargs(cfg, stats)
     if cfg.compact_data:
-        train_loader = make_replay_reservoir_loader(
+        train_loader = make_reservoir_loader(
             split="train",
             num_workers=cfg.num_workers,
             prefetch_factor=cfg.prefetch_factor,
             predownload=cfg.predownload,
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
-            batch_prefetch=cfg.train_batch_prefetch,
+            prefetch_batches=cfg.prefetch_batches,
             **loader_kwargs,
         )
     else:
@@ -3169,76 +2845,10 @@ def _prepare_final_decode_model(model: GPT, cfg: TrainConfig) -> None:
         _halve_for_decode(model)
 
 
-def run_checkpoint_decode_parity(
-    ckpt_path: str,
-    *,
-    output_path: str,
-    frames: int | None,
-    slots: int,
-    seed: int,
-) -> dict[str, object]:
-    if DEVICE != "cuda":
-        raise RuntimeError("checkpoint decode parity requires CUDA")
-    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    cfg = _cfg_from_state(state["cfg"])
-    _validate_incremental_decode(replace(cfg, eval_incremental_kv=True))
-    torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
-    n_frames = 2 * cfg.L_ctx + 17 if frames is None else frames
-    tolerances = {"float32": (1e-4, 1e-4), "float16": (5e-3, 5e-3)}
-    results = {}
-    for name, (atol, rtol) in tolerances.items():
-        model = GPT(cfg).to(DEVICE)
-        _load_model_state(model, state["model"])
-        if name == "float16":
-            _halve_for_decode(model)
-        results[name] = checkpoint_decode_parity(
-            model,
-            cfg,
-            frames=n_frames,
-            slots=slots,
-            seed=seed,
-            atol=atol,
-            rtol=rtol,
-        )
-        del model
-        torch.cuda.empty_cache()
-    checkpoint_path = Path(ckpt_path)
-    with checkpoint_path.open("rb") as checkpoint_file:
-        checkpoint_sha256 = hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
-    payload = {
-        "schema_version": 1,
-        "checkpoint": str(checkpoint_path.resolve()),
-        "checkpoint_bytes": checkpoint_path.stat().st_size,
-        "checkpoint_sha256": checkpoint_sha256,
-        "step": int(state["step"]),
-        "wandb_id": state.get("wandb_id"),
-        "config": {
-            "d_model": cfg.d_model,
-            "n_layers": cfg.n_layers,
-            "n_heads": cfg.n_heads,
-            "L_ctx": cfg.L_ctx,
-            "attn_window": cfg.attn_window,
-            "head_offsets": list(cfg.head_offsets),
-        },
-        "results": results,
-        "passed": all(bool(result["passed"]) for result in results.values()),
-    }
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output.with_suffix(output.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True))
-    tmp.replace(output)
-    print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
-    if not payload["passed"]:
-        raise RuntimeError(f"checkpoint decode parity failed; evidence written to {output}")
-    return payload
-
-
 def eval_ckpt(
     ckpt_path: str,
     *,
     eval_output_dir: str | None = None,
-    eval_incremental_kv: bool | None = None,
     eval_exec_horizon: int | None = None,
     decode_temp: float | None = None,
     decode_temps: tuple[float, float, float, float] | None = None,
@@ -3256,9 +2866,6 @@ def eval_ckpt(
 ) -> dict[str, float]:
     """Load a checkpoint and run the closed-loop evaluation."""
     model, cfg, stats, state = _load_ckpt(ckpt_path)
-    if eval_incremental_kv is not None:
-        cfg = replace(cfg, eval_incremental_kv=eval_incremental_kv)
-        _validate_incremental_decode(cfg)
     exec_horizon = cfg.exec_horizon if eval_exec_horizon is None else eval_exec_horizon
     settings = _decode_settings(
         model,
@@ -3283,7 +2890,6 @@ def eval_ckpt(
     _exec_horizon_offsets(model.head_offsets, exec_horizon)
     print(
         f"[eval] loaded {ckpt_path}  step={state['step']}  device={DEVICE}  exec_horizon={exec_horizon}  "
-        f"incremental_kv={cfg.eval_incremental_kv}  "
         f"temp={settings.temp}  temps={settings.temps}  btn_support_min={settings.btn_support_min}  "
         f"min_p={settings.min_p}  click_trigger_fix={settings.click_trigger_fix}",
         flush=True,
@@ -3393,7 +2999,6 @@ class Args:
     eval_run: str | None = None  # R2 run name; download eval_checkpoint_name, evaluate, and upload evidence
     eval_checkpoint_name: str = "final.pt"
     eval_output_dir: str | None = None
-    eval_decode: Literal["checkpoint", "recompute", "kv"] = "checkpoint"
     eval_exec_horizon: int | None = None  # override execution horizon s for --eval (chunked decode; 1=per-frame)
     eval_temp: float | None = None  # override decode temperature for --eval
     eval_temps: tuple[float, float, float, float] | None = None  # per-group temps (buttons, main, c, triggers)
@@ -3408,13 +3013,6 @@ class Args:
     wandb_project: str = "hal"
     wandb_entity: str | None = None
     wandb_label: str | None = None
-    parity: str | None = None
-    parity_run: str | None = None
-    parity_checkpoint_name: str = "final.pt"
-    parity_output: str | None = None
-    parity_frames: int | None = None
-    parity_slots: int = 3
-    parity_seed: int = 0
     resume: str | None = None  # run_name to resume; pulls latest.pt (local, else R2)
     comment: str = ""
     # internal: one-shot async-eval worker (the trainer spawns this; not for manual use).
@@ -3429,60 +3027,10 @@ def main(args: Args) -> None:
         assert args.eval_worker_result is not None and args.eval_worker_replay is not None
         run_eval_worker(args.eval_worker, args.eval_worker_step, args.eval_worker_result, args.eval_worker_replay)
         return
-    selected_modes = sum(
-        value is not None for value in (args.eval, args.eval_run, args.parity, args.parity_run, args.resume)
-    )
+    selected_modes = sum(value is not None for value in (args.eval, args.eval_run, args.resume))
     if selected_modes > 1:
-        raise SystemExit("pass only one of --eval, --eval-run, --parity, --parity-run, or --resume")
-    if args.parity is not None or args.parity_run is not None:
-        parity_path = args.parity
-        parity_output = args.parity_output
-        uploader = None
-        upload_base = None
-        if args.parity_run is not None:
-            if Path(args.parity_run).name != args.parity_run:
-                raise SystemExit("--parity-run must be one run-name path segment")
-            if Path(args.parity_checkpoint_name).name != args.parity_checkpoint_name:
-                raise SystemExit("--parity-checkpoint-name must be one file name")
-            run_dir = Path("runs") / args.parity_run
-            checkpoint = download_latest(
-                args.parity_run,
-                run_dir / "manual_checkpoints",
-                name=args.parity_checkpoint_name,
-            )
-            if checkpoint is None:
-                raise SystemExit(f"no {args.parity_checkpoint_name} for run {args.parity_run!r}")
-            parity_path = str(checkpoint)
-            output = (
-                Path(parity_output)
-                if parity_output is not None
-                else run_dir / "manual_evals" / "p2-parity" / "decode_parity.json"
-            )
-            parity_output = str(output.resolve())
-            upload_base = run_dir.resolve()
-            if not Path(parity_output).is_relative_to(upload_base):
-                raise SystemExit("--parity-output must be inside runs/<parity-run> so evidence can upload")
-            uploader = BackgroundUploader(args.parity_run)
-        assert parity_path is not None
-        output = parity_output or str(Path(parity_path).resolve().with_name("decode_parity.json"))
-        try:
-            run_checkpoint_decode_parity(
-                parity_path,
-                output_path=output,
-                frames=args.parity_frames,
-                slots=args.parity_slots,
-                seed=args.parity_seed,
-            )
-        finally:
-            if uploader is not None:
-                assert upload_base is not None
-                output_path = Path(output)
-                if output_path.exists():
-                    uploader.upload(output_path, key=str(output_path.relative_to(upload_base)))
-                uploader.close()
-        return
+        raise SystemExit("pass only one of --eval, --eval-run, or --resume")
     if args.eval is not None or args.eval_run is not None:
-        eval_incremental_kv = None if args.eval_decode == "checkpoint" else args.eval_decode == "kv"
         eval_path = args.eval
         output_dir = args.eval_output_dir
         eval_label = args.wandb_label
@@ -3518,7 +3066,6 @@ def main(args: Args) -> None:
             eval_ckpt(
                 eval_path,
                 eval_output_dir=output_dir,
-                eval_incremental_kv=eval_incremental_kv,
                 eval_exec_horizon=args.eval_exec_horizon,
                 decode_temp=args.eval_temp,
                 decode_temps=args.eval_temps,

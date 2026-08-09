@@ -22,6 +22,7 @@ from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
 from hal.training import scoring
 from hal.training.dataloader import WindowDataset
+from hal.training.dataloader import collate_train_batch
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import CAT_FEATURES
@@ -158,9 +159,16 @@ def _mds_replay(frames: int, ranks: tuple[Rank, Rank] = (Rank.MASTER, Rank.PLATI
 def _windows(replays: list[dict], *, L_ctx: int, L_chunk: int = 2, gamma: float = 0.9, K: int = 4, seed: int = 0):
     """Drive hal's real sampler (ego coin flip, windowing, left padding, relabel) over in-memory
     return-labeled replays."""
-    labeled = exp022.ReturnLabeledReplays(replays, gamma=gamma, damage_shaping=0.0, win_reward=0.0)
+    labeled = [
+        exp022.label_replay_returns(replay, gamma=gamma, damage_shaping=0.0, win_reward=0.0) for replay in replays
+    ]
     sampler = WindowDataset(labeled, L_ctx, L_chunk, seed=seed, windows_per_replay=K, schema_version=SCHEMA_VERSION)
     return list(sampler)
+
+
+def _collate(windows: list[dict], L_ctx: int, rank_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+    batch = collate_train_batch(windows, stats=_stats(), L_ctx=L_ctx)
+    return exp022.collate_awr_batch(windows, batch, L_ctx=L_ctx, rank_weights=rank_weights)
 
 
 def _write_tiny_mds(root: Path, lobbies: Sequence[tuple[Rank, Rank]], *, frames: int = 240) -> Path:
@@ -294,7 +302,7 @@ _AWR_MACHINERY = (
 _UNPINNED_FROM_020 = {
     "replay_returns": "emits the per-frame reward beside the return, so the TD critic has its r",
     "collate_awr_batch": "stacks the reward and the ego tier, and takes the rank multipliers",
-    "_attach_returns": "passes cfg.awr_rank_weights down to that collate",
+    "label_replay_returns": "adds the reward column beside the return column",
     "awr_weights": "takes a rank multiplier, and an advantage of None for the rank-only BC path",
     "action_loss": "keeps V as a [B, L_ctx] grid and teacher-forces the within-frame chain",
     "group_nll": "reads the chain's per-group logits dict, not one joint vector's slices",
@@ -662,9 +670,8 @@ def test_click_trigger_fix_holds_on_the_chains_output() -> None:
     assert torch.all(action[..., exp022._TRIGGER_R_CH] == 1.0)
 
 
-def test_the_incremental_head_path_runs_the_same_chain() -> None:
-    """``chunk_from_hidden`` is what the rolling-KV policy samples through — no second backbone
-    forward — so it must walk the chain exactly as ``decode`` does."""
+def test_chunk_from_hidden_runs_the_same_chain() -> None:
+    """The shared chunk sampler must walk the same action chain as ``decode``."""
     cfg = _tiny_cfg(attn_window=8)
     model = _factored_model(cfg)
     _randomize_conditioning(model)
@@ -729,24 +736,6 @@ def test_the_chain_order_is_019s_default_and_reaches_the_run_name() -> None:
         replace(cfg, chain_order=("buttons", "triggers", "main_stick", "c_stick"))
     )
     assert "chain" not in exp022._reward_tag(cfg)
-
-
-def test_incremental_decode_matches_the_full_forward_under_a_window() -> None:
-    """The trunk answers with the whole sequence, so the call site takes the last position. Frame by
-    frame past the window, the decoded state must still equal the full forward's."""
-    cfg = _tiny_cfg(L_ctx=24, attn_window=8)
-    torch.manual_seed(3)
-    model = exp022.GPT(cfg).eval()
-    features = _features(2, cfg.L_ctx, torch.Generator().manual_seed(4))
-    ctx_pad = torch.zeros(2, dtype=torch.long)
-
-    want = model(features, ctx_pad)[:, -1]
-    past: list = [None] * cfg.n_layers
-    for t in range(cfg.L_ctx):
-        got, past = model.forward_incremental({k: v[:, t : t + 1] for k, v in features.items()}, past)
-
-    assert got.shape == want.shape
-    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
 def test_the_decode_cast_leaves_the_quantization_grids_in_fp32() -> None:
@@ -823,132 +812,6 @@ def test_compiling_the_bound_method_leaves_the_checkpoint_keys_alone() -> None:
 
     assert set(model.state_dict()) == keys
     assert not any("_orig_mod" in key for key in keys)
-
-
-def _incremental_policy(attn_window: int = 8, L_ctx: int = 32, exec_horizon: int = 1):
-    cfg = _tiny_cfg(
-        L_ctx=L_ctx, attn_window=attn_window, eval_incremental_kv=True, exec_horizon=exec_horizon, head_offsets=(1, 2)
-    )
-    torch.manual_seed(3)
-    model = exp022.GPT(cfg).eval()
-    return cfg, model, exp022.make_policy(model, _stats(), cfg, device="cpu")
-
-
-def _one_frame(features: dict[str, torch.Tensor], rows: list[int], t: int, slot_ids: list[int], reset: list[bool]):
-    """The ``Context`` ``RecedingHorizon`` hands an incremental decoder: ONE frame per live slot."""
-    return Context(
-        features={name: value[rows, t : t + 1] for name, value in features.items()},
-        ctx_pad=torch.zeros(len(rows), dtype=torch.long),
-        slot_ids=torch.tensor(slot_ids, dtype=torch.long),
-        reset=torch.tensor(reset, dtype=torch.bool),
-    )
-
-
-def _closure_dict(policy, value_type: type) -> dict:
-    """The per-slot ``kv_cache`` / ``hidden`` state, read out of the policy closure. Nothing else
-    exposes it, and these tests are about exactly that state."""
-    return next(
-        cell.cell_contents
-        for cell in policy.encode_frame.__wrapped__.__closure__
-        if isinstance(cell.cell_contents, dict)
-        and cell.cell_contents
-        and all(isinstance(value, value_type) for value in cell.cell_contents.values())
-    )
-
-
-def _cache_lengths(policy) -> dict[int, int]:
-    return {sid: entry[0][0].size(2) for sid, entry in _closure_dict(policy, list).items()}
-
-
-def test_an_instant_restart_drops_that_slots_cache_and_only_that_slots() -> None:
-    """The reset flag and the KV cache must move on the SAME frame, or the first frames of a new
-    match attend to the last frames of the old one. A wave restarts asynchronously, so the slot that
-    did not restart must keep every frame it had."""
-    _, _, policy = _incremental_policy(attn_window=8)
-    features = _features(2, 20, torch.Generator().manual_seed(4))
-    restart_at = 12
-
-    lengths = []
-    for t in range(20):
-        rows, ids = ([0], [10]) if t < 5 else ([0, 1], [10, 11])
-        reset = [t == 0 or t == restart_at] if t < 5 else [t == restart_at, t == 5]
-        policy.encode_frame(_one_frame(features, rows, t, ids, reset))
-        lengths.append(_cache_lengths(policy))
-
-    # Slot 10 alone: it fills, saturates at the window, and starts again from 1 on the restart frame.
-    assert [x[10] for x in lengths] == [1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8, 8, 1, 2, 3, 4, 5, 6, 7, 8]
-    # Slot 11 joins five frames later and is untouched by the other slot's restart.
-    assert [x[11] for x in lengths[5:]] == [1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8, 8, 8, 8, 8]
-
-
-def test_slots_at_different_cache_lengths_decode_as_if_they_were_alone() -> None:
-    """``encode_frame`` batches slots by cache LENGTH, so a wave whose matches drift apart runs
-    several forwards a frame. Each slot's hidden state must be the one it would get on its own —
-    including across the frame where a restart moves one slot into a different group."""
-    _, _, policy = _incremental_policy(attn_window=8)
-    features = _features(2, 14, torch.Generator().manual_seed(4))
-    restart_at = 9
-
-    for t in range(14):
-        rows, ids = ([0], [10]) if t < 3 else ([0, 1], [10, 11])
-        reset = [t == 0] if t < 3 else [t == restart_at, t == 3]
-        policy.encode_frame(_one_frame(features, rows, t, ids, reset))
-
-    got = _closure_dict(policy, torch.Tensor)
-
-    # The same two slots, each encoded alone, from its own first frame.
-    for row, sid, first in ((0, 10, restart_at), (1, 11, 3)):
-        alone = _incremental_policy(attn_window=8)[2]
-        for t in range(first, 14):
-            alone.encode_frame(_one_frame(features, [row], t, [sid], [t == first]))
-        torch.testing.assert_close(got[sid], _closure_dict(alone, torch.Tensor)[sid], rtol=1e-5, atol=1e-5)
-
-
-@pytest.mark.parametrize("k", [1, 2, 8, 9, 32])
-def test_a_re_warming_slot_decodes_like_the_padded_full_forward_it_replaces(k: int) -> None:
-    """Straight after a restart the cache holds FEWER frames than the window and no padding at all,
-    where training left-padded the window and hid the prefix with ``ctx_pad``. If the two disagreed,
-    every frame right after a match boundary would be decoded off-distribution. The pad frames here
-    carry loud garbage, so any attention that reaches them moves the answer."""
-    cfg, model, policy = _incremental_policy(attn_window=8, L_ctx=32)
-    features = _features(1, cfg.L_ctx, torch.Generator().manual_seed(4))
-    garbage = _features(1, cfg.L_ctx, torch.Generator().manual_seed(99))
-
-    for t in range(k):
-        policy.encode_frame(_one_frame(features, [0], t, [10], [t == 0]))
-    got = _closure_dict(policy, torch.Tensor)[10]
-
-    padded = {
-        name: torch.cat([garbage[name][:, : cfg.L_ctx - k] * 50, value[:, :k]], dim=1)
-        if value.is_floating_point()
-        else torch.cat([garbage[name][:, : cfg.L_ctx - k], value[:, :k]], dim=1)
-        for name, value in features.items()
-    }
-    want = model(padded, torch.tensor([cfg.L_ctx - k]))[0, -1]
-
-    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
-
-
-def test_the_cached_path_still_refuses_a_multi_token_call() -> None:
-    """The cached attention applies no mask, so two tokens in one call would see each other."""
-    _, model, _ = _incremental_policy(attn_window=8)
-    features = _features(1, 2, torch.Generator().manual_seed(4))
-
-    with pytest.raises(ValueError, match="one token"):
-        model.forward_incremental(features, [None] * 2)
-
-
-@pytest.mark.parametrize("incremental", [True, False])
-def test_the_policy_wires_the_incremental_seams_together(incremental: bool) -> None:
-    """Both callbacks or neither: an incremental decoder that is not fed every frame would decode
-    from a state several frames stale as soon as the execution horizon passes 1."""
-    cfg = _tiny_cfg(attn_window=8, eval_incremental_kv=incremental, exec_horizon=2)
-    policy = exp022.make_policy(exp022.GPT(cfg).eval(), _stats(), cfg, device="cpu")
-
-    assert (policy.encode_frame is not None) == incremental
-    assert (policy.predict_incremental is not None) == incremental
-    assert policy.s == 2
-    assert policy.float_dtype == torch.float32  # an fp32 model must not be handed an fp16 context
 
 
 def test_020_checkpoints_are_refused() -> None:
@@ -1103,31 +966,6 @@ def test_val_block_drops_the_uninformative_metrics() -> None:
 def test_validate_config_rejects_a_negative_window() -> None:
     with pytest.raises(ValueError, match="attn_window"):
         exp022.validate_config(_tiny_cfg(attn_window=-1), has_button_combo_counts=False)
-
-
-def test_validate_config_rejects_incremental_decode_at_full_attention() -> None:
-    """Without a window the rolling cache drops history the full forward keeps. The trunk raises
-    L_ctx frames into the first match; this raises at startup."""
-    with pytest.raises(ValueError, match="eval_incremental_kv"):
-        exp022.validate_config(_tiny_cfg(attn_window=0, eval_incremental_kv=True), has_button_combo_counts=False)
-    exp022.validate_config(_tiny_cfg(attn_window=8, eval_incremental_kv=True), has_button_combo_counts=False)
-
-
-def test_validate_config_rejects_incremental_swa_reaching_the_raw_context_boundary() -> None:
-    with pytest.raises(ValueError, match="receptive field.*reaches or exceeds L_ctx"):
-        exp022.validate_config(
-            _tiny_cfg(L_ctx=16, n_layers=2, attn_window=9, eval_incremental_kv=True),
-            has_button_combo_counts=False,
-        )
-    with pytest.raises(ValueError, match="receptive field.*reaches or exceeds L_ctx"):
-        exp022.validate_config(
-            _tiny_cfg(L_ctx=17, n_layers=2, attn_window=9, eval_incremental_kv=True),
-            has_button_combo_counts=False,
-        )
-    exp022.validate_config(
-        _tiny_cfg(L_ctx=18, n_layers=2, attn_window=9, eval_incremental_kv=True),
-        has_button_combo_counts=False,
-    )
 
 
 def test_validate_config_rejects_an_indivisible_effective_batch() -> None:
@@ -1321,7 +1159,7 @@ def test_a_padded_window_still_reads_its_true_tier_through_the_collate() -> None
     windows = _windows([_mds_replay(20, (Rank.DIAMOND, Rank.DIAMOND))], L_ctx=16, K=4, seed=3)
     assert any(int(window["ctx_pad"]) > 0 for window in windows), "expected a cold-start window"
 
-    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=16, rank_weights=_RANK_ARM)
+    batch = _collate(windows, 16, _RANK_ARM)
 
     assert batch.rank.tolist() == [int(Rank.DIAMOND)] * len(windows)
     torch.testing.assert_close(batch.rank_weight, torch.full((len(windows),), 2.0))
@@ -1339,7 +1177,7 @@ def test_the_logged_tier_mix_is_the_datasets_tier_mix() -> None:
     ]
     assert len(windows) == len(lobbies)
 
-    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=16, rank_weights=_RANK_ARM)
+    batch = _collate(windows, 16, _RANK_ARM)
     valid = torch.ones(len(windows), 16, dtype=torch.bool)
     weight, _ = exp022.awr_weights(None, beta=0.8, weight_max=5.0, rank_weight=batch.valid_rank_weights(valid))
     stats = exp022.rank_stats(batch.valid_ranks(valid), weight)
@@ -1355,7 +1193,7 @@ def test_the_tier_never_reaches_the_model_as_a_feature() -> None:
     nothing at deploy time."""
     windows = _windows([_mds_replay(60)], L_ctx=8, K=2, seed=1)
 
-    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=8, rank_weights=_RANK_ARM)
+    batch = _collate(windows, 8, _RANK_ARM)
 
     features = batch.batch.context.features
     assert not [name for name in features if "rank" in name or "awr_" in name]
@@ -1371,7 +1209,7 @@ def test_the_collated_arrays_satisfy_the_td_identity() -> None:
     replay["p2_stock"][120:] = 3  # a real event, so the columns are not all zeros
     windows = _windows([replay], L_ctx=16, gamma=gamma, K=4, seed=5)
 
-    batch = exp022.collate_awr_batch(windows, stats=_stats(), L_ctx=16)
+    batch = _collate(windows, 16)
 
     torch.testing.assert_close(
         batch.returns[:, :-1], batch.rewards[:, :-1] + gamma * batch.returns[:, 1:], rtol=0, atol=1e-6
@@ -1548,6 +1386,7 @@ def _isolate_run(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(exp022, "eval_vs_cpu", _no_dolphin)
     monkeypatch.setattr(exp022, "BackgroundUploader", Uploader)
+    monkeypatch.setattr(exp022, "wandb", _FakeWandb())
 
 
 def _mini_cfg(**kwargs):
@@ -1576,31 +1415,41 @@ def _mini_cfg(**kwargs):
     return exp022.TrainConfig(**{**defaults, **kwargs})
 
 
-class _WandbSpy:
-    """A stand-in for the ``wandb`` module that keeps every logged payload and forwards the rest.
+class _FakeRun:
+    def __init__(self, run_id: str) -> None:
+        self.id = run_id
+        self.summary: dict[str, object] = {}
 
-    The experiment's own module attribute is what gets replaced, so the real ``wandb`` module is
-    never mutated: ``wandb.init`` REBINDS ``wandb.log`` to the live run's method, and patching that
-    attribute would both lose the spy and leave a dead pre-init stub behind for the next test."""
 
-    def __init__(self, real) -> None:
-        self._real = real
+class _FakeWandb:
+    """Keep test logs and run metadata without starting a W&B service."""
+
+    def __init__(self) -> None:
         self.logs: list[dict] = []
+        self.run: _FakeRun | None = None
 
-    def log(self, payload: dict, *args, **kwargs):
-        self.logs.append(payload)
-        return self._real.log(payload, *args, **kwargs)
+    def init(self, **kwargs) -> _FakeRun:
+        self.run = _FakeRun(kwargs.get("id") or "pytest-run")
+        return self.run
 
-    def __getattr__(self, name: str):
-        return getattr(self._real, name)
+    def log(self, payload: dict, *args, **kwargs) -> None:
+        self.logs.append(dict(payload))
+
+    def define_metric(self, *args, **kwargs) -> None:
+        pass
+
+    def Histogram(self, values):
+        return values
+
+    def finish(self) -> None:
+        self.run = None
 
 
 def _logged_steps(monkeypatch) -> list[dict]:
     """Every ``wandb.log`` payload the run emits, so a test reads the numbers the dashboard would
     show instead of re-deriving them."""
-    spy = _WandbSpy(exp022.wandb)
-    monkeypatch.setattr(exp022, "wandb", spy)
-    return spy.logs
+    assert isinstance(exp022.wandb, _FakeWandb)
+    return exp022.wandb.logs
 
 
 @pytest.mark.skipif(not (_DEV_MDS / "train").is_dir(), reason="local dev MDS not materialized")

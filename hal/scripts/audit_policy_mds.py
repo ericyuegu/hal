@@ -13,8 +13,9 @@ from hal.data.mds import read_shard_index
 from hal.data.policy_schema import PLAYER_PREFIXES
 from hal.data.policy_schema import assert_policy_replay_equal
 from hal.data.policy_schema import encode_policy_replay
-from hal.scripts.project_policy_mds import DEFAULT_SCRATCH
 from hal.wire import MASK_INT32
+
+DEFAULT_SCRATCH = Path("/dev/shm/hal_policy_audit")
 
 
 def audit_policy_mds(
@@ -56,7 +57,7 @@ def audit_policy_mds(
                                 value.nbytes for value in compact.values() if isinstance(value, np.ndarray)
                             )
                             for prefix in nana_present:
-                                nana_present[prefix] += int(compact[f"{prefix}_present"])
+                                nana_present[prefix] += int(np.asarray(compact[f"{prefix}_present"]).item())
                             replay_has_large_action = False
                             for prefix in PLAYER_PREFIXES:
                                 action = np.asarray(source[f"{prefix}_action"])

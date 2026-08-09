@@ -19,6 +19,32 @@ import peppi_py.game
 from numpy.typing import DTypeLike
 
 # ---------------------------------------------------------------------------
+# Policy action wire
+# ---------------------------------------------------------------------------
+
+# Canonical ordering of the action vector used by policy datasets and models.
+# START is not included: a policy must not open the pause menu during a match.
+ACTION_CHANNELS: Final[tuple[str, ...]] = (
+    "main_stick_x",
+    "main_stick_y",
+    "c_stick_x",
+    "c_stick_y",
+    "trigger_l",
+    "trigger_r",
+    "button_a",
+    "button_b",
+    "button_x",
+    "button_y",
+    "button_z",
+    "button_r",
+    "button_l",
+    "button_d_up",
+)
+ACTION_DIM: Final[int] = len(ACTION_CHANNELS)
+# Compatibility name used by existing model code.
+A_DIM: Final[int] = ACTION_DIM
+
+# ---------------------------------------------------------------------------
 # Player / port conventions
 # ---------------------------------------------------------------------------
 
@@ -74,7 +100,7 @@ def dedupe_keep_idx(frame_ids: Sequence[int]) -> np.ndarray:
 
 # Slp-native bitmasks per the Slippi spec. Single declaration; the MDS column
 # names, the libmelee press/release dispatch, and the bit-decode in
-# MdsControllerView all derive from this dict at import time.
+# MDS controller playback derives its packed mask from this dict once.
 BUTTON_BITS: Final[dict[str, int]] = {
     "a": 0x0100,
     "b": 0x0200,

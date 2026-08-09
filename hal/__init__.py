@@ -20,7 +20,7 @@ from hal.sim.session import Session
 from hal.sim.session import session
 from hal.sim.sources import ControllerSource
 from hal.sim.sources import InternalControllerSource
-from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import MDSControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.trajectory import Trajectory
 from hal.sim.vec import BatchPolicy
@@ -37,7 +37,7 @@ __all__ = [
     "Fixture",
     "InternalControllerSource",
     "Matchup",
-    "MdsControllerSource",
+    "MDSControllerSource",
     "PlayerSetup",
     "ReplayIndexEntry",
     "ReplayMatchup",

@@ -19,7 +19,7 @@ Reductions and per-match views:
 
 - ``vs_cpu_metrics`` — pool a ``SweepResult`` into per-active-minute rates with
   bootstrap CIs (the frozen active-frame protocol; see its docstring).
-- ``match_rows`` / ``sweep_vs_cpu_prior_rows`` — one ``MatchRow`` per completed
+- ``match_rows`` — one ``MatchRow`` per completed
   match (characters, boot index, ordinal, active frames, damage, stocks), the
   source for matched-boot diagnostics.
 - ``matched_vs_cpu_deltas`` — a character-matched delta that treats each boot as
@@ -31,8 +31,8 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
-from dataclasses import fields
 from typing import Literal
+from typing import cast
 
 import melee
 import numpy as np
@@ -255,7 +255,19 @@ class MatchRow:
     def from_dict(cls, data: Mapping[str, int | float]) -> MatchRow:
         """Rebuild from a persisted flat dict (round-trips ``as_dict``); extra keys
         are ignored so logging can annotate rows without breaking the loader."""
-        return cls(**{f.name: data[f.name] for f in fields(cls)})
+        return cls(
+            ego_character=cast(int, data["ego_character"]),
+            opp_character=cast(int, data["opp_character"]),
+            stage=cast(int, data["stage"]),
+            boot_index=cast(int, data["boot_index"]),
+            match_ordinal=cast(int, data["match_ordinal"]),
+            active_frames=cast(int, data["active_frames"]),
+            total_frames=cast(int, data["total_frames"]),
+            damage_dealt=data["damage_dealt"],
+            damage_taken=data["damage_taken"],
+            stocks_taken=cast(int, data["stocks_taken"]),
+            stocks_lost=cast(int, data["stocks_lost"]),
+        )
 
 
 def match_rows(
@@ -448,8 +460,7 @@ def sweep_vs_cpu_prior(
     ``max_frames``. Every completed match becomes one ``SweepResult`` row (the
     ``stage`` label is the seed, kept only for shape compatibility with
     ``vs_cpu_metrics``); a boot that produced no match contributes one ``None`` row.
-    Pool the rows with ``vs_cpu_metrics`` exactly as the fixed sweep, or use
-    ``sweep_vs_cpu_prior_rows`` for the per-match view."""
+    Pool the rows with ``vs_cpu_metrics`` exactly as the fixed sweep."""
     matches, boots = _drive_prior(
         policy_factory,
         session_cfg=session_cfg,
@@ -505,39 +516,6 @@ def sweep_vs_cpu_prior_with_rows(
         start_retries=start_retries,
     )
     return _prior_sweep_result(boots, seed_stage), match_rows(boots, matches, ego_port=ego_port)
-
-
-def sweep_vs_cpu_prior_rows(
-    policy_factory: Callable[[], BatchPolicy],
-    *,
-    session_cfg: SessionConfig,
-    n_matchups: int,
-    max_parallel: int,
-    cpu_level: int = 9,
-    ego_port: Literal[1, 2] = 1,
-    seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
-    max_frames: int = 15_000,
-    start_retries: int = DEFAULT_START_RETRIES,
-) -> list[MatchRow]:
-    """Same instant-restart prior sweep as ``sweep_vs_cpu_prior``, but returns one
-    ``MatchRow`` per completed match (characters, boot index, ordinal, active frames,
-    damage, stocks) instead of the pooled ``SweepResult``.
-
-    The matchup schedule is ``matchups_for(n_matchups)`` — deterministic and
-    prefix-stable — so two checkpoints evaluated at the same ``n_matchups`` share the
-    boot-to-matchup mapping. Later restart stages and game randomness are not shared."""
-    matches, boots = _drive_prior(
-        policy_factory,
-        session_cfg=session_cfg,
-        n_matchups=n_matchups,
-        max_parallel=max_parallel,
-        cpu_level=cpu_level,
-        ego_port=ego_port,
-        seed_stage=seed_stage,
-        max_frames=max_frames,
-        start_retries=start_retries,
-    )
-    return match_rows(boots, matches, ego_port=ego_port)
 
 
 def _rows_by_boot(rows: Sequence[MatchRow]) -> dict[int, list[MatchRow]]:

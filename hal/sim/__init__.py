@@ -23,7 +23,6 @@ from hal.sim.diff import DiffReport
 from hal.sim.diff import diff
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import ControllerInputsValue
-from hal.sim.inputs import MdsControllerView
 from hal.sim.inputs import apply_inputs
 from hal.sim.loop import drive
 from hal.sim.session import Matchup
@@ -31,7 +30,7 @@ from hal.sim.session import PlayerSetup
 from hal.sim.session import Session
 from hal.sim.sources import ControllerSource
 from hal.sim.sources import InternalControllerSource
-from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import MDSControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.trajectory import Trajectory
 from hal.sim.vec import BatchPolicy

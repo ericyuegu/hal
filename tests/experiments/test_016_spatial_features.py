@@ -359,12 +359,3 @@ def test_spatial_features_on_widens_the_token_and_needs_the_block() -> None:
         features[name] = torch.zeros(2, cfg.L_ctx)
     with torch.no_grad():
         assert model(features, torch.tensor([0, 0], dtype=torch.long)).shape == (2, cfg.L_ctx, cfg.d_model)
-
-
-def test_incremental_decode_is_rejected_with_spatial_features() -> None:
-    """A one-frame token cannot carry a finite difference, so the combination would train and
-    deploy on different feature distributions."""
-    with pytest.raises(ValueError, match="finite-difference velocity"):
-        exp016.validate_config(
-            _tiny_cfg(exp016, spatial_features=True, eval_incremental_kv=True), has_button_combo_counts=False
-        )

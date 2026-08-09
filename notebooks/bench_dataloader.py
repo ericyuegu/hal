@@ -12,13 +12,13 @@ import torch
 import tyro
 
 from hal.training.dataloader import make_loader
-from hal.training.dataloader import make_replay_reservoir_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import BASE_ACTION_PROJECTION
 from hal.training.features import TrainBatch
+from hal.training.replay_reservoir import make_reservoir_loader
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Args:
     source: Path
     compact: Path
@@ -169,7 +169,7 @@ def main(args: Args) -> None:
         (
             "compact-reservoir",
             args.compact,
-            lambda: make_replay_reservoir_loader(
+            lambda: make_reservoir_loader(
                 data_root=str(args.compact),
                 remote=args.compact_remote,
                 cache_limit=f"{args.cache_limit_gb}gb",

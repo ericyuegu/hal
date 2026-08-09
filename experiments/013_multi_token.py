@@ -218,10 +218,6 @@ class TrainConfig:
     # Set true only when the evaluator has an actually separate GPU (or intentionally accepts
     # same-device contention).
     eval_overlap_training: bool = False
-    # Experimental incremental decoder. Disabled until a locally-trained attention window (or
-    # periodic boundary recomputation) is selected; a naive sliding KV cache is not exactly
-    # equivalent to recomputing the finite context because cached states contain dropped history.
-    eval_incremental_kv: bool = False
     # If an eval is still running at the next boundary, the trainer waits up to this bound and
     # then kills the worker.
     eval_timeout_seconds: float = 900.0
@@ -356,11 +352,6 @@ class Rotary(nn.Module):
         assert self.cos_cached is not None and self.sin_cached is not None
         return self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
 
-    def at(self, positions: Tensor) -> tuple[Tensor, Tensor]:
-        """RoPE factors for absolute positions used by incremental decoding."""
-        freqs = torch.outer(positions.to(self.inv_freq), self.inv_freq)
-        return freqs.cos()[None, :, None, :], freqs.sin()[None, :, None, :]
-
 
 @jaxtyped(typechecker=beartype)
 def apply_rotary_emb(
@@ -408,34 +399,6 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
         return self.c_proj(y)
 
-    def forward_incremental(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, position: int, max_cache: int
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        """One-token causal attention with a rolling KV cache."""
-        B, L, _ = x.shape
-        q, k, v = self.c_attn(x).split(self.d_model, dim=2)
-        q = q.view(B, L, self.n_heads, self.head_dim)
-        k = k.view(B, L, self.n_heads, self.head_dim)
-        v = v.view(B, L, self.n_heads, self.head_dim)
-        # Keep K unrotated in the cache. Re-apply RoPE on the retained window with positions
-        # 0..T-1, matching the existing full-context model when the left edge slides.
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        if past is not None:
-            k = torch.cat((past[0], k), dim=2)
-            v = torch.cat((past[1], v), dim=2)
-        if k.size(2) > max_cache:
-            k = k[:, :, -max_cache:]
-            v = v[:, :, -max_cache:]
-        positions = torch.arange(k.size(2), device=x.device)
-        cos, sin = self.rotary.at(positions)
-        q = apply_rotary_emb(q, cos[:, -L:], sin[:, -L:])
-        k_rot = k.transpose(1, 2)
-        k_rot = apply_rotary_emb(k_rot, cos, sin).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q.transpose(1, 2), k_rot, v)
-        y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.c_proj(y), (k, v)
-
 
 class MLP(nn.Module):
     def __init__(self, cfg: TrainConfig) -> None:
@@ -460,14 +423,6 @@ class Block(nn.Module):
         x = x + self.attn_scale * self.attn(rmsnorm(x), mask)
         x = x + self.mlp(rmsnorm(x))
         return x
-
-    def forward_incremental(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, position: int, max_cache: int
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        attn, kv = self.attn.forward_incremental(rmsnorm(x), past, position, max_cache)
-        x = x + self.attn_scale * attn
-        x = x + self.mlp(rmsnorm(x))
-        return x, kv
 
 
 # %%
@@ -564,23 +519,6 @@ class GPT(nn.Module):
         for block in self.blocks:
             x = block(x, mask)
         return rmsnorm(x)
-
-    @torch.no_grad()
-    def forward_incremental(
-        self,
-        features: dict[str, Tensor],
-        past: list[tuple[Tensor, Tensor] | None],
-        position: int,
-    ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
-        """Encode one current token using per-layer rolling KV state."""
-        x = self._context_tokens(features)
-        if x.size(1) != 1:
-            raise ValueError(f"incremental decode expects one token, got L={x.size(1)}")
-        new_past: list[tuple[Tensor, Tensor]] = []
-        for block, old in zip(self.blocks, past, strict=True):
-            x, kv = block.forward_incremental(x, old, position, self.L_ctx)
-            new_past.append(kv)
-        return rmsnorm(x)[:, -1], new_past
 
 
 # %%
@@ -996,11 +934,6 @@ def make_policy(
     model_device = next(model.parameters()).device
     gen = None if decode_seed is None else torch.Generator(device=model_device).manual_seed(decode_seed)
 
-    # Per-slot incremental state. Entries are kept separately because instant-restart boundaries
-    # occur at different frames; callbacks batch together slots with the same absolute position.
-    kv_cache: dict[int, list[tuple[torch.Tensor, torch.Tensor] | None]] = {}
-    kv_position: dict[int, int] = {}
-
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         assert committed is None, "receding-horizon policy does not condition on a committed prefix"
@@ -1030,62 +963,8 @@ def make_policy(
         )
         return chunk.cpu().numpy()
 
-    @torch.no_grad()
-    def predict_incremental(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        assert committed is None, "receding-horizon policy does not condition on a committed prefix"
-        if ctx.slot_ids is None or ctx.reset is None:
-            raise ValueError("incremental closed-loop decode requires slot_ids and reset metadata")
-        n = ctx.slot_ids.numel()
-        out = torch.empty((n, s, A_DIM), device=model_device, dtype=torch.float32)
-        ids = ctx.slot_ids.detach().cpu().tolist()
-        resets = ctx.reset.detach().cpu().tolist()
-        groups: dict[int, list[int]] = {}
-        for i, (sid, reset) in enumerate(zip(ids, resets, strict=True)):
-            sid = int(sid)
-            if reset:
-                kv_cache.pop(sid, None)
-                kv_position.pop(sid, None)
-            groups.setdefault(kv_position.get(sid, 0), []).append(i)
-        for position, rows in groups.items():
-            row_idx = torch.tensor(rows, device=model_device, dtype=torch.long)
-            features = {k: v.index_select(0, row_idx) for k, v in ctx.features.items()}
-            # All rows in a group have the same position and therefore the same cache length.
-            past_batch: list[tuple[torch.Tensor, torch.Tensor] | None] = []
-            for layer in range(len(model.blocks)):
-                vals = [kv_cache.get(int(ids[r]), [None] * len(model.blocks))[layer] for r in rows]
-                if vals[0] is None:
-                    past_batch.append(None)
-                else:
-                    assert all(v is not None for v in vals)
-                    past_batch.append(
-                        (
-                            torch.cat([v[0] for v in vals if v is not None], 0),
-                            torch.cat([v[1] for v in vals if v is not None], 0),
-                        )
-                    )
-            h, new = model.forward_incremental(features, past_batch, position)
-            for j, r in enumerate(rows):
-                sid = int(ids[r])
-                kv_cache[sid] = [(k[j : j + 1], v[j : j + 1]) for k, v in new]
-                kv_position[sid] = position + 1
-            # Incremental mode currently supports the same offset-1 deployment contract as s=1.
-            if s != 1:
-                raise ValueError("incremental decode currently requires exec_horizon=1")
-            logits = model.heads[model.primary_head_idx](h).float()
-            out[row_idx, 0] = _sample_action_from_logits(
-                model,
-                logits,
-                group_temps=settings.temps or (settings.temp,) * N_GROUPS,
-                btn_support_min=settings.btn_support_min,
-                min_p=settings.min_p,
-                click_trigger_fix=settings.click_trigger_fix,
-                gen=gen,
-            )
-        return out.cpu().numpy()
-
     return RecedingHorizon(
         predict_chunk=predict_chunk,
-        predict_incremental=predict_incremental if cfg.eval_incremental_kv else None,
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=s,

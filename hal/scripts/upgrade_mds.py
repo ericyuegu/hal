@@ -35,13 +35,13 @@ from tqdm import tqdm
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
 from hal.data.index import write_jsonl
+from hal.data.mds import FULL_MDS_SHARD_SIZE_LIMIT
 from hal.data.mds import open_shard
 from hal.data.mds import read_shard_index
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
 from hal.data.schema import rank_from_player_name
-from hal.scripts.materialize import SHARD_SIZE_LIMIT
 from hal.wire import PLAYER_PREFIXES
 
 # The one version this upgrade reads. A different source version means a
@@ -134,7 +134,7 @@ def _upgrade_split(src: Path, out: Path, split: str, ranks: list[tuple[Rank, ...
         out=str(out / split),
         columns=MDS_COLUMNS,
         compression="zstd",
-        size_limit=SHARD_SIZE_LIMIT,
+        size_limit=FULL_MDS_SHARD_SIZE_LIMIT,
         exist_ok=False,
     )
     try:

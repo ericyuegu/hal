@@ -51,7 +51,6 @@ from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import make_loader
-from hal.training.dataloader import make_replay_reservoir_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
@@ -63,6 +62,7 @@ from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
+from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
@@ -183,7 +183,7 @@ class TrainConfig:
     val_split: str = "val"
     num_workers: int = 16
     prefetch_factor: int = 2
-    train_batch_prefetch: bool = True
+    prefetch_batches: int = 4
     push_to_r2: bool = True
 
 
@@ -260,6 +260,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("wandb_grad_every must be an integer")
     if cfg.wandb_grad_every < 0:
         raise ValueError("wandb_grad_every must be non-negative")
+    if not isinstance(cfg.prefetch_batches, int) or isinstance(cfg.prefetch_batches, bool):
+        raise ValueError("prefetch_batches must be an integer")
+    if cfg.prefetch_batches < 0:
+        raise ValueError("prefetch_batches must be non-negative")
     if cfg.reservoir_capacity < 2 * micro_batch_size(cfg):
         raise ValueError("reservoir_capacity must be at least twice the micro-batch size")
 
@@ -1466,15 +1470,14 @@ def train(
 
     kwargs = loader_kwargs(cfg, stats)
     if cfg.compact_data:
-        train_loader = make_replay_reservoir_loader(
+        train_loader = make_reservoir_loader(
             split="train",
             num_workers=cfg.num_workers,
             prefetch_factor=cfg.prefetch_factor,
             predownload=cfg.predownload,
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
-            batch_prefetch=cfg.train_batch_prefetch,
-            batch_prefetch_depth=cfg.grad_accum_steps,
+            prefetch_batches=cfg.prefetch_batches,
             **kwargs,
         )
     else:

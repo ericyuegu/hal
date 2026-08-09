@@ -6,8 +6,7 @@ paths must agree.
    has to draw the same weights, in the same order, and give the same output at ``attn_window=0``.
 2. The two paths agree. The dense bool mask is the reference. FlexAttention must match it in value,
    and its mask must match a plain double-loop statement of the three rules.
-3. Sliding-window decode is exact. With a trained window, the rolling KV cache holds precisely the
-   window the model saw in training, so incremental decode equals the full forward.
+3. Sliding-window attention follows the same masking rules as full causal attention.
 """
 
 import importlib.util
@@ -185,101 +184,6 @@ def test_flex_and_dense_train_the_same() -> None:
         curves.append(torch.tensor(losses))
 
     torch.testing.assert_close(curves[0], curves[1], rtol=1e-5, atol=1e-5)
-
-
-@pytest.mark.parametrize("prefer_flex", [False, pytest.param(True, marks=requires_flex)])
-def test_incremental_matches_full_forward_under_swa(prefer_flex: bool) -> None:
-    """The rolling cache holds exactly the trained window, and RoPE is relative, so decoding frame
-    by frame gives the same hidden state as one forward over the whole sequence."""
-    device = "cuda" if prefer_flex else "cpu"
-    attn_window = 16
-    L = 3 * attn_window
-    cfg = _cfg(L_ctx=L, attn_window=attn_window)
-    trunk = _trunk(cfg, prefer_flex=prefer_flex, device=device)
-
-    torch.manual_seed(17)
-    x = torch.randn(2, L, cfg.d_model, device=device)
-    ctx_pad = torch.zeros(2, dtype=torch.long, device=device)
-    want = trunk(x, ctx_pad)[:, -1]
-
-    past: list = [None] * cfg.n_layers
-    for t in range(L):
-        h, past = trunk.forward_incremental(x[:, t : t + 1], past)
-    assert all(kv[0].size(2) == attn_window for kv in past)
-
-    torch.testing.assert_close(h[:, -1], want, rtol=1e-5, atol=1e-5)
-
-
-def test_incremental_rejects_a_chunk() -> None:
-    """The cached attention has no mask inside the given chunk, so more than one token is refused."""
-    trunk = _trunk(_cfg(attn_window=16), prefer_flex=False, device="cpu")
-    x = torch.randn(2, 3, _GEOM["d_model"])
-
-    with pytest.raises(ValueError, match="one token"):
-        trunk.forward_incremental(x, [None] * len(trunk.blocks))
-
-
-def test_incremental_rejects_decoding_past_a_full_context() -> None:
-    """At full attention the cache is the whole context, so one more frame would drop history the
-    full forward keeps. The trunk refuses rather than answer with a quietly wrong hidden state."""
-    L = 8
-    trunk = _trunk(_cfg(L_ctx=L, attn_window=0), prefer_flex=False, device="cpu")
-    x = torch.randn(2, 1, _GEOM["d_model"])
-
-    past: list = [None] * len(trunk.blocks)
-    for _ in range(L):
-        _, past = trunk.forward_incremental(x, past)
-    with pytest.raises(ValueError, match="passed the 8-frame context"):
-        trunk.forward_incremental(x, past)
-
-
-def test_incremental_rejects_an_swa_receptive_field_wider_than_the_rolling_context() -> None:
-    trunk = _trunk(_cfg(L_ctx=16, n_layers=2, attn_window=9), prefer_flex=False, device="cpu")
-
-    with pytest.raises(ValueError, match="receptive field.*exceeds L_ctx"):
-        trunk.forward_incremental(torch.randn(2, 1, _GEOM["d_model"]), [None] * 2)
-
-
-def test_incremental_matches_the_rolling_full_forward_after_left_edge_eviction() -> None:
-    L_ctx, attn_window, n_layers = 17, 5, 4  # receptive field = 17 exactly
-    trunk = _trunk(
-        _cfg(L_ctx=L_ctx, attn_window=attn_window, n_layers=n_layers),
-        prefer_flex=False,
-        device="cpu",
-    )
-    x = torch.randn(2, 2 * L_ctx + 3, _GEOM["d_model"], generator=torch.Generator().manual_seed(41))
-    past: list = [None] * n_layers
-
-    for t in range(x.size(1)):
-        incremental, past = trunk.forward_incremental(x[:, t : t + 1], past)
-        start = max(0, t + 1 - L_ctx)
-        window = x[:, start : t + 1]
-        full = trunk(window, torch.zeros(2, dtype=torch.long))
-        torch.testing.assert_close(incremental[:, -1], full[:, -1], rtol=1e-5, atol=1e-5)
-
-
-@pytest.mark.parametrize("k", [1, 2, 7, 8, 9, 16, 48])
-def test_a_short_cache_decodes_like_a_left_padded_full_forward(k: int) -> None:
-    """A slot that just re-warmed after an instant restart decodes from a cache HOLDING FEWER frames
-    than the window, with no padding in it at all. Training instead left-pads the window and hides
-    the prefix with ``ctx_pad``. The two must agree, or the frames right after a match boundary
-    would be decoded off-distribution: the pad keys carry loud garbage here, so any attention that
-    reads them moves the answer."""
-    attn_window, L = 8, 48
-    cfg = _cfg(L_ctx=L, attn_window=attn_window)
-    trunk = _trunk(cfg, prefer_flex=False, device="cpu")
-
-    torch.manual_seed(17)
-    real = torch.randn(2, k, cfg.d_model)
-    padding = torch.randn(2, L - k, cfg.d_model) * 50.0
-    want = trunk(torch.cat([padding, real], dim=1), torch.full((2,), L - k, dtype=torch.long))[:, -1]
-
-    past: list = [None] * cfg.n_layers
-    for t in range(k):
-        h, past = trunk.forward_incremental(real[:, t : t + 1], past)
-
-    assert all(kv[0].size(2) == min(k, attn_window) for kv in past)
-    torch.testing.assert_close(h[:, -1], want, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("length", [128, 1024])

@@ -14,8 +14,16 @@ from loguru import logger
 
 from hal import r2
 
-_SENTINEL: Final[object] = object()
 _NOT_FOUND: Final[frozenset[str]] = frozenset({"404", "NoSuchKey"})
+_FileVersion = tuple[str, int, int, int, int, int]
+_UploadItem = tuple[str, str | None]
+
+
+class _Stop:
+    """Private queue marker that tells the upload thread to exit."""
+
+
+_SENTINEL: Final[_Stop] = _Stop()
 
 
 class BackgroundUploader:
@@ -30,8 +38,8 @@ class BackgroundUploader:
         self._prefix = prefix
         self._bucket = r2.bucket()
         self._client = r2.client()
-        self._queue: queue.Queue = queue.Queue()
-        self._queued_versions: set[tuple[str, int, int, int, int, int]] = set()
+        self._queue: queue.Queue[_UploadItem | _Stop] = queue.Queue()
+        self._queued_versions: set[_FileVersion] = set()
         self._queue_lock = threading.Lock()
         self._failures = 0
         self._thread = threading.Thread(target=self._drain, name=f"r2-upload-{run_name}", daemon=True)
@@ -41,7 +49,7 @@ class BackgroundUploader:
         while True:
             item = self._queue.get()
             try:
-                if item is _SENTINEL:
+                if isinstance(item, _Stop):
                     return
                 local_str, rel_key = item
                 local = Path(local_str)
@@ -59,7 +67,7 @@ class BackgroundUploader:
         """Queue a file unless the same version is already queued."""
         stat = path.stat()
         rel_key = key or path.name
-        version = (rel_key, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        version: _FileVersion = (rel_key, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         with self._queue_lock:
             if version in self._queued_versions:
                 return False
@@ -69,8 +77,8 @@ class BackgroundUploader:
 
     def upload_tree(self, root: Path, *, base: Path, pattern: str = "*") -> int:
         """Queue matching files and return the number of new file versions."""
-        files = [p for p in sorted(root.rglob(pattern)) if p.is_file()]
-        return sum(self.upload(p, key=str(p.relative_to(base))) for p in files)
+        files = (path for path in sorted(root.rglob(pattern)) if path.is_file())
+        return sum(1 for path in files if self.upload(path, key=str(path.relative_to(base))))
 
     def close(self) -> None:
         """Drain the queue and fail if any upload failed."""

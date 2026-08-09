@@ -126,7 +126,6 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
         "step": int(state["step"]),
         "L_ctx": cfg.L_ctx,
         "model_dtype": str(next(model.parameters()).dtype),
-        "eval_incremental_kv": getattr(cfg, "eval_incremental_kv", False),
     }
 
     if args.family == "rle_token":

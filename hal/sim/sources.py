@@ -22,7 +22,6 @@ import numpy as np
 
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import ControllerInputsValue
-from hal.sim.inputs import MdsControllerView
 from hal.wire import BUTTON_BITS
 
 
@@ -33,12 +32,12 @@ class ControllerSource(Protocol):
     def __call__(self, frame_index: int, last_gamestate: dict | None) -> ControllerInputs | None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class MdsControllerSource:
+@dataclass(slots=True)
+class MDSControllerSource:
     """Replay an MDS-recorded port of inputs.
 
-    Returns a fresh ``MdsControllerView`` each frame. The view itself is
-    zero-copy over the column dict; constructing the wrapper is ~50 ns.
+    Resolve all input arrays once. Pack the button mask once. Each call changes
+    only the current frame index and returns this object as the input view.
 
     Frame alignment: drive's ``captured[0]`` is the gamestate returned by
     ``start_match`` — its slp pre-frame inputs are already locked in by the
@@ -52,13 +51,87 @@ class MdsControllerSource:
 
     columns: dict[str, np.ndarray]
     port_prefix: Literal["p1", "p2"]
+    _main_x: np.ndarray = field(init=False, repr=False)
+    _main_y: np.ndarray = field(init=False, repr=False)
+    _c_x: np.ndarray = field(init=False, repr=False)
+    _c_y: np.ndarray = field(init=False, repr=False)
+    _trigger_l: np.ndarray = field(init=False, repr=False)
+    _trigger_r: np.ndarray = field(init=False, repr=False)
+    _buttons: np.ndarray = field(init=False, repr=False)
+    _frame_idx: int = field(default=-1, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        prefix = self.port_prefix
+        arrays = {
+            "main_x": np.asarray(self.columns[f"{prefix}_main_stick_x"]),
+            "main_y": np.asarray(self.columns[f"{prefix}_main_stick_y"]),
+            "c_x": np.asarray(self.columns[f"{prefix}_c_stick_x"]),
+            "c_y": np.asarray(self.columns[f"{prefix}_c_stick_y"]),
+            "trigger_l": np.asarray(self.columns[f"{prefix}_trigger_l"]),
+            "trigger_r": np.asarray(self.columns[f"{prefix}_trigger_r"]),
+        }
+        lengths = {len(values) for values in arrays.values()}
+        if len(lengths) != 1:
+            shapes = {name: values.shape for name, values in arrays.items()}
+            raise ValueError(f"MDS controller columns have different lengths: {shapes}")
+        frames = lengths.pop()
+        buttons = np.zeros(frames, dtype=np.uint16)
+        for name, bit in BUTTON_BITS.items():
+            values = np.asarray(self.columns[f"{prefix}_button_{name}"])
+            if values.shape != (frames,):
+                raise ValueError(f"{prefix}_button_{name} has shape {values.shape}; expected {(frames,)}")
+            if not np.isin(values, (0, 1)).all():
+                raise ValueError(f"{prefix}_button_{name} must contain only 0 or 1")
+            buttons |= values.astype(np.uint16) * np.uint16(bit)
+        self._main_x = arrays["main_x"]
+        self._main_y = arrays["main_y"]
+        self._c_x = arrays["c_x"]
+        self._c_y = arrays["c_y"]
+        self._trigger_l = arrays["trigger_l"]
+        self._trigger_r = arrays["trigger_r"]
+        self._buttons = buttons
 
     def __call__(self, frame_index: int, last_gamestate: dict | None) -> ControllerInputs | None:
         next_idx = frame_index + 1
-        n = len(self.columns[f"{self.port_prefix}_main_stick_x"])
-        if next_idx >= n:
+        if next_idx >= len(self._main_x):
             return None
-        return MdsControllerView(columns=self.columns, port_prefix=self.port_prefix, frame_idx=next_idx)
+        self._frame_idx = next_idx
+        return self
+
+    def _at(self, values: np.ndarray) -> float:
+        if self._frame_idx < 0:
+            raise RuntimeError("MDS controller input was read before its first frame")
+        return float(values[self._frame_idx])
+
+    @property
+    def main_x(self) -> float:
+        return self._at(self._main_x)
+
+    @property
+    def main_y(self) -> float:
+        return self._at(self._main_y)
+
+    @property
+    def c_x(self) -> float:
+        return self._at(self._c_x)
+
+    @property
+    def c_y(self) -> float:
+        return self._at(self._c_y)
+
+    @property
+    def trigger_l(self) -> float:
+        return self._at(self._trigger_l)
+
+    @property
+    def trigger_r(self) -> float:
+        return self._at(self._trigger_r)
+
+    @property
+    def buttons(self) -> int:
+        if self._frame_idx < 0:
+            raise RuntimeError("MDS controller input was read before its first frame")
+        return int(self._buttons[self._frame_idx])
 
 
 @dataclass(frozen=True, slots=True)

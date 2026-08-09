@@ -21,18 +21,15 @@ the attention output NaN.
 Parameter creation order is the order in 016 to 021. A seeded build therefore draws the same
 initial weights as those files do. ``tests/test_trunk.py`` pins this.
 
-Shapes are annotated here but NOT checked at runtime by ``jaxtyped``. Two measurements decided
-that: a ``jaxtyped`` call costs 58 us on this box, and the per-op helpers run four times per layer,
-which is 1.9 ms of a 7.0 ms one-token decode; and dynamo cannot trace a beartype wrapper, so a
-checked forward cannot be ``torch.compile``d (measured 1.65x on the training step). :meth:`Trunk
-.forward` keeps ONE hand-written guard instead, at the per-step boundary, for the one wrong shape
-that broadcasts rather than raising. The rest of the contract is held by ``tests/test_trunk.py``,
-which drives every path against a reference.
+Shapes are annotated but not checked at runtime. Dynamo cannot trace the runtime type wrapper.
+The public forward method has one direct shape guard for the error that could otherwise broadcast.
+``tests/test_trunk.py`` checks all attention paths against a reference.
 """
 
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -112,9 +109,6 @@ class Rotary(nn.Module):
 
     def at(self, length: int, device: torch.device) -> tuple[Tensor, Tensor]:
         """RoPE factors for absolute positions ``0..length-1``, in the module's dtype.
-
-        The full forward and incremental decode both want exactly this, so they share one cache:
-        past the warm-up a decode holds the window's length frame after frame and rebuilds nothing.
 
         The angles are ALWAYS built at fp32, from the integer geometry rather than from the
         ``inv_freq`` buffer, because this table is a lookup and not a weight. A whole-module cast to
@@ -199,7 +193,7 @@ def flex_is_usable(device_type: str) -> bool:
         with torch.enable_grad():
             q, k, v = (torch.zeros(1, 1, 128, 16, device=device_type, requires_grad=True) for _ in range(3))
             pad = torch.zeros(1, dtype=torch.long, device=device_type)
-            _flex_attention(q, k, v, block_mask=block_mask(pad, 128, 0)).sum().backward()
+            cast(Tensor, _flex_attention(q, k, v, block_mask=block_mask(pad, 128, 0))).sum().backward()
     except (RuntimeError, NotImplementedError) as e:
         logger.warning(f"FlexAttention does not run on {device_type} ({type(e).__name__}: {e}); trunk uses SDPA")
         return False
@@ -227,37 +221,11 @@ class CausalSelfAttention(nn.Module):
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
         if isinstance(mask, BlockMask):
-            y = _flex_attention(q, k, v, block_mask=mask)
+            y = cast(Tensor, _flex_attention(q, k, v, block_mask=mask))
         else:
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
         return self.c_proj(y)
-
-    def forward_incremental(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, max_cache: int
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        """Causal attention over a rolling KV cache of the last ``max_cache`` frames."""
-        B, L, _ = x.shape
-        q, k, v = self.c_attn(x).split(self.d_model, dim=2)
-        q = q.view(B, L, self.n_heads, self.head_dim)
-        k = k.view(B, L, self.n_heads, self.head_dim)
-        v = v.view(B, L, self.n_heads, self.head_dim)
-        # Keep K unrotated in the cache and re-apply RoPE over the retained window with positions
-        # 0..T-1. RoPE is relative, so the scores stay correct as the left edge slides.
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        if past is not None:
-            k = torch.cat((past[0], k), dim=2)
-            v = torch.cat((past[1], v), dim=2)
-        if k.size(2) > max_cache:
-            k = k[:, :, -max_cache:]
-            v = v[:, :, -max_cache:]
-        cos, sin = self.rotary.at(k.size(2), x.device)
-        q = apply_rotary_emb(q, cos[:, -L:], sin[:, -L:])
-        k_rot = apply_rotary_emb(k.transpose(1, 2), cos, sin).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q.transpose(1, 2), k_rot, v)
-        y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.c_proj(y), (k, v)
 
 
 class MLP(nn.Module):
@@ -282,14 +250,6 @@ class Block(nn.Module):
         x = x + self.mlp(rmsnorm(x))
         return x
 
-    def forward_incremental(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, max_cache: int
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        attn, kv = self.attn.forward_incremental(rmsnorm(x), past, max_cache)
-        x = x + self.attn_scale * attn
-        x = x + self.mlp(rmsnorm(x))
-        return x, kv
-
 
 class Trunk(nn.Module):
     """The block stack plus the final norm. Callers own the input projection and the heads.
@@ -304,9 +264,6 @@ class Trunk(nn.Module):
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
         self.attn_window = cfg.attn_window
         self.L_ctx = cfg.L_ctx
-        # With a trained window the cache holds exactly the training window, so incremental decode
-        # matches the full forward. Without one it holds the whole context.
-        self.max_cache = cfg.attn_window if cfg.attn_window > 0 else cfg.L_ctx
         self.prefer_flex = prefer_flex
         self.require_flex = cfg.require_flex
         self._use_flex: bool | None = None
@@ -342,40 +299,3 @@ class Trunk(nn.Module):
         for block in self.blocks:
             x = block(x, mask)
         return rmsnorm(x)
-
-    @torch.no_grad()
-    def forward_incremental(
-        self, x: Tensor, past: list[tuple[Tensor, Tensor] | None]
-    ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
-        """Encode ONE new token against per-layer rolling KV state.
-
-        The cached attention applies no mask, so every query sees the whole cache. That is correct
-        for a single token and wrong for a chunk, where the tokens would also see each other. A
-        chunk prefill needs its own mask; add it here when a caller needs one.
-
-        Without a window, the cache holds ``L_ctx`` frames and the model was trained to read all of
-        them, so a longer decode would drop history that the full forward keeps. That is a silent
-        error of about 9e-2 in the hidden state, so it raises here instead."""
-        if x.size(1) != 1:
-            raise ValueError(f"incremental decode takes one token, got L={x.size(1)}")
-        # Cached hidden states span 1 + n_layers * (window - 1) raw tokens. They must not retain
-        # tokens that the full rolling window has dropped.
-        if self.attn_window > 0:
-            receptive_field = 1 + len(self.blocks) * (self.attn_window - 1)
-            if receptive_field > self.L_ctx:
-                raise ValueError(
-                    "incremental SWA receptive field is not equivalent to the training rolling window: "
-                    f"1 + n_layers * (attn_window - 1) = {receptive_field} exceeds L_ctx={self.L_ctx}. "
-                    "Increase L_ctx, reduce attn_window/layers, or disable incremental decode."
-                )
-        cached = 0 if past[0] is None else past[0][0].size(2)
-        if self.attn_window == 0 and cached + 1 > self.max_cache:
-            raise ValueError(
-                f"incremental decode passed the {self.max_cache}-frame context at full attention: "
-                "the cache would drop history the full forward keeps. Train with attn_window > 0."
-            )
-        new_past: list[tuple[Tensor, Tensor]] = []
-        for block, old in zip(self.blocks, past, strict=True):
-            x, kv = block.forward_incremental(x, old, self.max_cache)
-            new_past.append(kv)
-        return rmsnorm(x), new_past

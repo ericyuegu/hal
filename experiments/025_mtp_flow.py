@@ -45,12 +45,12 @@ from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import make_loader
-from hal.training.dataloader import make_replay_reservoir_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
+from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
@@ -556,15 +556,14 @@ def train(
 
     kwargs = mtp.loader_kwargs(cfg, stats)
     if cfg.compact_data:
-        train_loader = make_replay_reservoir_loader(
+        train_loader = make_reservoir_loader(
             split="train",
             num_workers=cfg.num_workers,
             prefetch_factor=cfg.prefetch_factor,
             predownload=cfg.predownload,
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
-            batch_prefetch=cfg.train_batch_prefetch,
-            batch_prefetch_depth=cfg.grad_accum_steps,
+            prefetch_batches=cfg.prefetch_batches,
             **kwargs,
         )
     else:

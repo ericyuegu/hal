@@ -36,11 +36,12 @@ from hal.data.feature_stats import FeatureStats
 from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import ControllerInputsValue
 from hal.training.ego_stats import consolidate_key
+from hal.wire import A_DIM
+from hal.wire import ACTION_CHANNELS
+from hal.wire import ACTION_DIM as _ACTION_DIM
 from hal.wire import BUTTON_BITS
 from hal.wire import VELOCITY_COMPONENTS
 from hal.wire import mask_value
-
-A_DIM = 14  # 4 sticks + 2 triggers + 8 buttons (START excluded — see ACTION_CHANNELS)
 
 # Continuous gamestate features (normalized via FeatureStats). Sticks, triggers,
 # buttons and categoricals are routed separately below.
@@ -134,31 +135,9 @@ V6_PLAYER_COLUMNS: Final[ExtraColumns] = ExtraColumns(
 
 _NO_EXTRA: Final[ExtraColumns] = ExtraColumns(floats={}, cats={})
 
-# Canonical ordering of the 14-channel ego action vector. Matches
-# ControllerInputsValue field order for sticks/triggers and BUTTON_BITS for
-# buttons. Used as model target and to construct ControllerInputsValue at
-# inference — must stay in lockstep with _BUTTON_ORDER / action_vec_to_controller.
-# START is deliberately absent: pressing it opens Melee's pause menu, which drops
-# the match out of IN_GAME and ends the rollout, so the policy can never emit it.
-# Excluding it from the action space spares the model a target dim it can't use;
-# round-trip replay of recorded inputs uses a different path and keeps START.
-ACTION_CHANNELS: tuple[str, ...] = (
-    "main_stick_x",
-    "main_stick_y",
-    "c_stick_x",
-    "c_stick_y",
-    "trigger_l",
-    "trigger_r",
-    "button_a",
-    "button_b",
-    "button_x",
-    "button_y",
-    "button_z",
-    "button_r",
-    "button_l",
-    "button_d_up",
-)
-assert len(ACTION_CHANNELS) == A_DIM
+# Re-export the policy action wire. Training callers that imported these names
+# from this module continue to work while data code imports hal.wire directly.
+ACTION_DIM = _ACTION_DIM
 
 BASE_PLAYER_PREFIXES: Final[tuple[str, ...]] = ("ego", "ego_nana", "opp_nana", "opp")
 BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
@@ -417,8 +396,8 @@ class Context:
 
     features: dict[str, Tensor]
     ctx_pad: Tensor  # [B] int64
-    # Optional closed-loop metadata. Training and full-context inference leave these unset;
-    # incremental inference uses them to reset per-slot KV state at match boundaries.
+    # Optional closed-loop metadata. Training leaves these unset. Evaluation uses them for
+    # slot-keyed sampling and for a fresh random stream after a match reset.
     slot_ids: Tensor | None = None  # [B] int64
     reset: Tensor | None = None  # [B] bool
 

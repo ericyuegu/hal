@@ -5,7 +5,7 @@ from typing import Final
 
 import numpy as np
 
-from hal.training.features import ACTION_CHANNELS
+from hal.wire import ACTION_CHANNELS
 from hal.wire import MASK_INT32
 
 POLICY_SCHEMA_VERSION: Final[int] = 2
@@ -238,7 +238,14 @@ def _nana_is_absent(source: Mapping[str, object], prefix: str) -> bool:
         if name != "direction"
     )
     direction_absent = np.isnan(np.asarray(source[f"{prefix}_direction"])).all()
-    return floats_absent and ints_absent and direction_absent
+    return bool(floats_absent and ints_absent and direction_absent)
+
+
+def _scalar_int(source: Mapping[str, object], name: str) -> int:
+    value = np.asarray(source[name])
+    if value.shape:
+        raise ValueError(f"{name} must be a scalar, got shape {value.shape}")
+    return int(value.item())
 
 
 def encode_policy_replay(source: Mapping[str, object], replay_id: str) -> dict[str, object]:
@@ -246,7 +253,7 @@ def encode_policy_replay(source: Mapping[str, object], replay_id: str) -> dict[s
     if frame.ndim != 1 or not len(frame):
         raise ValueError(f"frame must be a non-empty vector, got {frame.shape}")
     frames = len(frame)
-    source_version = int(source["schema_version"])
+    source_version = _scalar_int(source, "schema_version")
     out: dict[str, object] = {
         "policy_schema_version": POLICY_SCHEMA_VERSION,
         "source_schema_version": source_version,
@@ -313,11 +320,11 @@ def _select_ranges(
 
 
 def _policy_frames(source: Mapping[str, object]) -> int:
-    if int(source["policy_schema_version"]) != POLICY_SCHEMA_VERSION:
+    if _scalar_int(source, "policy_schema_version") != POLICY_SCHEMA_VERSION:
         raise ValueError(
             f"policy schema version {source['policy_schema_version']} != expected {POLICY_SCHEMA_VERSION}"
         )
-    frames = int(source["num_frames"])
+    frames = _scalar_int(source, "num_frames")
     if frames < 1:
         raise ValueError(f"num_frames must be positive, got {frames}")
     return frames
@@ -338,11 +345,11 @@ def decode_policy_replay_slices(
     outs: list[dict[str, np.ndarray | int]] = []
     for (start, stop), length in zip(ranges, lengths, strict=True):
         out: dict[str, np.ndarray | int] = {
-            "schema_version": int(source["source_schema_version"]),
+            "schema_version": _scalar_int(source, "source_schema_version"),
             "frame": np.arange(start, stop, dtype=np.int32),
         }
         for name in ("stage", "p1_character", "p2_character"):
-            out[name] = np.full(length, int(source[name]), dtype=np.int32)
+            out[name] = np.full(length, _scalar_int(source, name), dtype=np.int32)
         outs.append(out)
 
     def assign(name: str, values: np.ndarray) -> None:
@@ -352,7 +359,7 @@ def decode_policy_replay_slices(
     for prefix in PLAYER_PREFIXES:
         present = True
         if prefix.endswith("_nana"):
-            flag = int(source[f"{prefix}_present"])
+            flag = _scalar_int(source, f"{prefix}_present")
             if flag not in (0, 1):
                 raise ValueError(f"{prefix}_present must be 0 or 1, got {flag}")
             present = bool(flag)

@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 from hal.sim.inputs import ControllerInputsValue
-from hal.sim.inputs import MdsControllerView
 from hal.sim.inputs import apply_inputs
+from hal.sim.sources import MDSControllerSource
 from hal.wire import BUTTON_BITS
 
 
@@ -48,28 +48,32 @@ def test_stick_wire_recovers_every_byte_on_the_80_grid() -> None:
 
 
 def _minimal_columns(prefix: str) -> dict[str, np.ndarray]:
-    """Single-frame column dict satisfying MdsControllerView property reads."""
+    """Two-frame MDS input columns."""
     cols: dict[str, np.ndarray] = {
-        f"{prefix}_main_stick_x": np.array([0.5], dtype=np.float32),
-        f"{prefix}_main_stick_y": np.array([-0.25], dtype=np.float32),
-        f"{prefix}_c_stick_x": np.array([0.0], dtype=np.float32),
-        f"{prefix}_c_stick_y": np.array([0.0], dtype=np.float32),
-        f"{prefix}_trigger_l": np.array([0.5], dtype=np.float32),
-        f"{prefix}_trigger_r": np.array([0.0], dtype=np.float32),
+        f"{prefix}_main_stick_x": np.array([0.0, 0.5], dtype=np.float32),
+        f"{prefix}_main_stick_y": np.array([0.0, -0.25], dtype=np.float32),
+        f"{prefix}_c_stick_x": np.array([0.0, 0.0], dtype=np.float32),
+        f"{prefix}_c_stick_y": np.array([0.0, 0.0], dtype=np.float32),
+        f"{prefix}_trigger_l": np.array([0.0, 0.5], dtype=np.float32),
+        f"{prefix}_trigger_r": np.array([0.0, 0.0], dtype=np.float32),
     }
     for b in BUTTON_BITS:
-        cols[f"{prefix}_button_{b}"] = np.array([0], dtype=np.int32)
-    cols[f"{prefix}_button_a"] = np.array([1], dtype=np.int32)
+        cols[f"{prefix}_button_{b}"] = np.array([0, 0], dtype=np.int32)
+    cols[f"{prefix}_button_a"] = np.array([0, 1], dtype=np.int32)
     return cols
 
 
-def test_view_reads_logical_columns() -> None:
-    view = MdsControllerView(columns=_minimal_columns("p1"), port_prefix="p1", frame_idx=0)
-    assert view.main_x == 0.5
-    assert view.main_y == -0.25
-    assert view.trigger_l == 0.5
-    assert view.trigger_r == 0.0
-    assert view.buttons == BUTTON_BITS["a"]
+def test_mds_source_reads_logical_columns_without_a_frame_object() -> None:
+    source = MDSControllerSource(columns=_minimal_columns("p1"), port_prefix="p1")
+    view = source(0, None)
+
+    assert view is source
+    assert source.main_x == 0.5
+    assert source.main_y == -0.25
+    assert source.trigger_l == 0.5
+    assert source.trigger_r == 0.0
+    assert source.buttons == BUTTON_BITS["a"]
+    assert source(1, None) is None
 
 
 class _RecordingSink:
@@ -105,7 +109,7 @@ def test_apply_inputs_converts_logical_to_wire_and_dispatches_buttons() -> None:
         trigger_r=0.0,
         buttons=BUTTON_BITS["a"] | BUTTON_BITS["l"],
     )
-    apply_inputs(sink, src)  # type: ignore[arg-type]  # ControllerSink double
+    apply_inputs(sink, src)
 
     fix = melee.controller.fix_analog_stick_signed
     assert sink.tilts[melee.enums.Button.BUTTON_MAIN] == (fix(0.5), fix(-0.25))
@@ -123,7 +127,7 @@ def test_apply_inputs_rejects_nonfinite_analog_values(value: float) -> None:
     src = ControllerInputsValue(value, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
 
     with pytest.raises(ValueError, match="controller input main_x must be finite"):
-        apply_inputs(sink, src)  # type: ignore[arg-type]
+        apply_inputs(sink, src)
 
     assert not sink.tilts
     assert not sink.shoulders

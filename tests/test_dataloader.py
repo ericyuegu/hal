@@ -9,16 +9,17 @@ import torch
 from streaming.base.shared.memory import SharedMemory
 from torch.utils.data import DataLoader
 
+import hal.training.dataloader as dataloader
 from hal.data.schema import SCHEMA_VERSION
-from hal.training.dataloader import OneBatchPrefetch
-from hal.training.dataloader import ReplayPack
-from hal.training.dataloader import ReplayReservoir
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
-from hal.training.dataloader import _stable_replay_rng
 from hal.training.features import Context
 from hal.training.features import TrainBatch
+from hal.training.replay_reservoir import OneBatchPrefetch
+from hal.training.replay_reservoir import ReplayPack
+from hal.training.replay_reservoir import ReplayReservoir
+from hal.training.replay_reservoir import _stable_replay_rng
 
 L_CTX, L_CHUNK = 6, 4
 _L = L_CTX + L_CHUNK
@@ -220,6 +221,50 @@ def test_windows_vary_across_epochs() -> None:
     epoch0 = _fingerprint(s)
     epoch1 = _fingerprint(s)
     assert epoch0 != epoch1
+
+
+def test_replay_transform_runs_after_validation_and_before_windowing() -> None:
+    calls: list[int] = []
+
+    def add_return(sample: dict[str, np.ndarray | int]) -> dict[str, np.ndarray | int]:
+        calls.append(int(sample["schema_version"]))
+        out = dict(sample)
+        frames = len(np.asarray(sample["frame"]))
+        out["p1_return"] = np.arange(frames, dtype=np.float32)
+        out["p2_return"] = np.arange(frames, dtype=np.float32) + 100
+        return out
+
+    windows = list(WindowDataset(_fake_mds(n_samples=1), L_CTX, L_CHUNK, seed=2, replay_transform=add_return))
+
+    assert calls == [SCHEMA_VERSION]
+    assert len(windows) == 1
+    assert {"ego_return", "opp_return"} <= windows[0].keys()
+
+    invalid = _fake_mds(n_samples=1)
+    invalid[0]["schema_version"] = SCHEMA_VERSION - 1
+    with np.testing.assert_raises_regex(ValueError, "schema_version"):
+        list(WindowDataset(invalid, L_CTX, L_CHUNK, seed=2, replay_transform=add_return))
+    assert calls == [SCHEMA_VERSION]
+
+
+def test_batch_transform_receives_windows_and_normal_train_batch() -> None:
+    normal = _train_batch(5)
+    windows = [{"ego_return": np.array([3.5], dtype=np.float32)}]
+
+    def wrap(source_windows: list[dict[str, np.ndarray]], batch: TrainBatch) -> tuple[str, TrainBatch]:
+        assert source_windows is windows
+        assert source_windows[0]["ego_return"].item() == 3.5
+        assert batch is normal
+        return "wrapped", batch
+
+    with patch.object(dataloader, "collate_train_batch", return_value=normal):
+        result = dataloader._collate_with_batch_transform(
+            windows, stats={}, L_ctx=L_CTX, extra=None, projection=None, batch_transform=wrap
+        )
+
+    assert isinstance(result, tuple)
+    assert result[0] == "wrapped"
+    assert result[1] is normal
 
 
 def test_window_length_and_ctx_pad() -> None:

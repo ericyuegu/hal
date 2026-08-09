@@ -23,12 +23,14 @@ they never contribute to count / mean / M2 / min / max.
 import json
 import math
 from collections.abc import Iterable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import fsspec
 import numpy as np
+from numpy.typing import DTypeLike
 
 # Bump on breaking changes to the on-disk JSON schema (field add/remove/rename,
 # semantics change). Independent of ``hal.data.schema.SCHEMA_VERSION``, which
@@ -345,7 +347,7 @@ def load_and_merge_stats(
     return result
 
 
-def float_feature_names(mds_dtypes: dict[str, np.dtype]) -> list[str]:
+def float_feature_names(mds_dtypes: Mapping[str, DTypeLike]) -> list[str]:
     """Continuous-feature whitelist derived from the MDS schema.
 
     Stage 3 normalizes only floating-point columns. Integer columns (action

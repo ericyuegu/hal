@@ -49,7 +49,7 @@ from hal.sim.session import ReplayMatchup
 from hal.sim.session import Session
 from hal.sim.sources import ControllerSource
 from hal.sim.sources import InternalControllerSource
-from hal.sim.sources import MdsControllerSource
+from hal.sim.sources import MDSControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.sources import demo_sequence
 from hal.sim.trajectory import Trajectory
@@ -125,7 +125,7 @@ def test_controller_wire_format_faithful() -> None:
 
     sources: dict[int, ControllerSource] = {}
     for port, prefix in matchup.port_to_mds_prefix.items():
-        sources[port] = MdsControllerSource(columns=row, port_prefix=prefix)
+        sources[port] = MDSControllerSource(columns=row, port_prefix=prefix)
     for player in matchup.players:
         sources.setdefault(player.port, InternalControllerSource())
 
@@ -179,8 +179,8 @@ def test_fresh_recording_roundtrip_bit_exact(tmp_path: Path) -> None:
     assert rows is not None, f"extract_replay returned None for fresh slp {fresh_slp}"
 
     replay_sources: dict[int, ControllerSource] = {
-        1: MdsControllerSource(columns=rows, port_prefix="p1"),
-        2: MdsControllerSource(columns=rows, port_prefix="p2"),
+        1: MDSControllerSource(columns=rows, port_prefix="p1"),
+        2: MDSControllerSource(columns=rows, port_prefix="p2"),
     }
     with Session(
         iso_path=ISO_PATH,
@@ -271,8 +271,8 @@ def test_instant_restart_enabled_match_is_bit_exact(tmp_path: Path) -> None:
     assert rows is not None, f"extract_replay returned None for fresh slp {fresh_slp}"
 
     replay_sources: dict[int, ControllerSource] = {
-        1: MdsControllerSource(columns=rows, port_prefix="p1"),
-        2: MdsControllerSource(columns=rows, port_prefix="p2"),
+        1: MDSControllerSource(columns=rows, port_prefix="p1"),
+        2: MDSControllerSource(columns=rows, port_prefix="p2"),
     }
     with Session(
         iso_path=ISO_PATH,

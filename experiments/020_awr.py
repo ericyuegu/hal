@@ -15,7 +15,6 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from collections.abc import Iterable
 from collections.abc import Iterator
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -37,7 +36,6 @@ from jaxtyping import jaxtyped
 from streaming import StreamingDataset
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
 
 import wandb
 from hal import streams
@@ -57,8 +55,6 @@ from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import VAL_L_CHUNK
-from hal.training.dataloader import WindowDataset
-from hal.training.dataloader import collate_train_batch
 from hal.training.dataloader import make_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
@@ -238,10 +234,6 @@ class TrainConfig:
     # Set true only when the evaluator has an actually separate GPU (or intentionally accepts
     # same-device contention).
     eval_overlap_training: bool = False
-    # Experimental incremental decoder. Disabled until a locally-trained attention window (or
-    # periodic boundary recomputation) is selected; a naive sliding KV cache is not exactly
-    # equivalent to recomputing the finite context because cached states contain dropped history.
-    eval_incremental_kv: bool = False
     # If an eval is still running at the next boundary, the trainer waits up to this bound and
     # then kills the worker.
     eval_timeout_seconds: float = 2700.0
@@ -389,11 +381,6 @@ class Rotary(nn.Module):
         assert self.cos_cached is not None and self.sin_cached is not None
         return self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
 
-    def at(self, positions: Tensor) -> tuple[Tensor, Tensor]:
-        """RoPE factors for absolute positions used by incremental decoding."""
-        freqs = torch.outer(positions.to(self.inv_freq), self.inv_freq)
-        return freqs.cos()[None, :, None, :], freqs.sin()[None, :, None, :]
-
 
 @jaxtyped(typechecker=beartype)
 def apply_rotary_emb(
@@ -441,34 +428,6 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
         return self.c_proj(y)
 
-    def forward_incremental(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, position: int, max_cache: int
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        """One-token causal attention with a rolling KV cache."""
-        B, L, _ = x.shape
-        q, k, v = self.c_attn(x).split(self.d_model, dim=2)
-        q = q.view(B, L, self.n_heads, self.head_dim)
-        k = k.view(B, L, self.n_heads, self.head_dim)
-        v = v.view(B, L, self.n_heads, self.head_dim)
-        # Keep K unrotated in the cache. Re-apply RoPE on the retained window with positions
-        # 0..T-1, matching the existing full-context model when the left edge slides.
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        if past is not None:
-            k = torch.cat((past[0], k), dim=2)
-            v = torch.cat((past[1], v), dim=2)
-        if k.size(2) > max_cache:
-            k = k[:, :, -max_cache:]
-            v = v[:, :, -max_cache:]
-        positions = torch.arange(k.size(2), device=x.device)
-        cos, sin = self.rotary.at(positions)
-        q = apply_rotary_emb(q, cos[:, -L:], sin[:, -L:])
-        k_rot = k.transpose(1, 2)
-        k_rot = apply_rotary_emb(k_rot, cos, sin).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q.transpose(1, 2), k_rot, v)
-        y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.c_proj(y), (k, v)
-
 
 class MLP(nn.Module):
     def __init__(self, cfg: TrainConfig) -> None:
@@ -493,14 +452,6 @@ class Block(nn.Module):
         x = x + self.attn_scale * self.attn(rmsnorm(x), mask)
         x = x + self.mlp(rmsnorm(x))
         return x
-
-    def forward_incremental(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, position: int, max_cache: int
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        attn, kv = self.attn.forward_incremental(rmsnorm(x), past, position, max_cache)
-        x = x + self.attn_scale * attn
-        x = x + self.mlp(rmsnorm(x))
-        return x, kv
 
 
 # %%
@@ -586,34 +537,12 @@ def replay_returns(
     }
 
 
-class ReturnLabeledReplays:
-    """The replay stream ``WindowDataset`` iterates, with the two return columns added.
-
-    AWR needs ``G_t`` over the WHOLE episode, and the only place a whole replay exists in the
-    pipeline is the MDS row the sampler reads before it slices windows. Labeling the row here means
-    the returns are ordinary per-frame columns from that point on: the sampler windows them,
-    left-pads them and relabels them ego/opp without knowing AWR exists, and the value target is
-    aligned with the action targets by construction.
-
-    REVIEW: the seam is ``WindowDataset._mds`` (see ``_attach_returns``), the one place an
-    experiment can inject a per-replay transform without editing ``hal/training/dataloader.py``. A
-    ``dataset``/``collate`` argument on ``make_loader`` would make the injection explicit; that is a
-    shared-infra change, so it is flagged rather than taken here."""
-
-    def __init__(self, replays: Iterable[dict], *, gamma: float, damage_shaping: float, win_reward: float) -> None:
-        self._replays = replays
-        self._gamma = gamma
-        self._damage_shaping = damage_shaping
-        self._win_reward = win_reward
-
-    def __iter__(self) -> Iterator[dict]:
-        for sample in self._replays:
-            yield {
-                **sample,
-                **replay_returns(
-                    sample, gamma=self._gamma, damage_shaping=self._damage_shaping, win_reward=self._win_reward
-                ),
-            }
+def label_replay_returns(sample: dict, *, gamma: float, damage_shaping: float, win_reward: float) -> dict:
+    """Add full-episode return labels before the loader makes windows."""
+    return {
+        **sample,
+        **replay_returns(sample, gamma=gamma, damage_shaping=damage_shaping, win_reward=win_reward),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -642,36 +571,10 @@ class AWRBatch:
         return self.returns.reshape(-1)[valid.reshape(-1)]
 
 
-def collate_awr_batch(windows: list[dict], *, stats: dict[str, FeatureStats], L_ctx: int) -> AWRBatch:
-    """Worker-side collate: hal's ``collate_train_batch`` builds the observation/action batch and the
-    ego return column is stacked beside it, sliced to the PREDICTED frames (``1 .. L_ctx``): position
-    ``t``'s return is ``G_{t+1}``, see :class:`AWRBatch`. The window always extends ``VAL_L_CHUNK``
-    target frames past the context, so the shifted slice never runs off the end. The return columns
-    stay in the window dicts hal collates: ``features._classify`` does not recognize the suffix, so
-    ``preprocess`` drops them and they can never reach the model as an input feature."""
+def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> AWRBatch:
+    """Add aligned return targets to a normal training batch."""
     returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, 1 : L_ctx + 1]
-    batch = collate_train_batch(windows, stats=stats, L_ctx=L_ctx)
     return AWRBatch(batch=batch, returns=torch.from_numpy(np.ascontiguousarray(returns)))
-
-
-def _attach_returns(loader: DataLoader, cfg: TrainConfig, stats: dict[str, FeatureStats]) -> DataLoader:
-    """Re-point a loader hal built at the AWR sample stream and collate.
-
-    hal keeps ownership of everything that is easy to get wrong — the StreamingDataset (shard
-    prefetch depth, cache limit, shuffle geometry), the worker/pinning geometry and the window
-    sampler itself; this replaces exactly two things: the replay stream (now return-labeled) and the
-    collate (now emitting ``AWRBatch``). See ``ReturnLabeledReplays`` for the review flag."""
-    sampler = loader.dataset
-    if not isinstance(sampler, WindowDataset):
-        raise TypeError(f"expected make_loader to yield a WindowDataset sampler, got {type(sampler).__name__}")
-    sampler._mds = ReturnLabeledReplays(
-        sampler._mds,
-        gamma=cfg.awr_gamma,
-        damage_shaping=cfg.awr_damage_shaping,
-        win_reward=cfg.awr_win_reward,
-    )
-    loader.collate_fn = functools.partial(collate_awr_batch, stats=stats, L_ctx=cfg.L_ctx)
-    return loader
 
 
 def awr_weights(
@@ -799,23 +702,6 @@ class GPT(nn.Module):
         for block in self.blocks:
             x = block(x, mask)
         return rmsnorm(x)
-
-    @torch.no_grad()
-    def forward_incremental(
-        self,
-        features: dict[str, Tensor],
-        past: list[tuple[Tensor, Tensor] | None],
-        position: int,
-    ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
-        """Encode one current token using per-layer rolling KV state."""
-        x = self._context_tokens(features)
-        if x.size(1) != 1:
-            raise ValueError(f"incremental decode expects one token, got L={x.size(1)}")
-        new_past: list[tuple[Tensor, Tensor]] = []
-        for block, old in zip(self.blocks, past, strict=True):
-            x, kv = block.forward_incremental(x, old, position, self.L_ctx)
-            new_past.append(kv)
-        return rmsnorm(x)[:, -1], new_past
 
 
 # %%
@@ -1274,11 +1160,6 @@ def make_policy(
     model_device = next(model.parameters()).device
     gen = None if decode_seed is None else torch.Generator(device=model_device).manual_seed(decode_seed)
 
-    # Per-slot incremental state. Entries are kept separately because instant-restart boundaries
-    # occur at different frames; callbacks batch together slots with the same absolute position.
-    kv_cache: dict[int, list[tuple[torch.Tensor, torch.Tensor] | None]] = {}
-    kv_position: dict[int, int] = {}
-
     @torch.no_grad()
     def predict_chunk(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         assert committed is None, "receding-horizon policy does not condition on a committed prefix"
@@ -1308,62 +1189,8 @@ def make_policy(
         )
         return chunk.cpu().numpy()
 
-    @torch.no_grad()
-    def predict_incremental(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        assert committed is None, "receding-horizon policy does not condition on a committed prefix"
-        if ctx.slot_ids is None or ctx.reset is None:
-            raise ValueError("incremental closed-loop decode requires slot_ids and reset metadata")
-        n = ctx.slot_ids.numel()
-        out = torch.empty((n, s, A_DIM), device=model_device, dtype=torch.float32)
-        ids = ctx.slot_ids.detach().cpu().tolist()
-        resets = ctx.reset.detach().cpu().tolist()
-        groups: dict[int, list[int]] = {}
-        for i, (sid, reset) in enumerate(zip(ids, resets, strict=True)):
-            sid = int(sid)
-            if reset:
-                kv_cache.pop(sid, None)
-                kv_position.pop(sid, None)
-            groups.setdefault(kv_position.get(sid, 0), []).append(i)
-        for position, rows in groups.items():
-            row_idx = torch.tensor(rows, device=model_device, dtype=torch.long)
-            features = {k: v.index_select(0, row_idx) for k, v in ctx.features.items()}
-            # All rows in a group have the same position and therefore the same cache length.
-            past_batch: list[tuple[torch.Tensor, torch.Tensor] | None] = []
-            for layer in range(len(model.blocks)):
-                vals = [kv_cache.get(int(ids[r]), [None] * len(model.blocks))[layer] for r in rows]
-                if vals[0] is None:
-                    past_batch.append(None)
-                else:
-                    assert all(v is not None for v in vals)
-                    past_batch.append(
-                        (
-                            torch.cat([v[0] for v in vals if v is not None], 0),
-                            torch.cat([v[1] for v in vals if v is not None], 0),
-                        )
-                    )
-            h, new = model.forward_incremental(features, past_batch, position)
-            for j, r in enumerate(rows):
-                sid = int(ids[r])
-                kv_cache[sid] = [(k[j : j + 1], v[j : j + 1]) for k, v in new]
-                kv_position[sid] = position + 1
-            # Incremental mode currently supports the same offset-1 deployment contract as s=1.
-            if s != 1:
-                raise ValueError("incremental decode currently requires exec_horizon=1")
-            logits = model.heads[model.primary_head_idx](h).float()
-            out[row_idx, 0] = _sample_action_from_logits(
-                model,
-                logits,
-                group_temps=settings.temps or (settings.temp,) * N_GROUPS,
-                btn_support_min=settings.btn_support_min,
-                min_p=settings.min_p,
-                click_trigger_fix=settings.click_trigger_fix,
-                gen=gen,
-            )
-        return out.cpu().numpy()
-
     return RecedingHorizon(
         predict_chunk=predict_chunk,
-        predict_incremental=predict_incremental if cfg.eval_incremental_kv else None,
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=s,
@@ -2127,25 +1954,32 @@ def train(
         wandb.run.summary["model/num_params"] = n_params
     print(f"[model] {_model_tag(cfg)}  num_params={n_params / 1e6:.2f}M", flush=True)
     loader_kwargs = _loader_kwargs(cfg, stats)
-    # Both splits carry the return label (val needs it for the value-head metrics), so both go through
-    # _attach_returns and both yield AWRBatch.
-    train_loader = _attach_returns(
-        make_loader(
-            split="train",
-            num_workers=cfg.num_workers,
-            prefetch_factor=cfg.prefetch_factor,
-            windows_per_replay=cfg.windows_per_replay,
-            **loader_kwargs,
-        ),
-        cfg,
-        stats,
+    replay_transform = functools.partial(
+        label_replay_returns,
+        gamma=cfg.awr_gamma,
+        damage_shaping=cfg.awr_damage_shaping,
+        win_reward=cfg.awr_win_reward,
+    )
+    batch_transform = functools.partial(collate_awr_batch, L_ctx=cfg.L_ctx)
+    train_loader = make_loader(
+        split="train",
+        num_workers=cfg.num_workers,
+        prefetch_factor=cfg.prefetch_factor,
+        windows_per_replay=cfg.windows_per_replay,
+        replay_transform=replay_transform,
+        batch_transform=batch_transform,
+        **loader_kwargs,
     )
     # Val uses the FROZEN wider chunk (VAL_L_CHUNK) so its window geometry — hence its NLL — is
     # comparable across experiments regardless of the train-time L_chunk. This makes val loss NOT
     # comparable to pre-freeze 012 runs; that break is the intended freeze. The val path slices the
     # wider target back to max(head_offsets) frames.
-    val_loader = _attach_returns(
-        make_loader(split=cfg.val_split, num_workers=0, **{**loader_kwargs, "L_chunk": VAL_L_CHUNK}), cfg, stats
+    val_loader = make_loader(
+        split=cfg.val_split,
+        num_workers=0,
+        replay_transform=replay_transform,
+        batch_transform=batch_transform,
+        **{**loader_kwargs, "L_chunk": VAL_L_CHUNK},
     )
 
     opt = make_optimizer(model, cfg)

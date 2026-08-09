@@ -56,13 +56,13 @@ from hal.data.index import Stage3Annotation
 from hal.data.index import read_jsonl
 from hal.data.index import replay_uuid_from_path
 from hal.data.index import write_jsonl
+from hal.data.mds import FULL_MDS_SHARD_SIZE_LIMIT
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 
-SHARD_SIZE_LIMIT: int = 1 << 31  # 2 GiB; data is repetitive, compression is 10-20x
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_process_replays")
 
 
@@ -169,7 +169,7 @@ def _open_writers(output: str, splits: Iterable[str]) -> dict[str, MDSWriter]:
             out=str(_join(output, split)),
             columns=MDS_COLUMNS,
             compression="zstd",
-            size_limit=SHARD_SIZE_LIMIT,
+            size_limit=FULL_MDS_SHARD_SIZE_LIMIT,
             exist_ok=False,
         )
         for split in splits

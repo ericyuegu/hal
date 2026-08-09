@@ -55,7 +55,6 @@ def test_defaults_match_the_e0_plan() -> None:
     assert cfg.aux_loss_weight == 1.0
     assert (cfg.d_model, cfg.n_layers, cfg.n_heads) == (256, 8, 4)
     assert (cfg.attn_window, cfg.L_ctx, cfg.batch_size) == (0, 256, 512)
-    assert cfg.eval_incremental_kv is False
     assert cfg.batch_size * cfg.L_ctx == 131072
     assert (cfg.max_steps, cfg.warmup_steps) == (2**14, 500)
     assert (cfg.muon_lr, cfg.adam_lr, cfg.weight_decay) == (0.02, 8.5e-4, 0.01)
@@ -88,7 +87,6 @@ def test_matched_p1_geometry_keeps_tokens_and_attention_work_close() -> None:
     p1_edges = p1.batch_size * p1_edges_per_sample
     assert (p0_edges, p1_edges) == (16_842_752, 15_736_832)
     assert p1_edges / p0_edges == pytest.approx(0.93434, rel=1e-5)
-    assert not p1.eval_incremental_kv
 
 
 def test_gradient_diagnostics_select_only_the_shared_representation() -> None:
@@ -108,11 +106,12 @@ def test_compact_config_requires_cooldown_capacity() -> None:
         exp.validate_config(cfg, has_button_combo_counts=True)
 
 
-def test_config_rejects_a_non_boolean_train_batch_prefetch() -> None:
+@pytest.mark.parametrize("value", [True, 1.5, -1])
+def test_config_rejects_invalid_prefetch_batches(value: object) -> None:
     cfg = exp.TrainConfig()
-    cfg.train_batch_prefetch = 1  # type: ignore[invalid-assignment]
+    cfg.prefetch_batches = value  # type: ignore[invalid-assignment]
 
-    with pytest.raises(ValueError, match="train_batch_prefetch must be a boolean"):
+    with pytest.raises(ValueError, match="prefetch_batches"):
         exp.validate_config(cfg, has_button_combo_counts=True)
 
 
@@ -204,7 +203,6 @@ def test_h2h_protocol_gate_accepts_matching_decode_settings() -> None:
     protocol = {
         "L_ctx": 256,
         "model_dtype": "torch.float16",
-        "eval_incremental_kv": False,
         "decode_settings": {"temp": 1.0, "min_p": 0.0},
     }
 
@@ -216,7 +214,6 @@ def test_h2h_protocol_gate_accepts_matching_decode_settings() -> None:
     [
         ("L_ctx", 128),
         ("model_dtype", "torch.float32"),
-        ("eval_incremental_kv", True),
         ("decode_settings", {"temp": 0.9, "min_p": 0.0}),
     ],
 )
@@ -224,7 +221,6 @@ def test_h2h_protocol_gate_rejects_a_decode_mismatch(field: str, value: object) 
     challenger = {
         "L_ctx": 256,
         "model_dtype": "torch.float16",
-        "eval_incremental_kv": False,
         "decode_settings": {"temp": 1.0, "min_p": 0.0},
     }
     reference = dict(challenger)
@@ -381,11 +377,11 @@ def test_input_projection_preserves_every_consumed_tensor_and_loss() -> None:
         torch.testing.assert_close(projected_parts.nll[key], full_parts.nll[key])
 
 
-def test_run_tag_names_attention_and_decode_mode() -> None:
+def test_run_tag_names_attention_and_full_recompute() -> None:
     baseline = exp.TrainConfig()
-    swa = exp.TrainConfig(attn_window=128, eval_incremental_kv=True)
+    swa = exp.TrainConfig(attn_window=128)
     assert "-full-recompute-" in exp._model_tag(baseline)
-    assert "-swa128-kv-" in exp._model_tag(swa)
+    assert "-swa128-recompute-" in exp._model_tag(swa)
 
 
 def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
@@ -403,7 +399,6 @@ def test_eval_protocol_records_the_actual_model_dtype(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["schema_version"] == 2
     assert payload["protocol"]["model_dtype"] == "torch.float16"
-    assert payload["protocol"]["eval_incremental_kv"] is False
     assert payload["protocol"]["cpu_level"] == 9
     assert payload["protocol"]["ego_port"] == 1
     assert payload["protocol"]["seed_stage"] == int(exp.PRIOR_SWEEP_SEED_STAGE.value)
@@ -512,58 +507,6 @@ def test_decode_telemetry_measures_cpu_model_forwards() -> None:
     assert metrics["decode_model_forward_ms_per_row"] >= 0
 
 
-def test_manual_eval_overrides_checkpoint_incremental_mode(tmp_path, monkeypatch) -> None:
-    cfg = exp.TrainConfig(
-        d_model=32,
-        n_layers=2,
-        n_heads=2,
-        L_ctx=32,
-        attn_window=8,
-        eval_incremental_kv=False,
-        eval_fp16=False,
-    )
-    model = exp.GPT(cfg).eval()
-    seen = {}
-
-    monkeypatch.setattr(exp, "_load_ckpt", lambda _path: (model, cfg, _stats(), {"step": 7}))
-
-    def fake_make_policy(_model, _stats_arg, eval_cfg, **_kwargs):
-        seen["cfg"] = eval_cfg
-        return object()
-
-    def fake_sweep(factory, *, protocol, **_kwargs):
-        factory()
-        seen["protocol"] = protocol
-        return {}
-
-    monkeypatch.setattr(exp, "make_policy", fake_make_policy)
-    monkeypatch.setattr(exp, "_run_eval_sweep", fake_sweep)
-    exp.eval_ckpt(
-        "checkpoint.pt",
-        eval_output_dir=str(tmp_path),
-        eval_incremental_kv=True,
-        eval_n_matchups=1,
-    )
-
-    assert seen["cfg"].eval_incremental_kv is True
-    assert seen["protocol"].eval_incremental_kv is True
-    assert cfg.eval_incremental_kv is False
-
-
-def test_manual_eval_rejects_incremental_override_for_full_attention(tmp_path, monkeypatch) -> None:
-    cfg = exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16, attn_window=0, eval_fp16=False)
-    model = exp.GPT(cfg).eval()
-    monkeypatch.setattr(exp, "_load_ckpt", lambda _path: (model, cfg, _stats(), {"step": 7}))
-
-    with pytest.raises(ValueError, match="needs attn_window > 0"):
-        exp.eval_ckpt(
-            "checkpoint.pt",
-            eval_output_dir=str(tmp_path),
-            eval_incremental_kv=True,
-            eval_n_matchups=1,
-        )
-
-
 def test_final_decode_uses_the_checkpoint_decode_dtype(monkeypatch) -> None:
     cfg = exp.TrainConfig(d_model=32, n_layers=1, n_heads=2, L_ctx=16, eval_fp16=True)
     model = exp.GPT(cfg)
@@ -616,7 +559,6 @@ def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, mo
             wandb_label="p2-kv",
             eval_n_matchups=96,
             eval_max_parallel=32,
-            eval_decode="kv",
         )
     )
 
@@ -628,7 +570,6 @@ def test_eval_run_downloads_checkpoint_and_uploads_labeled_evidence(tmp_path, mo
     assert kwargs["eval_output_dir"] == str(output_dir)
     assert kwargs["eval_n_matchups"] == 96
     assert kwargs["eval_max_parallel"] == 32
-    assert kwargs["eval_incremental_kv"] is True
     assert kwargs["wandb_label"] == "p2-kv"
     assert calls["upload"] == (output_dir, run_dir, "*")
     assert calls["uploader_run"] == "p1-run"
@@ -893,23 +834,6 @@ def test_slot_group_streams_are_order_invariant_and_reset_local() -> None:
         left_next = left.uniforms(name)
         right_next = right.uniforms(name)
         torch.testing.assert_close(left_next[1], right_next[1], rtol=0, atol=0)
-
-
-def test_selecting_incremental_slots_does_not_repeat_a_reset() -> None:
-    ctx = Context(
-        features={},
-        ctx_pad=torch.zeros(1, dtype=torch.long),
-        slot_ids=torch.tensor([11]),
-        reset=torch.tensor([True]),
-    )
-    streams = exp.SlotGroupRandom(7)
-
-    streams.begin(ctx)
-    generation = streams.generations[11]
-    streams.select(ctx)
-
-    assert streams.generations[11] == generation
-    assert streams.state() == tuple((11, generation, name, 0) for name in sorted(exp._GROUP_NAMES))
 
 
 @pytest.mark.parametrize(
@@ -1346,7 +1270,6 @@ def test_one_training_step_uses_only_plain_behavior_cloning() -> None:
         max_steps=1,
         warmup_steps=0,
         compile_trunk=False,
-        eval_incremental_kv=False,
     )
     batch = _random_batch(cfg)
     model = exp.GPT(cfg)
@@ -1409,79 +1332,6 @@ def test_policy_telemetry_does_not_change_full_decode() -> None:
     assert metrics["decode_model_rows"] == 2
 
 
-def test_checkpoint_decode_parity_covers_rolls_and_mixed_resets() -> None:
-    cfg = exp.TrainConfig(
-        d_model=32,
-        n_layers=2,
-        n_heads=2,
-        L_ctx=16,
-        attn_window=4,
-        head_offsets=(1, 2),
-        batch_size=2,
-        compile_trunk=False,
-        require_flex=False,
-    )
-
-    result = exp.checkpoint_decode_parity(
-        exp.GPT(cfg),
-        cfg,
-        frames=37,
-        slots=3,
-        seed=5,
-        atol=1e-4,
-        rtol=1e-4,
-    )
-
-    assert result["passed"]
-    assert result["comparisons"] == 111
-    assert result["sampled_action_mismatches"] == 0
-    assert result["reset_frames"] == {"0": [0], "1": [0, 11], "2": [0, 14, 35]}
-
-
-def test_parity_run_downloads_checkpoint_and_uploads_evidence(tmp_path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    calls = {}
-
-    def fake_download(run_name, dest_dir, *, name):
-        calls["download"] = (run_name, dest_dir, name)
-        dest_dir.mkdir(parents=True)
-        path = dest_dir / name
-        path.touch()
-        return path
-
-    def fake_parity(checkpoint, **kwargs):
-        calls["parity"] = (checkpoint, kwargs)
-        output = Path(kwargs["output_path"])
-        output.parent.mkdir(parents=True)
-        output.write_text("{}")
-        return {"passed": True}
-
-    class Uploader:
-        def __init__(self, run_name):
-            calls["uploader_run"] = run_name
-
-        def upload(self, path, *, key):
-            calls["upload"] = (path, key)
-
-        def close(self):
-            calls["closed"] = True
-
-    monkeypatch.setattr(exp, "download_latest", fake_download)
-    monkeypatch.setattr(exp, "run_checkpoint_decode_parity", fake_parity)
-    monkeypatch.setattr(exp, "BackgroundUploader", Uploader)
-    exp.main(exp.Args(parity_run="p1-run", parity_frames=99, parity_slots=4, parity_seed=7))
-
-    checkpoint, kwargs = calls["parity"]
-    run_dir = (tmp_path / "runs" / "p1-run").resolve()
-    output = run_dir / "manual_evals" / "p2-parity" / "decode_parity.json"
-    assert calls["download"] == ("p1-run", Path("runs/p1-run/manual_checkpoints"), "final.pt")
-    assert checkpoint == Path("runs/p1-run/manual_checkpoints/final.pt").as_posix()
-    assert kwargs == {"output_path": str(output), "frames": 99, "slots": 4, "seed": 7}
-    assert calls["upload"] == (output, "manual_evals/p2-parity/decode_parity.json")
-    assert calls["uploader_run"] == "p1-run"
-    assert calls["closed"] is True
-
-
 def test_validation_reports_each_group_at_each_offset() -> None:
     cfg = exp.TrainConfig(
         d_model=32,
@@ -1492,7 +1342,6 @@ def test_validation_reports_each_group_at_each_offset() -> None:
         head_offsets=(1, 2),
         batch_size=2,
         compile_trunk=False,
-        eval_incremental_kv=False,
     )
 
     metrics = exp.val_metrics(exp.GPT(cfg), [_random_batch(cfg)], cfg)
@@ -1623,7 +1472,6 @@ def test_train_runs_end_to_end_without_value_or_weight_logs(
         num_workers=0,
         windows_per_replay=2,
         val_split="train",
-        eval_incremental_kv=False,
         head_mode=head_mode,
         action_group_order=group_order,
     )

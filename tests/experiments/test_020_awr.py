@@ -27,6 +27,7 @@ from melee import Stage
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.training.dataloader import WindowDataset
+from hal.training.dataloader import collate_train_batch
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import CAT_FEATURES
@@ -96,6 +97,36 @@ def _awr_batch(cfg, batch: int = 4, seed: int = 0) -> exp020.AWRBatch:
 def _model(cfg, seed: int = 7):
     torch.manual_seed(seed)
     return exp020.GPT(cfg).eval()
+
+
+class _FakeRun:
+    def __init__(self, run_id: str) -> None:
+        self.id = run_id
+        self.summary: dict[str, object] = {}
+
+
+class _FakeWandb:
+    """Keep local test state without starting a W&B service."""
+
+    def __init__(self) -> None:
+        self.logs: list[dict] = []
+        self.run: _FakeRun | None = None
+
+    def init(self, **kwargs) -> _FakeRun:
+        self.run = _FakeRun(kwargs.get("id") or "pytest-run")
+        return self.run
+
+    def log(self, payload: dict, *args, **kwargs) -> None:
+        self.logs.append(dict(payload))
+
+    def define_metric(self, *args, **kwargs) -> None:
+        pass
+
+    def Histogram(self, values):
+        return values
+
+    def finish(self) -> None:
+        self.run = None
 
 
 # --- the frozen recipe -------------------------------------------------------
@@ -330,8 +361,13 @@ def _mds_replay(frames: int) -> dict[str, np.ndarray]:
 
 def _windows(replay: dict, *, L_ctx: int, L_chunk: int, gamma: float, K: int, seed: int) -> list[dict]:
     """Drive hal's real sampler over an in-memory return-labeled replay stream."""
-    labeled = exp020.ReturnLabeledReplays([replay], gamma=gamma, damage_shaping=0.0, win_reward=0.0)
+    labeled = [exp020.label_replay_returns(replay, gamma=gamma, damage_shaping=0.0, win_reward=0.0)]
     return list(WindowDataset(labeled, L_ctx, L_chunk, seed=seed, windows_per_replay=K, schema_version=6))
+
+
+def _collate(windows: list[dict], L_ctx: int):
+    batch = collate_train_batch(windows, stats=_stats(), L_ctx=L_ctx)
+    return exp020.collate_awr_batch(windows, batch, L_ctx=L_ctx)
 
 
 def test_window_threading_aligns_the_return_with_the_context_frames() -> None:
@@ -363,7 +399,7 @@ def test_returns_do_not_reach_the_model_as_a_feature() -> None:
     replay = _mds_replay(60)
     replay["p2_stock"][40:] = 3
     windows = _windows(replay, L_ctx=L_ctx, L_chunk=2, gamma=0.9, K=2, seed=1)
-    batch = exp020.collate_awr_batch(windows, stats=_stats(), L_ctx=L_ctx)
+    batch = _collate(windows, L_ctx)
     assert batch.returns.shape == (len(windows), L_ctx)
     assert exp020.EGO_RETURN_COLUMN not in batch.batch.context.features
     assert "opp_awr_return" not in batch.batch.context.features
@@ -378,7 +414,7 @@ def test_collate_shifts_the_return_to_the_predicted_frame() -> None:
     replay = _mds_replay(60)
     replay["p2_stock"][40:] = 3
     windows = _windows(replay, L_ctx=L_ctx, L_chunk=2, gamma=0.9, K=3, seed=2)
-    batch = exp020.collate_awr_batch(windows, stats=_stats(), L_ctx=L_ctx)
+    batch = _collate(windows, L_ctx)
     for b, window in enumerate(windows):
         np.testing.assert_allclose(
             batch.returns[b].numpy(), window[exp020.EGO_RETURN_COLUMN][1 : L_ctx + 1], rtol=0, atol=0
@@ -390,7 +426,7 @@ def test_left_padded_positions_carry_a_zero_return() -> None:
     it, and those positions are masked out of the loss by ctx_pad anyway."""
     replay = _mds_replay(20)
     replay["p2_stock"][10:] = 3
-    labeled = exp020.ReturnLabeledReplays([replay], gamma=0.9, damage_shaping=0.0, win_reward=0.0)
+    labeled = [exp020.label_replay_returns(replay, gamma=0.9, damage_shaping=0.0, win_reward=0.0)]
     sampler = WindowDataset(labeled, 16, 2, seed=3, windows_per_replay=4, schema_version=6)
     padded = [w for w in sampler if int(w["ctx_pad"]) > 0]
     assert padded, "expected at least one cold-start window from a 20-frame replay"
@@ -545,17 +581,6 @@ def test_validate_config_rejects_bad_awr_knobs(field: str, value: float, match: 
         exp020.validate_config(_tiny_cfg(exp020, **{field: value}), has_button_combo_counts=False)
 
 
-def test_attach_returns_rejects_a_foreign_loader() -> None:
-    """The seam is a WindowDataset; anything else must fail loud rather than silently train
-    on batches with no return label."""
-
-    class NotALoader:
-        dataset = object()
-
-    with pytest.raises(TypeError, match="WindowDataset"):
-        exp020._attach_returns(NotALoader(), exp020.TrainConfig(), _stats())
-
-
 # --- end to end on real data -------------------------------------------------
 
 
@@ -571,6 +596,7 @@ def test_mini_train_on_dev_mds(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     monkeypatch.setattr(exp020, "eval_vs_cpu", lambda *a, **k: {})  # no Dolphin in a unit test
+    monkeypatch.setattr(exp020, "wandb", _FakeWandb())
 
     class Uploader:
         def __init__(self, _run_name: str) -> None:
