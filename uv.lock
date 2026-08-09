@@ -1071,7 +1071,7 @@ requires-dist = [
     { name = "libcst" },
     { name = "loguru" },
     { name = "matplotlib" },
-    { name = "melee", git = "https://github.com/ericyuegu/libmelee?branch=exp%2Fnonfinite-misc-as" },
+    { name = "melee", git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d" },
     { name = "more-itertools" },
     { name = "mosaicml-streaming", specifier = ">=0.11.0" },
     { name = "mypy-extensions" },
@@ -1598,7 +1598,7 @@ wheels = [
 [[package]]
 name = "melee"
 version = "0.47.0"
-source = { git = "https://github.com/ericyuegu/libmelee?branch=exp%2Fnonfinite-misc-as#222a399cd1368d33458b4c36f4823f7220ca889d" }
+source = { git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d#222a399cd1368d33458b4c36f4823f7220ca889d" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },

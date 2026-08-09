@@ -164,7 +164,7 @@ fi
 # Test the Blackwell compile path before downloading the dataset.
 if [ "$gpu_cap" = 120 ] && [ "${HAL_SKIP_SM120_PROBE:-0}" != 1 ]; then
   log "sm_120: running compile smoke probe (600s hard timeout)"
-  timeout 600 uv run notebooks/probe_sm120.py
+  timeout 600 uv run docker/probe_sm120.py
 fi
 
 # Pull data only after the GPU and compiler checks pass.

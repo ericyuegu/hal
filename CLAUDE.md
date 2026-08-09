@@ -26,7 +26,15 @@ One controller representation end-to-end: the **logical** (game-causal) values p
 
 `hal/data/schema.py` owns the column set; `wire.POST_FIELD_SUFFIXES` + `wire.ITEM_FIELD_SUFFIXES` own the field vocabulary. v6 widened the post block with `velocities_*` (5 channels), `misc_as`, `state_age`, `state_flags_{0..4}` (raw bytes, undecoded), `l_cancel`, `ground`, `character_live` — all suffix-driven, so the Nana follower block carries them too — and added a **global** `item{0..3}_*` block (projectiles). `misc_as` is multiplexed by action state (hitstun frames remaining only during hitstun states); `state_age` is the engine's own counter and the truth-source replacement for the reconstructed `action_frame` column dropped at v3.
 
-v7 adds `p{1,2}_rank` (uint8 `schema.Rank`): the ranked-ladder tier of each player, a per-replay constant broadcast across frames like `stage` and `p{1,2}_character`. The value comes from the slp start block's netplay display name, which anonymization replaces with exactly one of "Platinum Player" / "Diamond Player" / "Master Player". The match is **exact** — a real display name that only contains "Master" is a name, not a tier — and any other name is `Rank.UNKNOWN` (0), so a non-ranked corpus reads loud instead of claiming a tier. `extract` and `index.extract_index_entry` read the name through the one `extract.netplay_name` helper, so the MDS column and `PlayerEntry.name` can never disagree. An existing v6 MDS is upgraded in place of a re-extract with `python -m hal.scripts.upgrade_mds --src <mds-v6> --out <mds-v7>`: it joins the tier from the dataset's own `manifest.jsonl` on `(annotation.split, annotation.mds_row_idx)`, so no .slp is parsed again. The rank columns have **no closed-loop injection path yet** — `training/canonical.flatten_canonical_frame` broadcasts `stage` and `p{1,2}_character` from the driver's `_matchup`, not rank — so an experiment must add one before it conditions on rank, or train and eval will disagree.
+v7 adds the `p1_rank` and `p2_rank` columns. Each column contains one uint8 `schema.Rank` value for
+all frames in a replay. Anonymized ranked data uses the exact names `Platinum Player`,
+`Diamond Player`, and `Master Player`. All other names map to `Rank.UNKNOWN`. `extract` and
+`index.extract_index_entry` use the same `extract.netplay_name` function.
+
+Use `python -m hal.scripts.upgrade_mds --src <mds-v6> --out <mds-v7>` to upgrade v6 data. The
+command joins ranks from `manifest.jsonl` by split and MDS row. It does not parse the replay again.
+Closed-loop observations do not contain rank. A model must not use rank until the closed-loop path
+can supply the same value.
 
 Item slots are ordered by **ascending spawn id** (`Item.id`), so a slot is stable until an older item despawns and overflow past K=4 drops the newest. `wire.canonical_item_columns` applies that rule to libmelee's canonical `items` list, so the closed-loop observation emits the same columns in the same order as `extract` does from peppi's SoA. Item `owner` is normalized from the slp's peppi 0..3 port to the libmelee 1..4 port (`wire.ITEM_OWNER_NONE` = -1 for unowned).
 
@@ -37,6 +45,7 @@ Item slots are ordered by **ascending spawn id** (`Item.id`), so a slot is stabl
 - Delete liberally. Code is tech debt — rewrites are cheap, better abstractions compound. Versioning is git's job: no `*_v0.py`, `stage1_*`, `*_old.py`.
 - Invalid states should be impossible to represent. Fail loud, fail early — no fallback values that silently change behavior or configuration.
 - Don't re-implement library helpers (libmelee, peppi-py, streaming, torch). Local copies drift and turn upstream upgrades into silent behavior changes. If the upstream genuinely doesn't fit, write the smallest primitive that fills the gap and reuse the library for everything else. Fork-dep fixes (libmelee, peppi-py) go upstream, not into a local translation layer.
+- `hal/data/streaming_compat.py` is the approved exception. It fixes the Python 3.14 resource-tracker call until Streaming includes the fix.
 - Don't reference our conversations or "existing convention from elsewhere in the repo" in code comments.
 - Follow the 3-tier codebase layout for organizing shared infra: https://www.moderndescartes.com/essays/research_code/
 - Write in ASD-STE100 Simplified Technical English.

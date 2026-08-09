@@ -40,7 +40,7 @@ downloaded, CPU use, RAM, and batch hashes. `predownload` must remain greater th
 Files:
 
 - `hal/training/dataloader.py`: expose explicit settings and counters.
-- `scripts/bench_dataloader.py`: repeatable loader benchmark.
+- `notebooks/bench_dataloader.py`: repeatable loader benchmark.
 - `tests/test_dataloader.py`: order and tensor-equality tests.
 
 Gate: lower startup pressure without changing the first fixed batches.

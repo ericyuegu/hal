@@ -77,7 +77,7 @@ and compact policy layout 2.
 - `hal/data/policy_schema.py`: exact compact replay format.
 - `hal/training/dataloader.py`: replay packs and central reservoir.
 - `hal/training/features.py`: early feature projection.
-- `scripts/bench_dataloader.py`: repeatable loader measurements.
+- `notebooks/bench_dataloader.py`: repeatable loader measurements.
 - `tests/experiments/test_023_mtp_heads.py`: experiment invariants.
 - `tests/test_policy_schema.py`: storage exactness.
 - `tests/test_dataloader.py`: sampling and reservoir behavior.

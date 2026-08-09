@@ -216,7 +216,7 @@ Copy the selected E0 package and E1 configuration exactly. E2 may change only:
 - `action_group_order`
 - `factorization_diag_seed=0`
 - `factorization_diag_samples=1`
-- `train_batch_prefetch=True`, after the exact systems gate above.
+- `prefetch_batches=4`, after the exact systems gate above.
 - Run labels and H2H reference fields.
 
 Keep `action_mlp_ratio=2`, offsets `(1,5,9,13)`, the normalized auxiliary loss, 16,384 steps, seed

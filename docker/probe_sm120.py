@@ -17,7 +17,7 @@ diagnosis itself:
 
 Run it under a timeout so a hang exits instead of billing forever:
 
-    timeout 600 uv run notebooks/probe_sm120.py; echo probe_rc=$?
+    timeout 600 uv run docker/probe_sm120.py; echo probe_rc=$?
 
 rc 0 = all stages pass. rc 124 = the stage after the last printed marker hangs.
 

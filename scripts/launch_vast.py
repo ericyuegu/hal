@@ -502,7 +502,7 @@ class Args:
     ceiling. Use to exclude architectures the training stack is not validated on.
 
     On sm_120 (Blackwell, RTX 5090) the FlexAttention + torch.compile stack is NOT the fault.
-    ``notebooks/probe_sm120.py`` walks the block-mask build, the compiled flex forward and
+    ``docker/probe_sm120.py`` walks the block-mask build, the compiled flex forward and
     backward, and a compiled bf16 trunk step at the 022 geometry; all stages pass on a 5090 in
     34 s, with the compile-thread count, an eager mask build and the aot_eager backend giving
     the same result. A full training start stalls instead, just after "[val] cached", at 0% GPU.
