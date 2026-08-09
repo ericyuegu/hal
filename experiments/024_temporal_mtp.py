@@ -114,6 +114,10 @@ class TrainConfig:
     temporal_layers: int = 1
     temporal_heads: int = 2
     temporal_ff_dim: int = 128
+    # PyTorch fused SDPA cannot launch a CUDA batch axis above 65,535. The
+    # temporal block flattens micro-batch x context prefixes, so bound each
+    # fused launch while retaining parallel teacher forcing and FlashAttention.
+    temporal_attn_chunk_sequences: int = 32_768
     group_head_dim: int = 64
     main_stick_embed_dim: int = 40
     c_stick_embed_dim: int = 8
@@ -195,6 +199,7 @@ def validate_config(cfg: TrainConfig) -> None:
         "temporal_layers": cfg.temporal_layers,
         "temporal_heads": cfg.temporal_heads,
         "temporal_ff_dim": cfg.temporal_ff_dim,
+        "temporal_attn_chunk_sequences": cfg.temporal_attn_chunk_sequences,
         "group_head_dim": cfg.group_head_dim,
         "main_stick_embed_dim": cfg.main_stick_embed_dim,
         "c_stick_embed_dim": cfg.c_stick_embed_dim,
@@ -226,6 +231,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("temporal_d_model must be divisible by temporal_heads")
     if (cfg.temporal_d_model // cfg.temporal_heads) % 2:
         raise ValueError("temporal attention head dimension must be even for rotary positions")
+    if cfg.temporal_attn_chunk_sequences > 65_535:
+        raise ValueError("temporal_attn_chunk_sequences must not exceed CUDA's fused SDPA batch-axis limit (65,535)")
     if cfg.attn_window < 0:
         raise ValueError("attn_window must be non-negative")
     controller_width = 8 + cfg.main_stick_embed_dim + cfg.c_stick_embed_dim + cfg.trigger_embed_dim
@@ -348,6 +355,7 @@ class TemporalBlock(nn.Module):
         self.n_heads = cfg.temporal_heads
         self.d_model = cfg.temporal_d_model
         self.head_dim = self.d_model // self.n_heads
+        self.attn_chunk_sequences = cfg.temporal_attn_chunk_sequences
         self.attn_scale = 1.0 / math.sqrt(2 * cfg.temporal_layers)
         self.qkv = nn.Linear(self.d_model, 3 * self.d_model, bias=False)
         self.proj = nn.Linear(self.d_model, self.d_model, bias=False)
@@ -369,7 +377,22 @@ class TemporalBlock(nn.Module):
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
-        attention = F.scaled_dot_product_attention(q, k, v.transpose(1, 2), is_causal=True)
+        v = v.transpose(1, 2)
+        # A production micro-batch can contain 512 * 256 = 131,072 independent
+        # action-prefix sequences. Fused CUDA SDPA maps this leading dimension
+        # directly to a grid axis capped at 65,535 and otherwise fails with
+        # cudaErrorInvalidValue. Chunk only that independent axis; no sequence
+        # can attend across it, so this is mathematically identical to one call.
+        attention_parts = [
+            F.scaled_dot_product_attention(
+                q[start : start + self.attn_chunk_sequences],
+                k[start : start + self.attn_chunk_sequences],
+                v[start : start + self.attn_chunk_sequences],
+                is_causal=True,
+            )
+            for start in range(0, q.shape[0], self.attn_chunk_sequences)
+        ]
+        attention = attention_parts[0] if len(attention_parts) == 1 else torch.cat(attention_parts, dim=0)
         attention = attention.transpose(1, 2).contiguous().view_as(x)
         x = x + self.attn_scale * self.proj(attention)
         return x + self.down(F.silu(self.up(decoder_rmsnorm(x))))

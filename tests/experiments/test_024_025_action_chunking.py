@@ -98,6 +98,7 @@ def test_defaults_pin_the_requested_geometry() -> None:
     assert ar.decoder_arch_version == 2
     assert ar.grad_accum_steps == 4 and ar.exec_horizon == 4
     assert (ar.temporal_d_model, ar.temporal_layers, ar.temporal_heads, ar.temporal_ff_dim) == (64, 1, 2, 128)
+    assert ar.temporal_attn_chunk_sequences == 32_768
     assert ar.group_head_dim == 64
     assert ar.compile_trunk and ar.compile_temporal
     assert ar.wandb_log_code and ar.wandb_grad_every == 1024
@@ -148,6 +149,32 @@ def test_temporal_mtp_loss_and_ancestral_decode_smoke() -> None:
     decoded = exp024.decode_chunk(model.eval(), batch.context, cfg.L_chunk, argmax=True)
     assert decoded.shape == (2, 20, A_DIM)
     assert ((decoded[..., 6:] == 0) | (decoded[..., 6:] == 1)).all()
+
+
+def test_temporal_attention_chunks_only_the_independent_sequence_axis(monkeypatch) -> None:
+    cfg = _tiny_cfg(exp024, temporal_attn_chunk_sequences=3)
+    chunked = exp024.TemporalBlock(cfg).eval()
+    reference = exp024.TemporalBlock(_tiny_cfg(exp024, temporal_attn_chunk_sequences=100)).eval()
+    reference.load_state_dict(chunked.state_dict())
+    x = torch.randn(7, cfg.L_chunk, cfg.temporal_d_model)
+    expected = reference(x)
+
+    original_sdpa = exp024.F.scaled_dot_product_attention
+    launch_sizes: list[int] = []
+
+    def recorded_sdpa(query, key, value, **kwargs):
+        launch_sizes.append(query.shape[0])
+        return original_sdpa(query, key, value, **kwargs)
+
+    monkeypatch.setattr(exp024.F, "scaled_dot_product_attention", recorded_sdpa)
+    actual = chunked(x)
+    assert launch_sizes == [3, 3, 1]
+    torch.testing.assert_close(actual, expected)
+
+
+def test_temporal_attention_rejects_an_unsafe_cuda_launch_chunk() -> None:
+    with pytest.raises(ValueError, match="65,535"):
+        exp024.validate_config(_tiny_cfg(exp024, temporal_attn_chunk_sequences=65_536))
 
 
 def test_temporal_chain_uses_previous_teacher_forced_frame() -> None:
