@@ -114,6 +114,27 @@ def test_one_batch_prefetch_overlaps_the_next_item() -> None:
         next(prefetch)
 
 
+def test_one_batch_prefetch_prepares_the_full_requested_depth() -> None:
+    prepared = Event()
+
+    def source() -> Iterator[int]:
+        for index in range(4):
+            if index == 2:
+                prepared.set()
+            yield index
+
+    prefetch = OneBatchPrefetch(source(), depth=3)
+    assert prepared.wait(timeout=1)
+    assert [next(prefetch) for _ in range(4)] == [0, 1, 2, 3]
+    with np.testing.assert_raises(StopIteration):
+        next(prefetch)
+
+
+def test_one_batch_prefetch_rejects_invalid_depth() -> None:
+    with np.testing.assert_raises_regex(ValueError, "positive integer"):
+        OneBatchPrefetch(iter(()), depth=0)
+
+
 def test_one_batch_prefetch_propagates_errors_and_closes_early() -> None:
     started = Event()
     release = Event()

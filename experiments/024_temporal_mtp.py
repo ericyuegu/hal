@@ -151,6 +151,7 @@ class TrainConfig:
     amp_dtype: str = "bfloat16"
     allow_tf32: bool = True
     compile_trunk: bool = True
+    compile_temporal: bool = True
 
     # Source is captured once. Full gradient distributions are captured after
     # accumulation, in optimizer-step units, so observability stays cheap.
@@ -435,8 +436,8 @@ class CausalTrunkCrossAttention(nn.Module):
     def memory_mask(ctx_pad: Tensor, length: int) -> Tensor:
         return torch.arange(length, device=ctx_pad.device)[None, :] >= ctx_pad[:, None]
 
-    def forward(self, x: Tensor, key: Tensor, value: Tensor) -> Tensor:
-        """Cross-attend ``x[B, L, H, d]`` to unpadded memory ``[B, heads, L, dh]``."""
+    def forward(self, x: Tensor, key: Tensor, value: Tensor, valid_memory: Tensor | None = None) -> Tensor:
+        """Cross-attend ``x[B, L, H, d]`` to causal trunk memory ``[B, heads, L, dh]``."""
         if x.ndim != 4 or key.shape != value.shape:
             raise ValueError(
                 f"cross attention expects x [B, L, H, d] and matching K/V, got "
@@ -460,11 +461,19 @@ class CausalTrunkCrossAttention(nn.Module):
         ).view(batch, length, horizon, self.n_heads, self.head_dim)
         key = apply_rotary_emb(key.transpose(1, 2), cos, sin).transpose(1, 2)
         query = query.permute(0, 3, 2, 1, 4).reshape(batch, self.n_heads * horizon, length, self.head_dim)
+        if valid_memory is not None and valid_memory.shape != (batch, length):
+            raise ValueError(f"cross-attention memory mask must be {(batch, length)}, got {tuple(valid_memory.shape)}")
+        attention_mask = None
+        if valid_memory is not None:
+            positions = torch.arange(length, device=x.device)
+            causal = positions[:, None] >= positions[None, :]
+            attention_mask = valid_memory[:, None, None, :] & causal[None, None, :, :]
         attended = F.scaled_dot_product_attention(
             query,
             key,
             value,
-            is_causal=True,
+            attn_mask=attention_mask,
+            is_causal=valid_memory is None,
             enable_gqa=horizon > 1,
         )
         attended = attended.view(batch, self.n_heads, horizon, length, self.head_dim)
@@ -581,6 +590,7 @@ class CausalTemporalDecoder(nn.Module):
         self,
         hidden: Tensor,
         targets: Tensor,
+        valid_memory: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         expected = (*hidden.shape[:2], self.L_chunk, N_GROUPS)
         if hidden.ndim != 3 or targets.shape != expected:
@@ -612,10 +622,11 @@ class CausalTemporalDecoder(nn.Module):
                         x,
                         key,
                         value,
+                        valid_memory,
                         use_reentrant=False,
                     )
                 else:
-                    x = self.trunk_cross_attention(x, key, value)
+                    x = self.trunk_cross_attention(x, key, value, valid_memory)
                 x = self.post_cross_ff(x)
                 x = x.reshape(batch * length, self.L_chunk, self.d_model)
         x = x.view(batch, length, self.L_chunk, self.d_model)
@@ -643,9 +654,14 @@ class CausalTemporalDecoder(nn.Module):
             for name in GROUP_NAMES
         }
 
-    def teacher_forced_nll(self, hidden: Tensor, targets: Tensor) -> Tensor:
+    def teacher_forced_nll(
+        self,
+        hidden: Tensor,
+        targets: Tensor,
+        valid_memory: Tensor | None = None,
+    ) -> Tensor:
         """Return ``[B, L, H, G]`` NLL while bounding classifier activations."""
-        states, embedded = self.teacher_forced_states(hidden, targets)
+        states, embedded = self.teacher_forced_states(hidden, targets, valid_memory)
         normalized_hidden = decoder_rmsnorm(hidden)
         prefix_index = (
             torch.arange(
@@ -876,9 +892,42 @@ class ActionLoss:
     targets: Tensor  # [N_valid, H, N_GROUPS]
 
 
-def padding_groups(batch: TrainBatch) -> tuple[int, ...]:
-    """Distinct left-pad lengths, computed while the batch is still on CPU."""
-    return tuple(sorted(set(int(value) for value in batch.context.ctx_pad.tolist())))
+def _record_batch_stream(batch: TrainBatch, stream: torch.cuda.Stream) -> None:
+    """Tell the CUDA allocator that the consumer stream owns these copies."""
+    tensors = [*batch.context.features.values(), batch.context.ctx_pad, batch.target]
+    if batch.context.slot_ids is not None:
+        tensors.append(batch.context.slot_ids)
+    if batch.context.reset is not None:
+        tensors.append(batch.context.reset)
+    for tensor in tensors:
+        tensor.record_stream(stream)
+
+
+def device_batches(
+    cpu_batches: list[TrainBatch],
+    device: str | torch.device,
+    copy_stream: torch.cuda.Stream | None,
+) -> Iterator[TrainBatch]:
+    """Pipeline pinned host copies one micro-batch ahead of GPU compute."""
+    if not cpu_batches:
+        return
+    target = torch.device(device)
+    if target.type != "cuda" or copy_stream is None:
+        for batch in cpu_batches:
+            yield batch.to(target)
+        return
+
+    compute_stream = torch.cuda.current_stream(target)
+    with torch.cuda.stream(copy_stream):
+        staged = cpu_batches[0].to(target)
+    for index in range(len(cpu_batches)):
+        compute_stream.wait_stream(copy_stream)
+        ready = staged
+        _record_batch_stream(ready, compute_stream)
+        if index + 1 < len(cpu_batches):
+            with torch.cuda.stream(copy_stream):
+                staged = cpu_batches[index + 1].to(target)
+        yield ready
 
 
 def action_loss(
@@ -886,38 +935,24 @@ def action_loss(
     batch: TrainBatch,
     *,
     hidden: Tensor | None = None,
-    pad_values: tuple[int, ...] | None = None,
 ) -> ActionLoss:
-    targets, _ = chunk_targets(model, batch)
+    targets, valid = chunk_targets(model, batch)
     if hidden is None:
         hidden = model(batch.context.features, batch.context.ctx_pad)
     if hidden.shape[:2] != targets.shape[:2]:
         raise ValueError(
             f"hidden and target context axes must match, got {tuple(hidden.shape)} and {tuple(targets.shape)}"
         )
-    # Strip each distinct left-padding length before cross-attention. This both
-    # prevents padded trunk states from being visible and preserves the fused
-    # ``is_causal=True`` SDPA path without a large custom mask.
-    losses: list[Tensor] = []
-    valid_targets: list[Tensor] = []
-    pads = padding_groups(batch) if pad_values is None else pad_values
-    for pad in pads:
-        if not 0 <= pad < hidden.shape[1]:
-            continue
-        if pads == (0,):
-            group_hidden = hidden
-            group_targets = targets
-        else:
-            selected = batch.context.ctx_pad == pad
-            group_hidden = hidden[selected, pad:]
-            group_targets = targets[selected, pad:]
-        group_nll = model.temporal.teacher_forced_nll(group_hidden, group_targets)
-        losses.append(group_nll.reshape(-1, model.L_chunk, N_GROUPS))
-        valid_targets.append(group_targets.reshape(-1, model.L_chunk, N_GROUPS))
-    if not losses:
+    # Keep the decoder's training geometry fixed for compilation. Cross-attention
+    # combines the broadcast key-validity mask with its causal mask, so every
+    # valid prefix sees the same history as the former variable-size sliced calls.
+    positions = torch.arange(hidden.shape[1], device=hidden.device)
+    valid_memory = positions[None, :] >= batch.context.ctx_pad[:, None]
+    dense_nll = model.temporal.teacher_forced_nll(hidden, targets, valid_memory)
+    nll = dense_nll[valid]
+    target_valid = targets[valid]
+    if nll.numel() == 0:
         raise ValueError("batch contains no valid context prefixes")
-    nll = torch.cat(losses)
-    target_valid = torch.cat(valid_targets)
     if nll.shape != target_valid.shape:
         raise RuntimeError(f"NLL and target shapes differ: {tuple(nll.shape)} != {tuple(target_valid.shape)}")
     return ActionLoss(nll=nll, targets=target_valid)
@@ -1079,6 +1114,8 @@ def evaluation_mode(model: nn.Module) -> Iterator[None]:
     """Use the class's eager forward for every non-training batch shape."""
     was_training = model.training
     compiled = model.__dict__.pop("forward", None)
+    temporal = getattr(model, "temporal", None)
+    compiled_temporal = None if temporal is None else temporal.__dict__.pop("teacher_forced_nll", None)
     model.eval()
     try:
         yield
@@ -1086,6 +1123,9 @@ def evaluation_mode(model: nn.Module) -> Iterator[None]:
         model.train(was_training)
         if compiled is not None:
             model.forward = compiled
+        if compiled_temporal is not None:
+            assert temporal is not None
+            temporal.teacher_forced_nll = compiled_temporal
 
 
 @torch.no_grad()
@@ -1106,11 +1146,10 @@ def _val_metrics_eval(
     raw_exact = raw_groups = deploy_exact = deploy_groups = total_groups = 0
     for cpu_batch in batches:
         validate_batch_geometry(cpu_batch, cfg)
-        pads = padding_groups(cpu_batch)
         batch = cpu_batch.to(device)
         with amp_context(cfg, device):
             hidden = model(batch.context.features, batch.context.ctx_pad)
-            parts = action_loss(model, batch, hidden=hidden, pad_values=pads)
+            parts = action_loss(model, batch, hidden=hidden)
             raw = model.temporal.sample_indices(
                 hidden,
                 batch.context.ctx_pad,
@@ -1388,6 +1427,11 @@ def train(
     model = GPT(cfg).to(DEVICE)
     if cfg.compile_trunk and DEVICE == "cuda":
         model.forward = torch.compile(model.forward, dynamic=False)
+    if cfg.compile_temporal and DEVICE == "cuda":
+        model.temporal.teacher_forced_nll = torch.compile(
+            model.temporal.teacher_forced_nll,
+            dynamic=False,
+        )
     optimizer = make_optimizer(model, cfg)
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
     start_step = 0
@@ -1407,6 +1451,7 @@ def train(
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
             batch_prefetch=cfg.train_batch_prefetch,
+            batch_prefetch_depth=cfg.grad_accum_steps,
             **kwargs,
         )
     else:
@@ -1425,6 +1470,7 @@ def train(
     val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **val_kwargs)
     val_cache = cache_validation(val_loader, cfg.val_n_samples)
     iterator = iter(train_loader)
+    copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     run_started = time.monotonic()
     train_batches_seen = 0
     model.train()
@@ -1434,7 +1480,7 @@ def train(
                 torch.cuda.reset_peak_memory_stats()
             with profile("step") as stopwatch:
                 optimizer.zero_grad()
-                cpu_batches: list[tuple[TrainBatch, tuple[int, ...]]] = []
+                cpu_batches: list[TrainBatch] = []
                 loader_started = time.monotonic()
                 for _ in range(cfg.grad_accum_steps):
                     try:
@@ -1443,19 +1489,18 @@ def train(
                         iterator = iter(train_loader)
                         batch = next(iterator)
                     validate_batch_geometry(batch, cfg, expected_batch_size=micro_batch_size(cfg))
-                    cpu_batches.append((batch, padding_groups(batch)))
+                    cpu_batches.append(batch)
                     train_batches_seen += 1
                 loader_wait = time.monotonic() - loader_started
-                valid_prefixes = sum(int((cfg.L_ctx - batch.context.ctx_pad).sum()) for batch, _ in cpu_batches)
+                valid_prefixes = sum(int((cfg.L_ctx - batch.context.ctx_pad).sum()) for batch in cpu_batches)
                 if valid_prefixes <= 0:
                     raise RuntimeError("training accumulation contains no valid context prefixes")
                 nll_sum = torch.zeros(cfg.L_chunk, N_GROUPS, device=DEVICE, dtype=torch.float32)
                 n_prefixes = 0
                 normalizer = valid_prefixes * cfg.L_chunk
-                for cpu_batch, pads in cpu_batches:
-                    batch = cpu_batch.to(DEVICE)
+                for batch in device_batches(cpu_batches, DEVICE, copy_stream):
                     with amp_context(cfg, DEVICE):
-                        parts = action_loss(model, batch, pad_values=pads)
+                        parts = action_loss(model, batch)
                         loss = parts.nll.sum() / normalizer
                     loss.backward()
                     nll_sum += parts.nll.detach().sum(dim=0)
@@ -1758,6 +1803,11 @@ def run_benchmark(
     train_model = GPT(cfg).to(device).train()
     if cfg.compile_trunk and device.type == "cuda":
         train_model.forward = torch.compile(train_model.forward, dynamic=False)
+    if cfg.compile_temporal and device.type == "cuda":
+        train_model.temporal.teacher_forced_nll = torch.compile(
+            train_model.temporal.teacher_forced_nll,
+            dynamic=False,
+        )
     optimizer = make_optimizer(train_model, cfg)
     micro = micro_batch_size(cfg)
     train_context = synthetic_context(cfg, micro, device)
@@ -1769,7 +1819,7 @@ def run_benchmark(
         optimizer.zero_grad()
         for _ in range(cfg.grad_accum_steps):
             with amp_context(cfg, device):
-                loss = action_loss(train_model, train_batch, pad_values=(0,)).nll.sum() / normalizer
+                loss = action_loss(train_model, train_batch).nll.sum() / normalizer
             loss.backward()
         optimizer.step()
 

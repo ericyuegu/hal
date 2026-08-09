@@ -6,7 +6,6 @@ import hashlib
 from collections import deque
 from collections.abc import Iterable
 from collections.abc import Iterator
-from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,40 +48,47 @@ def _next_item[T](source: Iterator[T]) -> T:
 
 
 class OneBatchPrefetch[T](Iterator[T]):
-    def __init__(self, source: Iterator[T]) -> None:
+    def __init__(self, source: Iterator[T], *, depth: int = 1) -> None:
+        if not isinstance(depth, int) or isinstance(depth, bool) or depth <= 0:
+            raise ValueError(f"prefetch depth must be a positive integer, got {depth!r}")
         self._source = source
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="train-batch")
-        self._future: Future[Any] | None = self._pool.submit(_next_item, source)
+        # A single worker advances the generator safely and serially, while
+        # several queued futures let it prepare a complete accumulation window
+        # during the preceding GPU step.
+        self._futures = deque(self._pool.submit(_next_item, source) for _ in range(depth))
         self._closed = False
 
     def __iter__(self) -> OneBatchPrefetch[T]:
         return self
 
     def __next__(self) -> T:
-        if self._closed or self._future is None:
+        if self._closed or not self._futures:
             raise StopIteration
-        future = self._future
+        future = self._futures.popleft()
         try:
-            item = future.result()
+            item: Any = future.result()
         except BaseException:
             self.close(wait=False)
             raise
-        self._future = self._pool.submit(_next_item, self._source)
+        self._futures.append(self._pool.submit(_next_item, self._source))
         return item
 
     def close(self, *, wait: bool = True) -> None:
         if self._closed:
             return
         self._closed = True
-        future = self._future
-        self._future = None
-        if wait and future is not None:
-            with contextlib.suppress(BaseException):
-                future.result()
-        elif future is not None:
-            future.cancel()
+        futures = tuple(self._futures)
+        self._futures.clear()
+        if wait:
+            for future in futures:
+                with contextlib.suppress(BaseException):
+                    future.result()
+        else:
+            for future in futures:
+                future.cancel()
         self._pool.shutdown(wait=wait, cancel_futures=True)
-        if wait or future is None or future.done():
+        if wait or all(future.done() for future in futures):
             close = getattr(self._source, "close", None)
             if close is not None:
                 close()
@@ -299,6 +305,8 @@ class ReservoirLoader:
         extra: ExtraColumns | None,
         projection: FeatureProjection | None,
         batch_prefetch: bool,
+        batch_prefetch_depth: int,
+        pin_memory: bool,
     ) -> None:
         self._pack_loader = pack_loader
         self._stats = stats
@@ -309,6 +317,8 @@ class ReservoirLoader:
         self._extra = extra
         self._projection = projection
         self._batch_prefetch = batch_prefetch
+        self._batch_prefetch_depth = batch_prefetch_depth
+        self._pin_memory = pin_memory
         self._epoch = 0
         self.last_epoch_stats: dict[str, int] | None = None
 
@@ -321,7 +331,7 @@ class ReservoirLoader:
         )
         self._epoch += 1
         batches = self._batches(reservoir)
-        return OneBatchPrefetch(batches) if self._batch_prefetch else batches
+        return OneBatchPrefetch(batches, depth=self._batch_prefetch_depth) if self._batch_prefetch else batches
 
     def _batches(self, reservoir: ReplayReservoir) -> Iterator[TrainBatch]:
         try:
@@ -333,7 +343,8 @@ class ReservoirLoader:
                     extra=self._extra,
                     projection=self._projection,
                 )
-                yield TrainBatch(context=batch.context, target=batch.target, replay_ids=item.replay_ids)
+                batch = TrainBatch(context=batch.context, target=batch.target, replay_ids=item.replay_ids)
+                yield batch.pin_memory() if self._pin_memory else batch
         finally:
             self.last_epoch_stats = {
                 "emitted_windows": reservoir.emitted_windows,
@@ -645,12 +656,22 @@ def make_replay_reservoir_loader(
     predownload: int = 512,
     windows_per_replay: int = 4,
     batch_prefetch: bool = False,
+    batch_prefetch_depth: int = 1,
+    pin_memory: bool | None = None,
     schema_version: int = SCHEMA_VERSION,
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
 ) -> ReservoirLoader:
     if predownload < 1:
         raise ValueError(f"predownload must be positive, got {predownload}")
+    if (
+        not isinstance(batch_prefetch_depth, int)
+        or isinstance(batch_prefetch_depth, bool)
+        or batch_prefetch_depth <= 0
+    ):
+        raise ValueError(f"batch_prefetch_depth must be a positive integer, got {batch_prefetch_depth!r}")
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
     mds = StreamingDataset(
         remote=f"{remote}/{split}" if remote else None,
         local=str(Path(data_root) / split),
@@ -691,4 +712,6 @@ def make_replay_reservoir_loader(
         extra=extra,
         projection=projection,
         batch_prefetch=batch_prefetch,
+        batch_prefetch_depth=batch_prefetch_depth,
+        pin_memory=pin_memory,
     )

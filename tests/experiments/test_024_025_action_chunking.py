@@ -99,6 +99,7 @@ def test_defaults_pin_the_requested_geometry() -> None:
     assert ar.grad_accum_steps == 4 and ar.exec_horizon == 4
     assert (ar.temporal_d_model, ar.temporal_layers, ar.temporal_heads, ar.temporal_ff_dim) == (64, 1, 2, 128)
     assert ar.group_head_dim == 64
+    assert ar.compile_trunk and ar.compile_temporal
     assert ar.wandb_log_code and ar.wandb_grad_every == 1024
     assert not ar.checkpoint_temporal and not ar.checkpoint_classifiers
     assert (ar.action_state_embed_dim, ar.char_dim, ar.stage_dim) == (48, 8, 4)
@@ -200,6 +201,26 @@ def test_temporal_cross_attention_cannot_read_future_trunk_states() -> None:
         torch.testing.assert_close(original[name][:, -2], future_changed[name][:, -2])
 
 
+def test_dense_padding_mask_matches_individually_stripped_decoder_calls() -> None:
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg).eval()
+    gen = torch.Generator().manual_seed(12)
+    hidden = torch.randn(2, cfg.L_ctx, cfg.d_model, generator=gen)
+    targets = torch.stack(
+        [torch.randint(vocab, (2, cfg.L_ctx, cfg.L_chunk), generator=gen) for vocab in exp024.GROUP_VOCABS],
+        dim=-1,
+    )
+    pads = torch.tensor([0, 2])
+    positions = torch.arange(cfg.L_ctx)
+    dense = model.temporal.teacher_forced_nll(hidden, targets, positions[None, :] >= pads[:, None])
+    for row, pad in enumerate(pads.tolist()):
+        stripped = model.temporal.teacher_forced_nll(
+            hidden[row : row + 1, pad:],
+            targets[row : row + 1, pad:],
+        )
+        torch.testing.assert_close(dense[row : row + 1, pad:], stripped, atol=2e-5, rtol=2e-5)
+
+
 def test_chunk_targets_are_next_20_actions_at_every_prefix() -> None:
     cfg = _tiny_cfg(exp024)
     model = exp024.GPT(cfg)
@@ -223,20 +244,13 @@ def test_chunk_targets_are_next_20_actions_at_every_prefix() -> None:
         torch.testing.assert_close(targets[0, prefix], indices[0, prefix + 1 : prefix + 21])
 
 
-def test_padding_groups_match_default_action_loss() -> None:
+def test_device_batch_pipeline_preserves_cpu_batches_and_padding() -> None:
     cfg = _tiny_cfg(exp024)
-    model = exp024.GPT(cfg).eval()
-    batch = _batch(exp024, cfg)
-    hidden = model(batch.context.features, batch.context.ctx_pad)
-    inferred = exp024.action_loss(model, batch, hidden=hidden)
-    explicit = exp024.action_loss(
-        model,
-        batch,
-        hidden=hidden,
-        pad_values=exp024.padding_groups(batch),
-    )
-    torch.testing.assert_close(inferred.nll, explicit.nll)
-    torch.testing.assert_close(inferred.targets, explicit.targets)
+    batches = [_batch(exp024, cfg, seed=seed) for seed in range(2)]
+    outputs = list(exp024.device_batches(batches, "cpu", None))
+    for actual, expected in zip(outputs, batches, strict=True):
+        torch.testing.assert_close(actual.target, expected.target)
+        torch.testing.assert_close(actual.context.ctx_pad, expected.context.ctx_pad)
 
 
 def test_batch_geometry_rejects_variable_training_batch() -> None:
@@ -251,18 +265,26 @@ def test_validation_never_calls_fixed_shape_compiled_forward() -> None:
     cfg = _tiny_cfg(exp024)
     model = exp024.GPT(cfg).train()
     batch = _batch(exp024, cfg, batch=1)
-    calls = 0
+    trunk_calls = temporal_calls = 0
 
     def fixed_training_forward(features, ctx_pad):
-        nonlocal calls
-        calls += 1
+        nonlocal trunk_calls
+        trunk_calls += 1
         assert ctx_pad.shape == (cfg.batch_size,)
         return type(model).forward(model, features, ctx_pad)
 
+    def fixed_training_temporal(hidden, targets, valid_memory):
+        nonlocal temporal_calls
+        temporal_calls += 1
+        assert hidden.shape[0] == cfg.batch_size
+        return type(model.temporal).teacher_forced_nll(model.temporal, hidden, targets, valid_memory)
+
     model.forward = fixed_training_forward
+    model.temporal.teacher_forced_nll = fixed_training_temporal
     metrics = exp024.val_metrics(model, [batch], cfg)
-    assert calls == 0
+    assert trunk_calls == temporal_calls == 0
     assert model.__dict__["forward"] is fixed_training_forward
+    assert model.temporal.__dict__["teacher_forced_nll"] is fixed_training_temporal
     assert model.training
     assert torch.isfinite(torch.tensor(metrics["loss"]))
 
@@ -317,18 +339,26 @@ def test_flow_validation_also_bypasses_compiled_ar_forward() -> None:
     cfg = _tiny_cfg(exp025, flow_steps=1)
     model = exp025.GPT(cfg).train()
     batch = _batch(exp025, cfg, batch=1)
-    calls = 0
+    trunk_calls = temporal_calls = 0
 
     def fixed_training_forward(features, ctx_pad):
-        nonlocal calls
-        calls += 1
+        nonlocal trunk_calls
+        trunk_calls += 1
         assert ctx_pad.shape == (cfg.batch_size,)
         return type(model.ar).forward(model.ar, features, ctx_pad)
 
+    def fixed_training_temporal(hidden, targets, valid_memory):
+        nonlocal temporal_calls
+        temporal_calls += 1
+        assert hidden.shape[0] == cfg.batch_size
+        return type(model.ar.temporal).teacher_forced_nll(model.ar.temporal, hidden, targets, valid_memory)
+
     model.ar.forward = fixed_training_forward
+    model.ar.temporal.teacher_forced_nll = fixed_training_temporal
     metrics = exp025.val_metrics(model, [batch], cfg)
-    assert calls == 0
+    assert trunk_calls == temporal_calls == 0
     assert model.ar.__dict__["forward"] is fixed_training_forward
+    assert model.ar.temporal.__dict__["teacher_forced_nll"] is fixed_training_temporal
     assert model.training
     assert torch.isfinite(torch.tensor(metrics["ar_loss"]))
 

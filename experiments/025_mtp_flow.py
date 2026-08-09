@@ -540,6 +540,11 @@ def train(
     run_dir, replay_dir = setup_run_dir(run_name)
     if cfg.compile_trunk and DEVICE == "cuda":
         model.ar.forward = torch.compile(model.ar.forward, dynamic=False)
+    if cfg.compile_temporal and DEVICE == "cuda":
+        model.ar.temporal.teacher_forced_nll = torch.compile(
+            model.ar.temporal.teacher_forced_nll,
+            dynamic=False,
+        )
     optimizer = make_optimizer(model, cfg)
     scheduler = LambdaLR(optimizer, mtp.lr_schedule(cfg))
     start_step = 0
@@ -559,6 +564,7 @@ def train(
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
             batch_prefetch=cfg.train_batch_prefetch,
+            batch_prefetch_depth=cfg.grad_accum_steps,
             **kwargs,
         )
     else:
@@ -574,6 +580,7 @@ def train(
     val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **val_kwargs)
     val_cache = cache_validation(val_loader, cfg.val_n_samples)
     iterator = iter(train_loader)
+    copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     run_started = time.monotonic()
     train_batches_seen = 0
     model.train()
@@ -583,7 +590,7 @@ def train(
                 torch.cuda.reset_peak_memory_stats()
             with profile("step") as stopwatch:
                 optimizer.zero_grad()
-                cpu_batches: list[tuple[TrainBatch, tuple[int, ...]]] = []
+                cpu_batches: list[TrainBatch] = []
                 loader_started = time.monotonic()
                 for _ in range(cfg.grad_accum_steps):
                     try:
@@ -592,11 +599,11 @@ def train(
                         iterator = iter(train_loader)
                         batch = next(iterator)
                     mtp.validate_batch_geometry(batch, cfg, expected_batch_size=mtp.micro_batch_size(cfg))
-                    cpu_batches.append((batch, mtp.padding_groups(batch)))
+                    cpu_batches.append(batch)
                     train_batches_seen += 1
                 loader_wait = time.monotonic() - loader_started
-                valid_prefixes = sum(int((cfg.L_ctx - batch.context.ctx_pad).sum()) for batch, _ in cpu_batches)
-                flow_samples = sum(batch.target.shape[0] for batch, _ in cpu_batches)
+                valid_prefixes = sum(int((cfg.L_ctx - batch.context.ctx_pad).sum()) for batch in cpu_batches)
+                flow_samples = sum(batch.target.shape[0] for batch in cpu_batches)
                 if valid_prefixes <= 0 or flow_samples != cfg.batch_size:
                     raise RuntimeError(
                         f"bad accumulated geometry: valid_prefixes={valid_prefixes}, "
@@ -607,11 +614,10 @@ def train(
                 nll_sum = torch.zeros(cfg.L_chunk, mtp.N_GROUPS, device=DEVICE, dtype=torch.float32)
                 flow_sum = torch.zeros(cfg.L_chunk, device=DEVICE, dtype=torch.float32)
                 n_prefixes = 0
-                for cpu_batch, pads in cpu_batches:
-                    batch = cpu_batch.to(DEVICE)
+                for batch in mtp.device_batches(cpu_batches, DEVICE, copy_stream):
                     with mtp.amp_context(cfg, DEVICE):
                         hidden = model(batch.context.features, batch.context.ctx_pad)
-                        ar = mtp.action_loss(model.ar, batch, hidden=hidden, pad_values=pads)
+                        ar = mtp.action_loss(model.ar, batch, hidden=hidden)
                         flow = flow_matching_loss(model, batch, hidden, cfg)
                         loss = (
                             cfg.ar_loss_weight * ar.nll.sum() / ar_normalizer
