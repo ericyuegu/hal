@@ -470,6 +470,7 @@ _WARMSTART_FIELDS = (
     "temporal_layers",
     "temporal_heads",
     "temporal_ff_dim",
+    "group_head_dim",
     "main_stick_embed_dim",
     "c_stick_embed_dim",
     "trigger_embed_dim",
@@ -534,6 +535,8 @@ def train(
         tags=["gpt", "temporal-mtp", "flow-matching", "chunk20"],
         config=asdict(cfg),
     )
+    if cfg.wandb_log_code and wandb.run is not None:
+        mtp.log_wandb_code(wandb.run)
     run_dir, replay_dir = setup_run_dir(run_name)
     if cfg.compile_trunk and DEVICE == "cuda":
         model.ar.forward = torch.compile(model.ar.forward, dynamic=False)
@@ -623,6 +626,11 @@ def train(
                 gradients = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradients):
                     raise FloatingPointError(f"step {step}: non-finite gradient norm {gradients}")
+                gradient_log = (
+                    mtp.wandb_gradient_log(model)
+                    if wandb.run is not None and mtp.gradient_log_due(step, start_step, cfg.wandb_grad_every)
+                    else {}
+                )
                 optimizer.step()
                 scheduler.step()
                 if DEVICE == "cuda":
@@ -635,6 +643,7 @@ def train(
                 **{f"train/ar_{name}": value for name, value in ar_values.items()},
                 **{f"train/{name}": value for name, value in flow_values.items()},
                 "train/grad_norm": float(gradients),
+                **gradient_log,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
                 "throughput/step_s": stopwatch.elapsed,

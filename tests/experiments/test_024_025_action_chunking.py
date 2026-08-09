@@ -2,8 +2,10 @@
 
 import importlib.util
 import sys
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
@@ -93,9 +95,11 @@ def test_defaults_pin_the_requested_geometry() -> None:
     ar = exp024.TrainConfig()
     flow = exp025.TrainConfig()
     assert (ar.L_ctx, ar.batch_size, ar.d_model, ar.n_layers, ar.L_chunk) == (256, 512, 256, 8, 20)
-    assert ar.decoder_arch_version == 1
+    assert ar.decoder_arch_version == 2
     assert ar.grad_accum_steps == 4 and ar.exec_horizon == 4
     assert (ar.temporal_d_model, ar.temporal_layers, ar.temporal_heads, ar.temporal_ff_dim) == (64, 1, 2, 128)
+    assert ar.group_head_dim == 64
+    assert ar.wandb_log_code and ar.wandb_grad_every == 1024
     assert not ar.checkpoint_temporal and not ar.checkpoint_classifiers
     assert (ar.action_state_embed_dim, ar.char_dim, ar.stage_dim) == (48, 8, 4)
     assert (ar.main_stick_embed_dim, ar.c_stick_embed_dim, ar.trigger_embed_dim) == (40, 8, 8)
@@ -107,9 +111,12 @@ def test_default_model_keeps_full_trunk_path_with_a_tiny_temporal_residual() -> 
     cfg = exp024.TrainConfig()
     model = exp024.GPT(cfg)
     assert sum(parameter.numel() for parameter in model.parameters()) < 7_000_000
-    assert sum(parameter.numel() for parameter in model.temporal.parameters()) < 300_000
+    assert sum(parameter.numel() for parameter in model.temporal.parameters()) < 350_000
     assert model.temporal.condition_in.weight.shape == (64, 256)
-    assert model.temporal.outputs["buttons"].weight.shape == (256, 64)
+    assert model.temporal.post_cross_ff.up.weight.shape == (128, 64)
+    assert model.temporal.group_condition["main_stick"].weight.shape == (128, 24)
+    assert model.temporal.outputs["buttons"].up.weight.shape == (64, 64)
+    assert model.temporal.outputs["buttons"].down.weight.shape == (256, 64)
     assert model.temporal.trunk_outputs["buttons"].weight.shape == (256, 256)
     assert not [
         name
@@ -133,6 +140,9 @@ def test_temporal_mtp_loss_and_ancestral_decode_smoke() -> None:
     loss.backward()
     assert model.temporal.blocks[-1].down.weight.grad is not None
     assert model.temporal.trunk_cross_attention.key_value.weight.grad is not None
+    assert model.temporal.post_cross_ff.down.weight.grad is not None
+    assert model.temporal.group_condition["main_stick"].weight.grad is not None
+    assert model.temporal.outputs["main_stick"].up.weight.grad is not None
     assert model.temporal.trunk_outputs["buttons"].weight.grad is not None
     decoded = exp024.decode_chunk(model.eval(), batch.context, cfg.L_chunk, argmax=True)
     assert decoded.shape == (2, 20, A_DIM)
@@ -258,8 +268,34 @@ def test_validation_never_calls_fixed_shape_compiled_forward() -> None:
 
 
 def test_legacy_sequential_checkpoint_config_is_rejected() -> None:
-    with pytest.raises(ValueError, match="predates the causal cross-attention decoder"):
+    with pytest.raises(ValueError, match="predates nonlinear causal decoder v2"):
         exp024.config_from_state({"d_model": 256, "action_embed_dim": 64})
+
+
+def test_wandb_code_and_gradient_logging_are_bounded() -> None:
+    captured: dict[str, object] = {}
+
+    class Run:
+        def log_code(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    exp024.log_wandb_code(Run())
+    root = str(captured["root"])
+    include = cast(Callable[[str, str], bool], captured["include_fn"])
+    assert include(str(_EXP_DIR / "024_temporal_mtp.py"), root)
+    assert not include(str(Path(root) / "data" / "replay.npy"), root)
+
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg)
+    loss = exp024.objective(exp024.action_loss(model, _batch(exp024, cfg)))
+    loss.backward()
+    payload = exp024.wandb_gradient_log(model, sample_limit=128)
+    assert "gradients/decoder/post_cross_ff" in payload
+    assert "gradient_norm/decoder/nonlinear_heads" in payload
+    assert float(payload["gradient_norm/decoder/nonlinear_heads"]) > 0
+    assert exp024.gradient_log_due(0, 0, 1024)
+    assert not exp024.gradient_log_due(1, 0, 1024)
+    assert exp024.gradient_log_due(1023, 0, 1024)
 
 
 def test_synthetic_benchmark_context_has_production_geometry() -> None:

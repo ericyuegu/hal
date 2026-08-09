@@ -108,12 +108,13 @@ class TrainConfig:
     L_ctx: int = 256
 
     # Parallel-teacher-forced causal controller decoder.
-    decoder_arch_version: int = 1
+    decoder_arch_version: int = 2
     L_chunk: int = 20
     temporal_d_model: int = 64
     temporal_layers: int = 1
     temporal_heads: int = 2
     temporal_ff_dim: int = 128
+    group_head_dim: int = 64
     main_stick_embed_dim: int = 40
     c_stick_embed_dim: int = 8
     trigger_embed_dim: int = 8
@@ -150,6 +151,11 @@ class TrainConfig:
     amp_dtype: str = "bfloat16"
     allow_tf32: bool = True
     compile_trunk: bool = True
+
+    # Source is captured once. Full gradient distributions are captured after
+    # accumulation, in optimizer-step units, so observability stays cheap.
+    wandb_log_code: bool = True
+    wandb_grad_every: int = 1024
 
     val_every: int = 1024
     val_n_samples: int = 1192
@@ -188,6 +194,7 @@ def validate_config(cfg: TrainConfig) -> None:
         "temporal_layers": cfg.temporal_layers,
         "temporal_heads": cfg.temporal_heads,
         "temporal_ff_dim": cfg.temporal_ff_dim,
+        "group_head_dim": cfg.group_head_dim,
         "main_stick_embed_dim": cfg.main_stick_embed_dim,
         "c_stick_embed_dim": cfg.c_stick_embed_dim,
         "trigger_embed_dim": cfg.trigger_embed_dim,
@@ -210,7 +217,7 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
     if cfg.L_chunk != 20:
         raise ValueError(f"this experiment requires L_chunk=20, got {cfg.L_chunk}")
-    if cfg.decoder_arch_version != 1:
+    if cfg.decoder_arch_version != 2:
         raise ValueError(f"unsupported decoder_arch_version={cfg.decoder_arch_version}")
     if cfg.d_model % cfg.n_heads:
         raise ValueError("d_model must be divisible by n_heads")
@@ -241,6 +248,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("weight_decay must be finite and non-negative")
     if cfg.warmup_steps < 0 or cfg.warmup_steps > cfg.max_steps:
         raise ValueError("warmup_steps must be in [0, max_steps]")
+    if not isinstance(cfg.wandb_grad_every, int) or isinstance(cfg.wandb_grad_every, bool):
+        raise ValueError("wandb_grad_every must be an integer")
+    if cfg.wandb_grad_every < 0:
+        raise ValueError("wandb_grad_every must be non-negative")
     if cfg.reservoir_capacity < 2 * micro_batch_size(cfg):
         raise ValueError("reservoir_capacity must be at least twice the micro-batch size")
 
@@ -261,7 +272,8 @@ def model_tag(cfg: TrainConfig) -> str:
     attention = "full" if cfg.attn_window == 0 else f"swa{cfg.attn_window}"
     return (
         f"mtp20-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-"
-        f"{attention}-ct{cfg.temporal_d_model}x{cfg.temporal_layers}-xattn-fskip-v1-s{cfg.exec_horizon}"
+        f"{attention}-ct{cfg.temporal_d_model}x{cfg.temporal_layers}-xattn-"
+        f"gh{cfg.group_head_dim}-nlhead-v2-s{cfg.exec_horizon}"
     )
 
 
@@ -301,6 +313,30 @@ def dequantize_groups(
 def decoder_rmsnorm(x: Tensor) -> Tensor:
     """Fused eager RMSNorm used by the small, uncompiled temporal decoder."""
     return F.rms_norm(x, (x.shape[-1],), eps=1e-6)
+
+
+class TemporalFeedForward(nn.Module):
+    """Small nonlinear residual used after cross-attention."""
+
+    def __init__(self, d_model: int, d_hidden: int) -> None:
+        super().__init__()
+        self.up = nn.Linear(d_model, d_hidden, bias=False)
+        self.down = nn.Linear(d_hidden, d_model, bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x + self.down(F.silu(self.up(decoder_rmsnorm(x))))
+
+
+class NonlinearActionHead(nn.Module):
+    """Tiny nonlinear classifier applied after causal group modulation."""
+
+    def __init__(self, d_model: int, d_hidden: int, vocab: int) -> None:
+        super().__init__()
+        self.up = nn.Linear(d_model, d_hidden, bias=False)
+        self.down = nn.Linear(d_hidden, vocab)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.down(F.silu(self.up(decoder_rmsnorm(x))))
 
 
 class TemporalBlock(nn.Module):
@@ -497,15 +533,29 @@ class CausalTemporalDecoder(nn.Module):
         self.bos = nn.Parameter(torch.zeros(self.d_model))
         self.blocks = nn.ModuleList([TemporalBlock(cfg) for _ in range(cfg.temporal_layers)])
         self.trunk_cross_attention = CausalTrunkCrossAttention(cfg)
+        # With one temporal block, cross-attention used to feed the classifiers
+        # directly. This residual lets retrieved trunk history interact
+        # nonlinearly before any action group is scored.
+        self.post_cross_ff = TemporalFeedForward(self.d_model, cfg.temporal_ff_dim)
         self.group_condition = nn.ModuleDict(
             {
-                name: nn.Linear(sum(self.group_dims[group] for group in GROUP_ORDER[:position]), self.d_model)
+                name: nn.Linear(
+                    sum(self.group_dims[group] for group in GROUP_ORDER[:position]),
+                    2 * self.d_model,
+                )
                 for position, name in enumerate(GROUP_ORDER)
                 if position > 0
             }
         )
         self.outputs = nn.ModuleDict(
-            {name: nn.Linear(self.d_model, GROUP_VOCABS[GROUP_INDEX[name]]) for name in GROUP_NAMES}
+            {
+                name: NonlinearActionHead(
+                    self.d_model,
+                    cfg.group_head_dim,
+                    GROUP_VOCABS[GROUP_INDEX[name]],
+                )
+                for name in GROUP_NAMES
+            }
         )
         # Full-width skip: action dynamics use a tiny temporal state, but no
         # classifier is forced to recover the current 256-wide trunk state from
@@ -566,6 +616,7 @@ class CausalTemporalDecoder(nn.Module):
                     )
                 else:
                     x = self.trunk_cross_attention(x, key, value)
+                x = self.post_cross_ff(x)
                 x = x.reshape(batch * length, self.L_chunk, self.d_model)
         x = x.view(batch, length, self.L_chunk, self.d_model)
         return decoder_rmsnorm(x), embedded
@@ -581,12 +632,13 @@ class CausalTemporalDecoder(nn.Module):
         if not earlier:
             return states
         prefix = torch.cat([embedded[group] for group in earlier], dim=-1)
-        return states + self.group_condition[name](prefix)
+        scale, shift = self.group_condition[name](prefix).chunk(2, dim=-1)
+        return states * (1.0 + torch.tanh(scale)) + shift
 
     def teacher_forced_logits_by_group(self, hidden: Tensor, targets: Tensor) -> dict[str, Tensor]:
         states, embedded = self.teacher_forced_states(hidden, targets)
         return {
-            name: self.outputs[name](decoder_rmsnorm(self.group_features(states, name, embedded)))
+            name: self.outputs[name](self.group_features(states, name, embedded))
             + self.trunk_outputs[name](decoder_rmsnorm(hidden))[:, :, None, :]
             for name in GROUP_NAMES
         }
@@ -614,9 +666,9 @@ class CausalTemporalDecoder(nn.Module):
                 feature_chunk: Tensor,
                 trunk_chunk: Tensor,
                 target_chunk: Tensor,
-                output: nn.Linear = output,
+                output: nn.Module = output,
             ) -> Tensor:
-                logits = output(decoder_rmsnorm(feature_chunk)) + trunk_chunk
+                logits = output(feature_chunk) + trunk_chunk
                 return F.cross_entropy(logits.float(), target_chunk, reduction="none")
 
             parts: list[Tensor] = []
@@ -670,14 +722,14 @@ class CausalTemporalDecoder(nn.Module):
                 next_caches.append(present)
                 if index == 0:
                     state = self.trunk_cross_attention.forward_step(state, key, value, valid_memory)
+                    state = self.post_cross_ff(state)
             caches = next_caches
             state = decoder_rmsnorm(state)
             target = targets[:, depth]
             embedded = self.embed_groups(target)
             out.append(
                 {
-                    name: self.outputs[name](decoder_rmsnorm(self.group_features(state, name, embedded)))
-                    + trunk_logits[name]
+                    name: self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
                     for name in GROUP_NAMES
                 }
             )
@@ -713,13 +765,14 @@ class CausalTemporalDecoder(nn.Module):
                 next_caches.append(present)
                 if index == 0:
                     state = self.trunk_cross_attention.forward_step(state, key, value, valid_memory)
+                    state = self.post_cross_ff(state)
             caches = next_caches
             state = decoder_rmsnorm(state)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
                 features = self.group_features(state, name, embedded)
-                logits = self.outputs[name](decoder_rmsnorm(features)) + trunk_logits[name]
+                logits = self.outputs[name](features) + trunk_logits[name]
                 pick = sample_categorical(logits, temperature=temperature, argmax=argmax, gen=gen)
                 picks[name] = pick
                 embedded[name] = self.group_embedding(name, pick)
@@ -1130,6 +1183,95 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     )
 
 
+def log_wandb_code(run: wandb.Run) -> None:
+    """Capture the reproducibility-relevant source tree once per run."""
+    root = Path(__file__).resolve().parents[1]
+    source_dirs = {"docker", "experiments", "hal", "scripts", "tests"}
+    source_files = {"Dockerfile", "pyproject.toml", "uv.lock"}
+
+    def include(path: str, code_root: str) -> bool:
+        try:
+            relative = Path(path).resolve().relative_to(Path(code_root).resolve())
+        except ValueError:
+            return False
+        if relative.as_posix() in source_files:
+            return True
+        return (
+            bool(relative.parts)
+            and relative.parts[0] in source_dirs
+            and relative.suffix
+            in {
+                ".py",
+                ".sh",
+                ".toml",
+                ".yaml",
+                ".yml",
+            }
+        )
+
+    run.log_code(root=str(root), include_fn=include)
+
+
+def _gradient_group(name: str) -> str:
+    """Keep W&B gradient panels useful without emitting one chart per tensor."""
+    if name.startswith("ar."):
+        name = name.removeprefix("ar.")
+    parts = name.split(".")
+    if len(parts) >= 3 and parts[:2] == ["trunk", "blocks"]:
+        return f"trunk/block_{parts[2]}"
+    if len(parts) >= 3 and parts[:2] == ["temporal", "blocks"]:
+        return f"decoder/temporal_block_{parts[2]}"
+    decoder_groups = {
+        "condition_in": "decoder/input",
+        "frame_projection": "decoder/input",
+        "bos": "decoder/input",
+        "controller_embeddings": "decoder/input",
+        "trunk_cross_attention": "decoder/cross_attention",
+        "post_cross_ff": "decoder/post_cross_ff",
+        "group_condition": "decoder/group_condition",
+        "outputs": "decoder/nonlinear_heads",
+        "trunk_outputs": "decoder/trunk_skip",
+    }
+    if len(parts) >= 2 and parts[0] == "temporal":
+        return decoder_groups.get(parts[1], "decoder/other")
+    if len(parts) >= 3 and parts[:2] == ["flow", "blocks"]:
+        return f"flow/block_{parts[2]}"
+    if parts[0] == "flow":
+        return "flow/other"
+    return "trunk/input"
+
+
+def wandb_gradient_log(model: nn.Module, *, sample_limit: int = 65_536) -> dict[str, object]:
+    """Build sampled gradient histograms and exact grouped L2 norms.
+
+    This is called only after a complete accumulation and only at the configured
+    optimizer-step interval. Sampling bounds the device transfer while the norm
+    still covers every gradient element.
+    """
+    buckets: dict[str, list[Tensor]] = {}
+    for name, parameter in model.named_parameters():
+        gradient = parameter.grad
+        if gradient is None:
+            continue
+        values = gradient.coalesce().values() if gradient.is_sparse else gradient
+        buckets.setdefault(_gradient_group(name), []).append(values.detach())
+
+    payload: dict[str, object] = {}
+    for group, gradients in buckets.items():
+        count = sum(gradient.numel() for gradient in gradients)
+        stride = max(1, math.ceil(count / sample_limit))
+        samples = torch.cat([gradient.reshape(-1)[::stride] for gradient in gradients])[:sample_limit]
+        squared_norm = torch.stack([gradient.float().square().sum() for gradient in gradients]).sum()
+        payload[f"gradients/{group}"] = wandb.Histogram(samples.float().cpu().numpy())
+        payload[f"gradient_norm/{group}"] = float(squared_norm.sqrt())
+    return payload
+
+
+def gradient_log_due(step: int, start_step: int, every: int) -> bool:
+    """Log the first accumulated gradient and then every N optimizer steps."""
+    return every > 0 and (step == start_step or (step + 1) % every == 0)
+
+
 def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
     return dict(
         data_root=cfg.data_root,
@@ -1238,6 +1380,8 @@ def train(
         tags=["gpt", "temporal-mtp", "chunk20"],
         config=asdict(cfg),
     )
+    if cfg.wandb_log_code and wandb.run is not None:
+        log_wandb_code(wandb.run)
     run_dir, replay_dir = setup_run_dir(run_name)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
@@ -1321,6 +1465,11 @@ def train(
                 gradients = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradients):
                     raise FloatingPointError(f"step {step}: non-finite gradient norm {gradients}")
+                gradient_log = (
+                    wandb_gradient_log(model)
+                    if wandb.run is not None and gradient_log_due(step, start_step, cfg.wandb_grad_every)
+                    else {}
+                )
                 optimizer.step()
                 scheduler.step()
                 if DEVICE == "cuda":
@@ -1333,6 +1482,7 @@ def train(
                 "samples": (step + 1) * cfg.batch_size,
                 **{f"train/{name}": value for name, value in metrics.items()},
                 "train/grad_norm": float(gradients),
+                **gradient_log,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
                 "throughput/step_s": stopwatch.elapsed,
@@ -1420,6 +1570,7 @@ _CHECKPOINT_ARCH_FIELDS = {
     "temporal_layers",
     "temporal_heads",
     "temporal_ff_dim",
+    "group_head_dim",
     "main_stick_embed_dim",
     "c_stick_embed_dim",
     "trigger_embed_dim",
@@ -1431,7 +1582,7 @@ def config_from_state(values: dict) -> TrainConfig:
     missing = _CHECKPOINT_ARCH_FIELDS - values.keys()
     if missing:
         raise ValueError(
-            "checkpoint predates the causal cross-attention decoder and cannot be resumed or "
+            "checkpoint predates nonlinear causal decoder v2 and cannot be resumed or "
             f"loaded by experiment 024; missing config fields: {sorted(missing)}"
         )
     known = {item.name for item in fields(TrainConfig)}
