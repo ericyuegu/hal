@@ -1,4 +1,4 @@
-"""Core contracts for the sequential MTP and detached flow experiments."""
+"""Core contracts for the causal MTP and detached flow experiments."""
 
 import importlib.util
 import sys
@@ -37,8 +37,11 @@ def _tiny_cfg(exp, **overrides):
         n_layers=1,
         n_heads=4,
         L_ctx=4,
-        action_embed_dim=8,
-        action_mlp_ratio=2,
+        temporal_d_model=32,
+        temporal_layers=2,
+        temporal_heads=4,
+        temporal_ff_dim=64,
+        classifier_chunk_tokens=128,
         batch_size=2,
         grad_accum_steps=1,
         reservoir_capacity=4,
@@ -90,9 +93,33 @@ def test_defaults_pin_the_requested_geometry() -> None:
     ar = exp024.TrainConfig()
     flow = exp025.TrainConfig()
     assert (ar.L_ctx, ar.batch_size, ar.d_model, ar.n_layers, ar.L_chunk) == (256, 512, 256, 8, 20)
+    assert ar.decoder_arch_version == 1
     assert ar.grad_accum_steps == 4 and ar.exec_horizon == 4
+    assert (ar.temporal_d_model, ar.temporal_layers, ar.temporal_heads, ar.temporal_ff_dim) == (64, 1, 2, 128)
+    assert not ar.checkpoint_temporal and not ar.checkpoint_classifiers
+    assert (ar.action_state_embed_dim, ar.char_dim, ar.stage_dim) == (48, 8, 4)
+    assert (ar.main_stick_embed_dim, ar.c_stick_embed_dim, ar.trigger_embed_dim) == (40, 8, 8)
     assert (flow.flow_d_model, flow.flow_layers, flow.flow_steps) == (128, 2, 10)
     assert flow.max_steps == 16_384
+
+
+def test_default_model_keeps_full_trunk_path_with_a_tiny_temporal_residual() -> None:
+    cfg = exp024.TrainConfig()
+    model = exp024.GPT(cfg)
+    assert sum(parameter.numel() for parameter in model.parameters()) < 7_000_000
+    assert sum(parameter.numel() for parameter in model.temporal.parameters()) < 300_000
+    assert model.temporal.condition_in.weight.shape == (64, 256)
+    assert model.temporal.outputs["buttons"].weight.shape == (256, 64)
+    assert model.temporal.trunk_outputs["buttons"].weight.shape == (256, 256)
+    assert not [
+        name
+        for name, _ in model.temporal.named_parameters()
+        if "position" in name or "horizon" in name or "rotary" in name
+    ]
+    assert {name for name, _ in model.temporal.named_buffers() if "rotary" in name} == {
+        "blocks.0.rotary.inv_freq",
+        "trunk_cross_attention.rotary.inv_freq",
+    }
 
 
 def test_temporal_mtp_loss_and_ancestral_decode_smoke() -> None:
@@ -104,7 +131,9 @@ def test_temporal_mtp_loss_and_ancestral_decode_smoke() -> None:
     loss = exp024.objective(parts)
     assert torch.isfinite(loss)
     loss.backward()
-    assert model.temporal_heads[-1].down.weight.grad is not None
+    assert model.temporal.blocks[-1].down.weight.grad is not None
+    assert model.temporal.trunk_cross_attention.key_value.weight.grad is not None
+    assert model.temporal.trunk_outputs["buttons"].weight.grad is not None
     decoded = exp024.decode_chunk(model.eval(), batch.context, cfg.L_chunk, argmax=True)
     assert decoded.shape == (2, 20, A_DIM)
     assert ((decoded[..., 6:] == 0) | (decoded[..., 6:] == 1)).all()
@@ -113,16 +142,132 @@ def test_temporal_mtp_loss_and_ancestral_decode_smoke() -> None:
 def test_temporal_chain_uses_previous_teacher_forced_frame() -> None:
     cfg = _tiny_cfg(exp024)
     model = exp024.GPT(cfg).eval()
-    hidden = torch.randn(2, cfg.d_model)
-    targets = torch.zeros(2, cfg.L_chunk, exp024.N_GROUPS, dtype=torch.long)
+    hidden = torch.randn(2, cfg.L_ctx, cfg.d_model)
+    targets = torch.zeros(2, cfg.L_ctx, cfg.L_chunk, exp024.N_GROUPS, dtype=torch.long)
     changed = targets.clone()
-    changed[:, 0, exp024.C_G] = 1
+    changed[:, :, 0, exp024.C_G] = 1
     original_logits = model.teacher_forced_logits(hidden, targets)
     changed_logits = model.teacher_forced_logits(hidden, changed)
-    # Head 1 predicts the changed frame, so its first group cannot inspect that target.
+    # Horizon 1 predicts the changed frame, so its first group cannot inspect that target.
     torch.testing.assert_close(original_logits[0]["c_stick"], changed_logits[0]["c_stick"])
-    # Head 2 receives the full changed frame embedding through the fixed-width chain.
+    # The next group in the same frame is explicitly conditioned on the true C-stick.
+    assert not torch.equal(original_logits[0]["triggers"], changed_logits[0]["triggers"])
+    # Horizon 2 receives the full changed frame through the causal action chain.
     assert not torch.equal(original_logits[1]["c_stick"], changed_logits[1]["c_stick"])
+
+
+def test_temporal_parallel_teacher_forcing_matches_cached_decode() -> None:
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg).eval()
+    gen = torch.Generator().manual_seed(11)
+    hidden = torch.randn(2, cfg.L_ctx, cfg.d_model, generator=gen)
+    targets = torch.stack(
+        [torch.randint(vocab, (2, cfg.L_ctx, cfg.L_chunk), generator=gen) for vocab in exp024.GROUP_VOCABS],
+        dim=-1,
+    )
+    parallel = model.temporal.teacher_forced_logits_by_group(hidden, targets)
+    stepwise = model.temporal.forced_stepwise_logits(
+        hidden,
+        targets[:, -1],
+        torch.zeros(2, dtype=torch.long),
+    )
+    for depth, logits in enumerate(stepwise):
+        for name in exp024.GROUP_NAMES:
+            torch.testing.assert_close(parallel[name][:, -1, depth], logits[name], atol=2e-5, rtol=2e-5)
+
+
+def test_temporal_cross_attention_cannot_read_future_trunk_states() -> None:
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg).eval()
+    hidden = torch.randn(1, cfg.L_ctx, cfg.d_model)
+    targets = torch.zeros(1, cfg.L_ctx, cfg.L_chunk, exp024.N_GROUPS, dtype=torch.long)
+    changed = hidden.clone()
+    changed[:, -1] += 100.0
+    original = model.temporal.teacher_forced_logits_by_group(hidden, targets)
+    future_changed = model.temporal.teacher_forced_logits_by_group(changed, targets)
+    for name in exp024.GROUP_NAMES:
+        # The penultimate prefix cannot attend the modified final trunk state.
+        torch.testing.assert_close(original[name][:, -2], future_changed[name][:, -2])
+
+
+def test_chunk_targets_are_next_20_actions_at_every_prefix() -> None:
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg)
+    gen = torch.Generator().manual_seed(17)
+    length = cfg.L_ctx + cfg.L_chunk
+    indices = torch.stack(
+        [torch.arange(length).remainder(vocab) for vocab in exp024.GROUP_VOCABS],
+        dim=-1,
+    )[None]
+    native = exp024.dequantize(model, indices)
+    features = _features(exp024, 1, cfg.L_ctx, gen)
+    for channel, values in zip(ACTION_CHANNELS, native[:, : cfg.L_ctx].unbind(dim=-1), strict=True):
+        features[f"ego_{channel}"] = values
+    batch = TrainBatch(
+        context=Context(features=features, ctx_pad=torch.zeros(1, dtype=torch.long)),
+        target=native[:, cfg.L_ctx :],
+    )
+    targets, valid = exp024.chunk_targets(model, batch)
+    assert valid.all()
+    for prefix in range(cfg.L_ctx):
+        torch.testing.assert_close(targets[0, prefix], indices[0, prefix + 1 : prefix + 21])
+
+
+def test_padding_groups_match_default_action_loss() -> None:
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg).eval()
+    batch = _batch(exp024, cfg)
+    hidden = model(batch.context.features, batch.context.ctx_pad)
+    inferred = exp024.action_loss(model, batch, hidden=hidden)
+    explicit = exp024.action_loss(
+        model,
+        batch,
+        hidden=hidden,
+        pad_values=exp024.padding_groups(batch),
+    )
+    torch.testing.assert_close(inferred.nll, explicit.nll)
+    torch.testing.assert_close(inferred.targets, explicit.targets)
+
+
+def test_batch_geometry_rejects_variable_training_batch() -> None:
+    cfg = _tiny_cfg(exp024)
+    batch = _batch(exp024, cfg, batch=1)
+    exp024.validate_batch_geometry(batch, cfg)
+    with pytest.raises(ValueError, match="fixed training batch"):
+        exp024.validate_batch_geometry(batch, cfg, expected_batch_size=2)
+
+
+def test_validation_never_calls_fixed_shape_compiled_forward() -> None:
+    cfg = _tiny_cfg(exp024)
+    model = exp024.GPT(cfg).train()
+    batch = _batch(exp024, cfg, batch=1)
+    calls = 0
+
+    def fixed_training_forward(features, ctx_pad):
+        nonlocal calls
+        calls += 1
+        assert ctx_pad.shape == (cfg.batch_size,)
+        return type(model).forward(model, features, ctx_pad)
+
+    model.forward = fixed_training_forward
+    metrics = exp024.val_metrics(model, [batch], cfg)
+    assert calls == 0
+    assert model.__dict__["forward"] is fixed_training_forward
+    assert model.training
+    assert torch.isfinite(torch.tensor(metrics["loss"]))
+
+
+def test_legacy_sequential_checkpoint_config_is_rejected() -> None:
+    with pytest.raises(ValueError, match="predates the causal cross-attention decoder"):
+        exp024.config_from_state({"d_model": 256, "action_embed_dim": 64})
+
+
+def test_synthetic_benchmark_context_has_production_geometry() -> None:
+    cfg = _tiny_cfg(exp024)
+    context = exp024.synthetic_context(cfg, 3, torch.device("cpu"))
+    assert context.ctx_pad.shape == (3,)
+    assert context.ctx_pad.eq(0).all()
+    assert all(value.shape[:2] == (3, cfg.L_ctx) for value in context.features.values())
 
 
 def test_flow_codec_preserves_native_analog_values() -> None:
@@ -130,6 +275,26 @@ def test_flow_codec_preserves_native_analog_values() -> None:
     native = _native_actions(2, 20, gen)
     decoded = exp025.flow_decode(exp025.flow_encode(native), click_trigger_fix=False)
     torch.testing.assert_close(decoded, native)
+
+
+def test_flow_validation_also_bypasses_compiled_ar_forward() -> None:
+    cfg = _tiny_cfg(exp025, flow_steps=1)
+    model = exp025.GPT(cfg).train()
+    batch = _batch(exp025, cfg, batch=1)
+    calls = 0
+
+    def fixed_training_forward(features, ctx_pad):
+        nonlocal calls
+        calls += 1
+        assert ctx_pad.shape == (cfg.batch_size,)
+        return type(model.ar).forward(model.ar, features, ctx_pad)
+
+    model.ar.forward = fixed_training_forward
+    metrics = exp025.val_metrics(model, [batch], cfg)
+    assert calls == 0
+    assert model.ar.__dict__["forward"] is fixed_training_forward
+    assert model.training
+    assert torch.isfinite(torch.tensor(metrics["ar_loss"]))
 
 
 def test_flow_loss_is_stopped_at_the_ar_model() -> None:

@@ -12,7 +12,6 @@ Run:
 """
 
 # %%
-import contextlib
 import hashlib
 import importlib.util
 import itertools
@@ -311,8 +310,10 @@ def make_policy(
     def predict(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         if committed is not None:
             raise ValueError("this policy does not use a committed RTC prefix")
-        hidden = model(ctx.features, ctx.ctx_pad)
-        return integrate_chunk(model, hidden, cfg, gen=generator)[:, :horizon].cpu().numpy()
+        with mtp.amp_context(cfg, device):
+            hidden = model(ctx.features, ctx.ctx_pad)
+            action = integrate_chunk(model, hidden, cfg, gen=generator)[:, :horizon]
+        return action.cpu().numpy()
 
     return RecedingHorizon(
         predict_chunk=predict,
@@ -329,9 +330,16 @@ def make_policy(
 
 # %%
 def flow_metrics(squared_error: Tensor) -> dict[str, float]:
-    mse_horizon = squared_error.mean(dim=(0, 2))
+    if squared_error.ndim != 3 or squared_error.shape[-1] != A_DIM:
+        raise ValueError(f"flow squared error must be [B, H, {A_DIM}], got {tuple(squared_error.shape)}")
+    return flow_mean_metrics(squared_error.mean(dim=(0, 2)))
+
+
+def flow_mean_metrics(mse_horizon: Tensor) -> dict[str, float]:
+    if mse_horizon.ndim != 1:
+        raise ValueError(f"flow horizon MSE must be one-dimensional, got {tuple(mse_horizon.shape)}")
     return {
-        "flow_mse": float(squared_error.mean()),
+        "flow_mse": float(mse_horizon.mean()),
         **{f"flow_mse_h{index + 1:02d}": float(value) for index, value in enumerate(mse_horizon)},
     }
 
@@ -340,34 +348,41 @@ def flow_metrics(squared_error: Tensor) -> dict[str, float]:
 def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict[str, float]:
     was_training = model.training
     model.eval()
-    ar = mtp.val_metrics(model.ar, batches)
-    generator = torch.Generator(device=DEVICE).manual_seed(0)
-    errors: list[Tensor] = []
-    stick_error = trigger_error = 0.0
-    stick_count = trigger_count = 0
-    button_correct = button_count = 0
-    group_correct = group_count = exact_frames = 0
     try:
-        for cpu_batch in batches:
-            batch = cpu_batch.to(DEVICE)
-            hidden = model(batch.context.features, batch.context.ctx_pad)
-            loss = flow_matching_loss(model, batch, hidden, cfg, gen=generator)
-            errors.append(loss.squared_error.cpu())
-            predicted = integrate_chunk(model, hidden, cfg, gen=generator)
-            target = batch.target[:, : cfg.L_chunk]
-            stick_error += float((predicted[..., :4] - target[..., :4]).abs().sum())
-            stick_count += target[..., :4].numel()
-            trigger_error += float((predicted[..., 4:6] - target[..., 4:6]).abs().sum())
-            trigger_count += target[..., 4:6].numel()
-            button_matches = predicted[..., 6:] == (target[..., 6:] > 0.5)
-            button_correct += int(button_matches.sum())
-            button_count += button_matches.numel()
-            predicted_groups = mtp.quantize(model.ar, predicted)
-            target_groups = mtp.quantize(model.ar, target)
-            matches = predicted_groups == target_groups
-            group_correct += int(matches.sum())
-            group_count += matches.numel()
-            exact_frames += int(matches.all(dim=-1).sum())
+        # The AR forward is compiled only for the fixed training micro-batch.
+        # Keep it eager for every cached validation batch, including the final
+        # sliced batch, in both the AR and flow passes.
+        with mtp.evaluation_mode(model.ar):
+            ar = mtp.val_metrics(model.ar, batches, cfg)
+            device = next(model.parameters()).device
+            generator = torch.Generator(device=device).manual_seed(0)
+            errors: list[Tensor] = []
+            stick_error = trigger_error = 0.0
+            stick_count = trigger_count = 0
+            button_correct = button_count = 0
+            group_correct = group_count = exact_frames = 0
+            for cpu_batch in batches:
+                mtp.validate_batch_geometry(cpu_batch, cfg)
+                batch = cpu_batch.to(device)
+                with mtp.amp_context(cfg, device):
+                    hidden = model(batch.context.features, batch.context.ctx_pad)
+                    loss = flow_matching_loss(model, batch, hidden, cfg, gen=generator)
+                    predicted = integrate_chunk(model, hidden, cfg, gen=generator)
+                errors.append(loss.squared_error.cpu())
+                target = batch.target[:, : cfg.L_chunk]
+                stick_error += float((predicted[..., :4] - target[..., :4]).abs().sum())
+                stick_count += target[..., :4].numel()
+                trigger_error += float((predicted[..., 4:6] - target[..., 4:6]).abs().sum())
+                trigger_count += target[..., 4:6].numel()
+                button_matches = predicted[..., 6:] == (target[..., 6:] > 0.5)
+                button_correct += int(button_matches.sum())
+                button_count += button_matches.numel()
+                predicted_groups = mtp.quantize(model.ar, predicted)
+                target_groups = mtp.quantize(model.ar, target)
+                matches = predicted_groups == target_groups
+                group_correct += int(matches.sum())
+                group_count += matches.numel()
+                exact_frames += int(matches.all(dim=-1).sum())
     finally:
         model.train(was_training)
     return {
@@ -390,7 +405,7 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
             model.ar.cat_embeds,
             model.ar.char_emb,
             model.ar.stage_emb,
-            model.ar.action_embeddings,
+            model.ar.temporal.controller_embeddings,
         )
         for parameter in module.parameters()
     }
@@ -401,6 +416,8 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
         if id(parameter) in muon_ids:
             continue
         (no_decay if parameter.ndim < 2 or id(parameter) in embedding_ids else decay).append(parameter)
+    if len(muon) + len(decay) + len(no_decay) != sum(1 for _ in model.parameters()):
+        raise RuntimeError("optimizer parameter partition is incomplete")
     adam = dict(betas=(0.9, 0.95), eps=1e-10, use_muon=False)
     return SingleDeviceMuonWithAuxAdam(
         [
@@ -427,13 +444,14 @@ def eval_vs_cpu(
     model.eval()
     policies = itertools.count()
     try:
-        result = sweep_vs_cpu_prior(
-            lambda: make_policy(model, stats, cfg, seed=cfg.seed + next(policies)),
-            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
-            n_matchups=n_matchups,
-            max_parallel=min(n_matchups, cfg.eval_max_parallel),
-            max_frames=cfg.eval_max_frames,
-        )
+        with mtp.evaluation_mode(model.ar):
+            result = sweep_vs_cpu_prior(
+                lambda: make_policy(model, stats, cfg, seed=cfg.seed + next(policies)),
+                session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+                n_matchups=n_matchups,
+                max_parallel=min(n_matchups, cfg.eval_max_parallel),
+                max_frames=cfg.eval_max_frames,
+            )
     finally:
         model.train(was_training)
     return vs_cpu_metrics(result)
@@ -444,11 +462,19 @@ _WARMSTART_FIELDS = (
     "n_layers",
     "n_heads",
     "attn_window",
+    "require_flex",
     "L_ctx",
+    "decoder_arch_version",
     "L_chunk",
-    "action_embed_dim",
-    "action_mlp_ratio",
+    "temporal_d_model",
+    "temporal_layers",
+    "temporal_heads",
+    "temporal_ff_dim",
+    "main_stick_embed_dim",
+    "c_stick_embed_dim",
+    "trigger_embed_dim",
     "action_vocab",
+    "action_state_embed_dim",
     "char_vocab",
     "char_dim",
     "stage_vocab",
@@ -509,11 +535,6 @@ def train(
         config=asdict(cfg),
     )
     run_dir, replay_dir = setup_run_dir(run_name)
-    autocast = (
-        torch.autocast(DEVICE, dtype=torch.bfloat16)
-        if cfg.amp_dtype == "bfloat16" and DEVICE == "cuda"
-        else contextlib.nullcontext()
-    )
     if cfg.compile_trunk and DEVICE == "cuda":
         model.ar.forward = torch.compile(model.ar.forward, dynamic=False)
     optimizer = make_optimizer(model, cfg)
@@ -546,34 +567,59 @@ def train(
             compact=False,
             **kwargs,
         )
-    val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **kwargs)
+    val_kwargs = {**kwargs, "batch_size": cfg.val_batch_size}
+    val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **val_kwargs)
     val_cache = cache_validation(val_loader, cfg.val_n_samples)
     iterator = iter(train_loader)
     run_started = time.monotonic()
+    train_batches_seen = 0
     model.train()
     try:
         for step in range(start_step, cfg.max_steps):
+            if DEVICE == "cuda":
+                torch.cuda.reset_peak_memory_stats()
             with profile("step") as stopwatch:
                 optimizer.zero_grad()
-                nll_parts: list[Tensor] = []
-                flow_parts: list[Tensor] = []
+                cpu_batches: list[tuple[TrainBatch, tuple[int, ...]]] = []
+                loader_started = time.monotonic()
                 for _ in range(cfg.grad_accum_steps):
                     try:
                         batch = next(iterator)
                     except StopIteration:
                         iterator = iter(train_loader)
                         batch = next(iterator)
-                    batch = batch.to(DEVICE)
-                    with autocast:
+                    mtp.validate_batch_geometry(batch, cfg, expected_batch_size=mtp.micro_batch_size(cfg))
+                    cpu_batches.append((batch, mtp.padding_groups(batch)))
+                    train_batches_seen += 1
+                loader_wait = time.monotonic() - loader_started
+                valid_prefixes = sum(int((cfg.L_ctx - batch.context.ctx_pad).sum()) for batch, _ in cpu_batches)
+                flow_samples = sum(batch.target.shape[0] for batch, _ in cpu_batches)
+                if valid_prefixes <= 0 or flow_samples != cfg.batch_size:
+                    raise RuntimeError(
+                        f"bad accumulated geometry: valid_prefixes={valid_prefixes}, "
+                        f"flow_samples={flow_samples}, expected_samples={cfg.batch_size}"
+                    )
+                ar_normalizer = valid_prefixes * cfg.L_chunk
+                flow_normalizer = flow_samples * cfg.L_chunk * A_DIM
+                nll_sum = torch.zeros(cfg.L_chunk, mtp.N_GROUPS, device=DEVICE, dtype=torch.float32)
+                flow_sum = torch.zeros(cfg.L_chunk, device=DEVICE, dtype=torch.float32)
+                n_prefixes = 0
+                for cpu_batch, pads in cpu_batches:
+                    batch = cpu_batch.to(DEVICE)
+                    with mtp.amp_context(cfg, DEVICE):
                         hidden = model(batch.context.features, batch.context.ctx_pad)
-                        ar = mtp.action_loss(model.ar, batch, hidden=hidden)
+                        ar = mtp.action_loss(model.ar, batch, hidden=hidden, pad_values=pads)
                         flow = flow_matching_loss(model, batch, hidden, cfg)
                         loss = (
-                            cfg.ar_loss_weight * mtp.objective(ar) + cfg.flow_loss_weight * flow.squared_error.mean()
-                        ) / cfg.grad_accum_steps
+                            cfg.ar_loss_weight * ar.nll.sum() / ar_normalizer
+                            + cfg.flow_loss_weight * flow.squared_error.sum() / flow_normalizer
+                        )
                     loss.backward()
-                    nll_parts.append(ar.nll.detach().cpu())
-                    flow_parts.append(flow.squared_error.detach().cpu())
+                    nll_sum += ar.nll.detach().sum(dim=0)
+                    flow_sum += flow.squared_error.detach().sum(dim=(0, 2))
+                    n_prefixes += ar.nll.shape[0]
+                if n_prefixes != valid_prefixes:
+                    raise RuntimeError(f"decoded {n_prefixes} prefixes, expected {valid_prefixes}")
                 gradients = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradients):
                     raise FloatingPointError(f"step {step}: non-finite gradient norm {gradients}")
@@ -581,18 +627,34 @@ def train(
                 scheduler.step()
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
-            ar_values = mtp.nll_metrics(torch.cat(nll_parts))
-            flow_values = flow_metrics(torch.cat(flow_parts))
+            ar_values = mtp.nll_mean_metrics((nll_sum / n_prefixes).cpu())
+            flow_values = flow_mean_metrics((flow_sum / (flow_samples * A_DIM)).cpu())
             log = {
                 "global_step": step,
                 "samples": (step + 1) * cfg.batch_size,
                 **{f"train/ar_{name}": value for name, value in ar_values.items()},
                 **{f"train/{name}": value for name, value in flow_values.items()},
                 "train/grad_norm": float(gradients),
+                "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
+                "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
                 "throughput/step_s": stopwatch.elapsed,
+                "throughput/loader_wait_s": loader_wait,
                 "throughput/samples_per_s": cfg.batch_size / stopwatch.elapsed,
+                "throughput/prefixes_per_s": n_prefixes / stopwatch.elapsed,
+                "data/train_batches_seen": train_batches_seen,
             }
+            if DEVICE == "cuda":
+                log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
+                log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             wandb.log(log)
+            if step == start_step:
+                print(
+                    f"[model] attention path: {model.ar.trunk.attn_path}, window={cfg.attn_window}",
+                    flush=True,
+                )
+                if wandb.run is not None:
+                    wandb.run.summary["model/attn_path"] = model.ar.trunk.attn_path
+                    wandb.run.summary["startup/compiled_step0_s"] = stopwatch.elapsed
             if step < 10 or step % 50 == 0:
                 print(
                     f"[t+{time.monotonic() - run_started:.0f}s] step {step}: "
@@ -600,11 +662,10 @@ def train(
                     f"flow {flow_values['flow_mse']:.4f}  dt={stopwatch.elapsed:.3f}s",
                     flush=True,
                 )
-            if cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0:
-                values = val_metrics(model, val_cache, cfg)
-                wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
-                print(f"[val] step {step}: {values}", flush=True)
-            if cfg.ckpt_every > 0 and step > 0 and step % cfg.ckpt_every == 0:
+            val_due = cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0
+            eval_due = cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0
+            periodic_ckpt_due = cfg.ckpt_every > 0 and step > 0 and step % cfg.ckpt_every == 0
+            if periodic_ckpt_due or val_due or eval_due:
                 save_checkpoint(
                     run_dir / "latest.pt",
                     step=step,
@@ -615,7 +676,11 @@ def train(
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     uploader=uploader,
                 )
-            if cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0:
+            if val_due:
+                values = val_metrics(model, val_cache, cfg)
+                wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
+                print(f"[val] step {step}: {values}", flush=True)
+            if eval_due:
                 values = eval_vs_cpu(
                     model,
                     stats,
@@ -625,16 +690,6 @@ def train(
                 )
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
 
-        final_val = val_metrics(model, val_cache, cfg)
-        wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
-        final_eval = eval_vs_cpu(
-            model,
-            stats,
-            cfg,
-            n_matchups=cfg.final_eval_n_matchups,
-            replay_dir=replay_dir / "final",
-        )
-        wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
         save_checkpoint(
             run_dir / "final.pt",
             step=cfg.max_steps,
@@ -645,6 +700,16 @@ def train(
             wandb_id=None if wandb.run is None else wandb.run.id,
             uploader=uploader,
         )
+        final_val = val_metrics(model, val_cache, cfg)
+        wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
+        final_eval = eval_vs_cpu(
+            model,
+            stats,
+            cfg,
+            n_matchups=cfg.final_eval_n_matchups,
+            replay_dir=replay_dir / "final",
+        )
+        wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
     finally:
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
@@ -653,7 +718,20 @@ def train(
 
 
 # %%
+_FLOW_CHECKPOINT_FIELDS = {
+    "flow_d_model",
+    "flow_layers",
+    "flow_heads",
+    "flow_ff_dim",
+    "flow_time_dim",
+    "flow_steps",
+}
+
+
 def config_from_state(values: dict) -> TrainConfig:
+    missing = (mtp._CHECKPOINT_ARCH_FIELDS | _FLOW_CHECKPOINT_FIELDS) - values.keys()
+    if missing:
+        raise ValueError(f"checkpoint is structurally incompatible; missing config fields: {sorted(missing)}")
     known = {item.name for item in fields(TrainConfig)}
     return TrainConfig(**{name: value for name, value in values.items() if name in known})
 
