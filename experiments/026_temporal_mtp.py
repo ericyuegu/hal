@@ -1089,6 +1089,12 @@ class BF16Inference:
                 groups.append(F.pad(real, (0, bucket - rows), value=0.5))
             uniform_parts.append(torch.stack(groups))
         uniforms = torch.stack(uniform_parts)
+        if self.compiled:
+            # The trunk and decoder are separate CUDA Graph trees.  Mark one
+            # complete decode as a graph step so the next trunk replay may
+            # safely reuse its managed output storage after the decoder has
+            # consumed it.
+            torch.compiler.cudagraph_mark_step_begin()
         with amp_context(self.cfg, ctx.ctx_pad.device):
             hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
             if argmax:

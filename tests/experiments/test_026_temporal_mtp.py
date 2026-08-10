@@ -243,6 +243,29 @@ def test_bucket_padding_and_slot_keyed_rng_do_not_change_real_rows() -> None:
     torch.testing.assert_close(first, second)
 
 
+def test_compiled_inference_marks_each_cuda_graph_decode_step(monkeypatch) -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False)
+    engine.compiled = True
+    bucket = 2
+    engine._trunks[bucket] = lambda features, pad, actions: model(features, pad, actions)
+    engine._decoders[(bucket, 4)] = lambda hidden, observed, uniforms: model.temporal.sample_indices(
+        hidden, observed, cfg.head_offsets[:4], argmax=False, uniforms=uniforms
+    )
+    calls = 0
+
+    def marked() -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", marked)
+    ctx = _context(cfg)
+    engine.decode(ctx, 4)
+    engine.decode(ctx, 4)
+    assert calls == 2
+
+
 @pytest.mark.parametrize("bundle", ["base", "v6_lean"])
 def test_both_observation_bundles_forward_and_optimize(bundle: str) -> None:
     cfg = _cfg(observation_bundle=bundle)
