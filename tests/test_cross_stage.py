@@ -151,6 +151,15 @@ def test_keeps_legacy_keys_and_adds_new_ones() -> None:
     assert "dead_frame_frac" in m
     for key in ("damage_dealt_per_min", "stocks_taken_per_min"):
         assert f"{key}_ci_lo" in m and f"{key}_ci_hi" in m
+    assert m["net_stock_per_min"] == pytest.approx(1.0)
+    assert m["net_dmg_per_min"] == pytest.approx(10.0)
+    for key in (
+        "net_stock_lcb",
+        "net_dmg_lcb",
+        "net_stock_cluster_bootstrap_lcb",
+        "net_dmg_cluster_bootstrap_lcb",
+    ):
+        assert key in m
 
 
 def test_all_crashed_returns_minimal_dict() -> None:

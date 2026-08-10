@@ -81,6 +81,12 @@ _RATE_KEYS: tuple[str, ...] = (
 # determinism (byte-identical CIs across runs/boxes).
 BOOTSTRAP_RESAMPLES = 2000
 
+# Frozen confidence conventions shared with notebooks/backfill_net_lcb.py.  The
+# marginal intervals logged by older experiments are two-sided 95% intervals;
+# the headline net score is a conservative one-sided 95% lower bound.
+NET_LCB_Z = 1.645
+MARGINAL_CI_Z = 1.96
+
 # Seed stage for the one menu navigation an instant-restart boot makes before the
 # Gecko code takes over with random legal stages. Battlefield's cursor target sits
 # near the menu origin, so it is the most reliable single nav under concurrent load.
@@ -142,6 +148,44 @@ def _summary_numerator(summary: MatchSummary, rate_key: str) -> float:
         "damage_dealt_per_min": summary.p2_damage_taken,
         "damage_taken_per_min": summary.p1_damage_taken,
     }[rate_key]
+
+
+def conservative_net_lcb(
+    positive_rate: float,
+    negative_rate: float,
+    positive_ci: tuple[float, float],
+    negative_ci: tuple[float, float],
+) -> float:
+    """Conservative one-sided 95% LCB for a difference of two rates.
+
+    This is intentionally identical to :func:`notebooks.backfill_net_lcb.lcbs`
+    on its CI tier.  The covariance of the two marginal rates is ignored and
+    ``SE(a - b) <= SE(a) + SE(b)`` is used, making this comparable with runs for
+    which only the four marginal intervals were retained.
+    """
+    positive_half_width = (positive_ci[1] - positive_ci[0]) / 2.0
+    negative_half_width = (negative_ci[1] - negative_ci[0]) / 2.0
+    standard_error = (positive_half_width + negative_half_width) / MARGINAL_CI_Z
+    return positive_rate - negative_rate - NET_LCB_Z * standard_error
+
+
+def _direct_net_lcb(
+    positive: np.ndarray,
+    negative: np.ndarray,
+    active_minutes: np.ndarray,
+    idx: np.ndarray | None,
+    point: float,
+) -> float:
+    """Paired, boot-cluster percentile LCB for one net pooled rate."""
+    if idx is None:
+        return point
+    numerator = (positive - negative)[idx].sum(axis=1)
+    denominator = active_minutes[idx].sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rates = np.where(denominator > 0.0, numerator / denominator, np.nan)
+    if np.all(np.isnan(rates)):
+        return point
+    return float(np.nanpercentile(rates, 5.0))
 
 
 def vs_cpu_metrics(
@@ -215,6 +259,46 @@ def vs_cpu_metrics(
         out[key] = point
         out[f"{key}_ci_lo"] = lo
         out[f"{key}_ci_hi"] = hi
+
+    stock_taken = out["stocks_taken_per_min"]
+    stock_lost = out["stocks_lost_per_min"]
+    damage_dealt = out["damage_dealt_per_min"]
+    damage_taken = out["damage_taken_per_min"]
+    out["net_stock_per_min"] = stock_taken - stock_lost
+    out["net_dmg_per_min"] = damage_dealt - damage_taken
+    out["net_stock_lcb"] = conservative_net_lcb(
+        stock_taken,
+        stock_lost,
+        (out["stocks_taken_per_min_ci_lo"], out["stocks_taken_per_min_ci_hi"]),
+        (out["stocks_lost_per_min_ci_lo"], out["stocks_lost_per_min_ci_hi"]),
+    )
+    out["net_dmg_lcb"] = conservative_net_lcb(
+        damage_dealt,
+        damage_taken,
+        (out["damage_dealt_per_min_ci_lo"], out["damage_dealt_per_min_ci_hi"]),
+        (out["damage_taken_per_min_ci_lo"], out["damage_taken_per_min_ci_hi"]),
+    )
+    boot_numerators = {
+        key: np.array(
+            [sum(_summary_numerator(summary, key) for summary in boot) for boot in by_boot.values()],
+            dtype=np.float64,
+        )
+        for key in _RATE_KEYS
+    }
+    out["net_stock_cluster_bootstrap_lcb"] = _direct_net_lcb(
+        boot_numerators["stocks_taken_per_min"],
+        boot_numerators["stocks_lost_per_min"],
+        boot_active_minutes,
+        idx,
+        out["net_stock_per_min"],
+    )
+    out["net_dmg_cluster_bootstrap_lcb"] = _direct_net_lcb(
+        boot_numerators["damage_dealt_per_min"],
+        boot_numerators["damage_taken_per_min"],
+        boot_active_minutes,
+        idx,
+        out["net_dmg_per_min"],
+    )
     out["dead_frame_frac"] = float((total - active).sum() / total.sum())
     out["frames"] = total_frames / len(summaries)  # mean episode length (incl. countdown), a diagnostic
     out["matches"] = float(len(summaries))  # completed matches pooled (many per boot under instant-restart)
