@@ -357,6 +357,9 @@ class NonlinearActionHead(nn.Module):
         return self.down(F.silu(self.up(decoder_rmsnorm(x))))
 
 
+TEMPORAL_SDPA_BATCH_LIMIT = 32_768
+
+
 class TemporalBlock(nn.Module):
     """RoPE causal SDPA block with an exact cached one-token path."""
 
@@ -378,7 +381,7 @@ class TemporalBlock(nn.Module):
         shape = (batch, length, self.n_heads, self.head_dim)
         return q.view(shape), k.view(shape), v.view(shape)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def _forward_chunk(self, x: Tensor) -> Tensor:
         q, k, v = self._qkv(x)
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
@@ -388,6 +391,16 @@ class TemporalBlock(nn.Module):
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
         return x + self.down(F.silu(self.up(decoder_rmsnorm(x))))
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Flash SDPA's CUDA launch rejects a flattened batch dimension above
+        # 65,535.  Training flattens batch and context positions, which is
+        # 1024 * 128 for the production configuration.  Chunking that
+        # independent dimension preserves the exact attention computation
+        # while keeping every static launch safely below the CUDA grid limit.
+        if x.shape[0] <= TEMPORAL_SDPA_BATCH_LIMIT:
+            return self._forward_chunk(x)
+        return torch.cat([self._forward_chunk(chunk) for chunk in x.split(TEMPORAL_SDPA_BATCH_LIMIT)], dim=0)
 
     def forward_step(self, x: Tensor, past: tuple[Tensor, Tensor] | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         q, k, v = self._qkv(x[:, None])
@@ -859,7 +872,8 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
             # Rollout-conditioned diagnostics use the last real context prefix;
             # temporal and within-frame prefixes are sampled greedily.
             last_observed = history[:, -1]
-            rollout_logits, sampled_all = model.temporal.rollout_conditioned_logits(hidden, last_observed)
+            with amp_context(cfg, device):
+                rollout_logits, sampled_all = model.temporal.rollout_conditioned_logits(hidden, last_observed)
             sampled = sampled_all[:, :6]
             target_last = targets[:, -1]
             target_rows.append(target_last.cpu())

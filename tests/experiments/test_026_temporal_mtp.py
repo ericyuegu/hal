@@ -191,6 +191,25 @@ def test_parallel_teacher_forcing_matches_stepwise_logits() -> None:
             torch.testing.assert_close(parallel[name][:, -1, depth], logits[name], atol=2e-5, rtol=2e-5)
 
 
+def test_temporal_sdpa_chunks_flattened_batch_without_changing_results(monkeypatch) -> None:
+    cfg = _cfg(temporal_layers=1)
+    block = exp.TemporalBlock(cfg).eval()
+    inputs = torch.randn(7, len(cfg.head_offsets), cfg.temporal_d_model)
+    expected = block._forward_chunk(inputs)
+    calls: list[int] = []
+    original = torch.nn.functional.scaled_dot_product_attention
+
+    def recorded(query, key, value, **kwargs):
+        calls.append(query.shape[0])
+        return original(query, key, value, **kwargs)
+
+    monkeypatch.setattr(exp, "TEMPORAL_SDPA_BATCH_LIMIT", 3)
+    monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", recorded)
+    actual = block(inputs)
+    assert calls == [3, 3, 1]
+    torch.testing.assert_close(actual, expected)
+
+
 def test_decoder_has_actual_offset_embeddings_and_no_cross_attention() -> None:
     model = exp.GPT(_cfg())
     assert model.temporal.offset_embedding.num_embeddings == model.cfg.sample_chunk_length + 1
