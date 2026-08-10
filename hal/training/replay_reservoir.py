@@ -2,12 +2,18 @@
 
 import hashlib
 from collections import deque
+from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from concurrent.futures import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Any
+
+if TYPE_CHECKING:
+    from hal.training.dataloader import BatchTransform
 
 import numpy as np
 import torch
@@ -22,6 +28,12 @@ from hal.data.schema import check_schema_version
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
+
+# Extra full-length per-frame columns computed from one compact MDS row, keyed like
+# the decoded columns (``p1_*`` / ``p2_*``). They are sliced with the same window
+# ranges and padding as every decoded column, so downstream ego relabeling and
+# masking need no special cases.
+type ReplayAnnotation = Callable[[Mapping[str, object]], dict[str, np.ndarray]]
 
 
 def _next_item[T](source: Iterator[T]) -> T:
@@ -220,6 +232,7 @@ class PolicyReplayPackDataset(IterableDataset):
         windows_per_replay: int,
         schema_version: int,
         projection: FeatureProjection | None,
+        annotate_replay: ReplayAnnotation | None = None,
     ) -> None:
         self._dataset = dataset
         self._L_ctx = L_ctx
@@ -228,6 +241,7 @@ class PolicyReplayPackDataset(IterableDataset):
         self._K = windows_per_replay
         self._schema_version = schema_version
         self._projection = projection
+        self._annotate = annotate_replay
         self._epoch = 0
 
     def __iter__(self) -> Iterator[ReplayPack]:
@@ -251,6 +265,19 @@ class PolicyReplayPackDataset(IterableDataset):
             ego_prefixes = ["p1" if rng.random() < 0.5 else "p2" for _ in starts]
             ranges = tuple((max(0, start), start + self._L_ctx + self._L_chunk) for start in starts)
             samples = decode_policy_replay_slices(compact, ranges)
+            if self._annotate is not None:
+                # All RNG draws for this replay happened above; the annotation can
+                # never change which windows are sampled.
+                extra = self._annotate(compact)
+                for name, values in extra.items():
+                    if np.asarray(values).shape[:1] != (frames,):
+                        raise ValueError(
+                            f"annotation column {name!r} has shape {np.asarray(values).shape}; "
+                            f"expected full replay length ({frames},)"
+                        )
+                for (lo, hi), sample in zip(ranges, samples, strict=True):
+                    for name, values in extra.items():
+                        sample[name] = np.asarray(values)[lo:hi]
             windows = []
             for start, ego_prefix, sample in zip(starts, ego_prefixes, samples, strict=True):
                 pad = max(0, -start)
@@ -282,10 +309,12 @@ class ReservoirLoader:
         projection: FeatureProjection | None,
         prefetch_batches: int,
         pin_memory: bool,
+        batch_transform: BatchTransform | None = None,
     ) -> None:
         if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
             raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
         self._pack_loader = pack_loader
+        self._batch_transform = batch_transform
         self._stats = stats
         self._L_ctx = L_ctx
         self._batch_size = batch_size
@@ -298,7 +327,7 @@ class ReservoirLoader:
         self._epoch = 0
         self.last_epoch_stats: dict[str, int] | None = None
 
-    def __iter__(self) -> Iterator[TrainBatch]:
+    def __iter__(self) -> Iterator[object]:
         reservoir = ReplayReservoir(
             iter(self._pack_loader),
             batch_size=self._batch_size,
@@ -311,7 +340,7 @@ class ReservoirLoader:
             return OneBatchPrefetch(batches, depth=self._prefetch_batches)
         return batches
 
-    def _batches(self, reservoir: ReplayReservoir) -> Iterator[TrainBatch]:
+    def _batches(self, reservoir: ReplayReservoir) -> Iterator[object]:
         from hal.training.dataloader import collate_train_batch
 
         try:
@@ -324,7 +353,16 @@ class ReservoirLoader:
                     projection=self._projection,
                 )
                 batch = TrainBatch(context=batch.context, target=batch.target, replay_ids=item.replay_ids)
-                yield batch.pin_memory() if self._pin_memory else batch
+                out = batch if self._batch_transform is None else self._batch_transform(list(item.windows), batch)
+                if self._pin_memory:
+                    pin = getattr(out, "pin_memory", None)
+                    if pin is None:
+                        raise TypeError(
+                            f"batch_transform produced {type(out).__name__}, which has no pin_memory(); "
+                            "required when the loader pins memory"
+                        )
+                    out = pin()
+                yield out
         finally:
             self.last_epoch_stats = {
                 "emitted_windows": reservoir.emitted_windows,
@@ -359,6 +397,8 @@ def make_reservoir_loader(
     schema_version: int = SCHEMA_VERSION,
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
+    annotate_replay: ReplayAnnotation | None = None,
+    batch_transform: BatchTransform | None = None,
 ) -> ReservoirLoader:
     """Build a compact replay loader with replay-aware batches."""
     if predownload < 1:
@@ -384,6 +424,7 @@ def make_reservoir_loader(
         windows_per_replay=windows_per_replay,
         schema_version=schema_version,
         projection=projection,
+        annotate_replay=annotate_replay,
     )
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
@@ -409,4 +450,5 @@ def make_reservoir_loader(
         projection=projection,
         prefetch_batches=prefetch_batches,
         pin_memory=pin_memory,
+        batch_transform=batch_transform,
     )

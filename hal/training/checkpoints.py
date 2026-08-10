@@ -98,20 +98,27 @@ def save_checkpoint(
     cfg: dict,
     wandb_id: str | None,
     uploader: BackgroundUploader | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Write a resumable checkpoint (model + optimizer + scheduler + config +
-    wandb id) and, if an uploader is given, enqueue it for R2 sync."""
-    torch.save(
-        {
-            "step": step,
-            "model": model.state_dict(),
-            "opt": opt.state_dict(),
-            "sched": sched.state_dict(),
-            "cfg": cfg,
-            "wandb_id": wandb_id,
-        },
-        path,
-    )
+    wandb id) and, if an uploader is given, enqueue it for R2 sync.
+
+    ``extra`` carries experiment-owned resumable state (for example an auxiliary
+    optimizer). Its keys must not collide with the base payload."""
+    payload: dict[str, Any] = {
+        "step": step,
+        "model": model.state_dict(),
+        "opt": opt.state_dict(),
+        "sched": sched.state_dict(),
+        "cfg": cfg,
+        "wandb_id": wandb_id,
+    }
+    if extra is not None:
+        collisions = payload.keys() & extra.keys()
+        if collisions:
+            raise ValueError(f"extra checkpoint keys collide with the base payload: {sorted(collisions)}")
+        payload.update(extra)
+    torch.save(payload, path)
     print(f"[ckpt] saved {path}", flush=True)
     if uploader is not None:
         uploader.upload(path)
