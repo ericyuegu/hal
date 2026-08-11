@@ -1511,12 +1511,33 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
     return Context(features=features, ctx_pad=ctx_pad, slot_ids=slot_ids, reset=reset)
 
 
+def canonical_context(ctx: Context, bundle: str) -> Context:
+    """Give every decode call one feature-dict shape, so one compiled program serves all.
+
+    The closed-loop builder emits a mask sidecar only where a mask fired, and orders
+    keys by its column layout. ``synthetic_context`` emits every sidecar in model
+    order. Dynamo guards on dict membership AND key order, so without this step the
+    first REAL decode of an evaluation recompiles on the production box and runs
+    kernels the prewarm never proved. An absent sidecar means zeros, so completing
+    the set changes no value the model sees."""
+    floats = FLOAT_FEATURES if bundle == "base" else FLOAT_FEATURES + _V6_FLOATS
+    features = dict(ctx.features)
+    for prefix in _PLAYER_PREFIXES:
+        for name in floats:
+            key = f"{prefix}_{name}_mask"
+            if key not in features:
+                features[key] = torch.zeros_like(features[f"{prefix}_{name}"])
+    return replace(ctx, features={name: features[name] for name in sorted(features)})
+
+
 class BF16Inference:
     """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
 
     The background prewarm builds every bucket required by the scheduled evaluations.
     Runtime calls use the smallest compiled bucket that fits. Padding and slot-keyed
-    random streams leave real rows unchanged.
+    random streams leave real rows unchanged. ``decode`` canonicalizes each context
+    (see :func:`canonical_context`), so the prewarmed programs are the ones the
+    evaluation replays.
     """
 
     def __init__(
@@ -1592,6 +1613,7 @@ class BF16Inference:
     ) -> Tensor:
         if horizon != EXECUTED_CHUNK:
             raise ValueError("experiment 027 executes exactly four frames before replanning")
+        ctx = canonical_context(ctx, self.cfg.observation_bundle)
         rows = ctx.ctx_pad.shape[0]
         bucket = self._bucket(rows)
         padded = _pad_context(ctx, bucket)
@@ -1856,17 +1878,21 @@ def eval_vs_cpu(
     model.eval()
     started = time.perf_counter()
     try:
-        results, rows = sweep_vs_cpu_prior_with_rows(
-            factory,
-            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
-            n_matchups=protocol.n_matchups,
-            max_parallel=protocol.max_parallel,
-            max_frames=protocol.max_frames,
-            cpu_level=protocol.cpu_level,
-            ego_port=protocol.ego_port,
-            seed_stage=melee.Stage(protocol.seed_stage),
-            start_retries=protocol.start_retries,
-        )
+        # The prewarm compiled every scheduled decode program. A compile during the
+        # evaluation itself would run kernels this box never proved, minutes into a
+        # 32-Dolphin lockstep — fail before it starts, and name the guard that missed.
+        with torch.compiler.set_stance("fail_on_recompile"):
+            results, rows = sweep_vs_cpu_prior_with_rows(
+                factory,
+                session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+                n_matchups=protocol.n_matchups,
+                max_parallel=protocol.max_parallel,
+                max_frames=protocol.max_frames,
+                cpu_level=protocol.cpu_level,
+                ego_port=protocol.ego_port,
+                seed_stage=melee.Stage(protocol.seed_stage),
+                start_retries=protocol.start_retries,
+            )
     finally:
         model.train(was_training)
     metrics = vs_cpu_metrics(results, seed=protocol.seed)

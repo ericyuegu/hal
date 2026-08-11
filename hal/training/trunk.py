@@ -55,7 +55,11 @@ torch._dynamo.config.cache_size_limit = 64
 # that you are using FX to symbolically trace a dynamo-optimized function" — cache hits included,
 # so no warm-up order can remove the race. This switch makes dynamo dispatch and compile normally
 # under the flag. The suppressed error stays correct only for a real single-thread
-# ``symbolic_trace`` over a compiled function, which this codebase never does.
+# ``symbolic_trace`` over a compiled function, which this codebase never does. The switch cannot
+# interleave two traces: every dynamo/AOT/Inductor compile runs inside the process-global
+# ``torch._dynamo.convert_frame.compile_lock``, and the flag windows live inside the lock — so a
+# cross-thread entry under the flag either dispatches to already-built code or blocks on the lock
+# until the foreign trace ends.
 torch._dynamo.config.force_compile_during_fx_trace = True
 
 # Compilation is lazy, so both of these cost nothing until the first FlexAttention call. The mask

@@ -184,9 +184,42 @@ log "training: ${cmd}"
 # Run training outside the trap so we can branch on its exit code: success destroys
 # the box (checkpoints already in R2), non-zero stops it (keeps /opt/hal/train.log
 # for inspection / --resume) — both subject to HAL_KEEP_ALIVE.
+#
+# The trainer writes STRAIGHT to train.log, never through a pipe. A crashed trainer
+# can orphan children (forkserver workers, Dolphin) that inherit its stdout; with
+# `cmd | tee` those orphans keep the pipe open, tee never sees EOF, and this script
+# never reaches teardown — the box then idle-bills until someone notices. `tail`
+# mirrors the file to the on-start log instead. `setsid` makes the trainer a session
+# leader so ALL its descendants share one process group we can kill when it exits.
 set +e
-bash -c "$cmd" 2>&1 | tee /opt/hal/train.log
-code=${PIPESTATUS[0]}
+: > /opt/hal/train.log
+tail -F /opt/hal/train.log & tail_pid=$!
+setsid bash -c "$cmd" >> /opt/hal/train.log 2>&1 & train_pid=$!
+
+# Stall watchdog: a healthy run logs at least every minute (per-step prints, Dolphin
+# output during evals). A trainer silent past the deadline is hung — kill its whole
+# group so `wait` returns and the normal non-zero exit path stops the box.
+stall_s=$(( ${HAL_STALL_MINUTES:-60} * 60 ))
+(
+  while kill -0 "$train_pid" 2>/dev/null; do
+    sleep 60
+    quiet_s=$(( $(date +%s) - $(stat -c %Y /opt/hal/train.log 2>/dev/null || date +%s) ))
+    if [ "$quiet_s" -ge "$stall_s" ]; then
+      echo "[on-start] watchdog: no log output for ${quiet_s}s — killing stalled trainer group" >> /opt/hal/train.log
+      kill -9 -- "-$train_pid" 2>/dev/null
+      break
+    fi
+  done
+) & watchdog_pid=$!
+
+wait "$train_pid"
+code=$?
+# The trainer is gone. Nothing of its tree may outlive it: orphaned forkserver
+# workers or Dolphin processes would hold the GPU and confuse the next boot.
+kill -9 -- "-$train_pid" 2>/dev/null
+kill "$watchdog_pid" 2>/dev/null
+sleep 1  # let tail flush the last lines to the on-start log
+kill "$tail_pid" 2>/dev/null
 set -e
 
 if [ "$code" -eq 0 ]; then

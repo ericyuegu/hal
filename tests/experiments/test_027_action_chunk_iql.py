@@ -240,6 +240,38 @@ def test_inference_never_calls_either_critic(monkeypatch) -> None:
         engine.decode(context, 6, argmax=True)
 
 
+def test_decode_canonicalizes_feature_keys_to_one_program_shape() -> None:
+    """A context that misses never-fired mask sidecars, in any key order, must reach
+    the model as the SAME feature dict the synthetic prewarm context reaches it with.
+    Dynamo guards on dict membership and key order, so a divergence makes the first
+    real decode of an evaluation recompile — and run kernels the prewarm never proved."""
+    cfg = _cfg(inference_mode="eager")
+    synthetic = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    reference = exp.canonical_context(synthetic, cfg.observation_bundle)
+    assert list(reference.features) == sorted(synthetic.features)
+
+    dropped = [name for name in synthetic.features if name.endswith("_mask") and not name.startswith("ego_nana")][:6]
+    scrambled_names = [name for name in reversed(list(synthetic.features)) if name not in dropped]
+    scrambled = Context(
+        features={name: synthetic.features[name] for name in scrambled_names},
+        ctx_pad=synthetic.ctx_pad,
+        slot_ids=synthetic.slot_ids,
+        reset=synthetic.reset,
+    )
+    canonical = exp.canonical_context(scrambled, cfg.observation_bundle)
+    assert list(canonical.features) == list(reference.features)
+    for name in dropped:
+        assert torch.equal(canonical.features[name], torch.zeros_like(reference.features[name]))
+
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False)
+    generator_a = torch.Generator().manual_seed(3)
+    generator_b = torch.Generator().manual_seed(3)
+    torch.testing.assert_close(
+        engine.decode(scrambled, 4, gen=generator_a), engine.decode(synthetic, 4, gen=generator_b)
+    )
+
+
 def test_optimizer_owns_new_critic_parameters_once() -> None:
     model = exp.GPT(_cfg())
     optimizer = exp.make_optimizer(model, model.cfg)
