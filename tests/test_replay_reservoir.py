@@ -4,7 +4,9 @@ from threading import Event
 import numpy as np
 import pytest
 
+import hal.training.replay_reservoir as replay_reservoir
 from hal.training.replay_reservoir import OneBatchPrefetch
+from hal.training.replay_reservoir import PolicyReplayPackDataset
 from hal.training.replay_reservoir import ReplayPack
 from hal.training.replay_reservoir import ReplayReservoir
 from hal.training.replay_reservoir import _stable_replay_rng
@@ -47,6 +49,45 @@ def test_stable_replay_rng_depends_on_identity_and_epoch() -> None:
     assert np.array_equal(first, _stable_replay_rng(7, 2, "replay-a").integers(0, 2**31, size=8))
     assert not np.array_equal(first, _stable_replay_rng(7, 3, "replay-a").integers(0, 2**31, size=8))
     assert not np.array_equal(first, _stable_replay_rng(7, 2, "replay-b").integers(0, 2**31, size=8))
+
+
+def test_compact_replay_transform_sees_full_episode_before_windowing(monkeypatch) -> None:
+    frames = 12
+    decoded = {
+        "schema_version": 7,
+        "frame": np.arange(frames, dtype=np.int32),
+        "p1_value": np.arange(frames, dtype=np.float32),
+        "p2_value": -np.arange(frames, dtype=np.float32),
+    }
+    compact = {"replay_id": "r", "source_schema_version": 7, "num_frames": frames}
+    monkeypatch.setattr(replay_reservoir, "decode_policy_replay", lambda row: decoded)
+    seen: list[int] = []
+
+    def transform(sample):
+        seen.append(len(sample["frame"]))
+        return {
+            **sample,
+            "p1_label": np.arange(frames, dtype=np.float32) + 100,
+            "p2_label": np.arange(frames, dtype=np.float32) + 100,
+        }
+
+    packs = list(
+        PolicyReplayPackDataset(
+            [compact],
+            L_ctx=3,
+            L_chunk=2,
+            seed=4,
+            windows_per_replay=1,
+            schema_version=7,
+            projection=None,
+            replay_transform=transform,
+        )
+    )
+    assert seen == [frames]
+    assert len(packs) == len(packs[0].windows) == 1
+    window = packs[0].windows[0]
+    pad = int(window["ctx_pad"])
+    np.testing.assert_array_equal(window["ego_label"][pad:], window["frame"][pad:] + 100)
 
 
 def test_prefetch_preserves_order_at_requested_depth() -> None:

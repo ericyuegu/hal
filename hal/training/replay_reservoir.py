@@ -2,6 +2,7 @@
 
 import hashlib
 from collections import deque
+from collections.abc import Callable
 from collections.abc import Iterator
 from concurrent.futures import CancelledError
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 
 from hal.data.feature_stats import FeatureStats
+from hal.data.policy_schema import decode_policy_replay
 from hal.data.policy_schema import decode_policy_replay_slices
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
@@ -220,6 +222,7 @@ class PolicyReplayPackDataset(IterableDataset):
         windows_per_replay: int,
         schema_version: int,
         projection: FeatureProjection | None,
+        replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         self._dataset = dataset
         self._L_ctx = L_ctx
@@ -228,6 +231,7 @@ class PolicyReplayPackDataset(IterableDataset):
         self._K = windows_per_replay
         self._schema_version = schema_version
         self._projection = projection
+        self._replay_transform = replay_transform
         self._epoch = 0
 
     def __iter__(self) -> Iterator[ReplayPack]:
@@ -250,20 +254,35 @@ class PolicyReplayPackDataset(IterableDataset):
             ]
             ego_prefixes = ["p1" if rng.random() < 0.5 else "p2" for _ in starts]
             ranges = tuple((max(0, start), start + self._L_ctx + self._L_chunk) for start in starts)
-            samples = decode_policy_replay_slices(compact, ranges)
             windows = []
-            for start, ego_prefix, sample in zip(starts, ego_prefixes, samples, strict=True):
-                pad = max(0, -start)
-                window = _make_window(
-                    sample,
-                    ego_prefix=ego_prefix,
-                    start=0,
-                    pad=pad,
-                    length=self._L_ctx + self._L_chunk,
-                    projection=self._projection,
-                )
-                window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
-                windows.append(window)
+            if self._replay_transform is None:
+                samples = decode_policy_replay_slices(compact, ranges)
+                for start, ego_prefix, sample in zip(starts, ego_prefixes, samples, strict=True):
+                    pad = max(0, -start)
+                    window = _make_window(
+                        sample,
+                        ego_prefix=ego_prefix,
+                        start=0,
+                        pad=pad,
+                        length=self._L_ctx + self._L_chunk,
+                        projection=self._projection,
+                    )
+                    window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
+                    windows.append(window)
+            else:
+                sample = self._replay_transform(decode_policy_replay(compact))
+                for start, ego_prefix in zip(starts, ego_prefixes, strict=True):
+                    pad = max(0, -start)
+                    window = _make_window(
+                        sample,
+                        ego_prefix=ego_prefix,
+                        start=start,
+                        pad=pad,
+                        length=self._L_ctx + self._L_chunk,
+                        projection=self._projection,
+                    )
+                    window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
+                    windows.append(window)
             if windows:
                 yield ReplayPack(replay_id, tuple(windows))
 
@@ -280,6 +299,7 @@ class ReservoirLoader:
         seed: int,
         extra: ExtraColumns | None,
         projection: FeatureProjection | None,
+        batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None,
         prefetch_batches: int,
         pin_memory: bool,
     ) -> None:
@@ -293,12 +313,13 @@ class ReservoirLoader:
         self._seed = seed
         self._extra = extra
         self._projection = projection
+        self._batch_transform = batch_transform
         self._prefetch_batches = prefetch_batches
         self._pin_memory = pin_memory
         self._epoch = 0
         self.last_epoch_stats: dict[str, int] | None = None
 
-    def __iter__(self) -> Iterator[TrainBatch]:
+    def __iter__(self) -> Iterator[object]:
         reservoir = ReplayReservoir(
             iter(self._pack_loader),
             batch_size=self._batch_size,
@@ -311,7 +332,7 @@ class ReservoirLoader:
             return OneBatchPrefetch(batches, depth=self._prefetch_batches)
         return batches
 
-    def _batches(self, reservoir: ReplayReservoir) -> Iterator[TrainBatch]:
+    def _batches(self, reservoir: ReplayReservoir) -> Iterator[object]:
         from hal.training.dataloader import collate_train_batch
 
         try:
@@ -324,7 +345,10 @@ class ReservoirLoader:
                     projection=self._projection,
                 )
                 batch = TrainBatch(context=batch.context, target=batch.target, replay_ids=item.replay_ids)
-                yield batch.pin_memory() if self._pin_memory else batch
+                transformed = (
+                    self._batch_transform(list(item.windows), batch) if self._batch_transform is not None else batch
+                )
+                yield transformed.pin_memory() if self._pin_memory else transformed
         finally:
             self.last_epoch_stats = {
                 "emitted_windows": reservoir.emitted_windows,
@@ -359,6 +383,8 @@ def make_reservoir_loader(
     schema_version: int = SCHEMA_VERSION,
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
+    replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
 ) -> ReservoirLoader:
     """Build a compact replay loader with replay-aware batches."""
     if predownload < 1:
@@ -384,6 +410,7 @@ def make_reservoir_loader(
         windows_per_replay=windows_per_replay,
         schema_version=schema_version,
         projection=projection,
+        replay_transform=replay_transform,
     )
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
@@ -407,6 +434,7 @@ def make_reservoir_loader(
         seed=seed,
         extra=extra,
         projection=projection,
+        batch_transform=batch_transform,
         prefetch_batches=prefetch_batches,
         pin_memory=pin_memory,
     )
