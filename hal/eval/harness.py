@@ -26,6 +26,7 @@ from hal.fixtures import ISO
 from hal.fixtures import ensure
 from hal.paths import EMULATOR_PATH
 from hal.sim.loop import drive
+from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.process_vec import SharedChunkPolicy
 from hal.sim.process_vec import drive_process_vec
 from hal.sim.rollout import nearest_power_of_two
@@ -175,6 +176,7 @@ def _drive_wave(
     max_frames: int,
     base_replay: Path | None,
     slippi_port_base: int,
+    process_telemetry: ProcessVecTelemetry | None = None,
 ) -> dict[int, list[Trajectory]]:
     """Build fresh Sessions for the given global boot ``indices`` and drive them
     once through ``drive_vec``. Returns ``{global_index: [Trajectory, ...]}`` — the
@@ -196,7 +198,7 @@ def _drive_wave(
         process_capable = (
             hasattr(policy, "runtime_spec")
             and callable(getattr(policy, "plan_rows", None))
-            and all(len(match.model_ports) == 1 for match in wave_matches)
+            and all(match.model_ports for match in wave_matches)
         )
         if process_capable:
             kwargs = [
@@ -209,6 +211,7 @@ def _drive_wave(
                 cast(SharedChunkPolicy, policy),
                 max_frames=max_frames,
                 instant_restart=session_cfg.instant_match_restart,
+                telemetry=process_telemetry,
             )
         else:
             sessions = [
@@ -237,6 +240,7 @@ def run_matches_vec(
     max_parallel: int | None,
     base_slippi_port: int = 51441,
     start_retries: int = DEFAULT_START_RETRIES,
+    process_telemetry: ProcessVecTelemetry | None = None,
 ) -> list[list[Trajectory]]:
     """Run ``matches`` (boots) concurrently in waves of up to ``max_parallel``
     Sessions, each frame batched through a single ``BatchPolicy`` call (see
@@ -277,6 +281,7 @@ def run_matches_vec(
                 max_frames=max_frames,
                 base_replay=base_replay,
                 slippi_port_base=slippi_port_base,
+                process_telemetry=process_telemetry,
             )
             for gi, boot in results.items():
                 if boot:

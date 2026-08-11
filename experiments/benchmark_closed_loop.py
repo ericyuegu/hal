@@ -43,15 +43,15 @@ class NeutralChunkPolicy:
         return {slot: np.zeros(shape, dtype=np.float32) for slot in rows}
 
 
-def _match() -> VecMatch:
+def _match(*, self_play: bool) -> VecMatch:
     matchup = Matchup(
         stage=melee.Stage.FINAL_DESTINATION,
         players=(
             PlayerSetup(port=1, character=melee.Character.FOX),
-            PlayerSetup(port=2, character=melee.Character.FOX, cpu_level=9),
+            PlayerSetup(port=2, character=melee.Character.FOX, cpu_level=0 if self_play else 9),
         ),
     )
-    return VecMatch(matchup=matchup, model_ports=(1,))
+    return VecMatch(matchup=matchup, model_ports=(1, 2) if self_play else (1,))
 
 
 def benchmark(
@@ -61,11 +61,12 @@ def benchmark(
     frames: int,
     prediction_frames: int,
     execution_stride: int,
+    self_play: bool,
 ) -> None:
     started = time.perf_counter()
     trajectories = run_matches_vec(
         session_cfg,
-        [_match() for _ in range(workers)],
+        [_match(self_play=self_play) for _ in range(workers)],
         lambda: NeutralChunkPolicy(
             prediction_frames=prediction_frames,
             execution_stride=execution_stride,
@@ -91,6 +92,7 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=2400)
     parser.add_argument("--prediction-frames", type=int, default=4)
     parser.add_argument("--execution-stride", type=int, default=4)
+    parser.add_argument("--self-play", action="store_true")
     args = parser.parse_args()
     benchmark(
         default_session_cfg(),
@@ -98,6 +100,7 @@ def main() -> None:
         frames=args.frames,
         prediction_frames=args.prediction_frames,
         execution_stride=args.execution_stride,
+        self_play=args.self_play,
     )
 
 

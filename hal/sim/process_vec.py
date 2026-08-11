@@ -4,6 +4,7 @@ import multiprocessing as mp
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait
 from typing import Protocol
@@ -37,6 +38,55 @@ class SharedChunkPolicy(Protocol):
     def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]: ...
 
 
+@dataclass(slots=True)
+class ProcessVecTelemetry:
+    """Wall-clock accounting for one spawned-driver wave.
+
+    The fields are mutated by :func:`drive_process_vec`.  Supplying this object
+    is optional, so the normal evaluation API does not allocate timing records.
+    """
+
+    startup_seconds: float = 0.0
+    control_wait_seconds: float = 0.0
+    request_read_seconds: float = 0.0
+    policy_seconds: float = 0.0
+    plan_write_seconds: float = 0.0
+    result_read_seconds: float = 0.0
+    total_seconds: float = 0.0
+    plan_calls: int = 0
+    plan_rows: int = 0
+    min_plan_rows: int = 0
+    max_plan_rows: int = 0
+    failed_workers: int = 0
+
+    def metrics(self) -> dict[str, float]:
+        calls = max(self.plan_calls, 1)
+        return {
+            "broker_startup_seconds": self.startup_seconds,
+            "broker_control_wait_seconds": self.control_wait_seconds,
+            "broker_request_read_seconds": self.request_read_seconds,
+            "broker_policy_seconds": self.policy_seconds,
+            "broker_plan_write_seconds": self.plan_write_seconds,
+            "broker_result_read_seconds": self.result_read_seconds,
+            "broker_unaccounted_seconds": max(
+                0.0,
+                self.total_seconds
+                - self.control_wait_seconds
+                - self.request_read_seconds
+                - self.policy_seconds
+                - self.plan_write_seconds
+                - self.result_read_seconds,
+            ),
+            "broker_total_seconds": self.total_seconds,
+            "broker_plan_calls": float(self.plan_calls),
+            "broker_plan_rows": float(self.plan_rows),
+            "broker_mean_plan_rows": self.plan_rows / calls,
+            "broker_min_plan_rows": float(self.min_plan_rows),
+            "broker_max_plan_rows": float(self.max_plan_rows),
+            "broker_failed_workers": float(self.failed_workers),
+        }
+
+
 def drive_process_vec(
     session_kwargs: Sequence[dict[str, object]],
     matches: Sequence[VecMatch],
@@ -45,28 +95,34 @@ def drive_process_vec(
     max_frames: int,
     instant_restart: bool = False,
     progress_every: int = 600,
+    telemetry: ProcessVecTelemetry | None = None,
 ) -> list[list[Trajectory]]:
     """Drive one wave with one spawned process per Dolphin Session.
 
     The parent owns inference and shared memory. Each child owns all Session CPU
     work. The hot IPC path contains fixed 64-byte notifications only.
     """
+    drive_started = time.monotonic()
     if len(session_kwargs) != len(matches):
         raise ValueError(f"got {len(session_kwargs)} Session configs for {len(matches)} matches")
     if not matches:
         return []
     for index, match in enumerate(matches):
-        if len(match.model_ports) != 1:
-            raise ValueError(
-                f"spawned driver currently needs one model port per match; match {index} has {match.model_ports}"
-            )
+        if not match.model_ports:
+            raise ValueError(f"spawned driver needs at least one model port; match {index} has none")
     runtime = policy.runtime_spec
     if runtime.action_token_groups:
         raise ValueError("spawned driver does not yet support tokenized controller plans")
 
     context = mp.get_context("spawn")
+    arena_slots_of: list[tuple[int, ...]] = []
+    arena_slot = 0
+    for match in matches:
+        slots = tuple(range(arena_slot, arena_slot + len(match.model_ports)))
+        arena_slots_of.append(slots)
+        arena_slot += len(slots)
     spec = ArenaSpec(
-        workers=len(matches),
+        workers=arena_slot,
         ring_capacity=runtime.raw_ring_capacity,
         prediction_frames=runtime.prediction_frames,
         action_dim=runtime.action_dim,
@@ -89,7 +145,8 @@ def drive_process_vec(
                     arena.descriptor,
                     kwargs,
                     match.matchup,
-                    match.model_ports[0],
+                    match.model_ports,
+                    arena_slots_of[worker],
                     runtime,
                     max_frames,
                     instant_restart,
@@ -101,14 +158,23 @@ def drive_process_vec(
             parents[worker] = parent
             processes[worker] = process
 
-        active = set(parents)
-        pending: dict[int, ControlMessage] = {}
+        active_workers = set(parents)
+        active_slots = {Slot(worker, port) for worker, match in enumerate(matches) for port in match.model_ports}
+        arena_slot_of = {
+            Slot(worker, port): slot_index
+            for worker, match in enumerate(matches)
+            for port, slot_index in zip(match.model_ports, arena_slots_of[worker], strict=True)
+        }
+        pending: dict[Slot, ControlMessage] = {}
         connection_to_worker = {connection: worker for worker, connection in parents.items()}
         plan_calls = 0
         started = time.monotonic()
         try:
-            while active:
-                ready = wait([parents[worker] for worker in active])
+            while active_workers:
+                wait_started = time.monotonic()
+                ready = wait([parents[worker] for worker in active_workers])
+                if telemetry is not None:
+                    telemetry.control_wait_seconds += time.monotonic() - wait_started
                 for connection in ready:
                     worker = connection_to_worker[connection]
                     try:
@@ -122,10 +188,19 @@ def drive_process_vec(
                     if message.worker_id != worker:
                         raise RuntimeError(f"connection {worker} received a message for worker {message.worker_id}")
                     if message.message_type is MessageType.PLAN_REQUEST:
-                        if worker in pending:
-                            raise RuntimeError(f"worker {worker} sent two plan requests without a reply")
-                        pending[worker] = message
+                        slot = Slot(worker, message.port_or_slot)
+                        if slot not in active_slots:
+                            raise RuntimeError(f"worker {worker} requested an inactive or unknown slot {slot}")
+                        if message.task_id != arena_slot_of[slot]:
+                            raise RuntimeError(
+                                f"worker {worker} published slot {slot} in arena row {message.task_id}; "
+                                f"expected {arena_slot_of[slot]}"
+                            )
+                        if slot in pending:
+                            raise RuntimeError(f"slot {slot} sent two plan requests without a reply")
+                        pending[slot] = message
                     elif message.message_type is MessageType.RESULT_READY:
+                        result_started = time.monotonic()
                         ports = tuple(player.port for player in matches[worker].matchup.players)
                         result_spec = ResultSpec(
                             frames=message.count,
@@ -154,16 +229,24 @@ def drive_process_vec(
                         finally:
                             result.close()
                         out[worker] = trajectories
-                        active.remove(worker)
-                        pending.pop(worker, None)
+                        active_workers.remove(worker)
+                        finished_slots = {slot for slot in active_slots if slot.match == worker}
+                        active_slots -= finished_slots
+                        for slot in finished_slots:
+                            pending.pop(slot, None)
                         send_buffers[worker] = send_control(
                             parents[worker],
                             ControlMessage(message_type=MessageType.RESULT_RELEASED, worker_id=worker),
                             send_buffers[worker],
                         )
+                        if telemetry is not None:
+                            telemetry.result_read_seconds += time.monotonic() - result_started
                     elif message.message_type is MessageType.ERROR:
-                        active.remove(worker)
-                        pending.pop(worker, None)
+                        active_workers.remove(worker)
+                        failed_slots = {slot for slot in active_slots if slot.match == worker}
+                        active_slots -= failed_slots
+                        for slot in failed_slots:
+                            pending.pop(slot, None)
                         errors[worker] = f"worker error status {message.status_code}"
                     else:
                         raise RuntimeError(
@@ -172,38 +255,49 @@ def drive_process_vec(
 
                 # Preserve one GPU call per lockstep boundary. A fast worker waits
                 # in recv while the slowest active worker completes its stride.
-                if pending and pending.keys() >= active:
-                    plan_workers = sorted(active)
+                if pending and pending.keys() >= active_slots:
+                    plan_slots = sorted(active_slots, key=lambda slot: (slot.match, slot.port))
+                    if telemetry is not None and telemetry.plan_calls == 0:
+                        telemetry.startup_seconds = time.monotonic() - drive_started
+                    request_started = time.monotonic()
                     requests: dict[Slot, list[ObservationRow]] = {}
-                    for worker in plan_workers:
-                        message = pending[worker]
-                        slot = Slot(worker, message.port_or_slot)
+                    for slot in plan_slots:
+                        message = pending[slot]
+                        shared_slot = arena_slot_of[slot]
                         rows: list[ObservationRow] = []
                         for sequence in range(message.sequence, message.sequence + message.count):
-                            flat, action, reset = arena.observation(worker, sequence)
+                            flat, action, reset = arena.observation(shared_slot, sequence)
                             rows.append(
                                 ObservationRow(
-                                    frame_id=int(arena.obs_frame_id[worker, sequence % spec.ring_capacity]),
+                                    frame_id=int(arena.obs_frame_id[shared_slot, sequence % spec.ring_capacity]),
                                     flat=flat,
                                     action=action,
                                     reset=reset,
                                 )
                             )
                         requests[slot] = rows
+                    if telemetry is not None:
+                        telemetry.request_read_seconds += time.monotonic() - request_started
+                    policy_started = time.monotonic()
                     plans = policy.plan_rows(requests)
-                    for worker in plan_workers:
-                        message = pending.pop(worker)
-                        slot = Slot(worker, message.port_or_slot)
+                    if telemetry is not None:
+                        telemetry.policy_seconds += time.monotonic() - policy_started
+                    write_started = time.monotonic()
+                    for slot in plan_slots:
+                        message = pending.pop(slot)
+                        worker = slot.match
+                        shared_slot = arena_slot_of[slot]
                         plan = np.asarray(plans[slot], dtype=np.float32)
                         expected = (runtime.prediction_frames, runtime.action_dim)
                         if plan.shape != expected:
                             raise ValueError(f"policy plan for {slot} has shape {plan.shape}, expected {expected}")
-                        arena.plan_actions[worker, message.plan_slot] = plan
+                        arena.plan_actions[shared_slot, message.plan_slot] = plan
                         send_buffers[worker] = send_control(
                             parents[worker],
                             ControlMessage(
                                 message_type=MessageType.PLAN_READY,
                                 worker_id=worker,
+                                task_id=shared_slot,
                                 auxiliary_sequence=message.auxiliary_sequence,
                                 count=runtime.prediction_frames,
                                 plan_slot=message.plan_slot,
@@ -211,13 +305,23 @@ def drive_process_vec(
                             ),
                             send_buffers[worker],
                         )
+                    if telemetry is not None:
+                        n_rows = len(plan_slots)
+                        telemetry.plan_calls += 1
+                        telemetry.plan_rows += n_rows
+                        if telemetry.min_plan_rows == 0:
+                            telemetry.min_plan_rows = n_rows
+                        else:
+                            telemetry.min_plan_rows = min(telemetry.min_plan_rows, n_rows)
+                        telemetry.max_plan_rows = max(telemetry.max_plan_rows, n_rows)
+                        telemetry.plan_write_seconds += time.monotonic() - write_started
                     plan_calls += 1
                     if progress_every and plan_calls % max(1, progress_every // runtime.execution_stride) == 0:
                         elapsed = time.monotonic() - started
                         frames = plan_calls * runtime.execution_stride
                         logger.info(
                             f"drive_process_vec: about {frames}/{max_frames} frames | "
-                            f"live {len(active)}/{len(matches)} | {frames / elapsed:.1f} lockstep fps"
+                            f"live {len(active_workers)}/{len(matches)} | {frames / elapsed:.1f} lockstep fps"
                         )
         finally:
             for connection in parents.values():
@@ -231,4 +335,7 @@ def drive_process_vec(
                 discard_result_shm(result_shm_name(arena.descriptor.name, worker))
     if errors:
         logger.warning(f"drive_process_vec: {len(errors)} worker(s) failed: {errors}")
+    if telemetry is not None:
+        telemetry.failed_workers = len(errors)
+        telemetry.total_seconds = time.monotonic() - drive_started
     return out

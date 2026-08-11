@@ -54,7 +54,8 @@ def _session_worker(
     arena_descriptor: Any,
     session_kwargs: dict[str, object],
     matchup: Matchup,
-    model_port: int,
+    model_ports: tuple[int, ...],
+    arena_slots: tuple[int, ...],
     runtime: PolicyRuntimeSpec,
     max_frames: int,
     instant_restart: bool,
@@ -66,6 +67,9 @@ def _session_worker(
     trajectories: list[Trajectory] = []
     segment: list[dict] = []
     ports = tuple(player.port for player in matchup.players)
+    if len(model_ports) != len(arena_slots):
+        raise ValueError(f"got {len(model_ports)} model ports but {len(arena_slots)} shared arena slots")
+    arena_slot_of = dict(zip(model_ports, arena_slots, strict=True))
 
     def close_segment() -> None:
         nonlocal segment
@@ -83,57 +87,77 @@ def _session_worker(
                 metadata = _match_metadata(matchup)
                 neutral = np.zeros(runtime.action_dim, dtype=np.float32)
                 sequence = 1
-                plan_generation = 0
+                plan_generation = {port: 0 for port in model_ports}
 
-                def publish(current: dict, action: np.ndarray, *, reset: bool) -> None:
+                def publish(current: dict, actions: Mapping[int, np.ndarray], *, reset: bool) -> None:
                     metadata["stage"] = current.get("stage", metadata["stage"])
                     view = {**current, "_matchup": metadata}
-                    arena.write_observation(
-                        worker_id,
-                        sequence,
-                        int(current["id"]),
-                        flatten_canonical_frame(view),
-                        action,
-                        reset=reset,
-                    )
-
-                def request_plan(first_sequence: int, count: int) -> np.ndarray:
-                    nonlocal plan_generation, send_buffer, receive_buffer
-                    plan_slot = plan_generation & 1
-                    send_buffer = send_control(
-                        connection,
-                        ControlMessage(
-                            message_type=MessageType.PLAN_REQUEST,
-                            worker_id=worker_id,
-                            sequence=first_sequence,
-                            auxiliary_sequence=plan_generation,
-                            count=count,
-                            plan_slot=plan_slot,
-                            port_or_slot=model_port,
-                        ),
-                        send_buffer,
-                    )
-                    reply, receive_buffer = receive_control(connection, receive_buffer)
-                    if reply.message_type is not MessageType.PLAN_READY:
-                        raise RuntimeError(f"worker {worker_id} expected PLAN_READY, got {reply.message_type.name}")
-                    if reply.auxiliary_sequence != plan_generation or reply.plan_slot != plan_slot:
-                        raise RuntimeError(
-                            f"worker {worker_id} got stale plan generation {reply.auxiliary_sequence} "
-                            f"in slot {reply.plan_slot}; expected {plan_generation} in {plan_slot}"
+                    flat = flatten_canonical_frame(view)
+                    for port in model_ports:
+                        arena.write_observation(
+                            arena_slot_of[port],
+                            sequence,
+                            int(current["id"]),
+                            flat,
+                            actions[port],
+                            reset=reset,
                         )
-                    plan_generation += 1
-                    return arena.plan_actions[worker_id, plan_slot]
 
-                publish(frame, neutral, reset=True)
-                plan = request_plan(sequence, 1)
+                def request_plans(first_sequence: int, count: int) -> dict[int, np.ndarray]:
+                    nonlocal send_buffer, receive_buffer
+                    for port in model_ports:
+                        generation = plan_generation[port]
+                        send_buffer = send_control(
+                            connection,
+                            ControlMessage(
+                                message_type=MessageType.PLAN_REQUEST,
+                                worker_id=worker_id,
+                                task_id=arena_slot_of[port],
+                                sequence=first_sequence,
+                                auxiliary_sequence=generation,
+                                count=count,
+                                plan_slot=generation & 1,
+                                port_or_slot=port,
+                            ),
+                            send_buffer,
+                        )
+                    plans: dict[int, np.ndarray] = {}
+                    for _ in model_ports:
+                        reply, receive_buffer = receive_control(connection, receive_buffer)
+                        if reply.message_type is not MessageType.PLAN_READY:
+                            raise RuntimeError(
+                                f"worker {worker_id} expected PLAN_READY, got {reply.message_type.name}"
+                            )
+                        port = reply.port_or_slot
+                        if port not in arena_slot_of or reply.task_id != arena_slot_of[port]:
+                            raise RuntimeError(
+                                f"worker {worker_id} got a plan for unknown port {port} in row {reply.task_id}"
+                            )
+                        generation = plan_generation[port]
+                        plan_slot = generation & 1
+                        if reply.auxiliary_sequence != generation or reply.plan_slot != plan_slot:
+                            raise RuntimeError(
+                                f"worker {worker_id} port {port} got stale plan generation "
+                                f"{reply.auxiliary_sequence} in slot {reply.plan_slot}; "
+                                f"expected {generation} in {plan_slot}"
+                            )
+                        plans[port] = arena.plan_actions[arena_slot_of[port], plan_slot]
+                        plan_generation[port] += 1
+                    return plans
+
+                neutral_actions = {port: neutral for port in model_ports}
+                publish(frame, neutral_actions, reset=True)
+                plans = request_plans(sequence, 1)
                 captured = 1
                 done = False
                 while captured < max_frames and not done:
                     first_unpublished = sequence + 1
                     executed = 0
                     while executed < runtime.execution_stride and captured < max_frames:
-                        action = plan[executed]
-                        frame, in_game = session.step({model_port: action_vec_to_controller(action)})
+                        actions = {port: plans[port][executed] for port in model_ports}
+                        frame, in_game = session.step(
+                            {port: action_vec_to_controller(action) for port, action in actions.items()}
+                        )
                         next_id = _frame_id(frame, frame_id)
                         sequence += 1
                         captured += 1
@@ -143,19 +167,22 @@ def _session_worker(
                             segment = [frame]
                         else:
                             segment.append(frame)
-                        publish(frame, neutral if reset else action, reset=reset)
                         frame_id = next_id
                         executed += 1
                         if not in_game:
+                            # A normal match-end frame can omit live player fields.
+                            # Keep it in the trajectory, but never feed it to the
+                            # policy or try to flatten it as an observation.
                             close_segment()
                             done = True
                             break
+                        publish(frame, neutral_actions if reset else actions, reset=reset)
                         if reset:
-                            plan = request_plan(sequence, 1)
+                            plans = request_plans(sequence, 1)
                             break
                     else:
                         if captured < max_frames:
-                            plan = request_plan(first_unpublished, executed)
+                            plans = request_plans(first_unpublished, executed)
                         continue
                     if done:
                         break
@@ -167,8 +194,8 @@ def _session_worker(
         finally:
             # These are zero-copy slices of ``arena``. Release the last local
             # aliases before the shared mapping is closed.
-            plan = None
-            action = None
+            plans = None
+            actions = None
             arena.close()
         frame_count = sum(len(trajectory) for trajectory in trajectories)
         result_spec = ResultSpec(frames=frame_count, segments=len(trajectories), ports=len(ports))

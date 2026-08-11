@@ -15,6 +15,7 @@ The implementation removes the first two causes and bounds the third:
 - Training starts a separate no-grad inference replica and compiles the scheduled inference programs in the background.
 - Each Dolphin Session now runs in a spawned Python process. The main process only owns the policy and GPU.
 - Observations, action plans, and final trajectories use typed shared memory. Hot control messages are fixed 64-byte binary records. The hot path does not use pickle.
+- One Session worker can publish more than one model slot. Self-play uses two slots per Dolphin, one for each controller port, and the broker decodes all live ports in one batch.
 - The loaded policy supplies its context length, prediction length, execution stride, committed prefix, and action width. The worker does not contain a four-frame constant.
 - Worker and inference sizes come from the process CPU affinity. The automatic wave size is the nearest power of two, with ties rounded up and no maximum cap.
 - Trajectory transposition runs in each Session worker. Dolphin gets 0.25 seconds to accept SIGTERM, then Session uses its existing hard-kill and replay-repair path.
@@ -132,6 +133,24 @@ For the present experiment the values are `L=128`, `P=4`, `S=4`, `D=0`, and `A=1
 
 At bootstrap, a worker publishes one real observation paired with a neutral action. It waits for a plan, executes the first `S` actions, publishes the `S` resulting observations, and requests the next plan. On an instant-restart frame-id reset, it discards the old plan, publishes the reset row with a neutral producing action, and requests a fresh plan immediately.
 
+For self-play, one Session worker owns one Dolphin and both controllers:
+
+```text
+                    one Session worker
+       +------------------------------------------+
+       | parse one shared game state              |
+       | flatten it once                          |
+       | publish slot (match, port 1) in row 2i   |
+       | publish slot (match, port 2) in row 2i+1 |
+       | wait for both plans                      |
+       | step both controllers together           |
+       +------------------------------------------+
+                           |
+                        Dolphin i
+```
+
+Twelve self-play Dolphins therefore produce 24 real model rows. Experiment 026 pads those rows to its batch-32 compiled inference program. The observation payload is shared between the two local slots; only the producing action and slot identity differ.
+
 ## IPC format
 
 Cap'n Proto is not useful for the hot path here. It would still need an ownership protocol for large arrays, and its schema traversal would add work to a fixed record that is only 64 bytes.
@@ -202,9 +221,63 @@ On the RTX 3060, the steady decode measurements were:
 Inductor `default` and `reduce-overhead` were within measurement noise for this model. Evaluation evidence records the selected wave, compiled bucket, compile mode, maximum decode duration, total prewarm time, and the time the first evaluation still had to wait.
 The added hardware and bucket fields raise the match-row evidence schema to version 6.
 
+## Checkpoint self-play benchmark
+
+The requested production-checkpoint benchmark used:
+
+```text
+checkpoint: runs/260810-071709_026_temporal_mtp_.../final.pt
+checkpoint SHA-256: 22333d1d61d6b648c757f0f1f3e887925fbb12a08fdffd1cb4ae72d6d6f2ef88
+workers: 12 Dolphin processes on 12 allowed CPUs
+model slots: 24, two per Dolphin
+compiled inference bucket: 32
+execution horizon: 4
+frame cap: 14,400 per match
+match mode: one normal head-to-head match per boot
+```
+
+All 12 boots completed with no worker failure. Normal games can end before the cap, so the run captured 106,814 frames rather than `12 * 14,400`. It took 132.65 seconds after compilation. This is 805.2 aggregate emulator-frames per second, or 67.1 frames per second averaged across the 12 original boots, including startup, finished games, result transfer, and teardown.
+
+While all 12 games were active, each 600-frame interval took approximately 4.47 seconds. The steady 12-way lockstep rate was therefore approximately 134 fps. As games ended, the live row count fell from 24 to 2 and some intervals reached approximately 210 fps. The fixed batch-32 program continued to run; the savings came from fewer active Session workers and less policy ingestion work.
+
+The wall-clock phase counters were:
+
+| Broker phase | Seconds | Share of 131.91 s broker run |
+|---|---:|---:|
+| Wait for worker control messages | 66.57 | 50.5% |
+| Policy ingestion, context build, transfer, and decode | 60.95 | 46.2% |
+| Shared observation reads | 0.67 | 0.5% |
+| Shared plan writes and replies | 1.51 | 1.1% |
+| Shared result reads | 0.02 | <0.1% |
+| Other broker and process lifecycle work | 2.19 | 1.7% |
+
+The 66.57 seconds of control wait includes 20.18 seconds before the first complete batch, when the 12 Dolphins spawned and navigated menus. It also includes Session stepping, match-end trajectory conversion, and final worker exit. Policy work includes 49.85 seconds inside the measured decode boundary. The difference, 11.10 seconds, is ring ingestion, context stacking, host-to-device setup, and policy bookkeeping.
+
+Decode timing across 3,600 replans was 13.51 ms median, 14.28 ms at p95, and 14.71 ms at p99. One first-live-shape call took 1.37 seconds. The separate prewarm took 6.91 seconds in this later process, compared with 22.80 seconds in the first cold benchmark process. The reduction shows that Inductor reused its disk cache, but loading and initializing cached kernels still has a cost.
+
+The result proves why full policy speed is near 134 fps instead of 240 fps. After startup, the strict lockstep broker does two dependent phases:
+
+```text
+Session workers execute four frames  ->  broker builds and decodes next plans
+          about 13 ms                +            about 17 ms
+```
+
+This is approximately 30 ms per four-frame stride, or 133 four-frame strides per second. The observed rate matches that arithmetic. A 240 fps target permits only 16.7 ms for the complete four-frame stride. The median decode alone consumes 13.5 ms, so small IPC changes cannot reach 240 fps.
+
+Reproduce the benchmark with:
+
+```text
+uv run experiments/026_temporal_mtp.py \
+  --self-play-eval runs/260810-071709_026_temporal_mtp_mtp026-d384-L8-h6-Lc128-t128x2-o1-2-3-4-5-6-9-12-16-20-s4-base_ranked-anon-1_production-seed0-d384-b512/final.pt \
+  --self-play-matches 12 \
+  --self-play-frames 14400
+```
+
+The machine-readable metrics and replays are in `self_play_benchmark_12x14400_single_match_run02` under the checkpoint run directory.
+
 ## What remains
 
-The non-GPU Session path has exceeded the 240 fps target. It is no longer the only limit on full-policy evaluation.
+The non-GPU Session path has exceeded the 240 fps target when measured alone. It is no longer the only limit on full-policy evaluation.
 
 The next full-policy ceiling is the serial broker work between Session strides:
 
@@ -214,11 +287,16 @@ The next full-policy ceiling is the serial broker work between Session strides:
 - quantization and sampling setup;
 - output synchronization and CPU conversion.
 
-The old measurement assigned about 4.5 ms per frame to these non-decode policy operations at 30 slots. The process implementation moves canonical flattening and controller conversion to workers, but the model-specific ring transforms, stacking, transfer, and output synchronization remain in the broker. A complete GPU-enabled benchmark is still required to split this new broker interval and report the final full-policy speedup. The GPU driver was not available during the final CPU benchmark.
+The production-checkpoint benchmark now measures this interval. Non-decode policy work was 11.10 seconds across 3,600 replans, or 3.08 ms per replan on average. The full policy phase averaged 16.93 ms per replan. Shared-memory request reads and plan writes added another 0.61 ms per replan.
+
+The largest remaining architectural gain is to pipeline worker groups. The present broker waits for every live Session slot, decodes one batch, sends every plan, and only then lets all Sessions advance. Two or more groups could execute Session work while another group uses the GPU. This can overlap the approximately 13 ms Session phase with the approximately 17 ms policy phase. It trades some inference batch size for overlap, so it needs a measured group-size search on each host.
+
+After pipelining, the next targets are the 13.5 ms median batch-32 decode and the 3.1 ms policy preparation interval. Reaching 240 fps needs the complete four-frame cycle below 16.7 ms. It will probably require overlap plus faster inference, not an IPC serializer change.
 
 Other remaining work is narrower:
 
-- The spawned driver currently supports one model-controlled port per match, which is the experiment-026 versus-CPU protocol. The legacy driver still covers two-model-port self-play. A future shared arena can assign multiple model slots to one Session worker.
 - `flatten_canonical_frame` still constructs a local dictionary inside each worker. It does not cross IPC, and it runs in parallel, but a direct canonical-frame-to-shared-row encoder can remove that allocation.
+- The optional Instant Match Gecko restart was unstable in one 12-way model-versus-itself stress run: one Dolphin emitted invalid memory reads and then timed out after approximately 9,000 frames. Standard one-match head-to-head mode is clean. Instant restart needs a separate Dolphin/Gecko investigation before it is the default for self-play.
+- The process worker now skips policy publication for the terminal menu frame. It still retains that frame in the trajectory. A regression test covers terminal frames that omit live player position fields.
 - Short evaluations still pay Dolphin process spawn and menu navigation. Persistent worker pools across evaluation calls would remove repeated boots, but they need a clear checkpoint and replay-directory lifecycle.
 - Result slabs are zero-copy between processes, but the parent copies them into durable NumPy arrays before unlinking shared memory. This is intentional cold-path ownership. A longer-lived result arena could remove that copy if scoring can consume borrowed buffers safely.

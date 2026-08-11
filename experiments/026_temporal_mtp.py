@@ -47,13 +47,19 @@ from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
+from hal.eval.h2h import mirrored_configs
 from hal.eval.harness import DEFAULT_START_RETRIES
 from hal.eval.harness import automatic_parallelism
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
+from hal.eval.harness import run_matches_vec
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
+from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.rollout import covering_power_of_two
+from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
+from hal.sim.vec import VecMatch
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import load_for_resume
@@ -1187,6 +1193,7 @@ class DecodeTelemetry:
     executed_frames: int = 0
     seconds: float = 0.0
     max_seconds: float = 0.0
+    durations: list[float] = dataclass_field(default_factory=list)
 
     def record(self, *, rows: int, horizon: int, seconds: float) -> None:
         self.calls += 1
@@ -1194,13 +1201,19 @@ class DecodeTelemetry:
         self.executed_frames += rows * horizon
         self.seconds += seconds
         self.max_seconds = max(self.max_seconds, seconds)
+        self.durations.append(seconds)
 
     def metrics(self) -> dict[str, float]:
+        durations = np.asarray(self.durations, dtype=np.float64)
         return {
             "decode_calls": float(self.calls),
             "decode_rows": float(self.rows),
             "decode_seconds": self.seconds,
             "decode_max_seconds": self.max_seconds,
+            "decode_p50_ms": float(np.percentile(durations, 50) * 1000) if durations.size else 0.0,
+            "decode_p95_ms": float(np.percentile(durations, 95) * 1000) if durations.size else 0.0,
+            "decode_p99_ms": float(np.percentile(durations, 99) * 1000) if durations.size else 0.0,
+            "decode_calls_over_100ms": float(np.count_nonzero(durations > 0.1)),
             "decode_mean_rows": self.rows / max(self.calls, 1),
             "decode_replans_per_s": self.calls / max(self.seconds, 1e-12),
             "decode_executed_frames_per_s": self.executed_frames / max(self.seconds, 1e-12),
@@ -1901,6 +1914,125 @@ def eval_checkpoint(
     return values
 
 
+def benchmark_self_play_checkpoint(
+    path: str,
+    *,
+    n_matches: int = 12,
+    max_frames: int = 14_400,
+    eager: bool = False,
+    instant_match_restart: bool = False,
+) -> dict[str, float]:
+    """Run one fixed wave with the checkpoint controlling both ports.
+
+    By default, each Dolphin boot plays one normal head-to-head match, and
+    ``max_frames`` is its cap.  Instant restart is available as a stress mode.
+    The policy sees ``2 * n_matches`` slots while all matches are live.
+    """
+    if n_matches < 1:
+        raise ValueError(f"n_matches must be >= 1, got {n_matches}")
+    if max_frames < 2:
+        raise ValueError(f"max_frames must be >= 2, got {max_frames}")
+    model, cfg, stats, state = load_checkpoint(path)
+    if eager:
+        cfg = replace(cfg, inference_mode="eager")
+    model.eval()
+    horizon = cfg.exec_horizon
+    real_rows = 2 * n_matches
+    inference_bucket = covering_power_of_two(real_rows)
+    # Match the background inference replica used during training. CUDA graphs
+    # cannot safely own the trunk's mutable rotary cache across graph partitions.
+    inference = BF16Inference(model, cfg, compile_mode="default", compiled_buckets=(inference_bucket,))
+    telemetry = DecodeTelemetry()
+
+    compile_started = time.perf_counter()
+    context = synthetic_context(cfg, inference_bucket, next(model.parameters()).device)
+    inference.decode(context, horizon)
+    inference.decode(context, horizon)
+    if next(model.parameters()).device.type == "cuda":
+        torch.cuda.synchronize(next(model.parameters()).device)
+    compile_seconds = time.perf_counter() - compile_started
+
+    configs = mirrored_configs(n_matches)
+    matches = [
+        VecMatch(
+            matchup=Matchup(
+                stage=config.stage,
+                players=(
+                    PlayerSetup(port=1, character=config.character_port_1, cpu_level=0),
+                    PlayerSetup(port=2, character=config.character_port_2, cpu_level=0),
+                ),
+            ),
+            model_ports=(1, 2),
+        )
+        for config in configs
+    ]
+    checkpoint = Path(path).resolve()
+    mode = "instant_restart" if instant_match_restart else "single_match"
+    base_name = f"self_play_benchmark_{n_matches}x{max_frames}_{mode}"
+    run_number = 1
+    while True:
+        suffix = "" if run_number == 1 else f"_run{run_number:02d}"
+        out_dir = checkpoint.parent / f"{base_name}{suffix}"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            run_number += 1
+    policy_index = itertools.count()
+
+    def factory() -> RecedingHorizon:
+        return make_policy(
+            model,
+            stats,
+            cfg,
+            decode_seed=cfg.eval_seed + next(policy_index),
+            inference=inference,
+            telemetry=telemetry,
+        )
+
+    rollout_started = time.perf_counter()
+    process_telemetry = ProcessVecTelemetry()
+    boots = run_matches_vec(
+        default_session_cfg(out_dir / "replays", instant_match_restart=instant_match_restart),
+        matches,
+        factory,
+        max_frames=max_frames,
+        # Explicit overrides are powers of two. This covers all n_matches in
+        # one wave while the active worker count remains exactly n_matches.
+        max_parallel=covering_power_of_two(n_matches),
+        start_retries=0,
+        process_telemetry=process_telemetry,
+    )
+    rollout_seconds = time.perf_counter() - rollout_started
+    completed_boots = sum(bool(boot) for boot in boots)
+    captured_frames = sum(len(trajectory) for boot in boots for trajectory in boot)
+    metrics = {
+        "checkpoint_step": float(state["step"]),
+        "workers": float(n_matches),
+        "model_slots": float(real_rows),
+        "max_frames_per_worker": float(max_frames),
+        "completed_workers": float(completed_boots),
+        "captured_frames": float(captured_frames),
+        "inference_bucket": float(inference_bucket),
+        "compile_seconds": compile_seconds,
+        "rollout_seconds": rollout_seconds,
+        "aggregate_fps": captured_frames / max(rollout_seconds, 1e-12),
+        "wall_lockstep_fps": captured_frames / max(completed_boots, 1) / max(rollout_seconds, 1e-12),
+        **telemetry.metrics(),
+        **process_telemetry.metrics(),
+    }
+    payload = {
+        "schema_version": 1,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": _checkpoint_sha256(checkpoint),
+        "instant_match_restart": instant_match_restart,
+        "metrics": metrics,
+    }
+    (out_dir / "metrics.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+    return metrics
+
+
 def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
     features: dict[str, Tensor] = {}
     floats = FLOAT_FEATURES if cfg.observation_bundle == "base" else FLOAT_FEATURES + _V6_FLOATS
@@ -2054,24 +2186,39 @@ class Args:
     eval_exec_horizon: int | None = None
     eval_n_matchups: int | None = None
     eval_eager: bool = False
+    self_play_eval: str | None = None
+    self_play_matches: int = 12
+    self_play_frames: int = 14_400
+    self_play_eager: bool = False
+    self_play_instant_match_restart: bool = False
     benchmark: bool = False
     benchmark_iterations: int = 20
 
 
 def main(args: Args) -> None:
     if args.benchmark:
-        if args.eval is not None or args.resume is not None:
-            raise SystemExit("--benchmark cannot be combined with --eval or --resume")
+        if args.eval is not None or args.resume is not None or args.self_play_eval is not None:
+            raise SystemExit("--benchmark cannot be combined with --eval, --self-play-eval, or --resume")
         run_benchmark(args.cfg, iterations=args.benchmark_iterations)
         return
-    if args.eval is not None and args.resume is not None:
-        raise SystemExit("pass only one of --eval or --resume")
+    selected = sum(value is not None for value in (args.eval, args.self_play_eval, args.resume))
+    if selected > 1:
+        raise SystemExit("pass only one of --eval, --self-play-eval, or --resume")
     if args.eval is not None:
         eval_checkpoint(
             args.eval,
             exec_horizon=args.eval_exec_horizon,
             n_matchups=args.eval_n_matchups,
             eager=args.eval_eager,
+        )
+        return
+    if args.self_play_eval is not None:
+        benchmark_self_play_checkpoint(
+            args.self_play_eval,
+            n_matches=args.self_play_matches,
+            max_frames=args.self_play_frames,
+            eager=args.self_play_eager,
+            instant_match_restart=args.self_play_instant_match_restart,
         )
         return
     resume_run = resume_state = None
