@@ -48,8 +48,8 @@ from torch.nn.attention.flex_attention import flex_attention
 # still says "flex".
 torch._dynamo.config.cache_size_limit = 64
 
-# Training overlaps a background thread that compiles the fixed inference programs. Inside each
-# such torch.compile, AOTAutograd's make_fx sets torch.fx's PROCESS-GLOBAL tracing flag
+# Experiment 026 can overlap training with a background thread that compiles fixed inference
+# programs. Inside each such torch.compile, AOTAutograd's make_fx sets torch.fx's PROCESS-GLOBAL tracing flag
 # (``torch.fx._symbolic_trace._is_fx_tracing_flag``; pytorch/pytorch#126024). While that thread
 # holds the flag, EVERY entry into a compiled function on the training thread raises "Detected
 # that you are using FX to symbolically trace a dynamo-optimized function" — cache hits included,

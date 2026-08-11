@@ -272,6 +272,67 @@ def test_decode_canonicalizes_feature_keys_to_one_program_shape() -> None:
     )
 
 
+def test_fixed_inference_bucket_pads_live_and_degraded_waves_to_one_shape() -> None:
+    cfg = _cfg(inference_mode="eager")
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, bucket=8, compiled=False)
+    engine.compiled = True  # exercise fixed-bucket routing with eager callables
+    seen: list[tuple[int, tuple[int, ...]]] = []
+    trunk = engine._trunk
+
+    def record(features, pad, actions):
+        seen.append((pad.shape[0], tuple(value.shape[0] for value in features.values())))
+        return trunk(features, pad, actions)
+
+    engine._trunk = record
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    assert engine.decode(context, 4, argmax=True).shape == (2, 4, A_DIM)
+    assert seen == [(8, (8,) * len(context.features))]
+
+    too_large = exp.synthetic_context(cfg, 9, torch.device("cpu"))
+    with pytest.raises(ValueError, match="exceeds fixed compiled bucket 8"):
+        engine.decode(too_large, 4, argmax=True)
+
+
+def test_eval_prewarms_synchronously_before_starting_dolphin(monkeypatch, tmp_path: Path) -> None:
+    cfg = _cfg(inference_mode="eager")
+    model = exp.GPT(cfg)
+    bucket = exp._eval_inference_bucket(cfg, 1)
+    engine = exp.BF16Inference(model, cfg, bucket=bucket, compiled=False)
+    events: list[str] = []
+
+    def prewarm() -> float:
+        events.append("prewarm")
+        return 1.25
+
+    def sweep(*args, **kwargs):
+        events.append("sweep")
+        assert not model.training
+        return [], []
+
+    monkeypatch.setattr(engine, "prewarm", prewarm)
+    monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", sweep)
+    monkeypatch.setattr(exp, "vs_cpu_metrics", lambda *args, **kwargs: {})
+    metrics = exp.eval_vs_cpu(
+        model,
+        {},
+        cfg,
+        n_matchups=1,
+        replay_dir=tmp_path,
+        inference=engine,
+    )
+    assert events == ["prewarm", "sweep"]
+    assert metrics["inference_compile_seconds"] == pytest.approx(1.25)
+    assert model.training
+
+
+def test_checkpoint_config_ignores_removed_inference_bucket_field() -> None:
+    cfg = _cfg()
+    values = dict(vars(cfg))
+    values["inference_buckets"] = (32, 64, 128)
+    assert exp.config_from_state(values) == cfg
+
+
 def test_optimizer_owns_new_critic_parameters_once() -> None:
     model = exp.GPT(_cfg())
     optimizer = exp.make_optimizer(model, model.cfg)
@@ -332,27 +393,13 @@ def test_tiny_training_run_reaches_policy_only_final_evaluation(monkeypatch, tmp
     monkeypatch.setattr(exp, "setup_run_dir", lambda name: (tmp_path, tmp_path / "replays"))
     monkeypatch.setattr(exp, "save_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp, "_checkpoint_sha256", lambda path: "a" * 64)
-    eval_model = exp.GPT(cfg)
-    eval_inference = object()
-    evaluations: list[int] = []
-    closed: list[bool] = []
-
-    class FakePrewarm:
-        def prepare(self, source):
-            return eval_model, eval_inference
-
-        def metrics(self):
-            return {"inference_prewarm_seconds": 1.0}
-
-        def close(self):
-            closed.append(True)
-
-    monkeypatch.setattr(exp, "start_inference_prewarm", lambda model, cfg: FakePrewarm())
+    evaluations: list[tuple[int, object, object]] = []
 
     def fake_eval(model, stats, cfg, *, n_matchups, replay_dir, checkpoint_sha256, inference=None, **kwargs):
-        assert model is eval_model
-        assert inference is eval_inference
-        evaluations.append(n_matchups)
+        assert isinstance(inference, exp.BF16Inference)
+        assert inference.model is model
+        assert inference.bucket == exp._eval_inference_bucket(cfg, n_matchups)
+        evaluations.append((n_matchups, model, inference))
         return {"net_stock_lcb": 0.0, "net_dmg_lcb": 0.0}
 
     monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
@@ -367,5 +414,4 @@ def test_tiny_training_run_reaches_policy_only_final_evaluation(monkeypatch, tmp
     monkeypatch.setattr(exp.wandb, "log", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp.wandb, "finish", lambda: None)
     exp.train(cfg, {}, comment="tiny")
-    assert evaluations == [cfg.final_eval_n_matchups]
-    assert closed == [True]
+    assert [n for n, _, _ in evaluations] == [cfg.final_eval_n_matchups]
