@@ -84,6 +84,8 @@ def test_defaults_freeze_requested_treatment_knobs() -> None:
     assert (cfg.temporal_d_model, cfg.temporal_layers, cfg.temporal_heads, cfg.temporal_ff_dim) == (128, 2, 4, 256)
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
     assert cfg.inference_buckets == (1, 2, 4, 8, 16, 32)
+    assert cfg.compiled_inference_bucket is None
+    assert cfg.eval_max_parallel is None
 
 
 def test_codec_canonicalizes_clicks_and_builds_semantic_tokens() -> None:
@@ -243,10 +245,21 @@ def test_bucket_padding_and_slot_keyed_rng_do_not_change_real_rows() -> None:
     torch.testing.assert_close(first, second)
 
 
-def test_compiled_inference_marks_each_cuda_graph_decode_step(monkeypatch) -> None:
+def test_compiled_inference_uses_the_smallest_prewarmed_hardware_bucket() -> None:
+    cfg = _cfg()
+    engine = exp.BF16Inference(exp.GPT(cfg).eval(), cfg, compiled=False, compiled_buckets=(8, 32))
+    assert [engine._bucket(rows) for rows in (1, 2, 3, 8, 17, 32)] == [1, 2, 4, 8, 32, 32]
+    engine.compiled = True
+    assert [engine._bucket(rows) for rows in (1, 2, 3, 8, 17, 32)] == [8, 8, 8, 8, 32, 32]
+    with pytest.raises(ValueError, match="largest compiled bucket"):
+        engine._bucket(33)
+
+
+@pytest.mark.parametrize(("compile_mode", "expected_marks"), [("reduce-overhead", 2), ("default", 0)])
+def test_only_cuda_graph_inference_marks_each_decode_step(monkeypatch, compile_mode, expected_marks) -> None:
     cfg = _cfg()
     model = exp.GPT(cfg).eval()
-    engine = exp.BF16Inference(model, cfg, compiled=False)
+    engine = exp.BF16Inference(model, cfg, compiled=False, compile_mode=compile_mode, compiled_buckets=(2,))
     engine.compiled = True
     bucket = 2
     engine._trunks[bucket] = lambda features, pad, actions: model(features, pad, actions)
@@ -263,7 +276,7 @@ def test_compiled_inference_marks_each_cuda_graph_decode_step(monkeypatch) -> No
     ctx = _context(cfg)
     engine.decode(ctx, 4)
     engine.decode(ctx, 4)
-    assert calls == 2
+    assert calls == expected_marks
 
 
 @pytest.mark.parametrize("bundle", ["base", "v6_lean"])
@@ -301,6 +314,9 @@ def test_checkpoint_config_round_trip_and_optimizer_owns_every_parameter() -> No
     cfg = _cfg()
     restored = exp.config_from_state(asdict(cfg))
     assert restored == cfg
+    old_values = asdict(cfg)
+    old_values.pop("compiled_inference_bucket")
+    assert exp.config_from_state(old_values).compiled_inference_bucket is None
     model = exp.GPT(cfg)
     optimizer = exp.make_optimizer(model, cfg)
     owned = [parameter for group in optimizer.param_groups for parameter in group["params"]]
@@ -324,8 +340,33 @@ def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeyp
     monkeypatch.setattr(exp, "save_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp, "_checkpoint_sha256", lambda path: "a" * 64)
     evaluations: list[tuple[int, int]] = []
+    eval_model = exp.GPT(cfg)
+    eval_inference = object()
+    prepared: list[object] = []
+    closed: list[bool] = []
 
-    def fake_eval(model, stats, cfg, *, n_matchups, replay_dir, exec_horizon=None, checkpoint_sha256):
+    class FakePrewarm:
+        def prepare(self, source):
+            prepared.append(source)
+            return eval_model, eval_inference
+
+        def metrics(self):
+            return {"inference_prewarm_seconds": 1.0}
+
+        def close(self):
+            closed.append(True)
+
+    starts: list[object] = []
+
+    def fake_start(model, cfg):
+        starts.append(model)
+        return FakePrewarm()
+
+    monkeypatch.setattr(exp, "start_inference_prewarm", fake_start)
+
+    def fake_eval(model, stats, cfg, *, n_matchups, replay_dir, exec_horizon=None, checkpoint_sha256, inference=None):
+        assert model is eval_model
+        assert inference is eval_inference
         evaluations.append((n_matchups, cfg.exec_horizon if exec_horizon is None else exec_horizon))
         return {"net_stock_lcb": 0.0, "net_dmg_lcb": 0.0}
 
@@ -342,3 +383,6 @@ def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeyp
     monkeypatch.setattr(exp.wandb, "finish", lambda: None)
     exp.train(cfg, {}, comment="tiny")
     assert evaluations == [(cfg.final_eval_n_matchups, 4), (cfg.final_diag_n_matchups, 6)]
+    assert starts and len(starts) == 1
+    assert prepared == starts
+    assert closed == [True]

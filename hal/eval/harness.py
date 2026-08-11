@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from loguru import logger
 
@@ -25,6 +26,9 @@ from hal.fixtures import ISO
 from hal.fixtures import ensure
 from hal.paths import EMULATOR_PATH
 from hal.sim.loop import drive
+from hal.sim.process_vec import SharedChunkPolicy
+from hal.sim.process_vec import drive_process_vec
+from hal.sim.rollout import nearest_power_of_two
 from hal.sim.session import Matchup
 from hal.sim.session import Session
 from hal.sim.sources import ControllerSource
@@ -48,6 +52,23 @@ def usable_cpus() -> int:
     if getaffinity is not None:
         return max(1, len(getaffinity(0)))
     return max(1, os.cpu_count() or 1)
+
+
+def automatic_parallelism() -> int:
+    """Nearest power-of-two worker bucket for the CPUs available to this process."""
+    return nearest_power_of_two(usable_cpus())
+
+
+def resolve_parallelism(n_matches: int, requested: int | None) -> int:
+    """Resolve active workers without imposing a hidden hardware ceiling."""
+    if n_matches < 1:
+        raise ValueError(f"n_matches must be >= 1, got {n_matches}")
+    parallel = automatic_parallelism() if requested is None else requested
+    if parallel < 1:
+        raise ValueError(f"max_parallel must be >= 1, got {parallel}")
+    if requested is not None and parallel & (parallel - 1):
+        raise ValueError(f"explicit max_parallel must be a power of two, got {parallel}")
+    return min(n_matches, parallel)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +125,14 @@ def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: 
     """Construct (don't enter) a Session from a SessionConfig, overriding the
     two fields that must differ per concurrent instance: ``slippi_port`` and
     ``replay_dir``."""
-    return Session(
+    return Session(**_session_kwargs(session_cfg, slippi_port=slippi_port, replay_dir=replay_dir))
+
+
+def _session_kwargs(
+    session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None
+) -> dict[str, object]:
+    """Spawn-safe Session constructor values for one worker."""
+    return dict(
         iso_path=session_cfg.iso_path,
         dolphin_path=session_cfg.dolphin_path,
         slippi_port=slippi_port,
@@ -156,20 +184,44 @@ def _drive_wave(
     OOM) can't be attributed to one boot, so every index is left empty and logged —
     the log-and-continue contract shared with ``run_match``."""
     try:
-        sessions: list[Session] = []
-        for offset, gi in enumerate(indices):
+        replay_dirs: list[Path | None] = []
+        for gi in indices:
             replay_dir = None
             if base_replay is not None:
                 replay_dir = base_replay / f"boot_{gi:03d}"
                 replay_dir.mkdir(parents=True, exist_ok=True)
-            sessions.append(_build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir))
-        boots = drive_vec(
-            sessions,
-            [matches[gi] for gi in indices],
-            policy_factory(),
-            max_frames=max_frames,
-            instant_restart=session_cfg.instant_match_restart,
+            replay_dirs.append(replay_dir)
+        wave_matches = [matches[gi] for gi in indices]
+        policy = policy_factory()
+        process_capable = (
+            hasattr(policy, "runtime_spec")
+            and callable(getattr(policy, "plan_rows", None))
+            and all(len(match.model_ports) == 1 for match in wave_matches)
         )
+        if process_capable:
+            kwargs = [
+                _session_kwargs(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir)
+                for offset, replay_dir in enumerate(replay_dirs)
+            ]
+            boots = drive_process_vec(
+                kwargs,
+                wave_matches,
+                cast(SharedChunkPolicy, policy),
+                max_frames=max_frames,
+                instant_restart=session_cfg.instant_match_restart,
+            )
+        else:
+            sessions = [
+                _build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir)
+                for offset, replay_dir in enumerate(replay_dirs)
+            ]
+            boots = drive_vec(
+                sessions,
+                wave_matches,
+                policy,
+                max_frames=max_frames,
+                instant_restart=session_cfg.instant_match_restart,
+            )
     except Exception as e:
         logger.warning(f"run_matches_vec: wave {list(indices)} failed: {e!r}; its boots stay empty")
         return {gi: [] for gi in indices}
@@ -182,7 +234,7 @@ def run_matches_vec(
     policy_factory: Callable[[], BatchPolicy],
     *,
     max_frames: int,
-    max_parallel: int,
+    max_parallel: int | None,
     base_slippi_port: int = 51441,
     start_retries: int = DEFAULT_START_RETRIES,
 ) -> list[list[Trajectory]]:
@@ -206,8 +258,9 @@ def run_matches_vec(
     dead boot still ends up empty and is logged. (Instant-restart navigates the menu
     only once per boot, so this flake now scales with boots, not matches.)
     """
-    if max_parallel < 1:
-        raise ValueError(f"max_parallel must be >= 1, got {max_parallel}")
+    if not matches:
+        return []
+    max_parallel = resolve_parallelism(len(matches), max_parallel)
     base_replay = Path(session_cfg.replay_dir) if session_cfg.replay_dir is not None else None
     out: list[list[Trajectory]] = [[] for _ in matches]
     for wave_start in range(0, len(matches), max_parallel):

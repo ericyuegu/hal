@@ -16,7 +16,10 @@ from typing import Protocol
 from typing import runtime_checkable
 
 import melee
+import numpy as np
 
+from hal.wire import ACTION_CHANNELS
+from hal.wire import ACTION_DIM
 from hal.wire import BUTTON_BITS
 from hal.wire import slp_button_to_melee
 
@@ -68,6 +71,32 @@ class ControllerInputsValue:
     trigger_l: float
     trigger_r: float
     buttons: int
+
+
+def action_vec_to_controller(action: np.ndarray) -> ControllerInputsValue:
+    """Convert one canonical policy action vector to logical controller inputs.
+
+    This codec is simulator-side and Torch-free so spawned Session workers do
+    not import the training program.  ``hal.wire.ACTION_CHANNELS`` defines the
+    channel order; START is intentionally absent from that wire.
+    """
+    values = np.asarray(action).reshape(-1)
+    if values.shape != (ACTION_DIM,):
+        raise ValueError(f"action has shape {values.shape}, expected {(ACTION_DIM,)}")
+    buttons = 0
+    for offset, channel in enumerate(ACTION_CHANNELS[6:]):
+        name = channel.removeprefix("button_")
+        if values[6 + offset] > 0.5:
+            buttons |= BUTTON_BITS[name]
+    return ControllerInputsValue(
+        main_x=float(np.clip(values[0], -1.0, 1.0)),
+        main_y=float(np.clip(values[1], -1.0, 1.0)),
+        c_x=float(np.clip(values[2], -1.0, 1.0)),
+        c_y=float(np.clip(values[3], -1.0, 1.0)),
+        trigger_l=float(np.clip(values[4], 0.0, 1.0)),
+        trigger_r=float(np.clip(values[5], 0.0, 1.0)),
+        buttons=int(buttons),
+    )
 
 
 def _require_finite(name: str, value: float) -> None:

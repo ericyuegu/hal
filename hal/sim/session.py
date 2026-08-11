@@ -41,6 +41,10 @@ from hal.wire import slp_stage_to_libmelee
 # without it, an orphaned Dolphin keeps UDP 51441 bound and breaks the next
 # Session boot until reboot or manual kill (see PID-575155 incident).
 _PR_SET_PDEATHSIG = 1
+# Dolphin often ignores SIGTERM while the EXI fast-forward loop is blocked on
+# input. A long grace period stalls every wave boundary and adds no replay
+# safety: ``finalize_replay_dir`` repairs an interrupted .slp below.
+_DOLPHIN_TERM_GRACE_SECONDS = 0.25
 
 
 def _set_pdeathsig_sigkill() -> None:
@@ -346,8 +350,12 @@ class Session:
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
-                proc.wait(timeout=10.0)
-            except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
+                proc.wait(timeout=_DOLPHIN_TERM_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                # Expected for EXI FFW while it blocks on the input device. The
+                # hard kill and replay repair below are the normal fallback.
+                pass
+            except (OSError, RuntimeError) as e:
                 logger.warning(f"Console SIGTERM wait failed: {e}")
         # 2. Hard SIGKILL ourselves before delegating to libmelee — its
         #    Console.stop() can raise inside slippstream.shutdown() when the

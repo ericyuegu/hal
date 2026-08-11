@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from hal.data.feature_stats import FeatureStats
+from hal.sim.rollout import ObservationRow
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.closed_loop import RecedingHorizon
@@ -345,3 +346,38 @@ def test_context_pad_tracks_the_refilling_context() -> None:
     assert pads[: L_CTX + 1] == [L_CTX - 1 - i for i in range(L_CTX)] + [0]
     assert pads[2 * L_CTX - 1] == 0
     assert pads[2 * L_CTX : 3 * L_CTX] == [L_CTX - 1 - i for i in range(L_CTX)]
+
+
+def test_shared_row_planning_uses_policy_schedule_and_resets_context() -> None:
+    pads: list[int] = []
+
+    def predict_chunk(ctx, committed):
+        pads.append(int(ctx.ctx_pad[0]))
+        return np.zeros((ctx.batch, L_CHUNK, A_DIM), dtype=np.float32)
+
+    policy = RecedingHorizon(
+        predict_chunk=predict_chunk,
+        stats=_stats(False, False),
+        L_ctx=L_CTX,
+        L_chunk=L_CHUNK,
+        s=4,
+        d=0,
+        device="cpu",
+    )
+    slot = Slot(0, EGO_PORT)
+
+    def row(t: int, frame_id: int, *, reset: bool = False) -> ObservationRow:
+        return ObservationRow(
+            frame_id=frame_id,
+            flat=flatten_canonical_frame(_obs(t, frame_id, v6=False, follower=False)),
+            action=NEUTRAL_ACTION,
+            reset=reset,
+        )
+
+    first = policy.plan_rows({slot: [row(0, 400, reset=True)]})[slot]
+    second = policy.plan_rows({slot: [row(t, 400 + t) for t in range(1, 5)]})[slot]
+    reset_plan = policy.plan_rows({slot: [row(5, -123, reset=True)]})[slot]
+
+    assert policy.runtime_spec.execution_stride == 4
+    assert first.shape == second.shape == reset_plan.shape == (L_CHUNK, A_DIM)
+    assert pads == [L_CTX - 1, L_CTX - 5, L_CTX - 1]

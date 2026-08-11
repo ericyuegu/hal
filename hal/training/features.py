@@ -34,12 +34,11 @@ from torch import Tensor
 
 from hal.data.feature_stats import FeatureStats
 from hal.policy import INCLUDED_STAGES
-from hal.sim.inputs import ControllerInputsValue
+from hal.sim.inputs import action_vec_to_controller as action_vec_to_controller
 from hal.training.ego_stats import consolidate_key
 from hal.wire import A_DIM
 from hal.wire import ACTION_CHANNELS
 from hal.wire import ACTION_DIM as _ACTION_DIM
-from hal.wire import BUTTON_BITS
 from hal.wire import VELOCITY_COMPONENTS
 from hal.wire import mask_value
 
@@ -149,7 +148,7 @@ BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     derive_spatial=False,
 )
 
-_BUTTON_ORDER = ("a", "b", "x", "y", "z", "r", "l", "d_up")
+_BUTTON_ORDER = tuple(channel.removeprefix("button_") for channel in ACTION_CHANNELS[6:])
 
 NEUTRAL_ACTION = np.zeros(A_DIM, dtype=np.float32)
 
@@ -571,23 +570,3 @@ def stack_actions(batch: dict[str, Tensor]) -> Tensor:
     whatever sequence length the batch carries (full window at train; L_ctx at
     inference)."""
     return torch.stack([batch[f"ego_{ch}"] for ch in ACTION_CHANNELS], dim=-1)
-
-
-def action_vec_to_controller(a: np.ndarray) -> ControllerInputsValue:
-    """One A_DIM-vector → one ControllerInputsValue. Buttons threshold at 0.5.
-    START is not in the action space (see ACTION_CHANNELS), so the policy can
-    never press it."""
-    a = np.asarray(a).reshape(-1)
-    buttons = 0
-    for i, name in enumerate(_BUTTON_ORDER):
-        if a[6 + i] > 0.5:
-            buttons |= BUTTON_BITS[name]
-    return ControllerInputsValue(
-        main_x=float(np.clip(a[0], -1.0, 1.0)),
-        main_y=float(np.clip(a[1], -1.0, 1.0)),
-        c_x=float(np.clip(a[2], -1.0, 1.0)),
-        c_y=float(np.clip(a[3], -1.0, 1.0)),
-        trigger_l=float(np.clip(a[4], 0.0, 1.0)),
-        trigger_r=float(np.clip(a[5], 0.0, 1.0)),
-        buttons=int(buttons),
-    )

@@ -42,6 +42,7 @@ keeps the two in step.
 
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
@@ -53,6 +54,9 @@ import torch
 
 from hal.data.feature_stats import FeatureStats
 from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import action_vec_to_controller
+from hal.sim.rollout import ObservationRow
+from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.ego_stats import consolidate_key
@@ -72,7 +76,6 @@ from hal.training.features import FeatureProjection
 from hal.training.features import _classify
 from hal.training.features import _float_transform
 from hal.training.features import _is_masked
-from hal.training.features import action_vec_to_controller
 from hal.training.features import derive_spatial
 
 # A bound model + integration scheme: (Context, committed-action prefix or None)
@@ -129,7 +132,7 @@ class _Layout:
     slot's layout can address the whole batch.
     """
 
-    gamestate_getters: tuple[Callable[[dict], tuple] | None, ...]
+    gamestate_getters: tuple[Callable[[Mapping[str, float | int]], tuple] | None, ...]
     gamestate_at: tuple[slice, ...]
     action_at: tuple[slice, ...]
     action_channels: tuple[np.ndarray, ...]  # ACTION_CHANNELS indices feeding each action_at
@@ -242,7 +245,7 @@ def _model_name(key: str, ego_prefix: str) -> str:
     return key
 
 
-def _getter(names: list[str]) -> Callable[[dict], tuple] | None:
+def _getter(names: list[str]) -> Callable[[Mapping[str, float | int]], tuple] | None:
     """``itemgetter`` over ``names`` that always answers with a tuple. A key that
     disappears mid-match raises ``KeyError`` here, as reading the column did before."""
     if not names:
@@ -254,7 +257,7 @@ def _getter(names: list[str]) -> Callable[[dict], tuple] | None:
 
 
 def _build_layout(
-    flat: dict,
+    flat: Mapping[str, float | int],
     ego_prefix: str,
     stats: dict[str, FeatureStats],
     extra: ExtraColumns | None,
@@ -302,7 +305,7 @@ def _build_layout(
     rank = {transform: i for i, transform in enumerate(_TRANSFORM_ORDER)}
     ordered = sorted(gamestate, key=lambda c: (rank[c[2]], c[0])) + sorted(action, key=lambda c: rank[c[2]])
 
-    getters: list[Callable[[dict], tuple] | None] = []
+    getters: list[Callable[[Mapping[str, float | int]], tuple] | None] = []
     gamestate_at: list[slice] = []
     action_at: list[slice] = []
     action_channels: list[np.ndarray] = []
@@ -470,7 +473,7 @@ class _Rings:
         """Real frames currently in context; caps at ``L``."""
         return min(self.written, self.L)
 
-    def gather(self, flat: dict, action: np.ndarray) -> None:
+    def gather(self, flat: Mapping[str, float | int], action: np.ndarray) -> None:
         """Read one frame plus the ego action that produced it into the raw scratch row."""
         self.prev, self.raw = self.raw, self.prev
         layout = self.layout
@@ -575,6 +578,17 @@ class RecedingHorizon:
         if not 0 <= self.d <= self.L_chunk - self.s:
             raise ValueError(f"inference delay d={self.d} must satisfy 0 <= d <= L_chunk - s={self.L_chunk - self.s}")
 
+    @property
+    def runtime_spec(self) -> PolicyRuntimeSpec:
+        """Scheduling and shared-memory sizes required by this loaded policy."""
+        return PolicyRuntimeSpec(
+            context_frames=self.L_ctx,
+            prediction_frames=self.L_chunk,
+            execution_stride=self.s,
+            committed_frames=self.d,
+            action_dim=len(ACTION_CHANNELS),
+        )
+
     def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]:
         live = list(obs)
         self._ingest(live, obs)
@@ -606,6 +620,58 @@ class RecedingHorizon:
             st.offset += 1
         return {sl: action_vec_to_controller(a) for sl, a in actions.items()}
 
+    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]:
+        """Ingest worker-published rows and return one new chunk per slot.
+
+        The worker supplies the action that produced each observation. This
+        keeps the training-time ``(post_i, pre_i)`` alignment without sending
+        nested canonical-frame dictionaries across processes.
+        """
+        live = list(rows)
+        if not live:
+            return {}
+        for slot in live:
+            slot_rows = rows[slot]
+            if not slot_rows:
+                raise ValueError(f"slot {slot} requested a plan without observation rows")
+            for row in slot_rows:
+                self._ingest_row(slot, row)
+        bootstrap = [slot for slot in live if self._slots[slot].pending is None]
+        continuing = [slot for slot in live if self._slots[slot].pending is not None]
+        if bootstrap:
+            self._replan(bootstrap, committed=None)
+        if continuing:
+            committed = self._committed(continuing) if self.d else None
+            self._replan(continuing, committed=committed)
+        return {slot: np.asarray(self._slots[slot].pending, dtype=np.float32) for slot in live}
+
+    @staticmethod
+    def _reset_state(st: _SlotState) -> None:
+        st.rings = None
+        st.pending = None
+        st.offset = 0
+        st.last_action = None
+        st.reset_pending = True
+
+    def _ingest_row(self, slot: Slot, row: ObservationRow) -> None:
+        st = self._slots.setdefault(slot, _SlotState())
+        if row.reset or (st.last_id is not None and row.frame_id < st.last_id):
+            self._reset_state(st)
+        st.last_id = row.frame_id
+        if st.rings is None:
+            st.rings = _Rings(
+                _build_layout(row.flat, _PORT_TO_PREFIX[slot.port], self.stats, self.extra, self.projection),
+                self.L_ctx,
+            )
+        action = np.asarray(row.action, dtype=np.float32)
+        st.rings.gather(row.flat, action)
+        if st.rings.layout.spatial_at is not None:
+            spatial = _spatial_block(st.rings.layout, [(st.rings.prev, st.rings.raw)])
+            st.rings.push(spatial[:, 0])
+        else:
+            st.rings.push(None)
+        st.last_action = action
+
     def _ingest(self, live: list[Slot], obs: Mapping[Slot, dict]) -> None:
         """Flatten + preprocess this frame once per live slot, into that slot's rings.
 
@@ -622,11 +688,7 @@ class RecedingHorizon:
             # Drop this slot's rings so its context never spans two matches (stale stage,
             # stocks back to 4, teleported positions — a window with zero training support).
             if st.last_id is not None and fid < st.last_id:
-                st.rings = None
-                st.pending = None
-                st.offset = 0
-                st.last_action = None
-                st.reset_pending = True
+                self._reset_state(st)
             st.last_id = fid
             flat = flatten_canonical_frame(obs[slot])
             if st.rings is None:
