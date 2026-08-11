@@ -881,7 +881,10 @@ class GPT(nn.Module):
         return self.q_head(torch.cat((hidden, action), dim=-1)).float()
 
     def decode_q(self, logits: Tensor) -> Tensor:
-        return torch.softmax(logits.float(), dim=-1) @ self.q_bin_values.float()
+        probabilities = torch.softmax(logits.float(), dim=-1)
+        # Elementwise reduction stays fp32 under autocast; matmul would be cast
+        # back to bf16 on CUDA and later break NumPy/W&B histogram conversion.
+        return (probabilities * self.q_bin_values.float()).sum(dim=-1)
 
 
 def quantize(model: GPT, actions: Tensor) -> Tensor:
@@ -983,6 +986,16 @@ class IQLBatch:
         )
 
 
+def aligned_iql_labels(windows: list[dict], L_ctx: int) -> tuple[Tensor, Tensor]:
+    reward = np.stack([window[EGO_REWARD_COLUMN] for window in windows])
+    rewards = np.stack([reward[:, step : step + L_ctx] for step in range(1, EXECUTED_CHUNK + 1)], axis=-1)
+    returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, 1 : L_ctx + 1]
+    return (
+        torch.from_numpy(np.ascontiguousarray(rewards)),
+        torch.from_numpy(np.ascontiguousarray(returns)),
+    )
+
+
 def collate_iql_batch(
     windows: list[dict],
     batch: TrainBatch,
@@ -998,14 +1011,12 @@ def collate_iql_batch(
         features={name: value[:, : L_ctx + EXECUTED_CHUNK] for name, value in features.items()},
         ctx_pad=batch.context.ctx_pad,
     )
-    reward = np.stack([window[EGO_REWARD_COLUMN] for window in windows])
-    rewards = np.stack([reward[:, step : step + L_ctx] for step in range(1, EXECUTED_CHUNK + 1)], axis=-1)
-    returns = np.stack([window[EGO_RETURN_COLUMN] for window in windows])[:, 1 : L_ctx + 1]
+    rewards, returns = aligned_iql_labels(windows, L_ctx)
     return IQLBatch(
         batch=batch,
         extended_context=extended,
-        rewards=torch.from_numpy(np.ascontiguousarray(rewards)),
-        returns=torch.from_numpy(np.ascontiguousarray(returns)),
+        rewards=rewards,
+        returns=returns,
     )
 
 
@@ -1403,10 +1414,10 @@ def val_metrics(model: GPT, batches: list[IQLBatch], cfg: TrainConfig) -> dict[s
             returns=pooled["return"],
         )
     )
-    out["q_histogram"] = wandb.Histogram(pooled["q"].numpy())
-    out["value_histogram"] = wandb.Histogram(pooled["value"].numpy())
-    out["advantage_histogram"] = wandb.Histogram(pooled["advantage"].numpy())
-    out["awr_weights"] = wandb.Histogram(pooled["weight"].numpy())
+    out["q_histogram"] = wandb.Histogram(pooled["q"].float().numpy())
+    out["value_histogram"] = wandb.Histogram(pooled["value"].float().numpy())
+    out["advantage_histogram"] = wandb.Histogram(pooled["advantage"].float().numpy())
+    out["awr_weights"] = wandb.Histogram(pooled["weight"].float().numpy())
     return out
 
 

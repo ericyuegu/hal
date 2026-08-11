@@ -134,6 +134,20 @@ def test_shaped_reward_and_return_have_exact_one_frame_recurrence() -> None:
     np.testing.assert_allclose(labeled["p1_iql_reward"], -labeled["p2_iql_reward"])
 
 
+def test_collated_chunk_labels_are_exactly_t_plus_one_through_t_plus_four() -> None:
+    length = 12
+    window = {
+        exp.EGO_REWARD_COLUMN: np.arange(length, dtype=np.float32),
+        exp.EGO_RETURN_COLUMN: np.arange(length, dtype=np.float32) + 100,
+    }
+    rewards, returns = exp.aligned_iql_labels([window], L_ctx=4)
+    torch.testing.assert_close(
+        rewards[0],
+        torch.tensor([[1, 2, 3, 4], [2, 3, 4, 5], [3, 4, 5, 6], [4, 5, 6, 7]], dtype=torch.float32),
+    )
+    torch.testing.assert_close(returns[0], torch.tensor([101, 102, 103, 104], dtype=torch.float32))
+
+
 def test_four_frame_td_target_uses_gamma_four_bootstrap_and_detaches_it() -> None:
     rewards = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])
     next_value = torch.tensor([[5.0]], requires_grad=True)
@@ -155,6 +169,14 @@ def test_categorical_encoders_are_normalized_and_two_hot_decodes_exactly() -> No
     hl = exp.encode_q_target(target, hl_model, hl_cfg)
     torch.testing.assert_close(hl.sum(-1), torch.ones(4), atol=1e-6, rtol=1e-6)
     assert (hl >= 0).all()
+
+
+def test_decoded_q_stays_float32_under_autocast() -> None:
+    model = exp.GPT(_cfg())
+    logits = torch.randn(7, model.cfg.iql_q_bins)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        decoded = model.decode_q(logits)
+    assert decoded.dtype == torch.float32
 
 
 def test_extended_causal_pass_leaves_policy_history_states_unchanged() -> None:
