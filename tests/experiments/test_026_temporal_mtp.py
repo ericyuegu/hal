@@ -255,6 +255,45 @@ def test_compiled_inference_uses_the_smallest_prewarmed_hardware_bucket() -> Non
         engine._bucket(33)
 
 
+def test_ad_hoc_matchup_count_uses_a_power_of_two_wave(monkeypatch) -> None:
+    monkeypatch.setattr(exp, "automatic_parallelism", lambda: 16)
+    cfg = _cfg()
+    assert exp._eval_parallelism(cfg, 12) == 16
+    assert exp._eval_inference_bucket(cfg, 12) == 16
+
+
+def test_inference_defaults_to_inductor_without_cuda_graphs() -> None:
+    engine = exp.BF16Inference(exp.GPT(_cfg()).eval(), _cfg(), compiled=False)
+    assert engine.compile_mode == "default"
+    assert not engine.uses_cuda_graphs
+
+
+def test_checkpoint_eval_accepts_memory_safe_wave_and_distinct_output(monkeypatch, tmp_path: Path) -> None:
+    cfg = _cfg(inference_mode="eager")
+    model = exp.GPT(cfg).eval()
+    checkpoint = tmp_path / "final.pt"
+    monkeypatch.setattr(exp, "load_checkpoint", lambda path: (model, cfg, {}, {"step": 7}))
+    monkeypatch.setattr(exp, "_checkpoint_sha256", lambda path: "a" * 64)
+    seen: dict[str, object] = {}
+
+    def fake_eval(model, stats, cfg, **kwargs):
+        seen.update(cfg=cfg, **kwargs)
+        return {"crashed": 0.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
+    exp.eval_checkpoint(
+        str(checkpoint),
+        exec_horizon=6,
+        n_matchups=32,
+        max_parallel=8,
+        output_name="eval_rerun_s6",
+    )
+    assert seen["cfg"].eval_max_parallel == 8
+    assert seen["n_matchups"] == 32
+    assert seen["exec_horizon"] == 6
+    assert seen["replay_dir"] == tmp_path / "eval_rerun_s6"
+
+
 @pytest.mark.parametrize(("compile_mode", "expected_marks"), [("reduce-overhead", 2), ("default", 0)])
 def test_only_cuda_graph_inference_marks_each_decode_step(monkeypatch, compile_mode, expected_marks) -> None:
     cfg = _cfg()

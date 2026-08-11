@@ -269,7 +269,10 @@ def micro_batch_size(cfg: TrainConfig) -> int:
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
-    return resolve_parallelism(n_matchups, cfg.eval_max_parallel)
+    # ``run_matches_vec`` accepts a power-of-two capacity and then limits the
+    # active worker count to ``n_matchups``. Keep that capacity a valid bucket
+    # when an ad hoc evaluation asks for, for example, 12 matchups.
+    return covering_power_of_two(resolve_parallelism(n_matchups, cfg.eval_max_parallel))
 
 
 def _eval_inference_bucket(cfg: TrainConfig, n_matchups: int) -> int:
@@ -1085,7 +1088,7 @@ class BF16Inference:
         cfg: TrainConfig,
         *,
         compiled: bool | None = None,
-        compile_mode: str = "reduce-overhead",
+        compile_mode: str = "default",
         compiled_buckets: tuple[int, ...] | None = None,
     ) -> None:
         self.model = model
@@ -1895,12 +1898,21 @@ def eval_checkpoint(
     exec_horizon: int | None = None,
     n_matchups: int | None = None,
     eager: bool = False,
+    max_parallel: int | None = None,
+    output_name: str | None = None,
 ) -> dict[str, float]:
     model, cfg, stats, state = load_checkpoint(path)
-    if eager:
-        cfg = replace(cfg, inference_mode="eager")
+    cfg = replace(
+        cfg,
+        inference_mode="eager" if eager else cfg.inference_mode,
+        eval_max_parallel=cfg.eval_max_parallel if max_parallel is None else max_parallel,
+    )
+    validate_config(cfg)
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    replay_dir = Path(path).resolve().parent / ("eval_replays_s6" if horizon == 6 else "eval_replays")
+    default_name = "eval_replays_s6" if horizon == 6 else "eval_replays"
+    if output_name is not None and (Path(output_name).name != output_name or output_name in ("", ".", "..")):
+        raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
+    replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
     values = eval_vs_cpu(
         model,
         stats,
@@ -2186,6 +2198,8 @@ class Args:
     eval_exec_horizon: int | None = None
     eval_n_matchups: int | None = None
     eval_eager: bool = False
+    eval_max_parallel: int | None = None
+    eval_output_name: str | None = None
     self_play_eval: str | None = None
     self_play_matches: int = 12
     self_play_frames: int = 14_400
@@ -2210,6 +2224,8 @@ def main(args: Args) -> None:
             exec_horizon=args.eval_exec_horizon,
             n_matchups=args.eval_n_matchups,
             eager=args.eval_eager,
+            max_parallel=args.eval_max_parallel,
+            output_name=args.eval_output_name,
         )
         return
     if args.self_play_eval is not None:
