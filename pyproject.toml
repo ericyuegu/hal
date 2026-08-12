@@ -64,7 +64,7 @@ dev = [
 python-preference = "only-managed"
 
 [tool.uv.sources]
-melee = { git = "https://github.com/ericyuegu/libmelee", rev = "222a399cd1368d33458b4c36f4823f7220ca889d" }
+melee = { git = "https://github.com/ericyuegu/libmelee", rev = "1ec3e66c37c3824b0f9921c9d79b1109217a0f63" }
 peppi-py = { git = "https://github.com/ericyuegu/peppi-py", branch = "libmelee-parity" }
 
 [tool.setuptools.packages.find]

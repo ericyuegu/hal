@@ -1122,7 +1122,7 @@ requires-dist = [
     { name = "libcst" },
     { name = "loguru" },
     { name = "matplotlib" },
-    { name = "melee", git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d" },
+    { name = "melee", git = "https://github.com/ericyuegu/libmelee?rev=1ec3e66c37c3824b0f9921c9d79b1109217a0f63" },
     { name = "modal", specifier = ">=1.5.3" },
     { name = "more-itertools" },
     { name = "mosaicml-streaming", specifier = ">=0.11.0" },
@@ -1668,7 +1668,7 @@ wheels = [
 [[package]]
 name = "melee"
 version = "0.47.0"
-source = { git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d#222a399cd1368d33458b4c36f4823f7220ca889d" }
+source = { git = "https://github.com/ericyuegu/libmelee?rev=1ec3e66c37c3824b0f9921c9d79b1109217a0f63#1ec3e66c37c3824b0f9921c9d79b1109217a0f63" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },
