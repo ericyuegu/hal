@@ -32,6 +32,33 @@ To launch experiments on cloud, wrap your local training command with a launcher
 uv run scripts/launch_vast.py --max-price 1.0 -- uv run experiments/001_flow_matching_baseline.py
 ```
 
+Modal is the default fixed-hardware option. One-time setup requires an authenticated
+Modal profile and a `hal` Secret with the R2 and W&B credentials:
+```bash
+uv run modal setup
+source .env
+uv run modal secret create hal \
+  AWS_ENDPOINT_URL="$AWS_ENDPOINT_URL" \
+  AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+  AWS_BUCKET="$AWS_BUCKET" \
+  WANDB_API_KEY="$WANDB_API_KEY"
+```
+The launcher defaults to one L40S, 8 requested/16 maximum CPU cores, 64 GiB RAM,
+and a 512 GiB ephemeral SSD. It submits a detached Function by default:
+```bash
+uv run scripts/launch_modal.py --dry-run -- uv run experiments/028_onehot_controller.py
+uv run scripts/launch_modal.py -- uv run experiments/028_onehot_controller.py
+uv run scripts/launch_modal.py --wait -- uv run experiments/028_onehot_controller.py
+```
+Modal can preempt GPU Functions, and each Function attempt is limited to 24 hours.
+The launcher gives an input ten retries and records its run name in the automatically
+created `hal-modal-state` Volume. A replacement attempt adds `--resume <run>` only
+after `runs/<run>/latest.pt` is present in R2. A normal nonzero training exit is
+recorded as terminal and is not run again. Arbitrary commands must opt out with
+`--no-auto-resume`. Use `uv run scripts/launch_modal.py --help` for resource,
+region, timeout, image, state, and retry options.
+
 Google Compute Engine is also supported. The launcher uses your interactive
 `gcloud auth login` session (no service-account key file) and reads job secrets
 from Secret Manager through the VM's attached service account:

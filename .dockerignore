@@ -1,6 +1,9 @@
 # Keep the build context lean and free of secrets/fixtures. Datasets, the
 # emulator, runs, and the host venv are mounted/fetched at runtime, never baked.
 .git
+.agents
+.claude
+.codex
 .venv
 data/
 runs/
