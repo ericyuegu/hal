@@ -10,6 +10,7 @@ paths must agree.
 """
 
 import importlib.util
+import warnings
 from pathlib import Path
 
 import pytest
@@ -243,6 +244,25 @@ def test_the_flex_probe_reads_the_same_under_no_grad() -> None:
     assert inside == outside
     if device == "cpu":
         assert inside is False  # no CPU backward; the verdict must be a clean False, not a raise
+
+
+def test_compiled_first_forward_keeps_path_resolution_outside_dynamo() -> None:
+    """The first forward resolves the attention path lazily. Dynamo must not trace through either
+    the cached FlexAttention probe or Loguru's caller-frame inspection while doing so."""
+    flex_is_usable.cache_clear()
+    trunk = torch.compile(_trunk(_cfg(), prefer_flex=True, device="cpu"), backend="eager", dynamic=False)
+    x = torch.randn(2, _GEOM["L_ctx"], _GEOM["d_model"])
+    ctx_pad = torch.zeros(2, dtype=torch.long)
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        output = trunk(x, ctx_pad)
+    flex_is_usable.cache_clear()
+
+    messages = [str(warning.message) for warning in seen]
+    assert output.shape == x.shape
+    assert not any("functools.lru_cache" in message for message in messages)
+    assert not any("sys._getframe" in message for message in messages)
 
 
 @pytest.mark.skipif(flex_is_usable("cpu"), reason="the fallback needs a device without FlexAttention")

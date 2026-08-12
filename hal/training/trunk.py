@@ -290,12 +290,23 @@ class Trunk(nn.Module):
             return "unresolved"
         return "flex" if self._use_flex else "dense"
 
+    @torch.compiler.disable
+    def _resolve_attn_path(self, device_type: str) -> None:
+        """Run the one-time hardware probe and path announcement outside Dynamo tracing.
+
+        The probe is cached with :func:`functools.cache`, whose wrapper Dynamo deliberately ignores,
+        and Loguru finds its caller with :func:`sys._getframe`, which Dynamo cannot trace. A trunk's
+        first forward is commonly already inside ``torch.compile``, so keep both eager explicitly.
+        Later forwards skip this method once ``_use_flex`` has been resolved.
+        """
+        self._use_flex = self.prefer_flex and flex_is_usable(device_type)
+        if self.require_flex and not self._use_flex:
+            raise RuntimeError(f"require_flex is set, but FlexAttention does not run on {device_type}")
+        logger.info(f"trunk attention: {'flex' if self._use_flex else 'dense'} path, window={self.attn_window}")
+
     def _mask(self, ctx_pad: Int[Tensor, " B"], L: int) -> AttnMask:
         if self._use_flex is None:
-            self._use_flex = self.prefer_flex and flex_is_usable(ctx_pad.device.type)
-            if self.require_flex and not self._use_flex:
-                raise RuntimeError(f"require_flex is set, but FlexAttention does not run on {ctx_pad.device.type}")
-            logger.info(f"trunk attention: {'flex' if self._use_flex else 'dense'} path, window={self.attn_window}")
+            self._resolve_attn_path(ctx_pad.device.type)
         if self._use_flex:
             return block_mask(ctx_pad, L, self.attn_window)
         return dense_mask(ctx_pad, L, self.attn_window)
