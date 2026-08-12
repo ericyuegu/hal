@@ -152,6 +152,11 @@ class TrainConfig:
     aux_loss_weight: float = 1.0
     group_order: tuple[str, ...] = GROUP_ORDER
 
+    # The background compile thread deadlocks against the training thread on H100
+    # for this experiment's graphs; False compiles the eval programs synchronously
+    # at first use instead (identical eval protocol, slower first eval).
+    background_inference_prewarm: bool = True
+
     action_vocab: int = 1024
     action_state_embed_dim: int = 48
     char_vocab: int = 32
@@ -1779,7 +1784,8 @@ def train(
             # the independent inference compile.  From here the CPU compiler and its
             # dedicated CUDA stream can overlap the many steps before evaluation.
             if not inference_prewarm_started:
-                inference_prewarm = start_inference_prewarm(model, cfg)
+                if cfg.background_inference_prewarm:
+                    inference_prewarm = start_inference_prewarm(model, cfg)
                 inference_prewarm_started = True
             val_due = cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0
             eval_due = cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0
@@ -1817,7 +1823,8 @@ def train(
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
 
         if not inference_prewarm_started:
-            inference_prewarm = start_inference_prewarm(model, cfg)
+            if cfg.background_inference_prewarm:
+                inference_prewarm = start_inference_prewarm(model, cfg)
             inference_prewarm_started = True
         final_path = run_dir / "final.pt"
         save_checkpoint(
