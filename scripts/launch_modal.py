@@ -44,6 +44,7 @@ EXPERIMENTS_ROOT: Final[Path] = ROOT / "experiments"
 REMOTE_ROOT: Final[Path] = Path("/opt/hal")
 STATE_ROOT: Final[Path] = Path("/modal-state")
 IMAGE: Final[str] = "ghcr.io/ericyuegu/hal:cuda13"
+PYPI_INDEX: Final[str] = "https://pypi.org/simple"
 REQUIRED_SECRET_KEYS: Final[tuple[str, ...]] = (
     "AWS_ENDPOINT_URL",
     "AWS_ACCESS_KEY_ID",
@@ -398,6 +399,9 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     logger.info(f"CUDA compute capability = sm_{cap}")
 
     env = os.environ.copy()
+    # Modal injects its internal PyPI mirror through UV_INDEX_URL. Keep uv's
+    # runtime project check aligned with the portable pypi.org URLs in uv.lock.
+    env["UV_INDEX_URL"] = PYPI_INDEX
     cache_root = Path("/opt/hal-cache")
     cache_vars = {
         "TORCHINDUCTOR_CACHE_DIR": cache_root / "torchinductor",
@@ -602,7 +606,10 @@ def _image(tag: str) -> modal.Image:
         modal.Image.from_registry(tag)
         .add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
         .workdir(str(REMOTE_ROOT))
-        .run_commands("uv sync --locked")
+        # Modal's build-time UV_INDEX_URL points at its internal mirror. If it
+        # reaches uv, the resolver wants to rewrite every registry URL in the
+        # portable lockfile and --locked fails before a Function is submitted.
+        .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked")
     )
 
 
