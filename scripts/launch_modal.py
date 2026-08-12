@@ -602,14 +602,22 @@ def _run_remote(spec: LaunchSpec) -> int:
 
 def _image(tag: str) -> modal.Image:
     ignore = modal.FilePatternMatcher.from_file(ROOT / ".dockerignore")
-    return (
+    dependency_image = (
         modal.Image.from_registry(tag)
-        .add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
+        .add_local_file(ROOT / "pyproject.toml", str(REMOTE_ROOT / "pyproject.toml"), copy=True)
+        .add_local_file(ROOT / "uv.lock", str(REMOTE_ROOT / "uv.lock"), copy=True)
         .workdir(str(REMOTE_ROOT))
         # Modal's build-time UV_INDEX_URL points at its internal mirror. If it
         # reaches uv, the resolver wants to rewrite every registry URL in the
         # portable lockfile and --locked fails before a Function is submitted.
-        .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked")
+        .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --no-install-project")
+    )
+    return (
+        dependency_image.add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
+        # Dependencies are complete in the parent layer. Install only the local
+        # project offline so ordinary source commits do not invalidate or rerun
+        # the expensive dependency layer.
+        .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
     )
 
 

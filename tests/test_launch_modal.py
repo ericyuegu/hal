@@ -213,6 +213,46 @@ def test_dry_run_does_not_create_a_volume_or_app(monkeypatch: pytest.MonkeyPatch
     _MODULE.main(Args(cmd=["uv", "run", EXPERIMENT], dry_run=True))
 
 
+def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple] = []
+
+    class FakeImage:
+        def add_local_file(self, local: Path, remote: str, *, copy: bool) -> FakeImage:
+            events.append(("file", local, remote, copy))
+            return self
+
+        def add_local_dir(self, local: Path, remote: str, *, copy: bool, ignore: object) -> FakeImage:
+            events.append(("dir", local, remote, copy, ignore))
+            return self
+
+        def workdir(self, path: str) -> FakeImage:
+            events.append(("workdir", path))
+            return self
+
+        def run_commands(self, command: str) -> FakeImage:
+            events.append(("run", command))
+            return self
+
+    fake = FakeImage()
+    monkeypatch.setattr(_MODULE.modal.Image, "from_registry", lambda tag: events.append(("base", tag)) or fake)
+    monkeypatch.setattr(_MODULE.modal.FilePatternMatcher, "from_file", lambda path: ("ignore", path))
+
+    assert _MODULE._image("example/image:tag") is fake
+    dependency_run = events.index(("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project"))
+    source_copy = next(index for index, event in enumerate(events) if event[0] == "dir")
+    project_run = events.index(
+        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
+    )
+
+    assert events[:4] == [
+        ("base", "example/image:tag"),
+        ("file", _MODULE.ROOT / "pyproject.toml", str(_MODULE.REMOTE_ROOT / "pyproject.toml"), True),
+        ("file", _MODULE.ROOT / "uv.lock", str(_MODULE.REMOTE_ROOT / "uv.lock"), True),
+        ("workdir", str(_MODULE.REMOTE_ROOT)),
+    ]
+    assert dependency_run < source_copy < project_run
+
+
 def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     states: list[RunState] = []
     monkeypatch.setattr(_MODULE, "REMOTE_ROOT", tmp_path)

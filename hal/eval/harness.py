@@ -82,6 +82,7 @@ class SessionConfig:
     enable_ffw: bool = True
     emulation_speed: float = 0.0
     blocking_input: bool = True
+    disable_audio: bool = True
     replay_dir: str | Path | None = None
     step_timeout_seconds: float = 30.0
     # Wall-clock cap on driving menus to the first in-game frame. Legit navigation
@@ -115,6 +116,7 @@ def default_session_cfg(replay_dir: Path | None = None, *, instant_match_restart
         enable_ffw=True,
         emulation_speed=0.0,
         blocking_input=True,
+        disable_audio=True,
         step_timeout_seconds=30.0,
         tmp_home_directory=True,
         replay_dir=str(replay_dir) if replay_dir is not None else None,
@@ -145,6 +147,7 @@ def _session_kwargs(
         use_exi_inputs=session_cfg.use_exi_inputs,
         enable_ffw=session_cfg.enable_ffw,
         emulation_speed=session_cfg.emulation_speed,
+        disable_audio=session_cfg.disable_audio,
         polling_mode=session_cfg.polling_mode,
         instant_match_restart=session_cfg.instant_match_restart,
     )

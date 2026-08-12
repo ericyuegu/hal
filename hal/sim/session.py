@@ -180,6 +180,7 @@ class Session:
         emulation_speed: float = 1.0,
         use_exi_inputs: bool = False,
         enable_ffw: bool = False,
+        disable_audio: bool = False,
         polling_mode: bool = False,
         instant_match_restart: bool = False,
     ) -> None:
@@ -223,6 +224,10 @@ class Session:
         self.emulation_speed = emulation_speed
         self.use_exi_inputs = use_exi_inputs
         self.enable_ffw = enable_ffw
+        # Cloud eval machines have no ALSA device. Keep the general Session
+        # default unchanged, but let the headless eval harness prevent Dolphin
+        # from probing a nonexistent default audio device.
+        self.disable_audio = disable_audio
         # Non-blocking slippstream reads, so ``_step_blocking`` polls and its
         # ``step_timeout_seconds`` deadline can actually fire. With the default
         # (False) libmelee blocks in ``recv`` forever if Dolphin stops streaming
@@ -263,6 +268,7 @@ class Session:
             emulation_speed=self.emulation_speed,
             use_exi_inputs=self.use_exi_inputs,
             enable_ffw=self.enable_ffw,
+            disable_audio=self.disable_audio,
             # Pinned libmelee ships the "Instant Match" Gecko code (GALE01r2.ini); when
             # set, a finished match restarts directly into a new one on a random legal
             # stage, so the eval driver navigates the stage-select menu only once per boot.
