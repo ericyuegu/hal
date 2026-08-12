@@ -21,6 +21,8 @@ import hashlib
 import itertools
 import json
 import math
+import os
+import sys
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -38,11 +40,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from scipy.signal import lfilter
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
-import wandb
 from hal import streams
 from hal.data.behavior import HITSTUN_ACTIONS
 from hal.data.feature_stats import FeatureStats
@@ -2138,7 +2140,8 @@ def train(
     comment: str = "",
     resume_run: str | None = None,
     resume_state: dict | None = None,
-) -> None:
+    run_closed_loop_evals: bool = True,
+) -> Path:
     validate_config(cfg)
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), cfg.data_root, comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
@@ -2329,7 +2332,7 @@ def train(
             if val_due:
                 values = val_metrics(model, val_cache, cfg)
                 wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
-            if eval_due:
+            if eval_due and run_closed_loop_evals:
                 values = eval_vs_cpu(
                     model,
                     stats,
@@ -2340,6 +2343,11 @@ def train(
                     inference=evaluation_inference(cfg.eval_n_matchups),
                 )
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
+            elif eval_due:
+                print(
+                    f"[eval] deferred step {step} closed-loop evaluation to an isolated process",
+                    flush=True,
+                )
 
         final_path = run_dir / "final.pt"
         save_checkpoint(
@@ -2352,24 +2360,26 @@ def train(
             wandb_id=None if wandb.run is None else wandb.run.id,
             uploader=uploader,
         )
-        checkpoint_sha = _checkpoint_sha256(final_path)
         final_val = val_metrics(model, val_cache, cfg)
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
-        final_eval = eval_vs_cpu(
-            model,
-            stats,
-            cfg,
-            n_matchups=cfg.final_eval_n_matchups,
-            replay_dir=replay_dir / "final",
-            checkpoint_sha256=checkpoint_sha,
-            inference=evaluation_inference(cfg.final_eval_n_matchups),
-        )
-        wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
+        if run_closed_loop_evals:
+            checkpoint_sha = _checkpoint_sha256(final_path)
+            final_eval = eval_vs_cpu(
+                model,
+                stats,
+                cfg,
+                n_matchups=cfg.final_eval_n_matchups,
+                replay_dir=replay_dir / "final",
+                checkpoint_sha256=checkpoint_sha,
+                inference=evaluation_inference(cfg.final_eval_n_matchups),
+            )
+            wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
     finally:
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
             uploader.close()
         wandb.finish()
+    return final_path
 
 
 _CHECKPOINT_ARCH_FIELDS = {
@@ -2641,6 +2651,7 @@ class Args:
     self_play_instant_match_restart: bool = False
     benchmark: bool = False
     benchmark_iterations: int = 20
+    isolated_closed_loop_evals: bool = False
 
 
 def main(args: Args) -> None:
@@ -2680,7 +2691,30 @@ def main(args: Args) -> None:
         resume_run = args.resume
         cfg = config_from_state(resume_state["cfg"])
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
-    train(cfg, stats, comment=args.comment, resume_run=resume_run, resume_state=resume_state)
+    final_path = train(
+        cfg,
+        stats,
+        comment=args.comment,
+        resume_run=resume_run,
+        resume_state=resume_state,
+        run_closed_loop_evals=not args.isolated_closed_loop_evals,
+    )
+    if args.isolated_closed_loop_evals:
+        # Compiled inference is sound in a fresh process but can hit an illegal
+        # access after thousands of compiled training steps have shaped the CUDA
+        # allocator/cudagraph state. Replace the training process so the final
+        # evaluation gets a pristine CUDA context and no training allocations.
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                __file__,
+                "--eval",
+                str(final_path),
+                "--eval-output-name",
+                "isolated-final",
+            ],
+        )
 
 
 if __name__ == "__main__":
