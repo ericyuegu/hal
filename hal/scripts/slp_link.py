@@ -1,9 +1,13 @@
-"""CLI: emit slippilab viewer URLs for `.slp` files (e.g. closed-loop replays under `runs/`).
+"""CLI: emit slippilab viewer URLs for local or R2 `.slp` files.
 
 slippilab's vite dev server serves files from its `public/` dir. This stages each
 `.slp` into a served directory, mirroring its absolute path so replays that share a
 basename (`Game_<timestamp>.slp` across many match dirs) stay distinct, and prints
 `<url>/?replayUrl=...`.
+
+R2 inputs use short-lived presigned URLs, so the replay is downloaded directly by
+the browser only when its link is opened. The R2 bucket must allow browser GETs
+from the slippilab origin via CORS.
 
 Setup once: `cd ~/src/slippilab && npm run dev` (vite, port 5173), and SSH-forward
 `-L 5173:localhost:5173`. The served dir is symlinked into slippilab's `public/`.
@@ -11,15 +15,21 @@ Setup once: `cd ~/src/slippilab && npm run dev` (vite, port 5173), and SSH-forwa
 Usage:
     python -m hal.scripts.slp_link runs/<run>/replays/match_000/Game_*.slp   # globs/files
     python -m hal.scripts.slp_link runs/<run>                                # all .slp under a dir
+    python -m hal.scripts.slp_link r2:hal/runs/<run>/                        # all R2 .slps under prefix
 """
 
+import fnmatch
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import tyro
+from botocore.exceptions import BotoCoreError
+from botocore.exceptions import ClientError
 from loguru import logger
 
+from hal import r2
 from hal.data.slp_finalize import finalize_bytes
 from hal.data.slp_finalize import is_finalized
 from hal.paths import REPO_DIR
@@ -31,6 +41,19 @@ SERVE_DIR = Path(REPO_DIR) / "data" / "scratch" / "slippilab"
 SLIPPILAB_PUBLIC = Path("~/src/slippilab/public").expanduser()
 SLIPPILAB_URL = "http://localhost:5173"
 SERVE_MOUNT = "hal-runs"
+R2_SCHEME = "r2:"
+DEFAULT_EXPIRES_IN = 3_600
+MIN_EXPIRES_IN = 1
+MAX_EXPIRES_IN = 604_800
+
+
+@dataclass(frozen=True, slots=True)
+class R2Object:
+    bucket: str
+    key: str
+
+    def __str__(self) -> str:
+        return f"{R2_SCHEME}{self.bucket}/{self.key}"
 
 
 def _ensure_mount() -> None:
@@ -82,7 +105,76 @@ def _link(slp: Path) -> str:
             staged.write_bytes(finalized)
     served = staged.relative_to(SERVE_DIR).as_posix()
     replay_url = f"{SLIPPILAB_URL}/{SERVE_MOUNT}/{urllib.parse.quote(served)}"
+    return _viewer_link(replay_url)
+
+
+def _viewer_link(replay_url: str) -> str:
     return f"{SLIPPILAB_URL}/?replayUrl={urllib.parse.quote(replay_url, safe=':/')}"
+
+
+def _parse_r2(value: str) -> R2Object:
+    """Parse ``r2:bucket/key-or-prefix`` without normalizing the object key."""
+    remote = value.removeprefix(R2_SCHEME)
+    bucket, separator, key = remote.partition("/")
+    if not separator or not bucket:
+        raise SystemExit(f"invalid R2 locator {value!r}; expected r2:<bucket>/<object-or-prefix>")
+    return R2Object(bucket=bucket, key=key)
+
+
+def _collect_r2(locator: R2Object, client) -> list[R2Object]:  # type: ignore[no-untyped-def]
+    """Resolve one exact `.slp` key or recursively list a prefix."""
+    try:
+        if locator.key.endswith(".slp"):
+            client.head_object(Bucket=locator.bucket, Key=locator.key)
+            return [locator]
+
+        objects: list[R2Object] = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=locator.bucket, Prefix=locator.key):
+            objects.extend(
+                R2Object(locator.bucket, item["Key"])
+                for item in page.get("Contents", [])
+                if item["Key"].endswith(".slp")
+            )
+        return sorted(objects, key=lambda obj: obj.key)
+    except (BotoCoreError, ClientError) as exc:
+        raise SystemExit(f"failed to inspect {locator}: {exc}") from exc
+
+
+def _cors_origin_matches(pattern: str, origin: str) -> bool:
+    return pattern == "*" or fnmatch.fnmatchcase(origin, pattern)
+
+
+def _validate_r2_cors(bucket: str, client) -> None:  # type: ignore[no-untyped-def]
+    """Require a browser-readable GET rule for slippilab's localhost origin."""
+    try:
+        rules = client.get_bucket_cors(Bucket=bucket).get("CORSRules", [])
+    except (BotoCoreError, ClientError) as exc:
+        raise SystemExit(
+            f"cannot verify CORS for R2 bucket {bucket!r}: {exc}. "
+            f"Allow GET from {SLIPPILAB_URL} before using browser links."
+        ) from exc
+
+    allowed = any(
+        "GET" in {method.upper() for method in rule.get("AllowedMethods", [])}
+        and any(_cors_origin_matches(pattern, SLIPPILAB_URL) for pattern in rule.get("AllowedOrigins", []))
+        for rule in rules
+    )
+    if not allowed:
+        raise SystemExit(
+            f"R2 bucket {bucket!r} does not allow browser GETs from {SLIPPILAB_URL}. "
+            "Add a bucket CORS rule with "
+            f"AllowedOrigins=[{SLIPPILAB_URL!r}] and AllowedMethods=['GET']."
+        )
+
+
+def _r2_link(obj: R2Object, client, expires_in: int) -> str:  # type: ignore[no-untyped-def]
+    replay_url = client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": obj.bucket, "Key": obj.key},
+        ExpiresIn=expires_in,
+    )
+    return _viewer_link(replay_url)
 
 
 def _collect(paths: list[Path]) -> list[Path]:
@@ -98,15 +190,45 @@ def _collect(paths: list[Path]) -> list[Path]:
     return list(dict.fromkeys(out))  # a dir and a file inside it may both be named
 
 
-def slp_link(paths: Annotated[list[Path], tyro.conf.Positional]) -> None:
-    """Print a slippilab URL for each `.slp` (files or dirs to walk)."""
-    slps = _collect(paths)
-    if not slps:
+def slp_link(
+    paths: Annotated[list[str], tyro.conf.Positional],
+    expires_in: int = DEFAULT_EXPIRES_IN,
+) -> None:
+    """Print slippilab URLs for local paths/directories or ``r2:bucket/prefix`` inputs."""
+    if not MIN_EXPIRES_IN <= expires_in <= MAX_EXPIRES_IN:
+        raise SystemExit(f"--expires-in must be between {MIN_EXPIRES_IN} and {MAX_EXPIRES_IN} seconds")
+
+    local_paths = [Path(value) for value in paths if not value.startswith(R2_SCHEME)]
+    remote_locators = [_parse_r2(value) for value in paths if value.startswith(R2_SCHEME)]
+    slps = _collect(local_paths)
+
+    client = None
+    remote_objects: list[R2Object] = []
+    if remote_locators:
+        try:
+            client = r2.client()
+        except r2.R2Error as exc:
+            raise SystemExit(str(exc)) from exc
+        for locator in remote_locators:
+            remote_objects.extend(_collect_r2(locator, client))
+        remote_objects = list(dict.fromkeys(remote_objects))
+
+    if not slps and not remote_objects:
         raise SystemExit("no .slp files found")
-    _ensure_mount()
+
+    if slps:
+        _ensure_mount()
     for slp in slps:
         print(f"{slp.relative_to(Path(REPO_DIR)) if slp.is_relative_to(Path(REPO_DIR)) else slp}")
         print(f"  {_link(slp)}")
+
+    if remote_objects:
+        assert client is not None
+        for bucket in dict.fromkeys(obj.bucket for obj in remote_objects):
+            _validate_r2_cors(bucket, client)
+        for obj in remote_objects:
+            print(obj)
+            print(f"  {_r2_link(obj, client, expires_in)}")
 
 
 def main() -> None:
