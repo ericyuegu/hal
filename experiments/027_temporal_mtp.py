@@ -22,6 +22,7 @@ import itertools
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -68,6 +69,7 @@ from hal.sim.session import PlayerSetup
 from hal.sim.vec import VecMatch
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
+from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
@@ -2160,6 +2162,10 @@ def train(
         if cfg.wandb_log_code:
             log_wandb_code(wandb.run)
     run_dir, replay_dir = setup_run_dir(run_name)
+    config_path = run_dir / "config.json"
+    config_path.write_text(json.dumps(asdict(cfg), indent=2, sort_keys=True, default=str) + "\n")
+    if uploader is not None:
+        uploader.upload(config_path)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model = GPT(cfg).to(DEVICE)
@@ -2333,16 +2339,19 @@ def train(
                 values = val_metrics(model, val_cache, cfg)
                 wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
             if eval_due and run_closed_loop_evals:
+                step_replay_dir = replay_dir / f"step_{step:06d}"
                 values = eval_vs_cpu(
                     model,
                     stats,
                     cfg,
                     n_matchups=cfg.eval_n_matchups,
-                    replay_dir=replay_dir / f"step_{step:06d}",
+                    replay_dir=step_replay_dir,
                     checkpoint_sha256=_checkpoint_sha256(checkpoint_path),
                     inference=evaluation_inference(cfg.eval_n_matchups),
                 )
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
+                if uploader is not None:
+                    uploader.upload_tree(step_replay_dir, base=run_dir)
             elif eval_due:
                 print(
                     f"[eval] deferred step {step} closed-loop evaluation to an isolated process",
@@ -2364,16 +2373,19 @@ def train(
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
         if run_closed_loop_evals:
             checkpoint_sha = _checkpoint_sha256(final_path)
+            final_replay_dir = replay_dir / "final"
             final_eval = eval_vs_cpu(
                 model,
                 stats,
                 cfg,
                 n_matchups=cfg.final_eval_n_matchups,
-                replay_dir=replay_dir / "final",
+                replay_dir=final_replay_dir,
                 checkpoint_sha256=checkpoint_sha,
                 inference=evaluation_inference(cfg.final_eval_n_matchups),
             )
             wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
+            if uploader is not None:
+                uploader.upload_tree(final_replay_dir, base=run_dir)
     finally:
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
@@ -2428,6 +2440,8 @@ def eval_checkpoint(
     eager: bool = False,
     max_parallel: int | None = None,
     output_name: str | None = None,
+    log_wandb: bool = False,
+    upload_artifacts: bool = False,
 ) -> dict[str, float]:
     model, cfg, stats, state = load_checkpoint(path)
     cfg = replace(
@@ -2450,6 +2464,34 @@ def eval_checkpoint(
         exec_horizon=horizon,
         checkpoint_sha256=_checkpoint_sha256(Path(path)),
     )
+    summary = {
+        "checkpoint": str(Path(path).resolve()),
+        "checkpoint_step": int(state["step"]),
+        "config": asdict(cfg),
+        "metrics": values,
+    }
+    (replay_dir / "metrics.json").write_text(json.dumps(summary, indent=2, sort_keys=True, default=str) + "\n")
+    if log_wandb:
+        wandb_id = state.get("wandb_id")
+        if not wandb_id:
+            raise RuntimeError("checkpoint has no wandb_id; cannot log standalone evaluation")
+        wandb.init(project="hal", id=wandb_id, resume="allow")
+        wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
+        wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
+        wandb.log(
+            {
+                "global_step": int(state["step"]),
+                **{f"eval/{name}": value for name, value in values.items()},
+            }
+        )
+        wandb.finish()
+    if upload_artifacts:
+        run_dir = Path(path).resolve().parent
+        (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, sort_keys=True, default=str) + "\n")
+        uploader = BackgroundUploader(run_dir.name)
+        uploader.upload(run_dir / "config.json")
+        uploader.upload_tree(replay_dir, base=run_dir)
+        uploader.close()
     print(f"[eval] step={state['step']} horizon={horizon}: {values}", flush=True)
     return values
 
@@ -2644,6 +2686,8 @@ class Args:
     eval_eager: bool = False
     eval_max_parallel: int | None = None
     eval_output_name: str | None = None
+    eval_log_wandb: bool = False
+    eval_upload_artifacts: bool = False
     self_play_eval: str | None = None
     self_play_matches: int = 12
     self_play_frames: int = 14_400
@@ -2652,6 +2696,7 @@ class Args:
     benchmark: bool = False
     benchmark_iterations: int = 20
     isolated_closed_loop_evals: bool = False
+    resume_closed_loop_eval_first: bool = False
 
 
 def main(args: Args) -> None:
@@ -2671,6 +2716,8 @@ def main(args: Args) -> None:
             eager=args.eval_eager,
             max_parallel=args.eval_max_parallel,
             output_name=args.eval_output_name,
+            log_wandb=args.eval_log_wandb,
+            upload_artifacts=args.eval_upload_artifacts,
         )
         return
     if args.self_play_eval is not None:
@@ -2682,6 +2729,40 @@ def main(args: Args) -> None:
             instant_match_restart=args.self_play_instant_match_restart,
         )
         return
+    if args.resume is not None and args.resume_closed_loop_eval_first:
+        checkpoint = download_latest(args.resume, Path("runs") / args.resume)
+        if checkpoint is None:
+            raise SystemExit(f"no latest.pt for run {args.resume!r}")
+        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        cfg = config_from_state(state["cfg"])
+        subprocess.run(
+            [
+                sys.executable,
+                __file__,
+                "--eval",
+                str(checkpoint),
+                "--eval-n-matchups",
+                str(cfg.eval_n_matchups),
+                "--eval-max-parallel",
+                str(cfg.eval_max_parallel),
+                "--eval-output-name",
+                f"step-{int(state['step']):06d}-isolated",
+                "--eval-log-wandb",
+                "--eval-upload-artifacts",
+            ],
+            check=True,
+        )
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                __file__,
+                "--resume",
+                args.resume,
+                "--isolated-closed-loop-evals",
+            ],
+        )
+
     resume_run = resume_state = None
     cfg = args.cfg
     if args.resume is not None:
@@ -2713,6 +2794,8 @@ def main(args: Args) -> None:
                 str(final_path),
                 "--eval-output-name",
                 "isolated-final",
+                "--eval-log-wandb",
+                "--eval-upload-artifacts",
             ],
         )
 
