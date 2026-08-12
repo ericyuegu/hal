@@ -9,6 +9,7 @@ to get wrong)."""
 
 import math
 
+import pytest
 import torch
 
 from hal.training import scoring
@@ -186,6 +187,56 @@ def test_btn_combo_support_thresholds():
     # raising the threshold keeps a strict subset; min_count=0 keeps every combo (masking disabled)
     assert bool((scoring.btn_combo_support(1000) & ~support).any()) is False
     assert scoring.btn_combo_support(0).all()
+
+
+def test_btn_combo_remap_is_identity_on_the_support():
+    remap = scoring.btn_combo_remap(100)
+    assert remap.shape == (scoring.N_BUTTON_COMBOS,) and remap.dtype == torch.long
+    support = scoring.btn_combo_support(100)
+    idx = torch.arange(scoring.N_BUTTON_COMBOS)
+    assert torch.equal(remap[support], idx[support])
+    assert scoring.btn_combo_support(0).all() and torch.equal(scoring.btn_combo_remap(0), idx)
+
+
+def test_btn_combo_remap_lands_on_a_nearest_supported_combo():
+    remap = scoring.btn_combo_remap(100)
+    support = scoring.btn_combo_support(100)
+    assert support[remap].all()  # every image is supported
+    bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS))
+    hamming = (bits[:, None, :] != bits[None, :, :]).sum(-1)  # [256, 256]
+    click = bits[:, list(scoring._CLICK_BITS)].bool()
+    adds_click = (click[None, :, :] & ~click[:, None, :]).any(-1)  # [src, dst]
+    candidates = support[None, :] & ~adds_click
+    best = hamming.masked_fill(~candidates, scoring.N_BUTTONS + 1).min(-1).values
+    achieved = hamming[torch.arange(scoring.N_BUTTON_COMBOS), remap]
+    assert torch.equal(achieved, best)  # minimal click-safe distance for every combo
+
+
+def test_btn_combo_remap_breaks_ties_toward_the_frequent_combo():
+    remap = scoring.btn_combo_remap(100)
+    support = scoring.btn_combo_support(100)
+    bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS))
+    hamming = (bits[:, None, :] != bits[None, :, :]).sum(-1)
+    counts = torch.tensor(scoring.BTN_COMBO_COUNTS)
+    click = bits[:, list(scoring._CLICK_BITS)].bool()
+    for combo in (~support).nonzero(as_tuple=True)[0]:
+        keeps_clicks = ~(click & ~click[combo]).any(-1)  # candidates that add no L/R click
+        tied = support & keeps_clicks & (hamming[combo] == hamming[combo, remap[combo]])
+        assert counts[remap[combo]] == counts[tied].max()
+
+
+def test_btn_combo_remap_raises_when_nothing_is_supported():
+    with pytest.raises(ValueError, match="no supported button combo"):
+        scoring.btn_combo_remap(max(scoring.BTN_COMBO_COUNTS) + 1)
+
+
+def test_btn_combo_remap_never_adds_a_digital_click():
+    bits = scoring.combo_to_buttons(torch.arange(scoring.N_BUTTON_COMBOS))
+    click = bits[:, list(scoring._CLICK_BITS)].bool()
+    for min_count in (10, 100, 1000):
+        remap = scoring.btn_combo_remap(min_count)
+        added = (click[remap] & ~click).any(-1)
+        assert not added.any()
 
 
 def test_dead_mass_is_softmax_mass_on_unsupported_combos():

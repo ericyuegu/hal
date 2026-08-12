@@ -290,6 +290,34 @@ def btn_combo_support(min_count: int) -> Tensor:
     return torch.tensor([c >= min_count for c in BTN_COMBO_COUNTS], dtype=torch.bool)
 
 
+# Digital L/R click bits inside the combo id (ACTION_CHANNELS button order a,b,x,y,z,r,l,d_up).
+_CLICK_BITS = (5, 6)
+
+
+def btn_combo_remap(min_count: int) -> Tensor:
+    """``[256]`` long lookup onto the ``min_count`` support set: a supported combo maps to
+    itself, an unsupported combo to the nearest supported combo by bit Hamming distance,
+    ties to the higher-count combo. ``min_count=0`` is the identity.
+
+    A remap never ADDS a digital L/R click bit: a click demands a full trigger
+    (``canonicalize``), so an added click could make a frame's button target invalid
+    against its own trigger class. Combo 0 carries no clicks and is always supported,
+    so a click-free candidate always exists."""
+    support = btn_combo_support(min_count)
+    if not support.any():
+        raise ValueError(f"min_count={min_count} leaves no supported button combo")
+    counts = torch.tensor(BTN_COMBO_COUNTS, dtype=torch.long)
+    supported = support.nonzero(as_tuple=True)[0]
+    # Descending-count order makes argmin's first-minimum tie-break pick the frequent combo.
+    supported = supported[counts[supported].argsort(descending=True, stable=True)]
+    hamming = (_COMBO_BITS[:, None, :] != _COMBO_BITS[None, supported, :]).sum(-1)  # [256, K]
+    source_clicks = _COMBO_BITS[:, _CLICK_BITS].bool()
+    target_clicks = _COMBO_BITS[supported][:, _CLICK_BITS].bool()
+    adds_click = (target_clicks[None, :, :] & ~source_clicks[:, None, :]).any(-1)  # [256, K]
+    hamming = hamming + adds_click.long() * (N_BUTTONS + 1)
+    return supported[hamming.argmin(-1)]
+
+
 def buttons_to_combo(buttons: Tensor) -> Tensor:
     """``[..., 8]`` button bits {0,1} → ``[...]`` long combo id in ``[0, 256)``. Bit ``k`` of
     the id is button channel ``k`` (ACTION_CHANNELS order), so the full co-press product is
