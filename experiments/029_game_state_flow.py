@@ -2687,7 +2687,7 @@ def eval_checkpoint(
         n_matchups=cfg.final_eval_n_matchups if n_matchups is None else n_matchups,
         replay_dir=replay_dir,
         exec_horizon=horizon,
-        checkpoint_sha256=_checkpoint_sha256(Path(path)),
+        checkpoint_sha256=_checkpoint_sha256(checkpoint),
     )
     print(f"[eval] step={state['step']} horizon={horizon}: {values}", flush=True)
     return values
