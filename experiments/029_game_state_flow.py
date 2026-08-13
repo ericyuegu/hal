@@ -23,8 +23,6 @@ import time
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
-from concurrent.futures import Future
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -1528,9 +1526,9 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
 class BF16Inference:
     """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
 
-    The background prewarm builds every bucket required by the scheduled evaluations.
-    Runtime calls use the smallest compiled bucket that fits. Padding and slot-keyed
-    random streams leave real rows unchanged.
+    Evaluation compiles each required program synchronously on first use. Runtime
+    calls use the smallest compiled bucket that fits. Padding and slot-keyed random
+    streams leave real rows unchanged.
     """
 
     def __init__(
@@ -2287,8 +2285,9 @@ def train(
     iterator = iter(train_loader)
     copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     run_started = time.monotonic()
-    inference_prewarm: OverlappedInference | None = None
-    inference_prewarm_started = False
+    # CUDA compilation must remain on the training thread. Background compilation
+    # deadlocked training on both H100 and L40S hosts.
+    eval_inference: BF16Inference | None = None
     model.train()
     try:
         for step in range(start_step, cfg.max_steps):
@@ -2373,12 +2372,6 @@ def train(
                     f"{metrics['loss']:.3f} bits objective, {cfg.batch_size / stopwatch.elapsed:.0f} samples/s",
                     flush=True,
                 )
-            # Let the first training step claim its compiled graphs before starting
-            # the independent inference compile.  From here the CPU compiler and its
-            # dedicated CUDA stream can overlap the many steps before evaluation.
-            if not inference_prewarm_started:
-                inference_prewarm = start_inference_prewarm(policy, cfg)
-                inference_prewarm_started = True
             val_due = cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0
             eval_due = cfg.eval_every > 0 and step > 0 and step % cfg.eval_every == 0
             ckpt_due = cfg.ckpt_every > 0 and step > 0 and step % cfg.ckpt_every == 0
@@ -2399,11 +2392,10 @@ def train(
                 values.update(gradient_interaction(model, val_cache[0], cfg))
                 wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
             if eval_due:
-                eval_model, eval_inference = (
-                    (policy, None) if inference_prewarm is None else inference_prewarm.prepare(policy)
-                )
+                if eval_inference is None:
+                    eval_inference = BF16Inference(policy, cfg)
                 values = eval_vs_cpu(
-                    eval_model,
+                    policy,
                     stats,
                     cfg,
                     n_matchups=cfg.eval_n_matchups,
@@ -2411,13 +2403,8 @@ def train(
                     checkpoint_sha256=_checkpoint_sha256(checkpoint_path),
                     inference=eval_inference,
                 )
-                if inference_prewarm is not None:
-                    values.update(inference_prewarm.metrics())
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
 
-        if not inference_prewarm_started:
-            inference_prewarm = start_inference_prewarm(policy, cfg)
-            inference_prewarm_started = True
         final_path = run_dir / "final.pt"
         save_checkpoint(
             final_path,
@@ -2432,9 +2419,10 @@ def train(
         checkpoint_sha = _checkpoint_sha256(final_path)
         final_val = combined_val_metrics(model, val_cache, cfg)
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
-        eval_model, eval_inference = (policy, None) if inference_prewarm is None else inference_prewarm.prepare(policy)
+        if eval_inference is None:
+            eval_inference = BF16Inference(policy, cfg)
         final_eval = eval_vs_cpu(
-            eval_model,
+            policy,
             stats,
             cfg,
             n_matchups=cfg.final_eval_n_matchups,
@@ -2442,11 +2430,9 @@ def train(
             checkpoint_sha256=checkpoint_sha,
             inference=eval_inference,
         )
-        if inference_prewarm is not None:
-            final_eval.update(inference_prewarm.metrics())
         wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
         stride6 = eval_vs_cpu(
-            eval_model,
+            policy,
             stats,
             cfg,
             n_matchups=cfg.final_diag_n_matchups,
@@ -2455,8 +2441,6 @@ def train(
             checkpoint_sha256=checkpoint_sha,
             inference=eval_inference,
         )
-        if inference_prewarm is not None:
-            stride6.update(inference_prewarm.metrics())
         wandb.log({"global_step": cfg.max_steps, **{f"eval_s6/{name}": value for name, value in stride6.items()}})
         model.state_expert.to("cpu")
         # The auxiliary expert and optimizer state are training-only. Release
@@ -2466,7 +2450,7 @@ def train(
         if DEVICE == "cuda":
             torch.cuda.empty_cache()
         final_h2h(
-            eval_model,
+            policy,
             stats,
             cfg,
             run_dir=run_dir,
@@ -2475,8 +2459,6 @@ def train(
             inference=eval_inference,
         )
     finally:
-        if inference_prewarm is not None:
-            inference_prewarm.close()
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
             uploader.close()
@@ -2590,8 +2572,8 @@ def benchmark_self_play_checkpoint(
     horizon = cfg.exec_horizon
     real_rows = 2 * n_matches
     inference_bucket = covering_power_of_two(real_rows)
-    # Match the background inference replica used during training. CUDA graphs
-    # cannot safely own the trunk's mutable rotary cache across graph partitions.
+    # CUDA graphs cannot safely own the trunk's mutable rotary cache across graph
+    # partitions, so checkpoint evaluation uses ordinary compiled kernels.
     inference = BF16Inference(model, cfg, compile_mode="default", compiled_buckets=(inference_bucket,))
     telemetry = DecodeTelemetry()
 
@@ -2713,81 +2695,6 @@ def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -
         slot_ids=torch.arange(batch_size, dtype=torch.long, device=device),
         reset=torch.ones(batch_size, dtype=torch.bool, device=device),
     )
-
-
-class OverlappedInference:
-    """Precompile a persistent inference replica while ordinary training continues.
-
-    CUDA graph capture is process-global enough to conflict with the trainer's per-step
-    synchronization, so the overlapped engine deliberately uses Inductor's ``default``
-    mode (compiled kernels, no CUDA graphs).  Keeping a replica separate from the
-    training model prevents the background no-grad forwards from racing with optimizer
-    updates; later checkpoints are copied into the replica's existing storages.
-    """
-
-    def __init__(self, source: GPT, cfg: TrainConfig) -> None:
-        if next(source.parameters()).device.type != "cuda" or cfg.inference_mode != "compiled":
-            raise ValueError("overlapped inference requires compiled CUDA evaluation")
-        self.cfg = cfg
-        self.model = GPT(cfg).to(next(source.parameters()).device).eval()
-        self.model.load_state_dict(source.state_dict())
-        self.inference = BF16Inference(self.model, cfg, compile_mode="default")
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference-prewarm")
-        self._future: Future[float] = self._executor.submit(self._prewarm)
-        self._reported = False
-        self.compile_seconds = 0.0
-        self.first_wait_seconds = 0.0
-
-    @torch.no_grad()
-    def _prewarm(self) -> float:
-        device = next(self.model.parameters()).device
-        stream = torch.cuda.Stream(device=device)
-        started = time.perf_counter()
-        with torch.cuda.device(device), torch.cuda.stream(stream):
-            for bucket, horizon in _planned_inference_programs(self.cfg):
-                ctx = synthetic_context(self.cfg, bucket, device)
-                # First call traces and compiles; the second proves the program can
-                # replay before an evaluation depends on it.
-                self.inference.decode(ctx, horizon)
-                self.inference.decode(ctx, horizon)
-        stream.synchronize()
-        return time.perf_counter() - started
-
-    @torch.no_grad()
-    def prepare(self, source: GPT) -> tuple[GPT, BF16Inference]:
-        """Wait for compilation if needed, then install the source's latest weights."""
-        wait_started = time.perf_counter()
-        compile_seconds = self._future.result()
-        wait_seconds = time.perf_counter() - wait_started
-        self.compile_seconds = compile_seconds
-        if not self._reported:
-            self.first_wait_seconds = wait_seconds
-        self.model.load_state_dict(source.state_dict())
-        torch.cuda.synchronize(next(self.model.parameters()).device)
-        if not self._reported:
-            print(
-                f"[inference] background prewarm took {compile_seconds:.1f}s; "
-                f"first evaluation waited {wait_seconds:.3f}s",
-                flush=True,
-            )
-            self._reported = True
-        return self.model, self.inference
-
-    def metrics(self) -> dict[str, float]:
-        return {
-            "inference_prewarm_seconds": self.compile_seconds,
-            "inference_prewarm_first_eval_wait_seconds": self.first_wait_seconds,
-        }
-
-    def close(self) -> None:
-        self._executor.shutdown(wait=True)
-
-
-def start_inference_prewarm(model: GPT, cfg: TrainConfig) -> OverlappedInference | None:
-    if next(model.parameters()).device.type != "cuda" or cfg.inference_mode != "compiled":
-        return None
-    print("[inference] compiling the fixed inference programs in the background", flush=True)
-    return OverlappedInference(model, cfg)
 
 
 def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]:

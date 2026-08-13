@@ -257,20 +257,18 @@ def test_tiny_training_run_reaches_final_evals_and_pinned_h2h(monkeypatch, tmp_p
     monkeypatch.setattr(exp, "save_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp, "_checkpoint_sha256", lambda path: "a" * 64)
     evaluations: list[tuple[int, int]] = []
+    eval_inference = object()
+    inference_models: list[object] = []
 
-    class FakePrewarm:
-        def prepare(self, source):
-            return source, None
+    def fake_inference(model, cfg):
+        inference_models.append(model)
+        return eval_inference
 
-        def metrics(self):
-            return {"inference_prewarm_seconds": 1.0}
+    monkeypatch.setattr(exp, "BF16Inference", fake_inference)
 
-        def close(self):
-            pass
-
-    monkeypatch.setattr(exp, "start_inference_prewarm", lambda model, cfg: FakePrewarm())
-
-    def fake_eval(model, stats, cfg, *, n_matchups, replay_dir, exec_horizon=None, **kwargs):
+    def fake_eval(model, stats, cfg, *, n_matchups, replay_dir, exec_horizon=None, inference=None, **kwargs):
+        assert model is inference_models[0]
+        assert inference is eval_inference
         evaluations.append((n_matchups, cfg.exec_horizon if exec_horizon is None else exec_horizon))
         return {"net_stock_lcb": 0.0, "net_dmg_lcb": 0.0}
 
@@ -278,6 +276,8 @@ def test_tiny_training_run_reaches_final_evals_and_pinned_h2h(monkeypatch, tmp_p
     h2h_calls: list[Path] = []
 
     def fake_h2h(model, stats, cfg, *, run_dir, reference, uploader, inference):
+        assert model is inference_models[0]
+        assert inference is eval_inference
         h2h_calls.append(reference)
         return {}
 
@@ -294,4 +294,5 @@ def test_tiny_training_run_reaches_final_evals_and_pinned_h2h(monkeypatch, tmp_p
     monkeypatch.setattr(exp.wandb, "finish", lambda: None)
     exp.train(cfg, {}, comment="tiny")
     assert evaluations == [(cfg.final_eval_n_matchups, 4), (cfg.final_diag_n_matchups, 6)]
+    assert len(inference_models) == 1
     assert h2h_calls == [reference]

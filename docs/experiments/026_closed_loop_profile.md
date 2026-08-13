@@ -12,7 +12,7 @@ Closed-loop evaluation had three independent costs:
 
 The implementation removes the first two causes and bounds the third:
 
-- Training starts a separate no-grad inference replica and compiles the scheduled inference programs in the background.
+- Evaluation compiles its inference programs synchronously on first use; training never compiles CUDA programs from another thread.
 - Each Dolphin Session now runs in a spawned Python process. The main process only owns the policy and GPU.
 - Observations, action plans, and final trajectories use typed shared memory. Hot control messages are fixed 64-byte binary records. The hot path does not use pickle.
 - One Session worker can publish more than one model slot. Self-play uses two slots per Dolphin, one for each controller port, and the broker decodes all live ports in one batch.
@@ -208,7 +208,7 @@ allowed CPUs 96 -> automatic wave 128 -> compiled bucket 128
 
 There is no hard maximum. Explicit power-of-two overrides remain available.
 
-Training constructs a separate inference replica after the first training step. A background thread runs its static inference programs under `torch.no_grad()` on a dedicated CUDA stream while later training steps continue. It uses Inductor `default` mode because CUDA graph capture conflicted with concurrent trainer synchronization. Before evaluation, the latest training weights are copied into the replica's existing parameter storage. The compiled program is code specialized to tensor shapes and operations; it is not a second set of frozen weights.
+Safety correction (2026-08-12): background inference compilation was removed repository-wide after it deadlocked training on both H100 and L40S hosts. CUDA compilation and training must not overlap across Python threads. Evaluation now keeps one inference engine over the live policy and compiles each required bucket/horizon synchronously on first use; later evaluations reuse those programs with the policy's updated parameter storage.
 
 On the RTX 3060, the steady decode measurements were:
 
@@ -218,7 +218,7 @@ On the RTX 3060, the steady decode measurements were:
 | batch 16, horizon 4 | 7.542 ms | 8,485 |
 | batch 32, horizon 4 | 9.88 ms | 12,955 |
 
-Inductor `default` and `reduce-overhead` were within measurement noise for this model. Evaluation evidence records the selected wave, compiled bucket, compile mode, maximum decode duration, total prewarm time, and the time the first evaluation still had to wait.
+Inductor `default` and `reduce-overhead` were within measurement noise for this model. Evaluation evidence records the selected wave, compiled bucket, compile mode, and maximum decode duration.
 The added hardware and bucket fields raise the match-row evidence schema to version 6.
 
 ## Checkpoint self-play benchmark

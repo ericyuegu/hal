@@ -379,32 +379,17 @@ def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeyp
     monkeypatch.setattr(exp, "save_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp, "_checkpoint_sha256", lambda path: "a" * 64)
     evaluations: list[tuple[int, int]] = []
-    eval_model = exp.GPT(cfg)
     eval_inference = object()
-    prepared: list[object] = []
-    closed: list[bool] = []
+    inference_models: list[object] = []
 
-    class FakePrewarm:
-        def prepare(self, source):
-            prepared.append(source)
-            return eval_model, eval_inference
+    def fake_inference(model, cfg):
+        inference_models.append(model)
+        return eval_inference
 
-        def metrics(self):
-            return {"inference_prewarm_seconds": 1.0}
-
-        def close(self):
-            closed.append(True)
-
-    starts: list[object] = []
-
-    def fake_start(model, cfg):
-        starts.append(model)
-        return FakePrewarm()
-
-    monkeypatch.setattr(exp, "start_inference_prewarm", fake_start)
+    monkeypatch.setattr(exp, "BF16Inference", fake_inference)
 
     def fake_eval(model, stats, cfg, *, n_matchups, replay_dir, exec_horizon=None, checkpoint_sha256, inference=None):
-        assert model is eval_model
+        assert model is inference_models[0]
         assert inference is eval_inference
         evaluations.append((n_matchups, cfg.exec_horizon if exec_horizon is None else exec_horizon))
         return {"net_stock_lcb": 0.0, "net_dmg_lcb": 0.0}
@@ -422,6 +407,4 @@ def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeyp
     monkeypatch.setattr(exp.wandb, "finish", lambda: None)
     exp.train(cfg, {}, comment="tiny")
     assert evaluations == [(cfg.final_eval_n_matchups, 4), (cfg.final_diag_n_matchups, 6)]
-    assert starts and len(starts) == 1
-    assert prepared == starts
-    assert closed == [True]
+    assert len(inference_models) == 1

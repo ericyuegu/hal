@@ -48,20 +48,6 @@ from torch.nn.attention.flex_attention import flex_attention
 # still says "flex".
 torch._dynamo.config.cache_size_limit = 64
 
-# Experiment 026 can overlap training with a background thread that compiles fixed inference
-# programs. Inside each such torch.compile, AOTAutograd's make_fx sets torch.fx's PROCESS-GLOBAL tracing flag
-# (``torch.fx._symbolic_trace._is_fx_tracing_flag``; pytorch/pytorch#126024). While that thread
-# holds the flag, EVERY entry into a compiled function on the training thread raises "Detected
-# that you are using FX to symbolically trace a dynamo-optimized function" — cache hits included,
-# so no warm-up order can remove the race. This switch makes dynamo dispatch and compile normally
-# under the flag. The suppressed error stays correct only for a real single-thread
-# ``symbolic_trace`` over a compiled function, which this codebase never does. The switch cannot
-# interleave two traces: every dynamo/AOT/Inductor compile runs inside the process-global
-# ``torch._dynamo.convert_frame.compile_lock``, and the flag windows live inside the lock — so a
-# cross-thread entry under the flag either dispatches to already-built code or blocks on the lock
-# until the foreign trace ends.
-torch._dynamo.config.force_compile_during_fx_trace = True
-
 # Compilation is lazy, so both of these cost nothing until the first FlexAttention call. The mask
 # build is compiled too: in eager it walks the whole [B, L, L] index grid once per forward, which
 # measures 6.6 ms at B=64/L=1024 and 13.2 ms at B=32/L=2048, against 0.3 ms compiled.
