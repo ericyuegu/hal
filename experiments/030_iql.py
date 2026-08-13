@@ -89,6 +89,7 @@ _exp026 = _experiment_module("hal_exp026_for_030", "026_temporal_mtp.py")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EXECUTED_CHUNK = 4
+EVAL_MAX_PARALLEL = 4
 GROUP_NAMES = _base.GROUP_NAMES
 GROUP_VOCABS = _base.GROUP_VOCABS
 GROUP_ORDER = _base.GROUP_ORDER
@@ -195,7 +196,9 @@ class TrainConfig:
     eval_max_frames: int = 7200
     eval_n_matchups: int = 32
     final_eval_n_matchups: int = 96
-    eval_max_parallel: int | None = None
+    # One Dolphin plus one slippstream child per boot. Modal training containers
+    # have 8 CPUs, so four concurrent boots avoid starving first-control startup.
+    eval_max_parallel: int | None = EVAL_MAX_PARALLEL
 
     final_h2h_reference_run: str = REFERENCE_026_RUN
     final_h2h_reference_sha256: str = REFERENCE_026_SHA256
@@ -1282,7 +1285,10 @@ def config_from_state(values: dict[str, Any]) -> TrainConfig:
     if missing:
         raise ValueError(f"checkpoint is not experiment 030; missing {sorted(missing)}")
     known = {item.name for item in fields(TrainConfig)}
-    return TrainConfig(**{name: value for name, value in values.items() if name in known})
+    cfg = TrainConfig(**{name: value for name, value in values.items() if name in known})
+    if cfg.eval_max_parallel is None or cfg.eval_max_parallel > EVAL_MAX_PARALLEL:
+        cfg = replace(cfg, eval_max_parallel=EVAL_MAX_PARALLEL)
+    return cfg
 
 
 def policy_state_dict(checkpoint_model: dict[str, Tensor]) -> dict[str, Tensor]:

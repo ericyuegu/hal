@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -272,6 +273,11 @@ def test_policy_only_state_omits_every_critic() -> None:
     loaded = exp.GPT(model.policy.cfg)
     loaded.load_state_dict(policy_state, strict=True)
     assert not any(name.startswith(("q1.", "q2.", "value.", "target_q")) for name in policy_state)
+
+
+def test_checkpoint_config_caps_eval_parallelism_for_modal_cpu_budget() -> None:
+    values = asdict(_cfg(eval_max_parallel=16))
+    assert exp.config_from_state(values).eval_max_parallel == exp.EVAL_MAX_PARALLEL
 
 
 def test_tiny_training_run_reaches_policy_only_eval_and_pinned_h2h(monkeypatch, tmp_path: Path) -> None:
