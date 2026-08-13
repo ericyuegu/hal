@@ -294,7 +294,13 @@ def test_tiny_training_run_reaches_policy_only_eval_and_pinned_h2h(monkeypatch, 
     inference = object()
     evaluated: list[object] = []
     h2h: list[tuple[object, Path]] = []
-    monkeypatch.setattr(exp, "BF16Inference", lambda model, cfg: inference)
+    inference_buckets: list[int | None] = []
+
+    def fake_inference(model, cfg, *, bucket=None):
+        inference_buckets.append(bucket)
+        return inference
+
+    monkeypatch.setattr(exp, "BF16Inference", fake_inference)
 
     def fake_eval(model, stats, cfg, **kwargs):
         assert isinstance(model, exp.GPT)
@@ -320,4 +326,5 @@ def test_tiny_training_run_reaches_policy_only_eval_and_pinned_h2h(monkeypatch, 
     monkeypatch.setattr(exp.wandb, "finish", lambda: None)
     exp.train(cfg, {}, comment="tiny")
     assert len(evaluated) == 1
+    assert inference_buckets == [exp._eval_inference_bucket(cfg, cfg.final_eval_n_matchups)]
     assert h2h == [(evaluated[0], reference)]

@@ -95,6 +95,7 @@ GROUP_ORDER = _base.GROUP_ORDER
 N_GROUPS = _base.N_GROUPS
 StructuredControllerCodec = _base.StructuredControllerCodec
 BF16Inference = _base.BF16Inference
+_eval_inference_bucket = _base._eval_inference_bucket
 RecedingHorizon = _base.RecedingHorizon
 amp_context = _base.amp_context
 canonical_context = _base.canonical_context
@@ -1200,7 +1201,9 @@ def train(
                 values = val_metrics(model, validation, cfg)
                 wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
             if eval_due:
-                inference = inference or BF16Inference(policy, cfg)
+                inference = inference or BF16Inference(
+                    policy, cfg, bucket=_eval_inference_bucket(cfg, cfg.eval_n_matchups)
+                )
                 values = eval_vs_cpu(
                     policy,
                     stats,
@@ -1225,7 +1228,9 @@ def train(
         )
         final_val = val_metrics(model, validation, cfg)
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
-        inference = inference or BF16Inference(policy, cfg)
+        final_bucket = _eval_inference_bucket(cfg, cfg.final_eval_n_matchups)
+        if inference is None or (inference.compiled and inference.bucket != final_bucket):
+            inference = BF16Inference(policy, cfg, bucket=final_bucket)
         values = eval_vs_cpu(
             policy,
             stats,
