@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import boto3
+import loguru
 import pytest
 from botocore.exceptions import ClientError
 
@@ -191,6 +192,13 @@ def test_retry_policy_uses_requested_attempt_count_without_delay() -> None:
 
     assert retries.max_retries == 10
     assert retries.initial_delay.total_seconds() == 0
+
+
+def test_serialized_remote_function_references_loguru_by_module() -> None:
+    # Modal serializes _run_remote and its referenced globals. Capturing the
+    # configured Logger directly also captures its TTY-backed stderr sink.
+    assert _MODULE._run_remote.__globals__["loguru"] is loguru
+    assert "logger" not in _MODULE._run_remote.__globals__
 
 
 def test_redact_argv_hides_conventional_secret_values() -> None:

@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import Final
 from typing import Literal
 
+import loguru
 import modal
 import tyro
 from botocore.exceptions import ClientError
-from loguru import logger
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 EXPERIMENTS_ROOT: Final[Path] = ROOT / "experiments"
@@ -160,7 +160,7 @@ def preflight_git() -> str:
         branch = _git("rev-parse", "--abbrev-ref", "HEAD")
         if branch == "HEAD":
             raise SystemExit(f"Git SHA {sha[:10]} is not pushed and the working tree is detached.")
-        logger.info(f"{sha[:10]} is not on a remote; pushing {branch}")
+        loguru.logger.info(f"{sha[:10]} is not on a remote; pushing {branch}")
         subprocess.run(["git", "push", "origin", branch], cwd=ROOT, check=True)
     return sha
 
@@ -350,7 +350,7 @@ def _run_checked(
     timeout: int | None = None,
     capture: bool = False,
 ) -> str:
-    logger.info(f"running: {shlex.join(argv)}")
+    loguru.logger.info(f"running: {shlex.join(argv)}")
     result = subprocess.run(
         argv,
         cwd=REMOTE_ROOT,
@@ -371,7 +371,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     """Fail before data download if the GPU, shared memory, or SSD is unsuitable."""
     subprocess.run(["mount", "-o", "remount,size=16g", "/dev/shm"], check=False, capture_output=True)
     shm_gib = shutil.disk_usage("/dev/shm").total / 2**30
-    logger.info(f"/dev/shm = {shm_gib:.1f} GiB")
+    loguru.logger.info(f"/dev/shm = {shm_gib:.1f} GiB")
     if shm_gib < 1:
         raise RuntimeError(f"/dev/shm is {shm_gib:.2f} GiB; training requires at least 1 GiB")
 
@@ -396,7 +396,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
         ],
         capture=True,
     )
-    logger.info(f"CUDA compute capability = sm_{cap}")
+    loguru.logger.info(f"CUDA compute capability = sm_{cap}")
 
     env = os.environ.copy()
     # Modal injects its internal PyPI mirror through UV_INDEX_URL. Keep uv's
@@ -418,7 +418,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     if cap == "120":
         env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
     free_gib = shutil.disk_usage(cache_root).free / 2**30
-    logger.info(f"compile-cache free = {free_gib:.1f} GiB")
+    loguru.logger.info(f"compile-cache free = {free_gib:.1f} GiB")
     if free_gib < 10:
         raise RuntimeError(f"compile cache has {free_gib:.1f} GiB free; training requires at least 10 GiB")
     _run_checked(
@@ -443,7 +443,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     )
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-    logger.info(f"open-file limit {soft} -> {hard}")
+    loguru.logger.info(f"open-file limit {soft} -> {hard}")
     return env
 
 
@@ -501,12 +501,12 @@ def _run_training(
             if state.run_name is None:
                 state = RunState(status="running", run_name=found)
                 _commit_state(path, state, volume_name)
-                logger.info(f"saved retry run name {found!r}")
+                loguru.logger.info(f"saved retry run name {found!r}")
         return None
 
     def interrupt(signum: int, _frame: object) -> None:
         interrupted.set()
-        logger.warning(f"received signal {signum}; forwarding SIGINT to the training process group")
+        loguru.logger.warning(f"received signal {signum}; forwarding SIGINT to the training process group")
         if process is not None:
             _kill_group(process.pid, signal.SIGINT)
 
@@ -526,7 +526,7 @@ def _run_training(
                 failure = f"could not start training command: {e}"
                 code = 127
             else:
-                logger.info(f"training pid={process.pid}: {redact_argv(argv)}")
+                loguru.logger.info(f"training pid={process.pid}: {redact_argv(argv)}")
                 interrupted_at: float | None = None
                 while process.poll() is None:
                     failure = drain_names()
@@ -536,13 +536,15 @@ def _run_training(
                     quiet_s = time.time() - log_path.stat().st_mtime
                     if quiet_s >= stall_s:
                         failure = f"no training log output for {int(quiet_s)} seconds"
-                        logger.error(f"watchdog: {failure}")
+                        loguru.logger.error(f"watchdog: {failure}")
                         _kill_group(process.pid, signal.SIGKILL)
                         break
                     if interrupted.is_set():
                         interrupted_at = interrupted_at or time.monotonic()
                         if time.monotonic() - interrupted_at >= INTERRUPT_GRACE_S:
-                            logger.warning("training did not exit during interrupt grace period; sending SIGKILL")
+                            loguru.logger.warning(
+                                "training did not exit during interrupt grace period; sending SIGKILL"
+                            )
                             _kill_group(process.pid, signal.SIGKILL)
                     time.sleep(0.5)
                 code = process.wait()
@@ -574,7 +576,7 @@ def _run_training(
 def _run_remote(spec: LaunchSpec) -> int:
     """One Modal Function attempt. Modal serializes this function into the configured image."""
     os.chdir(REMOTE_ROOT)
-    logger.info(f"starting launch {spec.launch_id} from Git {spec.git_sha[:10]}")
+    loguru.logger.info(f"starting launch {spec.launch_id} from Git {spec.git_sha[:10]}")
     path = _state_path(spec.launch_id)
     state = read_state(path)
     resume = explicit_resume(spec.argv)
@@ -582,7 +584,7 @@ def _run_remote(spec: LaunchSpec) -> int:
     checkpoint_found = bool(spec.auto_resume and resume is None and run_name and _checkpoint_exists(run_name))
     attempt = plan_attempt(state, spec.argv, auto_resume=spec.auto_resume, checkpoint_found=checkpoint_found)
     if attempt.action == "complete":
-        logger.info(f"launch {spec.launch_id} already succeeded; nothing to run")
+        loguru.logger.info(f"launch {spec.launch_id} already succeeded; nothing to run")
         return 0
     if attempt.action == "fail":
         raise RuntimeError(
@@ -630,16 +632,16 @@ def _app_name(args: Args, sha: str) -> str:
 
 def _print_request(args: Args, *, sha: str, name: str, launch_id: str) -> None:
     resources = function_resources(args)
-    logger.info(f"app={name} launch={launch_id} git={sha[:10]} image={args.image}")
-    logger.info(
+    loguru.logger.info(f"app={name} launch={launch_id} git={sha[:10]} image={args.image}")
+    loguru.logger.info(
         f"gpu={resources['gpu']} cpu={resources['cpu']} memory={args.memory_gib}GiB "
         f"ephemeral_ssd={args.disk_gib}GiB cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
     )
-    logger.info(
+    loguru.logger.info(
         f"attempt_timeout={args.timeout_hours}h retries={args.max_retries} secret={args.secret!r} "
         f"state_volume={args.state_volume!r} auto_resume={args.auto_resume}"
     )
-    logger.info(f"command: {redact_argv(args.cmd)}")
+    loguru.logger.info(f"command: {redact_argv(args.cmd)}")
 
 
 def main(args: Args) -> None:
@@ -650,7 +652,7 @@ def main(args: Args) -> None:
     launch_id = uuid.uuid4().hex
     _print_request(args, sha=sha, name=name, launch_id=launch_id)
     if args.dry_run:
-        logger.success("dry run passed; no Modal App, image build, Volume, or GPU Function was started")
+        loguru.logger.success("dry run passed; no Modal App, image build, Volume, or GPU Function was started")
         return
 
     state_volume = modal.Volume.from_name(args.state_volume, create_if_missing=True)
@@ -685,9 +687,9 @@ def main(args: Args) -> None:
     )
     with modal.enable_output(), app.run(name=name, client=client, detach=not args.wait):
         call = function.spawn(spec)
-        logger.success(f"submitted Modal App {app.app_id}, Function call {call.object_id}, Git {sha[:10]}")
-        logger.info(f"logs: uv run modal app logs {app.app_id} -f")
-        logger.info(f"stop: uv run modal app stop {app.app_id}")
+        loguru.logger.success(f"submitted Modal App {app.app_id}, Function call {call.object_id}, Git {sha[:10]}")
+        loguru.logger.info(f"logs: uv run modal app logs {app.app_id} -f")
+        loguru.logger.info(f"stop: uv run modal app stop {app.app_id}")
         if args.wait:
             call.get()
 
