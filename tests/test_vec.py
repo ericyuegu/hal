@@ -34,6 +34,7 @@ from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH as _ISO_PATH
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import ControllerInputsValue
+from hal.sim.process_vec import PolicyExecutionError
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.vec import Slot
@@ -358,6 +359,24 @@ def test_run_matches_vec_isolates_a_policy_failure(monkeypatch: pytest.MonkeyPat
 
     assert trajs[0] and trajs[1]  # wave 0 survived
     assert trajs[2] == [] and trajs[3] == []  # wave 1's policy raised → no trajectories
+
+
+def test_run_matches_vec_does_not_retry_systemic_process_policy_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fail_wave(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise PolicyExecutionError("CUDA policy failed")
+
+    monkeypatch.setattr("hal.eval.harness._drive_wave", fail_wave)
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,)) for _ in range(4)]
+    cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused")
+    with pytest.raises(PolicyExecutionError, match="CUDA policy failed"):
+        run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=2, start_retries=2)
+    assert calls == 1
 
 
 class _StartFails(FakeSession):

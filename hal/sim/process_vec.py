@@ -1,13 +1,19 @@
 """Main-process inference broker for spawned Session workers."""
 
+import json
 import math
 import multiprocessing as mp
+import os
+import platform
+import sys
 import time
+import traceback
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -37,6 +43,67 @@ class SharedChunkPolicy(Protocol):
     def runtime_spec(self) -> PolicyRuntimeSpec: ...
 
     def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]: ...
+
+
+class PolicyExecutionError(RuntimeError):
+    """A systemic parent-side policy failure; retrying workers cannot recover it."""
+
+    def __init__(self, message: str, *, capsule_path: Path | None = None) -> None:
+        super().__init__(message)
+        self.capsule_path = capsule_path
+
+
+def _write_policy_fault_capsule(
+    failure_dir: Path | None,
+    policy: SharedChunkPolicy,
+    requests: Mapping[Slot, Sequence[ObservationRow]],
+    *,
+    plan_call: int,
+) -> Path | None:
+    if failure_dir is None:
+        return None
+    failure_dir.mkdir(parents=True, exist_ok=True)
+    stem = failure_dir / f"policy_fault_{time.time_ns()}"
+    metadata: dict[str, object] = {}
+    arrays: dict[str, np.ndarray] = {}
+    snapshot = getattr(policy, "fault_snapshot", None)
+    if callable(snapshot):
+        try:
+            metadata, arrays = snapshot()
+        except Exception:
+            metadata = {"snapshot_error": traceback.format_exc()}
+            arrays = {}
+    payload = {
+        "schema_version": 1,
+        "plan_call": plan_call,
+        "pid": os.getpid(),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "git_sha": os.environ.get("HAL_GIT_SHA", "unknown"),
+        "exception": traceback.format_exc(),
+        "requests": [
+            {
+                "match": slot.match,
+                "port": slot.port,
+                "frame_ids": [row.frame_id for row in rows],
+                "reset": [row.reset for row in rows],
+            }
+            for slot, rows in requests.items()
+        ],
+        "policy": metadata,
+        "arrays": {name: {"shape": list(value.shape), "dtype": str(value.dtype)} for name, value in arrays.items()},
+    }
+    json_tmp = stem.with_suffix(".json.tmp")
+    json_path = stem.with_suffix(".json")
+    json_tmp.write_text(json.dumps(payload, sort_keys=True, indent=2))
+    json_tmp.replace(json_path)
+    if arrays:
+        npz_tmp = stem.with_suffix(".npz.tmp")
+        npz_path = stem.with_suffix(".npz")
+        with npz_tmp.open("wb") as handle:
+            np.savez_compressed(handle, **arrays)
+        npz_tmp.replace(npz_path)
+    return json_path
 
 
 @dataclass(slots=True)
@@ -101,6 +168,7 @@ def drive_process_vec(
     progress_every: int = 600,
     worker_timeout_seconds: float = 60.0,
     telemetry: ProcessVecTelemetry | None = None,
+    failure_dir: Path | None = None,
 ) -> list[list[Trajectory]]:
     """Drive one wave with one spawned process per Dolphin Session.
 
@@ -180,6 +248,8 @@ def drive_process_vec(
         plan_calls = 0
         startup_recorded = False
         started = time.monotonic()
+        progress_frames = 0
+        progress_time = started
 
         def retire_worker(worker: int, reason: str | None = None, *, kill: bool = False) -> None:
             """Remove one worker without discarding the rest of the wave."""
@@ -342,7 +412,20 @@ def drive_process_vec(
                     if telemetry is not None:
                         telemetry.request_read_seconds += time.monotonic() - request_started
                     policy_started = time.monotonic()
-                    plans = policy.plan_rows(requests)
+                    try:
+                        plans = policy.plan_rows(requests)
+                    except Exception as exc:
+                        try:
+                            capsule = _write_policy_fault_capsule(
+                                failure_dir, policy, requests, plan_call=plan_calls + 1
+                            )
+                        except Exception as capsule_exc:
+                            logger.opt(exception=capsule_exc).error("failed to write policy crash capsule")
+                            capsule = None
+                        suffix = "" if capsule is None else f"; crash capsule: {capsule}"
+                        raise PolicyExecutionError(
+                            f"parent policy failed on plan call {plan_calls + 1}{suffix}", capsule_path=capsule
+                        ) from exc
                     if telemetry is not None:
                         telemetry.policy_seconds += time.monotonic() - policy_started
                     write_started = time.monotonic()
@@ -393,11 +476,16 @@ def drive_process_vec(
                         telemetry.plan_write_seconds += time.monotonic() - write_started
                     plan_calls += 1
                     if progress_every and plan_calls % max(1, progress_every // runtime.execution_stride) == 0:
-                        elapsed = time.monotonic() - started
+                        now = time.monotonic()
+                        elapsed = now - started
                         frames = plan_calls * runtime.execution_stride
+                        interval_fps = (frames - progress_frames) / max(now - progress_time, 1e-12)
+                        progress_frames = frames
+                        progress_time = now
                         logger.info(
                             f"drive_process_vec: about {frames}/{max_frames} frames | "
-                            f"live {len(active_workers)}/{len(matches)} | {frames / elapsed:.1f} lockstep fps"
+                            f"live {len(active_workers)}/{len(matches)} | {interval_fps:.1f} interval fps | "
+                            f"{frames / elapsed:.1f} cumulative fps"
                         )
         finally:
             for connection in parents.values():

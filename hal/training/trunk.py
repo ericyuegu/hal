@@ -42,6 +42,7 @@ from torch import Tensor
 from torch.nn.attention.flex_attention import BlockMask
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.varlen import varlen_attn
 
 # One compiled kernel per (batch, sequence) shape. The default limit is 8, and a run that passes it
 # drops back to eager without a word: measured 4.7x slower and 2x the VRAM, while the reported path
@@ -69,6 +70,10 @@ class TrunkConfig:
     # Fail instead of falling back to the dense path. A cloud run wants the fast kernel or an error,
     # not a quiet 4x slowdown; a dev box without it still wants to run.
     require_flex: bool = False
+    # ``varlen_flash`` represents each row's ignored left prefix and real suffix as
+    # separate causal sequences.  It therefore preserves the valid-token mask while
+    # calling PyTorch's native FlashAttention kernel without a dense [B, L, L] mask.
+    attention_backend: str = "auto_flex"
 
     def __post_init__(self) -> None:
         if self.n_heads <= 0 or self.d_model % self.n_heads != 0:
@@ -81,6 +86,10 @@ class TrunkConfig:
             raise ValueError(f"L_ctx must be > 0, got {self.L_ctx}")
         if self.attn_window < 0:
             raise ValueError(f"attn_window must be >= 0 (0 = full context), got {self.attn_window}")
+        if self.attention_backend not in ("auto_flex", "dense_sdpa", "varlen_flash"):
+            raise ValueError(f"unknown attention_backend={self.attention_backend!r}")
+        if self.require_flex and self.attention_backend != "auto_flex":
+            raise ValueError("require_flex is compatible only with attention_backend='auto_flex'")
 
 
 class Rotary(nn.Module):
@@ -200,17 +209,45 @@ def flex_is_usable(device_type: str) -> bool:
     return True
 
 
+@functools.cache
+def varlen_flash_is_usable(device_type: str, L: int, n_heads: int, head_dim: int) -> bool:
+    """Probe the exact native FlashAttention forward/backward geometry once."""
+    if device_type != "cuda":
+        return False
+    try:
+        q = torch.zeros(L * 2, n_heads, head_dim, device=device_type, dtype=torch.bfloat16, requires_grad=True)
+        k = torch.zeros_like(q, requires_grad=True)
+        v = torch.zeros_like(q, requires_grad=True)
+        # Includes both a zero-length prefix and a one-token real suffix.
+        lengths = torch.tensor((0, L, L - 1, 1), device=device_type, dtype=torch.int32)
+        cumulative = lengths.cumsum(0, dtype=torch.int32)
+        cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
+        cast(Tensor, varlen_attn(q, k, v, cu_seqlens, cu_seqlens, L, L, window_size=(-1, 0))).sum().backward()
+        torch.cuda.synchronize()
+    except (RuntimeError, NotImplementedError) as exc:
+        logger.warning(f"native varlen FlashAttention probe failed ({type(exc).__name__}: {exc})")
+        return False
+    return True
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: TrunkConfig) -> None:
         super().__init__()
         self.n_heads = cfg.n_heads
         self.d_model = cfg.d_model
         self.head_dim = cfg.d_model // cfg.n_heads
+        self.attn_window = cfg.attn_window
+        self.attention_backend = cfg.attention_backend
         self.c_attn = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=False)
         self.c_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.rotary = Rotary(self.head_dim)
 
-    def forward(self, x: Float[Tensor, "B L d_model"], mask: AttnMask) -> Float[Tensor, "B L d_model"]:
+    def forward(
+        self,
+        x: Float[Tensor, "B L d_model"],
+        mask: AttnMask | None,
+        ctx_pad: Int[Tensor, " B"],
+    ) -> Float[Tensor, "B L d_model"]:
         B, L, _ = x.shape
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
         q = q.view(B, L, self.n_heads, self.head_dim)
@@ -220,6 +257,25 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
+        if self.attention_backend == "varlen_flash" and x.device.type == "cuda":
+            # Keep a static B*L token shape.  Each ignored prefix and real suffix is
+            # an independent causal sequence, so real queries cannot see padded keys.
+            # Zero-length prefix sequences are valid and keep cu_seqlens fixed at 2B+1.
+            lengths = torch.stack((ctx_pad, L - ctx_pad), dim=1).reshape(-1).to(torch.int32)
+            cumulative = lengths.cumsum(0, dtype=torch.int32)
+            cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
+            window = (-1, 0) if self.attn_window == 0 else (self.attn_window - 1, 0)
+            y = varlen_attn(
+                q.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
+                k.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
+                v.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
+                cu_seqlens,
+                cu_seqlens,
+                L,
+                L,
+                window_size=window,
+            ).reshape(B, L, self.n_heads, self.head_dim)
+            return self.c_proj(y.reshape(B, L, self.d_model))
         if isinstance(mask, BlockMask):
             y = cast(Tensor, _flex_attention(q, k, v, block_mask=mask))
         else:
@@ -245,8 +301,10 @@ class Block(nn.Module):
         self.mlp = MLP(cfg)
         self.attn_scale = 1 / (2 * cfg.n_layers) ** 0.5
 
-    def forward(self, x: Float[Tensor, "B L d_model"], mask: AttnMask) -> Float[Tensor, "B L d_model"]:
-        x = x + self.attn_scale * self.attn(rmsnorm(x), mask)
+    def forward(
+        self, x: Float[Tensor, "B L d_model"], mask: AttnMask | None, ctx_pad: Int[Tensor, " B"]
+    ) -> Float[Tensor, "B L d_model"]:
+        x = x + self.attn_scale * self.attn(rmsnorm(x), mask, ctx_pad)
         x = x + self.mlp(rmsnorm(x))
         return x
 
@@ -266,6 +324,7 @@ class Trunk(nn.Module):
         self.L_ctx = cfg.L_ctx
         self.prefer_flex = prefer_flex
         self.require_flex = cfg.require_flex
+        self.attention_backend = cfg.attention_backend
         self._use_flex: bool | None = None
 
     @property
@@ -274,6 +333,8 @@ class Trunk(nn.Module):
         until the first forward."""
         if self._use_flex is None:
             return "unresolved"
+        if self.attention_backend == "varlen_flash":
+            return "varlen_flash"
         return "flex" if self._use_flex else "dense"
 
     @torch.compiler.disable
@@ -285,14 +346,21 @@ class Trunk(nn.Module):
         first forward is commonly already inside ``torch.compile``, so keep both eager explicitly.
         Later forwards skip this method once ``_use_flex`` has been resolved.
         """
-        self._use_flex = self.prefer_flex and flex_is_usable(device_type)
+        self._use_flex = self.attention_backend == "auto_flex" and self.prefer_flex and flex_is_usable(device_type)
         if self.require_flex and not self._use_flex:
             raise RuntimeError(f"require_flex is set, but FlexAttention does not run on {device_type}")
-        logger.info(f"trunk attention: {'flex' if self._use_flex else 'dense'} path, window={self.attn_window}")
+        path = (
+            "varlen_flash"
+            if self.attention_backend == "varlen_flash" and device_type == "cuda"
+            else ("flex" if self._use_flex else "dense")
+        )
+        logger.info(f"trunk attention: {path} path, window={self.attn_window}")
 
-    def _mask(self, ctx_pad: Int[Tensor, " B"], L: int) -> AttnMask:
+    def _mask(self, ctx_pad: Int[Tensor, " B"], L: int) -> AttnMask | None:
         if self._use_flex is None:
             self._resolve_attn_path(ctx_pad.device.type)
+        if self.attention_backend == "varlen_flash" and ctx_pad.device.type == "cuda":
+            return None
         if self._use_flex:
             return block_mask(ctx_pad, L, self.attn_window)
         return dense_mask(ctx_pad, L, self.attn_window)
@@ -308,5 +376,5 @@ class Trunk(nn.Module):
             )
         mask = self._mask(ctx_pad, x.size(1))
         for block in self.blocks:
-            x = block(x, mask)
+            x = block(x, mask, ctx_pad)
         return rmsnorm(x)

@@ -32,6 +32,7 @@ requires_flex = pytest.mark.skipif(
     not (torch.cuda.is_available() and flex_is_usable("cuda")),
     reason="FlexAttention needs a GPU that compiles it",
 )
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="native varlen FlashAttention needs CUDA")
 
 
 @pytest.fixture(autouse=True)
@@ -158,6 +159,29 @@ def test_flex_matches_dense(attn_window: int) -> None:
 
     torch.testing.assert_close(flex(x, ctx_pad), dense(x, ctx_pad), rtol=1e-5, atol=1e-5)
     assert (flex.attn_path, dense.attn_path) == ("flex", "dense")
+
+
+@requires_cuda
+@pytest.mark.parametrize("attn_window", [0, 8])
+def test_varlen_flash_matches_dense_on_valid_tokens_and_gradients(attn_window: int) -> None:
+    cfg = _cfg(attn_window=attn_window)
+    dense = _trunk(cfg, prefer_flex=False, device="cuda", seed=11).to(torch.bfloat16)
+    flash = _trunk(
+        _cfg(attn_window=attn_window, attention_backend="varlen_flash"),
+        prefer_flex=False,
+        device="cuda",
+        seed=11,
+    ).to(torch.bfloat16)
+    x_dense = torch.randn(4, cfg.L_ctx, cfg.d_model, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x_flash = x_dense.detach().clone().requires_grad_(True)
+    ctx_pad = torch.tensor([0, 1, 17, cfg.L_ctx - 1], device="cuda")
+    valid = torch.arange(cfg.L_ctx, device="cuda")[None] >= ctx_pad[:, None]
+    dense_out = dense(x_dense, ctx_pad)
+    flash_out = flash(x_flash, ctx_pad)
+    torch.testing.assert_close(flash_out[valid], dense_out[valid], rtol=2e-2, atol=2e-2)
+    dense_out[valid].float().square().mean().backward()
+    flash_out[valid].float().square().mean().backward()
+    torch.testing.assert_close(x_flash.grad[valid], x_dense.grad[valid], rtol=5e-2, atol=5e-3)
 
 
 @requires_flex

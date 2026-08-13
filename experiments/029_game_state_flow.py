@@ -95,6 +95,7 @@ from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 from hal.training.trunk import apply_rotary_emb
+from hal.training.trunk import varlen_flash_is_usable
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
@@ -149,6 +150,7 @@ class TrainConfig:
     n_heads: int = 6
     attn_window: int = 0
     require_flex: bool = False
+    attention_backend: str = "varlen_flash"
     L_ctx: int = 128
 
     decoder_arch_version: int = 3
@@ -224,6 +226,11 @@ class TrainConfig:
     final_eval_n_matchups: int = 96
     final_diag_n_matchups: int = 32
     eval_max_parallel: int | None = None
+    # L40S launch gate: stop after N updates and run one bounded closed-loop eval,
+    # skipping the expensive final validation and H2H protocol.
+    smoke_eval_after_steps: int = 0
+    smoke_eval_n_matchups: int = 16
+    smoke_eval_max_frames: int = 4800
     final_h2h_reference_run: str = REFERENCE_026_RUN
     final_h2h_reference_sha256: str = REFERENCE_026_SHA256
     final_h2h_n_configs: int = 64
@@ -304,6 +311,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("experiment 029 freezes sampling temperature at 1")
     if cfg.inference_mode not in ("compiled", "eager"):
         raise ValueError("inference_mode must be 'compiled' or 'eager'")
+    if cfg.attention_backend != "varlen_flash":
+        raise ValueError("experiment 029 is frozen to attention_backend='varlen_flash'")
+    if cfg.require_flex:
+        raise ValueError("experiment 029 varlen FlashAttention is incompatible with require_flex")
     if cfg.inference_buckets != (1, 2, 4, 8, 16, 32):
         raise ValueError("inference_buckets are frozen to (1,2,4,8,16,32)")
     if cfg.compiled_inference_bucket is not None and (
@@ -314,6 +325,10 @@ def validate_config(cfg: TrainConfig) -> None:
         cfg.eval_max_parallel < 1 or cfg.eval_max_parallel & (cfg.eval_max_parallel - 1)
     ):
         raise ValueError("eval_max_parallel must be a positive power of two")
+    if cfg.smoke_eval_after_steps < 0 or cfg.smoke_eval_after_steps > cfg.max_steps:
+        raise ValueError("smoke_eval_after_steps must be in [0, max_steps]")
+    if cfg.smoke_eval_n_matchups < 1 or cfg.smoke_eval_max_frames < 2:
+        raise ValueError("smoke eval needs at least one matchup and two frames")
     if cfg.observation_bundle not in ("base", "v6_lean"):
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
     if cfg.observation_bundle != "base":
@@ -827,6 +842,7 @@ class GPT(nn.Module):
                 L_ctx=cfg.L_ctx,
                 attn_window=cfg.attn_window,
                 require_flex=cfg.require_flex,
+                attention_backend=cfg.attention_backend,
             )
         )
         self.temporal = CausalTemporalDecoder(cfg, self.codec)
@@ -1523,74 +1539,78 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
     return Context(features=features, ctx_pad=ctx_pad, slot_ids=slot_ids, reset=reset)
 
 
-class BF16Inference:
-    """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
+def canonical_context(ctx: Context, bundle: str) -> Context:
+    """Give every compiled decode the same feature-dict membership and order."""
+    floats = FLOAT_FEATURES if bundle == "base" else FLOAT_FEATURES + _V6_FLOATS
+    features = dict(ctx.features)
+    for prefix in _PLAYER_PREFIXES:
+        for name in floats:
+            key = f"{prefix}_{name}_mask"
+            if key not in features:
+                features[key] = torch.zeros_like(features[f"{prefix}_{name}"])
+    return replace(ctx, features={name: features[name] for name in sorted(features)})
 
-    Evaluation compiles each required program synchronously on first use. Runtime
-    calls use the smallest compiled bucket that fits. Padding and slot-keyed random
-    streams leave real rows unchanged.
-    """
+
+class BF16Inference:
+    """One fixed-bucket compiled trunk with four/six-frame decoders."""
 
     def __init__(
         self,
         model: GPT,
         cfg: TrainConfig,
         *,
+        bucket: int | None = None,
         compiled: bool | None = None,
         compile_mode: str = "default",
-        compiled_buckets: tuple[int, ...] | None = None,
     ) -> None:
         self.model = model
         self.cfg = cfg
-        self.buckets = tuple(cfg.inference_buckets)
-        chosen = _planned_inference_buckets(cfg) if compiled_buckets is None else compiled_buckets
-        self.compiled_buckets = tuple(sorted(set(chosen)))
-        if not self.compiled_buckets:
-            raise ValueError("compiled_buckets must contain at least one bucket")
-        if any(bucket < 1 or bucket & (bucket - 1) for bucket in self.compiled_buckets):
-            raise ValueError(f"compiled_buckets must be positive powers of two, got {self.compiled_buckets}")
+        if bucket is not None and (bucket < 1 or bucket & (bucket - 1)):
+            raise ValueError(f"inference bucket must be a positive power of two, got {bucket}")
         requested = cfg.inference_mode == "compiled" if compiled is None else compiled
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
+        if self.compiled and bucket is None:
+            raise ValueError("compiled inference requires one explicit fixed batch bucket")
+        self.bucket = bucket
         self.compile_mode = compile_mode
-        self._trunks: dict[int, Callable] = {}
-        self._decoders: dict[tuple[int, int], Callable] = {}
+        self.compile_seconds = 0.0
+        self._warmed_horizons: set[int] = set()
 
-    @property
-    def uses_cuda_graphs(self) -> bool:
-        return self.compiled and self.compile_mode == "reduce-overhead"
+        def trunk(features, pad, actions):
+            return self.model(features, pad, actions)
 
-    def _bucket(self, rows: int) -> int:
-        if self.compiled:
-            try:
-                return next(bucket for bucket in self.compiled_buckets if bucket >= rows)
-            except StopIteration as exc:
-                raise ValueError(
-                    f"inference batch {rows} exceeds largest compiled bucket {self.compiled_buckets[-1]}"
-                ) from exc
-        try:
-            return next(bucket for bucket in self.buckets if bucket >= rows)
-        except StopIteration:
-            return covering_power_of_two(rows)
+        self._trunk = torch.compile(trunk, dynamic=False, mode=compile_mode) if self.compiled else trunk
+        self._decoders: dict[int, Callable] = {}
 
-    def _trunk(self, bucket: int) -> Callable:
-        if bucket not in self._trunks:
-
-            def fn(features, pad, actions):
-                return self.model(features, pad, actions)
-
-            self._trunks[bucket] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
-        return self._trunks[bucket]
-
-    def _decoder(self, bucket: int, horizon: int) -> Callable:
-        key = (bucket, horizon)
-        if key not in self._decoders:
+    def _decoder(self, horizon: int) -> Callable:
+        if horizon not in self._decoders:
             offsets = self.model.head_offsets[:horizon]
 
             def fn(hidden, observed, uniforms):
                 return self.model.temporal.sample_indices(hidden, observed, offsets, argmax=False, uniforms=uniforms)
 
-            self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
-        return self._decoders[key]
+            self._decoders[horizon] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
+        return self._decoders[horizon]
+
+    @torch.no_grad()
+    def prewarm(self, horizon: int) -> float:
+        if not self.compiled or horizon in self._warmed_horizons:
+            self._warmed_horizons.add(horizon)
+            return 0.0
+        assert self.bucket is not None
+        device = next(self.model.parameters()).device
+        started = time.perf_counter()
+        ctx = synthetic_context(self.cfg, self.bucket, device)
+        self.decode(ctx, horizon)
+        self.decode(ctx, horizon)
+        torch.cuda.synchronize(device)
+        elapsed = time.perf_counter() - started
+        self.compile_seconds += elapsed
+        self._warmed_horizons.add(horizon)
+        print(
+            f"[inference] synchronously compiled batch {self.bucket}, horizon {horizon} in {elapsed:.1f}s", flush=True
+        )
+        return elapsed
 
     @torch.no_grad()
     def decode(
@@ -1605,8 +1625,10 @@ class BF16Inference:
         if horizon not in (4, 6):
             raise ValueError("only the unrolled four- and six-frame decoders exist")
         rows = ctx.ctx_pad.shape[0]
-        bucket = self._bucket(rows)
-        padded = _pad_context(ctx, bucket)
+        bucket = covering_power_of_two(rows) if self.bucket is None else self.bucket
+        if rows > bucket:
+            raise ValueError(f"inference batch {rows} exceeds fixed bucket {bucket}")
+        padded = canonical_context(_pad_context(ctx, bucket), self.cfg.observation_bundle)
         observed = self.model.codec.quantize(stack_actions(padded.features))
         uniform_parts: list[Tensor] = []
         if streams is not None:
@@ -1621,21 +1643,40 @@ class BF16Inference:
                 groups.append(F.pad(real, (0, bucket - rows), value=0.5))
             uniform_parts.append(torch.stack(groups))
         uniforms = torch.stack(uniform_parts)
-        if self.uses_cuda_graphs:
-            # The trunk and decoder are separate CUDA Graph trees.  Mark one
-            # complete decode as a graph step so the next trunk replay may
-            # safely reuse its managed output storage after the decoder has
-            # consumed it.
-            torch.compiler.cudagraph_mark_step_begin()
         with amp_context(self.cfg, ctx.ctx_pad.device):
-            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
+            hidden = self._trunk(padded.features, padded.ctx_pad, observed)
             if argmax:
                 indices = self.model.temporal.sample_indices(
                     hidden, observed[:, -1], self.model.head_offsets[:horizon], argmax=True
                 )
             else:
-                indices = self._decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
+                indices = self._decoder(horizon)(hidden, observed[:, -1], uniforms)
         return self.model.codec.dequantize(indices[:rows])
+
+
+class EvaluationReplica:
+    """Persistent inference-only policy whose compiled programs never touch training graphs."""
+
+    def __init__(self, source: GPT, cfg: TrainConfig) -> None:
+        self.cfg = cfg
+        self.model = GPT(cfg).to(next(source.parameters()).device).eval()
+        self.engines: dict[int, BF16Inference] = {}
+
+    @torch.no_grad()
+    def prepare(self, source: GPT, n_matchups: int) -> tuple[GPT, BF16Inference]:
+        return self.prepare_bucket(source, _eval_inference_bucket(self.cfg, n_matchups))
+
+    @torch.no_grad()
+    def prepare_bucket(self, source: GPT, bucket: int) -> tuple[GPT, BF16Inference]:
+        self.model.load_state_dict(source.state_dict())
+        device = next(self.model.parameters()).device
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        engine = self.engines.get(bucket)
+        if engine is None:
+            engine = BF16Inference(self.model, self.cfg, bucket=bucket)
+            self.engines[bucket] = engine
+        return self.model, engine
 
 
 @dataclass
@@ -1696,6 +1737,7 @@ def make_policy(
     decode_seed: int | None = None,
     inference: BF16Inference | None = None,
     telemetry: DecodeTelemetry | None = None,
+    fault_context: Mapping[str, object] | None = None,
     device: str = DEVICE,
 ) -> RecedingHorizon:
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
@@ -1727,6 +1769,23 @@ def make_policy(
         float_dtype=next(model.parameters()).dtype,
         extra=V6_PLAYER_COLUMNS if v6 else None,
         projection=None if v6 else BASE_ACTION_PROJECTION,
+        fault_metadata=lambda: {
+            **({} if fault_context is None else fault_context),
+            "decode_seed": decode_seed,
+            "rng_counters": [] if random_streams is None else list(random_streams.state()),
+            "inference_bucket": engine.bucket,
+            "inference_compiled": engine.compiled,
+            "inference_compile_mode": engine.compile_mode,
+            "attention_backend": cfg.attention_backend,
+            "exec_horizon": horizon,
+            "torch_version": str(torch.__version__),
+            "cuda_runtime_version": torch.version.cuda,
+            "cuda_device": (
+                torch.cuda.get_device_name(next(model.parameters()).device)
+                if next(model.parameters()).device.type == "cuda"
+                else None
+            ),
+        },
     )
 
 
@@ -1835,9 +1894,12 @@ def eval_vs_cpu(
     inference: BF16Inference | None = None,
 ) -> dict[str, float]:
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    inference = BF16Inference(model, cfg) if inference is None else inference
+    required_bucket = _eval_inference_bucket(cfg, n_matchups)
+    inference = BF16Inference(model, cfg, bucket=required_bucket) if inference is None else inference
     if inference.model is not model:
         raise ValueError("the supplied inference engine must own the evaluation model")
+    if inference.compiled and inference.bucket != required_bucket:
+        raise ValueError(f"evaluation requires bucket {required_bucket}, engine owns {inference.bucket}")
     protocol = _eval_protocol(
         cfg,
         model,
@@ -1851,6 +1913,7 @@ def eval_vs_cpu(
     ):
         raise RuntimeError("official CUDA evaluation requires compiled BF16 inference")
     telemetry = DecodeTelemetry()
+    process_telemetry = ProcessVecTelemetry()
     policy_index = itertools.count()
 
     def factory() -> RecedingHorizon:
@@ -1862,29 +1925,37 @@ def eval_vs_cpu(
             decode_seed=protocol.seed + next(policy_index),
             inference=inference,
             telemetry=telemetry,
+            fault_context={"eval_protocol": asdict(protocol)},
         )
 
     was_training = model.training
     model.eval()
-    started = time.perf_counter()
+    total_started = time.perf_counter()
     try:
-        results, rows = sweep_vs_cpu_prior_with_rows(
-            factory,
-            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
-            n_matchups=protocol.n_matchups,
-            max_parallel=protocol.max_parallel,
-            max_frames=protocol.max_frames,
-            cpu_level=protocol.cpu_level,
-            ego_port=protocol.ego_port,
-            seed_stage=melee.Stage(protocol.seed_stage),
-            start_retries=protocol.start_retries,
-        )
+        compile_seconds = inference.prewarm(horizon)
+        started = time.perf_counter()
+        with torch.compiler.set_stance("fail_on_recompile"):
+            results, rows = sweep_vs_cpu_prior_with_rows(
+                factory,
+                session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+                n_matchups=protocol.n_matchups,
+                max_parallel=protocol.max_parallel,
+                max_frames=protocol.max_frames,
+                cpu_level=protocol.cpu_level,
+                ego_port=protocol.ego_port,
+                seed_stage=melee.Stage(protocol.seed_stage),
+                start_retries=protocol.start_retries,
+                process_telemetry=process_telemetry,
+            )
     finally:
         model.train(was_training)
     metrics = vs_cpu_metrics(results, seed=protocol.seed)
     metrics["eval_wall_seconds"] = time.perf_counter() - started
+    metrics["eval_total_wall_seconds"] = time.perf_counter() - total_started
+    metrics["inference_compile_seconds"] = compile_seconds
     metrics["exec_horizon"] = float(horizon)
     metrics.update(telemetry.metrics())
+    metrics.update(process_telemetry.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)
     return metrics
 
@@ -1951,7 +2022,8 @@ def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.head_offsets))
     return (
         f"mtp029-stateflow-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-"
-        f"t{cfg.temporal_d_model}x{cfg.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-{cfg.observation_bundle}"
+        f"t{cfg.temporal_d_model}x{cfg.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-"
+        f"{cfg.observation_bundle}-varlenflash"
     )
 
 
@@ -2137,7 +2209,10 @@ def resolve_h2h_reference(cfg: TrainConfig, run_dir: Path) -> Path:
 def load_026_reference(path: Path, *, device: str = DEVICE) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(path, map_location=device, weights_only=False)
     known = {item.name for item in fields(TrainConfig)}
-    cfg = TrainConfig(**{name: value for name, value in state["cfg"].items() if name in known})
+    saved_cfg = {name: value for name, value in state["cfg"].items() if name in known}
+    saved_cfg["attention_backend"] = "varlen_flash"
+    saved_cfg["require_flex"] = False
+    cfg = TrainConfig(**saved_cfg)
     validate_config(cfg)
     model = GPT(cfg).to(device)
     model.load_state_dict(state["model"], strict=True)
@@ -2168,12 +2243,22 @@ def final_h2h(
 
     self_label = "029-state-flow"
     reference_label = "026-reference"
+    bucket = covering_power_of_two(cfg.final_h2h_max_parallel)
+    if inference is None:
+        inference = BF16Inference(model, cfg, bucket=bucket)
+    if inference.compiled and inference.bucket != bucket:
+        raise ValueError(f"H2H requires inference bucket {bucket}, engine owns {inference.bucket}")
+    reference_inference = BF16Inference(reference_model, reference_cfg, bucket=bucket)
+    inference.prewarm(cfg.exec_horizon)
+    reference_inference.prewarm(reference_cfg.exec_horizon)
 
     def build_self(seed: int) -> RecedingHorizon:
         return make_policy(model, stats, cfg, decode_seed=seed, inference=inference)
 
     def build_reference(seed: int) -> RecedingHorizon:
-        return make_policy(reference_model, reference_stats, reference_cfg, decode_seed=seed)
+        return make_policy(
+            reference_model, reference_stats, reference_cfg, decode_seed=seed, inference=reference_inference
+        )
 
     out_dir = run_dir / "h2h_final"
 
@@ -2233,6 +2318,8 @@ def train(
     resume_state: dict | None = None,
 ) -> None:
     validate_config(cfg)
+    if DEVICE == "cuda" and not varlen_flash_is_usable("cuda", cfg.L_ctx, cfg.n_heads, cfg.d_model // cfg.n_heads):
+        raise RuntimeError("experiment 029 requires native varlen FlashAttention forward/backward on CUDA")
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), cfg.data_root, comment)
     run_dir, replay_dir = setup_run_dir(run_name)
     # Resolve and authenticate the opponent before allocating the training
@@ -2287,7 +2374,7 @@ def train(
     run_started = time.monotonic()
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and L40S hosts.
-    eval_inference: BF16Inference | None = None
+    eval_replica: EvaluationReplica | None = None
     model.train()
     try:
         for step in range(start_step, cfg.max_steps):
@@ -2392,10 +2479,11 @@ def train(
                 values.update(gradient_interaction(model, val_cache[0], cfg))
                 wandb.log({"global_step": step, **{f"val/{name}": value for name, value in values.items()}})
             if eval_due:
-                if eval_inference is None:
-                    eval_inference = BF16Inference(policy, cfg)
+                if eval_replica is None:
+                    eval_replica = EvaluationReplica(policy, cfg)
+                eval_model, eval_inference = eval_replica.prepare(policy, cfg.eval_n_matchups)
                 values = eval_vs_cpu(
-                    policy,
+                    eval_model,
                     stats,
                     cfg,
                     n_matchups=cfg.eval_n_matchups,
@@ -2404,6 +2492,33 @@ def train(
                     inference=eval_inference,
                 )
                 wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
+            if cfg.smoke_eval_after_steps and step + 1 == cfg.smoke_eval_after_steps:
+                save_checkpoint(
+                    checkpoint_path,
+                    step=step,
+                    model=model,
+                    opt=optimizer,
+                    sched=scheduler,
+                    cfg=asdict(cfg),
+                    wandb_id=None if wandb.run is None else wandb.run.id,
+                    uploader=uploader,
+                )
+                if eval_replica is None:
+                    eval_replica = EvaluationReplica(policy, cfg)
+                eval_model, eval_inference = eval_replica.prepare(policy, cfg.smoke_eval_n_matchups)
+                smoke_cfg = replace(cfg, eval_max_frames=cfg.smoke_eval_max_frames)
+                values = eval_vs_cpu(
+                    eval_model,
+                    stats,
+                    smoke_cfg,
+                    n_matchups=cfg.smoke_eval_n_matchups,
+                    replay_dir=replay_dir / f"smoke_step_{step + 1:06d}",
+                    checkpoint_sha256=_checkpoint_sha256(checkpoint_path),
+                    inference=eval_inference,
+                )
+                wandb.log({"global_step": step, **{f"smoke_eval/{name}": value for name, value in values.items()}})
+                print(f"[smoke] completed {step + 1} updates and closed-loop evaluation", flush=True)
+                return
 
         final_path = run_dir / "final.pt"
         save_checkpoint(
@@ -2419,10 +2534,11 @@ def train(
         checkpoint_sha = _checkpoint_sha256(final_path)
         final_val = combined_val_metrics(model, val_cache, cfg)
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
-        if eval_inference is None:
-            eval_inference = BF16Inference(policy, cfg)
+        if eval_replica is None:
+            eval_replica = EvaluationReplica(policy, cfg)
+        eval_model, eval_inference = eval_replica.prepare(policy, cfg.final_eval_n_matchups)
         final_eval = eval_vs_cpu(
-            policy,
+            eval_model,
             stats,
             cfg,
             n_matchups=cfg.final_eval_n_matchups,
@@ -2431,8 +2547,9 @@ def train(
             inference=eval_inference,
         )
         wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
+        eval_model, eval_inference = eval_replica.prepare(policy, cfg.final_diag_n_matchups)
         stride6 = eval_vs_cpu(
-            policy,
+            eval_model,
             stats,
             cfg,
             n_matchups=cfg.final_diag_n_matchups,
@@ -2449,8 +2566,9 @@ def train(
         del scheduler
         if DEVICE == "cuda":
             torch.cuda.empty_cache()
+        eval_model, eval_inference = eval_replica.prepare_bucket(policy, cfg.final_h2h_max_parallel)
         final_h2h(
-            policy,
+            eval_model,
             stats,
             cfg,
             run_dir=run_dir,
@@ -2574,16 +2692,10 @@ def benchmark_self_play_checkpoint(
     inference_bucket = covering_power_of_two(real_rows)
     # CUDA graphs cannot safely own the trunk's mutable rotary cache across graph
     # partitions, so checkpoint evaluation uses ordinary compiled kernels.
-    inference = BF16Inference(model, cfg, compile_mode="default", compiled_buckets=(inference_bucket,))
+    inference = BF16Inference(model, cfg, bucket=inference_bucket, compile_mode="default")
     telemetry = DecodeTelemetry()
 
-    compile_started = time.perf_counter()
-    context = synthetic_context(cfg, inference_bucket, next(model.parameters()).device)
-    inference.decode(context, horizon)
-    inference.decode(context, horizon)
-    if next(model.parameters()).device.type == "cuda":
-        torch.cuda.synchronize(next(model.parameters()).device)
-    compile_seconds = time.perf_counter() - compile_started
+    compile_seconds = inference.prewarm(horizon)
 
     configs = mirrored_configs(n_matches)
     matches = [
@@ -2703,7 +2815,7 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
     model = GPT(cfg).to(device).eval()
     ctx = synthetic_context(cfg, min(32, micro_batch_size(cfg)), device)
     eager = BF16Inference(model, replace(cfg, inference_mode="eager"), compiled=False)
-    compiled = BF16Inference(model, cfg)
+    compiled = BF16Inference(model, cfg, bucket=covering_power_of_two(ctx.ctx_pad.shape[0]))
 
     def measure(engine: BF16Inference, rows: int, horizon: int) -> float:
         selected = Context(
@@ -2789,6 +2901,11 @@ def main(args: Args) -> None:
         resume_state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)
         if resume_state is None:
             raise SystemExit(f"no latest.pt for run {args.resume!r}")
+        if resume_state["cfg"].get("attention_backend") != "varlen_flash":
+            raise SystemExit(
+                "refusing to resume a pre-varlen-Flash experiment-029 trajectory; "
+                "use --eval to validate that checkpoint and restart training from step 0"
+            )
         resume_run = args.resume
         cfg = config_from_state(resume_state["cfg"])
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")

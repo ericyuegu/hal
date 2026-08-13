@@ -43,6 +43,7 @@ from hal.eval.harness import run_matches_vec
 from hal.eval.match_summary import MatchSummary
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.matchups import matchups_for_vs_cpu
+from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory
@@ -507,6 +508,7 @@ def _drive_prior(
     seed_stage: melee.Stage,
     max_frames: int,
     start_retries: int,
+    process_telemetry: ProcessVecTelemetry | None = None,
 ) -> tuple[list[VecMatch], list[list[Trajectory]]]:
     """Drive the prior-distribution instant-restart sweep, returning the boot matches
     and their per-boot trajectory lists (aligned). Shared by the pooled-metric and
@@ -519,6 +521,7 @@ def _drive_prior(
         max_frames=max_frames,
         max_parallel=max_parallel,
         start_retries=start_retries,
+        process_telemetry=process_telemetry,
     )
     return matches, boots
 
@@ -534,6 +537,7 @@ def sweep_vs_cpu_prior(
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
     start_retries: int = DEFAULT_START_RETRIES,
+    process_telemetry: ProcessVecTelemetry | None = None,
 ) -> SweepResult:
     """Prior-distribution vs-CPU sweep for instant-restart sessions.
 
@@ -555,6 +559,7 @@ def sweep_vs_cpu_prior(
         seed_stage=seed_stage,
         max_frames=max_frames,
         start_retries=start_retries,
+        process_telemetry=process_telemetry,
     )
     return _prior_sweep_result(boots, seed_stage)
 
@@ -581,6 +586,7 @@ def sweep_vs_cpu_prior_with_rows(
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
     start_retries: int = DEFAULT_START_RETRIES,
+    process_telemetry: ProcessVecTelemetry | None = None,
 ) -> tuple[SweepResult, list[MatchRow]]:
     """Run the prior sweep once and retain both pooled-metric input and exact rows.
 
@@ -598,6 +604,7 @@ def sweep_vs_cpu_prior_with_rows(
         seed_stage=seed_stage,
         max_frames=max_frames,
         start_retries=start_retries,
+        process_telemetry=process_telemetry,
     )
     return _prior_sweep_result(boots, seed_stage), match_rows(boots, matches, ego_port=ego_port)
 

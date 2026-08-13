@@ -570,7 +570,10 @@ class RecedingHorizon:
     # would differ from the trained one.
     extra: ExtraColumns | None = None
     projection: FeatureProjection | None = None
+    fault_metadata: Callable[[], Mapping[str, object]] | None = None
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
+    _last_fault_arrays: dict[str, np.ndarray] = field(default_factory=dict, init=False)
+    _last_fault_metadata: dict[str, object] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         if not 0 < self.s <= self.L_chunk:
@@ -744,6 +747,21 @@ class RecedingHorizon:
         reset flag. The model sees a match boundary once, in the first context after it."""
         windows = self._stack_windows(live, self.L_ctx, truncate_left_edge=True)
         layout = windows.layout
+        # These arrays already exist for the H2D transfer. Retaining references costs
+        # no copies in the hot path and lets the parent serialize the exact input if
+        # asynchronous CUDA execution later reports a fault.
+        pads = [max(0, self.L_ctx - self._count(sl)) for sl in live]
+        resets = [self._slots[sl].reset_pending for sl in live]
+        self._last_fault_arrays = {"floats": windows.floats, "cats": windows.cats}
+        self._last_fault_metadata = {
+            "slots": [{"match": sl.match, "port": sl.port} for sl in live],
+            "ctx_pad": pads,
+            "reset": resets,
+            "value_names": list(layout.value_names),
+            "mask_names": list(layout.mask_names),
+            "cat_names": list(layout.cat_names),
+            "emitted_masks": windows.emitted.tolist(),
+        }
         # One host→device transfer per dtype. Moving ~73 feature tensors independently
         # makes CUDA scheduling/allocator overhead dominate when a trainer shares the
         # device; the rings already hold the batch packed, so this copies contiguous
@@ -757,20 +775,23 @@ class RecedingHorizon:
             feats.update(zip(layout.cat_names, cats.unbind(0), strict=True))
         # Hide each slot's still-empty context prefix from attention (frames 0..L_ctx
         # fill from empty); 0 once a slot's history reaches L_ctx.
-        ctx_pad = torch.tensor(
-            [max(0, self.L_ctx - self._count(sl)) for sl in live],
-            dtype=torch.long,
-            device=self.device,
-        )
+        ctx_pad = torch.tensor(pads, dtype=torch.long, device=self.device)
         ctx = Context(
             features=feats,
             ctx_pad=ctx_pad,
             slot_ids=torch.tensor([sl.match * 8 + sl.port for sl in live], dtype=torch.long, device=self.device),
-            reset=torch.tensor([self._slots[sl].reset_pending for sl in live], dtype=torch.bool, device=self.device),
+            reset=torch.tensor(resets, dtype=torch.bool, device=self.device),
         )
         for sl in live:
             self._slots[sl].reset_pending = False
         return ctx
+
+    def fault_snapshot(self) -> tuple[dict[str, object], dict[str, np.ndarray]]:
+        """Return the last already-packed host input without touching CUDA."""
+        metadata = dict(self._last_fault_metadata)
+        if self.fault_metadata is not None:
+            metadata.update(self.fault_metadata())
+        return metadata, dict(self._last_fault_arrays)
 
     def _replan(self, live: list[Slot], committed: np.ndarray | None) -> None:
         """One batched forward over every live slot. ``live`` order is fixed by

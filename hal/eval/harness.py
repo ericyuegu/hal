@@ -26,6 +26,7 @@ from hal.fixtures import ISO
 from hal.fixtures import ensure
 from hal.paths import EMULATOR_PATH
 from hal.sim.loop import drive
+from hal.sim.process_vec import PolicyExecutionError
 from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.process_vec import SharedChunkPolicy
 from hal.sim.process_vec import drive_process_vec
@@ -215,6 +216,7 @@ def _drive_wave(
                 max_frames=max_frames,
                 instant_restart=session_cfg.instant_match_restart,
                 telemetry=process_telemetry,
+                failure_dir=base_replay,
             )
         else:
             sessions = [
@@ -228,6 +230,8 @@ def _drive_wave(
                 max_frames=max_frames,
                 instant_restart=session_cfg.instant_match_restart,
             )
+    except PolicyExecutionError:
+        raise
     except Exception as e:
         logger.warning(f"run_matches_vec: wave {list(indices)} failed: {e!r}; its boots stay empty")
         return {gi: [] for gi in indices}

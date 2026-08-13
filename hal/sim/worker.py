@@ -227,7 +227,7 @@ def _session_worker(
         result.close()
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        logger.warning(f"Session worker {worker_id} failed: {error}")
+        logger.opt(exception=exc).warning(f"Session worker {worker_id} failed: {error}")
         with suppress(BrokenPipeError, EOFError, OSError):
             send_control(
                 connection,
