@@ -1320,7 +1320,13 @@ def eval_checkpoint(
     max_parallel: int | None = None,
     output_name: str | None = None,
 ) -> dict[str, float]:
-    policy, cfg, stats, state = load_checkpoint(path)
+    checkpoint = Path(path)
+    if not checkpoint.is_file():
+        downloaded = download_latest(path, Path("runs") / path)
+        if downloaded is None:
+            raise FileNotFoundError(f"no local checkpoint or remote latest.pt for {path!r}")
+        checkpoint = downloaded
+    policy, cfg, stats, state = load_checkpoint(str(checkpoint))
     cfg = replace(
         cfg,
         inference_mode="eager" if eager else cfg.inference_mode,
@@ -1334,8 +1340,8 @@ def eval_checkpoint(
         stats,
         cfg,
         n_matchups=cfg.final_eval_n_matchups if n_matchups is None else n_matchups,
-        replay_dir=Path(path).resolve().parent / name,
-        checkpoint_sha256=_checkpoint_sha256(Path(path)),
+        replay_dir=checkpoint.resolve().parent / name,
+        checkpoint_sha256=_checkpoint_sha256(checkpoint),
     )
     print(f"[eval] step={state['step']}: {values}", flush=True)
     return values
