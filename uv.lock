@@ -1091,6 +1091,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "seaborn" },
+    { name = "slippi-cuda" },
     { name = "tabulate" },
     { name = "tensordict" },
     { name = "torch" },
@@ -1139,6 +1140,7 @@ requires-dist = [
     { name = "scikit-learn" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "seaborn" },
+    { name = "slippi-cuda", path = "/home/ericgu/src/slippi-cuda/dist/slippi_cuda-0.0.1-1nativepgo-py3-none-linux_x86_64.whl" },
     { name = "tabulate" },
     { name = "tensordict" },
     { name = "torch" },
@@ -3114,6 +3116,20 @@ sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
+
+[[package]]
+name = "slippi-cuda"
+version = "0.0.1"
+source = { path = "/home/ericgu/src/slippi-cuda/dist/slippi_cuda-0.0.1-1nativepgo-py3-none-linux_x86_64.whl" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { filename = "slippi_cuda-0.0.1-1nativepgo-py3-none-linux_x86_64.whl", hash = "sha256:361377d81e6b2cea696ab83f0f526c627cdd734810f04fae2686f7c205882f60" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "numpy" }]
 
 [[package]]
 name = "smmap"

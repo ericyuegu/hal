@@ -82,6 +82,12 @@ def test_slp_character_to_libmelee_rejects_unknown() -> None:
         wire.slp_character_to_libmelee(99)
 
 
+def test_character_wire_bridge_round_trips_every_selectable_character() -> None:
+    for external in range(26):
+        character = wire.slp_character_to_libmelee(external)
+        assert wire.libmelee_character_to_slp(character) == external
+
+
 def test_stage_ids_do_not_identity_map() -> None:
     """Fountain of Dreams is the canonical witness that slp and libmelee stage ids disagree."""
     fod_slp_id = _LEGAL_STAGES_BY_NAME["FOUNTAIN_OF_DREAMS"]

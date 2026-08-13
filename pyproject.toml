@@ -34,6 +34,7 @@ dependencies = [
     "scikit-learn",
     "scipy>=1.17.1",
     "seaborn",
+    "slippi-cuda",
     "tabulate",
     "tensordict",
     "torch",
@@ -66,6 +67,7 @@ python-preference = "only-managed"
 [tool.uv.sources]
 melee = { git = "https://github.com/ericyuegu/libmelee", rev = "222a399cd1368d33458b4c36f4823f7220ca889d" }
 peppi-py = { git = "https://github.com/ericyuegu/peppi-py", branch = "libmelee-parity" }
+slippi-cuda = { path = "/home/ericgu/src/slippi-cuda/dist/slippi_cuda-0.0.1-1nativepgo-py3-none-linux_x86_64.whl" }
 
 [tool.setuptools.packages.find]
 include = ["hal*"]

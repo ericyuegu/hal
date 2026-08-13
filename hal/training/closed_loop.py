@@ -87,6 +87,16 @@ PredictChunk = Callable[[Context, np.ndarray | None], np.ndarray]
 
 _PORT_TO_PREFIX: dict[int, Literal["p1", "p2"]] = {1: "p1", 2: "p2"}
 
+# SlippiVec exposes a complete schema-v5 MDS row, including the controller inputs
+# recorded for both ports.  Closed-loop inference deliberately does not consume
+# those columns: its action token is the policy action that produced the incoming
+# post-frame observation (neutral at bootstrap), which is tracked independently
+# below.  Dropping the recorded controller block therefore gives the flat native
+# row the same feature surface and alignment as ``flatten_canonical_frame``.
+_FLAT_CONTROLLER_COLUMNS = frozenset(
+    f"{prefix}_{suffix}" for prefix in ("p1", "p2") for suffix in (*ACTION_CHANNELS, "button_start")
+)
+
 # A frame lands in two raw scratch rows, one per dtype. Which row a column takes is
 # decided by the Python type of its value on the slot's first frame (int -> int32,
 # anything else -> float32) — the rule that also picks its mask sentinel.
@@ -570,6 +580,11 @@ class RecedingHorizon:
     # would differ from the trained one.
     extra: ExtraColumns | None = None
     projection: FeatureProjection | None = None
+    # A compiled inference program needs a stable feature mapping.  Emitting every
+    # mask sidecar (zero when no value is masked) is numerically identical to the
+    # sparse mapping but prevents first-use recompilation when live rows contain a
+    # different subset of missing fields than the synthetic prewarm context.
+    emit_all_masks: bool = False
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -682,7 +697,15 @@ class RecedingHorizon:
         gathered: list[_Rings] = []
         for slot in live:
             st = self._slots.setdefault(slot, _SlotState())
-            fid = obs[slot]["id"]
+            observed = obs[slot]
+            if "ports" in observed and "id" in observed:
+                fid = int(observed["id"])
+                flat = flatten_canonical_frame(observed)
+            elif "frame" in observed:
+                fid = int(observed["frame"])
+                flat = {name: value for name, value in observed.items() if name not in _FLAT_CONTROLLER_COLUMNS}
+            else:
+                raise ValueError("observation must be a nested Dolphin frame (id/ports) or a flat MDS row (frame)")
             # Instant-restart boundary: Dolphin restarted in-place into a new match, so the
             # canonical frame id reset to the pre-game countdown (dropped below the last id).
             # Drop this slot's rings so its context never spans two matches (stale stage,
@@ -690,7 +713,6 @@ class RecedingHorizon:
             if st.last_id is not None and fid < st.last_id:
                 self._reset_state(st)
             st.last_id = fid
-            flat = flatten_canonical_frame(obs[slot])
             if st.rings is None:
                 st.rings = _Rings(
                     _build_layout(flat, _PORT_TO_PREFIX[slot.port], self.stats, self.extra, self.projection),
@@ -751,7 +773,8 @@ class RecedingHorizon:
         n_value = len(layout.value_names)
         packed = torch.from_numpy(windows.floats).to(self.device, self.float_dtype)
         feats: dict[str, torch.Tensor] = dict(zip(layout.value_names, packed[:n_value].unbind(0), strict=True))
-        feats.update({layout.mask_names[k]: packed[n_value + k] for k in np.flatnonzero(windows.emitted)})
+        mask_indices = range(len(layout.mask_names)) if self.emit_all_masks else np.flatnonzero(windows.emitted)
+        feats.update({layout.mask_names[k]: packed[n_value + k] for k in mask_indices})
         if layout.cat_names:
             cats = torch.from_numpy(windows.cats).to(self.device)
             feats.update(zip(layout.cat_names, cats.unbind(0), strict=True))

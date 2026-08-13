@@ -16,10 +16,15 @@ import hashlib
 import itertools
 import json
 import math
+import os
+import platform
+import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -57,6 +62,7 @@ from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.rollout import covering_power_of_two
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
+from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
@@ -86,6 +92,9 @@ from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 from hal.training.trunk import apply_rotary_emb
+from hal.wire import BUTTON_BITS
+from hal.wire import libmelee_character_to_slp
+from hal.wire import slp_stage_to_libmelee
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
@@ -1246,6 +1255,7 @@ def make_policy(
     inference: BF16Inference | None = None,
     telemetry: DecodeTelemetry | None = None,
     device: str = DEVICE,
+    emit_all_masks: bool = False,
 ) -> RecedingHorizon:
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
     if horizon not in (4, 6):
@@ -1276,6 +1286,7 @@ def make_policy(
         float_dtype=next(model.parameters()).dtype,
         extra=V6_PLAYER_COLUMNS if v6 else None,
         projection=None if v6 else BASE_ACTION_PROJECTION,
+        emit_all_masks=emit_all_masks,
     )
 
 
@@ -2027,6 +2038,881 @@ def benchmark_self_play_checkpoint(
     return metrics
 
 
+def pack_slippi_actions(selected: Mapping[Slot, object], *, num_envs: int, action_dtype: np.dtype) -> np.ndarray:
+    """Pack HAL controller values into SlippiVec's exact structured action wire."""
+    expected = {Slot(match, port) for match in range(num_envs) for port in (1, 2)}
+    if set(selected) != expected:
+        raise ValueError(
+            f"policy returned the wrong native slots: missing={sorted(expected - set(selected), key=repr)}, "
+            f"extra={sorted(set(selected) - expected, key=repr)}"
+        )
+    actions = np.zeros((num_envs, 2), dtype=action_dtype)
+    for slot, value in selected.items():
+        analog = np.asarray(
+            (
+                value.main_x,
+                value.main_y,
+                value.c_x,
+                value.c_y,
+                value.trigger_l,
+                value.trigger_r,
+            ),
+            dtype=np.float32,
+        )
+        buttons = int(value.buttons)
+        if not np.isfinite(analog).all():
+            raise ValueError(f"slot {slot} produced NaN/Inf controller analog values")
+        if buttons < 0 or buttons > np.iinfo(np.uint16).max:
+            raise ValueError(f"slot {slot} produced out-of-range button mask {buttons}")
+        actions["analog"][slot.match, slot.port - 1] = analog
+        actions["buttons"][slot.match, slot.port - 1] = buttons
+    return actions
+
+
+def _native_observation_map(observations: np.ndarray) -> dict[Slot, dict[str, float | int]]:
+    if observations.ndim != 2 or observations.shape[1] != 2:
+        raise ValueError(f"native observations must have shape (num_envs, 2), got {observations.shape}")
+    if observations.dtype.names is None or "frame" not in observations.dtype.names:
+        raise ValueError("native observations must be structured flat MDS rows containing frame")
+    if observations[:, 0].tobytes() != observations[:, 1].tobytes():
+        raise ValueError("the two policy slots in a native match received different match rows")
+    return {
+        Slot(match, port): {name: row[name].item() for name in observations.dtype.names}
+        for match, row in enumerate(observations[:, 0])
+        for port in (1, 2)
+    }
+
+
+def _first_array_difference(expected: np.ndarray, actual: np.ndarray) -> tuple[int, object, object] | None:
+    if expected.shape != actual.shape:
+        return min(expected.size, actual.size), expected.shape, actual.shape
+    equal = expected == actual
+    if expected.dtype.kind == "f" and actual.dtype.kind == "f":
+        equal |= np.isnan(expected) & np.isnan(actual)
+    differing = np.flatnonzero(~equal)
+    if not differing.size:
+        return None
+    index = int(differing[0])
+    return index, expected[index].item(), actual[index].item()
+
+
+def _trim_replay_overlap(
+    expected: np.ndarray, parsed: dict[str, np.ndarray]
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Align a live reset-inclusive history with extract's in-game-only replay rows."""
+    expected_frames = expected["frame"]
+    actual_frames = parsed["frame"]
+    if not len(expected_frames) or not len(actual_frames):
+        return expected, parsed
+    expected_at = {int(frame): index for index, frame in enumerate(expected_frames)}
+    actual_at = {int(frame): index for index, frame in enumerate(actual_frames)}
+    common = sorted(set(expected_at) & set(actual_at))
+    if not common:
+        return expected[:0], {name: value[:0] for name, value in parsed.items()}
+    first, last = common[0], common[-1]
+    expected_slice = slice(expected_at[first], expected_at[last] + 1)
+    actual_slice = slice(actual_at[first], actual_at[last] + 1)
+    return expected[expected_slice], {name: value[actual_slice] for name, value in parsed.items()}
+
+
+def _validate_native_replay(path: Path, in_memory_rows: list[np.void]) -> dict[str, object]:
+    """Parse a captured replay and exact-compare every schema-v5 field to live rows."""
+    from hal.data.extract import extract_replay
+
+    parsed = extract_replay(str(path))
+    if parsed is None:
+        return {
+            "passed": False,
+            "parsed_successfully": False,
+            "frames": 0,
+            "first_difference": {"event": "parse"},
+        }
+    if not in_memory_rows:
+        return {
+            "passed": False,
+            "parsed_successfully": False,
+            "frames": 0,
+            "first_difference": {"event": "empty-history"},
+        }
+    expected = np.asarray(in_memory_rows, dtype=in_memory_rows[0].dtype)
+    expected, parsed = _trim_replay_overlap(expected, parsed)
+    if not len(expected) or not len(parsed["frame"]):
+        return {
+            "passed": False,
+            "parsed_successfully": True,
+            "frames": 0,
+            "first_difference": {"event": "frame-overlap"},
+        }
+    first: dict[str, object] | None = None
+    for field in expected.dtype.names or ():
+        actual = parsed.get(field)
+        if actual is None:
+            first = {"event": "post/pre", "frame": None, "port": None, "field": field, "reason": "missing"}
+            break
+        difference = _first_array_difference(expected[field], actual)
+        if difference is not None:
+            index, wanted, got = difference
+            port = int(field[1]) if field.startswith(("p1_", "p2_")) else None
+            frame = int(expected["frame"][index]) if index < len(expected) else None
+            first = {
+                "event": "pre" if "button_" in field or "stick_" in field or "trigger_" in field else "post",
+                "frame": frame,
+                "port": port,
+                "field": field,
+                "expected": wanted,
+                "actual": got,
+            }
+            break
+    return {
+        "passed": first is None,
+        "parsed_successfully": True,
+        "frames": int(len(expected)),
+        "parsed_frames": int(len(parsed["frame"])),
+        "first_difference": first,
+    }
+
+
+def _save_and_validate_native_replay(
+    environment,
+    *,
+    env_index: int,
+    path: Path,
+    rows: list[np.void],
+) -> dict[str, object]:
+    environment.save_replay(path, env_index=env_index)
+    live_path = path.with_suffix(".live.npy")
+    np.save(live_path, np.asarray(rows, dtype=rows[0].dtype), allow_pickle=False)
+    result = _validate_native_replay(path, rows)
+    result |= {
+        "path": str(path),
+        "sha256": _checkpoint_sha256(path),
+        "live_rows_path": str(live_path),
+        "live_rows_sha256": _checkpoint_sha256(live_path),
+        "env": env_index,
+    }
+    return result
+
+
+def run_native_slippi_phase(
+    environment,
+    policy: RecedingHorizon,
+    *,
+    frames: int,
+    output_dir: Path,
+    phase: str,
+    action_dtype: np.dtype,
+    replay_stems: list[str] | None = None,
+) -> dict[str, object]:
+    """Drive one exact native phase, including terminal capture and selective reset."""
+    if frames < 1:
+        raise ValueError("native rollout frames must be positive")
+    if replay_stems is not None and len(replay_stems) != environment.num_envs:
+        raise ValueError("replay stems must have one entry per native environment")
+    stems = replay_stems or [f"env-{index:03d}" for index in range(environment.num_envs)]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    observations, _ = environment.reset()
+    _native_observation_map(observations)
+    histories: list[list[np.void]] = [[observations[i, 0].copy()] for i in range(environment.num_envs)]
+    episode = [0] * environment.num_envs
+    previous_frames = observations[:, 0]["frame"].astype(np.int64)
+    non_neutral = np.zeros((environment.num_envs, 2), dtype=np.int64)
+    policy_seconds = env_seconds = reset_seconds = replay_seconds = 0.0
+    reset_count = 0
+    replay_rows: list[dict[str, object]] = []
+    started = time.perf_counter()
+    for frame_index in range(frames):
+        policy_started = time.perf_counter()
+        selected = policy(frame_index, _native_observation_map(observations))
+        actions = pack_slippi_actions(selected, num_envs=environment.num_envs, action_dtype=action_dtype)
+        policy_seconds += time.perf_counter() - policy_started
+        active = np.any(actions["analog"] != 0.0, axis=-1) | (actions["buttons"] != 0)
+        non_neutral += active
+
+        env_started = time.perf_counter()
+        stepped, rewards, terminated, truncated, _ = environment.step(actions)
+        env_seconds += time.perf_counter() - env_started
+        _native_observation_map(stepped)
+        rewards = np.asarray(rewards)
+        terminated = np.asarray(terminated, dtype=bool)
+        truncated = np.asarray(truncated, dtype=bool)
+        expected_slots = 2 * environment.num_envs
+        if (
+            rewards.shape != (expected_slots,)
+            or terminated.shape != (expected_slots,)
+            or truncated.shape != (expected_slots,)
+        ):
+            raise ValueError("native reward and termination arrays must have one value per policy slot")
+        if not np.array_equal(rewards[0::2], -rewards[1::2]):
+            raise RuntimeError("native rewards were not antisymmetric within a match")
+        if not np.array_equal(terminated[0::2], terminated[1::2]) or not np.array_equal(
+            truncated[0::2], truncated[1::2]
+        ):
+            raise RuntimeError("native terminal flags disagreed across a match's two policy slots")
+        current_frames = stepped[:, 0]["frame"].astype(np.int64)
+        if not np.array_equal(current_frames, previous_frames + 1):
+            raise RuntimeError(
+                f"native observations did not advance monotonically: previous={previous_frames.tolist()} "
+                f"current={current_frames.tolist()}"
+            )
+        for env_index in range(environment.num_envs):
+            histories[env_index].append(stepped[env_index, 0].copy())
+
+        done = terminated[0::2] | truncated[0::2]
+        if done.any():
+            for env_index in np.flatnonzero(done):
+                replay_started = time.perf_counter()
+                replay_rows.append(
+                    _save_and_validate_native_replay(
+                        environment,
+                        env_index=int(env_index),
+                        path=output_dir / f"{stems[env_index]}-episode-{episode[env_index]:03d}.slp",
+                        rows=histories[env_index],
+                    )
+                )
+                replay_seconds += time.perf_counter() - replay_started
+                episode[env_index] += 1
+            reset_started = time.perf_counter()
+            reset_observations, _ = environment.reset(mask=done)
+            reset_seconds += time.perf_counter() - reset_started
+            for env_index in np.flatnonzero(~done):
+                if reset_observations[env_index].tobytes() != stepped[env_index].tobytes():
+                    raise RuntimeError(f"selective reset altered unrelated environment {env_index}")
+            observations = reset_observations
+            previous_frames = observations[:, 0]["frame"].astype(np.int64)
+            for env_index in np.flatnonzero(done):
+                histories[env_index] = [observations[env_index, 0].copy()]
+            reset_count += int(done.sum())
+        else:
+            observations = stepped
+            previous_frames = current_frames
+
+    for env_index in range(environment.num_envs):
+        replay_started = time.perf_counter()
+        replay_rows.append(
+            _save_and_validate_native_replay(
+                environment,
+                env_index=env_index,
+                path=output_dir / f"{stems[env_index]}-episode-{episode[env_index]:03d}-partial.slp",
+                rows=histories[env_index],
+            )
+        )
+        replay_seconds += time.perf_counter() - replay_started
+    wall_seconds = time.perf_counter() - started
+    result = {
+        "phase": phase,
+        "frames_per_environment": frames,
+        "aggregate_frames": frames * environment.num_envs,
+        "wall_seconds": wall_seconds,
+        "aggregate_fps": frames * environment.num_envs / max(wall_seconds, 1e-12),
+        "per_environment_fps": frames / max(wall_seconds, 1e-12),
+        "policy_seconds": policy_seconds,
+        "environment_step_seconds": env_seconds,
+        "reset_seconds": reset_seconds,
+        "replay_capture_seconds": replay_seconds,
+        "selective_resets": reset_count,
+        "non_neutral_frames_by_slot": non_neutral.tolist(),
+        "always_neutral_slots": [
+            {"env": int(match), "port": int(port + 1)} for match, port in np.argwhere(non_neutral == 0)
+        ],
+        "replays": replay_rows,
+    }
+    result["replay_divergences"] = sum(not bool(row["passed"]) for row in replay_rows)
+    result["replay_parse_failures"] = sum(not bool(row["parsed_successfully"]) for row in replay_rows)
+    return result
+
+
+class _NativeMatchupWave:
+    """Present heterogeneous one-env Slippi hosts as one vector environment."""
+
+    def __init__(
+        self,
+        matchups: list[tuple[melee.Character, melee.Character]],
+        *,
+        ciso: str | None,
+        stage: int,
+        seed: int,
+        capture_replays: bool,
+    ) -> None:
+        from slippi_cuda import ACTION_DTYPE
+        from slippi_cuda import SlippiVec
+
+        if not matchups:
+            raise ValueError("a native matchup wave cannot be empty")
+        self.num_envs = len(matchups)
+        self._matchups = matchups
+        self._stage = slp_stage_to_libmelee(stage)
+        self._action_dtype = ACTION_DTYPE
+        self._executor = ThreadPoolExecutor(max_workers=self.num_envs, thread_name_prefix="slippi-matchup")
+        self._environments = []
+        self._last_observations: np.ndarray | None = None
+
+        def construct(item: tuple[int, tuple[melee.Character, melee.Character]]):
+            index, (p1, p2) = item
+
+            def setup_character(character: melee.Character) -> int:
+                # Synthetic StartMelee cannot select Sheik directly. Boot Zelda;
+                # reset() performs a verified Down+B transform before publication.
+                selected = melee.Character.ZELDA if character is melee.Character.SHEIK else character
+                return libmelee_character_to_slp(selected)
+
+            return SlippiVec(
+                num_envs=1,
+                ciso=ciso,
+                stage=stage,
+                p1_character=setup_character(p1),
+                p2_character=setup_character(p2),
+                seed=seed + index,
+                capture_replays=capture_replays,
+            )
+
+        futures = [self._executor.submit(construct, item) for item in enumerate(matchups)]
+        try:
+            self._environments = [future.result() for future in futures]
+        except Exception:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            for future in futures:
+                if not future.cancelled():
+                    with contextlib.suppress(Exception):
+                        future.result().close(force=True)
+            raise
+
+    def _reset_one(self, index: int) -> np.ndarray:
+        environment = self._environments[index]
+        observations, _ = environment.reset()
+        matchup = self._matchups[index]
+        sheik_ports = [port for port, character in enumerate(matchup) if character is melee.Character.SHEIK]
+        if not sheik_ports:
+            return observations
+        actions = np.zeros((1, 2), dtype=self._action_dtype)
+        stable_sheik_frames = 0
+        for transform_frame in range(360):
+            transformed = all(
+                int(observations[0, 0][f"p{port + 1}_character"]) == int(melee.Character.SHEIK.value)
+                for port in sheik_ports
+            )
+            if transformed:
+                stable_sheik_frames += 1
+                actions[...] = np.zeros((), dtype=self._action_dtype)
+                if stable_sheik_frames >= 60:
+                    return observations
+            else:
+                stable_sheik_frames = 0
+                actions[...] = np.zeros((), dtype=self._action_dtype)
+                for port in sheik_ports:
+                    actions["analog"][0, port, 1] = -1.0
+                    actions["buttons"][0, port] = BUTTON_BITS["b"] if transform_frame % 2 == 0 else 0
+            observations, *_ = environment.step(actions)
+        found = [int(observations[0, 0][f"p{port + 1}_character"]) for port in sheik_ports]
+        raise RuntimeError(f"native Zelda-to-Sheik transform did not stabilize: ports={sheik_ports}, found={found}")
+
+    def reset(self, *, mask: np.ndarray | None = None):
+        selected = np.ones(self.num_envs, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+        if selected.shape != (self.num_envs,):
+            raise ValueError(f"reset mask must have shape ({self.num_envs},)")
+        if self._last_observations is None and not selected.all():
+            raise RuntimeError("the first heterogeneous native reset must select every environment")
+        pending = {
+            index: self._executor.submit(self._reset_one, index) for index in range(self.num_envs) if selected[index]
+        }
+        observations = (
+            np.empty((self.num_envs, 2), dtype=self._environments[0].single_observation_dtype)
+            if self._last_observations is None
+            else self._last_observations.copy()
+        )
+        for index, future in pending.items():
+            observations[index] = future.result()[0]
+            row = observations[index, 0]
+            p1, p2 = self._matchups[index]
+            observed = (int(row["p1_character"]), int(row["p2_character"]), int(row["stage"]))
+            expected = (int(p1.value), int(p2.value), int(self._stage.value))
+            if observed != expected:
+                raise RuntimeError(f"native matchup {index} booted as {observed}, expected {expected}")
+        self._last_observations = observations
+        return observations, [{} for _ in range(2 * self.num_envs)]
+
+    def step(self, actions):
+        pending = [
+            self._executor.submit(environment.step, actions[index : index + 1])
+            for index, environment in enumerate(self._environments)
+        ]
+        results = [future.result() for future in pending]
+        observations = np.concatenate([result[0] for result in results], axis=0)
+        rewards = np.concatenate([result[1] for result in results])
+        terminated = np.concatenate([result[2] for result in results])
+        truncated = np.concatenate([result[3] for result in results])
+        self._last_observations = observations
+        return observations, rewards, terminated, truncated, [{} for _ in range(2 * self.num_envs)]
+
+    def save_replay(self, path: Path, *, env_index: int) -> Path:
+        return self._environments[env_index].save_replay(path)
+
+    def close(self) -> None:
+        pending = [self._executor.submit(environment.close) for environment in self._environments]
+        for future in pending:
+            with contextlib.suppress(Exception):
+                future.result()
+        self._executor.shutdown(wait=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def _native_matchup_schedule(n_matchups: int) -> list[tuple[melee.Character, melee.Character]]:
+    """Use the byte-identical matchup schedule from official closed-loop eval."""
+    if n_matchups < 1:
+        raise ValueError("native evaluation requires at least one matchup")
+    return matchups_for_vs_cpu(n_matchups)
+
+
+def _native_replay_stem(index: int, matchup: tuple[melee.Character, melee.Character]) -> str:
+    p1, p2 = matchup
+    return f"matchup-{index:03d}-{p1.name.lower()}-vs-{p2.name.lower()}"
+
+
+def run_native_slippi_matchup_sweep(
+    schedule: list[tuple[melee.Character, melee.Character]],
+    policy_factory: Callable[[int], RecedingHorizon],
+    *,
+    max_parallel: int,
+    frames: int,
+    output_dir: Path,
+    phase: str,
+    ciso: str | None,
+    stage: int,
+    seed: int,
+    action_dtype: np.dtype,
+) -> dict[str, object]:
+    """Run a prior-sampled character schedule in heterogeneous native waves."""
+    if max_parallel < 1:
+        raise ValueError("native maximum parallelism must be positive")
+    results: list[dict[str, object]] = []
+    matchup_activity: list[dict[str, object]] = []
+    started = time.perf_counter()
+    phase_dir = output_dir / phase
+    for wave_start in range(0, len(schedule), max_parallel):
+        wave = schedule[wave_start : wave_start + max_parallel]
+        stems = [_native_replay_stem(wave_start + index, matchup) for index, matchup in enumerate(wave)]
+        with _NativeMatchupWave(
+            wave,
+            ciso=ciso,
+            stage=stage,
+            seed=seed + wave_start,
+            capture_replays=True,
+        ) as environment:
+            result = run_native_slippi_phase(
+                environment,
+                policy_factory(wave_start),
+                frames=frames,
+                output_dir=phase_dir,
+                phase=phase,
+                action_dtype=action_dtype,
+                replay_stems=stems,
+            )
+        results.append(result)
+        for local_index, matchup in enumerate(wave):
+            p1, p2 = matchup
+            matchup_activity.append(
+                {
+                    "index": wave_start + local_index,
+                    "p1_character": p1.name,
+                    "p2_character": p2.name,
+                    "non_neutral_frames": result["non_neutral_frames_by_slot"][local_index],
+                }
+            )
+    wall_seconds = time.perf_counter() - started
+    aggregate_frames = frames * len(schedule)
+    aggregate_fps = aggregate_frames / max(wall_seconds, 1e-12)
+    replay_rows = [replay for result in results for replay in result["replays"]]
+    return {
+        "phase": phase,
+        "matchups": len(schedule),
+        "max_parallel": max_parallel,
+        "frames_per_matchup": frames,
+        "aggregate_frames": aggregate_frames,
+        "wall_seconds": wall_seconds,
+        "aggregate_fps": aggregate_fps,
+        "per_active_environment_fps": aggregate_fps / min(max_parallel, len(schedule)),
+        "policy_seconds": sum(float(result["policy_seconds"]) for result in results),
+        "environment_step_seconds": sum(float(result["environment_step_seconds"]) for result in results),
+        "reset_seconds": sum(float(result["reset_seconds"]) for result in results),
+        "replay_capture_seconds": sum(float(result["replay_capture_seconds"]) for result in results),
+        "selective_resets": sum(int(result["selective_resets"]) for result in results),
+        "always_neutral_slots": [
+            {"matchup": row["index"], "port": port + 1}
+            for row in matchup_activity
+            for port, count in enumerate(row["non_neutral_frames"])
+            if count == 0
+        ],
+        "matchup_activity": matchup_activity,
+        "replays": replay_rows,
+        "replay_divergences": sum(not bool(row["passed"]) for row in replay_rows),
+        "replay_parse_failures": sum(not bool(row["parsed_successfully"]) for row in replay_rows),
+    }
+
+
+def _native_env_kwargs(num_envs: int, ciso: str | None, *, capture_replays: bool) -> dict[str, object]:
+    from slippi_cuda import Character
+    from slippi_cuda import Stage
+
+    return {
+        "num_envs": num_envs,
+        "ciso": ciso,
+        "stage": Stage.FINAL_DESTINATION,
+        "p1_character": Character.FOX,
+        "p2_character": Character.FOX,
+        "seed": 1,
+        "capture_replays": capture_replays,
+    }
+
+
+def _native_engine_probe(num_envs: int, ciso: str | None, action_dtype: np.dtype) -> dict[str, object]:
+    from slippi_cuda import SlippiVec
+
+    warmup_frames, measured_frames = 64, 600
+    with SlippiVec(**_native_env_kwargs(num_envs, ciso, capture_replays=False)) as environment:
+        observations, _ = environment.reset()
+        actions = np.zeros((num_envs, 2), dtype=action_dtype)
+        for frame in range(warmup_frames + measured_frames):
+            shoulder = (frame + np.arange(num_envs)[:, None]) % 3
+            actions["analog"][..., 4] = (shoulder == 1) * (43.0 / 140.0)
+            actions["analog"][..., 5] = (shoulder == 2) * (43.0 / 140.0)
+            actions["buttons"] = np.where(
+                shoulder == 1, BUTTON_BITS["l"], np.where(shoulder == 2, BUTTON_BITS["r"], 0)
+            )
+            if frame == warmup_frames:
+                started = time.perf_counter()
+            observations, _, terminated, truncated, _ = environment.step(actions)
+            done = np.asarray(terminated)[0::2] | np.asarray(truncated)[0::2]
+            if done.any():
+                observations, _ = environment.reset(mask=done)
+        elapsed = time.perf_counter() - started
+    del observations
+    return {
+        "warmup_frames_per_environment": warmup_frames,
+        "measured_frames_per_environment": measured_frames,
+        "seconds": elapsed,
+        "aggregate_fps": num_envs * measured_frames / elapsed,
+        "per_environment_fps": measured_frames / elapsed,
+    }
+
+
+def _selective_reset_probe(num_envs: int, ciso: str | None, action_dtype: np.dtype) -> dict[str, object]:
+    from slippi_cuda import SlippiVec
+
+    with SlippiVec(**_native_env_kwargs(num_envs, ciso, capture_replays=False)) as environment:
+        environment.reset()
+        actions = np.zeros((num_envs, 2), dtype=action_dtype)
+        before, *_ = environment.step(actions)
+        mask = np.zeros(num_envs, dtype=bool)
+        mask[0] = True
+        after, _ = environment.reset(mask=mask)
+    unchanged = [before[index].tobytes() == after[index].tobytes() for index in range(1, num_envs)]
+    reset_dropped = int(after[0, 0]["frame"]) < int(before[0, 0]["frame"])
+    if not all(unchanged) or not reset_dropped:
+        raise RuntimeError("native selective-reset isolation probe failed")
+    return {"reset_environment": 0, "unrelated_unchanged": unchanged, "reset_frame_dropped": reset_dropped}
+
+
+class _GpuSampler:
+    def __init__(self) -> None:
+        self.samples: list[float] = []
+        self.error: str | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        def sample() -> None:
+            try:
+                import pynvml
+
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+                while not self._stop.wait(0.1):
+                    self.samples.append(float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu))
+                pynvml.nvmlShutdown()
+            except Exception as error:  # telemetry must not crash an otherwise valid rollout
+                self.error = repr(error)
+
+        self._thread = threading.Thread(target=sample, name="native-slippi-gpu-sampler", daemon=True)
+        self._thread.start()
+
+    def finish(self) -> dict[str, object]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        values = np.asarray(self.samples, dtype=np.float64)
+        return {
+            "samples": int(values.size),
+            "mean_percent": float(values.mean()) if values.size else None,
+            "p95_percent": float(np.percentile(values, 95)) if values.size else None,
+            "max_percent": float(values.max()) if values.size else None,
+            "error": self.error,
+        }
+
+
+def _hardware_evidence() -> dict[str, object]:
+    model_name = "unknown"
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                model_name = line.partition(":")[2].strip()
+                break
+    except OSError:
+        pass
+    governors: dict[str, str] = {}
+    for cpu in sorted(os.sched_getaffinity(0)):
+        path = Path(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor")
+        if path.is_file():
+            governors[str(cpu)] = path.read_text().strip()
+    cuda = None
+    if torch.cuda.is_available():
+        cuda = {
+            "torch_cuda": torch.version.cuda,
+            "device": torch.cuda.get_device_name(),
+            "capability": list(torch.cuda.get_device_capability()),
+            "total_memory": torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory,
+        }
+    return {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "cpu": model_name,
+        "cpu_affinity": sorted(os.sched_getaffinity(0)),
+        "cpu_governors": governors,
+        "cuda": cuda,
+    }
+
+
+def _slippi_install_evidence() -> dict[str, object]:
+    import importlib.metadata
+    from urllib.parse import unquote
+    from urllib.parse import urlparse
+
+    from slippi_cuda.env import _default_host
+    from slippi_cuda.env import _default_manifest
+
+    distribution = importlib.metadata.distribution("slippi-cuda")
+    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+    wheel_url = direct_url.get("url")
+    wheel = Path(unquote(urlparse(wheel_url).path)) if isinstance(wheel_url, str) else None
+    host = _default_host().resolve()
+    manifest = _default_manifest().resolve()
+    if os.environ.get("SC_ENV_HOST") or os.environ.get("SC_LIVE_MANIFEST"):
+        raise RuntimeError("native evaluation refuses SC_ENV_HOST/SC_LIVE_MANIFEST source-tree overrides")
+    if "site-packages" not in str(host) or host.parent.name != "_native":
+        raise RuntimeError(f"native evaluation did not resolve the wheel-embedded host: {host}")
+    return {
+        "version": distribution.version,
+        "direct_url": direct_url,
+        "wheel": None if wheel is None else str(wheel),
+        "wheel_sha256": None if wheel is None or not wheel.is_file() else _checkpoint_sha256(wheel),
+        "host": str(host),
+        "host_sha256": _checkpoint_sha256(host),
+        "manifest": str(manifest),
+        "manifest_sha256": _checkpoint_sha256(manifest),
+        "source_overrides": False,
+    }
+
+
+def _profile_inference(inference: BF16Inference, cfg: TrainConfig, output_dir: Path, rows: int) -> dict[str, object]:
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    context = synthetic_context(cfg, rows, next(inference.model.parameters()).device)
+    trace = output_dir / "inference_trace.json"
+    table = output_dir / "inference_profile.txt"
+    with torch.profiler.profile(activities=activities, record_shapes=True, profile_memory=True) as profiler:
+        for _ in range(6):
+            inference.decode(context, cfg.exec_horizon)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    profiler.export_chrome_trace(str(trace))
+    sort_by = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
+    table.write_text(profiler.key_averages().table(sort_by=sort_by, row_limit=40))
+    return {"trace": str(trace), "table": str(table), "steps": 6, "real_rows": rows}
+
+
+def native_slippi_checkpoint(
+    path: str,
+    *,
+    num_envs: int = 6,
+    frames: int = 3_000,
+    n_matchups: int | None = None,
+    ciso: str | None = None,
+    output_name: str | None = None,
+    replay_dir: str | None = None,
+) -> dict[str, object]:
+    """Run the official closed-loop matchup schedule through native self-play."""
+    from slippi_cuda import ACTION_DTYPE
+    from slippi_cuda import Stage
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("native experiment-026 evaluation requires CUDA")
+    if num_envs < 1 or frames < 64:
+        raise ValueError("native evaluation requires at least one environment and 64 frames")
+    checkpoint = Path(path).resolve()
+    base_name = output_name or f"native_slippi_{num_envs}x{frames}"
+    if Path(base_name).name != base_name or base_name in ("", ".", ".."):
+        raise ValueError(f"native output name must be one directory name, got {base_name!r}")
+    out_dir = checkpoint.parent / base_name
+    suffix = 1
+    while out_dir.exists():
+        suffix += 1
+        out_dir = checkpoint.parent / f"{base_name}_run{suffix:02d}"
+    out_dir.mkdir(parents=True)
+    replay_root = out_dir / "replays" if replay_dir is None else Path(replay_dir).expanduser().resolve()
+    replay_root.mkdir(parents=True, exist_ok=False)
+    model, cfg, stats, state = load_checkpoint(str(checkpoint))
+    matchup_count = cfg.final_eval_n_matchups if n_matchups is None else n_matchups
+    schedule = _native_matchup_schedule(matchup_count)
+    pairs, p1_characters, p2_characters, schedule_sha = assert_protocol_diversity(matchup_count)
+    schedule_rows = [
+        {"index": index, "p1_character": p1.name, "p2_character": p2.name} for index, (p1, p2) in enumerate(schedule)
+    ]
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "configuration": {
+            "checkpoint": str(checkpoint),
+            "matchups": matchup_count,
+            "oriented_pairs": pairs,
+            "p1_characters": p1_characters,
+            "p2_characters": p2_characters,
+            "max_parallel_environments": num_envs,
+            "max_policy_slots": 2 * num_envs,
+            "stage": "BATTLEFIELD",
+            "seed": cfg.eval_seed,
+            "requested_frames_per_matchup": frames,
+            "inference": "compiled-bfloat16",
+            "compiled_bucket": 16,
+            "replay_directory": str(replay_root),
+        },
+        "hashes": {
+            "checkpoint_sha256": _checkpoint_sha256(checkpoint),
+            "matchup_schedule_sha256": schedule_sha,
+        },
+        "matchup_schedule": schedule_rows,
+        "hardware": _hardware_evidence(),
+        "slippi_cuda": _slippi_install_evidence(),
+        "failures": [],
+        "phases": [],
+    }
+
+    def write_evidence() -> None:
+        temporary = out_dir / "evidence.json.tmp"
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        temporary.replace(out_dir / "evidence.json")
+
+    write_evidence()
+    sampler = _GpuSampler()
+    sampler.start()
+    try:
+        cfg = replace(cfg, inference_mode="compiled", compiled_inference_bucket=16)
+        validate_config(cfg)
+        model.eval()
+        inference = BF16Inference(model, cfg, compile_mode="default", compiled_buckets=(16,))
+        compile_started = time.perf_counter()
+        prewarm_context = synthetic_context(cfg, 16, next(model.parameters()).device)
+        inference.decode(prewarm_context, cfg.exec_horizon)
+        inference.decode(prewarm_context, cfg.exec_horizon)
+        torch.cuda.synchronize()
+        compile_seconds = time.perf_counter() - compile_started
+        torch.cuda.reset_peak_memory_stats()
+        payload["configuration"] |= {"checkpoint_step": int(state["step"]), "exec_horizon": cfg.exec_horizon}
+        payload["timings"] = {"compile_seconds": compile_seconds}
+        payload["profile"] = _profile_inference(inference, cfg, out_dir, 2 * num_envs)
+        payload["engine_only"] = _native_engine_probe(num_envs, ciso, ACTION_DTYPE)
+        payload["selective_reset_probe"] = _selective_reset_probe(num_envs, ciso, ACTION_DTYPE)
+        write_evidence()
+
+        targets = [("smoke", 64), ("measured", 600)]
+        for phase_index, (phase, phase_frames) in enumerate(targets):
+            telemetry = DecodeTelemetry()
+            seed_base = cfg.eval_seed + phase_index * matchup_count
+
+            def policy_factory(wave_start: int, *, seed_base: int = seed_base, telemetry=telemetry):
+                return make_policy(
+                    model,
+                    stats,
+                    cfg,
+                    decode_seed=seed_base + wave_start,
+                    inference=inference,
+                    telemetry=telemetry,
+                    emit_all_masks=True,
+                )
+
+            phase_result = run_native_slippi_matchup_sweep(
+                schedule,
+                policy_factory,
+                max_parallel=num_envs,
+                frames=phase_frames,
+                output_dir=replay_root,
+                phase=phase,
+                ciso=ciso,
+                stage=int(Stage.BATTLEFIELD),
+                seed=cfg.eval_seed,
+                action_dtype=ACTION_DTYPE,
+            )
+            phase_result["decode"] = telemetry.metrics()
+            payload["phases"].append(phase_result)
+            write_evidence()
+        gate_failures = [
+            f"{phase['phase']}: replay-parse-failures={phase['replay_parse_failures']}"
+            for phase in payload["phases"]
+            if phase["replay_parse_failures"]
+        ]
+        measured = payload["phases"][-1]
+        if measured["always_neutral_slots"]:
+            gate_failures.append(f"measured: always-neutral={measured['always_neutral_slots']}")
+        if gate_failures:
+            raise RuntimeError("native smoke/measured gate failed: " + "; ".join(gate_failures))
+        if frames > 600:
+            telemetry = DecodeTelemetry()
+            phase_result = run_native_slippi_matchup_sweep(
+                schedule,
+                lambda wave_start: make_policy(
+                    model,
+                    stats,
+                    cfg,
+                    decode_seed=cfg.eval_seed + 2 * matchup_count + wave_start,
+                    inference=inference,
+                    telemetry=telemetry,
+                    emit_all_masks=True,
+                ),
+                max_parallel=num_envs,
+                frames=frames,
+                output_dir=replay_root,
+                phase="extended",
+                ciso=ciso,
+                stage=int(Stage.BATTLEFIELD),
+                seed=cfg.eval_seed,
+                action_dtype=ACTION_DTYPE,
+            )
+            phase_result["decode"] = telemetry.metrics()
+            payload["phases"].append(phase_result)
+            write_evidence()
+            if phase_result["replay_parse_failures"] or phase_result["always_neutral_slots"]:
+                raise RuntimeError("native extended gate failed")
+        payload["cuda_memory"] = {
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+        }
+    except Exception as error:
+        payload["failures"].append({"type": type(error).__name__, "message": str(error)})
+        raise
+    finally:
+        if torch.cuda.is_available():
+            payload["cuda_memory"] = {
+                "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+            }
+        payload["gpu_utilization"] = sampler.finish()
+        write_evidence()
+    print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+    return payload
+
+
 def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
     features: dict[str, Tensor] = {}
     floats = FLOAT_FEATURES if cfg.observation_bundle == "base" else FLOAT_FEATURES + _V6_FLOATS
@@ -2112,19 +2998,28 @@ class Args:
     self_play_frames: int = 14_400
     self_play_eager: bool = False
     self_play_instant_match_restart: bool = False
+    slippi_eval: str | None = None
+    slippi_num_envs: int = 6
+    slippi_frames: int = 3_000
+    slippi_matchups: int | None = None
+    slippi_ciso: str | None = None
+    slippi_output_name: str | None = None
+    slippi_replay_dir: str | None = None
     benchmark: bool = False
     benchmark_iterations: int = 20
 
 
 def main(args: Args) -> None:
     if args.benchmark:
-        if args.eval is not None or args.resume is not None or args.self_play_eval is not None:
-            raise SystemExit("--benchmark cannot be combined with --eval, --self-play-eval, or --resume")
+        if any(value is not None for value in (args.eval, args.resume, args.self_play_eval, args.slippi_eval)):
+            raise SystemExit(
+                "--benchmark cannot be combined with --eval, --self-play-eval, --slippi-eval, or --resume"
+            )
         run_benchmark(args.cfg, iterations=args.benchmark_iterations)
         return
-    selected = sum(value is not None for value in (args.eval, args.self_play_eval, args.resume))
+    selected = sum(value is not None for value in (args.eval, args.self_play_eval, args.slippi_eval, args.resume))
     if selected > 1:
-        raise SystemExit("pass only one of --eval, --self-play-eval, or --resume")
+        raise SystemExit("pass only one of --eval, --self-play-eval, --slippi-eval, or --resume")
     if args.eval is not None:
         eval_checkpoint(
             args.eval,
@@ -2142,6 +3037,17 @@ def main(args: Args) -> None:
             max_frames=args.self_play_frames,
             eager=args.self_play_eager,
             instant_match_restart=args.self_play_instant_match_restart,
+        )
+        return
+    if args.slippi_eval is not None:
+        native_slippi_checkpoint(
+            args.slippi_eval,
+            num_envs=args.slippi_num_envs,
+            frames=args.slippi_frames,
+            n_matchups=args.slippi_matchups,
+            ciso=args.slippi_ciso,
+            output_name=args.slippi_output_name,
+            replay_dir=args.slippi_replay_dir,
         )
         return
     resume_run = resume_state = None

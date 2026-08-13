@@ -27,6 +27,7 @@ from hal.training.features import ACTION_CHANNELS
 from hal.training.features import BASE_ACTION_PROJECTION
 from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import V6_PLAYER_COLUMNS
+from hal.training.features import Context
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import preprocess
@@ -346,6 +347,67 @@ def test_context_pad_tracks_the_refilling_context() -> None:
     assert pads[: L_CTX + 1] == [L_CTX - 1 - i for i in range(L_CTX)] + [0]
     assert pads[2 * L_CTX - 1] == 0
     assert pads[2 * L_CTX : 3 * L_CTX] == [L_CTX - 1 - i for i in range(L_CTX)]
+
+
+def test_flat_mds_and_nested_dolphin_observations_produce_identical_contexts_and_actions() -> None:
+    nested_contexts: list[Context] = []
+    flat_contexts: list[Context] = []
+
+    def make_policy(captured: list[Context]) -> RecedingHorizon:
+        def predict_chunk(ctx, committed):
+            del committed
+            captured.append(
+                Context(
+                    features={name: value.clone() for name, value in ctx.features.items()},
+                    ctx_pad=ctx.ctx_pad.clone(),
+                    slot_ids=None if ctx.slot_ids is None else ctx.slot_ids.clone(),
+                    reset=None if ctx.reset is None else ctx.reset.clone(),
+                )
+            )
+            actions = np.zeros((ctx.batch, 1, A_DIM), dtype=np.float32)
+            actions[..., 0] = 0.75
+            actions[..., 6] = 1.0
+            return actions
+
+        return RecedingHorizon(
+            predict_chunk=predict_chunk,
+            stats=_stats(False, False),
+            L_ctx=4,
+            L_chunk=1,
+            s=1,
+            d=0,
+            device="cpu",
+            projection=BASE_ACTION_PROJECTION,
+        )
+
+    nested_policy = make_policy(nested_contexts)
+    flat_policy = make_policy(flat_contexts)
+    slots = (Slot(0, 1), Slot(0, 2))
+    for t in range(6):
+        nested = _obs(t, -123 + t, v6=False, follower=False)
+        flat = flatten_canonical_frame(nested)
+        flat["frame"] = nested["id"]
+        # SlippiVec's MDS-v5 row includes both ports' recorded input blocks.
+        # Deliberately make them disagree with the policy's previous action: the
+        # closed-loop token must still come from the action the policy returned.
+        for prefix in ("p1", "p2"):
+            for channel in ACTION_CHANNELS:
+                flat[f"{prefix}_{channel}"] = 1 if channel.startswith("button_") else -0.25
+            flat[f"{prefix}_button_start"] = 1
+        nested_actions = nested_policy(t, {slot: nested for slot in slots})
+        flat_actions = flat_policy(t, {slot: flat for slot in slots})
+        assert nested_actions == flat_actions
+
+    assert len(nested_contexts) == len(flat_contexts) == 6
+    for nested_ctx, flat_ctx in zip(nested_contexts, flat_contexts, strict=True):
+        assert nested_ctx.ctx_pad.equal(flat_ctx.ctx_pad)
+        assert nested_ctx.slot_ids is not None and flat_ctx.slot_ids is not None
+        assert nested_ctx.slot_ids.equal(flat_ctx.slot_ids)
+        assert nested_ctx.reset is not None and flat_ctx.reset is not None
+        assert nested_ctx.reset.equal(flat_ctx.reset)
+        assert nested_ctx.features.keys() == flat_ctx.features.keys()
+        for name in nested_ctx.features:
+            assert torch.equal(nested_ctx.features[name], flat_ctx.features[name]), name
 
 
 def test_shared_row_planning_uses_policy_schedule_and_resets_context() -> None:

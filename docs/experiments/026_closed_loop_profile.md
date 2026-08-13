@@ -300,3 +300,63 @@ Other remaining work is narrower:
 - The process worker now skips policy publication for the terminal menu frame. It still retains that frame in the trajectory. A regression test covers terminal frames that omit live player position fields.
 - Short evaluations still pay Dolphin process spawn and menu navigation. Persistent worker pools across evaluation calls would remove repeated boots, but they need a clear checkpoint and replay-directory lifecycle.
 - Result slabs are zero-copy between processes, but the parent copies them into durable NumPy arrays before unlinking shared memory. This is intentional cold-path ownership. A longer-lived result arena could remove that copy if scoring can consume borrowed buffers safely.
+
+## Native Slippi evaluation
+
+Experiment 026 can also evaluate a checkpoint through `slippi-cuda`. It uses the
+same deterministic 96-entry character schedule as the normal closed-loop
+evaluation, but both ports are policy-controlled because the current native host
+does not implement level-9 CPU control. The stage is Battlefield and each wave
+contains at most six matches, or twelve policy slots.
+
+The local wheel is a two-pass `native-pgo` build for this Ryzen 5 5600X and is
+locked as an absolute file dependency. A clean Python 3.14 consumer and the HAL
+environment both passed `slippi-cuda-doctor --smoke`; the installed package
+resolved its embedded host without a source-tree override.
+
+The integration accepts Dolphin's nested `id`/`ports` observation format and
+SlippiVec's flat MDS-v5 `frame`/`p1_*`/`p2_*` rows. Flat recorded controller
+columns are excluded from state features, so they cannot overwrite the policy's
+aligned previous action. Stable mask sidecars prevent live observation patterns
+from causing new compiled inference programs.
+
+The native host accepts only one character pair per process. The heterogeneous
+adapter therefore starts one `SlippiVec(num_envs=1)` host per matchup and steps
+the six hosts concurrently. Requested Sheik players start as Zelda and transform
+during countdown; the adapter verifies 60 stable Sheik frames before it publishes
+the observation to the policy. A future per-environment native match
+configuration would remove this multi-process cost.
+
+The completed smoke and measured sweeps each saved 96 `.slp` files and matching
+`.live.npy` sidecars after every six-matchup wave. Every replay parsed. The
+measured sweep processed 57,600 environment frames at 265.0 aggregate fps, or
+44.2 fps per active environment. Native environment steps used 92.35 seconds,
+policy work used 66.82 seconds, and replay capture and validation used 1.80
+seconds of the 217.40-second run. The policy made 2,400 four-frame decode calls;
+decode time was 45.00 seconds with p50/p95/p99 latencies of 15.2/28.4/42.4 ms.
+
+The measured acceptance gate found one always-neutral policy slot at matchup 91,
+port 2. The driver recorded this failure and did not run the 3,000-frame extended
+sweep. It did not hide the failure with a tolerance. The same evidence records
+the known difference between the native host's applied-action live rows and the
+raw controller rows parsed from active-policy replays.
+
+The homogeneous six-environment engine probe reached 945.1 aggregate fps. The
+heterogeneous closed-loop adapter is slower because it uses six independent
+native host processes, and the current loop serializes policy work and native
+steps. GPU utilization was 5.7% mean and 13% p95, which supports adding an
+asynchronous committed-action pipeline in a later change.
+
+Machine-readable evidence, the inference profile, replay files, and live-row
+sidecars are in `native_slippi_all_matchups_run03` below the checkpoint run
+directory.
+
+Reproduce the closed-loop run with:
+
+```text
+uv run experiments/026_temporal_mtp.py \
+  --slippi-eval runs/260810-071709_026_temporal_mtp_mtp026-d384-L8-h6-Lc128-t128x2-o1-2-3-4-5-6-9-12-16-20-s4-base_ranked-anon-1_production-seed0-d384-b512/final.pt \
+  --slippi-num-envs 6 \
+  --slippi-frames 3000 \
+  --slippi-output-name native_slippi_all_matchups
+```

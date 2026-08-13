@@ -5,10 +5,13 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 from hal.eval.cross_stage import conservative_net_lcb
+from hal.sim.inputs import ControllerInputsValue
+from hal.sim.vec import Slot
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import SPATIAL_COLUMNS_LEAN
@@ -292,6 +295,110 @@ def test_checkpoint_eval_accepts_memory_safe_wave_and_distinct_output(monkeypatc
     assert seen["n_matchups"] == 32
     assert seen["exec_horizon"] == 6
     assert seen["replay_dir"] == tmp_path / "eval_rerun_s6"
+
+
+def test_native_action_packing_uses_exact_structured_wire() -> None:
+    action_dtype = np.dtype([("analog", "<f4", (6,)), ("buttons", "<u2"), ("reserved", "<u2")])
+    selected = {
+        Slot(match, port): ControllerInputsValue(
+            main_x=0.25 * port,
+            main_y=-0.5,
+            c_x=0.0,
+            c_y=1.0,
+            trigger_l=0.3,
+            trigger_r=0.7,
+            buttons=0x0100 << match,
+        )
+        for match in range(2)
+        for port in (1, 2)
+    }
+    packed = exp.pack_slippi_actions(selected, num_envs=2, action_dtype=action_dtype)
+    assert packed.shape == (2, 2)
+    assert packed.dtype == action_dtype
+    assert packed["analog"][1, 1].tolist() == pytest.approx([0.5, -0.5, 0.0, 1.0, 0.3, 0.7])
+    assert packed["buttons"].tolist() == [[0x0100, 0x0100], [0x0200, 0x0200]]
+
+
+def test_native_driver_captures_before_selective_reset_and_checks_paired_flags(monkeypatch, tmp_path: Path) -> None:
+    observation_dtype = np.dtype([("frame", "<i4")])
+    action_dtype = np.dtype([("analog", "<f4", (6,)), ("buttons", "<u2"), ("reserved", "<u2")])
+
+    class FakeEnvironment:
+        num_envs = 2
+
+        def __init__(self) -> None:
+            self.frames = np.array([-123, -123], dtype=np.int32)
+            self.events: list[tuple[str, object]] = []
+            self.terminated_once = False
+
+        def observations(self):
+            rows = np.zeros((self.num_envs, 2), dtype=observation_dtype)
+            rows["frame"] = self.frames[:, None]
+            return rows
+
+        def reset(self, *, mask=None):
+            if mask is None:
+                self.frames[:] = -123
+                self.events.append(("reset", "all"))
+            else:
+                mask = np.asarray(mask, dtype=bool)
+                self.frames[mask] = -123
+                self.events.append(("reset", mask.tolist()))
+            return self.observations(), [{}, {}, {}, {}]
+
+        def step(self, actions):
+            assert actions.dtype == action_dtype
+            self.frames += 1
+            rewards = np.array([1.0, -1.0, 2.0, -2.0], dtype=np.float32)
+            terminated = np.zeros(4, dtype=bool)
+            if not self.terminated_once:
+                terminated[:2] = True
+                self.terminated_once = True
+            self.events.append(("step", self.frames.tolist()))
+            return self.observations(), rewards, terminated, np.zeros(4, dtype=bool), [{}, {}, {}, {}]
+
+        def save_replay(self, path, *, env_index):
+            self.events.append(("save", env_index))
+            Path(path).write_bytes(f"replay-{env_index}".encode())
+
+    class FakePolicy:
+        def __call__(self, frame_index, observations):
+            del frame_index
+            return {slot: ControllerInputsValue(0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0x0100) for slot in observations}
+
+    monkeypatch.setattr(
+        exp,
+        "_validate_native_replay",
+        lambda path, rows: {
+            "passed": True,
+            "parsed_successfully": True,
+            "frames": len(rows),
+            "parsed_frames": len(rows),
+            "first_difference": None,
+        },
+    )
+    environment = FakeEnvironment()
+    result = exp.run_native_slippi_phase(
+        environment,
+        FakePolicy(),
+        frames=3,
+        output_dir=tmp_path,
+        phase="test",
+        action_dtype=action_dtype,
+    )
+    selective_reset = environment.events.index(("reset", [True, False]))
+    terminal_save = environment.events.index(("save", 0))
+    assert terminal_save < selective_reset
+    assert result["selective_resets"] == 1
+    assert result["non_neutral_frames_by_slot"] == [[3, 3], [3, 3]]
+    assert len(result["replays"]) == 3
+
+
+def test_native_matchup_schedule_is_the_official_closed_loop_schedule() -> None:
+    schedule = exp._native_matchup_schedule(96)
+    assert schedule == exp.matchups_for_vs_cpu(96)
+    assert len(set(schedule)) == 58
+    assert exp._native_replay_stem(0, schedule[0]) == "matchup-000-fox-vs-falco"
 
 
 @pytest.mark.parametrize(("compile_mode", "expected_marks"), [("reduce-overhead", 2), ("default", 0)])

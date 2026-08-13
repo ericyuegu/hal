@@ -225,6 +225,10 @@ _SLP_EXTERNAL_TO_CHARACTER: Final[dict[int, melee.Character]] = {
     25: melee.Character.GANONDORF,
 }
 
+_CHARACTER_TO_SLP_EXTERNAL: Final[dict[melee.Character, int]] = {
+    character: external for external, character in _SLP_EXTERNAL_TO_CHARACTER.items()
+}
+
 
 def slp_character_to_libmelee(slp_character_id: int) -> melee.Character:
     """slp external (character-select) character id -> ``melee.Character`` enum.
@@ -237,6 +241,14 @@ def slp_character_to_libmelee(slp_character_id: int) -> melee.Character:
     if char is None:
         raise ValueError(f"unknown slp character id {slp_character_id}")
     return char
+
+
+def libmelee_character_to_slp(character: melee.Character) -> int:
+    """Libmelee internal character enum -> Slippi external setup id."""
+    try:
+        return _CHARACTER_TO_SLP_EXTERNAL[character]
+    except KeyError as error:
+        raise ValueError(f"character is not selectable in a Slippi match: {character!r}") from error
 
 
 # Character name -> libmelee internal Character value (the id space the index/MDS
