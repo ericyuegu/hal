@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
+from hal.training.trunk import apply_rotary_emb
 from hal.training.trunk import dense_mask
 from hal.training.trunk import flex_is_usable
 from hal.training.trunk import flex_mask_mod
@@ -236,6 +237,16 @@ def test_the_rotary_table_is_bit_identical_at_fp32() -> None:
     freqs = torch.outer(torch.arange(length).float(), rotary.inv_freq)
     assert torch.equal(cos, freqs.cos()[None, :, None, :])
     assert torch.equal(sin, freqs.sin()[None, :, None, :])
+
+
+def test_rotary_forward_preserves_bfloat16_activation_dtype() -> None:
+    rotary = _trunk(_cfg(), prefer_flex=False, device="cpu").blocks[0].attn.rotary
+    x = torch.zeros(2, 8, 4, rotary.dim, dtype=torch.bfloat16)
+
+    cos, sin = rotary(x)
+
+    assert cos.dtype == sin.dtype == x.dtype
+    assert apply_rotary_emb(x, cos, sin).dtype == x.dtype
 
 
 def test_the_trunk_refuses_a_ctx_pad_that_would_broadcast() -> None:

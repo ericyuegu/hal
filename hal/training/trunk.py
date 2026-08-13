@@ -114,9 +114,9 @@ class Rotary(nn.Module):
         Float[Tensor, "1 L 1 half_dim"],
         Float[Tensor, "1 L 1 half_dim"],
     ]:
-        return self.at(x.shape[1], x.device)
+        return self.at(x.shape[1], x.device, x.dtype)
 
-    def at(self, length: int, device: torch.device) -> tuple[Tensor, Tensor]:
+    def at(self, length: int, device: torch.device, dtype: torch.dtype | None = None) -> tuple[Tensor, Tensor]:
         """RoPE factors for absolute positions ``0..length-1``, in the module's dtype.
 
         The angles are ALWAYS built at fp32, from the integer geometry rather than from the
@@ -127,15 +127,16 @@ class Rotary(nn.Module):
         counter also stops being exact past 2048 frames. The buffer stays registered, and stays the
         source whenever it is still fp32, so neither the checkpoint keys nor the fp32 arithmetic
         move."""
-        key = (length, device, self.inv_freq.dtype)
+        output_dtype = self.inv_freq.dtype if dtype is None else dtype
+        key = (length, device, output_dtype)
         if key != self.cache_key:
             inv_freq = self.inv_freq
             if inv_freq.dtype != torch.float32:
                 inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))
             freqs = torch.outer(torch.arange(length, device=device, dtype=torch.float32), inv_freq)
             self.cache_key = key
-            self.cos_cached = freqs.cos().to(self.inv_freq.dtype)[None, :, None, :]
-            self.sin_cached = freqs.sin().to(self.inv_freq.dtype)[None, :, None, :]
+            self.cos_cached = freqs.cos().to(output_dtype)[None, :, None, :]
+            self.sin_cached = freqs.sin().to(output_dtype)[None, :, None, :]
         assert self.cos_cached is not None and self.sin_cached is not None
         return self.cos_cached, self.sin_cached
 
@@ -265,12 +266,6 @@ class CausalSelfAttention(nn.Module):
             cumulative = lengths.cumsum(0, dtype=torch.int32)
             cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
             window = (-1, 0) if self.attn_window == 0 else (self.attn_window - 1, 0)
-            # torch.compile does not apply autocast to the varlen custom op.
-            # Keep FP32 master weights/residuals, but make the FlashAttention
-            # kernel boundary explicitly BF16 on Ampere-or-newer CUDA devices.
-            q = q.to(torch.bfloat16)
-            k = k.to(torch.bfloat16)
-            v = v.to(torch.bfloat16)
             y = varlen_attn(
                 q.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
                 k.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
@@ -281,7 +276,7 @@ class CausalSelfAttention(nn.Module):
                 L,
                 window_size=window,
             ).reshape(B, L, self.n_heads, self.head_dim)
-            return self.c_proj(y.to(x.dtype).reshape(B, L, self.d_model))
+            return self.c_proj(y.reshape(B, L, self.d_model))
         if isinstance(mask, BlockMask):
             y = cast(Tensor, _flex_attention(q, k, v, block_mask=mask))
         else:
