@@ -1428,14 +1428,16 @@ def gradient_interaction(model: TrainingModel, batch: StateBatch, cfg: TrainConf
     selected = batch.take(min(cfg.gradient_diagnostic_batch_size, batch.batch.target.shape[0])).to(device)
     shared = tuple(model.policy.trunk.parameters())
 
-    action_parts = action_loss(model.policy, selected.batch)
-    action_objective = objective(action_parts, cfg.aux_loss_weight)
+    with amp_context(cfg, device):
+        action_parts = action_loss(model.policy, selected.batch)
+        action_objective = objective(action_parts, cfg.aux_loss_weight)
     action_grad = torch.autograd.grad(action_objective, shared, allow_unused=False)
 
-    history, _, _ = prepared_targets(model.policy, selected.batch)
-    hidden = model.policy(selected.batch.context.features, selected.batch.context.ctx_pad, history)
-    generator = torch.Generator(device=device).manual_seed(0)
-    state_objective = state_loss(model, selected, hidden, cfg, gen=generator).loss
+    with amp_context(cfg, device):
+        history, _, _ = prepared_targets(model.policy, selected.batch)
+        hidden = model.policy(selected.batch.context.features, selected.batch.context.ctx_pad, history)
+        generator = torch.Generator(device=device).manual_seed(0)
+        state_objective = state_loss(model, selected, hidden, cfg, gen=generator).loss
     state_grad = torch.autograd.grad(state_objective, shared, allow_unused=False)
 
     action_norm_sq = sum(gradient.float().square().sum() for gradient in action_grad)
@@ -2511,6 +2513,14 @@ def train(
                 )
                 if eval_replica is None:
                     eval_replica = EvaluationReplica(policy, cfg)
+                smoke_validation = combined_val_metrics(model, val_cache, cfg)
+                smoke_validation.update(gradient_interaction(model, val_cache[0], cfg))
+                wandb.log(
+                    {
+                        "global_step": step,
+                        **{f"smoke_val/{name}": value for name, value in smoke_validation.items()},
+                    }
+                )
                 eval_model, eval_inference = eval_replica.prepare(policy, cfg.smoke_eval_n_matchups)
                 smoke_cfg = replace(cfg, eval_max_frames=cfg.smoke_eval_max_frames)
                 values = eval_vs_cpu(

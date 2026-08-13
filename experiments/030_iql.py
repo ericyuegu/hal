@@ -796,25 +796,28 @@ def val_metrics(model: TrainingModel, batches: list[IQLBatch], cfg: TrainConfig)
     try:
         for cpu_batch in batches:
             batch = cpu_batch.to(device)
-            chunk = quantized_chunk(model.policy, batch.batch)
-            next_context = rolling_next_context(batch.extended_context, cfg.L_ctx)
-            q1 = model.target_q1(batch.batch.context, chunk)
-            q2 = model.target_q2(batch.batch.context, chunk)
-            q = torch.minimum(q1, q2)
-            value = model.value(batch.batch.context)
-            target = chunk_td_target(
-                batch.rewards, model.value(next_context), batch.continuation, macro_discount=cfg.iql_discount
-            )
-            loss1, _ = q_loss(model.q1, batch.batch.context, chunk, target)
-            loss2, _ = q_loss(model.q2, batch.batch.context, chunk, target)
+            with amp_context(cfg, device):
+                chunk = quantized_chunk(model.policy, batch.batch)
+                next_context = rolling_next_context(batch.extended_context, cfg.L_ctx)
+                q1 = model.target_q1(batch.batch.context, chunk)
+                q2 = model.target_q2(batch.batch.context, chunk)
+                q = torch.minimum(q1, q2)
+                value = model.value(batch.batch.context)
+                target = chunk_td_target(
+                    batch.rewards, model.value(next_context), batch.continuation, macro_discount=cfg.iql_discount
+                )
+                loss1, _ = q_loss(model.q1, batch.batch.context, chunk, target)
+                loss2, _ = q_loss(model.q2, batch.batch.context, chunk, target)
+                actor_loss = actor_nll(model.policy, batch.batch, chunk).mean()
             count = chunk.shape[0]
-            actor_nll_sum += float(actor_nll(model.policy, batch.batch, chunk).mean()) * count
+            actor_nll_sum += float(actor_loss) * count
             q1_loss_sum += float(loss1) * count
             q2_loss_sum += float(loss2) * count
             value_loss_sum += float(expectile_loss(q, value, cfg.iql_expectile)) * count
             if cfg.q_objective == "hl_gauss":
-                probability1 = torch.softmax(model.q1.logits(batch.batch.context, chunk).float(), dim=-1)
-                probability2 = torch.softmax(model.q2.logits(batch.batch.context, chunk).float(), dim=-1)
+                with amp_context(cfg, device):
+                    probability1 = torch.softmax(model.q1.logits(batch.batch.context, chunk).float(), dim=-1)
+                    probability2 = torch.softmax(model.q2.logits(batch.batch.context, chunk).float(), dim=-1)
                 q1_edge_sum += float((probability1[:, 0] + probability1[:, -1]).sum())
                 q2_edge_sum += float((probability2[:, 0] + probability2[:, -1]).sum())
             samples += count

@@ -259,6 +259,12 @@ class CausalSelfAttention(nn.Module):
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
         if self.attention_backend == "varlen_flash" and x.device.type == "cuda":
+            if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
+                raise RuntimeError(
+                    "varlen_flash requires matching FP16/BF16 QKV activations; "
+                    f"got q={q.dtype}, k={k.dtype}, v={v.dtype}. "
+                    "Run the model forward inside its configured AMP context."
+                )
             # Keep a static B*L token shape.  Each ignored prefix and real suffix is
             # an independent causal sequence, so real queries cannot see padded keys.
             # Zero-length prefix sequences are valid and keep cu_seqlens fixed at 2B+1.
