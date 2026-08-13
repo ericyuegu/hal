@@ -3,6 +3,7 @@
 import ast
 import importlib.util
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,13 @@ def _load(name: str, filename: str):
 
 
 exp = _load("test_exp029", "029_game_state_flow.py")
+
+
+def test_checkpoint_config_caps_eval_parallelism_for_modal_cpu_budget() -> None:
+    values = asdict(exp.TrainConfig(eval_max_parallel=16))
+    assert exp.config_from_state(values).eval_max_parallel == exp.EVAL_MAX_PARALLEL
+
+
 exp026 = _load("test_exp026_for_029", "026_temporal_mtp.py")
 
 

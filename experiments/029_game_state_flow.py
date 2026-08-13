@@ -110,6 +110,7 @@ GROUP_VOCABS: tuple[int, ...] = (
     scoring.TRIGGER_CENTERS.shape[0] ** 2,
 )
 N_GROUPS = len(GROUP_NAMES)
+EVAL_MAX_PARALLEL = 4
 BUTTONS_G, MAIN_G, C_G, TRIG_G = range(N_GROUPS)
 GROUP_INDEX = {name: index for index, name in enumerate(GROUP_NAMES)}
 GROUP_ORDER: tuple[str, ...] = ("c_stick", "main_stick", "triggers", "buttons")
@@ -225,7 +226,9 @@ class TrainConfig:
     eval_n_matchups: int = 32
     final_eval_n_matchups: int = 96
     final_diag_n_matchups: int = 32
-    eval_max_parallel: int | None = None
+    # Four boots each own Dolphin plus a slippstream child; this fits the
+    # guaranteed 8-CPU Modal training container without starving startup.
+    eval_max_parallel: int | None = EVAL_MAX_PARALLEL
     # L40S launch gate: stop after N updates and run one bounded closed-loop eval,
     # skipping the expensive final validation and H2H protocol.
     smoke_eval_after_steps: int = 0
@@ -2627,7 +2630,10 @@ def config_from_state(values: dict) -> TrainConfig:
     if missing:
         raise ValueError(f"checkpoint is not an experiment-029 architecture; missing {sorted(missing)}")
     known = {item.name for item in fields(TrainConfig)}
-    return TrainConfig(**{name: value for name, value in values.items() if name in known})
+    cfg = TrainConfig(**{name: value for name, value in values.items() if name in known})
+    if cfg.eval_max_parallel is None or cfg.eval_max_parallel > EVAL_MAX_PARALLEL:
+        cfg = replace(cfg, eval_max_parallel=EVAL_MAX_PARALLEL)
+    return cfg
 
 
 def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
@@ -2656,7 +2662,13 @@ def eval_checkpoint(
     max_parallel: int | None = None,
     output_name: str | None = None,
 ) -> dict[str, float]:
-    model, cfg, stats, state = load_checkpoint(path)
+    checkpoint = Path(path)
+    if not checkpoint.is_file():
+        downloaded = download_latest(path, Path("runs") / path)
+        if downloaded is None:
+            raise FileNotFoundError(f"no local checkpoint or remote latest.pt for {path!r}")
+        checkpoint = downloaded
+    model, cfg, stats, state = load_checkpoint(str(checkpoint))
     cfg = replace(
         cfg,
         inference_mode="eager" if eager else cfg.inference_mode,
@@ -2667,7 +2679,7 @@ def eval_checkpoint(
     default_name = "eval_replays_s6" if horizon == 6 else "eval_replays"
     if output_name is not None and (Path(output_name).name != output_name or output_name in ("", ".", "..")):
         raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
-    replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
+    replay_dir = checkpoint.resolve().parent / (default_name if output_name is None else output_name)
     values = eval_vs_cpu(
         model,
         stats,
