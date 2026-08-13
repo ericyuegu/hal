@@ -265,6 +265,12 @@ class CausalSelfAttention(nn.Module):
             cumulative = lengths.cumsum(0, dtype=torch.int32)
             cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
             window = (-1, 0) if self.attn_window == 0 else (self.attn_window - 1, 0)
+            # torch.compile does not apply autocast to the varlen custom op.
+            # Keep FP32 master weights/residuals, but make the FlashAttention
+            # kernel boundary explicitly BF16 on Ampere-or-newer CUDA devices.
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
+            v = v.to(torch.bfloat16)
             y = varlen_attn(
                 q.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
                 k.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
@@ -275,7 +281,7 @@ class CausalSelfAttention(nn.Module):
                 L,
                 window_size=window,
             ).reshape(B, L, self.n_heads, self.head_dim)
-            return self.c_proj(y.reshape(B, L, self.d_model))
+            return self.c_proj(y.to(x.dtype).reshape(B, L, self.d_model))
         if isinstance(mask, BlockMask):
             y = cast(Tensor, _flex_attention(q, k, v, block_mask=mask))
         else:
