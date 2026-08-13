@@ -94,6 +94,11 @@ def test_defaults_pin_sparse_offsets_nana_weight_and_reference() -> None:
     assert cfg.final_h2h_max_parallel == 32
 
 
+def test_varlen_flash_rejects_float32_training() -> None:
+    with pytest.raises(ValueError, match="varlen_flash requires amp_dtype='bfloat16'"):
+        exp.validate_config(_cfg(amp_dtype="float32"))
+
+
 def test_experiment_has_no_numbered_experiment_import() -> None:
     path = Path(exp.__file__)
     tree = ast.parse(path.read_text())

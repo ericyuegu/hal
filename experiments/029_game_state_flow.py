@@ -356,6 +356,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("final_h2h_max_parallel is frozen to 32")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
+    if cfg.attention_backend == "varlen_flash" and cfg.amp_dtype != "bfloat16":
+        raise ValueError("varlen_flash requires amp_dtype='bfloat16'")
     if cfg.reservoir_capacity < 2 * micro_batch_size(cfg):
         raise ValueError("reservoir_capacity must be at least twice the micro-batch size")
 
@@ -2360,7 +2362,11 @@ def train(
     # Compilation stays in dedicated callables.  Evaluation therefore never
     # strips or mutates compiled methods and can build its own static buckets.
     def trunk_fn(features, pad, actions):
-        return policy(features, pad, actions)
+        # Keep autocast inside the compiled boundary. Native varlen
+        # FlashAttention does not have an autocast wrapper for its custom op,
+        # so an outer context alone can leave its QKV inputs in float32.
+        with amp_context(cfg, DEVICE):
+            return policy(features, pad, actions)
 
     temporal_fn: Callable = policy.temporal.teacher_forced_nll
     if DEVICE == "cuda" and cfg.compile_trunk:
