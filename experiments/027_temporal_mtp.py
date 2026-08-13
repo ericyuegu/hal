@@ -790,6 +790,7 @@ class GPT(nn.Module):
                 L_ctx=cfg.L_ctx,
                 attn_window=cfg.attn_window,
                 require_flex=cfg.require_flex,
+                attention_backend=getattr(cfg, "attention_backend", "auto_flex"),
             )
         )
         self.temporal = CausalTemporalDecoder(cfg, self.codec)

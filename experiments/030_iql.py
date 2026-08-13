@@ -63,6 +63,7 @@ from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
+from hal.training.trunk import varlen_flash_is_usable
 
 
 def _experiment_module(name: str, filename: str):
@@ -123,6 +124,7 @@ class TrainConfig:
     n_heads: int = 6
     attn_window: int = 0
     require_flex: bool = False
+    attention_backend: str = "varlen_flash"
     L_ctx: int = 128
 
     decoder_arch_version: int = 3
@@ -264,6 +266,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("decode_temp is fixed at 1 and inference_mode must be compiled or eager")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
+    if cfg.attention_backend != "varlen_flash" or cfg.require_flex:
+        raise ValueError("experiment 030 freezes attention_backend='varlen_flash' and require_flex=False")
+    if cfg.amp_dtype != "bfloat16":
+        raise ValueError("varlen_flash requires amp_dtype='bfloat16'")
     if cfg.final_h2h_reference_run != REFERENCE_026_RUN:
         raise ValueError("the final H2H reference run is pinned")
     if cfg.final_h2h_reference_sha256.lower() != REFERENCE_026_SHA256:
@@ -1067,7 +1073,7 @@ def model_tag(cfg: TrainConfig) -> str:
     return (
         f"iql030-{cfg.q_objective}-p{cfg.d_model}x{cfg.n_layers}-"
         f"c{cfg.critic_d_model}x{cfg.critic_layers}-b{cfg.batch_size}-"
-        f"tau{cfg.iql_expectile:g}-g{cfg.iql_discount:g}-t{cfg.iql_temperature:g}"
+        f"tau{cfg.iql_expectile:g}-g{cfg.iql_discount:g}-t{cfg.iql_temperature:g}-varlenflash"
     )
 
 
@@ -1080,6 +1086,13 @@ def train(
     resume_state: dict | None = None,
 ) -> None:
     validate_config(cfg)
+    longest_context = cfg.L_ctx + EXECUTED_CHUNK
+    head_dims = (cfg.d_model // cfg.n_heads, cfg.critic_d_model // cfg.critic_heads)
+    if DEVICE == "cuda" and not all(
+        varlen_flash_is_usable("cuda", longest_context, heads, head_dim)
+        for heads, head_dim in ((cfg.n_heads, head_dims[0]), (cfg.critic_heads, head_dims[1]))
+    ):
+        raise RuntimeError("experiment 030 requires native varlen FlashAttention forward/backward on CUDA")
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), cfg.data_root, comment)
     run_dir, replay_dir = setup_run_dir(run_name)
     reference = resolve_h2h_reference(cfg, run_dir)
@@ -1350,6 +1363,8 @@ def main(args: Args) -> None:
         resume_state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)
         if resume_state is None:
             raise SystemExit(f"no latest.pt for run {args.resume!r}")
+        if resume_state["cfg"].get("attention_backend") != "varlen_flash":
+            raise SystemExit("cannot resume a pre-varlen experiment 030 checkpoint; restart training from step zero")
         resume_run = args.resume
         cfg = config_from_state(resume_state["cfg"])
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")

@@ -61,6 +61,20 @@ def _actions(batch: int, length: int, generator: torch.Generator) -> torch.Tenso
     return actions
 
 
+def test_030_freezes_native_varlen_flash_attention() -> None:
+    cfg = _cfg()
+    model = exp.TrainingModel(cfg)
+    trunks = (
+        model.policy.trunk,
+        model.q1.encoder.trunk,
+        model.q2.encoder.trunk,
+        model.value.encoder.trunk,
+    )
+    assert all(trunk.attention_backend == "varlen_flash" for trunk in trunks)
+    with pytest.raises(ValueError, match="freezes attention_backend"):
+        exp.validate_config(_cfg(attention_backend="auto_flex"))
+
+
 def _batch(cfg, seed: int = 0):
     generator = torch.Generator().manual_seed(seed)
     context = exp.synthetic_context(cfg, cfg.batch_size, torch.device("cpu"))
