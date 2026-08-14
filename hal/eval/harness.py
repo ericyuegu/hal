@@ -181,6 +181,7 @@ def _drive_wave(
     base_replay: Path | None,
     slippi_port_base: int,
     process_telemetry: ProcessVecTelemetry | None = None,
+    process_cohorts: int = 1,
 ) -> dict[int, list[Trajectory]]:
     """Build fresh Sessions for the given global boot ``indices`` and drive them
     once through ``drive_vec``. Returns ``{global_index: [Trajectory, ...]}`` — the
@@ -217,8 +218,11 @@ def _drive_wave(
                 instant_restart=session_cfg.instant_match_restart,
                 telemetry=process_telemetry,
                 failure_dir=base_replay,
+                cohort_count=min(process_cohorts, len(wave_matches)),
             )
         else:
+            if process_cohorts != 1:
+                raise ValueError("process_cohorts requires a spawned-driver policy with runtime_spec and plan_rows")
             sessions = [
                 _build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir)
                 for offset, replay_dir in enumerate(replay_dirs)
@@ -248,6 +252,7 @@ def run_matches_vec(
     base_slippi_port: int = 51441,
     start_retries: int = DEFAULT_START_RETRIES,
     process_telemetry: ProcessVecTelemetry | None = None,
+    process_cohorts: int = 1,
 ) -> list[list[Trajectory]]:
     """Run ``matches`` (boots) concurrently in waves of up to ``max_parallel``
     Sessions, each frame batched through a single ``BatchPolicy`` call (see
@@ -261,6 +266,9 @@ def run_matches_vec(
     each wave. Returns one list per boot, aligned to ``matches``; empty where that
     Session produced no match after all retries.
 
+    ``process_cohorts`` partitions spawned Session workers into independently
+    dispatched inference groups. Its default of one preserves all-slot lockstep.
+
     libmelee's stage-select cursor navigation flakily fails to settle under
     concurrent FFW load (frame-delivery jitter starves its bang-bang controller),
     so a boot's first match intermittently never reaches IN_GAME and ``start_match``
@@ -271,6 +279,8 @@ def run_matches_vec(
     """
     if not matches:
         return []
+    if isinstance(process_cohorts, bool) or process_cohorts < 1:
+        raise ValueError(f"process_cohorts must be >= 1, got {process_cohorts}")
     max_parallel = resolve_parallelism(len(matches), max_parallel)
     base_replay = Path(session_cfg.replay_dir) if session_cfg.replay_dir is not None else None
     out: list[list[Trajectory]] = [[] for _ in matches]
@@ -289,6 +299,7 @@ def run_matches_vec(
                 base_replay=base_replay,
                 slippi_port_base=slippi_port_base,
                 process_telemetry=process_telemetry,
+                process_cohorts=process_cohorts,
             )
             for gi, boot in results.items():
                 if boot:

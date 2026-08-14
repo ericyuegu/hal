@@ -14,6 +14,7 @@ from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
+from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
 
 
@@ -130,3 +131,71 @@ def test_policy_fault_capsule_round_trips_host_snapshot(tmp_path) -> None:
     assert "kernel failed" in payload["exception"]
     with np.load(path.with_suffix(".npz")) as arrays:
         np.testing.assert_array_equal(arrays["floats"], np.arange(6, dtype=np.float32).reshape(1, 1, 6))
+
+
+def test_worker_cohort_assignment_is_balanced_and_keeps_ports_together() -> None:
+    ids = process_vec._worker_cohort_ids(10, 4)
+    sizes = [ids.count(cohort) for cohort in range(4)]
+    assert max(sizes) - min(sizes) == 1
+    slots = {Slot(worker, port) for worker in range(10) for port in (1, 2)}
+    pending = set(slots)
+    first = process_vec._next_ready_cohort(slots, pending, ids)
+    assert first
+    assert {ids[slot.match] for slot in first} == {0}
+    assert all(Slot(slot.match, 3 - slot.port) in first for slot in first)
+
+
+def test_one_cohort_preserves_the_all_live_slot_gate() -> None:
+    slots = {Slot(worker, port) for worker in range(4) for port in (1, 2)}
+    ids = process_vec._worker_cohort_ids(4, 1)
+    ordered = sorted(slots, key=lambda slot: (slot.match, slot.port))
+    assert process_vec._next_ready_cohort(slots, set(ordered[:-1]), ids) == []
+    assert process_vec._next_ready_cohort(slots, set(slots), ids) == ordered
+
+
+@pytest.mark.parametrize("cohort_count", [1, 2, 3, 4])
+def test_cohorts_preserve_slot_keyed_outputs_with_mixed_resets(cohort_count: int) -> None:
+    slots = [Slot(worker, port) for worker in range(8) for port in (1, 2)]
+    cohort_ids = process_vec._worker_cohort_ids(8, cohort_count)
+
+    class SlotKeyedPolicy:
+        def __init__(self, seed: int) -> None:
+            self.seed = seed
+            self.streams = {}
+
+        def plan_rows(self, rows):
+            out = {}
+            for slot, slot_rows in rows.items():
+                slot_seed = self.seed + slot.match * 8 + slot.port
+                if slot not in self.streams or any(row.reset for row in slot_rows):
+                    self.streams[slot] = np.random.default_rng(slot_seed)
+                noise = self.streams[slot].integers(0, 2**31, dtype=np.int64)
+                out[slot] = int(noise) + sum(row.frame_id for row in slot_rows)
+            return out
+
+    serial = SlotKeyedPolicy(91)
+    cohort = SlotKeyedPolicy(91)
+    for step in range(6):
+        rows = {
+            slot: [
+                ObservationRow(
+                    frame_id=step - 20 if step == 3 and slot.match % 3 == 0 else step,
+                    flat={"worker": slot.match},
+                    action=np.full(14, step, dtype=np.float32),
+                    reset=step == 3 and slot.match % 3 == 0,
+                )
+            ]
+            for slot in slots
+        }
+        expected = serial.plan_rows(rows)
+        actual = {}
+        for cohort_id in range(cohort_count):
+            group = {slot: rows[slot] for slot in slots if cohort_ids[slot.match] == cohort_id}
+            actual.update(cohort.plan_rows(group))
+        assert actual == expected
+
+
+@pytest.mark.parametrize("n_workers,cohort_count", [(0, 1), (4, 0), (4, 5), (4, True)])
+def test_invalid_worker_cohorts_are_rejected(n_workers: int, cohort_count: int) -> None:
+    with pytest.raises(ValueError, match="cohort_count|n_workers"):
+        process_vec._worker_cohort_ids(n_workers, cohort_count)

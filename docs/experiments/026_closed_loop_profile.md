@@ -291,6 +291,16 @@ The production-checkpoint benchmark now measures this interval. Non-decode polic
 
 The largest remaining architectural gain is to pipeline worker groups. The present broker waits for every live Session slot, decodes one batch, sends every plan, and only then lets all Sessions advance. Two or more groups could execute Session work while another group uses the GPU. This can overlap the approximately 13 ms Session phase with the approximately 17 ms policy phase. It trades some inference batch size for overlap, so it needs a measured group-size search on each host.
 
+The broker now exposes this search as an opt-in ``process_cohorts`` setting; one
+cohort remains the default and preserves the original all-slot lockstep path. The
+026 checkpoint harness can run the required comparison with
+``--self-play-cohort-sweep``, which executes cohort counts 1, 2, 3, and 4 and writes
+separate ``*_cN`` metric directories. Synthetic tests pin slot-keyed actions across
+all four schedules, including mixed slot resets. This is not the promotion gate:
+the sweep must still run with the production checkpoint and live Dolphin workers,
+and the chosen count must meet aggregate-FPS and batch-1 p99 targets without a
+crash regression.
+
 After pipelining, the next targets are the 13.5 ms median batch-32 decode and the 3.1 ms policy preparation interval. Reaching 240 fps needs the complete four-frame cycle below 16.7 ms. It will probably require overlap plus faster inference, not an IPC serializer change.
 
 Other remaining work is narrower:

@@ -1915,6 +1915,7 @@ def benchmark_self_play_checkpoint(
     max_frames: int = 14_400,
     eager: bool = False,
     instant_match_restart: bool = False,
+    process_cohorts: int = 1,
 ) -> dict[str, float]:
     """Run one fixed wave with the checkpoint controlling both ports.
 
@@ -1962,7 +1963,7 @@ def benchmark_self_play_checkpoint(
     ]
     checkpoint = Path(path).resolve()
     mode = "instant_restart" if instant_match_restart else "single_match"
-    base_name = f"self_play_benchmark_{n_matches}x{max_frames}_{mode}"
+    base_name = f"self_play_benchmark_{n_matches}x{max_frames}_{mode}_c{process_cohorts}"
     run_number = 1
     while True:
         suffix = "" if run_number == 1 else f"_run{run_number:02d}"
@@ -1996,6 +1997,7 @@ def benchmark_self_play_checkpoint(
         max_parallel=covering_power_of_two(n_matches),
         start_retries=0,
         process_telemetry=process_telemetry,
+        process_cohorts=process_cohorts,
     )
     rollout_seconds = time.perf_counter() - rollout_started
     completed_boots = sum(bool(boot) for boot in boots)
@@ -2020,6 +2022,7 @@ def benchmark_self_play_checkpoint(
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _checkpoint_sha256(checkpoint),
         "instant_match_restart": instant_match_restart,
+        "process_cohorts": process_cohorts,
         "metrics": metrics,
     }
     (out_dir / "metrics.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
@@ -2112,6 +2115,8 @@ class Args:
     self_play_frames: int = 14_400
     self_play_eager: bool = False
     self_play_instant_match_restart: bool = False
+    self_play_process_cohorts: int = 1
+    self_play_cohort_sweep: bool = False
     benchmark: bool = False
     benchmark_iterations: int = 20
 
@@ -2136,13 +2141,16 @@ def main(args: Args) -> None:
         )
         return
     if args.self_play_eval is not None:
-        benchmark_self_play_checkpoint(
-            args.self_play_eval,
-            n_matches=args.self_play_matches,
-            max_frames=args.self_play_frames,
-            eager=args.self_play_eager,
-            instant_match_restart=args.self_play_instant_match_restart,
-        )
+        cohorts = (1, 2, 3, 4) if args.self_play_cohort_sweep else (args.self_play_process_cohorts,)
+        for cohort_count in cohorts:
+            benchmark_self_play_checkpoint(
+                args.self_play_eval,
+                n_matches=args.self_play_matches,
+                max_frames=args.self_play_frames,
+                eager=args.self_play_eager,
+                instant_match_restart=args.self_play_instant_match_restart,
+                process_cohorts=cohort_count,
+            )
         return
     resume_run = resume_state = None
     cfg = args.cfg

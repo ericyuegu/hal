@@ -128,6 +128,7 @@ class ProcessVecTelemetry:
     max_plan_rows: int = 0
     failed_workers: int = 0
     timed_out_workers: int = 0
+    cohort_count: int = 1
 
     def metrics(self) -> dict[str, float]:
         calls = max(self.plan_calls, 1)
@@ -155,7 +156,34 @@ class ProcessVecTelemetry:
             "broker_max_plan_rows": float(self.max_plan_rows),
             "broker_failed_workers": float(self.failed_workers),
             "broker_timed_out_workers": float(self.timed_out_workers),
+            "broker_cohort_count": float(self.cohort_count),
         }
+
+
+def _worker_cohort_ids(n_workers: int, cohort_count: int) -> tuple[int, ...]:
+    """Balanced, stable worker-to-cohort assignment.
+
+    Every port owned by a Session stays in the same cohort.  Keeping the mapping
+    purely index-based makes retries and fixed-seed slot identities independent of
+    process timing.
+    """
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+    if isinstance(cohort_count, bool) or not 1 <= cohort_count <= n_workers:
+        raise ValueError(f"cohort_count must be between 1 and {n_workers}, got {cohort_count}")
+    return tuple(min(cohort_count - 1, worker * cohort_count // n_workers) for worker in range(n_workers))
+
+
+def _next_ready_cohort(
+    active_slots: set[Slot], pending_slots: set[Slot], cohort_of_worker: Sequence[int]
+) -> list[Slot]:
+    """Return the first complete cohort, or an empty list if none is ready."""
+    active_cohorts = sorted({cohort_of_worker[slot.match] for slot in active_slots})
+    for cohort in active_cohorts:
+        slots = {slot for slot in active_slots if cohort_of_worker[slot.match] == cohort}
+        if slots and pending_slots >= slots:
+            return sorted(slots, key=lambda slot: (slot.match, slot.port))
+    return []
 
 
 def drive_process_vec(
@@ -169,6 +197,7 @@ def drive_process_vec(
     worker_timeout_seconds: float = 60.0,
     telemetry: ProcessVecTelemetry | None = None,
     failure_dir: Path | None = None,
+    cohort_count: int = 1,
 ) -> list[list[Trajectory]]:
     """Drive one wave with one spawned process per Dolphin Session.
 
@@ -184,6 +213,9 @@ def drive_process_vec(
         raise ValueError(f"worker_timeout_seconds must be finite and positive, got {worker_timeout_seconds}")
     if not matches:
         return []
+    cohort_of_worker = _worker_cohort_ids(len(matches), cohort_count)
+    if telemetry is not None:
+        telemetry.cohort_count = max(telemetry.cohort_count, cohort_count)
     for index, match in enumerate(matches):
         if not match.model_ports:
             raise ValueError(f"spawned driver needs at least one model port; match {index} has none")
@@ -272,13 +304,21 @@ def drive_process_vec(
 
         try:
             while active_workers:
-                wait_started = time.monotonic()
-                ready = wait(
-                    [parents[worker] for worker in active_workers],
-                    timeout=worker_timeout_seconds,
-                )
-                if telemetry is not None:
-                    telemetry.control_wait_seconds += time.monotonic() - wait_started
+                # If a complete cohort remained pending after the previous dispatch,
+                # serve it immediately instead of sleeping in wait(). With one cohort
+                # (the public default), this is exactly the historical all-slot gate.
+                plan_slots = _next_ready_cohort(active_slots, set(pending), cohort_of_worker)
+                waited_for_control = not plan_slots
+                if waited_for_control:
+                    wait_started = time.monotonic()
+                    ready = wait(
+                        [parents[worker] for worker in active_workers],
+                        timeout=worker_timeout_seconds,
+                    )
+                    if telemetry is not None:
+                        telemetry.control_wait_seconds += time.monotonic() - wait_started
+                else:
+                    ready = []
                 for connection in ready:
                     worker = connection_to_worker[connection]
                     if worker not in active_workers:
@@ -369,7 +409,7 @@ def drive_process_vec(
                             f"exited without a result; pid={process.pid}, exitcode={process.exitcode}",
                         )
 
-                if not ready and active_workers:
+                if waited_for_control and not ready and active_workers:
                     blockers = []
                     for worker in sorted(active_workers):
                         worker_slots = {slot for slot in active_slots if slot.match == worker}
@@ -385,10 +425,10 @@ def drive_process_vec(
                         retire_worker(worker, reason, kill=True)
                         timed_out_workers += 1
 
-                # Preserve one GPU call per lockstep boundary. A fast worker waits
-                # in recv while the slowest active worker completes its stride.
-                if pending and pending.keys() >= active_slots:
-                    plan_slots = sorted(active_slots, key=lambda slot: (slot.match, slot.port))
+                # One cohort per GPU call. With cohort_count=1 a fast worker waits
+                # for every live worker, preserving the original lockstep behavior.
+                plan_slots = _next_ready_cohort(active_slots, set(pending), cohort_of_worker)
+                if plan_slots:
                     if telemetry is not None and not startup_recorded:
                         telemetry.startup_seconds += time.monotonic() - drive_started
                         startup_recorded = True
