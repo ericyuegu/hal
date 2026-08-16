@@ -5,6 +5,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -15,6 +16,7 @@ from torch.utils.data import get_worker_info
 
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import decode_policy_replay
+from hal.data.policy_world_schema import decode_policy_world_replay
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
 from hal.data.streaming_compat import patch_streaming_resource_tracker
@@ -43,6 +45,7 @@ type ReplayRow = dict[str, np.ndarray | int]
 type ReplayTransform = Callable[[ReplayRow], ReplayRow]
 type Window = dict[str, np.ndarray | np.integer]
 type BatchTransform = Callable[[list[Window], TrainBatch], object]
+type ReplayFormat = Literal["full", "policy", "policy-world"]
 
 
 def _loader_generator(seed: int) -> torch.Generator:
@@ -50,12 +53,25 @@ def _loader_generator(seed: int) -> torch.Generator:
 
 
 class PolicyReplayDataset(IterableDataset):
-    def __init__(self, dataset: StreamingDataset) -> None:
+    def __init__(self, dataset: StreamingDataset, replay_format: ReplayFormat = "policy") -> None:
+        if replay_format not in ("policy", "policy-world"):
+            raise ValueError(f"compact replay format must be 'policy' or 'policy-world', got {replay_format!r}")
         self._dataset = dataset
+        self._decode = decode_policy_replay if replay_format == "policy" else decode_policy_world_replay
 
     def __iter__(self) -> Iterator[dict[str, np.ndarray | int]]:
         for sample in self._dataset:
-            yield decode_policy_replay(sample)
+            yield self._decode(sample)
+
+
+def _resolve_replay_format(replay_format: ReplayFormat | None, compact: bool) -> ReplayFormat:
+    if replay_format is None:
+        return "policy" if compact else "full"
+    if replay_format not in ("full", "policy", "policy-world"):
+        raise ValueError(f"unknown replay_format {replay_format!r}")
+    if compact and replay_format != "policy":
+        raise ValueError("compact=True is the compatibility spelling of replay_format='policy'; do not pass both")
+    return replay_format
 
 
 def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.ndarray]:
@@ -278,6 +294,7 @@ def make_loader(
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
     compact: bool = False,
+    replay_format: ReplayFormat | None = None,
     replay_transform: ReplayTransform | None = None,
     batch_transform: BatchTransform | None = None,
 ) -> DataLoader:
@@ -321,6 +338,7 @@ def make_loader(
     # conservative default there.
     if predownload is None:
         predownload = 8 * batch_size if remote else None
+    resolved_format = _resolve_replay_format(replay_format, compact)
     mds = StreamingDataset(
         remote=f"{remote}/{split}" if remote else None,
         local=str(Path(data_root) / split),
@@ -330,7 +348,7 @@ def make_loader(
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
     )
-    rows = PolicyReplayDataset(mds) if compact else mds
+    rows = PolicyReplayDataset(mds, resolved_format) if resolved_format != "full" else mds
     sampler = WindowDataset(
         rows,
         L_ctx,

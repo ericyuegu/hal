@@ -84,6 +84,9 @@ class Rank(IntEnum):
     PLATINUM = 1
     DIAMOND = 2
     MASTER = 3
+    # Curated professional-player corpora assign this tier explicitly from
+    # source provenance. It is never inferred from an arbitrary netplay name.
+    PRO = 4
 
 
 # The three netplay display names the ranked-anonymized corpus carries, one per

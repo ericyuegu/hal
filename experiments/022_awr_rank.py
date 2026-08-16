@@ -115,7 +115,7 @@ EGO_REWARD_COLUMN = f"ego_{_REWARD_SUFFIX}"
 # The ego's ranked tier, one uint8 per frame. v6 shards do not carry it; rank weighting is what
 # makes it mandatory (see ``validate_config`` and ``_ego_rank_weights``).
 EGO_RANK_COLUMN = "ego_rank"
-_RANK_TIERS: tuple[Rank, ...] = (Rank.PLATINUM, Rank.DIAMOND, Rank.MASTER)
+_RANK_TIERS: tuple[Rank, ...] = (Rank.PLATINUM, Rank.DIAMOND, Rank.MASTER, Rank.PRO)
 _RANK_WEIGHTS_OFF: tuple[float, float, float] = (1.0, 1.0, 1.0)
 # The materialization that first carries p{1,2}_rank; rank weighting refuses anything older.
 _RANK_MDS_VERSION = 7
@@ -624,13 +624,23 @@ class AWRBatch:
         return self.rank[:, None].expand_as(valid).reshape(-1)[valid.reshape(-1)]
 
 
-def rank_weighting_on(rank_weights: tuple[float, float, float]) -> bool:
+def _expanded_rank_weights(rank_weights: tuple[float, ...]) -> tuple[float, float, float, float]:
+    if len(rank_weights) == 3:
+        # Legacy configs predate the explicit PRO tier; leave professional
+        # samples neutral unless a fourth multiplier is deliberately supplied.
+        return (*rank_weights, 1.0)
+    if len(rank_weights) == 4:
+        return tuple(rank_weights)  # type: ignore[return-value]
+    raise ValueError("awr_rank_weights needs 3 legacy tiers or 4 tiers including PRO")
+
+
+def rank_weighting_on(rank_weights: tuple[float, ...]) -> bool:
     """Whether the tier multipliers do anything. Off means 022 never reads the rank column, so the
     experiment still trains on a v6 materialization that has none."""
-    return tuple(rank_weights) != _RANK_WEIGHTS_OFF
+    return _expanded_rank_weights(rank_weights) != (1.0, 1.0, 1.0, 1.0)
 
 
-def _ego_rank_weights(windows: list[dict], rank_weights: tuple[float, float, float]) -> tuple[np.ndarray, np.ndarray]:
+def _ego_rank_weights(windows: list[dict], rank_weights: tuple[float, ...]) -> tuple[np.ndarray, np.ndarray]:
     """``(tier, multiplier)`` per window, read from the LAST frame of the ego rank column.
 
     The FIRST frame can be zero-filled left padding, which reads as ``Rank.UNKNOWN``; the last frame
@@ -654,7 +664,7 @@ def _ego_rank_weights(windows: list[dict], rank_weights: tuple[float, float, flo
             f"ego rank, and awr_rank_weights={rank_weights} would weight it as if it were platinum"
         )
     # Index 0 is UNKNOWN, which only survives with the multipliers off, where every tier weighs 1.
-    table = np.array((1.0, *rank_weights), dtype=np.float32)
+    table = np.array((1.0, *_expanded_rank_weights(rank_weights)), dtype=np.float32)
     return rank, table[rank]
 
 
@@ -663,7 +673,7 @@ def collate_awr_batch(
     batch: TrainBatch,
     *,
     L_ctx: int,
-    rank_weights: tuple[float, float, float] = _RANK_WEIGHTS_OFF,
+    rank_weights: tuple[float, ...] = _RANK_WEIGHTS_OFF,
 ) -> AWRBatch:
     """Add aligned reward, return, and rank targets to a normal training batch."""
     shifted = slice(1, L_ctx + 1)
@@ -1425,8 +1435,13 @@ def validate_config(cfg: TrainConfig, *, has_button_combo_counts: bool) -> None:
     if not math.isfinite(cfg.awr_expectile_tau) or not 0.0 < cfg.awr_expectile_tau < 1.0:
         raise ValueError(f"awr_expectile_tau must be in (0, 1), got {cfg.awr_expectile_tau!r}")
     weights = tuple(cfg.awr_rank_weights)
-    if len(weights) != len(_RANK_TIERS):
-        raise ValueError(f"awr_rank_weights needs one multiplier per tier {tuple(t.name for t in _RANK_TIERS)}")
+    try:
+        _expanded_rank_weights(weights)
+    except ValueError as error:
+        raise ValueError(
+            "awr_rank_weights needs one multiplier per tier: "
+            f"Platinum/Diamond/Master and optionally PRO; got {weights}"
+        ) from error
     if any(not math.isfinite(w) or w <= 0 for w in weights):
         raise ValueError(f"awr_rank_weights must all be finite and > 0, got {weights}")
     if rank_weighting_on(weights) and cfg.mds_schema_version < _RANK_MDS_VERSION:

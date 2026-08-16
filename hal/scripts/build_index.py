@@ -25,8 +25,10 @@ but never halt the run.
 import dataclasses
 import faulthandler
 import functools
+import json
 import multiprocessing as mp
 import signal
+from dataclasses import dataclass
 from pathlib import Path
 
 import tyro
@@ -46,6 +48,13 @@ from hal.paths import repo_relative
 _DEFAULT_TMPFS: Path = Path("/dev/shm/hal_build_index")
 
 
+@dataclass(frozen=True, slots=True)
+class IndexResult:
+    manifest_key: str
+    entry: ReplayIndexEntry | None
+    error: str | None
+
+
 def _worker_init() -> None:
     # Ensures any genuine segfault in peppi-py prints a C-level traceback
     # to stderr before the worker dies, instead of vanishing silently.
@@ -56,7 +65,7 @@ def _worker_init() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def _index_one(item: ReplayWork, *, compute_sha1: bool, with_stats: bool) -> ReplayIndexEntry | None:
+def _index_one(item: ReplayWork, *, compute_sha1: bool, with_stats: bool) -> IndexResult:
     name_hint = item.manifest_key if item.unlink_after else None
     try:
         entry = extract_index_entry(
@@ -65,6 +74,7 @@ def _index_one(item: ReplayWork, *, compute_sha1: bool, with_stats: bool) -> Rep
             name_hint=name_hint,
             with_stats=with_stats,
         )
+        error = "extract_index_entry returned None" if entry is None else None
     except KeyboardInterrupt, SystemExit:
         raise
     except BaseException as e:
@@ -74,12 +84,13 @@ def _index_one(item: ReplayWork, *, compute_sha1: bool, with_stats: bool) -> Rep
         # which takes the whole job (and the parent shell) down.
         logger.warning(f"unhandled error indexing {item.manifest_key}: {e!r}")
         entry = None
+        error = repr(e)
     finally:
         if item.unlink_after:
             item.open_path.unlink(missing_ok=True)
     if entry is not None:
         entry = dataclasses.replace(entry, path=item.manifest_key)
-    return entry
+    return IndexResult(item.manifest_key, entry, error)
 
 
 def _existing_paths(index_path: Path) -> set[str]:
@@ -114,6 +125,7 @@ def build_index(
     workers: int = max(1, (mp.cpu_count() or 2) - 1),
     tmpfs_root: Path = _DEFAULT_TMPFS,
     queue_size: int = 64,
+    failure_log: Path | None = None,
 ) -> None:
     """Walk replays into `index.jsonl`.
 
@@ -163,6 +175,7 @@ def build_index(
 
     written = 0
     failed = 0
+    failures: list[dict[str, str]] = []
     batch: list[ReplayIndexEntry] = []
     BATCH = 256
 
@@ -175,10 +188,18 @@ def build_index(
     with ctx.Pool(workers, initializer=_worker_init) as pool:
         results = pool.imap_unordered(worker, work_iter, chunksize=8)
         try:
-            for entry in tqdm(results, total=total, desc="indexing", unit="slp"):
-                if entry is None:
+            for result in tqdm(results, total=total, desc="indexing", unit="slp"):
+                if result.entry is None:
                     failed += 1
+                    failures.append(
+                        {
+                            "path": result.manifest_key,
+                            "phase": "index",
+                            "error": result.error or "unknown",
+                        }
+                    )
                     continue
+                entry = result.entry
                 batch.append(entry)
                 if len(batch) >= BATCH:
                     write_jsonl(output, batch, append=True)
@@ -209,6 +230,11 @@ def build_index(
     if interrupted:
         logger.info(f"interrupted: wrote {written} entries to {output} before ctrl-c; {failed} failures so far")
         raise SystemExit(130)
+    failure_log = failure_log or output.with_name(f"{output.stem}.failures.jsonl")
+    mode = "a" if incremental else "w"
+    with failure_log.open(mode) as handle:
+        for row in failures:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
     logger.info(
         f"wrote {written} entries to {output}; {failed} failures "
         f"({failed / max(1, total) * 100:.2f}%); with_stats={with_stats}"

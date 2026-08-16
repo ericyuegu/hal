@@ -19,8 +19,11 @@ from torch.utils.data import IterableDataset
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import decode_policy_replay
 from hal.data.policy_schema import decode_policy_replay_slices
+from hal.data.policy_world_schema import decode_policy_world_replay
+from hal.data.policy_world_schema import decode_policy_world_replay_slices
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
+from hal.training.dataloader import ReplayFormat
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
@@ -222,8 +225,11 @@ class PolicyReplayPackDataset(IterableDataset):
         windows_per_replay: int,
         schema_version: int,
         projection: FeatureProjection | None,
+        replay_format: ReplayFormat = "policy",
         replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
+        if replay_format not in ("policy", "policy-world"):
+            raise ValueError(f"replay reservoir requires a compact format, got {replay_format!r}")
         self._dataset = dataset
         self._L_ctx = L_ctx
         self._L_chunk = L_chunk
@@ -231,6 +237,10 @@ class PolicyReplayPackDataset(IterableDataset):
         self._K = windows_per_replay
         self._schema_version = schema_version
         self._projection = projection
+        self._decode = decode_policy_replay if replay_format == "policy" else decode_policy_world_replay
+        self._decode_slices = (
+            decode_policy_replay_slices if replay_format == "policy" else decode_policy_world_replay_slices
+        )
         self._replay_transform = replay_transform
         self._epoch = 0
 
@@ -256,7 +266,7 @@ class PolicyReplayPackDataset(IterableDataset):
             ranges = tuple((max(0, start), start + self._L_ctx + self._L_chunk) for start in starts)
             windows = []
             if self._replay_transform is None:
-                samples = decode_policy_replay_slices(compact, ranges)
+                samples = self._decode_slices(compact, ranges)
                 for start, ego_prefix, sample in zip(starts, ego_prefixes, samples, strict=True):
                     pad = max(0, -start)
                     window = _make_window(
@@ -270,7 +280,7 @@ class PolicyReplayPackDataset(IterableDataset):
                     window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
                     windows.append(window)
             else:
-                sample = self._replay_transform(decode_policy_replay(compact))
+                sample = self._replay_transform(self._decode(compact))
                 for start, ego_prefix in zip(starts, ego_prefixes, strict=True):
                     pad = max(0, -start)
                     window = _make_window(
@@ -385,6 +395,7 @@ def make_reservoir_loader(
     projection: FeatureProjection | None = None,
     replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
+    replay_format: ReplayFormat = "policy",
 ) -> ReservoirLoader:
     """Build a compact replay loader with replay-aware batches."""
     if predownload < 1:
@@ -410,6 +421,7 @@ def make_reservoir_loader(
         windows_per_replay=windows_per_replay,
         schema_version=schema_version,
         projection=projection,
+        replay_format=replay_format,
         replay_transform=replay_transform,
     )
     if num_workers > 0:

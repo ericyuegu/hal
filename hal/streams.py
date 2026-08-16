@@ -79,12 +79,68 @@ RANKED_ANONYMIZED_1_POLICY_V7: Final[StreamSource] = StreamSource(
     local=Path("data/processed/ranked-anonymized-1/mds-policy-v7"),
 )
 
+
+def _ranked_policy_world_source(rank: int) -> StreamSource:
+    name = f"ranked-anonymized-{rank}-policy-world-v7"
+    root = f"processed/ranked-anonymized-{rank}/mds-policy-world-v7"
+    return StreamSource(name=name, remote=f"s3://hal/{root}", local=Path("data") / root)
+
+
+RANKED_ANONYMIZED_POLICY_WORLD_V7: Final[tuple[StreamSource, ...]] = tuple(
+    _ranked_policy_world_source(rank) for rank in range(1, 7)
+)
+
+PROFESSIONAL_PLAYER_SLUGS: Final[tuple[str, ...]] = (
+    "aklo",
+    "amsa",
+    "axe",
+    "billybopeep",
+    "bobbybigballz",
+    "cody",
+    "cookbook",
+    "daniel",
+    "desertsnoopy",
+    "druggedfox",
+    "fknsilver",
+    "franz",
+    "frenzy",
+    "friend",
+    "ginger",
+    "gosu",
+    "grab2win",
+    "iliketurtles",
+    "isdsar",
+    "jchu",
+    "jahridin",
+    "kjh",
+    "kodorin",
+    "krudo",
+    "m2k",
+    "mang0",
+    "mof",
+    "monotheon",
+    "nicki",
+)
+
+
+def _professional_policy_world_source(slug: str) -> StreamSource:
+    name = f"professional-{slug}-policy-world-v7"
+    root = f"processed/professional/{slug}/mds-policy-world-v7"
+    return StreamSource(name=name, remote=f"s3://hal/{root}", local=Path("data") / root)
+
+
+PROFESSIONAL_POLICY_WORLD_V7: Final[dict[str, StreamSource]] = {
+    slug: _professional_policy_world_source(slug) for slug in PROFESSIONAL_PLAYER_SLUGS
+}
+
 # v5 and v6 stay registered: the frozen experiments still read them.
 ALL: Final[tuple[StreamSource, ...]] = (
     RANKED_ANONYMIZED_1,
     RANKED_ANONYMIZED_1_V6,
     RANKED_ANONYMIZED_1_V7,
     RANKED_ANONYMIZED_1_POLICY_V7,
+    *RANKED_ANONYMIZED_POLICY_WORLD_V7,
+    *PROFESSIONAL_POLICY_WORLD_V7.values(),
 )
 BY_NAME: Final[dict[str, StreamSource]] = {s.name: s for s in ALL}
 # Reverse map: local cache root (string) -> remote URI. Lets the dataloader turn

@@ -30,6 +30,8 @@ from peppi_py.frame import Item
 from peppi_py.frame import Post
 from peppi_py.game import Game
 
+from hal.data.policy_schema import FLOAT_STATE_SUFFIXES
+from hal.data.policy_schema import PACKED_STATE_SUFFIXES
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import rank_from_player_name
 from hal.wire import BUTTON_BITS
@@ -82,13 +84,19 @@ def _walk(obj: Any, path: Sequence[str | int]) -> Any:
     return cur
 
 
-def _gamestate_arrays(post: Post, key_prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
+def _gamestate_arrays(
+    post: Post,
+    key_prefix: str,
+    keep_idx: np.ndarray,
+    length: int,
+    suffixes: Sequence[str] = POST_FIELD_SUFFIXES,
+) -> dict[str, np.ndarray]:
     """Pull every gamestate column for one post block under ``key_prefix``.
 
     Shared by leader (``p1``/``p2``) and follower (``p1_nana``/``p2_nana``).
     """
     out: dict[str, np.ndarray] = {}
-    for suffix in POST_FIELD_SUFFIXES:
+    for suffix in suffixes:
         col = f"{key_prefix}_{suffix}"
         dtype = MDS_PER_FRAME_DTYPES[col]
         out[col] = _arr_to_np(_walk(post, post_field_path(suffix)), dtype, length)[keep_idx]
@@ -194,10 +202,16 @@ def _peppi_idx_by_libmelee_port(g: Game) -> dict[int, int]:
     return {peppi_port_to_libmelee(pl.port): i for i, pl in enumerate(g.start.players)}
 
 
-def _extract_player(leader: Data, prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
+def _extract_player(
+    leader: Data,
+    prefix: str,
+    keep_idx: np.ndarray,
+    length: int,
+    state_suffixes: Sequence[str] = POST_FIELD_SUFFIXES,
+) -> dict[str, np.ndarray]:
     """Pull the gamestate + controller columns for one port's leader (main char)."""
     pre = leader.pre
-    out = _gamestate_arrays(leader.post, prefix, keep_idx, length)
+    out = _gamestate_arrays(leader.post, prefix, keep_idx, length, state_suffixes)
 
     # Buttons
     for b, arr in _unpack_buttons(pre.buttons_physical, length).items():
@@ -222,20 +236,32 @@ def _extract_player(leader: Data, prefix: str, keep_idx: np.ndarray, length: int
     return out
 
 
-def _extract_nana(follower: Data | None, prefix: str, keep_idx: np.ndarray, length: int) -> dict[str, np.ndarray]:
+def _extract_nana(
+    follower: Data | None,
+    prefix: str,
+    keep_idx: np.ndarray,
+    length: int,
+    state_suffixes: Sequence[str] = POST_FIELD_SUFFIXES,
+) -> dict[str, np.ndarray]:
     """Nana columns: gamestate only (no controller). Mask if no follower."""
     nana_prefix = f"{prefix}_nana"
     if follower is None:
         out_length = int(keep_idx.size)
         return {
-            col: np.full(out_length, mask_value(dtype), dtype=dtype)
-            for col, dtype in MDS_PER_FRAME_DTYPES.items()
-            if col.startswith(f"{nana_prefix}_")
+            f"{nana_prefix}_{suffix}": np.full(
+                out_length,
+                mask_value(MDS_PER_FRAME_DTYPES[f"{nana_prefix}_{suffix}"]),
+                dtype=MDS_PER_FRAME_DTYPES[f"{nana_prefix}_{suffix}"],
+            )
+            for suffix in state_suffixes
         }
-    return _gamestate_arrays(follower.post, nana_prefix, keep_idx, length)
+    return _gamestate_arrays(follower.post, nana_prefix, keep_idx, length, state_suffixes)
 
 
-def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
+def _extract_replay(
+    replay_path: str,
+    state_suffixes: Sequence[str],
+) -> dict[str, np.ndarray] | None:
     """Parse a slp file and return per-frame ndarrays keyed by MDS column name.
 
     Returns None if peppi can't parse the file or the start block is missing
@@ -303,8 +329,8 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         # rather than silently labeled.
         rank = rank_from_player_name(netplay_name(start_player, metadata_players))
         sample[f"{prefix}_rank"] = np.full(out_length, int(rank), dtype=np.uint8)
-        sample.update(_extract_player(port_data.leader, prefix, keep_idx, raw_length))
-        sample.update(_extract_nana(port_data.follower, prefix, keep_idx, raw_length))
+        sample.update(_extract_player(port_data.leader, prefix, keep_idx, raw_length, state_suffixes))
+        sample.update(_extract_nana(port_data.follower, prefix, keep_idx, raw_length, state_suffixes))
 
     # Sanity: every column has the expected length.
     bad = [(k, v.shape[0]) for k, v in sample.items() if v.shape[0] != out_length]
@@ -313,3 +339,21 @@ def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
         return None
 
     return sample
+
+
+def extract_replay(replay_path: str) -> dict[str, np.ndarray] | None:
+    """Extract every canonical-v7 per-frame column."""
+    return _extract_replay(replay_path, POST_FIELD_SUFFIXES)
+
+
+_POLICY_STATE_SUFFIXES: tuple[str, ...] = tuple(dict.fromkeys((*FLOAT_STATE_SUFFIXES, *PACKED_STATE_SUFFIXES)))
+
+
+def extract_policy_world_replay(replay_path: str) -> dict[str, np.ndarray] | None:
+    """Extract only fields needed by ``mds-policy-world-v7``.
+
+    Peppi still validates and parses the whole replay, but avoiding conversion
+    of unused Arrow columns into NumPy substantially reduces scale-up CPU and
+    inter-process memory without changing any retained values.
+    """
+    return _extract_replay(replay_path, _POLICY_STATE_SUFFIXES)

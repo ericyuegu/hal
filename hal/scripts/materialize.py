@@ -30,13 +30,19 @@ Usage:
 """
 
 import dataclasses
+import hashlib
+import json
 import multiprocessing as mp
 import os
+import shutil
+import tempfile
 import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+import fsspec
 import numpy as np
 import tyro
 from loguru import logger
@@ -46,7 +52,12 @@ from tqdm import tqdm
 from hal.data.archive import ReplayWork
 from hal.data.archive import iter_replay_work
 from hal.data.archive import parse_archive_member_path
+from hal.data.bounded_writer import BoundedMDSWriter
+from hal.data.bounded_writer import RcloneMDSWriter
+from hal.data.bounded_writer import rclone_copyto
+from hal.data.extract import extract_policy_world_replay
 from hal.data.extract import extract_replay
+from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import StatsAccumulator
 from hal.data.feature_stats import dump_sufficient_stats
 from hal.data.feature_stats import float_feature_names
@@ -57,9 +68,15 @@ from hal.data.index import read_jsonl
 from hal.data.index import replay_uuid_from_path
 from hal.data.index import write_jsonl
 from hal.data.mds import FULL_MDS_SHARD_SIZE_LIMIT
+from hal.data.policy_world_schema import POLICY_WORLD_FLOAT_COLUMNS
+from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
+from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.policy_world_schema import assert_policy_world_replay_equal
+from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.data.schema import MDS_COLUMNS
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import SCHEMA_VERSION
+from hal.data.schema import Rank
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 
@@ -76,6 +93,25 @@ class ExtractResult:
 
     manifest_key: str
     sample: dict[str, np.ndarray] | None
+    error: str | None = None
+    frame_count: int | None = None
+    stats: dict[str, FeatureStatsSufficient] | None = None
+
+
+_WORKER_REPLAY_FORMAT: Literal["full", "policy-world"] = "full"
+_WORKER_RANK_OVERRIDE: Rank | None = None
+_WORKER_RANK_OVERRIDES: dict[str, tuple[int, int]] = {}
+
+
+def _worker_init(
+    replay_format: Literal["full", "policy-world"],
+    rank_override: Rank | None,
+    rank_overrides: dict[str, tuple[int, int]],
+) -> None:
+    global _WORKER_RANK_OVERRIDE, _WORKER_RANK_OVERRIDES, _WORKER_REPLAY_FORMAT
+    _WORKER_REPLAY_FORMAT = replay_format
+    _WORKER_RANK_OVERRIDE = rank_override
+    _WORKER_RANK_OVERRIDES = rank_overrides
 
 
 def bucket_fraction(replay_uuid: int) -> float:
@@ -111,7 +147,27 @@ def _split_for(replay_uuid: int, train: float, val: float) -> Split:
 def _process_one(item: ReplayWork) -> ExtractResult:
     """Worker: parse one replay's per-frame ndarrays."""
     try:
-        sample = extract_replay(str(item.open_path))
+        extractor = extract_policy_world_replay if _WORKER_REPLAY_FORMAT == "policy-world" else extract_replay
+        sample = extractor(str(item.open_path))
+        error = "extract_replay returned None" if sample is None else None
+        frame_count = None if sample is None else int(sample["frame"].shape[0])
+        sufficient = None
+        if sample is not None:
+            sample["schema_version"] = SCHEMA_VERSION
+        if sample is not None and _WORKER_REPLAY_FORMAT == "policy-world":
+            ranks = _WORKER_RANK_OVERRIDES.get(item.manifest_key)
+            if ranks is None and _WORKER_RANK_OVERRIDE is not None:
+                ranks = (int(_WORKER_RANK_OVERRIDE), int(_WORKER_RANK_OVERRIDE))
+            if ranks is not None:
+                sample["p1_rank"] = np.full(frame_count, ranks[0], dtype=np.uint8)
+                sample["p2_rank"] = np.full(frame_count, ranks[1], dtype=np.uint8)
+            encoded = encode_policy_world_replay(sample, _replay_identity(item.manifest_key))
+            assert_policy_world_replay_equal(sample, encoded, item.manifest_key)
+            replay_stats = StatsAccumulator(POLICY_WORLD_FLOAT_COLUMNS)
+            for name in POLICY_WORLD_FLOAT_COLUMNS:
+                replay_stats.update(name, sample[name])
+            sufficient = replay_stats.to_sufficient()
+            sample = encoded
     except KeyboardInterrupt, SystemExit:
         raise
     except BaseException as e:
@@ -120,9 +176,18 @@ def _process_one(item: ReplayWork) -> ExtractResult:
         # .slp kill the worker and trip BrokenProcessPool.
         logger.debug(f"extract_replay raised on {item.open_path}: {e!r}")
         sample = None
+        error = repr(e)
+        frame_count = None
+        sufficient = None
     if item.unlink_after:
         item.open_path.unlink(missing_ok=True)
-    return ExtractResult(manifest_key=item.manifest_key, sample=sample)
+    return ExtractResult(
+        manifest_key=item.manifest_key,
+        sample=sample,
+        error=error,
+        frame_count=frame_count,
+        stats=sufficient,
+    )
 
 
 def _index_by_path(index: Path) -> dict[str, ReplayIndexEntry]:
@@ -138,6 +203,10 @@ def _read_paths(paths_file: Path) -> list[str]:
 
 def _is_remote(output: str) -> bool:
     return urllib.parse.urlparse(output).scheme not in ("", "file")
+
+
+def _is_rclone(output: str) -> bool:
+    return output.startswith("r2:")
 
 
 def _join(base: str, name: str) -> str | Path:
@@ -163,17 +232,135 @@ def _bridge_streaming_env() -> None:
     os.environ.setdefault("S3_ENDPOINT_URL", endpoint)
 
 
-def _open_writers(output: str, splits: Iterable[str]) -> dict[str, MDSWriter]:
-    return {
-        split: MDSWriter(
-            out=str(_join(output, split)),
-            columns=MDS_COLUMNS,
-            compression="zstd",
-            size_limit=FULL_MDS_SHARD_SIZE_LIMIT,
-            exist_ok=False,
+def _open_writers(
+    output: str,
+    splits: Iterable[str],
+    *,
+    replay_format: Literal["full", "policy-world"],
+    tmpfs_root: Path,
+) -> tuple[dict[str, MDSWriter], Path | None]:
+    remote = _is_remote(output)
+    upload_root: Path | None = None
+    if remote:
+        tmpfs_root.mkdir(parents=True, exist_ok=True)
+        upload_root = Path(tempfile.mkdtemp(dir=tmpfs_root, prefix="mds-upload-"))
+    columns = MDS_COLUMNS if replay_format == "full" else POLICY_WORLD_MDS_COLUMNS
+    size_limit = FULL_MDS_SHARD_SIZE_LIMIT if replay_format == "full" else 256 * 2**20
+    writers: dict[str, MDSWriter] = {}
+    try:
+        for split in splits:
+            destination = str(_join(output, split))
+            out: str | tuple[str, str] = (
+                (str(upload_root / split), destination) if upload_root is not None else destination
+            )
+            common = {
+                "columns": columns,
+                "compression": "zstd",
+                "hashes": ["md5", "sha256"],
+                "size_limit": size_limit,
+                "exist_ok": False,
+                "max_workers": 2,
+                "max_pending_uploads": 2,
+            }
+            writers[split] = (
+                RcloneMDSWriter(local=upload_root / split, remote=destination, **common)
+                if upload_root is not None and _is_rclone(output)
+                else BoundedMDSWriter(out=out, **common)
+            )
+    except BaseException:
+        for writer in writers.values():
+            writer.finish()
+        if upload_root is not None:
+            shutil.rmtree(upload_root, ignore_errors=True)
+        raise
+    return writers, upload_root
+
+
+def _replay_identity(path: str) -> str:
+    return hashlib.blake2b(path.encode("utf-8"), digest_size=16, person=b"hal-policy-id-v1").hexdigest()
+
+
+def _read_rank_overrides(path: Path | None) -> dict[str, tuple[int, int]]:
+    if path is None:
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    with path.open() as handle:
+        for line_no, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            key = str(row["path"])
+            if key in out:
+                raise ValueError(f"{path}:{line_no}: duplicate rank override for {key}")
+            ranks = (int(row["p1_rank"]), int(row["p2_rank"]))
+            for rank in ranks:
+                Rank(rank)
+            out[key] = ranks
+    return out
+
+
+def _write_remote_text(path: str | Path, text: str, tmpfs_root: Path) -> None:
+    destination = str(path)
+    if not _is_rclone(destination):
+        with fsspec.open(destination, "w") as handle:
+            handle.write(text)
+        return
+    tmpfs_root.mkdir(parents=True, exist_ok=True)
+    fd, local_name = tempfile.mkstemp(dir=tmpfs_root, prefix="sidecar-")
+    local = Path(local_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        rclone_copyto(local, destination)
+    finally:
+        local.unlink(missing_ok=True)
+
+
+def _write_json(path: str | Path, payload: object, tmpfs_root: Path) -> None:
+    _write_remote_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", tmpfs_root)
+
+
+def _write_failures(path: str | Path, failures: list[dict[str, object]], tmpfs_root: Path) -> None:
+    text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in failures)
+    _write_remote_text(path, text, tmpfs_root)
+
+
+def _write_manifest(path: str | Path, entries: list[ReplayIndexEntry], tmpfs_root: Path) -> None:
+    destination = str(path)
+    if not _is_rclone(destination):
+        write_jsonl(destination, entries)
+        return
+    rows = "".join(json.dumps(entry.to_dict()) + "\n" for entry in entries)
+    _write_remote_text(destination, rows, tmpfs_root)
+
+
+def _dump_stats(
+    path: str | Path,
+    stats: StatsAccumulator,
+    tmpfs_root: Path,
+) -> None:
+    destination = str(path)
+    if not _is_rclone(destination):
+        dump_sufficient_stats(
+            destination,
+            stats.to_sufficient(),
+            split="train",
+            mds_schema_version=SCHEMA_VERSION,
         )
-        for split in splits
-    }
+        return
+    fd, local_name = tempfile.mkstemp(dir=tmpfs_root, prefix="stats-", suffix=".json")
+    os.close(fd)
+    local = Path(local_name)
+    try:
+        dump_sufficient_stats(
+            local,
+            stats.to_sufficient(),
+            split="train",
+            mds_schema_version=SCHEMA_VERSION,
+        )
+        rclone_copyto(local, destination)
+    finally:
+        local.unlink(missing_ok=True)
 
 
 def _bucket_paths(paths: list[str]) -> tuple[list[tuple[Path, str]], dict[Path, list[str]]]:
@@ -212,6 +399,9 @@ def process_replays(
     workers: int = max(1, (mp.cpu_count() or 2) - 1),
     tmpfs_root: Path = _DEFAULT_TMPFS,
     queue_size: int = 64,
+    replay_format: Literal["full", "policy-world"] = "full",
+    rank_override: Rank | None = None,
+    rank_overrides: Path | None = None,
 ) -> None:
     test_split = 1.0 - train_split - val_split
     if not (0.0 <= test_split <= 1.0):
@@ -222,7 +412,7 @@ def process_replays(
         raise FileNotFoundError(f"--index {index} not found")
 
     remote = _is_remote(output)
-    if remote:
+    if remote and not _is_rclone(output):
         _bridge_streaming_env()
     manifest_path = _join(output, "manifest.jsonl")
     # Per-split MDSWriter raises with exist_ok=False if its output dir already
@@ -234,6 +424,12 @@ def process_replays(
 
     paths = _read_paths(paths_file)
     fs_pairs, members_by_archive = _bucket_paths(paths)
+    per_replay_ranks = _read_rank_overrides(rank_overrides)
+    unknown_overrides = sorted(set(per_replay_ranks) - set(paths))
+    if unknown_overrides:
+        raise ValueError(f"rank override file contains {len(unknown_overrides)} paths not in paths.txt")
+    if replay_format == "full" and (rank_override is not None or per_replay_ranks):
+        raise ValueError("rank overrides are supported only for replay_format='policy-world'")
 
     # Fail loud and early on missing archives — we'd otherwise crash partway
     # through Stage 3 with shards already written and unrecoverable.
@@ -257,20 +453,32 @@ def process_replays(
     )
 
     splits = ("train", "val", "test")
-    writers = _open_writers(output, splits)
+    writers, upload_root = _open_writers(
+        output,
+        splits,
+        replay_format=replay_format,
+        tmpfs_root=tmpfs_root,
+    )
     rows_written: dict[str, int] = dict.fromkeys(splits, 0)
     annotated: list[ReplayIndexEntry] = []
     failed = 0
+    failures: list[dict[str, object]] = []
 
     # Train-split normalization stats: feed every continuous column from each
     # written train sample into a Welford accumulator. Categorical columns
     # (action ids, button bits, stocks) are skipped by dtype.
-    stat_features = float_feature_names(MDS_PER_FRAME_DTYPES)
+    stat_features = (
+        float_feature_names(MDS_PER_FRAME_DTYPES) if replay_format == "full" else list(POLICY_WORLD_FLOAT_COLUMNS)
+    )
     stats = StatsAccumulator(stat_features)
 
     ctx = mp.get_context("fork")
     try:
-        with ctx.Pool(workers) as pool:
+        with ctx.Pool(
+            workers,
+            initializer=_worker_init,
+            initargs=(replay_format, rank_override, per_replay_ranks),
+        ) as pool:
             for result in tqdm(
                 pool.imap_unordered(_process_one, work_iter),
                 total=len(paths),
@@ -279,11 +487,17 @@ def process_replays(
             ):
                 if result.sample is None:
                     failed += 1
+                    failures.append(
+                        {"path": result.manifest_key, "phase": "materialize", "error": result.error or "unknown"}
+                    )
                     continue
                 entry = by_path.get(result.manifest_key)
                 if entry is None:
                     logger.debug(f"path {result.manifest_key} not in index; skipping")
                     failed += 1
+                    failures.append(
+                        {"path": result.manifest_key, "phase": "manifest_join", "error": "path not in index"}
+                    )
                     continue
 
                 replay_uuid = replay_uuid_from_path(result.manifest_key)
@@ -291,13 +505,20 @@ def process_replays(
                 writer = writers[split]
                 # MDSWriter assigns sample_idx in write order; capture it before writing.
                 row_idx = rows_written[split]
-                result.sample["schema_version"] = SCHEMA_VERSION
-                writer.write(result.sample)
+                if replay_format == "policy-world":
+                    writer.write(result.sample)
+                else:
+                    writer.write(result.sample)
                 rows_written[split] += 1
 
                 if split == "train":
-                    for name in stat_features:
-                        stats.update(name, result.sample[name])
+                    if replay_format == "policy-world":
+                        if result.stats is None:
+                            raise RuntimeError(f"{result.manifest_key}: worker returned no policy-world stats")
+                        stats = stats.merge(StatsAccumulator.from_sufficient(result.stats))
+                    else:
+                        for name in stat_features:
+                            stats.update(name, result.sample[name])
 
                 annotated.append(
                     dataclasses.replace(
@@ -306,7 +527,7 @@ def process_replays(
                             replay_uuid=replay_uuid,
                             split=split,
                             mds_row_idx=row_idx,
-                            frame_count_actual=int(result.sample["frame"].shape[0]),
+                            frame_count_actual=int(result.frame_count),
                             schema_version=SCHEMA_VERSION,
                         ),
                     )
@@ -316,18 +537,32 @@ def process_replays(
         # finally-block (drain producer, release sem slots) runs deterministically
         # rather than whenever GC happens to collect the generator.
         work_iter.close()
-        for w in writers.values():
-            w.finish()
+        try:
+            for w in writers.values():
+                w.finish()
+        finally:
+            if upload_root is not None:
+                shutil.rmtree(upload_root, ignore_errors=True)
 
-    write_jsonl(manifest_path, annotated)
+    _write_manifest(manifest_path, annotated, tmpfs_root)
 
     stats_path = _join(output, "stats.json")
-    dump_sufficient_stats(
-        stats_path,
-        stats.to_sufficient(),
-        split="train",
-        mds_schema_version=SCHEMA_VERSION,
-    )
+    _dump_stats(stats_path, stats, tmpfs_root)
+
+    failures_path = _join(output, "failures.materialize.jsonl")
+    _write_failures(failures_path, failures, tmpfs_root)
+    if replay_format == "policy-world":
+        _write_json(
+            _join(output, "projection.json"),
+            {
+                "policy_world_schema_version": POLICY_WORLD_SCHEMA_VERSION,
+                "source_schema_version": SCHEMA_VERSION,
+                "rows": rows_written,
+                "failures": failed,
+                "columns": POLICY_WORLD_MDS_COLUMNS,
+            },
+            tmpfs_root,
+        )
 
     logger.info(
         "wrote {tr} train, {v} val, {te} test ({f} failures); manifest -> {m}; stats -> {s}",

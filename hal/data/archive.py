@@ -40,6 +40,8 @@ import gzip
 import os
 import queue
 import shutil
+import subprocess
+import tempfile
 import threading
 import types
 import zipfile
@@ -59,10 +61,13 @@ from py7zr.io import NullIO
 from py7zr.io import Py7zIO
 from py7zr.io import WriterFactory
 
+from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 
 _ZIP_MAGIC: bytes = b"PK\x03\x04"
 _7Z_MAGIC: bytes = b"7z\xbc\xaf\x27\x1c"
+_SLPZ_BIN_ENV: str = "HAL_SLPZ_BIN"
+_PINNED_SLPZ_BIN: Path = Path(REPO_DIR) / "data" / "tools" / "slpz-1.3.0" / "bin" / "slpz"
 
 
 def _sniff_archive_format(archive: Path) -> str:
@@ -92,12 +97,56 @@ def list_archive_slps(archive: Path) -> list[str]:
         with py7zr.SevenZipFile(str(archive), "r") as z:
             return [n for n in z.getnames() if n.endswith(".slp")]
     with zipfile.ZipFile(archive) as z:
-        return [n for n in z.namelist() if n.endswith(".slp") or n.endswith(".slp.gz")]
+        return [n for n in z.namelist() if n.endswith(".slp") or n.endswith(".slp.gz") or n.endswith(".slpz")]
+
+
+def _slpz_binary() -> Path:
+    configured = os.environ.get(_SLPZ_BIN_ENV)
+    candidates = [Path(configured)] if configured else []
+    on_path = shutil.which("slpz")
+    if on_path:
+        candidates.append(Path(on_path))
+    candidates.append(_PINNED_SLPZ_BIN)
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise FileNotFoundError(
+        "a .slpz member requires slpz 1.3.0; install it with "
+        f"`cargo install slpz --version 1.3.0 --locked --root {_PINNED_SLPZ_BIN.parents[1]}` "
+        f"or set {_SLPZ_BIN_ENV}"
+    )
+
+
+def _decode_slpz_member(raw: Any, out_path: Path) -> None:
+    """Decode one ZIP member through the pinned CLI without an input copy."""
+    with out_path.open("wb") as out, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            [str(_slpz_binary()), "-d", "-q", "-o", "-", "-"],
+            stdin=subprocess.PIPE,
+            stdout=out,
+            stderr=errors,
+        )
+        assert process.stdin is not None
+        try:
+            shutil.copyfileobj(raw, process.stdin, length=1 << 20)
+        except BrokenPipeError:
+            pass
+        finally:
+            process.stdin.close()
+        returncode = process.wait()
+        errors.seek(0)
+        stderr = errors.read().decode("utf-8", errors="replace").strip()
+    if returncode or not out_path.stat().st_size:
+        out_path.unlink(missing_ok=True)
+        raise RuntimeError(f"slpz decode failed (exit={returncode}): {stderr or 'empty output'}")
 
 
 def _extract_zip_member_to(z: zipfile.ZipFile, member: str, out_path: Path) -> None:
     """Stream one zip member into ``out_path``, decompressing the .gz wrapper if present."""
     with z.open(member) as raw:
+        if member.endswith(".slpz"):
+            _decode_slpz_member(raw, out_path)
+            return
         src = gzip.GzipFile(fileobj=raw, mode="rb") if member.endswith(".gz") else raw
         try:
             with out_path.open("wb") as out:
@@ -121,7 +170,9 @@ def read_archive_member_to_file(archive: Path, member: str, dest_dir: Path) -> P
         if not extracted.is_file():
             raise FileNotFoundError(f"member {member!r} not in {archive}")
         return extracted
-    out_path = dest_dir / Path(member).name.removesuffix(".gz")
+    name = Path(member).name
+    out_name = f"{name[:-5]}.slp" if name.endswith(".slpz") else name.removesuffix(".gz")
+    out_path = dest_dir / out_name
     with zipfile.ZipFile(archive) as z:
         try:
             _extract_zip_member_to(z, member, out_path)
@@ -653,7 +704,7 @@ def _iter_zip_members(
     tmpfs_root: Path,
     filter_paths: set[str] | None,
 ) -> Iterator[tuple[str, Path]]:
-    """Serial stdlib reader for zip-of-(`.slp` or `.slp.gz`) archives.
+    """Serial reader for ZIP members in `.slp`, `.slp.gz`, or `.slpz` form.
 
     No producer thread: per-member compression makes random-access cheap and
     the consumer's hold on the generator keeps at most one materialized
@@ -662,7 +713,7 @@ def _iter_zip_members(
     """
     run_dir = _run_tmpfs_dir(tmpfs_root)
     with zipfile.ZipFile(archive) as z:
-        members = [n for n in z.namelist() if n.endswith(".slp") or n.endswith(".slp.gz")]
+        members = [n for n in z.namelist() if n.endswith(".slp") or n.endswith(".slp.gz") or n.endswith(".slpz")]
         if filter_paths is not None:
             wanted = set(filter_paths)
             members = [m for m in members if m in wanted]

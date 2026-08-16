@@ -8,8 +8,10 @@ import pytest
 
 from hal.data.extract import _list_to_np
 from hal.data.extract import _unpack_buttons
+from hal.data.extract import extract_policy_world_replay
 from hal.data.extract import extract_replay
 from hal.data.index import extract_index_entry
+from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import Rank
 from hal.data.schema import rank_from_player_name
@@ -167,6 +169,26 @@ def test_extract_replay_produces_full_schema(dev_sample: dict[str, np.ndarray]) 
     for col in ("p1_trigger_l", "p1_trigger_r", "p2_trigger_l", "p2_trigger_r"):
         t = dev_sample[col][~np.isnan(dev_sample[col])]
         assert np.all((t == 0.0) | (t >= TRIGGER_DEADZONE)), f"{col} has sub-deadzone values"
+
+
+def test_projected_extractor_produces_the_exact_same_policy_world_payload(
+    dev_slp: str,
+    dev_sample: dict[str, np.ndarray],
+) -> None:
+    projected = extract_policy_world_replay(dev_slp)
+    assert projected is not None
+    full_compact = encode_policy_world_replay({**dev_sample, "schema_version": 7}, "same")
+    projected_compact = encode_policy_world_replay({**projected, "schema_version": 7}, "same")
+    assert full_compact.keys() == projected_compact.keys()
+    for name in full_compact:
+        expected = np.asarray(full_compact[name])
+        actual = np.asarray(projected_compact[name])
+        equal = (
+            np.array_equal(expected, actual, equal_nan=True)
+            if expected.dtype.kind in "fc"
+            else np.array_equal(expected, actual)
+        )
+        assert equal, name
 
 
 def test_extract_replay_stores_internal_character_id(dev_slp: str, dev_sample: dict[str, np.ndarray]) -> None:
