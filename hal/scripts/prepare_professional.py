@@ -110,6 +110,33 @@ def dedupe_index(source: Path, destination: Path) -> tuple[int, int]:
     return len(entries), len(selected)
 
 
+def write_filterable_index(source: Path, destination: Path, failure_log: Path) -> tuple[int, int]:
+    """Exclude rows that cannot satisfy the stats-based quality filter.
+
+    Aggregate stats are intentionally absent for non-1v1 games and missing
+    frame tables. These remain valid index rows, but they cannot pass the
+    professional combat/death predicates or become two-player trajectories.
+    """
+    entries = list(read_jsonl(source))
+    selected = [entry for entry in entries if entry.stats is not None]
+    missing = [entry for entry in entries if entry.stats is None]
+    write_jsonl(destination, selected)
+    with failure_log.open("w") as handle:
+        for entry in missing:
+            handle.write(
+                json.dumps(
+                    {
+                        "error": "aggregate replay stats unavailable (non-1v1 or missing frames)",
+                        "path": entry.path,
+                        "phase": "filter_prerequisite",
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    return len(entries), len(selected)
+
+
 def _normal(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
 
@@ -351,8 +378,11 @@ def prepare_professional(cfg: PrepareProfessionalConfig) -> None:
 
         deduped = player_root / "deduped-index.jsonl"
         before, after = dedupe_index(index, deduped)
+        filterable = player_root / "filterable-index.jsonl"
+        filter_failures = player_root / "filter.failures.jsonl"
+        _, filterable_count = write_filterable_index(deduped, filterable, filter_failures)
         paths = player_root / "paths.txt"
-        kept = filter_replays(FilterConfig(index=deduped, output=paths))
+        kept = filter_replays(FilterConfig(index=filterable, output=paths))
         rank_path = player_root / "rank-overrides.jsonl"
         rank_report = (
             write_owner_rank_overrides(slug, deduped, paths, rank_path)
@@ -365,6 +395,8 @@ def prepare_professional(cfg: PrepareProfessionalConfig) -> None:
             "indexed": before,
             "deduplicated": after,
             "duplicates_removed": before - after,
+            "filterable": filterable_count,
+            "missing_stats": after - filterable_count,
             "quality_filtered": kept,
             "rank": rank_report,
         }

@@ -17,6 +17,7 @@ import pytest
 
 from hal.data.archive import archive_member_path
 from hal.data.archive import iter_archive_members
+from hal.data.archive import iter_replay_work
 from hal.data.archive import list_archive_slps
 from hal.data.archive import read_archive_member_to_file
 
@@ -99,3 +100,48 @@ def test_unknown_magic_raises(tmp_path: Path) -> None:
     p.write_bytes(b"not-an-archive-format")
     with pytest.raises(ValueError, match="unrecognized archive magic"):
         list_archive_slps(p)
+
+
+def test_iter_replay_work_surfaces_bad_zip_crc(tmp_path: Path, tmpfs: Path) -> None:
+    p = tmp_path / "corrupt.zip"
+    payload = b"unique-replay-payload-for-crc-test"
+    with zipfile.ZipFile(p, "w", compression=zipfile.ZIP_STORED) as z:
+        z.writestr("bad.slp", payload)
+
+    raw = bytearray(p.read_bytes())
+    payload_offset = raw.index(payload)
+    raw[payload_offset] ^= 0x01
+    p.write_bytes(raw)
+
+    work = list(
+        iter_replay_work(
+            archive_members={p: ["bad.slp"]},
+            tmpfs_root=tmpfs,
+        )
+    )
+    assert len(work) == 1
+    assert work[0].manifest_key == archive_member_path(p, "bad.slp")
+    assert work[0].open_error is not None
+    assert "Bad CRC-32" in work[0].open_error
+
+
+def test_iter_replay_work_keeps_paths_unique_across_archives(tmp_path: Path, tmpfs: Path) -> None:
+    first = tmp_path / "first.zip"
+    second = tmp_path / "second.zip"
+    _build_zip_of_gz(first, {"game": b"first-replay"})
+    _build_zip_of_gz(second, {"game": b"second-replay"})
+
+    # Materialization can have files from both archives in flight at once.
+    # Do not unlink the first file before asking the iterator for the second;
+    # this reproduces the process-pool prefetch collision this guards against.
+    work = list(
+        iter_replay_work(
+            archive_members={first: ["game.slp.gz"], second: ["game.slp.gz"]},
+            tmpfs_root=tmpfs,
+        )
+    )
+
+    assert work[0].open_path != work[1].open_path
+    assert [item.open_path.read_bytes() for item in work] == [b"first-replay", b"second-replay"]
+    for item in work:
+        item.open_path.unlink()

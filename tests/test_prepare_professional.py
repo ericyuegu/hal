@@ -1,12 +1,17 @@
+import dataclasses
+import json
 from pathlib import Path
 
 from hal.data.index import PlayerEntry
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import write_jsonl
+from hal.data.replay_stats import PlayerStats
+from hal.data.replay_stats import ReplayStats
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
 from hal.scripts.prepare_professional import dedupe_index
 from hal.scripts.prepare_professional import write_corpus_rank_overrides
+from hal.scripts.prepare_professional import write_filterable_index
 from hal.scripts.prepare_professional import write_owner_rank_overrides
 
 
@@ -53,6 +58,32 @@ def test_dedupe_is_stable_by_path(tmp_path: Path) -> None:
     assert dedupe_index(source, destination) == (3, 2)
     assert '"path": "archive://a!same.slp"' in destination.read_text()
     assert '"path": "archive://z!same.slp"' not in destination.read_text()
+
+
+def test_filterable_index_ledgers_rows_without_stats(tmp_path: Path) -> None:
+    source = tmp_path / "deduped.jsonl"
+    destination = tmp_path / "filterable.jsonl"
+    failures = tmp_path / "filter.failures.jsonl"
+    players = [_player(1, "A", "A#1"), _player(2, "B", "B#1")]
+    entries = [
+        _entry("archive://one!missing.slp", "missing", players),
+        dataclasses.replace(
+            _entry("archive://one!present.slp", "present", players),
+            stats=ReplayStats(
+                players=(
+                    PlayerStats(1, 100.0, 100.0, 0, 10, (50.0, 60.0, 70.0)),
+                    PlayerStats(2, 100.0, 100.0, 0, 10, (50.0, 60.0, 70.0)),
+                )
+            ),
+        ),
+    ]
+    write_jsonl(source, entries)
+
+    assert write_filterable_index(source, destination, failures) == (2, 1)
+    assert "present.slp" in destination.read_text()
+    failure = json.loads(failures.read_text())
+    assert failure["phase"] == "filter_prerequisite"
+    assert "missing.slp" in failure["path"]
 
 
 def test_owner_rank_uses_logical_port_order_and_leaves_missing_unknown(tmp_path: Path) -> None:

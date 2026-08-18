@@ -36,6 +36,7 @@ regardless of source — the ``.gz`` layer is stripped on the zip path.
 import atexit
 import concurrent.futures
 import contextlib
+import functools
 import gzip
 import os
 import queue
@@ -46,6 +47,8 @@ import threading
 import types
 import zipfile
 from collections import Counter
+from collections import deque
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -214,6 +217,23 @@ class ReplayWork:
     open_path: Path
     manifest_key: str
     unlink_after: bool
+    open_error: str | None = None
+
+
+def _record_archive_error(
+    errors: deque[ReplayWork],
+    tmpfs_root: Path,
+    manifest_key: str,
+    error: BaseException,
+) -> None:
+    errors.append(
+        ReplayWork(
+            open_path=tmpfs_root / "archive-read-error.slp",
+            manifest_key=manifest_key,
+            unlink_after=False,
+            open_error=repr(error),
+        )
+    )
 
 
 def iter_replay_work(
@@ -235,13 +255,21 @@ def iter_replay_work(
     if archive_members is None:
         return
     for archive, members in archive_members.items():
+        errors: deque[ReplayWork] = deque()
+        record_error = functools.partial(_record_archive_error, errors, tmpfs_root)
+
         for synthetic, tmpfs_path in iter_archive_members(
             archive,
             tmpfs_root=tmpfs_root,
             filter_paths=set(members),
             queue_size=queue_size,
+            on_error=record_error,
         ):
+            while errors:
+                yield errors.popleft()
             yield ReplayWork(open_path=tmpfs_path, manifest_key=synthetic, unlink_after=True)
+        while errors:
+            yield errors.popleft()
 
 
 class _TmpfsWriter(Py7zIO):
@@ -564,12 +592,24 @@ def _run_tmpfs_dir(tmpfs_root: Path) -> Path:
     return run_dir
 
 
+def _archive_tmpfs_dir(tmpfs_root: Path) -> Path:
+    """Return a unique directory for one archive extraction.
+
+    ``iter_replay_work`` may advance to the next archive while process-pool
+    workers still own files yielded from the previous one.  A per-archive
+    namespace prevents each extractor's local sequence counter from
+    overwriting or unlinking those in-flight files.
+    """
+    return Path(tempfile.mkdtemp(dir=_run_tmpfs_dir(tmpfs_root), prefix="archive-"))
+
+
 def iter_archive_members(
     archive: Path,
     *,
     tmpfs_root: Path,
     filter_paths: set[str] | None = None,
     queue_size: int = 64,
+    on_error: Callable[[str, BaseException], None] | None = None,
 ) -> Iterator[tuple[str, Path]]:
     """Yield ``(synthetic_path, tmpfs_path)`` for each slp member of ``archive``.
 
@@ -600,7 +640,12 @@ def iter_archive_members(
     if fmt == "7z":
         yield from _iter_7z_members(archive, tmpfs_root=tmpfs_root, filter_paths=filter_paths, queue_size=queue_size)
     else:
-        yield from _iter_zip_members(archive, tmpfs_root=tmpfs_root, filter_paths=filter_paths)
+        yield from _iter_zip_members(
+            archive,
+            tmpfs_root=tmpfs_root,
+            filter_paths=filter_paths,
+            on_error=on_error,
+        )
 
 
 def _iter_7z_members(
@@ -618,7 +663,7 @@ def _iter_7z_members(
     ``filter_paths``) are still decompressed (unavoidable in a solid block)
     but discarded into a ``NullIO`` instead of materializing.
     """
-    run_dir = _run_tmpfs_dir(tmpfs_root)
+    run_dir = _archive_tmpfs_dir(tmpfs_root)
 
     out_q: queue.Queue = queue.Queue()
     sem = threading.Semaphore(queue_size)
@@ -703,6 +748,7 @@ def _iter_zip_members(
     *,
     tmpfs_root: Path,
     filter_paths: set[str] | None,
+    on_error: Callable[[str, BaseException], None] | None,
 ) -> Iterator[tuple[str, Path]]:
     """Serial reader for ZIP members in `.slp`, `.slp.gz`, or `.slpz` form.
 
@@ -711,7 +757,7 @@ def _iter_zip_members(
     file in tmpfs at a time, so no semaphore is needed. The ``.gz`` layer
     is decompressed inline; output tmpfs files are always raw ``.slp``.
     """
-    run_dir = _run_tmpfs_dir(tmpfs_root)
+    run_dir = _archive_tmpfs_dir(tmpfs_root)
     with zipfile.ZipFile(archive) as z:
         members = [n for n in z.namelist() if n.endswith(".slp") or n.endswith(".slp.gz") or n.endswith(".slpz")]
         if filter_paths is not None:
@@ -720,9 +766,20 @@ def _iter_zip_members(
         seen: set[str] = set()
         for seq, member in enumerate(members):
             tmpfs_path = run_dir / f"{os.getpid()}_zip_{seq}.slp"
-            _extract_zip_member_to(z, member, tmpfs_path)
             seen.add(member)
-            yield archive_member_path(archive, member), tmpfs_path
+            synthetic = archive_member_path(archive, member)
+            try:
+                _extract_zip_member_to(z, member, tmpfs_path)
+            except KeyboardInterrupt, SystemExit:
+                raise
+            except BaseException as error:
+                tmpfs_path.unlink(missing_ok=True)
+                if on_error is None:
+                    raise
+                logger.warning(f"cannot read {synthetic}: {error!r}")
+                on_error(synthetic, error)
+                continue
+            yield synthetic, tmpfs_path
     if filter_paths is not None:
         missing = set(filter_paths) - seen
         if missing:

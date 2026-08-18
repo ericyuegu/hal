@@ -146,6 +146,14 @@ def _split_for(replay_uuid: int, train: float, val: float) -> Split:
 
 def _process_one(item: ReplayWork) -> ExtractResult:
     """Worker: parse one replay's per-frame ndarrays."""
+    if item.open_error is not None:
+        return ExtractResult(
+            manifest_key=item.manifest_key,
+            sample=None,
+            error=item.open_error,
+            frame_count=None,
+            stats=None,
+        )
     try:
         extractor = extract_policy_world_replay if _WORKER_REPLAY_FORMAT == "policy-world" else extract_replay
         sample = extractor(str(item.open_path))

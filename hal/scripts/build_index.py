@@ -66,6 +66,8 @@ def _worker_init() -> None:
 
 
 def _index_one(item: ReplayWork, *, compute_sha1: bool, with_stats: bool) -> IndexResult:
+    if item.open_error is not None:
+        return IndexResult(item.manifest_key, None, item.open_error)
     name_hint = item.manifest_key if item.unlink_after else None
     try:
         entry = extract_index_entry(
