@@ -438,7 +438,13 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
 
     _run_checked(["uv", "run", "fetch"], env=env)
     _run_checked(
-        ["uv", "run", "python", "-c", "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"],
+        [
+            "uv",
+            "run",
+            "python",
+            "-c",
+            "from hal import streams; [streams.pull_stats_if_available(s) for s in streams.ALL]",
+        ],
         env=env,
     )
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)

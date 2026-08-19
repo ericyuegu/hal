@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from botocore.exceptions import ClientError
 from loguru import logger
 
 from hal import r2
@@ -147,6 +148,7 @@ BY_NAME: Final[dict[str, StreamSource]] = {s.name: s for s in ALL}
 # a plain `data_root` into its R2 origin, while purely-local paths (dev MDS,
 # overfit scratch) that aren't registered here resolve to None and stay local.
 _REMOTE_BY_LOCAL: Final[dict[str, str]] = {str(s.local_root): s.remote for s in ALL}
+_NOT_FOUND_CODES: Final[frozenset[str]] = frozenset({"404", "NoSuchKey", "NotFound"})
 
 
 def remote_for_local(local: str | Path) -> str | None:
@@ -176,3 +178,21 @@ def pull_stats(src: StreamSource) -> Path:
     r2.client().download_file(bucket, f"{key}/stats.json", str(dest))
     logger.info(f"[streams] {src.name}: stats.json -> {dest}")
     return dest
+
+
+def pull_stats_if_available(src: StreamSource) -> Path | None:
+    """Download stats when the registered stream exists in remote storage.
+
+    Some registered sources are intentionally retained for frozen experiments
+    after their remote artifact has been removed. Missing optional sources must
+    not prevent unrelated cloud experiments from starting. Authentication and
+    transport failures still propagate.
+    """
+    try:
+        return pull_stats(src)
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code")
+        if error_code not in _NOT_FOUND_CODES:
+            raise
+        logger.warning(f"[streams] {src.name}: remote stats.json is unavailable; skipping")
+        return None
