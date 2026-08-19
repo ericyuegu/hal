@@ -30,7 +30,6 @@ Usage:
 """
 
 import dataclasses
-import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -68,6 +67,7 @@ from hal.data.index import read_jsonl
 from hal.data.index import replay_uuid_from_path
 from hal.data.index import write_jsonl
 from hal.data.mds import FULL_MDS_SHARD_SIZE_LIMIT
+from hal.data.policy_schema import policy_replay_identity
 from hal.data.policy_world_schema import POLICY_WORLD_FLOAT_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
@@ -169,7 +169,7 @@ def _process_one(item: ReplayWork) -> ExtractResult:
             if ranks is not None:
                 sample["p1_rank"] = np.full(frame_count, ranks[0], dtype=np.uint8)
                 sample["p2_rank"] = np.full(frame_count, ranks[1], dtype=np.uint8)
-            encoded = encode_policy_world_replay(sample, _replay_identity(item.manifest_key))
+            encoded = encode_policy_world_replay(sample, policy_replay_identity(item.manifest_key))
             assert_policy_world_replay_equal(sample, encoded, item.manifest_key)
             replay_stats = StatsAccumulator(POLICY_WORLD_FLOAT_COLUMNS)
             for name in POLICY_WORLD_FLOAT_COLUMNS:
@@ -282,10 +282,6 @@ def _open_writers(
             shutil.rmtree(upload_root, ignore_errors=True)
         raise
     return writers, upload_root
-
-
-def _replay_identity(path: str) -> str:
-    return hashlib.blake2b(path.encode("utf-8"), digest_size=16, person=b"hal-policy-id-v1").hexdigest()
 
 
 def _read_rank_overrides(path: Path | None) -> dict[str, tuple[int, int]]:

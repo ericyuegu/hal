@@ -1,6 +1,5 @@
 """Build the compact replay dataset used by the base action model."""
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -18,14 +17,10 @@ from hal.data.policy_schema import POLICY_MDS_COLUMNS
 from hal.data.policy_schema import POLICY_SCHEMA_VERSION
 from hal.data.policy_schema import assert_policy_replay_equal
 from hal.data.policy_schema import encode_policy_replay
+from hal.data.policy_schema import policy_replay_identity
 
 DEFAULT_SCRATCH = Path("/dev/shm/hal_policy_projection")
 DEFAULT_SHARD_SIZE = 256 * 2**20
-
-
-def _replay_identity(path: str) -> str:
-    # The manifest's 32-bit replay UUID has three known collisions.
-    return hashlib.blake2b(path.encode("utf-8"), digest_size=16, person=b"hal-policy-id-v1").hexdigest()
 
 
 def _replay_ids(src: Path) -> dict[str, list[str]]:
@@ -38,7 +33,7 @@ def _replay_ids(src: Path) -> dict[str, list[str]]:
         split = rows.setdefault(annotation.split, {})
         if annotation.mds_row_idx in split:
             raise ValueError(f"duplicate {annotation.split} row {annotation.mds_row_idx} in manifest")
-        replay_id = _replay_identity(entry.path)
+        replay_id = policy_replay_identity(entry.path)
         previous_path = identity_paths.get(replay_id)
         if previous_path is not None:
             raise ValueError(

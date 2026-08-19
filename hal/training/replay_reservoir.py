@@ -28,6 +28,8 @@ from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 
+type WindowTransform = Callable[[str, str, dict[str, np.ndarray]], None]
+
 
 def _next_item[T](source: Iterator[T]) -> T:
     return next(source)
@@ -227,6 +229,7 @@ class PolicyReplayPackDataset(IterableDataset):
         projection: FeatureProjection | None,
         replay_format: ReplayFormat = "policy",
         replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        window_transform: WindowTransform | None = None,
     ) -> None:
         if replay_format not in ("policy", "policy-world"):
             raise ValueError(f"replay reservoir requires a compact format, got {replay_format!r}")
@@ -242,6 +245,7 @@ class PolicyReplayPackDataset(IterableDataset):
             decode_policy_replay_slices if replay_format == "policy" else decode_policy_world_replay_slices
         )
         self._replay_transform = replay_transform
+        self._window_transform = window_transform
         self._epoch = 0
 
     def __iter__(self) -> Iterator[ReplayPack]:
@@ -278,6 +282,8 @@ class PolicyReplayPackDataset(IterableDataset):
                         projection=self._projection,
                     )
                     window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
+                    if self._window_transform is not None:
+                        self._window_transform(replay_id, ego_prefix, window)
                     windows.append(window)
             else:
                 sample = self._replay_transform(self._decode(compact))
@@ -292,6 +298,8 @@ class PolicyReplayPackDataset(IterableDataset):
                         projection=self._projection,
                     )
                     window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
+                    if self._window_transform is not None:
+                        self._window_transform(replay_id, ego_prefix, window)
                     windows.append(window)
             if windows:
                 yield ReplayPack(replay_id, tuple(windows))
@@ -394,10 +402,16 @@ def make_reservoir_loader(
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
     replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    window_transform: WindowTransform | None = None,
     batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
     replay_format: ReplayFormat = "policy",
 ) -> ReservoirLoader:
-    """Build a compact replay loader with replay-aware batches."""
+    """Build a compact replay loader with replay-aware batches.
+
+    ``window_transform`` may attach target-side metadata after the replay ID,
+    ego port, window start, and padding have already been sampled. It must not
+    consume randomness or mutate model-input columns.
+    """
     if predownload < 1:
         raise ValueError(f"predownload must be positive, got {predownload}")
     if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
@@ -423,6 +437,7 @@ def make_reservoir_loader(
         projection=projection,
         replay_format=replay_format,
         replay_transform=replay_transform,
+        window_transform=window_transform,
     )
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")

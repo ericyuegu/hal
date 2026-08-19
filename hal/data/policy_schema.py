@@ -1,5 +1,6 @@
 """Exact compact replay fields for the base action model."""
 
+import hashlib
 from collections.abc import Mapping
 from typing import Final
 
@@ -27,6 +28,17 @@ PACKED_STATE_SUFFIXES: Final[tuple[str, ...]] = (
 )
 PLAYER_PREFIXES: Final[tuple[str, ...]] = ("p1", "p1_nana", "p2", "p2_nana")
 LEADER_PREFIXES: Final[tuple[str, ...]] = ("p1", "p2")
+
+
+def policy_replay_identity(path: str) -> str:
+    """Return the stable compact-policy replay ID for a manifest path."""
+    # The manifest's 32-bit replay UUID has three known collisions.
+    return hashlib.blake2b(
+        path.encode("utf-8"),
+        digest_size=16,
+        person=b"hal-policy-id-v1",
+    ).hexdigest()
+
 
 _FIELDS: Final[dict[str, tuple[int, int, int, int]]] = {
     # Slippi action state is an unsigned 16-bit engine value. Values above the

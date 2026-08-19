@@ -19,6 +19,7 @@ from hal.data.policy_schema import pack_buttons
 from hal.data.policy_schema import pack_player_state
 from hal.data.policy_schema import pack_stick
 from hal.data.policy_schema import pack_trigger
+from hal.data.policy_schema import policy_replay_identity
 from hal.data.policy_schema import unpack_buttons
 from hal.data.policy_schema import unpack_player_state
 from hal.data.policy_schema import unpack_stick
@@ -31,6 +32,10 @@ _DEV_TRAIN = Path(__file__).resolve().parents[1] / "data" / "processed" / "dev" 
 
 def _bits(values: np.ndarray) -> np.ndarray:
     return np.asarray(values, dtype=np.float32).view(np.uint32)
+
+
+def test_policy_replay_identity_is_stable() -> None:
+    assert policy_replay_identity("archive://ranked/example.slp") == "272a3b895dfedbf42a4bb86febb17ffc"
 
 
 def test_all_stick_codes_round_trip_exactly() -> None:
