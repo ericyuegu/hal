@@ -364,7 +364,10 @@ def test_checkpoint_config_round_trip_and_optimizer_owns_every_parameter() -> No
 
 
 def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeypatch, tmp_path: Path) -> None:
+    # Flex attention on CUDA needs head_dim >= 16, so the end-to-end model is
+    # slightly wider than the CPU-only unit-test models.
     cfg = _cfg(
+        d_model=64,
         max_steps=1,
         val_every=0,
         eval_every=0,

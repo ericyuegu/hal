@@ -444,6 +444,16 @@ class TrainBatch:
             context=self.context.pin_memory(), target=self.target.pin_memory(), replay_ids=self.replay_ids
         )
 
+    def record_stream(self, stream: torch.cuda.Stream) -> None:
+        """Keep every tensor's allocation owned until ``stream`` finishes using it."""
+        tensors = [*self.context.features.values(), self.context.ctx_pad, self.target]
+        if self.context.slot_ids is not None:
+            tensors.append(self.context.slot_ids)
+        if self.context.reset is not None:
+            tensors.append(self.context.reset)
+        for tensor in tensors:
+            tensor.record_stream(stream)
+
 
 # %%
 def _has_suffix(name: str, suffixes: Mapping[str, object] | tuple[str, ...]) -> bool:

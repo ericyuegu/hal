@@ -1,6 +1,6 @@
 # Action-model experiment status
 
-Updated: 2026-08-09
+Updated: 2026-08-19
 
 This file is the result index. Each linked file contains the full plan, command, evidence, and
 decision. Git keeps the source that made each historical result.
@@ -41,6 +41,8 @@ invalidates the policy path. See [p2_temporal_kv_ablation.md](p2_temporal_kv_abl
 | 024 temporal MTP | Implemented | No final training result is recorded. |
 | 025 flow head | Implemented as a direct follow-on to 024 | No final training result is recorded. |
 | E3 to E7 plans | Not selected as final results | Use the linked plans only when a new run starts. |
+| 034 rank-weighted BC | Implemented; production run pending | Gate: `net_stock_lcb` vs 026 run `cqbbbg77`. |
+| 036 advantage-weighted BC | Implemented; production run pending | Run `--audit-returns` first; gate: `net_stock_lcb` vs 026 run `cqbbbg77`. |
 
 E1 is W&B run `q3aojgfm`. Its final checkpoint SHA-256 is
 `c175aa53f1d0f4ff80157b26a51c67cf55c4577ded656b60b97d12e10d8a560f`. Its paired mean stock
@@ -65,6 +67,9 @@ See [e2_within_frame_factorization.md](e2_within_frame_factorization.md).
 - [E5 primary AWR](e5_primary_awr.md)
 - [E6 chunk critic](e6_chunk_critic.md)
 - [E7 chunk AWR execution](e7_chunk_awr_execution.md)
+- [034 rank-weighted BC](034_rank_weighted_bc.md)
+- [035 recursive chunk decoder](035_recursive_chunk_decoder.md)
+- [036 advantage-weighted BC](036_advantage_weighted_bc.md)
 
 ## Fixed evaluation rules
 

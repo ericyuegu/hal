@@ -414,3 +414,25 @@ def test_replay_draws_are_deterministic_and_change_each_epoch() -> None:
     epoch0 = _per_replay_draws(replay_ids, worker_count=4, epoch=0)
     assert _per_replay_draws(replay_ids, worker_count=4, epoch=0) == epoch0
     assert _per_replay_draws(replay_ids, worker_count=4, epoch=1) != epoch0
+
+
+def test_train_batch_record_stream_covers_optional_context_fields(monkeypatch) -> None:
+    recorded: list[torch.Tensor] = []
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, stream: recorded.append(self))
+    features = {"ego_position_x": torch.zeros(2, L_CTX), "opp_position_x": torch.zeros(2, L_CTX)}
+    target = torch.zeros(2, L_CHUNK, 14)
+    full = TrainBatch(
+        context=Context(
+            features=features,
+            ctx_pad=torch.zeros(2, dtype=torch.int64),
+            slot_ids=torch.arange(2),
+            reset=torch.ones(2, dtype=torch.bool),
+        ),
+        target=target,
+    )
+    full.record_stream(object())
+    assert len(recorded) == len(features) + 4  # ctx_pad, target, slot_ids, reset
+    recorded.clear()
+    bare = TrainBatch(context=Context(features=features, ctx_pad=torch.zeros(2, dtype=torch.int64)), target=target)
+    bare.record_stream(object())
+    assert len(recorded) == len(features) + 2

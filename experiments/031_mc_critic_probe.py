@@ -39,6 +39,7 @@ from torch import Tensor
 
 from hal.data.policy_schema import decode_policy_replay
 from hal.data.schema import check_schema_version
+from hal.training import returns as returns_lib
 from hal.training.dataloader import _make_window
 from hal.training.dataloader import collate_train_batch
 from hal.training.dataloader import collate_windows
@@ -50,7 +51,6 @@ from hal.training.features import Context
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
-from hal.wire import MASK_INT32
 
 
 def _load_026():
@@ -72,7 +72,7 @@ GROUP_NAMES: tuple[str, ...] = _exp026.GROUP_NAMES
 N_GROUPS: int = _exp026.N_GROUPS
 HORIZONS: tuple[int, int] = (1, 4)
 MC_RETURN_SUFFIX = "mc_probe_return"
-MC_VALID_SUFFIX = "mc_probe_valid"
+MC_VALID_SUFFIX = f"{MC_RETURN_SUFFIX}_valid"
 
 
 class ControllerCodec(Protocol):
@@ -116,35 +116,21 @@ def discounted_mc_return(reward: np.ndarray, gamma: float, *, terminated: bool) 
 
     A false ``terminated`` means the file ended without a known episode boundary.
     Partial returns are intentionally represented by NaN plus a false mask.
+    The formula lives in :mod:`hal.training.returns`; this wrapper keeps the
+    probe's tuple contract.
     """
     values = np.asarray(reward, dtype=np.float32)
     if values.ndim != 1:
         raise ValueError("reward must be one-dimensional")
     if not 0.0 <= gamma <= 1.0:
-        raise ValueError("gamma must be in [0, 1]")
+        raise ValueError(f"gamma must be in [0, 1], got {gamma}")
     valid = np.full(values.shape, bool(terminated), dtype=np.bool_)
     if not terminated:
         return np.full(values.shape, np.nan, dtype=np.float32), valid
-    out = np.empty_like(values)
-    carry = 0.0
-    for index in range(len(values) - 1, -1, -1):
-        carry = float(values[index]) + gamma * carry
-        out[index] = carry
-    return out, valid
+    return returns_lib.discounted_return(values, gamma), valid
 
 
-def infer_terminal_replay(sample: dict) -> bool:
-    """Conservative terminal test for policy MDS rows.
-
-    A materializer may attach scalar ``mc_terminated`` metadata.  Without it we
-    only trust an observed final-stock loss; ambiguous quit-outs are masked.
-    """
-    if "mc_terminated" in sample:
-        value = np.asarray(sample["mc_terminated"])
-        if value.size != 1:
-            raise ValueError("mc_terminated must be scalar")
-        return bool(value.reshape(-1)[0])
-    return any(int(np.asarray(sample[f"{port}_stock"])[-1]) == 0 for port in ("p1", "p2"))
+infer_terminal_replay = returns_lib.infer_terminal_replay
 
 
 def label_mc_replay(
@@ -156,32 +142,14 @@ def label_mc_replay(
     terminated: bool | None = None,
 ) -> dict:
     """Attach full-episode, per-port MC returns before random windowing."""
-    complete = infer_terminal_replay(sample) if terminated is None else terminated
-    out = dict(sample)
-    for port, other in (("p1", "p2"), ("p2", "p1")):
-        ego_stock = np.asarray(sample[f"{port}_stock"], dtype=np.int64)
-        opp_stock = np.asarray(sample[f"{other}_stock"], dtype=np.int64)
-        ego_percent = np.asarray(sample[f"{port}_percent"], dtype=np.float32)
-        opp_percent = np.asarray(sample[f"{other}_percent"], dtype=np.float32)
-        ego_loss = np.zeros(len(ego_stock), dtype=np.float32)
-        opp_loss = np.zeros(len(opp_stock), dtype=np.float32)
-        ego_known = ego_stock != MASK_INT32
-        opp_known = opp_stock != MASK_INT32
-        ego_loss[1:] = (ego_stock[1:] < ego_stock[:-1]) & ego_known[1:] & ego_known[:-1]
-        opp_loss[1:] = (opp_stock[1:] < opp_stock[:-1]) & opp_known[1:] & opp_known[:-1]
-        reward = opp_loss - ego_loss
-        if win_reward:
-            reward += win_reward * (opp_loss * (opp_stock == 0) - ego_loss * (ego_stock == 0))
-        if damage_shaping:
-            ego_damage = np.zeros(len(ego_percent), dtype=np.float32)
-            opp_damage = np.zeros(len(opp_percent), dtype=np.float32)
-            ego_damage[1:] = np.maximum(ego_percent[1:] - ego_percent[:-1], 0)
-            opp_damage[1:] = np.maximum(opp_percent[1:] - opp_percent[:-1], 0)
-            reward += damage_shaping * (np.nan_to_num(opp_damage, nan=0.0) - np.nan_to_num(ego_damage, nan=0.0))
-        returns, valid = discounted_mc_return(reward, gamma, terminated=complete)
-        out[f"{port}_{MC_RETURN_SUFFIX}"] = returns
-        out[f"{port}_{MC_VALID_SUFFIX}"] = valid
-    return out
+    return returns_lib.label_replay(
+        sample,
+        gamma=gamma,
+        damage_shaping=damage_shaping,
+        win_reward=win_reward,
+        suffix=MC_RETURN_SUFFIX,
+        terminated=terminated,
+    )
 
 
 @dataclass(frozen=True, slots=True)

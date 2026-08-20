@@ -1,8 +1,15 @@
 # E5: primary-only AWR
 
-Status: blocked on the policy architecture decision after E4
+Status: implemented as experiment 036 on the 026 architecture — see
+[036_advantage_weighted_bc.md](036_advantage_weighted_bc.md). 036 keeps this document's reward
+dose, gamma, actor weight, warm-up, and detached critic, and records four deliberate deviations:
+the "primary" weight covers the deployed four-frame chunk (offsets 1..4), not offset 1 alone,
+because 026 deploys a chunk per decision; the value head shares the policy optimizer's Adam
+groups (no separate AdamW or separate clip); there is no in-run warm-up ESS stop gate (the
+preflight audit and watch metrics replace it); and the weighting scope plus the head-offset set
+are explicit arm axes.
 
-Updated: 2026-08-08
+Updated: 2026-08-19
 
 ## Question
 

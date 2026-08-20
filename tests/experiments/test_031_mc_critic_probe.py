@@ -60,7 +60,7 @@ def test_replay_label_computes_before_windowing_and_marks_ambiguous_tail_invalid
     }
     labeled = exp.label_mc_replay(sample, gamma=1.0, damage_shaping=0.1)
     assert np.isnan(labeled["p1_mc_probe_return"]).all()
-    assert not labeled["p1_mc_probe_valid"].any()
+    assert not labeled["p1_mc_probe_return_valid"].any()
 
     complete = exp.label_mc_replay(sample, gamma=1.0, damage_shaping=0.1, terminated=True)
     np.testing.assert_allclose(complete["p1_mc_probe_return"], [1.0, 1.0, 0.0])
