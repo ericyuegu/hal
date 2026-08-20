@@ -102,10 +102,21 @@ def test_iter_archive_members_streams_and_cleans(tmpfs: Path) -> None:
     assert n > 100
     # +2 slack for the brief race between producer fill and consumer yield.
     assert max_inflight <= queue_size + 2, max_inflight
-    # No .slp leaked into any subdir of tmpfs. The per-run subdir itself stays
-    # until atexit (or until the next run's startup sweep) — that's by design.
-    assert not list(run_dir.iterdir())
+    # No .slp leaked into any subdir of tmpfs. The empty per-run and
+    # per-archive directories stay until atexit (or the next startup sweep).
+    assert not list(run_dir.rglob("*.slp"))
     assert total_bytes > 100_000_000
+
+
+def test_iter_archive_members_closes_while_backpressured(tmpfs: Path) -> None:
+    """Closing the consumer unblocks and drains the 7z producer."""
+    members = iter_archive_members(DEV_ARCHIVE, tmpfs_root=tmpfs, queue_size=1)
+    _, path = next(members)
+    path.unlink()
+    members.close()
+
+    run_dir = tmpfs / str(os.getpid())
+    assert not list(run_dir.rglob("*.slp"))
 
 
 def test_iter_archive_members_filter(tmpfs: Path) -> None:

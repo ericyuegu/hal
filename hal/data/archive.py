@@ -12,8 +12,9 @@ The dump ships in two mutually-incompatible on-disk layouts and both must work:
       ``__exit__``. The signal "writer N is done" is implicit: it arrives
       when ``factory.create()`` is called for the *next* file in the same
       thread (folders extract files sequentially within a thread). We
-      finalize the previous per-thread writer at that point, plus a sweep
-      after extract returns to flush the last writer per thread.
+      finalize the previous per-thread writer at that point and explicitly
+      finalize the last writer at each folder boundary. The latter matters
+      when a thread finishes its final folder while the bounded queue is full.
 
    b. Backpressure has to happen *before* a tmpfs file is opened, not after,
       or a slow consumer lets the producer fill /dev/shm. The factory
@@ -44,6 +45,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import types
 import zipfile
 from collections import Counter
@@ -282,6 +284,7 @@ class _TmpfsWriter(Py7zIO):
         self._fp = self.path.open("wb")
         self._size: int = 0
         self._finalized: bool = False
+        self._lock = threading.Lock()
 
     def write(self, s: bytes | bytearray) -> int:
         n = self._fp.write(s)
@@ -302,11 +305,22 @@ class _TmpfsWriter(Py7zIO):
 
     def finalize(self) -> None:
         """Close the file and hand it off to the consumer queue."""
-        if self._finalized:
-            return
-        self._finalized = True
-        self._fp.close()
+        with self._lock:
+            if self._finalized:
+                return
+            self._finalized = True
+            self._fp.close()
         self._out_q.put((self.member, self.path))
+
+    def abort(self) -> bool:
+        """Close and remove this writer without handing it to the consumer."""
+        with self._lock:
+            if self._finalized:
+                return False
+            self._finalized = True
+            self._fp.close()
+            self.path.unlink(missing_ok=True)
+        return True
 
 
 class _StreamFactory(WriterFactory):
@@ -337,41 +351,54 @@ class _StreamFactory(WriterFactory):
         # whether the GIL is enabled (py3.14 free-threading safe).
         self._counter: int = 0
 
-    def request_stop(self) -> None:
-        """Tell create() to refuse all further real writers (NullIO instead).
+    def abort_all(self) -> None:
+        """Stop new writers and release slots held by unfinished writers.
 
-        Used when the consumer aborts early: still drain the producer thread
-        cleanly, but don't materialize any more files.
+        Closing an active writer makes its extraction folder fail promptly.
+        The producer catches that failure and emits its sentinel, which lets
+        an interrupted consumer exit instead of waiting on the semaphore.
         """
         with self._lock:
             self._stopped = True
+            writers = list(self._open_per_thread.values())
+            self._open_per_thread.clear()
+        for writer in writers:
+            if isinstance(writer, _TmpfsWriter) and writer.abort():
+                self._sem.release()
 
-    def _next_path(self) -> Path:
+    def finalize_thread(self) -> None:
+        """Finalize the current extraction thread's last open writer."""
+        tid = threading.get_ident()
         with self._lock:
-            seq = self._counter
-            self._counter += 1
-        return self._tmpfs_root / f"{os.getpid()}_{threading.get_ident()}_{seq}.slp"
+            writer = self._open_per_thread.pop(tid, None)
+        if isinstance(writer, _TmpfsWriter):
+            writer.finalize()
 
     def create(self, filename: str) -> Py7zIO:
         tid = threading.get_ident()
         with self._lock:
-            prev = self._open_per_thread.get(tid)
+            prev = self._open_per_thread.pop(tid, None)
             stopped = self._stopped
         if isinstance(prev, _TmpfsWriter):
             prev.finalize()
 
         skip = stopped or (self._filter_paths is not None and filename not in self._filter_paths)
         if skip:
-            new: Py7zIO = NullIO()
-        else:
-            self._sem.acquire()
+            return NullIO()
+
+        self._sem.acquire()
+        with self._lock:
+            if self._stopped:
+                self._sem.release()
+                return NullIO()
+            seq = self._counter
+            self._counter += 1
+            path = self._tmpfs_root / f"{os.getpid()}_{tid}_{seq}.slp"
             try:
-                new = _TmpfsWriter(filename, self._next_path(), self._out_q)
+                new = _TmpfsWriter(filename, path, self._out_q)
             except BaseException:
                 self._sem.release()
                 raise
-
-        with self._lock:
             self._open_per_thread[tid] = new
         return new
 
@@ -391,6 +418,8 @@ def _bounded_pool_extract(
     parallel: bool,  # noqa: ARG001 (kept for signature compatibility)
     skip_notarget: bool = True,
     q: queue.Queue | None = None,
+    *,
+    factory: _StreamFactory,
 ) -> None:
     """Drop-in replacement for py7zr.Worker.extract with bounded concurrency.
 
@@ -405,19 +434,28 @@ def _bounded_pool_extract(
     """
     if not (hasattr(self.header, "main_streams") and self.header.main_streams is not None):
         empty = [f for f in self.files if f.emptystream]
-        self.extract_single(fp, empty, path, 0, 0, q)
+        try:
+            self.extract_single(fp, empty, path, 0, 0, q)
+        finally:
+            factory.finalize_thread()
         return
 
     src_end = self.src_start + self.header.main_streams.packinfo.packpositions[-1]
     numfolders = self.header.main_streams.unpackinfo.numfolders
     if numfolders == 1:
-        self.extract_single(fp, self.files, path, self.src_start, src_end, q, skip_notarget=skip_notarget)
+        try:
+            self.extract_single(fp, self.files, path, self.src_start, src_end, q, skip_notarget=skip_notarget)
+        finally:
+            factory.finalize_thread()
         return
 
     folders = self.header.main_streams.unpackinfo.folders
     positions = self.header.main_streams.packinfo.packpositions
     empty = [f for f in self.files if f.emptystream]
-    self.extract_single(fp, empty, path, 0, 0, q)
+    try:
+        self.extract_single(fp, empty, path, 0, 0, q)
+    finally:
+        factory.finalize_thread()
 
     targeted = [
         i
@@ -445,6 +483,7 @@ def _bounded_pool_extract(
                     skip_notarget=skip_notarget,
                 )
             finally:
+                factory.finalize_thread()
                 folders[i].decompressor = None
         return
 
@@ -479,6 +518,7 @@ def _bounded_pool_extract(
                 skip_notarget=skip_notarget,
             )
         finally:
+            factory.finalize_thread()
             folders[i].decompressor = None
 
     try:
@@ -676,7 +716,8 @@ def _iter_7z_members(
                 # Replace py7zr's broken parallel extract (one Thread per
                 # folder, each opening a fresh fd that is never closed) with
                 # a bounded thread pool that reuses fds. See _bounded_pool_extract.
-                z.worker.extract = types.MethodType(_bounded_pool_extract, z.worker)
+                extract = functools.partial(_bounded_pool_extract, factory=factory)
+                z.worker.extract = types.MethodType(extract, z.worker)
                 z.extract(factory=factory)
         except BaseException as e:
             logger.error(f"archive producer crashed on {archive}: {e!r}")
@@ -713,15 +754,25 @@ def _iter_7z_members(
         # Tell it to NullIO the rest, drain the queue releasing slots, and
         # unlink any leftover tmpfs files — otherwise producer.join() deadlocks.
         if not drained:
-            factory.request_stop()
-            while True:
-                item = out_q.get()
+            factory.abort_all()
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                try:
+                    item = out_q.get(timeout=1.0)
+                except queue.Empty:
+                    if not producer.is_alive():
+                        break
+                    continue
                 if item is _SENTINEL:
                     break
                 _, leftover = item
                 Path(leftover).unlink(missing_ok=True)
                 sem.release()
-        producer.join()
+            producer.join(timeout=max(0.0, deadline - time.monotonic()))
+            if producer.is_alive():
+                logger.warning(f"archive producer did not stop within 30 seconds: {archive}")
+        else:
+            producer.join()
         if watcher is not None:
             assert fd_watcher_stop is not None
             fd_watcher_stop.set()
