@@ -1,6 +1,7 @@
 # 034 rank-weighted behavioral cloning
 
-Status: preregistered and implemented 2026-08-19; local RTX 3060 smoke passed; production run pending.
+Status: production run complete. The official run and metric record is in the
+[audited blog experiment table](../blog_experiment_evidence.md).
 
 ## Aim
 
@@ -144,15 +145,5 @@ compilation was retained, while validation and closed-loop work were reduced to 
   `9.19/9.89 ms`; H6 was `11.75/13.27 ms`. The tiny post-100-step score estimates are intentionally non-decisional
   (`-3.22` and `-5.37` net stocks/min); this smoke tests execution and integrity, not the promotion hypothesis.
 
-Production source commit, launch command, W&B run ID, L40S throughput, checkpoint hash, final metrics, uncertainty
-intervals, and the promote/reject decision remain pending.
-
-## Next orthogonal candidate: recursive chunk decoder
-
-Do not combine this with 034. Experiment 026 already uses a shared two-layer causal temporal Transformer over future
-frame tokens, rather than independent temporal heads. A candidate 035 would replace those temporal attention blocks
-with a small recurrent register that repeatedly reads the frozen scene embedding, previous controller frame, and
-offset embedding, then emits the next controller frame. The expensive observation trunk remains amortized across the
-chunk. The first candidate should be a standard 128-wide GRU cell; modern scan-based RNN/SSM and matrix-memory cells
-mainly target much longer sequences than this 10-offset plan and are deferred pending evidence that the simple
-recurrence is insufficient.
+The production W&B run is `c5cxoyk8`. Use the audited blog experiment table for
+the final metrics, control, and mismatch record.

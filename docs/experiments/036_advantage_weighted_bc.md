@@ -1,6 +1,7 @@
 # 036 advantage-weighted behavioral cloning
 
-Status: preregistered and implemented 2026-08-19; production run pending.
+Status: production run complete. The official run and metric record is in the
+[audited blog experiment table](../blog_experiment_evidence.md).
 
 ## Aim
 
@@ -147,4 +148,5 @@ or asymmetry bug.
 
 ## Results
 
-Pending.
+The production W&B run is `hwzv0k9a`. Use the audited blog experiment table for
+the final metrics, control, lineage, and mismatch record.

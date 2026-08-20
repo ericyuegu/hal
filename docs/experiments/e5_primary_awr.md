@@ -307,4 +307,7 @@ justify a macro-action.
 
 ## Results
 
-Pending the post-E4 architecture decision.
+Experiment 036 completed this test on the 026-style architecture. The production
+W&B run is `hwzv0k9a`. Use the
+[audited blog experiment table](../blog_experiment_evidence.md) for the official
+run, metric, lineage, and mismatch record.
