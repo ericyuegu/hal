@@ -318,17 +318,9 @@ def _eval_inference_bucket(cfg: TrainConfig, n_matchups: int) -> int:
     return covering_power_of_two(rows)
 
 
-def _planned_inference_programs(cfg: TrainConfig) -> tuple[tuple[int, int], ...]:
-    scheduled = (
-        (cfg.eval_n_matchups, cfg.exec_horizon),
-        (cfg.final_eval_n_matchups, cfg.exec_horizon),
-        (cfg.final_diag_n_matchups, _FINAL_DIAG_EXEC_HORIZON),
-    )
-    return tuple(sorted({(_eval_inference_bucket(cfg, n), horizon) for n, horizon in scheduled}))
-
-
 def _planned_inference_buckets(cfg: TrainConfig) -> tuple[int, ...]:
-    return tuple(sorted({bucket for bucket, _ in _planned_inference_programs(cfg)}))
+    matchups = (cfg.eval_n_matchups, cfg.final_eval_n_matchups, cfg.final_diag_n_matchups)
+    return tuple(sorted({_eval_inference_bucket(cfg, n) for n in matchups}))
 
 
 def amp_context(cfg: TrainConfig, device: torch.device | str):
@@ -873,14 +865,6 @@ class GPT(nn.Module):
         return self.trunk(self.context_tokens(features, action_indices), ctx_pad)
 
 
-def quantize(model: GPT, actions: Tensor) -> Tensor:
-    return model.codec.quantize(actions)
-
-
-def dequantize(model: GPT, indices: Tensor) -> Tensor:
-    return model.codec.dequantize(indices)
-
-
 def prepared_targets(model: GPT, batch: TrainBatch | AWRBatch) -> tuple[Tensor, Tensor, Tensor]:
     """Quantize history+future exactly once, then align every selected offset."""
     if batch.target.shape[1] < model.L_chunk:
@@ -893,36 +877,6 @@ def prepared_targets(model: GPT, batch: TrainBatch | AWRBatch) -> tuple[Tensor, 
     targets = torch.stack([full[:, offset : offset + length] for offset in model.head_offsets], dim=2)
     valid = torch.arange(length, device=full.device)[None, :] >= batch.context.ctx_pad[:, None]
     return full[:, :length], targets, valid
-
-
-def chunk_targets(model: GPT, batch: TrainBatch) -> tuple[Tensor, Tensor]:
-    _, targets, valid = prepared_targets(model, batch)
-    return targets, valid
-
-
-@dataclass(frozen=True, slots=True)
-class ActionLoss:
-    nll: Tensor  # [valid prefixes, selected offsets, groups]
-    targets: Tensor
-
-
-def action_loss(model: GPT, batch: TrainBatch) -> ActionLoss:
-    history_indices, targets, valid = prepared_targets(model, batch)
-    hidden = model(batch.context.features, batch.context.ctx_pad, history_indices)
-    dense_nll = model.temporal.teacher_forced_nll(hidden, history_indices, targets)
-    nll = dense_nll[valid]
-    target_valid = targets[valid]
-    if nll.numel() == 0:
-        raise ValueError("batch contains no valid context prefixes")
-    return ActionLoss(nll=nll, targets=target_valid)
-
-
-def objective(parts: ActionLoss, aux_loss_weight: float = 1.0) -> Tensor:
-    """Primary dense-four joint NLL plus the mean auxiliary joint NLL."""
-    joint = parts.nll.sum(dim=-1)
-    primary = joint[:, :4].mean()
-    auxiliary = joint[:, 4:].mean()
-    return primary + aux_loss_weight * auxiliary
 
 
 @dataclass(frozen=True, slots=True)
@@ -946,10 +900,6 @@ class AWRBatch:
     def target(self) -> Tensor:
         return self.batch.target
 
-    @property
-    def replay_ids(self) -> tuple[str, ...] | None:
-        return self.batch.replay_ids
-
     def to(self, device: str | torch.device) -> AWRBatch:
         return AWRBatch(
             batch=self.batch.to(device),
@@ -963,11 +913,6 @@ class AWRBatch:
             returns=self.returns.pin_memory(),
             eligible=self.eligible.pin_memory(),
         )
-
-    def record_stream(self, stream: torch.cuda.Stream) -> None:
-        self.batch.record_stream(stream)
-        self.returns.record_stream(stream)
-        self.eligible.record_stream(stream)
 
     def valid_rows(self, valid: Tensor) -> tuple[Tensor, Tensor]:
         """Select the return rows used by the policy loss."""
@@ -1363,7 +1308,6 @@ class BF16Inference:
     ) -> None:
         self.model = model
         self.cfg = cfg
-        self.buckets = _INFERENCE_BUCKETS
         chosen = _planned_inference_buckets(cfg) if compiled_buckets is None else compiled_buckets
         self.compiled_buckets = tuple(sorted(set(chosen)))
         if not self.compiled_buckets:
@@ -1389,7 +1333,7 @@ class BF16Inference:
                     f"inference batch {rows} exceeds largest compiled bucket {self.compiled_buckets[-1]}"
                 ) from exc
         try:
-            return next(bucket for bucket in self.buckets if bucket >= rows)
+            return next(bucket for bucket in _INFERENCE_BUCKETS if bucket >= rows)
         except StopIteration:
             return covering_power_of_two(rows)
 
