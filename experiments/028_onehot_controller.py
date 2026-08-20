@@ -51,19 +51,17 @@ from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
-from hal.eval.h2h import mirrored_configs
 from hal.eval.harness import DEFAULT_START_RETRIES
 from hal.eval.harness import automatic_parallelism
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
-from hal.eval.harness import run_matches_vec
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
-from hal.sim.process_vec import ProcessVecTelemetry
+from hal.eval.self_play import DecodeTelemetry
+from hal.eval.self_play import benchmark_checkpoint as benchmark_self_play
+from hal.eval.self_play import canonical_context
+from hal.eval.self_play import synthetic_context
 from hal.sim.rollout import covering_power_of_two
-from hal.sim.session import Matchup
-from hal.sim.session import PlayerSetup
-from hal.sim.vec import VecMatch
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import load_for_resume
@@ -1096,6 +1094,7 @@ class BF16Inference:
         model: GPT,
         cfg: TrainConfig,
         *,
+        bucket: int | None = None,
         compiled: bool | None = None,
         compile_mode: str = "default",
         compiled_buckets: tuple[int, ...] | None = None,
@@ -1103,7 +1102,10 @@ class BF16Inference:
         self.model = model
         self.cfg = cfg
         self.buckets = tuple(cfg.inference_buckets)
-        chosen = _planned_inference_buckets(cfg) if compiled_buckets is None else compiled_buckets
+        if bucket is not None and compiled_buckets is not None:
+            raise ValueError("pass bucket or compiled_buckets, not both")
+        chosen = (bucket,) if bucket is not None else compiled_buckets
+        chosen = _planned_inference_buckets(cfg) if chosen is None else chosen
         self.compiled_buckets = tuple(sorted(set(chosen)))
         if not self.compiled_buckets:
             raise ValueError("compiled_buckets must contain at least one bucket")
@@ -1166,7 +1168,7 @@ class BF16Inference:
             raise ValueError("only the unrolled four- and six-frame decoders exist")
         rows = ctx.ctx_pad.shape[0]
         bucket = self._bucket(rows)
-        padded = _pad_context(ctx, bucket)
+        padded = canonical_context(_pad_context(ctx, bucket), self.cfg.observation_bundle)
         observed = self.model.codec.quantize(stack_actions(padded.features))
         uniform_parts: list[Tensor] = []
         if streams is not None:
@@ -1196,40 +1198,6 @@ class BF16Inference:
             else:
                 indices = self._decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
         return self.model.codec.dequantize(indices[:rows])
-
-
-@dataclass
-class DecodeTelemetry:
-    calls: int = 0
-    rows: int = 0
-    executed_frames: int = 0
-    seconds: float = 0.0
-    max_seconds: float = 0.0
-    durations: list[float] = dataclass_field(default_factory=list)
-
-    def record(self, *, rows: int, horizon: int, seconds: float) -> None:
-        self.calls += 1
-        self.rows += rows
-        self.executed_frames += rows * horizon
-        self.seconds += seconds
-        self.max_seconds = max(self.max_seconds, seconds)
-        self.durations.append(seconds)
-
-    def metrics(self) -> dict[str, float]:
-        durations = np.asarray(self.durations, dtype=np.float64)
-        return {
-            "decode_calls": float(self.calls),
-            "decode_rows": float(self.rows),
-            "decode_seconds": self.seconds,
-            "decode_max_seconds": self.max_seconds,
-            "decode_p50_ms": float(np.percentile(durations, 50) * 1000) if durations.size else 0.0,
-            "decode_p95_ms": float(np.percentile(durations, 95) * 1000) if durations.size else 0.0,
-            "decode_p99_ms": float(np.percentile(durations, 99) * 1000) if durations.size else 0.0,
-            "decode_calls_over_100ms": float(np.count_nonzero(durations > 0.1)),
-            "decode_mean_rows": self.rows / max(self.calls, 1),
-            "decode_replans_per_s": self.calls / max(self.seconds, 1e-12),
-            "decode_executed_frames_per_s": self.executed_frames / max(self.seconds, 1e-12),
-        }
 
 
 @torch.no_grad()
@@ -1919,156 +1887,6 @@ def eval_checkpoint(
     return values
 
 
-def benchmark_self_play_checkpoint(
-    path: str,
-    *,
-    n_matches: int = 12,
-    max_frames: int = 14_400,
-    eager: bool = False,
-    instant_match_restart: bool = False,
-) -> dict[str, float]:
-    """Run one fixed wave with the checkpoint controlling both ports.
-
-    By default, each Dolphin boot plays one normal head-to-head match, and
-    ``max_frames`` is its cap.  Instant restart is available as a stress mode.
-    The policy sees ``2 * n_matches`` slots while all matches are live.
-    """
-    if n_matches < 1:
-        raise ValueError(f"n_matches must be >= 1, got {n_matches}")
-    if max_frames < 2:
-        raise ValueError(f"max_frames must be >= 2, got {max_frames}")
-    model, cfg, stats, state = load_checkpoint(path)
-    if eager:
-        cfg = replace(cfg, inference_mode="eager")
-    model.eval()
-    horizon = cfg.exec_horizon
-    real_rows = 2 * n_matches
-    inference_bucket = covering_power_of_two(real_rows)
-    # CUDA graphs cannot safely own the trunk's mutable rotary cache across graph
-    # partitions, so checkpoint evaluation uses ordinary compiled kernels.
-    inference = BF16Inference(model, cfg, compile_mode="default", compiled_buckets=(inference_bucket,))
-    telemetry = DecodeTelemetry()
-
-    compile_started = time.perf_counter()
-    context = synthetic_context(cfg, inference_bucket, next(model.parameters()).device)
-    inference.decode(context, horizon)
-    inference.decode(context, horizon)
-    if next(model.parameters()).device.type == "cuda":
-        torch.cuda.synchronize(next(model.parameters()).device)
-    compile_seconds = time.perf_counter() - compile_started
-
-    configs = mirrored_configs(n_matches)
-    matches = [
-        VecMatch(
-            matchup=Matchup(
-                stage=config.stage,
-                players=(
-                    PlayerSetup(port=1, character=config.character_port_1, cpu_level=0),
-                    PlayerSetup(port=2, character=config.character_port_2, cpu_level=0),
-                ),
-            ),
-            model_ports=(1, 2),
-        )
-        for config in configs
-    ]
-    checkpoint = Path(path).resolve()
-    mode = "instant_restart" if instant_match_restart else "single_match"
-    base_name = f"self_play_benchmark_{n_matches}x{max_frames}_{mode}"
-    run_number = 1
-    while True:
-        suffix = "" if run_number == 1 else f"_run{run_number:02d}"
-        out_dir = checkpoint.parent / f"{base_name}{suffix}"
-        try:
-            out_dir.mkdir(parents=True, exist_ok=False)
-            break
-        except FileExistsError:
-            run_number += 1
-    policy_index = itertools.count()
-
-    def factory() -> RecedingHorizon:
-        return make_policy(
-            model,
-            stats,
-            cfg,
-            decode_seed=cfg.eval_seed + next(policy_index),
-            inference=inference,
-            telemetry=telemetry,
-        )
-
-    rollout_started = time.perf_counter()
-    process_telemetry = ProcessVecTelemetry()
-    boots = run_matches_vec(
-        default_session_cfg(out_dir / "replays", instant_match_restart=instant_match_restart),
-        matches,
-        factory,
-        max_frames=max_frames,
-        # Explicit overrides are powers of two. This covers all n_matches in
-        # one wave while the active worker count remains exactly n_matches.
-        max_parallel=covering_power_of_two(n_matches),
-        start_retries=0,
-        process_telemetry=process_telemetry,
-    )
-    rollout_seconds = time.perf_counter() - rollout_started
-    completed_boots = sum(bool(boot) for boot in boots)
-    captured_frames = sum(len(trajectory) for boot in boots for trajectory in boot)
-    metrics = {
-        "checkpoint_step": float(state["step"]),
-        "workers": float(n_matches),
-        "model_slots": float(real_rows),
-        "max_frames_per_worker": float(max_frames),
-        "completed_workers": float(completed_boots),
-        "captured_frames": float(captured_frames),
-        "inference_bucket": float(inference_bucket),
-        "compile_seconds": compile_seconds,
-        "rollout_seconds": rollout_seconds,
-        "aggregate_fps": captured_frames / max(rollout_seconds, 1e-12),
-        "wall_lockstep_fps": captured_frames / max(completed_boots, 1) / max(rollout_seconds, 1e-12),
-        **telemetry.metrics(),
-        **process_telemetry.metrics(),
-    }
-    payload = {
-        "schema_version": 1,
-        "checkpoint": str(checkpoint),
-        "checkpoint_sha256": _checkpoint_sha256(checkpoint),
-        "instant_match_restart": instant_match_restart,
-        "metrics": metrics,
-    }
-    (out_dir / "metrics.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
-    print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
-    return metrics
-
-
-def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
-    features: dict[str, Tensor] = {}
-    floats = FLOAT_FEATURES if cfg.observation_bundle == "base" else FLOAT_FEATURES + _V6_FLOATS
-    for prefix in _PLAYER_PREFIXES:
-        for name in floats:
-            features[f"{prefix}_{name}"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-            features[f"{prefix}_{name}_mask"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-        for name in CAT_FEATURES:
-            features[f"{prefix}_{name}"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-        if cfg.observation_bundle == "v6_lean":
-            for name in _V6_CATS:
-                features[f"{prefix}_{name}"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-            features[f"{prefix}_{_CHARACTER_LIVE}"] = torch.zeros(
-                batch_size, cfg.L_ctx, dtype=torch.long, device=device
-            )
-    for name in ACTION_CHANNELS:
-        features[f"ego_{name}"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-    features["ego_character"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-    features["opp_character"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-    features["stage"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-    if cfg.observation_bundle == "v6_lean":
-        for name in SPATIAL_COLUMNS_LEAN:
-            features[name] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-    return Context(
-        features=features,
-        ctx_pad=torch.zeros(batch_size, dtype=torch.long, device=device),
-        slot_ids=torch.arange(batch_size, dtype=torch.long, device=device),
-        reset=torch.ones(batch_size, dtype=torch.bool, device=device),
-    )
-
-
 def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]:
     validate_config(cfg)
     device = torch.device(DEVICE)
@@ -2147,8 +1965,11 @@ def main(args: Args) -> None:
         )
         return
     if args.self_play_eval is not None:
-        benchmark_self_play_checkpoint(
+        benchmark_self_play(
             args.self_play_eval,
+            load_checkpoint=load_checkpoint,
+            make_inference=BF16Inference,
+            make_policy=make_policy,
             n_matches=args.self_play_matches,
             max_frames=args.self_play_frames,
             eager=args.self_play_eager,
