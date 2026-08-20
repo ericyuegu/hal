@@ -11,6 +11,7 @@ the result by the bare feature name (``position_x``, ``percent``, …).
 
 from pathlib import Path
 
+from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import load_sufficient_stats
@@ -26,7 +27,8 @@ def consolidate_key(name: str) -> str:
 
 
 def load_consolidated_stats(path: Path) -> dict[str, FeatureStats]:
-    """Welford-merge sufficient stats across p1/p2 ports, then finalize."""
+    """Fetch selected stream stats, merge p1/p2 ports, and finalize."""
+    path = streams.ensure_stats(path)
     merged: dict[str, FeatureStatsSufficient] = {}
     for name, block in load_sufficient_stats(path).items():
         key = consolidate_key(name)

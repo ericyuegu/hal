@@ -55,9 +55,8 @@ cd /opt/hal
 git checkout --quiet "$HAL_GIT_SHA"
 uv sync --locked
 
-log "fetching fixtures + dataset stats"
+log "fetching fixtures"
 uv run fetch
-uv run python -c "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"
 pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &)
 export DISPLAY=:99
 uv run python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable inside HAL container'"

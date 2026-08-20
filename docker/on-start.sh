@@ -167,10 +167,10 @@ if [ "$gpu_cap" = 120 ] && [ "${HAL_SKIP_SM120_PROBE:-0}" != 1 ]; then
   timeout 600 uv run docker/probe_sm120.py
 fi
 
-# Pull data only after the GPU and compiler checks pass.
-log "fetching fixtures + dataset stats"
+# Pull data only after the GPU and compiler checks pass. The selected stream's
+# stats are fetched lazily when training loads them.
+log "fetching fixtures"
 uv run fetch
-uv run python -c "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"
 
 # DataLoader workers pass tensor-storage handles to the main process over a unix socket
 # via file descriptors; num_workers * prefetch_factor in-flight batches can exceed the

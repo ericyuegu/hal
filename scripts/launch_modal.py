@@ -437,10 +437,6 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
         _run_checked(["uv", "run", "docker/probe_sm120.py"], env=env, timeout=600)
 
     _run_checked(["uv", "run", "fetch"], env=env)
-    _run_checked(
-        ["uv", "run", "python", "-c", "from hal import streams; [streams.pull_stats(s) for s in streams.ALL]"],
-        env=env,
-    )
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     loguru.logger.info(f"open-file limit {soft} -> {hard}")

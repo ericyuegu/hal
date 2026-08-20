@@ -143,15 +143,26 @@ ALL: Final[tuple[StreamSource, ...]] = (
     *PROFESSIONAL_POLICY_WORLD_V7.values(),
 )
 BY_NAME: Final[dict[str, StreamSource]] = {s.name: s for s in ALL}
-# Reverse map: local cache root (string) -> remote URI. Lets the dataloader turn
-# a plain `data_root` into its R2 origin, while purely-local paths (dev MDS,
-# overfit scratch) that aren't registered here resolve to None and stay local.
-_REMOTE_BY_LOCAL: Final[dict[str, str]] = {str(s.local_root): s.remote for s in ALL}
+# Reverse map from a cache root to its registered source. This lets training
+# resolve a plain data_root while leaving local dev and scratch paths alone.
+_SOURCE_BY_LOCAL: Final[dict[Path, StreamSource]] = {s.local: s for s in ALL}
+
+
+def _source_for_local(local: str | Path) -> StreamSource | None:
+    """Registered stream whose cache root is ``local``, if any."""
+    path = Path(local)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(REPO_DIR)
+        except ValueError:
+            return None
+    return _SOURCE_BY_LOCAL.get(path)
 
 
 def remote_for_local(local: str | Path) -> str | None:
     """R2 remote URI backing a local cache root, or None if it's local-only."""
-    return _REMOTE_BY_LOCAL.get(str(Path(local) if Path(local).is_absolute() else Path(REPO_DIR) / local))
+    src = _source_for_local(local)
+    return src.remote if src is not None else None
 
 
 def _split_uri(remote: str) -> tuple[str, str]:
@@ -167,8 +178,8 @@ def pull_stats(src: StreamSource) -> Path:
 
     StreamingDataset pulls per-split shards on demand, but ``stats.json`` sits at
     the MDS *root* (outside any split), so the streaming layer never fetches it.
-    Training needs it before the first batch — hence this explicit, idempotent
-    pull, called from the cloud setup script. Shards still stream lazily.
+    Training needs it before the first batch. ``ensure_stats`` performs this
+    pull lazily for the selected data root. Shards still stream lazily.
     """
     bucket, key = _split_uri(src.remote)
     dest = src.local_root / "stats.json"
@@ -176,3 +187,12 @@ def pull_stats(src: StreamSource) -> Path:
     r2.client().download_file(bucket, f"{key}/stats.json", str(dest))
     logger.info(f"[streams] {src.name}: stats.json -> {dest}")
     return dest
+
+
+def ensure_stats(path: str | Path) -> Path:
+    """Fetch a missing stats file when its parent is a registered stream root."""
+    stats_path = Path(path)
+    if stats_path.is_file() or stats_path.name != "stats.json":
+        return stats_path
+    src = _source_for_local(stats_path.parent)
+    return pull_stats(src) if src is not None else stats_path

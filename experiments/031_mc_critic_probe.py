@@ -37,6 +37,7 @@ import torch.nn.functional as F
 from streaming import StreamingDataset
 from torch import Tensor
 
+from hal import streams
 from hal.data.policy_schema import decode_policy_replay
 from hal.data.schema import check_schema_version
 from hal.training import returns as returns_lib
@@ -800,7 +801,7 @@ def build_feature_artifact(args: argparse.Namespace) -> dict:
     policy.eval()
     trunk = Frozen026Trunk(policy).to(device)
     data_root = args.data_root or policy_cfg.data_root
-    stats_path = Path(data_root) / "stats.json"
+    stats_path = streams.ensure_stats(Path(data_root) / "stats.json")
     if not stats_path.is_file():
         raise FileNotFoundError(
             f"{stats_path} is required to reproduce 026 preprocessing; mount/materialize the policy MDS first"
