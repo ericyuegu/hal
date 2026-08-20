@@ -1,0 +1,2538 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HAL Offline Policy Scale Decision</title>
+  <meta name="description" content="A simple, source-based report about HAL offline policy architecture, evidence, scale, and PPO transfer.">
+  <style>
+    :root {
+      --ink: #13201d;
+      --muted: #5d6b66;
+      --paper: #f5f1e7;
+      --card: #fffdf8;
+      --line: #d9d2c3;
+      --teal: #087f73;
+      --teal2: #45a99c;
+      --blue: #3267a8;
+      --orange: #d66f2f;
+      --red: #b84235;
+      --purple: #7755a6;
+      --gold: #b48418;
+      --green: #28794d;
+      --shadow: 0 12px 35px rgba(28, 38, 34, .09);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --serif: Iowan Old Style, Charter, "Bitstream Charter", Georgia, serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 2%, rgba(8,127,115,.08), transparent 24rem),
+        radial-gradient(circle at 95% 8%, rgba(214,111,47,.07), transparent 28rem),
+        var(--paper);
+      font: 15px/1.55 var(--sans);
+    }
+    a { color: #0a6c64; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+    a:hover { color: #074d48; }
+    code, .mono { font-family: var(--mono); font-size: .91em; }
+    code { background: #eee9de; border: 1px solid #ddd5c6; border-radius: 4px; padding: .08rem .28rem; }
+    sup { line-height: 0; }
+    .masthead {
+      min-height: 42vh;
+      display: grid;
+      align-items: end;
+      padding: 4rem max(5vw, 2rem) 3.5rem;
+      color: #f7f4eb;
+      background:
+        linear-gradient(120deg, rgba(6,44,42,.98), rgba(10,78,71,.94) 58%, rgba(24,59,73,.96)),
+        repeating-linear-gradient(90deg, transparent 0 48px, rgba(255,255,255,.04) 49px 50px);
+      position: relative;
+      overflow: hidden;
+    }
+    .masthead:after {
+      content: "";
+      position: absolute;
+      width: 42rem; height: 42rem;
+      right: -12rem; top: -18rem;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 50%;
+      box-shadow: 0 0 0 5rem rgba(255,255,255,.025), 0 0 0 10rem rgba(255,255,255,.018);
+    }
+    .kicker { color: #9adbd1; letter-spacing: .13em; text-transform: uppercase; font-weight: 760; font-size: .75rem; }
+    h1 {
+      max-width: 1100px;
+      font: 700 clamp(2.8rem, 6vw, 5.5rem)/.96 var(--serif);
+      letter-spacing: -.055em;
+      margin: 1rem 0 1.3rem;
+    }
+    .deck { max-width: 870px; font-size: clamp(1.05rem, 2vw, 1.35rem); color: #d9e9e5; }
+    .meta { margin-top: 2.3rem; color: #a9c9c4; font: .81rem var(--mono); }
+    .layout { display: grid; grid-template-columns: 210px minmax(0, 1120px); gap: 2.5rem; max-width: 1410px; margin: 0 auto; padding: 2.5rem 2rem 6rem; }
+    nav { position: sticky; top: 1.2rem; align-self: start; max-height: calc(100vh - 2.4rem); overflow: auto; padding: 1rem 0; font-size: .81rem; }
+    nav a { display: block; padding: .32rem .5rem; color: #53625d; text-decoration: none; border-left: 2px solid transparent; }
+    nav a:hover { color: var(--teal); border-left-color: var(--teal2); }
+    nav .nav-title { font-weight: 800; text-transform: uppercase; letter-spacing: .11em; margin: 0 0 .6rem .5rem; color: var(--ink); font-size: .72rem; }
+    main { min-width: 0; }
+    section { scroll-margin-top: 1.5rem; margin: 0 0 3.6rem; }
+    h2 { font: 700 clamp(1.9rem,3.5vw,2.9rem)/1.06 var(--serif); letter-spacing: -.035em; margin: 0 0 1.1rem; }
+    h3 { font: 700 1.35rem/1.2 var(--serif); margin: 1.8rem 0 .7rem; }
+    h4 { font-size: .98rem; margin: 1.6rem 0 .5rem; text-transform: uppercase; letter-spacing: .06em; }
+    p { max-width: 78ch; }
+    .lead { font: 1.24rem/1.58 var(--serif); max-width: 77ch; color: #263632; }
+    .eyebrow { color: var(--teal); text-transform: uppercase; letter-spacing: .12em; font-size: .72rem; font-weight: 800; }
+    .rule { height: 1px; background: var(--line); margin: 2rem 0; }
+    .hero-answer {
+      display: grid;
+      grid-template-columns: 1.7fr 1fr;
+      gap: 1.2rem;
+      background: #092f2d;
+      color: #f7f5ed;
+      padding: clamp(1.5rem,4vw,3rem);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      margin: -4.5rem 0 2rem;
+      position: relative;
+      z-index: 2;
+    }
+    .hero-answer h2 { color: white; font-size: clamp(1.8rem,3.4vw,2.9rem); }
+    .hero-answer p { color: #cfdfdb; }
+    .decision {
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.15);
+      border-radius: 12px;
+      padding: 1.1rem;
+    }
+    .decision .big { font: 700 2.2rem/1 var(--serif); color: #9ee1d7; }
+    .grid2, .grid3, .grid4 { display: grid; gap: 1rem; }
+    .grid2 { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .grid3 { grid-template-columns: repeat(3,minmax(0,1fr)); }
+    .grid4 { grid-template-columns: repeat(4,minmax(0,1fr)); }
+    .card, figure {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      box-shadow: 0 4px 18px rgba(28,38,34,.045);
+    }
+    .card { padding: 1.25rem 1.35rem; }
+    .card h3, .card h4 { margin-top: .15rem; }
+    figure { margin: 1.3rem 0; padding: 1rem; overflow: hidden; }
+    figcaption { color: var(--muted); font-size: .85rem; margin: .65rem .3rem .1rem; }
+    .figure-title { font-weight: 800; color: var(--ink); margin: .2rem .3rem .55rem; }
+    .svg-wrap { overflow-x: auto; padding-bottom: .25rem; }
+    svg { width: 100%; height: auto; display: block; }
+    svg text { font-family: var(--sans); fill: var(--ink); }
+    svg .small { font-size: 12px; fill: var(--muted); }
+    svg .tiny { font-size: 10px; fill: var(--muted); }
+    svg .label { font-size: 13px; font-weight: 750; }
+    svg .title { font: 700 18px var(--serif); }
+    svg .box { fill: #fffdf8; stroke: #bfb7a8; stroke-width: 1.2; rx: 7; }
+    svg .state { fill: #e3f3ef; stroke: #4d9c91; }
+    svg .action { fill: #fff0dc; stroke: #d4874c; }
+    svg .trunk { fill: #dfeafa; stroke: #587eb2; }
+    svg .decoder { fill: #ece5f6; stroke: #876ca8; }
+    svg .loss { fill: #f8e0dc; stroke: #bd594d; }
+    svg .aux { fill: #f5edcc; stroke: #b39235; }
+    svg .exec { fill: #ddf0dd; stroke: #4c8a58; }
+    svg .ghost { fill: #f6f4ee; stroke: #c9c4ba; stroke-dasharray: 4 4; }
+    svg .arrow { stroke: #53645f; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    svg .grad { stroke: #bc493e; stroke-width: 1.8; fill: none; marker-end: url(#arrowRed); }
+    svg .sample { stroke: #73539a; stroke-width: 1.6; fill: none; stroke-dasharray: 5 3; marker-end: url(#arrowPurple); }
+    .confidence {
+      display: inline-flex; align-items: center; gap: .35rem;
+      border: 1px solid; border-radius: 999px;
+      padding: .16rem .52rem; font-size: .68rem; font-weight: 850; letter-spacing: .045em; text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .strong { color: #17643d; background: #e1f3e7; border-color: #8dc6a1; }
+    .moderate { color: #77520b; background: #fbefcc; border-color: #dfbd62; }
+    .weak { color: #9c4c19; background: #fde7d7; border-color: #e4a074; }
+    .hypothesis { color: #68418b; background: #eee3f7; border-color: #b99ad0; }
+    .finding { border-left: 4px solid var(--teal); padding: .2rem 0 .2rem 1rem; margin: 1rem 0; }
+    .finding p { margin: .35rem 0; }
+    .warning { border-left-color: var(--orange); }
+    .danger { border-left-color: var(--red); }
+    .metric { padding: 1rem; border-top: 4px solid var(--teal); background: var(--card); border-radius: 8px; }
+    .metric .value { font: 700 1.8rem/1.1 var(--serif); }
+    .metric .name { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .06em; margin-top: .25rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th { position: sticky; top: 0; background: #eee9de; z-index: 1; text-align: left; color: #34413d; }
+    th, td { border-bottom: 1px solid #ded8ca; padding: .48rem .55rem; vertical-align: top; }
+    tbody tr:hover { background: #f7f2e7; }
+    .table-wrap { overflow: auto; max-height: 680px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+    .nowrap { white-space: nowrap; }
+    .pos { color: #147044; font-weight: 750; }
+    .neg { color: #aa3e35; font-weight: 750; }
+    .na { color: #99958b; }
+    .protocol { font-size: .69rem; border: 1px solid var(--line); border-radius: 4px; padding: .08rem .3rem; white-space: nowrap; }
+    .formula { background: #0e2926; color: #e4f0ed; padding: 1.15rem 1.3rem; border-radius: 10px; font: .92rem/1.65 var(--mono); overflow-x: auto; }
+    .timeline { border-left: 2px solid #b9b2a4; margin-left: .6rem; padding-left: 1.4rem; }
+    .timeline .event { position: relative; margin: 0 0 1.5rem; }
+    .timeline .event:before { content:""; width: .65rem; height: .65rem; background: var(--teal); border: 3px solid var(--paper); border-radius: 50%; position: absolute; left: -1.82rem; top: .35rem; }
+    .timeline .date { color: var(--teal); font: .74rem var(--mono); }
+    .checklist { padding: 0; list-style: none; }
+    .checklist li { padding-left: 1.5rem; position: relative; margin: .55rem 0; }
+    .checklist li:before { content: "✓"; position: absolute; left: 0; color: var(--teal); font-weight: 900; }
+    .rank { display: grid; grid-template-columns: 2.2rem 1fr auto; gap: .7rem; align-items: start; padding: .9rem 0; border-bottom: 1px solid var(--line); }
+    .rank .n { width: 2rem; height: 2rem; display: grid; place-items:center; color:white; background:var(--teal); border-radius:50%; font-weight:850; }
+    .recipe td:first-child { font-weight: 750; width: 25%; }
+    .note { color: var(--muted); font-size: .86rem; }
+    .callout { padding: 1.25rem 1.4rem; border-radius: 11px; background:#e5f2ef; border:1px solid #b6d8d1; }
+    .callout.orange { background:#fbecdf; border-color:#e5b792; }
+    .plot-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+    .plot svg { min-height: 310px; }
+    .legend { display:flex; flex-wrap:wrap; gap:.8rem; font-size:.75rem; color:var(--muted); margin:.5rem .4rem; }
+    .legend i { width:.7rem; height:.7rem; border-radius:50%; display:inline-block; margin-right:.25rem; }
+    details { border:1px solid var(--line); background:var(--card); border-radius:9px; padding:.75rem 1rem; margin:.7rem 0; }
+    summary { cursor:pointer; font-weight:750; }
+    .footnotes { color: var(--muted); font-size:.8rem; }
+    .tag { font: .7rem var(--mono); color:#45645e; padding:.18rem .38rem; background:#e3eeea; border-radius:4px; }
+    .pillrow { display:flex; flex-wrap:wrap; gap:.4rem; }
+    .compact td, .compact th { padding:.4rem .48rem; }
+    .promptbox {
+      white-space: pre-wrap;
+      font: .82rem/1.5 var(--mono);
+      background:#102c29;
+      color:#e6f0ed;
+      border-radius:10px;
+      padding:1.2rem;
+      max-height:760px;
+      overflow:auto;
+    }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; padding:2rem 1rem 5rem; }
+      nav { display:none; }
+      .hero-answer, .grid2, .grid3, .grid4, .plot-grid { grid-template-columns:1fr; }
+      .hero-answer { margin-top:-3.5rem; }
+    }
+    @media print {
+      body { background:white; font-size:10pt; }
+      .masthead { min-height:0; padding:2rem; print-color-adjust:exact; }
+      .layout { display:block; padding:1rem; }
+      nav { display:none; }
+      section { break-inside:auto; margin-bottom:2rem; }
+      figure, .card, .callout { break-inside:avoid; box-shadow:none; }
+      .table-wrap { max-height:none; overflow:visible; }
+      th { position:static; }
+      a { color:inherit; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div>
+      <div class="kicker">HAL RESEARCH REPORT · 18 AUGUST 2026</div>
+      <h1>Offline policy<br>scale decision</h1>
+      <div class="deck">This report selects a model and a training recipe for the next offline run. It uses source code, local evaluations, and W&amp;B records.</div>
+      <div class="meta">Practical ASD-STE100 style · technical terms are defined · detailed run data is embedded</div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav aria-label="Report contents">
+      <div class="nav-title">Contents</div>
+      <a href="#decision">01 · Decision</a>
+      <a href="#evidence">02 · Evidence rules</a>
+      <a href="#families">03 · Model families</a>
+      <a href="#model026">04 · How 026 works</a>
+      <a href="#results">05 · Results</a>
+      <a href="#findings">06 · Findings</a>
+      <a href="#scale">07 · Scale and latency</a>
+      <a href="#recipe">08 · Training recipe</a>
+      <a href="#tests">09 · Pre-scale tests</a>
+      <a href="#prompt">10 · Experiment A prompt</a>
+      <a href="#ppo">11 · PPO transfer</a>
+      <a href="#appendix">Appendix</a>
+    </nav>
+
+    <main>
+      <section id="decision">
+        <div class="hero-answer">
+          <div>
+            <div class="eyebrow" style="color:#9ee1d7">Decision</div>
+            <h2>Use the 026 family. Run one small test first.</h2>
+            <p>026 is the best offline policy in the current evidence set. Use its causal trunk, semantic action embeddings, temporal decoder, and group decoder.</p>
+            <p>Do not treat 026 as a clean ablation. The change from 024 to 026 changed many variables. Experiment A must separate trunk width from decoder structure.</p>
+          </div>
+          <div class="decision">
+            <div class="big">026+</div>
+            <p><strong>Model:</strong> about 145M parameters.</p>
+            <p><strong>Context:</strong> 128 game frames.</p>
+            <p><strong>Output:</strong> four action frames.</p>
+            <p><strong>Base loss:</strong> behavior cloning.</p>
+            <p><strong>Do not add:</strong> Q learning or the world-state expert.</p>
+          </div>
+        </div>
+
+        <div class="grid4">
+          <div class="metric"><div class="value">+0.159</div><div class="name">026 net stocks/min</div></div>
+          <div class="metric"><div class="value">+37.53</div><div class="name">026 net damage/min</div></div>
+          <div class="metric"><div class="value">+0.058</div><div class="name">026 cluster stock LCB</div></div>
+          <div class="metric"><div class="value">13.51 ms</div><div class="name">026 p50 replan latency</div></div>
+        </div>
+
+        <div class="finding">
+          <span class="confidence strong">Strong evidence</span>
+          <p><strong>026 is the best scale candidate.</strong> It has the best stock result under the 026 evaluation protocol. It also has practical four-frame execution.</p>
+        </div>
+        <div class="finding warning">
+          <span class="confidence moderate">Moderate evidence</span>
+          <p><strong>Structured action decoding helps.</strong> Experiments 013, 019, 024, and 026 support this result. The comparisons are not fully controlled.</p>
+        </div>
+        <div class="finding danger">
+          <span class="confidence strong">Strong evidence</span>
+          <p><strong>Do not scale the tested Q methods.</strong> Experiments 027 and 030 fail in closed-loop control.</p>
+        </div>
+        <div class="callout orange">
+          <strong>Compute note.</strong> A 10× larger model with 10× more tokens needs about 100× more dense compute. The estimate is 9.3 EFLOP. A strict 10×-compute option appears in section 8.
+        </div>
+      </section>
+
+      <section id="evidence">
+        <div class="eyebrow">Evidence rules</div>
+        <h2>Use closed-loop control as the main test</h2>
+        <p class="lead">The report follows the code path. It does not use experiment names as proof. Local evaluation files replace stale W&amp;B summaries.</p>
+
+        <div class="grid3">
+          <div class="card">
+            <h3>Source</h3>
+            <p>Use <a href="../hal/training/features.py">features.py</a>, <a href="../hal/training/trunk.py">trunk.py</a>, experiment files, local run files, and W&amp;B.</p>
+          </div>
+          <div class="card">
+            <h3>Main protocol</h3>
+            <p>Use 96 character boots against a level-9 CPU. Each match has 7,200 frames. Each restart uses a random legal stage.</p>
+          </div>
+          <div class="card">
+            <h3>Main metric</h3>
+            <p>Use net stocks per minute and its boot-clustered confidence interval. Use net damage as the second metric.</p>
+          </div>
+        </div>
+
+        <h3>Confidence labels</h3>
+        <table class="compact">
+          <thead><tr><th>Label</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><span class="confidence strong">Strong</span></td><td>A controlled comparison supports the result. The closed-loop sample is useful.</td></tr>
+            <tr><td><span class="confidence moderate">Moderate</span></td><td>The result is consistent. One or more confounds remain.</td></tr>
+            <tr><td><span class="confidence weak">Weak</span></td><td>The result is small, noisy, or incomplete.</td></tr>
+            <tr><td><span class="confidence hypothesis">Hypothesis</span></td><td>The explanation is plausible. No direct test supports it.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Metric rules</h3>
+        <table class="compact">
+          <thead><tr><th>Metric</th><th>Use</th><th>Limit</th></tr></thead>
+          <tbody>
+            <tr><td>Net stocks/min</td><td>Primary policy result.</td><td>Compare only equal protocols.</td></tr>
+            <tr><td>Net damage/min</td><td>Early control signal.</td><td>Aggressive play can raise damage and still lose stocks.</td></tr>
+            <tr><td>Validation NLL</td><td>Training diagnostic.</td><td>Do not compare different codecs, losses, or offset sets.</td></tr>
+            <tr><td>Action reconstruction</td><td>Find group and transition errors.</td><td>Hold frames dominate the data.</td></tr>
+            <tr><td>Subjective control</td><td>Useful review signal.</td><td>The run set has no consistent blinded score.</td></tr>
+          </tbody>
+        </table>
+        <p class="note">This report uses ASD-STE100 principles. It is not a certified ASD-STE100 document. Project terms such as trunk, decoder, and MTP are approved technical terms in this report.</p>
+      </section>
+
+      <section id="families">
+        <div class="eyebrow">Model families</div>
+        <h2>The experiments form eight main families</h2>
+        <p class="lead">A family changes the data path. A loss change or a small parameter change stays inside the same family.</p>
+
+        <figure>
+          <div class="figure-title">Figure 1 · The 026 frame token</div>
+          <div class="svg-wrap">
+            <svg viewBox="0 0 1120 300" role="img" aria-label="The 026 input frame token">
+              <rect x="20" y="55" width="190" height="92" class="state"/>
+              <text x="115" y="79" text-anchor="middle" class="label">Player records ×4</text>
+              <text x="115" y="101" text-anchor="middle" class="small">ego · ego Nana</text>
+              <text x="115" y="120" text-anchor="middle" class="small">opponent Nana · opponent</text>
+              <text x="115" y="139" text-anchor="middle" class="small">4 × 67 = 268</text>
+
+              <rect x="230" y="55" width="190" height="92" class="action"/>
+              <text x="325" y="79" text-anchor="middle" class="label">Previous controller</text>
+              <text x="325" y="101" text-anchor="middle" class="small">buttons · main · C · triggers</text>
+              <text x="325" y="120" text-anchor="middle" class="small">semantic + class embedding</text>
+              <text x="325" y="139" text-anchor="middle" class="small">4 × 16 = 64</text>
+
+              <rect x="440" y="55" width="150" height="92" class="aux"/>
+              <text x="515" y="80" text-anchor="middle" class="label">Characters</text>
+              <text x="515" y="103" text-anchor="middle" class="small">ego + opponent</text>
+              <text x="515" y="126" text-anchor="middle" class="small">2 × 8 = 16</text>
+
+              <rect x="610" y="55" width="110" height="92" class="aux"/>
+              <text x="665" y="82" text-anchor="middle" class="label">Stage</text>
+              <text x="665" y="109" text-anchor="middle" class="small">4 values</text>
+
+              <text x="747" y="108" font-size="28">→</text>
+              <rect x="785" y="55" width="145" height="92" class="trunk"/>
+              <text x="858" y="82" text-anchor="middle" class="label">352 values</text>
+              <text x="858" y="108" text-anchor="middle" class="small">one frame token</text>
+              <text x="858" y="130" text-anchor="middle" class="small">Linear(352, 384)</text>
+
+              <text x="950" y="108" font-size="28">→</text>
+              <rect x="990" y="55" width="110" height="92" class="trunk"/>
+              <text x="1045" y="84" text-anchor="middle" class="label">Causal</text>
+              <text x="1045" y="106" text-anchor="middle" class="small">trunk</text>
+              <text x="1045" y="128" text-anchor="middle" class="small">128 frames</text>
+
+              <text x="20" y="205" class="label">Each player record</text>
+              <text x="20" y="229" class="small">Continuous: x, y, percent, shield, direction, hitlag, and six missing-value masks.</text>
+              <text x="20" y="251" class="small">Categorical: action state, stock, jumps, hurtbox state, and airborne state.</text>
+              <text x="20" y="273" class="small">Character, stage, role, and controller class information enters through learned embeddings.</text>
+            </svg>
+          </div>
+          <figcaption>The model receives one explicit feature token for each game frame. It does not receive a generic image token.</figcaption>
+        </figure>
+
+        <h3>Family map</h3>
+        <table class="compact">
+          <thead><tr><th>Family</th><th>Experiments</th><th>Actual data path</th><th>Live decode</th></tr></thead>
+          <tbody>
+            <tr><td>Flow action chunk</td><td>001–004</td><td>State history plus a noised 16-frame action chunk enters one non-causal Transformer.</td><td>Eight Euler steps. Experiment 001 executes 16 frames. Experiment 002 executes 4.</td></tr>
+            <tr><td>Frame GPT</td><td>005, 009–012</td><td>One state-and-action token enters the causal trunk for each frame.</td><td>Independent group logits, or one small group chain.</td></tr>
+            <tr><td>Full action autoregression</td><td>006, 007, 010, historical 013, 017, 019</td><td>Actions factor across time, controller groups, or both.</td><td>From 4 small group steps to 64 sequential steps.</td></tr>
+            <tr><td>Independent MTP</td><td>012, current 013, 015, 016, 021–023</td><td>One trunk state feeds separate future-offset heads.</td><td>Usually execute one frame. Extra heads mainly add training loss.</td></tr>
+            <tr><td>Interleaved tokens</td><td>historical 013</td><td>Each frame uses five full-trunk tokens: state, C-stick, triggers, buttons, and main stick.</td><td>Four full trunk calls for one action.</td></tr>
+            <tr><td>Compressed action tokens</td><td>008, 018</td><td>An event or BPE token represents an action span.</td><td>Expand a span, or expand one frame and replan.</td></tr>
+            <tr><td>Temporal MTP</td><td>024, 026, 028, 029</td><td>A causal trunk feeds a small future-action chain. Later future steps receive an earlier action.</td><td>026 samples four frames and executes four.</td></tr>
+            <tr><td>Offline RL and auxiliary models</td><td>020, 022, 025, 027, 029–033</td><td>A value, Q, flow, state, token, or latent-mode branch extends a policy family.</td><td>Most branches do not change the base serving path.</td></tr>
+          </tbody>
+        </table>
+
+        <figure>
+          <div class="figure-title">Figure 2 · Architecture genealogy</div>
+          <div class="svg-wrap">
+            <svg viewBox="0 0 1120 520" role="img" aria-label="Architecture genealogy">
+              <path d="M125 78 H255 M365 78 H470 M580 78 H690 M800 78 H935" stroke="#82908b" fill="none" stroke-width="2"/>
+              <path d="M310 112 V185 H470 M525 112 V310 H690 M745 112 V185 H935" stroke="#82908b" fill="none" stroke-width="2"/>
+              <path d="M525 238 V395 H690 M745 238 V395 H935" stroke="#82908b" fill="none" stroke-width="2"/>
+              <path d="M800 415 H935" stroke="#82908b" fill="none" stroke-width="2"/>
+
+              <rect x="20" y="42" width="105" height="70" class="decoder"/>
+              <text x="72" y="69" text-anchor="middle" class="label">001–004</text>
+              <text x="72" y="91" text-anchor="middle" class="small">flow chunk</text>
+
+              <rect x="255" y="42" width="110" height="70" class="action"/>
+              <text x="310" y="69" text-anchor="middle" class="label">005</text>
+              <text x="310" y="91" text-anchor="middle" class="small">classifiers</text>
+
+              <rect x="470" y="42" width="110" height="70" class="trunk"/>
+              <text x="525" y="69" text-anchor="middle" class="label">009–011</text>
+              <text x="525" y="91" text-anchor="middle" class="small">frame GPT</text>
+
+              <rect x="690" y="42" width="110" height="70" class="trunk"/>
+              <text x="745" y="69" text-anchor="middle" class="label">012</text>
+              <text x="745" y="91" text-anchor="middle" class="small">independent MTP</text>
+
+              <rect x="935" y="42" width="150" height="70" class="exec"/>
+              <text x="1010" y="69" text-anchor="middle" class="label">024 → 026</text>
+              <text x="1010" y="91" text-anchor="middle" class="small">temporal MTP</text>
+
+              <rect x="255" y="185" width="110" height="70" class="action"/>
+              <text x="310" y="212" text-anchor="middle" class="label">006–007</text>
+              <text x="310" y="234" text-anchor="middle" class="small">chunk AR</text>
+
+              <rect x="470" y="185" width="110" height="70" class="action"/>
+              <text x="525" y="212" text-anchor="middle" class="label">010 · 019</text>
+              <text x="525" y="234" text-anchor="middle" class="small">group AR</text>
+
+              <rect x="690" y="185" width="110" height="70" class="decoder"/>
+              <text x="745" y="212" text-anchor="middle" class="label">hist. 013</text>
+              <text x="745" y="234" text-anchor="middle" class="small">interleaved</text>
+
+              <rect x="935" y="185" width="150" height="70" class="aux"/>
+              <text x="1010" y="212" text-anchor="middle" class="label">028 · 029</text>
+              <text x="1010" y="234" text-anchor="middle" class="small">codec · state aux</text>
+
+              <rect x="470" y="310" width="110" height="70" class="action"/>
+              <text x="525" y="337" text-anchor="middle" class="label">008 · 018</text>
+              <text x="525" y="359" text-anchor="middle" class="small">RLE / BPE</text>
+
+              <rect x="690" y="310" width="110" height="70" class="aux"/>
+              <text x="745" y="337" text-anchor="middle" class="label">016 · 021</text>
+              <text x="745" y="359" text-anchor="middle" class="small">more features</text>
+
+              <rect x="690" y="395" width="110" height="70" class="aux"/>
+              <text x="745" y="422" text-anchor="middle" class="label">020 · 022</text>
+              <text x="745" y="444" text-anchor="middle" class="small">MC-AWR</text>
+
+              <rect x="935" y="395" width="150" height="70" class="loss"/>
+              <text x="1010" y="422" text-anchor="middle" class="label">027 · 030</text>
+              <text x="1010" y="444" text-anchor="middle" class="small">IQL / Q</text>
+
+              <text x="20" y="500" class="small">Other 026 branches: 025 action flow, 032 action tokens, and 033 latent trajectories. Experiment 014 is not present in the current tree.</text>
+            </svg>
+          </div>
+          <figcaption>The arrows show material changes in computation. They do not show every run or every tuning change.</figcaption>
+        </figure>
+
+        <figure>
+          <div class="figure-title">Figure 3 · The main computation paths</div>
+          <div class="svg-wrap">
+            <svg viewBox="0 0 1120 535" role="img" aria-label="Main architecture paths">
+              <text x="20" y="32" class="label">Flow, 001–004</text>
+              <rect x="165" y="12" width="220" height="42" class="state"/><text x="275" y="38" text-anchor="middle" class="small">state history</text>
+              <text x="398" y="40" font-size="22">+</text>
+              <rect x="425" y="12" width="220" height="42" class="decoder"/><text x="535" y="38" text-anchor="middle" class="small">noised action chunk</text>
+              <text x="660" y="40" font-size="22">→</text>
+              <rect x="695" y="12" width="220" height="42" class="trunk"/><text x="805" y="38" text-anchor="middle" class="small">non-causal Transformer</text>
+              <text x="930" y="40" font-size="22">→</text>
+              <rect x="965" y="12" width="135" height="42" class="action"/><text x="1032" y="38" text-anchor="middle" class="small">Euler update ×8</text>
+
+              <text x="20" y="113" class="label">Frame GPT, 009</text>
+              <rect x="165" y="91" width="300" height="42" class="state"/><text x="315" y="117" text-anchor="middle" class="small">[frame + previous action] × context</text>
+              <text x="480" y="119" font-size="22">→</text>
+              <rect x="515" y="91" width="220" height="42" class="trunk"/><text x="625" y="117" text-anchor="middle" class="small">causal frame trunk</text>
+              <text x="750" y="119" font-size="22">→</text>
+              <rect x="785" y="91" width="315" height="42" class="action"/><text x="942" y="117" text-anchor="middle" class="small">buttons ∥ main ∥ C ∥ triggers</text>
+
+              <text x="20" y="194" class="label">Interleaved 013</text>
+              <rect x="165" y="172" width="440" height="42" class="decoder"/><text x="385" y="198" text-anchor="middle" class="small">[state][C][triggers][buttons][main] × frame</text>
+              <text x="620" y="200" font-size="22">→</text>
+              <rect x="655" y="172" width="245" height="42" class="trunk"/><text x="777" y="198" text-anchor="middle" class="small">full causal trunk</text>
+              <text x="915" y="200" font-size="22">→</text>
+              <rect x="950" y="172" width="150" height="42" class="action"/><text x="1025" y="198" text-anchor="middle" class="small">4 trunk calls</text>
+
+              <text x="20" y="275" class="label">Independent MTP</text>
+              <rect x="165" y="253" width="260" height="42" class="trunk"/><text x="295" y="279" text-anchor="middle" class="small">causal trunk state h<tspan baseline-shift="sub">t</tspan></text>
+              <text x="440" y="281" font-size="22">→</text>
+              <rect x="475" y="237" width="200" height="30" class="action"/><text x="575" y="258" text-anchor="middle" class="tiny">head +1</text>
+              <rect x="475" y="274" width="200" height="30" class="action"/><text x="575" y="295" text-anchor="middle" class="tiny">head +5</text>
+              <rect x="475" y="311" width="200" height="30" class="action"/><text x="575" y="332" text-anchor="middle" class="tiny">head +9 …</text>
+              <text x="705" y="281" class="small">No future-action feedback.</text>
+
+              <text x="20" y="386" class="label">RLE / BPE, 018</text>
+              <rect x="165" y="364" width="260" height="42" class="state"/><text x="295" y="390" text-anchor="middle" class="small">state + action token history</text>
+              <text x="440" y="392" font-size="22">→</text>
+              <rect x="475" y="364" width="230" height="42" class="trunk"/><text x="590" y="390" text-anchor="middle" class="small">causal token model</text>
+              <text x="720" y="392" font-size="22">→</text>
+              <rect x="755" y="364" width="345" height="42" class="action"/><text x="927" y="390" text-anchor="middle" class="small">one variable-span action token</text>
+
+              <text x="20" y="467" class="label">026</text>
+              <rect x="165" y="445" width="215" height="42" class="trunk"/><text x="272" y="471" text-anchor="middle" class="small">causal trunk h<tspan baseline-shift="sub">t</tspan></text>
+              <text x="395" y="473" font-size="22">→</text>
+              <rect x="430" y="445" width="265" height="42" class="decoder"/><text x="562" y="471" text-anchor="middle" class="small">A<tspan baseline-shift="sub">t</tspan> → A<tspan baseline-shift="sub">t+1</tspan> → A<tspan baseline-shift="sub">t+2</tspan> → …</text>
+              <text x="710" y="473" font-size="22">→</text>
+              <rect x="745" y="445" width="355" height="42" class="action"/><text x="922" y="471" text-anchor="middle" class="small">C → main → triggers → buttons</text>
+              <text x="165" y="515" class="small">The 026 decoder uses action feedback across future frames and inside each controller frame.</text>
+            </svg>
+          </div>
+        </figure>
+      </section>
+
+      <section id="model026">
+        <div class="eyebrow">Model 026</div>
+        <h2>Training uses true actions. Inference uses sampled actions.</h2>
+        <p class="lead">This difference creates exposure bias. The decoder sees correct prefixes during training. It sees its own sampled prefixes during play.</p>
+
+        <figure>
+          <div class="figure-title">Figure 4 · Training path</div>
+          <div class="svg-wrap">
+            <svg viewBox="0 0 1120 410" role="img" aria-label="026 training path">
+              <rect x="25" y="55" width="210" height="78" class="state"/>
+              <text x="130" y="82" text-anchor="middle" class="label">Ground-truth history</text>
+              <text x="130" y="105" text-anchor="middle" class="small">state + prior controller</text>
+              <text x="130" y="124" text-anchor="middle" class="small">128 frames</text>
+
+              <text x="250" y="102" font-size="26">→</text>
+              <rect x="285" y="55" width="190" height="78" class="trunk"/>
+              <text x="380" y="82" text-anchor="middle" class="label">Causal trunk</text>
+              <text x="380" y="105" text-anchor="middle" class="small">d384 · L8 · h6</text>
+              <text x="380" y="124" text-anchor="middle" class="small">gradients enabled</text>
+
+              <text x="490" y="102" font-size="26">→</text>
+              <rect x="525" y="40" width="270" height="108" class="decoder"/>
+              <text x="660" y="68" text-anchor="middle" class="label">Temporal decoder</text>
+              <text x="660" y="91" text-anchor="middle" class="small">GT A<tspan baseline-shift="sub">t</tspan> for offset +1</text>
+              <text x="660" y="112" text-anchor="middle" class="small">GT prior target for later offsets</text>
+              <text x="660" y="133" text-anchor="middle" class="small">causal attention across offsets</text>
+
+              <text x="810" y="102" font-size="26">→</text>
+              <rect x="845" y="40" width="250" height="108" class="action"/>
+              <text x="970" y="68" text-anchor="middle" class="label">Group decoder</text>
+              <text x="970" y="91" text-anchor="middle" class="small">GT C → GT main</text>
+              <text x="970" y="112" text-anchor="middle" class="small">→ GT triggers → buttons</text>
+              <text x="970" y="133" text-anchor="middle" class="small">teacher forcing</text>
+
+              <rect x="210" y="228" width="700" height="72" class="loss"/>
+              <text x="560" y="254" text-anchor="middle" class="label">Categorical NLL</text>
+              <text x="560" y="277" text-anchor="middle" class="small">Primary: offsets 1–4 · Auxiliary: 5, 6, 9, 12, 16, 20</text>
+              <text x="560" y="296" text-anchor="middle" class="small">Loss updates the trunk, temporal decoder, codec, and group heads.</text>
+
+              <path d="M970 148 V190 H735 V228" stroke="#b84235" stroke-width="2" fill="none"/>
+              <path d="M380 133 V190 H385 V228" stroke="#b84235" stroke-width="2" fill="none"/>
+              <text x="925" y="188" class="tiny">gradient path</text>
+
+              <rect x="25" y="340" width="1070" height="45" class="ghost"/>
+              <text x="560" y="368" text-anchor="middle" class="small">No sampled future action enters the standard training loss. Rollout-conditioned metrics are diagnostics only.</text>
+            </svg>
+          </div>
+        </figure>
+
+        <figure>
+          <div class="figure-title">Figure 5 · Inference path</div>
+          <div class="svg-wrap">
+            <svg viewBox="0 0 1120 430" role="img" aria-label="026 inference path">
+              <rect x="25" y="48" width="205" height="72" class="state"/>
+              <text x="127" y="76" text-anchor="middle" class="label">Observed history</text>
+              <text x="127" y="99" text-anchor="middle" class="small">one live state stream</text>
+
+              <text x="245" y="93" font-size="26">→</text>
+              <rect x="280" y="48" width="180" height="72" class="trunk"/>
+              <text x="370" y="76" text-anchor="middle" class="label">One trunk call</text>
+              <text x="370" y="99" text-anchor="middle" class="small">take final h<tspan baseline-shift="sub">t</tspan></text>
+
+              <text x="475" y="93" font-size="26">→</text>
+              <rect x="510" y="36" width="260" height="96" class="decoder"/>
+              <text x="640" y="63" text-anchor="middle" class="label">Temporal step +1</text>
+              <text x="640" y="87" text-anchor="middle" class="small">sample C → main → triggers → buttons</text>
+              <text x="640" y="111" text-anchor="middle" class="small">temperature 1</text>
+
+              <path d="M770 84 H820 V177 H510" stroke="#7755a6" stroke-width="2" fill="none" stroke-dasharray="6 4"/>
+              <rect x="510" y="165" width="260" height="72" class="decoder"/>
+              <text x="640" y="193" text-anchor="middle" class="label">Temporal step +2</text>
+              <text x="640" y="216" text-anchor="middle" class="small">condition on sampled A<tspan baseline-shift="sub">t+1</tspan></text>
+
+              <path d="M770 201 H820 V282 H510" stroke="#7755a6" stroke-width="2" fill="none" stroke-dasharray="6 4"/>
+              <rect x="510" y="270" width="260" height="72" class="decoder"/>
+              <text x="640" y="298" text-anchor="middle" class="label">Steps +3 and +4</text>
+              <text x="640" y="321" text-anchor="middle" class="small">use cached temporal K/V</text>
+
+              <text x="790" y="314" font-size="26">→</text>
+              <rect x="835" y="270" width="260" height="72" class="exec"/>
+              <text x="965" y="298" text-anchor="middle" class="label">Execute four frames</text>
+              <text x="965" y="321" text-anchor="middle" class="small">then observe and replan</text>
+
+              <rect x="25" y="376" width="1070" height="38" class="ghost"/>
+              <text x="560" y="401" text-anchor="middle" class="small">One replan uses 4 temporal steps × 4 sequential group samples. It executes all four sampled frames.</text>
+            </svg>
+          </div>
+        </figure>
+
+        <h3>Do not mix these horizon terms</h3>
+        <div class="grid4">
+          <div class="card"><h4>Prediction horizon</h4><p>The largest target is 20 frames.</p></div>
+          <div class="card"><h4>MTP offsets</h4><p>The targets are 1, 2, 3, 4, 5, 6, 9, 12, 16, and 20.</p></div>
+          <div class="card"><h4>Decode horizon</h4><p>The live decoder normally samples four frames.</p></div>
+          <div class="card"><h4>Execution and replan</h4><p>The emulator uses four frames. The policy then observes a new state.</p></div>
+        </div>
+
+        <h3>026 specification</h3>
+        <table class="compact">
+          <tbody>
+            <tr><th>Trunk</th><td>d384, 8 layers, 6 heads, full causal attention, context 128.</td></tr>
+            <tr><th>Parameters</th><td>15.053M.</td></tr>
+            <tr><th>Action vocabularies</th><td>Buttons 256, main stick 65, C-stick 9, triggers 25.</td></tr>
+            <tr><th>Temporal decoder</th><td>d128, 2 layers, 4 heads, FF 256.</td></tr>
+            <tr><th>Group order</th><td>C-stick → main stick → triggers → buttons.</td></tr>
+            <tr><th>Serving</th><td>One trunk call. Four temporal steps. Sixteen sequential group samples. Execute four.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="results">
+        <div class="eyebrow">Production results</div>
+        <h2>026 has the strongest closed-loop result</h2>
+        <p class="lead">The main comparison uses the 026 protocol. Old evaluations with different rules stay separate.</p>
+
+        <figure>
+          <div class="figure-title">Figure 6 · Closed-loop production results</div>
+          <svg id="closed-loop-chart" viewBox="0 0 1120 560"></svg>
+          <div class="legend"><span><i style="background:#087f73"></i>net damage/min</span><span><i style="background:#d66f2f"></i>net stocks/min</span></div>
+          <figcaption>Stock bars use a visual factor for readability. Read the values at the right side of each row.</figcaption>
+        </figure>
+
+        <div class="grid3">
+          <div class="card">
+            <h3>026</h3>
+            <p><strong>+37.53</strong> damage/min.</p>
+            <p><strong>+0.159</strong> stocks/min.</p>
+            <p>Cluster stock LCB: <strong>+0.058</strong>.</p>
+          </div>
+          <div class="card">
+            <h3>Historical 013</h3>
+            <p><strong>+28.82</strong> damage/min.</p>
+            <p><strong>−0.101</strong> stocks/min.</p>
+            <p>102 matches. No boot crashed.</p>
+          </div>
+          <div class="card">
+            <h3>029</h3>
+            <p><strong>+24.93</strong> damage/min.</p>
+            <p><strong>+0.111</strong> stocks/min.</p>
+            <p>Paired H2H does not beat 026.</p>
+          </div>
+        </div>
+
+        <div class="callout">
+          <strong>013 re-evaluation.</strong> The checkpoint is step 14,336. Its SHA-256 starts with 38306286. The damage interval is +18.65 to +39.02. The stock interval is −0.272 to +0.070. The runtime is 54 minutes and 27 seconds.
+        </div>
+
+        <h3>Selected results</h3>
+        <table class="compact">
+          <thead><tr><th>Experiment</th><th>Model</th><th>Net damage/min</th><th>Net stocks/min</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>026</td><td>Temporal MTP</td><td class="pos">+37.53</td><td class="pos">+0.159</td><td>Best scale candidate.</td></tr>
+            <tr><td>013 historical</td><td>Interleaved tokens</td><td class="pos">+28.82</td><td class="neg">−0.101</td><td>Strong damage. High inference cost.</td></tr>
+            <tr><td>029</td><td>026 plus state expert</td><td class="pos">+24.93</td><td class="pos">+0.111</td><td>No paired gain over 026.</td></tr>
+            <tr><td>024</td><td>Dense temporal MTP</td><td class="pos">+21.55</td><td class="neg">−0.398</td><td>Useful precursor. Many confounds remain.</td></tr>
+            <tr><td>020 dense</td><td>MC-AWR</td><td class="pos">+31.06</td><td class="neg">−0.447</td><td>Promising H2H result. Not tested on 026.</td></tr>
+            <tr><td>027</td><td>Attached IQL</td><td class="neg">−58.32</td><td class="neg">−1.850</td><td>Policy collapse.</td></tr>
+            <tr><td>030 best</td><td>Separate IQL</td><td class="neg">−51.53</td><td class="neg">−1.551</td><td>Better critic correlation. Policy still fails.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>What predicts closed-loop quality?</h3>
+        <table class="compact">
+          <thead><tr><th>Signal</th><th>Finding</th><th>Confidence</th></tr></thead>
+          <tbody>
+            <tr><td>Net stocks</td><td>Use it for final selection.</td><td><span class="confidence strong">Strong</span></td></tr>
+            <tr><td>Net damage</td><td>Use it for early screening. Do not use it alone.</td><td><span class="confidence moderate">Moderate</span></td></tr>
+            <tr><td>Aggregate NLL</td><td>It does not rank different architectures. Experiments 024 and 028 show this problem.</td><td><span class="confidence strong">Strong</span></td></tr>
+            <tr><td>Transition NLL</td><td>It is more useful than hold accuracy. The data set is hold-heavy.</td><td><span class="confidence moderate">Moderate</span></td></tr>
+            <tr><td>Subjective coherence</td><td>No consistent blinded measurement is available.</td><td><span class="confidence weak">Weak</span></td></tr>
+          </tbody>
+        </table>
+
+        <details>
+          <summary>Open the full production run table</summary>
+          <p class="note">The table includes 34 run records. Each run ID links to W&amp;B.</p>
+          <div class="table-wrap">
+            <table id="run-table">
+              <thead>
+                <tr>
+                  <th>Exp</th><th>W&amp;B run</th><th>Family / variant</th><th>Params</th><th>Context</th><th>Shape</th>
+                  <th>Optimizer / LR</th><th>Batch</th><th>Steps</th><th>Positions</th><th>Compute</th><th>Wall</th>
+                  <th>Throughput</th><th>Validation</th><th>Net damage</th><th>Net stocks</th><th>Stock LCB</th>
+                  <th>p50 latency</th><th>Eval</th><th>Protocol</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <section id="findings">
+        <div class="eyebrow">Hypothesis audit</div>
+        <h2>Keep the supported parts. Remove the weak parts.</h2>
+
+        <table class="compact">
+          <thead><tr><th>Question</th><th>Finding</th><th>Confidence</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td>Is 026 the best family?</td><td>Yes, as a complete package. The 024-to-026 change is confounded.</td><td><span class="confidence strong">Strong</span></td><td>Use 026. Run experiment A first.</td></tr>
+            <tr><td>Does controller factorization help?</td><td>Structured models do better than joint or parallel models. No clean ablation proves the cause.</td><td><span class="confidence moderate">Moderate</span></td><td>Keep group autoregression.</td></tr>
+            <tr><td>Is the joint action head capacity-limited?</td><td>Experiment 023 adds head capacity and does not improve control.</td><td><span class="confidence weak">Weak</span></td><td>Do not solve the problem with a larger generic MLP.</td></tr>
+            <tr><td>Does independent MTP help?</td><td>It improves training supervision. Four-frame execution without a coherent chain can hurt.</td><td><span class="confidence moderate">Moderate</span></td><td>Use MTP with temporal conditioning.</td></tr>
+            <tr><td>Do long offsets help?</td><td>No fixed-execution ablation isolates offsets after +4.</td><td><span class="confidence weak">Weak</span></td><td>Keep them only until test D.</td></tr>
+            <tr><td>Is execution horizon 4 useful?</td><td>026 gives the best quality and latency point at horizon 4.</td><td><span class="confidence moderate">Moderate</span></td><td>Keep horizon 4.</td></tr>
+            <tr><td>Does RLE help?</td><td>The tested BPE form compresses actions. Whole-span execution fails. Frame replanning is neutral.</td><td><span class="confidence moderate">Moderate</span></td><td>Reject this RLE form only.</td></tr>
+            <tr><td>Does flow matching help?</td><td>The tested policies fail. Early models also have architecture and execution confounds.</td><td><span class="confidence moderate">Moderate</span></td><td>Remove flow matching from the scale path.</td></tr>
+            <tr><td>Do semantic controller embeddings help?</td><td>One-hot models get lower NLL and worse control.</td><td><span class="confidence moderate">Moderate</span></td><td>Keep semantic embeddings.</td></tr>
+            <tr><td>Does the world-state loss help?</td><td>029 costs more and does not beat 026.</td><td><span class="confidence moderate">Moderate</span></td><td>Do not add it to the main run.</td></tr>
+            <tr><td>Does MC-AWR help?</td><td>Dense MC-AWR has a favorable H2H result. It has no matched 026 test.</td><td><span class="confidence moderate">Moderate</span></td><td>Test it as a short continuation.</td></tr>
+            <tr><td>Does IQL or Q help?</td><td>027 has poor Q quality. 030 improves correlation but still destroys control.</td><td><span class="confidence strong">Strong</span></td><td>Do not use Q to weight the scale actor.</td></tr>
+            <tr><td>Does longer context help?</td><td>The 1,024-frame model lowers NLL but does not improve stocks.</td><td><span class="confidence strong">Strong</span></td><td>Keep context 128.</td></tr>
+            <tr><td>Do more state features help?</td><td>Experiments 016 and 021 do not improve closed-loop quality.</td><td><span class="confidence moderate">Moderate</span></td><td>Keep the base feature set.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>AWR and Q losses</h3>
+        <figure>
+          <div class="figure-title">Figure 7 · Loss paths</div>
+          <div class="svg-wrap">
+            <svg viewBox="0 0 1120 300" role="img" aria-label="AWR and Q loss paths">
+              <text x="20" y="35" class="label">MC-AWR, 020</text>
+              <rect x="160" y="12" width="175" height="48" class="state"/><text x="247" y="42" text-anchor="middle" class="small">episode return G<tspan baseline-shift="sub">t</tspan></text>
+              <text x="350" y="44" font-size="22">−</text>
+              <rect x="385" y="12" width="175" height="48" class="aux"/><text x="472" y="42" text-anchor="middle" class="small">value V(h<tspan baseline-shift="sub">t</tspan>)</text>
+              <text x="575" y="44" font-size="22">→</text>
+              <rect x="610" y="12" width="205" height="48" class="decoder"/><text x="712" y="42" text-anchor="middle" class="small">stop-gradient advantage</text>
+              <text x="830" y="44" font-size="22">→</text>
+              <rect x="865" y="12" width="235" height="48" class="loss"/><text x="982" y="42" text-anchor="middle" class="small">weighted imitation loss</text>
+
+              <text x="20" y="137" class="label">Attached IQL, 027</text>
+              <rect x="160" y="112" width="180" height="48" class="trunk"/><text x="250" y="142" text-anchor="middle" class="small">shared trunk h<tspan baseline-shift="sub">t</tspan></text>
+              <text x="355" y="144" font-size="22">→</text>
+              <rect x="390" y="100" width="190" height="40" class="aux"/><text x="485" y="126" text-anchor="middle" class="small">Q(h, action chunk)</text>
+              <rect x="390" y="151" width="190" height="40" class="aux"/><text x="485" y="177" text-anchor="middle" class="small">V(h)</text>
+              <text x="600" y="144" font-size="22">→</text>
+              <rect x="635" y="112" width="210" height="48" class="decoder"/><text x="740" y="142" text-anchor="middle" class="small">weight from Q−V</text>
+              <text x="860" y="144" font-size="22">→</text>
+              <rect x="895" y="112" width="205" height="48" class="loss"/><text x="997" y="142" text-anchor="middle" class="small">policy collapse</text>
+
+              <text x="20" y="242" class="small">MC returns use the recorded episode. IQL uses a bootstrapped target and action support estimates.</text>
+              <text x="20" y="267" class="small">The current evidence supports the MC-return advantage. It does not prove that all Q learning must fail.</text>
+            </svg>
+          </div>
+        </figure>
+
+        <h3>Important confounds</h3>
+        <ul>
+          <li>024 and 026 change width, context, codec, offsets, decoder, and training exposure.</li>
+          <li>013 changes token count and needs four full trunk calls per action.</li>
+          <li>028 trains on about twice the examples of 026.</li>
+          <li>029 changes loss, model size, throughput, and wall time.</li>
+          <li>Old evaluations use different match rules. Do not mix them with the 026 protocol.</li>
+        </ul>
+      </section>
+
+      <section id="scale">
+        <div class="eyebrow">Scale and latency</div>
+        <h2>The run set does not define a scaling law</h2>
+        <p class="lead">Use the plots as a map of existing runs. Do not call the points a Chinchilla sweep.</p>
+
+        <div class="formula">Training compute proxy: C ≈ 6 × trainable parameters × processed Transformer-token positions</div>
+        <p>The proxy omits some attention, decoder, embedding, and optimizer work. It gives one consistent comparison.</p>
+
+        <div class="plot-grid">
+          <figure class="plot"><div class="figure-title">Figure 8A · Compute and NLL</div><svg id="compute-nll" viewBox="0 0 540 350"></svg></figure>
+          <figure class="plot"><div class="figure-title">Figure 8B · Compute and damage</div><svg id="compute-dmg" viewBox="0 0 540 350"></svg></figure>
+          <figure class="plot"><div class="figure-title">Figure 8C · Compute and stocks</div><svg id="compute-stock" viewBox="0 0 540 350"></svg></figure>
+          <figure class="plot"><div class="figure-title">Figure 8D · Compute and stock LCB</div><svg id="compute-lcb" viewBox="0 0 540 350"></svg></figure>
+        </div>
+        <p class="note">026 dominates nearby frame models. More compute does not rescue 027, 029, or 030. Different NLL definitions remain a limit.</p>
+
+        <details>
+          <summary>Open model-size and data plots</summary>
+          <div class="plot-grid">
+            <figure class="plot"><div class="figure-title">Parameters and performance</div><svg id="params-performance" viewBox="0 0 540 365"></svg></figure>
+            <figure class="plot"><div class="figure-title">Processed positions and performance</div><svg id="tokens-performance" viewBox="0 0 540 365"></svg></figure>
+            <figure class="plot"><div class="figure-title">Parameters and NLL</div><svg id="params-nll" viewBox="0 0 540 350"></svg></figure>
+            <figure class="plot"><div class="figure-title">Parameters and stock LCB</div><svg id="params-lcb" viewBox="0 0 540 350"></svg></figure>
+            <figure class="plot"><div class="figure-title">Positions and NLL</div><svg id="tokens-nll" viewBox="0 0 540 350"></svg></figure>
+            <figure class="plot"><div class="figure-title">Positions and stock LCB</div><svg id="tokens-lcb" viewBox="0 0 540 350"></svg></figure>
+          </div>
+        </details>
+
+        <figure class="plot">
+          <div class="figure-title">Figure 9 · IsoFLOP map</div>
+          <svg id="isoflop-chart" viewBox="0 0 1120 525"></svg>
+          <figcaption>Only points on one contour have similar proxy compute. Runs 023, 024, the short 013 checkpoint, and 026 are near 75–100 PFLOP.</figcaption>
+        </figure>
+        <p>A real isoFLOP test is still missing. Run three model sizes at one compute budget before the scale run.</p>
+
+        <h3>Data limit</h3>
+        <p>The active processed stream has about 1.23B frames from source 1. The download manifest has six sources. A simple extrapolation gives about 9.1B frames.</p>
+        <p><strong>This is an estimate.</strong> Audit duplicates, conversion failures, player overlap, and split leakage before use.</p>
+
+        <h3>Inference limit</h3>
+        <figure class="plot">
+          <div class="figure-title">Figure 10 · 026 latency</div>
+          <svg id="latency-chart" viewBox="0 0 1120 390"></svg>
+          <figcaption>The production path has 24 real rows padded to 32. The p50 replan time is 13.51 ms. The amortized value is 3.38 ms per executed frame.</figcaption>
+        </figure>
+        <table class="compact">
+          <thead><tr><th>Model</th><th>Parameters</th><th>Approximate trunk work</th><th>Execution</th><th>Approximate work/frame</th></tr></thead>
+          <tbody>
+            <tr><td>009</td><td>6.51M</td><td>3.33 GF/replan</td><td>1</td><td>3.33 GF</td></tr>
+            <tr><td>Historical 013</td><td>6.60M</td><td>13.5 GF/replan</td><td>1</td><td>13.5 GF</td></tr>
+            <tr><td>026</td><td>15.05M</td><td>3.85 GF/replan</td><td>4</td><td>0.96 GF</td></tr>
+            <tr><td>Proposed model</td><td>about 145M</td><td>37.1 GF/replan</td><td>4</td><td>9.3 GF</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Most likely limits</h3>
+        <ol>
+          <li>Rare action transitions cause exposure errors.</li>
+          <li>The policy needs structured capacity for joint action trajectories.</li>
+          <li>The data needs more diversity and better rare-event coverage.</li>
+          <li>The larger model can exceed the reaction-time limit.</li>
+        </ol>
+        <p>Longer context, more hand-built features, and a larger generic output head have negative evidence.</p>
+      </section>
+
+      <section id="recipe">
+        <div class="eyebrow">Recommended run</div>
+        <h2>Use this recipe if experiment A does not reject 026</h2>
+
+        <table class="recipe compact">
+          <thead><tr><th>Item</th><th>Use</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr><td>Family</td><td>026 causal frame policy with a cached temporal decoder.</td><td>Best closed-loop result.</td></tr>
+            <tr><td>Trunk</td><td>d768, 20 layers, 12 heads, FF 3,072.</td><td>About 145M total parameters. This is about 9.6× 026.</td></tr>
+            <tr><td>Context</td><td>128 frames. Use full causal attention.</td><td>Long context did not improve control.</td></tr>
+            <tr><td>Frame token</td><td>Keep the 352-value 026 token.</td><td>The token is complete and deployment-safe.</td></tr>
+            <tr><td>Controller codec</td><td>Use vocabularies 256, 65, 9, and 25. Keep semantic embeddings.</td><td>The one-hot test has worse control.</td></tr>
+            <tr><td>Temporal decoder</td><td>d256, 2 layers, 8 heads, FF 1,024. Use a causal cache.</td><td>This keeps the 026 design simple.</td></tr>
+            <tr><td>Group order</td><td>C-stick → main stick → triggers → buttons.</td><td>This is the tested 026 order.</td></tr>
+            <tr><td>Offsets</td><td>1, 2, 3, 4, 5, 6, 9, 12, 16, and 20.</td><td>Offsets after 4 remain provisional.</td></tr>
+            <tr><td>Execution</td><td>Sample four frames. Execute four. Replan after four.</td><td>This is the best quality-latency point.</td></tr>
+            <tr><td>Base objective</td><td>Use categorical behavior cloning.</td><td>This is the only scale-ready policy loss.</td></tr>
+            <tr><td>MC-AWR</td><td>Add only as a final 10–20 percent continuation after a matched win.</td><td>Current evidence is promising but incomplete.</td></tr>
+            <tr><td>Value head</td><td>Use recorded Monte Carlo returns. Stop its trunk gradient by default.</td><td>This protects the policy representation.</td></tr>
+            <tr><td>Q and IQL</td><td>Do not include them.</td><td>The tested policies collapse.</td></tr>
+            <tr><td>World-state loss</td><td>Do not include it.</td><td>029 adds cost without a control gain.</td></tr>
+            <tr><td>Optimizer</td><td>Use Muon 0.02 for 2-D trunk-block matrices. Use AdamW 8.5e−4 for other parameters.</td><td>This matches the mature 026 split.</td></tr>
+            <tr><td>Schedule</td><td>Use momentum 0.95, Adam betas 0.9/0.95, warmup near 1,000 steps, and cosine decay.</td><td>This matches the stable modern runs.</td></tr>
+            <tr><td>Batch</td><td>Target 131,072 frame positions per optimizer step.</td><td>This is 1,024 sequences at context 128.</td></tr>
+            <tr><td>Data</td><td>Use all audited schema-v7 sources. Deduplicate by replay and player.</td><td>Current runs use one main source.</td></tr>
+            <tr><td>Data mixture</td><td>Sample half globally. Sample half by source, then replay.</td><td>This prevents one source from dominating.</td></tr>
+            <tr><td>Token budget</td><td>Use about 10.74B processed frame positions.</td><td>This is about 10× 026 exposure.</td></tr>
+            <tr><td>Steps</td><td>Use about 81,920 steps at the target batch.</td><td>This reaches the token budget.</td></tr>
+            <tr><td>Compute</td><td>Budget about 9.3 EFLOP with the 6NT proxy.</td><td>Model and data both increase by about 10×.</td></tr>
+            <tr><td>Latency gate</td><td>Require at most 4 ms amortized per frame, or use faster hardware.</td><td>Self-play has a real-time limit.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>If total compute can increase by only 10×</h3>
+        <div class="card">
+          <p>Use a 60–65M parameter 026-family model. Use about 2.5B frame positions. The compute estimate is about 1 EFLOP.</p>
+          <p>Select the final size and data split from the isoFLOP test.</p>
+        </div>
+
+        <div class="grid3">
+          <div class="card"><h3>Ready</h3><ul><li>Causal frame trunk.</li><li>Semantic action embeddings.</li><li>Group autoregression.</li><li>Temporal horizon 4.</li><li>Behavior cloning base.</li></ul></div>
+          <div class="card"><h3>Keep simple</h3><ul><li>Context 128.</li><li>Two decoder layers.</li><li>Current codec.</li><li>Current optimizer split.</li></ul></div>
+          <div class="card"><h3>Must pass a test</h3><ul><li>MC-AWR.</li><li>Offsets after +4.</li><li>Action-token decoder.</li><li>Latent modes.</li><li>Any Q loss.</li></ul></div>
+        </div>
+      </section>
+
+      <section id="tests">
+        <div class="eyebrow">Pre-scale gate</div>
+        <h2>Run five small tests. Stop early when a decision is clear.</h2>
+
+        <h3>Experiment A: width or decoder structure</h3>
+        <table class="compact">
+          <thead><tr><th>Cell</th><th>Trunk</th><th>Decoder</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>W0D0</td><td>d256, L8, h4</td><td>Independent offsets and groups</td><td>Small simple control.</td></tr>
+            <tr><td>W0D1</td><td>d256, L8, h4</td><td>Exact 026 temporal/group path</td><td>Decoder effect at d256.</td></tr>
+            <tr><td>W1D0</td><td>d384, L8, h6</td><td>Independent offsets and groups</td><td>Width effect with a simple decoder.</td></tr>
+            <tr><td>W1D1</td><td>d384, L8, h6</td><td>Exact 026 temporal/group path</td><td>026 control.</td></tr>
+          </tbody>
+        </table>
+        <p>Train each cell for 4,096 steps. Hold data, context, codec, offsets, losses, batch, and evaluation seeds constant. Match decoder parameters within 5 percent.</p>
+        <p><strong>Decision metric:</strong> paired net stocks under the 026 protocol. Use net damage and latency as secondary metrics.</p>
+
+        <h3>Other tests</h3>
+        <table class="compact">
+          <thead><tr><th>Test</th><th>Control</th><th>Treatment</th><th>Budget</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td>B · Action tokens</td><td>026 decoder</td><td>032-style cached action tokens</td><td>8,192 steps</td><td>Use the treatment only if stocks improve and p95 latency stays within 1.25×.</td></tr>
+            <tr><td>C · MC-AWR</td><td>026 BC continuation</td><td>Matched MC-AWR continuation</td><td>2,000–4,000 steps, 3 seeds</td><td>Add AWR only after a paired closed-loop win.</td></tr>
+            <tr><td>D1 · Long targets</td><td>Offsets 1–4</td><td>Full offset set</td><td>Shared training budget</td><td>Remove the tail if fixed-horizon control does not improve.</td></tr>
+            <tr><td>D2 · IsoFLOP</td><td>One compute budget</td><td>About 8M, 15M, and 30M models</td><td>About 25 PFLOP each</td><td>Set the size/data split for the large run.</td></tr>
+            <tr><td>E · Delay</td><td>Zero delay</td><td>2, 4, and 6 frame delay</td><td>Evaluation first</td><td>Add delay-aware training only if quality drops.</td></tr>
+          </tbody>
+        </table>
+        <p>Run A and the delay evaluation first. Run C after the architecture choice. Reuse A checkpoints in the isoFLOP analysis.</p>
+      </section>
+
+      <section id="prompt">
+        <div class="eyebrow">Agent handoff</div>
+        <h2>Prompt for the experiment A designer</h2>
+        <p>Use the full copyable prompt in <a href="experiment_a_width_vs_decoder_prompt.md">experiment_a_width_vs_decoder_prompt.md</a>.</p>
+        <details>
+          <summary>Open the prompt in this report</summary>
+          <div class="promptbox">You are an ML experiment designer. Work in /home/ericgu/src/hal.
+
+Objective
+
+Design one controlled experiment that answers this question:
+
+Did the gain from experiment 026 come mainly from the d384 trunk, or from the temporal and controller-group decoder?
+
+Produce an implementation-ready design. Do not change code. Do not start training. Do not create W&amp;B runs.
+
+Source rules
+
+Use source code, local evaluation artifacts, and W&amp;B records as the source of truth.
+
+Inspect:
+- experiments/023_mtp_heads.py
+- experiments/024_temporal_mtp.py
+- experiments/026_temporal_mtp.py
+- hal/training/features.py
+- hal/training/trunk.py
+- docs/offline_training_retrospective.html
+
+Reconstruct each forward path from code. Do not use filenames or comments as proof.
+
+Required experiment
+
+Design a 2×2 factorial test.
+
+Factor W:
+- W0: d256, 8 layers, 4 heads.
+- W1: d384, 8 layers, 6 heads.
+
+Factor D:
+- D0: independent MTP. Future offsets do not use prior predicted actions. Controller groups do not use prior predicted groups.
+- D1: exact 026 temporal and group decoding.
+
+The cells are W0D0, W0D1, W1D0, and W1D1.
+
+Keep input features, codec, context 128, offsets, loss weights, data order, batch, optimizer, schedule, execution horizon, and evaluation seeds constant.
+
+Make D0 and D1 similar in parameter count. Target less than 5 percent difference at each width. Do not add unused parameters.
+
+Train each cell for 4,096 steps. Save steps 1,024, 2,048, and 4,096. Add an approximately isoFLOP checkpoint comparison.
+
+Evaluate each final checkpoint with the exact 026 protocol. Use the same 96 boots for each cell.
+
+Primary metrics:
+- paired net stocks per minute;
+- boot-clustered stock confidence interval;
+- net_stock_lcb.
+
+Secondary metrics:
+- net damage;
+- action transition metrics;
+- rollout exposure gap;
+- p50, p95, and p99 replan latency;
+- amortized latency per executed frame.
+
+Estimate the width main effect, decoder main effect, and interaction. Report equal-data and approximately isoFLOP results.
+
+Define the practical effect threshold before implementation. Use existing boot variance for a power estimate.
+
+Decision rules:
+- If D has the clear effect, keep the 026 decoder.
+- If W has the clear effect, scale the trunk and use the simpler decoder.
+- If the interaction is large, use only the combined design. Do not claim an independent cause.
+- If neither factor explains the gain, stop the scale decision and identify the next confound.
+- If D1 improves quality but breaks latency, report the quality-latency frontier.
+
+Deliver one design document. Include the four configurations, fixed variables, compute estimates, evaluation plan, statistical plan, decision rule, code-change plan, leakage tests, risks, and stop conditions.
+
+Do not expand the first test beyond four cells. Put later ideas in a separate section.</div>
+        </details>
+      </section>
+
+      <section id="ppo">
+        <div class="eyebrow">Self-play handoff</div>
+        <h2>Transfer the policy. Reset unsafe offline parts.</h2>
+
+        <table class="compact">
+          <thead><tr><th>Part</th><th>Action for PPO</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr><td>Policy trunk</td><td>Transfer it.</td><td>It contains the main state representation.</td></tr>
+            <tr><td>Action decoder</td><td>Transfer it.</td><td>Keep group and temporal structure.</td></tr>
+            <tr><td>Action chunk</td><td>Keep horizon 4 first.</td><td>It reduces inference work and preserves coherent actions.</td></tr>
+            <tr><td>Value head</td><td>Initialize from MC value only after validation.</td><td>Value scale changes on-policy.</td></tr>
+            <tr><td>Q functions</td><td>Discard them.</td><td>Current Q estimates are not useful for the actor.</td></tr>
+            <tr><td>World-state expert</td><td>Discard it by default.</td><td>It adds cost without a control gain.</td></tr>
+            <tr><td>Style or mode input</td><td>Keep only if pretraining uses it.</td><td>PPO can otherwise ignore it.</td></tr>
+            <tr><td>Reaction delay</td><td>Match the live system.</td><td>A delay mismatch changes the control problem.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Research order after the baseline</h3>
+        <ol>
+          <li>Run a true size/data isoFLOP study.</li>
+          <li>Reduce exposure bias in the temporal action decoder.</li>
+          <li>Train and test a delay-aware policy.</li>
+          <li>Test one explicit trajectory-mode variable.</li>
+          <li>Test return or style conditioning.</li>
+          <li>Test long-memory attention or an SSM only after a memory diagnosis.</li>
+          <li>Return to offline Q learning only after action-ranking tests pass.</li>
+        </ol>
+      </section>
+
+      <section id="appendix">
+        <div class="eyebrow">Appendix</div>
+        <h2>Sources and definitions</h2>
+
+        <h3>Key source files</h3>
+        <div class="grid2">
+          <div class="card">
+            <p><a href="../experiments/001_flow_matching_baseline.py">001 flow</a></p>
+            <p><a href="../experiments/009_simplify_arch.py">009 frame GPT</a></p>
+            <p><a href="../experiments/012_multi_token.py">012 independent MTP</a></p>
+            <p><a href="../experiments/018_bpe_rle.py">018 BPE/RLE</a></p>
+            <p><a href="../experiments/020_awr.py">020 MC-AWR</a></p>
+          </div>
+          <div class="card">
+            <p><a href="../experiments/024_temporal_mtp.py">024 temporal MTP</a></p>
+            <p><a href="../experiments/026_temporal_mtp.py">026 selected-offset temporal MTP</a></p>
+            <p><a href="../experiments/027_temporal_mtp.py">027 attached IQL</a></p>
+            <p><a href="../experiments/029_game_state_flow.py">029 state expert</a></p>
+            <p><a href="../experiments/030_iql.py">030 separate IQL</a></p>
+          </div>
+        </div>
+
+        <h3>Parameter reference</h3>
+        <div class="pillrow">
+          <span class="tag">001: 4.994M</span><span class="tag">009: 6.512M</span><span class="tag">hist. 013: 6.601M</span>
+          <span class="tag">018: 7.747M</span><span class="tag">020: 6.786M</span><span class="tag">024: 6.669M</span>
+          <span class="tag">026: 15.053M</span><span class="tag">027: 15.269M</span><span class="tag">029: 16.307M</span>
+          <span class="tag">030: 25.455M trainable</span><span class="tag">033: 14.885M</span>
+        </div>
+
+        <h3>Historical 013 source</h3>
+        <p>The current tree does not contain the historical interleaved file. The reconstruction uses Git commit <code>df4e4d2</code>. The local evaluation path is:</p>
+        <p class="mono">runs/260618-200101_013_interleaved_groups_gpt-il-d256-L8-h4-Lc51_ranked-anon-1_iso-flop-short-ctx-b512-16k/eval_replays_026_protocol_96/evaluation.json</p>
+
+        <h3>Definitions</h3>
+        <table class="compact">
+          <tbody>
+            <tr><th>MTP</th><td>Training targets at more than one future offset.</td></tr>
+            <tr><th>Execution horizon</th><td>The number of predicted frames that the emulator uses before a new observation.</td></tr>
+            <tr><th>Replan interval</th><td>The number of executed frames between policy calls.</td></tr>
+            <tr><th>Teacher forcing</th><td>Training uses the correct prior action as decoder input.</td></tr>
+            <tr><th>Exposure bias</th><td>Inference uses sampled actions that training did not use as prefixes.</td></tr>
+            <tr><th>LCB</th><td>The lower endpoint of a confidence interval.</td></tr>
+            <tr><th>IsoFLOP</th><td>A comparison with approximately equal total training compute.</td></tr>
+          </tbody>
+        </table>
+
+        <p class="footnotes">Report date: 18 August 2026. Approximate values use “about,” “estimate,” or “proxy.” The JSON block below contains the machine-readable run table.</p>
+      </section>
+    </main>
+  </div>
+
+  <script type="application/json" id="experiment-data">
+[
+  {
+    "exp": "001",
+    "run": "6s5dqti0",
+    "family": "Unified flow",
+    "variant": "32k baseline",
+    "paramsM": 4.994,
+    "ctx": "256+16",
+    "d": "256×6/h8",
+    "batch": 512,
+    "steps": 32768,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 7.55,
+    "throughput": 775,
+    "val": 0.05783,
+    "valName": "flow MSE",
+    "netDmg": null,
+    "netStock": null,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "legacy aggregate",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Raw mixed 14-D flow; executes 16.",
+    "examplesM": 16.777,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "001",
+    "run": "xummemli",
+    "family": "Unified flow",
+    "variant": "131k long",
+    "paramsM": 4.994,
+    "ctx": "256+16",
+    "d": "256×6/h8",
+    "batch": 512,
+    "steps": 131072,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 28.31,
+    "throughput": 687,
+    "val": 0.05209,
+    "valName": "flow MSE",
+    "netDmg": -112.13,
+    "netStock": -2.262,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Lower MSE, worse behavior.",
+    "examplesM": 67.109,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "003",
+    "run": "shfkpxlu",
+    "family": "Per-position flow",
+    "variant": "64 train positions",
+    "paramsM": 5.351,
+    "ctx": "256+16",
+    "d": "256×6/h8",
+    "batch": 510,
+    "steps": 67441,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 25.47,
+    "throughput": 132,
+    "val": 0.0584,
+    "valName": "flow MSE",
+    "netDmg": -158.34,
+    "netStock": -1.338,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "crashed",
+    "notes": "Incomplete production run.",
+    "examplesM": 34.395,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "004",
+    "run": "1rdhvndp",
+    "family": "Unified flow",
+    "variant": "Beta(1,3) t",
+    "paramsM": 4.994,
+    "ctx": "256+16",
+    "d": "256×6/h8",
+    "batch": 512,
+    "steps": 87068,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 18.8,
+    "throughput": 615,
+    "val": 0.05479,
+    "valName": "flow MSE",
+    "netDmg": -72.36,
+    "netStock": -1.29,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "killed",
+    "notes": "Time-sampling change only.",
+    "examplesM": 44.579,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "005",
+    "run": "3j1hwovq",
+    "family": "Parallel categorical",
+    "variant": "multi-label buttons",
+    "paramsM": 5.373,
+    "ctx": 256,
+    "d": "256×6/h8 + 128×2",
+    "batch": 256,
+    "steps": 131072,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 22.47,
+    "throughput": 471,
+    "val": 1.1883,
+    "valName": "frame-1 NLL",
+    "netDmg": -81.64,
+    "netStock": -1.375,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "16 future query tokens; groups independent.",
+    "examplesM": 33.554,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "006",
+    "run": "ag0l8dgh",
+    "family": "Chord AR",
+    "variant": "joint chord",
+    "paramsM": 7.43,
+    "ctx": 256,
+    "d": "256×6/h8 + 128×2",
+    "batch": 32,
+    "steps": 32768,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 2.51,
+    "throughput": 1080,
+    "val": 1.3921,
+    "valName": "frame-1 NLL",
+    "netDmg": -66.29,
+    "netStock": -1.701,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Observed chord vocabulary; 16 sequential decodes.",
+    "examplesM": 1.049,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "007",
+    "run": "upyh58qa",
+    "family": "Factored chunk AR",
+    "variant": "small",
+    "paramsM": 5.416,
+    "ctx": 256,
+    "d": "256×6/h8 + 128×2",
+    "batch": 32,
+    "steps": 32768,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 5.84,
+    "throughput": 689,
+    "val": 1.2276,
+    "valName": "frame-1 NLL",
+    "netDmg": -81.3,
+    "netStock": -1.648,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "64 future group tokens.",
+    "examplesM": 1.049,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "007",
+    "run": "5ocyb63v",
+    "family": "Factored chunk AR",
+    "variant": "26M / chunk1",
+    "paramsM": 26,
+    "ctx": 256,
+    "d": "512×12/h16 + 128×2",
+    "batch": 32,
+    "steps": 20480,
+    "framesB": null,
+    "computePF": null,
+    "wallH": 5.72,
+    "throughput": 349,
+    "val": 1.1114,
+    "valName": "frame-1 NLL",
+    "netDmg": -71.49,
+    "netStock": -1.165,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Size, chunk, positions and steps all changed.",
+    "examplesM": 0.655,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "009/011",
+    "run": "vlim96s9",
+    "family": "Frame GPT",
+    "variant": "joint group logits",
+    "paramsM": 6.512,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 32768,
+    "framesB": 4.295,
+    "computePF": 167.8,
+    "wallH": 3.77,
+    "throughput": null,
+    "val": 0.98365,
+    "valName": "off1 NLL",
+    "netDmg": -8.15,
+    "netStock": -0.378,
+    "stockLcb": -0.853,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Independent group slices.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 3e-4"
+  },
+  {
+    "exp": "010",
+    "run": "pz0iti6x",
+    "family": "Frame GPT + group AR",
+    "variant": "buttons→main→C→trig",
+    "paramsM": 6.528,
+    "ctx": 256,
+    "d": "256×8/h8",
+    "batch": 128,
+    "steps": 32768,
+    "framesB": 1.074,
+    "computePF": 42.1,
+    "wallH": 2.1,
+    "throughput": 2124,
+    "val": 1.06254,
+    "valName": "total NLL",
+    "netDmg": -61.07,
+    "netStock": -1.44,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old CPU",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Four small group steps.",
+    "examplesM": 4.194,
+    "optimizer": "AdamW",
+    "lr": "3e-4"
+  },
+  {
+    "exp": "012",
+    "run": "shjnxxsu",
+    "family": "Independent MTP",
+    "variant": "offsets 1/5/9/13",
+    "paramsM": 6.786,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 1024,
+    "steps": 16384,
+    "framesB": 4.295,
+    "computePF": 174.9,
+    "wallH": 2.9,
+    "throughput": 1854,
+    "val": 1.0403,
+    "valName": "off1 NLL",
+    "netDmg": 34.27,
+    "netStock": 0.13,
+    "stockLcb": -0.345,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "old heterogeneous",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Only offset1 deployed.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "013h",
+    "run": "7tlk11io",
+    "family": "Interleaved state/action",
+    "variant": "short context; eval step 14336",
+    "paramsM": 6.601,
+    "ctx": "51f/255tok",
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 14336,
+    "framesB": 0.374,
+    "transformerTokensB": 1.872,
+    "computePF": 74.1,
+    "wallH": 0.81,
+    "throughput": 3387,
+    "val": 1.26188,
+    "valName": "final-run NLL",
+    "netDmg": 28.825,
+    "netDmgLo": 18.65,
+    "netDmgHi": 39.02,
+    "netStock": -0.1008,
+    "netStockLo": -0.272,
+    "netStockHi": 0.07,
+    "stockLcb": -0.244,
+    "clusterStockLcb": -0.202,
+    "boots": 96,
+    "matches": 102,
+    "protocol": "026 exact rerun",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Checkpoint step14336; 4 full trunk passes/action.",
+    "examplesM": 7.34,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 145.22056,
+      "damageTakenPerMin": 116.39599,
+      "stocksTakenPerMin": 0.88057,
+      "stocksLostPerMin": 0.98135,
+      "netDamageCI95": [
+        18.65,
+        39.02
+      ],
+      "netStockCI95": [
+        -0.272,
+        0.07
+      ],
+      "netDamageClusterLcb": 21.36517,
+      "netStockClusterLcb": -0.20165
+    },
+    "checkpoint": {
+      "step": 14336,
+      "sha256": "383062862ff954b649838ae6185532b5208241478788b78647e3e6f86b28b5d4"
+    }
+  },
+  {
+    "exp": "013h",
+    "run": "lxo3id9l",
+    "family": "Interleaved state/action",
+    "variant": "matched 256-frame context",
+    "paramsM": 6.601,
+    "ctx": "256f/1280tok",
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "transformerTokensB": 10.737,
+    "computePF": 425.2,
+    "wallH": 5.55,
+    "throughput": 566,
+    "val": 1.09815,
+    "valName": "group NLL",
+    "netDmg": 41.34,
+    "netStock": 0.262,
+    "stockLcb": 0.055,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 84,
+    "protocol": "old heterogeneous",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "Not modern re-evaluated.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "013",
+    "run": "m5e1kj7w",
+    "family": "Independent MTP",
+    "variant": "validity final rerun",
+    "paramsM": 6.786,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 256,
+    "steps": 32768,
+    "framesB": 2.147,
+    "computePF": 87.4,
+    "wallH": 4.87,
+    "throughput": 521,
+    "val": 1.04825,
+    "valName": "off1 NLL",
+    "netDmg": 14.52,
+    "netStock": -0.559,
+    "stockLcb": -0.731,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 120,
+    "protocol": "pre-026 CPU",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "Current 013 is not historical interleaved.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "013",
+    "run": "1z6oyio7",
+    "family": "Independent MTP",
+    "variant": "contiguous 1/2/3/4",
+    "paramsM": 6.786,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 256,
+    "steps": 32768,
+    "framesB": 2.147,
+    "computePF": 87.4,
+    "wallH": 7.56,
+    "throughput": 594,
+    "val": 0.99678,
+    "valName": "off1 NLL",
+    "netDmg": 10.64,
+    "netStock": -0.585,
+    "stockLcb": -0.777,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 120,
+    "protocol": "pre-026 CPU",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "Dense offsets improve NLL, not stocks.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "016",
+    "run": "fxhtoxu8",
+    "family": "Independent MTP",
+    "variant": "base control",
+    "paramsM": 6.792,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 87.5,
+    "wallH": 3.5,
+    "throughput": 2077,
+    "val": 1.05181,
+    "valName": "off1 NLL",
+    "netDmg": 17.14,
+    "netStock": -0.618,
+    "stockLcb": -0.782,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 114,
+    "protocol": "pre-026 CPU",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "Spatial-feature experiment control.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "018",
+    "run": "xgj1dwot",
+    "family": "BPE/RLE",
+    "variant": "token-native on-box",
+    "paramsM": 7.747,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 99.8,
+    "wallH": 3.25,
+    "throughput": 1310,
+    "val": 1.14488,
+    "valName": "frame1 marginal NLL",
+    "netDmg": -155.02,
+    "netStock": -3.253,
+    "stockLcb": -3.584,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 52,
+    "protocol": "pre-026 / invalid cadence",
+    "protocolGroup": "legacy",
+    "status": "finished",
+    "notes": "57.7% crashes; cadence-1 H2H is the fair test.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "019",
+    "run": "5b9x7mhq",
+    "family": "Factored frame MTP",
+    "variant": "C→trig→main→buttons",
+    "paramsM": 6.887,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 88.7,
+    "wallH": 10.67,
+    "throughput": 1855,
+    "val": 1.03649,
+    "valName": "off1 NLL",
+    "netDmg": 25.73,
+    "netStock": -0.387,
+    "stockLcb": -0.564,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 117,
+    "protocol": "pre-026 CPU",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "H2H vs016 directionally positive.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "020",
+    "run": "rnbyn7n8",
+    "family": "MC-AWR",
+    "variant": "sparse stocks",
+    "paramsM": 6.786,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 87.4,
+    "wallH": 7.26,
+    "throughput": 2377,
+    "val": 1.06707,
+    "valName": "off1 NLL",
+    "netDmg": 8.54,
+    "netStock": -0.503,
+    "stockLcb": -0.667,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 113,
+    "protocol": "pre-026 CPU",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "Sparse-return high variance.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "020",
+    "run": "3sgvx6xv",
+    "family": "MC-AWR",
+    "variant": "damage + win",
+    "paramsM": 6.786,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 87.4,
+    "wallH": 2.87,
+    "throughput": 1909,
+    "val": 1.08904,
+    "valName": "off1 NLL",
+    "netDmg": 31.06,
+    "netStock": -0.447,
+    "stockLcb": -0.63,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 126,
+    "protocol": "pre-026 CPU + paired H2H",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "Suggestive H2H, stock CI overlaps zero.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "021",
+    "run": "pu8jpmbf",
+    "family": "Independent MTP",
+    "variant": "v6 lean features",
+    "paramsM": 6.815,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 87.8,
+    "wallH": 7.26,
+    "throughput": 2167,
+    "val": 1.04979,
+    "valName": "off1 NLL",
+    "netDmg": 3.77,
+    "netStock": -0.886,
+    "stockLcb": -1.081,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": 136,
+    "protocol": "pre-026 CPU + paired H2H",
+    "protocolGroup": "near026",
+    "status": "finished",
+    "notes": "Paired stock significantly worse than 016.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "023",
+    "run": "obx3o3az",
+    "family": "Independent MTP",
+    "variant": "E0 linear P0",
+    "paramsM": 6.818,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 87.9,
+    "wallH": 2.44,
+    "throughput": 1352,
+    "val": 1.02851,
+    "valName": "off1 NLL",
+    "netDmg": 13.22,
+    "netStock": -0.692,
+    "stockLcb": -0.84,
+    "clusterStockLcb": null,
+    "boots": 96,
+    "matches": 118,
+    "protocol": "026-style predecessor",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Normalized aux BC control.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 129.60802,
+      "damageTakenPerMin": 116.39194,
+      "stocksTakenPerMin": 0.77677,
+      "stocksLostPerMin": 1.46841
+    },
+    "reconstruction": {
+      "offset1Bits": 1.02851,
+      "buttons": 0.24248,
+      "cStick": 0.05,
+      "mainStick": 0.64605,
+      "triggers": 0.08997,
+      "buttonsTransition": 2.50879,
+      "cStickTransition": 2.86377,
+      "mainStickTransition": 2.98214,
+      "triggersTransition": 2.51511
+    }
+  },
+  {
+    "exp": "023",
+    "run": "q3aojgfm",
+    "family": "Independent MTP",
+    "variant": "E1 state MLP",
+    "paramsM": 7.679,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 98.9,
+    "wallH": 2,
+    "throughput": 1453,
+    "val": 1.02644,
+    "valName": "off1 NLL",
+    "netDmg": 14.14,
+    "netStock": -0.581,
+    "stockLcb": -0.758,
+    "clusterStockLcb": null,
+    "boots": 96,
+    "matches": 126,
+    "protocol": "026-style predecessor + H2H",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "More head capacity, no paired gain.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 130.90848,
+      "damageTakenPerMin": 116.76955,
+      "stocksTakenPerMin": 0.80452,
+      "stocksLostPerMin": 1.38527
+    },
+    "reconstruction": {
+      "offset1Bits": 1.02644,
+      "buttons": 0.2427,
+      "cStick": 0.04993,
+      "mainStick": 0.64409,
+      "triggers": 0.08972
+    }
+  },
+  {
+    "exp": "023",
+    "run": "46zi7fgo",
+    "family": "Independent MTP",
+    "variant": "P1 ctx1024/SWA128",
+    "paramsM": 6.818,
+    "ctx": 1024,
+    "d": "256×8/h4",
+    "batch": 128,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 87.9,
+    "wallH": 2.83,
+    "throughput": 499,
+    "val": 1.01064,
+    "valName": "off1 NLL",
+    "netDmg": 5.28,
+    "netStock": -0.714,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": 96,
+    "matches": 116,
+    "protocol": "026-style predecessor + H2H",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Same positions; longer context no gain.",
+    "examplesM": 2.097,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 124.35478,
+      "damageTakenPerMin": 119.07714,
+      "stocksTakenPerMin": 0.70846,
+      "stocksLostPerMin": 1.42224
+    },
+    "reconstruction": {
+      "offset1Bits": 1.01064,
+      "buttons": 0.2397,
+      "cStick": 0.04835,
+      "mainStick": 0.63596,
+      "triggers": 0.08662
+    }
+  },
+  {
+    "exp": "024",
+    "run": "4hoe86s7",
+    "family": "Temporal MTP",
+    "variant": "d64×1 cross-attn / dense20",
+    "paramsM": 6.669,
+    "ctx": 256,
+    "d": "256×8/h4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 85.9,
+    "wallH": 3.28,
+    "throughput": 1133,
+    "val": 1.06659,
+    "valName": "h1 NLL",
+    "netDmg": 21.55,
+    "netStock": -0.398,
+    "stockLcb": -0.552,
+    "clusterStockLcb": null,
+    "boots": 96,
+    "matches": 106,
+    "protocol": "026 style",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Exec/replan 4.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 138.85946,
+      "damageTakenPerMin": 117.31444,
+      "stocksTakenPerMin": 0.77531,
+      "stocksLostPerMin": 1.17358
+    },
+    "reconstruction": {
+      "horizon1Bits": 1.06659,
+      "meanHorizonBits": 1.18539,
+      "meanButtons": 0.24748,
+      "meanCStick": 0.06692,
+      "meanMainStick": 0.77081,
+      "meanTriggers": 0.10019
+    }
+  },
+  {
+    "exp": "026",
+    "run": "cqbbbg77",
+    "family": "Temporal MTP",
+    "variant": "production",
+    "paramsM": 15.053,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 1.074,
+    "computePF": 97,
+    "wallH": 2.63,
+    "throughput": 1769,
+    "val": 1.15964,
+    "valName": "mean o1–4 NLL",
+    "netDmg": 37.529,
+    "netDmgLo": 31.006,
+    "netDmgHi": null,
+    "netStock": 0.1591,
+    "stockLcb": 0.0319,
+    "clusterStockLcb": 0.0584,
+    "boots": 96,
+    "matches": 101,
+    "protocol": "026 exact",
+    "protocolGroup": "026",
+    "status": "finished",
+    "latencyP50": 13.51,
+    "latencyP95": 14.28,
+    "amortizedP50": 3.38,
+    "notes": "Best production baseline.",
+    "examplesM": 8.389,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 149.39778,
+      "damageDealtCI95": [
+        143.92812,
+        154.59409
+      ],
+      "damageTakenPerMin": 111.86845,
+      "damageTakenCI95": [
+        108.06217,
+        115.69807
+      ],
+      "stocksTakenPerMin": 0.98118,
+      "stocksTakenCI95": [
+        0.90194,
+        1.06603
+      ],
+      "stocksLostPerMin": 0.82207,
+      "stocksLostCI95": [
+        0.75285,
+        0.89192
+      ],
+      "netDamageClusterLcb": 31.00626,
+      "netStockClusterLcb": 0.05835
+    },
+    "reconstruction": {
+      "primaryOffsets1to4Bits": 1.15964,
+      "offset1Bits": 1.16105,
+      "buttons": 0.22302,
+      "cStick": 0.06121,
+      "mainStick": 0.77029,
+      "triggers": 0.10653
+    },
+    "inference": {
+      "hardware": "RTX 3060",
+      "replanP50Ms": 13.51,
+      "replanP95Ms": 14.28,
+      "replanP99Ms": 14.71,
+      "executionHorizon": 4,
+      "amortizedP50MsPerFrame": 3.38
+    }
+  },
+  {
+    "exp": "027",
+    "run": "06fi5jms",
+    "family": "Attached IQL",
+    "variant": "201-bin Q / shared trunk",
+    "paramsM": 15.269,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 1024,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 196.8,
+    "wallH": 5.03,
+    "throughput": 1314,
+    "val": 1.3122,
+    "valName": "mean o1–4 NLL",
+    "netDmg": -58.32,
+    "netStock": -1.85,
+    "stockLcb": -2.022,
+    "clusterStockLcb": -1.985,
+    "boots": 96,
+    "matches": 162,
+    "protocol": "026 exact",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Q–MC corr .043; support saturation.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 85.40324,
+      "damageTakenPerMin": 143.72314,
+      "stocksTakenPerMin": 0.32178,
+      "stocksLostPerMin": 2.17199
+    },
+    "critic": {
+      "qReturnCorrelation": 0.04293,
+      "valueReturnCorrelation": 0.03527,
+      "qReturnMae": 3.85082,
+      "targetOutOfBoundsFraction": 0.26276
+    }
+  },
+  {
+    "exp": "028",
+    "run": "1zzstd2d",
+    "family": "Temporal MTP",
+    "variant": "one-hot btn256",
+    "paramsM": 15.218,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 1024,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 196.1,
+    "wallH": 4.2,
+    "throughput": 576,
+    "val": 1.14437,
+    "valName": "mean o1–4 NLL",
+    "netDmg": 13.854,
+    "netStock": -0.1007,
+    "stockLcb": -0.2297,
+    "clusterStockLcb": -0.1966,
+    "boots": 96,
+    "matches": 99,
+    "protocol": "026 local rerun",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Local eval overrides W&B incomplete eval.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 136.13983,
+      "damageTakenPerMin": 122.28577,
+      "stocksTakenPerMin": 0.86953,
+      "stocksLostPerMin": 0.97027
+    },
+    "reconstruction": {
+      "primaryOffsets1to4Bits": 1.14437,
+      "offset1Bits": 1.14469,
+      "buttons": 0.21809,
+      "cStick": 0.05996,
+      "mainStick": 0.7618,
+      "triggers": 0.10484
+    },
+    "inference": {
+      "replanP50Ms": 8.8286,
+      "replanP95Ms": 10.6971,
+      "executionHorizon": 4,
+      "amortizedP50MsPerFrame": 2.2072
+    },
+    "latencyP50": 8.8286,
+    "latencyP95": 10.6971,
+    "amortizedP50": 2.2072
+  },
+  {
+    "exp": "028",
+    "run": "4wyxy1g2",
+    "family": "Temporal MTP",
+    "variant": "one-hot btn52",
+    "paramsM": 14.983,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 1024,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 193,
+    "wallH": 4.17,
+    "throughput": 1755,
+    "val": 1.1428,
+    "valName": "mean o1–4 NLL",
+    "netDmg": 6.222,
+    "netStock": -0.0636,
+    "stockLcb": -0.1979,
+    "clusterStockLcb": -0.1644,
+    "boots": 96,
+    "matches": 100,
+    "protocol": "026 local rerun",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Rare button classes pruned.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 130.54673,
+      "damageTakenPerMin": 124.32454,
+      "stocksTakenPerMin": 0.86434,
+      "stocksLostPerMin": 0.92797
+    },
+    "reconstruction": {
+      "primaryOffsets1to4Bits": 1.1428,
+      "offset1Bits": 1.14305,
+      "buttons": 0.21754,
+      "cStick": 0.06005,
+      "mainStick": 0.76077,
+      "triggers": 0.10468
+    },
+    "inference": {
+      "replanP50Ms": 9.2132,
+      "replanP95Ms": 10.4861,
+      "executionHorizon": 4,
+      "amortizedP50MsPerFrame": 2.3033
+    },
+    "latencyP50": 9.2132,
+    "latencyP95": 10.4861,
+    "amortizedP50": 2.3033
+  },
+  {
+    "exp": "029",
+    "run": "qxcjjwl8",
+    "family": "Temporal MTP + state aux",
+    "variant": "future-state flow",
+    "paramsM": 16.307,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 1024,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 210.1,
+    "wallH": 8.1,
+    "throughput": 690,
+    "val": null,
+    "valName": "mixed action/state losses",
+    "netDmg": 24.926,
+    "netStock": 0.1114,
+    "stockLcb": -0.0251,
+    "clusterStockLcb": 0.0106,
+    "boots": 96,
+    "matches": 101,
+    "protocol": "026 exact + H2H",
+    "protocolGroup": "026",
+    "status": "finished",
+    "latencyP50": 17.56,
+    "latencyP95": 19.87,
+    "amortizedP50": 4.39,
+    "notes": "Latency batch shape differs from 026.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 144.63957,
+      "damageTakenPerMin": 119.7136,
+      "stocksTakenPerMin": 0.99184,
+      "stocksLostPerMin": 0.88046,
+      "netDamageClusterLcb": 17.61953,
+      "netStockClusterLcb": 0.01062
+    },
+    "inference": {
+      "replanP50Ms": 17.56,
+      "replanP95Ms": 19.87,
+      "executionHorizon": 4,
+      "amortizedP50MsPerFrame": 4.39
+    }
+  },
+  {
+    "exp": "030",
+    "run": "ud4p5klw",
+    "family": "Separate IQL",
+    "variant": "scalar Q",
+    "paramsM": 25.455,
+    "ctx": 128,
+    "d": "p384×8 + critics256×4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 1.074,
+    "computePF": 164,
+    "computeNote": "lower bound",
+    "wallH": 4.44,
+    "throughput": 973,
+    "val": 0.4274,
+    "valName": "Q–return corr",
+    "netDmg": -51.529,
+    "netStock": -1.551,
+    "stockLcb": -1.708,
+    "clusterStockLcb": -1.676,
+    "boots": 96,
+    "matches": 146,
+    "protocol": "026 exact",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "Critics separate; actor still collapses.",
+    "examplesM": 8.389,
+    "optimizer": "Adam",
+    "lr": "3e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 92.34127,
+      "damageTakenPerMin": 143.86986,
+      "stocksTakenPerMin": 0.37441,
+      "stocksLostPerMin": 1.92552
+    },
+    "critic": {
+      "qReturnCorrelation": 0.42736,
+      "valueReturnCorrelation": 0.42146,
+      "qReturnMae": 0.30795
+    }
+  },
+  {
+    "exp": "030",
+    "run": "kxzc3m9a",
+    "family": "Separate IQL",
+    "variant": "HL-Gauss Q",
+    "paramsM": 25.481,
+    "ctx": 128,
+    "d": "p384×8 + critics256×4",
+    "batch": 512,
+    "steps": 16384,
+    "framesB": 1.074,
+    "computePF": 164.2,
+    "computeNote": "lower bound",
+    "wallH": 4.77,
+    "throughput": 1311,
+    "val": 0.4508,
+    "valName": "Q–return corr",
+    "netDmg": -54.994,
+    "netStock": -1.455,
+    "stockLcb": -1.605,
+    "clusterStockLcb": -1.573,
+    "boots": 96,
+    "matches": 146,
+    "protocol": "026 exact",
+    "protocolGroup": "026",
+    "status": "finished",
+    "notes": "No support clipping; actor still collapses.",
+    "examplesM": 8.389,
+    "optimizer": "Adam",
+    "lr": "3e-4",
+    "closedLoop": {
+      "damageDealtPerMin": 90.74703,
+      "damageTakenPerMin": 145.74093,
+      "stocksTakenPerMin": 0.41189,
+      "stocksLostPerMin": 1.86688
+    },
+    "critic": {
+      "qReturnCorrelation": 0.45081,
+      "valueReturnCorrelation": 0.4457,
+      "qReturnMae": 0.30596
+    }
+  },
+  {
+    "exp": "033",
+    "run": "feic18gt",
+    "family": "Parallel latent modes",
+    "variant": "K=8 best-of-K",
+    "paramsM": 14.885,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 1024,
+    "steps": 10240,
+    "framesB": 1.352,
+    "computePF": 120.7,
+    "wallH": 19.27,
+    "throughput": 181,
+    "val": 1.31076,
+    "valName": "oracle primary NLL",
+    "netDmg": null,
+    "netStock": null,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "not evaluated",
+    "protocolGroup": "none",
+    "status": "stopped",
+    "notes": "No outcome; oracle mode selection.",
+    "examplesM": 10.486,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  },
+  {
+    "exp": "033",
+    "run": "mz8dk2gh",
+    "family": "Parallel latent modes",
+    "variant": "K=1",
+    "paramsM": 14.884,
+    "ctx": 128,
+    "d": "384×8/h6",
+    "batch": 1024,
+    "steps": 16384,
+    "framesB": 2.147,
+    "computePF": 191.8,
+    "wallH": 5.85,
+    "throughput": 1056,
+    "val": 1.90535,
+    "valName": "primary NLL",
+    "netDmg": null,
+    "netStock": null,
+    "stockLcb": null,
+    "clusterStockLcb": null,
+    "boots": null,
+    "matches": null,
+    "protocol": "not evaluated",
+    "protocolGroup": "none",
+    "status": "finished",
+    "notes": "Parallel noncausal queries; no outcome.",
+    "examplesM": 16.777,
+    "optimizer": "Muon + AdamW",
+    "lr": "0.02 / 8.5e-4"
+  }
+]
+  </script>
+
+  <script>
+  (function () {
+    "use strict";
+    var NS = "http://www.w3.org/2000/svg";
+    var data = JSON.parse(document.getElementById("experiment-data").textContent);
+    var colors = {
+      "Interleaved state/action":"#7755a6",
+      "Temporal MTP":"#087f73",
+      "Temporal MTP + state aux":"#b48418",
+      "Independent MTP":"#3267a8",
+      "Attached IQL":"#b84235",
+      "Separate IQL":"#b84235",
+      "MC-AWR":"#d66f2f",
+      "Factored frame MTP":"#5e8b4b",
+      "BPE/RLE":"#8a6a49",
+      "Parallel latent modes":"#795e87",
+      "Frame GPT":"#587eb2",
+      "Frame GPT + group AR":"#587eb2"
+    };
+    function color(row) { return colors[row.family] || "#697773"; }
+    function fmt(v, n) {
+      if (v === null || v === undefined) return "—";
+      return Number(v).toFixed(n === undefined ? 2 : n);
+    }
+    function signed(v, n) {
+      if (v === null || v === undefined) return "—";
+      return (v >= 0 ? "+" : "") + Number(v).toFixed(n === undefined ? 2 : n);
+    }
+    function node(name, attrs, text) {
+      var x = document.createElementNS(NS, name);
+      Object.keys(attrs || {}).forEach(function (k) { x.setAttribute(k, attrs[k]); });
+      if (text !== undefined) x.textContent = text;
+      return x;
+    }
+    function htmlEscape(s) {
+      return String(s).replace(/[&<>"']/g, function(c) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]; });
+    }
+
+    var tbody = document.querySelector("#run-table tbody");
+    data.forEach(function (r) {
+      var tr = document.createElement("tr");
+      function metric(v, digits) {
+        if (v === null || v === undefined) return '<span class="na">—</span>';
+        return '<span class="' + (v >= 0 ? "pos" : "neg") + '">' + signed(v, digits) + "</span>";
+      }
+      var lcb = r.clusterStockLcb !== null && r.clusterStockLcb !== undefined ? r.clusterStockLcb : r.stockLcb;
+      var evalText = r.boots ? r.boots + "b / " + r.matches + "m" : (r.matches ? r.matches + "m" : "—");
+      var cells = [
+        htmlEscape(r.exp),
+        '<a class="mono nowrap" href="https://wandb.ai/ericyuegu/hal/runs/' + encodeURIComponent(r.run) + '">' + htmlEscape(r.run) + "</a>",
+        "<strong>" + htmlEscape(r.family) + "</strong><br><span class=note>" + htmlEscape(r.variant) + "</span>",
+        fmt(r.paramsM, 3) + "M",
+        htmlEscape(r.ctx),
+        htmlEscape(r.d),
+        htmlEscape(r.optimizer) + '<br><span class=note>' + htmlEscape(r.lr) + "</span>",
+        fmt(r.batch, 0),
+        fmt(r.steps, 0),
+        r.framesB === null ? "—" : fmt(r.framesB, 3) + "B",
+        r.computePF === null ? "—" : "≈" + fmt(r.computePF, 1) + " PF" + (r.computeNote ? " " + htmlEscape(r.computeNote) : ""),
+        r.wallH === null ? "—" : fmt(r.wallH, 2) + "h",
+        r.throughput === null ? "—" : fmt(r.throughput, 0) + "/s",
+        r.val === null ? "—" : fmt(r.val, 4) + '<br><span class=note>' + htmlEscape(r.valName) + "</span>",
+        metric(r.netDmg, 2),
+        metric(r.netStock, 3),
+        metric(lcb, 3),
+        r.latencyP50 === null || r.latencyP50 === undefined ? "—" : fmt(r.latencyP50, 2) + " ms",
+        evalText,
+        '<span class=protocol title="' + htmlEscape(r.notes || "") + '">' + htmlEscape(r.protocol) + "</span>"
+      ];
+      tr.innerHTML = cells.map(function(c) { return "<td>" + c + "</td>"; }).join("");
+      tbody.appendChild(tr);
+    });
+
+    function axes(svg, box, xLabel, yLabel, xTicks, yTicks, xScale, yScale) {
+      svg.appendChild(node("line",{x1:box.x,y1:box.y+box.h,x2:box.x+box.w,y2:box.y+box.h,stroke:"#8e958f"}));
+      svg.appendChild(node("line",{x1:box.x,y1:box.y,x2:box.x,y2:box.y+box.h,stroke:"#8e958f"}));
+      xTicks.forEach(function(t) {
+        var x=xScale(t);
+        svg.appendChild(node("line",{x1:x,y1:box.y,x2:x,y2:box.y+box.h,stroke:"#e4ded2"}));
+        svg.appendChild(node("text",{x:x,y:box.y+box.h+20,"text-anchor":"middle","font-size":"10",fill:"#65716d"},String(t)));
+      });
+      yTicks.forEach(function(t) {
+        var y=yScale(t);
+        svg.appendChild(node("line",{x1:box.x,y1:y,x2:box.x+box.w,y2:y,stroke:t===0?"#9ea49f":"#e4ded2","stroke-width":t===0?1.4:1}));
+        svg.appendChild(node("text",{x:box.x-8,y:y+4,"text-anchor":"end","font-size":"10",fill:"#65716d"},String(t)));
+      });
+      svg.appendChild(node("text",{x:box.x+box.w/2,y:box.y+box.h+42,"text-anchor":"middle","font-size":"11",fill:"#55625e"},xLabel));
+      var yl=node("text",{x:14,y:box.y+box.h/2,"text-anchor":"middle","font-size":"11",fill:"#55625e",transform:"rotate(-90 14 "+(box.y+box.h/2)+")"},yLabel);
+      svg.appendChild(yl);
+    }
+    function linear(a,b,c,d) { return function(v){ return c+(v-a)*(d-c)/(b-a); }; }
+    function logscale(a,b,c,d) { var la=Math.log10(a), lb=Math.log10(b); return function(v){ return c+(Math.log10(v)-la)*(d-c)/(lb-la); }; }
+    function labelPoint(svg,x,y,r,anchor) {
+      svg.appendChild(node("circle",{cx:x,cy:y,r:5.2,fill:color(r),stroke:"#fffdf8","stroke-width":1.5}));
+      svg.appendChild(node("text",{x:x+(anchor==="end"?-7:7),y:y-7,"text-anchor":anchor||"start","font-size":"9.5",fill:"#33413d"},r.exp));
+    }
+    function scatter(id, rows, xKey, yKey, options) {
+      var svg=document.getElementById(id), box={x:58,y:20,w:450,h:275};
+      var xScale=(options.logX?logscale:linear)(options.xMin,options.xMax,box.x,box.x+box.w);
+      var yScale=linear(options.yMin,options.yMax,box.y+box.h,box.y);
+      axes(svg,box,options.xLabel,options.yLabel,options.xTicks,options.yTicks,xScale,yScale);
+      rows.filter(function(r){return r[xKey]!==null&&r[xKey]!==undefined&&r[yKey]!==null&&r[yKey]!==undefined;}).forEach(function(r){
+        labelPoint(svg,xScale(r[xKey]),yScale(r[yKey]),r,r.exp==="030"?"end":"start");
+      });
+    }
+
+    var standard = data.filter(function(r){ return r.protocolGroup==="026"; });
+    var chartRows = standard.filter(function(r){ return r.netDmg!==null && ["013h","023","024","026","027","028","029","030"].indexOf(r.exp)>=0; });
+    (function closedLoop() {
+      var svg=document.getElementById("closed-loop-chart"), left=155, top=38, rowH=48, center=590, scaleD=5.2, scaleS=130;
+      svg.appendChild(node("line",{x1:center,y1:20,x2:center,y2:top+chartRows.length*rowH+10,stroke:"#76817d","stroke-width":1.4}));
+      [-60,-40,-20,0,20,40].forEach(function(v){
+        var x=center+v*scaleD;
+        svg.appendChild(node("line",{x1:x,y1:20,x2:x,y2:top+chartRows.length*rowH+10,stroke:v===0?"#89928e":"#e5dfd3"}));
+        svg.appendChild(node("text",{x:x,y:16,"text-anchor":"middle","font-size":"10"},String(v)));
+      });
+      chartRows.forEach(function(r,i){
+        var y=top+i*rowH;
+        var name=r.exp+" "+r.variant.replace(/ \/.*$/,"");
+        svg.appendChild(node("text",{x:left-10,y:y+5,"text-anchor":"end","font-size":"11","font-weight":"700"},name));
+        var xD=center+r.netDmg*scaleD;
+        svg.appendChild(node("line",{x1:center,y1:y-7,x2:xD,y2:y-7,stroke:"#087f73","stroke-width":8,"stroke-linecap":"round"}));
+        svg.appendChild(node("circle",{cx:xD,cy:y-7,r:4.5,fill:"#087f73"}));
+        var xS=center+r.netStock*scaleS;
+        svg.appendChild(node("line",{x1:center,y1:y+11,x2:xS,y2:y+11,stroke:"#d66f2f","stroke-width":8,"stroke-linecap":"round"}));
+        svg.appendChild(node("circle",{cx:xS,cy:y+11,r:4.5,fill:"#d66f2f"}));
+        if (r.netStockLo!==undefined) {
+          svg.appendChild(node("line",{x1:center+r.netStockLo*scaleS,y1:y+11,x2:center+r.netStockHi*scaleS,y2:y+11,stroke:"#6c4c35","stroke-width":1.5}));
+        }
+        svg.appendChild(node("text",{x:1040,y:y-3,"text-anchor":"end","font-size":"10",fill:"#087f73"},signed(r.netDmg,1)+" dmg"));
+        svg.appendChild(node("text",{x:1110,y:y+15,"text-anchor":"end","font-size":"10",fill:"#b45823"},signed(r.netStock,3)+" stock"));
+      });
+      svg.setAttribute("viewBox","0 0 1120 "+Math.max(500,top+chartRows.length*rowH+30));
+    })();
+
+    var perfRows=standard.filter(function(r){return r.computePF && r.netDmg!==null;});
+    var nllRows=standard.filter(function(r){return r.computePF && r.val!==null && r.valName.indexOf("NLL")>=0 && ["023","024","026","027","028"].indexOf(r.exp)>=0;});
+    scatter("compute-nll",nllRows,"computePF","val",{logX:true,xMin:65,xMax:230,yMin:.95,yMax:1.36,xTicks:[75,100,150,200],yTicks:[1.0,1.1,1.2,1.3],xLabel:"proxy training PFLOP (log)",yLabel:"reported primary NLL"});
+    scatter("compute-dmg",perfRows,"computePF","netDmg",{logX:true,xMin:65,xMax:230,yMin:-75,yMax:50,xTicks:[75,100,150,200],yTicks:[-60,-30,0,30],xLabel:"proxy training PFLOP (log)",yLabel:"net damage / min"});
+    scatter("compute-stock",perfRows,"computePF","netStock",{logX:true,xMin:65,xMax:230,yMin:-2.2,yMax:.4,xTicks:[75,100,150,200],yTicks:[-2,-1.5,-1,-.5,0],xLabel:"proxy training PFLOP (log)",yLabel:"net stocks / min"});
+    var lcbRows=perfRows.map(function(r){var q=Object.assign({},r);q.lcb=(r.clusterStockLcb!==null&&r.clusterStockLcb!==undefined)?r.clusterStockLcb:r.stockLcb;return q;}).filter(function(r){return r.lcb!==null;});
+    scatter("compute-lcb",lcbRows,"computePF","lcb",{logX:true,xMin:65,xMax:230,yMin:-2.2,yMax:.25,xTicks:[75,100,150,200],yTicks:[-2,-1.5,-1,-.5,0],xLabel:"proxy training PFLOP (log)",yLabel:"net-stock lower bound"});
+
+    (function dualScatter(id,xKey,xMin,xMax,xTicks,xLabel,logX) {
+      var svg=document.getElementById(id), box={x:58,y:20,w:450,h:300};
+      var xScale=(logX?logscale:linear)(xMin,xMax,box.x,box.x+box.w), yScale=linear(-75,50,box.y+box.h,box.y);
+      axes(svg,box,xLabel,"net damage/min (circle); stocks×25 (diamond)",xTicks,[-60,-30,0,30],xScale,yScale);
+      perfRows.forEach(function(r){
+        var x=xScale(r[xKey]), yd=yScale(r.netDmg), ys=yScale(r.netStock*25);
+        svg.appendChild(node("circle",{cx:x,cy:yd,r:4.8,fill:color(r),stroke:"#fff","stroke-width":1}));
+        svg.appendChild(node("path",{d:"M"+x+" "+(ys-5)+"L"+(x+5)+" "+ys+"L"+x+" "+(ys+5)+"L"+(x-5)+" "+ys+"Z",fill:color(r),stroke:"#fff","stroke-width":1}));
+        svg.appendChild(node("text",{x:x+6,y:yd-6,"font-size":"9"},r.exp));
+      });
+    })("params-performance","paramsM",6,28,[8,12,16,20,24,28],"parameters (M)",false);
+    (function(){
+      var rows=perfRows.filter(function(r){return r.framesB;});
+      var svg=document.getElementById("tokens-performance"),box={x:58,y:20,w:450,h:300},xs=linear(.3,2.3,box.x,box.x+box.w),ys=linear(-75,50,box.y+box.h,box.y);
+      axes(svg,box,"processed frame positions (B; not unique)","net damage/min (circle); stocks×25 (diamond)",[.5,1,1.5,2],[ -60,-30,0,30],xs,ys);
+      rows.forEach(function(r){var x=xs(r.framesB),yd=ys(r.netDmg),yst=ys(r.netStock*25);svg.appendChild(node("circle",{cx:x,cy:yd,r:4.8,fill:color(r)}));svg.appendChild(node("path",{d:"M"+x+" "+(yst-5)+"L"+(x+5)+" "+yst+"L"+x+" "+(yst+5)+"L"+(x-5)+" "+yst+"Z",fill:color(r)}));svg.appendChild(node("text",{x:x+6,y:yd-6,"font-size":"9"},r.exp));});
+    })();
+    scatter("params-nll",nllRows,"paramsM","val",{logX:false,xMin:6,xMax:27,yMin:.95,yMax:1.36,xTicks:[8,12,16,20,24],yTicks:[1.0,1.1,1.2,1.3],xLabel:"parameters (M)",yLabel:"reported primary NLL"});
+    scatter("params-lcb",lcbRows,"paramsM","lcb",{logX:false,xMin:6,xMax:27,yMin:-2.2,yMax:.25,xTicks:[8,12,16,20,24],yTicks:[-2,-1.5,-1,-.5,0],xLabel:"parameters (M)",yLabel:"net-stock lower bound"});
+    var nllTokenRows=nllRows.filter(function(r){return r.framesB;});
+    var lcbTokenRows=lcbRows.filter(function(r){return r.framesB;});
+    scatter("tokens-nll",nllTokenRows,"framesB","val",{logX:false,xMin:.3,xMax:2.3,yMin:.95,yMax:1.36,xTicks:[.5,1,1.5,2],yTicks:[1.0,1.1,1.2,1.3],xLabel:"processed frame positions (B)",yLabel:"reported primary NLL"});
+    scatter("tokens-lcb",lcbTokenRows,"framesB","lcb",{logX:false,xMin:.3,xMax:2.3,yMin:-2.2,yMax:.25,xTicks:[.5,1,1.5,2],yTicks:[-2,-1.5,-1,-.5,0],xLabel:"processed frame positions (B)",yLabel:"net-stock lower bound"});
+
+    (function iso() {
+      var svg=document.getElementById("isoflop-chart"),box={x:78,y:28,w:965,h:430},xs=logscale(5,35,box.x,box.x+box.w),ys=logscale(.5,12,box.y+box.h,box.y);
+      axes(svg,box,"model parameters (M, log)","processed Transformer-token positions (B, log)",[5,8,10,15,20,30],[.5,1,2,4,8,12],xs,ys);
+      [50,100,200,500].forEach(function(pf){
+        var pts=[];
+        for(var n=5;n<=35;n+=.5){var t=pf/(6*n);if(t>=.5&&t<=12)pts.push((pts.length?"L":"M")+xs(n)+" "+ys(t));}
+        svg.appendChild(node("path",{d:pts.join(" "),fill:"none",stroke:"#b9b2a5","stroke-dasharray":"5 4"}));
+        var labelN=30, labelT=pf/(6*labelN);
+        if(labelT>=.5&&labelT<=12) svg.appendChild(node("text",{x:xs(labelN)-5,y:ys(labelT)-5,"text-anchor":"end","font-size":"10",fill:"#777"},pf+" PF"));
+      });
+      data.filter(function(r){return r.computePF&&r.paramsM&&((r.transformerTokensB)||r.framesB)&&["none","legacy"].indexOf(r.protocolGroup)<0;}).forEach(function(r){
+        var t=r.transformerTokensB||r.framesB,x=xs(r.paramsM),y=ys(t);
+        labelPoint(svg,x,y,r,r.paramsM>20?"end":"start");
+      });
+    })();
+
+    (function latency(){
+      var svg=document.getElementById("latency-chart"),box={x:120,y:25,w:920,h:280},rows=[
+        {name:"micro b12 h4",replan:7.525,frame:1.881,c:"#3267a8"},
+        {name:"micro b16 h4",replan:7.542,frame:1.886,c:"#3267a8"},
+        {name:"micro b32 h4",replan:9.88,frame:2.470,c:"#3267a8"},
+        {name:"production p50",replan:13.51,frame:3.378,c:"#087f73"},
+        {name:"production p95",replan:14.28,frame:3.570,c:"#d66f2f"},
+        {name:"production p99",replan:14.71,frame:3.678,c:"#b84235"}
+      ],xs=linear(0,16,box.x,box.x+box.w);
+      [0,4,8,12,16].forEach(function(t){var x=xs(t);svg.appendChild(node("line",{x1:x,y1:box.y,x2:x,y2:box.y+box.h,stroke:"#e4ded2"}));svg.appendChild(node("text",{x:x,y:box.y+box.h+25,"text-anchor":"middle","font-size":"10"},t+" ms"));});
+      rows.forEach(function(r,i){var y=box.y+25+i*42;svg.appendChild(node("text",{x:box.x-12,y:y+4,"text-anchor":"end","font-size":"11"},r.name));svg.appendChild(node("rect",{x:box.x,y:y-10,width:xs(r.replan)-box.x,height:16,rx:4,fill:r.c,opacity:.85}));svg.appendChild(node("text",{x:xs(r.replan)+7,y:y+3,"font-size":"10"},r.replan.toFixed(2)+" ms/replan · "+r.frame.toFixed(2)+" ms/frame"));});
+      svg.appendChild(node("text",{x:box.x+box.w/2,y:box.y+box.h+55,"text-anchor":"middle","font-size":"11",fill:"#55625e"},"latency (four executed frames per replan)"));
+    })();
+  })();
+  </script>
+</body>
+</html>

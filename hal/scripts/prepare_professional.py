@@ -12,13 +12,13 @@ This command does not materialize or upload MDS.  It emits, per player:
 * ``index.failures.jsonl``: parser failures from all archives;
 * ``deduped-index.jsonl``: deterministic SHA-1 deduplication;
 * ``paths.txt``: the standard quality-filtered replay paths;
-* ``rank-overrides.jsonl``: owner-only ``PRO`` labels when identity is known;
+* ``rank-overrides.jsonl``: per-side rank labels from explicit corpus policy;
 * ``professional-report.json``: source, dedupe, filter, and label coverage.
 
-The rank override is conservative.  It labels the archive owner only when a
-name/connect-code identity can be linked across the corpus.  An opponent is
-never promoted merely because they appear in a professional player's archive,
-and replays with no usable identity metadata remain ``UNKNOWN``.
+The default rank override is conservative. It labels the archive owner only
+when a name/connect-code identity can be linked across the corpus. Explicit
+per-player policies cover documented exceptions, such as anonymous offline
+sets whose participants are known to be at least Master-ranked.
 """
 
 from __future__ import annotations
@@ -145,7 +145,18 @@ _EXTRA_ALIASES: dict[str, set[str]] = {
     "m2k": {"m2k", "mew2king"},
     "mang0": {"mango", "mang0"},
     "bobbybigballz": {"bobbybigballz", "bbb"},
+    "friend": {"regularfriend", "ybfriend"},
     "iliketurtles": {"iliketurtles", "turtles"},
+}
+
+# Franz's archive contains many anonymous offline sets. The archive owner is a
+# Dr. Mario main, so a unique Dr. Mario is useful owner evidence when identity
+# metadata is absent. The archive's known participants are at least Master.
+_OWNER_CHARACTER_FALLBACKS: dict[str, frozenset[int]] = {
+    "franz": frozenset({21}),
+}
+_CORPUS_FALLBACK_RANKS: dict[str, Rank] = {
+    "franz": Rank.MASTER,
 }
 
 
@@ -206,8 +217,14 @@ def _owner_component(slug: str, entries: list[ReplayIndexEntry]) -> tuple[set[st
     ]
     method = "alias"
     owner: str | None = None
-    if len(matches) == 1:
-        owner = matches[0]
+    if matches:
+        ranked_matches = sorted(matches, key=component_counts.__getitem__, reverse=True)
+        best = ranked_matches[0]
+        second_count = component_counts[ranked_matches[1]] if len(ranked_matches) > 1 else 0
+        if component_counts[best] >= 2 * max(1, second_count):
+            owner = best
+        else:
+            method = "ambiguous-alias"
     elif not matches and component_counts:
         # Some folders use a legal name while the replay metadata uses a tag.
         # Accept a dominant identity only when it appears in at least half the
@@ -218,8 +235,6 @@ def _owner_component(slug: str, entries: list[ReplayIndexEntry]) -> tuple[set[st
         if best_count >= max(3, len(entries) // 2) and best_count >= 2 * max(1, second_count):
             owner = best
             method = "dominant"
-    elif len(matches) > 1:
-        method = "ambiguous-alias"
     else:
         method = "unresolved"
 
@@ -246,17 +261,27 @@ def write_owner_rank_overrides(
     paths = [line.strip() for line in selected_paths.read_text().splitlines() if line.strip()]
     selected = [entries[path] for path in paths]
     owner_tokens, identity_report = _owner_component(slug, selected)
+    character_fallbacks = _OWNER_CHARACTER_FALLBACKS.get(slug, frozenset())
+    corpus_fallback_rank = _CORPUS_FALLBACK_RANKS.get(slug, Rank.UNKNOWN)
 
     rows: list[dict[str, object]] = []
     labeled_replays = 0
+    character_fallback_labeled_replays = 0
     ambiguous_replays = 0
     for entry in selected:
         owner_ports = [player.port for player in entry.players if _tokens(player) & owner_tokens]
+        used_character_fallback = False
+        if len(owner_ports) != 1 and character_fallbacks:
+            character_ports = [player.port for player in entry.players if player.character in character_fallbacks]
+            if len(character_ports) == 1:
+                owner_ports = character_ports
+                used_character_fallback = True
+
+        ranks = [corpus_fallback_rank, corpus_fallback_rank]
         if len(owner_ports) == 1:
             # p1/p2 are the two occupied physical ports in ascending order,
             # not literal controller ports 1 and 2 (see extract_replay).
             occupied = sorted(player.port for player in entry.players)
-            ranks = [Rank.UNKNOWN, Rank.UNKNOWN]
             try:
                 logical_port = occupied.index(owner_ports[0])
             except ValueError:
@@ -264,6 +289,7 @@ def write_owner_rank_overrides(
             if logical_port in (0, 1):
                 ranks[logical_port] = Rank.PRO
                 labeled_replays += 1
+                character_fallback_labeled_replays += used_character_fallback
             rows.append(
                 {
                     "path": entry.path,
@@ -276,8 +302,8 @@ def write_owner_rank_overrides(
             rows.append(
                 {
                     "path": entry.path,
-                    "p1_rank": int(Rank.UNKNOWN),
-                    "p2_rank": int(Rank.UNKNOWN),
+                    "p1_rank": int(ranks[0]),
+                    "p2_rank": int(ranks[1]),
                 }
             )
 
@@ -287,8 +313,12 @@ def write_owner_rank_overrides(
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     return {
         **identity_report,
+        "character_fallbacks": sorted(character_fallbacks),
+        "corpus_fallback_rank": int(corpus_fallback_rank),
         "selected_replays": len(selected),
         "owner_labeled_replays": labeled_replays,
+        "character_fallback_labeled_replays": character_fallback_labeled_replays,
+        "fully_ranked_replays": len(selected) if corpus_fallback_rank != Rank.UNKNOWN else 0,
         "unlabeled_replays": len(selected) - labeled_replays,
         "ambiguous_replays": ambiguous_replays,
     }

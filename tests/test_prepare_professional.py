@@ -31,10 +31,10 @@ def _entry(path: str, sha1: str, players: list[PlayerEntry]) -> ReplayIndexEntry
     )
 
 
-def _player(port: int, name: str | None, code: str | None) -> PlayerEntry:
+def _player(port: int, name: str | None, code: str | None, character: int = 1) -> PlayerEntry:
     return PlayerEntry(
         port=port,
-        character=1,
+        character=character,
         costume=0,
         player_type="HUMAN",
         code=code,
@@ -114,6 +114,82 @@ def test_owner_rank_uses_logical_port_order_and_leaves_missing_unknown(tmp_path:
     assert '"p2_rank": 0' in rows[1]
     assert report["owner_labeled_replays"] == 1
     assert report["unlabeled_replays"] == 1
+
+
+def test_friend_alias_prefers_dominant_matching_component(tmp_path: Path) -> None:
+    index = tmp_path / "index.jsonl"
+    paths = tmp_path / "paths.txt"
+    overrides = tmp_path / "ranks.jsonl"
+    entries = [
+        _entry(
+            f"archive://one!{game}.slp",
+            str(game),
+            [_player(1, "RegularFriend", "FRIE#438"), _player(2, f"Opponent{game}", None)],
+        )
+        for game in range(4)
+    ]
+    entries.append(
+        _entry(
+            "archive://one!collision.slp",
+            "collision",
+            [_player(1, "Friend", "ROY#296"), _player(2, "Opponent", None)],
+        )
+    )
+    write_jsonl(index, entries)
+    paths.write_text("\n".join(entry.path for entry in entries) + "\n")
+
+    report = write_owner_rank_overrides("friend", index, paths, overrides)
+
+    assert report["method"] == "alias"
+    assert report["owner_labeled_replays"] == 4
+    assert "name:regularfriend" in report["owner_tokens"]
+
+
+def test_franz_uses_pro_owner_and_master_corpus_fallback(tmp_path: Path) -> None:
+    index = tmp_path / "index.jsonl"
+    paths = tmp_path / "paths.txt"
+    overrides = tmp_path / "ranks.jsonl"
+    entries = [
+        _entry(
+            "archive://one!identified.slp",
+            "identified",
+            [_player(1, "Opponent", None), _player(2, "Franz", "FLOW#242")],
+        ),
+        _entry(
+            "archive://one!doctor.slp",
+            "doctor",
+            [_player(1, None, None, character=21), _player(2, None, None, character=2)],
+        ),
+        _entry(
+            "archive://one!anonymous.slp",
+            "anonymous",
+            [_player(1, None, None, character=1), _player(2, None, None, character=2)],
+        ),
+    ]
+    write_jsonl(index, entries)
+    paths.write_text("\n".join(entry.path for entry in entries) + "\n")
+
+    report = write_owner_rank_overrides("franz", index, paths, overrides)
+
+    rows = [json.loads(line) for line in overrides.read_text().splitlines()]
+    assert rows[0] == {
+        "path": entries[0].path,
+        "p1_rank": int(Rank.MASTER),
+        "p2_rank": int(Rank.PRO),
+    }
+    assert rows[1] == {
+        "path": entries[1].path,
+        "p1_rank": int(Rank.PRO),
+        "p2_rank": int(Rank.MASTER),
+    }
+    assert rows[2] == {
+        "path": entries[2].path,
+        "p1_rank": int(Rank.MASTER),
+        "p2_rank": int(Rank.MASTER),
+    }
+    assert report["owner_labeled_replays"] == 2
+    assert report["character_fallback_labeled_replays"] == 1
+    assert report["fully_ranked_replays"] == 3
 
 
 def test_corpus_rank_mode_labels_both_sides_explicitly(tmp_path: Path) -> None:
