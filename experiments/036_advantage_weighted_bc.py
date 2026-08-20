@@ -1,14 +1,12 @@
 """Advantage-weighted behavior cloning on the experiment-026 policy.
 
-This file is a full copy of experiments/026_temporal_mtp.py plus the treatment
-(experiments stay self-contained; they never import each other). The loader
-labels every replay with full-episode discounted returns before window
-sampling. A small value head on detached trunk states fits those returns, and
-the deployed-chunk loss at each context position is weighted by
-``w = min(exp(A / beta), w_max)`` with ``A = G_{t+1} - V(s_t)``, normalized to
-mean 1 over the optimizer batch. Weights change the backprop objective only;
-every logged train and validation metric stays unweighted, so arms compare
-directly against the 026 control.
+Replays are labeled with full-episode discounted returns before window
+sampling. A value head fits those returns, and the policy loss is weighted by
+``min(exp((G_{t+1} - V(s_t)) / beta), w_max)``. The weights are normalized to
+mean one; logged NLLs remain unweighted and comparable with experiment 026.
+
+Experiments are self-contained, so the 026 model and evaluation code is copied
+here rather than imported.
 
 Run:
     uv run experiments/036_advantage_weighted_bc.py
@@ -29,7 +27,6 @@ import math
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
-from collections.abc import Iterator
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -110,6 +107,8 @@ _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
 _AUDIT_BETAS = (0.4, 0.8, 1.6, 3.2)
+_INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32)
+_FINAL_DIAG_EXEC_HORIZON = 6
 
 GROUP_NAMES: tuple[str, ...] = ("buttons", "main_stick", "c_stick", "triggers")
 GROUP_VOCABS: tuple[int, ...] = (
@@ -136,16 +135,12 @@ _MISC_AS = "misc_as"
 
 @dataclass
 class TrainConfig:
-    # Causal observation trunk.  The 5090 shakedown may change these together
-    # to 256/4, but there is deliberately no intermediate width.
     d_model: int = 384
     n_layers: int = 8
     n_heads: int = 6
     attn_window: int = 0
-    require_flex: bool = False
     L_ctx: int = 128
 
-    decoder_arch_version: int = 3
     sample_chunk_length: int = 20
     head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     temporal_d_model: int = 128
@@ -160,7 +155,6 @@ class TrainConfig:
     # False reproduces 026's decoder behavior.
     temporal_state_film: bool = False
     aux_loss_weight: float = 1.0
-    group_order: tuple[str, ...] = GROUP_ORDER
 
     action_vocab: int = 1024
     action_state_embed_dim: int = 48
@@ -171,10 +165,7 @@ class TrainConfig:
     observation_bundle: str = "base"  # or v6_lean
 
     exec_horizon: int = 4
-    final_diag_exec_horizon: int = 6
-    decode_temp: float = 1.0
     inference_mode: str = "compiled"  # explicit "eager" is for debugging
-    inference_buckets: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
     # Hardware-derived by default. An explicit power of two is a reproducibility
     # or memory-pressure override, not an architecture parameter.
     compiled_inference_bucket: int | None = None
@@ -182,7 +173,6 @@ class TrainConfig:
     seed: int = 0
     eval_seed: int = 0
     batch_size: int = 512
-    grad_accum_steps: int = 1
     muon_lr: float = 0.02
     adam_lr: float = 8.5e-4
     weight_decay: float = 0.01
@@ -194,7 +184,6 @@ class TrainConfig:
     compile_temporal: bool = True
 
     wandb_log_code: bool = True
-    wandb_grad_every: int = 1024
     val_every: int = 1024
     val_n_samples: int = 1192
     val_batch_size: int = 128
@@ -207,7 +196,6 @@ class TrainConfig:
     eval_max_parallel: int | None = 32
 
     data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
-    compact_data: bool = True
     mds_schema_version: int = 7
     cache_limit_gb: int = 160
     shuffle_block_size: int = 2000
@@ -220,7 +208,6 @@ class TrainConfig:
     prefetch_batches: int = 4
     push_to_r2: bool = True
 
-    experiment_id: str = _EXPERIMENT_ID
     # "primary" weights only the dense-prefix (deployed chunk) loss; "all" also
     # weights every auxiliary offset. An arm axis, together with head_offsets.
     advantage_scope: str = "primary"
@@ -259,14 +246,11 @@ def validate_config(cfg: TrainConfig) -> None:
         "action_embed_dim": cfg.action_embed_dim,
         "offset_embed_dim": cfg.offset_embed_dim,
         "batch_size": cfg.batch_size,
-        "grad_accum_steps": cfg.grad_accum_steps,
         "max_steps": cfg.max_steps,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    if cfg.decoder_arch_version != 3:
-        raise ValueError(f"unsupported decoder_arch_version={cfg.decoder_arch_version}")
     if cfg.d_model % cfg.n_heads or cfg.temporal_d_model % cfg.temporal_heads:
         raise ValueError("model dimensions must be divisible by their head counts")
     if (cfg.temporal_d_model // cfg.temporal_heads) % 2:
@@ -278,18 +262,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("head_offsets extend beyond sample_chunk_length")
     if offsets[:6] != (1, 2, 3, 4, 5, 6):
         raise ValueError("the live four/six-frame decoders require a dense 1..6 prefix")
-    if cfg.group_order != GROUP_ORDER:
-        raise ValueError(f"group_order must be {GROUP_ORDER}, got {cfg.group_order}")
-    if cfg.batch_size % cfg.grad_accum_steps:
-        raise ValueError("batch_size must be divisible by grad_accum_steps")
-    if cfg.exec_horizon not in (4, 6) or cfg.final_diag_exec_horizon != 6:
-        raise ValueError("execution horizons are restricted to the unrolled four/six-frame decoders")
-    if cfg.decode_temp != 1.0:
-        raise ValueError("experiment 026 freezes sampling temperature at 1")
+    if cfg.exec_horizon not in (4, 6):
+        raise ValueError("exec_horizon must be 4 or 6")
     if cfg.inference_mode not in ("compiled", "eager"):
         raise ValueError("inference_mode must be 'compiled' or 'eager'")
-    if cfg.inference_buckets != (1, 2, 4, 8, 16, 32):
-        raise ValueError("inference_buckets are frozen to (1,2,4,8,16,32)")
     if cfg.compiled_inference_bucket is not None and (
         cfg.compiled_inference_bucket < 1 or cfg.compiled_inference_bucket & (cfg.compiled_inference_bucket - 1)
     ):
@@ -304,12 +280,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("aux_loss_weight must be finite and non-negative")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
-    if cfg.reservoir_capacity < 2 * micro_batch_size(cfg):
-        raise ValueError("reservoir_capacity must be at least twice the micro-batch size")
+    if cfg.reservoir_capacity < 2 * cfg.batch_size:
+        raise ValueError("reservoir_capacity must be at least twice the batch size")
     if cfg.advantage_scope not in ("primary", "all"):
         raise ValueError(f"advantage_scope must be 'primary' or 'all', got {cfg.advantage_scope!r}")
-    if cfg.grad_accum_steps != 1:
-        raise ValueError("advantage weights normalize to mean 1 over ONE optimizer batch; grad_accum_steps must be 1")
     if not 0.0 < cfg.awr_gamma < 1.0:
         raise ValueError(f"awr_gamma must be in (0, 1), got {cfg.awr_gamma}")
     if not math.isfinite(cfg.awr_beta) or cfg.awr_beta <= 0:
@@ -322,12 +296,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(f"awr_value_loss_weight must be finite and >= 0, got {cfg.awr_value_loss_weight}")
     if cfg.value_head_hidden_dim <= 0:
         raise ValueError(f"value_head_hidden_dim must be positive, got {cfg.value_head_hidden_dim}")
-    if not cfg.compact_data:
-        raise ValueError("036 reads the compact policy replay stream; compact_data must be true")
-
-
-def micro_batch_size(cfg: TrainConfig) -> int:
-    return cfg.batch_size // cfg.grad_accum_steps
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
@@ -354,7 +322,7 @@ def _planned_inference_programs(cfg: TrainConfig) -> tuple[tuple[int, int], ...]
     scheduled = (
         (cfg.eval_n_matchups, cfg.exec_horizon),
         (cfg.final_eval_n_matchups, cfg.exec_horizon),
-        (cfg.final_diag_n_matchups, cfg.final_diag_exec_horizon),
+        (cfg.final_diag_n_matchups, _FINAL_DIAG_EXEC_HORIZON),
     )
     return tuple(sorted({(_eval_inference_bucket(cfg, n), horizon) for n, horizon in scheduled}))
 
@@ -633,6 +601,24 @@ class CausalTemporalDecoder(nn.Module):
             shift = shift.unsqueeze(-2)
         return states * (1.0 + scale) + shift
 
+    def _decode_step(
+        self,
+        previous: Tensor,
+        offset: int,
+        state_bias: Tensor,
+        film: tuple[Tensor, Tensor] | None,
+        caches: list[tuple[Tensor, Tensor] | None],
+    ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
+        """Advance the temporal chain by one selected frame offset."""
+        offsets = torch.full((previous.shape[0],), offset, device=previous.device, dtype=torch.long)
+        state = state_bias + self._step_features(previous, offsets)
+        next_caches: list[tuple[Tensor, Tensor] | None] = []
+        for block, past in zip(self.blocks, caches, strict=True):
+            state, present = block.forward_step(state, past)
+            next_caches.append(present)
+        state = self._apply_film(decoder_rmsnorm(state), film)
+        return state, next_caches
+
     def teacher_forced_states(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> Tensor:
         expected = (*hidden.shape[:2], len(self.head_offsets), N_GROUPS)
         if observed.shape != (*hidden.shape[:2], N_GROUPS) or targets.shape != expected:
@@ -699,14 +685,7 @@ class CausalTemporalDecoder(nn.Module):
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         out: list[dict[str, Tensor]] = []
         for depth, offset in enumerate(self.head_offsets):
-            offset_tensor = torch.full((hidden.shape[0],), offset, device=hidden.device, dtype=torch.long)
-            state = state_bias + self._step_features(previous, offset_tensor)
-            next_caches = []
-            for block, past in zip(self.blocks, caches, strict=True):
-                state, present = block.forward_step(state, past)
-                next_caches.append(present)
-            caches = next_caches
-            state = self._apply_film(decoder_rmsnorm(state), film)
+            state, caches = self._decode_step(previous, offset, state_bias, film, caches)
             target = targets[:, depth]
             embedded = self.codec.embed_groups(target)
             group_logits = {
@@ -742,14 +721,7 @@ class CausalTemporalDecoder(nn.Module):
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         frames: list[Tensor] = []
         for depth, offset in enumerate(offsets):
-            offset_tensor = torch.full((hidden.shape[0],), offset, device=hidden.device, dtype=torch.long)
-            state = state_bias + self._step_features(previous, offset_tensor)
-            next_caches = []
-            for block, past in zip(self.blocks, caches, strict=True):
-                state, present = block.forward_step(state, past)
-                next_caches.append(present)
-            caches = next_caches
-            state = self._apply_film(decoder_rmsnorm(state), film)
+            state, caches = self._decode_step(previous, offset, state_bias, film, caches)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
@@ -782,14 +754,7 @@ class CausalTemporalDecoder(nn.Module):
         frames: list[Tensor] = []
         all_logits: list[dict[str, Tensor]] = []
         for offset in self.head_offsets:
-            offset_tensor = torch.full((hidden.shape[0],), offset, device=hidden.device, dtype=torch.long)
-            state = state_bias + self._step_features(previous, offset_tensor)
-            next_caches = []
-            for block, past in zip(self.blocks, caches, strict=True):
-                state, present = block.forward_step(state, past)
-                next_caches.append(present)
-            caches = next_caches
-            state = self._apply_film(decoder_rmsnorm(state), film)
+            state, caches = self._decode_step(previous, offset, state_bias, film, caches)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             frame_logits: dict[str, Tensor] = {}
@@ -813,7 +778,6 @@ class GPT(nn.Module):
         self.cfg = cfg
         self.L_chunk = cfg.sample_chunk_length
         self.head_offsets = tuple(cfg.head_offsets)
-        self.group_order = tuple(cfg.group_order)
         self.codec = StructuredControllerCodec(cfg.action_embed_dim)
         self.cat_specs = {**CAT_FEATURES, "action": (cfg.action_vocab, cfg.action_state_embed_dim)}
         self.cat_embeds = nn.ModuleDict(
@@ -849,7 +813,6 @@ class GPT(nn.Module):
                 n_heads=cfg.n_heads,
                 L_ctx=cfg.L_ctx,
                 attn_window=cfg.attn_window,
-                require_flex=cfg.require_flex,
             )
         )
         self.temporal = CausalTemporalDecoder(cfg, self.codec)
@@ -918,7 +881,7 @@ def dequantize(model: GPT, indices: Tensor) -> Tensor:
     return model.codec.dequantize(indices)
 
 
-def prepared_targets(model: GPT, batch: TrainBatch) -> tuple[Tensor, Tensor, Tensor]:
+def prepared_targets(model: GPT, batch: TrainBatch | AWRBatch) -> tuple[Tensor, Tensor, Tensor]:
     """Quantize history+future exactly once, then align every selected offset."""
     if batch.target.shape[1] < model.L_chunk:
         raise ValueError(f"target contains {batch.target.shape[1]} frames, expected {model.L_chunk}")
@@ -964,14 +927,11 @@ def objective(parts: ActionLoss, aux_loss_weight: float = 1.0) -> Tensor:
 
 @dataclass(frozen=True, slots=True)
 class AWRBatch:
-    """An unchanged 026-style batch plus the ego's return target, aligned to G_{t+1}.
+    """A policy batch with return targets aligned to the next frame.
 
-    ``returns[b, t]`` is the discounted return from the first frame the action
-    predicted at context position ``t`` can affect. ``eligible[b, t]`` is False
-    on truncated replays (unknown return tail) and on left padding; those rows
-    keep actor weight 1 and take no value loss. Truncated returns are NaN, so
-    consumers must select by ``eligible`` with boolean indexing, never by
-    multiplication.
+    Ineligible positions are padding or truncated returns. They keep policy
+    weight one and take no value loss. Their return may be NaN, so select them
+    with ``eligible`` rather than masking by multiplication.
     """
 
     batch: TrainBatch
@@ -1010,20 +970,15 @@ class AWRBatch:
         self.eligible.record_stream(stream)
 
     def valid_rows(self, valid: Tensor) -> tuple[Tensor, Tensor]:
-        """Returns and eligibility flattened by the SAME mask the NLLs use."""
-        flat = valid.reshape(-1)
-        return self.returns.reshape(-1)[flat], self.eligible.reshape(-1)[flat]
+        """Select the return rows used by the policy loss."""
+        return self.returns[valid], self.eligible[valid]
 
 
 def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> AWRBatch:
-    """Attach the one-frame-shifted return target to a normal training batch.
-
-    The slice ``[:, 1 : L_ctx + 1]`` pairs context position ``t`` with
-    ``G_{t+1}``; the window is ``L_ctx + L_chunk`` frames long, so the index
-    always exists.
-    """
-    returns = np.stack([window[EGO_RETURN] for window in windows])[:, 1 : L_ctx + 1]
-    eligible = np.stack([window[EGO_RETURN_VALID] for window in windows])[:, 1 : L_ctx + 1]
+    """Attach ``G_{t+1}`` and its validity mask to each context position."""
+    next_frames = slice(1, L_ctx + 1)
+    returns = np.stack([window[EGO_RETURN] for window in windows])[:, next_frames]
+    eligible = np.stack([window[EGO_RETURN_VALID] for window in windows])[:, next_frames]
     return AWRBatch(
         batch=batch,
         returns=torch.from_numpy(np.ascontiguousarray(returns)),
@@ -1034,23 +989,17 @@ def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> 
 def advantage_weights(
     advantage: Tensor, eligible: Tensor, *, beta: float, weight_max: float
 ) -> tuple[Tensor, dict[str, Tensor]]:
-    """AWR weights ``min(exp(A / beta), w_max)``, eligible rows normalized to mean 1.
+    """Compute capped AWR weights with mean one over eligible positions.
 
-    The math runs in log space: ``A / beta`` is clipped at ``log(w_max)`` before
-    exponentiation, and the mean-1 normalization subtracts
-    ``logsumexp(q) - log(n)``, so an all-negative advantage batch still yields
-    finite mean-1 weights instead of underflowing to 0/0. ``w_max`` caps the raw
-    weight only; the normalized maximum can exceed it and is reported, never
-    clipped again (the E5 rule). Truncated rows keep weight 1, so the whole
-    batch keeps mean weight 1 and 026's gradient scale. Eligible rows are
-    selected by boolean index, so their NaN-return neighbors never enter
-    arithmetic.
+    Log-space normalization avoids underflow. The cap applies before
+    normalization, so the final maximum may exceed ``weight_max``. Ineligible
+    positions keep weight one.
     """
     if advantage.requires_grad:
         raise ValueError("AWR weights must come from a DETACHED advantage; the policy loss never trains V")
     if advantage.shape != eligible.shape:
         raise ValueError(f"advantage {tuple(advantage.shape)} and eligibility {tuple(eligible.shape)} must align")
-    weight = torch.ones_like(advantage, dtype=torch.float32)
+    weights = torch.ones_like(advantage, dtype=torch.float32)
     zero = torch.zeros((), device=advantage.device)
     stats = {
         "advantage_mean": zero,
@@ -1062,22 +1011,25 @@ def advantage_weights(
     }
     n_eligible = int(eligible.sum())
     if n_eligible == 0:
-        return weight, stats
-    values = advantage[eligible].float()
-    if not torch.isfinite(values).all():
+        return weights, stats
+
+    eligible_advantage = advantage[eligible].float()
+    if not torch.isfinite(eligible_advantage).all():
         raise FloatingPointError("advantage contains a non-finite value on an eligible row")
-    log_cap = math.log(weight_max)
-    q = (values / beta).clamp(max=log_cap)
-    scaled = torch.exp(q - (torch.logsumexp(q, dim=0) - math.log(n_eligible)))
-    weight[eligible] = scaled
+
+    max_log_weight = math.log(weight_max)
+    log_weights = (eligible_advantage / beta).clamp(max=max_log_weight)
+    log_mean_weight = torch.logsumexp(log_weights, dim=0) - math.log(n_eligible)
+    normalized_weights = torch.exp(log_weights - log_mean_weight)
+    weights[eligible] = normalized_weights
     stats.update(
-        advantage_mean=values.mean(),
-        advantage_std=values.std(correction=0),
-        weight_ess=scaled.sum().square() / (n_eligible * scaled.square().sum()),
-        weight_clip_frac=(q >= log_cap).float().mean(),
-        weight_norm_max=scaled.max(),
+        advantage_mean=eligible_advantage.mean(),
+        advantage_std=eligible_advantage.std(correction=0),
+        weight_ess=normalized_weights.sum().square() / (n_eligible * normalized_weights.square().sum()),
+        weight_clip_frac=(log_weights >= max_log_weight).float().mean(),
+        weight_norm_max=normalized_weights.max(),
     )
-    return weight, stats
+    return weights, stats
 
 
 def advantage_weighted_objective(
@@ -1106,11 +1058,13 @@ def advantage_weighted_objective(
         raise ValueError("one weight is required per valid prefix")
     if weight.requires_grad:
         raise ValueError("objective weights must be detached")
-    joint = nll.float().sum(dim=-1)
-    scaled = weight.float()[:, None]
-    primary = (joint[:, :n_primary] * scaled).sum() / (valid_prefixes * n_primary)
-    aux = joint[:, n_primary:] * scaled if scope == "all" else joint[:, n_primary:]
-    auxiliary = aux.sum() / (valid_prefixes * (n_offsets - n_primary))
+    joint_nll = nll.float().sum(dim=-1)
+    weights = weight.float()[:, None]
+    primary = (joint_nll[:, :n_primary] * weights).sum() / (valid_prefixes * n_primary)
+    auxiliary_nll = joint_nll[:, n_primary:]
+    if scope == "all":
+        auxiliary_nll = auxiliary_nll * weights
+    auxiliary = auxiliary_nll.sum() / (valid_prefixes * (n_offsets - n_primary))
     return primary + aux_loss_weight * auxiliary
 
 
@@ -1124,13 +1078,10 @@ def microbatch_loss(
     trunk_fn: Callable,
     temporal_fn: Callable,
 ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-    """One optimizer batch's loss: weighted BC, plus the value MSE.
+    """Compute the weighted policy loss and value loss for one batch.
 
-    The compiled trunk and temporal functions run unchanged; the value head,
-    the weights, and the warm-up branch all live outside them, so activation
-    at ``awr_warmup_steps`` triggers no recompilation. ``train/weighted_objective``
-    reports the actor term alone (bits); the value MSE is a separate unit and a
-    separate key.
+    Weighting stays outside the compiled policy functions, so crossing the
+    warmup boundary does not trigger recompilation. Logged NLLs are unweighted.
     """
     if not isinstance(batch, AWRBatch):
         raise TypeError(f"advantage training needs an AWRBatch, got {type(batch).__name__}")
@@ -1141,31 +1092,32 @@ def microbatch_loss(
     nll = dense_nll[valid]
     if nll.shape[0] != valid_prefixes:
         raise RuntimeError(f"GPU valid-prefix count {nll.shape[0]} != step normalizer {valid_prefixes}")
-    state = hidden.detach() if cfg.awr_value_detach_trunk else hidden
-    value = model.value_head(state[valid].float()).squeeze(-1)
-    returns_flat, eligible = batch.valid_rows(valid)
+    value_input = hidden.detach() if cfg.awr_value_detach_trunk else hidden
+    value = model.value_head(value_input[valid].float()).squeeze(-1)
+    returns, eligible = batch.valid_rows(valid)
     if bool(eligible.any()):
-        value_loss = F.mse_loss(value[eligible], returns_flat[eligible])
+        value_loss = F.mse_loss(value[eligible], returns[eligible])
     else:
         value_loss = torch.zeros((), device=nll.device)
-    advantage = (returns_flat - value).detach()
-    weight, stats = advantage_weights(advantage, eligible, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max)
+
+    advantage = (returns - value).detach()
+    weights, stats = advantage_weights(advantage, eligible, beta=cfg.awr_beta, weight_max=cfg.awr_weight_max)
     active = step >= cfg.awr_warmup_steps
     if not active:
-        weight = torch.ones_like(weight)
-    actor = advantage_weighted_objective(
+        weights.fill_(1.0)
+    policy_loss = advantage_weighted_objective(
         nll,
-        weight,
+        weights,
         scope=cfg.advantage_scope,
         valid_prefixes=valid_prefixes,
         aux_loss_weight=cfg.aux_loss_weight,
     )
-    loss = actor + cfg.awr_value_loss_weight * value_loss
+    loss = policy_loss + cfg.awr_value_loss_weight * value_loss
     if not torch.isfinite(loss):
         raise FloatingPointError(f"step {step}: non-finite advantage-weighted loss {loss}")
     extra = {
         "train/value_loss": value_loss.detach(),
-        "train/weighted_objective": actor.detach() / _LN2,
+        "train/weighted_objective": policy_loss.detach() / _LN2,
         "awr/active": torch.tensor(float(active)),
         **{f"train/{name}": value.detach() for name, value in stats.items()},
     }
@@ -1411,7 +1363,7 @@ class BF16Inference:
     ) -> None:
         self.model = model
         self.cfg = cfg
-        self.buckets = tuple(cfg.inference_buckets)
+        self.buckets = _INFERENCE_BUCKETS
         chosen = _planned_inference_buckets(cfg) if compiled_buckets is None else compiled_buckets
         self.compiled_buckets = tuple(sorted(set(chosen)))
         if not self.compiled_buckets:
@@ -1853,7 +1805,7 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
         stats=stats,
         L_ctx=cfg.L_ctx,
         L_chunk=cfg.sample_chunk_length,
-        batch_size=micro_batch_size(cfg),
+        batch_size=cfg.batch_size,
         seed=cfg.seed,
         schema_version=cfg.mds_schema_version,
         extra=V6_PLAYER_COLUMNS if v6 else None,
@@ -1861,7 +1813,9 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
     )
 
 
-def validate_batch_geometry(batch: TrainBatch, cfg: TrainConfig, expected_batch_size: int | None = None) -> None:
+def validate_batch_geometry(
+    batch: TrainBatch | AWRBatch, cfg: TrainConfig, expected_batch_size: int | None = None
+) -> None:
     if batch.target.shape[1:] != (cfg.sample_chunk_length, A_DIM):
         raise ValueError(f"target must be [B, {cfg.sample_chunk_length}, {A_DIM}], got {tuple(batch.target.shape)}")
     batch_size = batch.target.shape[0]
@@ -1901,30 +1855,6 @@ def cache_validation(loader: Iterable[TrainBatch], n_samples: int) -> list[Train
     return batches
 
 
-def device_batches(
-    cpu_batches: list[TrainBatch], device: str | torch.device, copy_stream: torch.cuda.Stream | None
-) -> Iterator[TrainBatch]:
-    # A one-ahead asynchronous copy keeps loader wait separate from GPU time.
-    if not cpu_batches:
-        return
-    target = torch.device(device)
-    if target.type != "cuda" or copy_stream is None:
-        for batch in cpu_batches:
-            yield batch.to(target)
-        return
-    compute_stream = torch.cuda.current_stream(target)
-    with torch.cuda.stream(copy_stream):
-        staged = cpu_batches[0].to(target)
-    for index in range(len(cpu_batches)):
-        compute_stream.wait_stream(copy_stream)
-        ready = staged
-        ready.record_stream(compute_stream)
-        if index + 1 < len(cpu_batches):
-            with torch.cuda.stream(copy_stream):
-                staged = cpu_batches[index + 1].to(target)
-        yield ready
-
-
 def _checkpoint_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1934,11 +1864,11 @@ def _checkpoint_sha256(path: Path) -> str:
 
 
 def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
-    kwargs = loader_kwargs(cfg, stats)
-    projection = kwargs["projection"]
+    common = loader_kwargs(cfg, stats)
+    projection = common["projection"]
     if projection is not None:
-        kwargs["projection"] = replace(projection, columns=projection.columns | {EGO_RETURN, EGO_RETURN_VALID})
-    label = functools.partial(
+        common["projection"] = replace(projection, columns=projection.columns | {EGO_RETURN, EGO_RETURN_VALID})
+    label_replay = functools.partial(
         returns_lib.label_replay,
         gamma=cfg.awr_gamma,
         damage_shaping=cfg.awr_damage_shaping,
@@ -1954,13 +1884,12 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         reservoir_capacity=cfg.reservoir_capacity,
         prefetch_batches=cfg.prefetch_batches,
         replay_format="policy",
-        replay_transform=label,
+        replay_transform=label_replay,
         batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.L_ctx),
-        **kwargs,
+        **common,
     )
-    # No replay transform here: validation stays byte-identical to 026's.
-    val_kwargs = {**kwargs, "batch_size": cfg.val_batch_size}
-    val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=True, **val_kwargs)
+    validation = {**common, "batch_size": cfg.val_batch_size}
+    val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=True, **validation)
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
 
 
@@ -2012,9 +1941,10 @@ def train(
 
     # Compilation stays in dedicated callables.  Evaluation therefore never
     # strips or mutates compiled methods and can build its own static buckets.
-    def trunk_fn(features, pad, actions):
+    def eager_trunk(features, pad, actions):
         return model(features, pad, actions)
 
+    trunk_fn: Callable = eager_trunk
     temporal_fn: Callable = model.temporal.teacher_forced_nll
     if DEVICE == "cuda" and cfg.compile_trunk:
         trunk_fn = torch.compile(trunk_fn, dynamic=False)
@@ -2023,7 +1953,6 @@ def train(
 
     train_loader, val_cache = _make_loaders(cfg, stats)
     iterator = iter(train_loader)
-    copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     run_started = time.monotonic()
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and L40S hosts.
@@ -2034,38 +1963,30 @@ def train(
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
             loader_started = time.monotonic()
-            cpu_batches: list[TrainBatch] = []
-            for _ in range(cfg.grad_accum_steps):
-                try:
-                    batch = next(iterator)
-                except StopIteration:
-                    iterator = iter(train_loader)
-                    batch = next(iterator)
-                validate_batch_geometry(batch, cfg, micro_batch_size(cfg))
-                cpu_batches.append(batch)
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                iterator = iter(train_loader)
+                batch = next(iterator)
+            validate_batch_geometry(batch, cfg, cfg.batch_size)
             loader_wait = time.monotonic() - loader_started
-            valid_prefixes = sum(int((cfg.L_ctx - batch.context.ctx_pad).sum()) for batch in cpu_batches)
+            valid_prefixes = int((cfg.L_ctx - batch.context.ctx_pad).sum())
             if valid_prefixes <= 0:
-                raise RuntimeError("training accumulation contains no valid context prefixes")
+                raise RuntimeError("training batch contains no valid context prefixes")
+
             optimizer.zero_grad()
-            nll_sum = torch.zeros(len(cfg.head_offsets), N_GROUPS, device=DEVICE)
-            n_prefixes = 0
-            step_metrics: dict[str, Tensor] = {}
             with profile("step") as stopwatch:
-                for batch in device_batches(cpu_batches, DEVICE, copy_stream):
-                    loss, nll, extra = microbatch_loss(
-                        model,
-                        batch,
-                        cfg,
-                        step=step,
-                        valid_prefixes=valid_prefixes,
-                        trunk_fn=trunk_fn,
-                        temporal_fn=temporal_fn,
-                    )
-                    loss.backward()
-                    nll_sum += nll.sum(dim=0)
-                    n_prefixes += nll.shape[0]
-                    step_metrics.update(extra)
+                batch = batch.to(DEVICE)
+                loss, nll, step_metrics = microbatch_loss(
+                    model,
+                    batch,
+                    cfg,
+                    step=step,
+                    valid_prefixes=valid_prefixes,
+                    trunk_fn=trunk_fn,
+                    temporal_fn=temporal_fn,
+                )
+                loss.backward()
                 gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"step {step}: non-finite gradient norm {gradient_norm}")
@@ -2073,7 +1994,7 @@ def train(
                 scheduler.step()
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
-            metrics = nll_mean_metrics((nll_sum / n_prefixes).cpu(), cfg.head_offsets)
+            metrics = nll_metrics(nll.cpu(), cfg.head_offsets)
             log = {
                 "global_step": step,
                 "samples": (step + 1) * cfg.batch_size,
@@ -2083,7 +2004,7 @@ def train(
                 "throughput/loader_wait_s": loader_wait,
                 "throughput/samples_per_s": cfg.batch_size / stopwatch.elapsed,
                 "throughput/samples_per_wall_s": cfg.batch_size / (stopwatch.elapsed + loader_wait),
-                "throughput/prefixes_per_s": n_prefixes / stopwatch.elapsed,
+                "throughput/prefixes_per_s": valid_prefixes / stopwatch.elapsed,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
                 **{name: float(value) for name, value in step_metrics.items()},
@@ -2109,7 +2030,7 @@ def train(
                     model=model,
                     opt=optimizer,
                     sched=scheduler,
-                    cfg=asdict(cfg),
+                    cfg=_checkpoint_config(cfg),
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     uploader=uploader,
                 )
@@ -2137,7 +2058,7 @@ def train(
             model=model,
             opt=optimizer,
             sched=scheduler,
-            cfg=asdict(cfg),
+            cfg=_checkpoint_config(cfg),
             wandb_id=None if wandb.run is None else wandb.run.id,
             uploader=uploader,
         )
@@ -2162,7 +2083,7 @@ def train(
             cfg,
             n_matchups=cfg.final_diag_n_matchups,
             replay_dir=replay_dir / "final_s6",
-            exec_horizon=cfg.final_diag_exec_horizon,
+            exec_horizon=_FINAL_DIAG_EXEC_HORIZON,
             checkpoint_sha256=checkpoint_sha,
             inference=eval_inference,
         )
@@ -2175,7 +2096,6 @@ def train(
 
 
 _CHECKPOINT_ARCH_FIELDS = {
-    "decoder_arch_version",
     "head_offsets",
     "sample_chunk_length",
     "temporal_d_model",
@@ -2185,7 +2105,6 @@ _CHECKPOINT_ARCH_FIELDS = {
     "group_head_dim",
     "action_embed_dim",
     "offset_embed_dim",
-    "group_order",
     "observation_bundle",
 }
 
@@ -2203,6 +2122,10 @@ _AWR_CHECKPOINT_FIELDS = {
     "value_head_hidden_dim",
     "temporal_state_film",
 }
+
+
+def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
+    return {"experiment_id": _EXPERIMENT_ID, **asdict(cfg)}
 
 
 def config_from_state(values: dict) -> TrainConfig:
@@ -2418,7 +2341,7 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
     validate_config(cfg)
     device = torch.device(DEVICE)
     model = GPT(cfg).to(device).eval()
-    ctx = synthetic_context(cfg, min(32, micro_batch_size(cfg)), device)
+    ctx = synthetic_context(cfg, min(32, cfg.batch_size), device)
     eager = BF16Inference(model, replace(cfg, inference_mode="eager"), compiled=False)
     compiled = BF16Inference(model, cfg)
 
@@ -2557,19 +2480,23 @@ class Args:
 
 
 def main(args: Args) -> None:
+    modes = {
+        "--audit-returns": args.audit_returns,
+        "--benchmark": args.benchmark,
+        "--eval": args.eval is not None,
+        "--self-play-eval": args.self_play_eval is not None,
+        "--resume": args.resume is not None,
+    }
+    selected_modes = [name for name, selected in modes.items() if selected]
+    if len(selected_modes) > 1:
+        raise SystemExit(f"pass only one mode, got {', '.join(selected_modes)}")
+
     if args.audit_returns:
-        if args.eval is not None or args.resume is not None or args.self_play_eval is not None or args.benchmark:
-            raise SystemExit("--audit-returns cannot be combined with other modes")
         return_audit(args.cfg, split=args.audit_split)
         return
     if args.benchmark:
-        if args.eval is not None or args.resume is not None or args.self_play_eval is not None:
-            raise SystemExit("--benchmark cannot be combined with --eval, --self-play-eval, or --resume")
         run_benchmark(args.cfg, iterations=args.benchmark_iterations)
         return
-    selected = sum(value is not None for value in (args.eval, args.self_play_eval, args.resume))
-    if selected > 1:
-        raise SystemExit("pass only one of --eval, --self-play-eval, or --resume")
     if args.eval is not None:
         eval_checkpoint(
             args.eval,

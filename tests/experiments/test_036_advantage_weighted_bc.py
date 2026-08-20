@@ -5,6 +5,7 @@ import importlib.util
 import math
 import sys
 from dataclasses import asdict
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -51,7 +52,6 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "group_head_dim": 64,
         "value_head_hidden_dim": 32,
         "batch_size": 2,
-        "grad_accum_steps": 1,
         "reservoir_capacity": 4,
         "warmup_steps": 1,
         "awr_warmup_steps": 1,
@@ -423,12 +423,18 @@ def _policy_state(model) -> dict[str, torch.Tensor]:
     return {name: value for name, value in model.state_dict().items() if not name.startswith("value_head.")}
 
 
+def _control_model(cfg) -> exp026.GPT:
+    names = {field.name for field in fields(exp026.TrainConfig)}
+    control_cfg = exp026.TrainConfig(**{name: value for name, value in asdict(cfg).items() if name in names})
+    return exp026.GPT(control_cfg)
+
+
 def test_same_seed_policy_parameters_match_026_and_optimizer_owns_the_value_head() -> None:
     cfg = _cfg()
     torch.manual_seed(0)
     model = exp.GPT(cfg)
     torch.manual_seed(0)
-    control = exp026.GPT(cfg)
+    control = _control_model(cfg)
     ours = _policy_state(model)
     theirs = control.state_dict()
     assert ours.keys() == theirs.keys()
@@ -449,7 +455,7 @@ def test_warmup_step_is_exact_bc_while_the_value_head_still_learns() -> None:
     torch.manual_seed(0)
     model = exp.GPT(cfg)
     torch.manual_seed(0)
-    control = exp026.GPT(cfg)
+    control = _control_model(cfg)
     batch = _awr_batch(cfg, eligible_rows=[True, False])
     prefixes = _valid_prefixes(cfg, batch)
 
@@ -548,29 +554,52 @@ def test_offset_variants_pass_validation_and_flow_through_the_loss() -> None:
 
 
 def test_config_gates() -> None:
-    with pytest.raises(ValueError, match="grad_accum_steps must be 1"):
-        exp.validate_config(_cfg(grad_accum_steps=2))
     with pytest.raises(ValueError, match="advantage_scope"):
         exp.validate_config(_cfg(advantage_scope="offset1"))
     with pytest.raises(ValueError, match="awr_warmup_steps"):
         exp.validate_config(_cfg(awr_warmup_steps=2, max_steps=2))
-    with pytest.raises(ValueError, match="compact"):
-        exp.validate_config(_cfg(compact_data=False))
     with pytest.raises(TypeError, match="AWRBatch"):
         cfg = _cfg()
         model = exp.GPT(cfg)
         exp.microbatch_loss(model, _batch(cfg), cfg, step=0, valid_prefixes=7, **_loss_fns(model))
 
 
+def test_fixed_policies_are_not_config_fields() -> None:
+    removed = {
+        "compact_data",
+        "decode_temp",
+        "decoder_arch_version",
+        "final_diag_exec_horizon",
+        "grad_accum_steps",
+        "group_order",
+        "inference_buckets",
+        "experiment_id",
+        "require_flex",
+        "wandb_grad_every",
+    }
+    assert removed.isdisjoint(field.name for field in fields(exp.TrainConfig))
+
+
 def test_checkpoint_config_round_trip_and_identity_rejections() -> None:
     cfg = _cfg(advantage_scope="all", awr_beta=1.6)
-    restored = exp.config_from_state(asdict(cfg))
+    checkpoint_cfg = exp._checkpoint_config(cfg)
+    assert checkpoint_cfg["experiment_id"] == exp._EXPERIMENT_ID
+    restored = exp.config_from_state(checkpoint_cfg)
     assert restored == cfg
+    legacy_cfg = {
+        **checkpoint_cfg,
+        "compact_data": True,
+        "decoder_arch_version": 3,
+        "grad_accum_steps": 1,
+        "group_order": exp.GROUP_ORDER,
+        "require_flex": False,
+    }
+    assert exp.config_from_state(legacy_cfg) == cfg
     values_026 = {name: 0 for name in exp._CHECKPOINT_ARCH_FIELDS}
     with pytest.raises(ValueError, match="not experiment 036"):
         exp.config_from_state(values_026)
     with pytest.raises(ValueError, match="experiment_id"):
-        exp.config_from_state({**asdict(cfg), "experiment_id": "034_rank_weighted_bc_v1"})
+        exp.config_from_state({**checkpoint_cfg, "experiment_id": "034_rank_weighted_bc_v1"})
 
 
 def test_experiment_file_is_self_contained() -> None:
