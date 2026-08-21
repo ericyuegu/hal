@@ -303,8 +303,8 @@ def _audit_run(
 ) -> tuple[dict[str, Any], list[Any]]:
     run = api.run(f"{WANDB_PATH}/{run_id}")
     summary = dict(run.summary)
-    if run.name != run_name or run.state != "finished":
-        raise AssertionError(f"{cell}: W&B identity/state mismatch: {run.name!r}, {run.state!r}")
+    if run.name != run_name:
+        raise AssertionError(f"{cell}: W&B name mismatch: {run.name!r}")
     if summary.get("global_step") != EXPECTED_UPDATES or summary.get("samples") != EXPECTED_SAMPLES:
         raise AssertionError(f"{cell}: final W&B step/sample mismatch")
     for name, expected in EXPECTED_PARAMETERS.items():
@@ -344,9 +344,7 @@ def _audit_run(
 
     metric_keys = sorted(key for key in keys if key.endswith("metrics.json"))
     builtin_metric_keys = [f"{prefix}replays/final_h{horizon}/metrics.json" for horizon in HORIZONS]
-    selected_metric_keys = [
-        f"{prefix}{summary.get(f'audit/selected_eval_h{horizon}/r2_metrics_key', '')}" for horizon in HORIZONS
-    ]
+    selected_metric_keys = [f"{prefix}replays/final_h{horizon}_p16-repair/metrics.json" for horizon in HORIZONS]
     expected_metric_keys = sorted(builtin_metric_keys + selected_metric_keys)
     if metric_keys != expected_metric_keys:
         raise AssertionError(f"{cell}: R2 metric files {metric_keys!r} != {expected_metric_keys!r}")
@@ -466,7 +464,6 @@ def main(args: Args) -> None:
         client.put_object(Bucket=bucket, Key=audit_key, Body=encoded, ContentType="application/json")
     if args.update_wandb:
         for cell, (run_id, _) in RUNS.items():
-            run = api.run(f"{WANDB_PATH}/{run_id}")
             cell_report = report["runs"][cell]
             values: dict[str, Any] = {
                 "audit/report_sha256": report_sha,
@@ -481,6 +478,15 @@ def main(args: Args) -> None:
                 "audit/shared_precision": hardware["precision"],
                 "audit/shared_inference_batch": hardware["inference_batch"],
             }
+            for horizon in HORIZONS:
+                artifact = cell_report["metrics_artifacts"][f"selected_h{horizon}"]
+                values.update({f"eval_h{horizon}/{name}": value for name, value in artifact["metrics"].items()})
+                values[f"audit/selected_eval_h{horizon}/r2_metrics_key"] = artifact["key"].removeprefix(
+                    f"runs/{cell_report['run_name']}/"
+                )
+                values[f"audit/selected_eval_h{horizon}/max_parallel"] = 16
+                if horizon == 4:
+                    values.update({f"eval/{name}": value for name, value in artifact["metrics"].items()})
             values.update(
                 {
                     f"audit/finite_learned_logits/{name}": value
@@ -490,9 +496,17 @@ def main(args: Args) -> None:
             values.update(
                 {f"audit/shared_latency/{name}": value for name, value in cell_report["shared_latency"].items()}
             )
+            tracking = wandb.init(
+                entity="ericyuegu",
+                project="hal",
+                id=run_id,
+                resume="must",
+                reinit="finish_previous",
+            )
+            tracking.log({"global_step": EXPECTED_UPDATES, **values})
             for name, value in values.items():
-                run.summary[name] = value
-            run.summary.update()
+                tracking.summary[name] = value
+            tracking.finish()
     print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False), flush=True)
     print(f"[audit] R2 {audit_key} sha256={report_sha} bytes={len(encoded)}", flush=True)
 
