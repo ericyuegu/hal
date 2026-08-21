@@ -48,6 +48,7 @@ dependencies = [
 [project.scripts]
 fetch = "hal.scripts.fetch:main"
 slp-link = "hal.scripts.slp_link:main"
+slippi-jwt = "hal.scripts.slippi_jwt:main"
 
 [dependency-groups]
 dev = [
