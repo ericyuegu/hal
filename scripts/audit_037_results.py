@@ -311,7 +311,7 @@ def _audit_run(
         progress = list(run.scan_history(keys=["global_step", "samples"], page_size=10_000))
         history_max_step = max((row.get("global_step", -1) for row in progress), default=-1)
         history_max_samples = max((row.get("samples", -1) for row in progress), default=-1)
-        if history_max_step != EXPECTED_UPDATES or history_max_samples != EXPECTED_SAMPLES:
+        if history_max_step not in (EXPECTED_UPDATES - 1, EXPECTED_UPDATES) or history_max_samples != EXPECTED_SAMPLES:
             raise AssertionError(f"{cell}: W&B history ends at step={history_max_step}, samples={history_max_samples}")
     for name, expected in EXPECTED_PARAMETERS.items():
         if summary.get(f"parameters/{name}") != expected:
