@@ -187,10 +187,11 @@ def finite_learned_logit_metrics(exp: ModuleType, model: Any, batches: list[Any]
                 teacher = model.temporal.teacher_forced_learned_logits_by_group(hidden, history, targets)
 
             target = targets[:, -1]
-            trunk = exp.decoder_rmsnorm(hidden[:, -1])
-            trunk_logits = {name: model.temporal.trunk_outputs[name](trunk) for name in exp.GROUP_NAMES}
-            state_bias = model.temporal._state_bias(trunk)
-            film = model.temporal._film_params(trunk)
+            with exp.amp_context(cfg, device):
+                trunk = exp.decoder_rmsnorm(hidden[:, -1])
+                trunk_logits = {name: model.temporal.trunk_outputs[name](trunk) for name in exp.GROUP_NAMES}
+                state_bias = model.temporal._state_bias(trunk)
+                film = model.temporal._film_params(trunk)
             previous = history[:, -1]
             caches: list[Any] = [None] * len(model.temporal.blocks)
             for depth, offset in enumerate(model.head_offsets):
