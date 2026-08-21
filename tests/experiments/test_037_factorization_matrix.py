@@ -29,6 +29,7 @@ def _load(name: str, path: Path):
 _ROOT = Path(__file__).resolve().parents[2]
 exp = _load("test_exp037", _ROOT / "experiments" / "037_factorization_matrix.py")
 exp036 = _load("test_exp037_control_036", _ROOT / "experiments" / "036_advantage_weighted_bc.py")
+audit037 = _load("test_audit037", _ROOT / "scripts" / "audit_037_results.py")
 
 
 def _cfg(cell: str = "D3", **overrides):
@@ -443,6 +444,15 @@ def test_metrics_artifact_contains_the_horizon_and_protocol_digest(tmp_path: Pat
     assert payload["protocol"]["group_conditioning"] == "autoregressive"
     assert payload["protocol"]["protocol_sha256"] == protocol.protocol_sha256
     assert payload["metrics"]["net_stock_lcb"] == 0.25
+
+
+def test_finite_learned_logit_audit_keeps_hard_support_separate() -> None:
+    cfg = _cfg("D0")
+    model = exp.GPT(cfg)
+    values = audit037.finite_learned_logit_metrics(exp, model, [_batch(cfg)], cfg)
+    assert all(torch.isfinite(torch.tensor(value)) for value in values.values())
+    assert values["gap"] == pytest.approx(0.0, abs=1e-6)
+    assert 0.0 <= values["target_button_support_rate"] <= 1.0
 
 
 def test_experiment_source_is_self_contained() -> None:
