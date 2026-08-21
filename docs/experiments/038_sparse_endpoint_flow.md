@@ -1,7 +1,24 @@
 # 038 sparse categorical-endpoint flow
 
-Status: implemented and locally validated; no production training or Dolphin
-quality result has been run yet.
+Status: complete. The seed-0 production run finished at step 16,384. W&B and
+R2 contain the final checkpoint, the 96-boot H4 evaluation, and the L40S
+latency result.
+
+## Production result
+
+- W&B: [`t4s3gohe`](https://wandb.ai/ericyuegu/hal/runs/t4s3gohe)
+- R2 prefix: `runs/038-sparse-endpoint-flow-nfe4-h4-seed0/`
+- Final checkpoint SHA-256: `84a6eb39826b02da9b9a34ffb4af0a300657bc2eae116bfd5edfad40aba45bc1`
+- Training: 16,384 updates, 8,388,608 examples, 8,946,063 parameters
+- Approximate training work: 57.635 PF with the repository `6NT` estimate
+- Evaluation: 96 boots, 101 matches, 0 crashes
+- Net stock/min: -0.2811; one-sided 95% LCB: -0.4153
+- Net damage/min: -8.1861; one-sided 95% LCB: -16.5141
+- L40S H4 latency: 10.904 ms p50 and 11.063 ms p95 per replan
+- Inference estimate: 1.830 GFLOPs per replan; 0.458 GFLOPs per executed frame
+
+W&B and `replays/final_h4/metrics.json` contain the same closed-loop values.
+The R2 evaluation record names the final checkpoint hash above.
 
 ## Question
 

@@ -2,21 +2,22 @@
 
 This report is a run ledger. It does not interpret model quality.
 
-Audit date: 20 August 2026.
+Audit date: 21 August 2026.
 
 ## Audit rules
 
 - The corrected W&B export has 24 runs. All 24 runs are in the table.
 - I compared all 314 non-empty metric cells in the export with the W&B API. There are zero metric mismatches.
-- I also include eight real runs that are needed for the listed comparisons: two 028 runs, 023 P1, 010, 001, both 033 runs, and 034.
-- I compared each W&B run name with the top-level directories under `r2:hal/runs`. There are 32 matches and zero missing directories. For 31 runs, the W&B name is the R2 directory name. For `m5e1kj7w`, W&B calls the run `final-rerun`; its config points to the exact 013 R2 directory and checkpoint.
-- The 32 R2 directories contain 50 `metrics.json` files in 12 runs. I read and parsed all 50 files. There were zero read or JSON errors. The closed-loop source cell states which final, standalone, W&B, or local result is used.
+- I also include eight earlier runs that are needed for the listed comparisons: two 028 runs, 023 P1, 010, 001, both 033 runs, and 034.
+- I include the four completed 037 matrix runs and the completed 038 flow run. The table now has 37 unique W&B run IDs.
+- I compared each W&B run name with its top-level directory under `r2:hal/runs`. There are 37 matches and zero missing directories. For `m5e1kj7w`, W&B calls the run `final-rerun`; its config points to the exact 013 R2 directory and checkpoint.
+- The 37 R2 directories contain 83 `metrics.json` files in 17 runs. I read and parsed all files through 038. There were zero read or JSON errors. The closed-loop source cell states which final, standalone, W&B, or local result is used.
 - W&B metadata for several old runs now names the LCB backfill script as the program. For those runs, lineage comes from the W&B config, the exact R2 run name, and the matching repository source at the recorded commit when available.
 - The closed-loop columns use `net_stock_lcb` and `net_dmg_lcb`. These are the repository's conservative one-sided 95% lower bounds. They are not cluster-bootstrap LCBs. They are not the low end of a two-sided confidence interval.
 - Validation names are kept in the cells. Compare a validation number only with the same named loss and the same target format.
 - Parameter counts come from W&B when present. The 001 and 024 counts come from constructing the recorded source config. The 030 trainable total excludes frozen target copies.
 - Training PF is an estimate: `6 × trainable parameters × processed Transformer positions`. It does not include exact attention cost or all non-Transformer work. The 030 values are lower bounds because target-critic forward work is not included.
-- These runs do not log measured inference FLOPs. The table reports measured latency only. A latency comparison is controlled only when the hardware, worker layout, batch shape, precision, compile mode, and execution horizon match.
+- Most older runs do not log inference FLOPs. Experiments 037 and 038 log static inference estimates and measured latency. A latency comparison is controlled only when the hardware, worker layout, batch shape, precision, compile mode, and execution horizon match.
 - The W&B CSV `Runtime` field is not used. Resume and metric-backfill activity changed that field for old runs.
 - A dash means that the source does not contain the value.
 
@@ -46,9 +47,14 @@ Audit date: 20 August 2026.
             ├── 033: non-causal parallel latent-trajectory decoder
             ├── 034: exact 026 policy plus rank-weighted BC
             └── 036: 026-style temporal/group actor at d256 plus MC-AWR and a value head
+
+037: controlled d256 BC matrix for the two factorization choices in the 036 actor
+├── D0-D3: fixed model and work; only future and group conditioning change
+└── 038: parallel categorical-endpoint flow on the same d256 trunk and data recipe
 ```
 
 Experiment 036 is an objective-and-scale branch from 026. It is not a pure next step in the temporal-MTP architecture line.
+Experiment 038 is a parallel decoder branch from the 037 test platform. It is not a child of D3's autoregressive decoder.
 
 ## One run per row
 
@@ -80,6 +86,8 @@ Rows follow the blog outline. Direct siblings are in ascending stock-LCB order w
 | D1 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw)<br>future independent; learned group AR | primary NLL 1.8588; joint 5.2507 | change F1 .324; exact frame .639; dense-4 .474 | -0.4381 | +4.8455 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 101 matches, 0 crashes. Original p32 artifact failed. | same fixed d256 037 model; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 10.03 / 10.75 ms; shared L40S; implementation latency | D0 | Only learned group conditioning changes independent→autoregressive. The fixed trigger/button legality mask remains in both cells. |
 | D2 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j)<br>future selected-AR; no learned group conditioning | primary NLL 1.1819; joint 3.2126 | change F1 .207; exact frame .599; dense-4 .501 | -0.3306 | +10.3874 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 102 matches, 0 crashes. Original p32 artifact failed. | same fixed d256 037 model; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 9.44 / 9.65 ms; shared L40S; implementation latency | D0 | Only future conditioning changes independent→selected-offset autoregressive. This is the first production D2 run. |
 | D3 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf)<br>future selected-AR; learned group AR; uniform BC | primary NLL 1.1821; joint 3.1883 | change F1 .213; exact frame .599; dense-4 .499 | -0.2504 | +15.6568 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 106 matches, 0 crashes. Original p32 artifact failed. | exact 036 actor architecture with uniform BC; detached value head; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 10.34 / 10.53 ms; shared L40S | D0, D1, D2; later control for 036-style MC-AWR | Both factorization flags are on. All fixed training, parameter, and nominal-compute controls match D0–D2. Actor weighting is uniform, not MC-AWR. |
+| **PARALLEL FLOW BRANCH** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| F2 | 038 [`038_sparse_endpoint_flow.py`](../experiments/038_sparse_endpoint_flow.py) | [t4s3gohe](https://wandb.ai/ericyuegu/hal/runs/t4s3gohe)<br>parallel sparse categorical-endpoint flow; NFE 4 | primary NLL 1.0381; joint 3.1013; flow objective .2865 | change F1 .330; exact frame .500; dense-4 .289 | -0.4153 | -16.5141 | W&B and R2 `replays/final_h4/metrics.json` match; 96 boots, 101 matches, 0 crashes. | d256 L8 h4 trunk; context 128; bidirectional d192 L3 flow expert; ten offsets in parallel; execute 4 | 512 · 16,384 · 8.389M | 8.946M | 57.6 | 10.90 / 11.06 ms; shared L40S benchmark | D3 H4 | Same trunk, data, updates, samples, H4, and 96-boot schedule. Decoder, objective, training-prefix geometry, and action generation change. Total params and 6NT PF are +25.2%; inference FLOPs/replan are +7.3%; p50 is +5.5%. |
 | **JOINT SLICES, GROUP AR, AND INTERLEAVED TOKENS** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
 | M3.1a | 011 [`011_muon.py`](../experiments/011_muon.py) | [6g1fud8e](https://wandb.ai/ericyuegu/hal/runs/6g1fud8e)<br>16k-step frame GPT | offset-1 NLL 1.0051 | reconstruction F1 .908; accuracy .992 | -0.9504 | +42.0529 | W&B standard field; old protocol; only 4 matches. R2 run exists. | d256 L8 h4; context 256; one 355-logit vector split into four independent softmaxes | 512 · 16,384 · 8.389M | 6.512M | 83.9 | — | M3.1b and M3.1c | Versus the 32k runs: half the updates, samples, and PF. |
 | M3.1b | 009 [`009_simplify_arch.py`](../experiments/009_simplify_arch.py) | [o3nihah5](https://wandb.ai/ericyuegu/hal/runs/o3nihah5)<br>AdamW frame GPT | offset-1 NLL 1.0129 | reconstruction F1 .901; accuracy .992 | -0.8831 | -1.9628 | W&B standard field; old protocol. R2 run exists but has no final `metrics.json`. | d256 L8 h4; context 256; independent group slices | 512 · 32,768 · 16.777M | 6.512M | 167.8 | — | M3.1c | Same model, batch, updates, samples, and PF. Optimizer and learning rates change: AdamW .001 vs Muon .02 + AdamW .0003. |

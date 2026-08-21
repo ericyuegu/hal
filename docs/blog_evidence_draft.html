@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Offline Melee policy experiments: simple evidence draft</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f2;
+      --panel: #ffffff;
+      --text: #1c252b;
+      --muted: #5c6971;
+      --line: #cbd2d6;
+      --soft: #e9edef;
+      --link: #0b6496;
+      --d0: #777f85;
+      --d1: #c77724;
+      --d2: #4179a8;
+      --d3: #25856d;
+      --flow: #8a5aa8;
+      --good: #19735f;
+      --warn: #966517;
+      --bad: #a44444;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111619;
+        --panel: #182025;
+        --text: #edf1f3;
+        --muted: #aeb9bf;
+        --line: #405058;
+        --soft: #263239;
+        --link: #75c5ee;
+        --d0: #a5adb2;
+        --d1: #e4a35f;
+        --d2: #78b3df;
+        --d3: #67c5aa;
+        --flow: #c69ae0;
+        --good: #67c5aa;
+        --warn: #e4b86e;
+        --bad: #e08a8a;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.55;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 42px 24px 80px; }
+    header { max-width: 920px; margin-bottom: 32px; }
+    h1, h2, h3 { line-height: 1.2; font-weight: 650; letter-spacing: -0.012em; }
+    h1 { font-size: clamp(2rem, 5vw, 3.2rem); margin: 0 0 12px; }
+    h2 { font-size: 1.65rem; margin: 52px 0 14px; }
+    h3 { font-size: 1.15rem; margin: 28px 0 10px; }
+    p { max-width: 900px; margin: 9px 0; }
+    a { color: var(--link); }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .kicker, .small { color: var(--muted); }
+    .kicker { margin: 0 0 8px; }
+    .small { font-size: 0.9rem; }
+    .lede { font-size: 1.15rem; max-width: 860px; }
+    .toc {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 7px 20px;
+      max-width: 930px;
+      margin: 22px 0 8px;
+      padding: 0;
+      list-style: none;
+    }
+    .toc a { text-decoration: none; }
+    .finding, .note {
+      max-width: 940px;
+      margin: 17px 0;
+      padding: 13px 15px;
+      border-left: 4px solid var(--line);
+      background: color-mix(in srgb, var(--panel) 74%, transparent);
+    }
+    .strong { border-color: var(--good); }
+    .moderate { border-color: var(--warn); }
+    .weak { border-color: var(--bad); }
+    .table-wrap { overflow-x: auto; margin: 15px 0 25px; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); }
+    caption { text-align: left; font-weight: 650; padding: 0 0 8px; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { text-align: left; color: var(--muted); font-size: 0.86rem; }
+    td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    tr:last-child td { border-bottom: 0; }
+    .best { color: var(--good); font-weight: 700; }
+    .tag {
+      display: inline-block;
+      margin-right: 5px;
+      padding: 1px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .flow-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      max-width: 1050px;
+      margin: 14px 0 20px;
+      padding: 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+    .flow-line span {
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+    }
+    .flow-line b { color: var(--muted); }
+    .diagram-wrap { overflow-x: auto; margin: 16px 0 8px; }
+    svg.arch {
+      width: 100%;
+      min-width: 920px;
+      display: block;
+      background: color-mix(in srgb, var(--panel) 84%, var(--bg));
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    svg.arch text { fill: var(--text); font-family: inherit; font-size: 13px; }
+    svg.arch .arch-title { font-size: 19px; font-weight: 650; letter-spacing: -0.015em; }
+    svg.arch .arch-kicker { fill: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: 0.12em; }
+    svg.arch .arch-subtitle, svg.arch .arch-note { fill: var(--muted); font-size: 12px; }
+    svg.arch .arch-code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    svg.arch .arch-math { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-size: 15px; }
+    svg.arch .arch-panel { fill: color-mix(in srgb, var(--panel) 82%, transparent); stroke: var(--line); stroke-width: 1; }
+    svg.arch .arch-rule { stroke: var(--line); stroke-width: 1; }
+    svg.arch .arch-box { fill: var(--soft); stroke: var(--line); stroke-width: 1.2; }
+    svg.arch .arch-state { fill: color-mix(in srgb, var(--d2) 14%, var(--panel)); stroke: color-mix(in srgb, var(--d2) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-action { fill: color-mix(in srgb, var(--d3) 14%, var(--panel)); stroke: color-mix(in srgb, var(--d3) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-loss { fill: color-mix(in srgb, var(--d1) 15%, var(--panel)); stroke: color-mix(in srgb, var(--d1) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-button { fill: color-mix(in srgb, var(--d1) 17%, var(--panel)); stroke: color-mix(in srgb, var(--d1) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-main { fill: color-mix(in srgb, var(--d2) 17%, var(--panel)); stroke: color-mix(in srgb, var(--d2) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-cstick { fill: color-mix(in srgb, var(--flow) 17%, var(--panel)); stroke: color-mix(in srgb, var(--flow) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-trigger { fill: color-mix(in srgb, var(--d3) 17%, var(--panel)); stroke: color-mix(in srgb, var(--d3) 70%, var(--line)); stroke-width: 1.2; }
+    svg.arch .arch-edge { fill: none; stroke: var(--muted); stroke-width: 1.35; }
+    svg.arch .arch-edge-soft { fill: none; stroke: var(--line); stroke-width: 1.1; }
+    svg.arch .arch-edge-dash { fill: none; stroke: var(--muted); stroke-width: 1.15; stroke-dasharray: 4 4; }
+    svg.arch .arch-brace { fill: none; stroke: var(--muted); stroke-width: 1.1; }
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 26px;
+      align-items: start;
+    }
+    .chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }
+    .chart-panel { min-width: 0; }
+    .chart-panel h3 { margin: 0 0 5px; }
+    figure { margin: 27px 0 37px; }
+    figcaption { max-width: 920px; margin-top: 8px; color: var(--muted); font-size: 0.92rem; }
+    svg.chart { width: 100%; min-height: 330px; display: block; background: var(--panel); border: 1px solid var(--line); }
+    svg.chart text { fill: var(--text); font-family: inherit; font-size: 12px; }
+    svg.chart .muted { fill: var(--muted); }
+    svg.chart .grid { stroke: var(--line); stroke-width: 1; opacity: 0.58; }
+    svg.chart .axis { stroke: var(--line); stroke-width: 1; }
+    svg.chart .zero { stroke: var(--text); stroke-width: 1; opacity: 0.52; }
+    svg.chart .series-line { fill: none; stroke-width: 2.2; }
+    svg.chart .point { stroke: var(--panel); stroke-width: 1.5; }
+    .legend { display: flex; flex-wrap: wrap; gap: 7px 18px; margin: 7px 0 10px; color: var(--muted); }
+    .legend span::before {
+      content: "";
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: var(--key);
+    }
+    pre.lineage {
+      overflow-x: auto;
+      max-width: 980px;
+      padding: 15px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      line-height: 1.45;
+    }
+    ul.compact { max-width: 900px; margin: 8px 0; padding-left: 22px; }
+    ul.compact li { margin: 5px 0; }
+    footer { border-top: 1px solid var(--line); margin-top: 58px; padding-top: 18px; color: var(--muted); }
+    @media (max-width: 800px) {
+      main { padding: 28px 14px 60px; }
+      .chart-grid, .two-col { grid-template-columns: 1fr; }
+      th, td { padding: 8px; }
+    }
+    @media print {
+      :root { --bg: #fff; --panel: #fff; --text: #111; --muted: #444; --line: #bbb; --soft: #f4f4f4; }
+      main { max-width: none; padding: 0; }
+      a { color: inherit; }
+      figure, table { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="kicker">Working draft · 21 August 2026 · evidence through experiment 038</p>
+    <h1>Offline Melee policy experiments</h1>
+    <p class="lede">This draft explains the path from controller data to action chunks. It separates controlled tests from historical tests. It uses closed-loop play as the main measure.</p>
+    <p>The <a href="blog_experiment_evidence.md">audited run ledger</a> and the <a href="blog_experiment_runs.csv">machine-readable table</a> are the source of truth. They contain 37 W&amp;B runs.</p>
+    <ul class="toc">
+      <li><a href="#metrics">0. Choose the evaluation metrics</a></li>
+      <li><a href="#controller">1. Encode the controller</a></li>
+      <li><a href="#decoder">2. Factor the action decoder</a></li>
+      <li><a href="#offline-rl">3. Add offline RL</a></li>
+      <li><a href="#failed">4. Record the failed branches</a></li>
+      <li><a href="#flow">5. Revisit flow matching</a></li>
+      <li><a href="#remaining">6. List the missing controls</a></li>
+    </ul>
+  </header>
+
+  <section id="metrics">
+    <h2>0. Choose the evaluation metrics</h2>
+    <p>No one metric is sufficient. Open-loop metrics measure imitation. Closed-loop metrics measure play.</p>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Table 1. Metric choice</caption>
+        <thead><tr><th>Metric</th><th>Question</th><th>Why use it?</th><th>Main limit</th></tr></thead>
+        <tbody>
+          <tr><td>Validation NLL</td><td>How much probability does the policy give to the recorded action?</td><td>It is a proper score. It uses the full predicted distribution. Lower is better.</td><td>It uses recorded history and teacher forcing. It does not measure recovery from model errors.</td></tr>
+          <tr><td>Button or group accuracy</td><td>Does the most likely class match the recorded class?</td><td>It is easy to read. It finds large decoding errors.</td><td>Holds and neutral inputs are common. High accuracy can hide rare action errors.</td></tr>
+          <tr><td>Change-event F1</td><td>Does the policy change a controller group when the player changes it?</td><td>It gives more weight to rare transitions than raw accuracy.</td><td>The current <span class="mono">val/change_f1</span> covers all four groups. It is not a button-only F1.</td></tr>
+          <tr><td>Net damage LCB</td><td>What lower bound do we have on damage dealt minus damage taken?</td><td>Damage is dense. It reacts before stock results become stable. Higher is better.</td><td>Damage is not the win condition. A policy can deal damage and fail to take a stock.</td></tr>
+          <tr><td>Net stock LCB</td><td>What lower bound do we have on stocks taken minus stocks lost?</td><td>Stocks are close to the game objective. The lower bound penalizes noisy results. Higher is better.</td><td>Stocks are sparse. The estimate needs many boots and one fixed protocol.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="finding strong"><strong>Use this order.</strong> Use net stock LCB as the main score. Use net damage LCB as the second score. Use NLL, accuracy, and F1 to diagnose the model.</div>
+    <div class="note"><strong>Do not call codec reconstruction a policy score.</strong> Old fields such as <span class="mono">recon_f1</span> and <span class="mono">recon_acc</span> test quantization and reconstruction. For current models, use <span class="mono">val/acc_o01_buttons</span>, <span class="mono">val/change_f1</span>, <span class="mono">val/exact_frame_acc</span>, and <span class="mono">val/dense_prefix_h4_acc</span>.</div>
+    <p class="small">The repository LCB is a conservative one-sided 95% lower bound. It uses the confidence intervals for the positive and negative rates. It is not the low end of a two-sided interval for the net value. Always report the point estimate, LCB, boots, matches, crashes, and protocol.</p>
+    <p class="small">NLL values in this report are in bits per frame unless the table says otherwise. Compare NLL only when the action vocabulary, offsets, and loss aggregation match. PF means approximate training petaflops. The estimate is 6 × parameters × processed training positions.</p>
+  </section>
+
+  <section id="controller">
+    <h2>1. Encode the controller</h2>
+
+    <h3>Keep simultaneous button presses</h3>
+    <p>The <a href="https://ericyuegu.com/melee-pt1">early 2025 system</a> reduced simultaneous button presses to one label. This removed information from the replay.</p>
+    <div class="flow-line" aria-label="Old and current button encoding">
+      <span>Old: eight button bits</span><b>→</b><span>select one active button</span><b>→</b><span>one label</span>
+    </div>
+    <div class="flow-line" aria-label="Current button encoding">
+      <span>Current: A, B, X, Y, Z, R, L, D-up</span><b>→</b><span>eight-bit mask</span><b>→</b><span>one of 2<sup>8</sup> = 256 combinations</span>
+    </div>
+    <p>The current format preserves jump-and-attack inputs and other same-frame combinations. It also models the complete button chord with one categorical distribution. The cost is a larger and sparse output vocabulary. This choice can hurt a small model. We accept that cost because the target must keep the original action.</p>
+    <div class="finding weak"><strong>Design choice.</strong> We do not have a clean small-scale result for the 9-class and 256-class button formats. This section makes a data-fidelity argument. It does not make a performance claim.</div>
+
+    <h3>Use more analog detail</h3>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 2. Current action groups</caption>
+        <thead><tr><th>Group</th><th>Classes</th><th>Physical value</th></tr></thead>
+        <tbody>
+          <tr><td>Buttons</td><td class="num">256</td><td>Eight bits: A, B, X, Y, Z, R, L, D-up</td></tr>
+          <tr><td>Main stick</td><td class="num">65</td><td>Joint two-axis centers. The set includes tilts and dense rim angles.</td></tr>
+          <tr><td>C-stick</td><td class="num">9</td><td>Neutral plus eight directions.</td></tr>
+          <tr><td>Triggers</td><td class="num">25</td><td>Five levels for L times five levels for R.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Learn how each controller group enters the model</h3>
+    <figure>
+      <div class="diagram-wrap">
+        <svg class="arch" viewBox="0 0 1120 860" role="img" aria-labelledby="controller-codec-title controller-codec-desc">
+          <title id="controller-codec-title">Previous-controller input encoding in experiments 026, 036, and 037</title>
+          <desc id="controller-codec-desc">Each controller group is quantized. A learned class embedding is added to a projection of the physical values. Four normalized 16-dimensional group vectors are concatenated. The resulting 64-dimensional controller vector enters both the frame token and each temporal decoder step.</desc>
+          <defs>
+            <marker id="ctl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--muted)"/></marker>
+          </defs>
+
+          <text class="arch-kicker" x="34" y="31">CONTROLLER CODEC · ONE RECORDED FRAME</text>
+          <text class="arch-title" x="34" y="58">One group token carries class identity and physical meaning</text>
+          <text class="arch-note" x="34" y="80">The four groups use separate parameters. This gives each group an identity. There is no extra role embedding. A digital L/R click sets its analog trigger to full before quantization.</text>
+
+          <text class="arch-kicker" x="92" y="111" text-anchor="middle">RAW CHANNELS</text>
+          <text class="arch-kicker" x="288" y="111" text-anchor="middle">QUANTIZED VIEW</text>
+          <text class="arch-kicker" x="474" y="111" text-anchor="middle">TWO LEARNED PATHS</text>
+          <text class="arch-kicker" x="682" y="111" text-anchor="middle">ADD + NORMALIZE</text>
+          <text class="arch-kicker" x="818" y="111" text-anchor="middle">GROUP TOKEN</text>
+
+          <!-- Buttons -->
+          <text x="32" y="147" font-weight="650">Buttons</text>
+          <rect class="arch-button" x="32" y="158" width="130" height="54" rx="3"/>
+          <text class="arch-code" x="97" y="181" text-anchor="middle">A B X Y Z R L ↑</text>
+          <text class="arch-note" x="97" y="199" text-anchor="middle">8 bits</text>
+          <rect class="arch-button" x="214" y="130" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="154" text-anchor="middle">class b ∈ [0,255]</text>
+          <rect class="arch-button" x="214" y="183" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="207" text-anchor="middle">value v = 8 bits</text>
+          <rect class="arch-button" x="399" y="130" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="154" text-anchor="middle">E_buttons[b] ∈ R¹⁶</text>
+          <rect class="arch-button" x="399" y="183" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="207" text-anchor="middle">P_buttons(v) ∈ R¹⁶</text>
+          <circle class="arch-loss" cx="594" cy="176" r="14"/><text x="594" y="181" text-anchor="middle">+</text>
+          <rect class="arch-box" x="630" y="149" width="105" height="54" rx="3"/>
+          <text x="682" y="181" text-anchor="middle">RMSNorm</text>
+          <rect class="arch-button" x="775" y="149" width="88" height="54" rx="3"/>
+          <text class="arch-math" x="819" y="172" text-anchor="middle">eᴮₜ</text>
+          <text class="arch-note" x="819" y="191" text-anchor="middle">16d</text>
+
+          <!-- Main stick -->
+          <text x="32" y="257" font-weight="650">Main stick</text>
+          <rect class="arch-main" x="32" y="268" width="130" height="54" rx="3"/>
+          <text class="arch-code" x="97" y="291" text-anchor="middle">main_x, main_y</text>
+          <text class="arch-note" x="97" y="309" text-anchor="middle">continuous pair</text>
+          <rect class="arch-main" x="214" y="240" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="264" text-anchor="middle">class m ∈ [0,64]</text>
+          <rect class="arch-main" x="214" y="293" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="317" text-anchor="middle">value v = center(x,y)</text>
+          <rect class="arch-main" x="399" y="240" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="264" text-anchor="middle">E_main[m] ∈ R¹⁶</text>
+          <rect class="arch-main" x="399" y="293" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="317" text-anchor="middle">P_main(v) ∈ R¹⁶</text>
+          <circle class="arch-loss" cx="594" cy="286" r="14"/><text x="594" y="291" text-anchor="middle">+</text>
+          <rect class="arch-box" x="630" y="259" width="105" height="54" rx="3"/>
+          <text x="682" y="291" text-anchor="middle">RMSNorm</text>
+          <rect class="arch-main" x="775" y="259" width="88" height="54" rx="3"/>
+          <text class="arch-math" x="819" y="282" text-anchor="middle">eᴹₜ</text>
+          <text class="arch-note" x="819" y="301" text-anchor="middle">16d</text>
+
+          <!-- C-stick -->
+          <text x="32" y="367" font-weight="650">C-stick</text>
+          <rect class="arch-cstick" x="32" y="378" width="130" height="54" rx="3"/>
+          <text class="arch-code" x="97" y="401" text-anchor="middle">c_x, c_y</text>
+          <text class="arch-note" x="97" y="419" text-anchor="middle">continuous pair</text>
+          <rect class="arch-cstick" x="214" y="350" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="374" text-anchor="middle">class c ∈ [0,8]</text>
+          <rect class="arch-cstick" x="214" y="403" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="427" text-anchor="middle">value v = center(x,y)</text>
+          <rect class="arch-cstick" x="399" y="350" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="374" text-anchor="middle">E_cstick[c] ∈ R¹⁶</text>
+          <rect class="arch-cstick" x="399" y="403" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="427" text-anchor="middle">P_cstick(v) ∈ R¹⁶</text>
+          <circle class="arch-loss" cx="594" cy="396" r="14"/><text x="594" y="401" text-anchor="middle">+</text>
+          <rect class="arch-box" x="630" y="369" width="105" height="54" rx="3"/>
+          <text x="682" y="401" text-anchor="middle">RMSNorm</text>
+          <rect class="arch-cstick" x="775" y="369" width="88" height="54" rx="3"/>
+          <text class="arch-math" x="819" y="392" text-anchor="middle">eᶜₜ</text>
+          <text class="arch-note" x="819" y="411" text-anchor="middle">16d</text>
+
+          <!-- Triggers -->
+          <text x="32" y="477" font-weight="650">Triggers</text>
+          <rect class="arch-trigger" x="32" y="488" width="130" height="54" rx="3"/>
+          <text class="arch-code" x="97" y="511" text-anchor="middle">trigger L, trigger R</text>
+          <text class="arch-note" x="97" y="529" text-anchor="middle">continuous pair</text>
+          <rect class="arch-trigger" x="214" y="460" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="484" text-anchor="middle">class t ∈ [0,24]</text>
+          <rect class="arch-trigger" x="214" y="513" width="145" height="38" rx="3"/>
+          <text class="arch-code" x="286" y="537" text-anchor="middle">value v = level(L,R)</text>
+          <rect class="arch-trigger" x="399" y="460" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="484" text-anchor="middle">E_trigger[t] ∈ R¹⁶</text>
+          <rect class="arch-trigger" x="399" y="513" width="160" height="38" rx="3"/>
+          <text class="arch-code" x="479" y="537" text-anchor="middle">P_trigger(v) ∈ R¹⁶</text>
+          <circle class="arch-loss" cx="594" cy="506" r="14"/><text x="594" y="511" text-anchor="middle">+</text>
+          <rect class="arch-box" x="630" y="479" width="105" height="54" rx="3"/>
+          <text x="682" y="511" text-anchor="middle">RMSNorm</text>
+          <rect class="arch-trigger" x="775" y="479" width="88" height="54" rx="3"/>
+          <text class="arch-math" x="819" y="502" text-anchor="middle">eᵀₜ</text>
+          <text class="arch-note" x="819" y="521" text-anchor="middle">16d</text>
+
+          <!-- Repeated lane edges -->
+          <g marker-end="url(#ctl-arrow)">
+            <path class="arch-edge" d="M162 185 H190 V149 H214"/><path class="arch-edge" d="M190 185 V202 H214"/><path class="arch-edge" d="M359 149 H399"/><path class="arch-edge" d="M359 202 H399"/><path class="arch-edge" d="M559 149 C575 149 577 165 580 172"/><path class="arch-edge" d="M559 202 C575 202 577 187 580 181"/><path class="arch-edge" d="M608 176 H630"/><path class="arch-edge" d="M735 176 H775"/>
+            <path class="arch-edge" d="M162 295 H190 V259 H214"/><path class="arch-edge" d="M190 295 V312 H214"/><path class="arch-edge" d="M359 259 H399"/><path class="arch-edge" d="M359 312 H399"/><path class="arch-edge" d="M559 259 C575 259 577 275 580 282"/><path class="arch-edge" d="M559 312 C575 312 577 297 580 291"/><path class="arch-edge" d="M608 286 H630"/><path class="arch-edge" d="M735 286 H775"/>
+            <path class="arch-edge" d="M162 405 H190 V369 H214"/><path class="arch-edge" d="M190 405 V422 H214"/><path class="arch-edge" d="M359 369 H399"/><path class="arch-edge" d="M359 422 H399"/><path class="arch-edge" d="M559 369 C575 369 577 385 580 392"/><path class="arch-edge" d="M559 422 C575 422 577 407 580 401"/><path class="arch-edge" d="M608 396 H630"/><path class="arch-edge" d="M735 396 H775"/>
+            <path class="arch-edge" d="M162 515 H190 V479 H214"/><path class="arch-edge" d="M190 515 V532 H214"/><path class="arch-edge" d="M359 479 H399"/><path class="arch-edge" d="M359 532 H399"/><path class="arch-edge" d="M559 479 C575 479 577 495 580 502"/><path class="arch-edge" d="M559 532 C575 532 577 517 580 511"/><path class="arch-edge" d="M608 506 H630"/><path class="arch-edge" d="M735 506 H775"/>
+          </g>
+
+          <!-- Concatenation -->
+          <path class="arch-brace" d="M888 148 h10 v386 h-10"/>
+          <path class="arch-edge-soft" d="M863 176 H898 M863 286 H898 M863 396 H898 M863 506 H898"/>
+          <path class="arch-edge" d="M898 341 H927" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-action" x="928" y="284" width="160" height="114" rx="3"/>
+          <text class="arch-kicker" x="1008" y="307" text-anchor="middle">FIXED CONCAT ORDER</text>
+          <text class="arch-code" x="1008" y="338" text-anchor="middle">[ B | Main | C | Trig ]</text>
+          <text class="arch-math" x="1008" y="367" text-anchor="middle">a-embedₜ ∈ R⁶⁴</text>
+          <text class="arch-note" x="1008" y="386" text-anchor="middle">same codec for targets</text>
+
+          <line class="arch-rule" x1="32" x2="1088" y1="580" y2="580"/>
+          <text class="arch-kicker" x="34" y="607">WHERE THE 64D VECTOR GOES</text>
+
+          <!-- Frame token path -->
+          <text x="34" y="650" font-weight="650">Frame history</text>
+          <rect class="arch-state" x="134" y="621" width="250" height="55" rx="3"/>
+          <text x="259" y="644" text-anchor="middle">4 fixed player slots</text><text class="arch-note" x="259" y="663" text-anchor="middle">ego · ego Nana · opp Nana · opp · 268d</text>
+          <rect class="arch-action" x="393" y="621" width="110" height="55" rx="3"/>
+          <text x="448" y="644" text-anchor="middle">controller</text><text class="arch-note" x="448" y="663" text-anchor="middle">64d</text>
+          <rect class="arch-box" x="512" y="621" width="90" height="55" rx="3"/>
+          <text x="557" y="644" text-anchor="middle">characters</text><text class="arch-note" x="557" y="663" text-anchor="middle">16d</text>
+          <rect class="arch-box" x="611" y="621" width="70" height="55" rx="3"/>
+          <text x="646" y="644" text-anchor="middle">stage</text><text class="arch-note" x="646" y="663" text-anchor="middle">4d</text>
+          <path class="arch-edge" d="M681 649 H716" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-loss" x="718" y="621" width="112" height="55" rx="3"/>
+          <text class="arch-code" x="774" y="644" text-anchor="middle">ctx_proj</text><text class="arch-note" x="774" y="663" text-anchor="middle">352 → d_model</text>
+          <path class="arch-edge" d="M830 649 H864" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-state" x="866" y="621" width="92" height="55" rx="3"/>
+          <text class="arch-math" x="912" y="644" text-anchor="middle">xₜ</text><text class="arch-note" x="912" y="663" text-anchor="middle">frame token</text>
+          <path class="arch-edge" d="M958 649 H992" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-box" x="994" y="621" width="94" height="55" rx="3"/>
+          <text x="1041" y="644" text-anchor="middle">causal</text><text class="arch-note" x="1041" y="663" text-anchor="middle">frame trunk</text>
+
+          <!-- Temporal decoder path -->
+          <text x="34" y="741" font-weight="650">Temporal step</text>
+          <rect class="arch-state" x="134" y="705" width="80" height="55" rx="3"/><text class="arch-math" x="174" y="738" text-anchor="middle">hₜ</text>
+          <text x="226" y="738" text-anchor="middle">+</text>
+          <rect class="arch-action" x="242" y="705" width="157" height="55" rx="3"/>
+          <text x="320" y="727" text-anchor="middle">previous controller</text><text class="arch-note" x="320" y="747" text-anchor="middle">observed or prior future · 64d</text>
+          <text x="412" y="738" text-anchor="middle">+</text>
+          <rect class="arch-box" x="428" y="705" width="124" height="55" rx="3"/>
+          <text x="490" y="727" text-anchor="middle">offset embedding</text><text class="arch-note" x="490" y="747" text-anchor="middle">16d</text>
+          <path class="arch-edge" d="M552 733 H587" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-loss" x="589" y="705" width="150" height="55" rx="3"/>
+          <text x="664" y="727" text-anchor="middle">token projection</text><text class="arch-note" x="664" y="747" text-anchor="middle">sum of three linear terms</text>
+          <path class="arch-edge" d="M739 733 H774" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-box" x="776" y="705" width="154" height="55" rx="3"/>
+          <text x="853" y="727" text-anchor="middle">2 causal decoder blocks</text><text class="arch-note" x="853" y="747" text-anchor="middle">128d temporal state</text>
+          <path class="arch-edge" d="M930 733 H965" marker-end="url(#ctl-arrow)"/>
+          <rect class="arch-action" x="967" y="705" width="121" height="55" rx="3"/>
+          <text x="1027" y="727" text-anchor="middle">group heads</text><text class="arch-note" x="1027" y="747" text-anchor="middle">C → Main → Trig → B</text>
+
+          <rect class="arch-panel" x="134" y="792" width="954" height="42" rx="3"/>
+          <text class="arch-note" x="151" y="817">028 ablation: replace the learned 64d codec with [one-hot buttons 256 | main 65 | C-stick 9 | triggers 25] = 355d. The full frame input becomes 643d.</text>
+        </svg>
+      </div>
+      <figcaption>Architecture diagram 1. The previous controller is not one generic token. It is four learned group tokens. The fixed frame-vector order is buttons, main stick, C-stick, triggers. The decoder order is different: C-stick, main stick, triggers, buttons.</figcaption>
+    </figure>
+    <p>In 026, buttons use their eight bits as physical values. Sticks use their two coordinates. Triggers use their two levels. Each group also has its own learned class table. The separate modules give the model the group role. There is no extra role vector.</p>
+    <p>Experiment 028 keeps the same analog classes. It removes the learned and semantic controller codec. Thus, 028 tests the input encoding. It does not test analog resolution.</p>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Table 3. 028 sample-matched validation at 8.389M examples. Rows go from weaker to stronger primary NLL.</caption>
+        <thead><tr><th>Encoding</th><th>Run or checkpoint</th><th class="num">Batch</th><th class="num">Updates</th><th class="num">Params</th><th class="num">Train PF</th><th class="num">Offset-1 NLL</th><th class="num">Primary NLL</th><th class="num">Change F1</th></tr></thead>
+        <tbody>
+          <tr><td>One-hot, 256 buttons</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">028 · 1zzstd2d</a>, step 8,192</td><td class="num">1,024</td><td class="num">8,192</td><td class="num">15.218M</td><td class="num">98.1</td><td class="num">1.1805</td><td class="num">1.1799</td><td class="num">.2035</td></tr>
+          <tr><td>One-hot, 52 buttons</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/4wyxy1g2">028 · 4wyxy1g2</a>, step 8,192</td><td class="num">1,024</td><td class="num">8,192</td><td class="num">14.983M</td><td class="num">96.5</td><td class="num">1.1783</td><td class="num">1.1775</td><td class="num">.2031</td></tr>
+          <tr><td>Learned + semantic</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">026 · cqbbbg77</a>, step 16,384</td><td class="num">512</td><td class="num">16,384</td><td class="num">15.053M</td><td class="num">97.0</td><td class="num best">1.1610</td><td class="num best">1.1596</td><td class="num best">.2176</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="small">All three rows see the same number of examples. The batches and update counts differ. The 52-button NLL also uses a different button vocabulary. The 256-button row is the direct encoding comparison.</p>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Table 4. Final 96-boot results. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Encoding</th><th>Run</th><th class="num">Examples</th><th class="num">Primary NLL</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>Mismatch versus 026</th></tr></thead>
+        <tbody>
+          <tr><td>One-hot, 256 buttons</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">1zzstd2d</a></td><td class="num">16.777M</td><td class="num best">1.1444</td><td class="num">-0.2297</td><td class="num">+6.1129</td><td>Batch, data, and PF are 2×. Params are 1.1% higher.</td></tr>
+          <tr><td>One-hot, 52 buttons</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/4wyxy1g2">4wyxy1g2</a></td><td class="num">16.777M</td><td class="num">1.1428*</td><td class="num">-0.1979</td><td class="num">-1.9239</td><td>Same 2× batch/data change. Button support also changes.</td></tr>
+          <tr><td>Learned + semantic</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">cqbbbg77</a></td><td class="num">8.389M</td><td class="num">1.1596</td><td class="num best">+0.0319</td><td class="num best">+29.8491</td><td>Reference.</td></tr>
+        </tbody>
+      </table>
+      <p class="small">*The 52-button NLL is not directly equal to the 256-button NLL.</p>
+    </div>
+    <div class="finding moderate"><strong>Moderate evidence.</strong> The learned and semantic encoding is more sample-efficient at the matched example count. It also has the best closed-loop result, although the final training budgets differ. The one-hot models get a lower final NLL after 2× data, but they play worse. This is one example where NLL does not fully predict closed-loop play.</div>
+
+    <h3>One RLE representation failed</h3>
+    <p><a href="../experiments/018_bpe_rle.py">Experiment 018</a> used BPE/RLE action tokens. Run <a href="https://wandb.ai/ericyuegu/hal/runs/xgj1dwot">xgj1dwot</a> had stock LCB -3.5838 and damage LCB -169.7728. It also had a 57.7% crash fraction. The output format, execution timing, parameters, and training PF changed. This result rejects that tested RLE system. It does not reject all RLE systems.</p>
+  </section>
+
+  <section id="decoder">
+    <h2>2. Factor the action decoder</h2>
+    <p>MTP means multi-token prediction. One frame context predicts actions at several future frame offsets. AR means autoregressive. A later prediction reads an earlier prediction.</p>
+    <p>The decoder changed in two steps. First, it predicted more future frames. Then it made later predictions depend on earlier predictions. “DSV3-style” is the name used here for the small causal decoder over selected offsets. It is a design label. It does not mean that this code is an exact copy of DeepSeek-V3.</p>
+    <div class="flow-line" aria-label="Current autoregressive action path">
+      <span>game state + controller history</span><b>→</b><span>causal frame trunk</span><b>→</b><span>future offset 1</span><b>→</b><span>future offset 2</span><b>→</b><span>future offset 3</span><b>→</b><span>future offset 4</span><b>→</b><span>execute four frames</span><b>→</b><span>replan</span>
+    </div>
+    <div class="flow-line" aria-label="Current within-frame action path">
+      <span>future-frame state</span><b>→</b><span>C-stick</span><b>→</b><span>main stick</span><b>→</b><span>triggers</span><b>→</b><span>buttons</span>
+    </div>
+
+    <h3>The historical path</h3>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 5. Main decoder steps. The row order is the design order, not a controlled score ranking.</caption>
+        <thead><tr><th>Step</th><th>Experiment and run</th><th>Decoder</th><th class="num">Params</th><th class="num">Train PF</th><th class="num">Offset-1 NLL</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>Main limit</th></tr></thead>
+        <tbody>
+          <tr><td>Next frame</td><td><a href="../experiments/011_muon.py">011</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/6g1fud8e">6g1fud8e</a></td><td>One next-frame head. Four group softmaxes are independent.</td><td class="num">6.512M</td><td class="num">83.9</td><td class="num best">1.0051</td><td class="num">-0.9504</td><td class="num">+42.0529</td><td>Only four closed-loop matches. Do not use the LCBs.</td></tr>
+          <tr><td>Independent MTP</td><td><a href="../experiments/016_spatial_features.py">016</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/fxhtoxu8">fxhtoxu8</a></td><td>Independent heads at offsets 1, 5, 9, 13. Execute one frame.</td><td class="num">6.786M</td><td class="num">87.4</td><td class="num">1.0518</td><td class="num">-0.7822</td><td class="num">+7.8324</td><td>Old protocol. Params and PF are 4.2% above 011.</td></tr>
+          <tr><td>Group AR</td><td><a href="../experiments/019_factored_frame.py">019</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5b9x7mhq">5b9x7mhq</a></td><td>Independent future heads. Groups are AR in each frame.</td><td class="num">6.887M</td><td class="num">88.7</td><td class="num">1.0365</td><td class="num">-0.5636</td><td class="num">+16.3996</td><td>Near-matched to 016. Head type and 1.5% capacity change together.</td></tr>
+          <tr><td>Future AR</td><td><a href="../experiments/024_temporal_mtp.py">024</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/4hoe86s7">4hoe86s7</a></td><td>Dense 20-frame causal future decoder plus group AR.</td><td class="num">6.669M</td><td class="num">85.9</td><td class="num">1.0666</td><td class="num">-0.5525</td><td class="num">+12.1926</td><td>Many decoder and codec details change.</td></tr>
+          <tr><td>Sparse future AR</td><td><a href="../experiments/026_temporal_mtp.py">026</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">cqbbbg77</a></td><td>Offsets 1,2,3,4,5,6,9,12,16,20 plus group AR. Execute four frames.</td><td class="num">15.053M</td><td class="num">97.0</td><td class="num">1.1610</td><td class="num best">+0.0319</td><td class="num best">+29.8491</td><td>Width, context, codec, offsets, and decoder all change versus 024.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="finding weak"><strong>No clean next-frame to MTP gain yet.</strong> Runs 011 and 016 match on width, depth, context, batch, updates, data root, optimizer, and seed. The MTP run has 4.2% more parameters and PF. Its offset-1 NLL is worse. The 011 closed-loop evaluation has only four matches. We can show this as the design path. We cannot call it a measured improvement.</div>
+    <div class="finding moderate"><strong>Moderate historical evidence for group AR.</strong> Runs 016 and 019 are close controls. Group AR improves both closed-loop LCBs. The action head also adds 1.5% parameters and PF.</div>
+
+    <h3>Principal MTP architectures</h3>
+    <figure>
+      <div class="diagram-wrap">
+        <svg class="arch" viewBox="0 0 1120 610" role="img" aria-labelledby="mtp-family-title mtp-family-desc">
+          <title id="mtp-family-title">Naive independent MTP compared with the DSV3-style temporal decoder</title>
+          <desc id="mtp-family-desc">The naive model sends one trunk state to separate future heads. The DSV3-style model uses a causal decoder over selected offsets. Each later step reads the prior selected action. Within-frame group factorization is a separate choice.</desc>
+          <defs>
+            <marker id="mtp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--muted)"/></marker>
+          </defs>
+
+          <line class="arch-rule" x1="560" x2="560" y1="26" y2="584"/>
+
+          <!-- Independent heads -->
+          <text class="arch-kicker" x="34" y="34">HISTORICAL FAMILY · 012 / 016 / 023</text>
+          <text class="arch-title" x="34" y="62">Naive MTP: add independent future heads</text>
+          <text class="arch-note" x="34" y="84">Each offset has its own linear head. All heads read the same trunk state.</text>
+
+          <text class="arch-kicker" x="34" y="123">FRAME TOKENS</text>
+          <rect class="arch-state" x="34" y="140" width="55" height="54" rx="3"/><text class="arch-math" x="61" y="172" text-anchor="middle">xₜ₋₃</text>
+          <rect class="arch-state" x="95" y="140" width="55" height="54" rx="3"/><text class="arch-math" x="122" y="172" text-anchor="middle">xₜ₋₂</text>
+          <rect class="arch-state" x="156" y="140" width="55" height="54" rx="3"/><text class="arch-math" x="183" y="172" text-anchor="middle">xₜ₋₁</text>
+          <rect class="arch-state" x="217" y="140" width="55" height="54" rx="3"/><text class="arch-math" x="244" y="172" text-anchor="middle">xₜ</text>
+          <path class="arch-edge" d="M272 167 H304" marker-end="url(#mtp-arrow)"/>
+          <rect class="arch-box" x="306" y="132" width="142" height="70" rx="3"/>
+          <text x="377" y="159" text-anchor="middle">causal frame</text><text x="377" y="180" text-anchor="middle">Transformer</text>
+          <path class="arch-edge" d="M448 167 H482" marker-end="url(#mtp-arrow)"/>
+          <rect class="arch-state" x="484" y="140" width="50" height="54" rx="3"/><text class="arch-math" x="509" y="172" text-anchor="middle">hₜ</text>
+
+          <path class="arch-edge-soft" d="M509 194 V235 M76 235 H509"/>
+          <path class="arch-edge" d="M76 235 V268" marker-end="url(#mtp-arrow)"/>
+          <path class="arch-edge" d="M207 235 V268" marker-end="url(#mtp-arrow)"/>
+          <path class="arch-edge" d="M338 235 V268" marker-end="url(#mtp-arrow)"/>
+          <path class="arch-edge" d="M469 235 V268" marker-end="url(#mtp-arrow)"/>
+
+          <g>
+            <rect class="arch-action" x="34" y="270" width="84" height="104" rx="3"/>
+            <text class="arch-kicker" x="76" y="292" text-anchor="middle">HEAD O1</text><text class="arch-math" x="76" y="320" text-anchor="middle">aₜ₊₁</text>
+            <text class="arch-code" x="76" y="351" text-anchor="middle">B  M  C  T</text>
+            <rect class="arch-action" x="165" y="270" width="84" height="104" rx="3"/>
+            <text class="arch-kicker" x="207" y="292" text-anchor="middle">HEAD O5</text><text class="arch-math" x="207" y="320" text-anchor="middle">aₜ₊₅</text>
+            <text class="arch-code" x="207" y="351" text-anchor="middle">B  M  C  T</text>
+            <rect class="arch-action" x="296" y="270" width="84" height="104" rx="3"/>
+            <text class="arch-kicker" x="338" y="292" text-anchor="middle">HEAD O9</text><text class="arch-math" x="338" y="320" text-anchor="middle">aₜ₊₉</text>
+            <text class="arch-code" x="338" y="351" text-anchor="middle">B  M  C  T</text>
+            <rect class="arch-action" x="427" y="270" width="84" height="104" rx="3"/>
+            <text class="arch-kicker" x="469" y="292" text-anchor="middle">HEAD O13</text><text class="arch-math" x="469" y="320" text-anchor="middle">aₜ₊₁₃</text>
+            <text class="arch-code" x="469" y="351" text-anchor="middle">B  M  C  T</text>
+          </g>
+
+          <rect class="arch-panel" x="34" y="408" width="477" height="133" rx="3"/>
+          <text class="arch-kicker" x="52" y="432">INFORMATION FLOW</text>
+          <text x="52" y="459">• No future head reads another future action.</text>
+          <text x="52" y="484">• Four group softmax slices are independent inside each head.</text>
+          <text x="52" y="509">• Run 016 executes offset 1 only, then replans: H1.</text>
+
+          <!-- DSV3-style chain -->
+          <text class="arch-kicker" x="586" y="34">TEMPORAL FAMILY · 024 / 026 / 036 / 037</text>
+          <text class="arch-title" x="586" y="62">DSV3-style MTP: decode selected offsets in order</text>
+          <text class="arch-note" x="586" y="84">A small causal Transformer links the selected future actions.</text>
+
+          <rect class="arch-state" x="586" y="132" width="145" height="70" rx="3"/>
+          <text x="658" y="158" text-anchor="middle">frame tokens</text><text class="arch-note" x="658" y="180" text-anchor="middle">state + controller history</text>
+          <path class="arch-edge" d="M731 167 H765" marker-end="url(#mtp-arrow)"/>
+          <rect class="arch-box" x="767" y="132" width="142" height="70" rx="3"/>
+          <text x="838" y="158" text-anchor="middle">causal frame</text><text x="838" y="180" text-anchor="middle">Transformer</text>
+          <path class="arch-edge" d="M909 167 H943" marker-end="url(#mtp-arrow)"/>
+          <rect class="arch-state" x="945" y="140" width="58" height="54" rx="3"/><text class="arch-math" x="974" y="172" text-anchor="middle">hₜ</text>
+
+          <path class="arch-edge-soft" d="M974 194 V229 H626 M626 229 V255 M736 229 V255 M846 229 V255 M956 229 V255"/>
+          <text class="arch-note" x="777" y="220" text-anchor="middle">hₜ and one offset embedding enter every step</text>
+
+          <rect class="arch-action" x="586" y="257" width="80" height="111" rx="3"/>
+          <text class="arch-kicker" x="626" y="280" text-anchor="middle">OFFSET 1</text><text class="arch-math" x="626" y="306" text-anchor="middle">z₁ ← aₜ</text><line class="arch-rule" x1="598" x2="654" y1="319" y2="319"/><text class="arch-math" x="626" y="346" text-anchor="middle">aₜ₊₁</text>
+          <rect class="arch-action" x="696" y="257" width="80" height="111" rx="3"/>
+          <text class="arch-kicker" x="736" y="280" text-anchor="middle">OFFSET 2</text><text class="arch-math" x="736" y="306" text-anchor="middle">z₂ ← aₜ₊₁</text><line class="arch-rule" x1="708" x2="764" y1="319" y2="319"/><text class="arch-math" x="736" y="346" text-anchor="middle">aₜ₊₂</text>
+          <rect class="arch-action" x="806" y="257" width="80" height="111" rx="3"/>
+          <text class="arch-kicker" x="846" y="280" text-anchor="middle">OFFSET 3</text><text class="arch-math" x="846" y="306" text-anchor="middle">z₃ ← aₜ₊₂</text><line class="arch-rule" x1="818" x2="874" y1="319" y2="319"/><text class="arch-math" x="846" y="346" text-anchor="middle">aₜ₊₃</text>
+          <rect class="arch-action" x="916" y="257" width="80" height="111" rx="3"/>
+          <text class="arch-kicker" x="956" y="280" text-anchor="middle">OFFSET 4</text><text class="arch-math" x="956" y="306" text-anchor="middle">z₄ ← aₜ₊₃</text><line class="arch-rule" x1="928" x2="984" y1="319" y2="319"/><text class="arch-math" x="956" y="346" text-anchor="middle">aₜ₊₄</text>
+          <path class="arch-edge" d="M666 338 H696" marker-end="url(#mtp-arrow)"/>
+          <path class="arch-edge" d="M776 338 H806" marker-end="url(#mtp-arrow)"/>
+          <path class="arch-edge" d="M886 338 H916" marker-end="url(#mtp-arrow)"/>
+          <path class="arch-edge-dash" d="M996 312 H1030" marker-end="url(#mtp-arrow)"/>
+          <text class="arch-note" x="1039" y="302">026+ tail:</text>
+          <text class="arch-code" x="1039" y="322">5, 6, 9,</text>
+          <text class="arch-code" x="1039" y="341">12, 16, 20</text>
+
+          <rect class="arch-panel" x="586" y="408" width="502" height="133" rx="3"/>
+          <text class="arch-kicker" x="604" y="432">INFORMATION FLOW</text>
+          <text x="604" y="459">• Training uses the prior ground-truth selected action.</text>
+          <text x="604" y="484">• Inference uses the prior sampled action. H4 runs offsets 1–4.</text>
+          <text x="604" y="509">• Each group logit adds a direct trunk logit to the temporal-head logit.</text>
+
+          <rect class="arch-loss" x="222" y="558" width="676" height="32" rx="3"/>
+          <text x="560" y="579" text-anchor="middle">Within-frame group factorization is a separate axis: independent groups or C → Main → Triggers → Buttons.</text>
+        </svg>
+      </div>
+      <figcaption>Architecture diagram 2. Naive MTP adds independent loss heads to the trunk. B, M, C, and T mean buttons, main stick, C-stick, and triggers. DSV3-style MTP adds a causal chain over selected future actions. The next diagram holds the modules fixed and isolates this temporal chain from the within-frame group chain.</figcaption>
+    </figure>
+    <div class="note"><strong>D0 is a matched information-flow control.</strong> It is not the old 016 implementation. D0 keeps the complete 037 temporal decoder and its parameter count. A diagonal attention mask removes future-to-future information. Every offset reads the observed action again. This makes D0 comparable with D1, D2, and D3.</div>
+
+    <figure>
+      <div class="diagram-wrap">
+        <svg class="arch" viewBox="0 0 1120 790" role="img" aria-labelledby="factor-grid-title factor-grid-desc">
+          <title id="factor-grid-title">The four cells of the decoder factorization matrix</title>
+          <desc id="factor-grid-desc">Columns change access to earlier controller-group IDs. Rows change access to earlier selected future actions. D0 has neither path, D1 has group autoregression, D2 has future autoregression, and D3 has both.</desc>
+          <defs>
+            <marker id="matrix-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--muted)"/></marker>
+          </defs>
+
+          <text class="arch-kicker" x="34" y="31">EXPERIMENT 037 · EXACT 2 × 2 INFORMATION-FLOW TEST</text>
+          <text class="arch-title" x="34" y="58">Two causal chains, tested separately and together</text>
+
+          <text class="arch-kicker" x="358" y="98" text-anchor="middle">EARLIER GROUP IDS HIDDEN</text>
+          <text class="arch-note" x="358" y="117" text-anchor="middle">no learned within-frame dependence</text>
+          <text class="arch-kicker" x="848" y="98" text-anchor="middle">EARLIER GROUP IDS VISIBLE</text>
+          <text class="arch-note" x="848" y="117" text-anchor="middle">autoregressive within-frame dependence</text>
+          <text class="arch-kicker" x="35" y="257" text-anchor="middle" transform="rotate(-90 35 257)">EARLIER FUTURE ACTIONS HIDDEN</text>
+          <text class="arch-note" x="64" y="257" text-anchor="middle" transform="rotate(-90 64 257)">self-only temporal attention</text>
+          <text class="arch-kicker" x="35" y="558" text-anchor="middle" transform="rotate(-90 35 558)">EARLIER FUTURE ACTIONS VISIBLE</text>
+          <text class="arch-note" x="64" y="558" text-anchor="middle" transform="rotate(-90 64 558)">causal temporal attention</text>
+
+          <!-- D0 -->
+          <rect class="arch-panel" x="105" y="132" width="482" height="275" rx="3"/>
+          <text class="arch-title" x="127" y="163">D0</text>
+          <text class="arch-note" x="172" y="163">independent future · independent groups</text>
+          <text class="arch-kicker" x="127" y="193">BETWEEN FUTURE OFFSETS</text>
+          <rect class="arch-state" x="130" y="218" width="72" height="50" rx="3"/><text class="arch-math" x="166" y="248" text-anchor="middle">hₜ , aₜ</text>
+          <rect class="arch-action" x="268" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="293" y="248" text-anchor="middle">o1</text>
+          <rect class="arch-action" x="337" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="362" y="248" text-anchor="middle">o2</text>
+          <rect class="arch-action" x="406" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="431" y="248" text-anchor="middle">o3</text>
+          <rect class="arch-action" x="475" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="500" y="248" text-anchor="middle">o4</text>
+          <path class="arch-edge-soft" d="M202 243 H235 V205 H500 M293 205 V218 M362 205 V218 M431 205 V218 M500 205 V218"/>
+          <text class="arch-note" x="327" y="289" text-anchor="middle">Every offset repeats the observed aₜ.</text>
+          <text class="arch-kicker" x="127" y="322">INSIDE EACH OFFSET</text>
+          <rect class="arch-cstick" x="270" y="309" width="42" height="38" rx="3"/><text x="291" y="333" text-anchor="middle">C</text>
+          <rect class="arch-main" x="329" y="309" width="42" height="38" rx="3"/><text x="350" y="333" text-anchor="middle">M</text>
+          <rect class="arch-trigger" x="388" y="309" width="42" height="38" rx="3"/><text x="409" y="333" text-anchor="middle">T</text>
+          <rect class="arch-button" x="447" y="309" width="42" height="38" rx="3"/><text x="468" y="333" text-anchor="middle">B</text>
+          <text class="arch-note" x="379" y="372" text-anchor="middle">Earlier group embeddings are replaced with zeros.</text>
+
+          <!-- D1 -->
+          <rect class="arch-panel" x="625" y="132" width="482" height="275" rx="3"/>
+          <text class="arch-title" x="647" y="163">D1</text>
+          <text class="arch-note" x="692" y="163">independent future · autoregressive groups</text>
+          <text class="arch-kicker" x="647" y="193">BETWEEN FUTURE OFFSETS</text>
+          <rect class="arch-state" x="650" y="218" width="72" height="50" rx="3"/><text class="arch-math" x="686" y="248" text-anchor="middle">hₜ , aₜ</text>
+          <rect class="arch-action" x="788" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="813" y="248" text-anchor="middle">o1</text>
+          <rect class="arch-action" x="857" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="882" y="248" text-anchor="middle">o2</text>
+          <rect class="arch-action" x="926" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="951" y="248" text-anchor="middle">o3</text>
+          <rect class="arch-action" x="995" y="218" width="50" height="50" rx="3"/><text class="arch-code" x="1020" y="248" text-anchor="middle">o4</text>
+          <path class="arch-edge-soft" d="M722 243 H755 V205 H1020 M813 205 V218 M882 205 V218 M951 205 V218 M1020 205 V218"/>
+          <text class="arch-note" x="847" y="289" text-anchor="middle">Every offset repeats the observed aₜ.</text>
+          <text class="arch-kicker" x="647" y="322">INSIDE EACH OFFSET</text>
+          <rect class="arch-cstick" x="790" y="309" width="42" height="38" rx="3"/><text x="811" y="333" text-anchor="middle">C</text>
+          <rect class="arch-main" x="859" y="309" width="42" height="38" rx="3"/><text x="880" y="333" text-anchor="middle">M</text>
+          <rect class="arch-trigger" x="928" y="309" width="42" height="38" rx="3"/><text x="949" y="333" text-anchor="middle">T</text>
+          <rect class="arch-button" x="997" y="309" width="42" height="38" rx="3"/><text x="1018" y="333" text-anchor="middle">B</text>
+          <path class="arch-edge" d="M832 328 H859" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M901 328 H928" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M970 328 H997" marker-end="url(#matrix-arrow)"/>
+          <text class="arch-note" x="899" y="372" text-anchor="middle">M, T, and B read earlier group IDs.</text>
+
+          <!-- D2 -->
+          <rect class="arch-panel" x="105" y="432" width="482" height="275" rx="3"/>
+          <text class="arch-title" x="127" y="463">D2</text>
+          <text class="arch-note" x="172" y="463">autoregressive future · independent groups</text>
+          <text class="arch-kicker" x="127" y="493">BETWEEN FUTURE OFFSETS</text>
+          <rect class="arch-state" x="130" y="518" width="72" height="50" rx="3"/><text class="arch-math" x="166" y="548" text-anchor="middle">hₜ , aₜ</text>
+          <rect class="arch-action" x="268" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="293" y="548" text-anchor="middle">o1</text>
+          <rect class="arch-action" x="337" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="362" y="548" text-anchor="middle">o2</text>
+          <rect class="arch-action" x="406" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="431" y="548" text-anchor="middle">o3</text>
+          <rect class="arch-action" x="475" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="500" y="548" text-anchor="middle">o4</text>
+          <path class="arch-edge" d="M202 543 H268" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M318 543 H337" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M387 543 H406" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M456 543 H475" marker-end="url(#matrix-arrow)"/>
+          <text class="arch-note" x="327" y="589" text-anchor="middle">Each later offset reads the prior selected action.</text>
+          <text class="arch-kicker" x="127" y="622">INSIDE EACH OFFSET</text>
+          <rect class="arch-cstick" x="270" y="609" width="42" height="38" rx="3"/><text x="291" y="633" text-anchor="middle">C</text>
+          <rect class="arch-main" x="329" y="609" width="42" height="38" rx="3"/><text x="350" y="633" text-anchor="middle">M</text>
+          <rect class="arch-trigger" x="388" y="609" width="42" height="38" rx="3"/><text x="409" y="633" text-anchor="middle">T</text>
+          <rect class="arch-button" x="447" y="609" width="42" height="38" rx="3"/><text x="468" y="633" text-anchor="middle">B</text>
+          <text class="arch-note" x="379" y="672" text-anchor="middle">Earlier group embeddings are replaced with zeros.</text>
+
+          <!-- D3 -->
+          <rect class="arch-panel" x="625" y="432" width="482" height="275" rx="3"/>
+          <text class="arch-title" x="647" y="463">D3</text>
+          <text class="arch-note" x="692" y="463">autoregressive future · autoregressive groups</text>
+          <text class="arch-kicker" x="647" y="493">BETWEEN FUTURE OFFSETS</text>
+          <rect class="arch-state" x="650" y="518" width="72" height="50" rx="3"/><text class="arch-math" x="686" y="548" text-anchor="middle">hₜ , aₜ</text>
+          <rect class="arch-action" x="788" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="813" y="548" text-anchor="middle">o1</text>
+          <rect class="arch-action" x="857" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="882" y="548" text-anchor="middle">o2</text>
+          <rect class="arch-action" x="926" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="951" y="548" text-anchor="middle">o3</text>
+          <rect class="arch-action" x="995" y="518" width="50" height="50" rx="3"/><text class="arch-code" x="1020" y="548" text-anchor="middle">o4</text>
+          <path class="arch-edge" d="M722 543 H788" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M838 543 H857" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M907 543 H926" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M976 543 H995" marker-end="url(#matrix-arrow)"/>
+          <text class="arch-note" x="847" y="589" text-anchor="middle">Each later offset reads the prior selected action.</text>
+          <text class="arch-kicker" x="647" y="622">INSIDE EACH OFFSET</text>
+          <rect class="arch-cstick" x="790" y="609" width="42" height="38" rx="3"/><text x="811" y="633" text-anchor="middle">C</text>
+          <rect class="arch-main" x="859" y="609" width="42" height="38" rx="3"/><text x="880" y="633" text-anchor="middle">M</text>
+          <rect class="arch-trigger" x="928" y="609" width="42" height="38" rx="3"/><text x="949" y="633" text-anchor="middle">T</text>
+          <rect class="arch-button" x="997" y="609" width="42" height="38" rx="3"/><text x="1018" y="633" text-anchor="middle">B</text>
+          <path class="arch-edge" d="M832 628 H859" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M901 628 H928" marker-end="url(#matrix-arrow)"/><path class="arch-edge" d="M970 628 H997" marker-end="url(#matrix-arrow)"/>
+          <text class="arch-note" x="899" y="672" text-anchor="middle">M, T, and B read earlier group IDs.</text>
+
+          <rect class="arch-loss" x="105" y="729" width="1002" height="40" rx="3"/>
+          <text class="arch-note" x="606" y="746" text-anchor="middle">All cells keep the same modules, 7.148M parameters, optimizer, data, and work. Each offset reads hₜ and its offset embedding; group logits also add direct hₜ logits.</text>
+          <text class="arch-note" x="606" y="762" text-anchor="middle">“Independent groups” removes learned earlier-group IDs. The fixed trigger-to-button legality mask remains in all cells.</text>
+        </svg>
+      </div>
+      <figcaption>Architecture diagram 3. D0 has no learned chain. D1 has only the within-frame group chain. D2 has only the future-offset chain. D3 has both chains. The four cells keep the same parameters and nominal work.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="diagram-wrap">
+        <svg class="arch" viewBox="0 0 1120 690" role="img" aria-labelledby="d3-train-title d3-train-desc">
+          <title id="d3-train-title">D3 training and inference paths</title>
+          <desc id="d3-train-desc">Training uses ground-truth prior future actions and ground-truth earlier groups. Inference uses sampled actions. It samples four ordered groups at each of four ordered future offsets, executes four frames, and replans.</desc>
+          <defs>
+            <marker id="d3-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--muted)"/></marker>
+          </defs>
+
+          <!-- Training -->
+          <rect class="arch-panel" x="18" y="18" width="1084" height="305" rx="3"/>
+          <text class="arch-kicker" x="40" y="47">D3 TRAINING · TEACHER FORCING</text>
+          <text class="arch-title" x="40" y="75">Correct past actions are visible at both factorization levels</text>
+
+          <rect class="arch-state" x="40" y="106" width="142" height="62" rx="3"/>
+          <text x="111" y="131" text-anchor="middle">recorded state</text><text class="arch-note" x="111" y="151" text-anchor="middle">and controller history</text>
+          <path class="arch-edge" d="M182 137 H216" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-box" x="218" y="106" width="130" height="62" rx="3"/>
+          <text x="283" y="131" text-anchor="middle">causal frame trunk</text><text class="arch-note" x="283" y="151" text-anchor="middle">one hidden state hₜ</text>
+
+          <path class="arch-edge-soft" d="M348 137 H385 V96 H997 M459 96 V113 M605 96 V113 M751 96 V113 M897 96 V113"/>
+          <text class="arch-note" x="679" y="89" text-anchor="middle">hₜ and the selected offset embedding enter every temporal step</text>
+
+          <rect class="arch-action" x="401" y="115" width="116" height="70" rx="3"/>
+          <text class="arch-kicker" x="459" y="138" text-anchor="middle">OFFSET 1</text><text class="arch-note" x="459" y="159" text-anchor="middle">prev: observed aₜ</text><text class="arch-math" x="459" y="178" text-anchor="middle">z₁</text>
+          <rect class="arch-action" x="547" y="115" width="116" height="70" rx="3"/>
+          <text class="arch-kicker" x="605" y="138" text-anchor="middle">OFFSET 2</text><text class="arch-note" x="605" y="159" text-anchor="middle">prev: GT a*₁</text><text class="arch-math" x="605" y="178" text-anchor="middle">z₂</text>
+          <rect class="arch-action" x="693" y="115" width="116" height="70" rx="3"/>
+          <text class="arch-kicker" x="751" y="138" text-anchor="middle">OFFSET 3</text><text class="arch-note" x="751" y="159" text-anchor="middle">prev: GT a*₂</text><text class="arch-math" x="751" y="178" text-anchor="middle">z₃</text>
+          <rect class="arch-action" x="839" y="115" width="116" height="70" rx="3"/>
+          <text class="arch-kicker" x="897" y="138" text-anchor="middle">OFFSET 4</text><text class="arch-note" x="897" y="159" text-anchor="middle">prev: GT a*₃</text><text class="arch-math" x="897" y="178" text-anchor="middle">z₄</text>
+          <path class="arch-edge" d="M517 150 H547" marker-end="url(#d3-arrow)"/>
+          <path class="arch-edge" d="M663 150 H693" marker-end="url(#d3-arrow)"/>
+          <path class="arch-edge" d="M809 150 H839" marker-end="url(#d3-arrow)"/>
+          <path class="arch-edge-dash" d="M955 150 H985" marker-end="url(#d3-arrow)"/>
+          <text class="arch-note" x="991" y="140">also train</text><text class="arch-code" x="991" y="159">o5,o6,o9,</text><text class="arch-code" x="991" y="177">o12,o16,o20</text>
+
+          <text class="arch-kicker" x="40" y="221">WITHIN EACH OFFSET</text>
+          <rect class="arch-cstick" x="218" y="203" width="134" height="52" rx="3"/>
+          <text class="arch-code" x="285" y="226" text-anchor="middle">predict C</text><text class="arch-note" x="285" y="244" text-anchor="middle">from z</text>
+          <rect class="arch-main" x="381" y="203" width="134" height="52" rx="3"/>
+          <text class="arch-code" x="448" y="226" text-anchor="middle">predict Main</text><text class="arch-note" x="448" y="244" text-anchor="middle">from z, GT C*</text>
+          <rect class="arch-trigger" x="544" y="203" width="148" height="52" rx="3"/>
+          <text class="arch-code" x="618" y="226" text-anchor="middle">predict Triggers</text><text class="arch-note" x="618" y="244" text-anchor="middle">from z, GT C*, Main*</text>
+          <rect class="arch-button" x="721" y="203" width="174" height="52" rx="3"/>
+          <text class="arch-code" x="808" y="226" text-anchor="middle">predict Buttons</text><text class="arch-note" x="808" y="244" text-anchor="middle">from z, GT C*, Main*, Trig*</text>
+          <path class="arch-edge" d="M352 229 H381" marker-end="url(#d3-arrow)"/>
+          <path class="arch-edge" d="M515 229 H544" marker-end="url(#d3-arrow)"/>
+          <path class="arch-edge" d="M692 229 H721" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-loss" x="218" y="274" width="677" height="31" rx="3"/>
+          <text x="556" y="295" text-anchor="middle">NLL for 4 groups × 10 offsets · gradients update the codec, group heads, temporal decoder, and frame trunk</text>
+
+          <!-- Inference -->
+          <rect class="arch-panel" x="18" y="347" width="1084" height="325" rx="3"/>
+          <text class="arch-kicker" x="40" y="376">D3 INFERENCE · SAMPLED ANCESTORS · H4</text>
+          <text class="arch-title" x="40" y="404">One trunk pass, four temporal steps, sixteen categorical draws</text>
+
+          <rect class="arch-state" x="40" y="439" width="126" height="67" rx="3"/>
+          <text x="103" y="464" text-anchor="middle">available state</text><text class="arch-note" x="103" y="484" text-anchor="middle">history ends at aₜ</text>
+          <path class="arch-edge" d="M166 472 H196" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-box" x="198" y="439" width="110" height="67" rx="3"/>
+          <text x="253" y="464" text-anchor="middle">causal trunk</text><text class="arch-note" x="253" y="484" text-anchor="middle">compute hₜ once</text>
+          <path class="arch-edge" d="M308 472 H338" marker-end="url(#d3-arrow)"/>
+
+          <rect class="arch-action" x="340" y="428" width="124" height="89" rx="3"/>
+          <text class="arch-kicker" x="402" y="451" text-anchor="middle">OFFSET 1</text><text class="arch-code" x="402" y="475" text-anchor="middle">sample C→M→T→B</text><text class="arch-note" x="402" y="498" text-anchor="middle">prev: observed aₜ</text>
+          <path class="arch-edge" d="M464 472 H486" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-action" x="488" y="428" width="124" height="89" rx="3"/>
+          <text class="arch-kicker" x="550" y="451" text-anchor="middle">OFFSET 2</text><text class="arch-code" x="550" y="475" text-anchor="middle">sample C→M→T→B</text><text class="arch-note" x="550" y="498" text-anchor="middle">prev: sampled a₁</text>
+          <path class="arch-edge" d="M612 472 H634" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-action" x="636" y="428" width="124" height="89" rx="3"/>
+          <text class="arch-kicker" x="698" y="451" text-anchor="middle">OFFSET 3</text><text class="arch-code" x="698" y="475" text-anchor="middle">sample C→M→T→B</text><text class="arch-note" x="698" y="498" text-anchor="middle">prev: sampled a₂</text>
+          <path class="arch-edge" d="M760 472 H782" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-action" x="784" y="428" width="124" height="89" rx="3"/>
+          <text class="arch-kicker" x="846" y="451" text-anchor="middle">OFFSET 4</text><text class="arch-code" x="846" y="475" text-anchor="middle">sample C→M→T→B</text><text class="arch-note" x="846" y="498" text-anchor="middle">prev: sampled a₃</text>
+          <path class="arch-edge" d="M908 472 H930" marker-end="url(#d3-arrow)"/>
+          <rect class="arch-loss" x="932" y="428" width="148" height="89" rx="3"/>
+          <text x="1006" y="455" text-anchor="middle">execute a₁…a₄</text><text class="arch-note" x="1006" y="477" text-anchor="middle">4 emulator frames</text><text class="arch-note" x="1006" y="499" text-anchor="middle">then replan</text>
+
+          <path class="arch-edge-dash" d="M1006 517 V551 H103 M103 551 V506" marker-end="url(#d3-arrow)"/>
+          <text class="arch-note" x="555" y="545" text-anchor="middle">The new game state closes the receding-horizon loop.</text>
+
+          <rect class="arch-panel" x="198" y="575" width="882" height="72" rx="3"/>
+          <text class="arch-note" x="216" y="597">Prediction horizon: 20 frames. Selected MTP offsets: 1,2,3,4,5,6,9,12,16,20. Autoregressive decode horizon at H4: offsets 1–4.</text>
+          <text class="arch-note" x="216" y="619">Execution horizon: 4 frames. Replanning frequency: once per 4 executed frames. Closed-loop evaluation samples; it does not use argmax.</text>
+          <text class="arch-note" x="216" y="641">At every group, the model adds direct trunk logits to temporal-head logits. The trigger class also masks illegal button classes.</text>
+        </svg>
+      </div>
+      <figcaption>Architecture diagram 4. Training gives D3 correct ancestors. Inference gives it sampled ancestors. Errors can therefore propagate across groups and across future frames. H4 executes four of the ten trained offsets.</figcaption>
+    </figure>
+
+    <h3>The controlled 2×2 test</h3>
+    <p><a href="../experiments/037_factorization_matrix.py">Experiment 037</a> isolates two choices. All four cells use the same model, 7.148M parameters, data, batch, 16,384 updates, 8.389M examples, 46.047 PF, optimizer, seed, offsets, and H4 evaluation.</p>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 6. Experiment 037 at H4. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Cell</th><th>Future offsets</th><th>Groups in one frame</th><th class="num">Primary NLL</th><th class="num">Change F1</th><th class="num">Stock/min</th><th class="num">Stock LCB</th><th class="num">Damage/min</th><th class="num">Damage LCB</th></tr></thead>
+        <tbody>
+          <tr><td>D0</td><td>Independent</td><td>No learned group conditioning</td><td class="num">1.8934</td><td class="num">.3009</td><td class="num">-0.7017</td><td class="num">-0.8457</td><td class="num">+2.7712</td><td class="num">-5.8843</td></tr>
+          <tr><td>D1</td><td>Independent</td><td>Autoregressive</td><td class="num">1.8588</td><td class="num best">.3245</td><td class="num">-0.3129</td><td class="num">-0.4381</td><td class="num">+13.0490</td><td class="num">+4.8455</td></tr>
+          <tr><td>D2</td><td>Autoregressive</td><td>No learned group conditioning</td><td class="num best">1.1819</td><td class="num">.2068</td><td class="num">-0.1963</td><td class="num">-0.3306</td><td class="num">+18.0595</td><td class="num">+10.3874</td></tr>
+          <tr><td>D3</td><td>Autoregressive</td><td>Autoregressive</td><td class="num">1.1821</td><td class="num">.2126</td><td class="num best">-0.0956</td><td class="num best">-0.2504</td><td class="num best">+24.7452</td><td class="num best">+15.6568</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <figure>
+      <div class="legend"><span style="--key:var(--d0)">D0</span><span style="--key:var(--d1)">D1</span><span style="--key:var(--d2)">D2</span><span style="--key:var(--d3)">D3</span></div>
+      <div class="chart-grid">
+        <div class="chart-panel"><h3>H4 net stock LCB</h3><svg id="factor-stock" class="chart" role="img" aria-label="H4 net stock lower confidence bound for D0 to D3"></svg></div>
+        <div class="chart-panel"><h3>H4 net damage LCB</h3><svg id="factor-damage" class="chart" role="img" aria-label="H4 net damage lower confidence bound for D0 to D3"></svg></div>
+      </div>
+      <figcaption>Figure 1. Both factorization choices help at H4. Future-offset AR has the larger change. Group AR adds a smaller gain after future AR is on.</figcaption>
+    </figure>
+
+    <div class="finding strong"><strong>Strong control.</strong> Experiment 037 is the clean architecture result. Future AR improves both group backgrounds. Group AR improves both future backgrounds.</div>
+    <div class="finding moderate"><strong>Moderate performance evidence.</strong> The result uses one training seed. The closed-loop sample is useful, but the difference between two LCB values is not a confidence interval for their difference.</div>
+    <div class="note"><strong>Open-loop metrics do not give one ranking.</strong> D0 and D1 have higher change F1 and exact-frame accuracy than D2 and D3, but they play worse at H4. Primary NLL clearly detects future AR. It barely separates D2 and D3.</div>
+
+    <h3>Execution horizon changes the result</h3>
+    <figure>
+      <div class="legend"><span style="--key:var(--d0)">D0</span><span style="--key:var(--d1)">D1</span><span style="--key:var(--d2)">D2</span><span style="--key:var(--d3)">D3</span></div>
+      <div class="chart-grid">
+        <div class="chart-panel"><h3>Stock LCB by executed frames</h3><svg id="horizon-stock" class="chart" role="img" aria-label="Net stock LCB by execution horizon"></svg></div>
+        <div class="chart-panel"><h3>Damage LCB by executed frames</h3><svg id="horizon-damage" class="chart" role="img" aria-label="Net damage LCB by execution horizon"></svg></div>
+      </div>
+      <figcaption>Figure 2. Each cell uses one fixed checkpoint. H1, H2, H4, and H6 execute one, two, four, or six predicted frames before the next plan. The emulator waits for the model. Thus, this figure measures action-chunk quality, not hardware delay.</figcaption>
+    </figure>
+
+    <h3>Two decoder questions remain</h3>
+    <p><strong>Group order.</strong> The current order is C-stick, main stick, triggers, buttons. There is no clean order test. Experiment 010 and experiment 019 use other orders, but many other settings also change. A useful one-run test changes only the order to main stick, C-stick, triggers, buttons. Triggers must remain before buttons because the legality mask uses the trigger result.</p>
+    <p><strong>Interleaved tokens.</strong> The historical short-context 013 model places one state token and four action-group tokens in the main trunk for every frame. Its new 026-style evaluation has stock LCB -0.2442 and damage LCB +20.2728. This is close to D3. However, its token count, context, checkpoint step, training PF, and inference path differ. Keep it as a side branch. Do not place it in the D0-to-D3 causal chain.</p>
+  </section>
+
+  <section id="offline-rl">
+    <h2>3. Add offline RL</h2>
+    <p>Monte-Carlo AWR uses the return from the recorded episode. It does not bootstrap through a learned Q function.</p>
+    <div class="flow-line" aria-label="AWR objective">
+      <span>recorded return G<sub>t+1</sub></span><b>−</b><span>value V(h<sub>t</sub>)</span><b>→</b><span>detached advantage</span><b>→</b><span>capped exponential weight</span><b>→</b><span>weighted imitation loss</span>
+    </div>
+    <p>Experiment 036 uses <span class="mono">beta = 0.8</span>, a raw weight cap of 5, and a 2,048-step BC warm-up. It weights the first four offsets. The value head fits the recorded return. Its value loss does not update the policy trunk.</p>
+    <p>The reward is stock change plus 0.01 times net damage change plus a 0.5 bonus for the game-ending stock. The discount is 0.99827.</p>
+
+    <h3>The useful AWR comparison is 037 D3 versus 036</h3>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 7. d256 uniform BC versus d256 MC-AWR. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Objective</th><th>Experiment and run</th><th class="num">Params</th><th class="num">Train PF</th><th class="num">Boots</th><th class="num">Stock/min</th><th class="num">Stock LCB</th><th class="num">Damage/min</th><th class="num">Damage LCB</th><th>Mismatch</th></tr></thead>
+        <tbody>
+          <tr><td>Uniform BC</td><td><a href="../experiments/037_factorization_matrix.py">037 D3</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">5wfk2esf</a></td><td class="num">7.148M</td><td class="num">46.047</td><td class="num">96</td><td class="num">-0.0956</td><td class="num">-0.2504</td><td class="num">+24.7452</td><td class="num">+15.6568</td><td>Current 037 schedule.</td></tr>
+          <tr><td>MC-AWR</td><td><a href="../experiments/036_advantage_weighted_bc.py">036</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/hwzv0k9a">hwzv0k9a</a></td><td class="num">7.148M</td><td class="num">46.047</td><td class="num">128</td><td class="num best">-0.0199</td><td class="num best">-0.1422</td><td class="num best">+35.5402</td><td class="num best">+27.6210</td><td>Older matchup and random-stream schedule. The actor and training work match.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <figure>
+      <div class="chart-grid">
+        <div class="chart-panel"><h3>D3 BC versus AWR: stock LCB</h3><svg id="awr-stock" class="chart" role="img" aria-label="Stock LCB for D3 BC and 036 AWR"></svg></div>
+        <div class="chart-panel"><h3>D3 BC versus AWR: damage LCB</h3><svg id="awr-damage" class="chart" role="img" aria-label="Damage LCB for D3 BC and 036 AWR"></svg></div>
+      </div>
+      <figcaption>Figure 3. The actor, parameter count, examples, updates, and approximate training PF match. The evaluation schedules differ.</figcaption>
+    </figure>
+    <div class="finding moderate"><strong>Moderate evidence.</strong> MC-AWR improves the d256 D3 actor. Both the point estimates and the LCBs improve. One evaluation-only run of 036 on the 037 schedule would remove the protocol mismatch.</div>
+    <div class="note"><strong>Do not compare 036 with 026 as an AWR ablation.</strong> Experiment 026 is d384 and uses 15.053M policy parameters. Experiment 036 is d256 and uses 7.082M policy parameters. Experiment 026 still has the higher stock LCB (+0.0319) and damage LCB (+29.8491). The 036 result shows that AWR helps the smaller D3 actor. It does not show a gain over 026.</div>
+
+    <h3>Early stock-only and shaped AWR</h3>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 8. Early AWR on the independent-MTP actor. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Recipe</th><th>Run</th><th>Reward and weight settings</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>Control quality</th></tr></thead>
+        <tbody>
+          <tr><td>Uniform BC</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/fxhtoxu8">016 · fxhtoxu8</a></td><td>No value head. No AWR weight.</td><td class="num">-0.7822</td><td class="num">+7.8324</td><td>Actor control.</td></tr>
+          <tr><td>Stock-only AWR</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/rnbyn7n8">020 · rnbyn7n8</a></td><td>gamma .999; beta .5; cap 20; no damage or win bonus</td><td class="num">-0.6674</td><td class="num">-0.4435</td><td>Same batch, steps, samples, actor, and PF. Value MSE also updates the trunk.</td></tr>
+          <tr><td>Damage + win AWR</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/3sgvx6xv">020 · 3sgvx6xv</a></td><td>gamma .99769; beta .4059; cap 25; damage .01176; win bonus 2</td><td class="num best">-0.6300</td><td class="num best">+22.3703</td><td>Same training size as stock-only. Five AWR settings change together.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="finding moderate"><strong>Moderate evidence for the tested recipes.</strong> Both early AWR runs improve stock LCB over BC. The shaped recipe improves damage LCB. The test does not isolate reward shaping because gamma, beta, cap, damage reward, and win reward all change.</div>
+
+    <h3>The tested IQL systems failed</h3>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 9. IQL and Q branches. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Experiment</th><th>Run</th><th>Critic</th><th class="num">Q-return corr.</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>Main mismatch</th></tr></thead>
+        <tbody>
+          <tr><td>027</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/06fi5jms">06fi5jms</a></td><td>Attached IQL heads</td><td class="num">.043</td><td class="num">-2.0216</td><td class="num">-66.3153</td><td>2× data and PF plus new heads and losses.</td></tr>
+          <tr><td>030 scalar</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/ud4p5klw">ud4p5klw</a></td><td>Separate Q1, Q2, V, and target critics</td><td class="num">.427</td><td class="num">-1.7075</td><td class="num">-59.0704</td><td>Critics, optimizer, offsets, chunk length, and parameters differ.</td></tr>
+          <tr><td>030 HL-Gauss</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/kxzc3m9a">kxzc3m9a</a></td><td>Distributional Q target</td><td class="num best">.451</td><td class="num best">-1.6051</td><td class="num">-63.3770</td><td>Clean versus the scalar 030 run except for the Q target and 0.1% parameters.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="finding moderate"><strong>Moderate evidence about these implementations.</strong> A better Q-return correlation did not produce good control. These runs do not isolate Q learning, bootstrapping, IQL, and optimization. They show that the tested Q systems are not ready to scale.</div>
+  </section>
+
+  <section id="failed">
+    <h2>4. Record the failed branches</h2>
+    <p>Failed tests are useful when we state the changed settings.</p>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 10. Other branches. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Branch</th><th>Experiment and run</th><th class="num">Params</th><th class="num">Train PF</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>What changed?</th></tr></thead>
+        <tbody>
+          <tr><td>One trajectory mode</td><td><a href="../experiments/033_parallel_latent_trajectory.py">033 K1</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/mz8dk2gh">mz8dk2gh</a></td><td class="num">14.884M</td><td class="num">191.8</td><td class="num">-1.7438</td><td class="num">-62.4007</td><td>Parallel non-causal decoder, objective, and 2× data change versus 026.</td></tr>
+          <tr><td>Eight trajectory modes</td><td><a href="../experiments/033_parallel_latent_trajectory.py">033 K8</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/feic18gt">feic18gt</a></td><td class="num">14.885M</td><td class="num">120.8</td><td class="num">-0.7917</td><td class="num">-15.1754</td><td>K changes. This run stops at step 10,240 and has 37% less PF than K1.</td></tr>
+          <tr><td>Future-state expert</td><td><a href="../experiments/029_game_state_flow.py">029</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/qxcjjwl8">qxcjjwl8</a></td><td class="num">16.307M</td><td class="num">210.1</td><td class="num best">-0.0251</td><td class="num best">+16.4426</td><td>2× data, +8.3% total params, +116.7% PF, and a backend change versus 026.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="finding weak"><strong>Weak evidence about state prediction.</strong> The future-state expert does not improve on 026. The run is not a one-variable test. It does not show that all world-state losses are useless.</div>
+    <div class="finding moderate"><strong>Moderate evidence about the tested latent policy.</strong> The K1 and K8 systems do not produce good control. The K8 run also has less training work. This is not a general test of exploration modeling.</div>
+  </section>
+
+  <section id="flow">
+    <h2>5. Revisit flow matching</h2>
+    <p>The first continuous flow model was a separate system. Experiment 001 used a 16-frame continuous chunk, eight flow steps, 4.994M parameters, and 546.9 PF. Its mean stock result was -2.262 per minute. Its mean damage result was -112.129 per minute. It had no confidence interval. This test changed too many settings to compare with D3.</p>
+    <p><a href="../experiments/038_sparse_endpoint_flow.py">Experiment 038</a> is a more useful test. It keeps the d256 trunk, controller codec, data, batch, updates, examples, offsets, H4 execution, and 96-boot protocol from experiment 037. It replaces the AR decoder with a categorical endpoint flow.</p>
+    <div class="flow-line" aria-label="Experiment 038 inference path">
+      <span>state and controller history</span><b>→</b><span>d256 causal trunk</span><b>→</b><span>noisy ten-offset action plan</span><b>→</b><span>bidirectional flow expert × 4</span><b>→</b><span>group argmax</span><b>→</b><span>execute offsets 1 to 4</span><b>→</b><span>replan</span>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Table 11. Current D3 and flow results at H4. Rows are in ascending stock performance.</caption>
+        <thead><tr><th>Policy</th><th>Run</th><th class="num">Params</th><th class="num">Examples</th><th class="num">Train PF</th><th class="num">Stock/min</th><th class="num">Stock LCB</th><th class="num">Damage/min</th><th class="num">Damage LCB</th><th class="num">p50 replan</th><th class="num">GFLOPs/replan</th></tr></thead>
+        <tbody>
+          <tr><td>038 categorical flow, NFE4</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/t4s3gohe">t4s3gohe</a></td><td class="num">8.946M</td><td class="num">8.389M</td><td class="num">57.635</td><td class="num">-0.2811</td><td class="num">-0.4153</td><td class="num">-8.1861</td><td class="num">-16.5141</td><td class="num">10.904 ms</td><td class="num">1.830</td></tr>
+          <tr><td>037 D3 AR-AR</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">5wfk2esf</a></td><td class="num">7.148M</td><td class="num">8.389M</td><td class="num">46.047</td><td class="num best">-0.0956</td><td class="num best">-0.2504</td><td class="num best">+24.7452</td><td class="num best">+15.6568</td><td class="num best">10.340 ms</td><td class="num best">1.706</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <figure>
+      <div class="legend"><span style="--key:var(--flow)">038 flow</span><span style="--key:var(--d3)">037 D3</span></div>
+      <div class="chart-grid">
+        <div class="chart-panel"><h3>Flow versus D3: stock LCB</h3><svg id="flow-stock" class="chart" role="img" aria-label="Stock LCB for 038 flow and 037 D3"></svg></div>
+        <div class="chart-panel"><h3>Flow versus D3: damage LCB</h3><svg id="flow-damage" class="chart" role="img" aria-label="Damage LCB for 038 flow and 037 D3"></svg></div>
+      </div>
+      <figcaption>Figure 4. The stock LCB gap is 0.165 stocks per active minute. The damage LCB gap is 32.171 damage per active minute.</figcaption>
+    </figure>
+    <div class="finding moderate"><strong>Moderate evidence.</strong> The new flow model is much better than the first flow model. It is still worse than D3 at H4. The stock result is close enough for one more test. The damage result is not close.</div>
+    <div class="note"><strong>This is equal data, not equal compute.</strong> Flow has 25.2% more parameters and approximate training PF. It has 7.3% more inference FLOPs and 5.5% more p50 latency. The decoder, loss, and training-prefix geometry also change.</div>
+
+    <h3>Cost and closed-loop result</h3>
+    <figure>
+      <div class="legend"><span style="--key:var(--d0)">D0</span><span style="--key:var(--d1)">D1</span><span style="--key:var(--d2)">D2</span><span style="--key:var(--d3)">D3</span><span style="--key:var(--flow)">038 flow</span></div>
+      <div class="chart-grid">
+        <div class="chart-panel"><h3>Latency versus stock LCB</h3><svg id="latency-stock" class="chart" role="img" aria-label="H4 p50 latency versus stock LCB"></svg></div>
+        <div class="chart-panel"><h3>Latency versus damage LCB</h3><svg id="latency-damage" class="chart" role="img" aria-label="H4 p50 latency versus damage LCB"></svg></div>
+        <div class="chart-panel"><h3>Inference FLOPs versus stock LCB</h3><svg id="flops-stock" class="chart" role="img" aria-label="H4 inference FLOPs per replan versus stock LCB"></svg></div>
+        <div class="chart-panel"><h3>Inference FLOPs versus damage LCB</h3><svg id="flops-damage" class="chart" role="img" aria-label="H4 inference FLOPs per replan versus damage LCB"></svg></div>
+      </div>
+      <figcaption>Figure 5. All points use H4. The 037 points use the same nominal inference FLOPs. The L40S latency test is shared. The emulator is lockstep, so latency does not change these closed-loop scores.</figcaption>
+    </figure>
+  </section>
+
+  <section id="remaining">
+    <h2>6. List the missing controls</h2>
+    <p>The current draft can defend the 037 factorization result. It can defend AWR as a useful d256 extension, with one protocol note. Other claims need narrower language or one more test.</p>
+    <div class="table-wrap">
+      <table>
+        <caption>Table 12. Small set of remaining tests</caption>
+        <thead><tr><th>Claim</th><th>What exists?</th><th>What is missing?</th><th>Minimum next action</th></tr></thead>
+        <tbody>
+          <tr><td>Independent MTP improves a next-frame model</td><td>011 and 016 have a near-matched training recipe.</td><td>011 has only four closed-loop matches. Its offset-1 NLL is better.</td><td>Evaluate the existing 011 and 016 checkpoints with the same current H1 protocol. Do not retrain unless the checkpoints cannot run.</td></tr>
+          <tr><td>Within-frame group AR helps</td><td>016 versus 019 is near-matched. The 037 matrix is exact.</td><td>The historical pair uses an old protocol. The current group order is not tested.</td><td>Use 037 as the main proof. Run one order-only D3 treatment only if order can change the scale choice.</td></tr>
+          <tr><td>Future AR helps</td><td>037 D0 to D2 and D1 to D3 are exact controls.</td><td>No new training test is required.</td><td>Keep the H1/H2/H4/H6 sweep in the article.</td></tr>
+          <tr><td>AWR helps D3</td><td>037 D3 and 036 match on actor and training work.</td><td>The evaluation schedule differs: 96 boots versus 128 boots.</td><td>Use the existing results with the mismatch label. Re-evaluate 036 only for a strict same-protocol table.</td></tr>
+          <tr><td>Shaped returns are better than stock-only returns</td><td>Two 020 recipes exist.</td><td>Five AWR settings change together.</td><td>Train one stock-only 036 recipe. Change only damage shaping and win bonus.</td></tr>
+          <tr><td>D3 should scale wider</td><td>d256 D3 and d384 026 exist.</td><td>The source, width, and objective lineage do not form a width-only sweep.</td><td>Train d384 037 D3 BC with the same source. Put this in the scaling section.</td></tr>
+          <tr><td>Flow can compete at scale</td><td>038 has equal data and a current H4 evaluation.</td><td>It uses 25.2% more training PF than D3.</td><td>Run one equal-compute control before a large flow run.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Current throughline</h3>
+    <pre class="lineage">Preserve the controller action
+└── 256 button chords + detailed analog groups
+    └── learned class and physical-value controller encoding
+        └── causal frame Transformer
+            ├── next-frame head                    011
+            ├── independent future heads           012 / 016 / 023
+            ├── add within-frame group AR          019
+            └── add future AR and group AR         024 / 026
+                ├── controlled factorization test  037 D0-D3
+                ├── MC-AWR objective               036
+                └── parallel flow alternative      038
+
+Side branches:
+  interleaved state/action tokens  historical 013
+  RLE action tokens               018
+  IQL and Q                        027 / 030
+  future-state expert             029
+  latent trajectory modes         033</pre>
+    <div class="finding strong"><strong>Best supported base.</strong> Use the D3 decoder structure for the main scaling study. It has future-offset AR and within-frame group AR.</div>
+    <div class="finding moderate"><strong>Best supported objective extension.</strong> Add the 036 Monte-Carlo AWR recipe to the d256 D3 actor. Keep Q and IQL out of the main scale run.</div>
+    <div class="finding weak"><strong>Flow remains an alternate branch.</strong> Run one equal-compute test before flow receives a large training budget.</div>
+  </section>
+
+  <footer>
+    <p>Sources: <a href="blog_experiment_evidence.md">audited experiment ledger</a>, <a href="blog_experiment_runs.csv">run CSV</a>, <a href="experiments/037_factorization_matrix.md">037 audit</a>, and <a href="experiments/038_sparse_endpoint_flow.md">038 record</a>. W&amp;B and R2 values were checked through experiment 038.</p>
+  </footer>
+</main>
+
+<script>
+  const NS = "http://www.w3.org/2000/svg";
+  const colors = {
+    D0: "var(--d0)", D1: "var(--d1)", D2: "var(--d2)", D3: "var(--d3)",
+    BC: "var(--d1)", AWR: "var(--d3)", Flow: "var(--flow)"
+  };
+  const factor = [
+    {id: "D0", stock: -0.8457, damage: -5.8843, latency: 9.515, flops: 1.706},
+    {id: "D1", stock: -0.4381, damage: 4.8455, latency: 10.031, flops: 1.706},
+    {id: "D2", stock: -0.3306, damage: 10.3874, latency: 9.439, flops: 1.706},
+    {id: "D3", stock: -0.2504, damage: 15.6568, latency: 10.340, flops: 1.706}
+  ];
+  const horizons = [1, 2, 4, 6];
+  const horizonData = [
+    {id: "D0", h: {1: {stock: -0.0453, damage: 26.3547}, 2: {stock: -0.2924, damage: 12.0242}, 4: {stock: -0.8457, damage: -5.8843}, 6: {stock: -1.0581, damage: -26.6320}}},
+    {id: "D1", h: {1: {stock: -0.0013, damage: 31.4097}, 2: {stock: -0.0813, damage: 27.3800}, 4: {stock: -0.4381, damage: 4.8455}, 6: {stock: -0.6078, damage: -10.1160}}},
+    {id: "D2", h: {1: {stock: -0.3176, damage: 20.5230}, 2: {stock: -0.2066, damage: 18.6906}, 4: {stock: -0.3306, damage: 10.3874}, 6: {stock: -0.3837, damage: 7.1205}}},
+    {id: "D3", h: {1: {stock: -0.0740, damage: 28.1024}, 2: {stock: -0.1428, damage: 22.4929}, 4: {stock: -0.2504, damage: 15.6568}, 6: {stock: -0.1644, damage: 17.7811}}}
+  ];
+  const awr = [
+    {id: "BC", label: "037 D3 BC", stock: -0.2504, damage: 15.6568},
+    {id: "AWR", label: "036 MC-AWR", stock: -0.1422, damage: 27.6210}
+  ];
+  const flow = [
+    {id: "Flow", label: "038 flow", stock: -0.4153, damage: -16.5141, latency: 10.904, flops: 1.830},
+    {id: "D3", label: "037 D3", stock: -0.2504, damage: 15.6568, latency: 10.340, flops: 1.706}
+  ];
+  const cost = [...factor, {id: "Flow", stock: -0.4153, damage: -16.5141, latency: 10.904, flops: 1.830}];
+
+  function el(name, attrs = {}, text = "") {
+    const item = document.createElementNS(NS, name);
+    for (const [key, value] of Object.entries(attrs)) item.setAttribute(key, value);
+    if (text !== "") item.textContent = text;
+    return item;
+  }
+  function scale(value, domain, range) {
+    return range[0] + (value - domain[0]) * (range[1] - range[0]) / (domain[1] - domain[0]);
+  }
+  function signed(value, digits = 2) {
+    return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
+  }
+  function chartBase(svg, xDomain, xTicks, yDomain, yTicks, xLabel, yLabel) {
+    const W = 620, H = 350, m = {left: 76, right: 34, top: 22, bottom: 58};
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const x = value => scale(value, xDomain, [m.left, W - m.right]);
+    const y = value => scale(value, yDomain, [H - m.bottom, m.top]);
+    for (const tick of yTicks) {
+      svg.appendChild(el("line", {x1: m.left, x2: W - m.right, y1: y(tick), y2: y(tick), class: tick === 0 ? "zero" : "grid"}));
+      svg.appendChild(el("text", {x: m.left - 9, y: y(tick) + 4, "text-anchor": "end", class: "muted"}, String(tick)));
+    }
+    for (const tick of xTicks) {
+      svg.appendChild(el("line", {x1: x(tick), x2: x(tick), y1: m.top, y2: H - m.bottom, class: "grid"}));
+      svg.appendChild(el("text", {x: x(tick), y: H - m.bottom + 22, "text-anchor": "middle", class: "muted"}, String(tick)));
+    }
+    svg.appendChild(el("line", {x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom, class: "axis"}));
+    svg.appendChild(el("line", {x1: m.left, x2: m.left, y1: m.top, y2: H - m.bottom, class: "axis"}));
+    svg.appendChild(el("text", {x: (m.left + W - m.right) / 2, y: H - 14, "text-anchor": "middle", class: "muted"}, xLabel));
+    svg.appendChild(el("text", {x: 17, y: (m.top + H - m.bottom) / 2, transform: `rotate(-90 17 ${(m.top + H - m.bottom) / 2})`, "text-anchor": "middle", class: "muted"}, yLabel));
+    return {W, H, m, x, y};
+  }
+  function barChart(id, rows, key, domain, ticks, label, digits) {
+    const svg = document.getElementById(id);
+    const W = 620, H = 350, m = {left: 175, right: 70, top: 24, bottom: 54};
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const x = value => scale(value, domain, [m.left, W - m.right]);
+    const sorted = [...rows].sort((a, b) => a[key] - b[key]);
+    for (const tick of ticks) {
+      svg.appendChild(el("line", {x1: x(tick), x2: x(tick), y1: m.top, y2: H - m.bottom, class: tick === 0 ? "zero" : "grid"}));
+      svg.appendChild(el("text", {x: x(tick), y: H - m.bottom + 22, "text-anchor": "middle", class: "muted"}, String(tick)));
+    }
+    const rowH = (H - m.top - m.bottom) / sorted.length;
+    sorted.forEach((row, index) => {
+      const cy = m.top + rowH * (index + 0.5);
+      const x0 = x(Math.max(domain[0], Math.min(0, domain[1])));
+      const xv = x(row[key]);
+      const color = colors[row.id];
+      svg.appendChild(el("text", {x: m.left - 12, y: cy + 4, "text-anchor": "end"}, row.label || row.id));
+      svg.appendChild(el("rect", {x: Math.min(x0, xv), y: cy - 9, width: Math.max(2, Math.abs(xv - x0)), height: 18, fill: color, opacity: 0.82}));
+      svg.appendChild(el("circle", {cx: xv, cy, r: 5, fill: color, class: "point"}));
+      const putRight = row[key] < domain[1] - (domain[1] - domain[0]) * 0.17;
+      svg.appendChild(el("text", {x: xv + (putRight ? 8 : -8), y: cy + 4, "text-anchor": putRight ? "start" : "end"}, signed(row[key], digits)));
+    });
+    svg.appendChild(el("text", {x: (m.left + W - m.right) / 2, y: H - 14, "text-anchor": "middle", class: "muted"}, label));
+  }
+  function horizonChart(id, key, yDomain, yTicks) {
+    const svg = document.getElementById(id);
+    const base = chartBase(svg, [1, 6], horizons, yDomain, yTicks, "executed frames before replan", key === "stock" ? "net stock LCB (stocks/min)" : "net damage LCB (damage/min)");
+    for (const row of horizonData) {
+      const points = horizons.map(h => [base.x(h), base.y(row.h[h][key])]);
+      svg.appendChild(el("polyline", {points: points.map(p => p.join(",")).join(" "), stroke: colors[row.id], class: "series-line"}));
+      points.forEach((point, index) => {
+        svg.appendChild(el("circle", {cx: point[0], cy: point[1], r: 5, fill: colors[row.id], class: "point"}));
+        if (index === points.length - 1) svg.appendChild(el("text", {x: point[0] + 8, y: point[1] + 4}, row.id));
+      });
+    }
+  }
+  function scatterChart(id, xKey, yKey, xDomain, xTicks, yDomain, yTicks, xLabel) {
+    const svg = document.getElementById(id);
+    const base = chartBase(svg, xDomain, xTicks, yDomain, yTicks, xLabel, yKey === "stock" ? "net stock LCB (stocks/min)" : "net damage LCB (damage/min)");
+    for (const row of cost) {
+      const x = base.x(row[xKey]);
+      const y = base.y(row[yKey]);
+      svg.appendChild(el("circle", {cx: x, cy: y, r: 6, fill: colors[row.id], class: "point"}));
+      const dx = row.id === "Flow" ? -9 : 9;
+      svg.appendChild(el("text", {x: x + dx, y: y - 8, "text-anchor": row.id === "Flow" ? "end" : "start"}, row.id === "Flow" ? "038 flow" : row.id));
+    }
+  }
+
+  barChart("factor-stock", factor, "stock", [-0.95, 0.12], [-0.8, -0.6, -0.4, -0.2, 0], "net stocks/min, one-sided 95% LCB", 4);
+  barChart("factor-damage", factor, "damage", [-10, 20], [-10, 0, 10, 20], "net damage/min, one-sided 95% LCB", 2);
+  horizonChart("horizon-stock", "stock", [-1.15, 0.12], [-1, -0.75, -0.5, -0.25, 0]);
+  horizonChart("horizon-damage", "damage", [-30, 35], [-20, 0, 20]);
+  barChart("awr-stock", awr, "stock", [-0.30, 0.05], [-0.3, -0.2, -0.1, 0], "net stocks/min, one-sided 95% LCB", 4);
+  barChart("awr-damage", awr, "damage", [0, 32], [0, 10, 20, 30], "net damage/min, one-sided 95% LCB", 2);
+  barChart("flow-stock", flow, "stock", [-0.50, 0.05], [-0.5, -0.4, -0.3, -0.2, -0.1, 0], "net stocks/min, one-sided 95% LCB", 4);
+  barChart("flow-damage", flow, "damage", [-20, 20], [-20, -10, 0, 10, 20], "net damage/min, one-sided 95% LCB", 2);
+  scatterChart("latency-stock", "latency", "stock", [9.2, 11.15], [9.5, 10, 10.5, 11], [-0.92, -0.15], [-0.8, -0.6, -0.4, -0.2], "p50 H4 replan latency (ms)");
+  scatterChart("latency-damage", "latency", "damage", [9.2, 11.15], [9.5, 10, 10.5, 11], [-20, 20], [-20, -10, 0, 10, 20], "p50 H4 replan latency (ms)");
+  scatterChart("flops-stock", "flops", "stock", [1.68, 1.86], [1.70, 1.75, 1.80, 1.85], [-0.92, -0.15], [-0.8, -0.6, -0.4, -0.2], "inference GFLOPs per H4 replan");
+  scatterChart("flops-damage", "flops", "damage", [1.68, 1.86], [1.70, 1.75, 1.80, 1.85], [-20, 20], [-20, -10, 0, 10, 20], "inference GFLOPs per H4 replan");
+</script>
+</body>
+</html>
