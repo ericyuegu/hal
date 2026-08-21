@@ -160,7 +160,9 @@ class TrainConfig:
     grad_accum_steps: int = 1
     muon_lr: float = 0.02
     adam_lr: float = 8.5e-4
-    weight_decay: float = 0.01
+    muon_weight_decay: float = 0.01
+    adam_weight_decay: float = 0.01
+    lr_floor_ratio: float = 1e-5 / 8.5e-4
     warmup_steps: int = 500
     max_steps: int = 16_384
     amp_dtype: str = "bfloat16"
@@ -254,6 +256,12 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
     if cfg.final_diag_n_matchups < 0:
         raise ValueError("final_diag_n_matchups must be non-negative")
+    if not math.isfinite(cfg.muon_weight_decay) or cfg.muon_weight_decay < 0:
+        raise ValueError("muon_weight_decay must be finite and non-negative")
+    if not math.isfinite(cfg.adam_weight_decay) or cfg.adam_weight_decay < 0:
+        raise ValueError("adam_weight_decay must be finite and non-negative")
+    if not math.isfinite(cfg.lr_floor_ratio) or not 0 <= cfg.lr_floor_ratio <= 1:
+        raise ValueError("lr_floor_ratio must be finite and between zero and one")
     if not math.isfinite(cfg.aux_loss_weight) or cfg.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be finite and non-negative")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
@@ -1409,14 +1417,12 @@ def eval_vs_cpu(
 
 
 def lr_schedule(cfg: TrainConfig):
-    floor = 1e-5 / cfg.adam_lr
-
     def schedule(step: int) -> float:
         if step < cfg.warmup_steps:
             return step / max(cfg.warmup_steps, 1)
         progress = (step - cfg.warmup_steps) / max(cfg.max_steps - cfg.warmup_steps, 1)
         cosine = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
-        return floor + (1.0 - floor) * cosine
+        return cfg.lr_floor_ratio + (1.0 - cfg.lr_floor_ratio) * cosine
 
     return schedule
 
@@ -1444,8 +1450,14 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     adam = dict(betas=(0.9, 0.95), eps=1e-10, use_muon=False)
     return SingleDeviceMuonWithAuxAdam(
         [
-            dict(params=muon, lr=cfg.muon_lr, momentum=0.95, weight_decay=cfg.weight_decay, use_muon=True),
-            dict(params=decay, lr=cfg.adam_lr, weight_decay=cfg.weight_decay, **adam),
+            dict(
+                params=muon,
+                lr=cfg.muon_lr,
+                momentum=0.95,
+                weight_decay=cfg.muon_weight_decay,
+                use_muon=True,
+            ),
+            dict(params=decay, lr=cfg.adam_lr, weight_decay=cfg.adam_weight_decay, **adam),
             dict(params=no_decay, lr=cfg.adam_lr, weight_decay=0.0, **adam),
         ]
     )
@@ -1830,6 +1842,10 @@ def config_from_state(values: dict) -> TrainConfig:
     missing = _CHECKPOINT_ARCH_FIELDS - values.keys()
     if missing:
         raise ValueError(f"checkpoint is not an experiment-026 architecture; missing {sorted(missing)}")
+    values = dict(values)
+    if "weight_decay" in values:
+        values.setdefault("muon_weight_decay", values["weight_decay"])
+        values.setdefault("adam_weight_decay", values["weight_decay"])
     known = {item.name for item in fields(TrainConfig)}
     return TrainConfig(**{name: value for name, value in values.items() if name in known})
 

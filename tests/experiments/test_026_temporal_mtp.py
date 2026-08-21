@@ -80,6 +80,8 @@ def test_defaults_freeze_requested_treatment_knobs() -> None:
     cfg = exp.TrainConfig()
     assert (cfg.batch_size, cfg.L_ctx, cfg.max_steps, cfg.seed) == (1024, 128, 16_384, 0)
     assert (cfg.d_model, cfg.n_layers, cfg.n_heads) == (384, 8, 6)
+    assert (cfg.muon_weight_decay, cfg.adam_weight_decay) == (0.01, 0.01)
+    assert cfg.lr_floor_ratio == pytest.approx(1e-5 / 8.5e-4)
     assert cfg.head_offsets == (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     assert (cfg.temporal_d_model, cfg.temporal_layers, cfg.temporal_heads, cfg.temporal_ff_dim) == (128, 2, 4, 256)
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
@@ -92,6 +94,13 @@ def test_final_diagnostic_matchups_accept_zero_but_not_negative() -> None:
     exp.validate_config(_cfg(final_diag_n_matchups=0))
     with pytest.raises(ValueError, match="final_diag_n_matchups"):
         exp.validate_config(_cfg(final_diag_n_matchups=-1))
+
+
+def test_lr_schedule_shape_does_not_depend_on_lr_scale() -> None:
+    low = _cfg(muon_lr=0.014, adam_lr=5.95e-4)
+    high = _cfg(muon_lr=0.028, adam_lr=1.19e-3)
+    for step in range(low.max_steps + 1):
+        assert exp.lr_schedule(low)(step) == pytest.approx(exp.lr_schedule(high)(step))
 
 
 def test_codec_canonicalizes_clicks_and_builds_semantic_tokens() -> None:
@@ -356,7 +365,7 @@ def test_conservative_lcb_matches_backfill_formula() -> None:
 
 
 def test_checkpoint_config_round_trip_and_optimizer_owns_every_parameter() -> None:
-    cfg = _cfg()
+    cfg = _cfg(muon_weight_decay=0.012, adam_weight_decay=0.034)
     restored = exp.config_from_state(asdict(cfg))
     assert restored == cfg
     old_values = asdict(cfg)
@@ -367,6 +376,21 @@ def test_checkpoint_config_round_trip_and_optimizer_owns_every_parameter() -> No
     owned = [parameter for group in optimizer.param_groups for parameter in group["params"]]
     assert len(owned) == sum(1 for _ in model.parameters())
     assert len({id(parameter) for parameter in owned}) == len(owned)
+    muon_group = next(group for group in optimizer.param_groups if group["use_muon"])
+    adam_decay_group = next(
+        group for group in optimizer.param_groups if not group["use_muon"] and group["weight_decay"] > 0
+    )
+    assert muon_group["weight_decay"] == 0.012
+    assert adam_decay_group["weight_decay"] == 0.034
+
+
+def test_legacy_checkpoint_weight_decay_populates_both_optimizers() -> None:
+    values = asdict(_cfg())
+    values.pop("muon_weight_decay")
+    values.pop("adam_weight_decay")
+    values["weight_decay"] = 0.023
+    restored = exp.config_from_state(values)
+    assert (restored.muon_weight_decay, restored.adam_weight_decay) == (0.023, 0.023)
 
 
 def test_tiny_training_run_can_disable_final_diagnostic(monkeypatch, tmp_path: Path) -> None:
