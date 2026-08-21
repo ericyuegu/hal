@@ -503,7 +503,15 @@ def main(args: Args) -> None:
                 resume="must",
                 reinit="finish_previous",
             )
-            tracking.log({"global_step": EXPECTED_UPDATES, **values})
+            tracking.log(
+                {
+                    "global_step": EXPECTED_UPDATES,
+                    "samples": EXPECTED_SAMPLES,
+                    **values,
+                }
+            )
+            tracking.summary["global_step"] = EXPECTED_UPDATES
+            tracking.summary["samples"] = EXPECTED_SAMPLES
             for name, value in values.items():
                 tracking.summary[name] = value
             tracking.finish()
