@@ -119,6 +119,8 @@ def _audit_eval(
     horizon: int,
     checkpoint_sha256: str,
     summary: dict[str, Any],
+    expected_max_parallel: int,
+    compare_wandb: bool,
 ) -> None:
     protocol = payload.get("protocol")
     metrics = payload.get("metrics")
@@ -138,6 +140,7 @@ def _audit_eval(
         "action_hygiene": "structured_codec_trigger_button_mask_v1",
         "instant_legal_stage_restarts": True,
         "bootstrap_resamples": 2000,
+        "max_parallel": expected_max_parallel,
     }
     for name, expected in expected_protocol.items():
         if protocol.get(name) != expected:
@@ -152,10 +155,11 @@ def _audit_eval(
     }[cell]
     if (protocol.get("future_conditioning"), protocol.get("group_conditioning")) != expected_axes:
         raise AssertionError(f"{cell} H{horizon}: factorization flags do not match the cell")
-    for name, expected in metrics.items():
-        _assert_close(summary.get(f"eval_h{horizon}/{name}"), expected, f"{cell} H{horizon} {name}")
-        if horizon == 4:
-            _assert_close(summary.get(f"eval/{name}"), expected, f"{cell} mirrored H4 {name}")
+    if compare_wandb:
+        for name, expected in metrics.items():
+            _assert_close(summary.get(f"eval_h{horizon}/{name}"), expected, f"{cell} H{horizon} {name}")
+            if horizon == 4:
+                _assert_close(summary.get(f"eval/{name}"), expected, f"{cell} mirrored H4 {name}")
 
 
 @torch.no_grad()
@@ -339,20 +343,35 @@ def _audit_run(
             raise AssertionError(f"{cell}: W&B config {name}={actual!r}, checkpoint has {expected!r}")
 
     metric_keys = sorted(key for key in keys if key.endswith("metrics.json"))
-    expected_metric_keys = [f"{prefix}replays/final_h{horizon}/metrics.json" for horizon in HORIZONS]
+    builtin_metric_keys = [f"{prefix}replays/final_h{horizon}/metrics.json" for horizon in HORIZONS]
+    selected_metric_keys = [
+        f"{prefix}{summary.get(f'audit/selected_eval_h{horizon}/r2_metrics_key', '')}" for horizon in HORIZONS
+    ]
+    expected_metric_keys = sorted(builtin_metric_keys + selected_metric_keys)
     if metric_keys != expected_metric_keys:
         raise AssertionError(f"{cell}: R2 metric files {metric_keys!r} != {expected_metric_keys!r}")
     metrics_audit: dict[str, Any] = {}
-    for horizon, key in zip(HORIZONS, metric_keys, strict=True):
+    for key in metric_keys:
         payload, digest, size = _download_json(client, bucket, key)
+        protocol = payload.get("protocol", {})
+        horizon = protocol.get("exec_horizon")
+        if horizon not in HORIZONS:
+            raise AssertionError(f"{cell}: {key} has invalid horizon {horizon!r}")
+        selected = key == selected_metric_keys[HORIZONS.index(horizon)]
+        builtin = key == builtin_metric_keys[HORIZONS.index(horizon)]
+        if selected == builtin:
+            raise AssertionError(f"{cell}: cannot classify evaluation artifact {key}")
         _audit_eval(
             payload,
             cell=cell,
             horizon=horizon,
             checkpoint_sha256=checkpoint_sha,
             summary=summary,
+            expected_max_parallel=16 if selected else 32,
+            compare_wandb=selected,
         )
-        metrics_audit[f"h{horizon}"] = {
+        label = f"{'selected' if selected else 'builtin'}_h{horizon}"
+        metrics_audit[label] = {
             "key": key,
             "bytes": size,
             "sha256": digest,
@@ -430,6 +449,8 @@ def main(args: Args) -> None:
     }
     for cell, cell_report in report["runs"].items():
         for horizon, artifact in cell_report["metrics_artifacts"].items():
+            if not horizon.startswith("selected_"):
+                continue
             common = {
                 name: value for name, value in artifact["protocol"].items() if name not in variable_protocol_fields
             }
