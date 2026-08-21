@@ -446,6 +446,14 @@ def test_metrics_artifact_contains_the_horizon_and_protocol_digest(tmp_path: Pat
     assert payload["metrics"]["net_stock_lcb"] == 0.25
 
 
+def test_evaluator_never_starts_more_dolphins_than_cpus(monkeypatch) -> None:
+    cfg = _cfg("D3", eval_max_parallel=32)
+    monkeypatch.setattr(exp, "usable_cpus", lambda: 16)
+    assert exp._eval_parallelism(cfg, 96) == 16
+    monkeypatch.setattr(exp, "usable_cpus", lambda: 10)
+    assert exp._eval_parallelism(cfg, 96) == 8
+
+
 def test_finite_learned_logit_audit_keeps_hard_support_separate() -> None:
     cfg = _cfg("D0")
     model = exp.GPT(cfg)

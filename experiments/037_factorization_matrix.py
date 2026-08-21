@@ -408,8 +408,14 @@ def validate_production_config(cfg: TrainConfig) -> None:
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
     # ``run_matches_vec`` accepts a power-of-two capacity and then limits the
     # active worker count to ``n_matchups``. Keep that capacity a valid bucket
-    # when an ad hoc evaluation asks for, for example, 12 matchups.
-    return covering_power_of_two(resolve_parallelism(n_matchups, cfg.eval_max_parallel))
+    # when an ad hoc evaluation asks for, for example, 12 matchups. Never start
+    # more Dolphin workers than physical CPUs: oversubscribed startup waves can
+    # time out before reaching IN_GAME and leave no policy-quality evidence.
+    requested = covering_power_of_two(resolve_parallelism(n_matchups, cfg.eval_max_parallel))
+    available_cpus = usable_cpus()
+    declared_cpus = cfg.num_workers if cfg.num_workers > 0 else available_cpus
+    cpu_cap = 1 << (min(available_cpus, declared_cpus).bit_length() - 1)
+    return min(requested, cpu_cap)
 
 
 def _eval_inference_bucket(cfg: TrainConfig, n_matchups: int) -> int:
