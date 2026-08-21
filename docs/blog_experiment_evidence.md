@@ -6,11 +6,12 @@ Audit date: 20 August 2026.
 
 ## Audit rules
 
-- The corrected W&B export has 24 runs. All 24 runs are in the table.
+- The corrected W&B export has 24 historical runs. All 24 are in the table. This audit adds the four actual
+  037 production runs from the W&B API and their R2 evidence.
 - I compared all 314 non-empty metric cells in the export with the W&B API. There are zero metric mismatches.
 - I also include eight real runs that are needed for the listed comparisons: two 028 runs, 023 P1, 010, 001, both 033 runs, and 034.
-- I compared each W&B run name with the top-level directories under `r2:hal/runs`. There are 32 matches and zero missing directories. For 31 runs, the W&B name is the R2 directory name. For `m5e1kj7w`, W&B calls the run `final-rerun`; its config points to the exact 013 R2 directory and checkpoint.
-- The 32 R2 directories contain 50 `metrics.json` files in 12 runs. I read and parsed all 50 files. There were zero read or JSON errors. The closed-loop source cell states which final, standalone, W&B, or local result is used.
+- I compared each W&B run name with the top-level directories under `r2:hal/runs`. There are 36 matches and zero missing directories. For 35 runs, the W&B name is the R2 directory name. For `m5e1kj7w`, W&B calls the run `final-rerun`; its config points to the exact 013 R2 directory and checkpoint.
+- The 36 R2 run directories contain 82 `metrics.json` files in 16 runs. I read and parsed all 82 files. There were zero read or JSON errors. The closed-loop source cell states which final, standalone, W&B, or local result is used.
 - W&B metadata for several old runs now names the LCB backfill script as the program. For those runs, lineage comes from the W&B config, the exact R2 run name, and the matching repository source at the recorded commit when available.
 - The closed-loop columns use `net_stock_lcb` and `net_dmg_lcb`. These are the repository's conservative one-sided 95% lower bounds. They are not cluster-bootstrap LCBs. They are not the low end of a two-sided confidence interval.
 - Validation names are kept in the cells. Compare a validation number only with the same named loss and the same target format.
@@ -45,10 +46,14 @@ Audit date: 20 August 2026.
             ├── 029: training-only future-state expert
             ├── 033: non-causal parallel latent-trajectory decoder
             ├── 034: exact 026 policy plus rank-weighted BC
-            └── 036: 026-style temporal/group actor at d256 plus MC-AWR and a value head
+            ├── 036: 026-style temporal/group actor at d256 plus MC-AWR and a value head
+            └── 037: the d256 036 actor in a uniform-BC 2×2 decoder-factorization matrix
 ```
 
 Experiment 036 is an objective-and-scale branch from 026. It is not a pure next step in the temporal-MTP architecture line.
+Experiment 037 uses the 036 actor architecture and detached value head but uniform actor weights. Its D0 and D1
+are new controlled runs, not renamed 016 or 019 runs. D2 is the first production future-AR/group-independent
+cell. Both 024 and 026 are D3-like; neither is historical D2.
 
 ## One run per row
 
@@ -75,6 +80,11 @@ Rows follow the blog outline. Direct siblings are in ascending stock-LCB order w
 | **TEMPORAL / DSV3-STYLE MTP** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
 | M2.1 | 024 [`024_temporal_mtp.py`](../experiments/024_temporal_mtp.py) | [4hoe86s7](https://wandb.ai/ericyuegu/hal/runs/4hoe86s7)<br>dense 20-frame causal decoder | mean-horizon NLL 1.1854; horizon-1 1.0666 | deploy frame accuracy .390; group accuracy .766 | -0.5525 | +12.1926 | W&B standard field; 96 boots, 106 matches, 0 crashes. R2 run exists. | trunk d256 L8 h4, context 256; temporal d64 L1; execute 4 | 512 · 16,384 · 8.389M | 6.669M | 85.9 | — | M2.2 | Versus 026: trunk width, context, temporal width/depth, group head, codec, group order, offsets, and decoder version change. Parameters +125.7%; PF +12.9% in 026. |
 | M2.2 | 026 [`026_temporal_mtp.py`](../experiments/026_temporal_mtp.py) | [cqbbbg77](https://wandb.ai/ericyuegu/hal/runs/cqbbbg77)<br>sparse-offset temporal MTP | primary NLL 1.1596; total 3.1272 | change F1 .218; exact frame .597; dense-4 .492 | +0.0319 | +29.8491 | W&B and R2 `replays/final/metrics.json` match; 96 boots, 101 matches, 0 crashes. | trunk d384 L8 h6, context 128; temporal d128 L2; offsets 1/2/3/4/5/6/9/12/16/20; execute 4 | 512 · 16,384 · 8.389M | 15.053M | 97.0 | 13.51 / 14.28 ms; local `self_play_benchmark_12x14400_single_match_run02/metrics.json` | Main control | No mismatch within this row. The latency is from a separate benchmark, not the 96-boot eval file. |
+| **DECODER FACTORIZATION MATRIX; AUDITED H4** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| D0 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj)<br>future independent; no learned group conditioning | primary NLL 1.8934; joint 5.4241 | change F1 .301; exact frame .640; dense-4 .471 | -0.8457 | -5.8843 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 113 matches, 0 crashes. Original p32 artifact failed. | d256 L8 h4; context 128; temporal d128 L2; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 9.51 / 9.61 ms; shared L40S; implementation latency | Matrix baseline | No row-internal mismatch. Same modules, parameters, optimizer ownership, data, updates, and nominal work as D1–D3. |
+| D1 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw)<br>future independent; learned group AR | primary NLL 1.8588; joint 5.2507 | change F1 .324; exact frame .639; dense-4 .474 | -0.4381 | +4.8455 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 101 matches, 0 crashes. Original p32 artifact failed. | same fixed d256 037 model; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 10.03 / 10.75 ms; shared L40S; implementation latency | D0 | Only learned group conditioning changes independent→autoregressive. The fixed trigger/button legality mask remains in both cells. |
+| D2 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j)<br>future selected-AR; no learned group conditioning | primary NLL 1.1819; joint 3.2126 | change F1 .207; exact frame .599; dense-4 .501 | -0.3306 | +10.3874 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 102 matches, 0 crashes. Original p32 artifact failed. | same fixed d256 037 model; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 9.44 / 9.65 ms; shared L40S; implementation latency | D0 | Only future conditioning changes independent→selected-offset autoregressive. This is the first production D2 run. |
+| D3 | 037 [`037_factorization_matrix.py`](../experiments/037_factorization_matrix.py) | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf)<br>future selected-AR; learned group AR; uniform BC | primary NLL 1.1821; joint 3.1883 | change F1 .213; exact frame .599; dense-4 .499 | -0.2504 | +15.6568 | W&B and R2 `replays/final_h4_p16-repair/metrics.json`; 96 boots, 106 matches, 0 crashes. Original p32 artifact failed. | exact 036 actor architecture with uniform BC; detached value head; execute 4 | 512 · 16,384 · 8.389M | 7.148M total; 7.082M policy | 46.0 | 10.34 / 10.53 ms; shared L40S | D0, D1, D2; later control for 036-style MC-AWR | Both factorization flags are on. All fixed training, parameter, and nominal-compute controls match D0–D2. Actor weighting is uniform, not MC-AWR. |
 | **JOINT SLICES, GROUP AR, AND INTERLEAVED TOKENS** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
 | M3.1a | 011 [`011_muon.py`](../experiments/011_muon.py) | [6g1fud8e](https://wandb.ai/ericyuegu/hal/runs/6g1fud8e)<br>16k-step frame GPT | offset-1 NLL 1.0051 | reconstruction F1 .908; accuracy .992 | -0.9504 | +42.0529 | W&B standard field; old protocol; only 4 matches. R2 run exists. | d256 L8 h4; context 256; one 355-logit vector split into four independent softmaxes | 512 · 16,384 · 8.389M | 6.512M | 83.9 | — | M3.1b and M3.1c | Versus the 32k runs: half the updates, samples, and PF. |
 | M3.1b | 009 [`009_simplify_arch.py`](../experiments/009_simplify_arch.py) | [o3nihah5](https://wandb.ai/ericyuegu/hal/runs/o3nihah5)<br>AdamW frame GPT | offset-1 NLL 1.0129 | reconstruction F1 .901; accuracy .992 | -0.8831 | -1.9628 | W&B standard field; old protocol. R2 run exists but has no final `metrics.json`. | d256 L8 h4; context 256; independent group slices | 512 · 32,768 · 16.777M | 6.512M | 167.8 | — | M3.1c | Same model, batch, updates, samples, and PF. Optimizer and learning rates change: AdamW .001 vs Muon .02 + AdamW .0003. |
@@ -108,6 +118,54 @@ Rows follow the blog outline. Direct siblings are in ascending stock-LCB order w
 | 028 evaluation | The uploaded built-in evaluations failed. The successful 96-boot evaluations are local files. |
 | 034 evaluation | The built-in final evaluation failed. The successful 96-boot R2 standalone evaluation is the table source. |
 | 033 K=8 sample counter | The checkpoint/global step is 10,240. W&B reports 10,563,584 samples, which is 0.74% above `1,024 × 10,240`. PF uses the W&B sample counter. |
+| 037 training counters | Evaluation repair briefly left stale mutable W&B summary counters. Immutable histories end at zero-based step 16,383 with 8,388,608 samples, and all four `final.pt` files contain step 16,384. The final audit restored every original W&B summary to 16,384 and 8,388,608. |
+| 037 built-in evaluation | The initial jobs requested 32 Dolphin processes on 16 CPUs. All 1,536 scheduled cell/horizon boots failed before gameplay. The p32 files remain failure evidence. The selected p16 repairs use unchanged final checkpoints, 16 processes on 16 CPUs, distinct R2 paths, and the original W&B runs. |
+
+## 037 evaluation artifact rows
+
+This table gives one row for every actual 037 run and horizon artifact. The four `built-in` rows per cell are
+runtime failures and are not architecture evidence. The four `selected` rows per cell are the official horizon
+results. Full component rates and confidence intervals are in
+[`docs/experiments/037_factorization_matrix.md`](experiments/037_factorization_matrix.md).
+
+| Cell | Artifact | Original W&B run | R2 metrics path | H | Boots | Matches | Crashes | Stock LCB | Damage LCB | Protocol SHA-256 |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---|
+| D0 | built-in failure | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h1/metrics.json` | 1 | 0 complete / 96 scheduled | 0 | 96 | — | — | `e055b1c41a34f9e8781dbe1342ce9ecf790f94cfd71a9b74728fd929653f6a46` |
+| D0 | built-in failure | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h2/metrics.json` | 2 | 0 complete / 96 scheduled | 0 | 96 | — | — | `4736f8d1cd4354f789483db0100b38db8f71a4491ebb39d56e74eaf5d2140d12` |
+| D0 | built-in failure | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h4/metrics.json` | 4 | 0 complete / 96 scheduled | 0 | 96 | — | — | `b1f1dfc934575358601c2f98db7c612fa5ad35d0a2700bcf3c1acb7ab1712aa9` |
+| D0 | built-in failure | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h6/metrics.json` | 6 | 0 complete / 96 scheduled | 0 | 96 | — | — | `da904f4619a4bb0cfa249021374260e8fcdcc9090779ca33c34d53c5843cc09b` |
+| D0 | selected repair | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h1_p16-repair/metrics.json` | 1 | 96 | 101 | 0 | -0.0453 | +26.3547 | `f0e74b70eb41d715543966a050108fe5c2764e2902ed2356ccd76113d7d909c2` |
+| D0 | selected repair | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h2_p16-repair/metrics.json` | 2 | 96 | 98 | 0 | -0.2924 | +12.0242 | `d7d4272c385afec91fb40612dc2dd008868431138cf46146e80ece6f0b22ce2b` |
+| D0 | selected repair | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h4_p16-repair/metrics.json` | 4 | 96 | 113 | 0 | -0.8457 | -5.8843 | `10cf9e03d93669eb6a8404ec044985dcecb93823aa9b06fa6eab07d6604044b3` |
+| D0 | selected repair | [98r9smrj](https://wandb.ai/ericyuegu/hal/runs/98r9smrj) | `replays/final_h6_p16-repair/metrics.json` | 6 | 96 | 121 | 0 | -1.0581 | -26.6320 | `a39d42df4ac4f7dfa492749adc08425ac9b0921fd79f6afb17f685c0b18e78f7` |
+| D1 | built-in failure | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h1/metrics.json` | 1 | 0 complete / 96 scheduled | 0 | 96 | — | — | `af441781da6d44bde8639d71baf1c2b218017cf89b199605c93877ed2565bfd4` |
+| D1 | built-in failure | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h2/metrics.json` | 2 | 0 complete / 96 scheduled | 0 | 96 | — | — | `716f3ed7612e015b814734e20aa8a322c00511a582da53ab0e5b40e754f3d512` |
+| D1 | built-in failure | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h4/metrics.json` | 4 | 0 complete / 96 scheduled | 0 | 96 | — | — | `390d651c85d3c61ea95b67775ff397938eed5dde0d6a5e36a98c567e8840a898` |
+| D1 | built-in failure | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h6/metrics.json` | 6 | 0 complete / 96 scheduled | 0 | 96 | — | — | `d5d0919306c4e0ab9506b52ef2fea0d2f4a7ec0112e065a4bb9ba225bc4f96e9` |
+| D1 | selected repair | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h1_p16-repair/metrics.json` | 1 | 96 | 101 | 0 | -0.0013 | +31.4097 | `04f78125a174f6977cd74cc06e7bae19ed73d0dcad267ae58fb91ccaf9d78040` |
+| D1 | selected repair | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h2_p16-repair/metrics.json` | 2 | 96 | 97 | 0 | -0.0813 | +27.3800 | `54849c4f9eca407d8b82a4c73beb0668a05ec5fe1f009ef917c495ab23bcffc1` |
+| D1 | selected repair | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h4_p16-repair/metrics.json` | 4 | 96 | 101 | 0 | -0.4381 | +4.8455 | `732552552b0b6e5eeb96f26d5a65706d445097e2d68b55648c4d606a362a2e36` |
+| D1 | selected repair | [a117chkw](https://wandb.ai/ericyuegu/hal/runs/a117chkw) | `replays/final_h6_p16-repair/metrics.json` | 6 | 96 | 104 | 0 | -0.6078 | -10.1160 | `6e19f76a1cad4e03ccf8ac1390d553673713d782081081150b9928412d9766c8` |
+| D2 | built-in failure | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h1/metrics.json` | 1 | 0 complete / 96 scheduled | 0 | 96 | — | — | `3e1a689aed12654d509cb5b98cdba679cf5d8af232e4785e78cb2457d921cf85` |
+| D2 | built-in failure | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h2/metrics.json` | 2 | 0 complete / 96 scheduled | 0 | 96 | — | — | `67bcc647e241cdbdb936578b08b9ce72b85fc7e084461db5d4c5e2de24eeaca5` |
+| D2 | built-in failure | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h4/metrics.json` | 4 | 0 complete / 96 scheduled | 0 | 96 | — | — | `f9b97a572c628e363a4303713eb50497024f7fd9530a637c2698b0e1319c0342` |
+| D2 | built-in failure | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h6/metrics.json` | 6 | 0 complete / 96 scheduled | 0 | 96 | — | — | `ac28fcada7e8e7360b7818b24094577d3a43b82321c009dc2630458b3fef6d02` |
+| D2 | selected repair | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h1_p16-repair/metrics.json` | 1 | 96 | 102 | 0 | -0.3176 | +20.5230 | `721dfd69f9a2e21b9a2fd357581bb1f5d4eddceab53a1fb31cf1e4ae2c8f6483` |
+| D2 | selected repair | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h2_p16-repair/metrics.json` | 2 | 96 | 104 | 0 | -0.2066 | +18.6906 | `5e94c9143dcb2be953120cf368f81d3e31b12cafe423a995dc5e56bd4ba5df68` |
+| D2 | selected repair | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h4_p16-repair/metrics.json` | 4 | 96 | 102 | 0 | -0.3306 | +10.3874 | `4d9cc2c5f73d2dc5b17c1b42a468d82eb89622a414b0a35907218d294ce3ec60` |
+| D2 | selected repair | [50q39o9j](https://wandb.ai/ericyuegu/hal/runs/50q39o9j) | `replays/final_h6_p16-repair/metrics.json` | 6 | 96 | 103 | 0 | -0.3837 | +7.1205 | `6b5aebc6e707b5e16117f5afec7074d7427c0194bff933ffd6a9647e2b05e20d` |
+| D3 | built-in failure | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h1/metrics.json` | 1 | 0 complete / 96 scheduled | 0 | 96 | — | — | `f55b82237adc333f0e0df7d1d238542fd5935f438afb3dbdc875c6edc2446bb5` |
+| D3 | built-in failure | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h2/metrics.json` | 2 | 0 complete / 96 scheduled | 0 | 96 | — | — | `0908883b2c5d3e63376c0c70d6ea4ee19c7a8035139d247c4ba3d76167cccf16` |
+| D3 | built-in failure | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h4/metrics.json` | 4 | 0 complete / 96 scheduled | 0 | 96 | — | — | `b6d26872457bac0b685cc9508c6e1b57651e5032f075e9ddb92f4e67e140e611` |
+| D3 | built-in failure | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h6/metrics.json` | 6 | 0 complete / 96 scheduled | 0 | 96 | — | — | `ed77a0c055f445c767e67230ee3871c296852c795bf4106cab998c40da7ef092` |
+| D3 | selected repair | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h1_p16-repair/metrics.json` | 1 | 96 | 99 | 0 | -0.0740 | +28.1024 | `cebfe3ae9df00d4f32de261e400f20ae3536c9cf6a9097c21d6ec3c1bd37ff5e` |
+| D3 | selected repair | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h2_p16-repair/metrics.json` | 2 | 96 | 105 | 0 | -0.1428 | +22.4929 | `f382f135b48c792e3ed756e559ec2d579b7968695f7806a5acdf785d5b49d065` |
+| D3 | selected repair | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h4_p16-repair/metrics.json` | 4 | 96 | 106 | 0 | -0.2504 | +15.6568 | `2f2aa01632022d3abe55a10a8410b53b784e8401d10cc1525c561958c08597b1` |
+| D3 | selected repair | [5wfk2esf](https://wandb.ai/ericyuegu/hal/runs/5wfk2esf) | `replays/final_h6_p16-repair/metrics.json` | 6 | 96 | 100 | 0 | -0.1644 | +17.7811 | `2e33ca91b0f62a5ac2754f141a40a468da3261ebb3a9625c79a40b37ae938500` |
+
+The shared audit report is `runs/037_factorization_matrix_audit/shared_l40s_audit.json`, SHA-256
+`e54d9275134f17d8c42572668b169c40d25b5c9058ee607f5067a2f5ab396810`. It includes the SHA-256 of every
+`metrics.json` in this table and all parsed metric and protocol fields.
 
 ## Experiment ideas from the outline
 
