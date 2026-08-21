@@ -305,8 +305,14 @@ def _audit_run(
     summary = dict(run.summary)
     if run.name != run_name:
         raise AssertionError(f"{cell}: W&B name mismatch: {run.name!r}")
-    if summary.get("global_step") != EXPECTED_UPDATES or summary.get("samples") != EXPECTED_SAMPLES:
-        raise AssertionError(f"{cell}: final W&B step/sample mismatch")
+    history_max_step = summary.get("global_step")
+    history_max_samples = summary.get("samples")
+    if history_max_step != EXPECTED_UPDATES or history_max_samples != EXPECTED_SAMPLES:
+        progress = list(run.scan_history(keys=["global_step", "samples"], page_size=10_000))
+        history_max_step = max((row.get("global_step", -1) for row in progress), default=-1)
+        history_max_samples = max((row.get("samples", -1) for row in progress), default=-1)
+        if history_max_step != EXPECTED_UPDATES or history_max_samples != EXPECTED_SAMPLES:
+            raise AssertionError(f"{cell}: W&B history ends at step={history_max_step}, samples={history_max_samples}")
     for name, expected in EXPECTED_PARAMETERS.items():
         if summary.get(f"parameters/{name}") != expected:
             raise AssertionError(f"{cell}: parameters/{name} mismatch")
@@ -386,6 +392,13 @@ def _audit_run(
         "run_id": run_id,
         "run_name": run_name,
         "wandb_url": run.url,
+        "wandb_pre_audit": {
+            "state": run.state,
+            "summary_global_step": summary.get("global_step"),
+            "summary_samples": summary.get("samples"),
+            "history_max_global_step": history_max_step,
+            "history_max_samples": history_max_samples,
+        },
         "r2_prefix": prefix,
         "r2_object_count": len(objects),
         "final_pt": {"key": final_key, "bytes": checkpoint_bytes, "sha256": checkpoint_sha},
