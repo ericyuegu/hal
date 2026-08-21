@@ -252,6 +252,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("eval_max_parallel must be a positive power of two")
     if cfg.observation_bundle not in ("base", "v6_lean"):
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
+    if cfg.final_diag_n_matchups < 0:
+        raise ValueError("final_diag_n_matchups must be non-negative")
     if not math.isfinite(cfg.aux_loss_weight) or cfg.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be finite and non-negative")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
@@ -285,11 +287,11 @@ def _eval_inference_bucket(cfg: TrainConfig, n_matchups: int) -> int:
 
 
 def _planned_inference_programs(cfg: TrainConfig) -> tuple[tuple[int, int], ...]:
-    scheduled = (
-        (cfg.eval_n_matchups, cfg.exec_horizon),
-        (cfg.final_eval_n_matchups, cfg.exec_horizon),
-        (cfg.final_diag_n_matchups, cfg.final_diag_exec_horizon),
-    )
+    scheduled = [(cfg.final_eval_n_matchups, cfg.exec_horizon)]
+    if cfg.eval_every > 0:
+        scheduled.append((cfg.eval_n_matchups, cfg.exec_horizon))
+    if cfg.final_diag_n_matchups > 0:
+        scheduled.append((cfg.final_diag_n_matchups, cfg.final_diag_exec_horizon))
     return tuple(sorted({(_eval_inference_bucket(cfg, n), horizon) for n, horizon in scheduled}))
 
 
@@ -1789,17 +1791,18 @@ def train(
             inference=eval_inference,
         )
         wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
-        stride6 = eval_vs_cpu(
-            model,
-            stats,
-            cfg,
-            n_matchups=cfg.final_diag_n_matchups,
-            replay_dir=replay_dir / "final_s6",
-            exec_horizon=cfg.final_diag_exec_horizon,
-            checkpoint_sha256=checkpoint_sha,
-            inference=eval_inference,
-        )
-        wandb.log({"global_step": cfg.max_steps, **{f"eval_s6/{name}": value for name, value in stride6.items()}})
+        if cfg.final_diag_n_matchups > 0:
+            stride6 = eval_vs_cpu(
+                model,
+                stats,
+                cfg,
+                n_matchups=cfg.final_diag_n_matchups,
+                replay_dir=replay_dir / "final_s6",
+                exec_horizon=cfg.final_diag_exec_horizon,
+                checkpoint_sha256=checkpoint_sha,
+                inference=eval_inference,
+            )
+            wandb.log({"global_step": cfg.max_steps, **{f"eval_s6/{name}": value for name, value in stride6.items()}})
     finally:
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)

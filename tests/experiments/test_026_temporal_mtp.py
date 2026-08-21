@@ -88,6 +88,12 @@ def test_defaults_freeze_requested_treatment_knobs() -> None:
     assert cfg.eval_max_parallel is None
 
 
+def test_final_diagnostic_matchups_accept_zero_but_not_negative() -> None:
+    exp.validate_config(_cfg(final_diag_n_matchups=0))
+    with pytest.raises(ValueError, match="final_diag_n_matchups"):
+        exp.validate_config(_cfg(final_diag_n_matchups=-1))
+
+
 def test_codec_canonicalizes_clicks_and_builds_semantic_tokens() -> None:
     model = exp.GPT(_cfg())
     actions = torch.zeros(1, 2, A_DIM)
@@ -363,7 +369,7 @@ def test_checkpoint_config_round_trip_and_optimizer_owns_every_parameter() -> No
     assert len({id(parameter) for parameter in owned}) == len(owned)
 
 
-def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeypatch, tmp_path: Path) -> None:
+def test_tiny_training_run_can_disable_final_diagnostic(monkeypatch, tmp_path: Path) -> None:
     # Flex attention on CUDA needs head_dim >= 16, so the end-to-end model is
     # slightly wider than the CPU-only unit-test models.
     cfg = _cfg(
@@ -374,6 +380,7 @@ def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeyp
         ckpt_every=0,
         wandb_log_code=False,
         inference_mode="eager",
+        final_diag_n_matchups=0,
     )
     batch = _batch(cfg)
     monkeypatch.setattr(exp, "_make_loaders", lambda cfg, stats: ([batch], [batch]))
@@ -409,5 +416,5 @@ def test_tiny_training_run_reaches_final_validation_and_both_evaluations(monkeyp
     monkeypatch.setattr(exp.wandb, "log", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp.wandb, "finish", lambda: None)
     exp.train(cfg, {}, comment="tiny")
-    assert evaluations == [(cfg.final_eval_n_matchups, 4), (cfg.final_diag_n_matchups, 6)]
+    assert evaluations == [(cfg.final_eval_n_matchups, 4)]
     assert len(inference_models) == 1
