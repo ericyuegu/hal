@@ -201,9 +201,10 @@ def vs_cpu_metrics(
     default). Stocks/damage are reported as **per-active-minute rates**, pooled
     frame-weighted over every non-crashed match (``sum(metric) / sum(active_minutes)``)
     so the numbers are comparable across runs regardless of how many episodes ran or
-    how long each lasted. ``crashed`` is the fraction of scheduled boots that produced no game.
-    A countdown-only tail fragment is recorded as ``zero_active`` but is not a completed match and
-    does not enter rates or confidence intervals.
+    how long each lasted. ``scheduled_boots`` and ``completed_boots`` make coverage
+    explicit; ``crashed`` is the fraction of scheduled boots that produced no game.
+    A countdown-only tail fragment is recorded as ``zero_active`` but is not a
+    completed match and does not enter rates or confidence intervals.
 
     Protocol freeze (see ``PREGAME_FRAMES``): the denominator counts only **active**
     frames (canonical id >= 0). Each match's ``PREGAME_FRAMES`` pre-GO countdown frames
@@ -219,6 +220,10 @@ def vs_cpu_metrics(
     """
     boot_ids = {(stage, boot_index) for stage, boot_index, _ in result}
     completed_boot_ids = {(stage, boot_index) for stage, boot_index, summary in result if summary is not None}
+    coverage = {
+        "scheduled_boots": float(len(boot_ids)),
+        "completed_boots": float(len(completed_boot_ids)),
+    }
     all_summaries = [s for _, _, s in result if s is not None]
     active_rows = [
         (stage, boot_index, s) for stage, boot_index, s in result if s is not None and _active_frames(s.frames) > 0
@@ -228,8 +233,14 @@ def vs_cpu_metrics(
     crashed = len(boot_ids - completed_boot_ids) / len(boot_ids) if boot_ids else 1.0
     if not summaries:
         if not all_summaries:
-            return {"crashed": crashed}
-        return {"matches": 0.0, "zero_active": float(zero_active), "crashed": crashed}
+            return {**coverage, "crashed": crashed}
+        return {
+            **coverage,
+            "matches": 0.0,
+            "boots": 0.0,
+            "zero_active": float(zero_active),
+            "crashed": crashed,
+        }
     total_frames = sum(s.frames for s in summaries)
 
     total = np.array([s.frames for s in summaries], dtype=np.float64)
@@ -249,7 +260,7 @@ def vs_cpu_metrics(
         dtype=np.float64,
     )
     idx = _resample_index(np.random.default_rng(seed), len(by_boot), bootstrap_resamples)
-    out: dict[str, float] = {}
+    out: dict[str, float] = dict(coverage)
     for key in _RATE_KEYS:
         point = float(numerators[key].sum() / total_active_minutes) if total_active_minutes > 0.0 else 0.0
         boot_numerators = np.array(

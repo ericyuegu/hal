@@ -150,8 +150,8 @@ class TrainConfig:
     decode_temp: float = 1.0
     inference_mode: str = "compiled"  # explicit "eager" is for debugging
     inference_buckets: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
-    # Hardware-derived by default. An explicit power of two is a reproducibility
-    # or memory-pressure override, not an architecture parameter.
+    # A power-of-two capacity is required by vectorized inference. Keep an
+    # explicit override available for reproducibility or memory pressure.
     compiled_inference_bucket: int | None = None
 
     seed: int = 0
@@ -181,7 +181,9 @@ class TrainConfig:
     eval_n_matchups: int = 32
     final_eval_n_matchups: int = 96
     final_diag_n_matchups: int = 32
-    eval_max_parallel: int | None = None
+    # L40S jobs request eight physical CPU cores. More Dolphin workers make
+    # Slippstream startup unreliable even when the container can burst higher.
+    eval_max_parallel: int | None = 8
 
     data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
     compact_data: bool = True
@@ -1350,6 +1352,19 @@ def _write_eval_evidence(
         temporary.replace(path)
 
 
+def require_complete_eval(metrics: dict[str, float], expected_boots: int) -> None:
+    """Fail unless every scheduled boot reached active gameplay."""
+    scheduled = int(metrics.get("scheduled_boots", 0.0))
+    completed = int(metrics.get("completed_boots", 0.0))
+    active = int(metrics.get("boots", 0.0))
+    if scheduled != expected_boots or completed != expected_boots or active != expected_boots:
+        raise RuntimeError(
+            "closed-loop evaluation is incomplete: "
+            f"scheduled={scheduled}/{expected_boots}, completed={completed}/{expected_boots}, "
+            f"active={active}/{expected_boots}"
+        )
+
+
 def eval_vs_cpu(
     model: GPT,
     stats: dict[str, FeatureStats],
@@ -1803,6 +1818,7 @@ def train(
             inference=eval_inference,
         )
         wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
+        require_complete_eval(final_eval, cfg.final_eval_n_matchups)
         if cfg.final_diag_n_matchups > 0:
             stride6 = eval_vs_cpu(
                 model,
@@ -1815,6 +1831,7 @@ def train(
                 inference=eval_inference,
             )
             wandb.log({"global_step": cfg.max_steps, **{f"eval_s6/{name}": value for name, value in stride6.items()}})
+            require_complete_eval(stride6, cfg.final_diag_n_matchups)
     finally:
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
@@ -1892,6 +1909,7 @@ def eval_checkpoint(
         checkpoint_sha256=_checkpoint_sha256(Path(path)),
     )
     print(f"[eval] step={state['step']} horizon={horizon}: {values}", flush=True)
+    require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
     return values
 
 

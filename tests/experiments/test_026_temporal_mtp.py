@@ -87,7 +87,7 @@ def test_defaults_freeze_requested_treatment_knobs() -> None:
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
     assert cfg.inference_buckets == (1, 2, 4, 8, 16, 32)
     assert cfg.compiled_inference_bucket is None
-    assert cfg.eval_max_parallel is None
+    assert cfg.eval_max_parallel == 8
 
 
 def test_final_diagnostic_matchups_accept_zero_but_not_negative() -> None:
@@ -273,8 +273,15 @@ def test_compiled_inference_uses_the_smallest_prewarmed_hardware_bucket() -> Non
 def test_ad_hoc_matchup_count_uses_a_power_of_two_wave(monkeypatch) -> None:
     monkeypatch.setattr(exp, "automatic_parallelism", lambda: 16)
     cfg = _cfg()
-    assert exp._eval_parallelism(cfg, 12) == 16
-    assert exp._eval_inference_bucket(cfg, 12) == 16
+    assert exp._eval_parallelism(cfg, 12) == 8
+    assert exp._eval_inference_bucket(cfg, 12) == 8
+
+
+def test_complete_eval_requires_every_boot_to_reach_active_play() -> None:
+    complete = {"scheduled_boots": 96.0, "completed_boots": 96.0, "boots": 96.0}
+    exp.require_complete_eval(complete, 96)
+    with pytest.raises(RuntimeError, match="active=95/96"):
+        exp.require_complete_eval({**complete, "boots": 95.0}, 96)
 
 
 def test_inference_defaults_to_inductor_without_cuda_graphs() -> None:
@@ -293,7 +300,7 @@ def test_checkpoint_eval_accepts_memory_safe_wave_and_distinct_output(monkeypatc
 
     def fake_eval(model, stats, cfg, **kwargs):
         seen.update(cfg=cfg, **kwargs)
-        return {"crashed": 0.0}
+        return {"scheduled_boots": 32.0, "completed_boots": 32.0, "boots": 32.0, "crashed": 0.0}
 
     monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
     exp.eval_checkpoint(
@@ -426,7 +433,13 @@ def test_tiny_training_run_can_disable_final_diagnostic(monkeypatch, tmp_path: P
         assert model is inference_models[0]
         assert inference is eval_inference
         evaluations.append((n_matchups, cfg.exec_horizon if exec_horizon is None else exec_horizon))
-        return {"net_stock_lcb": 0.0, "net_dmg_lcb": 0.0}
+        return {
+            "scheduled_boots": float(n_matchups),
+            "completed_boots": float(n_matchups),
+            "boots": float(n_matchups),
+            "net_stock_lcb": 0.0,
+            "net_dmg_lcb": 0.0,
+        }
 
     monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
 

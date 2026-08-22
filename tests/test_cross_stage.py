@@ -147,6 +147,9 @@ def test_keeps_legacy_keys_and_adds_new_ones() -> None:
     assert m.keys() >= _LEGACY_METRIC_KEYS
     assert m["frames"] == pytest.approx(float(_ONE_ACTIVE_MINUTE))  # mean total frames, unchanged meaning
     assert m["matches"] == 1.0
+    assert m["scheduled_boots"] == 1.0
+    assert m["completed_boots"] == 1.0
+    assert m["boots"] == 1.0
     assert m["crashed"] == 0.0
     assert "dead_frame_frac" in m
     for key in ("damage_dealt_per_min", "stocks_taken_per_min"):
@@ -162,8 +165,12 @@ def test_keeps_legacy_keys_and_adds_new_ones() -> None:
         assert key in m
 
 
-def test_all_crashed_returns_minimal_dict() -> None:
-    assert vs_cpu_metrics([(Stage.BATTLEFIELD, 0, None), (Stage.BATTLEFIELD, 1, None)]) == {"crashed": 1.0}
+def test_all_crashed_preserves_boot_coverage() -> None:
+    assert vs_cpu_metrics([(Stage.BATTLEFIELD, 0, None), (Stage.BATTLEFIELD, 1, None)]) == {
+        "scheduled_boots": 2.0,
+        "completed_boots": 0.0,
+        "crashed": 1.0,
+    }
 
 
 def test_crashed_fraction_counts_failed_boots() -> None:
@@ -193,7 +200,14 @@ def test_crashed_fraction_keeps_same_replica_on_different_stages_separate() -> N
 def test_countdown_only_fragment_is_not_a_completed_match() -> None:
     partial = _summary(PREGAME_FRAMES - 73, p1_left=4, p2_left=4, p1_dmg=0.0, p2_dmg=0.0)
     m = vs_cpu_metrics([(Stage.BATTLEFIELD, 0, partial)], bootstrap_resamples=50)
-    assert m == {"matches": 0.0, "zero_active": 1.0, "crashed": 0.0}
+    assert m == {
+        "scheduled_boots": 1.0,
+        "completed_boots": 1.0,
+        "matches": 0.0,
+        "boots": 0.0,
+        "zero_active": 1.0,
+        "crashed": 0.0,
+    }
 
 
 def test_countdown_only_fragment_does_not_change_rates_or_intervals() -> None:
@@ -205,7 +219,8 @@ def test_countdown_only_fragment_does_not_change_rates_or_intervals() -> None:
         bootstrap_resamples=100,
         seed=3,
     )
-    assert with_partial == {**baseline, "zero_active": 1.0}
+    expected = {**baseline, "scheduled_boots": 2.0, "completed_boots": 2.0, "zero_active": 1.0}
+    assert with_partial == expected
 
 
 def test_bootstrap_ci_brackets_point_estimate() -> None:
