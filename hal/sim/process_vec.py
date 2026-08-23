@@ -199,6 +199,19 @@ def _next_ready_cohort(
     return []
 
 
+def _cohort_latency_start_ns(acknowledged: Sequence[tuple[int, int, int, int]]) -> int:
+    """Return the earliest preprocessing start in an inferred worker cohort.
+
+    End-to-end batch latency begins when the first worker starts preprocessing,
+    not when the last worker reaches the synchronization gate.  Using the
+    earliest timestamp therefore includes cohort synchronization in the measured
+    deployment-path latency.
+    """
+    if not acknowledged:
+        raise ValueError("latency accounting requires at least one acknowledged plan")
+    return min(started for _, _, _, started in acknowledged)
+
+
 def drive_process_vec(
     session_kwargs: Sequence[dict[str, object]],
     matches: Sequence[VecMatch],
@@ -572,7 +585,7 @@ def drive_process_vec(
                     latency_group = plan_calls if telemetry is not None and inferred and acknowledged else None
                     if latency_group is not None:
                         latency_groups[latency_group] = [
-                            max(started for _, _, _, started in acknowledged),
+                            _cohort_latency_start_ns(acknowledged),
                             inference_rows,
                             batch_rows,
                             len(acknowledged),

@@ -153,6 +153,16 @@ def test_one_cohort_preserves_the_all_live_slot_gate() -> None:
     assert process_vec._next_ready_cohort(slots, set(slots), ids) == ordered
 
 
+def test_cohort_latency_starts_at_first_worker_preprocessing() -> None:
+    acknowledged = [(0, 11, 1, 300), (1, 12, 1, 100), (2, 13, 1, 200)]
+    assert process_vec._cohort_latency_start_ns(acknowledged) == 100
+
+
+def test_empty_cohort_latency_is_rejected() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        process_vec._cohort_latency_start_ns([])
+
+
 @pytest.mark.parametrize("cohort_count", [1, 2, 3, 4])
 def test_cohorts_preserve_slot_keyed_outputs_with_mixed_resets(cohort_count: int) -> None:
     slots = [Slot(worker, port) for worker in range(8) for port in (1, 2)]
