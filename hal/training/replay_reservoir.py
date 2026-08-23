@@ -29,6 +29,7 @@ from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 
 type WindowTransform = Callable[[str, str, dict[str, np.ndarray]], None]
+type ReplayFilter = Callable[[str], bool]
 
 
 def _next_item[T](source: Iterator[T]) -> T:
@@ -163,6 +164,37 @@ class ReplayReservoir:
     def __iter__(self) -> ReplayReservoir:
         return self
 
+    def state_dict(self) -> dict[str, Any]:
+        """Return the exact between-batch reservoir state."""
+        return {
+            "batch_size": self._batch_size,
+            "capacity": self._capacity,
+            "rng": self._rng.bit_generator.state,
+            "active": tuple((replay_id, tuple(windows)) for replay_id, windows in self._active.items()),
+            "cooldown": tuple(tuple(sorted(replays)) for replays in self._cooldown),
+            "cooldown_batches": self._cooldown.maxlen,
+            "source_done": self._source_done,
+            "finished": self._finished,
+            "emitted_windows": self._emitted_windows,
+            "dropped_windows": self._dropped_windows,
+            "dropped_replays": self._dropped_replays,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore a state produced after a complete batch was emitted."""
+        if state["batch_size"] != self._batch_size or state["capacity"] != self._capacity:
+            raise ValueError("reservoir geometry changed across resume")
+        if state["cooldown_batches"] != self._cooldown.maxlen:
+            raise ValueError("reservoir cooldown changed across resume")
+        self._rng.bit_generator.state = state["rng"]
+        self._active = {replay_id: deque(windows) for replay_id, windows in state["active"]}
+        self._cooldown = deque((set(replays) for replays in state["cooldown"]), maxlen=self._cooldown.maxlen)
+        self._source_done = bool(state["source_done"])
+        self._finished = bool(state["finished"])
+        self._emitted_windows = int(state["emitted_windows"])
+        self._dropped_windows = int(state["dropped_windows"])
+        self._dropped_replays = int(state["dropped_replays"])
+
     def _fill(self) -> None:
         while len(self._active) < self._capacity and not self._source_done:
             try:
@@ -230,6 +262,7 @@ class PolicyReplayPackDataset(IterableDataset):
         replay_format: ReplayFormat = "policy",
         replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         window_transform: WindowTransform | None = None,
+        replay_filter: ReplayFilter | None = None,
     ) -> None:
         if replay_format not in ("policy", "policy-world"):
             raise ValueError(f"replay reservoir requires a compact format, got {replay_format!r}")
@@ -246,7 +279,21 @@ class PolicyReplayPackDataset(IterableDataset):
         )
         self._replay_transform = replay_transform
         self._window_transform = window_transform
+        self._replay_filter = replay_filter
         self._epoch = 0
+        self._current_epoch: int | None = None
+        self._source_samples = 0
+
+    @property
+    def current_epoch(self) -> int | None:
+        return self._current_epoch
+
+    @property
+    def source_samples(self) -> int:
+        return self._source_samples
+
+    def resume_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
 
     def __iter__(self) -> Iterator[ReplayPack]:
         # Defer shared helpers so dataloader can re-export this module safely.
@@ -255,8 +302,13 @@ class PolicyReplayPackDataset(IterableDataset):
 
         epoch = self._epoch
         self._epoch += 1
+        self._current_epoch = epoch
+        self._source_samples = 0
         for compact in self._dataset:
+            self._source_samples += 1
             replay_id = str(compact["replay_id"])
+            if self._replay_filter is not None and not self._replay_filter(replay_id):
+                continue
             check_schema_version(
                 {"schema_version": int(compact["source_schema_version"])}, expected=self._schema_version
             )
@@ -320,6 +372,8 @@ class ReservoirLoader:
         batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None,
         prefetch_batches: int,
         pin_memory: bool,
+        dataset: StreamingDataset,
+        packs: PolicyReplayPackDataset,
     ) -> None:
         if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
             raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
@@ -334,7 +388,11 @@ class ReservoirLoader:
         self._batch_transform = batch_transform
         self._prefetch_batches = prefetch_batches
         self._pin_memory = pin_memory
+        self._dataset = dataset
+        self._packs = packs
         self._epoch = 0
+        self._reservoir: ReplayReservoir | None = None
+        self._resume_state: dict[str, Any] | None = None
         self.last_epoch_stats: dict[str, int] | None = None
 
     def __iter__(self) -> Iterator[object]:
@@ -344,11 +402,42 @@ class ReservoirLoader:
             capacity=self._capacity,
             seed=self._seed + self._epoch,
         )
+        if self._resume_state is not None:
+            reservoir.load_state_dict(self._resume_state["reservoir"])
+            self._resume_state = None
+        self._reservoir = reservoir
         self._epoch += 1
         batches = self._batches(reservoir)
         if self._prefetch_batches:
             return OneBatchPrefetch(batches, depth=self._prefetch_batches)
         return batches
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return an exact cursor when workers and background prefetch are off."""
+        if self._pack_loader.num_workers != 0 or self._prefetch_batches:
+            raise RuntimeError("exact reservoir checkpoints require num_workers=0 and prefetch_batches=0")
+        if self._reservoir is None or self._packs.current_epoch is None:
+            raise RuntimeError("the reservoir loader has not emitted a batch")
+        return {
+            "schema": 1,
+            "loader_epoch": self._epoch,
+            "pack_epoch": self._packs.current_epoch,
+            "mds": self._dataset.state_dict(self._packs.source_samples, from_beginning=False),
+            "reservoir": self._reservoir.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Schedule an exact restore before the next iterator is created."""
+        if state.get("schema") != 1:
+            raise ValueError(f"unsupported reservoir-loader state schema {state.get('schema')!r}")
+        if self._pack_loader.num_workers != 0 or self._prefetch_batches:
+            raise RuntimeError("exact reservoir checkpoints require num_workers=0 and prefetch_batches=0")
+        if self._reservoir is not None:
+            raise RuntimeError("load reservoir state before creating its iterator")
+        self._dataset.load_state_dict(state["mds"])
+        self._packs.resume_epoch(int(state["pack_epoch"]))
+        self._epoch = int(state["loader_epoch"]) - 1
+        self._resume_state = state
 
     def _batches(self, reservoir: ReplayReservoir) -> Iterator[object]:
         from hal.training.dataloader import collate_train_batch
@@ -405,6 +494,7 @@ def make_reservoir_loader(
     window_transform: WindowTransform | None = None,
     batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
     replay_format: ReplayFormat = "policy",
+    replay_filter: ReplayFilter | None = None,
 ) -> ReservoirLoader:
     """Build a compact replay loader with replay-aware batches.
 
@@ -438,6 +528,7 @@ def make_reservoir_loader(
         replay_format=replay_format,
         replay_transform=replay_transform,
         window_transform=window_transform,
+        replay_filter=replay_filter,
     )
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
@@ -464,4 +555,6 @@ def make_reservoir_loader(
         batch_transform=batch_transform,
         prefetch_batches=prefetch_batches,
         pin_memory=pin_memory,
+        dataset=dataset,
+        packs=packs,
     )

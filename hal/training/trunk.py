@@ -129,6 +129,19 @@ class Rotary(nn.Module):
         move."""
         output_dtype = self.inv_freq.dtype if dtype is None else dtype
         key = (length, device, output_dtype)
+        if torch.compiler.is_compiling():
+            # A cached tensor created while CUDA Graph capture is tracing becomes
+            # graph-owned storage. Saving it on the module makes the next replay
+            # read storage that the graph has already overwritten. Compiled paths
+            # keep the same RoPE arithmetic but own the factors inside the graph.
+            inv_freq = self.inv_freq
+            if inv_freq.dtype != torch.float32:
+                inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))
+            freqs = torch.outer(torch.arange(length, device=device, dtype=torch.float32), inv_freq)
+            return (
+                freqs.cos().to(output_dtype)[None, :, None, :],
+                freqs.sin().to(output_dtype)[None, :, None, :],
+            )
         if key != self.cache_key:
             inv_freq = self.inv_freq
             if inv_freq.dtype != torch.float32:

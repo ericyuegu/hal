@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextlib import suppress
@@ -242,6 +243,8 @@ class Session:
         self.instant_match_restart = instant_match_restart
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
+        self._pending_flush_ports: set[int] = set()
+        self._inputs_flushed_callback: Callable[[], None] | None = None
         self._menu_helpers: dict[int, melee.MenuHelper] = {}
         self._stage_select_steps = 0
         self._matchup: Matchup | None = None
@@ -406,6 +409,7 @@ class Session:
                 type=player.controller_type,
                 fix_analog_inputs=False,
             )
+            self._instrument_controller_flush(player.port, controller)
             self._controllers[player.port] = controller
 
         with _popen_with_pdeathsig():
@@ -419,6 +423,20 @@ class Session:
             self._menu_helpers[port] = melee.MenuHelper()
 
         return self._navigate_to_live()
+
+    def _instrument_controller_flush(self, port: int, controller: melee.Controller) -> None:
+        """Deliver the latency callback at the real Dolphin pipe boundary."""
+        original_flush = controller.flush
+
+        def instrumented_flush() -> None:
+            original_flush()
+            self._pending_flush_ports.discard(port)
+            if not self._pending_flush_ports and self._inputs_flushed_callback is not None:
+                callback = self._inputs_flushed_callback
+                self._inputs_flushed_callback = None
+                callback()
+
+        controller.flush = instrumented_flush
 
     def _navigate_to_live(self) -> dict:
         """Drive the menus until the match goes live, returning the first
@@ -492,7 +510,12 @@ class Session:
         d["stage"] = int(gamestate.stage.value)
         return d
 
-    def step(self, inputs: dict[int, ControllerInputs]) -> tuple[dict, bool]:
+    def step(
+        self,
+        inputs: dict[int, ControllerInputs],
+        *,
+        on_inputs_flushed: Callable[[], None] | None = None,
+    ) -> tuple[dict, bool]:
         """Punch inputs, advance one frame, return (canonical, in_game).
 
         ``in_game=False`` signals match end (menu state left IN_GAME /
@@ -503,9 +526,17 @@ class Session:
         """
         if self._console is None:
             raise RuntimeError("Session must be used as a context manager")
+        if self._inputs_flushed_callback is not None:
+            raise RuntimeError("the previous frame's controller flush callback was not delivered")
         for port, src in inputs.items():
             apply_inputs(self._controllers[port], src)
-        gamestate = self._step_blocking()
+        self._pending_flush_ports = set(inputs) if on_inputs_flushed is not None else set()
+        self._inputs_flushed_callback = on_inputs_flushed
+        try:
+            gamestate = self._step_blocking()
+        finally:
+            self._pending_flush_ports.clear()
+            self._inputs_flushed_callback = None
         return self._canonical(gamestate), gamestate.menu_state in LIVE_MENU_STATES
 
     def _step_blocking(self) -> melee.GameState:

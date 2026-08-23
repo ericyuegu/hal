@@ -11,6 +11,7 @@ import traceback
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import field
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait
 from pathlib import Path
@@ -129,9 +130,15 @@ class ProcessVecTelemetry:
     failed_workers: int = 0
     timed_out_workers: int = 0
     cohort_count: int = 1
+    inference_latency_ms: list[float] = field(default_factory=list)
+    inference_rows_by_call: list[int] = field(default_factory=list)
+    inference_batch_rows_by_call: list[int] = field(default_factory=list)
+    inference_rows: int = 0
+    inference_batch_rows: int = 0
 
     def metrics(self) -> dict[str, float]:
         calls = max(self.plan_calls, 1)
+        latency = np.asarray(self.inference_latency_ms, dtype=np.float64)
         return {
             "broker_startup_seconds": self.startup_seconds,
             "broker_control_wait_seconds": self.control_wait_seconds,
@@ -157,6 +164,12 @@ class ProcessVecTelemetry:
             "broker_failed_workers": float(self.failed_workers),
             "broker_timed_out_workers": float(self.timed_out_workers),
             "broker_cohort_count": float(self.cohort_count),
+            "broker_inference_latency_p50_ms": float(np.percentile(latency, 50)) if len(latency) else 0.0,
+            "broker_inference_latency_p95_ms": float(np.percentile(latency, 95)) if len(latency) else 0.0,
+            "broker_inference_rows": float(self.inference_rows),
+            "broker_inference_batch_rows": float(self.inference_batch_rows),
+            "broker_sustained_inference_rows_per_s": self.inference_batch_rows
+            / max(float(latency.sum()) / 1_000, 1e-12),
         }
 
 
@@ -276,6 +289,8 @@ def drive_process_vec(
             for port, slot_index in zip(match.model_ports, arena_slots_of[worker], strict=True)
         }
         pending: dict[Slot, ControlMessage] = {}
+        pending_acks: dict[tuple[int, int, int], tuple[int | None, int]] = {}
+        latency_groups: dict[int, list[int]] = {}
         connection_to_worker = {connection: worker for worker, connection in parents.items()}
         plan_calls = 0
         startup_recorded = False
@@ -292,6 +307,9 @@ def drive_process_vec(
             active_slots.difference_update(retired_slots)
             for slot in retired_slots:
                 pending.pop(slot, None)
+            for key in tuple(pending_acks):
+                if key[0] == worker:
+                    pending_acks.pop(key)
             process = processes[worker]
             if reason is not None:
                 errors[worker] = reason
@@ -348,6 +366,30 @@ def drive_process_vec(
                         if slot in pending:
                             raise RuntimeError(f"slot {slot} sent two plan requests without a reply")
                         pending[slot] = message
+                    elif message.message_type is MessageType.PLAN_APPLIED:
+                        key = (worker, int(message.auxiliary_sequence), int(message.port_or_slot))
+                        if key not in pending_acks:
+                            raise RuntimeError(
+                                f"worker {worker} acknowledged unknown plan generation {key[1]} port {key[2]}"
+                            )
+                        latency_group, expected_start = pending_acks.pop(key)
+                        if message.task_generation != expected_start:
+                            raise RuntimeError(
+                                f"worker {worker} changed plan start timestamp "
+                                f"{expected_start} -> {message.task_generation}"
+                            )
+                        if latency_group is not None and telemetry is not None:
+                            info = latency_groups[latency_group]
+                            info[3] -= 1
+                            if info[3] == 0:
+                                started_ns, inference_rows, batch_rows, _ = latency_groups.pop(latency_group)
+                                telemetry.inference_latency_ms.append(
+                                    (time.perf_counter_ns() - started_ns) / 1_000_000
+                                )
+                                telemetry.inference_rows_by_call.append(inference_rows)
+                                telemetry.inference_batch_rows_by_call.append(batch_rows)
+                                telemetry.inference_rows += inference_rows
+                                telemetry.inference_batch_rows += batch_rows
                     elif message.message_type is MessageType.RESULT_READY:
                         result_started = time.monotonic()
                         ports = tuple(player.port for player in matches[worker].matchup.players)
@@ -470,6 +512,7 @@ def drive_process_vec(
                         telemetry.policy_seconds += time.monotonic() - policy_started
                     write_started = time.monotonic()
                     sent_rows = 0
+                    acknowledged: list[tuple[int, int, int, int]] = []
                     for slot in plan_slots:
                         worker = slot.match
                         if worker not in active_workers:
@@ -489,6 +532,7 @@ def drive_process_vec(
                                 ControlMessage(
                                     message_type=MessageType.PLAN_READY,
                                     worker_id=worker,
+                                    task_generation=message.task_generation,
                                     task_id=shared_slot,
                                     auxiliary_sequence=message.auxiliary_sequence,
                                     count=runtime.prediction_frames,
@@ -498,6 +542,14 @@ def drive_process_vec(
                                 send_buffers[worker],
                             )
                             sent_rows += 1
+                            acknowledged.append(
+                                (
+                                    worker,
+                                    int(message.auxiliary_sequence),
+                                    int(message.port_or_slot),
+                                    int(message.task_generation),
+                                )
+                            )
                         except (BrokenPipeError, EOFError, OSError) as exc:
                             retire_worker(
                                 worker,
@@ -514,6 +566,19 @@ def drive_process_vec(
                                 telemetry.min_plan_rows = min(telemetry.min_plan_rows, sent_rows)
                             telemetry.max_plan_rows = max(telemetry.max_plan_rows, sent_rows)
                         telemetry.plan_write_seconds += time.monotonic() - write_started
+                    inferred = bool(getattr(policy, "last_plan_inferred", True))
+                    inference_rows = int(getattr(policy, "last_inference_rows", sent_rows))
+                    batch_rows = int(getattr(policy, "last_inference_batch_rows", inference_rows))
+                    latency_group = plan_calls if telemetry is not None and inferred and acknowledged else None
+                    if latency_group is not None:
+                        latency_groups[latency_group] = [
+                            max(started for _, _, _, started in acknowledged),
+                            inference_rows,
+                            batch_rows,
+                            len(acknowledged),
+                        ]
+                    for worker, generation, port, started in acknowledged:
+                        pending_acks[(worker, generation, port)] = (latency_group, started)
                     plan_calls += 1
                     if progress_every and plan_calls % max(1, progress_every // runtime.execution_stride) == 0:
                         now = time.monotonic()

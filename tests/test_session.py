@@ -12,6 +12,8 @@ import time
 import melee
 import pytest
 
+import hal.sim.session as session_module
+from hal.sim.inputs import ControllerInputsValue
 from hal.sim.session import Session
 
 
@@ -57,3 +59,37 @@ def test_navigate_to_live_returns_on_live_menu() -> None:
 
     # _navigate_to_live returns the canonical dict augmented with the live stage.
     assert s._navigate_to_live() == {"menu": melee.Menu.IN_GAME, "stage": int(melee.Stage.FINAL_DESTINATION.value)}
+
+
+def test_step_reports_latency_only_after_controller_pipe_flush(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    class Controller:
+        def flush(self) -> None:
+            events.append("flush")
+
+    session = _session(5.0)
+    controller = Controller()
+    session._instrument_controller_flush(1, controller)  # type: ignore[arg-type]
+    session._controllers = {1: controller}  # type: ignore[dict-item]
+    monkeypatch.setattr(session_module, "apply_inputs", lambda _controller, _inputs: events.append("apply"))
+
+    def advance() -> _FakeGameState:
+        events.append("advance")
+        controller.flush()
+        events.append("receive")
+        return _FakeGameState(melee.Menu.IN_GAME)
+
+    session._step_blocking = advance  # type: ignore[method-assign]
+    inputs = ControllerInputsValue(
+        main_x=0.0,
+        main_y=0.0,
+        c_x=0.0,
+        c_y=0.0,
+        trigger_l=0.0,
+        trigger_r=0.0,
+        buttons=0,
+    )
+    session.step({1: inputs}, on_inputs_flushed=lambda: events.append("ack"))
+
+    assert events == ["apply", "advance", "flush", "ack", "receive"]

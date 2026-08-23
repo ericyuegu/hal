@@ -98,20 +98,24 @@ def save_checkpoint(
     cfg: dict,
     wandb_id: str | None,
     uploader: BackgroundUploader | None = None,
+    extra_state: dict[str, Any] | None = None,
 ) -> None:
     """Write a resumable checkpoint (model + optimizer + scheduler + config +
     wandb id) and, if an uploader is given, enqueue it for R2 sync."""
-    torch.save(
-        {
-            "step": step,
-            "model": model.state_dict(),
-            "opt": opt.state_dict(),
-            "sched": sched.state_dict(),
-            "cfg": cfg,
-            "wandb_id": wandb_id,
-        },
-        path,
-    )
+    state = {
+        "step": step,
+        "model": model.state_dict(),
+        "opt": opt.state_dict(),
+        "sched": sched.state_dict(),
+        "cfg": cfg,
+        "wandb_id": wandb_id,
+    }
+    if extra_state is not None:
+        overlap = state.keys() & extra_state.keys()
+        if overlap:
+            raise ValueError(f"extra checkpoint state replaces reserved keys: {sorted(overlap)}")
+        state.update(extra_state)
+    torch.save(state, path)
     print(f"[ckpt] saved {path}", flush=True)
     if uploader is not None:
         uploader.upload(path)

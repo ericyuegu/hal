@@ -249,6 +249,20 @@ def test_rotary_forward_preserves_bfloat16_activation_dtype() -> None:
     assert apply_rotary_emb(x, cos, sin).dtype == x.dtype
 
 
+def test_compiled_rotary_does_not_persist_graph_owned_cache() -> None:
+    rotary = _trunk(_cfg(), prefer_flex=False, device="cpu").blocks[0].attn.rotary
+    x = torch.zeros(2, 8, 4, rotary.dim, dtype=torch.bfloat16)
+    compiled = torch.compile(rotary, backend="eager", fullgraph=True)
+
+    first = compiled(x)
+    second = compiled(x)
+
+    assert rotary.cache_key is None
+    assert rotary.cos_cached is None and rotary.sin_cached is None
+    torch.testing.assert_close(first[0], second[0])
+    torch.testing.assert_close(first[1], second[1])
+
+
 def test_the_trunk_refuses_a_ctx_pad_that_would_broadcast() -> None:
     """The one shape the annotations cannot catch by failing: a ctx_pad of the wrong length does not
     raise downstream, it broadcasts one sample's cold-start prefix over the whole batch."""

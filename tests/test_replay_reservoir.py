@@ -1,16 +1,24 @@
 from collections.abc import Iterator
+from pathlib import Path
 from threading import Event
 
 import numpy as np
 import pytest
+import torch
+from streaming import MDSWriter
 
 import hal.training.replay_reservoir as replay_reservoir
+from hal.data.policy_schema import POLICY_MDS_COLUMNS
+from hal.data.policy_schema import POLICY_SCHEMA_VERSION
+from hal.training.ego_stats import load_consolidated_stats
 from hal.training.replay_reservoir import OneBatchPrefetch
 from hal.training.replay_reservoir import PolicyReplayPackDataset
 from hal.training.replay_reservoir import ReplayPack
 from hal.training.replay_reservoir import ReplayReservoir
 from hal.training.replay_reservoir import _stable_replay_rng
 from hal.training.replay_reservoir import make_reservoir_loader
+
+_DEV_STATS = Path("data/processed/dev/mds/stats.json")
 
 
 def _packs(n_replays: int, windows: int) -> Iterator[ReplayPack]:
@@ -42,6 +50,105 @@ def test_reservoir_rng_is_repeatable() -> None:
         return [batch.replay_ids for batch in ReplayReservoir(_packs(20, 3), batch_size=4, capacity=8, seed=2)]
 
     assert run() == run()
+
+
+class _CountedPacks:
+    def __init__(self, packs: list[ReplayPack], start: int = 0) -> None:
+        self.packs = packs
+        self.at = start
+
+    def __iter__(self) -> _CountedPacks:
+        return self
+
+    def __next__(self) -> ReplayPack:
+        if self.at == len(self.packs):
+            raise StopIteration
+        value = self.packs[self.at]
+        self.at += 1
+        return value
+
+
+def test_reservoir_state_resumes_exact_next_batches() -> None:
+    packs = list(_packs(30, 3))
+    source = _CountedPacks(packs)
+    uninterrupted = ReplayReservoir(iter(source), batch_size=4, capacity=12, seed=9)
+    for _ in range(5):
+        next(uninterrupted)
+    state = uninterrupted.state_dict()
+    source_position = source.at
+    expected = [next(uninterrupted) for _ in range(6)]
+
+    resumed_source = _CountedPacks(packs, source_position)
+    resumed = ReplayReservoir(iter(resumed_source), batch_size=4, capacity=12, seed=9)
+    resumed.load_state_dict(state)
+    actual = [next(resumed) for _ in range(6)]
+    assert [batch.replay_ids for batch in actual] == [batch.replay_ids for batch in expected]
+    for got, want in zip(actual, expected, strict=True):
+        for got_window, want_window in zip(got.windows, want.windows, strict=True):
+            np.testing.assert_array_equal(got_window["value"], want_window["value"])
+
+
+def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path) -> None:
+    frames = 12
+    with MDSWriter(out=str(tmp_path / "train"), columns=POLICY_MDS_COLUMNS, compression="zstd") as writer:
+        for replay in range(20):
+            sample: dict[str, object] = {
+                "policy_schema_version": POLICY_SCHEMA_VERSION,
+                "source_schema_version": 7,
+                "replay_id": f"replay-{replay:02d}",
+                "num_frames": frames,
+                "stage": 25,
+                "p1_character": 1,
+                "p2_character": 22,
+                "p1_nana_present": 0,
+                "p2_nana_present": 0,
+            }
+            for name, encoding in POLICY_MDS_COLUMNS.items():
+                if name in sample:
+                    continue
+                dtype = np.dtype(encoding.removeprefix("ndarray:"))
+                sample[name] = np.zeros(1 if "nana" in name else frames, dtype=dtype)
+            writer.write(sample)
+    stats = load_consolidated_stats(_DEV_STATS)
+
+    def loader():
+        return make_reservoir_loader(
+            str(tmp_path),
+            "train",
+            stats=stats,
+            L_ctx=4,
+            L_chunk=2,
+            batch_size=2,
+            seed=23,
+            reservoir_capacity=4,
+            remote=None,
+            shuffle_block_size=32,
+            predownload=1,
+            windows_per_replay=1,
+            prefetch_batches=0,
+            num_workers=0,
+            pin_memory=False,
+            schema_version=7,
+        )
+
+    source = loader()
+    source_iterator = iter(source)
+    for _ in range(3):
+        next(source_iterator)
+    state = source.state_dict()
+    expected = [next(source_iterator) for _ in range(3)]
+
+    resumed = loader()
+    resumed.load_state_dict(state)
+    resumed_iterator = iter(resumed)
+    actual = [next(resumed_iterator) for _ in range(3)]
+    for got, want in zip(actual, expected, strict=True):
+        assert got.replay_ids == want.replay_ids
+        assert torch.equal(got.context.ctx_pad, want.context.ctx_pad)
+        assert torch.equal(got.target, want.target)
+        assert got.context.features.keys() == want.context.features.keys()
+        for name in got.context.features:
+            assert torch.equal(got.context.features[name], want.context.features[name])
 
 
 def test_stable_replay_rng_depends_on_identity_and_epoch() -> None:

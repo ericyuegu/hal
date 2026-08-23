@@ -43,6 +43,7 @@ class MessageType(IntEnum):
     ERROR = 9
     SHUTDOWN = 10
     SHUTDOWN_ACK = 11
+    PLAN_APPLIED = 12
 
 
 @dataclass(frozen=True, slots=True)

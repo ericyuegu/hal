@@ -2,6 +2,7 @@
 
 import multiprocessing as mp
 import threading
+from collections.abc import Callable
 from collections.abc import Mapping
 
 import melee
@@ -64,8 +65,15 @@ class _TerminalFrameSession:
     def start_match(self, _matchup: Matchup) -> dict:
         return _live_frame(0)
 
-    def step(self, inputs: Mapping[int, ControllerInputs]) -> tuple[dict, bool]:
+    def step(
+        self,
+        inputs: Mapping[int, ControllerInputs],
+        *,
+        on_inputs_flushed: Callable[[], None] | None = None,
+    ) -> tuple[dict, bool]:
         assert set(inputs) == {1, 2}
+        if on_inputs_flushed is not None:
+            on_inputs_flushed()
         self.steps += 1
         if self.steps == 1:
             return _live_frame(1), True
@@ -125,6 +133,12 @@ def test_worker_keeps_terminal_frame_without_publishing_it(monkeypatch: pytest.M
                 ),
                 send_buffer,
             )
+
+        for request in requests:
+            applied, receive_buffer = receive_control(parent, receive_buffer)
+            assert applied.message_type is MessageType.PLAN_APPLIED
+            assert applied.auxiliary_sequence == request.auxiliary_sequence
+            assert applied.port_or_slot == request.port_or_slot
 
         ready, receive_buffer = receive_control(parent, receive_buffer)
         assert ready.message_type is MessageType.RESULT_READY

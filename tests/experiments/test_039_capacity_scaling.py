@@ -1,0 +1,311 @@
+"""Contracts for experiment 039 capacity/exposure/delay scaling."""
+
+import importlib.util
+import math
+import sys
+from collections.abc import Mapping
+from dataclasses import asdict
+from dataclasses import fields
+from pathlib import Path
+
+import melee
+import numpy as np
+import pytest
+import torch
+
+from hal.sim.inputs import ControllerInputs
+from hal.sim.rollout import ObservationRow
+from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
+from hal.sim.vec import Slot
+from hal.sim.vec import VecMatch
+from hal.sim.vec import drive_vec
+from hal.training.features import A_DIM
+from hal.training.features import Context
+
+
+def _load(name: str, filename: str):
+    path = Path(__file__).resolve().parents[2] / "experiments" / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+exp = _load("test_exp039", "039_capacity_scaling.py")
+exp026 = _load("test_exp026_for_039", "026_temporal_mtp.py")
+
+
+def _tiny_scaled(**overrides):
+    values = asdict(exp.scaled_config(5))
+    values |= {
+        "batch_size": 8,
+        "grad_accum_steps": 1,
+        "reservoir_capacity": 16,
+        "compile_trunk": False,
+        "compile_temporal": False,
+        "push_to_r2": False,
+    }
+    values |= overrides
+    return exp.TrainConfig(**values)
+
+
+def test_scaled_family_and_distinct_026_baseline_geometry() -> None:
+    for level in exp.CAPACITY_LEVELS:
+        cfg = exp.scaled_config(level)
+        assert cfg.d_model == 64 * level
+        assert cfg.n_heads == cfg.n_layers == level
+        assert cfg.d_model // cfg.n_heads == 64
+        assert cfg.head_offsets == tuple(range(1, 37))
+        assert cfg.temporal_d_model == max(128, 64 * math.ceil(cfg.d_model / 256))
+        assert cfg.temporal_layers == max(2, math.ceil(level / 4))
+        assert cfg.temporal_heads == cfg.temporal_d_model // 32
+        assert cfg.temporal_ff_dim == cfg.group_head_dim == 2 * cfg.temporal_d_model
+        assert cfg.grad_accum_steps == exp.GRAD_ACCUM_BY_LEVEL[level]
+        assert cfg.batch_size // cfg.grad_accum_steps in (4, 8, 16)
+        exp.validate_config(cfg)
+
+    baseline = exp.baseline_026_config()
+    scaled_l5 = exp.scaled_config(5)
+    assert (baseline.d_model, baseline.n_layers, baseline.n_heads) == (256, 8, 4)
+    assert baseline.head_offsets == tuple(range(1, 37))
+    assert baseline.grad_accum_steps == exp.BASELINE_026_GRAD_ACCUM
+    assert (baseline.d_model, baseline.n_layers) != (scaled_l5.d_model, scaled_l5.n_layers)
+    exp.validate_config(baseline)
+
+
+def test_026_observation_trunk_codec_and_optimizer_partition_are_frozen() -> None:
+    cfg = exp.baseline_026_config()
+    shared = {field.name: getattr(cfg, field.name) for field in fields(exp026.TrainConfig) if hasattr(cfg, field.name)}
+    shared |= {
+        "sample_chunk_length": 20,
+        "head_offsets": (1, 2, 3, 4, 5, 6, 9, 12, 16, 20),
+        "temporal_d_model": 128,
+        "temporal_layers": 2,
+        "temporal_heads": 4,
+        "temporal_ff_dim": 256,
+        "group_head_dim": 256,
+    }
+    control_cfg = exp026.TrainConfig(**shared)
+    torch.manual_seed(17)
+    control = exp026.GPT(control_cfg)
+    torch.manual_seed(17)
+    treatment = exp.GPT(cfg)
+
+    frozen_prefixes = (
+        "codec.",
+        "cat_embeds.",
+        "v6_cat_embeds.",
+        "char_emb.",
+        "stage_emb.",
+        "ctx_proj.",
+        "trunk.",
+        "hitstun_action",
+    )
+    ours = {name: value for name, value in treatment.state_dict().items() if name.startswith(frozen_prefixes)}
+    theirs = {name: value for name, value in control.state_dict().items() if name.startswith(frozen_prefixes)}
+    assert ours.keys() == theirs.keys()
+    for name, value in ours.items():
+        torch.testing.assert_close(value, theirs[name], rtol=0, atol=0)
+    assert treatment.group_order == control.group_order == exp.GROUP_ORDER
+
+    def assignments(model, optimizer):
+        names = {id(parameter): name for name, parameter in model.named_parameters()}
+        return {
+            names[id(parameter)]: (index, bool(group["use_muon"]), float(group["weight_decay"]))
+            for index, group in enumerate(optimizer.param_groups)
+            for parameter in group["params"]
+        }
+
+    control_groups = assignments(control, exp026.make_optimizer(control, control_cfg))
+    treatment_groups = assignments(treatment, exp.make_optimizer(treatment, cfg))
+    for name in control_groups.keys() & treatment_groups.keys():
+        assert treatment_groups[name][0:2] == control_groups[name][0:2]
+
+
+def test_dense_loss_weighting_is_exact() -> None:
+    nll = torch.arange(2 * 36 * exp.N_GROUPS, dtype=torch.float32).reshape(2, 36, exp.N_GROUPS) / 100
+    parts = exp.ActionLoss(nll=nll, targets=torch.zeros(2, 36, exp.N_GROUPS, dtype=torch.long))
+    joint = nll.sum(dim=-1)
+    expected = joint[:, :16].mean() + 0.5 * joint[:, 16:].mean()
+    torch.testing.assert_close(exp.objective(parts), expected, rtol=0, atol=0)
+
+
+def test_powerlines_decay_and_terminal_schedule_use_exact_position_formula() -> None:
+    cfg = _tiny_scaled()
+    parameters = 6_988_015
+    scale = exp.adam_scale(cfg, parameters)
+    batch_positions = cfg.batch_size * cfg.L_ctx
+    tau_ref = batch_positions / (cfg.adam_lr * cfg.adam_reference_weight_decay * cfg.adam_reference_positions)
+    expected_tau = (
+        tau_ref
+        * (
+            (cfg.adam_weight_decay_endpoint / parameters)
+            / (cfg.adam_reference_positions / cfg.adam_reference_parameters)
+        )
+        ** -0.52
+    )
+    expected_decay = batch_positions / (cfg.adam_lr * expected_tau * cfg.adam_weight_decay_endpoint)
+    assert scale.tau == pytest.approx(expected_tau)
+    assert scale.weight_decay == pytest.approx(expected_decay)
+
+    endpoint = 2**26
+    cooldown = exp.cooldown_positions(endpoint, cfg.cooldown_fraction)
+    branch = endpoint - cooldown
+    terminal = exp.replace(cfg, phase="cooldown", target_processed_positions=endpoint)
+    assert exp.lr_multiplier(terminal, branch) == pytest.approx(1.0)
+    assert exp.lr_multiplier(terminal, endpoint) == pytest.approx(cfg.lr_floor_ratio)
+
+
+def test_position_boundary_retains_every_unused_loss_position() -> None:
+    cfg = _tiny_scaled(L_ctx=4)
+    context = Context(features={}, ctx_pad=torch.tensor([0, 2]))
+    batch = exp.TrainBatch(context=context, target=torch.zeros(2, 36, A_DIM))
+    available = exp._valid_position_mask(batch, cfg)
+    selected, pending, count = exp._select_position_work([(batch, available)], 3)
+    assert count == 3
+    selected_mask = selected[0][1]
+    pending_mask = pending[0][1]
+    assert not (selected_mask & pending_mask).any()
+    assert torch.equal(selected_mask | pending_mask, available)
+
+
+class _FakeContextBuilder:
+    def _ingest(self, live, obs) -> None:
+        del live, obs
+
+    def _context(self, due) -> Context:
+        return Context(
+            features={},
+            ctx_pad=torch.zeros(len(due), dtype=torch.long),
+            slot_ids=torch.arange(len(due)),
+            reset=torch.zeros(len(due), dtype=torch.bool),
+        )
+
+    def _ingest_row(self, slot, row) -> None:
+        del slot, row
+
+    def _push_ego(self, slot, action) -> None:
+        del slot, action
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.frame = 0
+        self.main_x: list[float] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        del exc
+        return False
+
+    @staticmethod
+    def _frame(frame: int) -> dict:
+        value = exp._benchmark_observation(frame)
+        value["start"] = {"random_seed": frame}
+        return value
+
+    def start_match(self, matchup: Matchup) -> dict:
+        del matchup
+        return self._frame(0)
+
+    def step(self, inputs: Mapping[int, ControllerInputs]) -> tuple[dict, bool]:
+        self.main_x.append(inputs[1].main_x)
+        self.frame += 1
+        return self._frame(self.frame), True
+
+
+@pytest.mark.parametrize("delay", [1, 2, 4, 6])
+def test_absolute_frame_alignment_executes_exact_dense_offsets(delay: int) -> None:
+    cfg = exp.scaled_config(5)
+    horizon = exp.decode_horizon(delay, delay)
+
+    def predict(ctx: Context) -> np.ndarray:
+        actions = np.zeros((ctx.ctx_pad.shape[0], horizon, A_DIM), dtype=np.float32)
+        actions[:, :, 0] = np.arange(1, horizon + 1, dtype=np.float32) / 100
+        return actions
+
+    policy = exp.AbsoluteDelayPolicy(
+        predict,
+        {},
+        cfg,
+        delay=delay,
+        replan_interval=delay,
+        telemetry=None,
+        device="cpu",
+        float_dtype=torch.float32,
+    )
+    policy.context = _FakeContextBuilder()
+    session = _RecordingSession()
+    matchup = Matchup(
+        stage=melee.Stage.FINAL_DESTINATION,
+        players=(
+            PlayerSetup(port=1, character=melee.Character.FOX),
+            PlayerSetup(port=2, character=melee.Character.FOX, cpu_level=9),
+        ),
+    )
+    drive_vec(
+        [session],
+        [VecMatch(matchup=matchup, model_ports=(1,))],
+        policy,
+        max_frames=3 * delay + 1,
+        progress_every=0,
+    )
+
+    expected = []
+    for observation_frame in range(3 * delay):
+        if observation_frame < delay - 1:
+            expected.append(0.0)
+        else:
+            offset = delay + (observation_frame - (delay - 1)) % delay
+            expected.append(offset / 100)
+    assert session.main_x == pytest.approx(expected)
+
+
+def test_horizon_covers_every_execution_frame_at_max_delay() -> None:
+    assert exp.decode_horizon(16, 16) == 31
+    assert set(range(16, 32)).issubset(exp.HEAD_OFFSETS)
+
+
+def test_process_worker_contract_holds_and_releases_by_absolute_frame() -> None:
+    delay = 4
+    horizon = exp.decode_horizon(delay, delay)
+
+    def predict(ctx: Context) -> np.ndarray:
+        actions = np.zeros((ctx.ctx_pad.shape[0], horizon, A_DIM), dtype=np.float32)
+        actions[:, :, 0] = np.arange(1, horizon + 1, dtype=np.float32) / 100
+        return actions
+
+    policy = exp.AbsoluteDelayPolicy(
+        predict,
+        {},
+        exp.scaled_config(5),
+        delay=delay,
+        replan_interval=delay,
+        telemetry=None,
+        device="cpu",
+        float_dtype=torch.float32,
+    )
+    policy.context = _FakeContextBuilder()
+    assert policy.runtime_spec.prediction_frames == policy.runtime_spec.execution_stride == 1
+    slot = Slot(0, 1)
+    executed = []
+    for frame in range(10):
+        plan = policy.plan_rows(
+            {
+                slot: [
+                    ObservationRow(
+                        frame_id=frame,
+                        flat={},
+                        action=np.zeros(A_DIM, dtype=np.float32),
+                        reset=frame == 0,
+                    )
+                ]
+            }
+        )
+        executed.append(float(plan[slot][0, 0]))
+    assert executed == pytest.approx([0.0, 0.0, 0.0, 0.04, 0.05, 0.06, 0.07, 0.04, 0.05, 0.06])

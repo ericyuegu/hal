@@ -7,6 +7,7 @@ numeric plans cross the hot process boundary, through ``RolloutArena``.
 
 import faulthandler
 import math
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from multiprocessing.connection import Connection
@@ -15,6 +16,7 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
+from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import action_vec_to_controller
 from hal.sim.ipc import ControlMessage
 from hal.sim.ipc import MessageType
@@ -88,6 +90,9 @@ def _session_worker(
                 neutral = np.zeros(runtime.action_dim, dtype=np.float32)
                 sequence = 1
                 plan_generation = {port: 0 for port in model_ports}
+                observation_started_ns: dict[int, int] = {}
+                plan_started_ns = {port: 0 for port in model_ports}
+                plan_ack_generation = {port: 0 for port in model_ports}
 
                 def publish(current: dict, actions: Mapping[int, np.ndarray], *, reset: bool) -> None:
                     metadata["stage"] = current.get("stage", metadata["stage"])
@@ -112,6 +117,7 @@ def _session_worker(
                             ControlMessage(
                                 message_type=MessageType.PLAN_REQUEST,
                                 worker_id=worker_id,
+                                task_generation=observation_started_ns[first_sequence],
                                 task_id=arena_slot_of[port],
                                 sequence=first_sequence,
                                 auxiliary_sequence=generation,
@@ -121,6 +127,8 @@ def _session_worker(
                             ),
                             send_buffer,
                         )
+                    for published_sequence in range(first_sequence, first_sequence + count):
+                        observation_started_ns.pop(published_sequence, None)
                     plans: dict[int, np.ndarray] = {}
                     for _ in model_ports:
                         reply, receive_buffer = receive_control(connection, receive_buffer)
@@ -142,12 +150,36 @@ def _session_worker(
                                 f"expected {generation} in {plan_slot}"
                             )
                         plans[port] = arena.plan_actions[arena_slot_of[port], plan_slot]
+                        plan_started_ns[port] = reply.task_generation
+                        plan_ack_generation[port] = reply.auxiliary_sequence
                         plan_generation[port] += 1
                     return plans
 
+                def prepare_first_inputs(plans: Mapping[int, np.ndarray]) -> dict[int, ControllerInputs]:
+                    """Convert the first plan row before Dolphin's input boundary."""
+                    return {port: action_vec_to_controller(plans[port][0]) for port in model_ports}
+
+                def acknowledge_plans() -> None:
+                    """Acknowledge after libmelee flushes every model controller."""
+                    nonlocal send_buffer
+                    for port in model_ports:
+                        send_buffer = send_control(
+                            connection,
+                            ControlMessage(
+                                message_type=MessageType.PLAN_APPLIED,
+                                worker_id=worker_id,
+                                task_generation=plan_started_ns[port],
+                                auxiliary_sequence=plan_ack_generation[port],
+                                port_or_slot=port,
+                            ),
+                            send_buffer,
+                        )
+
                 neutral_actions = {port: neutral for port in model_ports}
+                observation_started_ns[sequence] = time.perf_counter_ns()
                 publish(frame, neutral_actions, reset=True)
                 plans = request_plans(sequence, 1)
+                first_inputs = prepare_first_inputs(plans)
                 captured = 1
                 done = False
                 while captured < max_frames and not done:
@@ -155,8 +187,14 @@ def _session_worker(
                     executed = 0
                     while executed < runtime.execution_stride and captured < max_frames:
                         actions = {port: plans[port][executed] for port in model_ports}
+                        controller_inputs = (
+                            first_inputs
+                            if executed == 0
+                            else {port: action_vec_to_controller(action) for port, action in actions.items()}
+                        )
                         frame, in_game = session.step(
-                            {port: action_vec_to_controller(action) for port, action in actions.items()}
+                            controller_inputs,
+                            on_inputs_flushed=acknowledge_plans if executed == 0 else None,
                         )
                         next_id = _frame_id(frame, frame_id)
                         sequence += 1
@@ -176,13 +214,16 @@ def _session_worker(
                             close_segment()
                             done = True
                             break
+                        observation_started_ns[sequence] = time.perf_counter_ns()
                         publish(frame, neutral_actions if reset else actions, reset=reset)
                         if reset:
                             plans = request_plans(sequence, 1)
+                            first_inputs = prepare_first_inputs(plans)
                             break
                     else:
                         if captured < max_frames:
                             plans = request_plans(first_unpublished, executed)
+                            first_inputs = prepare_first_inputs(plans)
                         continue
                     if done:
                         break
