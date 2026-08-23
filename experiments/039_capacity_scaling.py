@@ -2299,7 +2299,7 @@ def run_training_smoke(
         "grad_accum_steps": cfg.grad_accum_steps,
         "micro_batch_size": micro_batch_size(cfg),
         "loss_positions": int(valid.sum()),
-        "objective_bits": float(loss.detach()),
+        "objective_nats": float(loss.detach()),
         "gradient_norm": float(gradient_norm),
         "compiled_trunk": cfg.compile_trunk,
         "compiled_temporal": cfg.compile_temporal,
