@@ -1,19 +1,24 @@
 import hashlib
 from collections.abc import Iterator
 from multiprocessing import resource_tracker
+from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
+from streaming import MDSWriter
 from streaming.base.shared.memory import SharedMemory
 from torch.utils.data import DataLoader
 
 import hal.training.dataloader as dataloader
 from hal.data.schema import SCHEMA_VERSION
+from hal.streams import StreamSource
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
+from hal.training.dataloader import _make_streaming_dataset
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.replay_reservoir import OneBatchPrefetch
@@ -23,6 +28,59 @@ from hal.training.replay_reservoir import _stable_replay_rng
 
 L_CTX, L_CHUNK = 6, 4
 _L = L_CTX + L_CHUNK
+
+
+def _write_scalar_mds(root: Path, split: str, values: range) -> None:
+    with MDSWriter(out=str(root / split), columns={"value": "int"}, compression="zstd") as writer:
+        for value in values:
+            writer.write({"value": value})
+
+
+def test_multistream_dataset_uses_every_source_and_exposes_counts(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_scalar_mds(first, "val", range(0, 3))
+    _write_scalar_mds(second, "val", range(10, 15))
+    sources = (
+        StreamSource("first", None, first),  # type: ignore[arg-type]
+        StreamSource("second", None, second),  # type: ignore[arg-type]
+    )
+
+    dataset, names = _make_streaming_dataset(
+        None,
+        "val",
+        sources=sources,
+        remote=None,
+        shuffle=True,
+        shuffle_seed=123,
+        cache_limit=None,
+        shuffle_block_size=16,
+        predownload=None,
+    )
+
+    assert names == ("first", "second")
+    assert dataset.samples_per_stream.tolist() == [3, 5]
+    assert dataset.shuffle and dataset.shuffle_seed == 123
+    assert sorted(int(sample["value"]) for sample in dataset) == [0, 1, 2, 10, 11, 12, 13, 14]
+
+
+def test_streaming_dataset_mode_selection_is_strict(tmp_path: Path) -> None:
+    source = StreamSource("source", "s3://example/source", Path("cache/source"))
+    kwargs = {
+        "split": "train",
+        "remote": None,
+        "shuffle": None,
+        "shuffle_seed": None,
+        "cache_limit": None,
+        "shuffle_block_size": None,
+        "predownload": None,
+    }
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _make_streaming_dataset(str(tmp_path), sources=[source], **kwargs)
+    with pytest.raises(ValueError, match="must not be empty"):
+        _make_streaming_dataset(None, sources=[], **kwargs)
+    with pytest.raises(ValueError, match="data_root is required"):
+        _make_streaming_dataset(None, sources=None, **kwargs)
 
 
 def test_streaming_resource_tracker_forwards_without_extra_self() -> None:

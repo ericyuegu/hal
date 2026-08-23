@@ -53,16 +53,25 @@ def damage_taken(percent: np.ndarray) -> np.ndarray:
     return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def frame_reward(sample: dict, *, ego: str, opp: str, damage_shaping: float, win_reward: float) -> np.ndarray:
+def frame_reward(
+    sample: dict,
+    *,
+    ego: str,
+    opp: str,
+    damage_shaping: float,
+    win_reward: float,
+    stock_value: float = 1.0,
+) -> np.ndarray:
     """Per-frame reward for the player at port ``ego`` over one whole replay.
 
-    ``+1`` when the opponent loses a stock and ``-1`` when the ego does, both on
+    ``+stock_value`` when the opponent loses a stock and ``-stock_value`` when the ego does, both on
     the frame the drop becomes visible; plus ``win_reward`` extra on the
     match-deciding stock; plus ``damage_shaping`` times the percent the opponent
     took minus the percent the ego took on that frame. The sparse stock term is
     the outcome the match is scored on; the shaping terms densify the signal.
     """
-    reward = stock_loss_events(sample[f"{opp}_stock"]) - stock_loss_events(sample[f"{ego}_stock"])
+    stock = stock_loss_events(sample[f"{opp}_stock"]) - stock_loss_events(sample[f"{ego}_stock"])
+    reward = stock if stock_value == 1.0 else stock_value * stock
     if win_reward:
         wins = match_point_events(sample[f"{opp}_stock"]) - match_point_events(sample[f"{ego}_stock"])
         reward = reward + win_reward * wins
@@ -109,6 +118,7 @@ def replay_returns(
     gamma: float,
     damage_shaping: float,
     win_reward: float,
+    stock_value: float = 1.0,
     suffix: str,
     terminated: bool | None = None,
 ) -> dict[str, np.ndarray]:
@@ -127,7 +137,14 @@ def replay_returns(
     complete = infer_terminal_replay(sample) if terminated is None else bool(terminated)
     out: dict[str, np.ndarray] = {}
     for port, other in (("p1", "p2"), ("p2", "p1")):
-        reward = frame_reward(sample, ego=port, opp=other, damage_shaping=damage_shaping, win_reward=win_reward)
+        reward = frame_reward(
+            sample,
+            ego=port,
+            opp=other,
+            damage_shaping=damage_shaping,
+            win_reward=win_reward,
+            stock_value=stock_value,
+        )
         returns = discounted_return(reward, gamma) if complete else np.full(reward.shape, np.nan, dtype=np.float32)
         out[f"{port}_{suffix}"] = returns
         out[f"{port}_{suffix}_valid"] = np.full(reward.shape, complete, dtype=np.bool_)
@@ -140,6 +157,7 @@ def label_replay(
     gamma: float,
     damage_shaping: float,
     win_reward: float,
+    stock_value: float = 1.0,
     suffix: str,
     terminated: bool | None = None,
 ) -> dict:
@@ -151,6 +169,7 @@ def label_replay(
             gamma=gamma,
             damage_shaping=damage_shaping,
             win_reward=win_reward,
+            stock_value=stock_value,
             suffix=suffix,
             terminated=terminated,
         ),

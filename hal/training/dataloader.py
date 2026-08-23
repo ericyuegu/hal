@@ -4,11 +4,13 @@ import functools
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import torch
+from streaming import Stream
 from streaming import StreamingDataset
 from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
@@ -20,6 +22,7 @@ from hal.data.policy_world_schema import decode_policy_world_replay
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
 from hal.data.streaming_compat import patch_streaming_resource_tracker
+from hal.streams import StreamSource
 from hal.training.features import Context
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
@@ -72,6 +75,56 @@ def _resolve_replay_format(replay_format: ReplayFormat | None, compact: bool) ->
     if compact and replay_format != "policy":
         raise ValueError("compact=True is the compatibility spelling of replay_format='policy'; do not pass both")
     return replay_format
+
+
+def _make_streaming_dataset(
+    data_root: str | None,
+    split: str,
+    *,
+    sources: Sequence[StreamSource] | None,
+    remote: str | None,
+    shuffle: bool | None,
+    shuffle_seed: int | None,
+    cache_limit: str | int | None,
+    shuffle_block_size: int | None,
+    predownload: int | None,
+) -> tuple[StreamingDataset, tuple[str, ...]]:
+    """Build one single- or multi-stream MDS dataset with strict mode selection."""
+    if sources is not None:
+        if data_root is not None or remote is not None:
+            raise ValueError("sources cannot be combined with data_root or remote")
+        if not sources:
+            raise ValueError("sources must not be empty")
+        names = tuple(source.name for source in sources)
+        if len(set(names)) != len(names):
+            raise ValueError("source names must be unique")
+        selected_streams = [
+            Stream(remote=source.remote, local=str(source.local_root), split=split) for source in sources
+        ]
+        kwargs = {
+            "streams": selected_streams,
+            "cache_limit": cache_limit,
+            "predownload": predownload,
+        }
+    else:
+        if data_root is None:
+            raise ValueError("data_root is required when sources are not provided")
+        names = ()
+        kwargs = {
+            "remote": f"{remote}/{split}" if remote else None,
+            "local": str(Path(data_root) / split),
+            "cache_limit": cache_limit if remote else None,
+            "predownload": predownload if remote else None,
+        }
+    if shuffle_seed is not None:
+        kwargs["shuffle_seed"] = shuffle_seed
+    dataset = StreamingDataset(
+        **kwargs,
+        batch_size=1,
+        shuffle=(split == "train") if shuffle is None else shuffle,
+        shuffle_block_size=shuffle_block_size,
+    )
+    return dataset, names
 
 
 def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.ndarray]:
@@ -274,7 +327,7 @@ def _collate_with_batch_transform(
 
 
 def make_loader(
-    data_root: str,
+    data_root: str | None,
     split: str,
     *,
     stats: dict[str, FeatureStats],
@@ -283,8 +336,11 @@ def make_loader(
     batch_size: int,
     seed: int,
     remote: str | None = None,
+    sources: Sequence[StreamSource] | None = None,
     cache_limit: str | int | None = None,
     shuffle_block_size: int | None = None,
+    shuffle: bool | None = None,
+    shuffle_seed: int | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 4,
     predownload: int | None = None,
@@ -306,15 +362,16 @@ def make_loader(
     Both callables run in loader workers, so they must be picklable when
     ``num_workers`` is positive.
 
-    ``remote`` is the dataset's R2 root URI; when set, StreamingDataset pulls the
-    split's shards on demand into the ``data_root`` cache (cloud training). When
-    None, ``data_root`` must already hold the shards (local dev/overfit).
+    ``sources`` selects multi-stream mode and cannot be combined with
+    ``data_root`` or ``remote``. Otherwise, ``remote`` is the dataset's R2 root
+    URI; when set, StreamingDataset pulls the split's shards on demand into the
+    ``data_root`` cache. Without it, ``data_root`` must already hold the shards.
 
     ``cache_limit`` bounds that local shard cache (e.g. ``"100gb"``) so a dataset
     far larger than disk streams without filling it — StreamingDataset evicts
     least-recently-used shards past the limit. Only meaningful with ``remote`` set:
     a local-only dataset has nowhere to re-download an evicted shard from, so it's
-    ignored when ``remote`` is None.
+    ignored only for a single local-only dataset.
 
     ``shuffle_block_size`` is the py1e shuffle unit (samples mixed together). It
     governs *startup* download: py1e must buffer a block before yielding, so the
@@ -337,14 +394,16 @@ def make_loader(
     # partial local cache would try to fetch shards that aren't there — so keep streaming's
     # conservative default there.
     if predownload is None:
-        predownload = 8 * batch_size if remote else None
+        predownload = 8 * batch_size if remote or sources is not None else None
     resolved_format = _resolve_replay_format(replay_format, compact)
-    mds = StreamingDataset(
-        remote=f"{remote}/{split}" if remote else None,
-        local=str(Path(data_root) / split),
-        batch_size=1,
-        shuffle=(split == "train"),
-        cache_limit=cache_limit if remote else None,
+    mds, _ = _make_streaming_dataset(
+        data_root,
+        split,
+        sources=sources,
+        remote=remote,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
+        cache_limit=cache_limit,
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
     )

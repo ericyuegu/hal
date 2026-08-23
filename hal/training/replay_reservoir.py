@@ -4,10 +4,10 @@ import hashlib
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Sequence
 from concurrent.futures import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -23,7 +23,9 @@ from hal.data.policy_world_schema import decode_policy_world_replay
 from hal.data.policy_world_schema import decode_policy_world_replay_slices
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
+from hal.streams import StreamSource
 from hal.training.dataloader import ReplayFormat
+from hal.training.dataloader import _make_streaming_dataset
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
@@ -373,6 +375,7 @@ class ReservoirLoader:
         prefetch_batches: int,
         pin_memory: bool,
         dataset: StreamingDataset,
+        source_names: tuple[str, ...],
         packs: PolicyReplayPackDataset,
     ) -> None:
         if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
@@ -389,11 +392,19 @@ class ReservoirLoader:
         self._prefetch_batches = prefetch_batches
         self._pin_memory = pin_memory
         self._dataset = dataset
+        self._source_names = source_names
         self._packs = packs
         self._epoch = 0
         self._reservoir: ReplayReservoir | None = None
         self._resume_state: dict[str, Any] | None = None
         self.last_epoch_stats: dict[str, int] | None = None
+
+    @property
+    def source_sample_counts(self) -> dict[str, int]:
+        """Per-stream sample counts in configured source order."""
+        return {
+            name: int(count) for name, count in zip(self._source_names, self._dataset.samples_per_stream, strict=True)
+        }
 
     def __iter__(self) -> Iterator[object]:
         reservoir = ReplayReservoir(
@@ -469,7 +480,7 @@ def _identity(value: Any) -> Any:
 
 
 def make_reservoir_loader(
-    data_root: str,
+    data_root: str | None,
     split: str,
     *,
     stats: dict[str, FeatureStats],
@@ -479,8 +490,11 @@ def make_reservoir_loader(
     seed: int,
     reservoir_capacity: int,
     remote: str | None = None,
+    sources: Sequence[StreamSource] | None = None,
     cache_limit: str | int | None = None,
     shuffle_block_size: int | None = None,
+    shuffle: bool | None = None,
+    shuffle_seed: int | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 2,
     predownload: int = 512,
@@ -508,14 +522,16 @@ def make_reservoir_loader(
         raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
-    dataset = StreamingDataset(
-        remote=f"{remote}/{split}" if remote else None,
-        local=str(Path(data_root) / split),
-        batch_size=1,
-        shuffle=(split == "train"),
-        cache_limit=cache_limit if remote else None,
+    dataset, source_names = _make_streaming_dataset(
+        data_root,
+        split,
+        sources=sources,
+        remote=remote,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
+        cache_limit=cache_limit,
         shuffle_block_size=shuffle_block_size,
-        predownload=predownload if remote else None,
+        predownload=predownload if remote or sources is not None else None,
     )
     packs = PolicyReplayPackDataset(
         dataset,
@@ -556,5 +572,6 @@ def make_reservoir_loader(
         prefetch_batches=prefetch_batches,
         pin_memory=pin_memory,
         dataset=dataset,
+        source_names=source_names,
         packs=packs,
     )

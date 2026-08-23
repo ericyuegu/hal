@@ -36,6 +36,23 @@ def test_frame_reward_matches_the_hand_derivation() -> None:
     np.testing.assert_allclose(reward, _REWARD_P1, atol=1e-6)
 
 
+def test_stock_value_scales_only_stock_events() -> None:
+    reward = returns.frame_reward(_sample(), ego="p1", opp="p2", damage_shaping=0.1, win_reward=0.5, stock_value=120.0)
+    expected = np.array([0.0, -1.0, -118.0, 120.0, -0.5, 120.5], dtype=np.float32)
+    np.testing.assert_allclose(reward, expected, atol=1e-6)
+
+
+def test_default_stock_value_is_bitwise_compatible() -> None:
+    sample = _sample()
+    stock = returns.stock_loss_events(sample["p2_stock"]) - returns.stock_loss_events(sample["p1_stock"])
+    legacy = stock + 0.5 * (
+        returns.match_point_events(sample["p2_stock"]) - returns.match_point_events(sample["p1_stock"])
+    )
+    legacy = legacy + 0.1 * (returns.damage_taken(sample["p2_percent"]) - returns.damage_taken(sample["p1_percent"]))
+    actual = returns.frame_reward(sample, ego="p1", opp="p2", damage_shaping=0.1, win_reward=0.5)
+    np.testing.assert_array_equal(actual, legacy.astype(np.float32, copy=False))
+
+
 def test_swapping_ports_flips_every_reward_and_return_sign() -> None:
     sample = _sample()
     kwargs = dict(damage_shaping=0.1, win_reward=0.5)
