@@ -2481,7 +2481,8 @@ def train(
         wandb.define_metric("processed_positions")
         wandb.define_metric("train/*", step_metric="processed_positions")
         wandb.define_metric("val/*", step_metric="processed_positions")
-        wandb.define_metric("eval_d*/*", step_metric="processed_positions")
+        for delay in DELAY_BUCKETS:
+            wandb.define_metric(f"eval_d{delay}/*", step_metric="processed_positions")
         if cfg.wandb_log_code:
             log_wandb_code(wandb.run)
         for name, value in counts.items():
