@@ -205,7 +205,7 @@
 <body>
 <main>
   <header>
-    <p class="kicker">Working draft · 21 August 2026 · evidence through experiment 038</p>
+    <p class="kicker">Working draft · 22 August 2026 · evidence through experiment 038</p>
     <h1>Offline Melee policy experiments</h1>
     <p class="lede">This draft explains the path from controller data to action chunks. It separates controlled tests from historical tests. It uses closed-loop play as the main measure.</p>
     <p>The <a href="blog_experiment_evidence.md">audited run ledger</a> and the <a href="blog_experiment_runs.csv">machine-readable table</a> are the source of truth. They contain 37 W&amp;B runs.</p>
@@ -837,6 +837,33 @@
       <figcaption>Figure 2. Each cell uses one fixed checkpoint. H1, H2, H4, and H6 execute one, two, four, or six predicted frames before the next plan. The emulator waits for the model. Thus, this figure measures action-chunk quality, not hardware delay.</figcaption>
     </figure>
 
+    <div class="table-wrap">
+      <table>
+        <caption>Table 7. Full experiment 037 horizon evaluation. Model parameters and training work do not change across these rows.</caption>
+        <thead><tr><th>Cell</th><th>Execution horizon</th><th class="num">Matches</th><th class="num">Stock/min</th><th class="num">Stock LCB</th><th class="num">Damage/min</th><th class="num">Damage LCB</th></tr></thead>
+        <tbody>
+          <tr><td rowspan="4"><strong>D0</strong></td><td>H1</td><td class="num">101</td><td class="num">+0.0955</td><td class="num">-0.0453</td><td class="num">+35.5039</td><td class="num">+26.3547</td></tr>
+          <tr><td>H2</td><td class="num">98</td><td class="num">-0.1590</td><td class="num">-0.2924</td><td class="num">+21.0396</td><td class="num">+12.0242</td></tr>
+          <tr><td>H4</td><td class="num">113</td><td class="num">-0.7017</td><td class="num">-0.8457</td><td class="num">+2.7712</td><td class="num">-5.8843</td></tr>
+          <tr><td>H6</td><td class="num">121</td><td class="num">-0.9051</td><td class="num">-1.0581</td><td class="num">-19.0119</td><td class="num">-26.6320</td></tr>
+          <tr><td rowspan="4"><strong>D1</strong></td><td>H1</td><td class="num">101</td><td class="num">+0.1326</td><td class="num">-0.0013</td><td class="num">+40.7768</td><td class="num">+31.4097</td></tr>
+          <tr><td>H2</td><td class="num">97</td><td class="num">+0.0477</td><td class="num">-0.0813</td><td class="num">+36.1129</td><td class="num">+27.3800</td></tr>
+          <tr><td>H4</td><td class="num">101</td><td class="num">-0.3129</td><td class="num">-0.4381</td><td class="num">+13.0490</td><td class="num">+4.8455</td></tr>
+          <tr><td>H6</td><td class="num">104</td><td class="num">-0.4670</td><td class="num">-0.6078</td><td class="num">-1.4068</td><td class="num">-10.1160</td></tr>
+          <tr><td rowspan="4"><strong>D2</strong></td><td>H1</td><td class="num">102</td><td class="num">-0.1857</td><td class="num">-0.3176</td><td class="num">+29.4782</td><td class="num">+20.5230</td></tr>
+          <tr><td>H2</td><td class="num">104</td><td class="num">-0.0637</td><td class="num">-0.2066</td><td class="num">+28.0807</td><td class="num">+18.6906</td></tr>
+          <tr><td>H4</td><td class="num">102</td><td class="num">-0.1963</td><td class="num">-0.3306</td><td class="num">+18.0595</td><td class="num">+10.3874</td></tr>
+          <tr><td>H6</td><td class="num">103</td><td class="num">-0.2335</td><td class="num">-0.3837</td><td class="num">+15.6934</td><td class="num">+7.1205</td></tr>
+          <tr><td rowspan="4"><strong>D3</strong></td><td>H1</td><td class="num">99</td><td class="num">+0.0530</td><td class="num">-0.0740</td><td class="num">+36.3244</td><td class="num">+28.1024</td></tr>
+          <tr><td>H2</td><td class="num">105</td><td class="num">+0.0000</td><td class="num">-0.1428</td><td class="num">+31.5488</td><td class="num">+22.4929</td></tr>
+          <tr><td>H4</td><td class="num">106</td><td class="num">-0.0956</td><td class="num">-0.2504</td><td class="num">+24.7452</td><td class="num">+15.6568</td></tr>
+          <tr><td>H6</td><td class="num">100</td><td class="num">-0.0212</td><td class="num">-0.1644</td><td class="num">+25.8506</td><td class="num">+17.7811</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="finding strong"><strong>Strong execution-horizon result.</strong> Longer open-loop execution usually reduces closed-loop performance at the same parameter count. The effect is large for D0 and D1. Future-offset AR makes the loss smaller for D2 and D3. The trend is not strictly monotonic: D2 has its best stock LCB at H2, and D3 recovers at H6 relative to H4.</div>
+
     <h3>Two decoder questions remain</h3>
     <p><strong>Group order.</strong> The current order is C-stick, main stick, triggers, buttons. There is no clean order test. Experiment 010 and experiment 019 use other orders, but many other settings also change. A useful one-run test changes only the order to main stick, C-stick, triggers, buttons. Triggers must remain before buttons because the legality mask uses the trigger result.</p>
     <p><strong>Interleaved tokens.</strong> The historical short-context 013 model places one state token and four action-group tokens in the main trunk for every frame. Its new 026-style evaluation has stock LCB -0.2442 and damage LCB +20.2728. This is close to D3. However, its token count, context, checkpoint step, training PF, and inference path differ. Keep it as a side branch. Do not place it in the D0-to-D3 causal chain.</p>
@@ -854,7 +881,7 @@
     <h3>The useful AWR comparison is 037 D3 versus 036</h3>
     <div class="table-wrap">
       <table>
-        <caption>Table 7. d256 uniform BC versus d256 MC-AWR. Rows are in ascending stock performance.</caption>
+        <caption>Table 8. d256 uniform BC versus d256 MC-AWR. Rows are in ascending stock performance.</caption>
         <thead><tr><th>Objective</th><th>Experiment and run</th><th class="num">Params</th><th class="num">Train PF</th><th class="num">Boots</th><th class="num">Stock/min</th><th class="num">Stock LCB</th><th class="num">Damage/min</th><th class="num">Damage LCB</th><th>Mismatch</th></tr></thead>
         <tbody>
           <tr><td>Uniform BC</td><td><a href="../experiments/037_factorization_matrix.py">037 D3</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">5wfk2esf</a></td><td class="num">7.148M</td><td class="num">46.047</td><td class="num">96</td><td class="num">-0.0956</td><td class="num">-0.2504</td><td class="num">+24.7452</td><td class="num">+15.6568</td><td>Current 037 schedule.</td></tr>
@@ -875,7 +902,7 @@
     <h3>Early stock-only and shaped AWR</h3>
     <div class="table-wrap">
       <table>
-        <caption>Table 8. Early AWR on the independent-MTP actor. Rows are in ascending stock performance.</caption>
+        <caption>Table 9. Early AWR on the independent-MTP actor. Rows are in ascending stock performance.</caption>
         <thead><tr><th>Recipe</th><th>Run</th><th>Reward and weight settings</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>Control quality</th></tr></thead>
         <tbody>
           <tr><td>Uniform BC</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/fxhtoxu8">016 · fxhtoxu8</a></td><td>No value head. No AWR weight.</td><td class="num">-0.7822</td><td class="num">+7.8324</td><td>Actor control.</td></tr>
@@ -889,7 +916,7 @@
     <h3>The tested IQL systems failed</h3>
     <div class="table-wrap">
       <table>
-        <caption>Table 9. IQL and Q branches. Rows are in ascending stock performance.</caption>
+        <caption>Table 10. IQL and Q branches. Rows are in ascending stock performance.</caption>
         <thead><tr><th>Experiment</th><th>Run</th><th>Critic</th><th class="num">Q-return corr.</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>Main mismatch</th></tr></thead>
         <tbody>
           <tr><td>027</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/06fi5jms">06fi5jms</a></td><td>Attached IQL heads</td><td class="num">.043</td><td class="num">-2.0216</td><td class="num">-66.3153</td><td>2× data and PF plus new heads and losses.</td></tr>
@@ -906,7 +933,7 @@
     <p>Failed tests are useful when we state the changed settings.</p>
     <div class="table-wrap">
       <table>
-        <caption>Table 10. Other branches. Rows are in ascending stock performance.</caption>
+        <caption>Table 11. Other branches. Rows are in ascending stock performance.</caption>
         <thead><tr><th>Branch</th><th>Experiment and run</th><th class="num">Params</th><th class="num">Train PF</th><th class="num">Stock LCB</th><th class="num">Damage LCB</th><th>What changed?</th></tr></thead>
         <tbody>
           <tr><td>One trajectory mode</td><td><a href="../experiments/033_parallel_latent_trajectory.py">033 K1</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/mz8dk2gh">mz8dk2gh</a></td><td class="num">14.884M</td><td class="num">191.8</td><td class="num">-1.7438</td><td class="num">-62.4007</td><td>Parallel non-causal decoder, objective, and 2× data change versus 026.</td></tr>
@@ -929,7 +956,7 @@
 
     <div class="table-wrap">
       <table>
-        <caption>Table 11. Current D3 and flow results at H4. Rows are in ascending stock performance.</caption>
+        <caption>Table 12. Current D3 and flow results at H4. Rows are in ascending stock performance.</caption>
         <thead><tr><th>Policy</th><th>Run</th><th class="num">Params</th><th class="num">Examples</th><th class="num">Train PF</th><th class="num">Stock/min</th><th class="num">Stock LCB</th><th class="num">Damage/min</th><th class="num">Damage LCB</th><th class="num">p50 replan</th><th class="num">GFLOPs/replan</th></tr></thead>
         <tbody>
           <tr><td>038 categorical flow, NFE4</td><td><a href="https://wandb.ai/ericyuegu/hal/runs/t4s3gohe">t4s3gohe</a></td><td class="num">8.946M</td><td class="num">8.389M</td><td class="num">57.635</td><td class="num">-0.2811</td><td class="num">-0.4153</td><td class="num">-8.1861</td><td class="num">-16.5141</td><td class="num">10.904 ms</td><td class="num">1.830</td></tr>
@@ -966,7 +993,7 @@
     <p>The current draft can defend the 037 factorization result. It can defend AWR as a useful d256 extension, with one protocol note. Other claims need narrower language or one more test.</p>
     <div class="table-wrap">
       <table>
-        <caption>Table 12. Small set of remaining tests</caption>
+        <caption>Table 13. Small set of remaining tests</caption>
         <thead><tr><th>Claim</th><th>What exists?</th><th>What is missing?</th><th>Minimum next action</th></tr></thead>
         <tbody>
           <tr><td>Independent MTP improves a next-frame model</td><td>011 and 016 have a near-matched training recipe.</td><td>011 has only four closed-loop matches. Its offset-1 NLL is better.</td><td>Evaluate the existing 011 and 016 checkpoints with the same current H1 protocol. Do not retrain unless the checkpoints cannot run.</td></tr>
