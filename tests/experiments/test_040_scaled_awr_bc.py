@@ -132,6 +132,14 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     assert schedule(209_715) == 1.0
     assert schedule(262_143) == pytest.approx(1 / 170)
 
+    parameter = torch.nn.Parameter(torch.ones(()))
+    optimizer = torch.optim.SGD([parameter], lr=2.0)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
+    assert optimizer.param_groups[0]["lr"] == 0.0
+    optimizer.step()
+    scheduler.step()
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(2.0 * schedule(1))
+
 
 def test_fixed_global_weights_match_hand_computation_and_warmup() -> None:
     returns = torch.tensor([12.0, 10.0, float("nan")])
@@ -190,6 +198,21 @@ def test_weights_cap_before_fixed_normalization_and_reject_bad_eligible_rows() -
             weight_max=3.5,
             weight_norm=1.0,
         )
+
+
+def test_extreme_negative_advantages_preserve_formula_and_keep_ess_finite() -> None:
+    weights, stats = exp.advantage_weights(
+        torch.tensor([-1e20, -1e30]),
+        torch.ones(2, dtype=torch.bool),
+        baseline=0.0,
+        beta=1.0,
+        weight_max=3.5,
+        weight_norm=2.0,
+    )
+
+    torch.testing.assert_close(weights, torch.zeros(2))
+    assert all(torch.isfinite(value) for value in stats.values())
+    assert float(stats["weight_ess"]) == 0.0
 
 
 def test_near_far_objective_matches_hand_computation() -> None:
@@ -356,13 +379,62 @@ def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path:
 
 
 def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        exp.validate_config(_cfg(batch_size=0))
     with pytest.raises(ValueError, match="beyond sample_chunk_length"):
         exp.validate_config(_cfg(sample_chunk_length=20))
     with pytest.raises(ValueError, match="dense offset prefix"):
         exp.validate_config(_cfg(head_offsets=(1, 2, 3, 4, 5, 7, 8)))
     with pytest.raises(ValueError, match="divisible"):
         exp.validate_config(_cfg(target_loss_positions=17))
+    with pytest.raises(ValueError, match="layer_rms_every"):
+        exp.validate_config(_cfg(layer_rms_every=-1))
     assert asdict(exp.TrainConfig())["target_loss_positions"] == 2**35
+    with pytest.raises(ValueError, match="frozen treatment"):
+        exp.validate_production_config(exp.TrainConfig(exec_horizon=6))
+    exp.validate_production_config(
+        exp.TrainConfig(
+            num_workers=8,
+            cache_limit_gb=512,
+            push_to_r2=False,
+            layer_rms_every=0,
+            layer_rms_batch_size=4,
+        )
+    )
+
+
+def test_histogram_cadence_does_not_restart_on_resume() -> None:
+    assert exp.histogram_due(1, 4096)
+    assert exp.histogram_due(4096, 4096)
+    assert not exp.histogram_due(1001, 4096)
+
+
+def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
+    cfg = _cfg(n_layers=2, temporal_layers=2)
+    model = exp.GPT(cfg)
+    batch = _awr_batch(cfg)
+    history, targets, _ = exp.prepared_targets(model, batch)
+    hidden = model(batch.context.features, batch.context.ctx_pad, history)
+    model.temporal.teacher_forced_nll(hidden, history, targets).mean().backward()
+
+    activations = exp.layer_activation_rms_log(model, batch, cfg, max_rows=1)
+    gradients = exp.layer_gradient_rms_log(model)
+    layer_names = {
+        "trunk_block_00",
+        "trunk_block_01",
+        "temporal_block_00",
+        "temporal_block_01",
+    }
+    assert set(activations) == {
+        f"{metric}/{name}"
+        for metric in ("activation_rms", "residual_branch_rms", "residual_ratio")
+        for name in layer_names
+    }
+    assert set(gradients) == {f"gradient_rms/{name}" for name in layer_names}
+    assert all(math.isfinite(value) and value >= 0 for value in (*activations.values(), *gradients.values()))
+    for name in layer_names:
+        expected_ratio = activations[f"residual_branch_rms/{name}"] / activations[f"activation_rms/{name}"]
+        assert activations[f"residual_ratio/{name}"] == pytest.approx(expected_ratio)
 
 
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -398,6 +470,7 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     exp.train(cfg, {}, smoke=True, stop_after_update=1, smoke_eval_matchups=0)
     first = torch.load(tmp_path / "latest.pt", map_location="cpu", weights_only=False)
     assert first["step"] == 0
+    assert first["actual_loss_positions"] == 7
     assert (tmp_path / "boundary-step-0000001.pt").is_file()
 
     exp.train(
@@ -411,5 +484,6 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     )
     second = torch.load(tmp_path / "latest.pt", map_location="cpu", weights_only=False)
     assert second["step"] == 1
+    assert second["actual_loss_positions"] == 14
     assert (tmp_path / "boundary-step-0000002.pt").is_file()
     assert (tmp_path / "smoke-final.pt").is_file()

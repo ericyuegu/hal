@@ -24,6 +24,7 @@ from hal.training.features import TrainBatch
 from hal.training.replay_reservoir import OneBatchPrefetch
 from hal.training.replay_reservoir import ReplayPack
 from hal.training.replay_reservoir import ReplayReservoir
+from hal.training.replay_reservoir import ReservoirLoader
 from hal.training.replay_reservoir import _stable_replay_rng
 
 L_CTX, L_CHUNK = 6, 4
@@ -81,6 +82,14 @@ def test_streaming_dataset_mode_selection_is_strict(tmp_path: Path) -> None:
         _make_streaming_dataset(None, sources=[], **kwargs)
     with pytest.raises(ValueError, match="data_root is required"):
         _make_streaming_dataset(None, sources=None, **kwargs)
+
+
+def test_single_stream_reservoir_count_metadata_is_empty() -> None:
+    loader = object.__new__(ReservoirLoader)
+    loader._source_names = ()
+    loader._dataset = type("Dataset", (), {"samples_per_stream": np.array([3])})()
+
+    assert loader.source_sample_counts == {}
 
 
 def test_streaming_resource_tracker_forwards_without_extra_self() -> None:

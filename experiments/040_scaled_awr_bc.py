@@ -100,6 +100,73 @@ _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32)
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _AWR_CONSTANTS_CALIBRATED = False
+_PRODUCTION_TREATMENT_FIELDS = frozenset(
+    {
+        "L_ctx",
+        "action_embed_dim",
+        "action_state_embed_dim",
+        "action_vocab",
+        "adam_lr",
+        "adam_weight_decay",
+        "allow_tf32",
+        "amp_dtype",
+        "attn_window",
+        "aux_loss_weight",
+        "awr_beta",
+        "awr_damage_shaping",
+        "awr_gamma",
+        "awr_return_baseline",
+        "awr_stock_value",
+        "awr_weight_max",
+        "awr_weight_norm",
+        "awr_win_reward",
+        "batch_size",
+        "char_dim",
+        "char_vocab",
+        "ckpt_every",
+        "d_model",
+        "eval_every",
+        "eval_max_frames",
+        "eval_max_parallel",
+        "eval_n_matchups",
+        "eval_seed",
+        "exec_horizon",
+        "final_eval_n_matchups",
+        "group_head_dim",
+        "head_offsets",
+        "inference_mode",
+        "lr_floor_ratio",
+        "mds_schema_version",
+        "muon_lr",
+        "muon_weight_decay",
+        "n_heads",
+        "n_layers",
+        "n_near",
+        "observation_bundle",
+        "offset_embed_dim",
+        "policy_world_schema_version",
+        "reservoir_capacity",
+        "sample_chunk_length",
+        "seed",
+        "shuffle_block_size",
+        "source_names",
+        "stable_fraction",
+        "stage_dim",
+        "stage_vocab",
+        "target_loss_positions",
+        "temporal_d_model",
+        "temporal_ff_dim",
+        "temporal_heads",
+        "temporal_layers",
+        "temporal_state_film",
+        "val_batch_size",
+        "val_every",
+        "val_n_samples",
+        "val_split",
+        "warmup_fraction",
+        "windows_per_replay",
+    }
+)
 
 GROUP_NAMES: tuple[str, ...] = ("buttons", "main_stick", "c_stick", "triggers")
 GROUP_VOCABS: tuple[int, ...] = (
@@ -180,6 +247,8 @@ class TrainConfig:
 
     wandb_log_code: bool = True
     wandb_hist_every: int = 4096
+    layer_rms_every: int = 4096
+    layer_rms_batch_size: int = 8
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
@@ -251,12 +320,14 @@ def validate_config(cfg: TrainConfig) -> None:
         "offset_embed_dim": cfg.offset_embed_dim,
         "batch_size": cfg.batch_size,
         "target_loss_positions": cfg.target_loss_positions,
-        "max_steps": cfg.max_steps,
         "n_near": cfg.n_near,
+        "layer_rms_batch_size": cfg.layer_rms_batch_size,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    if cfg.max_steps <= 0:
+        raise ValueError(f"max_steps must be positive, got {cfg.max_steps}")
     if cfg.d_model % cfg.n_heads or cfg.temporal_d_model % cfg.temporal_heads:
         raise ValueError("model dimensions must be divisible by their head counts")
     if (cfg.temporal_d_model // cfg.temporal_heads) % 2:
@@ -284,6 +355,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
     if not math.isfinite(cfg.aux_loss_weight) or cfg.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be finite and non-negative")
+    if not isinstance(cfg.layer_rms_every, int) or isinstance(cfg.layer_rms_every, bool) or cfg.layer_rms_every < 0:
+        raise ValueError(f"layer_rms_every must be a non-negative integer, got {cfg.layer_rms_every!r}")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
     if cfg.reservoir_capacity < 2 * cfg.batch_size:
@@ -311,6 +384,23 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(
             f"policy_world_schema_version {cfg.policy_world_schema_version} != {POLICY_WORLD_SCHEMA_VERSION}"
         )
+
+
+def validate_production_config(cfg: TrainConfig) -> None:
+    """Require frozen scientific settings while allowing operational tuning."""
+    expected = asdict(TrainConfig())
+    actual = asdict(cfg)
+    changed = {
+        name: (actual[name], expected_value)
+        for name, expected_value in expected.items()
+        if name in _PRODUCTION_TREATMENT_FIELDS and actual[name] != expected_value
+    }
+    if changed:
+        details = ", ".join(
+            f"{name}={value!r} (expected {expected_value!r})"
+            for name, (value, expected_value) in sorted(changed.items())
+        )
+        raise ValueError(f"production config differs from the frozen treatment: {details}")
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
@@ -990,10 +1080,13 @@ def advantage_weights(
     if not torch.isfinite(normalized_weights).all():
         raise FloatingPointError("normalized AWR weight contains a non-finite value")
     weights[eligible] = active_weights
+    stats_weights = active_weights.double()
+    squared_sum = stats_weights.square().sum()
+    ess = stats_weights.sum().square() / (n_eligible * squared_sum) if squared_sum > 0 else zero
     stats.update(
         advantage_mean=eligible_advantage.mean(),
         advantage_std=eligible_advantage.std(correction=0),
-        weight_ess=active_weights.sum().square() / (n_eligible * active_weights.square().sum()),
+        weight_ess=ess.float(),
         weight_clip_frac=(log_weights >= max_log_weight).float().mean(),
         weight_mean=active_weights.mean(),
         weight_max=active_weights.max(),
@@ -1860,6 +1953,118 @@ def wandb_weight_log(model: nn.Module) -> dict[str, object]:
     return _wandb_tensor_log(model, gradients=False)
 
 
+def histogram_due(update: int, every: int) -> bool:
+    """Whether global update-count cadence requests parameter histograms."""
+    return every > 0 and (update == 1 or update % every == 0)
+
+
+def _residual_layers(model: GPT) -> tuple[tuple[str, nn.Module], ...]:
+    """Return the residual blocks whose scale health is monitored."""
+    trunk = tuple((f"trunk_block_{index:02d}", block) for index, block in enumerate(model.trunk.blocks))
+    temporal = tuple((f"temporal_block_{index:02d}", block) for index, block in enumerate(model.temporal.blocks))
+    return trunk + temporal
+
+
+def _diagnostic_batch(batch: TrainBatch | AWRBatch, max_rows: int) -> TrainBatch:
+    """Take a small device-resident prefix for the occasional eager diagnostic."""
+    if max_rows < 1:
+        raise ValueError(f"max_rows must be positive, got {max_rows}")
+    source = batch.batch if isinstance(batch, AWRBatch) else batch
+    rows = min(max_rows, source.target.shape[0])
+    context = source.context
+    return TrainBatch(
+        context=Context(
+            features={name: value[:rows] for name, value in context.features.items()},
+            ctx_pad=context.ctx_pad[:rows],
+            slot_ids=None if context.slot_ids is None else context.slot_ids[:rows],
+            reset=None if context.reset is None else context.reset[:rows],
+        ),
+        target=source.target[:rows],
+        replay_ids=None if source.replay_ids is None else source.replay_ids[:rows],
+    )
+
+
+@torch.no_grad()
+@torch.compiler.disable
+def layer_activation_rms_log(
+    model: GPT,
+    batch: TrainBatch | AWRBatch,
+    cfg: TrainConfig,
+    *,
+    max_rows: int,
+) -> dict[str, float]:
+    """Measure residual-stream and branch RMS on a small eager forward pass.
+
+    A residual block is treated as one layer: ``x_{l+1} = x_l + F_l(x_l)``.
+    The branch is recovered exactly as ``F_l(x_l) = x_{l+1} - x_l``. Hooks are
+    present only for this infrequent eager pass, so they do not enter or
+    invalidate the compiled training graph.
+    """
+    measurements: dict[str, tuple[Tensor, Tensor]] = {}
+
+    def capture(name: str):
+        def hook(_module: nn.Module, inputs: tuple[object, ...], output: object) -> None:
+            layer_input = inputs[0]
+            if not isinstance(layer_input, Tensor) or not isinstance(output, Tensor):
+                raise TypeError(f"{name} RMS hook expected tensor input and output")
+            activation_rms = layer_input.detach().float().square().mean().sqrt()
+            residual_rms = (output.detach().float() - layer_input.detach().float()).square().mean().sqrt()
+            measurements[name] = (activation_rms, residual_rms)
+
+        return hook
+
+    handles = [layer.register_forward_hook(capture(name)) for name, layer in _residual_layers(model)]
+    try:
+        diagnostic = _diagnostic_batch(batch, max_rows)
+        history, targets, _ = prepared_targets(model, diagnostic)
+        device = next(model.parameters()).device
+        with amp_context(cfg, device):
+            hidden = model(diagnostic.context.features, diagnostic.context.ctx_pad, history)
+            model.temporal.teacher_forced_states(hidden, history, targets)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    layer_names = tuple(name for name, _ in _residual_layers(model))
+    missing = set(layer_names) - measurements.keys()
+    if missing:
+        raise RuntimeError(f"RMS diagnostic did not observe residual layers {sorted(missing)}")
+    scalars = torch.stack([value for name in layer_names for value in measurements[name]]).double().cpu()
+    payload: dict[str, float] = {}
+    tiny = torch.finfo(torch.float64).tiny
+    for index, name in enumerate(layer_names):
+        activation_rms = float(scalars[2 * index])
+        residual_rms = float(scalars[2 * index + 1])
+        payload[f"activation_rms/{name}"] = activation_rms
+        payload[f"residual_branch_rms/{name}"] = residual_rms
+        payload[f"residual_ratio/{name}"] = residual_rms / max(activation_rms, tiny)
+    nonfinite = {name: value for name, value in payload.items() if not math.isfinite(value)}
+    if nonfinite:
+        raise FloatingPointError(f"layer activation diagnostic produced non-finite metrics: {nonfinite}")
+    return payload
+
+
+@torch.no_grad()
+def layer_gradient_rms_log(model: GPT) -> dict[str, float]:
+    """Return parameter-gradient RMS for every monitored residual block."""
+    names: list[str] = []
+    values: list[Tensor] = []
+    for name, layer in _residual_layers(model):
+        gradients = [parameter.grad.detach() for parameter in layer.parameters() if parameter.grad is not None]
+        if not gradients:
+            raise RuntimeError(f"residual layer {name} has no parameter gradients")
+        squared_sum = torch.stack([gradient.float().square().sum() for gradient in gradients]).sum()
+        count = sum(gradient.numel() for gradient in gradients)
+        names.append(name)
+        values.append(torch.sqrt(squared_sum / count))
+    cpu_values = torch.stack(values).double().cpu()
+    payload = {f"gradient_rms/{name}": float(value) for name, value in zip(names, cpu_values, strict=True)}
+    nonfinite = {name: value for name, value in payload.items() if not math.isfinite(value)}
+    if nonfinite:
+        raise FloatingPointError(f"layer gradient diagnostic produced non-finite metrics: {nonfinite}")
+    return payload
+
+
 def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
     v6 = cfg.observation_bundle == "v6_lean"
     sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
@@ -1949,13 +2154,16 @@ def save_boundary_checkpoint(
     uploader: BackgroundUploader | None,
     milestone: bool,
     wandb_id: str | None,
+    actual_loss_positions: int,
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
     if snapshot.exists():
         raise FileExistsError(f"immutable checkpoint already exists: {snapshot}")
+    temporary = snapshot.with_suffix(snapshot.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
     save_checkpoint(
-        snapshot,
+        temporary,
         step=update - 1,
         model=model,
         opt=optimizer,
@@ -1963,7 +2171,9 @@ def save_boundary_checkpoint(
         cfg=_checkpoint_config(cfg),
         wandb_id=wandb_id,
         uploader=None,
+        extra_state={"actual_loss_positions": actual_loss_positions},
     )
+    os.replace(temporary, snapshot)
     latest = run_dir / "latest.pt"
     _replace_link(snapshot, latest)
     if uploader is not None:
@@ -2031,12 +2241,7 @@ def train(
 ) -> None:
     validate_config(cfg)
     if not smoke:
-        if cfg.target_loss_positions != _PRODUCTION_LOSS_POSITIONS:
-            raise ValueError("production requires exactly 2**35 requested loss positions")
-        if cfg.source_names != tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES):
-            raise ValueError("production requires the canonical ordered 35-source corpus")
-        if cfg.eval_n_matchups != _PRODUCTION_EVAL_MATCHUPS or cfg.final_eval_n_matchups != _PRODUCTION_EVAL_MATCHUPS:
-            raise ValueError("production requires the seeded 96-matchup schedule for every evaluation")
+        validate_production_config(cfg)
         if stop_after_update is not None:
             raise ValueError("stop_after_update is a smoke-only control")
         if not _AWR_CONSTANTS_CALIBRATED:
@@ -2060,6 +2265,10 @@ def train(
         wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
         wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
         wandb.run.summary["nll_semantics"] = "train/loss is weighted; *_unweighted and val metrics are unweighted"
+        wandb.run.summary["layer_rms_semantics"] = (
+            "activation=block input; residual_branch=block output-input; "
+            "residual_ratio=residual_branch/activation; gradient=parameter-gradient RMS"
+        )
         if cfg.wandb_log_code:
             log_wandb_code(wandb.run)
     run_dir, replay_dir = setup_run_dir(run_name)
@@ -2085,11 +2294,17 @@ def train(
     optimizer = make_optimizer(model, cfg)
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
     start_step = 0
+    actual_positions = 0
     if resume_state is not None:
         model.load_state_dict(resume_state["model"])
         optimizer.load_state_dict(resume_state["opt"])
         scheduler.load_state_dict(resume_state["sched"])
         start_step = int(resume_state["step"]) + 1
+        actual_positions = int(resume_state.get("actual_loss_positions", start_step * cfg.batch_size * cfg.L_ctx))
+        if not 0 <= actual_positions <= start_step * cfg.batch_size * cfg.L_ctx:
+            raise ValueError(
+                f"checkpoint actual_loss_positions={actual_positions} is invalid after {start_step} updates"
+            )
 
     # Compilation stays in dedicated callables.  Evaluation therefore never
     # strips or mutates compiled methods and can build its own static buckets.
@@ -2111,7 +2326,6 @@ def train(
     iterator = iter(train_loader)
     run_started = time.monotonic()
     loader_wait_fractions: list[float] = []
-    actual_positions = 0
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and L40S hosts.
     eval_inference: BF16Inference | None = None
@@ -2150,11 +2364,19 @@ def train(
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
                 histogram_payload = {}
-                histogram_due = cfg.wandb_hist_every > 0 and (
-                    update == start_step + 1 or update % cfg.wandb_hist_every == 0
-                )
-                if histogram_due:
+                if histogram_due(update, cfg.wandb_hist_every):
                     histogram_payload = {**wandb_gradient_log(model), **wandb_weight_log(model)}
+                layer_rms_payload = {}
+                if histogram_due(update, cfg.layer_rms_every):
+                    layer_rms_payload = {
+                        **layer_activation_rms_log(
+                            model,
+                            batch,
+                            cfg,
+                            max_rows=cfg.layer_rms_batch_size,
+                        ),
+                        **layer_gradient_rms_log(model),
+                    }
                 muon_lr = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
                 adam_lr = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
                 optimizer.step()
@@ -2185,6 +2407,7 @@ def train(
                 "lr/adam": adam_lr,
                 **{name: float(value) for name, value in step_metrics.items()},
                 **histogram_payload,
+                **layer_rms_payload,
             }
             if DEVICE == "cuda":
                 log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
@@ -2212,6 +2435,7 @@ def train(
                     uploader=uploader,
                     milestone=ckpt_due,
                     wandb_id=None if wandb.run is None else wandb.run.id,
+                    actual_loss_positions=actual_positions,
                 )
             if val_due:
                 values = val_metrics(model, val_cache, cfg)
@@ -2246,6 +2470,7 @@ def train(
             uploader=uploader,
             milestone=cfg.ckpt_every > 0 and run_stop % cfg.ckpt_every == 0,
             wandb_id=None if wandb.run is None else wandb.run.id,
+            actual_loss_positions=actual_positions,
         )
         final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
         _replace_link(final_snapshot, final_path)

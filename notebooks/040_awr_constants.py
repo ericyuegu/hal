@@ -5,9 +5,9 @@ Run from the repository root after exporting the R2 variables from ``.env``::
     uv run notebooks/040_awr_constants.py
 
 The sample follows the production loader's natural replay mixture. Within each
-source it reads one seeded contiguous span to avoid turning a 50k-replay audit
-into a near-full-corpus random shard download. Window and ego selection use the
-same deterministic functions and geometry as the production reservoir loader.
+source it reads seeded contiguous spans spread across the index, balancing
+representativeness against shard-download locality. Window and ego selection
+use the same deterministic functions and geometry as the production loader.
 """
 
 # %% Imports and frozen treatment
@@ -15,6 +15,7 @@ import argparse
 import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from streaming import StreamingDataset
@@ -36,6 +37,7 @@ DAMAGE_SHAPING = 1.0
 GAMMA = 0.99618
 BETA = 199.5
 WEIGHT_MAX = 3.5
+SAMPLE_SPANS_PER_SOURCE = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +58,38 @@ def replay_quotas(total: int) -> dict[str, int]:
     order = sorted(counts, key=lambda name: (exact[name] - quotas[name], name), reverse=True)
     for name in order[:remainder]:
         quotas[name] += 1
-    assert sum(quotas.values()) == total
+    if sum(quotas.values()) != total:
+        raise RuntimeError("largest-remainder allocation did not preserve the requested total")
     return quotas
+
+
+def stratified_spans(
+    population: int,
+    sample_size: int,
+    rng: np.random.Generator,
+    *,
+    max_spans: int = SAMPLE_SPANS_PER_SOURCE,
+) -> tuple[tuple[int, int], ...]:
+    """Allocate exact, non-overlapping contiguous blocks across index strata."""
+    if not 0 <= sample_size <= population:
+        raise ValueError(f"sample_size must be in [0, {population}], got {sample_size}")
+    if max_spans < 1:
+        raise ValueError(f"max_spans must be positive, got {max_spans}")
+    if sample_size == 0:
+        return ()
+    span_count = min(max_spans, sample_size)
+    population_base, population_remainder = divmod(population, span_count)
+    sample_base, sample_remainder = divmod(sample_size, span_count)
+    spans = []
+    lane_start = 0
+    for index in range(span_count):
+        lane_size = population_base + (index < population_remainder)
+        block_size = sample_base + (index < sample_remainder)
+        latest_start = lane_start + lane_size - block_size
+        block_start = int(rng.integers(lane_start, latest_start + 1))
+        spans.append((block_start, block_start + block_size))
+        lane_start += lane_size
+    return tuple(spans)
 
 
 def loader_weighted_returns(sample: dict[str, object], *, epoch: int = 0) -> tuple[list[np.ndarray], list[np.ndarray]]:
@@ -92,7 +124,7 @@ def loader_weighted_returns(sample: dict[str, object], *, epoch: int = 0) -> tup
 
 
 def source_rows(source: streams.StreamSource, quota: int, rng: np.random.Generator):
-    """Yield a seeded contiguous sample while verifying the immutable index."""
+    """Yield seeded stratified spans while verifying the immutable index."""
     dataset = StreamingDataset(
         remote=f"{source.remote}/train",
         local=str(source.local_root / "train"),
@@ -107,9 +139,9 @@ def source_rows(source: streams.StreamSource, quota: int, rng: np.random.Generat
         raise RuntimeError(f"{source.name}: index has {actual:,} replays; manifest says {expected:,}")
     if quota > actual:
         raise ValueError(f"{source.name}: requested {quota:,} of only {actual:,} replays")
-    start = int(rng.integers(0, actual - quota + 1))
-    for index in range(start, start + quota):
-        yield dataset[index]
+    for start, stop in stratified_spans(actual, quota, rng):
+        for index in range(start, stop):
+            yield dataset[index]
 
 
 # %% Stream the stratified replay sample
@@ -146,7 +178,8 @@ def calibrate(sample_replays: int = SAMPLE_REPLAYS) -> dict[str, object]:
 
     baseline = float(pooled.mean())
     advantage = pooled - baseline
-    raw_weight = np.minimum(np.exp(advantage / BETA), WEIGHT_MAX)
+    log_weight = np.minimum(advantage / BETA, math.log(WEIGHT_MAX))
+    raw_weight = np.exp(log_weight)
     weight_norm = float(raw_weight.mean())
     weight = raw_weight / weight_norm
     ess = float(weight.sum() ** 2 / (len(weight) * np.square(weight).sum()))
@@ -168,6 +201,7 @@ def calibrate(sample_replays: int = SAMPLE_REPLAYS) -> dict[str, object]:
     return {
         "sample_seed": SEED,
         "sample_replays": sample_replays,
+        "sample_spans_per_source": SAMPLE_SPANS_PER_SOURCE,
         "terminal_replays": sum(audit.terminal_replays for audit in audits),
         "eligible_positions": int(pooled.size),
         "loader_geometry": {
@@ -212,10 +246,17 @@ def calibrate(sample_replays: int = SAMPLE_REPLAYS) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample-replays", type=int, default=SAMPLE_REPLAYS)
+    parser.add_argument("--output", type=Path, default=Path(__file__).with_suffix(".json"))
     args = parser.parse_args()
     if args.sample_replays < 1:
         raise SystemExit("--sample-replays must be positive")
-    print(json.dumps(calibrate(args.sample_replays), indent=2, sort_keys=True))
+    payload = json.dumps(calibrate(args.sample_replays), indent=2, sort_keys=True) + "\n"
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+    temporary.write_text(payload)
+    temporary.replace(args.output)
+    print(payload, end="")
+    print(f"wrote {args.output}")
 
 
 if __name__ == "__main__":

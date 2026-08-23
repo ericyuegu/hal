@@ -402,6 +402,8 @@ class ReservoirLoader:
     @property
     def source_sample_counts(self) -> dict[str, int]:
         """Per-stream sample counts in configured source order."""
+        if not self._source_names:
+            return {}
         return {
             name: int(count) for name, count in zip(self._source_names, self._dataset.samples_per_stream, strict=True)
         }

@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from typing import Literal
 
 import numpy as np
@@ -101,7 +102,7 @@ def _make_streaming_dataset(
         selected_streams = [
             Stream(remote=source.remote, local=str(source.local_root), split=split) for source in sources
         ]
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "streams": selected_streams,
             "cache_limit": cache_limit,
             "predownload": predownload,
