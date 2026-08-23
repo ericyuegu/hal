@@ -598,7 +598,22 @@ def _run_remote(spec: LaunchSpec) -> int:
     )
 
 
-def _image(tag: str) -> modal.Image:
+def _ignored_python_commands(
+    argv: list[str] | tuple[str, ...], ignore: modal.FilePatternMatcher
+) -> tuple[tuple[Path, Path], ...]:
+    """Return command-referenced Python files omitted by the build context."""
+    selected: dict[Path, Path] = {}
+    for token in argv:
+        candidate = (ROOT / token).resolve()
+        if candidate.suffix != ".py" or not candidate.is_file() or not candidate.is_relative_to(ROOT):
+            continue
+        relative = candidate.relative_to(ROOT)
+        if ignore(relative):
+            selected[candidate] = relative
+    return tuple(selected.items())
+
+
+def _image(tag: str, argv: list[str] | tuple[str, ...]) -> modal.Image:
     ignore = modal.FilePatternMatcher.from_file(ROOT / ".dockerignore")
     dependency_image = (
         modal.Image.from_registry(tag)
@@ -610,13 +625,13 @@ def _image(tag: str) -> modal.Image:
         # portable lockfile and --locked fails before a Function is submitted.
         .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --no-install-project")
     )
-    return (
-        dependency_image.add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
-        # Dependencies are complete in the parent layer. Install only the local
-        # project offline so ordinary source commits do not invalidate or rerun
-        # the expensive dependency layer.
-        .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
-    )
+    source_image = dependency_image.add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
+    for source, relative in _ignored_python_commands(argv, ignore):
+        source_image = source_image.add_local_file(source, str(REMOTE_ROOT / relative), copy=True)
+    # Dependencies are complete in the parent layer. Install only the local
+    # project offline so ordinary source commits do not invalidate or rerun
+    # the expensive dependency layer.
+    return source_image.run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
 
 
 def _app_name(args: Args, sha: str) -> str:
@@ -654,7 +669,7 @@ def main(args: Args) -> None:
     state_volume = modal.Volume.from_name(args.state_volume, create_if_missing=True)
     app = modal.App(name=name, tags={"provider": "modal", "git_sha": sha, "launch_id": launch_id})
     function = app.function(
-        image=_image(args.image),
+        image=_image(args.image, args.cmd),
         secrets=[secret],
         volumes={str(STATE_ROOT): state_volume},
         gpu=gpu_request(args.gpu),

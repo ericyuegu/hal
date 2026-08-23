@@ -224,6 +224,10 @@ def test_dry_run_does_not_create_a_volume_or_app(monkeypatch: pytest.MonkeyPatch
 def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[tuple] = []
 
+    class FakeIgnore:
+        def __call__(self, path: Path) -> bool:
+            return path.parts[:1] == ("notebooks",)
+
     class FakeImage:
         def add_local_file(self, local: Path, remote: str, *, copy: bool) -> FakeImage:
             events.append(("file", local, remote, copy))
@@ -243,11 +247,16 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
 
     fake = FakeImage()
     monkeypatch.setattr(_MODULE.modal.Image, "from_registry", lambda tag: events.append(("base", tag)) or fake)
-    monkeypatch.setattr(_MODULE.modal.FilePatternMatcher, "from_file", lambda path: ("ignore", path))
+    ignore = FakeIgnore()
+    monkeypatch.setattr(_MODULE.modal.FilePatternMatcher, "from_file", lambda _path: ignore)
 
-    assert _MODULE._image("example/image:tag") is fake
+    notebook = _MODULE.ROOT / "notebooks" / "040_awr_constants.py"
+    assert _MODULE._image("example/image:tag", ("uv", "run", str(notebook.relative_to(_MODULE.ROOT)))) is fake
     dependency_run = events.index(("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project"))
     source_copy = next(index for index, event in enumerate(events) if event[0] == "dir")
+    notebook_copy = events.index(
+        ("file", notebook, str(_MODULE.REMOTE_ROOT / notebook.relative_to(_MODULE.ROOT)), True)
+    )
     project_run = events.index(
         ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
     )
@@ -258,7 +267,7 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
         ("file", _MODULE.ROOT / "uv.lock", str(_MODULE.REMOTE_ROOT / "uv.lock"), True),
         ("workdir", str(_MODULE.REMOTE_ROOT)),
     ]
-    assert dependency_run < source_copy < project_run
+    assert dependency_run < source_copy < notebook_copy < project_run
 
 
 def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
