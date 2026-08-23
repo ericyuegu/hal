@@ -1,0 +1,248 @@
+{
+  "awr_beta": 199.5,
+  "awr_weight_max": 3.5,
+  "between_256_frame_window_variance_fraction": 0.7930706966451868,
+  "between_loader_window_variance_fraction": 0.8953371428578324,
+  "eligible_positions": 12173087,
+  "loader_geometry": {
+    "L_chunk": 24,
+    "L_ctx": 128,
+    "windows_per_replay": 2
+  },
+  "return_baseline": -0.18709200966038386,
+  "return_quantiles": {
+    "1": -107.6547915649414,
+    "25": -17.108210563659668,
+    "5": -73.20919723510741,
+    "50": -0.06712144613265991,
+    "75": 16.92683696746826,
+    "95": 72.37640609741206,
+    "99": 107.35405776977552
+  },
+  "return_std": 39.78081967748043,
+  "reward": {
+    "damage_shaping": 1.0,
+    "gamma": 0.99618,
+    "stock_value": 120.0,
+    "win_reward": 50.0
+  },
+  "sample_replays": 50000,
+  "sample_seed": 0,
+  "sample_spans_per_source": 8,
+  "sources": [
+    {
+      "eligible_positions": 1173864,
+      "name": "ranked-anonymized-1-policy-world-v7",
+      "requested_replays": 4631,
+      "terminal_replays": 4612
+    },
+    {
+      "eligible_positions": 1529694,
+      "name": "ranked-anonymized-2-policy-world-v7",
+      "requested_replays": 6046,
+      "terminal_replays": 6015
+    },
+    {
+      "eligible_positions": 1298267,
+      "name": "ranked-anonymized-3-policy-world-v7",
+      "requested_replays": 5137,
+      "terminal_replays": 5104
+    },
+    {
+      "eligible_positions": 1493955,
+      "name": "ranked-anonymized-4-policy-world-v7",
+      "requested_replays": 5922,
+      "terminal_replays": 5878
+    },
+    {
+      "eligible_positions": 1347669,
+      "name": "ranked-anonymized-5-policy-world-v7",
+      "requested_replays": 5320,
+      "terminal_replays": 5298
+    },
+    {
+      "eligible_positions": 1734179,
+      "name": "ranked-anonymized-6-policy-world-v7",
+      "requested_replays": 6862,
+      "terminal_replays": 6820
+    },
+    {
+      "eligible_positions": 169112,
+      "name": "professional-aklo-policy-world-v7",
+      "requested_replays": 779,
+      "terminal_replays": 667
+    },
+    {
+      "eligible_positions": 234444,
+      "name": "professional-amsa-policy-world-v7",
+      "requested_replays": 978,
+      "terminal_replays": 927
+    },
+    {
+      "eligible_positions": 16506,
+      "name": "professional-axe-policy-world-v7",
+      "requested_replays": 66,
+      "terminal_replays": 65
+    },
+    {
+      "eligible_positions": 5632,
+      "name": "professional-billybopeep-policy-world-v7",
+      "requested_replays": 31,
+      "terminal_replays": 22
+    },
+    {
+      "eligible_positions": 22836,
+      "name": "professional-bobbybigballz-policy-world-v7",
+      "requested_replays": 104,
+      "terminal_replays": 91
+    },
+    {
+      "eligible_positions": 499669,
+      "name": "professional-cody-policy-world-v7",
+      "requested_replays": 2584,
+      "terminal_replays": 1963
+    },
+    {
+      "eligible_positions": 201632,
+      "name": "professional-cookbook-policy-world-v7",
+      "requested_replays": 843,
+      "terminal_replays": 792
+    },
+    {
+      "eligible_positions": 81079,
+      "name": "professional-daniel-policy-world-v7",
+      "requested_replays": 330,
+      "terminal_replays": 320
+    },
+    {
+      "eligible_positions": 269780,
+      "name": "professional-desertsnoopy-policy-world-v7",
+      "requested_replays": 1110,
+      "terminal_replays": 1061
+    },
+    {
+      "eligible_positions": 4096,
+      "name": "professional-druggedfox-policy-world-v7",
+      "requested_replays": 18,
+      "terminal_replays": 16
+    },
+    {
+      "eligible_positions": 56144,
+      "name": "professional-fknsilver-policy-world-v7",
+      "requested_replays": 227,
+      "terminal_replays": 221
+    },
+    {
+      "eligible_positions": 153156,
+      "name": "professional-franz-policy-world-v7",
+      "requested_replays": 627,
+      "terminal_replays": 602
+    },
+    {
+      "eligible_positions": 158875,
+      "name": "professional-frenzy-policy-world-v7",
+      "requested_replays": 813,
+      "terminal_replays": 624
+    },
+    {
+      "eligible_positions": 86491,
+      "name": "professional-friend-policy-world-v7",
+      "requested_replays": 350,
+      "terminal_replays": 340
+    },
+    {
+      "eligible_positions": 200155,
+      "name": "professional-ginger-policy-world-v7",
+      "requested_replays": 835,
+      "terminal_replays": 788
+    },
+    {
+      "eligible_positions": 195454,
+      "name": "professional-gosu-policy-world-v7",
+      "requested_replays": 843,
+      "terminal_replays": 772
+    },
+    {
+      "eligible_positions": 56950,
+      "name": "professional-grab2win-policy-world-v7",
+      "requested_replays": 232,
+      "terminal_replays": 223
+    },
+    {
+      "eligible_positions": 142021,
+      "name": "professional-iliketurtles-policy-world-v7",
+      "requested_replays": 610,
+      "terminal_replays": 558
+    },
+    {
+      "eligible_positions": 40571,
+      "name": "professional-isdsar-policy-world-v7",
+      "requested_replays": 229,
+      "terminal_replays": 160
+    },
+    {
+      "eligible_positions": 33662,
+      "name": "professional-jchu-policy-world-v7",
+      "requested_replays": 133,
+      "terminal_replays": 132
+    },
+    {
+      "eligible_positions": 243493,
+      "name": "professional-jahridin-policy-world-v7",
+      "requested_replays": 1079,
+      "terminal_replays": 957
+    },
+    {
+      "eligible_positions": 9667,
+      "name": "professional-kjh-policy-world-v7",
+      "requested_replays": 90,
+      "terminal_replays": 38
+    },
+    {
+      "eligible_positions": 89095,
+      "name": "professional-kodorin-policy-world-v7",
+      "requested_replays": 361,
+      "terminal_replays": 351
+    },
+    {
+      "eligible_positions": 71523,
+      "name": "professional-krudo-policy-world-v7",
+      "requested_replays": 395,
+      "terminal_replays": 281
+    },
+    {
+      "eligible_positions": 75175,
+      "name": "professional-m2k-policy-world-v7",
+      "requested_replays": 342,
+      "terminal_replays": 296
+    },
+    {
+      "eligible_positions": 283049,
+      "name": "professional-mang0-policy-world-v7",
+      "requested_replays": 1245,
+      "terminal_replays": 1116
+    },
+    {
+      "eligible_positions": 9957,
+      "name": "professional-mof-policy-world-v7",
+      "requested_replays": 51,
+      "terminal_replays": 40
+    },
+    {
+      "eligible_positions": 161801,
+      "name": "professional-monotheon-policy-world-v7",
+      "requested_replays": 673,
+      "terminal_replays": 637
+    },
+    {
+      "eligible_positions": 23434,
+      "name": "professional-nicki-policy-world-v7",
+      "requested_replays": 104,
+      "terminal_replays": 92
+    }
+  ],
+  "terminal_replays": 47879,
+  "weight_clip_fraction": 0.0,
+  "weight_ess": 0.9598852338323018,
+  "weight_norm": 1.0201610817403675
+}

@@ -1,6 +1,7 @@
 """Focused contracts for the scaled light-AWR experiment."""
 
 import importlib.util
+import json
 import math
 import sys
 from dataclasses import asdict
@@ -30,6 +31,16 @@ assert _SPEC is not None and _SPEC.loader is not None
 exp = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = exp
 _SPEC.loader.exec_module(exp)
+
+
+def test_production_awr_constants_match_calibration_artifact() -> None:
+    artifact_path = Path(__file__).resolve().parents[2] / "notebooks" / "040_awr_constants.json"
+    artifact = json.loads(artifact_path.read_text())
+    cfg = exp.TrainConfig()
+
+    assert exp._AWR_CONSTANTS_CALIBRATED
+    assert cfg.awr_return_baseline == artifact["return_baseline"]
+    assert cfg.awr_weight_norm == artifact["weight_norm"]
 
 
 def _cfg(**overrides) -> exp.TrainConfig:

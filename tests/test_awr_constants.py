@@ -2,6 +2,7 @@
 
 import importlib.util
 import itertools
+import json
 import sys
 from pathlib import Path
 
@@ -36,3 +37,38 @@ def test_stratified_spans_handle_empty_and_full_samples() -> None:
     assert sum(stop - start for start, stop in spans) == 10
     assert spans[0][0] == 0
     assert spans[-1][1] == 10
+
+
+def test_checked_in_calibration_artifact_is_complete() -> None:
+    artifact_path = _PATH.with_suffix(".json")
+    artifact = json.loads(artifact_path.read_text())
+
+    assert artifact["sample_replays"] == constants.SAMPLE_REPLAYS
+    assert artifact["sample_seed"] == constants.SEED
+    assert artifact["loader_geometry"] == {
+        "L_chunk": constants.L_CHUNK,
+        "L_ctx": constants.L_CTX,
+        "windows_per_replay": constants.WINDOWS_PER_REPLAY,
+    }
+    assert artifact["reward"] == {
+        "damage_shaping": constants.DAMAGE_SHAPING,
+        "gamma": constants.GAMMA,
+        "stock_value": constants.STOCK_VALUE,
+        "win_reward": constants.WIN_REWARD,
+    }
+    assert artifact["awr_beta"] == constants.BETA
+    assert artifact["awr_weight_max"] == constants.WEIGHT_MAX
+    assert sum(source["requested_replays"] for source in artifact["sources"]) == constants.SAMPLE_REPLAYS
+    assert sum(source["terminal_replays"] for source in artifact["sources"]) == artifact["terminal_replays"]
+    assert sum(source["eligible_positions"] for source in artifact["sources"]) == artifact["eligible_positions"]
+    assert [source["name"] for source in artifact["sources"]] == [
+        source.name for source in constants.streams.POLICY_WORLD_V7_SOURCES
+    ]
+
+
+def test_checked_in_calibration_passes_acceptance_gates() -> None:
+    artifact = json.loads(_PATH.with_suffix(".json").read_text())
+
+    assert artifact["weight_clip_fraction"] == 0.0
+    assert artifact["weight_ess"] > 0.95
+    assert 0.78 < artifact["between_256_frame_window_variance_fraction"] < 0.80

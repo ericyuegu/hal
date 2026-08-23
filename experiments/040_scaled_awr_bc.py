@@ -99,7 +99,7 @@ EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
 _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32)
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
-_AWR_CONSTANTS_CALIBRATED = False
+_AWR_CONSTANTS_CALIBRATED = True
 _PRODUCTION_TREATMENT_FIELDS = frozenset(
     {
         "L_ctx",
@@ -279,10 +279,10 @@ class TrainConfig:
     awr_stock_value: float = 120.0
     awr_damage_shaping: float = 1.0
     awr_win_reward: float = 50.0
-    # Frozen by notebooks/040_awr_constants.py. Replace these two provisional
-    # identity constants with the 50k-replay artifact before a production run.
-    awr_return_baseline: float = 0.0
-    awr_weight_norm: float = 1.0
+    # Frozen by notebooks/040_awr_constants.py from the checked-in 50k-replay
+    # calibration artifact (seed 0, 2026-08-23).
+    awr_return_baseline: float = -0.18709200966038386
+    awr_weight_norm: float = 1.0201610817403675
 
     @property
     def max_steps(self) -> int:
