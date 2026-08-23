@@ -1,12 +1,14 @@
 """Tests for experiment-039 result masking and native-latency joins."""
 
 import importlib.util
+import json
 import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "analyze_039_capacity.py"
 _SPEC = importlib.util.spec_from_file_location("analyze_039_capacity", _SCRIPT)
@@ -123,3 +125,22 @@ def test_latency_frontier_selects_largest_valid_model(tmp_path: Path) -> None:
     assert set(frontier["largest_model"]) == {"L7"}
     assert (tmp_path / "latency_capacity_frontier.csv").is_file()
     assert (tmp_path / "latency_capacity_frontier.json").is_file()
+
+
+def test_load_latency_requires_explicit_end_to_end_boundaries(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": analysis.LATENCY_ARTIFACT_SCHEMA,
+        "latency_start_boundary": analysis.LATENCY_START_BOUNDARY,
+        "latency_end_boundary": analysis.LATENCY_END_BOUNDARY,
+        "model_family": "scaled",
+        "L": 5,
+    }
+    artifact = tmp_path / "L5.json"
+    artifact.write_text(json.dumps(payload))
+
+    assert analysis._load_latency(tmp_path)["L5"] == payload
+
+    payload["latency_start_boundary"] = "latest_worker_observation_preprocessing"
+    artifact.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="unsupported latency artifact"):
+        analysis._load_latency(tmp_path)

@@ -105,6 +105,9 @@ PROCESSED_POSITION_EXPONENTS: tuple[int, ...] = (26, 27, 28, 29, 30)
 DELAY_BUCKETS: tuple[int, ...] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 HEAD_OFFSETS: tuple[int, ...] = tuple(range(1, 37))
 FRAME_TIME_MS = 1000.0 / 60.0
+LATENCY_ARTIFACT_SCHEMA = 3
+LATENCY_START_BOUNDARY = "earliest_worker_observation_preprocessing"
+LATENCY_END_BOUNDARY = "final_controller_pipe_ack"
 WANDB_GROUP = "026-capacity-scaling-data-delay"
 
 GROUP_NAMES: tuple[str, ...] = ("buttons", "main_stick", "c_stick", "triggers")
@@ -2974,7 +2977,9 @@ def run_benchmark(
 
     native = next((delay for delay in DELAY_BUCKETS if latency[str(delay)]["valid_bucket"]), None)
     payload: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": LATENCY_ARTIFACT_SCHEMA,
+        "latency_start_boundary": LATENCY_START_BOUNDARY,
+        "latency_end_boundary": LATENCY_END_BOUNDARY,
         "model_family": cfg.model_family,
         "L": cfg.n_layers,
         "d_model": cfg.d_model,

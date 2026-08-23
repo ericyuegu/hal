@@ -27,6 +27,9 @@ DELAYS: Final[tuple[int, ...]] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 D_EXPONENTS: Final[tuple[int, ...]] = (26, 27, 28, 29, 30)
 MODEL_ORDER: Final[tuple[str, ...]] = ("026base", "L5", "L7", "L10", "L13", "L16", "L18")
 PRIMARY_METRIC: Final[str] = "stock_lcb"
+LATENCY_ARTIFACT_SCHEMA: Final[int] = 3
+LATENCY_START_BOUNDARY: Final[str] = "earliest_worker_observation_preprocessing"
+LATENCY_END_BOUNDARY: Final[str] = "final_controller_pipe_ack"
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +153,13 @@ def _load_latency(directory: Path) -> dict[str, dict[str, Any]]:
         return out
     for path in sorted(directory.glob("*.json")):
         payload = json.loads(path.read_text())
-        if payload.get("schema_version") != 2:
+        protocol = (
+            payload.get("schema_version"),
+            payload.get("latency_start_boundary"),
+            payload.get("latency_end_boundary"),
+        )
+        expected = (LATENCY_ARTIFACT_SCHEMA, LATENCY_START_BOUNDARY, LATENCY_END_BOUNDARY)
+        if protocol != expected:
             raise ValueError(f"unsupported latency artifact {path}")
         label = "026base" if payload["model_family"] == "026-baseline" else f"L{payload['L']}"
         if label in out:
