@@ -21,6 +21,16 @@ _CGROUP_MEMORY_KEYS: Final[tuple[str, ...]] = (
     "kernel",
     "pagetables",
 )
+_CGROUP_V1_KEYS: Final[dict[str, str]] = {
+    "rss": "anon",
+    "cache": "file",
+    "inactive_file": "inactive_file",
+    "active_file": "active_file",
+    "dirty": "file_dirty",
+    "shmem": "shmem",
+    "kernel_stack": "kernel",
+    "page_tables": "pagetables",
+}
 _SMAPS_KEYS: Final[tuple[str, ...]] = ("Rss", "Pss", "Private_Dirty", "Anonymous")
 
 
@@ -54,41 +64,73 @@ def _read_keyed_ints(path: Path) -> dict[str, int]:
     return values
 
 
-def _resolve_cgroup_root(cgroup_root: Path, cgroup_file: Path) -> Path:
+def _resolve_cgroup_v2_root(cgroup_root: Path, cgroup_file: Path) -> Path | None:
     if (cgroup_root / "memory.current").is_file():
         return cgroup_root
     try:
         lines = cgroup_file.read_text().splitlines()
     except OSError:
-        return cgroup_root
+        return None
     for line in lines:
         hierarchy, controllers, relative = line.split(":", maxsplit=2)
         if hierarchy == "0" and not controllers:
             candidate = cgroup_root / relative.lstrip("/")
             if (candidate / "memory.current").is_file():
                 return candidate
-    return cgroup_root
+    return None
+
+
+def _resolve_cgroup_v1_root(cgroup_root: Path, cgroup_file: Path) -> Path | None:
+    candidates: list[Path] = []
+    try:
+        lines = cgroup_file.read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        _, controllers, relative = line.split(":", maxsplit=2)
+        if "memory" not in controllers.split(","):
+            continue
+        relative = relative.lstrip("/")
+        if relative:
+            candidates.extend((cgroup_root / "memory" / relative, cgroup_root / relative))
+    # A cgroup namespace can expose the container cgroup directly at the memory
+    # controller mount root, even though /proc/self/cgroup retains the host path.
+    candidates.extend((cgroup_root / "memory", cgroup_root))
+    return next((path for path in candidates if (path / "memory.usage_in_bytes").is_file()), None)
 
 
 def read_cgroup_memory(
     cgroup_root: Path = Path("/sys/fs/cgroup"),
     cgroup_file: Path = Path("/proc/self/cgroup"),
 ) -> dict[str, float]:
-    """Return byte-valued cgroup-v2 memory counters as GiB metrics."""
-    cgroup_root = _resolve_cgroup_root(cgroup_root, cgroup_file)
+    """Return byte-valued cgroup-v1 or cgroup-v2 memory counters as GiB metrics."""
     metrics: dict[str, float] = {}
-    current = _read_int(cgroup_root / "memory.current")
-    limit = _read_int(cgroup_root / "memory.max")
+    resolved = _resolve_cgroup_v2_root(cgroup_root, cgroup_file)
+    if resolved is not None:
+        current = _read_int(resolved / "memory.current")
+        limit = _read_int(resolved / "memory.max")
+        memory_stat = _read_keyed_ints(resolved / "memory.stat")
+        normalized_stat = {name: memory_stat[name] for name in _CGROUP_MEMORY_KEYS if name in memory_stat}
+        metrics["system/cgroup/version"] = 2.0
+    else:
+        resolved = _resolve_cgroup_v1_root(cgroup_root, cgroup_file)
+        if resolved is None:
+            return metrics
+        current = _read_int(resolved / "memory.usage_in_bytes")
+        limit = _read_int(resolved / "memory.limit_in_bytes")
+        memory_stat = _read_keyed_ints(resolved / "memory.stat")
+        normalized_stat = {
+            target: memory_stat[source] for source, target in _CGROUP_V1_KEYS.items() if source in memory_stat
+        }
+        metrics["system/cgroup/version"] = 1.0
     if current is not None:
         metrics["system/cgroup/current_gib"] = current / _GIB
     if limit is not None:
         metrics["system/cgroup/limit_gib"] = limit / _GIB
         if current is not None and limit > 0:
             metrics["system/cgroup/usage_fraction"] = current / limit
-    memory_stat = _read_keyed_ints(cgroup_root / "memory.stat")
-    for name in _CGROUP_MEMORY_KEYS:
-        if name in memory_stat:
-            metrics[f"system/cgroup/{name}_gib"] = memory_stat[name] / _GIB
+    for name, value in normalized_stat.items():
+        metrics[f"system/cgroup/{name}_gib"] = value / _GIB
     return metrics
 
 
@@ -128,6 +170,31 @@ def _read_smaps_rollup(path: Path) -> dict[str, int]:
     return {name: values[name] * _KIB for name in _SMAPS_KEYS if name in values}
 
 
+def _read_process_smaps(process_root: Path) -> dict[str, int]:
+    values = _read_smaps_rollup(process_root / "smaps_rollup")
+    if values:
+        return values
+    try:
+        lines = (process_root / "smaps").read_text().splitlines()
+    except OSError:
+        return {}
+    totals = {name: 0 for name in _SMAPS_KEYS}
+    found = False
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        name = fields[0].rstrip(":")
+        if name not in totals:
+            continue
+        try:
+            totals[name] += int(fields[1]) * _KIB
+            found = True
+        except ValueError:
+            continue
+    return totals if found else {}
+
+
 def read_process_tree_memory(
     root_pid: int | None = None,
     proc_root: Path = Path("/proc"),
@@ -140,7 +207,7 @@ def read_process_tree_memory(
     child_pss: list[int] = []
     root_pss = 0
     for pid in pids:
-        values = _read_smaps_rollup(proc_root / str(pid) / "smaps_rollup")
+        values = _read_process_smaps(proc_root / str(pid))
         if not values:
             continue
         observed += 1

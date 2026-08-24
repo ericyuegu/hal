@@ -7,11 +7,19 @@ import pytest
 from hal.training import system_metrics
 
 
-def _write_proc_process(root: Path, pid: int, parent: int, *, pss_kib: int) -> None:
+def _write_proc_process(
+    root: Path,
+    pid: int,
+    parent: int,
+    *,
+    pss_kib: int,
+    rollup: bool = True,
+) -> None:
     process = root / str(pid)
     process.mkdir()
     (process / "status").write_text(f"Name:\ttest\nPPid:\t{parent}\n")
-    (process / "smaps_rollup").write_text(
+    smaps_name = "smaps_rollup" if rollup else "smaps"
+    (process / smaps_name).write_text(
         f"Rss: {2 * pss_kib} kB\nPss: {pss_kib} kB\nPrivate_Dirty: {pss_kib // 2} kB\nAnonymous: {pss_kib // 4} kB\n"
     )
 
@@ -47,6 +55,25 @@ def test_read_cgroup_memory_resolves_nested_v2_path(tmp_path: Path) -> None:
     assert metrics["system/cgroup/anon_gib"] == 3.0
 
 
+def test_read_cgroup_memory_supports_namespaced_v1_mount(tmp_path: Path) -> None:
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    (memory_root / "memory.usage_in_bytes").write_text(str(6 * 2**30))
+    (memory_root / "memory.limit_in_bytes").write_text(str(24 * 2**30))
+    (memory_root / "memory.stat").write_text(f"cache {4 * 2**30}\nrss {2 * 2**30}\ninactive_file {3 * 2**30}\n")
+    cgroup_file = tmp_path / "self.cgroup"
+    cgroup_file.write_text("6:memory:/host/container-id\n")
+
+    metrics = system_metrics.read_cgroup_memory(tmp_path, cgroup_file)
+
+    assert metrics["system/cgroup/version"] == 1.0
+    assert metrics["system/cgroup/current_gib"] == 6.0
+    assert metrics["system/cgroup/limit_gib"] == 24.0
+    assert metrics["system/cgroup/usage_fraction"] == 0.25
+    assert metrics["system/cgroup/anon_gib"] == 2.0
+    assert metrics["system/cgroup/file_gib"] == 4.0
+
+
 def test_read_process_tree_memory_excludes_unrelated_processes(tmp_path: Path) -> None:
     _write_proc_process(tmp_path, 10, 1, pss_kib=1024)
     _write_proc_process(tmp_path, 11, 10, pss_kib=2048)
@@ -60,6 +87,16 @@ def test_read_process_tree_memory_excludes_unrelated_processes(tmp_path: Path) -
     assert metrics["system/process_tree/pss_gib"] == pytest.approx(7 / 1024)
     assert metrics["system/process_tree/main_pss_gib"] == pytest.approx(1 / 1024)
     assert metrics["system/process_tree/max_child_pss_gib"] == pytest.approx(4 / 1024)
+
+
+def test_read_process_tree_memory_falls_back_to_smaps(tmp_path: Path) -> None:
+    _write_proc_process(tmp_path, 10, 1, pss_kib=1024, rollup=False)
+    _write_proc_process(tmp_path, 11, 10, pss_kib=2048, rollup=False)
+
+    metrics = system_metrics.read_process_tree_memory(10, tmp_path)
+
+    assert metrics["system/process_tree/process_count"] == 2.0
+    assert metrics["system/process_tree/pss_gib"] == pytest.approx(3 / 1024)
 
 
 def test_read_cache_usage_sums_multiple_roots(tmp_path: Path) -> None:
