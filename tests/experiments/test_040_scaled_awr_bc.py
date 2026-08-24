@@ -134,6 +134,7 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     schedule = exp.lr_schedule(cfg)
 
     assert cfg.max_steps == 262_144
+    assert cfg.ckpt_every == 2048
     assert cfg.warmup_steps == 7_864
     assert cfg.stable_steps == 209_715
     assert cfg.batch_size * cfg.L_ctx * cfg.max_steps == 2**35

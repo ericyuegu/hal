@@ -83,6 +83,7 @@ from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
+from hal.training.system_metrics import HostMetricsSampler
 from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
@@ -254,7 +255,7 @@ class TrainConfig:
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
-    ckpt_every: int = 16_384
+    ckpt_every: int = 2048
     eval_every: int = 32_768
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
@@ -274,6 +275,11 @@ class TrainConfig:
     prefetch_factor: int = 2
     prefetch_batches: int = 4
     push_to_r2: bool = True
+    system_metrics_every: int = 25
+    system_metrics_interval_s: float = 5.0
+    process_metrics_interval_s: float = 30.0
+    cache_metrics_interval_s: float = 30.0
+    phase_timing_every: int = 10
 
     awr_beta: float = 199.5
     awr_weight_max: float = 3.5
@@ -359,6 +365,19 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("aux_loss_weight must be finite and non-negative")
     if not isinstance(cfg.layer_rms_every, int) or isinstance(cfg.layer_rms_every, bool) or cfg.layer_rms_every < 0:
         raise ValueError(f"layer_rms_every must be a non-negative integer, got {cfg.layer_rms_every!r}")
+    for name, value in (
+        ("system_metrics_every", cfg.system_metrics_every),
+        ("phase_timing_every", cfg.phase_timing_every),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    for name, value in (
+        ("system_metrics_interval_s", cfg.system_metrics_interval_s),
+        ("process_metrics_interval_s", cfg.process_metrics_interval_s),
+        ("cache_metrics_interval_s", cfg.cache_metrics_interval_s),
+    ):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive, got {value!r}")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
     if cfg.reservoir_capacity < 2 * cfg.batch_size:
@@ -434,6 +453,39 @@ def amp_context(cfg: TrainConfig, device: torch.device | str):
     if cfg.amp_dtype == "bfloat16" and torch.device(device).type == "cuda":
         return torch.autocast("cuda", dtype=torch.bfloat16)
     return contextlib.nullcontext()
+
+
+_CUDA_PHASES: tuple[tuple[str, str, str], ...] = (
+    ("h2d", "start", "h2d_end"),
+    ("target_prep", "h2d_end", "target_prep_end"),
+    ("trunk", "target_prep_end", "trunk_end"),
+    ("temporal", "trunk_end", "temporal_end"),
+    ("objective", "temporal_end", "objective_end"),
+    ("backward", "objective_end", "backward_end"),
+    ("grad_norm", "backward_end", "grad_norm_end"),
+    ("diagnostics", "grad_norm_end", "diagnostics_end"),
+    ("optimizer", "diagnostics_end", "optimizer_end"),
+)
+
+
+class CudaPhaseTimer:
+    """Measure named phases on the current CUDA stream with one final sync."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, torch.cuda.Event] = {}
+
+    def record(self, name: str) -> None:
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        self._events[name] = event
+
+    def metrics(self) -> dict[str, float]:
+        """Return seconds for every phase whose boundary events were recorded."""
+        metrics: dict[str, float] = {}
+        for metric, start, end in _CUDA_PHASES:
+            if start in self._events and end in self._events:
+                metrics[f"throughput/phase_{metric}_s"] = self._events[start].elapsed_time(self._events[end]) / 1000
+        return metrics
 
 
 def decoder_rmsnorm(x: Tensor) -> Tensor:
@@ -1159,6 +1211,7 @@ def microbatch_loss(
     valid_prefixes: int,
     trunk_fn: Callable,
     temporal_fn: Callable,
+    phase_timer: CudaPhaseTimer | None = None,
 ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
     """Compute the globally normalized near-weighted policy loss.
 
@@ -1167,41 +1220,53 @@ def microbatch_loss(
     """
     if not isinstance(batch, AWRBatch):
         raise TypeError(f"advantage training needs an AWRBatch, got {type(batch).__name__}")
-    history, targets, valid = prepared_targets(model, batch)
+    with torch.profiler.record_function("train/target_prep"):
+        history, targets, valid = prepared_targets(model, batch)
+    if phase_timer is not None:
+        phase_timer.record("target_prep_end")
     with amp_context(cfg, DEVICE):
-        hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
-        dense_nll = temporal_fn(hidden, history, targets)
-    nll = dense_nll[valid]
-    if nll.shape[0] != valid_prefixes:
-        raise RuntimeError(f"GPU valid-prefix count {nll.shape[0]} != step normalizer {valid_prefixes}")
-    returns, eligible = batch.valid_rows(valid)
-    active = step >= cfg.awr_warmup_steps
-    weights, stats = advantage_weights(
-        returns.detach(),
-        eligible,
-        baseline=cfg.awr_return_baseline,
-        beta=cfg.awr_beta,
-        weight_max=cfg.awr_weight_max,
-        weight_norm=cfg.awr_weight_norm,
-        active=active,
-    )
-    near, far, loss = temporal_objective_parts(
-        nll,
-        weights,
-        valid_prefixes=valid_prefixes,
-        aux_loss_weight=cfg.aux_loss_weight,
-        n_near=cfg.n_near,
-    )
-    if not torch.isfinite(loss):
-        raise FloatingPointError(f"step {step}: non-finite advantage-weighted loss {loss}")
-    extra = {
-        "train/loss": loss.detach() / _LN2,
-        "train/temporal_loss_near": near.detach() / _LN2,
-        "train/temporal_loss_far": far.detach() / _LN2,
-        "train/temporal_loss_total": loss.detach() / _LN2,
-        "awr/active": torch.tensor(float(active)),
-        **{f"train/{name}": value.detach() for name, value in stats.items()},
-    }
+        with torch.profiler.record_function("train/trunk"):
+            hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
+        if phase_timer is not None:
+            phase_timer.record("trunk_end")
+        with torch.profiler.record_function("train/temporal"):
+            dense_nll = temporal_fn(hidden, history, targets)
+        if phase_timer is not None:
+            phase_timer.record("temporal_end")
+    with torch.profiler.record_function("train/objective"):
+        nll = dense_nll[valid]
+        if nll.shape[0] != valid_prefixes:
+            raise RuntimeError(f"GPU valid-prefix count {nll.shape[0]} != step normalizer {valid_prefixes}")
+        returns, eligible = batch.valid_rows(valid)
+        active = step >= cfg.awr_warmup_steps
+        weights, stats = advantage_weights(
+            returns.detach(),
+            eligible,
+            baseline=cfg.awr_return_baseline,
+            beta=cfg.awr_beta,
+            weight_max=cfg.awr_weight_max,
+            weight_norm=cfg.awr_weight_norm,
+            active=active,
+        )
+        near, far, loss = temporal_objective_parts(
+            nll,
+            weights,
+            valid_prefixes=valid_prefixes,
+            aux_loss_weight=cfg.aux_loss_weight,
+            n_near=cfg.n_near,
+        )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"step {step}: non-finite advantage-weighted loss {loss}")
+        extra = {
+            "train/loss": loss.detach() / _LN2,
+            "train/temporal_loss_near": near.detach() / _LN2,
+            "train/temporal_loss_far": far.detach() / _LN2,
+            "train/temporal_loss_total": loss.detach() / _LN2,
+            "awr/active": torch.tensor(float(active)),
+            **{f"train/{name}": value.detach() for name, value in stats.items()},
+        }
+    if phase_timer is not None:
+        phase_timer.record("objective_end")
     return loss, nll.detach(), extra
 
 
@@ -2275,6 +2340,47 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
 
 
+def _export_training_profile(profiler: torch.profiler.profile, profile_dir: Path) -> None:
+    """Write one Chrome trace, CUDA memory view, and operator summary."""
+    trace_path = profile_dir / "trace.json.gz"
+    memory_path = profile_dir / "memory-timeline.html"
+    operators_path = profile_dir / "operators.txt"
+    profiler.export_chrome_trace(str(trace_path))
+    profiler.export_memory_timeline(str(memory_path), device="cuda:0")
+    operators_path.write_text(
+        profiler.key_averages(group_by_input_shape=True).table(
+            sort_by="self_cuda_time_total",
+            row_limit=200,
+        )
+    )
+    print(
+        f"[profile] wrote {trace_path}, {memory_path}, and {operators_path}",
+        flush=True,
+    )
+
+
+def _training_profiler(profile_dir: Path, *, enabled: bool) -> torch.profiler.profile | None:
+    """Create a bounded post-compile CUDA profiler when requested."""
+    if not enabled:
+        return None
+    if DEVICE != "cuda":
+        raise ValueError("training profiling requires CUDA")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return torch.profiler.profile(
+        activities=(
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ),
+        schedule=torch.profiler.schedule(wait=10, warmup=3, active=5, repeat=1),
+        on_trace_ready=functools.partial(_export_training_profile, profile_dir=profile_dir),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=True,
+        post_processing_timeout_s=600,
+    )
+
+
 def train(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
@@ -2285,6 +2391,7 @@ def train(
     smoke: bool = False,
     stop_after_update: int | None = None,
     smoke_eval_matchups: int = 4,
+    profile_steps: int = 0,
 ) -> None:
     validate_config(cfg)
     if not smoke:
@@ -2295,9 +2402,15 @@ def train(
             raise ValueError("run notebooks/040_awr_constants.py and freeze its constants before production")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
         raise ValueError(f"stop_after_update must be in [1, {cfg.max_steps}], got {stop_after_update}")
+    if not isinstance(profile_steps, int) or isinstance(profile_steps, bool) or profile_steps < 0:
+        raise ValueError(f"profile_steps must be a non-negative integer, got {profile_steps!r}")
+    if profile_steps and profile_steps < 20:
+        raise ValueError("profile_steps must be at least 20 to exclude compilation from the active trace")
+    if profile_steps and (smoke or stop_after_update is not None or resume_state is not None):
+        raise ValueError("profile_steps requires a fresh production-config run")
     if smoke_eval_matchups < 0:
         raise ValueError("smoke_eval_matchups must be non-negative")
-    run_stop = cfg.max_steps if stop_after_update is None else stop_after_update
+    run_stop = profile_steps or (cfg.max_steps if stop_after_update is None else stop_after_update)
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), "policy-world-v7-35", comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     wandb.init(
@@ -2307,6 +2420,10 @@ def train(
         resume="allow" if resume_state is not None else None,
         tags=["gpt", "temporal-mtp", "advantage-weighted-bc", "scaled", "040"],
         config=asdict(cfg),
+        settings=wandb.Settings(
+            x_stats_sampling_interval=1.0 if profile_steps else 5.0,
+            x_stats_track_process_tree=True,
+        ),
     )
     if wandb.run is not None:
         wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
@@ -2319,6 +2436,7 @@ def train(
         if cfg.wandb_log_code:
             log_wandb_code(wandb.run)
     run_dir, replay_dir = setup_run_dir(run_name)
+    profile_dir = run_dir / "profile"
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model = GPT(cfg).to(DEVICE)
@@ -2375,12 +2493,29 @@ def train(
     iterator = iter(train_loader)
     run_started = time.monotonic()
     loader_wait_fractions: list[float] = []
+    cache_roots = tuple(streams.BY_NAME[name].local_root for name in cfg.source_names)
+    host_metrics = HostMetricsSampler(
+        cache_roots,
+        interval_s=cfg.system_metrics_interval_s,
+        process_interval_s=cfg.process_metrics_interval_s,
+        cache_interval_s=cfg.cache_metrics_interval_s,
+    )
+    host_metrics.start()
+    training_profiler = _training_profiler(profile_dir, enabled=bool(profile_steps))
+    if training_profiler is not None:
+        training_profiler.start()
+    previous_update_started: float | None = None
+    previous_wandb_log_s: float | None = None
+    previous_checkpoint_s: float | None = None
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and L40S hosts.
     eval_inference: BF16Inference | None = None
     model.train()
     try:
         for step in range(start_step, run_stop):
+            update_started = time.monotonic()
+            previous_loop_s = None if previous_update_started is None else update_started - previous_update_started
+            previous_update_started = update_started
             update = step + 1
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
@@ -2396,9 +2531,20 @@ def train(
             if valid_prefixes <= 0:
                 raise RuntimeError("training batch contains no valid context prefixes")
 
+            phase_due = (
+                DEVICE == "cuda"
+                and cfg.phase_timing_every > 0
+                and (update == 1 or update % cfg.phase_timing_every == 0)
+            )
+            phase_timer = CudaPhaseTimer() if phase_due else None
             optimizer.zero_grad()
             with profile("step") as stopwatch:
-                batch = batch.to(DEVICE)
+                if phase_timer is not None:
+                    phase_timer.record("start")
+                with torch.profiler.record_function("train/h2d"):
+                    batch = batch.to(DEVICE)
+                if phase_timer is not None:
+                    phase_timer.record("h2d_end")
                 loss, nll, step_metrics = microbatch_loss(
                     model,
                     batch,
@@ -2407,39 +2553,57 @@ def train(
                     valid_prefixes=valid_prefixes,
                     trunk_fn=trunk_fn,
                     temporal_fn=temporal_fn,
+                    phase_timer=phase_timer,
                 )
-                loss.backward()
-                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+                with torch.profiler.record_function("train/backward"):
+                    loss.backward()
+                if phase_timer is not None:
+                    phase_timer.record("backward_end")
+                with torch.profiler.record_function("train/grad_norm"):
+                    gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
+                if phase_timer is not None:
+                    phase_timer.record("grad_norm_end")
                 histogram_payload = {}
-                if histogram_due(update, cfg.wandb_hist_every):
-                    histogram_payload = {**wandb_gradient_log(model), **wandb_weight_log(model)}
                 layer_rms_payload = {}
-                if histogram_due(update, cfg.layer_rms_every):
-                    layer_rms_payload = {
-                        **layer_activation_rms_log(
-                            model,
-                            batch,
-                            cfg,
-                            max_rows=cfg.layer_rms_batch_size,
-                        ),
-                        **layer_gradient_rms_log(model),
-                    }
+                with torch.profiler.record_function("train/diagnostics"):
+                    if histogram_due(update, cfg.wandb_hist_every):
+                        histogram_payload = {**wandb_gradient_log(model), **wandb_weight_log(model)}
+                    if histogram_due(update, cfg.layer_rms_every):
+                        layer_rms_payload = {
+                            **layer_activation_rms_log(
+                                model,
+                                batch,
+                                cfg,
+                                max_rows=cfg.layer_rms_batch_size,
+                            ),
+                            **layer_gradient_rms_log(model),
+                        }
+                if phase_timer is not None:
+                    phase_timer.record("diagnostics_end")
                 muon_lr = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
                 adam_lr = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
-                optimizer.step()
-                scheduler.step()
+                with torch.profiler.record_function("train/optimizer"):
+                    optimizer.step()
+                    scheduler.step()
+                if phase_timer is not None:
+                    phase_timer.record("optimizer_end")
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
+            phase_metrics = {} if phase_timer is None else phase_timer.metrics()
             actual_positions += valid_prefixes
             loader_wait_fractions.append(loader_wait / max(loader_wait + stopwatch.elapsed, 1e-12))
-            metrics = nll_metrics(
-                nll.cpu(),
-                cfg.head_offsets,
-                n_near=cfg.n_near,
-                aux_loss_weight=cfg.aux_loss_weight,
-            )
+            metrics_started = time.monotonic()
+            with torch.profiler.record_function("train/metrics_d2h"):
+                metrics = nll_metrics(
+                    nll.cpu(),
+                    cfg.head_offsets,
+                    n_near=cfg.n_near,
+                    aux_loss_weight=cfg.aux_loss_weight,
+                )
+            metrics_d2h_s = time.monotonic() - metrics_started
+            log_started = time.monotonic()
             log = {
                 "global_step": update,
                 "samples": update * cfg.batch_size,
@@ -2452,16 +2616,33 @@ def train(
                 "throughput/samples_per_s": cfg.batch_size / stopwatch.elapsed,
                 "throughput/samples_per_wall_s": cfg.batch_size / (stopwatch.elapsed + loader_wait),
                 "throughput/prefixes_per_s": valid_prefixes / stopwatch.elapsed,
+                "throughput/metrics_d2h_s": metrics_d2h_s,
                 "lr/muon": muon_lr,
                 "lr/adam": adam_lr,
                 **{name: float(value) for name, value in step_metrics.items()},
                 **histogram_payload,
                 **layer_rms_payload,
+                **phase_metrics,
             }
+            if previous_loop_s is not None:
+                log["throughput/previous_loop_s"] = previous_loop_s
+                log["throughput/previous_samples_per_true_wall_s"] = cfg.batch_size / previous_loop_s
+            if previous_wandb_log_s is not None:
+                log["throughput/previous_wandb_log_s"] = previous_wandb_log_s
+            if previous_checkpoint_s is not None:
+                log["throughput/previous_checkpoint_save_s"] = previous_checkpoint_s
+                previous_checkpoint_s = None
+            if cfg.system_metrics_every > 0 and (update == 1 or update % cfg.system_metrics_every == 0):
+                log.update(host_metrics.snapshot())
             if DEVICE == "cuda":
                 log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
                 log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
-            wandb.log(log)
+            log["throughput/log_build_s"] = time.monotonic() - log_started
+            log["throughput/pre_wandb_loop_s"] = time.monotonic() - update_started
+            wandb_started = time.monotonic()
+            with torch.profiler.record_function("train/wandb_log"):
+                wandb.log(log)
+            previous_wandb_log_s = time.monotonic() - wandb_started
             if update <= 10 or update % 50 == 0:
                 print(
                     f"[t+{time.monotonic() - run_started:.0f}s] update {update}: "
@@ -2474,6 +2655,7 @@ def train(
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
             checkpoint_path: Path | None = None
             if val_due or eval_due or ckpt_due:
+                checkpoint_started = time.monotonic()
                 checkpoint_path = save_boundary_checkpoint(
                     run_dir,
                     update=update,
@@ -2486,6 +2668,7 @@ def train(
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
                 )
+                previous_checkpoint_s = time.monotonic() - checkpoint_started
             if val_due:
                 values = val_metrics(model, val_cache, cfg)
                 wandb.log({"global_step": update, **{f"val/{name}": value for name, value in values.items()}})
@@ -2508,6 +2691,15 @@ def train(
                 ):
                     print(f"[eval] warning: update {update} evaluation was incomplete: {values}", flush=True)
                 wandb.log({"global_step": update, **{f"eval/{name}": value for name, value in values.items()}})
+            if training_profiler is not None:
+                training_profiler.step()
+
+        if profile_steps:
+            print(
+                f"[profile] completed {profile_steps} diagnostic updates; skipping checkpoint and evaluation",
+                flush=True,
+            )
+            return
 
         final_snapshot = save_boundary_checkpoint(
             run_dir,
@@ -2550,10 +2742,16 @@ def train(
         if smoke and (mean_wait > 0.05 or p95_wait > 0.10):
             raise RuntimeError("smoke loader gate failed: require mean wait <=5% and p95 <=10%")
     finally:
-        if uploader is not None:
-            uploader.upload_tree(replay_dir, base=run_dir)
-            uploader.close()
-        wandb.finish()
+        try:
+            if training_profiler is not None:
+                training_profiler.stop()
+        finally:
+            host_metrics.close()
+            if uploader is not None:
+                uploader.upload_tree(replay_dir, base=run_dir)
+                uploader.upload_tree(profile_dir, base=run_dir)
+                uploader.close()
+            wandb.finish()
 
 
 _CHECKPOINT_ARCH_FIELDS = {
@@ -2762,6 +2960,7 @@ class Args:
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
+    profile_steps: int = 0
 
 
 def main(args: Args) -> None:
@@ -2770,6 +2969,7 @@ def main(args: Args) -> None:
         "--eval": args.eval is not None,
         "--self-play-eval": args.self_play_eval is not None,
         "--resume": args.resume is not None,
+        "--profile-steps": args.profile_steps > 0,
     }
     selected_modes = [name for name, selected in modes.items() if selected]
     if len(selected_modes) > 1:
@@ -2821,6 +3021,7 @@ def main(args: Args) -> None:
         smoke=args.smoke,
         stop_after_update=args.stop_after_update,
         smoke_eval_matchups=args.smoke_eval_matchups,
+        profile_steps=args.profile_steps,
     )
 
 
