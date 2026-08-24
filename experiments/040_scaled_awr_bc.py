@@ -1493,6 +1493,8 @@ class BF16Inference:
         requested = cfg.inference_mode == "compiled" if compiled is None else compiled
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
         self.compile_mode = compile_mode
+        self.compile_seconds = 0.0
+        self._warmed: set[tuple[int, int]] = set()
         self._trunks: dict[int, Callable] = {}
         self._decoders: dict[tuple[int, int], Callable] = {}
 
@@ -1532,6 +1534,29 @@ class BF16Inference:
 
             self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
         return self._decoders[key]
+
+    @torch.no_grad()
+    def prewarm(self, rows: int, horizon: int) -> float:
+        """Compile and replay the exact evaluation program before Dolphin starts."""
+        bucket = self._bucket(rows)
+        key = (bucket, horizon)
+        if key in self._warmed or not self.compiled:
+            self._warmed.add(key)
+            return 0.0
+        device = next(self.model.parameters()).device
+        started = time.perf_counter()
+        context = synthetic_context(self.cfg, bucket, device)
+        self.decode(context, horizon)
+        self.decode(context, horizon)
+        torch.cuda.synchronize(device)
+        elapsed = time.perf_counter() - started
+        self.compile_seconds += elapsed
+        self._warmed.add(key)
+        print(
+            f"[inference] synchronously compiled batch {bucket}, horizon {horizon} in {elapsed:.1f}s",
+            flush=True,
+        )
+        return elapsed
 
     @torch.no_grad()
     def decode(
@@ -1773,23 +1798,28 @@ def eval_vs_cpu(
 
     was_training = model.training
     model.eval()
-    started = time.perf_counter()
+    total_started = time.perf_counter()
     try:
-        results, rows = sweep_vs_cpu_prior_with_rows(
-            factory,
-            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
-            n_matchups=protocol.n_matchups,
-            max_parallel=protocol.max_parallel,
-            max_frames=protocol.max_frames,
-            cpu_level=protocol.cpu_level,
-            ego_port=protocol.ego_port,
-            seed_stage=melee.Stage(protocol.seed_stage),
-            start_retries=protocol.start_retries,
-        )
+        compile_seconds = inference.prewarm(protocol.max_parallel, horizon)
+        started = time.perf_counter()
+        with torch.compiler.set_stance("fail_on_recompile"):
+            results, rows = sweep_vs_cpu_prior_with_rows(
+                factory,
+                session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+                n_matchups=protocol.n_matchups,
+                max_parallel=protocol.max_parallel,
+                max_frames=protocol.max_frames,
+                cpu_level=protocol.cpu_level,
+                ego_port=protocol.ego_port,
+                seed_stage=melee.Stage(protocol.seed_stage),
+                start_retries=protocol.start_retries,
+            )
     finally:
         model.train(was_training)
     metrics = vs_cpu_metrics(results, seed=protocol.seed)
     metrics["eval_wall_seconds"] = time.perf_counter() - started
+    metrics["eval_total_wall_seconds"] = time.perf_counter() - total_started
+    metrics["inference_compile_seconds"] = compile_seconds
     metrics["exec_horizon"] = float(horizon)
     metrics.update(telemetry.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)

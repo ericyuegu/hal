@@ -448,6 +448,38 @@ def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
         assert activations[f"residual_ratio/{name}"] == pytest.approx(expected_ratio)
 
 
+def test_eval_prewarms_before_starting_dolphin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = _cfg(inference_mode="eager", eval_max_parallel=4)
+    model = exp.GPT(cfg)
+    engine = exp.BF16Inference(model, cfg, compiled=False)
+    events: list[str] = []
+
+    def prewarm(rows: int, horizon: int) -> float:
+        events.append(f"prewarm:{rows}:{horizon}")
+        return 1.25
+
+    def sweep(*args, **kwargs):
+        events.append("sweep")
+        assert not model.training
+        return [], []
+
+    monkeypatch.setattr(engine, "prewarm", prewarm)
+    monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", sweep)
+    monkeypatch.setattr(exp, "vs_cpu_metrics", lambda *args, **kwargs: {})
+    metrics = exp.eval_vs_cpu(
+        model,
+        {},
+        cfg,
+        n_matchups=4,
+        replay_dir=tmp_path,
+        inference=engine,
+    )
+
+    assert events == ["prewarm:4:4", "sweep"]
+    assert metrics["inference_compile_seconds"] == pytest.approx(1.25)
+    assert model.training
+
+
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = _cfg(
         wandb_hist_every=0,
