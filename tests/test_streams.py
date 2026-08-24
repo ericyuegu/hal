@@ -86,12 +86,34 @@ def test_consolidated_mixture_stats_use_source_proportions(tmp_path: Path) -> No
         mds_schema_version=7,
     )
 
-    stats = load_consolidated_mixture_stats([first, second], [0.25, 0.75], expected_mds_schema_version=7)["x"]
+    mixture = load_consolidated_mixture_stats([first, second], [0.25, 0.75], expected_mds_schema_version=7)
+    stats = mixture["x"]
 
     assert stats.mean == pytest.approx(3.0)
     assert stats.std == pytest.approx(2.5)
     assert stats.min == -1.0
     assert stats.max == 6.0
+    assert mixture["direction"].mean == 0.0
+    assert mixture["direction"].std == 1.0
+    assert mixture["direction"].min == -1.0
+    assert mixture["direction"].max == 1.0
+
+
+def test_consolidated_stats_add_packed_direction_bounds(tmp_path: Path) -> None:
+    stats_path = tmp_path / "stats.json"
+    dump_sufficient_stats(
+        stats_path,
+        {"p1_x": FeatureStatsSufficient(count=1, mean=0.0, m2=0.0, min=0.0, max=0.0)},
+        split="train",
+        mds_schema_version=7,
+    )
+
+    direction = load_consolidated_stats(stats_path)["direction"]
+
+    assert direction.mean == 0.0
+    assert direction.std == 1.0
+    assert direction.min == -1.0
+    assert direction.max == 1.0
 
 
 def test_consolidated_mixture_stats_check_every_schema(tmp_path: Path) -> None:

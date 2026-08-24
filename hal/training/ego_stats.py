@@ -19,6 +19,14 @@ from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import load_sufficient_stats
 from hal.data.feature_stats import merge_sufficient
 
+_SCHEMA_IMPLIED_STATS = {
+    # Compact policy datasets pack facing direction into the integer player
+    # state, so it is intentionally absent from their float stats sidecar.
+    # Decoding restores exactly {-1, 0, 1, NaN}; preprocessing min-max scales
+    # it and therefore needs only these schema-defined bounds.
+    "direction": FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0),
+}
+
 
 def consolidate_key(name: str) -> str:
     """Strip ``p1_`` / ``p2_`` / ``ego_`` / ``opp_`` so symmetric features collapse."""
@@ -35,7 +43,10 @@ def load_consolidated_stats(path: Path) -> dict[str, FeatureStats]:
     for name, block in load_sufficient_stats(path).items():
         key = consolidate_key(name)
         merged[key] = merge_sufficient(merged[key], block) if key in merged else block
-    return {k: b.finalize() for k, b in merged.items()}
+    result = {k: b.finalize() for k, b in merged.items()}
+    for name, stats in _SCHEMA_IMPLIED_STATS.items():
+        result.setdefault(name, stats)
+    return result
 
 
 def load_consolidated_mixture_stats(
@@ -92,4 +103,6 @@ def load_consolidated_mixture_stats(
             min=min(block.min for _, block in normalized),
             max=max(block.max for _, block in normalized),
         )
+    for name, stats in _SCHEMA_IMPLIED_STATS.items():
+        result.setdefault(name, stats)
     return result
