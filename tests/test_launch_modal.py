@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import threading
 from pathlib import Path
@@ -241,8 +242,14 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
             events.append(("workdir", path))
             return self
 
-        def run_commands(self, command: str, *, secrets: list[object] | None = None) -> FakeImage:
-            events.append(("run", command, secrets))
+        def run_commands(
+            self,
+            command: str,
+            *,
+            env: dict[str, str] | None = None,
+            secrets: list[object] | None = None,
+        ) -> FakeImage:
+            events.append(("run", command, env, secrets))
             return self
 
     fake = FakeImage()
@@ -254,16 +261,22 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
     secret = object()
     assert _MODULE._image("example/image:tag", ("uv", "run", str(notebook.relative_to(_MODULE.ROOT))), secret) is fake
     dependency_run = events.index(
-        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project", None)
+        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project", None, None)
+    )
+    helper = _MODULE.ROOT / "scripts" / "cache_modal_fixtures.py"
+    helper_copy = events.index(("file", helper, "/opt/cache_modal_fixtures.py", True))
+    fixture_run = next(
+        index
+        for index, event in enumerate(events)
+        if event[:2] == ("run", "/opt/venv/bin/python /opt/cache_modal_fixtures.py")
     )
     source_copy = next(index for index, event in enumerate(events) if event[0] == "dir")
     notebook_copy = events.index(
         ("file", notebook, str(_MODULE.REMOTE_ROOT / notebook.relative_to(_MODULE.ROOT)), True)
     )
     project_run = events.index(
-        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation", None)
+        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation", None, None)
     )
-    fixture_run = events.index(("run", "uv run fetch", [secret]))
 
     assert events[:4] == [
         ("base", "example/image:tag"),
@@ -271,7 +284,11 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
         ("file", _MODULE.ROOT / "uv.lock", str(_MODULE.REMOTE_ROOT / "uv.lock"), True),
         ("workdir", str(_MODULE.REMOTE_ROOT)),
     ]
-    assert dependency_run < source_copy < notebook_copy < project_run < fixture_run
+    assert dependency_run < helper_copy < fixture_run < source_copy < notebook_copy < project_run
+    fixture_event = events[fixture_run]
+    assert fixture_event[2]["HAL_FIXTURE_ROOT"] == str(_MODULE.REMOTE_ROOT)
+    assert json.loads(fixture_event[2]["HAL_FIXTURE_MANIFEST"])
+    assert fixture_event[3] == [secret]
 
 
 def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -614,12 +614,34 @@ def _ignored_python_commands(
     return tuple(selected.items())
 
 
+def _fixture_manifest_json() -> str:
+    """Serialize the canonical fixture manifest without coupling its image layer to source."""
+    from hal.fixtures import ALL
+
+    return json.dumps(
+        [
+            {
+                "name": fixture.name,
+                "sha256": fixture.sha256,
+                "size_bytes": fixture.size_bytes,
+                "dest": str(fixture.dest),
+                "r2_key": fixture.r2_key,
+                "url": fixture.url,
+                "extract": fixture.extract,
+            }
+            for fixture in ALL
+        ],
+        sort_keys=True,
+    )
+
+
 def _image(
     tag: str,
     argv: list[str] | tuple[str, ...],
     secret: modal.Secret,
 ) -> modal.Image:
     ignore = modal.FilePatternMatcher.from_file(ROOT / ".dockerignore")
+    fixture_helper = ROOT / "scripts" / "cache_modal_fixtures.py"
     dependency_image = (
         modal.Image.from_registry(tag)
         .add_local_file(ROOT / "pyproject.toml", str(REMOTE_ROOT / "pyproject.toml"), copy=True)
@@ -630,19 +652,25 @@ def _image(
         # portable lockfile and --locked fails before a Function is submitted.
         .run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --no-install-project")
     )
-    source_image = dependency_image.add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
+    fixture_image = dependency_image.add_local_file(
+        fixture_helper,
+        "/opt/cache_modal_fixtures.py",
+        copy=True,
+    ).run_commands(
+        "/opt/venv/bin/python /opt/cache_modal_fixtures.py",
+        env={
+            "HAL_FIXTURE_MANIFEST": _fixture_manifest_json(),
+            "HAL_FIXTURE_ROOT": str(REMOTE_ROOT),
+        },
+        secrets=[secret],
+    )
+    source_image = fixture_image.add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore)
     for source, relative in _ignored_python_commands(argv, ignore):
         source_image = source_image.add_local_file(source, str(REMOTE_ROOT / relative), copy=True)
-    # Dependencies are complete in the parent layer. Install only the local
-    # project offline so ordinary source commits do not invalidate or rerun
-    # the expensive dependency layer. Fixture credentials exist only while
-    # the final build command runs; Modal does not persist secret environment
-    # variables into the image. The verified fixture files themselves become
-    # a reusable layer, so GPU containers only hash-check them at startup.
-    project_image = source_image.run_commands(
-        f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation"
-    )
-    return project_image.run_commands("uv run fetch", secrets=[secret])
+    # Dependencies and fixtures are complete in the parent layers. Install
+    # only the local project offline. Ordinary source commits therefore reuse
+    # both the dependency environment and the large immutable fixture layer.
+    return source_image.run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
 
 
 def _app_name(args: Args, sha: str) -> str:
