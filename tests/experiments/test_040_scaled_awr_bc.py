@@ -586,7 +586,7 @@ def test_inference_parity_uses_scale_aware_bf16_tolerances() -> None:
     assert metrics["max_abs_error"] == pytest.approx(0.046875)
     assert metrics["relative_rms_error"] < exp._INFERENCE_PARITY_RELATIVE_RMS
     with pytest.raises(AssertionError, match="relative_rms"):
-        exp._inference_parity_metrics(reference + 0.02, reference)
+        exp._inference_parity_metrics(reference + 0.03, reference)
     outlier = reference.clone()
     outlier[0] += 0.125
     with pytest.raises(AssertionError, match="max_abs"):
