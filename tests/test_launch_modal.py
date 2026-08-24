@@ -21,6 +21,7 @@ _SPEC.loader.exec_module(_MODULE)
 Args = _MODULE.Args
 RunState = _MODULE.RunState
 explicit_resume = _MODULE.explicit_resume
+explicit_resume_as = _MODULE.explicit_resume_as
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
 plan_attempt = _MODULE.plan_attempt
@@ -73,6 +74,15 @@ def test_explicit_resume_supports_both_forms_and_rejects_ambiguity() -> None:
         explicit_resume(("python", EXPERIMENT, "--resume", "../escape"))
 
 
+def test_explicit_resume_as_supports_both_forms_and_rejects_ambiguity() -> None:
+    assert explicit_resume_as(("python", EXPERIMENT, "--resume-as", "run-2")) == "run-2"
+    assert explicit_resume_as(("python", EXPERIMENT, "--resume-as=run-2")) == "run-2"
+    with pytest.raises(SystemExit, match="more than once"):
+        explicit_resume_as(("python", EXPERIMENT, "--resume-as=one", "--resume-as", "two"))
+    with pytest.raises(SystemExit, match="invalid"):
+        explicit_resume_as(("python", EXPERIMENT, "--resume-as", "../escape"))
+
+
 def test_plan_attempt_resumes_only_after_checkpoint_exists() -> None:
     command = ("uv", "run", EXPERIMENT)
     running = RunState(status="running", run_name="run-1")
@@ -102,6 +112,70 @@ def test_explicit_resume_is_not_duplicated() -> None:
 
     assert attempt.argv == command
     assert attempt.state.run_name == "run-1"
+
+
+def test_resume_as_tracks_destination_run_name() -> None:
+    command = (
+        "uv",
+        "run",
+        EXPERIMENT,
+        "--resume",
+        "source-run",
+        "--resume-as",
+        "destination-run",
+    )
+    attempt = plan_attempt(None, command, auto_resume=True, checkpoint_found=False)
+
+    assert attempt.argv == command
+    assert attempt.state.run_name == "destination-run"
+
+
+@pytest.mark.parametrize(
+    "fork_flags",
+    [
+        (
+            "--resume",
+            "source-run",
+            "--resume-checkpoint",
+            "branch_D2p29.pt",
+            "--resume-as",
+            "destination-run",
+        ),
+        (
+            "--resume=source-run",
+            "--resume-checkpoint=branch_D2p29.pt",
+            "--resume-as=destination-run",
+        ),
+    ],
+)
+def test_resume_as_retry_resumes_only_destination(fork_flags: tuple[str, ...]) -> None:
+    command = ("uv", "run", EXPERIMENT, *fork_flags)
+    running = RunState(status="running", run_name="destination-run")
+
+    resumed = plan_attempt(running, command, auto_resume=True, checkpoint_found=True)
+
+    assert resumed.argv == ("uv", "run", EXPERIMENT, "--resume", "destination-run")
+    assert resumed.state == running
+
+
+def test_resume_as_retry_without_destination_checkpoint_retries_original_fork() -> None:
+    command = (
+        "uv",
+        "run",
+        EXPERIMENT,
+        "--resume",
+        "source-run",
+        "--resume-checkpoint",
+        "branch_D2p29.pt",
+        "--resume-as",
+        "destination-run",
+    )
+    running = RunState(status="running", run_name="destination-run")
+
+    retried = plan_attempt(running, command, auto_resume=True, checkpoint_found=False)
+
+    assert retried.argv == command
+    assert retried.state == running
 
 
 def test_state_round_trip_and_validation(tmp_path: Path) -> None:

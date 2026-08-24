@@ -192,6 +192,7 @@ def validate_args(args: Args) -> None:
             "pass --no-auto-resume for an arbitrary command."
         )
     explicit_resume(args.cmd)
+    explicit_resume_as(args.cmd)
 
 
 def experiment_script(argv: list[str] | tuple[str, ...]) -> Path | None:
@@ -225,6 +226,47 @@ def explicit_resume(argv: list[str] | tuple[str, ...]) -> str | None:
     return found[0] if found else None
 
 
+def explicit_resume_as(argv: list[str] | tuple[str, ...]) -> str | None:
+    """Read one ``--resume-as`` destination without interpreting the experiment CLI."""
+    found: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--resume-as":
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                raise SystemExit("--resume-as requires a run name.")
+            found.append(argv[i + 1])
+            i += 2
+            continue
+        if token.startswith("--resume-as="):
+            found.append(token.partition("=")[2])
+        i += 1
+    if len(found) > 1:
+        raise SystemExit("the training command contains --resume-as more than once.")
+    if found and not RUN_NAME.fullmatch(found[0]):
+        raise SystemExit(f"invalid --resume-as run name: {found[0]!r}")
+    return found[0] if found else None
+
+
+def resume_fork_from_destination(argv: tuple[str, ...], run_name: str) -> tuple[str, ...]:
+    """Replace source-fork flags with one resume from the fork destination."""
+    source_flags = {"--resume", "--resume-checkpoint", "--resume-as"}
+    command: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        flag = token.partition("=")[0]
+        if flag not in source_flags:
+            command.append(token)
+            i += 1
+            continue
+        if token == flag:
+            i += 2
+        else:
+            i += 1
+    return (*command, "--resume", run_name)
+
+
 def plan_attempt(
     state: RunState | None,
     argv: tuple[str, ...],
@@ -234,14 +276,18 @@ def plan_attempt(
 ) -> Attempt:
     """Convert durable state into the command for one Modal retry attempt."""
     resume = explicit_resume(argv)
+    resume_as = explicit_resume_as(argv)
     if state is not None and state.status == "failed":
         return Attempt(action="fail", argv=argv, state=state)
     if state is not None and state.status == "succeeded":
         return Attempt(action="complete", argv=argv, state=state)
 
-    run_name = resume or (state.run_name if state is not None else None)
+    run_name = resume_as or resume or (state.run_name if state is not None else None)
     command = argv
-    if auto_resume and resume is None and run_name is not None:
+    retrying_fork = state is not None and state.status == "running" and resume_as is not None
+    if auto_resume and retrying_fork and checkpoint_found and run_name is not None:
+        command = resume_fork_from_destination(argv, run_name)
+    elif auto_resume and resume is None and run_name is not None:
         if checkpoint_found:
             command = (*argv, "--resume", run_name)
         else:
@@ -577,8 +623,11 @@ def _run_remote(spec: LaunchSpec) -> int:
     path = _state_path(spec.launch_id)
     state = read_state(path)
     resume = explicit_resume(spec.argv)
-    run_name = resume or (state.run_name if state is not None else None)
-    checkpoint_found = bool(spec.auto_resume and resume is None and run_name and _checkpoint_exists(run_name))
+    resume_as = explicit_resume_as(spec.argv)
+    run_name = resume_as or resume or (state.run_name if state is not None else None)
+    retrying_fork = state is not None and state.status == "running" and resume_as is not None
+    can_resume = resume is None or retrying_fork
+    checkpoint_found = bool(spec.auto_resume and can_resume and run_name and _checkpoint_exists(run_name))
     attempt = plan_attempt(state, spec.argv, auto_resume=spec.auto_resume, checkpoint_found=checkpoint_found)
     if attempt.action == "complete":
         loguru.logger.info(f"launch {spec.launch_id} already succeeded; nothing to run")
