@@ -17,6 +17,7 @@ import hashlib
 import itertools
 import json
 import math
+import re
 import tempfile
 import time
 from collections.abc import Callable
@@ -105,6 +106,7 @@ PROCESSED_POSITION_EXPONENTS: tuple[int, ...] = (26, 27, 28, 29, 30)
 DELAY_BUCKETS: tuple[int, ...] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 HEAD_OFFSETS: tuple[int, ...] = tuple(range(1, 37))
 FRAME_TIME_MS = 1000.0 / 60.0
+RUN_COMPONENT = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?")
 LATENCY_ARTIFACT_SCHEMA = 3
 LATENCY_START_BOUNDARY = "earliest_worker_observation_preprocessing"
 LATENCY_END_BOUNDARY = "final_controller_pipe_ack"
@@ -2457,12 +2459,13 @@ def train(
     run_name = requested_run_name
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     state = resume_state if resume_state is not None else branch_state
+    resume_wandb_id = None if resume_state is None else resume_state.get("wandb_id")
     wandb.init(
         project="hal",
         group=WANDB_GROUP,
         name=run_name,
-        id=None if resume_state is None else resume_state.get("wandb_id"),
-        resume="allow" if resume_state is not None else None,
+        id=resume_wandb_id,
+        resume="allow" if resume_wandb_id is not None else None,
         tags=["gpt", "temporal-mtp", "dense-1-36", "026-capacity-scaling", cfg.phase],
         config={
             **asdict(cfg),
@@ -3005,6 +3008,104 @@ def run_benchmark(
     return payload
 
 
+def parse_eval_delays(value: str) -> tuple[int, ...]:
+    """Parse one comma-separated subset of the frozen delay buckets."""
+    if not value:
+        return DELAY_BUCKETS
+    try:
+        delays = tuple(int(item.strip()) for item in value.split(","))
+    except ValueError as error:
+        raise ValueError(f"repair evaluation delays must be integers, got {value!r}") from error
+    if not delays or len(delays) != len(set(delays)) or any(delay not in DELAY_BUCKETS for delay in delays):
+        raise ValueError(f"repair evaluation delays must be unique members of {DELAY_BUCKETS}, got {delays}")
+    return delays
+
+
+def validate_run_component(value: str, *, flag: str) -> None:
+    """Reject path traversal, empty values, and ambiguous run components."""
+    if not RUN_COMPONENT.fullmatch(value):
+        raise ValueError(f"{flag} must be one nonempty run-name component, got {value!r}")
+
+
+def remote_run_exists(run_name: str) -> bool:
+    response = r2.client().list_objects_v2(Bucket=r2.bucket(), Prefix=f"runs/{run_name}/", MaxKeys=1)
+    return bool(response.get("KeyCount", len(response.get("Contents", ()))))
+
+
+def repair_endpoint_evaluations(run_name: str, delays: tuple[int, ...]) -> None:
+    """Fill missing delay cells without rewriting the terminal checkpoint.
+
+    A normal training resume serializes ``final.pt`` again before evaluation.
+    That is correct after additional optimization, but wrong for evaluation-only
+    repair because the new archive has a different evidence hash. This path
+    downloads the original terminal archive, verifies its existing progress
+    ledger, and appends only requested missing evaluations.
+    """
+    validate_run_component(run_name, flag="--repair-evals")
+    run_dir, replay_dir = setup_run_dir(run_name)
+    state = load_for_resume(run_name, run_dir, device="cpu", name="final.pt")
+    if state is None:
+        raise SystemExit(f"no final.pt for terminal run {run_name!r}")
+    final_path = run_dir / "final.pt"
+    model, cfg, stats, state = load_checkpoint(str(final_path))
+    if cfg.phase != "cooldown":
+        raise ValueError("evaluation repair requires a terminal cooldown checkpoint")
+    audit = dataset_audit(cfg)
+    checkpoint_sha = _checkpoint_sha256(final_path)
+    completed = _load_eval_progress(run_dir, run_name, cfg, audit, checkpoint_sha)
+    pending = tuple(delay for delay in delays if delay not in completed)
+    if not pending:
+        if cfg.push_to_r2:
+            progress_uploader = BackgroundUploader(run_name)
+            progress_uploader.upload(run_dir / "eval_progress.json")
+            progress_uploader.close()
+        print(f"[eval] requested delays already completed for {run_name}", flush=True)
+        return
+
+    wandb_id = state.get("wandb_id")
+    if not wandb_id:
+        raise ValueError(f"terminal checkpoint for {run_name!r} has no W&B run id")
+    processed_positions = int(state["processed_positions"])
+    wandb.init(project="hal", group=WANDB_GROUP, name=run_name, id=wandb_id, resume="must")
+    for delay in DELAY_BUCKETS:
+        wandb.define_metric(f"eval_d{delay}/*", step_metric="processed_positions")
+    inference = BF16Inference(model, cfg)
+    try:
+        for delay in pending:
+            values = eval_vs_cpu(
+                model,
+                stats,
+                cfg,
+                n_matchups=cfg.final_eval_n_matchups,
+                replay_dir=replay_dir / f"final_d{delay}",
+                delay=delay,
+                replan_interval=delay,
+                checkpoint_sha256=checkpoint_sha,
+                inference=inference,
+            )
+            require_complete_eval(values, cfg.final_eval_n_matchups)
+            if cfg.push_to_r2:
+                evidence_uploader = BackgroundUploader(run_name)
+                evidence_uploader.upload_tree(replay_dir / f"final_d{delay}", base=run_dir)
+                evidence_uploader.close()
+            wandb.log(
+                {
+                    "processed_positions": processed_positions,
+                    **{f"eval_d{delay}/{name}": value for name, value in values.items()},
+                }
+            )
+            completed.add(delay)
+            progress_uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
+            _write_eval_progress(run_dir, cfg, audit, checkpoint_sha, completed, progress_uploader)
+            if progress_uploader is not None:
+                progress_uploader.close()
+            if wandb.run is not None:
+                for name, value in values.items():
+                    wandb.run.summary[f"eval_d{delay}/{name}"] = value
+    finally:
+        wandb.finish()
+
+
 def parameter_counts_for_config(cfg: TrainConfig) -> dict[str, int]:
     with torch.device("meta"):
         model = GPT(cfg)
@@ -3020,7 +3121,11 @@ class Args:
     target_d_exp: int = 30
     unique_data_divisor: int = 1
     resume: str | None = None
+    resume_checkpoint: str = "latest.pt"
+    resume_as: str | None = None
     branch_from_run: str | None = None
+    repair_evals: str | None = None
+    repair_eval_delays: str = ""
     eval: str | None = None
     eval_delay: int | None = None
     eval_replan_interval: int | None = None
@@ -3047,6 +3152,25 @@ def requested_config(args: Args) -> TrainConfig:
 
 
 def main(args: Args) -> None:
+    if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
+        raise SystemExit("--resume-checkpoint and --resume-as require --resume")
+    if args.repair_evals is None and args.repair_eval_delays:
+        raise SystemExit("--repair-eval-delays requires --repair-evals")
+    if args.repair_evals is not None:
+        if (
+            args.eval is not None
+            or args.resume is not None
+            or args.branch_from_run is not None
+            or args.benchmark
+            or args.training_smoke
+            or args.audit_only
+            or args.resume_checkpoint != "latest.pt"
+            or args.resume_as is not None
+        ):
+            raise SystemExit("--repair-evals cannot be combined with training, benchmark, audit, or --eval")
+        repair_endpoint_evaluations(args.repair_evals, parse_eval_delays(args.repair_eval_delays))
+        return
+
     if args.eval is not None:
         if args.benchmark or args.training_smoke or args.resume is not None or args.audit_only:
             raise SystemExit("--eval cannot be combined with benchmark, training smoke, resume, or audit")
@@ -3064,11 +3188,33 @@ def main(args: Args) -> None:
     if args.resume is not None:
         if args.benchmark or args.training_smoke or args.audit_only or args.branch_from_run is not None:
             raise SystemExit("--resume cannot be combined with benchmark, training smoke, audit, or a fresh branch")
-        resume_state = load_for_resume(args.resume, Path("runs") / args.resume, device="cpu")
+        if Path(args.resume_checkpoint).name != args.resume_checkpoint or not args.resume_checkpoint.endswith(".pt"):
+            raise SystemExit("--resume-checkpoint must be one checkpoint filename ending in .pt")
+        resume_state = load_for_resume(
+            args.resume,
+            Path("runs") / args.resume,
+            device="cpu",
+            name=args.resume_checkpoint,
+        )
         if resume_state is None:
-            raise SystemExit(f"no latest.pt for run {args.resume!r}")
+            raise SystemExit(f"no {args.resume_checkpoint} for run {args.resume!r}")
         cfg = config_from_state(resume_state["cfg"])
-        requested_run_name = args.resume
+        requested_run_name = args.resume_as or args.resume
+        if args.resume_as is not None:
+            try:
+                validate_run_component(args.resume_as, flag="--resume-as")
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
+            if args.resume_as == args.resume:
+                raise SystemExit("--resume-as must differ from the source run")
+            destination_exists = (Path("runs") / args.resume_as).exists()
+            if cfg.push_to_r2:
+                destination_exists = destination_exists or remote_run_exists(args.resume_as)
+            if destination_exists:
+                raise SystemExit(
+                    f"resume destination {args.resume_as!r} already exists; continue it with --resume {args.resume_as}"
+                )
+            resume_state = {**resume_state, "wandb_id": None}
         branch_state = None
     else:
         resume_state = None

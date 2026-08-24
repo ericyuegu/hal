@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import melee
 import numpy as np
@@ -131,6 +132,130 @@ def test_dense_loss_weighting_is_exact() -> None:
     joint = nll.sum(dim=-1)
     expected = joint[:, :16].mean() + 0.5 * joint[:, 16:].mean()
     torch.testing.assert_close(exp.objective(parts), expected, rtol=0, atol=0)
+
+
+def test_parse_eval_delays_defaults_and_validates_subset() -> None:
+    assert exp.parse_eval_delays("") == exp.DELAY_BUCKETS
+    assert exp.parse_eval_delays("4,6,16") == (4, 6, 16)
+    with pytest.raises(ValueError, match="unique members"):
+        exp.parse_eval_delays("4,4")
+    with pytest.raises(ValueError, match="unique members"):
+        exp.parse_eval_delays("3")
+
+
+@pytest.mark.parametrize("value", ["", ".", "..", "a/b", "a\\b"])
+def test_run_component_rejects_unsafe_values(value: str) -> None:
+    with pytest.raises(ValueError, match="one nonempty run-name component"):
+        exp.validate_run_component(value, flag="--test")
+
+
+def test_repair_evaluations_preserves_checkpoint_and_commits_evidence_first(tmp_path, monkeypatch) -> None:
+    run_name = "cap-test"
+    run_dir = tmp_path / run_name
+    replay_dir = run_dir / "replays"
+    run_dir.mkdir()
+    final_path = run_dir / "final.pt"
+    original = b"immutable terminal checkpoint"
+    final_path.write_bytes(original)
+    cfg = _tiny_scaled(phase="cooldown", target_processed_positions=2**26, push_to_r2=True)
+    state = {"wandb_id": "abc123", "processed_positions": 2**26}
+    events = []
+
+    class FakeUploader:
+        def __init__(self, selected_run):
+            assert selected_run == run_name
+            events.append("uploader")
+
+        def upload_tree(self, root, *, base, pattern="*"):
+            assert base == run_dir
+            assert root == replay_dir / "final_d4"
+            events.append("evidence")
+            return 1
+
+        def upload(self, path, *, key=None):
+            assert path == run_dir / "eval_progress.json"
+            events.append("progress")
+            return True
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(exp, "setup_run_dir", lambda _: (run_dir, replay_dir))
+    monkeypatch.setattr(exp, "load_for_resume", lambda *args, **kwargs: state)
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _: (object(), cfg, {}, state))
+    monkeypatch.setattr(exp, "dataset_audit", lambda _: SimpleNamespace(episode_hash="episode"))
+    monkeypatch.setattr(exp, "_load_eval_progress", lambda *args: {1})
+    monkeypatch.setattr(exp, "BackgroundUploader", FakeUploader)
+    monkeypatch.setattr(exp, "BF16Inference", lambda *args: object())
+
+    def fake_eval(*args, replay_dir, **kwargs):
+        replay_dir.mkdir(parents=True)
+        (replay_dir / "metrics.json").write_text("{}")
+        return {"metric": 1.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
+    monkeypatch.setattr(exp, "require_complete_eval", lambda *args: None)
+    monkeypatch.setattr(exp.wandb, "init", lambda **kwargs: events.append(("wandb", kwargs["resume"])))
+    monkeypatch.setattr(exp.wandb, "define_metric", lambda *args, **kwargs: None)
+    monkeypatch.setattr(exp.wandb, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(exp.wandb, "finish", lambda: None)
+    monkeypatch.setattr(exp.wandb, "run", SimpleNamespace(summary={}))
+
+    exp.repair_endpoint_evaluations(run_name, (1, 4))
+
+    assert final_path.read_bytes() == original
+    assert events == [("wandb", "must"), "uploader", "evidence", "close", "uploader", "progress", "close"]
+
+
+def test_repair_evaluations_reuploads_completed_progress_before_return(tmp_path, monkeypatch) -> None:
+    run_name = "cap-test"
+    run_dir = tmp_path / run_name
+    replay_dir = run_dir / "replays"
+    run_dir.mkdir()
+    (run_dir / "final.pt").write_bytes(b"checkpoint")
+    progress_path = run_dir / "eval_progress.json"
+    progress_path.write_text("{}")
+    cfg = _tiny_scaled(phase="cooldown", target_processed_positions=2**26, push_to_r2=True)
+    state = {"wandb_id": "abc123", "processed_positions": 2**26}
+    events = []
+
+    class FakeUploader:
+        def __init__(self, selected_run):
+            assert selected_run == run_name
+
+        def upload(self, path, *, key=None):
+            assert path == progress_path
+            events.append("progress")
+            return True
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(exp, "setup_run_dir", lambda _: (run_dir, replay_dir))
+    monkeypatch.setattr(exp, "load_for_resume", lambda *args, **kwargs: state)
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _: (object(), cfg, {}, state))
+    monkeypatch.setattr(exp, "dataset_audit", lambda _: SimpleNamespace(episode_hash="episode"))
+    monkeypatch.setattr(exp, "_load_eval_progress", lambda *args: set(exp.DELAY_BUCKETS))
+    monkeypatch.setattr(exp, "BackgroundUploader", FakeUploader)
+
+    exp.repair_endpoint_evaluations(run_name, (1, 4))
+
+    assert events == ["progress", "close"]
+
+
+def test_remote_run_exists_checks_any_prefixed_object(monkeypatch) -> None:
+    calls = []
+
+    class FakeClient:
+        def list_objects_v2(self, **kwargs):
+            calls.append(kwargs)
+            return {"KeyCount": 1, "Contents": [{"Key": "runs/new/branch_D2p29.pt"}]}
+
+    monkeypatch.setattr(exp.r2, "client", lambda: FakeClient())
+    monkeypatch.setattr(exp.r2, "bucket", lambda: "bucket")
+
+    assert exp.remote_run_exists("new")
+    assert calls == [{"Bucket": "bucket", "Prefix": "runs/new/", "MaxKeys": 1}]
 
 
 def test_powerlines_decay_and_terminal_schedule_use_exact_position_formula() -> None:
