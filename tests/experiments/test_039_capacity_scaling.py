@@ -77,6 +77,75 @@ def test_scaled_family_and_distinct_026_baseline_geometry() -> None:
     exp.validate_config(baseline)
 
 
+@pytest.mark.parametrize(
+    ("level", "target", "total_parameters", "effective_parameters"),
+    [
+        (3, 350_981_584, 2_064_111, 23_742_936),
+        (4, 312_145_120, 3_936_239, 26_696_984),
+    ],
+)
+def test_small_isoflop_configs_have_exact_geometry_and_endpoint(
+    level: int,
+    target: int,
+    total_parameters: int,
+    effective_parameters: int,
+) -> None:
+    cfg = exp.scaled_config(
+        level,
+        exp.replace(
+            exp.TrainConfig(),
+            target_processed_positions=target,
+            adam_weight_decay_endpoint=target,
+        ),
+    )
+    counts = exp.parameter_counts_for_config(cfg)
+
+    assert counts["total"] == total_parameters
+    assert counts["trunk"] + 36 * counts["decoder"] == effective_parameters
+    assert 6 * effective_parameters * target == pytest.approx(5e16, rel=1e-8)
+    assert exp._prefix_branch_targets(cfg) == (target,)
+    assert exp._prefix_branch_positions(cfg) == (exp.branch_position(target, 0.125),)
+    assert exp.branch_checkpoint_name(target) == f"branch_D{target}.pt"
+    assert f"D{target}" in exp.run_name_for(exp.replace(cfg, phase="cooldown"), counts["total"])
+    exp.validate_config(cfg)
+
+
+def test_small_isoflop_endpoint_is_bound_to_its_capacity() -> None:
+    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3]
+    cfg = exp.scaled_config(
+        4,
+        exp.replace(
+            exp.TrainConfig(),
+            target_processed_positions=target,
+            adam_weight_decay_endpoint=target,
+        ),
+    )
+    with pytest.raises(ValueError, match="not a study endpoint"):
+        exp.validate_config(cfg)
+
+
+@pytest.mark.parametrize("level", [3, 4])
+def test_small_isoflop_cli_sets_exact_powerlines_endpoint(level: int) -> None:
+    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[level]
+    cfg = exp.requested_config(exp.Args(model_l=level, phase="prefix", target_positions=target))
+    counts = exp.parameter_counts_for_config(cfg)
+
+    assert cfg.target_processed_positions == target
+    assert cfg.adam_weight_decay_endpoint == target
+    assert exp.run_name_for(cfg, counts["total"]) == (
+        f"cap-L{level}-d{64 * level}-{round(counts['total'] / 1_000_000)}M-U1-prefix-D{target}-tauPL"
+    )
+    exp.validate_config(cfg)
+
+
+def test_standard_prefix_name_remains_canonical_d2p30() -> None:
+    cfg = exp.scaled_config(5, exp.replace(exp.TrainConfig(), target_processed_positions=2**26))
+    counts = exp.parameter_counts_for_config(cfg)
+
+    assert exp._training_stop(cfg) == exp.branch_position(2**30, cfg.cooldown_fraction)
+    assert exp.run_name_for(cfg, counts["total"]) == "cap-L5-d320-7M-U1-prefix-D2p30-tauPL"
+
+
 def test_026_observation_trunk_codec_and_optimizer_partition_are_frozen() -> None:
     cfg = exp.baseline_026_config()
     shared = {field.name: getattr(cfg, field.name) for field in fields(exp026.TrainConfig) if hasattr(cfg, field.name)}

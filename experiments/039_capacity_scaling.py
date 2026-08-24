@@ -99,10 +99,14 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-CAPACITY_LEVELS: tuple[int, ...] = (5, 7, 10, 13, 16, 18)
-GRAD_ACCUM_BY_LEVEL: dict[int, int] = {5: 32, 7: 32, 10: 32, 13: 64, 16: 64, 18: 128}
+CAPACITY_LEVELS: tuple[int, ...] = (3, 4, 5, 7, 10, 13, 16, 18)
+GRAD_ACCUM_BY_LEVEL: dict[int, int] = {3: 32, 4: 32, 5: 32, 7: 32, 10: 32, 13: 64, 16: 64, 18: 128}
 BASELINE_026_GRAD_ACCUM = 32
 PROCESSED_POSITION_EXPONENTS: tuple[int, ...] = (26, 27, 28, 29, 30)
+EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL: dict[int, int] = {
+    3: 350_981_584,
+    4: 312_145_120,
+}
 DELAY_BUCKETS: tuple[int, ...] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 HEAD_OFFSETS: tuple[int, ...] = tuple(range(1, 37))
 FRAME_TIME_MS = 1000.0 / 60.0
@@ -418,8 +422,20 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("phase must be 'prefix' or 'cooldown'")
     if cfg.unique_data_divisor not in (1, 2, 4):
         raise ValueError("unique_data_divisor must be 1, 2, or 4")
-    if cfg.target_processed_positions not in tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS):
+    standard_endpoints = tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS)
+    exact_endpoint = EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL.get(cfg.n_layers)
+    if cfg.target_processed_positions not in standard_endpoints and not (
+        cfg.model_family == "scaled" and cfg.target_processed_positions == exact_endpoint
+    ):
         raise ValueError("target_processed_positions is not a study endpoint")
+    expected_decay_endpoint = (
+        cfg.target_processed_positions if cfg.target_processed_positions not in standard_endpoints else 2**30
+    )
+    if cfg.adam_weight_decay_endpoint != expected_decay_endpoint:
+        raise ValueError(
+            f"adam_weight_decay_endpoint must be {expected_decay_endpoint} for this endpoint, "
+            f"got {cfg.adam_weight_decay_endpoint}"
+        )
     for name, value in (("warmup_fraction", cfg.warmup_fraction), ("cooldown_fraction", cfg.cooldown_fraction)):
         if not math.isfinite(value) or not 0 < value < 1:
             raise ValueError(f"{name} must be finite and strictly between zero and one")
@@ -2397,8 +2413,18 @@ def _checkpoint_extra(
     }
 
 
+def _standard_endpoints() -> tuple[int, ...]:
+    return tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS)
+
+
+def _prefix_branch_targets(cfg: TrainConfig) -> tuple[int, ...]:
+    if cfg.target_processed_positions in _standard_endpoints():
+        return _standard_endpoints()
+    return (cfg.target_processed_positions,)
+
+
 def _prefix_branch_positions(cfg: TrainConfig) -> tuple[int, ...]:
-    return tuple(branch_position(2**exponent, cfg.cooldown_fraction) for exponent in PROCESSED_POSITION_EXPONENTS)
+    return tuple(branch_position(target, cfg.cooldown_fraction) for target in _prefix_branch_targets(cfg))
 
 
 def _training_stop(cfg: TrainConfig) -> int:
@@ -2412,10 +2438,20 @@ def run_name_for(cfg: TrainConfig, total_parameters: int) -> str:
     unique_label = "U1" if cfg.unique_data_divisor == 1 else f"U1d{cfg.unique_data_divisor}"
     tau_label = "tauPL" if cfg.adam_tau_scaling == "powerlines" else "tauFixed"
     if cfg.phase == "prefix":
-        exposure = "prefix-D2p30"
+        exposure = f"prefix-{endpoint_label(max(_prefix_branch_targets(cfg)))}"
     else:
-        exposure = f"D2p{int(math.log2(cfg.target_processed_positions))}"
+        exposure = endpoint_label(cfg.target_processed_positions)
     return f"cap-{capacity}-{width_label}-{parameter_label}-{unique_label}-{exposure}-{tau_label}"
+
+
+def endpoint_label(target: int) -> str:
+    if target > 0 and target & (target - 1) == 0:
+        return f"D2p{target.bit_length() - 1}"
+    return f"D{target}"
+
+
+def branch_checkpoint_name(target: int) -> str:
+    return f"branch_{endpoint_label(target)}.pt"
 
 
 def _configs_match_for_branch(source: TrainConfig, target: TrainConfig) -> None:
@@ -2543,10 +2579,8 @@ def train(
         _restore_rng(state)
     copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     stop_position = _training_stop(cfg)
-    branch_exponents = {
-        branch_position(2**exponent, cfg.cooldown_fraction): exponent for exponent in PROCESSED_POSITION_EXPONENTS
-    }
-    branches = set(branch_exponents) if cfg.phase == "prefix" else set()
+    branch_targets = {branch_position(target, cfg.cooldown_fraction): target for target in _prefix_branch_targets(cfg)}
+    branches = set(branch_targets) if cfg.phase == "prefix" else set()
     completed_branches = {position for position in branches if position <= processed_positions}
     run_started = time.monotonic()
     model.train()
@@ -2655,8 +2689,8 @@ def train(
                 )
 
             if cfg.phase == "prefix" and processed_positions in branches - completed_branches:
-                exponent = branch_exponents[processed_positions]
-                save(run_dir / f"branch_D2p{exponent}.pt")
+                target = branch_targets[processed_positions]
+                save(run_dir / branch_checkpoint_name(target))
                 completed_branches.add(processed_positions)
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0
@@ -3119,6 +3153,7 @@ class Args:
     baseline_026: bool = False
     phase: str = "prefix"
     target_d_exp: int = 30
+    target_positions: int | None = None
     unique_data_divisor: int = 1
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
@@ -3142,16 +3177,23 @@ class Args:
 
 
 def requested_config(args: Args) -> TrainConfig:
+    target = 2**args.target_d_exp if args.target_positions is None else args.target_positions
+    standard_endpoints = _standard_endpoints()
     base = replace(
         args.cfg,
         phase=args.phase,
-        target_processed_positions=2**args.target_d_exp,
+        target_processed_positions=target,
+        adam_weight_decay_endpoint=target if target not in standard_endpoints else 2**30,
         unique_data_divisor=args.unique_data_divisor,
     )
     return baseline_026_config(base) if args.baseline_026 else scaled_config(args.model_l, base)
 
 
 def main(args: Args) -> None:
+    if args.target_positions is not None and (
+        args.resume is not None or args.repair_evals is not None or args.eval is not None
+    ):
+        raise SystemExit("--target-positions is only valid for fresh training, benchmark, smoke, or audit commands")
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
     if args.repair_evals is None and args.repair_eval_delays:
@@ -3224,17 +3266,20 @@ def main(args: Args) -> None:
         requested_run_name = run_name_for(cfg, counts["total"])
         branch_state = None
         if cfg.phase == "cooldown":
-            prefix_cfg = replace(cfg, phase="prefix", target_processed_positions=2**30)
+            prefix_target = (
+                2**30 if cfg.target_processed_positions in _standard_endpoints() else cfg.target_processed_positions
+            )
+            prefix_cfg = replace(cfg, phase="prefix", target_processed_positions=prefix_target)
             prefix_name = args.branch_from_run or run_name_for(prefix_cfg, counts["total"])
-            exponent = int(math.log2(cfg.target_processed_positions))
+            checkpoint_name = branch_checkpoint_name(cfg.target_processed_positions)
             branch_state = load_for_resume(
                 prefix_name,
                 Path("runs") / prefix_name,
                 device="cpu",
-                name=f"branch_D2p{exponent}.pt",
+                name=checkpoint_name,
             )
             if branch_state is None:
-                raise SystemExit(f"no branch_D2p{exponent}.pt for shared-prefix run {prefix_name!r}")
+                raise SystemExit(f"no {checkpoint_name} for shared-prefix run {prefix_name!r}")
 
     validate_config(cfg)
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
