@@ -97,6 +97,8 @@ _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
 _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32)
+_INFERENCE_PARITY_MAX_ABS = 1 / 16
+_INFERENCE_PARITY_RELATIVE_RMS = 1e-2
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _AWR_CONSTANTS_CALIBRATED = True
@@ -2645,6 +2647,38 @@ def eval_checkpoint(
     return values
 
 
+def _inference_parity_metrics(actual: Tensor, reference: Tensor) -> dict[str, float]:
+    """Check compiled BF16 output without over-weighting relative error near zero."""
+    error = actual.float() - reference.float()
+    values = (
+        torch.stack(
+            (
+                error.abs().max(),
+                error.square().mean().sqrt(),
+                reference.float().square().mean().sqrt(),
+            )
+        )
+        .double()
+        .cpu()
+    )
+    max_abs, error_rms, reference_rms = map(float, values)
+    relative_rms = error_rms / max(reference_rms, torch.finfo(torch.float64).tiny)
+    metrics = {
+        "max_abs_error": max_abs,
+        "rms_error": error_rms,
+        "relative_rms_error": relative_rms,
+    }
+    if not all(math.isfinite(value) for value in metrics.values()):
+        raise AssertionError(f"compiled inference parity produced non-finite metrics: {metrics}")
+    if max_abs > _INFERENCE_PARITY_MAX_ABS or relative_rms > _INFERENCE_PARITY_RELATIVE_RMS:
+        raise AssertionError(
+            "compiled inference parity exceeded BF16 tolerances: "
+            f"{metrics}, max_abs <= {_INFERENCE_PARITY_MAX_ABS}, "
+            f"relative_rms <= {_INFERENCE_PARITY_RELATIVE_RMS}"
+        )
+    return metrics
+
+
 @torch.no_grad()
 def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]:
     validate_config(cfg)
@@ -2662,7 +2696,7 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
             reset=ctx.reset[:rows] if ctx.reset is not None else None,
         )
 
-    def trunk_parity(rows: int) -> float:
+    def trunk_parity(rows: int) -> dict[str, float]:
         selected = selected_context(rows)
         bucket = compiled._bucket(rows)
         padded = canonical_context(_pad_context(selected, bucket), cfg.observation_bundle)
@@ -2672,8 +2706,7 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
             actual = compiled._trunk(bucket)(padded.features, padded.ctx_pad, observed)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        torch.testing.assert_close(actual, reference, rtol=2e-2, atol=2e-2)
-        return float((actual - reference).abs().max())
+        return _inference_parity_metrics(actual, reference)
 
     def measure(engine: BF16Inference, rows: int, horizon: int) -> float:
         selected = selected_context(rows)
@@ -2694,7 +2727,8 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
         out[f"compiled_b{compiled._bucket(1)}_s{horizon}_compile_s"] = compiled.prewarm(1, horizon)
     with torch.compiler.set_stance("fail_on_recompile"):
         for rows in rows_to_check:
-            out[f"compiled_dense_b{rows}_max_abs_error"] = trunk_parity(rows)
+            for name, value in trunk_parity(rows).items():
+                out[f"compiled_dense_b{rows}_{name}"] = value
             for horizon in (4, 6):
                 eager_s = measure(eager, rows, horizon)
                 compiled_s = measure(compiled, rows, horizon)
