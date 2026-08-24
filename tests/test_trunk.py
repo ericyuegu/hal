@@ -295,23 +295,43 @@ def test_the_flex_probe_reads_the_same_under_no_grad() -> None:
         assert inside is False  # no CPU backward; the verdict must be a clean False, not a raise
 
 
-def test_compiled_first_forward_keeps_path_resolution_outside_dynamo() -> None:
-    """The first forward resolves the attention path lazily. Dynamo must not trace through either
-    the cached FlexAttention probe or Loguru's caller-frame inspection while doing so."""
+def test_resolved_trunk_compiles_as_one_full_graph() -> None:
+    """A compiled owner resolves hardware policy before Dynamo sees model computation."""
     flex_is_usable.cache_clear()
-    trunk = torch.compile(_trunk(_cfg(), prefer_flex=True, device="cpu"), backend="eager", dynamic=False)
+    trunk = _trunk(_cfg(), prefer_flex=True, device="cpu")
+    trunk.resolve_attention("cpu")
+    compiled = torch.compile(trunk, backend="eager", dynamic=False, fullgraph=True)
     x = torch.randn(2, _GEOM["L_ctx"], _GEOM["d_model"])
     ctx_pad = torch.zeros(2, dtype=torch.long)
 
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")
-        output = trunk(x, ctx_pad)
+        output = compiled(x, ctx_pad)
     flex_is_usable.cache_clear()
 
     messages = [str(warning.message) for warning in seen]
     assert output.shape == x.shape
     assert not any("functools.lru_cache" in message for message in messages)
     assert not any("sys._getframe" in message for message in messages)
+
+
+@requires_flex
+def test_resolved_flex_trunk_compiles_forward_and_backward_as_one_full_graph() -> None:
+    """The production owner traces raw block-mask creation and FlexAttention together."""
+    cfg = _cfg(L_ctx=256, attn_window=128)
+    trunk = _trunk(cfg, prefer_flex=True, device="cuda")
+    trunk.resolve_attention("cuda")
+    compiled = torch.compile(trunk, dynamic=False, fullgraph=True)
+    x = torch.randn(2, cfg.L_ctx, cfg.d_model, device="cuda", requires_grad=True)
+    ctx_pad = torch.tensor([0, 40], device="cuda")
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        output = compiled(x, ctx_pad)
+    output.float().square().mean().backward()
+    torch.cuda.synchronize()
+
+    assert trunk.attn_path == "flex"
+    assert x.grad is not None and torch.isfinite(x.grad).all()
 
 
 @pytest.mark.skipif(flex_is_usable("cpu"), reason="the fallback needs a device without FlexAttention")

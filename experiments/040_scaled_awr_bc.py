@@ -1279,7 +1279,7 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
             batch = cpu_batch.to(device)
             history, targets, valid = prepared_targets(model, batch)
             with amp_context(cfg, device):
-                hidden = model(batch.context.features, batch.context.ctx_pad, history)
+                hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
                 logits = model.temporal.teacher_forced_logits_by_group(hidden, history, targets)
                 dense_nll = model.temporal.teacher_forced_nll(hidden, history, targets)
             row_valid = batch.context.ctx_pad < cfg.L_ctx
@@ -1502,7 +1502,7 @@ class BF16Inference:
         requested = cfg.inference_mode == "compiled" if compiled is None else compiled
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
         self.compile_mode = compile_mode
-        self.attention_backend = "dense_sdpa" if self.compiled else "model_default"
+        self.attention_backend = "dense_sdpa"
         self.compile_seconds = 0.0
         self._warmed: set[tuple[int, int]] = set()
         self._trunks: dict[int, Callable] = {}
@@ -1527,12 +1527,12 @@ class BF16Inference:
 
     def _trunk(self, bucket: int) -> Callable:
         if bucket not in self._trunks:
-            forward = self.model.forward_dense if self.compiled else self.model.forward
-
-            def fn(features, pad, actions):
-                return forward(features, pad, actions)
-
-            self._trunks[bucket] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
+            forward = self.model.forward_dense
+            self._trunks[bucket] = (
+                torch.compile(forward, dynamic=False, fullgraph=True, mode=self.compile_mode)
+                if self.compiled
+                else forward
+            )
         return self._trunks[bucket]
 
     def _decoder(self, bucket: int, horizon: int) -> Callable:
@@ -2064,7 +2064,7 @@ def layer_activation_rms_log(
         history, targets, _ = prepared_targets(model, diagnostic)
         device = next(model.parameters()).device
         with amp_context(cfg, device):
-            hidden = model(diagnostic.context.features, diagnostic.context.ctx_pad, history)
+            hidden = model.forward_dense(diagnostic.context.features, diagnostic.context.ctx_pad, history)
             model.temporal.teacher_forced_states(hidden, history, targets)
     finally:
         for handle in handles:
@@ -2351,15 +2351,17 @@ def train(
                 f"checkpoint actual_loss_positions={actual_positions} is invalid after {start_step} updates"
             )
 
-    # Compilation stays in dedicated callables.  Evaluation therefore never
-    # strips or mutates compiled methods and can build its own static buckets.
-    def eager_trunk(features, pad, actions):
-        return model(features, pad, actions)
-
-    trunk_fn: Callable = eager_trunk
+    # Resolve the hardware-dependent backend before Dynamo sees the model. The shared trunk contains
+    # raw mask and attention operations; this entrypoint is their one compilation owner.
+    trunk_fn: Callable = model.forward
     temporal_fn: Callable = model.temporal.teacher_forced_nll
     if DEVICE == "cuda" and cfg.compile_trunk:
-        trunk_fn = torch.compile(trunk_fn, dynamic=False)
+        model.trunk.resolve_attention(DEVICE)
+        if model.trunk.attn_path != "flex":
+            raise RuntimeError(
+                f"compiled CUDA training requires FlexAttention, resolved {model.trunk.attn_path!r} instead"
+            )
+        trunk_fn = torch.compile(trunk_fn, dynamic=False, fullgraph=True)
     if DEVICE == "cuda" and cfg.compile_temporal:
         temporal_fn = torch.compile(temporal_fn, dynamic=False)
 
@@ -2643,6 +2645,7 @@ def eval_checkpoint(
     return values
 
 
+@torch.no_grad()
 def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]:
     validate_config(cfg)
     device = torch.device(DEVICE)

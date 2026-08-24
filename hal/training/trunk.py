@@ -44,17 +44,6 @@ from torch.nn.attention.flex_attention import create_block_mask
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.attention.varlen import varlen_attn
 
-# One compiled kernel per (batch, sequence) shape. The default limit is 8, and a run that passes it
-# drops back to eager without a word: measured 4.7x slower and 2x the VRAM, while the reported path
-# still says "flex".
-torch._dynamo.config.cache_size_limit = 64
-
-# Compilation is lazy, so both of these cost nothing until the first FlexAttention call. The mask
-# build is compiled too: in eager it walks the whole [B, L, L] index grid once per forward, which
-# measures 6.6 ms at B=64/L=1024 and 13.2 ms at B=32/L=2048, against 0.3 ms compiled.
-_flex_attention = torch.compile(flex_attention, dynamic=False)
-_create_block_mask = torch.compile(create_block_mask, dynamic=False)
-
 AttnMask = Bool[Tensor, "B 1 L L"] | BlockMask
 
 
@@ -197,10 +186,14 @@ def flex_mask_mod(ctx_pad: Int[Tensor, " B"], attn_window: int) -> Callable[...,
 
 
 def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMask:
-    """The FlexAttention form of :func:`dense_mask`. FlexAttention drops whole masked blocks, so the
-    cost of a window grows with the window and not with the sequence length."""
+    """Build the FlexAttention form of :func:`dense_mask`.
+
+    This function deliberately contains raw PyTorch operations. The execution entrypoint that
+    owns the complete model graph also owns ``torch.compile``; compiling mask construction here
+    would create a nested graph with a separate shape cache.
+    """
     mask_mod = flex_mask_mod(ctx_pad, attn_window)
-    return _create_block_mask(mask_mod, ctx_pad.shape[0], None, L, L, device=ctx_pad.device)
+    return create_block_mask(mask_mod, ctx_pad.shape[0], None, L, L, device=ctx_pad.device)
 
 
 @functools.cache
@@ -212,11 +205,18 @@ def flex_is_usable(device_type: str) -> bool:
     ``enable_grad`` because the first caller is often an eval worker, whose first forward runs under
     ``torch.no_grad()``. Without it the backward raises there, the probe reads that as "no flex", and
     the answer is cached for the life of the process."""
+
+    def probe(q: Tensor, k: Tensor, v: Tensor, pad: Tensor) -> Tensor:
+        """Trace mask construction and attention together, as the training graph does."""
+        return cast(Tensor, flex_attention(q, k, v, block_mask=block_mask(pad, q.size(-2), 0)))
+
     try:
         with torch.enable_grad():
             q, k, v = (torch.zeros(1, 1, 128, 16, device=device_type, requires_grad=True) for _ in range(3))
             pad = torch.zeros(1, dtype=torch.long, device=device_type)
-            cast(Tensor, _flex_attention(q, k, v, block_mask=block_mask(pad, 128, 0))).sum().backward()
+            torch.compile(probe, dynamic=False, fullgraph=True)(q, k, v, pad).sum().backward()
+            if device_type == "cuda":
+                torch.cuda.synchronize()
     except (RuntimeError, NotImplementedError) as e:
         logger.warning(f"FlexAttention does not run on {device_type} ({type(e).__name__}: {e}); trunk uses SDPA")
         return False
@@ -297,7 +297,7 @@ class CausalSelfAttention(nn.Module):
             ).reshape(B, L, self.n_heads, self.head_dim)
             return self.c_proj(y.reshape(B, L, self.d_model))
         if isinstance(mask, BlockMask):
-            y = cast(Tensor, _flex_attention(q, k, v, block_mask=mask))
+            y = cast(Tensor, flex_attention(q, k, v, block_mask=mask))
         else:
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
@@ -358,14 +358,16 @@ class Trunk(nn.Module):
         return "flex" if self._use_flex else "dense"
 
     @torch.compiler.disable
-    def _resolve_attn_path(self, device_type: str) -> None:
-        """Run the one-time hardware probe and path announcement outside Dynamo tracing.
+    def resolve_attention(self, device_type: str) -> None:
+        """Resolve and announce the attention path before compiling a model entrypoint.
 
         The probe is cached with :func:`functools.cache`, whose wrapper Dynamo deliberately ignores,
-        and Loguru finds its caller with :func:`sys._getframe`, which Dynamo cannot trace. A trunk's
-        first forward is commonly already inside ``torch.compile``, so keep both eager explicitly.
-        Later forwards skip this method once ``_use_flex`` has been resolved.
+        and Loguru finds its caller with :func:`sys._getframe`, which Dynamo cannot trace. Compiled
+        callers should invoke this method eagerly before ``torch.compile`` so their graph contains
+        only model computation. Plain eager callers may rely on the lazy fallback in :meth:`forward`.
         """
+        if self._use_flex is not None:
+            return
         self._use_flex = self.attention_backend == "auto_flex" and self.prefer_flex and flex_is_usable(device_type)
         if self.require_flex and not self._use_flex:
             raise RuntimeError(f"require_flex is set, but FlexAttention does not run on {device_type}")
@@ -378,7 +380,7 @@ class Trunk(nn.Module):
 
     def _mask(self, ctx_pad: Int[Tensor, " B"], L: int) -> AttnMask | None:
         if self._use_flex is None:
-            self._resolve_attn_path(ctx_pad.device.type)
+            self.resolve_attention(ctx_pad.device.type)
         if self.attention_backend == "varlen_flash" and ctx_pad.device.type == "cuda":
             return None
         if self._use_flex:

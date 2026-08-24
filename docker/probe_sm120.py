@@ -24,7 +24,6 @@ rc 0 = all stages pass. rc 124 = the stage after the last printed marker hangs.
 Env knobs, to run the fix candidates without a code change:
 
     HAL_PROBE_WATCHDOG=45           # seconds between thread dumps (0 = off)
-    HAL_PROBE_EAGER_BLOCK_MASK=1    # do not torch.compile create_block_mask
     HAL_PROBE_BACKEND=aot_eager     # torch.compile backend for the trunk (default inductor)
     TORCHINDUCTOR_COMPILE_THREADS=1 # read by inductor; serializes the async compile pool
 """
@@ -35,6 +34,7 @@ import os
 import sys
 import threading
 import time
+from typing import cast
 
 _T0 = time.monotonic()
 
@@ -97,41 +97,26 @@ for var in sorted(k for k in os.environ if k.startswith(("TORCHINDUCTOR", "TRITO
     print(f"[probe] env {var}={os.environ[var]}", flush=True)
 
 stage("import trunk")
-from hal.training import trunk as trunk_mod  # noqa: E402
 from hal.training.trunk import Trunk  # noqa: E402
 from hal.training.trunk import TrunkConfig  # noqa: E402
 from hal.training.trunk import block_mask  # noqa: E402
 from hal.training.trunk import flex_is_usable  # noqa: E402
 
-if os.environ.get("HAL_PROBE_EAGER_BLOCK_MASK") == "1":
-    from torch.nn.attention.flex_attention import create_block_mask
-
-    trunk_mod._create_block_mask = create_block_mask
-    print("[probe] create_block_mask: eager (torch.compile removed)", flush=True)
-
 B, L, d_model, n_heads = 32, 512, 256, 4
 head_dim = d_model // n_heads
 pad = torch.zeros(B, dtype=torch.long, device="cuda")
 
-stage("block_mask build (compiles create_block_mask)")
+stage("eager block_mask build")
 mask = block_mask(pad, L, 128)
 
 stage("eager flex_attention forward (uncompiled kernel)")
 from torch.nn.attention.flex_attention import flex_attention  # noqa: E402
 
 q, k, v = (torch.zeros(B, n_heads, L, head_dim, device="cuda", requires_grad=True) for _ in range(3))
-flex_attention(q, k, v, block_mask=mask).sum().backward()
+cast(torch.Tensor, flex_attention(q, k, v, block_mask=mask)).sum().backward()
 torch.cuda.synchronize()
 
-stage("compiled flex_attention forward (compiles the Triton kernel)")
-out = trunk_mod._flex_attention(q, k, v, block_mask=mask)
-torch.cuda.synchronize()
-
-stage("compiled flex_attention backward (compiles the bwd Triton kernel)")
-out.sum().backward()
-torch.cuda.synchronize()
-
-stage("flex_is_usable probe")
+stage("full-graph flex_is_usable probe")
 print("[probe] flex usable:", flex_is_usable("cuda"), flush=True)
 
 stage("trunk construction")
@@ -148,7 +133,8 @@ print("[probe] eager path OK, attn_path:", trunk.attn_path, flush=True)
 backend = os.environ.get("HAL_PROBE_BACKEND", "inductor")
 stage(f"torch.compile'd trunk forward (backend={backend}) — the training path")
 trunk.zero_grad()
-compiled = torch.compile(trunk, backend=backend, dynamic=False)
+trunk.resolve_attention("cuda")
+compiled = torch.compile(trunk, backend=backend, dynamic=False, fullgraph=True)
 y = compiled(x, pad)
 torch.cuda.synchronize()
 

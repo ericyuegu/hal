@@ -425,7 +425,7 @@ def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
     model = exp.GPT(cfg)
     batch = _awr_batch(cfg)
     history, targets, _ = exp.prepared_targets(model, batch)
-    hidden = model(batch.context.features, batch.context.ctx_pad, history)
+    hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
     model.temporal.teacher_forced_nll(hidden, history, targets).mean().backward()
 
     activations = exp.layer_activation_rms_log(model, batch, cfg, max_rows=1)
@@ -516,7 +516,13 @@ def test_compiled_inference_routes_the_trunk_through_dense_sdpa(monkeypatch: pyt
 
     monkeypatch.setattr(model, "forward_dense", record_dense)
     monkeypatch.setattr(model, "forward", forbidden)
-    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
+    compile_calls: list[dict[str, object]] = []
+
+    def compile_once(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", compile_once)
     context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
     observed = model.codec.quantize(exp.stack_actions(context.features))
 
@@ -524,6 +530,50 @@ def test_compiled_inference_routes_the_trunk_through_dense_sdpa(monkeypatch: pyt
 
     assert output.shape == (2, cfg.L_ctx, cfg.d_model)
     assert calls == ["dense"]
+    assert compile_calls == [{"dynamic": False, "fullgraph": True, "mode": "default"}]
+
+
+def test_eager_inference_also_routes_the_trunk_through_dense_sdpa(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(inference_mode="eager")
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False, compiled_buckets=(2,))
+    calls: list[str] = []
+    dense_forward = model.forward_dense
+
+    def record_dense(features, pad, actions):
+        calls.append("dense")
+        return dense_forward(features, pad, actions)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("eager inference reached the training attention path")
+
+    monkeypatch.setattr(model, "forward_dense", record_dense)
+    monkeypatch.setattr(model, "forward", forbidden)
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    observed = model.codec.quantize(exp.stack_actions(context.features))
+
+    output = engine._trunk(2)(context.features, context.ctx_pad, observed)
+
+    assert output.shape == (2, cfg.L_ctx, cfg.d_model)
+    assert calls == ["dense"]
+
+
+def test_benchmark_keeps_the_inference_graph_under_no_grad(monkeypatch: pytest.MonkeyPatch) -> None:
+    grad_modes: list[bool] = []
+
+    class BenchmarkStopped(Exception):
+        pass
+
+    def stop_after_observing_grad_mode(_cfg: exp.TrainConfig) -> None:
+        grad_modes.append(torch.is_grad_enabled())
+        raise BenchmarkStopped
+
+    monkeypatch.setattr(exp, "validate_config", stop_after_observing_grad_mode)
+
+    with torch.enable_grad(), pytest.raises(BenchmarkStopped):
+        exp.run_benchmark(_cfg(), iterations=1)
+
+    assert grad_modes == [False]
 
 
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
