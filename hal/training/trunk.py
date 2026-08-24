@@ -385,7 +385,8 @@ class Trunk(nn.Module):
             return block_mask(ctx_pad, L, self.attn_window)
         return dense_mask(ctx_pad, L, self.attn_window)
 
-    def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:
+    @staticmethod
+    def _check_shape(x: Tensor, ctx_pad: Tensor) -> None:
         # The one runtime shape check on the trunk's input path, at the per-STEP boundary. A ctx_pad
         # of the wrong length does not raise further down, it BROADCASTS — one sample's cold-start
         # prefix silently masks every sample. 0.3 us, and dynamo traces it, which a jaxtyped wrapper
@@ -394,7 +395,25 @@ class Trunk(nn.Module):
             raise ValueError(
                 f"trunk takes x [B, L, d_model] and ctx_pad [B]; got {tuple(x.shape)}, {tuple(ctx_pad.shape)}"
             )
-        mask = self._mask(ctx_pad, x.size(1))
+
+    def _forward_with_mask(
+        self,
+        x: Float[Tensor, "B L d_model"],
+        ctx_pad: Int[Tensor, " B"],
+        mask: AttnMask | None,
+    ) -> Float[Tensor, "B L d_model"]:
         for block in self.blocks:
             x = block(x, mask, ctx_pad)
         return rmsnorm(x)
+
+    def forward_dense(
+        self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]
+    ) -> Float[Tensor, "B L d_model"]:
+        """Run the dense-SDPA correctness path without resolving FlexAttention."""
+        self._check_shape(x, ctx_pad)
+        return self._forward_with_mask(x, ctx_pad, dense_mask(ctx_pad, x.size(1), self.attn_window))
+
+    def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:
+        self._check_shape(x, ctx_pad)
+        mask = self._mask(ctx_pad, x.size(1))
+        return self._forward_with_mask(x, ctx_pad, mask)

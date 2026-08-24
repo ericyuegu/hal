@@ -965,6 +965,15 @@ class GPT(nn.Module):
     def forward(self, features: dict[str, Tensor], ctx_pad: Tensor, action_indices: Tensor | None = None) -> Tensor:
         return self.trunk(self.context_tokens(features, action_indices), ctx_pad)
 
+    def forward_dense(
+        self,
+        features: dict[str, Tensor],
+        ctx_pad: Tensor,
+        action_indices: Tensor | None = None,
+    ) -> Tensor:
+        """Run the shared model weights through the dense inference trunk."""
+        return self.trunk.forward_dense(self.context_tokens(features, action_indices), ctx_pad)
+
 
 def prepared_targets(model: GPT, batch: TrainBatch | AWRBatch) -> tuple[Tensor, Tensor, Tensor]:
     """Quantize history+future exactly once, then align every selected offset."""
@@ -1493,6 +1502,7 @@ class BF16Inference:
         requested = cfg.inference_mode == "compiled" if compiled is None else compiled
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
         self.compile_mode = compile_mode
+        self.attention_backend = "dense_sdpa" if self.compiled else "model_default"
         self.compile_seconds = 0.0
         self._warmed: set[tuple[int, int]] = set()
         self._trunks: dict[int, Callable] = {}
@@ -1517,9 +1527,10 @@ class BF16Inference:
 
     def _trunk(self, bucket: int) -> Callable:
         if bucket not in self._trunks:
+            forward = self.model.forward_dense if self.compiled else self.model.forward
 
             def fn(features, pad, actions):
-                return self.model(features, pad, actions)
+                return forward(features, pad, actions)
 
             self._trunks[bucket] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
         return self._trunks[bucket]
@@ -1545,7 +1556,7 @@ class BF16Inference:
             return 0.0
         device = next(self.model.parameters()).device
         started = time.perf_counter()
-        context = synthetic_context(self.cfg, bucket, device)
+        context = synthetic_context(self.cfg, rows, device)
         self.decode(context, horizon)
         self.decode(context, horizon)
         torch.cuda.synchronize(device)
@@ -1681,6 +1692,7 @@ class EvalProtocol:
     dtype: str
     inference_mode: str
     inference_compile_mode: str
+    inference_attention_backend: str
     compiled_inference_bucket: int
     checkpoint_sha256: str
     bootstrap_resamples: int = BOOTSTRAP_RESAMPLES
@@ -1712,6 +1724,7 @@ def _eval_protocol(
     exec_horizon: int,
     checkpoint_sha256: str,
     inference_compile_mode: str = "reduce-overhead",
+    inference_attention_backend: str = "dense_sdpa",
 ) -> EvalProtocol:
     pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
     return EvalProtocol(
@@ -1732,6 +1745,7 @@ def _eval_protocol(
         dtype=str(next(model.parameters()).dtype),
         inference_mode=cfg.inference_mode,
         inference_compile_mode=inference_compile_mode,
+        inference_attention_backend=inference_attention_backend,
         compiled_inference_bucket=_eval_inference_bucket(cfg, n_matchups),
         checkpoint_sha256=checkpoint_sha256,
     )
@@ -1777,6 +1791,7 @@ def eval_vs_cpu(
         exec_horizon=horizon,
         checkpoint_sha256=checkpoint_sha256,
         inference_compile_mode=inference.compile_mode,
+        inference_attention_backend=inference.attention_backend,
     )
     if next(model.parameters()).device.type == "cuda" and (
         protocol.inference_mode != "compiled" or not inference.compiled
@@ -2636,13 +2651,29 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
     eager = BF16Inference(model, replace(cfg, inference_mode="eager"), compiled=False)
     compiled = BF16Inference(model, cfg)
 
-    def measure(engine: BF16Inference, rows: int, horizon: int) -> float:
-        selected = Context(
+    def selected_context(rows: int) -> Context:
+        return Context(
             features={name: value[:rows] for name, value in ctx.features.items()},
             ctx_pad=ctx.ctx_pad[:rows],
             slot_ids=ctx.slot_ids[:rows] if ctx.slot_ids is not None else None,
             reset=ctx.reset[:rows] if ctx.reset is not None else None,
         )
+
+    def trunk_parity(rows: int) -> float:
+        selected = selected_context(rows)
+        bucket = compiled._bucket(rows)
+        padded = canonical_context(_pad_context(selected, bucket), cfg.observation_bundle)
+        observed = model.codec.quantize(stack_actions(padded.features))
+        with amp_context(cfg, device):
+            reference = model.forward_dense(padded.features, padded.ctx_pad, observed)
+            actual = compiled._trunk(bucket)(padded.features, padded.ctx_pad, observed)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        torch.testing.assert_close(actual, reference, rtol=2e-2, atol=2e-2)
+        return float((actual - reference).abs().max())
+
+    def measure(engine: BF16Inference, rows: int, horizon: int) -> float:
+        selected = selected_context(rows)
         for _ in range(2):
             engine.decode(selected, horizon)
         if device.type == "cuda":
@@ -2655,13 +2686,18 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
         return (time.perf_counter() - started) / iterations
 
     out: dict[str, float] = {}
-    for rows in (1, min(32, ctx.ctx_pad.shape[0])):
-        for horizon in (4, 6):
-            eager_s = measure(eager, rows, horizon)
-            compiled_s = measure(compiled, rows, horizon)
-            out[f"eager_b{rows}_s{horizon}_ms"] = eager_s * 1000
-            out[f"compiled_b{rows}_s{horizon}_ms"] = compiled_s * 1000
-            out[f"compiled_b{rows}_s{horizon}_executed_fps"] = rows * horizon / compiled_s
+    rows_to_check = tuple(sorted({1, min(4, ctx.ctx_pad.shape[0]), ctx.ctx_pad.shape[0]}))
+    for horizon in (4, 6):
+        out[f"compiled_b{compiled._bucket(1)}_s{horizon}_compile_s"] = compiled.prewarm(1, horizon)
+    with torch.compiler.set_stance("fail_on_recompile"):
+        for rows in rows_to_check:
+            out[f"compiled_dense_b{rows}_max_abs_error"] = trunk_parity(rows)
+            for horizon in (4, 6):
+                eager_s = measure(eager, rows, horizon)
+                compiled_s = measure(compiled, rows, horizon)
+                out[f"eager_b{rows}_s{horizon}_ms"] = eager_s * 1000
+                out[f"compiled_b{rows}_s{horizon}_ms"] = compiled_s * 1000
+                out[f"compiled_b{rows}_s{horizon}_executed_fps"] = rows * horizon / compiled_s
     print(json.dumps(out, indent=2, sort_keys=True), flush=True)
     return out
 

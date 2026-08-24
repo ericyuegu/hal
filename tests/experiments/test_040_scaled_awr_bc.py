@@ -480,6 +480,52 @@ def test_eval_prewarms_before_starting_dolphin(monkeypatch: pytest.MonkeyPatch, 
     assert model.training
 
 
+def test_prewarm_uses_real_rows_before_bucket_padding(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(inference_mode="compiled")
+    engine = exp.BF16Inference(exp.GPT(cfg), cfg, compiled=False, compiled_buckets=(8,))
+    engine.compiled = True
+    seen_rows: list[int] = []
+
+    def decode(context: Context, horizon: int) -> None:
+        del horizon
+        seen_rows.append(context.ctx_pad.shape[0])
+
+    monkeypatch.setattr(engine, "decode", decode)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device: None)
+
+    engine.prewarm(3, 4)
+
+    assert seen_rows == [3, 3]
+    assert engine._warmed == {(8, 4)}
+
+
+def test_compiled_inference_routes_the_trunk_through_dense_sdpa(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(inference_mode="compiled")
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False, compiled_buckets=(2,))
+    engine.compiled = True
+    calls: list[str] = []
+    dense_forward = model.forward_dense
+
+    def record_dense(features, pad, actions):
+        calls.append("dense")
+        return dense_forward(features, pad, actions)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("compiled inference reached the model-default attention path")
+
+    monkeypatch.setattr(model, "forward_dense", record_dense)
+    monkeypatch.setattr(model, "forward", forbidden)
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    observed = model.codec.quantize(exp.stack_actions(context.features))
+
+    output = engine._trunk(2)(context.features, context.ctx_pad, observed)
+
+    assert output.shape == (2, cfg.L_ctx, cfg.d_model)
+    assert calls == ["dense"]
+
+
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = _cfg(
         wandb_hist_every=0,
