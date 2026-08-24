@@ -241,8 +241,8 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
             events.append(("workdir", path))
             return self
 
-        def run_commands(self, command: str) -> FakeImage:
-            events.append(("run", command))
+        def run_commands(self, command: str, *, secrets: list[object] | None = None) -> FakeImage:
+            events.append(("run", command, secrets))
             return self
 
     fake = FakeImage()
@@ -251,15 +251,19 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
     monkeypatch.setattr(_MODULE.modal.FilePatternMatcher, "from_file", lambda _path: ignore)
 
     notebook = _MODULE.ROOT / "notebooks" / "040_awr_constants.py"
-    assert _MODULE._image("example/image:tag", ("uv", "run", str(notebook.relative_to(_MODULE.ROOT)))) is fake
-    dependency_run = events.index(("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project"))
+    secret = object()
+    assert _MODULE._image("example/image:tag", ("uv", "run", str(notebook.relative_to(_MODULE.ROOT))), secret) is fake
+    dependency_run = events.index(
+        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project", None)
+    )
     source_copy = next(index for index, event in enumerate(events) if event[0] == "dir")
     notebook_copy = events.index(
         ("file", notebook, str(_MODULE.REMOTE_ROOT / notebook.relative_to(_MODULE.ROOT)), True)
     )
     project_run = events.index(
-        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
+        ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation", None)
     )
+    fixture_run = events.index(("run", "uv run fetch", [secret]))
 
     assert events[:4] == [
         ("base", "example/image:tag"),
@@ -267,7 +271,7 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
         ("file", _MODULE.ROOT / "uv.lock", str(_MODULE.REMOTE_ROOT / "uv.lock"), True),
         ("workdir", str(_MODULE.REMOTE_ROOT)),
     ]
-    assert dependency_run < source_copy < notebook_copy < project_run
+    assert dependency_run < source_copy < notebook_copy < project_run < fixture_run
 
 
 def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

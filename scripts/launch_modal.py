@@ -9,8 +9,9 @@ attempt can add ``--resume <run>`` after the checkpoint reaches R2.
     uv run scripts/launch_modal.py --wait -- uv run experiments/028_onehot_controller.py
 
 The default ``hal`` Modal Secret must contain the R2 ``AWS_*`` variables and
-``WANDB_API_KEY``. The dataset and compile caches use ephemeral SSD; only the
-small retry state file survives between attempts.
+``WANDB_API_KEY``. Immutable integration fixtures are fetched into a cached
+image layer during the build; dataset shards and compile caches use ephemeral
+SSD. Only the small retry state file survives between attempts.
 """
 
 import json
@@ -613,7 +614,11 @@ def _ignored_python_commands(
     return tuple(selected.items())
 
 
-def _image(tag: str, argv: list[str] | tuple[str, ...]) -> modal.Image:
+def _image(
+    tag: str,
+    argv: list[str] | tuple[str, ...],
+    secret: modal.Secret,
+) -> modal.Image:
     ignore = modal.FilePatternMatcher.from_file(ROOT / ".dockerignore")
     dependency_image = (
         modal.Image.from_registry(tag)
@@ -630,8 +635,14 @@ def _image(tag: str, argv: list[str] | tuple[str, ...]) -> modal.Image:
         source_image = source_image.add_local_file(source, str(REMOTE_ROOT / relative), copy=True)
     # Dependencies are complete in the parent layer. Install only the local
     # project offline so ordinary source commits do not invalidate or rerun
-    # the expensive dependency layer.
-    return source_image.run_commands(f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation")
+    # the expensive dependency layer. Fixture credentials exist only while
+    # the final build command runs; Modal does not persist secret environment
+    # variables into the image. The verified fixture files themselves become
+    # a reusable layer, so GPU containers only hash-check them at startup.
+    project_image = source_image.run_commands(
+        f"UV_INDEX_URL={PYPI_INDEX} uv sync --locked --offline --no-build-isolation"
+    )
+    return project_image.run_commands("uv run fetch", secrets=[secret])
 
 
 def _app_name(args: Args, sha: str) -> str:
@@ -669,7 +680,7 @@ def main(args: Args) -> None:
     state_volume = modal.Volume.from_name(args.state_volume, create_if_missing=True)
     app = modal.App(name=name, tags={"provider": "modal", "git_sha": sha, "launch_id": launch_id})
     function = app.function(
-        image=_image(args.image, args.cmd),
+        image=_image(args.image, args.cmd, secret),
         secrets=[secret],
         volumes={str(STATE_ROOT): state_volume},
         gpu=gpu_request(args.gpu),

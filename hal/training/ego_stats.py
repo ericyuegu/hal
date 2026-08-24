@@ -19,12 +19,15 @@ from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import load_sufficient_stats
 from hal.data.feature_stats import merge_sufficient
 
+# Compact policy datasets pack facing direction into the integer player state,
+# so it is intentionally absent from their float stats sidecar. Decoding
+# restores exactly {-1, 0, 1, NaN}; preprocessing min-max scales it and
+# therefore needs only these schema-defined bounds. Leaders and Nana
+# consolidate to separate keys because their missingness distributions differ.
+_DIRECTION_STATS = FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
 _SCHEMA_IMPLIED_STATS = {
-    # Compact policy datasets pack facing direction into the integer player
-    # state, so it is intentionally absent from their float stats sidecar.
-    # Decoding restores exactly {-1, 0, 1, NaN}; preprocessing min-max scales
-    # it and therefore needs only these schema-defined bounds.
-    "direction": FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0),
+    "direction": _DIRECTION_STATS,
+    "nana_direction": _DIRECTION_STATS,
 }
 
 

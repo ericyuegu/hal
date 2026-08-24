@@ -93,10 +93,11 @@ def test_consolidated_mixture_stats_use_source_proportions(tmp_path: Path) -> No
     assert stats.std == pytest.approx(2.5)
     assert stats.min == -1.0
     assert stats.max == 6.0
-    assert mixture["direction"].mean == 0.0
-    assert mixture["direction"].std == 1.0
-    assert mixture["direction"].min == -1.0
-    assert mixture["direction"].max == 1.0
+    for name in ("direction", "nana_direction"):
+        assert mixture[name].mean == 0.0
+        assert mixture[name].std == 1.0
+        assert mixture[name].min == -1.0
+        assert mixture[name].max == 1.0
 
 
 def test_consolidated_stats_add_packed_direction_bounds(tmp_path: Path) -> None:
@@ -108,12 +109,13 @@ def test_consolidated_stats_add_packed_direction_bounds(tmp_path: Path) -> None:
         mds_schema_version=7,
     )
 
-    direction = load_consolidated_stats(stats_path)["direction"]
+    stats = load_consolidated_stats(stats_path)
 
-    assert direction.mean == 0.0
-    assert direction.std == 1.0
-    assert direction.min == -1.0
-    assert direction.max == 1.0
+    for name in ("direction", "nana_direction"):
+        assert stats[name].mean == 0.0
+        assert stats[name].std == 1.0
+        assert stats[name].min == -1.0
+        assert stats[name].max == 1.0
 
 
 def test_consolidated_mixture_stats_check_every_schema(tmp_path: Path) -> None:
