@@ -39,7 +39,9 @@ from hal.training.ego_stats import consolidate_key
 from hal.wire import A_DIM
 from hal.wire import ACTION_CHANNELS
 from hal.wire import ACTION_DIM as _ACTION_DIM
+from hal.wire import ITEM_SLOTS
 from hal.wire import VELOCITY_COMPONENTS
+from hal.wire import item_column
 from hal.wire import mask_value
 
 # Continuous gamestate features (normalized via FeatureStats). Sticks, triggers,
@@ -132,6 +134,45 @@ V6_PLAYER_COLUMNS: Final[ExtraColumns] = ExtraColumns(
     },
 )
 
+ITEM_COLUMNS: Final[ExtraColumns] = ExtraColumns(
+    floats={
+        # Item position and velocity, in the same raw game units as the player
+        # positions. Standardize: projectile speeds are heavy-tailed.
+        "pos_x": "standardize",
+        "pos_y": "standardize",
+        "vel_x": "standardize",
+        "vel_y": "standardize",
+    },
+    cats={
+        "type": (256, 16),
+        # Per-item engine state. Its meaning depends on the item type, so a model
+        # reads it together with ``type``.
+        "state": (256, 4),
+    },
+)
+"""Schema v6's GLOBAL projectile block, ``item{0..3}_*``.
+
+Slots are ordered by ascending spawn id, so a slot keeps its item until an OLDER
+item despawns.
+
+``owner`` is deliberately NOT routed. It holds a physical libmelee port (1..4),
+and the MDS does not record which ports p1/p2 occupy, so the column cannot be made
+ego-relative. It stays dropped until a schema v8 stores those ports.
+
+``type`` is the raw u16 item id: the ``melee.enums.ProjectileType`` values sit in
+[6, 210] and 255 means unknown, so a 256-row table covers the space.
+
+Suffix collisions (verified): ``pos_x``, ``pos_y``, ``vel_x``, ``vel_y`` and ``type``
+match item columns only. ``state`` also matches ``*_hurtbox_state``, which
+:func:`_classify` routes as "cat" through :data:`CAT_FEATURES` in the same clause —
+same kind, so no column is misrouted.
+"""
+
+ITEM_INPUT_COLUMNS: Final[frozenset[str]] = frozenset(
+    item_column(slot, suffix) for slot in range(ITEM_SLOTS) for suffix in (*ITEM_COLUMNS.floats, *ITEM_COLUMNS.cats)
+)
+"""The raw item columns a model reads: every slot crossed with every routed suffix."""
+
 _NO_EXTRA: Final[ExtraColumns] = ExtraColumns(floats={}, cats={})
 
 # Re-export the policy action wire. Training callers that imported these names
@@ -147,6 +188,12 @@ BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     ),
     derive_spatial=False,
 )
+
+BASE_ITEMS_PROJECTION: Final[FeatureProjection] = FeatureProjection(
+    columns=BASE_ACTION_PROJECTION.columns | ITEM_INPUT_COLUMNS,
+    derive_spatial=False,
+)
+""":data:`BASE_ACTION_PROJECTION` plus the projectile block."""
 
 _BUTTON_ORDER = tuple(channel.removeprefix("button_") for channel in ACTION_CHANNELS[6:])
 

@@ -26,9 +26,12 @@ from hal.training.features import ACTION_CHANNELS
 from hal.training.features import BASE_PLAYER_PREFIXES
 from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
+from hal.training.features import ITEM_COLUMNS
 from hal.training.features import SPATIAL_COLUMNS_LEAN
 from hal.training.features import V6_PLAYER_COLUMNS
 from hal.training.features import Context
+from hal.wire import ITEM_SLOTS
+from hal.wire import item_column
 
 
 @dataclass
@@ -95,6 +98,14 @@ def synthetic_context(cfg: Any, batch_size: int, device: torch.device) -> Contex
     if cfg.observation_bundle == "v6_lean":
         for name in SPATIAL_COLUMNS_LEAN:
             features[name] = torch.zeros(batch_size, cfg.L_ctx, device=device)
+    if getattr(cfg, "item_conditioning", False):
+        for slot in range(ITEM_SLOTS):
+            for name in ITEM_COLUMNS.cats:
+                features[item_column(slot, name)] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
+            for name in ITEM_COLUMNS.floats:
+                column = item_column(slot, name)
+                features[column] = torch.zeros(batch_size, cfg.L_ctx, device=device)
+                features[f"{column}_mask"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
     return Context(
         features=features,
         ctx_pad=torch.zeros(batch_size, dtype=torch.long, device=device),
@@ -103,12 +114,15 @@ def synthetic_context(cfg: Any, batch_size: int, device: torch.device) -> Contex
     )
 
 
-def canonical_context(ctx: Context, observation_bundle: str) -> Context:
+def canonical_context(ctx: Context, observation_bundle: str, *, items: bool = False) -> Context:
     """Match every live decode's feature keys to the synthetic prewarm context.
 
     Missing mask sidecars mean zero, but Dynamo guards on dictionary membership and
     key order. Filling and sorting them prevents a live decode from compiling a
     second, untested program after prewarm.
+
+    ``items`` extends the same fill to the projectile block's float sidecars, for the
+    model that conditions on it.
     """
     floats = FLOAT_FEATURES
     if observation_bundle != "base":
@@ -119,6 +133,12 @@ def canonical_context(ctx: Context, observation_bundle: str) -> Context:
             key = f"{prefix}_{name}_mask"
             if key not in features:
                 features[key] = torch.zeros_like(features[f"{prefix}_{name}"])
+    if items:
+        for slot in range(ITEM_SLOTS):
+            for name in ITEM_COLUMNS.floats:
+                column = item_column(slot, name)
+                if f"{column}_mask" not in features:
+                    features[f"{column}_mask"] = torch.zeros_like(features[column])
     return replace(ctx, features={name: features[name] for name in sorted(features)})
 
 

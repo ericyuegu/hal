@@ -9,6 +9,9 @@ import pytest
 import torch
 
 from hal.eval import self_play
+from hal.training.features import ITEM_COLUMNS
+from hal.wire import ITEM_SLOTS
+from hal.wire import item_column
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,11 @@ class _Config:
     eval_seed: int = 17
     observation_bundle: str = "base"
     L_ctx: int = 4
+
+
+@dataclass(frozen=True)
+class _ItemConfig(_Config):
+    item_conditioning: bool = True
 
 
 class _Inference:
@@ -207,3 +215,27 @@ def test_canonical_context_matches_prewarm_feature_keys() -> None:
     assert list(actual.features) == list(expected.features)
     for name in dropped:
         assert torch.equal(actual.features[name], torch.zeros_like(expected.features[name]))
+
+
+def test_item_conditioning_carries_the_projectile_block() -> None:
+    """A config that opts in gets every item slot, with the float mask sidecars the
+    live decode can omit. A config that does not stays byte-identical."""
+    cfg = _ItemConfig()
+    context = self_play.synthetic_context(cfg, 2, torch.device("cpu"))
+
+    base = self_play.synthetic_context(_Config(), 2, torch.device("cpu"))
+    assert [name for name in base.features if name.startswith("item")] == []
+    for slot in range(ITEM_SLOTS):
+        for name in ITEM_COLUMNS.cats:
+            assert context.features[item_column(slot, name)].dtype == torch.long
+        for name in ITEM_COLUMNS.floats:
+            column = item_column(slot, name)
+            assert context.features[column].shape == (2, cfg.L_ctx)
+            assert context.features[f"{column}_mask"].shape == (2, cfg.L_ctx)
+
+    absent = f"{item_column(0, next(iter(ITEM_COLUMNS.floats)))}_mask"
+    live = replace(context, features={k: v for k, v in context.features.items() if k != absent})
+    assert absent not in self_play.canonical_context(live, cfg.observation_bundle).features
+    filled = self_play.canonical_context(live, cfg.observation_bundle, items=True)
+    assert list(filled.features) == sorted(context.features)
+    assert torch.equal(filled.features[absent], torch.zeros_like(context.features[absent]))
