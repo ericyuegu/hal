@@ -119,6 +119,7 @@ _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
 _TRAIN_METRICS_EVERY = 10
 _TRAIN_COMPILE_MODE = "reduce-overhead"
+_TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
         "cache_limit_gb",
@@ -1011,6 +1012,7 @@ class GPT(nn.Module):
                 n_heads=cfg.arch.n_heads,
                 L_ctx=cfg.arch.L_ctx,
                 attn_window=cfg.arch.attn_window,
+                attention_backend=_TRUNK_ATTENTION_BACKEND,
             )
         )
         self.temporal = CausalTemporalDecoder(cfg, self.codec)
@@ -2512,9 +2514,9 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.
         model.trunk.resolve_attention(DEVICE)
-        if model.trunk.attn_path != "flex":
+        if model.trunk.attn_path not in ("flex", "varlen_flash"):
             raise RuntimeError(
-                f"compiled CUDA training requires FlexAttention, resolved {model.trunk.attn_path!r} instead"
+                f"compiled CUDA training requires a fused attention path, resolved {model.trunk.attn_path!r} instead"
             )
         trunk_fn = torch.compile(
             trunk_fn,

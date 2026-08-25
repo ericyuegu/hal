@@ -183,6 +183,9 @@ def test_synthetic_train_step_benchmark_batch_has_frozen_geometry() -> None:
 
 def test_training_compile_mode_prefers_cuda_graph_replay() -> None:
     assert exp._TRAIN_COMPILE_MODE == "reduce-overhead"
+    assert exp._TRUNK_ATTENTION_BACKEND == "varlen_flash"
+    model = exp.GPT(_cfg())
+    assert model.trunk.attention_backend == "varlen_flash"
 
 
 def test_short_causal_attention_matches_sdpa() -> None:
