@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from hal.data.policy_schema import pack_player_state
 from hal.training import returns
 from hal.wire import MASK_INT32
 
@@ -19,6 +20,29 @@ def _sample() -> dict:
         "p2_stock": _P2_STOCK.copy(),
         "p1_percent": _P1_PERCENT.copy(),
         "p2_percent": _P2_PERCENT.copy(),
+    }
+
+
+def _compact_sample() -> dict[str, object]:
+    def packed_state(stock: np.ndarray) -> np.ndarray:
+        zeros = np.zeros(stock.shape, dtype=np.int32)
+        return pack_player_state(
+            {
+                "action": zeros,
+                "stock": stock,
+                "jumps_used": zeros,
+                "hurtbox_state": zeros,
+                "airborne": zeros,
+                "direction": np.zeros(stock.shape, dtype=np.float32),
+            }
+        )
+
+    return {
+        "num_frames": np.int64(len(_P1_STOCK)),
+        "p1_percent": _P1_PERCENT.copy(),
+        "p2_percent": _P2_PERCENT.copy(),
+        "p1_state": packed_state(_P1_STOCK),
+        "p2_state": packed_state(_P2_STOCK),
     }
 
 
@@ -108,6 +132,53 @@ def test_label_replay_keeps_every_source_column_and_adds_four() -> None:
     }
     for name, value in sample.items():
         assert labeled[name] is value
+
+
+def test_compact_policy_returns_match_decoded_replay_exactly() -> None:
+    kwargs = {
+        "gamma": 0.99618,
+        "damage_shaping": 1.0,
+        "win_reward": 50.0,
+        "stock_value": 120.0,
+        "suffix": "awr_return",
+    }
+
+    expected = returns.replay_returns(_sample(), **kwargs)
+    actual = returns.compact_policy_returns(_compact_sample(), **kwargs)
+
+    assert actual.keys() == expected.keys()
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+
+def test_compact_policy_returns_preserve_truncation_mask() -> None:
+    compact = _compact_sample()
+    p2_stock = np.array([2, 2, 2, 1, 1, 1])
+    zeros = np.zeros(p2_stock.shape, dtype=np.int32)
+    compact["p2_state"] = pack_player_state(
+        {
+            "action": zeros,
+            "stock": p2_stock,
+            "jumps_used": zeros,
+            "hurtbox_state": zeros,
+            "airborne": zeros,
+            "direction": np.zeros(p2_stock.shape, dtype=np.float32),
+        }
+    )
+
+    actual = returns.compact_policy_returns(
+        compact,
+        gamma=0.9,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+        suffix="awr_return",
+    )
+
+    assert np.isnan(actual["p1_awr_return"]).all()
+    assert np.isnan(actual["p2_awr_return"]).all()
+    assert not actual["p1_awr_return_valid"].any()
+    assert not actual["p2_awr_return_valid"].any()
 
 
 def test_lfilter_matches_a_naive_float64_reverse_scan() -> None:

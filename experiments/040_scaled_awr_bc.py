@@ -809,8 +809,8 @@ class CausalTemporalDecoder(nn.Module):
         logits["buttons"] = logits["buttons"].masked_fill(self.codec.button_mask(targets[..., TRIG_G]), float("-inf"))
         return logits
 
-    def teacher_forced_nll(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> Tensor:
-        logits = self.teacher_forced_logits_by_group(hidden, observed, targets)
+    @staticmethod
+    def nll_from_logits(logits: dict[str, Tensor], targets: Tensor) -> Tensor:
         losses = [
             F.cross_entropy(
                 logits[name].float().reshape(-1, GROUP_VOCABS[group]),
@@ -820,6 +820,10 @@ class CausalTemporalDecoder(nn.Module):
             for group, name in enumerate(GROUP_NAMES)
         ]
         return torch.stack(losses, dim=-1)
+
+    def teacher_forced_nll(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> Tensor:
+        logits = self.teacher_forced_logits_by_group(hidden, observed, targets)
+        return self.nll_from_logits(logits, targets)
 
     def teacher_forced_logits(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> list[dict[str, Tensor]]:
         values = self.teacher_forced_logits_by_group(hidden, observed, targets)
@@ -1476,7 +1480,7 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
             with amp_context(cfg, device):
                 hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
                 logits = model.temporal.teacher_forced_logits_by_group(hidden, history, targets)
-                dense_nll = model.temporal.teacher_forced_nll(hidden, history, targets)
+                dense_nll = model.temporal.nll_from_logits(logits, targets)
             row_valid = batch.context.ctx_pad < cfg.L_ctx
             if not bool(row_valid.any()):
                 continue
@@ -2437,8 +2441,8 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
     projection = common["projection"]
     if projection is not None:
         common["projection"] = replace(projection, columns=projection.columns | {EGO_RETURN, EGO_RETURN_VALID})
-    label_replay = functools.partial(
-        returns_lib.label_replay,
+    replay_labels = functools.partial(
+        returns_lib.compact_policy_returns,
         gamma=cfg.awr_gamma,
         damage_shaping=cfg.awr_damage_shaping,
         win_reward=cfg.awr_win_reward,
@@ -2455,7 +2459,7 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         reservoir_capacity=cfg.reservoir_capacity,
         prefetch_batches=batch_prefetch,
         replay_format="policy-world",
-        replay_transform=label_replay,
+        replay_labels=replay_labels,
         batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.L_ctx),
         **common,
     )
@@ -2470,13 +2474,15 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
 
 
 def _loader_prefetch_depths(cfg: TrainConfig) -> tuple[int, int]:
-    """Derive both internal queue depths from one sample-count budget."""
-    batch_prefetch = math.ceil(cfg.prefetch_samples / cfg.batch_size)
+    """Split one sample budget across worker and ready-batch queues."""
+    total_batches = math.ceil(cfg.prefetch_samples / cfg.batch_size)
     if cfg.num_workers == 0:
-        return 1, batch_prefetch
-    windows_per_worker_item = cfg.windows_per_replay
-    worker_prefetch = math.ceil(cfg.prefetch_samples / (cfg.num_workers * windows_per_worker_item))
-    return max(1, worker_prefetch), batch_prefetch
+        return 1, total_batches
+
+    # Keep one batch-equivalent of decoded windows flowing out of the workers;
+    # spend the rest of the budget on fully collated batches nearest the GPU.
+    worker_prefetch = math.ceil(cfg.batch_size / (cfg.num_workers * cfg.windows_per_replay))
+    return max(1, worker_prefetch), max(0, total_batches - 1)
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
@@ -2588,6 +2594,14 @@ def _download_step_metrics(
     return gradient_norm_value, nll_values_by_offset, step_metric_values
 
 
+def _prefix_metrics(namespace: str, metrics: dict[str, float]) -> dict[str, float]:
+    return {f"{namespace}/{name}": value for name, value in metrics.items()}
+
+
+def _log_metrics(update: int, metrics: dict[str, float | int]) -> None:
+    wandb.log({"global_step": update, **metrics})
+
+
 def _finalize_training(
     *,
     model: GPT,
@@ -2625,8 +2639,7 @@ def _finalize_training(
         uploader.upload(snapshot, key=final_path.name)
 
     checkpoint_sha = _checkpoint_sha256(final_path)
-    final_val = val_metrics(model, val_cache, cfg)
-    wandb.log({"global_step": update, **{f"val/{name}": value for name, value in final_val.items()}})
+    final_metrics = _prefix_metrics("val", val_metrics(model, val_cache, cfg))
     final_matchups = smoke_eval_matchups if smoke else cfg.final_eval_n_matchups
     if final_matchups:
         if eval_inference is None:
@@ -2642,7 +2655,8 @@ def _finalize_training(
         )
         if not smoke:
             require_complete_eval(final_eval, cfg.final_eval_n_matchups)
-        wandb.log({"global_step": update, **{f"eval/{name}": value for name, value in final_eval.items()}})
+        final_metrics.update(_prefix_metrics("eval", final_eval))
+    _log_metrics(update, final_metrics)
 
     mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
     p95_wait = float(np.percentile(loader_wait_fractions, 95)) if loader_wait_fractions else 0.0
@@ -2796,8 +2810,7 @@ def train(
             phase_metrics = {} if phase_timer is None else phase_timer.metrics()
             loader_wait_fractions.append(loader_wait / max(loader_wait + step_s, 1e-12))
             log_started = time.monotonic()
-            log = {
-                "global_step": update,
+            log: dict[str, float | int] = {
                 "samples": update * cfg.batch_size,
                 "data/actual_loss_positions": actual_positions,
                 "data/actual_loss_positions_this_update": valid_prefixes,
@@ -2806,7 +2819,6 @@ def train(
                 "throughput/step_s": step_s,
                 "throughput/loader_wait_s": loader_wait,
                 "throughput/samples_per_s": cfg.batch_size / step_s,
-                "throughput/samples_per_wall_s": cfg.batch_size / (step_s + loader_wait),
                 "throughput/prefixes_per_s": valid_prefixes / step_s,
                 "throughput/metrics_d2h_s": metrics_d2h_s,
                 "lr/muon": muon_lr,
@@ -2816,12 +2828,12 @@ def train(
                 **phase_metrics,
             }
             if previous_loop_s is not None:
-                log["throughput/previous_loop_s"] = previous_loop_s
-                log["throughput/previous_samples_per_true_wall_s"] = cfg.batch_size / previous_loop_s
+                log["throughput/loop_s"] = previous_loop_s
+                log["throughput/samples_per_wall_s"] = cfg.batch_size / previous_loop_s
             if previous_wandb_log_s is not None:
-                log["throughput/previous_wandb_log_s"] = previous_wandb_log_s
+                log["throughput/wandb_log_s"] = previous_wandb_log_s
             if previous_checkpoint_s is not None:
-                log["throughput/previous_checkpoint_save_s"] = previous_checkpoint_s
+                log["throughput/checkpoint_save_s"] = previous_checkpoint_s
                 previous_checkpoint_s = None
             if cfg.system_metrics_every > 0 and (update == 1 or update % cfg.system_metrics_every == 0):
                 log.update(host_metrics.snapshot())
@@ -2829,9 +2841,8 @@ def train(
                 log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
                 log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             log["throughput/log_build_s"] = time.monotonic() - log_started
-            log["throughput/pre_wandb_loop_s"] = time.monotonic() - update_started
             wandb_started = time.monotonic()
-            wandb.log(log)
+            _log_metrics(update, log)
             previous_wandb_log_s = time.monotonic() - wandb_started
             if update <= 10 or update % 50 == 0:
                 print(
@@ -2859,9 +2870,10 @@ def train(
                     actual_loss_positions=actual_positions,
                 )
                 previous_checkpoint_s = time.monotonic() - checkpoint_started
+            boundary_metrics: dict[str, float] = {}
             if val_due:
                 values = val_metrics(model, val_cache, cfg)
-                wandb.log({"global_step": update, **{f"val/{name}": value for name, value in values.items()}})
+                boundary_metrics.update(_prefix_metrics("val", values))
             if eval_due:
                 assert checkpoint_path is not None
                 if eval_inference is None:
@@ -2880,7 +2892,9 @@ def train(
                     int(values.get(name, 0.0)) != expected for name in ("scheduled_boots", "completed_boots", "boots")
                 ):
                     print(f"[eval] warning: update {update} evaluation was incomplete: {values}", flush=True)
-                wandb.log({"global_step": update, **{f"eval/{name}": value for name, value in values.items()}})
+                boundary_metrics.update(_prefix_metrics("eval", values))
+            if boundary_metrics:
+                _log_metrics(update, boundary_metrics)
         _finalize_training(
             model=model,
             optimizer=optimizer,

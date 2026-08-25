@@ -197,6 +197,96 @@ def test_compact_replay_transform_sees_full_episode_before_windowing(monkeypatch
     np.testing.assert_array_equal(window["ego_label"][pad:], window["frame"][pad:] + 100)
 
 
+def test_compact_replay_labels_are_computed_once_then_sliced(monkeypatch) -> None:
+    frames = 20
+    compact = {"replay_id": "r", "source_schema_version": 7, "num_frames": frames}
+
+    def decode_slices(row, ranges):
+        del row
+        return tuple(
+            {
+                "schema_version": 7,
+                "frame": np.arange(start, stop, dtype=np.int32),
+                "p1_value": np.arange(start, stop, dtype=np.float32),
+                "p2_value": -np.arange(start, stop, dtype=np.float32),
+            }
+            for start, stop in ranges
+        )
+
+    monkeypatch.setattr(replay_reservoir, "decode_policy_replay_slices", decode_slices)
+    calls = 0
+
+    def replay_labels(row):
+        nonlocal calls
+        assert row is compact
+        calls += 1
+        values = np.arange(frames, dtype=np.float32) + 100
+        return {"p1_label": values, "p2_label": values}
+
+    packs = list(
+        PolicyReplayPackDataset(
+            [compact],
+            L_ctx=3,
+            L_chunk=2,
+            seed=4,
+            windows_per_replay=2,
+            schema_version=7,
+            projection=None,
+            replay_labels=replay_labels,
+        )
+    )
+
+    assert calls == 1
+    assert len(packs) == 1
+    for window in packs[0].windows:
+        pad = int(window["ctx_pad"])
+        np.testing.assert_array_equal(window["ego_label"][pad:], window["frame"][pad:] + 100)
+
+
+def test_replay_labels_reject_transform_and_wrong_length(monkeypatch) -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        PolicyReplayPackDataset(
+            [],
+            L_ctx=3,
+            L_chunk=2,
+            seed=0,
+            windows_per_replay=1,
+            schema_version=7,
+            projection=None,
+            replay_transform=lambda replay: replay,
+            replay_labels=lambda replay: {},
+        )
+
+    frames = 12
+    compact = {"replay_id": "r", "source_schema_version": 7, "num_frames": frames}
+    monkeypatch.setattr(
+        replay_reservoir,
+        "decode_policy_replay_slices",
+        lambda row, ranges: tuple(
+            {
+                "schema_version": 7,
+                "frame": np.arange(start, stop, dtype=np.int32),
+                "p1_value": np.arange(start, stop, dtype=np.float32),
+                "p2_value": -np.arange(start, stop, dtype=np.float32),
+            }
+            for start, stop in ranges
+        ),
+    )
+    packs = PolicyReplayPackDataset(
+        [compact],
+        L_ctx=3,
+        L_chunk=2,
+        seed=0,
+        windows_per_replay=1,
+        schema_version=7,
+        projection=None,
+        replay_labels=lambda replay: {"p1_label": np.zeros(frames - 1)},
+    )
+
+    with pytest.raises(ValueError, match="invalid shapes"):
+        list(packs)
+
+
 def test_prefetch_preserves_order_at_requested_depth() -> None:
     prepared = Event()
 

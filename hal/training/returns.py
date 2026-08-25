@@ -9,9 +9,12 @@ The formulas were first written and tested inside experiments 020 and 031. This
 module is their single home; experiments import it instead of copying it.
 """
 
+from collections.abc import Mapping
+
 import numpy as np
 from scipy.signal import lfilter
 
+from hal.data.policy_schema import unpack_player_state
 from hal.wire import MASK_INT32
 
 
@@ -174,3 +177,35 @@ def label_replay(
             terminated=terminated,
         ),
     }
+
+
+def compact_policy_returns(
+    compact: Mapping[str, object],
+    *,
+    gamma: float,
+    damage_shaping: float,
+    win_reward: float,
+    stock_value: float = 1.0,
+    suffix: str,
+) -> dict[str, np.ndarray]:
+    """Compute exact return labels without decoding unrelated replay fields."""
+    frames = int(np.asarray(compact["num_frames"]).item())
+    sample: dict[str, np.ndarray] = {}
+    for port in ("p1", "p2"):
+        percent = np.asarray(compact[f"{port}_percent"], dtype=np.float32)
+        stock = unpack_player_state(np.asarray(compact[f"{port}_state"]))["stock"]
+        if percent.shape != (frames,) or stock.shape != (frames,):
+            raise ValueError(
+                f"compact {port} return fields must have shape {(frames,)}, "
+                f"got percent={percent.shape}, stock={stock.shape}"
+            )
+        sample[f"{port}_percent"] = percent
+        sample[f"{port}_stock"] = stock
+    return replay_returns(
+        sample,
+        gamma=gamma,
+        damage_shaping=damage_shaping,
+        win_reward=win_reward,
+        stock_value=stock_value,
+        suffix=suffix,
+    )

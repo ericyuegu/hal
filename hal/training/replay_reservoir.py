@@ -4,6 +4,7 @@ import hashlib
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import CancelledError
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +33,7 @@ from hal.training.features import TrainBatch
 
 type WindowTransform = Callable[[str, str, dict[str, np.ndarray]], None]
 type ReplayFilter = Callable[[str], bool]
+type ReplayLabels = Callable[[Mapping[str, object]], dict[str, np.ndarray]]
 
 
 def _next_item[T](source: Iterator[T]) -> T:
@@ -263,11 +265,14 @@ class PolicyReplayPackDataset(IterableDataset):
         projection: FeatureProjection | None,
         replay_format: ReplayFormat = "policy",
         replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        replay_labels: ReplayLabels | None = None,
         window_transform: WindowTransform | None = None,
         replay_filter: ReplayFilter | None = None,
     ) -> None:
         if replay_format not in ("policy", "policy-world"):
             raise ValueError(f"replay reservoir requires a compact format, got {replay_format!r}")
+        if replay_transform is not None and replay_labels is not None:
+            raise ValueError("replay_transform and replay_labels are mutually exclusive")
         self._dataset = dataset
         self._L_ctx = L_ctx
         self._L_chunk = L_chunk
@@ -280,6 +285,7 @@ class PolicyReplayPackDataset(IterableDataset):
             decode_policy_replay_slices if replay_format == "policy" else decode_policy_world_replay_slices
         )
         self._replay_transform = replay_transform
+        self._replay_labels = replay_labels
         self._window_transform = window_transform
         self._replay_filter = replay_filter
         self._epoch = 0
@@ -320,12 +326,24 @@ class PolicyReplayPackDataset(IterableDataset):
                 int(chunk_start) - self._L_ctx
                 for chunk_start in _choose_chunk_starts(frames, self._L_ctx, self._L_chunk, self._K, rng)
             ]
+            if not starts:
+                continue
             ego_prefixes = ["p1" if rng.random() < 0.5 else "p2" for _ in starts]
             ranges = tuple((max(0, start), start + self._L_ctx + self._L_chunk) for start in starts)
             windows = []
             if self._replay_transform is None:
                 samples = self._decode_slices(compact, ranges)
-                for start, ego_prefix, sample in zip(starts, ego_prefixes, samples, strict=True):
+                labels = (
+                    {}
+                    if self._replay_labels is None
+                    else {name: np.asarray(value) for name, value in self._replay_labels(compact).items()}
+                )
+                wrong_labels = {name: value.shape for name, value in labels.items() if value.shape != (frames,)}
+                if wrong_labels:
+                    raise ValueError(f"replay labels have invalid shapes {wrong_labels}; expected {(frames,)}")
+                for start, ego_prefix, frame_range, sample in zip(starts, ego_prefixes, ranges, samples, strict=True):
+                    range_start, range_stop = frame_range
+                    sample.update({name: value[range_start:range_stop] for name, value in labels.items()})
                     pad = max(0, -start)
                     window = _make_window(
                         sample,
@@ -507,6 +525,7 @@ def make_reservoir_loader(
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
     replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    replay_labels: ReplayLabels | None = None,
     window_transform: WindowTransform | None = None,
     batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
     replay_format: ReplayFormat = "policy",
@@ -545,6 +564,7 @@ def make_reservoir_loader(
         projection=projection,
         replay_format=replay_format,
         replay_transform=replay_transform,
+        replay_labels=replay_labels,
         window_transform=window_transform,
         replay_filter=replay_filter,
     )

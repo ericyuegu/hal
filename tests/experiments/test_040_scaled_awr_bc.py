@@ -62,6 +62,7 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "compile_trunk": False,
         "compile_temporal": False,
         "num_workers": 0,
+        "prefetch_samples": 16,
         "push_to_r2": False,
         "inference_mode": "eager",
         "awr_return_baseline": 10.0,
@@ -471,7 +472,7 @@ def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path:
         schema_version=7,
         projection=projection,
         replay_format="policy-world",
-        replay_transform=lambda replay: returns_lib.label_replay(
+        replay_labels=lambda replay: returns_lib.compact_policy_returns(
             replay,
             gamma=0.9,
             damage_shaping=1.0,
@@ -546,7 +547,11 @@ def test_production_loader_and_eval_defaults() -> None:
     assert cfg.windows_per_replay == 2
     assert cfg.num_workers == 32
     assert cfg.prefetch_samples == 8 * cfg.batch_size
-    assert exp._loader_prefetch_depths(cfg) == (128, 8)
+    worker_prefetch, batch_prefetch = exp._loader_prefetch_depths(cfg)
+    assert (worker_prefetch, batch_prefetch) == (16, 7)
+    queued_worker_samples = cfg.num_workers * worker_prefetch * cfg.windows_per_replay
+    queued_batch_samples = batch_prefetch * cfg.batch_size
+    assert queued_worker_samples + queued_batch_samples == cfg.prefetch_samples
     assert cfg.eval_every == 2**14
     assert cfg.eval_max_parallel == 48
     assert exp._eval_parallelism(cfg, 96) == 48
@@ -585,6 +590,20 @@ def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
     for name in layer_names:
         expected_ratio = activations[f"residual_branch_rms/{name}"] / activations[f"activation_rms/{name}"]
         assert activations[f"residual_ratio/{name}"] == pytest.approx(expected_ratio)
+
+
+def test_temporal_nll_from_existing_logits_matches_direct_path() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg)
+    batch = _awr_batch(cfg)
+    history, targets, _ = exp.prepared_targets(model, batch)
+    hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
+
+    logits = model.temporal.teacher_forced_logits_by_group(hidden, history, targets)
+    reused = model.temporal.nll_from_logits(logits, targets)
+    direct = model.temporal.teacher_forced_nll(hidden, history, targets)
+
+    torch.testing.assert_close(reused, direct)
 
 
 def test_eval_prewarms_before_starting_dolphin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
