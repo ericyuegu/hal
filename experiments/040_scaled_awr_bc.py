@@ -77,7 +77,6 @@ from hal.training.features import BASE_PLAYER_PREFIXES
 from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import ITEM_COLUMNS
-from hal.training.features import SPATIAL_MASKS
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
