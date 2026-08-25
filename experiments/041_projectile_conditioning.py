@@ -157,6 +157,7 @@ _PRODUCTION_TREATMENT_FIELDS = frozenset(
         "item_type_dim",
         "lr_floor_ratio",
         "mds_schema_version",
+        "muon_adjust_lr_fn",
         "muon_lr",
         "muon_weight_decay",
         "n_heads",
@@ -241,7 +242,7 @@ class TrainConfig:
     L_ctx: int = 128
 
     sample_chunk_length: int = 24
-    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20, 24)
+    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20, 24)
     n_near: int = 6
     temporal_d_model: int = 256
     temporal_layers: int = 4
@@ -279,12 +280,13 @@ class TrainConfig:
 
     seed: int = 0
     eval_seed: int = 0
-    batch_size: int = 512
+    batch_size: int = 1024
     target_loss_positions: int = _PRODUCTION_LOSS_POSITIONS
-    muon_lr: float = 0.028
-    muon_weight_decay: float = 0.1
+    muon_adjust_lr_fn: str = "match_rms_adamw"
+    muon_lr: float = 8.5e-4
+    muon_weight_decay: float = 0.0625
     adam_lr: float = 8.5e-4
-    adam_weight_decay: float = 0.0071
+    adam_weight_decay: float = 0.0625
     warmup_fraction: float = 0.03
     stable_fraction: float = 0.80
     lr_floor_ratio: float = 1 / 170
@@ -443,6 +445,8 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError(f"{name} must be finite and positive, got {value!r}")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
+    if cfg.muon_adjust_lr_fn not in ("original", "match_rms_adamw"):
+        raise ValueError("muon_adjust_lr_fn must be 'original' or 'match_rms_adamw'")
     if cfg.reservoir_capacity < 2 * cfg.batch_size:
         raise ValueError("reservoir_capacity must be at least twice the batch size")
     if not isinstance(cfg.num_workers, int) or isinstance(cfg.num_workers, bool) or not 0 <= cfg.num_workers <= 32:
@@ -2218,6 +2222,7 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
                 lr=cfg.muon_lr,
                 momentum=0.95,
                 weight_decay=cfg.muon_weight_decay,
+                adjust_lr_fn=cfg.muon_adjust_lr_fn,
                 use_muon=True,
             ),
             dict(params=decay, lr=cfg.adam_lr, weight_decay=cfg.adam_weight_decay, **adam),
@@ -2913,6 +2918,7 @@ def train(
                 muon_lr = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
                 adam_lr = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
                 optimizer.step()
+                step_metrics.update(optimizer.pre_lr_update_rms_metrics())
                 scheduler.step()
                 if phase_timer is not None:
                     phase_timer.record("optimizer_end")
