@@ -40,8 +40,7 @@ _ITEM_PREFIXES: Final[tuple[str, ...]] = tuple(f"item{slot}_" for slot in range(
 
 
 def consolidate_key(name: str) -> str:
-    """Strip ``p1_`` / ``p2_`` / ``ego_`` / ``opp_`` so symmetric features collapse,
-    and fold the four item slots onto one ``item_`` key."""
+    """Strip ``p1_`` / ``p2_`` / ``ego_`` / ``opp_`` and fold the four item slots onto one key."""
     for pre in ("p1_", "p2_", "ego_", "opp_"):
         if name.startswith(pre):
             return name[len(pre) :]
