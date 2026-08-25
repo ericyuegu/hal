@@ -1042,7 +1042,6 @@ class AWRBatch:
     batch: TrainBatch
     returns: Tensor  # [B, L_ctx] float32
     eligible: Tensor  # [B, L_ctx] bool
-    _packed: tuple[Tensor, ...] = dataclass_field(default=(), repr=False, compare=False)
 
     @property
     def context(self) -> Context:
@@ -1054,16 +1053,6 @@ class AWRBatch:
 
     def to(self, device: str | torch.device) -> AWRBatch:
         target_device = torch.device(device)
-        if target_device.type == "cuda" and self._packed:
-            device_storage = {
-                packed.untyped_storage().data_ptr(): packed.to(target_device, non_blocking=True)
-                for packed in self._packed
-            }
-            moved: list[Tensor] = []
-            for tensor in self._tensors():
-                packed = device_storage[tensor.untyped_storage().data_ptr()]
-                moved.append(packed.as_strided(tensor.shape, tensor.stride(), tensor.storage_offset()))
-            return self._replace_tensors(moved)
         return AWRBatch(
             batch=self.batch.to(target_device),
             returns=self.returns.to(target_device, non_blocking=True),
@@ -1071,59 +1060,17 @@ class AWRBatch:
         )
 
     def pin_memory(self) -> AWRBatch:
-        tensors = self._tensors()
-        indices_by_dtype: dict[torch.dtype, list[int]] = {}
-        for index, tensor in enumerate(tensors):
-            indices_by_dtype.setdefault(tensor.dtype, []).append(index)
-        packed_tensors: dict[int, Tensor] = {}
-        packed_storage: list[Tensor] = []
-        for indices in indices_by_dtype.values():
-            total = sum(tensors[index].numel() for index in indices)
-            storage = torch.empty(total, dtype=tensors[indices[0]].dtype, pin_memory=True)
-            packed_storage.append(storage)
-            offset = 0
-            for index in indices:
-                tensor = tensors[index]
-                view = storage[offset : offset + tensor.numel()].view(tensor.shape)
-                view.copy_(tensor)
-                packed_tensors[index] = view
-                offset += tensor.numel()
-        if len(packed_tensors) != len(tensors):
-            raise RuntimeError("failed to pack every AWR batch tensor")
-        pinned = self._replace_tensors([packed_tensors[index] for index in range(len(tensors))])
-        return replace(pinned, _packed=tuple(packed_storage))
+        return AWRBatch(
+            batch=self.batch.pin_memory(),
+            returns=self.returns.pin_memory(),
+            eligible=self.eligible.pin_memory(),
+        )
 
     def record_stream(self, stream: torch.cuda.Stream) -> None:
         """Keep staged device storage alive until the compute stream is done."""
         self.batch.record_stream(stream)
         self.returns.record_stream(stream)
         self.eligible.record_stream(stream)
-
-    def _tensors(self) -> tuple[Tensor, ...]:
-        tensors = [*self.context.features.values(), self.context.ctx_pad]
-        if self.context.slot_ids is not None:
-            tensors.append(self.context.slot_ids)
-        if self.context.reset is not None:
-            tensors.append(self.context.reset)
-        tensors.extend((self.target, self.returns, self.eligible))
-        return tuple(tensors)
-
-    def _replace_tensors(self, tensors: list[Tensor]) -> AWRBatch:
-        values = iter(tensors)
-        features = {name: next(values) for name in self.context.features}
-        context = Context(
-            features=features,
-            ctx_pad=next(values),
-            slot_ids=None if self.context.slot_ids is None else next(values),
-            reset=None if self.context.reset is None else next(values),
-        )
-        batch = TrainBatch(context=context, target=next(values), replay_ids=self.batch.replay_ids)
-        rebuilt = AWRBatch(batch=batch, returns=next(values), eligible=next(values))
-        try:
-            next(values)
-        except StopIteration:
-            return rebuilt
-        raise ValueError("too many tensors supplied while rebuilding an AWR batch")
 
     def valid_rows(self, valid: Tensor) -> tuple[Tensor, Tensor]:
         """Select the return rows used by the policy loss."""

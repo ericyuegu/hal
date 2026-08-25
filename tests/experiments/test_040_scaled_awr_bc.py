@@ -393,22 +393,21 @@ def test_device_batch_prefetcher_preserves_cpu_batches() -> None:
     torch.testing.assert_close(second.returns, torch.full_like(second.returns, 2.0))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for packed transfer")
-def test_packed_awr_batch_copies_one_storage_per_dtype() -> None:
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device transfer")
+def test_awr_batch_uses_standard_pinned_transfer() -> None:
     cfg = _cfg()
     batch = _awr_batch(cfg)
     pinned = batch.pin_memory()
-    tensors = pinned._tensors()
-
-    assert all(tensor.is_pinned() for tensor in tensors)
-    assert len({tensor.untyped_storage().data_ptr() for tensor in tensors}) == len(
-        {tensor.dtype for tensor in tensors}
-    )
+    assert pinned.returns.is_pinned()
+    assert pinned.eligible.is_pinned()
+    assert pinned.target.is_pinned()
+    assert all(tensor.is_pinned() for tensor in pinned.context.features.values())
 
     moved = pinned.to("cuda")
     torch.cuda.synchronize()
-    for actual, expected in zip(moved._tensors(), batch._tensors(), strict=True):
-        torch.testing.assert_close(actual.cpu(), expected)
+    torch.testing.assert_close(moved.returns.cpu(), batch.returns)
+    torch.testing.assert_close(moved.eligible.cpu(), batch.eligible)
+    torch.testing.assert_close(moved.target.cpu(), batch.target)
 
 
 def test_near_far_objective_matches_hand_computation() -> None:
