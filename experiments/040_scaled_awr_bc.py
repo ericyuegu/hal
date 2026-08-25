@@ -664,9 +664,10 @@ def short_causal_attention(
     cost to materialize 121 scores per head. This implementation reduced the
     full train step by approximately 100 ms.
     """
-    scores = (query @ key.transpose(-2, -1)) * (query.shape[-1] ** -0.5)
+    scores = query @ key.transpose(-2, -1)
+    scores = scores.float() * (query.shape[-1] ** -0.5)
     causal = torch.ones(scores.shape[-2:], dtype=torch.bool, device=scores.device).tril()
-    weights = F.softmax(scores.masked_fill(~causal, -torch.inf), dim=-1)
+    weights = F.softmax(scores.masked_fill(~causal, -torch.inf), dim=-1).to(query.dtype)
     return weights @ value
 
 

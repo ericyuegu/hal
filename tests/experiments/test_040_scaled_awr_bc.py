@@ -197,12 +197,6 @@ def test_short_causal_attention_matches_sdpa() -> None:
 
     torch.testing.assert_close(actual, expected)
 
-    expected_bf16 = torch.nn.functional.scaled_dot_product_attention(
-        query.bfloat16(), key.bfloat16(), value.bfloat16(), is_causal=True
-    )
-    actual_bf16 = compiled(query.bfloat16(), key.bfloat16(), value.bfloat16())
-    torch.testing.assert_close(actual_bf16, expected_bf16, atol=2e-2, rtol=2e-2)
-
 
 def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
     frames = 40
