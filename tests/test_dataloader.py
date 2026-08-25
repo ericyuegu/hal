@@ -1,4 +1,8 @@
 import hashlib
+import json
+import subprocess
+import sys
+import textwrap
 from collections.abc import Iterator
 from multiprocessing import resource_tracker
 from pathlib import Path
@@ -147,6 +151,53 @@ def test_streaming_resource_tracker_forwards_without_extra_self() -> None:
     with patch.object(resource_tracker._resource_tracker, "unregister") as unregister:
         memory.fix_unregister("/semaphore", "semaphore")
     unregister.assert_called_once_with("/semaphore", "semaphore")
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="requires Linux procfs")
+def test_streaming_prefix_probes_do_not_leak_file_descriptors(tmp_path: Path) -> None:
+    _write_scalar_mds(tmp_path, "train", range(1))
+    program = textwrap.dedent(
+        """\
+        import gc
+        import json
+        import os
+        import sys
+
+        import hal.training.dataloader
+        from streaming import StreamingDataset
+
+
+        def count_shared_memory_descriptors():
+            count = 0
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    target = os.readlink(f"/proc/self/fd/{name}")
+                except FileNotFoundError:
+                    continue
+                count += target.startswith("/dev/shm/")
+            return count
+
+
+        counts = [count_shared_memory_descriptors()]
+        for _ in range(5):
+            dataset = StreamingDataset(local=sys.argv[1], batch_size=1, shuffle=False)
+            del dataset
+            gc.collect()
+            counts.append(count_shared_memory_descriptors())
+        print(json.dumps(counts))
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path / "train")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    counts = json.loads(completed.stdout.splitlines()[-1])
+    increments = [after - before for before, after in zip(counts[:-1], counts[1:], strict=True)]
+
+    assert increments == [increments[0]] * len(increments), counts
 
 
 def test_loader_generator_does_not_change_process_rng() -> None:
