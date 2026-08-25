@@ -14,6 +14,7 @@ from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 
 import melee
 import numpy as np
@@ -85,6 +86,11 @@ STAGE = int(melee.Stage.FINAL_DESTINATION.value)
 _V7_TRAIN = (
     Path(__file__).resolve().parents[2] / "data" / "processed" / "ranked-anonymized-1" / "mds-v7-sub4" / "train"
 )
+
+
+def _local_stream_source(name: str, path: Path) -> StreamSource:
+    """Construct the local-only source form supported by Mosaic Streaming."""
+    return StreamSource(name, cast(str, None), path)
 
 
 def test_production_awr_constants_match_calibration_artifact() -> None:
@@ -373,8 +379,12 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         aux_loss_weight=0.5,
     )[2].backward()
 
-    torch.testing.assert_close(dense_nll.grad[valid], selected_nll.grad)
-    torch.testing.assert_close(dense_nll.grad[~valid], torch.zeros_like(dense_nll.grad[~valid]))
+    dense_grad = dense_nll.grad
+    selected_grad = selected_nll.grad
+    assert dense_grad is not None
+    assert selected_grad is not None
+    torch.testing.assert_close(dense_grad[valid], selected_grad)
+    torch.testing.assert_close(dense_grad[~valid], torch.zeros_like(dense_grad[~valid]))
 
 
 def test_device_batch_prefetcher_preserves_cpu_batches() -> None:
@@ -581,8 +591,8 @@ def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path:
     _write_policy_world(first, "first")
     _write_policy_world(second, "second")
     sources = (
-        StreamSource("first", None, first),  # type: ignore[arg-type]
-        StreamSource("second", None, second),  # type: ignore[arg-type]
+        _local_stream_source("first", first),
+        _local_stream_source("second", second),
     )
     dataset, names = _make_streaming_dataset(
         None,
@@ -625,7 +635,7 @@ def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path:
     bad_dataset, _ = _make_streaming_dataset(
         None,
         "train",
-        sources=(StreamSource("invalid", None, invalid),),  # type: ignore[arg-type]
+        sources=(_local_stream_source("invalid", invalid),),
         remote=None,
         shuffle=False,
         shuffle_seed=0,
@@ -1014,7 +1024,7 @@ _LASER = {"type": 6, "state": 2, "pos_x": 12.5, "pos_y": -3.25, "vel_x": 1.5, "v
 _TURNIP = {"type": 210, "state": 4, "pos_x": -40.0, "pos_y": 18.75, "vel_x": -0.5, "vel_y": 2.25}
 
 
-def _pooled(model: torch.nn.Module, items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> Tensor:
+def _pooled(model: exp.GPT, items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> Tensor:
     with torch.no_grad():
         return model._item_features(_item_columns(items, masks=masks))
 

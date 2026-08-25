@@ -32,6 +32,9 @@ from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
+from typing import Literal
+from typing import TypedDict
+from typing import cast
 
 import melee
 import numpy as np
@@ -78,6 +81,8 @@ from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import ITEM_COLUMNS
 from hal.training.features import Context
+from hal.training.features import ExtraColumns
+from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
@@ -508,6 +513,11 @@ def decoder_rmsnorm(x: Tensor) -> Tensor:
 class StructuredControllerCodec(nn.Module):
     """The sole raw<->categorical boundary and shared semantic action token."""
 
+    main_centers: Tensor
+    c_centers: Tensor
+    trigger_centers: Tensor
+    button_valid_for_trigger: Tensor
+
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -530,6 +540,12 @@ class StructuredControllerCodec(nn.Module):
         right_click = button_bits[:, BUTTON_R_CH - _N_CONT].bool()
         valid = (~left_click[None, :] | left_full[:, None]) & (~right_click[None, :] | right_full[:, None])
         self.register_buffer("button_valid_for_trigger", valid)
+
+    def _class_embedding(self, name: str) -> nn.Embedding:
+        return cast(nn.Embedding, self.class_embeddings[name])
+
+    def _semantic_projection(self, name: str) -> nn.Linear:
+        return cast(nn.Linear, self.semantic_projections[name])
 
     @staticmethod
     def canonicalize(actions: Tensor) -> Tensor:
@@ -565,7 +581,7 @@ class StructuredControllerCodec(nn.Module):
 
     def semantic_values(self, name: str, indices: Tensor) -> Tensor:
         if name == "buttons":
-            return scoring.combo_to_buttons(indices).to(self.class_embeddings[name].weight.dtype)
+            return scoring.combo_to_buttons(indices).to(self._class_embedding(name).weight.dtype)
         if name == "main_stick":
             return scoring.cluster_to_xy(indices, self.main_centers)
         if name == "c_stick":
@@ -582,8 +598,9 @@ class StructuredControllerCodec(nn.Module):
         raise ValueError(f"unknown controller group {name!r}")
 
     def group_embedding(self, name: str, indices: Tensor) -> Tensor:
-        semantic = self.semantic_values(name, indices).to(self.class_embeddings[name].weight.dtype)
-        value = self.class_embeddings[name](indices) + self.semantic_projections[name](semantic)
+        class_embedding = self._class_embedding(name)
+        semantic = self.semantic_values(name, indices).to(class_embedding.weight.dtype)
+        value = class_embedding(indices) + self._semantic_projection(name)(semantic)
         return decoder_rmsnorm(value)
 
     def embed_groups(self, indices: Tensor) -> dict[str, Tensor]:
@@ -764,7 +781,8 @@ class CausalTemporalDecoder(nn.Module):
         offsets = torch.full((previous.shape[0],), offset, device=previous.device, dtype=torch.long)
         state = state_bias + self._step_features(previous, offsets)
         next_caches: list[tuple[Tensor, Tensor] | None] = []
-        for block, past in zip(self.blocks, caches, strict=True):
+        for module, past in zip(self.blocks, caches, strict=True):
+            block = cast(TemporalBlock, module)
             state, present = block.forward_step(state, past)
             next_caches.append(present)
         return decoder_rmsnorm(state), next_caches
@@ -1780,7 +1798,7 @@ class EvalProtocol:
     max_frames: int
     seed: int
     cpu_level: int
-    ego_port: int
+    ego_port: Literal[1, 2]
     seed_stage: int
     matchup_schedule_sha256: str
     oriented_pairs: int
@@ -2179,7 +2197,24 @@ def layer_activation_rms_log(
     return payload
 
 
-def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
+class _LoaderKwargs(TypedDict):
+    data_root: str | None
+    sources: tuple[streams.StreamSource, ...]
+    source_weights: tuple[float, ...]
+    cache_limit: str
+    shuffle_block_size: int
+    shuffle_seed: int
+    stats: dict[str, FeatureStats]
+    L_ctx: int
+    L_chunk: int
+    batch_size: int
+    seed: int
+    schema_version: int
+    extra: ExtraColumns
+    projection: FeatureProjection
+
+
+def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKwargs:
     sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
     return dict(
         data_root=None,
@@ -2335,11 +2370,12 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx),
         **common,
     )
-    validation = {**common, "batch_size": cfg.val_batch_size, "shuffle": True}
+    validation: _LoaderKwargs = {**common, "batch_size": cfg.val_batch_size}
     val_loader = make_loader(
         split=cfg.val_split,
         num_workers=0,
         replay_format="policy-world",
+        shuffle=True,
         **validation,
     )
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
@@ -3037,7 +3073,7 @@ class SelfPlayArgs:
     cohort_sweep: bool = False
 
 
-Command = (
+type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[SelfPlayArgs, tyro.conf.subcommand(name="self-play")]
@@ -3092,4 +3128,4 @@ def main(args: Command) -> None:
 
 
 if __name__ == "__main__":
-    main(tyro.cli(Command))
+    main(tyro.cli(cast(type[Command], Command)))
