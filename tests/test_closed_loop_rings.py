@@ -25,11 +25,17 @@ from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import BASE_ACTION_PROJECTION
+from hal.training.features import BASE_ITEMS_PROJECTION
+from hal.training.features import ITEM_COLUMNS
+from hal.training.features import ITEM_INPUT_COLUMNS
 from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import V6_PLAYER_COLUMNS
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import preprocess
+from hal.wire import ITEM_SLOTS
+from hal.wire import MASK_INT32
+from hal.wire import item_column
 
 STAGE = int(melee.Stage.FINAL_DESTINATION.value)
 EGO_PORT, OPP_PORT = 1, 2
@@ -346,6 +352,118 @@ def test_context_pad_tracks_the_refilling_context() -> None:
     assert pads[: L_CTX + 1] == [L_CTX - 1 - i for i in range(L_CTX)] + [0]
     assert pads[2 * L_CTX - 1] == 0
     assert pads[2 * L_CTX : 3 * L_CTX] == [L_CTX - 1 - i for i in range(L_CTX)]
+
+
+# --- the global item block ----------------------------------------------------
+#
+# The two observation paths deliver the same projectile frame in DIFFERENT dtypes:
+# the MDS stores the ids as int32 with ``MASK_INT32`` in an empty slot, while the
+# closed loop hands ``preprocess`` all seven fields as float NaN-sentinel columns
+# (``wire.canonical_item_columns``). Both must produce the same item tensors.
+
+ITEM_L = 8
+_ITEM_FLOATS: tuple[str, ...] = tuple(ITEM_COLUMNS.floats)
+_ITEM_CATS: tuple[str, ...] = tuple(ITEM_COLUMNS.cats)
+
+
+def _item_live(slot: int) -> np.ndarray:
+    """Which of the ``ITEM_L`` frames carry an item in ``slot``. Every slot is empty on
+    at least one frame, so every routed float column emits its ``_mask`` sidecar."""
+    return np.array([(t + slot) % 3 != 0 for t in range(ITEM_L)])
+
+
+def _item_value(slot: int, suffix: str) -> np.ndarray:
+    """One item column's logical value over the ``ITEM_L`` frames, before masking."""
+    t = np.arange(ITEM_L, dtype=np.float64)
+    if suffix == "type":  # a Fox laser (6) up to a Peach turnip (210)
+        return 6.0 + 51.0 * slot + (t % 3)
+    if suffix == "state":
+        return (t + slot) % 5
+    if suffix == "owner":  # a libmelee port, 1..4
+        return np.full(ITEM_L, 1.0 + slot % 2)
+    offset = 0.0 if suffix.endswith("_x") else 1.7
+    return (90.0 if suffix.startswith("pos") else 4.0) * np.sin(0.4 * t + 1.1 * slot + offset)
+
+
+def _item_batch(*, online: bool) -> dict[str, np.ndarray]:
+    """One ``[L]`` stream of every item column, in the offline MDS dtypes or in the
+    online all-float sentinel form."""
+    batch: dict[str, np.ndarray] = {}
+    for slot in range(ITEM_SLOTS):
+        live = _item_live(slot)
+        for suffix in (*_ITEM_CATS, *_ITEM_FLOATS, "owner"):
+            values = _item_value(slot, suffix)
+            if online or suffix in _ITEM_FLOATS:
+                column = np.where(live, values, np.nan).astype(np.float32)
+            else:
+                column = np.where(live, values.astype(np.int32), MASK_INT32).astype(np.int32)
+            batch[item_column(slot, suffix)] = column
+    return batch
+
+
+def _item_stats() -> dict[str, FeatureStats]:
+    """The four consolidated ``item_*`` keys: one shared scale over the four slots."""
+    rng = np.random.default_rng(23)
+    out: dict[str, FeatureStats] = {}
+    for suffix in _ITEM_FLOATS:
+        low = float(rng.normal(-50, 10))
+        out[f"item_{suffix}"] = FeatureStats(
+            mean=float(rng.normal(0, 20)),
+            std=float(abs(rng.normal(0, 10)) + 0.5),
+            min=low,
+            max=low + float(abs(rng.normal(0, 60)) + 1.0),
+        )
+    return out
+
+
+def test_preprocess_routes_the_item_block() -> None:
+    """``ITEM_COLUMNS`` over offline dtypes: the ids come back as int64 with 0 in an
+    empty slot, the floats standardize against the one consolidated scale and flag the
+    empty frames, and ``owner`` stays dropped."""
+    stats = _item_stats()
+    out = preprocess(_item_batch(online=False), stats, extra=ITEM_COLUMNS)
+
+    assert [name for name in out if name.endswith("_owner")] == []
+    for slot in range(ITEM_SLOTS):
+        live = _item_live(slot)
+        for suffix in _ITEM_CATS:
+            got = out[item_column(slot, suffix)]
+            assert got.dtype == torch.int64
+            expected = np.where(live, _item_value(slot, suffix).astype(np.int64), 0)
+            assert torch.equal(got, torch.from_numpy(expected))
+        for suffix in _ITEM_FLOATS:
+            name = item_column(slot, suffix)
+            s = stats[f"item_{suffix}"]
+            got = out[name]
+            assert got.dtype == torch.float32
+            expected = np.where(live, (_item_value(slot, suffix) - s.mean) / s.std, 0.0)
+            assert got.numpy() == pytest.approx(expected, rel=1e-5, abs=1e-6)
+            assert torch.equal(out[f"{name}_mask"], torch.from_numpy((~live).astype(np.float32)))
+
+
+def test_item_projection_extends_the_base_action_projection() -> None:
+    """``BASE_ITEMS_PROJECTION`` adds exactly the routed item columns to the base
+    projection: four slots, six suffixes, no ``owner``."""
+    added = BASE_ITEMS_PROJECTION.columns - BASE_ACTION_PROJECTION.columns
+    assert added == ITEM_INPUT_COLUMNS
+    assert len(added) == ITEM_SLOTS * (len(_ITEM_CATS) + len(_ITEM_FLOATS)) == 24
+    assert [name for name in added if name.endswith("_owner")] == []
+    assert BASE_ITEMS_PROJECTION.derive_spatial is False
+
+
+def test_preprocess_item_routing_is_dtype_agnostic() -> None:
+    """The same logical item frame, offline int32/NaN and online all-float, produces
+    the same tensors. Pins the dtype asymmetry the two observation paths carry."""
+    stats = _item_stats()
+    offline = preprocess(_item_batch(online=False), stats, extra=ITEM_COLUMNS)
+    online = preprocess(_item_batch(online=True), stats, extra=ITEM_COLUMNS)
+
+    assert len(offline) == ITEM_SLOTS * (len(_ITEM_CATS) + 2 * len(_ITEM_FLOATS))
+    assert set(online) == set(offline)
+    for name, expected in offline.items():
+        got = online[name]
+        assert got.dtype == expected.dtype, f"{name} is {got.dtype}, offline is {expected.dtype}"
+        assert torch.equal(got, expected), f"{name} differs between the two dtype forms"
 
 
 def test_shared_row_planning_uses_policy_schedule_and_resets_context() -> None:

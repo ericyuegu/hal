@@ -1,8 +1,9 @@
 """Pinning tests for ``hal.data.feature_stats``.
 
 These tests stand alone — no MDS fixtures, no Dolphin. They guard the math
-(Welford against numpy, merge associativity, mixture analytics) and the
-on-disk contract (JSON round-trip, NaN masking).
+(Welford against numpy, merge associativity, mixture analytics), the on-disk
+contract (JSON round-trip, NaN masking), and the key consolidation that decides
+which on-disk entries share one scale at train time.
 """
 
 import math
@@ -16,6 +17,7 @@ from hal.data.feature_stats import StatsAccumulator
 from hal.data.feature_stats import dump_sufficient_stats
 from hal.data.feature_stats import load_and_merge_stats
 from hal.data.feature_stats import load_sufficient_stats
+from hal.training.ego_stats import consolidate_key
 
 FEATURE = "x"
 TOL = 1e-9
@@ -156,6 +158,15 @@ def test_finalize_empty_returns_unit_placeholder() -> None:
     empty = FeatureStatsSufficient(count=0, mean=0.0, m2=0.0, min=math.inf, max=-math.inf)
     placeholder = empty.finalize()
     assert placeholder == FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
+
+
+def test_consolidate_key_folds_ports_and_item_slots() -> None:
+    """Port prefixes collapse so the two perspectives share one scale, and the four
+    global item slots collapse the same way. Everything else passes through."""
+    assert consolidate_key("p1_position_x") == "position_x"
+    assert consolidate_key("item2_pos_x") == "item_pos_x"
+    assert consolidate_key("item0_type") == "item_type"
+    assert consolidate_key("stage") == "stage"
 
 
 def test_unknown_feature_raises() -> None:

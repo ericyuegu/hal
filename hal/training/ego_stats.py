@@ -12,12 +12,14 @@ the result by the bare feature name (``position_x``, ``percent``, …).
 import math
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import load_sufficient_stats
 from hal.data.feature_stats import merge_sufficient
+from hal.wire import ITEM_SLOTS
 
 # Compact policy datasets pack facing direction into the integer player state,
 # so it is intentionally absent from their float stats sidecar. Decoding
@@ -31,11 +33,21 @@ _SCHEMA_IMPLIED_STATS = {
 }
 
 
+# The four global item slots hold one distribution, not four: a projectile occupies
+# whichever slot its spawn id lands in, so the slot index carries no signal. Fold them
+# onto one key (``item2_pos_x`` -> ``item_pos_x``) and every slot gets one shared scale.
+_ITEM_PREFIXES: Final[tuple[str, ...]] = tuple(f"item{slot}_" for slot in range(ITEM_SLOTS))
+
+
 def consolidate_key(name: str) -> str:
-    """Strip ``p1_`` / ``p2_`` / ``ego_`` / ``opp_`` so symmetric features collapse."""
+    """Strip ``p1_`` / ``p2_`` / ``ego_`` / ``opp_`` so symmetric features collapse,
+    and fold the four item slots onto one ``item_`` key."""
     for pre in ("p1_", "p2_", "ego_", "opp_"):
         if name.startswith(pre):
             return name[len(pre) :]
+    for pre in _ITEM_PREFIXES:
+        if name.startswith(pre):
+            return f"item_{name[len(pre) :]}"
     return name
 
 
