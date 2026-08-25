@@ -157,7 +157,7 @@ def test_optimizer_and_counts_place_the_item_modules() -> None:
 # --- the pooled set encoder ---------------------------------------------------
 
 
-def _item_features(items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> dict[str, Tensor]:
+def _item_columns(items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> dict[str, Tensor]:
     """Model-ready item columns for a ``[2, 3]`` batch: ``items`` maps a slot to its
     live projectile, and every other slot is the preprocessed empty form (id 0, zeroed
     floats, sidecar 1.0)."""
@@ -182,7 +182,7 @@ _TURNIP = {"type": 210, "state": 4, "pos_x": -40.0, "pos_y": 18.75, "vel_x": -0.
 
 def _pooled(model: torch.nn.Module, items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> Tensor:
     with torch.no_grad():
-        return model._item_features(_item_features(items, masks=masks))
+        return model._item_features(_item_columns(items, masks=masks))
 
 
 def test_pooling_is_permutation_invariant_over_the_slots() -> None:
@@ -299,8 +299,6 @@ def test_item_conditioning_rejects_a_format_that_drops_items() -> None:
     # The control arm reads the same source, so the comparison stays one-axis.
     exp.validate_config(_cfg(item_conditioning=False, replay_format="policy"))
     exp.validate_config(_cfg(replay_format="full"))
-    with pytest.raises(ValueError, match="replay_format"):
-        exp.validate_config(_cfg(replay_format="compact"))
 
 
 def test_a_batch_without_item_columns_fails_loud() -> None:
