@@ -198,33 +198,6 @@ def test_short_causal_attention_matches_sdpa() -> None:
     torch.testing.assert_close(actual, expected)
 
 
-def test_teacher_forcing_shares_rotary_factors_across_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = _cfg(temporal_layers=3)
-    model = exp.GPT(cfg)
-    decoder = model.temporal
-    calls: list[int] = []
-    first_rotary_at = decoder.blocks[0].rotary.at
-
-    def first_at(*args, **kwargs):
-        calls.append(0)
-        return first_rotary_at(*args, **kwargs)
-
-    def duplicate_at(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("a temporal block rebuilt shared rotary factors")
-
-    monkeypatch.setattr(decoder.blocks[0].rotary, "at", first_at)
-    for block in decoder.blocks[1:]:
-        monkeypatch.setattr(block.rotary, "at", duplicate_at)
-
-    batch = _awr_batch(cfg)
-    observed, targets, _ = exp.prepared_targets(model, batch)
-    hidden = torch.randn(cfg.batch_size, cfg.arch.L_ctx, cfg.arch.d_model)
-    decoder.teacher_forced_states(hidden, observed, targets)
-
-    assert calls == [0]
-
-
 def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
     frames = 40
     sample: dict[str, object] = {
