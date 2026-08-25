@@ -206,10 +206,15 @@ class ReplayReservoir:
             except StopIteration:
                 self._source_done = True
                 break
-            if pack.replay_id in self._active:
-                raise ValueError(f"replay {pack.replay_id!r} is already active")
             order = self._rng.permutation(len(pack.windows))
-            self._active[pack.replay_id] = deque(pack.windows[int(index)] for index in order)
+            windows = (pack.windows[int(index)] for index in order)
+            if pack.replay_id in self._active:
+                # Weighted streams can repeat a small source within one epoch.
+                # Keep its repeated windows, but retain one active replay key so
+                # a batch never contains the same replay more than once.
+                self._active[pack.replay_id].extend(windows)
+            else:
+                self._active[pack.replay_id] = deque(windows)
 
     def _finish(self) -> None:
         if self._finished:

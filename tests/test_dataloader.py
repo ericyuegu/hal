@@ -455,6 +455,21 @@ def test_reservoir_batches_have_distinct_replays_and_no_repeated_windows() -> No
     assert reservoir.emitted_windows + reservoir.dropped_windows == 12 * 4
 
 
+def test_reservoir_keeps_weighted_repeats_without_batch_duplicates() -> None:
+    packs = iter(
+        (
+            ReplayPack("repeat", (("repeat", 0),)),
+            ReplayPack("repeat", (("repeat", 1),)),
+            ReplayPack("other", (("other", 0),)),
+        )
+    )
+
+    batches = list(ReplayReservoir(packs, batch_size=1, capacity=2, seed=7, cooldown_batches=0))
+
+    assert sorted(batch.windows[0] for batch in batches) == [("other", 0), ("repeat", 0), ("repeat", 1)]
+    assert all(len(batch.replay_ids) == len(set(batch.replay_ids)) for batch in batches)
+
+
 def test_reservoir_is_deterministic_and_bounded() -> None:
     def run() -> tuple[list[tuple[str, ...]], int]:
         reservoir = ReplayReservoir(_packs(20, 3), batch_size=4, capacity=8, seed=2)
