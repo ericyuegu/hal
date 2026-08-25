@@ -194,7 +194,7 @@ class Architecture:
     temporal_heads: int = 8
     temporal_ff_dim: int = 1536
     group_head_dim: int = 512
-    action_embed_dim: int = 16
+    action_embed_dim: int = 32
     offset_embed_dim: int = 16
     action_vocab: int = 1024
     action_state_embed_dim: int = 48
@@ -263,7 +263,7 @@ class TrainConfig:
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
-    ckpt_every: int = 2048
+    ckpt_every: int = 4096
     eval_every: int = 16_384
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
