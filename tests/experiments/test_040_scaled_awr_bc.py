@@ -171,6 +171,16 @@ def _awr_batch(cfg: exp.TrainConfig) -> exp.AWRBatch:
     return exp.AWRBatch(batch=batch, returns=returns, eligible=eligible)
 
 
+def test_synthetic_train_step_benchmark_batch_has_frozen_geometry() -> None:
+    cfg = _cfg()
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+
+    assert batch.target.shape == (cfg.batch_size, cfg.arch.sample_chunk_length, A_DIM)
+    assert batch.returns.shape == batch.eligible.shape == (cfg.batch_size, cfg.arch.L_ctx)
+    assert batch.eligible.all()
+    exp.validate_batch_geometry(batch, cfg, cfg.batch_size)
+
+
 def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
     frames = 40
     sample: dict[str, object] = {

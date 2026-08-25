@@ -13,6 +13,7 @@ vector and the live-item count stays implicit in the sum.
 
 Run:
     uv run experiments/040_scaled_awr_bc.py train
+    uv run experiments/040_scaled_awr_bc.py benchmark-train-step
     uv run experiments/040_scaled_awr_bc.py eval --checkpoint runs/<run>/final.pt
 """
 
@@ -43,6 +44,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -51,7 +53,6 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
-import wandb
 from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
@@ -448,6 +449,15 @@ def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -
         observation_bundle="base",
         items=True,
     )
+
+
+def synthetic_awr_batch(cfg: TrainConfig, device: torch.device) -> AWRBatch:
+    """Build one fully valid production-shaped batch without touching the corpus."""
+    context = synthetic_context(cfg, cfg.batch_size, device)
+    target = torch.zeros(cfg.batch_size, cfg.arch.sample_chunk_length, A_DIM, device=device)
+    returns = torch.zeros(cfg.batch_size, cfg.arch.L_ctx, device=device)
+    eligible = torch.ones(cfg.batch_size, cfg.arch.L_ctx, dtype=torch.bool, device=device)
+    return AWRBatch(batch=TrainBatch(context=context, target=target), returns=returns, eligible=eligible)
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
@@ -2611,6 +2621,110 @@ def train_step(
     return TrainStepResult(nll_sum, gradient_norm, metrics, diagnostics, muon_lr, adam_lr)
 
 
+def benchmark_train_step(*, warmup_steps: int = 3, measured_steps: int = 20) -> dict[str, float]:
+    """Benchmark the frozen production train step on a synthetic device batch."""
+    if DEVICE != "cuda":
+        raise RuntimeError("the production train-step benchmark requires CUDA")
+    if warmup_steps < 1 or measured_steps < 1:
+        raise ValueError("warmup_steps and measured_steps must be positive")
+
+    cfg = replace(
+        TrainConfig(),
+        gradient_hist_every=0,
+        weight_hist_every=0,
+        layer_rms_every=0,
+        phase_timing_every=0,
+        push_to_r2=False,
+        wandb_log_code=False,
+    )
+    validate_config(cfg)
+    torch.manual_seed(cfg.seed)
+    torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
+    model = GPT(cfg).to(DEVICE).train()
+    optimizer = make_optimizer(model, cfg)
+    muon_parameters = next(group["params"] for group in optimizer.param_groups if group["use_muon"])
+    muon_shapes = {
+        tuple(parameter.shape) if parameter.ndim != 4 else (len(parameter), parameter.numel() // len(parameter))
+        for parameter in muon_parameters
+    }
+    scheduler = LambdaLR(optimizer, lr_schedule(cfg))
+    trunk_fn, temporal_fn = _training_functions(model, cfg)
+    batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
+    valid_prefixes = cfg.batch_size * cfg.arch.L_ctx
+
+    print(
+        f"[benchmark] compiling/warming {warmup_steps} production train steps "
+        f"at batch={cfg.batch_size}, context={cfg.arch.L_ctx}",
+        flush=True,
+    )
+    for index in range(warmup_steps):
+        train_step(
+            model,
+            batch,
+            cfg,
+            step=index,
+            update=index + 2,
+            valid_prefixes=valid_prefixes,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+
+    step_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+    phase_timers: list[CudaPhaseTimer] = []
+    wall_started = time.monotonic()
+    for index in range(measured_steps):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        timer = CudaPhaseTimer()
+        start.record()
+        timer.record("start")
+        timer.record("h2d_end")
+        train_step(
+            model,
+            batch,
+            cfg,
+            step=warmup_steps + index,
+            update=warmup_steps + index + 2,
+            valid_prefixes=valid_prefixes,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            phase_timer=timer,
+        )
+        end.record()
+        step_events.append((start, end))
+        phase_timers.append(timer)
+    torch.cuda.synchronize()
+    wall_seconds = time.monotonic() - wall_started
+
+    step_seconds = np.asarray([start.elapsed_time(end) / 1000 for start, end in step_events])
+    phase_samples: dict[str, list[float]] = {}
+    for timer in phase_timers:
+        for name, value in timer.metrics().items():
+            phase_samples.setdefault(name, []).append(value)
+    metrics = {
+        "batch_size": float(cfg.batch_size),
+        "measured_steps": float(measured_steps),
+        "muon_bucket_count": float(len(muon_shapes)),
+        "muon_matrix_count": float(len(muon_parameters)),
+        "step_s_mean": float(step_seconds.mean()),
+        "step_s_median": float(np.median(step_seconds)),
+        "step_s_p95": float(np.percentile(step_seconds, 95)),
+        "samples_per_s": cfg.batch_size / float(step_seconds.mean()),
+        "samples_per_wall_s": cfg.batch_size * measured_steps / wall_seconds,
+        "peak_allocated_gb": torch.cuda.max_memory_allocated() / 2**30,
+        "peak_reserved_gb": torch.cuda.max_memory_reserved() / 2**30,
+        **{f"{name}_median": float(np.median(values)) for name, values in phase_samples.items()},
+    }
+    print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
+    return metrics
+
+
 def _cadence_in_window(first_update: int, last_update: int, every: int) -> bool:
     """Return whether update one or a cadence boundary is in the window."""
     if every <= 0:
@@ -3094,14 +3208,24 @@ class SelfPlayArgs:
     cohort_sweep: bool = False
 
 
+@dataclass
+class BenchmarkTrainStepArgs:
+    warmup_steps: int = 3
+    measured_steps: int = 20
+
+
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[SelfPlayArgs, tyro.conf.subcommand(name="self-play")]
+    | Annotated[BenchmarkTrainStepArgs, tyro.conf.subcommand(name="benchmark-train-step")]
 )
 
 
 def main(args: Command) -> None:
+    if isinstance(args, BenchmarkTrainStepArgs):
+        benchmark_train_step(warmup_steps=args.warmup_steps, measured_steps=args.measured_steps)
+        return
     if isinstance(args, EvalArgs):
         eval_checkpoint(
             args.checkpoint,
