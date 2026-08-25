@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import queue
 import sys
 import threading
 from pathlib import Path
@@ -20,8 +21,7 @@ _SPEC.loader.exec_module(_MODULE)
 
 Args = _MODULE.Args
 RunState = _MODULE.RunState
-explicit_resume = _MODULE.explicit_resume
-explicit_resume_as = _MODULE.explicit_resume_as
+drain_run_names = _MODULE._drain_run_names
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
 plan_attempt = _MODULE.plan_attempt
@@ -29,6 +29,7 @@ preflight_git = _MODULE.preflight_git
 preflight_modal = _MODULE.preflight_modal
 read_state = _MODULE.read_state
 redact_argv = _MODULE.redact_argv
+recovery_context = _MODULE._recovery_context
 retry_policy = _MODULE.retry_policy
 validate_args = _MODULE.validate_args
 write_state = _MODULE.write_state
@@ -65,22 +66,24 @@ def test_validate_args_requires_experiment_for_auto_resume() -> None:
         validate_args(Args(cmd=["python", "train.py"]))
 
 
-def test_explicit_resume_supports_both_forms_and_rejects_ambiguity() -> None:
-    assert explicit_resume(("python", EXPERIMENT, "--resume", "run-1")) == "run-1"
-    assert explicit_resume(("python", EXPERIMENT, "--resume=run-1")) == "run-1"
-    with pytest.raises(SystemExit, match="more than once"):
-        explicit_resume(("python", EXPERIMENT, "--resume=one", "--resume", "two"))
-    with pytest.raises(SystemExit, match="invalid"):
-        explicit_resume(("python", EXPERIMENT, "--resume", "../escape"))
+@pytest.mark.parametrize(
+    ("flag", "explicit_resume"),
+    [("--resume", "run-1"), ("--resume-as", None)],
+)
+def test_recovery_context_parses_and_validates_run_names(flag: str, explicit_resume: str | None) -> None:
+    spaced = recovery_context(("python", EXPERIMENT, flag, "run-1"), None)
+    joined = recovery_context(("python", EXPERIMENT, f"{flag}=run-1"), None)
 
-
-def test_explicit_resume_as_supports_both_forms_and_rejects_ambiguity() -> None:
-    assert explicit_resume_as(("python", EXPERIMENT, "--resume-as", "run-2")) == "run-2"
-    assert explicit_resume_as(("python", EXPERIMENT, "--resume-as=run-2")) == "run-2"
+    assert spaced.explicit_resume == explicit_resume
+    assert joined.explicit_resume == explicit_resume
+    assert spaced.run_name == "run-1"
+    assert joined.run_name == "run-1"
+    with pytest.raises(SystemExit, match="requires a run name"):
+        recovery_context(("python", EXPERIMENT, flag), None)
     with pytest.raises(SystemExit, match="more than once"):
-        explicit_resume_as(("python", EXPERIMENT, "--resume-as=one", "--resume-as", "two"))
+        recovery_context(("python", EXPERIMENT, f"{flag}=one", flag, "two"), None)
     with pytest.raises(SystemExit, match="invalid"):
-        explicit_resume_as(("python", EXPERIMENT, "--resume-as", "../escape"))
+        recovery_context(("python", EXPERIMENT, flag, "../escape"), None)
 
 
 def test_plan_attempt_resumes_only_after_checkpoint_exists() -> None:
@@ -301,6 +304,40 @@ def test_state_round_trip_and_validation(tmp_path: Path) -> None:
         RunState(status="failed")
 
 
+def test_drain_run_names_persists_first_name_and_rejects_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states: list[RunState] = []
+    run_names: queue.SimpleQueue[str] = queue.SimpleQueue()
+    run_names.put("run-1")
+    run_names.put("run-1")
+    monkeypatch.setattr(_MODULE, "_commit_state", lambda _path, state, _volume: states.append(state))
+
+    state, failure = drain_run_names(
+        run_names,
+        RunState(status="running"),
+        state_path=tmp_path / "state.json",
+        state_volume_name="test-volume",
+    )
+
+    assert state == RunState(status="running", run_name="run-1")
+    assert failure is None
+    assert states == [state]
+
+    run_names.put("run-2")
+    unchanged, failure = drain_run_names(
+        run_names,
+        state,
+        state_path=tmp_path / "state.json",
+        state_volume_name="test-volume",
+    )
+
+    assert unchanged == state
+    assert failure == "training changed run name from 'run-1' to 'run-2'"
+    assert states == [state]
+
+
 def test_checkpoint_detection_handles_not_found_and_propagates_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     class Client:
         def __init__(self, code: str | None) -> None:
@@ -491,8 +528,8 @@ def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypat
             command,
             RunState(status="running"),
             env=dict(_MODULE.os.environ),
-            path=tmp_path / "state.json",
-            volume_name="test-volume",
+            state_path=tmp_path / "state.json",
+            state_volume_name="test-volume",
             stall_s=10,
         )
 
@@ -527,8 +564,8 @@ def test_training_interrupt_preserves_recoverable_state(tmp_path: Path, monkeypa
             command,
             RunState(status="running"),
             env=dict(_MODULE.os.environ),
-            path=tmp_path / "state.json",
-            volume_name="test-volume",
+            state_path=tmp_path / "state.json",
+            state_volume_name="test-volume",
             stall_s=10,
         )
     for timer in timers:

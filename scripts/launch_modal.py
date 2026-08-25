@@ -1,6 +1,6 @@
 """Run one retry-safe HAL training experiment on a Modal GPU.
 
-The launcher ships the clean, pushed working tree in the dependency image, then
+The launcher ships the clean, pushed working tree in a layered image, then
 starts one detached Modal Function call. Modal may preempt or time out a Function
 attempt. A small Modal Volume records the W&B/checkpoint run name so the next
 attempt can add ``--resume <run>`` after the checkpoint reaches R2.
@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final
 from typing import Literal
+from typing import TypedDict
 
 import loguru
 import modal
@@ -62,6 +63,16 @@ SENSITIVE_FLAGS: Final[frozenset[str]] = frozenset(
         "--password",
         "--secret",
         "--token",
+    }
+)
+FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        "--prefix-fork-checkpoint",
+        "--prefix-fork-from-run",
+        "--resume",
+        "--resume-as",
+        "--resume-checkpoint",
+        "--target-positions",
     }
 )
 STATE_SCHEMA: Final[int] = 1
@@ -112,6 +123,17 @@ class Args:
     """Verify Git, Modal authentication, and the Secret, then print the request without launching."""
 
 
+class FunctionResources(TypedDict):
+    gpu: str | list[str]
+    cpu: tuple[float, float]
+    memory: int
+    ephemeral_disk: int
+    timeout: int
+    startup_timeout: int
+    cloud: str | None
+    region: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchSpec:
     argv: tuple[str, ...]
@@ -142,7 +164,14 @@ class RunState:
 
 
 @dataclass(frozen=True, slots=True)
-class Attempt:
+class RecoveryContext:
+    explicit_resume: str | None
+    run_name: str | None
+    retrying_fork: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptPlan:
     action: Literal["run", "fail", "complete"]
     argv: tuple[str, ...]
     state: RunState
@@ -191,8 +220,7 @@ def validate_args(args: Args) -> None:
             "automatic recovery only supports commands containing an existing experiments/*.py script; "
             "pass --no-auto-resume for an arbitrary command."
         )
-    explicit_resume(args.cmd)
-    explicit_resume_as(args.cmd)
+    _recovery_context(args.cmd, None)
 
 
 def experiment_script(argv: list[str] | tuple[str, ...]) -> Path | None:
@@ -204,66 +232,53 @@ def experiment_script(argv: list[str] | tuple[str, ...]) -> Path | None:
     return None
 
 
-def explicit_resume(argv: list[str] | tuple[str, ...]) -> str | None:
-    """Read one ``--resume`` value without interpreting the rest of the experiment CLI."""
+def _command_option(argv: list[str] | tuple[str, ...], flag: str) -> str | None:
+    """Read one named value without interpreting the rest of the experiment CLI."""
     found: list[str] = []
     i = 0
     while i < len(argv):
         token = argv[i]
-        if token == "--resume":
+        if token == flag:
             if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
-                raise SystemExit("--resume requires a run name.")
+                raise SystemExit(f"{flag} requires a run name.")
             found.append(argv[i + 1])
             i += 2
             continue
-        if token.startswith("--resume="):
-            found.append(token.partition("=")[2])
+        name, separator, value = token.partition("=")
+        if name == flag and separator:
+            found.append(value)
         i += 1
     if len(found) > 1:
-        raise SystemExit("the training command contains --resume more than once.")
+        raise SystemExit(f"the training command contains {flag} more than once.")
     if found and not RUN_NAME.fullmatch(found[0]):
-        raise SystemExit(f"invalid --resume run name: {found[0]!r}")
+        raise SystemExit(f"invalid {flag} run name: {found[0]!r}")
     return found[0] if found else None
 
 
-def explicit_resume_as(argv: list[str] | tuple[str, ...]) -> str | None:
-    """Read one ``--resume-as`` destination without interpreting the experiment CLI."""
-    found: list[str] = []
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token == "--resume-as":
-            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
-                raise SystemExit("--resume-as requires a run name.")
-            found.append(argv[i + 1])
-            i += 2
-            continue
-        if token.startswith("--resume-as="):
-            found.append(token.partition("=")[2])
-        i += 1
-    if len(found) > 1:
-        raise SystemExit("the training command contains --resume-as more than once.")
-    if found and not RUN_NAME.fullmatch(found[0]):
-        raise SystemExit(f"invalid --resume-as run name: {found[0]!r}")
-    return found[0] if found else None
+def _recovery_context(
+    argv: list[str] | tuple[str, ...],
+    state: RunState | None,
+) -> RecoveryContext:
+    """Resolve the recovery-relevant command flags and durable run name."""
+    resume = _command_option(argv, "--resume")
+    resume_as = _command_option(argv, "--resume-as")
+    prefix_fork = any(token.partition("=")[0] == "--prefix-fork-from-run" for token in argv)
+    retrying_fork = state is not None and state.status == "running" and (resume_as is not None or prefix_fork)
+    return RecoveryContext(
+        explicit_resume=resume,
+        run_name=resume_as or resume or (state.run_name if state is not None else None),
+        retrying_fork=retrying_fork,
+    )
 
 
-def resume_fork_from_destination(argv: tuple[str, ...], run_name: str) -> tuple[str, ...]:
+def _resume_fork_from_destination(argv: tuple[str, ...], run_name: str) -> tuple[str, ...]:
     """Replace source-fork flags with one resume from the fork destination."""
-    source_flags = {
-        "--prefix-fork-checkpoint",
-        "--prefix-fork-from-run",
-        "--resume",
-        "--resume-as",
-        "--resume-checkpoint",
-        "--target-positions",
-    }
     command: list[str] = []
     i = 0
     while i < len(argv):
         token = argv[i]
         flag = token.partition("=")[0]
-        if flag not in source_flags:
+        if flag not in FORK_SOURCE_FLAGS:
             command.append(token)
             i += 1
             continue
@@ -274,39 +289,30 @@ def resume_fork_from_destination(argv: tuple[str, ...], run_name: str) -> tuple[
     return (*command, "--resume", run_name)
 
 
-def has_prefix_fork(argv: list[str] | tuple[str, ...]) -> bool:
-    """Return whether a command creates a new prefix from a source run."""
-    return any(token.partition("=")[0] == "--prefix-fork-from-run" for token in argv)
-
-
 def plan_attempt(
     state: RunState | None,
     argv: tuple[str, ...],
     *,
     auto_resume: bool,
     checkpoint_found: bool,
-) -> Attempt:
+) -> AttemptPlan:
     """Convert durable state into the command for one Modal retry attempt."""
-    resume = explicit_resume(argv)
-    resume_as = explicit_resume_as(argv)
+    recovery = _recovery_context(argv, state)
     if state is not None and state.status == "failed":
-        return Attempt(action="fail", argv=argv, state=state)
+        return AttemptPlan(action="fail", argv=argv, state=state)
     if state is not None and state.status == "succeeded":
-        return Attempt(action="complete", argv=argv, state=state)
+        return AttemptPlan(action="complete", argv=argv, state=state)
 
-    run_name = resume_as or resume or (state.run_name if state is not None else None)
+    run_name = recovery.run_name
     command = argv
-    retrying_fork = (
-        state is not None and state.status == "running" and (resume_as is not None or has_prefix_fork(argv))
-    )
-    if auto_resume and retrying_fork and checkpoint_found and run_name is not None:
-        command = resume_fork_from_destination(argv, run_name)
-    elif auto_resume and not retrying_fork and resume is None and run_name is not None:
+    if auto_resume and recovery.retrying_fork and checkpoint_found and run_name is not None:
+        command = _resume_fork_from_destination(argv, run_name)
+    elif auto_resume and not recovery.retrying_fork and recovery.explicit_resume is None and run_name is not None:
         if checkpoint_found:
             command = (*argv, "--resume", run_name)
         else:
             run_name = None
-    return Attempt(action="run", argv=command, state=RunState(status="running", run_name=run_name))
+    return AttemptPlan(action="run", argv=command, state=RunState(status="running", run_name=run_name))
 
 
 def redact_argv(argv: list[str] | tuple[str, ...]) -> str:
@@ -337,7 +343,7 @@ def gpu_request(gpu: str) -> str | list[str]:
     return choices[0] if len(choices) == 1 else choices
 
 
-def function_resources(args: Args) -> dict[str, object]:
+def function_resources(args: Args) -> FunctionResources:
     """Modal resource values in the units expected by ``App.function``."""
     return {
         "gpu": gpu_request(args.gpu),
@@ -446,7 +452,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
                 stderr=subprocess.STDOUT,
             )
 
-    cap = _run_checked(
+    compute_capability = _run_checked(
         [
             "uv",
             "run",
@@ -457,7 +463,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
         ],
         capture=True,
     )
-    loguru.logger.info(f"CUDA compute capability = sm_{cap}")
+    loguru.logger.info(f"CUDA compute capability = sm_{compute_capability}")
 
     env = os.environ.copy()
     # Modal injects its internal PyPI mirror through UV_INDEX_URL. Keep uv's
@@ -476,7 +482,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
         probe.touch()
         probe.unlink()
         env[key] = str(path)
-    if cap == "120":
+    if compute_capability == "120":
         env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
     free_gib = shutil.disk_usage(cache_root).free / 2**30
     loguru.logger.info(f"compile-cache free = {free_gib:.1f} GiB")
@@ -494,7 +500,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
         ],
         env=env,
     )
-    if cap == "120" and not skip_sm120_probe:
+    if compute_capability == "120" and not skip_sm120_probe:
         _run_checked(["uv", "run", "docker/probe_sm120.py"], env=env, timeout=600)
 
     _run_checked(["uv", "run", "fetch"], env=env)
@@ -504,7 +510,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     return env
 
 
-def _follow_log(path: Path, stopped: threading.Event, names: queue.Queue[str]) -> None:
+def _follow_log(path: Path, stopped: threading.Event, run_names: queue.SimpleQueue[str]) -> None:
     with path.open(errors="replace") as stream:
         while True:
             line = stream.readline()
@@ -512,7 +518,7 @@ def _follow_log(path: Path, stopped: threading.Event, names: queue.Queue[str]) -
                 print(line, end="", flush=True)
                 match = RUN_LINE.fullmatch(line.rstrip("\n"))
                 if match is not None:
-                    names.put(match.group(1).rstrip())
+                    run_names.put(match.group(1).rstrip())
                 continue
             if stopped.is_set():
                 return
@@ -526,40 +532,53 @@ def _kill_group(pid: int, sig: signal.Signals) -> None:
         return
 
 
+def _drain_run_names(
+    run_names: queue.SimpleQueue[str],
+    state: RunState,
+    *,
+    state_path: Path,
+    state_volume_name: str,
+) -> tuple[RunState, str | None]:
+    while True:
+        try:
+            found = run_names.get_nowait()
+        except queue.Empty:
+            return state, None
+        if not RUN_NAME.fullmatch(found):
+            return state, f"training emitted invalid run name {found!r}"
+        if state.run_name is not None and state.run_name != found:
+            return state, f"training changed run name from {state.run_name!r} to {found!r}"
+        if state.run_name is None:
+            state = RunState(status="running", run_name=found)
+            _commit_state(state_path, state, state_volume_name)
+            loguru.logger.info(f"saved retry run name {found!r}")
+
+
 def _run_training(
     argv: tuple[str, ...],
     state: RunState,
     *,
     env: dict[str, str],
-    path: Path,
-    volume_name: str,
+    state_path: Path,
+    state_volume_name: str,
     stall_s: int,
 ) -> int:
     log_path = REMOTE_ROOT / "train.log"
     log_path.write_text("")
-    names: queue.Queue[str] = queue.Queue()
-    tail_stopped = threading.Event()
-    tail = threading.Thread(target=_follow_log, args=(log_path, tail_stopped, names), name="train-log", daemon=True)
-    tail.start()
+    run_names: queue.SimpleQueue[str] = queue.SimpleQueue()
+    follower_stopped = threading.Event()
+    log_follower = threading.Thread(
+        target=_follow_log,
+        args=(log_path, follower_stopped, run_names),
+        name="train-log",
+        daemon=True,
+    )
+    log_follower.start()
 
     interrupted = threading.Event()
     process: subprocess.Popen[bytes] | None = None
     failure: str | None = None
     code: int | None = None
-
-    def drain_names() -> str | None:
-        nonlocal state
-        while not names.empty():
-            found = names.get_nowait()
-            if not RUN_NAME.fullmatch(found):
-                return f"training emitted invalid run name {found!r}"
-            if state.run_name is not None and state.run_name != found:
-                return f"training changed run name from {state.run_name!r} to {found!r}"
-            if state.run_name is None:
-                state = RunState(status="running", run_name=found)
-                _commit_state(path, state, volume_name)
-                loguru.logger.info(f"saved retry run name {found!r}")
-        return None
 
     def interrupt(signum: int, _frame: object) -> None:
         interrupted.set()
@@ -586,7 +605,12 @@ def _run_training(
                 loguru.logger.info(f"training pid={process.pid}: {redact_argv(argv)}")
                 interrupted_at: float | None = None
                 while process.poll() is None:
-                    failure = drain_names()
+                    state, failure = _drain_run_names(
+                        run_names,
+                        state,
+                        state_path=state_path,
+                        state_volume_name=state_volume_name,
+                    )
                     if failure is not None:
                         _kill_group(process.pid, signal.SIGKILL)
                         break
@@ -612,10 +636,16 @@ def _run_training(
                 process.wait()
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
-        tail_stopped.set()
-        tail.join(timeout=5)
+        follower_stopped.set()
+        log_follower.join(timeout=5)
 
-    failure = failure or drain_names()
+    if failure is None:
+        state, failure = _drain_run_names(
+            run_names,
+            state,
+            state_path=state_path,
+            state_volume_name=state_volume_name,
+        )
     if code is None:
         raise RuntimeError("training process ended without an exit status")
 
@@ -623,10 +653,10 @@ def _run_training(
         raise RuntimeError("training was interrupted; leaving retry state running")
     if code != 0 or failure is not None:
         failed = RunState(status="failed", run_name=state.run_name, exit_code=code)
-        _commit_state(path, failed, volume_name)
+        _commit_state(state_path, failed, state_volume_name)
         detail = failure or f"training exited with status {code}"
         raise RuntimeError(f"{detail}; saved terminal failure state so retries do not rerun it")
-    _commit_state(path, RunState(status="succeeded", run_name=state.run_name), volume_name)
+    _commit_state(state_path, RunState(status="succeeded", run_name=state.run_name), state_volume_name)
     return code
 
 
@@ -634,16 +664,13 @@ def _run_remote(spec: LaunchSpec) -> int:
     """One Modal Function attempt. Modal serializes this function into the configured image."""
     os.chdir(REMOTE_ROOT)
     loguru.logger.info(f"starting launch {spec.launch_id} from Git {spec.git_sha[:10]}")
-    path = _state_path(spec.launch_id)
-    state = read_state(path)
-    resume = explicit_resume(spec.argv)
-    resume_as = explicit_resume_as(spec.argv)
-    run_name = resume_as or resume or (state.run_name if state is not None else None)
-    retrying_fork = (
-        state is not None and state.status == "running" and (resume_as is not None or has_prefix_fork(spec.argv))
+    state_path = _state_path(spec.launch_id)
+    state = read_state(state_path)
+    recovery = _recovery_context(spec.argv, state)
+    can_resume = recovery.explicit_resume is None or recovery.retrying_fork
+    checkpoint_found = bool(
+        spec.auto_resume and can_resume and recovery.run_name and _checkpoint_exists(recovery.run_name)
     )
-    can_resume = resume is None or retrying_fork
-    checkpoint_found = bool(spec.auto_resume and can_resume and run_name and _checkpoint_exists(run_name))
     attempt = plan_attempt(state, spec.argv, auto_resume=spec.auto_resume, checkpoint_found=checkpoint_found)
     if attempt.action == "complete":
         loguru.logger.info(f"launch {spec.launch_id} already succeeded; nothing to run")
@@ -652,14 +679,14 @@ def _run_remote(spec: LaunchSpec) -> int:
         raise RuntimeError(
             f"launch {spec.launch_id} already failed with exit code {attempt.state.exit_code}; refusing to rerun"
         )
-    _commit_state(path, attempt.state, spec.state_volume)
+    _commit_state(state_path, attempt.state, spec.state_volume)
     env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe)
     return _run_training(
         attempt.argv,
         attempt.state,
         env=env,
-        path=path,
-        volume_name=spec.state_volume,
+        state_path=state_path,
+        state_volume_name=spec.state_volume,
         stall_s=spec.stall_s,
     )
 
@@ -745,8 +772,14 @@ def _app_name(args: Args, sha: str) -> str:
     return f"hal-{stamp}-{sha[:7]}"
 
 
-def _print_request(args: Args, *, sha: str, name: str, launch_id: str) -> None:
-    resources = function_resources(args)
+def _print_request(
+    args: Args,
+    resources: FunctionResources,
+    *,
+    sha: str,
+    name: str,
+    launch_id: str,
+) -> None:
     loguru.logger.info(f"app={name} launch={launch_id} git={sha[:10]} image={args.image}")
     loguru.logger.info(
         f"gpu={resources['gpu']} cpu={resources['cpu']} memory={args.memory_gib}GiB "
@@ -765,7 +798,8 @@ def main(args: Args) -> None:
     client, secret = preflight_modal(args.secret)
     name = _app_name(args, sha)
     launch_id = uuid.uuid4().hex
-    _print_request(args, sha=sha, name=name, launch_id=launch_id)
+    resources = function_resources(args)
+    _print_request(args, resources, sha=sha, name=name, launch_id=launch_id)
     if args.dry_run:
         loguru.logger.success("dry run passed; no Modal App, image build, Volume, or GPU Function was started")
         return
@@ -776,20 +810,13 @@ def main(args: Args) -> None:
         image=_image(args.image, args.cmd, secret),
         secrets=[secret],
         volumes={str(STATE_ROOT): state_volume},
-        gpu=gpu_request(args.gpu),
-        cpu=(args.cpu, args.cpu_limit),
-        memory=args.memory_gib * 1024,
-        ephemeral_disk=args.disk_gib * 1024,
-        timeout=args.timeout_hours * 60 * 60,
-        startup_timeout=args.startup_timeout_minutes * 60,
-        cloud=args.cloud,
-        region=args.region,
         retries=retry_policy(args.max_retries),
         max_containers=1,
         single_use_containers=True,
         serialized=True,
         include_source=False,
         name="train",
+        **resources,
     )(_run_remote)
     spec = LaunchSpec(
         argv=tuple(args.cmd),
