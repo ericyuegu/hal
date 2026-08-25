@@ -192,7 +192,7 @@ class Architecture:
     temporal_d_model: int = 512
     temporal_layers: int = 4
     temporal_heads: int = 8
-    temporal_ff_dim: int = 512
+    temporal_ff_dim: int = 1536
     group_head_dim: int = 512
     action_embed_dim: int = 16
     offset_embed_dim: int = 16
@@ -274,11 +274,11 @@ class TrainConfig:
     source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
-    cache_limit_gb: int = 700
-    shuffle_block_size: int = 2000
+    cache_limit_gb: int = 2048
+    shuffle_block_size: int = 8192
     predownload: int = 1024
     windows_per_replay: int = 2
-    reservoir_capacity: int = 8192
+    reservoir_capacity: int = 16_384
     val_split: str = "val"
     num_workers: int = 32
     prefetch_batches: int = 8
@@ -722,7 +722,7 @@ def sample_categorical(
 
 
 class CausalTemporalDecoder(nn.Module):
-    """Selected-offset temporal chain conditioned by concatenation, never cross-attention."""
+    """Temporal action chain conditioned by concatenation."""
 
     def __init__(self, cfg: TrainConfig, codec: StructuredControllerCodec) -> None:
         super().__init__()

@@ -1,0 +1,499 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1760 1248" width="1760" height="1248" font-kerning="normal" text-rendering="geometricPrecision">
+<title>Experiment 040 — scaled AWR behaviour cloning: model architecture</title>
+<style><![CDATA[
+:root{
+  --bg:#FBFAF7; --panel:#FFFFFF; --ink:#191B20; --muted:#6E737C; --faint:#9AA0A9;
+  --line:#E3DFD7; --hair:#F1EEE8;
+  --obs:#2E6F7C; --trunk:#3C5AA6; --dec:#B06C2C; --head:#8A4E74; --awr:#4A7A55;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0E1014; --panel:#171A20; --ink:#E9E7E2; --muted:#9BA1AB; --faint:#767C86;
+    --line:#2C313A; --hair:#1E222A;
+    --obs:#63B3BF; --trunk:#8098DF; --dec:#DDA061; --head:#C98BB2; --awr:#84B98D;
+  }
+}
+]]></style>
+<defs>
+<marker id="arrowL" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="5.2" markerHeight="5.2" orient="auto-start-end"><path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="var(--line)"/></marker>
+<marker id="arrowO" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="5.2" markerHeight="5.2" orient="auto-start-end"><path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="var(--obs)"/></marker>
+<marker id="arrowT" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="5.2" markerHeight="5.2" orient="auto-start-end"><path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="var(--trunk)"/></marker>
+<marker id="arrowD" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="5.2" markerHeight="5.2" orient="auto-start-end"><path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="var(--dec)"/></marker>
+<marker id="arrowH" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="5.2" markerHeight="5.2" orient="auto-start-end"><path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="var(--head)"/></marker>
+</defs>
+<rect x="0.0" y="0.0" width="1760.0" height="1248.0" rx="0" fill="var(--bg)" stroke="none" stroke-width="1" />
+<text x="56.0" y="60.0" font-family="Charter, 'Bitstream Charter', 'Iowan Old Style', Georgia, 'Nimbus Roman', serif" font-size="29" fill="var(--ink)" font-weight="600">Scaled AWR Behaviour Cloning — Model Architecture</text>
+<text x="56.0" y="85.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--muted)" font-weight="400">experiments/040_scaled_awr_bc.py  ·  v4  ·  a 128-frame causal trunk over Melee gamestate, decoded into 11 future controller frames</text>
+<text x="1704.0" y="39.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10" fill="var(--faint)" font-weight="600" text-anchor="end" letter-spacing="1.5">221.2 M PARAMETERS</text>
+<rect x="1144.0" y="50.0" width="523.4" height="9.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.88" />
+<rect x="1668.6" y="50.0" width="19.7" height="9.0" rx="2" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.88" />
+<rect x="1689.4" y="50.0" width="5.7" height="9.0" rx="2" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.88" />
+<rect x="1696.3" y="50.0" width="1.5" height="9.0" rx="2" fill="var(--awr)" stroke="none" stroke-width="1" fill-opacity="0.88" />
+<rect x="1699.1" y="50.0" width="4.9" height="9.0" rx="2" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.88" />
+<text x="1144.0" y="74.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--trunk)" font-weight="600">trunk  201.3 M</text>
+<text x="1704.0" y="74.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--muted)" font-weight="400" text-anchor="end">decoder 14.30 · heads 2.64 · critic 1.05 · encoder 1.90   M</text>
+<path d="M 56.0 110.0 L 1704.0 110.0" fill="none" stroke="var(--line)" stroke-width="1"/>
+<rect x="56.0" y="128.0" width="410.0" height="806.0" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1" />
+<path d="M 66.0 128.6 L 456.0 128.6" stroke="var(--obs)" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<rect x="514.0" y="128.0" width="286.0" height="806.0" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1" />
+<path d="M 524.0 128.6 L 790.0 128.6" stroke="var(--trunk)" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<rect x="848.0" y="128.0" width="356.0" height="806.0" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1" />
+<path d="M 858.0 128.6 L 1194.0 128.6" stroke="var(--dec)" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<rect x="1252.0" y="128.0" width="452.0" height="806.0" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1" />
+<path d="M 1262.0 128.6 L 1694.0 128.6" stroke="var(--head)" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M 485 524 L 495 531 L 485 538" fill="none" stroke="var(--faint)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.7"/>
+<path d="M 819 524 L 829 531 L 819 538" fill="none" stroke="var(--faint)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.7"/>
+<path d="M 1223 524 L 1233 531 L 1223 538" fill="none" stroke="var(--faint)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.7"/>
+<text x="74.0" y="158.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--obs)" font-weight="700" letter-spacing="0.8">01</text>
+<text x="100.0" y="158.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--ink)" font-weight="700" letter-spacing="1.35">OBSERVATION ENCODER</text>
+<text x="74.0" y="175.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--faint)" font-weight="400">one 1024-d token per frame · 128-frame causal window</text>
+<rect x="74.0" y="194.0" width="322.0" height="150.0" rx="7" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="74.0" y="194.0" width="322.0" height="150.0" rx="7" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.34" />
+<text x="86.0" y="212.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12" fill="var(--ink)" font-weight="600">Player state × 4</text>
+<text x="384.0" y="212.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--obs)" font-weight="600" text-anchor="end">4 × 67 = 268</text>
+<text x="86.0" y="227.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--faint)" font-weight="400">ego   ·   ego_nana   ·   opp_nana   ·   opp</text>
+<text x="86.0" y="251.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.2" fill="var(--ink)" font-weight="600">6 floats</text>
+<text x="384.0" y="251.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--obs)" font-weight="400" text-anchor="end">6</text>
+<text x="86.0" y="264.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">position x/y · percent · shield · direction · hitlag</text>
+<path d="M 86.0 272.0 L 384.0 272.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<text x="86.0" y="286.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.2" fill="var(--ink)" font-weight="600">6 masks</text>
+<text x="384.0" y="286.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--obs)" font-weight="400" text-anchor="end">6</text>
+<text x="86.0" y="299.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">one validity sidecar per float</text>
+<path d="M 86.0 307.0 L 384.0 307.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<text x="86.0" y="321.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.2" fill="var(--ink)" font-weight="600">5 embeddings</text>
+<text x="384.0" y="321.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--obs)" font-weight="400" text-anchor="end">55</text>
+<text x="86.0" y="334.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">action 1024→48 · stock · jumps · hurtbox · airborne</text>
+<rect x="74.0" y="364.0" width="322.0" height="58.0" rx="7" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="74.0" y="364.0" width="322.0" height="58.0" rx="7" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.34" />
+<text x="86.0" y="382.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12" fill="var(--ink)" font-weight="600">Previous ego action</text>
+<text x="384.0" y="382.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--obs)" font-weight="600" text-anchor="end">64</text>
+<text x="86.0" y="402.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">shared codec embedding of frame t−1 · 4 groups × 16</text>
+<rect x="74.0" y="440.0" width="322.0" height="56.0" rx="7" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="74.0" y="440.0" width="322.0" height="56.0" rx="7" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.34" />
+<text x="86.0" y="458.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12" fill="var(--ink)" font-weight="600">Match conditioning</text>
+<text x="384.0" y="458.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--obs)" font-weight="600" text-anchor="end">20</text>
+<text x="86.0" y="478.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">ego character 8 · opp character 8 · stage 4</text>
+<rect x="74.0" y="514.0" width="322.0" height="172.0" rx="7" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="74.0" y="514.0" width="322.0" height="172.0" rx="7" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.34" />
+<text x="86.0" y="532.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12" fill="var(--ink)" font-weight="600">Projectile set encoder</text>
+<text x="384.0" y="532.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--obs)" font-weight="600" text-anchor="end">32</text>
+<text x="86.0" y="547.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--faint)" font-weight="400">4 item slots, ordered by ascending spawn id</text>
+<rect x="86.0" y="556.0" width="68.0" height="34.0" rx="4" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="86.0" y="556.0" width="68.0" height="34.0" rx="4" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="120.0" y="571.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">slot 0</text>
+<text x="120.0" y="584.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">29</text>
+<path d="M 120.0 590.0 L 120.0 602.0" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.45"/>
+<rect x="162.7" y="556.0" width="68.0" height="34.0" rx="4" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="162.7" y="556.0" width="68.0" height="34.0" rx="4" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="196.7" y="571.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">slot 1</text>
+<text x="196.7" y="584.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">29</text>
+<path d="M 196.7 590.0 L 196.7 602.0" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.45"/>
+<rect x="239.3" y="556.0" width="68.0" height="34.0" rx="4" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="239.3" y="556.0" width="68.0" height="34.0" rx="4" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="273.3" y="571.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">slot 2</text>
+<text x="273.3" y="584.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">29</text>
+<path d="M 273.3 590.0 L 273.3 602.0" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.45"/>
+<rect x="316.0" y="556.0" width="68.0" height="34.0" rx="4" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="316.0" y="556.0" width="68.0" height="34.0" rx="4" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="350.0" y="571.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">slot 3</text>
+<text x="350.0" y="584.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">29</text>
+<path d="M 350.0 590.0 L 350.0 602.0" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.45"/>
+<path d="M 120.0 602.0 L 350.0 602.0" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.45"/>
+<path d="M 235.0 602.0 L 235.0 614.0" fill="none" stroke="var(--obs)" stroke-width="1.3" marker-end="url(#arrowO)"/>
+<rect x="114.0" y="616.0" width="242.0" height="26.0" rx="4" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.13" />
+<rect x="114.0" y="616.0" width="242.0" height="26.0" rx="4" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="235.0" y="632.4" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.8" fill="var(--ink)" font-weight="500" text-anchor="middle">shared encoder   SwiGLU 29 → 64 → 32</text>
+<path d="M 235.0 642.0 L 235.0 653.0" fill="none" stroke="var(--obs)" stroke-width="1.3" marker-end="url(#arrowO)"/>
+<text x="235.0" y="667.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10" fill="var(--ink)" font-weight="600" text-anchor="middle">× presence gate      →      Σ over slots</text>
+<text x="235.0" y="680.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle" font-style="italic">permutation-invariant; an empty slot adds exactly zero</text>
+<path d="M 396.0 269.0 L 411.0 269.0 Q 418.0 269.0 418.0 276.0" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.4"/>
+<path d="M 396.0 393.0 L 411.0 393.0 Q 418.0 393.0 418.0 400.0" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.4"/>
+<path d="M 396.0 468.0 L 411.0 468.0 Q 418.0 468.0 418.0 475.0" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.4"/>
+<path d="M 396.0 588.0 L 411.0 588.0 Q 418.0 588.0 418.0 595.0" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.4"/>
+<path d="M 418.0 269.0 L 418.0 701.0" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.4"/>
+<path d="M 418.0 701.0 Q 418.0 708.0 411.0 708.0 L 242.0 708.0 Q 235.0 708.0 235.0 715.0" fill="none" stroke="var(--obs)" stroke-width="1" stroke-opacity="0.4"/>
+<path d="M 235.0 713.0 L 235.0 728.0" fill="none" stroke="var(--obs)" stroke-width="1.3" marker-end="url(#arrowO)"/>
+<rect x="74.0" y="730.0" width="322.0" height="28.0" rx="4" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.16" />
+<rect x="74.0" y="730.0" width="322.0" height="28.0" rx="4" fill="none" stroke="var(--obs)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="235.0" y="747.9" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="11" fill="var(--ink)" font-weight="600" text-anchor="middle">concatenate   ·   384</text>
+<path d="M 235.0 758.0 L 235.0 774.0" fill="none" stroke="var(--obs)" stroke-width="1.3" marker-end="url(#arrowO)"/>
+<rect x="74.0" y="776.0" width="322.0" height="48.0" rx="7" fill="var(--obs)" stroke="none" stroke-width="1" fill-opacity="0.15" />
+<rect x="74.0" y="776.0" width="322.0" height="48.0" rx="7" fill="none" stroke="var(--obs)" stroke-width="1.2" stroke-opacity="0.5" />
+<text x="235.0" y="797.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="12" fill="var(--ink)" font-weight="600" text-anchor="middle">observation_encoder</text>
+<text x="235.0" y="812.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--ink)" font-weight="500" text-anchor="middle">SwiGLU  384 → 1024 → 1024</text>
+<path d="M 235.0 828.0 L 235.0 846.0" fill="none" stroke="var(--obs)" stroke-width="1.3" marker-end="url(#arrowO)"/>
+<text x="235.0" y="862.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--obs)" font-weight="600" text-anchor="middle">[B, 128, 1024]</text>
+<path d="M 74.0 880.0 L 396.0 880.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<text x="74.0" y="896.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">Floats are standardized by frozen FeatureStats; every masked</text>
+<text x="74.0" y="908.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">column keeps its validity sidecar as an explicit input.</text>
+<text x="532.0" y="158.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--trunk)" font-weight="700" letter-spacing="0.8">02</text>
+<text x="558.0" y="158.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--ink)" font-weight="700" letter-spacing="1.35">TRANSFORMER TRUNK</text>
+<text x="532.0" y="175.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--faint)" font-weight="400">16 blocks · d 1024 · 16 heads × 64 · RoPE</text>
+<rect x="542.0" y="204.0" width="250.0" height="226.0" rx="8" fill="var(--panel)" stroke="none" stroke-width="1" />
+<rect x="542.0" y="204.0" width="250.0" height="226.0" rx="8" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-opacity="0.14" />
+<rect x="537.0" y="209.0" width="250.0" height="226.0" rx="8" fill="var(--panel)" stroke="none" stroke-width="1" />
+<rect x="537.0" y="209.0" width="250.0" height="226.0" rx="8" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-opacity="0.23" />
+<rect x="532.0" y="214.0" width="250.0" height="226.0" rx="8" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.05" />
+<rect x="532.0" y="214.0" width="250.0" height="226.0" rx="8" fill="none" stroke="var(--trunk)" stroke-width="1.1" stroke-opacity="0.4" />
+<text x="546.0" y="235.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12" fill="var(--ink)" font-weight="600">Pre-norm block</text>
+<text x="768.0" y="235.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="11" fill="var(--trunk)" font-weight="700" text-anchor="end">× 16</text>
+<path d="M 555.0 262.0 L 555.0 253.0 Q 555.0 247.0 561.0 247.0 L 753.0 247.0 Q 759.0 247.0 759.0 253.0 L 759.0 262.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrowT)" stroke-opacity="0.5"/>
+<rect x="546.0" y="262.0" width="62.0" height="22.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="546.0" y="262.0" width="62.0" height="22.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="577.0" y="276.3" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.3" fill="var(--ink)" font-weight="500" text-anchor="middle">RMSNorm</text>
+<path d="M 608.0 273.0 L 616.0 273.0" fill="none" stroke="var(--trunk)" stroke-width="1" marker-end="url(#arrowT)" stroke-opacity="0.65"/>
+<rect x="618.0" y="258.0" width="124.0" height="30.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.15" />
+<rect x="618.0" y="258.0" width="124.0" height="30.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="680.0" y="276.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10" fill="var(--ink)" font-weight="600" text-anchor="middle">causal self-attention</text>
+<path d="M 744.0 273.0 L 750.0 273.0" fill="none" stroke="var(--trunk)" stroke-width="1" marker-end="url(#arrowT)" stroke-opacity="0.65"/>
+<circle cx="759.0" cy="273.0" r="7.5" fill="var(--panel)" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 755.4 273.0 L 762.6 273.0" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 759.0 269.4 L 759.0 276.6" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<text x="680.0" y="302.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle">RoPE · 16 heads × 64 · residual × 1/√32</text>
+<path d="M 555.0 346.0 L 555.0 337.0 Q 555.0 331.0 561.0 331.0 L 753.0 331.0 Q 759.0 331.0 759.0 337.0 L 759.0 346.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrowT)" stroke-opacity="0.5"/>
+<rect x="546.0" y="346.0" width="62.0" height="22.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="546.0" y="346.0" width="62.0" height="22.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="577.0" y="360.3" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.3" fill="var(--ink)" font-weight="500" text-anchor="middle">RMSNorm</text>
+<path d="M 608.0 357.0 L 616.0 357.0" fill="none" stroke="var(--trunk)" stroke-width="1" marker-end="url(#arrowT)" stroke-opacity="0.65"/>
+<rect x="618.0" y="342.0" width="124.0" height="30.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.15" />
+<rect x="618.0" y="342.0" width="124.0" height="30.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="680.0" y="360.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10" fill="var(--ink)" font-weight="600" text-anchor="middle">MLP  1024 → 4096 → 1024</text>
+<path d="M 744.0 357.0 L 750.0 357.0" fill="none" stroke="var(--trunk)" stroke-width="1" marker-end="url(#arrowT)" stroke-opacity="0.65"/>
+<circle cx="759.0" cy="357.0" r="7.5" fill="var(--panel)" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 755.4 357.0 L 762.6 357.0" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 759.0 353.4 L 759.0 360.6" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<text x="680.0" y="386.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle">GELU</text>
+<text x="546.0" y="428.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" font-style="italic">residual stream · RMSNorm carries no affine parameters</text>
+<path d="M 657.0 452.0 L 657.0 472.0" fill="none" stroke="var(--trunk)" stroke-width="1.3" marker-end="url(#arrowT)"/>
+<rect x="592.0" y="474.0" width="130.0" height="26.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="592.0" y="474.0" width="130.0" height="26.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="657.0" y="490.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10" fill="var(--ink)" font-weight="500" text-anchor="middle">final RMSNorm</text>
+<path d="M 657.0 504.0 L 657.0 522.0" fill="none" stroke="var(--trunk)" stroke-width="1.3" marker-end="url(#arrowT)"/>
+<text x="657.0" y="540.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--trunk)" font-weight="600" text-anchor="middle">[B, 128, 1024]</text>
+<text x="657.0" y="556.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle" font-style="italic">the critic in 05 reads this same state</text>
+<rect x="532.0" y="582.0" width="250.0" height="226.0" rx="8" fill="var(--hair)" stroke="none" stroke-width="1" />
+<text x="548.0" y="604.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="11" fill="var(--ink)" font-weight="600">Attention mask</text>
+<rect x="562.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="575.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="601.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="614.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="627.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="640.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="653.0" y="620.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="588.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="601.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="614.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="627.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="640.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="653.0" y="633.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="601.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="614.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="627.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="640.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="653.0" y="646.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="601.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="614.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="627.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="640.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="653.0" y="659.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="601.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="614.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="627.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="640.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="653.0" y="672.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="601.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="614.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="627.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="640.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="653.0" y="685.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="601.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="614.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="627.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="640.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="653.0" y="698.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="562.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="575.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--line)" stroke="none" stroke-width="1" fill-opacity="1" />
+<rect x="588.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="601.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="614.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="627.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="640.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<rect x="653.0" y="711.0" width="11.0" height="11.0" rx="2" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.8" />
+<path d="M 562.0 729.0 L 586.0 729.0" fill="none" stroke="var(--trunk)" stroke-width="1.6" stroke-opacity="0.7"/>
+<text x="590.0" y="733.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.5" fill="var(--trunk)" font-weight="600">ctx_pad</text>
+<text x="664.0" y="747.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="8.5" fill="var(--faint)" font-weight="400" text-anchor="end">key →</text>
+<text x="553.0" y="671.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="8.5" fill="var(--faint)" text-anchor="middle" transform="rotate(-90 553.0 671.0)">query →</text>
+<text x="686.0" y="632.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--muted)" font-weight="400">key ≤ query</text>
+<text x="686.0" y="649.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--muted)" font-weight="400">key ≥ ctx_pad</text>
+<text x="686.0" y="666.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--muted)" font-weight="400">diagonal open</text>
+<text x="686.0" y="683.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--faint)" font-weight="400">attn_window = 0</text>
+<path d="M 548.0 752.0 L 766.0 752.0" fill="none" stroke="var(--line)" stroke-width="1"/>
+<text x="548.0" y="768.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">Every window is left-padded to 128 frames;</text>
+<text x="548.0" y="779.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">ctx_pad marks the cold-start prefix a query</text>
+<text x="548.0" y="791.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">must not read. FlexAttention runs it as a</text>
+<text x="548.0" y="802.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">block-sparse kernel.</text>
+<path d="M 532.0 838.0 L 782.0 838.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<text x="532.0" y="856.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">12.58 M parameters per block  ·  no bias anywhere</text>
+<text x="532.0" y="869.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">in the trunk  ·  bf16 autocast throughout.</text>
+<text x="532.0" y="882.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">128 frames of context ≈ 2.1 s of play at 60 Hz.</text>
+<text x="866.0" y="158.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--dec)" font-weight="700" letter-spacing="0.8">03</text>
+<text x="892.0" y="158.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--ink)" font-weight="700" letter-spacing="1.35">TEMPORAL ACTION DECODER</text>
+<text x="866.0" y="175.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--faint)" font-weight="400">11 future offsets · d 512 · 4 blocks</text>
+<rect x="866.0" y="206.0" width="320.0" height="104.0" rx="7" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="866.0" y="206.0" width="320.0" height="104.0" rx="7" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.34" />
+<text x="878.0" y="224.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12" fill="var(--ink)" font-weight="600">Per-step token</text>
+<text x="1174.0" y="224.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--dec)" font-weight="600" text-anchor="end">1104 → 512</text>
+<rect x="878.0" y="234.0" width="93.3" height="34.0" rx="4" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.13" />
+<rect x="878.0" y="234.0" width="93.3" height="34.0" rx="4" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="924.7" y="249.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">hₜ</text>
+<text x="924.7" y="262.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">1024</text>
+<path d="M 924.7 268.0 L 924.7 280.0" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.45"/>
+<rect x="979.3" y="234.0" width="93.3" height="34.0" rx="4" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.13" />
+<rect x="979.3" y="234.0" width="93.3" height="34.0" rx="4" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1026.0" y="249.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">aₚᵣₑᵥ</text>
+<text x="1026.0" y="262.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">64</text>
+<path d="M 1026.0 268.0 L 1026.0 280.0" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.45"/>
+<rect x="1080.7" y="234.0" width="93.3" height="34.0" rx="4" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.13" />
+<rect x="1080.7" y="234.0" width="93.3" height="34.0" rx="4" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1127.3" y="249.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--ink)" font-weight="600" text-anchor="middle">offset</text>
+<text x="1127.3" y="262.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="8.8" fill="var(--faint)" font-weight="400" text-anchor="middle">16</text>
+<path d="M 1127.3 268.0 L 1127.3 280.0" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.45"/>
+<path d="M 924.7 280.0 L 1127.3 280.0" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.45"/>
+<path d="M 1026.0 280.0 L 1026.0 290.0" fill="none" stroke="var(--dec)" stroke-width="1.3" marker-end="url(#arrowD)"/>
+<text x="1026.0" y="303.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--ink)" font-weight="600" text-anchor="middle">Linear 1104 → 512</text>
+<text x="1026.0" y="326.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle" font-style="italic">the trunk share is computed once and reused by every step</text>
+<text x="866.0" y="366.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="11" fill="var(--ink)" font-weight="600">Offsets decoded autoregressively</text>
+<text x="1186.0" y="366.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="end">frames ahead of t</text>
+<circle cx="877.5" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.88" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.9"/>
+<text x="877.5" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--panel)" font-weight="700" text-anchor="middle">1</text>
+<circle cx="907.2" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.88" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.9"/>
+<text x="907.2" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--panel)" font-weight="700" text-anchor="middle">2</text>
+<path d="M 890.5 402.0 L 892.7 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="936.9" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.88" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.9"/>
+<text x="936.9" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--panel)" font-weight="700" text-anchor="middle">3</text>
+<path d="M 920.2 402.0 L 922.4 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="966.6" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.88" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.9"/>
+<text x="966.6" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--panel)" font-weight="700" text-anchor="middle">4</text>
+<path d="M 949.9 402.0 L 952.1 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="996.3" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.88" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.9"/>
+<text x="996.3" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--panel)" font-weight="700" text-anchor="middle">5</text>
+<path d="M 979.6 402.0 L 981.8 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="1026.0" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.88" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.9"/>
+<text x="1026.0" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--panel)" font-weight="700" text-anchor="middle">6</text>
+<path d="M 1009.3 402.0 L 1011.5 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="1055.7" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.09" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.5"/>
+<text x="1055.7" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--dec)" font-weight="700" text-anchor="middle">9</text>
+<path d="M 1039.0 402.0 L 1041.2 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="1085.4" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.09" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.5"/>
+<text x="1085.4" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--dec)" font-weight="700" text-anchor="middle">12</text>
+<path d="M 1068.7 402.0 L 1070.9 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="1115.1" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.09" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.5"/>
+<text x="1115.1" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--dec)" font-weight="700" text-anchor="middle">16</text>
+<path d="M 1098.4 402.0 L 1100.6 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="1144.8" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.09" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.5"/>
+<text x="1144.8" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--dec)" font-weight="700" text-anchor="middle">20</text>
+<path d="M 1128.1 402.0 L 1130.3 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<circle cx="1174.5" cy="402.0" r="11.5" fill="var(--dec)" fill-opacity="0.09" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.5"/>
+<text x="1174.5" y="405.6" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.4" fill="var(--dec)" font-weight="700" text-anchor="middle">24</text>
+<path d="M 1157.8 402.0 L 1160.0 402.0" fill="none" stroke="var(--dec)" stroke-width="0.9" marker-end="url(#arrowD)" stroke-opacity="0.5"/>
+<path d="M 866.0 429.5 L 866.0 423.5 L 1037.5 423.5 L 1037.5 429.5" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.45"/>
+<text x="951.8" y="444.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--dec)" font-weight="700" text-anchor="middle">near</text>
+<text x="951.8" y="456.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle">AWR-weighted</text>
+<path d="M 1044.2 429.5 L 1044.2 423.5 L 1186.0 423.5 L 1186.0 429.5" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.45"/>
+<text x="1115.1" y="444.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--dec)" font-weight="700" text-anchor="middle">far</text>
+<text x="1115.1" y="456.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle">auxiliary × 0.5</text>
+<rect x="874.0" y="499.5" width="320.0" height="92.0" rx="8" fill="var(--panel)" stroke="none" stroke-width="1" />
+<rect x="874.0" y="499.5" width="320.0" height="92.0" rx="8" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.14" />
+<rect x="870.0" y="503.5" width="320.0" height="92.0" rx="8" fill="var(--panel)" stroke="none" stroke-width="1" />
+<rect x="870.0" y="503.5" width="320.0" height="92.0" rx="8" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.23" />
+<rect x="866.0" y="507.5" width="320.0" height="92.0" rx="8" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.05" />
+<rect x="866.0" y="507.5" width="320.0" height="92.0" rx="8" fill="none" stroke="var(--dec)" stroke-width="1.1" stroke-opacity="0.4" />
+<text x="878.0" y="527.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="11.5" fill="var(--ink)" font-weight="600">TemporalBlock</text>
+<text x="1174.0" y="527.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--dec)" font-weight="700" text-anchor="end">× 4</text>
+<rect x="878.0" y="537.5" width="296.0" height="24.0" rx="4" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.13" />
+<rect x="878.0" y="537.5" width="296.0" height="24.0" rx="4" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1026.0" y="552.9" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.6" fill="var(--ink)" font-weight="500" text-anchor="middle">RMSNorm → RoPE causal SDPA (8 heads × 64) → ⊕</text>
+<rect x="878.0" y="565.5" width="296.0" height="24.0" rx="4" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.13" />
+<rect x="878.0" y="565.5" width="296.0" height="24.0" rx="4" fill="none" stroke="var(--dec)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1026.0" y="580.9" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.6" fill="var(--ink)" font-weight="500" text-anchor="middle">RMSNorm → SwiGLU 512 → 1536 → 512 → ⊕</text>
+<text x="866.0" y="637.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--ink)" font-weight="700">train</text>
+<text x="912.0" y="637.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.6" fill="var(--muted)" font-weight="400">all 11 steps teacher-forced in one parallel pass</text>
+<text x="866.0" y="654.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--ink)" font-weight="700">eval</text>
+<text x="912.0" y="654.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.6" fill="var(--muted)" font-weight="400">KV-cached, one offset at a time</text>
+<path d="M 1026.0 675.5 L 1026.0 693.5" fill="none" stroke="var(--dec)" stroke-width="1.3" marker-end="url(#arrowD)"/>
+<text x="1026.0" y="709.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--dec)" font-weight="600" text-anchor="middle">[B, 128, 11, 512]</text>
+<rect x="866.0" y="735.5" width="320.0" height="138.0" rx="8" fill="var(--hair)" stroke="none" stroke-width="1" />
+<text x="880.0" y="757.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="11" fill="var(--ink)" font-weight="600">StructuredControllerCodec</text>
+<text x="880.0" y="771.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">the one raw ↔ categorical boundary</text>
+<text x="880.0" y="791.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">canonicalize</text>
+<text x="958.0" y="791.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">an L / R click forces its analog to 1.0</text>
+<text x="880.0" y="810.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">quantize</text>
+<text x="958.0" y="810.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">14 channels → 4 indices by nearest centre</text>
+<text x="880.0" y="829.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">embed</text>
+<text x="958.0" y="829.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">class table + linear map of the value, RMSNorm</text>
+<text x="880.0" y="848.5" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">mask</text>
+<text x="958.0" y="848.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--muted)" font-weight="400">trigger pair vetoes the impossible button combos</text>
+<text x="880.0" y="863.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" font-style="italic">shared by the observation token, the decoder input and the sampler</text>
+<text x="1270.0" y="158.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--head)" font-weight="700" letter-spacing="0.8">04</text>
+<text x="1296.0" y="158.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--ink)" font-weight="700" letter-spacing="1.35">WITHIN-FRAME ACTION CHAIN</text>
+<text x="1270.0" y="175.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--faint)" font-weight="400">four categorical groups, decoded in this order</text>
+<rect x="1358.0" y="198.0" width="328.0" height="26.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="1358.0" y="198.0" width="328.0" height="26.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1522.0" y="214.4" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.6" fill="var(--ink)" font-weight="500" text-anchor="middle">trunk logits   Linear 1024 → V   (no bias)</text>
+<text x="1270.0" y="215.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--trunk)" font-weight="600">from hₜ</text>
+<rect x="1296.0" y="244.0" width="364.0" height="84.0" rx="7" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="1296.0" y="244.0" width="364.0" height="84.0" rx="7" fill="none" stroke="var(--head)" stroke-width="1" stroke-opacity="0.34" />
+<text x="1310.0" y="269.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="13.5" fill="var(--ink)" font-weight="600">c_stick</text>
+<text x="1310.0" y="284.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">9 cluster centres · c-stick x / y</text>
+<text x="1646.0" y="269.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--head)" font-weight="600" text-anchor="end">9 classes</text>
+<rect x="1310.0" y="294.0" width="336.0" height="22.0" rx="4" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="1310.0" y="294.0" width="336.0" height="22.0" rx="4" fill="none" stroke="var(--head)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1478.0" y="308.2" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--ink)" font-weight="500" text-anchor="middle">head   RMSNorm → SwiGLU 512 → 512 → 9</text>
+<circle cx="1660.0" cy="286.0" r="7.5" fill="var(--panel)" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1656.4 286.0 L 1663.6 286.0" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1660.0 282.4 L 1660.0 289.6" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1674.0 286.0 L 1673.0 286.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrowT)" stroke-opacity="0.5"/>
+<path d="M 1338.0 335.0 L 1338.0 365.0" fill="none" stroke="var(--head)" stroke-width="1.3" marker-end="url(#arrowH)"/>
+<text x="1352.0" y="348.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--ink)" font-weight="600">FiLM   s · (1 + tanh γ) + β</text>
+<text x="1352.0" y="360.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="8.8" fill="var(--faint)" font-weight="400">γ, β from c_stick</text>
+<rect x="1296.0" y="372.0" width="364.0" height="84.0" rx="7" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="1296.0" y="372.0" width="364.0" height="84.0" rx="7" fill="none" stroke="var(--head)" stroke-width="1" stroke-opacity="0.34" />
+<text x="1310.0" y="397.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="13.5" fill="var(--ink)" font-weight="600">main_stick</text>
+<text x="1310.0" y="412.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">65 cluster centres · stick x / y</text>
+<text x="1646.0" y="397.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--head)" font-weight="600" text-anchor="end">65 classes</text>
+<rect x="1310.0" y="422.0" width="336.0" height="22.0" rx="4" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="1310.0" y="422.0" width="336.0" height="22.0" rx="4" fill="none" stroke="var(--head)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1478.0" y="436.2" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--ink)" font-weight="500" text-anchor="middle">head   RMSNorm → SwiGLU 512 → 512 → 65</text>
+<circle cx="1660.0" cy="414.0" r="7.5" fill="var(--panel)" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1656.4 414.0 L 1663.6 414.0" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1660.0 410.4 L 1660.0 417.6" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1674.0 414.0 L 1673.0 414.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrowT)" stroke-opacity="0.5"/>
+<path d="M 1338.0 463.0 L 1338.0 493.0" fill="none" stroke="var(--head)" stroke-width="1.3" marker-end="url(#arrowH)"/>
+<text x="1352.0" y="476.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--ink)" font-weight="600">FiLM   s · (1 + tanh γ) + β</text>
+<text x="1352.0" y="488.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="8.8" fill="var(--faint)" font-weight="400">γ, β from c_stick + main_stick</text>
+<rect x="1296.0" y="500.0" width="364.0" height="84.0" rx="7" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="1296.0" y="500.0" width="364.0" height="84.0" rx="7" fill="none" stroke="var(--head)" stroke-width="1" stroke-opacity="0.34" />
+<text x="1310.0" y="525.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="13.5" fill="var(--ink)" font-weight="600">triggers</text>
+<text x="1310.0" y="540.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">5 × 5 analog pair · L and R</text>
+<text x="1646.0" y="525.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--head)" font-weight="600" text-anchor="end">25 classes</text>
+<rect x="1310.0" y="550.0" width="336.0" height="22.0" rx="4" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="1310.0" y="550.0" width="336.0" height="22.0" rx="4" fill="none" stroke="var(--head)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1478.0" y="564.2" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--ink)" font-weight="500" text-anchor="middle">head   RMSNorm → SwiGLU 512 → 512 → 25</text>
+<circle cx="1660.0" cy="542.0" r="7.5" fill="var(--panel)" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1656.4 542.0 L 1663.6 542.0" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1660.0 538.4 L 1660.0 545.6" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1674.0 542.0 L 1673.0 542.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrowT)" stroke-opacity="0.5"/>
+<path d="M 1338.0 591.0 L 1338.0 621.0" fill="none" stroke="var(--head)" stroke-width="1.3" marker-end="url(#arrowH)"/>
+<text x="1352.0" y="604.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--ink)" font-weight="600">FiLM   s · (1 + tanh γ) + β</text>
+<text x="1352.0" y="616.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="8.8" fill="var(--faint)" font-weight="400">γ, β from c_stick + main_stick + triggers</text>
+<rect x="1296.0" y="628.0" width="364.0" height="84.0" rx="7" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.055" />
+<rect x="1296.0" y="628.0" width="364.0" height="84.0" rx="7" fill="none" stroke="var(--head)" stroke-width="1" stroke-opacity="0.34" />
+<text x="1310.0" y="653.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="13.5" fill="var(--ink)" font-weight="600">buttons</text>
+<text x="1310.0" y="668.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400">multi-label bitmask combination</text>
+<text x="1646.0" y="653.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10" fill="var(--head)" font-weight="600" text-anchor="end">256 classes</text>
+<rect x="1310.0" y="678.0" width="336.0" height="22.0" rx="4" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="1310.0" y="678.0" width="336.0" height="22.0" rx="4" fill="none" stroke="var(--head)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="1478.0" y="692.2" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--ink)" font-weight="500" text-anchor="middle">head   RMSNorm → SwiGLU 512 → 512 → 256</text>
+<circle cx="1660.0" cy="670.0" r="7.5" fill="var(--panel)" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1656.4 670.0 L 1663.6 670.0" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1660.0 666.4 L 1660.0 673.6" fill="none" stroke="var(--trunk)" stroke-width="1.1"/>
+<path d="M 1674.0 670.0 L 1673.0 670.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrowT)" stroke-opacity="0.5"/>
+<path d="M 1674.0 224.0 L 1674.0 670.0" fill="none" stroke="var(--trunk)" stroke-width="1" stroke-dasharray="3 3" stroke-opacity="0.5"/>
+<path d="M 1284.0 542.0 Q 1275.0 542.0 1275.0 560.0 L 1275.0 652.0 Q 1275.0 670.0 1295.0 670.0" fill="none" stroke="var(--head)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrowH)" stroke-opacity="0.85"/>
+<text x="1296.0" y="732.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.3" fill="var(--head)" font-weight="400">A held L or R click implies a full analog trigger, so the buttons</text>
+<text x="1296.0" y="744.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.3" fill="var(--head)" font-weight="400">logits that contradict the sampled trigger pair are masked to −∞.</text>
+<path d="M 1478.0 756.0 L 1478.0 776.0" fill="none" stroke="var(--head)" stroke-width="1.3" marker-end="url(#arrowH)"/>
+<rect x="1296.0" y="780.0" width="364.0" height="40.0" rx="7" fill="var(--head)" stroke="none" stroke-width="1" fill-opacity="0.15" />
+<rect x="1296.0" y="780.0" width="364.0" height="40.0" rx="7" fill="none" stroke="var(--head)" stroke-width="1.2" stroke-opacity="0.5" />
+<text x="1478.0" y="805.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="12" fill="var(--ink)" font-weight="600" text-anchor="middle">codec.dequantize</text>
+<path d="M 1478.0 824.0 L 1478.0 842.0" fill="none" stroke="var(--head)" stroke-width="1.3" marker-end="url(#arrowH)"/>
+<text x="1478.0" y="858.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="11" fill="var(--head)" font-weight="600" text-anchor="middle">14-channel controller frame</text>
+<text x="1478.0" y="872.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9" fill="var(--faint)" font-weight="400" text-anchor="middle">2 sticks · 2 triggers · 8 buttons · logical, post-deadzone units</text>
+<rect x="56.0" y="962.0" width="900.0" height="226.0" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1" />
+<path d="M 66.0 962.6 L 946.0 962.6" stroke="var(--awr)" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<rect x="988.0" y="962.0" width="716.0" height="226.0" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1" />
+<path d="M 998.0 962.6 L 1694.0 962.6" stroke="var(--dec)" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<text x="76.0" y="992.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--awr)" font-weight="700" letter-spacing="0.8">05</text>
+<text x="102.0" y="992.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--ink)" font-weight="700" letter-spacing="1.35">TRAINING OBJECTIVE — AWR ON A LEARNED VALUE BASELINE</text>
+<text x="76.0" y="1009.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--faint)" font-weight="400">a detached critic supplies the advantage; the policy loss reweights behaviour cloning</text>
+<rect x="76.0" y="1028.0" width="314.0" height="26.0" rx="4" fill="var(--trunk)" stroke="none" stroke-width="1" fill-opacity="0.1" />
+<rect x="76.0" y="1028.0" width="314.0" height="26.0" rx="4" fill="none" stroke="var(--trunk)" stroke-width="0.9" stroke-opacity="0.3" />
+<text x="233.0" y="1044.5" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10" fill="var(--ink)" font-weight="500" text-anchor="middle">trunk state  hₜ   ·   1024</text>
+<path d="M 233.0 1054.0 L 233.0 1068.0" fill="none" stroke="var(--awr)" stroke-width="1.3" marker-end="url(#arrowA)"/>
+<rect x="76.0" y="1070.0" width="314.0" height="38.0" rx="7" fill="var(--awr)" stroke="none" stroke-width="1" fill-opacity="0.15" />
+<rect x="76.0" y="1070.0" width="314.0" height="38.0" rx="7" fill="none" stroke="var(--awr)" stroke-width="1.2" stroke-opacity="0.5" />
+<text x="233.0" y="1087.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="11.5" fill="var(--ink)" font-weight="600" text-anchor="middle">value_head</text>
+<text x="233.0" y="1101.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.6" fill="var(--ink)" font-weight="400" text-anchor="middle">SwiGLU  1024 → 512 → 1</text>
+<path d="M 233.0 1108.0 L 233.0 1122.0" fill="none" stroke="var(--awr)" stroke-width="1.3" marker-end="url(#arrowA)"/>
+<text x="76.0" y="1136.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">V(sₜ) is fitted to G₍ₜ₊₁₎, the return aligned with the next action.</text>
+<rect x="76.0" y="1144.0" width="314.0" height="28.0" rx="6" fill="var(--awr)" stroke="none" stroke-width="1" fill-opacity="0.08" />
+<text x="90.0" y="1162.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="11.5" fill="var(--ink)" font-weight="600">L_value  =  mean[ ((V − G) / β)² ]</text>
+<path d="M 416.0 1024.0 L 416.0 1166.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<rect x="442.0" y="1028.0" width="494.0" height="32.0" rx="6" fill="var(--awr)" stroke="none" stroke-width="1" fill-opacity="0.08" />
+<text x="458.0" y="1049.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="12.5" fill="var(--ink)" font-weight="600">A  =  G₍ₜ₊₁₎  −  sg[ V(sₜ) ]</text>
+<text x="922.0" y="1049.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--awr)" font-weight="600" text-anchor="end">detached</text>
+<rect x="442.0" y="1068.0" width="494.0" height="32.0" rx="6" fill="var(--awr)" stroke="none" stroke-width="1" fill-opacity="0.08" />
+<text x="458.0" y="1089.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="12.5" fill="var(--ink)" font-weight="600">w  ∝  min( exp( A / β ),  3.5 )</text>
+<text x="922.0" y="1089.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--awr)" font-weight="600" text-anchor="end">β = 199.5</text>
+<rect x="442.0" y="1108.0" width="494.0" height="32.0" rx="6" fill="var(--awr)" stroke="none" stroke-width="1" fill-opacity="0.08" />
+<text x="458.0" y="1129.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="11.5" fill="var(--ink)" font-weight="600">L  =  ( mean_near[ w·NLL ] + 0.5·mean_far[ NLL ] ) / 1.5  +  L_value</text>
+<text x="442.0" y="1164.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">the weight is renormalized per batch, so the eligible mean weight is exactly 1</text>
+<text x="442.0" y="1178.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--faint)" font-weight="400">w ≡ 1 on ineligible rows and through the first 3 % of steps  ·  γ = 0.99618 · stock 120 · damage 1.0 · win 50</text>
+<text x="1008.0" y="992.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="10.5" fill="var(--dec)" font-weight="700" letter-spacing="0.8">06</text>
+<text x="1034.0" y="992.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="12.5" fill="var(--ink)" font-weight="700" letter-spacing="1.35">CLOSED-LOOP EXECUTION</text>
+<text x="1008.0" y="1009.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="10.5" fill="var(--faint)" font-weight="400">receding horizon · s = 4, d = 0</text>
+<rect x="1008.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.85" />
+<rect x="1036.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.85" />
+<rect x="1064.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.85" />
+<rect x="1092.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.85" />
+<rect x="1120.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.5" />
+<rect x="1148.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.5" />
+<rect x="1176.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.5" />
+<rect x="1204.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.5" />
+<rect x="1232.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.28" />
+<rect x="1260.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.28" />
+<rect x="1288.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.28" />
+<rect x="1316.0" y="1034.0" width="25.0" height="20.0" rx="3" fill="var(--dec)" stroke="none" stroke-width="1" fill-opacity="0.28" />
+<path d="M 1008.0 1066.0 L 1008.0 1060.0 L 1117.0 1060.0 L 1117.0 1066.0" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.45"/>
+<text x="1062.5" y="1079.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400" text-anchor="middle">plan 1</text>
+<path d="M 1120.0 1066.0 L 1120.0 1060.0 L 1229.0 1060.0 L 1229.0 1066.0" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.45"/>
+<text x="1174.5" y="1079.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400" text-anchor="middle">plan 2</text>
+<path d="M 1232.0 1066.0 L 1232.0 1060.0 L 1341.0 1060.0 L 1341.0 1066.0" fill="none" stroke="var(--dec)" stroke-width="1" stroke-opacity="0.45"/>
+<text x="1286.5" y="1079.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.2" fill="var(--faint)" font-weight="400" text-anchor="middle">plan 3</text>
+<text x="1008.0" y="1102.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.7" fill="var(--muted)" font-weight="400">Every plan decodes the dense four-offset prefix from a fresh</text>
+<text x="1008.0" y="1116.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.7" fill="var(--muted)" font-weight="400">128-frame observation, commits all four frames, then replans.</text>
+<text x="1008.0" y="1134.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.7" fill="var(--faint)" font-weight="400">Offsets 9 – 24 shape the trunk in training and never reach Dolphin.</text>
+<text x="1008.0" y="1148.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.7" fill="var(--faint)" font-weight="400">The critic is training-only, so the policy it weights is unchanged here.</text>
+<path d="M 1378.0 1026.0 L 1378.0 1150.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<text x="1408.0" y="1036.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">decode</text>
+<text x="1470.0" y="1036.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">ancestral, one group at a time</text>
+<text x="1408.0" y="1058.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">compile</text>
+<text x="1470.0" y="1058.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">trunk and decoder per batch bucket</text>
+<text x="1408.0" y="1080.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">dtype</text>
+<text x="1470.0" y="1080.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">bf16 autocast, dense SDPA</text>
+<text x="1408.0" y="1102.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">critic</text>
+<text x="1470.0" y="1102.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">fp32, outside the autocast region</text>
+<text x="1408.0" y="1124.0" font-family="'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono', Menlo, monospace" font-size="9.5" fill="var(--dec)" font-weight="700">vs CPU</text>
+<text x="1470.0" y="1124.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.5" fill="var(--muted)" font-weight="400">96 matchups · 7 200 frames each</text>
+<path d="M 56.0 1208.0 L 1704.0 1208.0" fill="none" stroke="var(--hair)" stroke-width="1"/>
+<text x="56.0" y="1226.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.3" fill="var(--faint)" font-weight="400" letter-spacing="0.7">MDS SCHEMA v7  ·  POLICY-WORLD CORPUS  ·  512 × 128 POSITIONS PER STEP  ·  524 288 STEPS</text>
+<text x="1704.0" y="1226.0" font-family="Inter, 'Helvetica Neue', 'Nimbus Sans', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="9.3" fill="var(--faint)" font-weight="400" text-anchor="end" letter-spacing="0.7">hal  ·  experiments/040_scaled_awr_bc.py</text>
+</svg>

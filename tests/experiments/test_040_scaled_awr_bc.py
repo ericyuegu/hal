@@ -581,6 +581,7 @@ def test_temporal_decoder_matrices_use_muon() -> None:
     ]
 
     assert exp.ARCHITECTURE.temporal_d_model == 512
+    assert exp.ARCHITECTURE.temporal_ff_dim == 1536
     assert temporal_matrices
     assert all(groups[id(parameter)]["use_muon"] for parameter in temporal_matrices)
     assert all(not groups[parameter_id]["use_muon"] for parameter_id in embedding_ids)
