@@ -100,7 +100,7 @@ _V7_TRAIN = (
 )
 
 
-def _cfg(**overrides):
+def _cfg(**overrides) -> exp.TrainConfig:
     return exp.TrainConfig(**{**_TINY, **_TINY_ITEMS, **overrides})
 
 
@@ -329,18 +329,23 @@ def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> No
     policy-world format, read back through ``loader_kwargs``'s routing, and forwarded."""
     if not _V7_TRAIN.is_dir():
         pytest.skip("local v7 subset is not available")
+    cfg = _cfg()
     source = dict(StreamingDataset(local=str(_V7_TRAIN), batch_size=1, shuffle=False)[0])
     live = ~np.isnan(np.asarray(source[item_column(0, "pos_x")], dtype=np.float64))
-    length = 64
-    start = min(int(np.flatnonzero(live)[0]), len(live) - length)
+    # The record is real data, so it decides the fixture: this asserts nothing without a
+    # live projectile, and the window sampler needs a replay at least one window long.
+    length = min(64, len(live))
+    if not live.any() or length < cfg.L_ctx + cfg.sample_chunk_length:
+        pytest.skip("the sampled replay is too short or carries no slot-0 projectile")
+    start = max(0, min(int(np.flatnonzero(live)[0]), len(live) - length))
     replay = _sliced_replay(source, start, length)
-    assert np.count_nonzero(~np.isnan(np.asarray(replay[item_column(0, "pos_x")], dtype=np.float64))) > 8
+    if np.count_nonzero(~np.isnan(np.asarray(replay[item_column(0, "pos_x")], dtype=np.float64))) < 8:
+        pytest.skip("the sliced window carries too few live projectile frames")
 
     encoded = encode_policy_world_replay(replay, "items-0")
     with MDSWriter(out=str(tmp_path / "train"), columns=POLICY_WORLD_MDS_COLUMNS, compression="zstd") as writer:
         writer.write(encoded)
 
-    cfg = _cfg()
     kwargs = exp.loader_kwargs(cfg, _parity_stats())
     kwargs |= {"data_root": str(tmp_path), "remote": None, "batch_size": 1}
     batch = next(iter(make_loader(split="train", num_workers=0, windows_per_replay=4, **kwargs)))

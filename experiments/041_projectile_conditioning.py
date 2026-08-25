@@ -33,6 +33,7 @@ from dataclasses import field as dataclass_field
 from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
+from typing import get_args
 
 import melee
 import numpy as np
@@ -138,9 +139,10 @@ assert set(ITEM_COLUMNS.cats) == {"type", "state"}
 _ITEM_PRESENCE_SUFFIX = "pos_x"
 # The column whose absence means the observation cannot carry projectiles at all.
 _ITEM_PROBE_COLUMN = item_column(0, _ITEM_PRESENCE_SUFFIX)
-# Replay formats whose decoder carries the item columns. The compact "policy" format
-# builds its dict from POLICY_MDS_COLUMNS, which holds no item block.
-_ITEM_REPLAY_FORMATS: tuple[str, ...] = ("full", "policy-world")
+# Replay formats, read off the dataloader's own vocabulary. Only the compact "policy"
+# format drops the projectile block: it builds its dict from POLICY_MDS_COLUMNS.
+_REPLAY_FORMATS: tuple[str, ...] = get_args(ReplayFormat.__value__)
+_ITEM_REPLAY_FORMATS: tuple[str, ...] = tuple(name for name in _REPLAY_FORMATS if name != "policy")
 
 
 @dataclass
@@ -300,12 +302,12 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("eval_max_parallel must be a positive power of two")
     if cfg.observation_bundle not in ("base", "v6_lean"):
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
-    if cfg.replay_format not in ("full", "policy", "policy-world"):
-        raise ValueError(f"replay_format must be 'full', 'policy' or 'policy-world', got {cfg.replay_format!r}")
+    if cfg.replay_format not in _REPLAY_FORMATS:
+        raise ValueError(f"replay_format must be one of {_REPLAY_FORMATS}, got {cfg.replay_format!r}")
     if cfg.item_conditioning and cfg.replay_format not in _ITEM_REPLAY_FORMATS:
         raise ValueError(
-            f"item_conditioning needs replay_format 'policy-world', got {cfg.replay_format!r}: the compact "
-            "'policy' decoder emits no item columns, so the projectile block would never reach the model"
+            f"item_conditioning needs replay_format in {_ITEM_REPLAY_FORMATS}, got {cfg.replay_format!r}: the "
+            "compact 'policy' decoder emits no item columns, so the projectile block would never reach the model"
         )
     if cfg.item_conditioning and cfg.observation_bundle == "v6_lean":
         raise ValueError(
