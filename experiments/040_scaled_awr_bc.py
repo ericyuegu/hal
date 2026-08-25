@@ -177,7 +177,7 @@ class Architecture:
 
     sample_chunk_length: int = 24
     head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20, 24)
-    temporal_d_model: int = 256
+    temporal_d_model: int = 512
     temporal_layers: int = 4
     temporal_heads: int = 8
     temporal_ff_dim: int = 512
@@ -596,14 +596,26 @@ class StructuredControllerCodec(nn.Module):
         return ~self.button_valid_for_trigger[trigger_indices]
 
 
+class SwiGLU(nn.Module):
+    """Gated MLP used by every nonlinear projection in the policy."""
+
+    def __init__(self, d_input: int, d_hidden: int, d_output: int, *, output_bias: bool = False) -> None:
+        super().__init__()
+        self.up = nn.Linear(d_input, 2 * d_hidden, bias=False)
+        self.down = nn.Linear(d_hidden, d_output, bias=output_bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        gate, value = self.up(x).chunk(2, dim=-1)
+        return self.down(F.silu(gate) * value)
+
+
 class NonlinearActionHead(nn.Module):
     def __init__(self, d_model: int, d_hidden: int, vocab: int) -> None:
         super().__init__()
-        self.up = nn.Linear(d_model, d_hidden, bias=False)
-        self.down = nn.Linear(d_hidden, vocab)
+        self.mlp = SwiGLU(d_model, d_hidden, vocab, output_bias=True)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.down(F.silu(self.up(decoder_rmsnorm(x))))
+        return self.mlp(decoder_rmsnorm(x))
 
 
 TEMPORAL_SDPA_BATCH_LIMIT = 32_768
@@ -621,8 +633,7 @@ class TemporalBlock(nn.Module):
         self.qkv = nn.Linear(self.d_model, 3 * self.d_model, bias=False)
         self.proj = nn.Linear(self.d_model, self.d_model, bias=False)
         self.rotary = Rotary(self.head_dim)
-        self.up = nn.Linear(self.d_model, cfg.arch.temporal_ff_dim, bias=False)
-        self.down = nn.Linear(cfg.arch.temporal_ff_dim, self.d_model, bias=False)
+        self.mlp = SwiGLU(self.d_model, cfg.arch.temporal_ff_dim, self.d_model)
 
     def _qkv(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         batch, length, _ = x.shape
@@ -639,7 +650,7 @@ class TemporalBlock(nn.Module):
         attended = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        return x + self.down(F.silu(self.up(decoder_rmsnorm(x))))
+        return x + self.mlp(decoder_rmsnorm(x))
 
     def forward(self, x: Tensor) -> Tensor:
         # Flash SDPA's CUDA launch rejects a flattened batch dimension above
@@ -664,7 +675,7 @@ class TemporalBlock(nn.Module):
         attended = F.scaled_dot_product_attention(q, rotated_k, v)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        x = x + self.down(F.silu(self.up(decoder_rmsnorm(x))))
+        x = x + self.mlp(decoder_rmsnorm(x))
         return x, (k, v)
 
 
@@ -701,13 +712,6 @@ class CausalTemporalDecoder(nn.Module):
             cfg.arch.d_model + controller_width + cfg.arch.offset_embed_dim, self.d_model
         )
         self.blocks = nn.ModuleList([TemporalBlock(cfg) for _ in range(cfg.arch.temporal_layers)])
-        self.group_condition = nn.ModuleDict(
-            {
-                name: nn.Linear(position * cfg.arch.action_embed_dim, 2 * self.d_model)
-                for position, name in enumerate(GROUP_ORDER)
-                if position
-            }
-        )
         self.outputs = nn.ModuleDict(
             {
                 name: NonlinearActionHead(self.d_model, cfg.arch.group_head_dim, GROUP_VOCABS[GROUP_INDEX[name]])
@@ -773,22 +777,11 @@ class CausalTemporalDecoder(nn.Module):
             x = block(x)
         return decoder_rmsnorm(x.view(*hidden.shape[:2], len(self.head_offsets), self.d_model))
 
-    def group_features(self, states: Tensor, name: str, embedded: dict[str, Tensor]) -> Tensor:
-        position = GROUP_ORDER.index(name)
-        if position == 0:
-            return states
-        prefix = torch.cat([embedded[group] for group in GROUP_ORDER[:position]], dim=-1)
-        scale, shift = self.group_condition[name](prefix).chunk(2, dim=-1)
-        return states * (1.0 + torch.tanh(scale)) + shift
-
     def teacher_forced_logits_by_group(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> dict[str, Tensor]:
         states = self.teacher_forced_states(hidden, observed, targets)
-        embedded = self.codec.embed_groups(targets)
         trunk = decoder_rmsnorm(hidden)
         logits = {
-            name: self.outputs[name](self.group_features(states, name, embedded))
-            + self.trunk_outputs[name](trunk)[:, :, None]
-            for name in GROUP_NAMES
+            name: self.outputs[name](states) + self.trunk_outputs[name](trunk)[:, :, None] for name in GROUP_NAMES
         }
         logits["buttons"] = logits["buttons"].masked_fill(self.codec.button_mask(targets[..., TRIG_G]), float("-inf"))
         return logits
@@ -827,11 +820,7 @@ class CausalTemporalDecoder(nn.Module):
         for depth, offset in enumerate(self.head_offsets):
             state, caches = self._decode_step(previous, offset, state_bias, caches)
             target = targets[:, depth]
-            embedded = self.codec.embed_groups(target)
-            group_logits = {
-                name: self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
-                for name in GROUP_NAMES
-            }
+            group_logits = {name: self.outputs[name](state) + trunk_logits[name] for name in GROUP_NAMES}
             group_logits["buttons"] = group_logits["buttons"].masked_fill(
                 self.codec.button_mask(target[:, TRIG_G]), float("-inf")
             )
@@ -861,17 +850,15 @@ class CausalTemporalDecoder(nn.Module):
         frames: list[Tensor] = []
         for depth, offset in enumerate(offsets):
             state, caches = self._decode_step(previous, offset, state_bias, caches)
-            embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
-                logits = self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
+                logits = self.outputs[name](state) + trunk_logits[name]
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 group = GROUP_INDEX[name]
                 uniform = None if uniforms is None else uniforms[depth, group]
                 pick = sample_categorical(logits, argmax=argmax, uniform=uniform, gen=gen)
                 picks[name] = pick
-                embedded[name] = self.codec.group_embedding(name, pick)
             indices = torch.stack([picks[name] for name in GROUP_NAMES], dim=-1)
             frames.append(indices)
             previous = indices
@@ -893,17 +880,15 @@ class CausalTemporalDecoder(nn.Module):
         all_logits: list[dict[str, Tensor]] = []
         for offset in self.head_offsets:
             state, caches = self._decode_step(previous, offset, state_bias, caches)
-            embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             frame_logits: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
-                logits = self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
+                logits = self.outputs[name](state) + trunk_logits[name]
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 pick = logits.argmax(dim=-1)
                 frame_logits[name] = logits
                 picks[name] = pick
-                embedded[name] = self.codec.group_embedding(name, pick)
             previous = torch.stack([picks[name] for name in GROUP_NAMES], dim=-1)
             frames.append(previous)
             all_logits.append(frame_logits)
@@ -933,10 +918,9 @@ class GPT(nn.Module):
         self.item_type_emb = nn.Embedding(_ITEM_CAT_VOCABS["type"], cfg.arch.item_type_dim)
         self.item_state_emb = nn.Embedding(_ITEM_CAT_VOCABS["state"], cfg.arch.item_state_dim)
         slot_width = cfg.arch.item_type_dim + cfg.arch.item_state_dim + 2 * len(_ITEM_FLOATS) + 1
-        self.item_up = nn.Linear(slot_width, cfg.arch.item_hidden_dim, bias=False)
-        self.item_down = nn.Linear(cfg.arch.item_hidden_dim, cfg.arch.item_dim, bias=False)
+        self.item_encoder = SwiGLU(slot_width, cfg.arch.item_hidden_dim, cfg.arch.item_dim)
         d_in += cfg.arch.item_dim
-        self.ctx_proj = nn.Linear(d_in, cfg.arch.d_model)
+        self.observation_encoder = SwiGLU(d_in, cfg.arch.d_model, cfg.arch.d_model, output_bias=True)
         self.trunk = Trunk(
             TrunkConfig(
                 d_model=cfg.arch.d_model,
@@ -992,7 +976,7 @@ class GPT(nn.Module):
             parts.append(live[..., None])
             slots.append(torch.cat(parts, dim=-1))
             presence.append(live)
-        encoded = self.item_down(F.silu(self.item_up(torch.stack(slots, dim=-2))))
+        encoded = self.item_encoder(torch.stack(slots, dim=-2))
         return (encoded * torch.stack(presence, dim=-1)[..., None]).sum(dim=-2)
 
     def context_tokens(self, features: dict[str, Tensor], action_indices: Tensor | None = None) -> Tensor:
@@ -1004,7 +988,7 @@ class GPT(nn.Module):
         parts.append(self.char_emb(features["opp_character"].clamp(0, self.char_emb.num_embeddings - 1)))
         parts.append(self.stage_emb(features["stage"].clamp(0, self.stage_emb.num_embeddings - 1)))
         parts.append(self._item_features(features))
-        return self.ctx_proj(torch.cat(parts, dim=-1))
+        return self.observation_encoder(torch.cat(parts, dim=-1))
 
     def forward(self, features: dict[str, Tensor], ctx_pad: Tensor, action_indices: Tensor | None = None) -> Tensor:
         return self.trunk(self.context_tokens(features, action_indices), ctx_pad)
@@ -1955,8 +1939,6 @@ def lr_schedule(cfg: TrainConfig):
 
 
 def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
-    muon = [parameter for parameter in model.trunk.blocks.parameters() if parameter.ndim >= 2]
-    muon_ids = {id(parameter) for parameter in muon}
     embedding_modules = [
         model.cat_embeds,
         model.char_emb,
@@ -1967,6 +1949,14 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     # The item encoder's linears stay in the decayed bucket; only the tables here.
     embedding_modules += [model.item_type_emb, model.item_state_emb]
     embedding_ids = {id(parameter) for module in embedding_modules for parameter in module.parameters()}
+    muon_modules = (model.trunk.blocks, model.temporal)
+    muon = [
+        parameter
+        for module in muon_modules
+        for parameter in module.parameters()
+        if parameter.ndim >= 2 and id(parameter) not in embedding_ids
+    ]
+    muon_ids = {id(parameter) for parameter in muon}
     decay: list[nn.Parameter] = []
     no_decay: list[nn.Parameter] = []
     for parameter in model.parameters():

@@ -489,6 +489,29 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
         exp.config_from_state({**checkpoint, "experiment_id": "040_scaled_awr_bc_v1"})
 
 
+def test_temporal_decoder_matrices_use_muon() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg)
+    groups = {
+        id(parameter): group for group in exp.make_optimizer(model, cfg).param_groups for parameter in group["params"]
+    }
+    embedding_ids = {
+        id(parameter)
+        for module in (model.temporal.offset_embedding, model.codec.class_embeddings)
+        for parameter in module.parameters()
+    }
+    temporal_matrices = [
+        parameter
+        for parameter in model.temporal.parameters()
+        if parameter.ndim >= 2 and id(parameter) not in embedding_ids
+    ]
+
+    assert exp.ARCHITECTURE.temporal_d_model == 512
+    assert temporal_matrices
+    assert all(groups[id(parameter)]["use_muon"] for parameter in temporal_matrices)
+    assert all(not groups[parameter_id]["use_muon"] for parameter_id in embedding_ids)
+
+
 def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -851,13 +874,18 @@ def test_model_includes_the_projectile_modules() -> None:
     model = exp.GPT(cfg)
 
     item_keys = {name for name in model.state_dict() if name.startswith("item_")}
-    assert item_keys == {"item_type_emb.weight", "item_state_emb.weight", "item_up.weight", "item_down.weight"}
+    assert item_keys == {
+        "item_type_emb.weight",
+        "item_state_emb.weight",
+        "item_encoder.up.weight",
+        "item_encoder.down.weight",
+    }
     assert model.item_type_emb.weight.shape == (256, cfg.arch.item_type_dim)
     assert model.item_state_emb.weight.shape == (256, cfg.arch.item_state_dim)
     # type + state embeddings, four floats, four sidecars, one presence flag.
     slot_width = cfg.arch.item_type_dim + cfg.arch.item_state_dim + 2 * len(_ITEM_FLOATS) + 1
-    assert model.item_up.weight.shape == (cfg.arch.item_hidden_dim, slot_width)
-    assert model.item_down.weight.shape == (cfg.arch.item_dim, cfg.arch.item_hidden_dim)
+    assert model.item_encoder.up.weight.shape == (2 * cfg.arch.item_hidden_dim, slot_width)
+    assert model.item_encoder.down.weight.shape == (cfg.arch.item_dim, cfg.arch.item_hidden_dim)
 
 
 def test_optimizer_and_counts_place_the_item_modules() -> None:
@@ -867,7 +895,7 @@ def test_optimizer_and_counts_place_the_item_modules() -> None:
 
     groups = {id(parameter): group for group in optimizer.param_groups for parameter in group["params"]}
     tables = (model.item_type_emb.weight, model.item_state_emb.weight)
-    linears = (model.item_up.weight, model.item_down.weight)
+    linears = (model.item_encoder.up.weight, model.item_encoder.down.weight)
     assert all(groups[id(w)]["weight_decay"] == 0.0 for w in tables)
     assert all(groups[id(w)]["weight_decay"] == cfg.adam_weight_decay for w in linears)
     assert all(not groups[id(w)]["use_muon"] for w in tables + linears)
@@ -875,6 +903,16 @@ def test_optimizer_and_counts_place_the_item_modules() -> None:
     # The item encoder sits outside the trunk, the temporal chain, and the group heads.
     item_parameters = sum(w.numel() for w in tables + linears)
     assert exp.subsystem_parameter_counts(model)["other"] > item_parameters
+
+
+def test_every_policy_mlp_uses_swiglu() -> None:
+    model = exp.GPT(_cfg())
+
+    assert isinstance(model.observation_encoder, exp.SwiGLU)
+    assert isinstance(model.item_encoder, exp.SwiGLU)
+    assert all(isinstance(block.mlp, exp.SwiGLU) for block in model.temporal.blocks)
+    assert all(isinstance(head.mlp, exp.SwiGLU) for head in model.temporal.outputs.values())
+    assert not hasattr(model.temporal, "group_condition")
 
 
 # --- the pooled set encoder ---------------------------------------------------
