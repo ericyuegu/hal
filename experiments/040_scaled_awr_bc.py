@@ -694,23 +694,29 @@ class TemporalBlock(nn.Module):
         shape = (batch, length, self.n_heads, self.head_dim)
         return q.view(shape), k.view(shape), v.view(shape)
 
-    def _forward_chunk(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         q, k, v = self._qkv(x)
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
-        attended = short_causal_attention(q, k, v)
+        # Two balanced attention chunks are faster than one 65,536-row tiny
+        # BMM. The large linear and SwiGLU operations use the full batch.
+        attended = torch.cat(
+            [
+                short_causal_attention(query, key, values)
+                for query, key, values in zip(
+                    q.split(TEMPORAL_ATTENTION_BATCH),
+                    k.split(TEMPORAL_ATTENTION_BATCH),
+                    v.split(TEMPORAL_ATTENTION_BATCH),
+                    strict=True,
+                )
+            ],
+            dim=0,
+        )
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
         return x + self.mlp(decoder_rmsnorm(x))
-
-    def forward(self, x: Tensor) -> Tensor:
-        # Two balanced chunks are faster than one 65,536-row batch for the
-        # production short-attention BMM. The split has no small tail.
-        if x.shape[0] <= TEMPORAL_ATTENTION_BATCH:
-            return self._forward_chunk(x)
-        return torch.cat([self._forward_chunk(chunk) for chunk in x.split(TEMPORAL_ATTENTION_BATCH)], dim=0)
 
     def forward_step(self, x: Tensor, past: tuple[Tensor, Tensor] | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         q, k, v = self._qkv(x[:, None])

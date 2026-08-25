@@ -198,6 +198,18 @@ def test_short_causal_attention_matches_sdpa() -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_temporal_attention_chunking_preserves_block_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    block = exp.TemporalBlock(_cfg()).eval()
+    inputs = torch.randn(5, 3, block.d_model)
+
+    monkeypatch.setattr(exp, "TEMPORAL_ATTENTION_BATCH", 2)
+    chunked = block(inputs)
+    monkeypatch.setattr(exp, "TEMPORAL_ATTENTION_BATCH", 8)
+    unchunked = block(inputs)
+
+    torch.testing.assert_close(chunked, unchunked)
+
+
 def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
     frames = 40
     sample: dict[str, object] = {
