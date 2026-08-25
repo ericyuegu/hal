@@ -1,36 +1,90 @@
-"""Focused contracts for the scaled light-AWR experiment."""
+"""Contracts for scaled light AWR with optional projectile inputs.
+
+The pooled set encoder must ignore which slots the live items occupy, the two
+observation paths must deliver the same item tensors, and the configured sources
+must be ones that carry the projectile block at all.
+"""
 
 import importlib.util
 import json
 import math
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
+from types import ModuleType
 
+import melee
 import numpy as np
 import pytest
 import torch
 from streaming import MDSWriter
+from streaming import StreamingDataset
+from torch import Tensor
 
+from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import POLICY_SCHEMA_VERSION
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.streams import StreamSource
 from hal.training import returns as returns_lib
+from hal.training.canonical import flatten_canonical_frame
+from hal.training.closed_loop import _build_layout
+from hal.training.closed_loop import _Rings
 from hal.training.dataloader import _make_streaming_dataset
+from hal.training.dataloader import make_loader
+from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
+from hal.training.features import BASE_ACTION_PROJECTION
+from hal.training.features import BASE_ITEMS_PROJECTION
+from hal.training.features import ITEM_COLUMNS
+from hal.training.features import ITEM_INPUT_COLUMNS
 from hal.training.features import Context
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
+from hal.training.features import preprocess
 from hal.training.replay_reservoir import PolicyReplayPackDataset
+from hal.wire import ITEM_SLOTS
+from hal.wire import MASK_INT32
+from hal.wire import item_column
 
-_PATH = Path(__file__).resolve().parents[2] / "experiments" / "040_scaled_awr_bc.py"
-_SPEC = importlib.util.spec_from_file_location("test_exp040", _PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-exp = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = exp
-_SPEC.loader.exec_module(exp)
+
+def _load(name: str, filename: str) -> ModuleType:
+    """Experiments load by path: their filenames start with a digit."""
+    path = Path(__file__).resolve().parents[2] / "experiments" / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+exp = _load("test_exp040", "040_scaled_awr_bc.py")
+
+# Every item width differs from every other, so a mixed-up concatenation cannot pass by
+# coincidence.
+_TINY_ITEMS: dict[str, object] = {
+    "item_type_dim": 6,
+    "item_state_dim": 3,
+    "item_hidden_dim": 8,
+    "item_dim": 5,
+}
+
+_ITEM_CATS: tuple[str, ...] = tuple(ITEM_COLUMNS.cats)
+_ITEM_FLOATS: tuple[str, ...] = tuple(ITEM_COLUMNS.floats)
+_ITEM_CAT_COLUMNS = {item_column(slot, name) for slot in range(ITEM_SLOTS) for name in _ITEM_CATS}
+
+EGO_PORT, OPP_PORT = 1, 2
+EGO_PREFIX = "p1"
+STAGE = int(melee.Stage.FINAL_DESTINATION.value)
+
+# The local v7 subset the schema tests also read. Absent on a fresh checkout.
+_V7_TRAIN = (
+    Path(__file__).resolve().parents[2] / "data" / "processed" / "ranked-anonymized-1" / "mds-v7-sub4" / "train"
+)
 
 
 def test_production_awr_constants_match_calibration_artifact() -> None:
@@ -38,7 +92,6 @@ def test_production_awr_constants_match_calibration_artifact() -> None:
     artifact = json.loads(artifact_path.read_text())
     cfg = exp.TrainConfig()
 
-    assert exp._AWR_CONSTANTS_CALIBRATED
     assert cfg.awr_return_baseline == artifact["return_baseline"]
     assert cfg.awr_weight_norm == artifact["weight_norm"]
 
@@ -62,11 +115,12 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "compile_trunk": False,
         "compile_temporal": False,
         "num_workers": 0,
-        "prefetch_samples": 16,
+        "prefetch_batches": 8,
         "push_to_r2": False,
         "inference_mode": "eager",
         "awr_return_baseline": 10.0,
         "awr_weight_norm": 2.0,
+        **_TINY_ITEMS,
     }
     return exp.TrainConfig(**{**values, **overrides})
 
@@ -134,16 +188,16 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     cfg = exp.TrainConfig()
     schedule = exp.lr_schedule(cfg)
 
-    assert cfg.max_steps == 262_144
+    assert cfg.max_steps == 524_288
     assert cfg.ckpt_every == 2048
-    assert cfg.warmup_steps == 7_864
-    assert cfg.stable_steps == 209_715
+    assert cfg.warmup_steps == 15_728
+    assert cfg.stable_steps == 419_430
     assert cfg.batch_size * cfg.L_ctx * cfg.max_steps == 2**35
     assert schedule(0) == 0.0
-    assert schedule(7_864) == 1.0
+    assert schedule(15_728) == 1.0
     assert schedule(100_000) == 1.0
-    assert schedule(209_715) == 1.0
-    assert schedule(262_143) == pytest.approx(1 / 170)
+    assert schedule(419_430) == 1.0
+    assert schedule(524_287) == pytest.approx(1 / 170)
 
     parameter = torch.nn.Parameter(torch.ones(()))
     optimizer = torch.optim.SGD([parameter], lr=2.0)
@@ -268,7 +322,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight,
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
         valid=valid,
     )
     selected_parts = exp.temporal_objective_parts(
@@ -276,7 +329,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight[valid],
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
     )
 
     for dense, selected in zip(dense_parts, selected_parts, strict=True):
@@ -289,7 +341,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight,
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
         valid=valid,
     )
     for masked, selected in zip(nan_masked_parts, selected_parts, strict=True):
@@ -302,7 +353,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight,
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
         valid=valid,
     )[2].backward()
     exp.temporal_objective_parts(
@@ -310,7 +360,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight[valid],
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
     )[2].backward()
 
     torch.testing.assert_close(dense_nll.grad[valid], selected_nll.grad)
@@ -364,7 +413,6 @@ def test_near_far_objective_matches_hand_computation() -> None:
         weight,
         valid_prefixes=2,
         aux_loss_weight=0.5,
-        n_near=6,
     )
 
     # Four controller groups: near=(4*1*2 + 4*2*.5)/2=6,
@@ -372,25 +420,14 @@ def test_near_far_objective_matches_hand_computation() -> None:
     torch.testing.assert_close(near, torch.tensor(6.0))
     torch.testing.assert_close(far, torch.tensor(16.0))
     torch.testing.assert_close(total, torch.tensor(14 / 1.5))
-    torch.testing.assert_close(
-        exp.advantage_weighted_objective(
-            nll,
-            weight,
-            valid_prefixes=2,
-            aux_loss_weight=0.5,
-            n_near=6,
-        ),
-        total,
-    )
 
 
 def test_unweighted_metric_uses_the_same_near_far_normalization() -> None:
     mean_nll = torch.ones(15, exp.N_GROUPS)
     mean_nll[6:] *= 3
-    metrics = exp.nll_mean_metrics(mean_nll, tuple(range(1, 16)), n_near=6, aux_loss_weight=0.5)
+    metrics = exp.nll_mean_metrics(mean_nll, tuple(range(1, 16)), aux_loss_weight=0.5)
     expected = (4 / exp._LN2 + 0.5 * 12 / exp._LN2) / 1.5
     assert metrics["loss_unweighted"] == pytest.approx(expected)
-    assert metrics["temporal_loss_total_unweighted"] == pytest.approx(expected)
 
 
 def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
@@ -438,8 +475,9 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
     checkpoint = exp._checkpoint_config(cfg)
     assert all(isinstance(name, str) for name in checkpoint["source_names"])
     assert exp.config_from_state(checkpoint) == cfg
+    assert exp.config_from_state({**checkpoint, "experiment_id": "041_projectile_conditioning_v1"}) == cfg
     with pytest.raises(ValueError, match="experiment_id"):
-        exp.config_from_state({**checkpoint, "experiment_id": "036_advantage_weighted_bc_v1"})
+        exp.config_from_state({**checkpoint, "experiment_id": "040_scaled_awr_bc_v1"})
 
 
 def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path: Path) -> None:
@@ -535,8 +573,11 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
             num_workers=8,
             cache_limit_gb=512,
             push_to_r2=False,
+            gradient_hist_every=128,
+            weight_hist_every=256,
             layer_rms_every=0,
             layer_rms_batch_size=4,
+            prefetch_batches=4,
         )
     )
 
@@ -546,34 +587,59 @@ def test_production_loader_and_eval_defaults() -> None:
 
     assert cfg.windows_per_replay == 2
     assert cfg.num_workers == 32
-    assert cfg.prefetch_samples == 8 * cfg.batch_size
+    assert cfg.prefetch_batches == 8
     worker_prefetch, batch_prefetch = exp._loader_prefetch_depths(cfg)
-    assert (worker_prefetch, batch_prefetch) == (16, 7)
+    assert (worker_prefetch, batch_prefetch) == (8, 7)
     queued_worker_samples = cfg.num_workers * worker_prefetch * cfg.windows_per_replay
     queued_batch_samples = batch_prefetch * cfg.batch_size
-    assert queued_worker_samples + queued_batch_samples == cfg.prefetch_samples
+    assert queued_worker_samples + queued_batch_samples == cfg.prefetch_batches * cfg.batch_size
     assert cfg.eval_every == 2**14
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
     assert exp._eval_inference_bucket(cfg, 96) == 32
+    assert len(cfg.source_names) == len(cfg.source_weights) == 44
+    assert dict(zip(cfg.source_names, cfg.source_weights, strict=True)) == {
+        name: 2.0 if name == "professional-zain-policy-world-v7" else 1.0 for name in cfg.source_names
+    }
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:
+    cfg = exp.TrainConfig()
+    assert cfg.gradient_hist_every == 2**12
+    assert cfg.weight_hist_every == 2**11
     assert exp.histogram_due(1, 4096)
     assert exp.histogram_due(4096, 4096)
     assert not exp.histogram_due(1001, 4096)
+
+
+def test_wandb_watch_logs_gradient_histograms(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = torch.nn.Linear(2, 2)
+    calls: list[tuple[torch.nn.Module, dict[str, object]]] = []
+    monkeypatch.setattr(exp.wandb, "run", object())
+    monkeypatch.setattr(exp.wandb, "watch", lambda watched, **kwargs: calls.append((watched, kwargs)))
+
+    exp._watch_gradients(model, _cfg(gradient_hist_every=17))
+    exp._watch_gradients(model, _cfg(gradient_hist_every=0))
+
+    assert calls == [(model, {"log": "gradients", "log_freq": 17, "log_graph": False})]
+
+
+def test_weight_histograms_use_their_own_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(weight_hist_every=2**11, layer_rms_every=0)
+    model = exp.GPT(cfg)
+    batch = _awr_batch(cfg)
+    monkeypatch.setattr(exp, "wandb_weight_log", lambda _model: {"weights/test": "histogram"})
+
+    assert exp._training_diagnostics(model, batch, cfg, 2**11) == {"weights/test": "histogram"}
+    assert exp._training_diagnostics(model, batch, cfg, 2**11 + 1) == {}
 
 
 def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
     cfg = _cfg(n_layers=2, temporal_layers=2)
     model = exp.GPT(cfg)
     batch = _awr_batch(cfg)
-    history, targets, _ = exp.prepared_targets(model, batch)
-    hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
-    model.temporal.teacher_forced_nll(hidden, history, targets).mean().backward()
 
     activations = exp.layer_activation_rms_log(model, batch, cfg, max_rows=1)
-    gradients = exp.layer_gradient_rms_log(model)
     layer_names = {
         "trunk_block_00",
         "trunk_block_01",
@@ -585,8 +651,7 @@ def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
         for metric in ("activation_rms", "residual_branch_rms", "residual_ratio")
         for name in layer_names
     }
-    assert set(gradients) == {f"gradient_rms/{name}" for name in layer_names}
-    assert all(math.isfinite(value) and value >= 0 for value in (*activations.values(), *gradients.values()))
+    assert all(math.isfinite(value) and value >= 0 for value in activations.values())
     for name in layer_names:
         expected_ratio = activations[f"residual_branch_rms/{name}"] / activations[f"activation_rms/{name}"]
         assert activations[f"residual_ratio/{name}"] == pytest.approx(expected_ratio)
@@ -753,7 +818,8 @@ def test_inference_parity_uses_scale_aware_bf16_tolerances() -> None:
 
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = _cfg(
-        wandb_hist_every=0,
+        gradient_hist_every=0,
+        weight_hist_every=0,
         val_every=0,
         ckpt_every=0,
         eval_every=0,
@@ -801,3 +867,460 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     assert second["actual_loss_positions"] == 14
     assert (tmp_path / "boundary-step-0000002.pt").is_file()
     assert (tmp_path / "smoke-final.pt").is_file()
+
+
+# --- projectile arm ----------------------------------------------------------
+
+
+def test_flag_on_adds_exactly_the_item_modules() -> None:
+    cfg = _cfg()
+    off = exp.GPT(_cfg(item_conditioning=False))
+    on = exp.GPT(cfg)
+
+    added = set(on.state_dict()) - set(off.state_dict())
+    assert set(off.state_dict()) <= set(on.state_dict())
+    assert added == {"item_type_emb.weight", "item_state_emb.weight", "item_up.weight", "item_down.weight"}
+    assert on.item_type_emb.weight.shape == (256, cfg.item_type_dim)
+    assert on.item_state_emb.weight.shape == (256, cfg.item_state_dim)
+    # type + state embeddings, four floats, four sidecars, one presence flag.
+    slot_width = cfg.item_type_dim + cfg.item_state_dim + 2 * len(_ITEM_FLOATS) + 1
+    assert on.item_up.weight.shape == (cfg.item_hidden_dim, slot_width)
+    assert on.item_down.weight.shape == (cfg.item_dim, cfg.item_hidden_dim)
+    assert on.ctx_proj.weight.shape[1] == off.ctx_proj.weight.shape[1] + cfg.item_dim
+
+
+def test_optimizer_and_counts_place_the_item_modules() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+
+    groups = {id(parameter): group for group in optimizer.param_groups for parameter in group["params"]}
+    tables = (model.item_type_emb.weight, model.item_state_emb.weight)
+    linears = (model.item_up.weight, model.item_down.weight)
+    assert all(groups[id(w)]["weight_decay"] == 0.0 for w in tables)
+    assert all(groups[id(w)]["weight_decay"] == cfg.adam_weight_decay for w in linears)
+    assert all(not groups[id(w)]["use_muon"] for w in tables + linears)
+
+    # The item encoder sits outside the trunk, the temporal chain, and the group heads.
+    counts = exp.subsystem_parameter_counts(model)
+    off_counts = exp.subsystem_parameter_counts(exp.GPT(_cfg(item_conditioning=False)))
+    item_parameters = sum(w.numel() for w in tables + linears)
+    assert counts["other"] - off_counts["other"] == item_parameters + cfg.item_dim * cfg.d_model
+    assert {name: counts[name] for name in ("trunk", "temporal_decoder", "group_heads")} == {
+        name: off_counts[name] for name in ("trunk", "temporal_decoder", "group_heads")
+    }
+
+
+# --- the pooled set encoder ---------------------------------------------------
+
+
+def _item_columns(items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> dict[str, Tensor]:
+    """Model-ready item columns for a ``[2, 3]`` batch: ``items`` maps a slot to its
+    live projectile, and every other slot is the preprocessed empty form (id 0, zeroed
+    floats, sidecar 1.0)."""
+    shape = (2, 3)
+    features: dict[str, Tensor] = {}
+    for slot in range(ITEM_SLOTS):
+        item = items.get(slot)
+        for name in _ITEM_CATS:
+            value = 0 if item is None else int(item[name])
+            features[item_column(slot, name)] = torch.full(shape, value, dtype=torch.long)
+        for name in _ITEM_FLOATS:
+            column = item_column(slot, name)
+            features[column] = torch.full(shape, 0.0 if item is None else float(item[name]))
+            if masks:
+                features[f"{column}_mask"] = torch.full(shape, 1.0 if item is None else 0.0)
+    return features
+
+
+_LASER = {"type": 6, "state": 2, "pos_x": 12.5, "pos_y": -3.25, "vel_x": 1.5, "vel_y": 0.0}
+_TURNIP = {"type": 210, "state": 4, "pos_x": -40.0, "pos_y": 18.75, "vel_x": -0.5, "vel_y": 2.25}
+
+
+def _pooled(model: torch.nn.Module, items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> Tensor:
+    with torch.no_grad():
+        return model._item_features(_item_columns(items, masks=masks))
+
+
+def test_pooling_is_permutation_invariant_over_the_slots() -> None:
+    """A slot holds its item until an OLDER item despawns, so live items shift slots
+    mid-match. The pooled value must not move with them."""
+    torch.manual_seed(0)
+    model = exp.GPT(_cfg()).eval()
+
+    first = _pooled(model, {0: _LASER, 1: _TURNIP})
+    permuted = _pooled(model, {3: _TURNIP, 1: _LASER})
+    one_item = _pooled(model, {2: _LASER})
+
+    assert first.shape == (2, 3, model.cfg.item_dim)
+    assert torch.allclose(first, permuted, atol=1e-6)
+    # Non-vacuity: the pooled value does depend on the set, just not on the slots.
+    assert not torch.allclose(first, one_item, atol=1e-4)
+
+
+def test_an_empty_frame_pools_to_exactly_zero() -> None:
+    torch.manual_seed(0)
+    model = exp.GPT(_cfg()).eval()
+
+    pooled = _pooled(model, {})
+
+    assert torch.equal(pooled, torch.zeros_like(pooled))
+
+
+def test_a_missing_sidecar_reads_as_a_live_slot() -> None:
+    """``preprocess`` emits ``{name}_mask`` only where a mask fires, so an absent
+    sidecar means zero — a slot that holds an item."""
+    torch.manual_seed(0)
+    model = exp.GPT(_cfg()).eval()
+
+    full = _pooled(model, {0: _LASER, 1: _TURNIP, 2: _LASER, 3: _TURNIP})
+    without_sidecars = _pooled(model, {0: _LASER, 1: _TURNIP, 2: _LASER, 3: _TURNIP}, masks=False)
+
+    assert torch.equal(full, without_sidecars)
+
+
+def test_the_type_clamp_lands_unknown_ids_on_the_last_row() -> None:
+    """The stored type is peppi's raw u16 id, which the routed table does not cover."""
+    torch.manual_seed(0)
+    model = exp.GPT(_cfg()).eval()
+
+    unknown = _pooled(model, {0: {**_LASER, "type": 70_000}})
+    last_row = _pooled(model, {0: {**_LASER, "type": model.item_type_emb.num_embeddings - 1}})
+
+    assert torch.equal(unknown, last_row)
+
+
+def test_context_tokens_accept_the_synthetic_item_context() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+    ctx = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+
+    sidecars = {f"{item_column(slot, name)}_mask" for slot in range(ITEM_SLOTS) for name in ITEM_COLUMNS.floats}
+    assert set(ctx.features) >= ITEM_INPUT_COLUMNS | sidecars
+    with torch.no_grad():
+        tokens = model.context_tokens(ctx.features)
+    assert tokens.shape == (2, cfg.L_ctx, cfg.d_model)
+
+
+def test_decode_asks_for_the_item_canonical_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``canonical_context`` does not self-gate: a decode that forgets ``items`` would
+    compile a second program on a different key set."""
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+    seen: list[bool] = []
+    real = exp.canonical_context
+
+    def spy(ctx: Context, observation_bundle: str, *, items: bool = False) -> Context:
+        seen.append(items)
+        return real(ctx, observation_bundle, items=items)
+
+    monkeypatch.setattr(exp, "canonical_context", spy)
+    with torch.no_grad():
+        chunk = exp.BF16Inference(model, cfg).decode(exp.synthetic_context(cfg, 1, torch.device("cpu")), 4)
+
+    assert seen == [True]
+    assert chunk.shape[1:] == (4, A_DIM)
+
+
+# --- routing ------------------------------------------------------------------
+
+
+def test_one_routing_feeds_both_observation_paths() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+
+    assert exp._routing(cfg) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
+    assert exp._routing(_cfg(item_conditioning=False)) == (None, BASE_ACTION_PROJECTION)
+
+    loader = exp.loader_kwargs(cfg, {})
+    policy = exp.make_policy(model, {}, cfg, device="cpu")
+    assert (loader["extra"], loader["projection"]) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
+    assert (policy.extra, policy.projection) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
+
+
+def test_the_shipped_config_reads_only_sources_that_store_items() -> None:
+    """No other decoder emits the item block, so the shipped source set must be the
+    policy-world one, and the train loader must read it with the policy-world format."""
+    cfg = exp.TrainConfig()
+
+    assert cfg.item_conditioning
+    assert set(cfg.source_names) == exp._POLICY_WORLD_NAMES
+    assert exp.loader_kwargs(cfg, {})["projection"] is BASE_ITEMS_PROJECTION
+
+
+def test_item_conditioning_rejects_a_source_that_drops_items() -> None:
+    compact = "ranked-anonymized-1-policy-v7"
+    assert compact in exp.streams.BY_NAME and compact not in exp._POLICY_WORLD_NAMES
+
+    with pytest.raises(ValueError, match="policy-world sources"):
+        exp.validate_config(_cfg(source_names=(compact,), source_weights=(1.0,)))
+    # The control arm may read it; the shipped comparison keeps both arms on one source.
+    exp.validate_config(_cfg(item_conditioning=False, source_names=(compact,), source_weights=(1.0,)))
+
+
+def test_a_batch_without_item_columns_fails_loud() -> None:
+    """A flag-on model handed an item-less observation must name the requirement rather
+    than raise a bare KeyError deep inside the encoder."""
+    model = exp.GPT(_cfg()).eval()
+    item_less = exp.synthetic_context(_cfg(item_conditioning=False), 2, torch.device("cpu")).features
+
+    assert not any(name.startswith("item") for name in item_less)
+    with pytest.raises(ValueError, match="policy-world"):
+        model.context_tokens(item_less)
+
+
+def _sliced_replay(source: Mapping[str, object], start: int, length: int) -> dict[str, object]:
+    """One shorter replay: every per-frame column is cut, constants pass through."""
+    frames = len(np.asarray(source["frame"]))
+    out: dict[str, object] = {}
+    for name, value in source.items():
+        array = np.asarray(value)
+        out[name] = array[start : start + length] if array.ndim == 1 and array.shape[0] == frames else value
+    return out
+
+
+def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> None:
+    """End to end on real data: a v7 replay with live projectiles, encoded to the
+    policy-world format, read back through ``loader_kwargs``'s routing, and forwarded."""
+    if not _V7_TRAIN.is_dir():
+        pytest.skip("local v7 subset is not available")
+    cfg = _cfg()
+    source = dict(StreamingDataset(local=str(_V7_TRAIN), batch_size=1, shuffle=False)[0])
+    live = ~np.isnan(np.asarray(source[item_column(0, "pos_x")], dtype=np.float64))
+    # The record is real data, so it decides the fixture: this asserts nothing without a
+    # live projectile, and the window sampler needs a replay at least one window long.
+    length = min(64, len(live))
+    if not live.any() or length < cfg.L_ctx + cfg.sample_chunk_length:
+        pytest.skip("the sampled replay is too short or carries no slot-0 projectile")
+    start = max(0, min(int(np.flatnonzero(live)[0]), len(live) - length))
+    replay = _sliced_replay(source, start, length)
+    if np.count_nonzero(~np.isnan(np.asarray(replay[item_column(0, "pos_x")], dtype=np.float64))) < 8:
+        pytest.skip("the sliced window carries too few live projectile frames")
+
+    encoded = encode_policy_world_replay(replay, "items-0")
+    with MDSWriter(out=str(tmp_path / "train"), columns=POLICY_WORLD_MDS_COLUMNS, compression="zstd") as writer:
+        writer.write(encoded)
+
+    kwargs = exp.loader_kwargs(cfg, _parity_stats())
+    kwargs |= {
+        "data_root": str(tmp_path),
+        "sources": None,
+        "source_weights": None,
+        "remote": None,
+        "batch_size": 1,
+    }
+    batch = next(
+        iter(make_loader(split="train", num_workers=0, windows_per_replay=4, replay_format="policy-world", **kwargs))
+    )
+    features = batch.context.features
+
+    assert set(features) >= ITEM_INPUT_COLUMNS
+    model = exp.GPT(cfg).eval()
+    with torch.no_grad():
+        tokens = model.context_tokens(features)
+    assert tokens.shape == (1, cfg.L_ctx, cfg.d_model)
+    assert torch.isfinite(tokens).all()
+
+
+# --- offline / online parity for one projectile frame -------------------------
+
+
+def _post(side: int) -> dict[str, object]:
+    return {
+        "position": {"x": 42.0 - 11.0 * side, "y": -7.5 * side},
+        "direction": 1.0 - 2.0 * side,
+        "percent": 31.0 + side,
+        "shield": 47.5,
+        "stock": 3,
+        "action": 14 + side,
+        "jumps_used": side,
+        "airborne": side,
+        "hurtbox_state": 1,
+        "hitlag_left": 2.0,
+    }
+
+
+def _obs_with_two_items() -> dict[str, object]:
+    """One canonical closed-loop frame carrying two live projectiles. Spawn ids are
+    ascending, so the laser takes slot 0 and the turnip slot 1."""
+    items = [
+        {
+            "id": 3,
+            "type": _LASER["type"],
+            "state": _LASER["state"],
+            "position": {"x": _LASER["pos_x"], "y": _LASER["pos_y"]},
+            "velocity": {"x": _LASER["vel_x"], "y": _LASER["vel_y"]},
+            "owner": 0,
+        },
+        {
+            "id": 7,
+            "type": _TURNIP["type"],
+            "state": _TURNIP["state"],
+            "position": {"x": _TURNIP["pos_x"], "y": _TURNIP["pos_y"]},
+            "velocity": {"x": _TURNIP["vel_x"], "y": _TURNIP["vel_y"]},
+            "owner": 1,
+        },
+    ]
+    return {
+        "id": 400,
+        "ports": {
+            EGO_PORT: {"leader": {"post": _post(0)}, "follower": None},
+            OPP_PORT: {"leader": {"post": _post(1)}, "follower": None},
+        },
+        "items": items,
+        "stage": STAGE,
+        "_matchup": {"stage": STAGE, "character": {EGO_PORT: 1, OPP_PORT: 22}},
+    }
+
+
+def _parity_stats() -> dict[str, FeatureStats]:
+    """Asymmetric stats so standardize and min-max both do real work."""
+    rng = np.random.default_rng(41)
+    names = ["position_x", "position_y", "percent", "shield", "direction", "hitlag_left"]
+    keys = names + [f"nana_{name}" for name in names] + [f"item_{name}" for name in _ITEM_FLOATS]
+    out: dict[str, FeatureStats] = {}
+    for key in keys:
+        low = float(rng.normal(-50, 10))
+        out[key] = FeatureStats(
+            mean=float(rng.normal(0, 20)),
+            std=float(abs(rng.normal(0, 10)) + 0.5),
+            min=low,
+            max=low + float(abs(rng.normal(0, 60)) + 1.0),
+        )
+    return out
+
+
+def _offline_batch(flat: Mapping[str, float], action: np.ndarray) -> dict[str, np.ndarray]:
+    """The same frame in the OFFLINE MDS dtypes: item ids are int32 with ``MASK_INT32``
+    in an empty slot, while the closed loop hands every item field over as a float NaN
+    sentinel column."""
+    out: dict[str, np.ndarray] = {}
+    for key, value in flat.items():
+        if key == "frame":
+            continue
+        if key in _ITEM_CAT_COLUMNS:
+            out[key] = np.array([MASK_INT32 if math.isnan(value) else int(value)], dtype=np.int32)
+        elif isinstance(value, int):
+            out[key] = np.array([value], dtype=np.int32)
+        else:
+            out[key] = np.array([value], dtype=np.float32)
+    for index, channel in enumerate(ACTION_CHANNELS):
+        name = f"{EGO_PREFIX}_{channel}"
+        if channel.startswith("button_"):
+            out[name] = np.array([action[index] > 0.5], dtype=np.int32)
+        else:
+            out[name] = np.array([action[index]], dtype=np.float32)
+    return relabel_ego(out, EGO_PREFIX)
+
+
+def test_ring_item_rows_match_preprocess_on_the_offline_dtypes() -> None:
+    """One two-projectile frame through the closed-loop ring builder reproduces
+    ``preprocess`` on the equivalent MDS-dtype arrays, tensor for tensor."""
+    cfg = _cfg()
+    extra, projection = exp._routing(cfg)
+    stats = _parity_stats()
+    flat = flatten_canonical_frame(_obs_with_two_items())
+    action = np.linspace(-1.0, 1.0, A_DIM, dtype=np.float32)
+
+    layout = _build_layout(flat, EGO_PREFIX, stats, extra, projection)
+    rings = _Rings(layout, cfg.L_ctx)
+    rings.gather(flat, action)
+    rings.push(None)
+    newest = rings.window(1)
+    values = dict(zip(layout.value_names, rings.values[:, newest][:, 0], strict=True))
+    cats = dict(zip(layout.cat_names, rings.cats[:, newest][:, 0], strict=True))
+    masks = dict(zip(layout.mask_names, rings.masks[:, newest][:, 0], strict=True))
+
+    reference = preprocess(_offline_batch(flat, action), stats, extra=extra, projection=projection)
+
+    assert set(values) | set(cats) == {name for name in reference if not name.endswith("_mask")}
+    assert set(values) | set(cats) >= ITEM_INPUT_COLUMNS
+    for name, value in values.items():
+        assert float(value) == pytest.approx(float(reference[name][0]), rel=1e-6, abs=1e-6), name
+    for name, value in cats.items():
+        assert int(value) == int(reference[name][0]), name
+    for name, value in masks.items():
+        expected = reference.get(name)
+        assert float(value) == (0.0 if expected is None else float(expected[0])), name
+
+    # The frame is not degenerate: two live slots, two empty ones.
+    assert int(cats[item_column(0, "type")]) == _LASER["type"]
+    assert int(cats[item_column(1, "type")]) == _TURNIP["type"]
+    assert int(cats[item_column(2, "type")]) == 0
+    for slot in range(ITEM_SLOTS):
+        empty = 1.0 if slot >= 2 else 0.0
+        assert masks[f"{item_column(slot, 'pos_x')}_mask"] == empty
+    assert values[item_column(0, "pos_x")] != 0.0
+    assert all(values[item_column(slot, name)] == 0.0 for slot in (2, 3) for name in _ITEM_FLOATS)
+    assert [name for name in values if name.endswith("_owner")] == []
+
+
+# --- configuration ------------------------------------------------------------
+
+
+def test_config_round_trips_and_rejects_an_040_checkpoint() -> None:
+    cfg = _cfg()
+    values = exp._checkpoint_config(cfg)
+    item_fields = {"item_conditioning", "item_type_dim", "item_state_dim", "item_hidden_dim", "item_dim"}
+
+    assert item_fields <= exp._CHECKPOINT_ARCH_FIELDS
+    assert exp.config_from_state(values) == cfg
+
+    legacy = dict(values)
+    del legacy["gradient_hist_every"]
+    del legacy["prefetch_batches"]
+    del legacy["weight_hist_every"]
+    legacy["wandb_hist_every"] = 17
+    legacy["prefetch_samples"] = 6 * cfg.batch_size
+    restored = exp.config_from_state(legacy)
+    assert restored.gradient_hist_every == 17
+    assert restored.prefetch_batches == 6
+    assert restored.weight_hist_every == 2**11
+
+    with pytest.raises(ValueError, match="item_dim"):
+        exp.config_from_state({name: value for name, value in values.items() if name not in item_fields})
+
+
+def test_validate_config_rejects_non_positive_item_dims() -> None:
+    exp.validate_config(_cfg())
+    for name in ("item_type_dim", "item_state_dim", "item_hidden_dim", "item_dim"):
+        with pytest.raises(ValueError, match=name):
+            exp.validate_config(_cfg(**{name: 0}))
+
+
+def test_model_tag_records_the_arm() -> None:
+    assert exp.model_tag(_cfg()).startswith("scaled040-")
+    assert "-items-awr-near-" in exp.model_tag(_cfg())
+    assert "-noitems-awr-near-" in exp.model_tag(_cfg(item_conditioning=False))
+
+
+def test_the_item_dims_are_frozen_but_the_arm_is_not() -> None:
+    """Both arms ship as production runs, so the flag is the treatment axis; the item
+    widths are architecture and stay frozen."""
+    exp.validate_production_config(exp.TrainConfig(item_conditioning=False))
+    with pytest.raises(ValueError, match="item_dim"):
+        exp.validate_production_config(exp.TrainConfig(item_dim=8))
+
+
+def test_gradients_are_clipped_to_the_frozen_norm() -> None:
+    """A gradient spike must not reach the optimizer unscaled.
+
+    Muon orthogonalizes its own updates, but the aux AdamW groups are not
+    scale-bounded, so an unclipped spike can destroy the model in one step.
+    """
+    cfg = exp.TrainConfig()
+    assert cfg.grad_clip == 1.0
+
+    with pytest.raises(ValueError, match="grad_clip must be finite and positive"):
+        exp.validate_config(_cfg(grad_clip=0.0))
+    with pytest.raises(ValueError, match="grad_clip must be finite and positive"):
+        exp.validate_config(_cfg(grad_clip=math.inf))
+    with pytest.raises(ValueError, match="frozen treatment"):
+        exp.validate_production_config(exp.TrainConfig(grad_clip=5.0))
+
+    parameter = torch.nn.Parameter(torch.zeros(4))
+    parameter.grad = torch.full((4,), 25.0)
+    pre_clip = torch.nn.utils.clip_grad_norm_([parameter], cfg.grad_clip)
+
+    assert pre_clip.item() == pytest.approx(50.0)
+    assert parameter.grad.norm().item() == pytest.approx(cfg.grad_clip)
