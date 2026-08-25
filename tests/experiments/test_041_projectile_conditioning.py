@@ -1,8 +1,9 @@
 """Contracts for the projectile-conditioned experiment.
 
 The flag-off architecture must stay bit-identical to experiment 026, the pooled set
-encoder must ignore which slots the live items occupy, and the two observation paths
-must deliver the same item tensors.
+encoder must ignore which slots the live items occupy, the two observation paths must
+deliver the same item tensors, and the configured replay format must be one that
+carries the projectile block at all.
 """
 
 import importlib.util
@@ -17,13 +18,18 @@ import melee
 import numpy as np
 import pytest
 import torch
+from streaming import MDSWriter
+from streaming import StreamingDataset
 from torch import Tensor
 
 from hal.data.feature_stats import FeatureStats
+from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
+from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.eval.self_play import synthetic_context
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.closed_loop import _build_layout
 from hal.training.closed_loop import _Rings
+from hal.training.dataloader import make_loader
 from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
@@ -31,6 +37,8 @@ from hal.training.features import BASE_ACTION_PROJECTION
 from hal.training.features import BASE_ITEMS_PROJECTION
 from hal.training.features import ITEM_COLUMNS
 from hal.training.features import ITEM_INPUT_COLUMNS
+from hal.training.features import V6_PLAYER_COLUMNS
+from hal.training.features import Context
 from hal.training.features import preprocess
 from hal.wire import ITEM_SLOTS
 from hal.wire import MASK_INT32
@@ -86,8 +94,13 @@ EGO_PORT, OPP_PORT = 1, 2
 EGO_PREFIX = "p1"
 STAGE = int(melee.Stage.FINAL_DESTINATION.value)
 
+# The local v7 subset the schema tests also read. Absent on a fresh checkout.
+_V7_TRAIN = (
+    Path(__file__).resolve().parents[2] / "data" / "processed" / "ranked-anonymized-1" / "mds-v7-sub4" / "train"
+)
 
-def _cfg(**overrides) -> object:
+
+def _cfg(**overrides):
     return exp.TrainConfig(**{**_TINY, **_TINY_ITEMS, **overrides})
 
 
@@ -167,9 +180,9 @@ _LASER = {"type": 6, "state": 2, "pos_x": 12.5, "pos_y": -3.25, "vel_x": 1.5, "v
 _TURNIP = {"type": 210, "state": 4, "pos_x": -40.0, "pos_y": 18.75, "vel_x": -0.5, "vel_y": 2.25}
 
 
-def _pooled(model, items: Mapping[int, Mapping[str, float]], **kwargs) -> Tensor:
+def _pooled(model: torch.nn.Module, items: Mapping[int, Mapping[str, float]], *, masks: bool = True) -> Tensor:
     with torch.no_grad():
-        return model._item_features(_item_features(items, **kwargs))
+        return model._item_features(_item_features(items, masks=masks))
 
 
 def test_pooling_is_permutation_invariant_over_the_slots() -> None:
@@ -225,16 +238,14 @@ def test_context_tokens_accept_the_synthetic_item_context() -> None:
     model = exp.GPT(cfg).eval()
     ctx = synthetic_context(cfg, 2, torch.device("cpu"))
 
-    assert set(ctx.features) >= ITEM_INPUT_COLUMNS
-    assert {f"{name}_mask" for name in ITEM_INPUT_COLUMNS if name.rsplit("_", 1)[-1] not in _ITEM_CATS} <= set(
-        ctx.features
-    )
+    sidecars = {f"{item_column(slot, name)}_mask" for slot in range(ITEM_SLOTS) for name in ITEM_COLUMNS.floats}
+    assert set(ctx.features) >= ITEM_INPUT_COLUMNS | sidecars
     with torch.no_grad():
         tokens = model.context_tokens(ctx.features)
     assert tokens.shape == (2, cfg.L_ctx, cfg.d_model)
 
 
-def test_decode_asks_for_the_item_canonical_context(monkeypatch) -> None:
+def test_decode_asks_for_the_item_canonical_context(monkeypatch: pytest.MonkeyPatch) -> None:
     """``canonical_context`` does not self-gate: a decode that forgets ``items`` would
     compile a second program on a different key set."""
     cfg = _cfg()
@@ -242,7 +253,7 @@ def test_decode_asks_for_the_item_canonical_context(monkeypatch) -> None:
     seen: list[bool] = []
     real = exp.canonical_context
 
-    def spy(ctx, observation_bundle, *, items=False):
+    def spy(ctx: Context, observation_bundle: str, *, items: bool = False) -> Context:
         seen.append(items)
         return real(ctx, observation_bundle, items=items)
 
@@ -263,18 +274,90 @@ def test_one_routing_feeds_both_observation_paths() -> None:
 
     assert exp._routing(cfg) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
     assert exp._routing(_cfg(item_conditioning=False)) == (None, BASE_ACTION_PROJECTION)
-    assert exp._routing(_cfg(item_conditioning=False, observation_bundle="v6_lean"))[1] is None
+    assert exp._routing(_cfg(item_conditioning=False, observation_bundle="v6_lean")) == (V6_PLAYER_COLUMNS, None)
 
     loader = exp.loader_kwargs(cfg, {})
     policy = exp.make_policy(model, {}, cfg, device="cpu")
     assert (loader["extra"], loader["projection"]) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
     assert (policy.extra, policy.projection) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
+    assert loader["replay_format"] == "policy-world"
+
+
+def test_the_shipped_config_reads_the_only_source_that_stores_items() -> None:
+    """The compact 'policy' decoder builds its dict from POLICY_MDS_COLUMNS, which has
+    no item block, so the default source and format must be the policy-world pair."""
+    cfg = exp.TrainConfig()
+
+    assert cfg.item_conditioning
+    assert cfg.replay_format == "policy-world"
+    assert cfg.data_root.endswith("mds-policy-world-v7")
+
+
+def test_item_conditioning_rejects_a_format_that_drops_items() -> None:
+    with pytest.raises(ValueError, match="policy-world"):
+        exp.validate_config(_cfg(replay_format="policy"))
+    # The control arm reads the same source, so the comparison stays one-axis.
+    exp.validate_config(_cfg(item_conditioning=False, replay_format="policy"))
+    exp.validate_config(_cfg(replay_format="full"))
+    with pytest.raises(ValueError, match="replay_format"):
+        exp.validate_config(_cfg(replay_format="compact"))
+
+
+def test_a_batch_without_item_columns_fails_loud() -> None:
+    """A flag-on model handed an item-less observation must name the requirement rather
+    than raise a bare KeyError deep inside the encoder."""
+    model = exp.GPT(_cfg()).eval()
+    item_less = synthetic_context(_cfg(item_conditioning=False), 2, torch.device("cpu")).features
+
+    assert not any(name.startswith("item") for name in item_less)
+    with pytest.raises(ValueError, match="policy-world"):
+        model.context_tokens(item_less)
+
+
+def _sliced_replay(source: Mapping[str, object], start: int, length: int) -> dict[str, object]:
+    """One shorter replay: every per-frame column is cut, constants pass through."""
+    frames = len(np.asarray(source["frame"]))
+    out: dict[str, object] = {}
+    for name, value in source.items():
+        array = np.asarray(value)
+        out[name] = array[start : start + length] if array.ndim == 1 and array.shape[0] == frames else value
+    return out
+
+
+def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> None:
+    """End to end on real data: a v7 replay with live projectiles, encoded to the
+    policy-world format, read back through ``loader_kwargs``'s routing, and forwarded."""
+    if not _V7_TRAIN.is_dir():
+        pytest.skip("local v7 subset is not available")
+    source = dict(StreamingDataset(local=str(_V7_TRAIN), batch_size=1, shuffle=False)[0])
+    live = ~np.isnan(np.asarray(source[item_column(0, "pos_x")], dtype=np.float64))
+    length = 64
+    start = min(int(np.flatnonzero(live)[0]), len(live) - length)
+    replay = _sliced_replay(source, start, length)
+    assert np.count_nonzero(~np.isnan(np.asarray(replay[item_column(0, "pos_x")], dtype=np.float64))) > 8
+
+    encoded = encode_policy_world_replay(replay, "items-0")
+    with MDSWriter(out=str(tmp_path / "train"), columns=POLICY_WORLD_MDS_COLUMNS, compression="zstd") as writer:
+        writer.write(encoded)
+
+    cfg = _cfg()
+    kwargs = exp.loader_kwargs(cfg, _parity_stats())
+    kwargs |= {"data_root": str(tmp_path), "remote": None, "batch_size": 1}
+    batch = next(iter(make_loader(split="train", num_workers=0, windows_per_replay=4, **kwargs)))
+    features = batch.context.features
+
+    assert set(features) >= ITEM_INPUT_COLUMNS
+    model = exp.GPT(cfg).eval()
+    with torch.no_grad():
+        tokens = model.context_tokens(features)
+    assert tokens.shape == (1, cfg.L_ctx, cfg.d_model)
+    assert torch.isfinite(tokens).all()
 
 
 # --- offline / online parity for one projectile frame -------------------------
 
 
-def _post(side: int) -> dict:
+def _post(side: int) -> dict[str, object]:
     return {
         "position": {"x": 42.0 - 11.0 * side, "y": -7.5 * side},
         "direction": 1.0 - 2.0 * side,
@@ -289,7 +372,7 @@ def _post(side: int) -> dict:
     }
 
 
-def _obs_with_two_items() -> dict:
+def _obs_with_two_items() -> dict[str, object]:
     """One canonical closed-loop frame carrying two live projectiles. Spawn ids are
     ascending, so the laser takes slot 0 and the turnip slot 1."""
     items = [

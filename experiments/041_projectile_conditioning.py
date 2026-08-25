@@ -68,6 +68,7 @@ from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
+from hal.training.dataloader import ReplayFormat
 from hal.training.dataloader import make_loader
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import A_DIM
@@ -127,12 +128,19 @@ _MISC_AS = "misc_as"
 
 # The projectile block, per slot: four normalized floats, their validity sidecars, and
 # two categorical ids. Table sizes come from the routing declaration; the embedding
-# widths are architecture and live in TrainConfig.
+# widths are architecture and live in TrainConfig. The two ids get one table each, so a
+# third routed categorical must fail here rather than pass unread into the model.
 _ITEM_FLOATS = tuple(ITEM_COLUMNS.floats)
 _ITEM_CAT_VOCABS = {name: spec[0] for name, spec in ITEM_COLUMNS.cats.items() if spec is not None}
-# Every routed float of one item shares its validity, so the position sidecar is the
-# slot's presence flag: 1.0 means the slot holds a live projectile.
-_ITEM_PRESENCE_FLOAT = "pos_x"
+assert set(ITEM_COLUMNS.cats) == {"type", "state"}
+# The sidecar that gates a slot: an item with an unusable position tells the model
+# nothing about where it is, so the slot pools to zero.
+_ITEM_PRESENCE_SUFFIX = "pos_x"
+# The column whose absence means the observation cannot carry projectiles at all.
+_ITEM_PROBE_COLUMN = item_column(0, _ITEM_PRESENCE_SUFFIX)
+# Replay formats whose decoder carries the item columns. The compact "policy" format
+# builds its dict from POLICY_MDS_COLUMNS, which holds no item block.
+_ITEM_REPLAY_FORMATS: tuple[str, ...] = ("full", "policy-world")
 
 
 @dataclass
@@ -214,8 +222,11 @@ class TrainConfig:
     # Slippstream startup unreliable even when the container can burst higher.
     eval_max_parallel: int | None = 8
 
-    data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
-    compact_data: bool = True
+    # The policy-world source. Both arms read it, so the comparison stays one-axis.
+    data_root: str = "data/processed/ranked-anonymized-1/mds-policy-world-v7"
+    # Which decoder reads a replay. Only policy-world carries the projectile block: the
+    # compact "policy" decoder builds its dict from POLICY_MDS_COLUMNS, which has none.
+    replay_format: ReplayFormat = "policy-world"
     mds_schema_version: int = 7
     cache_limit_gb: int = 128
     shuffle_block_size: int = 2000
@@ -289,6 +300,13 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("eval_max_parallel must be a positive power of two")
     if cfg.observation_bundle not in ("base", "v6_lean"):
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
+    if cfg.replay_format not in ("full", "policy", "policy-world"):
+        raise ValueError(f"replay_format must be 'full', 'policy' or 'policy-world', got {cfg.replay_format!r}")
+    if cfg.item_conditioning and cfg.replay_format not in _ITEM_REPLAY_FORMATS:
+        raise ValueError(
+            f"item_conditioning needs replay_format 'policy-world', got {cfg.replay_format!r}: the compact "
+            "'policy' decoder emits no item columns, so the projectile block would never reach the model"
+        )
     if cfg.item_conditioning and cfg.observation_bundle == "v6_lean":
         raise ValueError(
             "item_conditioning with observation_bundle='v6_lean' is an untested combination; "
@@ -857,7 +875,12 @@ class GPT(nn.Module):
         vector, the pooled value does not depend on WHICH slots the live items occupy,
         and the item count stays implicit in the sum.
         """
-        zeros = torch.zeros_like(features[item_column(0, _ITEM_PRESENCE_FLOAT)])
+        if _ITEM_PROBE_COLUMN not in features:
+            raise ValueError(
+                f"the observation carries no {_ITEM_PROBE_COLUMN!r} column, so item_conditioning has nothing to "
+                "read; training needs replay_format 'policy-world' and closed-loop eval needs the item routing"
+            )
+        zeros = torch.zeros_like(features[_ITEM_PROBE_COLUMN])
         slots: list[Tensor] = []
         presence: list[Tensor] = []
         for slot in range(ITEM_SLOTS):
@@ -866,7 +889,7 @@ class GPT(nn.Module):
             type_ids = features[item_column(slot, "type")].clamp(0, self.item_type_emb.num_embeddings - 1)
             state_ids = features[item_column(slot, "state")].clamp(0, self.item_state_emb.num_embeddings - 1)
             masks = {name: features.get(f"{item_column(slot, name)}_mask", zeros) for name in _ITEM_FLOATS}
-            live = 1.0 - masks[_ITEM_PRESENCE_FLOAT]
+            live = 1.0 - masks[_ITEM_PRESENCE_SUFFIX]
             parts = [self.item_type_emb(type_ids), self.item_state_emb(state_ids)]
             parts += [features[item_column(slot, name)][..., None] for name in _ITEM_FLOATS]
             parts += [masks[name][..., None] for name in _ITEM_FLOATS]
@@ -1626,6 +1649,7 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
         batch_size=micro_batch_size(cfg),
         seed=cfg.seed,
         schema_version=cfg.mds_schema_version,
+        replay_format=cfg.replay_format,
         extra=extra,
         projection=projection,
     )
@@ -1706,7 +1730,7 @@ def _checkpoint_sha256(path: Path) -> str:
 
 def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
     kwargs = loader_kwargs(cfg, stats)
-    if cfg.compact_data:
+    if cfg.replay_format != "full":
         train_loader = make_reservoir_loader(
             split="train",
             num_workers=cfg.num_workers,
@@ -1723,11 +1747,10 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
             num_workers=cfg.num_workers,
             prefetch_factor=cfg.prefetch_factor,
             windows_per_replay=cfg.windows_per_replay,
-            compact=False,
             **kwargs,
         )
     val_kwargs = {**kwargs, "batch_size": cfg.val_batch_size}
-    val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **val_kwargs)
+    val_loader = make_loader(split=cfg.val_split, num_workers=0, **val_kwargs)
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
 
 
