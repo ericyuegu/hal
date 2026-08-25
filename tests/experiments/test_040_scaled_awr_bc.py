@@ -181,6 +181,10 @@ def test_synthetic_train_step_benchmark_batch_has_frozen_geometry() -> None:
     exp.validate_batch_geometry(batch, cfg, cfg.batch_size)
 
 
+def test_training_compile_mode_prefers_cuda_graph_replay() -> None:
+    assert exp._TRAIN_COMPILE_MODE == "reduce-overhead"
+
+
 def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
     frames = 40
     sample: dict[str, object] = {

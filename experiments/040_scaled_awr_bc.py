@@ -118,6 +118,7 @@ _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
 _TRAIN_METRICS_EVERY = 10
+_TRAIN_COMPILE_MODE = "reduce-overhead"
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
         "cache_limit_gb",
@@ -2493,9 +2494,19 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
             raise RuntimeError(
                 f"compiled CUDA training requires FlexAttention, resolved {model.trunk.attn_path!r} instead"
             )
-        trunk_fn = torch.compile(trunk_fn, dynamic=False, fullgraph=True)
+        trunk_fn = torch.compile(
+            trunk_fn,
+            dynamic=False,
+            fullgraph=True,
+            mode=_TRAIN_COMPILE_MODE,
+        )
     if DEVICE == "cuda" and cfg.compile_temporal:
-        temporal_fn = torch.compile(temporal_fn, dynamic=False)
+        temporal_fn = torch.compile(
+            temporal_fn,
+            dynamic=False,
+            fullgraph=True,
+            mode=_TRAIN_COMPILE_MODE,
+        )
     return trunk_fn, temporal_fn
 
 
@@ -2592,6 +2603,8 @@ def train_step(
     phase_timer: CudaPhaseTimer | None = None,
 ) -> TrainStepResult:
     """Run one complete optimization step on a device-resident batch."""
+    if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
+        torch.compiler.cudagraph_mark_step_begin()
     optimizer.zero_grad()
     loss, nll_sum, metrics = microbatch_loss(
         model,
