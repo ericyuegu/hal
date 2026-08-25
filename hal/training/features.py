@@ -134,6 +134,20 @@ V6_PLAYER_COLUMNS: Final[ExtraColumns] = ExtraColumns(
     },
 )
 
+# Schema v6's GLOBAL projectile block, ``item{0..3}_*``. Slots are ordered by ascending
+# spawn id, so a slot keeps its item until an OLDER item despawns.
+#
+# ``owner`` is NOT routed: it holds a physical libmelee port (1..4), and the MDS does not
+# record which ports p1/p2 occupy, so the column cannot be made ego-relative. It stays
+# dropped until a schema v8 stores those ports.
+#
+# ``type`` is peppi's raw u16 item id, stored widened to int32 and clamped nowhere in the
+# pipeline. A consuming embedding table must clamp its ids into [0, 255]: that lands every
+# id at or above 255 on the last row, which is libmelee's UNKNOWN_PROJECTILE, by
+# construction. The empty-slot sentinel is separate — ``preprocess`` masks it to 0.
+#
+# Suffix collisions: the routed suffixes match no float column. ``state`` also matches
+# ``*_hurtbox_state``, which routes as a categorical either way, so nothing is misrouted.
 ITEM_COLUMNS: Final[ExtraColumns] = ExtraColumns(
     floats={
         # Item position and velocity, in the same raw game units as the player
@@ -150,28 +164,11 @@ ITEM_COLUMNS: Final[ExtraColumns] = ExtraColumns(
         "state": (256, 4),
     },
 )
-"""Schema v6's GLOBAL projectile block, ``item{0..3}_*``.
 
-Slots are ordered by ascending spawn id, so a slot keeps its item until an OLDER
-item despawns.
-
-``owner`` is deliberately NOT routed. It holds a physical libmelee port (1..4),
-and the MDS does not record which ports p1/p2 occupy, so the column cannot be made
-ego-relative. It stays dropped until a schema v8 stores those ports.
-
-``type`` is the raw u16 item id: the ``melee.enums.ProjectileType`` values sit in
-[6, 210] and 255 means unknown, so a 256-row table covers the space.
-
-Suffix collisions (verified): ``pos_x``, ``pos_y``, ``vel_x``, ``vel_y`` and ``type``
-match item columns only. ``state`` also matches ``*_hurtbox_state``, which
-:func:`_classify` routes as "cat" through :data:`CAT_FEATURES` in the same clause —
-same kind, so no column is misrouted.
-"""
-
+# The raw item columns a model reads: every slot crossed with every routed suffix.
 ITEM_INPUT_COLUMNS: Final[frozenset[str]] = frozenset(
     item_column(slot, suffix) for slot in range(ITEM_SLOTS) for suffix in (*ITEM_COLUMNS.floats, *ITEM_COLUMNS.cats)
 )
-"""The raw item columns a model reads: every slot crossed with every routed suffix."""
 
 _NO_EXTRA: Final[ExtraColumns] = ExtraColumns(floats={}, cats={})
 
@@ -189,11 +186,11 @@ BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     derive_spatial=False,
 )
 
+# BASE_ACTION_PROJECTION plus the projectile block.
 BASE_ITEMS_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     columns=BASE_ACTION_PROJECTION.columns | ITEM_INPUT_COLUMNS,
     derive_spatial=False,
 )
-""":data:`BASE_ACTION_PROJECTION` plus the projectile block."""
 
 _BUTTON_ORDER = tuple(channel.removeprefix("button_") for channel in ACTION_CHANNELS[6:])
 
