@@ -694,9 +694,9 @@ class TemporalBlock(nn.Module):
         shape = (batch, length, self.n_heads, self.head_dim)
         return q.view(shape), k.view(shape), v.view(shape)
 
-    def _forward_chunk(self, x: Tensor) -> Tensor:
+    def _forward_chunk(self, x: Tensor, rotary_factors: tuple[Tensor, Tensor]) -> Tensor:
         q, k, v = self._qkv(x)
-        cos, sin = self.rotary(q)
+        cos, sin = rotary_factors
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
@@ -705,12 +705,17 @@ class TemporalBlock(nn.Module):
         x = x + self.scale * self.proj(attended)
         return x + self.mlp(decoder_rmsnorm(x))
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, rotary_factors: tuple[Tensor, Tensor] | None = None) -> Tensor:
         # Two balanced chunks are faster than one 65,536-row batch for the
         # production short-attention BMM. The split has no small tail.
+        if rotary_factors is None:
+            rotary_factors = self.rotary.at(x.shape[1], x.device, x.dtype)
         if x.shape[0] <= TEMPORAL_ATTENTION_BATCH:
-            return self._forward_chunk(x)
-        return torch.cat([self._forward_chunk(chunk) for chunk in x.split(TEMPORAL_ATTENTION_BATCH)], dim=0)
+            return self._forward_chunk(x, rotary_factors)
+        return torch.cat(
+            [self._forward_chunk(chunk, rotary_factors) for chunk in x.split(TEMPORAL_ATTENTION_BATCH)],
+            dim=0,
+        )
 
     def forward_step(self, x: Tensor, past: tuple[Tensor, Tensor] | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         q, k, v = self._qkv(x[:, None])
@@ -831,8 +836,10 @@ class CausalTemporalDecoder(nn.Module):
         offsets = torch.tensor(self.head_offsets, device=hidden.device)
         x = self._state_bias(trunk)[:, :, None] + self._step_features(previous, offsets)
         x = x.reshape(hidden.shape[0] * hidden.shape[1], len(self.head_offsets), self.d_model)
+        first_block = cast(TemporalBlock, self.blocks[0])
+        rotary_factors = first_block.rotary.at(x.shape[1], x.device, x.dtype)
         for block in self.blocks:
-            x = block(x)
+            x = block(x, rotary_factors)
         return decoder_rmsnorm(x.view(*hidden.shape[:2], len(self.head_offsets), self.d_model))
 
     def group_features(self, states: Tensor, name: str, embedded: dict[str, Tensor]) -> Tensor:
