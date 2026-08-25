@@ -142,6 +142,7 @@ _PRODUCTION_TREATMENT_FIELDS = frozenset(
         "ckpt_every",
         "d_model",
         "eval_every",
+        "grad_clip",
         "eval_max_frames",
         "eval_max_parallel",
         "eval_n_matchups",
@@ -286,6 +287,7 @@ class TrainConfig:
     muon_weight_decay: float = 0.0625
     adam_lr: float = 8.5e-4
     adam_weight_decay: float = 0.0625
+    grad_clip: float = 1.0
     warmup_fraction: float = 0.03
     stable_fraction: float = 0.80
     lr_floor_ratio: float = 1 / 170
@@ -460,6 +462,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("awr_return_baseline must be finite")
     if not math.isfinite(cfg.awr_weight_norm) or cfg.awr_weight_norm <= 0:
         raise ValueError("awr_weight_norm must be finite and positive")
+    if not math.isfinite(cfg.grad_clip) or cfg.grad_clip <= 0:
+        raise ValueError(f"grad_clip must be finite and positive, got {cfg.grad_clip}")
     if not 0.0 <= cfg.warmup_fraction < cfg.stable_fraction < 1.0:
         raise ValueError("schedule fractions must satisfy 0 <= warmup < stable < 1")
     if not 0.0 < cfg.lr_floor_ratio <= 1.0:
@@ -2908,7 +2912,7 @@ def train(
                 loss.backward()
                 if phase_timer is not None:
                     phase_timer.record("backward_end")
-                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 if phase_timer is not None:
                     phase_timer.record("grad_norm_end")
                 diagnostics = _training_diagnostics(model, batch, cfg, update)

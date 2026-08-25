@@ -873,7 +873,7 @@ def _cfg040(**overrides) -> object:
     values = {
         name: value
         for name, value in asdict(_cfg(**overrides)).items()
-        if not name.startswith("item_") and name not in ("muon_adjust_lr_fn", "source_weights")
+        if not name.startswith("item_") and name not in ("muon_adjust_lr_fn", "source_weights", "grad_clip")
     }
     return exp040.TrainConfig(**values)
 
@@ -1313,3 +1313,27 @@ def test_the_item_dims_are_frozen_but_the_arm_is_not() -> None:
     exp.validate_production_config(exp.TrainConfig(item_conditioning=False))
     with pytest.raises(ValueError, match="item_dim"):
         exp.validate_production_config(exp.TrainConfig(item_dim=8))
+
+
+def test_gradients_are_clipped_to_the_frozen_norm() -> None:
+    """A gradient spike must not reach the optimizer unscaled.
+
+    Muon orthogonalizes its own updates, but the aux AdamW groups are not
+    scale-bounded, so an unclipped spike can destroy the model in one step.
+    """
+    cfg = exp.TrainConfig()
+    assert cfg.grad_clip == 1.0
+
+    with pytest.raises(ValueError, match="grad_clip must be finite and positive"):
+        exp.validate_config(_cfg(grad_clip=0.0))
+    with pytest.raises(ValueError, match="grad_clip must be finite and positive"):
+        exp.validate_config(_cfg(grad_clip=math.inf))
+    with pytest.raises(ValueError, match="frozen treatment"):
+        exp.validate_production_config(exp.TrainConfig(grad_clip=5.0))
+
+    parameter = torch.nn.Parameter(torch.zeros(4))
+    parameter.grad = torch.full((4,), 25.0)
+    pre_clip = torch.nn.utils.clip_grad_norm_([parameter], cfg.grad_clip)
+
+    assert pre_clip.item() == pytest.approx(50.0)
+    assert parameter.grad.norm().item() == pytest.approx(cfg.grad_clip)
