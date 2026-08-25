@@ -192,16 +192,16 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     cfg = exp.TrainConfig()
     schedule = exp.lr_schedule(cfg)
 
-    assert cfg.max_steps == 262_144
+    assert cfg.max_steps == 524_288
     assert cfg.ckpt_every == 2048
-    assert cfg.warmup_steps == 7_864
-    assert cfg.stable_steps == 209_715
+    assert cfg.warmup_steps == 15_728
+    assert cfg.stable_steps == 419_430
     assert cfg.batch_size * cfg.L_ctx * cfg.max_steps == 2**35
     assert schedule(0) == 0.0
-    assert schedule(7_864) == 1.0
+    assert schedule(15_728) == 1.0
     assert schedule(100_000) == 1.0
-    assert schedule(209_715) == 1.0
-    assert schedule(262_143) == pytest.approx(1 / 170)
+    assert schedule(419_430) == 1.0
+    assert schedule(524_287) == pytest.approx(1 / 170)
 
     parameter = torch.nn.Parameter(torch.ones(()))
     optimizer = torch.optim.SGD([parameter], lr=2.0)
@@ -606,7 +606,7 @@ def test_production_loader_and_eval_defaults() -> None:
     assert cfg.num_workers == 32
     assert cfg.prefetch_samples == 8 * cfg.batch_size
     worker_prefetch, batch_prefetch = exp._loader_prefetch_depths(cfg)
-    assert (worker_prefetch, batch_prefetch) == (16, 7)
+    assert (worker_prefetch, batch_prefetch) == (8, 7)
     queued_worker_samples = cfg.num_workers * worker_prefetch * cfg.windows_per_replay
     queued_batch_samples = batch_prefetch * cfg.batch_size
     assert queued_worker_samples + queued_batch_samples == cfg.prefetch_samples
@@ -624,6 +624,18 @@ def test_histogram_cadence_does_not_restart_on_resume() -> None:
     assert exp.histogram_due(1, 4096)
     assert exp.histogram_due(4096, 4096)
     assert not exp.histogram_due(1001, 4096)
+
+
+def test_wandb_watch_logs_gradient_histograms(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = torch.nn.Linear(2, 2)
+    calls: list[tuple[torch.nn.Module, dict[str, object]]] = []
+    monkeypatch.setattr(exp.wandb, "run", object())
+    monkeypatch.setattr(exp.wandb, "watch", lambda watched, **kwargs: calls.append((watched, kwargs)))
+
+    exp._watch_gradients(model, _cfg(wandb_hist_every=17))
+    exp._watch_gradients(model, _cfg(wandb_hist_every=0))
+
+    assert calls == [(model, {"log": "gradients", "log_freq": 17, "log_graph": False})]
 
 
 def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
@@ -873,7 +885,7 @@ def _cfg040(**overrides) -> object:
     values = {
         name: value
         for name, value in asdict(_cfg(**overrides)).items()
-        if not name.startswith("item_") and name not in ("muon_adjust_lr_fn", "source_weights", "grad_clip")
+        if not name.startswith("item_") and name not in ("source_weights", "grad_clip")
     }
     return exp040.TrainConfig(**values)
 
@@ -913,8 +925,6 @@ def test_optimizer_and_counts_place_the_item_modules() -> None:
     optimizer = exp.make_optimizer(model, cfg)
 
     groups = {id(parameter): group for group in optimizer.param_groups for parameter in group["params"]}
-    muon_group = next(group for group in optimizer.param_groups if group["use_muon"])
-    assert muon_group["adjust_lr_fn"] == "match_rms_adamw"
     tables = (model.item_type_emb.weight, model.item_state_emb.weight)
     linears = (model.item_up.weight, model.item_down.weight)
     assert all(groups[id(w)]["weight_decay"] == 0.0 for w in tables)

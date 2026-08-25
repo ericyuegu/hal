@@ -20,8 +20,6 @@ def _parameters() -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
 def _optimizer(
     muon_parameters: list[torch.nn.Parameter],
     adam_parameters: list[torch.nn.Parameter],
-    *,
-    adjust_lr_fn: str = "original",
 ) -> muon.SingleDeviceMuonWithAuxAdam:
     return muon.SingleDeviceMuonWithAuxAdam(
         [
@@ -30,7 +28,6 @@ def _optimizer(
                 "lr": 0.02,
                 "momentum": 0.95,
                 "weight_decay": 0.01,
-                "adjust_lr_fn": adjust_lr_fn,
                 "use_muon": True,
             },
             {
@@ -60,7 +57,6 @@ def _reference_step(optimizer: muon.SingleDeviceMuonWithAuxAdam) -> None:
                     parameter.grad,
                     state["momentum_buffer"],
                     beta=group["momentum"],
-                    adjust_lr_fn=group["adjust_lr_fn"],
                 )
             else:
                 if not state:
@@ -147,39 +143,6 @@ def test_batched_optimizer_state_dict_resumes_exactly() -> None:
         strict=True,
     ):
         torch.testing.assert_close(resumed_parameter, first_parameter)
-
-
-@pytest.mark.parametrize("shape", [(3, 5), (5, 3), (4, 4)])
-def test_match_rms_adamw_scale_targets_point_two(shape: tuple[int, int]) -> None:
-    update = torch.eye(*shape)
-
-    scaled = update * muon._muon_update_scale(update, "match_rms_adamw")
-
-    assert float(scaled.square().mean().sqrt()) == pytest.approx(0.2)
-
-
-def test_optimizer_reports_pre_lr_update_rms() -> None:
-    muon_parameters, adam_parameters = _parameters()
-    optimizer = _optimizer(
-        muon_parameters,
-        adam_parameters,
-        adjust_lr_fn="match_rms_adamw",
-    )
-    for parameter in (*muon_parameters, *adam_parameters):
-        parameter.grad = torch.ones_like(parameter)
-
-    optimizer.step()
-    metrics = optimizer.pre_lr_update_rms_metrics()
-
-    assert set(metrics) == {
-        "optimizer/pre_lr_update_rms/adam_max",
-        "optimizer/pre_lr_update_rms/adam_mean",
-        "optimizer/pre_lr_update_rms/adam_min",
-        "optimizer/pre_lr_update_rms/muon_max",
-        "optimizer/pre_lr_update_rms/muon_mean",
-        "optimizer/pre_lr_update_rms/muon_min",
-    }
-    assert all(torch.isfinite(value) for value in metrics.values())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for batched Muon parity")

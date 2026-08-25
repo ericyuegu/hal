@@ -158,7 +158,6 @@ _PRODUCTION_TREATMENT_FIELDS = frozenset(
         "item_type_dim",
         "lr_floor_ratio",
         "mds_schema_version",
-        "muon_adjust_lr_fn",
         "muon_weight_decay",
         "n_heads",
         "n_layers",
@@ -242,7 +241,7 @@ class TrainConfig:
     L_ctx: int = 128
 
     sample_chunk_length: int = 24
-    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20, 24)
+    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20, 24)
     n_near: int = 6
     temporal_d_model: int = 256
     temporal_layers: int = 4
@@ -280,13 +279,12 @@ class TrainConfig:
 
     seed: int = 0
     eval_seed: int = 0
-    batch_size: int = 1024
+    batch_size: int = 512
     target_loss_positions: int = _PRODUCTION_LOSS_POSITIONS
-    muon_adjust_lr_fn: str = "match_rms_adamw"
-    muon_lr: float = 8.5e-4
-    muon_weight_decay: float = 0.0625
+    muon_lr: float = 0.028
+    muon_weight_decay: float = 0.1
     adam_lr: float = 8.5e-4
-    adam_weight_decay: float = 0.0625
+    adam_weight_decay: float = 0.0071
     grad_clip: float = 1.0
     warmup_fraction: float = 0.03
     stable_fraction: float = 0.80
@@ -446,8 +444,6 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError(f"{name} must be finite and positive, got {value!r}")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
-    if cfg.muon_adjust_lr_fn not in ("original", "match_rms_adamw"):
-        raise ValueError("muon_adjust_lr_fn must be 'original' or 'match_rms_adamw'")
     if cfg.reservoir_capacity < 2 * cfg.batch_size:
         raise ValueError("reservoir_capacity must be at least twice the batch size")
     if not isinstance(cfg.num_workers, int) or isinstance(cfg.num_workers, bool) or not 0 <= cfg.num_workers <= 32:
@@ -2225,7 +2221,6 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
                 lr=cfg.muon_lr,
                 momentum=0.95,
                 weight_decay=cfg.muon_weight_decay,
-                adjust_lr_fn=cfg.muon_adjust_lr_fn,
                 use_muon=True,
             ),
             dict(params=decay, lr=cfg.adam_lr, weight_decay=cfg.adam_weight_decay, **adam),
@@ -2299,35 +2294,24 @@ def _wandb_parameter_group(name: str) -> str:
     return "trunk/input"
 
 
-def _wandb_tensor_log(model: nn.Module, *, gradients: bool, sample_limit: int = 65_536) -> dict[str, object]:
+def wandb_weight_log(model: nn.Module, sample_limit: int = 65_536) -> dict[str, object]:
+    """Return sampled parameter histograms and norms grouped by subsystem."""
     buckets: dict[str, list[Tensor]] = {}
     for name, parameter in model.named_parameters():
-        value = parameter.grad if gradients else parameter
-        if value is None:
-            continue
+        value = parameter
         if value.is_sparse:
             value = value.coalesce().values()
         buckets.setdefault(_wandb_parameter_group(name), []).append(value.detach())
 
     payload: dict[str, object] = {}
-    histogram_root = "gradients" if gradients else "weights"
-    norm_root = "gradient_norm" if gradients else "weight_norm"
     for group, values in buckets.items():
         count = sum(value.numel() for value in values)
         stride = max(1, math.ceil(count / sample_limit))
         samples = torch.cat([value.reshape(-1)[::stride] for value in values])[:sample_limit]
         squared_norm = torch.stack([value.float().square().sum() for value in values]).sum()
-        payload[f"{histogram_root}/{group}"] = wandb.Histogram(samples.float().cpu().numpy())
-        payload[f"{norm_root}/{group}"] = float(squared_norm.sqrt())
+        payload[f"weights/{group}"] = wandb.Histogram(samples.float().cpu().numpy())
+        payload[f"weight_norm/{group}"] = float(squared_norm.sqrt())
     return payload
-
-
-def wandb_gradient_log(model: nn.Module) -> dict[str, object]:
-    return _wandb_tensor_log(model, gradients=True)
-
-
-def wandb_weight_log(model: nn.Module) -> dict[str, object]:
-    return _wandb_tensor_log(model, gradients=False)
 
 
 def histogram_due(update: int, every: int) -> bool:
@@ -2646,6 +2630,17 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         log_wandb_code(wandb.run)
 
 
+def _watch_gradients(model: nn.Module, cfg: TrainConfig) -> None:
+    """Ask W&B to log per-parameter gradient histograms during training."""
+    if wandb.run is not None and cfg.wandb_hist_every > 0:
+        wandb.watch(
+            model,
+            log="gradients",
+            log_freq=cfg.wandb_hist_every,
+            log_graph=False,
+        )
+
+
 def _log_training_summary(cfg: TrainConfig, parameter_counts: dict[str, int]) -> None:
     """Record the fixed model and corpus accounting for this run."""
     if wandb.run is None:
@@ -2688,7 +2683,6 @@ def _training_diagnostics(model: GPT, batch: AWRBatch, cfg: TrainConfig, update:
     """Collect the infrequent parameter and layer diagnostics due this update."""
     metrics: dict[str, object] = {}
     if histogram_due(update, cfg.wandb_hist_every):
-        metrics.update(wandb_gradient_log(model))
         metrics.update(wandb_weight_log(model))
     if histogram_due(update, cfg.layer_rms_every):
         metrics.update(layer_activation_rms_log(model, batch, cfg, max_rows=cfg.layer_rms_batch_size))
@@ -2828,6 +2822,7 @@ def train(
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model = GPT(cfg).to(DEVICE)
+    _watch_gradients(model, cfg)
     counts = subsystem_parameter_counts(model)
     _log_training_summary(cfg, counts)
     optimizer = make_optimizer(model, cfg)
@@ -2921,7 +2916,6 @@ def train(
                 muon_lr = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
                 adam_lr = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
                 optimizer.step()
-                step_metrics.update(optimizer.pre_lr_update_rms_metrics())
                 scheduler.step()
                 if phase_timer is not None:
                     phase_timer.record("optimizer_end")

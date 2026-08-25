@@ -1,5 +1,3 @@
-import math
-
 import torch
 import torch.distributed as dist
 from torch import Tensor
@@ -39,30 +37,13 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
-def _muon_update_scale(update: Tensor, adjust_lr_fn: str) -> float:
-    """Return the shape-dependent scale for an orthogonalized Muon update."""
-    rows, columns = update.shape[-2:]
-    if adjust_lr_fn == "original":
-        return math.sqrt(max(1, rows / columns))
-    if adjust_lr_fn == "match_rms_adamw":
-        return 0.2 * math.sqrt(max(rows, columns))
-    raise ValueError(f"unsupported Muon LR adjustment {adjust_lr_fn!r}")
-
-
-def muon_update(
-    grad,
-    momentum,
-    beta=0.95,
-    ns_steps=5,
-    nesterov=True,
-    adjust_lr_fn="original",
-):
+def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4:  # for the case of conv filters
         update = update.view(len(update), -1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-    update *= _muon_update_scale(update, adjust_lr_fn)
+    update *= max(1, update.size(-2) / update.size(-1)) ** 0.5
     return update
 
 
@@ -88,13 +69,8 @@ class Muon(torch.optim.Optimizer):
         momentum: The momentum. A value of 0.95 here is usually fine.
     """
 
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95, adjust_lr_fn="original"):
-        defaults = dict(
-            lr=lr,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            adjust_lr_fn=adjust_lr_fn,
-        )
+    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
         assert isinstance(params, list) and len(params) >= 1 and isinstance(params[0], torch.nn.Parameter)
         params = sorted(params, key=lambda x: x.size(), reverse=True)
         super().__init__(params, defaults)
@@ -121,12 +97,7 @@ class Muon(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(
-                        p.grad,
-                        state["momentum_buffer"],
-                        beta=group["momentum"],
-                        adjust_lr_fn=group.get("adjust_lr_fn", "original"),
-                    )
+                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 dist.all_gather(
@@ -141,13 +112,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
     Muon variant for usage in non-distributed settings.
     """
 
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95, adjust_lr_fn="original"):
-        defaults = dict(
-            lr=lr,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            adjust_lr_fn=adjust_lr_fn,
-        )
+    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -166,12 +132,7 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                 state = self.state[p]
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(p)
-                update = muon_update(
-                    p.grad,
-                    state["momentum_buffer"],
-                    beta=group["momentum"],
-                    adjust_lr_fn=group.get("adjust_lr_fn", "original"),
-                )
+                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
@@ -198,8 +159,7 @@ def _batched_muon_step(
     lr: float,
     momentum: float,
     weight_decay: float,
-    adjust_lr_fn: str,
-) -> Tensor:
+) -> None:
     """Apply one Muon update to a bucket of identically shaped matrices."""
     parameter_tensors: list[Tensor] = list(parameters)
     gradients = [parameter.grad for parameter in parameters]
@@ -211,15 +171,12 @@ def _batched_muon_step(
     nesterov_updates = torch._foreach_lerp(gradients, momentum_buffers, momentum)
     matrices = torch.stack([_matrix_view(update) for update in nesterov_updates])
     matrices = zeropower_via_newtonschulz5(matrices, steps=5)
-    matrices *= _muon_update_scale(matrices, adjust_lr_fn)
-    update_rms = torch.linalg.vector_norm(matrices, dim=(-2, -1), dtype=torch.float32)
-    update_rms /= math.sqrt(matrices.size(-2) * matrices.size(-1))
+    matrices *= max(1, matrices.size(-2) / matrices.size(-1)) ** 0.5
     updates = [update.reshape(parameter.shape) for update, parameter in zip(matrices, parameters, strict=True)]
 
     if weight_decay:
         torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
     torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
-    return update_rms
 
 
 def _foreach_adam_step(
@@ -231,7 +188,7 @@ def _foreach_adam_step(
     betas: tuple[float, float],
     eps: float,
     weight_decay: float,
-) -> Tensor:
+) -> None:
     """Apply the existing AdamW formula with multi-tensor CUDA kernels."""
     parameter_tensors: list[Tensor] = list(parameters)
     gradients = [parameter.grad for parameter in parameters]
@@ -249,14 +206,10 @@ def _foreach_adam_step(
     denominators = torch._foreach_sqrt(denominators)
     torch._foreach_add_(denominators, eps)
     updates = torch._foreach_div(updates, denominators)
-    update_rms = torch.stack(
-        [torch.linalg.vector_norm(update, dtype=torch.float32) / math.sqrt(update.numel()) for update in updates]
-    )
 
     if weight_decay:
         torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
     torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
-    return update_rms
 
 
 class MuonWithAuxAdam(torch.optim.Optimizer):
@@ -296,10 +249,7 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 group["lr"] = group.get("lr", 0.02)
                 group["momentum"] = group.get("momentum", 0.95)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                group["adjust_lr_fn"] = group.get("adjust_lr_fn", "original")
-                assert set(group.keys()) == set(
-                    ["params", "lr", "momentum", "weight_decay", "adjust_lr_fn", "use_muon"]
-                )
+                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
@@ -332,12 +282,7 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                         state = self.state[p]
                         if len(state) == 0:
                             state["momentum_buffer"] = torch.zeros_like(p)
-                        update = muon_update(
-                            p.grad,
-                            state["momentum_buffer"],
-                            beta=group["momentum"],
-                            adjust_lr_fn=group.get("adjust_lr_fn", "original"),
-                        )
+                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
                         p.mul_(1 - group["lr"] * group["weight_decay"])
                         p.add_(update.reshape(p.shape), alpha=-group["lr"])
                     dist.all_gather(
@@ -376,10 +321,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["lr"] = group.get("lr", 0.02)
                 group["momentum"] = group.get("momentum", 0.95)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                group["adjust_lr_fn"] = group.get("adjust_lr_fn", "original")
-                assert set(group.keys()) == set(
-                    ["params", "lr", "momentum", "weight_decay", "adjust_lr_fn", "use_muon"]
-                )
+                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
@@ -388,16 +330,6 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
-        self._pre_lr_update_rms: dict[str, Tensor] = {}
-
-    def pre_lr_update_rms_metrics(self) -> dict[str, Tensor]:
-        """Return per-optimizer summaries from the most recent update."""
-        metrics: dict[str, Tensor] = {}
-        for optimizer_name, values in self._pre_lr_update_rms.items():
-            metrics[f"optimizer/pre_lr_update_rms/{optimizer_name}_mean"] = values.mean()
-            metrics[f"optimizer/pre_lr_update_rms/{optimizer_name}_min"] = values.min()
-            metrics[f"optimizer/pre_lr_update_rms/{optimizer_name}_max"] = values.max()
-        return metrics
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -406,7 +338,6 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        update_rms: dict[str, list[Tensor]] = {"muon": [], "adam": []}
         for group in self.param_groups:
             if group["use_muon"]:
                 buckets: dict[tuple[torch.device, torch.dtype, tuple[int, ...]], list[nn.Parameter]] = {}
@@ -420,15 +351,12 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     key = (parameter.device, parameter.dtype, matrix_shape)
                     buckets.setdefault(key, []).append(parameter)
                 for parameters in buckets.values():
-                    update_rms["muon"].append(
-                        _batched_muon_step(
-                            parameters,
-                            [self.state[parameter]["momentum_buffer"] for parameter in parameters],
-                            lr=group["lr"],
-                            momentum=group["momentum"],
-                            weight_decay=group["weight_decay"],
-                            adjust_lr_fn=group.get("adjust_lr_fn", "original"),
-                        )
+                    _batched_muon_step(
+                        parameters,
+                        [self.state[parameter]["momentum_buffer"] for parameter in parameters],
+                        lr=group["lr"],
+                        momentum=group["momentum"],
+                        weight_decay=group["weight_decay"],
                     )
             else:
                 parameters_by_step: dict[int, list[nn.Parameter]] = {}
@@ -443,20 +371,14 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     state["step"] += 1
                     parameters_by_step.setdefault(state["step"], []).append(parameter)
                 for step, parameters in parameters_by_step.items():
-                    update_rms["adam"].append(
-                        _foreach_adam_step(
-                            parameters,
-                            states=[self.state[parameter] for parameter in parameters],
-                            step=step,
-                            lr=group["lr"],
-                            betas=group["betas"],
-                            eps=group["eps"],
-                            weight_decay=group["weight_decay"],
-                        )
+                    _foreach_adam_step(
+                        parameters,
+                        states=[self.state[parameter] for parameter in parameters],
+                        step=step,
+                        lr=group["lr"],
+                        betas=group["betas"],
+                        eps=group["eps"],
+                        weight_decay=group["weight_decay"],
                     )
-
-        self._pre_lr_update_rms = {
-            optimizer_name: torch.cat(values) for optimizer_name, values in update_rms.items() if values
-        }
 
         return loss
