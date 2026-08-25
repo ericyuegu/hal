@@ -2422,6 +2422,60 @@ def _training_diagnostics(model: GPT, batch: AWRBatch, cfg: TrainConfig, update:
     return metrics
 
 
+@dataclass(frozen=True, slots=True)
+class TrainStepResult:
+    nll_sum: Tensor
+    gradient_norm: Tensor
+    metrics: dict[str, Tensor]
+    diagnostics: dict[str, object]
+    muon_lr: float
+    adam_lr: float
+
+
+def train_step(
+    model: GPT,
+    batch: AWRBatch,
+    cfg: TrainConfig,
+    *,
+    step: int,
+    update: int,
+    valid_prefixes: int,
+    trunk_fn: Callable,
+    temporal_fn: Callable,
+    optimizer: SingleDeviceMuonWithAuxAdam,
+    scheduler: LambdaLR,
+    phase_timer: CudaPhaseTimer | None = None,
+) -> TrainStepResult:
+    """Run one complete optimization step on a device-resident batch."""
+    optimizer.zero_grad()
+    loss, nll_sum, metrics = microbatch_loss(
+        model,
+        batch,
+        cfg,
+        step=step,
+        valid_prefixes=valid_prefixes,
+        trunk_fn=trunk_fn,
+        temporal_fn=temporal_fn,
+        phase_timer=phase_timer,
+    )
+    loss.backward()
+    if phase_timer is not None:
+        phase_timer.record("backward_end")
+    gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+    if phase_timer is not None:
+        phase_timer.record("grad_norm_end")
+    diagnostics = _training_diagnostics(model, batch, cfg, update)
+    if phase_timer is not None:
+        phase_timer.record("diagnostics_end")
+    muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
+    adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
+    optimizer.step()
+    scheduler.step()
+    if phase_timer is not None:
+        phase_timer.record("optimizer_end")
+    return TrainStepResult(nll_sum, gradient_norm, metrics, diagnostics, muon_lr, adam_lr)
+
+
 def _download_step_metrics(
     nll_sum: Tensor,
     gradient_norm: Tensor,
@@ -2606,7 +2660,6 @@ def train(
                 if DEVICE == "cuda"
                 else None
             )
-            optimizer.zero_grad()
             with profile("step") as stopwatch:
                 if step_events is not None:
                     step_events[0].record()
@@ -2615,31 +2668,19 @@ def train(
                 batch, valid_prefixes, loader_wait = batch_prefetcher.next()
                 if phase_timer is not None:
                     phase_timer.record("h2d_end")
-                loss, nll_sum, step_metrics = microbatch_loss(
+                result = train_step(
                     model,
                     batch,
                     cfg,
                     step=step,
+                    update=update,
                     valid_prefixes=valid_prefixes,
                     trunk_fn=trunk_fn,
                     temporal_fn=temporal_fn,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
                     phase_timer=phase_timer,
                 )
-                loss.backward()
-                if phase_timer is not None:
-                    phase_timer.record("backward_end")
-                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-                if phase_timer is not None:
-                    phase_timer.record("grad_norm_end")
-                diagnostics = _training_diagnostics(model, batch, cfg, update)
-                if phase_timer is not None:
-                    phase_timer.record("diagnostics_end")
-                muon_lr = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
-                adam_lr = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
-                optimizer.step()
-                scheduler.step()
-                if phase_timer is not None:
-                    phase_timer.record("optimizer_end")
                 if step_events is not None:
                     step_events[1].record()
             if update < run_stop:
@@ -2647,9 +2688,9 @@ def train(
             actual_positions += valid_prefixes
             metrics_started = time.monotonic()
             gradient_norm_value, nll_metrics_by_offset, step_metric_values = _download_step_metrics(
-                nll_sum,
-                gradient_norm,
-                step_metrics,
+                result.nll_sum,
+                result.gradient_norm,
+                result.metrics,
                 cfg,
                 update=update,
                 valid_prefixes=valid_prefixes,
@@ -2675,10 +2716,10 @@ def train(
                 "throughput/metrics_d2h_s": metrics_d2h_s,
                 "training/elapsed_wall_s": training_elapsed_wall_s,
                 "training/projected_remaining_s": projected_training_remaining_s,
-                "lr/muon": muon_lr,
-                "lr/adam": adam_lr,
+                "lr/muon": result.muon_lr,
+                "lr/adam": result.adam_lr,
                 **step_metric_values,
-                **diagnostics,
+                **result.diagnostics,
                 **phase_metrics,
             }
             if previous_loop_s is not None:
