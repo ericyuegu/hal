@@ -9,7 +9,7 @@
     "L_ctx": 128,
     "windows_per_replay": 2
   },
-  "return_baseline": -0.18709200966038386,
+  "return_mean": -0.18709200966038386,
   "return_quantiles": {
     "1": -107.6547915649414,
     "25": -17.108210563659668,
@@ -241,8 +241,5 @@
       "terminal_replays": 92
     }
   ],
-  "terminal_replays": 47879,
-  "weight_clip_fraction": 0.0,
-  "weight_ess": 0.9598852338323018,
-  "weight_norm": 1.0201610817403675
+  "terminal_replays": 47879
 }

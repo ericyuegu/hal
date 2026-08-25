@@ -1,4 +1,4 @@
-"""Calibrate Experiment 040's fixed AWR baseline and weight normalizer.
+"""Audit Experiment 040's reward scale and AWR temperature.
 
 Run from the repository root after exporting the R2 variables from ``.env``::
 
@@ -176,19 +176,12 @@ def calibrate(sample_replays: int = SAMPLE_REPLAYS) -> dict[str, object]:
     if not np.isfinite(pooled).all():
         raise FloatingPointError("eligible return sample contains a non-finite value")
 
-    baseline = float(pooled.mean())
-    advantage = pooled - baseline
-    log_weight = np.minimum(advantage / BETA, math.log(WEIGHT_MAX))
-    raw_weight = np.exp(log_weight)
-    weight_norm = float(raw_weight.mean())
-    weight = raw_weight / weight_norm
-    ess = float(weight.sum() ** 2 / (len(weight) * np.square(weight).sum()))
-    clip_fraction = float(np.mean(raw_weight == WEIGHT_MAX))
+    return_mean = float(pooled.mean())
 
     # Law-of-total-variance diagnostics across production and 256-frame windows.
     window_means = np.array([window.mean() for window in selected_returns], dtype=np.float64)
     window_sizes = np.array([len(window) for window in selected_returns], dtype=np.float64)
-    between_variance = float(np.average(np.square(window_means - baseline), weights=window_sizes))
+    between_variance = float(np.average(np.square(window_means - return_mean), weights=window_sizes))
     total_variance = float(pooled.var())
     between_fraction = between_variance / total_variance if total_variance else 0.0
     pooled_256 = np.concatenate(diagnostic_256_returns).astype(np.float64, copy=False)
@@ -217,10 +210,7 @@ def calibrate(sample_replays: int = SAMPLE_REPLAYS) -> dict[str, object]:
         },
         "awr_beta": BETA,
         "awr_weight_max": WEIGHT_MAX,
-        "return_baseline": baseline,
-        "weight_norm": weight_norm,
-        "weight_ess": ess,
-        "weight_clip_fraction": clip_fraction,
+        "return_mean": return_mean,
         "return_std": float(pooled.std()),
         "return_quantiles": {
             str(percentile): float(value)

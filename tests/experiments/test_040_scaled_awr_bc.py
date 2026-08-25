@@ -93,13 +93,15 @@ def _local_stream_source(name: str, path: Path) -> StreamSource:
     return StreamSource(name, cast(str, None), path)
 
 
-def test_production_awr_constants_match_calibration_artifact() -> None:
+def test_production_return_scale_matches_calibration_artifact() -> None:
     artifact_path = Path(__file__).resolve().parents[2] / "notebooks" / "040_awr_constants.json"
     artifact = json.loads(artifact_path.read_text())
     cfg = exp.TrainConfig()
 
-    assert cfg.awr.return_baseline == artifact["return_baseline"]
-    assert cfg.awr.weight_norm == artifact["weight_norm"]
+    assert cfg.awr.beta == artifact["awr_beta"]
+    assert cfg.awr.weight_max == artifact["awr_weight_max"]
+    assert cfg.awr.gamma == artifact["reward"]["gamma"]
+    assert cfg.awr.stock_value == artifact["reward"]["stock_value"]
 
 
 def _cfg(**overrides) -> exp.TrainConfig:
@@ -114,13 +116,10 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "temporal_heads": 4,
         "temporal_ff_dim": 64,
         "group_head_dim": 64,
+        "value_hidden_dim": 16,
         **_TINY_ITEMS,
     }
-    awr_values = {
-        **asdict(exp.AWR_CALIBRATION),
-        "return_baseline": 10.0,
-        "weight_norm": 2.0,
-    }
+    awr_values = asdict(exp.AWR_CALIBRATION)
     values = {
         "batch_size": 2,
         "target_loss_positions": 16,
@@ -167,7 +166,7 @@ def _batch(cfg: exp.TrainConfig, pads: list[int] | None = None, seed: int = 0) -
 def _awr_batch(cfg: exp.TrainConfig) -> exp.AWRBatch:
     batch = _batch(cfg)
     batch.target[..., 6:] = 0.0
-    returns = torch.full((batch.target.shape[0], cfg.arch.L_ctx), cfg.awr.return_baseline)
+    returns = torch.zeros(batch.target.shape[0], cfg.arch.L_ctx)
     eligible = torch.ones_like(returns, dtype=torch.bool)
     return exp.AWRBatch(batch=batch, returns=returns, eligible=eligible)
 
@@ -225,78 +224,30 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     assert optimizer.param_groups[0]["lr"] == pytest.approx(2.0 * schedule(1))
 
 
-def test_fixed_global_weights_match_hand_computation_and_warmup() -> None:
-    returns = torch.tensor([12.0, 10.0, float("nan")])
+def test_learned_advantage_weights_match_hand_computation_and_warmup() -> None:
+    advantage = torch.tensor([2.0, 0.0, float("nan")])
     eligible = torch.tensor([True, True, False])
     weight, stats = exp.advantage_weights(
-        returns,
+        advantage,
         eligible,
-        baseline=10.0,
         beta=2.0,
         weight_max=3.5,
-        weight_norm=2.0,
     )
 
-    torch.testing.assert_close(weight, torch.tensor([math.e / 2, 0.5, 1.0]))
-    assert float(stats["weight_mean"]) == pytest.approx((math.e + 1) / 4)
+    expected = torch.tensor([math.e, 1.0])
+    expected /= expected.mean()
+    torch.testing.assert_close(weight, torch.cat((expected, torch.ones(1))))
+    assert float(stats["weight_mean"]) == pytest.approx(1.0)
     assert float(stats["weight_clip_frac"]) == 0.0
     warmup, warmup_stats = exp.advantage_weights(
-        returns,
+        advantage,
         eligible,
-        baseline=10.0,
         beta=2.0,
         weight_max=3.5,
-        weight_norm=2.0,
         active=False,
     )
     torch.testing.assert_close(warmup, torch.ones(3))
     assert float(warmup_stats["weight_ess"]) == 1.0
-
-
-def test_weights_cap_before_fixed_normalization_and_reject_bad_eligible_rows() -> None:
-    weight, stats = exp.advantage_weights(
-        torch.tensor([100.0, float("nan")]),
-        torch.tensor([True, False]),
-        baseline=0.0,
-        beta=1.0,
-        weight_max=3.5,
-        weight_norm=2.0,
-    )
-    torch.testing.assert_close(weight, torch.tensor([1.75, 1.0]))
-    assert float(stats["weight_clip_frac"]) == 1.0
-    with pytest.raises(FloatingPointError, match="non-finite"):
-        exp.advantage_weights(
-            torch.tensor([float("inf")]),
-            torch.tensor([True]),
-            baseline=0.0,
-            beta=1.0,
-            weight_max=3.5,
-            weight_norm=1.0,
-        )
-    with pytest.raises(ValueError, match="detached"):
-        exp.advantage_weights(
-            torch.ones(1, requires_grad=True),
-            torch.tensor([True]),
-            baseline=0.0,
-            beta=1.0,
-            weight_max=3.5,
-            weight_norm=1.0,
-        )
-
-
-def test_extreme_negative_advantages_preserve_formula_and_keep_ess_finite() -> None:
-    weights, stats = exp.advantage_weights(
-        torch.tensor([-1e20, -1e30]),
-        torch.ones(2, dtype=torch.bool),
-        baseline=0.0,
-        beta=1.0,
-        weight_max=3.5,
-        weight_norm=2.0,
-    )
-
-    torch.testing.assert_close(weights, torch.zeros(2))
-    assert all(torch.isfinite(value) for value in stats.values())
-    assert float(stats["weight_ess"]) == 0.0
 
 
 def test_dense_awr_mask_matches_selecting_valid_prefixes() -> None:
@@ -307,25 +258,67 @@ def test_dense_awr_mask_matches_selecting_valid_prefixes() -> None:
     dense_weights, dense_stats = exp.advantage_weights(
         returns,
         eligible,
-        baseline=10.0,
         beta=2.0,
         weight_max=3.5,
-        weight_norm=2.0,
         valid=valid,
     )
     selected_weights, selected_stats = exp.advantage_weights(
         returns[valid],
         eligible[valid],
-        baseline=10.0,
         beta=2.0,
         weight_max=3.5,
-        weight_norm=2.0,
     )
 
     torch.testing.assert_close(dense_weights[valid], selected_weights)
     torch.testing.assert_close(dense_weights[~valid], torch.ones_like(dense_weights[~valid]))
     for name in dense_stats:
         torch.testing.assert_close(dense_stats[name], selected_stats[name])
+
+
+def test_value_objective_uses_g_t_plus_1_minus_v_t() -> None:
+    value = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+    returns = torch.tensor([[11.0, float("nan"), 23.0], [float("nan"), -5.0, 36.0]])
+    eligible = torch.tensor([[True, False, True], [False, True, True]])
+    valid = torch.tensor([[True, False, True], [False, True, False]])
+
+    loss, advantage, stats = exp.value_objective(value, returns, eligible, beta=10.0, valid=valid)
+
+    torch.testing.assert_close(advantage, torch.tensor([[10.0, 0.0, 20.0], [0.0, -10.0, 0.0]]))
+    torch.testing.assert_close(loss, torch.tensor(2.0))
+    torch.testing.assert_close(stats["value_rmse"], torch.tensor(math.sqrt(200.0)))
+    assert float(stats["value_mean"]) == pytest.approx(3.0)
+    assert float(stats["return_mean"]) == pytest.approx(29 / 3)
+
+    loss.backward()
+    assert value.grad is not None
+    torch.testing.assert_close(value.grad[~valid], torch.zeros_like(value.grad[~valid]))
+
+
+def test_microbatch_trains_value_head_and_builds_advantage_from_it() -> None:
+    cfg = _cfg()
+    torch.manual_seed(0)
+    model = exp.GPT(cfg)
+    batch = _awr_batch(cfg)
+    batch.returns.fill_(30.0)
+    with torch.no_grad():
+        model.value_head.up.weight.zero_()
+        model.value_head.down.weight.zero_()
+        model.value_head.down.bias.fill_(10.0)
+
+    loss, _, metrics = exp.microbatch_loss(
+        model,
+        batch,
+        cfg,
+        step=cfg.warmup_steps,
+        valid_prefixes=7,
+        trunk_fn=model.forward,
+        temporal_fn=model.temporal.teacher_forced_nll,
+    )
+
+    torch.testing.assert_close(metrics["train/advantage_mean"], torch.tensor(20.0))
+    torch.testing.assert_close(metrics["train/value_loss"], torch.tensor((20 / cfg.awr.beta) ** 2))
+    loss.backward()
+    assert float(model.value_head.down.bias.grad.abs()) > 0
 
 
 def test_dense_temporal_objective_matches_selected_prefixes() -> None:
@@ -346,6 +339,7 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight[valid],
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
+        valid=torch.ones_like(weight[valid], dtype=torch.bool),
     )
 
     for dense, selected in zip(dense_parts, selected_parts, strict=True):
@@ -377,6 +371,7 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight[valid],
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
+        valid=torch.ones_like(weight[valid], dtype=torch.bool),
     )[2].backward()
 
     dense_grad = dense_nll.grad
@@ -433,6 +428,7 @@ def test_near_far_objective_matches_hand_computation() -> None:
         weight,
         valid_prefixes=2,
         aux_loss_weight=0.5,
+        valid=torch.ones_like(weight, dtype=torch.bool),
     )
 
     # Four controller groups: near=(4*1*2 + 4*2*.5)/2=6,
@@ -551,9 +547,14 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
     model = exp.GPT(cfg)
     counts = exp.subsystem_parameter_counts(model)
     assert sum(value for name, value in counts.items() if name != "total") == counts["total"]
-    assert not hasattr(model, "value_head")
+    expected_value_parameters = 2 * cfg.arch.d_model * cfg.arch.value_hidden_dim + cfg.arch.value_hidden_dim + 1
+    assert counts["value_head"] == expected_value_parameters
     owned = [parameter for group in exp.make_optimizer(model, cfg).param_groups for parameter in group["params"]]
     assert len(owned) == len({id(parameter) for parameter in owned}) == sum(1 for _ in model.parameters())
+    groups = {
+        id(parameter): group for group in exp.make_optimizer(model, cfg).param_groups for parameter in group["params"]
+    }
+    assert all(not groups[id(parameter)]["use_muon"] for parameter in model.value_head.parameters())
 
     checkpoint = exp._checkpoint_config(cfg)
     assert all(isinstance(name, str) for name in checkpoint["source_names"])
@@ -1368,7 +1369,7 @@ def test_validate_config_rejects_non_positive_item_dims() -> None:
 
 def test_model_tag_records_projectiles() -> None:
     assert exp.model_tag(_cfg()).startswith("scaled040-")
-    assert "-projectiles-awr-near-" in exp.model_tag(_cfg())
+    assert "-projectiles-awr-v-near-" in exp.model_tag(_cfg())
 
 
 def test_the_item_dims_are_frozen() -> None:

@@ -1,7 +1,8 @@
-"""Scaled light-AWR behavior cloning with projectile inputs.
+"""Scaled advantage-weighted behavior cloning with projectile inputs.
 
-This experiment trains light AWR over the complete policy-world corpus with a
-fixed, globally calibrated weight and no learned critic. It includes the
+This experiment trains AWR over the complete policy-world corpus. A learned
+value head estimates the return from each trunk state, and the detached
+``G_{t+1} - V(s_t)`` advantage weights the policy objective. It includes the
 schema-v6 projectile block (``item{0..3}_*``) in every observation.
 
 The four item slots are ordered by ascending spawn id, so a slot keeps its item
@@ -42,6 +43,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+from beartype import beartype
+from jaxtyping import Bool
+from jaxtyping import Float
+from jaxtyping import Int
+from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -102,7 +108,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID = "040_scaled_awr_bc_v3"
+_EXPERIMENT_ID = "040_scaled_awr_bc_v4"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -200,6 +206,7 @@ class Architecture:
     item_state_dim: int = 4
     item_hidden_dim: int = 64
     item_dim: int = 32
+    value_hidden_dim: int = 512
 
 
 @dataclass(frozen=True)
@@ -210,10 +217,9 @@ class AWRCalibration:
     stock_value: float = 120.0
     damage_shaping: float = 1.0
     win_reward: float = 50.0
-    # Frozen by notebooks/040_awr_constants.py from the checked-in 50k-replay
-    # calibration artifact (seed 0, 2026-08-23).
-    return_baseline: float = -0.18709200966038386
-    weight_norm: float = 1.0201610817403675
+    # Regressing the value error in beta units keeps the critic loss O(1)
+    # despite the reward's roughly hundred-point scale.
+    value_loss_weight: float = 1.0
     auxiliary_loss_weight: float = 0.5
 
 
@@ -317,6 +323,7 @@ def validate_config(cfg: TrainConfig) -> None:
         "item_state_dim": cfg.arch.item_state_dim,
         "item_hidden_dim": cfg.arch.item_hidden_dim,
         "item_dim": cfg.arch.item_dim,
+        "value_hidden_dim": cfg.arch.value_hidden_dim,
         "batch_size": cfg.batch_size,
         "target_loss_positions": cfg.target_loss_positions,
         "layer_rms_batch_size": cfg.layer_rms_batch_size,
@@ -388,10 +395,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(f"awr_beta must be finite and positive, got {cfg.awr.beta}")
     if not math.isfinite(cfg.awr.weight_max) or cfg.awr.weight_max <= 1:
         raise ValueError(f"awr_weight_max must be finite and above 1, got {cfg.awr.weight_max}")
-    if not math.isfinite(cfg.awr.return_baseline):
-        raise ValueError("awr_return_baseline must be finite")
-    if not math.isfinite(cfg.awr.weight_norm) or cfg.awr.weight_norm <= 0:
-        raise ValueError("awr_weight_norm must be finite and positive")
+    if not math.isfinite(cfg.awr.value_loss_weight) or cfg.awr.value_loss_weight < 0:
+        raise ValueError("awr_value_loss_weight must be finite and non-negative")
     if not math.isfinite(cfg.grad_clip) or cfg.grad_clip <= 0:
         raise ValueError(f"grad_clip must be finite and positive, got {cfg.grad_clip}")
     if not 0.0 <= cfg.warmup_fraction < cfg.stable_fraction < 1.0:
@@ -622,7 +627,7 @@ class SwiGLU(nn.Module):
         self.up = nn.Linear(d_input, 2 * d_hidden, bias=False)
         self.down = nn.Linear(d_hidden, d_output, bias=output_bias)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Float[Tensor, "... d_input"]) -> Float[Tensor, "... d_output"]:
         gate, value = self.up(x).chunk(2, dim=-1)
         return self.down(F.silu(gate) * value)
 
@@ -976,6 +981,10 @@ class GPT(nn.Module):
             )
         )
         self.temporal = CausalTemporalDecoder(cfg, self.codec)
+        # V(s_t) predicts G_{t+1}, the return aligned with the next action. Keep
+        # it last so the same seed preserves every policy parameter's draw.
+        # Closed-loop inference never reads it.
+        self.value_head = SwiGLU(cfg.arch.d_model, cfg.arch.value_hidden_dim, 1, output_bias=True)
 
     def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
         ref = features[f"{prefix}_position_x"]
@@ -1048,20 +1057,6 @@ class GPT(nn.Module):
         return self.trunk.forward_dense(self.context_tokens(features, action_indices), ctx_pad)
 
 
-def prepared_targets(model: GPT, batch: TrainBatch | AWRBatch) -> tuple[Tensor, Tensor, Tensor]:
-    """Quantize history+future exactly once, then align every selected offset."""
-    if batch.target.shape[1] < model.L_chunk:
-        raise ValueError(f"target contains {batch.target.shape[1]} frames, expected {model.L_chunk}")
-    history = stack_actions(batch.context.features)
-    if history.shape[1] != model.trunk.L_ctx:
-        raise ValueError(f"context length {history.shape[1]} != {model.trunk.L_ctx}")
-    full = model.codec.quantize(torch.cat((history, batch.target[:, : model.L_chunk]), dim=1))
-    length = history.shape[1]
-    targets = torch.stack([full[:, offset : offset + length] for offset in model.head_offsets], dim=2)
-    valid = torch.arange(length, device=full.device)[None, :] >= batch.context.ctx_pad[:, None]
-    return full[:, :length], targets, valid
-
-
 @dataclass(frozen=True, slots=True)
 class AWRBatch:
     """A policy batch with return targets aligned to the next frame.
@@ -1072,8 +1067,8 @@ class AWRBatch:
     """
 
     batch: TrainBatch
-    returns: Tensor  # [B, L_ctx] float32
-    eligible: Tensor  # [B, L_ctx] bool
+    returns: Float[Tensor, "B L_ctx"]
+    eligible: Bool[Tensor, "B L_ctx"]
 
     @property
     def context(self) -> Context:
@@ -1104,9 +1099,22 @@ class AWRBatch:
         self.returns.record_stream(stream)
         self.eligible.record_stream(stream)
 
-    def valid_rows(self, valid: Tensor) -> tuple[Tensor, Tensor]:
-        """Select the return rows used by the policy loss."""
-        return self.returns[valid], self.eligible[valid]
+
+@jaxtyped(typechecker=beartype)
+def prepared_targets(
+    model: GPT, batch: TrainBatch | AWRBatch
+) -> tuple[
+    Int[Tensor, "B L_ctx n_groups"],
+    Int[Tensor, "B L_ctx n_offsets n_groups"],
+    Bool[Tensor, "B L_ctx"],
+]:
+    """Quantize history+future exactly once, then align every selected offset."""
+    history = stack_actions(batch.context.features)
+    full = model.codec.quantize(torch.cat((history, batch.target[:, : model.L_chunk]), dim=1))
+    length = history.shape[1]
+    targets = torch.stack([full[:, offset : offset + length] for offset in model.head_offsets], dim=2)
+    valid = torch.arange(length, device=full.device)[None, :] >= batch.context.ctx_pad[:, None]
+    return full[:, :length], targets, valid
 
 
 class DeviceBatchPrefetcher:
@@ -1171,55 +1179,40 @@ def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> 
     )
 
 
+@jaxtyped(typechecker=beartype)
 def advantage_weights(
-    return_target: Tensor,
-    eligible: Tensor,
+    advantage: Float[Tensor, "*batch"],
+    eligible: Bool[Tensor, "*batch"],
     *,
-    baseline: float,
     beta: float,
     weight_max: float,
-    weight_norm: float,
     active: bool = True,
-    valid: Tensor | None = None,
-    check_finite: bool = True,
-) -> tuple[Tensor, dict[str, Tensor]]:
-    """Compute globally calibrated capped AWR weights; ineligible rows stay one."""
-    if return_target.requires_grad:
-        raise ValueError("AWR weights must come from detached returns")
-    if return_target.shape != eligible.shape:
-        raise ValueError(f"return {tuple(return_target.shape)} and eligibility {tuple(eligible.shape)} must align")
-    if not math.isfinite(baseline) or not math.isfinite(beta) or beta <= 0:
-        raise ValueError("baseline must be finite and beta must be finite and positive")
-    if not math.isfinite(weight_max) or weight_max <= 1:
-        raise ValueError("weight_max must be finite and above one")
-    if not math.isfinite(weight_norm) or weight_norm <= 0:
-        raise ValueError("weight_norm must be finite and positive")
+    valid: Bool[Tensor, "*batch"] | None = None,
+) -> tuple[Float[Tensor, "*batch"], dict[str, Float[Tensor, ""]]]:
+    """Compute capped, batch-normalized weights from detached advantages."""
     if valid is None:
         valid = torch.ones_like(eligible)
-    if valid.shape != eligible.shape:
-        raise ValueError(f"valid mask {tuple(valid.shape)} and eligibility {tuple(eligible.shape)} must align")
     eligible = eligible & valid
     eligible_float = eligible.float()
     eligible_count = eligible_float.sum()
     eligible_denominator = eligible_count.clamp_min(1)
     valid_count = valid.float().sum().clamp_min(1)
 
-    safe_return = torch.where(eligible, return_target, baseline).float()
-    advantage = safe_return - baseline
-    if check_finite and not torch.isfinite(advantage).all():
-        raise FloatingPointError("return or advantage contains a non-finite value on an eligible row")
+    safe_advantage = torch.where(eligible, advantage, 0).float()
 
     max_log_weight = math.log(weight_max)
-    log_weights = (advantage / beta).clamp(max=max_log_weight)
-    normalized_weights = torch.exp(log_weights) / weight_norm
-    if check_finite and not torch.isfinite(normalized_weights).all():
-        raise FloatingPointError("normalized AWR weight contains a non-finite value")
+    log_weights = (safe_advantage / beta).clamp(max=max_log_weight)
+    eligible_log_weights = log_weights.masked_fill(~eligible, -torch.inf)
+    log_mean_weight = torch.logsumexp(eligible_log_weights.reshape(-1), dim=0) - eligible_count.clamp_min(1).log()
+    log_mean_weight = torch.where(eligible_count > 0, log_mean_weight, torch.zeros_like(log_mean_weight))
+    normalized_log_weights = torch.where(eligible, log_weights - log_mean_weight, 0)
+    normalized_weights = torch.exp(normalized_log_weights)
     active_weights = normalized_weights if active else torch.ones_like(normalized_weights)
     weights = torch.where(eligible, active_weights, torch.ones_like(active_weights))
 
     has_eligible = eligible_count > 0
-    advantage_scale = (advantage.abs() * eligible_float).max().clamp_min(torch.finfo(torch.float32).tiny)
-    scaled_advantage = advantage / advantage_scale
+    advantage_scale = (safe_advantage.abs() * eligible_float).max().clamp_min(torch.finfo(torch.float32).tiny)
+    scaled_advantage = safe_advantage / advantage_scale
     scaled_mean = (scaled_advantage * eligible_float).sum() / eligible_denominator
     scaled_variance = ((scaled_advantage - scaled_mean).square() * eligible_float).sum() / eligible_denominator
     advantage_mean = scaled_mean * advantage_scale
@@ -1227,7 +1220,7 @@ def advantage_weights(
     weight_sum = (active_weights * eligible_float).sum()
     squared_sum = (active_weights.square() * eligible_float).sum()
     raw_ess = weight_sum.square() / (eligible_count * squared_sum).clamp_min(torch.finfo(torch.float32).tiny)
-    zero = torch.zeros((), device=return_target.device)
+    zero = torch.zeros((), device=advantage.device)
     stats = {
         "advantage_mean": torch.where(has_eligible, advantage_mean, zero),
         "advantage_std": torch.where(has_eligible, advantage_std, zero),
@@ -1248,31 +1241,44 @@ def advantage_weights(
     return weights, stats
 
 
+@jaxtyped(typechecker=beartype)
+def value_objective(
+    value: Float[Tensor, "B L_ctx"],
+    return_target: Float[Tensor, "B L_ctx"],
+    eligible: Bool[Tensor, "B L_ctx"],
+    *,
+    beta: float,
+    valid: Bool[Tensor, "B L_ctx"],
+) -> tuple[Float[Tensor, ""], Float[Tensor, "B L_ctx"], dict[str, Float[Tensor, ""]]]:
+    """Fit ``V(s_t)`` to ``G_{t+1}`` and return a detached advantage."""
+    selected = eligible & valid
+    selected_float = selected.float()
+    count = selected_float.sum().clamp_min(1)
+    value_float = value.float()
+    return_float = return_target.float()
+    error = torch.where(selected, (value_float - return_float) / beta, 0)
+    value_loss = error.square().sum() / count
+    advantage = torch.where(selected, return_float - value_float.detach(), 0)
+    stats = {
+        "value_loss": value_loss.detach(),
+        "value_rmse": value_loss.detach().sqrt() * beta,
+        "value_mean": (value_float.detach() * selected_float).sum() / count,
+        "return_mean": torch.where(selected, return_float, 0).sum() / count,
+    }
+    return value_loss, advantage, stats
+
+
+@jaxtyped(typechecker=beartype)
 def temporal_objective_parts(
-    nll: Tensor,
-    weight: Tensor,
+    nll: Float[Tensor, "*prefix n_offsets n_groups"],
+    weight: Float[Tensor, "*prefix"],
     *,
     valid_prefixes: int,
     aux_loss_weight: float,
-    valid: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor]:
+    valid: Bool[Tensor, "*prefix"],
+) -> tuple[Float[Tensor, ""], Float[Tensor, ""], Float[Tensor, ""]]:
     """Return weighted near loss, unweighted far loss, and normalized total."""
-    if nll.ndim < 3 or nll.shape[-1] != N_GROUPS:
-        raise ValueError(f"per-prefix NLL must end in [n_offsets, {N_GROUPS}], got {tuple(nll.shape)}")
     n_offsets = nll.shape[-2]
-    if n_offsets <= _N_NEAR:
-        raise ValueError(f"the {_N_NEAR} near offsets must leave at least one far offset, got {n_offsets}")
-    if valid_prefixes <= 0:
-        raise ValueError("valid_prefixes must be positive")
-    prefix_shape = nll.shape[:-2]
-    if weight.shape != prefix_shape:
-        raise ValueError("one weight is required per valid prefix")
-    if weight.requires_grad:
-        raise ValueError("objective weights must be detached")
-    if valid is None:
-        valid = torch.ones(prefix_shape, dtype=torch.bool, device=nll.device)
-    if valid.shape != prefix_shape:
-        raise ValueError("valid mask must have one entry per prefix")
     joint_nll = nll.float().sum(dim=-1)
     joint_nll = torch.where(valid[..., None], joint_nll, 0)
     weights = weight.float()[..., None]
@@ -1293,7 +1299,7 @@ def microbatch_loss(
     temporal_fn: Callable,
     phase_timer: CudaPhaseTimer | None = None,
 ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-    """Compute the globally normalized near-weighted policy loss.
+    """Compute the learned-value AWR policy and critic losses.
 
     Weighting stays outside the compiled policy functions, so crossing the
     warmup boundary does not trigger recompilation. Logged NLLs are unweighted.
@@ -1310,31 +1316,39 @@ def microbatch_loss(
         dense_nll = temporal_fn(hidden, history, targets)
         if phase_timer is not None:
             phase_timer.record("temporal_end")
+    value = model.value_head(hidden.float()).squeeze(-1)
+    value_loss, advantage, value_stats = value_objective(
+        value,
+        batch.returns,
+        batch.eligible,
+        beta=cfg.awr.beta,
+        valid=valid,
+    )
     active = step >= cfg.warmup_steps
     weights, stats = advantage_weights(
-        batch.returns.detach(),
+        advantage,
         batch.eligible,
-        baseline=cfg.awr.return_baseline,
         beta=cfg.awr.beta,
         weight_max=cfg.awr.weight_max,
-        weight_norm=cfg.awr.weight_norm,
         active=active,
         valid=valid,
-        check_finite=False,
     )
-    near, far, loss = temporal_objective_parts(
+    near, far, policy_loss = temporal_objective_parts(
         dense_nll,
         weights,
         valid_prefixes=valid_prefixes,
         aux_loss_weight=cfg.awr.auxiliary_loss_weight,
         valid=valid,
     )
+    loss = policy_loss + cfg.awr.value_loss_weight * value_loss
     nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
     extra = {
-        "train/loss": loss.detach() / _LN2,
+        "train/loss": policy_loss.detach() / _LN2,
         "train/temporal_loss_near": near.detach() / _LN2,
         "train/temporal_loss_far": far.detach() / _LN2,
+        "train/total_objective": loss.detach(),
         "awr/active": torch.ones_like(loss) if active else torch.zeros_like(loss),
+        **{f"train/{name}": metric for name, metric in value_stats.items()},
         **{f"train/{name}": value.detach() for name, value in stats.items()},
     }
     if phase_timer is not None:
@@ -2032,11 +2046,13 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     head_modules = nn.ModuleList([model.temporal.outputs, model.temporal.trunk_outputs])
     head_ids = {id(parameter) for parameter in head_modules.parameters()}
     temporal_ids = {id(parameter) for parameter in model.temporal.parameters() if id(parameter) not in head_ids}
-    other_ids = {id(parameter) for parameter in all_parameters} - trunk_ids - temporal_ids - head_ids
+    value_ids = {id(parameter) for parameter in model.value_head.parameters()}
+    other_ids = {id(parameter) for parameter in all_parameters} - trunk_ids - temporal_ids - head_ids - value_ids
     partitions = {
         "trunk": trunk_ids,
         "temporal_decoder": temporal_ids,
         "group_heads": head_ids,
+        "value_head": value_ids,
         "other": other_ids,
     }
     counts = {
@@ -2051,7 +2067,7 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
 
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
-    treatment = f"awr-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
+    treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
     return (
         f"scaled040-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-"
@@ -2085,6 +2101,8 @@ def _wandb_parameter_group(name: str) -> str:
         return f"decoder/temporal_block_{parts[2]}"
     if parts[0] == "temporal":
         return "decoder/heads" if parts[1] in ("outputs", "trunk_outputs") else "decoder/other"
+    if parts[0] == "value_head":
+        return "critic/value_head"
     return "trunk/input"
 
 
@@ -2410,7 +2428,10 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         return
     wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
     wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
-    wandb.run.summary["nll_semantics"] = "train/loss is weighted; *_unweighted and val metrics are unweighted"
+    wandb.run.summary["nll_semantics"] = (
+        "train/loss is the weighted policy loss in bits; train/total_objective adds the beta-normalized "
+        "value MSE; *_unweighted and val metrics are unweighted"
+    )
     wandb.run.summary["layer_rms_semantics"] = (
         "activation=block input; residual_branch=block output-input; "
         "residual_ratio=residual_branch/activation; gradient=parameter-gradient RMS"
