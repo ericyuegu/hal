@@ -1,4 +1,4 @@
-"""Contracts for scaled light AWR with optional projectile inputs.
+"""Contracts for scaled light AWR with projectile inputs.
 
 The pooled set encoder must ignore which slots the live items occupy, the two
 observation paths must deliver the same item tensors, and the configured sources
@@ -11,6 +11,7 @@ import math
 import sys
 from collections.abc import Mapping
 from dataclasses import asdict
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -37,7 +38,6 @@ from hal.training.dataloader import make_loader
 from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
-from hal.training.features import BASE_ACTION_PROJECTION
 from hal.training.features import BASE_ITEMS_PROJECTION
 from hal.training.features import ITEM_COLUMNS
 from hal.training.features import ITEM_INPUT_COLUMNS
@@ -92,12 +92,13 @@ def test_production_awr_constants_match_calibration_artifact() -> None:
     artifact = json.loads(artifact_path.read_text())
     cfg = exp.TrainConfig()
 
-    assert cfg.awr_return_baseline == artifact["return_baseline"]
-    assert cfg.awr_weight_norm == artifact["weight_norm"]
+    assert cfg.awr.return_baseline == artifact["return_baseline"]
+    assert cfg.awr.weight_norm == artifact["weight_norm"]
 
 
 def _cfg(**overrides) -> exp.TrainConfig:
-    values = {
+    arch_values = {
+        **asdict(exp.ARCHITECTURE),
         "d_model": 32,
         "n_layers": 1,
         "n_heads": 4,
@@ -107,6 +108,14 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "temporal_heads": 4,
         "temporal_ff_dim": 64,
         "group_head_dim": 64,
+        **_TINY_ITEMS,
+    }
+    awr_values = {
+        **asdict(exp.AWR_CALIBRATION),
+        "return_baseline": 10.0,
+        "weight_norm": 2.0,
+    }
+    values = {
         "batch_size": 2,
         "target_loss_positions": 16,
         "reservoir_capacity": 4,
@@ -118,11 +127,13 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "prefetch_batches": 8,
         "push_to_r2": False,
         "inference_mode": "eager",
-        "awr_return_baseline": 10.0,
-        "awr_weight_norm": 2.0,
-        **_TINY_ITEMS,
     }
-    return exp.TrainConfig(**{**values, **overrides})
+    for name, value in overrides.items():
+        if name in arch_values:
+            arch_values[name] = value
+        else:
+            values[name] = value
+    return exp.TrainConfig(arch=exp.Architecture(**arch_values), awr=exp.AWRCalibration(**awr_values), **values)
 
 
 def _actions(batch: int, length: int, generator: torch.Generator) -> torch.Tensor:
@@ -138,19 +149,19 @@ def _batch(cfg: exp.TrainConfig, pads: list[int] | None = None, seed: int = 0) -
     generator = torch.Generator().manual_seed(seed)
     synthetic = exp.synthetic_context(cfg, len(pads), torch.device("cpu"))
     features = dict(synthetic.features)
-    native = _actions(len(pads), cfg.L_ctx, generator)
+    native = _actions(len(pads), cfg.arch.L_ctx, generator)
     for channel, values in zip(ACTION_CHANNELS, native.unbind(-1), strict=True):
         features[f"ego_{channel}"] = values
     return TrainBatch(
         context=Context(features=features, ctx_pad=torch.tensor(pads, dtype=torch.int64)),
-        target=_actions(len(pads), cfg.sample_chunk_length, generator),
+        target=_actions(len(pads), cfg.arch.sample_chunk_length, generator),
     )
 
 
 def _awr_batch(cfg: exp.TrainConfig) -> exp.AWRBatch:
     batch = _batch(cfg)
     batch.target[..., 6:] = 0.0
-    returns = torch.full((batch.target.shape[0], cfg.L_ctx), cfg.awr_return_baseline)
+    returns = torch.full((batch.target.shape[0], cfg.arch.L_ctx), cfg.awr.return_baseline)
     eligible = torch.ones_like(returns, dtype=torch.bool)
     return exp.AWRBatch(batch=batch, returns=returns, eligible=eligible)
 
@@ -192,7 +203,7 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     assert cfg.ckpt_every == 2048
     assert cfg.warmup_steps == 15_728
     assert cfg.stable_steps == 419_430
-    assert cfg.batch_size * cfg.L_ctx * cfg.max_steps == 2**35
+    assert cfg.batch_size * cfg.arch.L_ctx * cfg.max_steps == 2**35
     assert schedule(0) == 0.0
     assert schedule(15_728) == 1.0
     assert schedule(100_000) == 1.0
@@ -434,7 +445,7 @@ def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
     cfg = _cfg()
     torch.manual_seed(0)
     model = exp.GPT(cfg)
-    batch = _batch(cfg, pads=[0, 0, cfg.L_ctx])
+    batch = _batch(cfg, pads=[0, 0, cfg.arch.L_ctx])
     button_l = ACTION_CHANNELS.index("button_l")
     batch.target[..., 6:] = 0.0
     batch.target[0, :, button_l] = 1.0
@@ -442,9 +453,9 @@ def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
     def incompatible_rollout(hidden: torch.Tensor, observed: torch.Tensor):
         del observed
         rows = hidden.shape[0]
-        sampled = torch.zeros(rows, len(cfg.head_offsets), exp.N_GROUPS, dtype=torch.long)
+        sampled = torch.zeros(rows, len(cfg.arch.head_offsets), exp.N_GROUPS, dtype=torch.long)
         logits = []
-        for _ in cfg.head_offsets:
+        for _ in cfg.arch.head_offsets:
             frame = {
                 name: torch.zeros(rows, vocab) for name, vocab in zip(exp.GROUP_NAMES, exp.GROUP_VOCABS, strict=True)
             }
@@ -458,7 +469,7 @@ def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
     metrics = exp.val_metrics(model, [batch], cfg)
 
     assert all(math.isfinite(value) for value in metrics.values())
-    for offset in cfg.head_offsets:
+    for offset in cfg.arch.head_offsets:
         assert metrics[f"rollout_button_target_masked_rate_o{offset:02d}"] == 0.5
         assert math.isfinite(metrics[f"exposure_gap_o{offset:02d}_buttons"])
 
@@ -475,7 +486,6 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
     checkpoint = exp._checkpoint_config(cfg)
     assert all(isinstance(name, str) for name in checkpoint["source_names"])
     assert exp.config_from_state(checkpoint) == cfg
-    assert exp.config_from_state({**checkpoint, "experiment_id": "041_projectile_conditioning_v1"}) == cfg
     with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state({**checkpoint, "experiment_id": "040_scaled_awr_bc_v1"})
 
@@ -751,7 +761,7 @@ def test_compiled_inference_routes_the_trunk_through_dense_sdpa(monkeypatch: pyt
 
     output = engine._trunk(2)(context.features, context.ctx_pad, observed)
 
-    assert output.shape == (2, cfg.L_ctx, cfg.d_model)
+    assert output.shape == (2, cfg.arch.L_ctx, cfg.arch.d_model)
     assert calls == ["dense"]
     assert compile_calls == [{"dynamic": False, "fullgraph": True, "mode": "default"}]
 
@@ -777,7 +787,7 @@ def test_eager_inference_also_routes_the_trunk_through_dense_sdpa(monkeypatch: p
 
     output = engine._trunk(2)(context.features, context.ctx_pad, observed)
 
-    assert output.shape == (2, cfg.L_ctx, cfg.d_model)
+    assert output.shape == (2, cfg.arch.L_ctx, cfg.arch.d_model)
     assert calls == ["dense"]
 
 
@@ -834,24 +844,21 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     assert (tmp_path / "smoke-final.pt").is_file()
 
 
-# --- projectile arm ----------------------------------------------------------
+# --- projectile encoder ------------------------------------------------------
 
 
-def test_flag_on_adds_exactly_the_item_modules() -> None:
+def test_model_includes_the_projectile_modules() -> None:
     cfg = _cfg()
-    off = exp.GPT(_cfg(item_conditioning=False))
-    on = exp.GPT(cfg)
+    model = exp.GPT(cfg)
 
-    added = set(on.state_dict()) - set(off.state_dict())
-    assert set(off.state_dict()) <= set(on.state_dict())
-    assert added == {"item_type_emb.weight", "item_state_emb.weight", "item_up.weight", "item_down.weight"}
-    assert on.item_type_emb.weight.shape == (256, cfg.item_type_dim)
-    assert on.item_state_emb.weight.shape == (256, cfg.item_state_dim)
+    item_keys = {name for name in model.state_dict() if name.startswith("item_")}
+    assert item_keys == {"item_type_emb.weight", "item_state_emb.weight", "item_up.weight", "item_down.weight"}
+    assert model.item_type_emb.weight.shape == (256, cfg.arch.item_type_dim)
+    assert model.item_state_emb.weight.shape == (256, cfg.arch.item_state_dim)
     # type + state embeddings, four floats, four sidecars, one presence flag.
-    slot_width = cfg.item_type_dim + cfg.item_state_dim + 2 * len(_ITEM_FLOATS) + 1
-    assert on.item_up.weight.shape == (cfg.item_hidden_dim, slot_width)
-    assert on.item_down.weight.shape == (cfg.item_dim, cfg.item_hidden_dim)
-    assert on.ctx_proj.weight.shape[1] == off.ctx_proj.weight.shape[1] + cfg.item_dim
+    slot_width = cfg.arch.item_type_dim + cfg.arch.item_state_dim + 2 * len(_ITEM_FLOATS) + 1
+    assert model.item_up.weight.shape == (cfg.arch.item_hidden_dim, slot_width)
+    assert model.item_down.weight.shape == (cfg.arch.item_dim, cfg.arch.item_hidden_dim)
 
 
 def test_optimizer_and_counts_place_the_item_modules() -> None:
@@ -867,13 +874,8 @@ def test_optimizer_and_counts_place_the_item_modules() -> None:
     assert all(not groups[id(w)]["use_muon"] for w in tables + linears)
 
     # The item encoder sits outside the trunk, the temporal chain, and the group heads.
-    counts = exp.subsystem_parameter_counts(model)
-    off_counts = exp.subsystem_parameter_counts(exp.GPT(_cfg(item_conditioning=False)))
     item_parameters = sum(w.numel() for w in tables + linears)
-    assert counts["other"] - off_counts["other"] == item_parameters + cfg.item_dim * cfg.d_model
-    assert {name: counts[name] for name in ("trunk", "temporal_decoder", "group_heads")} == {
-        name: off_counts[name] for name in ("trunk", "temporal_decoder", "group_heads")
-    }
+    assert exp.subsystem_parameter_counts(model)["other"] > item_parameters
 
 
 # --- the pooled set encoder ---------------------------------------------------
@@ -917,7 +919,7 @@ def test_pooling_is_permutation_invariant_over_the_slots() -> None:
     permuted = _pooled(model, {3: _TURNIP, 1: _LASER})
     one_item = _pooled(model, {2: _LASER})
 
-    assert first.shape == (2, 3, model.cfg.item_dim)
+    assert first.shape == (2, 3, model.cfg.arch.item_dim)
     assert torch.allclose(first, permuted, atol=1e-6)
     # Non-vacuity: the pooled value does depend on the set, just not on the slots.
     assert not torch.allclose(first, one_item, atol=1e-4)
@@ -964,7 +966,7 @@ def test_context_tokens_accept_the_synthetic_item_context() -> None:
     assert set(ctx.features) >= ITEM_INPUT_COLUMNS | sidecars
     with torch.no_grad():
         tokens = model.context_tokens(ctx.features)
-    assert tokens.shape == (2, cfg.L_ctx, cfg.d_model)
+    assert tokens.shape == (2, cfg.arch.L_ctx, cfg.arch.d_model)
 
 
 def test_decode_asks_for_the_item_canonical_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -990,12 +992,9 @@ def test_decode_asks_for_the_item_canonical_context(monkeypatch: pytest.MonkeyPa
 # --- routing ------------------------------------------------------------------
 
 
-def test_one_routing_feeds_both_observation_paths() -> None:
+def test_projectile_routing_feeds_both_observation_paths() -> None:
     cfg = _cfg()
     model = exp.GPT(cfg).eval()
-
-    assert exp._routing(cfg) == (ITEM_COLUMNS, BASE_ITEMS_PROJECTION)
-    assert exp._routing(_cfg(item_conditioning=False)) == (None, BASE_ACTION_PROJECTION)
 
     loader = exp.loader_kwargs(cfg, {})
     policy = exp.make_policy(model, {}, cfg, device="cpu")
@@ -1008,26 +1007,25 @@ def test_the_shipped_config_reads_only_sources_that_store_items() -> None:
     policy-world one, and the train loader must read it with the policy-world format."""
     cfg = exp.TrainConfig()
 
-    assert cfg.item_conditioning
     assert set(cfg.source_names) == exp._POLICY_WORLD_NAMES
     assert exp.loader_kwargs(cfg, {})["projection"] is BASE_ITEMS_PROJECTION
 
 
-def test_item_conditioning_rejects_a_source_that_drops_items() -> None:
+def test_projectile_model_rejects_a_source_that_drops_items() -> None:
     compact = "ranked-anonymized-1-policy-v7"
     assert compact in exp.streams.BY_NAME and compact not in exp._POLICY_WORLD_NAMES
 
     with pytest.raises(ValueError, match="policy-world sources"):
         exp.validate_config(_cfg(source_names=(compact,), source_weights=(1.0,)))
-    # The control arm may read it; the shipped comparison keeps both arms on one source.
-    exp.validate_config(_cfg(item_conditioning=False, source_names=(compact,), source_weights=(1.0,)))
 
 
 def test_a_batch_without_item_columns_fails_loud() -> None:
-    """A flag-on model handed an item-less observation must name the requirement rather
+    """A model handed an item-less observation must name the requirement rather
     than raise a bare KeyError deep inside the encoder."""
-    model = exp.GPT(_cfg()).eval()
-    item_less = exp.synthetic_context(_cfg(item_conditioning=False), 2, torch.device("cpu")).features
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+    features = exp.synthetic_context(cfg, 2, torch.device("cpu")).features
+    item_less = {name: value for name, value in features.items() if not name.startswith("item")}
 
     assert not any(name.startswith("item") for name in item_less)
     with pytest.raises(ValueError, match="policy-world"):
@@ -1055,7 +1053,7 @@ def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> No
     # The record is real data, so it decides the fixture: this asserts nothing without a
     # live projectile, and the window sampler needs a replay at least one window long.
     length = min(64, len(live))
-    if not live.any() or length < cfg.L_ctx + cfg.sample_chunk_length:
+    if not live.any() or length < cfg.arch.L_ctx + cfg.arch.sample_chunk_length:
         pytest.skip("the sampled replay is too short or carries no slot-0 projectile")
     start = max(0, min(int(np.flatnonzero(live)[0]), len(live) - length))
     replay = _sliced_replay(source, start, length)
@@ -1083,7 +1081,7 @@ def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> No
     model = exp.GPT(cfg).eval()
     with torch.no_grad():
         tokens = model.context_tokens(features)
-    assert tokens.shape == (1, cfg.L_ctx, cfg.d_model)
+    assert tokens.shape == (1, cfg.arch.L_ctx, cfg.arch.d_model)
     assert torch.isfinite(tokens).all()
 
 
@@ -1182,13 +1180,13 @@ def test_ring_item_rows_match_preprocess_on_the_offline_dtypes() -> None:
     """One two-projectile frame through the closed-loop ring builder reproduces
     ``preprocess`` on the equivalent MDS-dtype arrays, tensor for tensor."""
     cfg = _cfg()
-    extra, projection = exp._routing(cfg)
+    extra, projection = ITEM_COLUMNS, BASE_ITEMS_PROJECTION
     stats = _parity_stats()
     flat = flatten_canonical_frame(_obs_with_two_items())
     action = np.linspace(-1.0, 1.0, A_DIM, dtype=np.float32)
 
     layout = _build_layout(flat, EGO_PREFIX, stats, extra, projection)
-    rings = _Rings(layout, cfg.L_ctx)
+    rings = _Rings(layout, cfg.arch.L_ctx)
     rings.gather(flat, action)
     rings.push(None)
     newest = rings.window(1)
@@ -1223,27 +1221,22 @@ def test_ring_item_rows_match_preprocess_on_the_offline_dtypes() -> None:
 # --- configuration ------------------------------------------------------------
 
 
-def test_config_round_trips_and_rejects_an_040_checkpoint() -> None:
+def test_config_round_trips_and_rejects_other_checkpoint_shapes() -> None:
     cfg = _cfg()
     values = exp._checkpoint_config(cfg)
-    item_fields = {"item_conditioning", "item_type_dim", "item_state_dim", "item_hidden_dim", "item_dim"}
+    item_fields = {"item_type_dim", "item_state_dim", "item_hidden_dim", "item_dim"}
 
-    assert item_fields <= exp._CHECKPOINT_ARCH_FIELDS
+    assert item_fields <= values["architecture"].keys()
     assert exp.config_from_state(values) == cfg
 
-    legacy = dict(values)
-    del legacy["gradient_hist_every"]
-    del legacy["prefetch_batches"]
-    del legacy["weight_hist_every"]
-    legacy["wandb_hist_every"] = 17
-    legacy["prefetch_samples"] = 6 * cfg.batch_size
-    restored = exp.config_from_state(legacy)
-    assert restored.gradient_hist_every == 17
-    assert restored.prefetch_batches == 6
-    assert restored.weight_hist_every == 2**11
-
-    with pytest.raises(ValueError, match="item_dim"):
-        exp.config_from_state({name: value for name, value in values.items() if name not in item_fields})
+    incomplete = dict(values)
+    incomplete["architecture"] = {
+        name: value for name, value in values["architecture"].items() if name not in item_fields
+    }
+    with pytest.raises(ValueError, match="architecture"):
+        exp.config_from_state(incomplete)
+    with pytest.raises(ValueError, match="unexpected"):
+        exp.config_from_state({**values, "wandb_hist_every": 17})
 
 
 def test_validate_config_rejects_non_positive_item_dims() -> None:
@@ -1253,18 +1246,14 @@ def test_validate_config_rejects_non_positive_item_dims() -> None:
             exp.validate_config(_cfg(**{name: 0}))
 
 
-def test_model_tag_records_the_arm() -> None:
+def test_model_tag_records_projectiles() -> None:
     assert exp.model_tag(_cfg()).startswith("scaled040-")
-    assert "-items-awr-near-" in exp.model_tag(_cfg())
-    assert "-noitems-awr-near-" in exp.model_tag(_cfg(item_conditioning=False))
+    assert "-projectiles-awr-near-" in exp.model_tag(_cfg())
 
 
-def test_the_item_dims_are_frozen_but_the_arm_is_not() -> None:
-    """Both arms ship as production runs, so the flag is the treatment axis; the item
-    widths are architecture and stay frozen."""
-    exp.validate_production_config(exp.TrainConfig(item_conditioning=False))
+def test_the_item_dims_are_frozen() -> None:
     with pytest.raises(ValueError, match="item_dim"):
-        exp.validate_production_config(exp.TrainConfig(item_dim=8))
+        exp.validate_production_config(exp.TrainConfig(arch=replace(exp.ARCHITECTURE, item_dim=8)))
 
 
 def test_gradients_are_clipped_to_the_frozen_norm() -> None:
