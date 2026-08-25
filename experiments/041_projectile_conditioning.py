@@ -41,10 +41,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
-import wandb
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
+import wandb
 from hal import streams
 from hal.data.behavior import HITSTUN_ACTIONS
 from hal.data.feature_stats import FeatureStats
@@ -170,6 +170,7 @@ _PRODUCTION_TREATMENT_FIELDS = frozenset(
         "seed",
         "shuffle_block_size",
         "source_names",
+        "source_weights",
         "stable_fraction",
         "stage_dim",
         "stage_vocab",
@@ -225,6 +226,10 @@ _ITEM_PROBE_COLUMN = item_column(0, _ITEM_PRESENCE_SUFFIX)
 # Only the policy-world decoder emits the projectile block. The compact "policy"
 # decoder builds its dict from POLICY_MDS_COLUMNS, which carries no item columns.
 _POLICY_WORLD_NAMES = frozenset(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
+_DEFAULT_SOURCE_NAMES = tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
+_DEFAULT_SOURCE_WEIGHTS = tuple(
+    2.0 if source.name == "professional-zain-policy-world-v7" else 1.0 for source in streams.POLICY_WORLD_V7_SOURCES
+)
 
 
 @dataclass
@@ -236,7 +241,7 @@ class TrainConfig:
     L_ctx: int = 128
 
     sample_chunk_length: int = 24
-    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20, 24)
+    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20, 24)
     n_near: int = 6
     temporal_d_model: int = 256
     temporal_layers: int = 4
@@ -274,12 +279,12 @@ class TrainConfig:
 
     seed: int = 0
     eval_seed: int = 0
-    batch_size: int = 1024
+    batch_size: int = 512
     target_loss_positions: int = _PRODUCTION_LOSS_POSITIONS
-    muon_lr: float = 0.040
-    muon_weight_decay: float = 0.0013
+    muon_lr: float = 0.028
+    muon_weight_decay: float = 0.1
     adam_lr: float = 8.5e-4
-    adam_weight_decay: float = 0.0625
+    adam_weight_decay: float = 0.0071
     warmup_fraction: float = 0.03
     stable_fraction: float = 0.80
     lr_floor_ratio: float = 1 / 170
@@ -302,7 +307,8 @@ class TrainConfig:
     final_eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
     eval_max_parallel: int | None = 32
 
-    source_names: tuple[str, ...] = tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
+    source_names: tuple[str, ...] = _DEFAULT_SOURCE_NAMES
+    source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
     cache_limit_gb: int = 1024
@@ -457,6 +463,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("lr_floor_ratio must be in (0, 1]")
     if not cfg.source_names or len(set(cfg.source_names)) != len(cfg.source_names):
         raise ValueError("source_names must be non-empty and unique")
+    if len(cfg.source_weights) != len(cfg.source_names):
+        raise ValueError(f"source_weights length {len(cfg.source_weights)} != source count {len(cfg.source_names)}")
+    if any(not math.isfinite(weight) or weight <= 0 for weight in cfg.source_weights):
+        raise ValueError("source_weights must be finite and positive")
     unknown = set(cfg.source_names) - streams.BY_NAME.keys()
     if unknown:
         raise ValueError(f"unknown source names: {sorted(unknown)}")
@@ -2430,6 +2440,7 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
     return dict(
         data_root=None,
         sources=sources,
+        source_weights=cfg.source_weights,
         cache_limit=f"{cfg.cache_limit_gb}gb",
         shuffle_block_size=cfg.shuffle_block_size,
         shuffle_seed=cfg.seed,
@@ -2546,7 +2557,7 @@ def load_stats(cfg: TrainConfig) -> dict[str, FeatureStats]:
     sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
     return load_consolidated_mixture_stats(
         [source.local_root / "stats.json" for source in sources],
-        [streams.POLICY_WORLD_V7_TRAIN_REPLAYS[source.name] for source in sources],
+        cfg.source_weights,
         expected_mds_schema_version=cfg.mds_schema_version,
     )
 
@@ -2636,16 +2647,15 @@ def _log_training_summary(cfg: TrainConfig, parameter_counts: dict[str, int]) ->
 
     unique_replays = sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names)
     unique_frames = sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES[name] for name in cfg.source_names)
+    source_weight_total = sum(cfg.source_weights)
     wandb.run.summary["data/unique_replays"] = unique_replays
     wandb.run.summary["data/unique_frames"] = unique_frames
     wandb.run.summary["data/processed_loss_positions"] = cfg.target_loss_positions
     wandb.run.summary["data/effective_epochs"] = cfg.target_loss_positions / unique_frames
     wandb.run.summary["data/D_over_N"] = cfg.target_loss_positions / parameter_counts["total"]
     wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * cfg.L_ctx
-    for name in cfg.source_names:
-        wandb.run.summary[f"data/source_replay_share/{name}"] = (
-            streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] / unique_replays
-        )
+    for name, weight in zip(cfg.source_names, cfg.source_weights, strict=True):
+        wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
 def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
@@ -2922,6 +2932,9 @@ def train(
             )
             metrics_d2h_s = time.monotonic() - metrics_started
             step_s = stopwatch.elapsed if step_events is None else step_events[0].elapsed_time(step_events[1]) / 1000
+            training_elapsed_wall_s = time.monotonic() - run_started
+            completed_updates = update - start_step
+            projected_training_remaining_s = training_elapsed_wall_s * (run_stop - update) / completed_updates
             phase_metrics = {} if phase_timer is None else phase_timer.metrics()
             loader_wait_fractions.append(loader_wait / max(loader_wait + step_s, 1e-12))
             log_started = time.monotonic()
@@ -2936,6 +2949,8 @@ def train(
                 "throughput/samples_per_s": cfg.batch_size / step_s,
                 "throughput/prefixes_per_s": valid_prefixes / step_s,
                 "throughput/metrics_d2h_s": metrics_d2h_s,
+                "training/elapsed_wall_s": training_elapsed_wall_s,
+                "training/projected_remaining_s": projected_training_remaining_s,
                 "lr/muon": muon_lr,
                 "lr/adam": adam_lr,
                 **step_metric_values,
@@ -2963,7 +2978,8 @@ def train(
                 print(
                     f"[t+{time.monotonic() - run_started:.0f}s] update {update}: "
                     f"{step_metric_values['train/loss']:.3f} bits objective, "
-                    f"{cfg.batch_size / step_s:.0f} samples/s",
+                    f"{cfg.batch_size / step_s:.0f} samples/s, "
+                    f"projected training remaining {projected_training_remaining_s / 60:.1f}m",
                     flush=True,
                 )
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
@@ -3049,6 +3065,7 @@ _CHECKPOINT_ARCH_FIELDS = {
     "observation_bundle",
     "target_loss_positions",
     "source_names",
+    "source_weights",
     "item_conditioning",
     "item_type_dim",
     "item_state_dim",

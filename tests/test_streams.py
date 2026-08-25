@@ -12,11 +12,11 @@ from hal.training.ego_stats import load_consolidated_stats
 def test_policy_world_manifest_has_the_verified_natural_mix() -> None:
     names = {source.name for source in streams.POLICY_WORLD_V7_SOURCES}
 
-    assert len(streams.POLICY_WORLD_V7_SOURCES) == len(names) == 35
+    assert len(streams.POLICY_WORLD_V7_SOURCES) == len(names) == 44
     assert names == set(streams.POLICY_WORLD_V7_TRAIN_REPLAYS)
     assert names == set(streams.POLICY_WORLD_V7_TRAIN_FRAMES)
-    assert sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS.values()) == 1_213_707
-    assert sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES.values()) == 12_391_036_805
+    assert sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS.values()) == 1_300_640
+    assert sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES.values()) == 13_292_693_140
 
 
 def test_stats_loader_pulls_only_selected_registered_stream(

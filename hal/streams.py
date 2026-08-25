@@ -120,6 +120,15 @@ PROFESSIONAL_PLAYER_SLUGS: Final[tuple[str, ...]] = (
     "mof",
     "monotheon",
     "nicki",
+    "rapm",
+    "redx",
+    "siddward",
+    "solobattle",
+    "technospider",
+    "trif",
+    "uhhei",
+    "ycz",
+    "zain",
 )
 
 
@@ -177,6 +186,15 @@ POLICY_WORLD_V7_TRAIN_REPLAYS: Final[dict[str, int]] = {
             "mof": 1_241,
             "monotheon": 16_333,
             "nicki": 2_517,
+            "rapm": 605,
+            "redx": 1_466,
+            "siddward": 16_243,
+            "solobattle": 27_063,
+            "technospider": 4_447,
+            "trif": 14_059,
+            "uhhei": 6_893,
+            "ycz": 7_390,
+            "zain": 8_767,
         }.items()
     },
 }
@@ -221,6 +239,15 @@ POLICY_WORLD_V7_TRAIN_FRAMES: Final[dict[str, int]] = {
             "mof": 12_195_613,
             "monotheon": 164_934_541,
             "nicki": 24_198_496,
+            "rapm": 6_171_906,
+            "redx": 18_634_454,
+            "siddward": 157_490_540,
+            "solobattle": 254_347_491,
+            "technospider": 52_310_073,
+            "trif": 147_228_758,
+            "uhhei": 83_763_834,
+            "ycz": 80_852_018,
+            "zain": 100_857_261,
         }.items()
     },
 }

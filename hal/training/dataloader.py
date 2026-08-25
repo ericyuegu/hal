@@ -1,6 +1,7 @@
 """MDS loaders shared by training experiments."""
 
 import functools
+import math
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -89,6 +90,7 @@ def _make_streaming_dataset(
     cache_limit: str | int | None,
     shuffle_block_size: int | None,
     predownload: int | None,
+    source_weights: Sequence[float] | None = None,
 ) -> tuple[StreamingDataset, tuple[str, ...]]:
     """Build one single- or multi-stream MDS dataset with strict mode selection."""
     if sources is not None:
@@ -99,8 +101,23 @@ def _make_streaming_dataset(
         names = tuple(source.name for source in sources)
         if len(set(names)) != len(names):
             raise ValueError("source names must be unique")
+        if source_weights is not None:
+            if len(source_weights) != len(sources):
+                raise ValueError(f"source_weights length {len(source_weights)} != source count {len(sources)}")
+            if any(not math.isfinite(weight) or weight <= 0 for weight in source_weights):
+                raise ValueError("source_weights must be finite and positive")
+            weight_total = sum(source_weights)
+            proportions: Sequence[float | None] = tuple(weight / weight_total for weight in source_weights)
+        else:
+            proportions = (None,) * len(sources)
         selected_streams = [
-            Stream(remote=source.remote, local=str(source.local_root), split=split) for source in sources
+            Stream(
+                remote=source.remote,
+                local=str(source.local_root),
+                split=split,
+                proportion=proportion,
+            )
+            for source, proportion in zip(sources, proportions, strict=True)
         ]
         kwargs: dict[str, Any] = {
             "streams": selected_streams,
@@ -108,6 +125,8 @@ def _make_streaming_dataset(
             "predownload": predownload,
         }
     else:
+        if source_weights is not None:
+            raise ValueError("source_weights requires sources")
         if data_root is None:
             raise ValueError("data_root is required when sources are not provided")
         names = ()
@@ -338,6 +357,7 @@ def make_loader(
     seed: int,
     remote: str | None = None,
     sources: Sequence[StreamSource] | None = None,
+    source_weights: Sequence[float] | None = None,
     cache_limit: str | int | None = None,
     shuffle_block_size: int | None = None,
     shuffle: bool | None = None,
@@ -401,6 +421,7 @@ def make_loader(
         data_root,
         split,
         sources=sources,
+        source_weights=source_weights,
         remote=remote,
         shuffle=shuffle,
         shuffle_seed=shuffle_seed,

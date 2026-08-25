@@ -192,16 +192,16 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     cfg = exp.TrainConfig()
     schedule = exp.lr_schedule(cfg)
 
-    assert cfg.max_steps == 262_144
+    assert cfg.max_steps == 524_288
     assert cfg.ckpt_every == 2048
-    assert cfg.warmup_steps == 7_864
-    assert cfg.stable_steps == 209_715
+    assert cfg.warmup_steps == 15_728
+    assert cfg.stable_steps == 419_430
     assert cfg.batch_size * cfg.L_ctx * cfg.max_steps == 2**35
     assert schedule(0) == 0.0
-    assert schedule(7_864) == 1.0
+    assert schedule(15_728) == 1.0
     assert schedule(100_000) == 1.0
-    assert schedule(209_715) == 1.0
-    assert schedule(262_143) == pytest.approx(1 / 170)
+    assert schedule(419_430) == 1.0
+    assert schedule(524_287) == pytest.approx(1 / 170)
 
     parameter = torch.nn.Parameter(torch.ones(()))
     optimizer = torch.optim.SGD([parameter], lr=2.0)
@@ -606,7 +606,7 @@ def test_production_loader_and_eval_defaults() -> None:
     assert cfg.num_workers == 32
     assert cfg.prefetch_samples == 8 * cfg.batch_size
     worker_prefetch, batch_prefetch = exp._loader_prefetch_depths(cfg)
-    assert (worker_prefetch, batch_prefetch) == (16, 7)
+    assert (worker_prefetch, batch_prefetch) == (8, 7)
     queued_worker_samples = cfg.num_workers * worker_prefetch * cfg.windows_per_replay
     queued_batch_samples = batch_prefetch * cfg.batch_size
     assert queued_worker_samples + queued_batch_samples == cfg.prefetch_samples
@@ -614,6 +614,10 @@ def test_production_loader_and_eval_defaults() -> None:
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
     assert exp._eval_inference_bucket(cfg, 96) == 32
+    assert len(cfg.source_names) == len(cfg.source_weights) == 44
+    assert dict(zip(cfg.source_names, cfg.source_weights, strict=True)) == {
+        name: 2.0 if name == "professional-zain-policy-world-v7" else 1.0 for name in cfg.source_names
+    }
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:
@@ -866,7 +870,11 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
 
 def _cfg040(**overrides) -> object:
     """The same tiny geometry on experiment 040, which knows no item fields."""
-    values = {name: value for name, value in asdict(_cfg(**overrides)).items() if not name.startswith("item_")}
+    values = {
+        name: value
+        for name, value in asdict(_cfg(**overrides)).items()
+        if not name.startswith("item_") and name != "source_weights"
+    }
     return exp040.TrainConfig(**values)
 
 
@@ -1064,9 +1072,9 @@ def test_item_conditioning_rejects_a_source_that_drops_items() -> None:
     assert compact in exp.streams.BY_NAME and compact not in exp._POLICY_WORLD_NAMES
 
     with pytest.raises(ValueError, match="policy-world sources"):
-        exp.validate_config(_cfg(source_names=(compact,)))
+        exp.validate_config(_cfg(source_names=(compact,), source_weights=(1.0,)))
     # The control arm may read it; the shipped comparison keeps both arms on one source.
-    exp.validate_config(_cfg(item_conditioning=False, source_names=(compact,)))
+    exp.validate_config(_cfg(item_conditioning=False, source_names=(compact,), source_weights=(1.0,)))
 
 
 def test_a_batch_without_item_columns_fails_loud() -> None:
@@ -1113,7 +1121,13 @@ def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> No
         writer.write(encoded)
 
     kwargs = exp.loader_kwargs(cfg, _parity_stats())
-    kwargs |= {"data_root": str(tmp_path), "sources": None, "remote": None, "batch_size": 1}
+    kwargs |= {
+        "data_root": str(tmp_path),
+        "sources": None,
+        "source_weights": None,
+        "remote": None,
+        "batch_size": 1,
+    }
     batch = next(
         iter(make_loader(split="train", num_workers=0, windows_per_replay=4, replay_format="policy-world", **kwargs))
     )

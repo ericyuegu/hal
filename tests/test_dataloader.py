@@ -65,6 +65,53 @@ def test_multistream_dataset_uses_every_source_and_exposes_counts(tmp_path: Path
     assert sorted(int(sample["value"]) for sample in dataset) == [0, 1, 2, 10, 11, 12, 13, 14]
 
 
+def test_multistream_dataset_applies_explicit_source_weights(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_scalar_mds(first, "train", range(0, 3))
+    _write_scalar_mds(second, "train", range(10, 15))
+    sources = (
+        StreamSource("first", None, first),  # type: ignore[arg-type]
+        StreamSource("second", None, second),  # type: ignore[arg-type]
+    )
+
+    dataset, _ = _make_streaming_dataset(
+        None,
+        "train",
+        sources=sources,
+        source_weights=(1.0, 2.0),
+        remote=None,
+        shuffle=False,
+        shuffle_seed=123,
+        cache_limit=None,
+        shuffle_block_size=16,
+        predownload=None,
+    )
+
+    assert [stream.proportion for stream in dataset.streams] == pytest.approx([1 / 3, 2 / 3])
+    assert dataset.samples_per_stream.tolist() == [3, 5]
+
+
+def test_source_weights_must_match_multistream_sources(tmp_path: Path) -> None:
+    source = StreamSource("source", "s3://example/source", Path("cache/source"))
+    kwargs = {
+        "split": "train",
+        "remote": None,
+        "shuffle": None,
+        "shuffle_seed": None,
+        "cache_limit": None,
+        "shuffle_block_size": None,
+        "predownload": None,
+    }
+
+    with pytest.raises(ValueError, match="length"):
+        _make_streaming_dataset(None, sources=[source], source_weights=(1.0, 2.0), **kwargs)
+    with pytest.raises(ValueError, match="finite and positive"):
+        _make_streaming_dataset(None, sources=[source], source_weights=(0.0,), **kwargs)
+    with pytest.raises(ValueError, match="requires sources"):
+        _make_streaming_dataset(str(tmp_path), sources=None, source_weights=(1.0,), **kwargs)
+
+
 def test_streaming_dataset_mode_selection_is_strict(tmp_path: Path) -> None:
     source = StreamSource("source", "s3://example/source", Path("cache/source"))
     kwargs = {
