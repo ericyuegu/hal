@@ -440,6 +440,69 @@ def test_unweighted_metric_uses_the_same_near_far_normalization() -> None:
     assert metrics["loss_unweighted"] == pytest.approx(expected)
 
 
+def test_training_metrics_accumulate_on_device_until_flush() -> None:
+    cfg = _cfg()
+    shape = (len(cfg.arch.head_offsets), exp.N_GROUPS)
+    accumulator = exp._TrainingMetricAccumulator()
+    accumulator.add(
+        exp.TrainStepResult(
+            nll_sum=torch.full(shape, 2.0),
+            gradient_norm=torch.tensor(2.0),
+            metrics={"train/loss": torch.tensor(1.0), "awr/active": torch.tensor(0.0)},
+            diagnostics={},
+            muon_lr=1e-3,
+            adam_lr=1e-4,
+        ),
+        valid_prefixes=2,
+    )
+    accumulator.add(
+        exp.TrainStepResult(
+            nll_sum=torch.full(shape, 9.0),
+            gradient_norm=torch.tensor(4.0),
+            metrics={"train/loss": torch.tensor(3.0), "awr/active": torch.tensor(1.0)},
+            diagnostics={},
+            muon_lr=1e-3,
+            adam_lr=1e-4,
+        ),
+        valid_prefixes=3,
+    )
+
+    metrics, updates, valid_prefixes = accumulator.flush(cfg, update=2)
+
+    assert updates == 2
+    assert valid_prefixes == 5
+    assert metrics["train/nll_o01_buttons"] == pytest.approx(2.2 / math.log(2.0))
+    assert metrics["train/grad_norm"] == pytest.approx(3.0)
+    assert metrics["train/loss"] == pytest.approx(2.0)
+    assert metrics["awr/active"] == pytest.approx(0.5)
+    assert accumulator.updates == 0
+    assert accumulator.valid_prefixes == 0
+
+
+def test_training_metric_flush_rejects_accumulated_nonfinite_values() -> None:
+    cfg = _cfg()
+    accumulator = exp._TrainingMetricAccumulator()
+    accumulator.add(
+        exp.TrainStepResult(
+            nll_sum=torch.zeros(len(cfg.arch.head_offsets), exp.N_GROUPS),
+            gradient_norm=torch.tensor(float("nan")),
+            metrics={"train/loss": torch.tensor(1.0)},
+            diagnostics={},
+            muon_lr=1e-3,
+            adam_lr=1e-4,
+        ),
+        valid_prefixes=1,
+    )
+
+    with pytest.raises(FloatingPointError, match="accumulated training metrics"):
+        accumulator.flush(cfg, update=1)
+
+
+def test_training_metrics_log_every_ten_updates() -> None:
+    assert exp._TRAIN_METRICS_EVERY == 10
+    assert [update for update in range(1, 31) if update % exp._TRAIN_METRICS_EVERY == 0] == [10, 20, 30]
+
+
 def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
     cfg = _cfg()
     torch.manual_seed(0)

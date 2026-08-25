@@ -105,6 +105,7 @@ _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
+_TRAIN_METRICS_EVERY = 10
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
         "cache_limit_gb",
@@ -2451,6 +2452,64 @@ class TrainStepResult:
     adam_lr: float
 
 
+@dataclass(slots=True)
+class _TrainingMetricAccumulator:
+    """Accumulate device metrics and download one payload per log window."""
+
+    _sum: Tensor | None = None
+    _metric_names: tuple[str, ...] = ()
+    updates: int = 0
+    valid_prefixes: int = 0
+
+    def add(self, result: TrainStepResult, valid_prefixes: int) -> None:
+        if valid_prefixes <= 0:
+            raise ValueError("valid_prefixes must be positive")
+        metric_names = tuple(result.metrics)
+        if self._metric_names and metric_names != self._metric_names:
+            raise RuntimeError(f"training metric names changed from {self._metric_names} to {metric_names}")
+        scalar_metrics = torch.stack(
+            [result.gradient_norm.detach().float(), *(result.metrics[name].detach().float() for name in metric_names)]
+        )
+        payload = torch.cat((result.nll_sum.detach().reshape(-1).float(), scalar_metrics))
+        if self._sum is None:
+            self._sum = payload
+            self._metric_names = metric_names
+        else:
+            self._sum.add_(payload)
+        self.updates += 1
+        self.valid_prefixes += valid_prefixes
+
+    def flush(self, cfg: TrainConfig, *, update: int) -> tuple[dict[str, float], int, int]:
+        """Synchronize once, return window means, and reset the accumulator."""
+        if self._sum is None or self.updates == 0 or self.valid_prefixes == 0:
+            raise RuntimeError("cannot flush an empty training metric accumulator")
+        payload = self._sum.cpu()
+        if not torch.isfinite(payload).all():
+            raise FloatingPointError(f"update {update}: accumulated training metrics contain a non-finite value")
+
+        nll_values = len(cfg.arch.head_offsets) * N_GROUPS
+        mean_nll = payload[:nll_values].reshape(len(cfg.arch.head_offsets), N_GROUPS) / self.valid_prefixes
+        scalar_values = payload[nll_values:] / self.updates
+        values = {
+            f"train/{name}": value
+            for name, value in nll_mean_metrics(
+                mean_nll,
+                cfg.arch.head_offsets,
+                aux_loss_weight=cfg.awr.auxiliary_loss_weight,
+            ).items()
+        }
+        values["train/grad_norm"] = float(scalar_values[0])
+        values.update({name: float(value) for name, value in zip(self._metric_names, scalar_values[1:], strict=True)})
+
+        updates = self.updates
+        valid_prefixes = self.valid_prefixes
+        self._sum = None
+        self._metric_names = ()
+        self.updates = 0
+        self.valid_prefixes = 0
+        return values, updates, valid_prefixes
+
+
 def train_step(
     model: GPT,
     batch: AWRBatch,
@@ -2495,34 +2554,19 @@ def train_step(
     return TrainStepResult(nll_sum, gradient_norm, metrics, diagnostics, muon_lr, adam_lr)
 
 
-def _download_step_metrics(
-    nll_sum: Tensor,
-    gradient_norm: Tensor,
-    step_metrics: dict[str, Tensor],
-    cfg: TrainConfig,
-    *,
-    update: int,
-    valid_prefixes: int,
-) -> tuple[float, dict[str, float], dict[str, float]]:
-    """Move all scalar training metrics to the CPU in one synchronization."""
-    step_metric_names = tuple(step_metrics)
-    scalar_metrics = torch.stack(
-        [gradient_norm.detach().float(), *(step_metrics[name].float() for name in step_metric_names)]
-    )
-    payload = torch.cat((nll_sum.reshape(-1).float(), scalar_metrics)).cpu()
-    if not torch.isfinite(payload).all():
-        raise FloatingPointError(f"update {update}: training metrics or gradients contain a non-finite value")
-    nll_values = len(cfg.arch.head_offsets) * N_GROUPS
-    mean_nll = payload[:nll_values].reshape(len(cfg.arch.head_offsets), N_GROUPS) / valid_prefixes
-    scalar_values = payload[nll_values:]
-    gradient_norm_value = float(scalar_values[0])
-    step_metric_values = {name: float(value) for name, value in zip(step_metric_names, scalar_values[1:], strict=True)}
-    nll_values_by_offset = nll_mean_metrics(
-        mean_nll,
-        cfg.arch.head_offsets,
-        aux_loss_weight=cfg.awr.auxiliary_loss_weight,
-    )
-    return gradient_norm_value, nll_values_by_offset, step_metric_values
+def _cadence_in_window(first_update: int, last_update: int, every: int) -> bool:
+    """Return whether update one or a cadence boundary is in the window."""
+    if every <= 0:
+        return False
+    return first_update == 1 or last_update // every > (first_update - 1) // every
+
+
+def _mean_phase_metrics(timers: list[CudaPhaseTimer]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for timer in timers:
+        for name, value in timer.metrics().items():
+            totals[name] = totals.get(name, 0.0) + value
+    return {name: value / len(timers) for name, value in totals.items()} if timers else {}
 
 
 def _finalize_training(
@@ -2652,7 +2696,15 @@ def train(
         cache_interval_s=cfg.cache_metrics_interval_s,
     )
     host_metrics.start()
-    previous_update_started: float | None = None
+    metric_accumulator = _TrainingMetricAccumulator()
+    window_step_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+    window_cpu_step_seconds: list[float] = []
+    window_loader_wait_seconds: list[float] = []
+    window_phase_timers: list[CudaPhaseTimer] = []
+    window_diagnostics: dict[str, object] = {}
+    window_peak_allocated_gb = 0.0
+    window_peak_reserved_gb = 0.0
+    metrics_window_started = time.monotonic()
     previous_wandb_log_s: float | None = None
     previous_checkpoint_s: float | None = None
     # CUDA compilation must remain on the training thread. Background compilation
@@ -2661,9 +2713,6 @@ def train(
     model.train()
     try:
         for step in range(start_step, run_stop):
-            update_started = time.monotonic()
-            previous_loop_s = None if previous_update_started is None else update_started - previous_update_started
-            previous_update_started = update_started
             update = step + 1
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
@@ -2705,67 +2754,105 @@ def train(
             if update < run_stop:
                 batch_prefetcher.preload()
             actual_positions += valid_prefixes
-            metrics_started = time.monotonic()
-            gradient_norm_value, nll_metrics_by_offset, step_metric_values = _download_step_metrics(
-                result.nll_sum,
-                result.gradient_norm,
-                result.metrics,
-                cfg,
-                update=update,
-                valid_prefixes=valid_prefixes,
-            )
-            metrics_d2h_s = time.monotonic() - metrics_started
-            step_s = stopwatch.elapsed if step_events is None else step_events[0].elapsed_time(step_events[1]) / 1000
-            training_elapsed_wall_s = time.monotonic() - run_started
-            completed_updates = update - start_step
-            projected_training_remaining_s = training_elapsed_wall_s * (run_stop - update) / completed_updates
-            phase_metrics = {} if phase_timer is None else phase_timer.metrics()
-            loader_wait_fractions.append(loader_wait / max(loader_wait + step_s, 1e-12))
-            log_started = time.monotonic()
-            log: dict[str, float | int] = {
-                "samples": update * cfg.batch_size,
-                "data/actual_loss_positions": actual_positions,
-                "data/actual_loss_positions_this_update": valid_prefixes,
-                **{f"train/{name}": value for name, value in nll_metrics_by_offset.items()},
-                "train/grad_norm": gradient_norm_value,
-                "throughput/step_s": step_s,
-                "throughput/loader_wait_s": loader_wait,
-                "throughput/samples_per_s": cfg.batch_size / step_s,
-                "throughput/prefixes_per_s": valid_prefixes / step_s,
-                "throughput/metrics_d2h_s": metrics_d2h_s,
-                "training/elapsed_wall_s": training_elapsed_wall_s,
-                "training/projected_remaining_s": projected_training_remaining_s,
-                "lr/muon": result.muon_lr,
-                "lr/adam": result.adam_lr,
-                **step_metric_values,
-                **result.diagnostics,
-                **phase_metrics,
-            }
-            if previous_loop_s is not None:
-                log["throughput/loop_s"] = previous_loop_s
-                log["throughput/samples_per_wall_s"] = cfg.batch_size / previous_loop_s
-            if previous_wandb_log_s is not None:
-                log["throughput/wandb_log_s"] = previous_wandb_log_s
-            if previous_checkpoint_s is not None:
-                log["throughput/checkpoint_save_s"] = previous_checkpoint_s
-                previous_checkpoint_s = None
-            if cfg.system_metrics_every > 0 and (update == 1 or update % cfg.system_metrics_every == 0):
-                log.update(host_metrics.snapshot())
+            metric_accumulator.add(result, valid_prefixes)
+            window_loader_wait_seconds.append(loader_wait)
+            window_diagnostics.update(result.diagnostics)
+            if step_events is None:
+                window_cpu_step_seconds.append(stopwatch.elapsed)
+            else:
+                window_step_events.append(step_events)
+            if phase_timer is not None:
+                window_phase_timers.append(phase_timer)
             if DEVICE == "cuda":
-                log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
-                log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
-            log["throughput/log_build_s"] = time.monotonic() - log_started
-            wandb_started = time.monotonic()
-            wandb.log({"global_step": update, **log})
-            previous_wandb_log_s = time.monotonic() - wandb_started
-            if update <= 10 or update % 50 == 0:
-                print(
-                    f"[t+{time.monotonic() - run_started:.0f}s] update {update}: "
-                    f"{step_metric_values['train/loss']:.3f} bits objective, "
-                    f"{cfg.batch_size / step_s:.0f} samples/s, "
-                    f"projected training remaining {projected_training_remaining_s / 60:.1f}m",
-                    flush=True,
+                window_peak_allocated_gb = max(
+                    window_peak_allocated_gb,
+                    torch.cuda.max_memory_allocated() / 2**30,
                 )
+                window_peak_reserved_gb = max(
+                    window_peak_reserved_gb,
+                    torch.cuda.max_memory_reserved() / 2**30,
+                )
+
+            metrics_due = update % _TRAIN_METRICS_EVERY == 0 or update == run_stop
+            if metrics_due:
+                metrics_started = time.monotonic()
+                window_metric_values, window_updates, window_valid_prefixes = metric_accumulator.flush(
+                    cfg,
+                    update=update,
+                )
+                metrics_d2h_s = time.monotonic() - metrics_started
+                step_seconds = (
+                    [start.elapsed_time(end) / 1000 for start, end in window_step_events]
+                    if window_step_events
+                    else window_cpu_step_seconds
+                )
+                if len(step_seconds) != window_updates or len(window_loader_wait_seconds) != window_updates:
+                    raise RuntimeError("training telemetry window lost an update")
+                step_s_total = sum(step_seconds)
+                step_s = step_s_total / window_updates
+                loader_wait_s = sum(window_loader_wait_seconds) / window_updates
+                loader_wait_fractions.extend(
+                    wait / max(wait + elapsed, 1e-12)
+                    for wait, elapsed in zip(window_loader_wait_seconds, step_seconds, strict=True)
+                )
+
+                training_elapsed_wall_s = time.monotonic() - run_started
+                completed_updates = update - start_step
+                projected_training_remaining_s = training_elapsed_wall_s * (run_stop - update) / completed_updates
+                window_wall_s = time.monotonic() - metrics_window_started
+                first_window_update = update - window_updates + 1
+                log_started = time.monotonic()
+                log: dict[str, object] = {
+                    "samples": update * cfg.batch_size,
+                    "data/actual_loss_positions": actual_positions,
+                    "data/actual_loss_positions_this_log": window_valid_prefixes,
+                    "data/actual_loss_positions_this_update": window_valid_prefixes / window_updates,
+                    "throughput/log_every_updates": window_updates,
+                    "throughput/step_s": step_s,
+                    "throughput/loader_wait_s": loader_wait_s,
+                    "throughput/samples_per_s": cfg.batch_size * window_updates / step_s_total,
+                    "throughput/prefixes_per_s": window_valid_prefixes / step_s_total,
+                    "throughput/metrics_d2h_s": metrics_d2h_s,
+                    "throughput/loop_s": window_wall_s / window_updates,
+                    "throughput/samples_per_wall_s": cfg.batch_size * window_updates / window_wall_s,
+                    "training/elapsed_wall_s": training_elapsed_wall_s,
+                    "training/projected_remaining_s": projected_training_remaining_s,
+                    "lr/muon": result.muon_lr,
+                    "lr/adam": result.adam_lr,
+                    **window_metric_values,
+                    **window_diagnostics,
+                    **_mean_phase_metrics(window_phase_timers),
+                }
+                if previous_wandb_log_s is not None:
+                    log["throughput/wandb_log_s"] = previous_wandb_log_s
+                if previous_checkpoint_s is not None:
+                    log["throughput/checkpoint_save_s"] = previous_checkpoint_s
+                    previous_checkpoint_s = None
+                if _cadence_in_window(first_window_update, update, cfg.system_metrics_every):
+                    log.update(host_metrics.snapshot())
+                if DEVICE == "cuda":
+                    log["hardware/peak_allocated_gb"] = window_peak_allocated_gb
+                    log["hardware/peak_reserved_gb"] = window_peak_reserved_gb
+                log["throughput/log_build_s"] = time.monotonic() - log_started
+                wandb_started = time.monotonic()
+                wandb.log({"global_step": update, **log})
+                previous_wandb_log_s = time.monotonic() - wandb_started
+                if update <= _TRAIN_METRICS_EVERY or update % 50 == 0 or update == run_stop:
+                    print(
+                        f"[t+{time.monotonic() - run_started:.0f}s] update {update}: "
+                        f"{window_metric_values['train/loss']:.3f} bits objective, "
+                        f"{cfg.batch_size * window_updates / step_s_total:.0f} samples/s, "
+                        f"projected training remaining {projected_training_remaining_s / 60:.1f}m",
+                        flush=True,
+                    )
+                window_step_events.clear()
+                window_cpu_step_seconds.clear()
+                window_loader_wait_seconds.clear()
+                window_phase_timers.clear()
+                window_diagnostics.clear()
+                window_peak_allocated_gb = 0.0
+                window_peak_reserved_gb = 0.0
+                metrics_window_started = wandb_started
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
             eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
