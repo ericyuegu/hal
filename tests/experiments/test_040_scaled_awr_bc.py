@@ -781,41 +781,6 @@ def test_eager_inference_also_routes_the_trunk_through_dense_sdpa(monkeypatch: p
     assert calls == ["dense"]
 
 
-def test_benchmark_keeps_the_inference_graph_under_no_grad(monkeypatch: pytest.MonkeyPatch) -> None:
-    grad_modes: list[bool] = []
-
-    class BenchmarkStopped(Exception):
-        pass
-
-    def stop_after_observing_grad_mode(_cfg: exp.TrainConfig) -> None:
-        grad_modes.append(torch.is_grad_enabled())
-        raise BenchmarkStopped
-
-    monkeypatch.setattr(exp, "validate_config", stop_after_observing_grad_mode)
-
-    with torch.enable_grad(), pytest.raises(BenchmarkStopped):
-        exp.run_benchmark(_cfg(), iterations=1)
-
-    assert grad_modes == [False]
-
-
-def test_inference_parity_uses_scale_aware_bf16_tolerances() -> None:
-    reference = torch.ones(1000)
-    sparse_rounding_drift = reference.clone()
-    sparse_rounding_drift[:10] += 0.046875
-
-    metrics = exp._inference_parity_metrics(sparse_rounding_drift, reference)
-
-    assert metrics["max_abs_error"] == pytest.approx(0.046875)
-    assert metrics["relative_rms_error"] < exp._INFERENCE_PARITY_RELATIVE_RMS
-    with pytest.raises(AssertionError, match="relative_rms"):
-        exp._inference_parity_metrics(reference + 0.03, reference)
-    outlier = reference.clone()
-    outlier[0] += 0.125
-    with pytest.raises(AssertionError, match="max_abs"):
-        exp._inference_parity_metrics(outlier, reference)
-
-
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = _cfg(
         gradient_hist_every=0,

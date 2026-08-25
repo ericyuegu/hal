@@ -13,8 +13,8 @@ vector and the live-item count stays implicit in the sum.
 Set ``--cfg.no-item-conditioning`` for the control arm.
 
 Run:
-    uv run experiments/040_scaled_awr_bc.py
-    uv run experiments/040_scaled_awr_bc.py --eval runs/<run>/final.pt
+    uv run experiments/040_scaled_awr_bc.py train
+    uv run experiments/040_scaled_awr_bc.py eval --checkpoint runs/<run>/final.pt
 """
 
 import contextlib
@@ -33,6 +33,7 @@ from dataclasses import field as dataclass_field
 from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
+from typing import Annotated
 from typing import ClassVar
 
 import melee
@@ -110,8 +111,6 @@ _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
 _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
-_INFERENCE_PARITY_MAX_ABS = 1 / 16
-_INFERENCE_PARITY_RELATIVE_RMS = 2e-2
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
@@ -2981,159 +2980,67 @@ def eval_checkpoint(
     return values
 
 
-def _inference_parity_metrics(actual: Tensor, reference: Tensor) -> dict[str, float]:
-    """Check compiled BF16 output without over-weighting relative error near zero."""
-    error = actual.float() - reference.float()
-    values = (
-        torch.stack(
-            (
-                error.abs().max(),
-                error.square().mean().sqrt(),
-                reference.float().square().mean().sqrt(),
-            )
-        )
-        .double()
-        .cpu()
-    )
-    max_abs, error_rms, reference_rms = map(float, values)
-    relative_rms = error_rms / max(reference_rms, torch.finfo(torch.float64).tiny)
-    metrics = {
-        "max_abs_error": max_abs,
-        "rms_error": error_rms,
-        "relative_rms_error": relative_rms,
-    }
-    if not all(math.isfinite(value) for value in metrics.values()):
-        raise AssertionError(f"compiled inference parity produced non-finite metrics: {metrics}")
-    if max_abs > _INFERENCE_PARITY_MAX_ABS or relative_rms > _INFERENCE_PARITY_RELATIVE_RMS:
-        raise AssertionError(
-            "compiled inference parity exceeded BF16 tolerances: "
-            f"{metrics}, max_abs <= {_INFERENCE_PARITY_MAX_ABS}, "
-            f"relative_rms <= {_INFERENCE_PARITY_RELATIVE_RMS}"
-        )
-    return metrics
-
-
-@torch.no_grad()
-def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]:
-    validate_config(cfg)
-    device = torch.device(DEVICE)
-    model = GPT(cfg).to(device).eval()
-    ctx = synthetic_context(cfg, min(32, cfg.batch_size), device)
-    eager = BF16Inference(model, replace(cfg, inference_mode="eager"), compiled=False)
-    compiled = BF16Inference(model, cfg)
-
-    def selected_context(rows: int) -> Context:
-        return Context(
-            features={name: value[:rows] for name, value in ctx.features.items()},
-            ctx_pad=ctx.ctx_pad[:rows],
-            slot_ids=ctx.slot_ids[:rows] if ctx.slot_ids is not None else None,
-            reset=ctx.reset[:rows] if ctx.reset is not None else None,
-        )
-
-    def trunk_parity(rows: int) -> dict[str, float]:
-        selected = selected_context(rows)
-        bucket = compiled._bucket(rows)
-        padded = canonical_context(_pad_context(selected, bucket), "base")
-        observed = model.codec.quantize(stack_actions(padded.features))
-        with amp_context(cfg, device):
-            reference = model.forward_dense(padded.features, padded.ctx_pad, observed)
-            actual = compiled._trunk(bucket)(padded.features, padded.ctx_pad, observed)
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        return _inference_parity_metrics(actual, reference)
-
-    def measure(engine: BF16Inference, rows: int, horizon: int) -> float:
-        selected = selected_context(rows)
-        for _ in range(2):
-            engine.decode(selected, horizon)
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        started = time.perf_counter()
-        for _ in range(iterations):
-            engine.decode(selected, horizon)
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        return (time.perf_counter() - started) / iterations
-
-    out: dict[str, float] = {}
-    rows_to_check = tuple(sorted({1, min(4, ctx.ctx_pad.shape[0]), ctx.ctx_pad.shape[0]}))
-    for horizon in (4, 6):
-        out[f"compiled_b{compiled._bucket(1)}_s{horizon}_compile_s"] = compiled.prewarm(1, horizon)
-    with torch.compiler.set_stance("fail_on_recompile"):
-        for rows in rows_to_check:
-            for name, value in trunk_parity(rows).items():
-                out[f"compiled_dense_b{rows}_{name}"] = value
-            for horizon in (4, 6):
-                eager_s = measure(eager, rows, horizon)
-                compiled_s = measure(compiled, rows, horizon)
-                out[f"eager_b{rows}_s{horizon}_ms"] = eager_s * 1000
-                out[f"compiled_b{rows}_s{horizon}_ms"] = compiled_s * 1000
-                out[f"compiled_b{rows}_s{horizon}_executed_fps"] = rows * horizon / compiled_s
-    print(json.dumps(out, indent=2, sort_keys=True), flush=True)
-    return out
-
-
 @dataclass
-class Args:
+class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
     comment: str = ""
     resume: str | None = None
-    eval: str | None = None
-    eval_exec_horizon: int | None = None
-    eval_n_matchups: int | None = None
-    eval_eager: bool = False
-    eval_max_parallel: int | None = None
-    eval_output_name: str | None = None
-    self_play_eval: str | None = None
-    self_play_matches: int = 12
-    self_play_frames: int = 14_400
-    self_play_eager: bool = False
-    self_play_instant_match_restart: bool = False
-    self_play_process_cohorts: int = 1
-    self_play_cohort_sweep: bool = False
-    benchmark: bool = False
-    benchmark_iterations: int = 20
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
 
 
-def main(args: Args) -> None:
-    modes = {
-        "--benchmark": args.benchmark,
-        "--eval": args.eval is not None,
-        "--self-play-eval": args.self_play_eval is not None,
-        "--resume": args.resume is not None,
-    }
-    selected_modes = [name for name, selected in modes.items() if selected]
-    if len(selected_modes) > 1:
-        raise SystemExit(f"pass only one mode, got {', '.join(selected_modes)}")
+@dataclass
+class EvalArgs:
+    checkpoint: str
+    exec_horizon: int | None = None
+    n_matchups: int | None = None
+    eager: bool = False
+    max_parallel: int | None = None
+    output_name: str | None = None
 
-    if args.benchmark:
-        run_benchmark(args.cfg, iterations=args.benchmark_iterations)
-        return
-    if args.eval is not None:
+
+@dataclass
+class SelfPlayArgs:
+    checkpoint: str
+    matches: int = 12
+    frames: int = 14_400
+    eager: bool = False
+    instant_match_restart: bool = False
+    process_cohorts: int = 1
+    cohort_sweep: bool = False
+
+
+Command = (
+    Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
+    | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
+    | Annotated[SelfPlayArgs, tyro.conf.subcommand(name="self-play")]
+)
+
+
+def main(args: Command) -> None:
+    if isinstance(args, EvalArgs):
         eval_checkpoint(
-            args.eval,
-            exec_horizon=args.eval_exec_horizon,
-            n_matchups=args.eval_n_matchups,
-            eager=args.eval_eager,
-            max_parallel=args.eval_max_parallel,
-            output_name=args.eval_output_name,
+            args.checkpoint,
+            exec_horizon=args.exec_horizon,
+            n_matchups=args.n_matchups,
+            eager=args.eager,
+            max_parallel=args.max_parallel,
+            output_name=args.output_name,
         )
         return
-    if args.self_play_eval is not None:
-        cohorts = (1, 2, 3, 4) if args.self_play_cohort_sweep else (args.self_play_process_cohorts,)
+    if isinstance(args, SelfPlayArgs):
+        cohorts = (1, 2, 3, 4) if args.cohort_sweep else (args.process_cohorts,)
         for cohort_count in cohorts:
             benchmark_self_play(
-                args.self_play_eval,
+                args.checkpoint,
                 load_checkpoint=load_checkpoint,
                 make_inference=BF16Inference,
                 make_policy=make_policy,
-                n_matches=args.self_play_matches,
-                max_frames=args.self_play_frames,
-                eager=args.self_play_eager,
-                instant_match_restart=args.self_play_instant_match_restart,
+                n_matches=args.matches,
+                max_frames=args.frames,
+                eager=args.eager,
+                instant_match_restart=args.instant_match_restart,
                 process_cohorts=cohort_count,
             )
         return
@@ -3159,4 +3066,4 @@ def main(args: Args) -> None:
 
 
 if __name__ == "__main__":
-    main(tyro.cli(Args))
+    main(tyro.cli(Command))
