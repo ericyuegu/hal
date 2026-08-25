@@ -652,9 +652,6 @@ class NonlinearActionHead(nn.Module):
         return self.mlp(decoder_rmsnorm(x))
 
 
-TEMPORAL_SDPA_BATCH_LIMIT = 32_768
-
-
 def short_causal_attention(
     query: Float[Tensor, "B H L D"],
     key: Float[Tensor, "B H L D"],
@@ -688,7 +685,7 @@ class TemporalBlock(nn.Module):
         shape = (batch, length, self.n_heads, self.head_dim)
         return q.view(shape), k.view(shape), v.view(shape)
 
-    def _forward_chunk(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         q, k, v = self._qkv(x)
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
@@ -698,13 +695,6 @@ class TemporalBlock(nn.Module):
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
         return x + self.mlp(decoder_rmsnorm(x))
-
-    def forward(self, x: Tensor) -> Tensor:
-        # Bound the explicit score matrix and the tiny-matrix BMM batch count.
-        # The flattened production prefix batch is 512 * 128 = 65,536 rows.
-        if x.shape[0] <= TEMPORAL_SDPA_BATCH_LIMIT:
-            return self._forward_chunk(x)
-        return torch.cat([self._forward_chunk(chunk) for chunk in x.split(TEMPORAL_SDPA_BATCH_LIMIT)], dim=0)
 
     def forward_step(self, x: Tensor, past: tuple[Tensor, Tensor] | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         q, k, v = self._qkv(x[:, None])
