@@ -655,6 +655,20 @@ class NonlinearActionHead(nn.Module):
 TEMPORAL_SDPA_BATCH_LIMIT = 32_768
 
 
+@jaxtyped(typechecker=beartype)
+def short_causal_attention(
+    query: Float[Tensor, "B H L D"],
+    key: Float[Tensor, "B H L D"],
+    value: Float[Tensor, "B H L D"],
+) -> Float[Tensor, "B H L D"]:
+    """Causal attention for the decoder's fixed, short offset sequence."""
+    scores = query @ key.transpose(-2, -1)
+    scores = scores.float() * (query.shape[-1] ** -0.5)
+    causal = torch.ones(scores.shape[-2:], dtype=torch.bool, device=scores.device).tril()
+    weights = F.softmax(scores.masked_fill(~causal, -torch.inf), dim=-1).to(query.dtype)
+    return weights @ value
+
+
 class TemporalBlock(nn.Module):
     """RoPE causal SDPA block with an exact cached one-token path."""
 
@@ -681,17 +695,14 @@ class TemporalBlock(nn.Module):
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
-        attended = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attended = short_causal_attention(q, k, v)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
         return x + self.mlp(decoder_rmsnorm(x))
 
     def forward(self, x: Tensor) -> Tensor:
-        # Flash SDPA's CUDA launch rejects a flattened batch dimension above
-        # 65,535.  Training flattens batch and context positions, which is
-        # 1024 * 128 for the production configuration.  Chunking that
-        # independent dimension preserves the exact attention computation
-        # while keeping every static launch safely below the CUDA grid limit.
+        # Bound the explicit score matrix and the tiny-matrix BMM batch count.
+        # The flattened production prefix batch is 512 * 128 = 65,536 rows.
         if x.shape[0] <= TEMPORAL_SDPA_BATCH_LIMIT:
             return self._forward_chunk(x)
         return torch.cat([self._forward_chunk(chunk) for chunk in x.split(TEMPORAL_SDPA_BATCH_LIMIT)], dim=0)

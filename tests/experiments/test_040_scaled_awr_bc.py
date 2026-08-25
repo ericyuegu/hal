@@ -185,6 +185,18 @@ def test_training_compile_mode_prefers_cuda_graph_replay() -> None:
     assert exp._TRAIN_COMPILE_MODE == "reduce-overhead"
 
 
+def test_short_causal_attention_matches_sdpa() -> None:
+    generator = torch.Generator().manual_seed(12)
+    query = torch.randn(3, 2, 5, 8, generator=generator)
+    key = torch.randn(3, 2, 5, 8, generator=generator)
+    value = torch.randn(3, 2, 5, 8, generator=generator)
+
+    expected = torch.nn.functional.scaled_dot_product_attention(query, key, value, is_causal=True)
+    actual = exp.short_causal_attention(query, key, value)
+
+    torch.testing.assert_close(actual, expected)
+
+
 def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
     frames = 40
     sample: dict[str, object] = {
