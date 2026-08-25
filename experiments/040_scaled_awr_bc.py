@@ -118,7 +118,7 @@ _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
 _TRAIN_METRICS_EVERY = 10
-_TRAIN_COMPILE_MODE = "reduce-overhead"
+_TRAIN_COMPILE_MODE = "max-autotune"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
@@ -672,7 +672,7 @@ def short_causal_attention(
     return weights @ value
 
 
-TEMPORAL_ATTENTION_BATCH = 32_768
+TEMPORAL_ATTENTION_BATCH = 16_384
 
 
 class TemporalBlock(nn.Module):
@@ -701,8 +701,8 @@ class TemporalBlock(nn.Module):
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
-        # Two balanced attention chunks are faster than one 65,536-row tiny
-        # BMM. The large linear and SwiGLU operations use the full batch.
+        # Equal attention chunks keep the tiny BMMs efficient. The large linear
+        # and SwiGLU operations use the full batch.
         attended = torch.cat(
             [
                 short_causal_attention(query, key, values)
