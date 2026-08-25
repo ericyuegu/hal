@@ -68,8 +68,6 @@ def resolve_parallelism(n_matches: int, requested: int | None) -> int:
     parallel = automatic_parallelism() if requested is None else requested
     if parallel < 1:
         raise ValueError(f"max_parallel must be >= 1, got {parallel}")
-    if requested is not None and parallel & (parallel - 1):
-        raise ValueError(f"explicit max_parallel must be a power of two, got {parallel}")
     return min(n_matches, parallel)
 
 

@@ -524,6 +524,8 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
         exp.validate_config(_cfg(target_loss_positions=17))
     with pytest.raises(ValueError, match="layer_rms_every"):
         exp.validate_config(_cfg(layer_rms_every=-1))
+    with pytest.raises(ValueError, match=r"num_workers must be an integer in \[0, 32\]"):
+        exp.validate_config(_cfg(num_workers=33))
     assert asdict(exp.TrainConfig())["target_loss_positions"] == 2**35
     with pytest.raises(ValueError, match="frozen treatment"):
         exp.validate_production_config(exp.TrainConfig(exec_horizon=6))
@@ -536,6 +538,19 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
             layer_rms_batch_size=4,
         )
     )
+
+
+def test_production_loader_and_eval_defaults() -> None:
+    cfg = exp.TrainConfig()
+
+    assert cfg.windows_per_replay == 2
+    assert cfg.num_workers == 32
+    assert cfg.prefetch_samples == 8 * cfg.batch_size
+    assert exp._loader_prefetch_depths(cfg) == (128, 8)
+    assert cfg.eval_every == 2**14
+    assert cfg.eval_max_parallel == 48
+    assert exp._eval_parallelism(cfg, 96) == 48
+    assert exp._eval_inference_bucket(cfg, 96) == 64
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:

@@ -43,8 +43,9 @@ def test_eval_parallelism_uses_affinity_bucket_and_validates_override(monkeypatc
     assert resolve_parallelism(96, None) == 16
     assert resolve_parallelism(7, None) == 7
     assert resolve_parallelism(96, 32) == 32
-    with pytest.raises(ValueError, match="power of two"):
-        resolve_parallelism(96, 30)
+    assert resolve_parallelism(96, 30) == 30
+    with pytest.raises(ValueError, match=">= 1"):
+        resolve_parallelism(96, 0)
 
 
 def test_policy_runtime_spec_validates_generic_schedule() -> None:

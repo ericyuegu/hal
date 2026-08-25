@@ -97,7 +97,7 @@ _EXPERIMENT_ID = "040_scaled_awr_bc_v1"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
-_INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32)
+_INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
 _INFERENCE_PARITY_MAX_ABS = 1 / 16
 _INFERENCE_PARITY_RELATIVE_RMS = 2e-2
 _PRODUCTION_LOSS_POSITIONS = 2**35
@@ -256,11 +256,11 @@ class TrainConfig:
     val_n_samples: int = 2048
     val_batch_size: int = 128
     ckpt_every: int = 2048
-    eval_every: int = 32_768
+    eval_every: int = 16_384
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
     final_eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
-    eval_max_parallel: int | None = 32
+    eval_max_parallel: int | None = 48
 
     source_names: tuple[str, ...] = tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
     mds_schema_version: int = 7
@@ -271,9 +271,8 @@ class TrainConfig:
     windows_per_replay: int = 2
     reservoir_capacity: int = 8192
     val_split: str = "val"
-    num_workers: int = 16
-    prefetch_factor: int = 2
-    prefetch_batches: int = 4
+    num_workers: int = 32
+    prefetch_samples: int = 8 * batch_size
     push_to_r2: bool = True
     system_metrics_every: int = 25
     system_metrics_interval_s: float = 5.0
@@ -330,6 +329,8 @@ def validate_config(cfg: TrainConfig) -> None:
         "target_loss_positions": cfg.target_loss_positions,
         "n_near": cfg.n_near,
         "layer_rms_batch_size": cfg.layer_rms_batch_size,
+        "prefetch_samples": cfg.prefetch_samples,
+        "windows_per_replay": cfg.windows_per_replay,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -356,9 +357,11 @@ def validate_config(cfg: TrainConfig) -> None:
     ):
         raise ValueError("compiled_inference_bucket must be a positive power of two")
     if cfg.eval_max_parallel is not None and (
-        cfg.eval_max_parallel < 1 or cfg.eval_max_parallel & (cfg.eval_max_parallel - 1)
+        not isinstance(cfg.eval_max_parallel, int)
+        or isinstance(cfg.eval_max_parallel, bool)
+        or cfg.eval_max_parallel < 1
     ):
-        raise ValueError("eval_max_parallel must be a positive power of two")
+        raise ValueError("eval_max_parallel must be a positive integer")
     if cfg.observation_bundle not in ("base", "v6_lean"):
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
     if not math.isfinite(cfg.aux_loss_weight) or cfg.aux_loss_weight < 0:
@@ -382,6 +385,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("amp_dtype must be bfloat16 or float32")
     if cfg.reservoir_capacity < 2 * cfg.batch_size:
         raise ValueError("reservoir_capacity must be at least twice the batch size")
+    if not isinstance(cfg.num_workers, int) or isinstance(cfg.num_workers, bool) or not 0 <= cfg.num_workers <= 32:
+        raise ValueError(f"num_workers must be an integer in [0, 32], got {cfg.num_workers!r}")
     if not 0.0 < cfg.awr_gamma < 1.0:
         raise ValueError(f"awr_gamma must be in (0, 1), got {cfg.awr_gamma}")
     if not math.isfinite(cfg.awr_beta) or cfg.awr_beta <= 0:
@@ -425,10 +430,7 @@ def validate_production_config(cfg: TrainConfig) -> None:
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
-    # ``run_matches_vec`` accepts a power-of-two capacity and then limits the
-    # active worker count to ``n_matchups``. Keep that capacity a valid bucket
-    # when an ad hoc evaluation asks for, for example, 12 matchups.
-    return covering_power_of_two(resolve_parallelism(n_matchups, cfg.eval_max_parallel))
+    return resolve_parallelism(n_matchups, cfg.eval_max_parallel)
 
 
 def _eval_inference_bucket(cfg: TrainConfig, n_matchups: int) -> int:
@@ -2443,14 +2445,15 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         stock_value=cfg.awr_stock_value,
         suffix=_RETURN_SUFFIX,
     )
+    worker_prefetch, batch_prefetch = _loader_prefetch_depths(cfg)
     train_loader = make_reservoir_loader(
         split="train",
         num_workers=cfg.num_workers,
-        prefetch_factor=cfg.prefetch_factor,
+        prefetch_factor=worker_prefetch,
         predownload=cfg.predownload,
         windows_per_replay=cfg.windows_per_replay,
         reservoir_capacity=cfg.reservoir_capacity,
-        prefetch_batches=cfg.prefetch_batches,
+        prefetch_batches=batch_prefetch,
         replay_format="policy-world",
         replay_transform=label_replay,
         batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.L_ctx),
@@ -2464,6 +2467,16 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         **validation,
     )
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
+
+
+def _loader_prefetch_depths(cfg: TrainConfig) -> tuple[int, int]:
+    """Derive both internal queue depths from one sample-count budget."""
+    batch_prefetch = math.ceil(cfg.prefetch_samples / cfg.batch_size)
+    if cfg.num_workers == 0:
+        return 1, batch_prefetch
+    windows_per_worker_item = cfg.windows_per_replay
+    worker_prefetch = math.ceil(cfg.prefetch_samples / (cfg.num_workers * windows_per_worker_item))
+    return max(1, worker_prefetch), batch_prefetch
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
