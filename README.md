@@ -55,9 +55,11 @@ Modal can preempt GPU Functions, and each Function attempt is limited to 24 hour
 The launcher gives an input ten retries and records its run name in the automatically
 created `hal-modal-state` Volume. A replacement attempt adds `--resume <run>` only
 after `runs/<run>/latest.pt` is present in R2. A normal nonzero training exit is
-recorded as terminal and is not run again. Arbitrary commands must opt out with
+recorded as terminal and is not run again. PyTorch's training and inference compiler
+caches share the persistent `hal-modal-compile-cache-v1` Volume; temporary compiler
+files remain on the Function's ephemeral SSD. Arbitrary commands must opt out with
 `--no-auto-resume`. Use `uv run scripts/launch_modal.py --help` for resource,
-region, timeout, image, state, and retry options.
+region, timeout, image, state, compile-cache, and retry options.
 
 Google Compute Engine is also supported. The launcher uses your interactive
 `gcloud auth login` session (no service-account key file) and reads job secrets

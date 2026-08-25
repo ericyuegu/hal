@@ -22,6 +22,7 @@ _SPEC.loader.exec_module(_MODULE)
 Args = _MODULE.Args
 RunState = _MODULE.RunState
 drain_run_names = _MODULE._drain_run_names
+configure_compiler_cache = _MODULE._configure_compiler_cache
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
 plan_attempt = _MODULE.plan_attempt
@@ -50,6 +51,30 @@ def test_defaults_request_l40s_with_burst_cpu_and_ephemeral_ssd() -> None:
         "cloud": None,
         "region": None,
     }
+    assert args.compile_cache_volume == "hal-modal-compile-cache-v1"
+
+
+def test_compiler_cache_persists_programs_but_keeps_scratch_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persistent_root = tmp_path / "persistent"
+    local_root = tmp_path / "local"
+    monkeypatch.setattr(_MODULE, "COMPILE_CACHE_ROOT", persistent_root)
+    monkeypatch.setattr(_MODULE, "LOCAL_CACHE_ROOT", local_root)
+    env: dict[str, str] = {}
+
+    configure_compiler_cache(env)
+
+    assert env == {
+        "TORCHINDUCTOR_CACHE_DIR": str(persistent_root / "torchinductor"),
+        "TRITON_CACHE_DIR": str(persistent_root / "triton"),
+        "CUDA_CACHE_PATH": str(persistent_root / "cuda"),
+        "TMPDIR": str(local_root / "tmp"),
+        "TORCHINDUCTOR_FX_GRAPH_CACHE": "1",
+        "TORCHINDUCTOR_AUTOGRAD_CACHE": "1",
+    }
+    assert all(Path(path).is_dir() for key, path in env.items() if key.endswith(("DIR", "PATH")))
 
 
 def test_gpu_request_accepts_fallbacks_and_rejects_empty() -> None:
