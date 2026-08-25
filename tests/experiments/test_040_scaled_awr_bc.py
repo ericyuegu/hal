@@ -227,6 +227,129 @@ def test_extreme_negative_advantages_preserve_formula_and_keep_ess_finite() -> N
     assert float(stats["weight_ess"]) == 0.0
 
 
+def test_dense_awr_mask_matches_selecting_valid_prefixes() -> None:
+    returns = torch.tensor([[12.0, float("nan"), 10.0], [8.0, 11.0, float("nan")]])
+    eligible = torch.tensor([[True, False, True], [True, True, False]])
+    valid = torch.tensor([[True, False, True], [False, True, False]])
+
+    dense_weights, dense_stats = exp.advantage_weights(
+        returns,
+        eligible,
+        baseline=10.0,
+        beta=2.0,
+        weight_max=3.5,
+        weight_norm=2.0,
+        valid=valid,
+    )
+    selected_weights, selected_stats = exp.advantage_weights(
+        returns[valid],
+        eligible[valid],
+        baseline=10.0,
+        beta=2.0,
+        weight_max=3.5,
+        weight_norm=2.0,
+    )
+
+    torch.testing.assert_close(dense_weights[valid], selected_weights)
+    torch.testing.assert_close(dense_weights[~valid], torch.ones_like(dense_weights[~valid]))
+    for name in dense_stats:
+        torch.testing.assert_close(dense_stats[name], selected_stats[name])
+
+
+def test_dense_temporal_objective_matches_selected_prefixes() -> None:
+    generator = torch.Generator().manual_seed(17)
+    nll = torch.rand(2, 3, 15, exp.N_GROUPS, generator=generator)
+    weight = torch.rand(2, 3, generator=generator)
+    valid = torch.tensor([[True, False, True], [False, True, True]])
+
+    dense_parts = exp.temporal_objective_parts(
+        nll,
+        weight,
+        valid_prefixes=int(valid.sum()),
+        aux_loss_weight=0.5,
+        n_near=6,
+        valid=valid,
+    )
+    selected_parts = exp.temporal_objective_parts(
+        nll[valid],
+        weight[valid],
+        valid_prefixes=int(valid.sum()),
+        aux_loss_weight=0.5,
+        n_near=6,
+    )
+
+    for dense, selected in zip(dense_parts, selected_parts, strict=True):
+        torch.testing.assert_close(dense, selected)
+
+    invalid_nan = nll.clone()
+    invalid_nan[~valid] = torch.nan
+    nan_masked_parts = exp.temporal_objective_parts(
+        invalid_nan,
+        weight,
+        valid_prefixes=int(valid.sum()),
+        aux_loss_weight=0.5,
+        n_near=6,
+        valid=valid,
+    )
+    for masked, selected in zip(nan_masked_parts, selected_parts, strict=True):
+        torch.testing.assert_close(masked, selected)
+
+    dense_nll = nll.clone().requires_grad_()
+    selected_nll = nll[valid].clone().requires_grad_()
+    exp.temporal_objective_parts(
+        dense_nll,
+        weight,
+        valid_prefixes=int(valid.sum()),
+        aux_loss_weight=0.5,
+        n_near=6,
+        valid=valid,
+    )[2].backward()
+    exp.temporal_objective_parts(
+        selected_nll,
+        weight[valid],
+        valid_prefixes=int(valid.sum()),
+        aux_loss_weight=0.5,
+        n_near=6,
+    )[2].backward()
+
+    torch.testing.assert_close(dense_nll.grad[valid], selected_nll.grad)
+    torch.testing.assert_close(dense_nll.grad[~valid], torch.zeros_like(dense_nll.grad[~valid]))
+
+
+def test_device_batch_prefetcher_preserves_cpu_batches() -> None:
+    cfg = _cfg()
+    batches = [_awr_batch(cfg), _awr_batch(cfg)]
+    batches[0].returns.fill_(1.0)
+    batches[1].returns.fill_(2.0)
+    prefetcher = exp.DeviceBatchPrefetcher(batches, cfg, "cpu")
+
+    first, first_prefixes, _ = prefetcher.next()
+    prefetcher.preload()
+    second, second_prefixes, _ = prefetcher.next()
+
+    assert first_prefixes == second_prefixes == 7
+    torch.testing.assert_close(first.returns, torch.ones_like(first.returns))
+    torch.testing.assert_close(second.returns, torch.full_like(second.returns, 2.0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for packed transfer")
+def test_packed_awr_batch_copies_one_storage_per_dtype() -> None:
+    cfg = _cfg()
+    batch = _awr_batch(cfg)
+    pinned = batch.pin_memory()
+    tensors = pinned._tensors()
+
+    assert all(tensor.is_pinned() for tensor in tensors)
+    assert len({tensor.untyped_storage().data_ptr() for tensor in tensors}) == len(
+        {tensor.dtype for tensor in tensors}
+    )
+
+    moved = pinned.to("cuda")
+    torch.cuda.synchronize()
+    for actual, expected in zip(moved._tensors(), batch._tensors(), strict=True):
+        torch.testing.assert_close(actual.cpu(), expected)
+
+
 def test_near_far_objective_matches_hand_computation() -> None:
     nll = torch.zeros(2, 15, exp.N_GROUPS)
     nll[0, :6] = 1.0

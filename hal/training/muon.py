@@ -1,5 +1,7 @@
 import torch
 import torch.distributed as dist
+from torch import Tensor
+from torch import nn
 
 
 def zeropower_via_newtonschulz5(G, steps: int):
@@ -145,6 +147,71 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
     return buf1c / (buf2c.sqrt() + eps)
 
 
+def _matrix_view(tensor: Tensor) -> Tensor:
+    """View a Muon parameter or gradient as a matrix."""
+    return tensor.view(len(tensor), -1) if tensor.ndim == 4 else tensor
+
+
+def _batched_muon_step(
+    parameters: list[nn.Parameter],
+    momentum_buffers: list[Tensor],
+    *,
+    lr: float,
+    momentum: float,
+    weight_decay: float,
+) -> None:
+    """Apply one Muon update to a bucket of identically shaped matrices."""
+    parameter_tensors: list[Tensor] = list(parameters)
+    gradients = [parameter.grad for parameter in parameters]
+    if any(gradient is None for gradient in gradients):
+        raise RuntimeError("Muon parameters must have gradients before the batched update")
+    gradients = [gradient for gradient in gradients if gradient is not None]
+
+    torch._foreach_lerp_(momentum_buffers, gradients, 1 - momentum)
+    nesterov_updates = torch._foreach_lerp(gradients, momentum_buffers, momentum)
+    matrices = torch.stack([_matrix_view(update) for update in nesterov_updates])
+    matrices = zeropower_via_newtonschulz5(matrices, steps=5)
+    matrices *= max(1, matrices.size(-2) / matrices.size(-1)) ** 0.5
+    updates = [update.reshape(parameter.shape) for update, parameter in zip(matrices, parameters, strict=True)]
+
+    if weight_decay:
+        torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
+    torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
+
+
+def _foreach_adam_step(
+    parameters: list[nn.Parameter],
+    *,
+    states: list[dict],
+    step: int,
+    lr: float,
+    betas: tuple[float, float],
+    eps: float,
+    weight_decay: float,
+) -> None:
+    """Apply the existing AdamW formula with multi-tensor CUDA kernels."""
+    parameter_tensors: list[Tensor] = list(parameters)
+    gradients = [parameter.grad for parameter in parameters]
+    if any(gradient is None for gradient in gradients):
+        raise RuntimeError("Adam parameters must have gradients before the foreach update")
+    gradients = [gradient for gradient in gradients if gradient is not None]
+    first_moments = [state["exp_avg"] for state in states]
+    second_moments = [state["exp_avg_sq"] for state in states]
+
+    torch._foreach_lerp_(first_moments, gradients, 1 - betas[0])
+    squared_gradients = torch._foreach_mul(gradients, gradients)
+    torch._foreach_lerp_(second_moments, squared_gradients, 1 - betas[1])
+    updates = torch._foreach_div(first_moments, 1 - betas[0] ** step)
+    denominators = torch._foreach_div(second_moments, 1 - betas[1] ** step)
+    denominators = torch._foreach_sqrt(denominators)
+    torch._foreach_add_(denominators, eps)
+    updates = torch._foreach_div(updates, denominators)
+
+    if weight_decay:
+        torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
+    torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
+
+
 class MuonWithAuxAdam(torch.optim.Optimizer):
     """
     Distributed Muon variant that can be used for all parameters in the network, since it runs an
@@ -266,7 +333,6 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
-
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -274,31 +340,45 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
 
         for group in self.param_groups:
             if group["use_muon"]:
-                for p in group["params"]:
-                    if p.grad is None:
-                        # continue
-                        p.grad = torch.zeros_like(p)  # Force synchronization
-                    state = self.state[p]
+                buckets: dict[tuple[torch.device, torch.dtype, tuple[int, ...]], list[nn.Parameter]] = {}
+                for parameter in group["params"]:
+                    if parameter.grad is None:
+                        parameter.grad = torch.zeros_like(parameter)
+                    state = self.state[parameter]
                     if len(state) == 0:
-                        state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
+                        state["momentum_buffer"] = torch.zeros_like(parameter)
+                    matrix_shape = tuple(_matrix_view(parameter).shape)
+                    key = (parameter.device, parameter.dtype, matrix_shape)
+                    buckets.setdefault(key, []).append(parameter)
+                for parameters in buckets.values():
+                    _batched_muon_step(
+                        parameters,
+                        [self.state[parameter]["momentum_buffer"] for parameter in parameters],
+                        lr=group["lr"],
+                        momentum=group["momentum"],
+                        weight_decay=group["weight_decay"],
+                    )
             else:
-                for p in group["params"]:
-                    if p.grad is None:
-                        # continue
-                        p.grad = torch.zeros_like(p)  # Force synchronization
-                    state = self.state[p]
+                parameters_by_step: dict[int, list[nn.Parameter]] = {}
+                for parameter in group["params"]:
+                    if parameter.grad is None:
+                        parameter.grad = torch.zeros_like(parameter)
+                    state = self.state[parameter]
                     if len(state) == 0:
-                        state["exp_avg"] = torch.zeros_like(p)
-                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["exp_avg"] = torch.zeros_like(parameter)
+                        state["exp_avg_sq"] = torch.zeros_like(parameter)
                         state["step"] = 0
                     state["step"] += 1
-                    update = adam_update(
-                        p.grad, state["exp_avg"], state["exp_avg_sq"], state["step"], group["betas"], group["eps"]
+                    parameters_by_step.setdefault(state["step"], []).append(parameter)
+                for step, parameters in parameters_by_step.items():
+                    _foreach_adam_step(
+                        parameters,
+                        states=[self.state[parameter] for parameter in parameters],
+                        step=step,
+                        lr=group["lr"],
+                        betas=group["betas"],
+                        eps=group["eps"],
+                        weight_decay=group["weight_decay"],
                     )
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update, alpha=-group["lr"])
 
         return loss

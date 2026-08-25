@@ -1055,6 +1055,7 @@ class AWRBatch:
     batch: TrainBatch
     returns: Tensor  # [B, L_ctx] float32
     eligible: Tensor  # [B, L_ctx] bool
+    _packed: tuple[Tensor, ...] = dataclass_field(default=(), repr=False, compare=False)
 
     @property
     def context(self) -> Context:
@@ -1065,22 +1066,131 @@ class AWRBatch:
         return self.batch.target
 
     def to(self, device: str | torch.device) -> AWRBatch:
+        target_device = torch.device(device)
+        if target_device.type == "cuda" and self._packed:
+            device_storage = {
+                packed.untyped_storage().data_ptr(): packed.to(target_device, non_blocking=True)
+                for packed in self._packed
+            }
+            moved: list[Tensor] = []
+            for tensor in self._tensors():
+                packed = device_storage[tensor.untyped_storage().data_ptr()]
+                moved.append(packed.as_strided(tensor.shape, tensor.stride(), tensor.storage_offset()))
+            return self._replace_tensors(moved)
         return AWRBatch(
-            batch=self.batch.to(device),
-            returns=self.returns.to(device, non_blocking=True),
-            eligible=self.eligible.to(device, non_blocking=True),
+            batch=self.batch.to(target_device),
+            returns=self.returns.to(target_device, non_blocking=True),
+            eligible=self.eligible.to(target_device, non_blocking=True),
         )
 
     def pin_memory(self) -> AWRBatch:
-        return AWRBatch(
-            batch=self.batch.pin_memory(),
-            returns=self.returns.pin_memory(),
-            eligible=self.eligible.pin_memory(),
+        tensors = self._tensors()
+        indices_by_dtype: dict[torch.dtype, list[int]] = {}
+        for index, tensor in enumerate(tensors):
+            indices_by_dtype.setdefault(tensor.dtype, []).append(index)
+        packed_tensors: dict[int, Tensor] = {}
+        packed_storage: list[Tensor] = []
+        for indices in indices_by_dtype.values():
+            total = sum(tensors[index].numel() for index in indices)
+            storage = torch.empty(total, dtype=tensors[indices[0]].dtype, pin_memory=True)
+            packed_storage.append(storage)
+            offset = 0
+            for index in indices:
+                tensor = tensors[index]
+                view = storage[offset : offset + tensor.numel()].view(tensor.shape)
+                view.copy_(tensor)
+                packed_tensors[index] = view
+                offset += tensor.numel()
+        if len(packed_tensors) != len(tensors):
+            raise RuntimeError("failed to pack every AWR batch tensor")
+        pinned = self._replace_tensors([packed_tensors[index] for index in range(len(tensors))])
+        return replace(pinned, _packed=tuple(packed_storage))
+
+    def record_stream(self, stream: torch.cuda.Stream) -> None:
+        """Keep staged device storage alive until the compute stream is done."""
+        self.batch.record_stream(stream)
+        self.returns.record_stream(stream)
+        self.eligible.record_stream(stream)
+
+    def _tensors(self) -> tuple[Tensor, ...]:
+        tensors = [*self.context.features.values(), self.context.ctx_pad]
+        if self.context.slot_ids is not None:
+            tensors.append(self.context.slot_ids)
+        if self.context.reset is not None:
+            tensors.append(self.context.reset)
+        tensors.extend((self.target, self.returns, self.eligible))
+        return tuple(tensors)
+
+    def _replace_tensors(self, tensors: list[Tensor]) -> AWRBatch:
+        values = iter(tensors)
+        features = {name: next(values) for name in self.context.features}
+        context = Context(
+            features=features,
+            ctx_pad=next(values),
+            slot_ids=None if self.context.slot_ids is None else next(values),
+            reset=None if self.context.reset is None else next(values),
         )
+        batch = TrainBatch(context=context, target=next(values), replay_ids=self.batch.replay_ids)
+        rebuilt = AWRBatch(batch=batch, returns=next(values), eligible=next(values))
+        try:
+            next(values)
+        except StopIteration:
+            return rebuilt
+        raise ValueError("too many tensors supplied while rebuilding an AWR batch")
 
     def valid_rows(self, valid: Tensor) -> tuple[Tensor, Tensor]:
         """Select the return rows used by the policy loss."""
         return self.returns[valid], self.eligible[valid]
+
+
+class DeviceBatchPrefetcher:
+    """Coalesce and overlap transfer of one training batch ahead."""
+
+    def __init__(self, loader: Iterable[AWRBatch], cfg: TrainConfig, device: str | torch.device) -> None:
+        self._loader = loader
+        self._iterator = iter(loader)
+        self._cfg = cfg
+        self._device = torch.device(device)
+        self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
+        self._staged: tuple[AWRBatch, AWRBatch, int, float] | None = None
+        self.preload()
+
+    def preload(self) -> None:
+        """Load and enqueue the next transfer while current GPU work runs."""
+        if self._staged is not None:
+            raise RuntimeError("consume the staged batch before preloading another")
+        started = time.monotonic()
+        try:
+            cpu_batch = next(self._iterator)
+        except StopIteration:
+            self._iterator = iter(self._loader)
+            cpu_batch = next(self._iterator)
+        if not isinstance(cpu_batch, AWRBatch):
+            raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
+        validate_batch_geometry(cpu_batch, self._cfg, self._cfg.batch_size)
+        valid_prefixes = int((self._cfg.L_ctx - cpu_batch.context.ctx_pad).sum())
+        if valid_prefixes <= 0:
+            raise RuntimeError("training batch contains no valid context prefixes")
+        loader_wait = time.monotonic() - started
+        if self._copy_stream is None:
+            device_batch = cpu_batch.to(self._device)
+        else:
+            with torch.cuda.stream(self._copy_stream):
+                device_batch = cpu_batch.to(self._device)
+        self._staged = (device_batch, cpu_batch, valid_prefixes, loader_wait)
+
+    def next(self) -> tuple[AWRBatch, int, float]:
+        """Wait only for the uncovered tail of the staged transfer."""
+        if self._staged is None:
+            raise RuntimeError("preload a batch before consuming it")
+        device_batch, cpu_batch, valid_prefixes, loader_wait = self._staged
+        if self._copy_stream is not None:
+            compute_stream = torch.cuda.current_stream(self._device)
+            compute_stream.wait_stream(self._copy_stream)
+            device_batch.record_stream(compute_stream)
+        self._staged = None
+        del cpu_batch
+        return device_batch, valid_prefixes, loader_wait
 
 
 def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> AWRBatch:
@@ -1104,6 +1214,8 @@ def advantage_weights(
     weight_max: float,
     weight_norm: float,
     active: bool = True,
+    valid: Tensor | None = None,
+    check_finite: bool = True,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Compute globally calibrated capped AWR weights; ineligible rows stay one."""
     if return_target.requires_grad:
@@ -1116,44 +1228,57 @@ def advantage_weights(
         raise ValueError("weight_max must be finite and above one")
     if not math.isfinite(weight_norm) or weight_norm <= 0:
         raise ValueError("weight_norm must be finite and positive")
-    weights = torch.ones_like(return_target, dtype=torch.float32)
-    zero = torch.zeros((), device=return_target.device)
-    stats = {
-        "advantage_mean": zero,
-        "advantage_std": zero,
-        "weight_ess": torch.ones_like(zero),
-        "weight_clip_frac": zero,
-        "weight_mean": torch.ones_like(zero),
-        "weight_max": torch.ones_like(zero),
-        "eligible_frac": eligible.float().mean(),
-    }
-    n_eligible = int(eligible.sum())
-    if n_eligible == 0:
-        return weights, stats
+    if valid is None:
+        valid = torch.ones_like(eligible)
+    if valid.shape != eligible.shape:
+        raise ValueError(f"valid mask {tuple(valid.shape)} and eligibility {tuple(eligible.shape)} must align")
+    eligible = eligible & valid
+    eligible_float = eligible.float()
+    eligible_count = eligible_float.sum()
+    eligible_denominator = eligible_count.clamp_min(1)
+    valid_count = valid.float().sum().clamp_min(1)
 
-    eligible_return = return_target[eligible].float()
-    eligible_advantage = eligible_return - baseline
-    if not torch.isfinite(eligible_advantage).all():
+    safe_return = torch.where(eligible, return_target, baseline).float()
+    advantage = safe_return - baseline
+    if check_finite and not torch.isfinite(advantage).all():
         raise FloatingPointError("return or advantage contains a non-finite value on an eligible row")
 
     max_log_weight = math.log(weight_max)
-    log_weights = (eligible_advantage / beta).clamp(max=max_log_weight)
+    log_weights = (advantage / beta).clamp(max=max_log_weight)
     normalized_weights = torch.exp(log_weights) / weight_norm
-    active_weights = normalized_weights if active else torch.ones_like(normalized_weights)
-    if not torch.isfinite(normalized_weights).all():
+    if check_finite and not torch.isfinite(normalized_weights).all():
         raise FloatingPointError("normalized AWR weight contains a non-finite value")
-    weights[eligible] = active_weights
-    stats_weights = active_weights.double()
-    squared_sum = stats_weights.square().sum()
-    ess = stats_weights.sum().square() / (n_eligible * squared_sum) if squared_sum > 0 else zero
-    stats.update(
-        advantage_mean=eligible_advantage.mean(),
-        advantage_std=eligible_advantage.std(correction=0),
-        weight_ess=ess.float(),
-        weight_clip_frac=(log_weights >= max_log_weight).float().mean(),
-        weight_mean=active_weights.mean(),
-        weight_max=active_weights.max(),
-    )
+    active_weights = normalized_weights if active else torch.ones_like(normalized_weights)
+    weights = torch.where(eligible, active_weights, torch.ones_like(active_weights))
+
+    has_eligible = eligible_count > 0
+    advantage_scale = (advantage.abs() * eligible_float).max().clamp_min(torch.finfo(torch.float32).tiny)
+    scaled_advantage = advantage / advantage_scale
+    scaled_mean = (scaled_advantage * eligible_float).sum() / eligible_denominator
+    scaled_variance = ((scaled_advantage - scaled_mean).square() * eligible_float).sum() / eligible_denominator
+    advantage_mean = scaled_mean * advantage_scale
+    advantage_std = scaled_variance.sqrt() * advantage_scale
+    weight_sum = (active_weights * eligible_float).sum()
+    squared_sum = (active_weights.square() * eligible_float).sum()
+    raw_ess = weight_sum.square() / (eligible_count * squared_sum).clamp_min(torch.finfo(torch.float32).tiny)
+    zero = torch.zeros((), device=return_target.device)
+    stats = {
+        "advantage_mean": torch.where(has_eligible, advantage_mean, zero),
+        "advantage_std": torch.where(has_eligible, advantage_std, zero),
+        "weight_ess": torch.where(has_eligible, raw_ess, torch.ones_like(zero)),
+        "weight_clip_frac": torch.where(
+            has_eligible,
+            ((log_weights >= max_log_weight).float() * eligible_float).sum() / eligible_denominator,
+            zero,
+        ),
+        "weight_mean": torch.where(has_eligible, weight_sum / eligible_denominator, torch.ones_like(zero)),
+        "weight_max": torch.where(
+            has_eligible,
+            active_weights.masked_fill(~eligible, 0).max(),
+            torch.ones_like(zero),
+        ),
+        "eligible_frac": eligible_count / valid_count,
+    }
     return weights, stats
 
 
@@ -1164,23 +1289,30 @@ def temporal_objective_parts(
     valid_prefixes: int,
     aux_loss_weight: float,
     n_near: int,
+    valid: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Return weighted near loss, unweighted far loss, and normalized total."""
-    if nll.ndim != 3 or nll.shape[2] != N_GROUPS:
-        raise ValueError(f"per-prefix NLL must be [n_valid, n_offsets, {N_GROUPS}], got {tuple(nll.shape)}")
-    n_offsets = nll.shape[1]
+    if nll.ndim < 3 or nll.shape[-1] != N_GROUPS:
+        raise ValueError(f"per-prefix NLL must end in [n_offsets, {N_GROUPS}], got {tuple(nll.shape)}")
+    n_offsets = nll.shape[-2]
     if not 0 < n_near < n_offsets:
         raise ValueError(f"n_near must split {n_offsets} offsets, got {n_near}")
     if valid_prefixes <= 0:
         raise ValueError("valid_prefixes must be positive")
-    if weight.shape != (nll.shape[0],):
+    prefix_shape = nll.shape[:-2]
+    if weight.shape != prefix_shape:
         raise ValueError("one weight is required per valid prefix")
     if weight.requires_grad:
         raise ValueError("objective weights must be detached")
+    if valid is None:
+        valid = torch.ones(prefix_shape, dtype=torch.bool, device=nll.device)
+    if valid.shape != prefix_shape:
+        raise ValueError("valid mask must have one entry per prefix")
     joint_nll = nll.float().sum(dim=-1)
-    weights = weight.float()[:, None]
-    near = (joint_nll[:, :n_near] * weights).sum() / (valid_prefixes * n_near)
-    far = joint_nll[:, n_near:].sum() / (valid_prefixes * (n_offsets - n_near))
+    joint_nll = torch.where(valid[..., None], joint_nll, 0)
+    weights = weight.float()[..., None]
+    near = (joint_nll[..., :n_near] * weights).sum() / (valid_prefixes * n_near)
+    far = joint_nll[..., n_near:].sum() / (valid_prefixes * (n_offsets - n_near))
     total = (near + aux_loss_weight * far) / (1.0 + aux_loss_weight)
     return near, far, total
 
@@ -1220,54 +1352,48 @@ def microbatch_loss(
     """
     if not isinstance(batch, AWRBatch):
         raise TypeError(f"advantage training needs an AWRBatch, got {type(batch).__name__}")
-    with torch.profiler.record_function("train/target_prep"):
-        history, targets, valid = prepared_targets(model, batch)
+    history, targets, valid = prepared_targets(model, batch)
     if phase_timer is not None:
         phase_timer.record("target_prep_end")
     with amp_context(cfg, DEVICE):
-        with torch.profiler.record_function("train/trunk"):
-            hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
+        hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
         if phase_timer is not None:
             phase_timer.record("trunk_end")
-        with torch.profiler.record_function("train/temporal"):
-            dense_nll = temporal_fn(hidden, history, targets)
+        dense_nll = temporal_fn(hidden, history, targets)
         if phase_timer is not None:
             phase_timer.record("temporal_end")
-    with torch.profiler.record_function("train/objective"):
-        nll = dense_nll[valid]
-        if nll.shape[0] != valid_prefixes:
-            raise RuntimeError(f"GPU valid-prefix count {nll.shape[0]} != step normalizer {valid_prefixes}")
-        returns, eligible = batch.valid_rows(valid)
-        active = step >= cfg.awr_warmup_steps
-        weights, stats = advantage_weights(
-            returns.detach(),
-            eligible,
-            baseline=cfg.awr_return_baseline,
-            beta=cfg.awr_beta,
-            weight_max=cfg.awr_weight_max,
-            weight_norm=cfg.awr_weight_norm,
-            active=active,
-        )
-        near, far, loss = temporal_objective_parts(
-            nll,
-            weights,
-            valid_prefixes=valid_prefixes,
-            aux_loss_weight=cfg.aux_loss_weight,
-            n_near=cfg.n_near,
-        )
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"step {step}: non-finite advantage-weighted loss {loss}")
-        extra = {
-            "train/loss": loss.detach() / _LN2,
-            "train/temporal_loss_near": near.detach() / _LN2,
-            "train/temporal_loss_far": far.detach() / _LN2,
-            "train/temporal_loss_total": loss.detach() / _LN2,
-            "awr/active": torch.tensor(float(active)),
-            **{f"train/{name}": value.detach() for name, value in stats.items()},
-        }
+    active = step >= cfg.awr_warmup_steps
+    weights, stats = advantage_weights(
+        batch.returns.detach(),
+        batch.eligible,
+        baseline=cfg.awr_return_baseline,
+        beta=cfg.awr_beta,
+        weight_max=cfg.awr_weight_max,
+        weight_norm=cfg.awr_weight_norm,
+        active=active,
+        valid=valid,
+        check_finite=False,
+    )
+    near, far, loss = temporal_objective_parts(
+        dense_nll,
+        weights,
+        valid_prefixes=valid_prefixes,
+        aux_loss_weight=cfg.aux_loss_weight,
+        n_near=cfg.n_near,
+        valid=valid,
+    )
+    nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
+    extra = {
+        "train/loss": loss.detach() / _LN2,
+        "train/temporal_loss_near": near.detach() / _LN2,
+        "train/temporal_loss_far": far.detach() / _LN2,
+        "train/temporal_loss_total": loss.detach() / _LN2,
+        "awr/active": torch.ones_like(loss) if active else torch.zeros_like(loss),
+        **{f"train/{name}": value.detach() for name, value in stats.items()},
+    }
     if phase_timer is not None:
         phase_timer.record("objective_end")
-    return loss, nll.detach(), extra
+    return loss, nll_sum.detach(), extra
 
 
 def nll_mean_metrics(
@@ -2340,45 +2466,176 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
 
 
-def _export_training_profile(profiler: torch.profiler.profile, profile_dir: Path) -> None:
-    """Write one Chrome trace, CUDA memory view, and operator summary."""
-    trace_path = profile_dir / "trace.json.gz"
-    memory_path = profile_dir / "memory-timeline.html"
-    operators_path = profile_dir / "operators.txt"
-    profiler.export_chrome_trace(str(trace_path))
-    profiler.export_memory_timeline(str(memory_path), device="cuda:0")
-    operators_path.write_text(
-        profiler.key_averages(group_by_input_shape=True).table(
-            sort_by="self_cuda_time_total",
-            row_limit=200,
-        )
-    )
-    print(
-        f"[profile] wrote {trace_path}, {memory_path}, and {operators_path}",
-        flush=True,
-    )
-
-
-def _training_profiler(profile_dir: Path, *, enabled: bool) -> torch.profiler.profile | None:
-    """Create a bounded post-compile CUDA profiler when requested."""
-    if not enabled:
-        return None
-    if DEVICE != "cuda":
-        raise ValueError("training profiling requires CUDA")
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    return torch.profiler.profile(
-        activities=(
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
+def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
+    """Start tracking and declare the experiment's logging semantics."""
+    wandb.init(
+        project="hal",
+        name=run_name,
+        id=None if resume_state is None else resume_state.get("wandb_id"),
+        resume="allow" if resume_state is not None else None,
+        tags=["gpt", "temporal-mtp", "advantage-weighted-bc", "scaled", "040"],
+        config=asdict(cfg),
+        settings=wandb.Settings(
+            x_stats_sampling_interval=5.0,
+            x_stats_track_process_tree=True,
         ),
-        schedule=torch.profiler.schedule(wait=10, warmup=3, active=5, repeat=1),
-        on_trace_ready=functools.partial(_export_training_profile, profile_dir=profile_dir),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-        with_flops=True,
-        post_processing_timeout_s=600,
     )
+    if wandb.run is None:
+        return
+    wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
+    wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
+    wandb.run.summary["nll_semantics"] = "train/loss is weighted; *_unweighted and val metrics are unweighted"
+    wandb.run.summary["layer_rms_semantics"] = (
+        "activation=block input; residual_branch=block output-input; "
+        "residual_ratio=residual_branch/activation; gradient=parameter-gradient RMS"
+    )
+    if cfg.wandb_log_code:
+        log_wandb_code(wandb.run)
+
+
+def _log_training_summary(cfg: TrainConfig, parameter_counts: dict[str, int]) -> None:
+    """Record the fixed model and corpus accounting for this run."""
+    if wandb.run is None:
+        return
+    for name, value in parameter_counts.items():
+        wandb.run.summary[f"parameters/{name}"] = value
+
+    unique_replays = sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names)
+    unique_frames = sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES[name] for name in cfg.source_names)
+    wandb.run.summary["data/unique_replays"] = unique_replays
+    wandb.run.summary["data/unique_frames"] = unique_frames
+    wandb.run.summary["data/processed_loss_positions"] = cfg.target_loss_positions
+    wandb.run.summary["data/effective_epochs"] = cfg.target_loss_positions / unique_frames
+    wandb.run.summary["data/D_over_N"] = cfg.target_loss_positions / parameter_counts["total"]
+    wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * cfg.L_ctx
+    for name in cfg.source_names:
+        wandb.run.summary[f"data/source_replay_share/{name}"] = (
+            streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] / unique_replays
+        )
+
+
+def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
+    """Return eager or singly compiled trunk and temporal training functions."""
+    trunk_fn: Callable = model.forward
+    temporal_fn: Callable = model.temporal.teacher_forced_nll
+    if DEVICE == "cuda" and cfg.compile_trunk:
+        # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
+        # the sole compilation owner for the raw mask and attention operations.
+        model.trunk.resolve_attention(DEVICE)
+        if model.trunk.attn_path != "flex":
+            raise RuntimeError(
+                f"compiled CUDA training requires FlexAttention, resolved {model.trunk.attn_path!r} instead"
+            )
+        trunk_fn = torch.compile(trunk_fn, dynamic=False, fullgraph=True)
+    if DEVICE == "cuda" and cfg.compile_temporal:
+        temporal_fn = torch.compile(temporal_fn, dynamic=False)
+    return trunk_fn, temporal_fn
+
+
+def _training_diagnostics(model: GPT, batch: AWRBatch, cfg: TrainConfig, update: int) -> dict[str, object]:
+    """Collect the infrequent parameter and layer diagnostics due this update."""
+    metrics: dict[str, object] = {}
+    if histogram_due(update, cfg.wandb_hist_every):
+        metrics.update(wandb_gradient_log(model))
+        metrics.update(wandb_weight_log(model))
+    if histogram_due(update, cfg.layer_rms_every):
+        metrics.update(layer_activation_rms_log(model, batch, cfg, max_rows=cfg.layer_rms_batch_size))
+        metrics.update(layer_gradient_rms_log(model))
+    return metrics
+
+
+def _download_step_metrics(
+    nll_sum: Tensor,
+    gradient_norm: Tensor,
+    step_metrics: dict[str, Tensor],
+    cfg: TrainConfig,
+    *,
+    update: int,
+    valid_prefixes: int,
+) -> tuple[float, dict[str, float], dict[str, float]]:
+    """Move all scalar training metrics to the CPU in one synchronization."""
+    step_metric_names = tuple(step_metrics)
+    scalar_metrics = torch.stack(
+        [gradient_norm.detach().float(), *(step_metrics[name].float() for name in step_metric_names)]
+    )
+    payload = torch.cat((nll_sum.reshape(-1).float(), scalar_metrics)).cpu()
+    if not torch.isfinite(payload).all():
+        raise FloatingPointError(f"update {update}: training metrics or gradients contain a non-finite value")
+    nll_values = len(cfg.head_offsets) * N_GROUPS
+    mean_nll = payload[:nll_values].reshape(len(cfg.head_offsets), N_GROUPS) / valid_prefixes
+    scalar_values = payload[nll_values:]
+    gradient_norm_value = float(scalar_values[0])
+    step_metric_values = {name: float(value) for name, value in zip(step_metric_names, scalar_values[1:], strict=True)}
+    nll_values_by_offset = nll_mean_metrics(
+        mean_nll,
+        cfg.head_offsets,
+        n_near=cfg.n_near,
+        aux_loss_weight=cfg.aux_loss_weight,
+    )
+    return gradient_norm_value, nll_values_by_offset, step_metric_values
+
+
+def _finalize_training(
+    *,
+    model: GPT,
+    optimizer: SingleDeviceMuonWithAuxAdam,
+    scheduler: LambdaLR,
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    val_cache: list[TrainBatch],
+    run_dir: Path,
+    replay_dir: Path,
+    uploader: BackgroundUploader | None,
+    eval_inference: BF16Inference | None,
+    loader_wait_fractions: list[float],
+    update: int,
+    actual_loss_positions: int,
+    smoke: bool,
+    smoke_eval_matchups: int,
+) -> None:
+    """Save and evaluate the final model, then enforce the smoke loader gate."""
+    snapshot = save_boundary_checkpoint(
+        run_dir,
+        update=update,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        cfg=cfg,
+        uploader=uploader,
+        milestone=cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0,
+        wandb_id=None if wandb.run is None else wandb.run.id,
+        actual_loss_positions=actual_loss_positions,
+    )
+    final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
+    _replace_link(snapshot, final_path)
+    if uploader is not None:
+        uploader.upload(snapshot, key=final_path.name)
+
+    checkpoint_sha = _checkpoint_sha256(final_path)
+    final_val = val_metrics(model, val_cache, cfg)
+    wandb.log({"global_step": update, **{f"val/{name}": value for name, value in final_val.items()}})
+    final_matchups = smoke_eval_matchups if smoke else cfg.final_eval_n_matchups
+    if final_matchups:
+        if eval_inference is None:
+            eval_inference = BF16Inference(model, cfg)
+        final_eval = eval_vs_cpu(
+            model,
+            stats,
+            cfg,
+            n_matchups=final_matchups,
+            replay_dir=replay_dir / ("smoke-final" if smoke else "final"),
+            checkpoint_sha256=checkpoint_sha,
+            inference=eval_inference,
+        )
+        if not smoke:
+            require_complete_eval(final_eval, cfg.final_eval_n_matchups)
+        wandb.log({"global_step": update, **{f"eval/{name}": value for name, value in final_eval.items()}})
+
+    mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
+    p95_wait = float(np.percentile(loader_wait_fractions, 95)) if loader_wait_fractions else 0.0
+    print(f"[loader] mean wait={100 * mean_wait:.2f}%, p95={100 * p95_wait:.2f}%", flush=True)
+    if smoke and (mean_wait > 0.05 or p95_wait > 0.10):
+        raise RuntimeError("smoke loader gate failed: require mean wait <=5% and p95 <=10%")
 
 
 def train(
@@ -2391,7 +2648,6 @@ def train(
     smoke: bool = False,
     stop_after_update: int | None = None,
     smoke_eval_matchups: int = 4,
-    profile_steps: int = 0,
 ) -> None:
     validate_config(cfg)
     if not smoke:
@@ -2402,60 +2658,18 @@ def train(
             raise ValueError("run notebooks/040_awr_constants.py and freeze its constants before production")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
         raise ValueError(f"stop_after_update must be in [1, {cfg.max_steps}], got {stop_after_update}")
-    if not isinstance(profile_steps, int) or isinstance(profile_steps, bool) or profile_steps < 0:
-        raise ValueError(f"profile_steps must be a non-negative integer, got {profile_steps!r}")
-    if profile_steps and profile_steps < 20:
-        raise ValueError("profile_steps must be at least 20 to exclude compilation from the active trace")
-    if profile_steps and (smoke or stop_after_update is not None or resume_state is not None):
-        raise ValueError("profile_steps requires a fresh production-config run")
     if smoke_eval_matchups < 0:
         raise ValueError("smoke_eval_matchups must be non-negative")
-    run_stop = profile_steps or (cfg.max_steps if stop_after_update is None else stop_after_update)
+    run_stop = cfg.max_steps if stop_after_update is None else stop_after_update
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), "policy-world-v7-35", comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
-    wandb.init(
-        project="hal",
-        name=run_name,
-        id=None if resume_state is None else resume_state.get("wandb_id"),
-        resume="allow" if resume_state is not None else None,
-        tags=["gpt", "temporal-mtp", "advantage-weighted-bc", "scaled", "040"],
-        config=asdict(cfg),
-        settings=wandb.Settings(
-            x_stats_sampling_interval=1.0 if profile_steps else 5.0,
-            x_stats_track_process_tree=True,
-        ),
-    )
-    if wandb.run is not None:
-        wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
-        wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
-        wandb.run.summary["nll_semantics"] = "train/loss is weighted; *_unweighted and val metrics are unweighted"
-        wandb.run.summary["layer_rms_semantics"] = (
-            "activation=block input; residual_branch=block output-input; "
-            "residual_ratio=residual_branch/activation; gradient=parameter-gradient RMS"
-        )
-        if cfg.wandb_log_code:
-            log_wandb_code(wandb.run)
+    _init_wandb(cfg, run_name, resume_state)
     run_dir, replay_dir = setup_run_dir(run_name)
-    profile_dir = run_dir / "profile"
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model = GPT(cfg).to(DEVICE)
     counts = subsystem_parameter_counts(model)
-    if wandb.run is not None:
-        for name, value in counts.items():
-            wandb.run.summary[f"parameters/{name}"] = value
-        unique_replays = sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names)
-        unique_frames = sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES[name] for name in cfg.source_names)
-        wandb.run.summary["data/unique_replays"] = unique_replays
-        wandb.run.summary["data/unique_frames"] = unique_frames
-        wandb.run.summary["data/processed_loss_positions"] = cfg.target_loss_positions
-        wandb.run.summary["data/effective_epochs"] = cfg.target_loss_positions / unique_frames
-        wandb.run.summary["data/D_over_N"] = cfg.target_loss_positions / counts["total"]
-        wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * cfg.L_ctx
-        for name in cfg.source_names:
-            wandb.run.summary[f"data/source_replay_share/{name}"] = (
-                streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] / unique_replays
-            )
+    _log_training_summary(cfg, counts)
     optimizer = make_optimizer(model, cfg)
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
     start_step = 0
@@ -2471,27 +2685,15 @@ def train(
                 f"checkpoint actual_loss_positions={actual_positions} is invalid after {start_step} updates"
             )
 
-    # Resolve the hardware-dependent backend before Dynamo sees the model. The shared trunk contains
-    # raw mask and attention operations; this entrypoint is their one compilation owner.
-    trunk_fn: Callable = model.forward
-    temporal_fn: Callable = model.temporal.teacher_forced_nll
-    if DEVICE == "cuda" and cfg.compile_trunk:
-        model.trunk.resolve_attention(DEVICE)
-        if model.trunk.attn_path != "flex":
-            raise RuntimeError(
-                f"compiled CUDA training requires FlexAttention, resolved {model.trunk.attn_path!r} instead"
-            )
-        trunk_fn = torch.compile(trunk_fn, dynamic=False, fullgraph=True)
-    if DEVICE == "cuda" and cfg.compile_temporal:
-        temporal_fn = torch.compile(temporal_fn, dynamic=False)
+    trunk_fn, temporal_fn = _training_functions(model, cfg)
 
     train_loader, val_cache = _make_loaders(cfg, stats)
     source_counts = train_loader.source_sample_counts
     expected_counts = {name: streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names}
     if source_counts != expected_counts:
         raise RuntimeError(f"train stream counts changed: got {source_counts}, expected {expected_counts}")
-    iterator = iter(train_loader)
     run_started = time.monotonic()
+    batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE)
     loader_wait_fractions: list[float] = []
     cache_roots = tuple(streams.BY_NAME[name].local_root for name in cfg.source_names)
     host_metrics = HostMetricsSampler(
@@ -2501,9 +2703,6 @@ def train(
         cache_interval_s=cfg.cache_metrics_interval_s,
     )
     host_metrics.start()
-    training_profiler = _training_profiler(profile_dir, enabled=bool(profile_steps))
-    if training_profiler is not None:
-        training_profiler.start()
     previous_update_started: float | None = None
     previous_wandb_log_s: float | None = None
     previous_checkpoint_s: float | None = None
@@ -2519,17 +2718,6 @@ def train(
             update = step + 1
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
-            loader_started = time.monotonic()
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                iterator = iter(train_loader)
-                batch = next(iterator)
-            validate_batch_geometry(batch, cfg, cfg.batch_size)
-            loader_wait = time.monotonic() - loader_started
-            valid_prefixes = int((cfg.L_ctx - batch.context.ctx_pad).sum())
-            if valid_prefixes <= 0:
-                raise RuntimeError("training batch contains no valid context prefixes")
 
             phase_due = (
                 DEVICE == "cuda"
@@ -2537,15 +2725,21 @@ def train(
                 and (update == 1 or update % cfg.phase_timing_every == 0)
             )
             phase_timer = CudaPhaseTimer() if phase_due else None
+            step_events = (
+                (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+                if DEVICE == "cuda"
+                else None
+            )
             optimizer.zero_grad()
             with profile("step") as stopwatch:
+                if step_events is not None:
+                    step_events[0].record()
                 if phase_timer is not None:
                     phase_timer.record("start")
-                with torch.profiler.record_function("train/h2d"):
-                    batch = batch.to(DEVICE)
+                batch, valid_prefixes, loader_wait = batch_prefetcher.next()
                 if phase_timer is not None:
                     phase_timer.record("h2d_end")
-                loss, nll, step_metrics = microbatch_loss(
+                loss, nll_sum, step_metrics = microbatch_loss(
                     model,
                     batch,
                     cfg,
@@ -2555,73 +2749,57 @@ def train(
                     temporal_fn=temporal_fn,
                     phase_timer=phase_timer,
                 )
-                with torch.profiler.record_function("train/backward"):
-                    loss.backward()
+                loss.backward()
                 if phase_timer is not None:
                     phase_timer.record("backward_end")
-                with torch.profiler.record_function("train/grad_norm"):
-                    gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
-                if not torch.isfinite(gradient_norm):
-                    raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
+                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if phase_timer is not None:
                     phase_timer.record("grad_norm_end")
-                histogram_payload = {}
-                layer_rms_payload = {}
-                with torch.profiler.record_function("train/diagnostics"):
-                    if histogram_due(update, cfg.wandb_hist_every):
-                        histogram_payload = {**wandb_gradient_log(model), **wandb_weight_log(model)}
-                    if histogram_due(update, cfg.layer_rms_every):
-                        layer_rms_payload = {
-                            **layer_activation_rms_log(
-                                model,
-                                batch,
-                                cfg,
-                                max_rows=cfg.layer_rms_batch_size,
-                            ),
-                            **layer_gradient_rms_log(model),
-                        }
+                diagnostics = _training_diagnostics(model, batch, cfg, update)
                 if phase_timer is not None:
                     phase_timer.record("diagnostics_end")
                 muon_lr = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
                 adam_lr = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
-                with torch.profiler.record_function("train/optimizer"):
-                    optimizer.step()
-                    scheduler.step()
+                optimizer.step()
+                scheduler.step()
                 if phase_timer is not None:
                     phase_timer.record("optimizer_end")
-                if DEVICE == "cuda":
-                    torch.cuda.synchronize()
-            phase_metrics = {} if phase_timer is None else phase_timer.metrics()
+                if step_events is not None:
+                    step_events[1].record()
+            if update < run_stop:
+                batch_prefetcher.preload()
             actual_positions += valid_prefixes
-            loader_wait_fractions.append(loader_wait / max(loader_wait + stopwatch.elapsed, 1e-12))
             metrics_started = time.monotonic()
-            with torch.profiler.record_function("train/metrics_d2h"):
-                metrics = nll_metrics(
-                    nll.cpu(),
-                    cfg.head_offsets,
-                    n_near=cfg.n_near,
-                    aux_loss_weight=cfg.aux_loss_weight,
-                )
+            gradient_norm_value, nll_metrics_by_offset, step_metric_values = _download_step_metrics(
+                nll_sum,
+                gradient_norm,
+                step_metrics,
+                cfg,
+                update=update,
+                valid_prefixes=valid_prefixes,
+            )
             metrics_d2h_s = time.monotonic() - metrics_started
+            step_s = stopwatch.elapsed if step_events is None else step_events[0].elapsed_time(step_events[1]) / 1000
+            phase_metrics = {} if phase_timer is None else phase_timer.metrics()
+            loader_wait_fractions.append(loader_wait / max(loader_wait + step_s, 1e-12))
             log_started = time.monotonic()
             log = {
                 "global_step": update,
                 "samples": update * cfg.batch_size,
                 "data/actual_loss_positions": actual_positions,
                 "data/actual_loss_positions_this_update": valid_prefixes,
-                **{f"train/{name}": value for name, value in metrics.items()},
-                "train/grad_norm": float(gradient_norm),
-                "throughput/step_s": stopwatch.elapsed,
+                **{f"train/{name}": value for name, value in nll_metrics_by_offset.items()},
+                "train/grad_norm": gradient_norm_value,
+                "throughput/step_s": step_s,
                 "throughput/loader_wait_s": loader_wait,
-                "throughput/samples_per_s": cfg.batch_size / stopwatch.elapsed,
-                "throughput/samples_per_wall_s": cfg.batch_size / (stopwatch.elapsed + loader_wait),
-                "throughput/prefixes_per_s": valid_prefixes / stopwatch.elapsed,
+                "throughput/samples_per_s": cfg.batch_size / step_s,
+                "throughput/samples_per_wall_s": cfg.batch_size / (step_s + loader_wait),
+                "throughput/prefixes_per_s": valid_prefixes / step_s,
                 "throughput/metrics_d2h_s": metrics_d2h_s,
                 "lr/muon": muon_lr,
                 "lr/adam": adam_lr,
-                **{name: float(value) for name, value in step_metrics.items()},
-                **histogram_payload,
-                **layer_rms_payload,
+                **step_metric_values,
+                **diagnostics,
                 **phase_metrics,
             }
             if previous_loop_s is not None:
@@ -2640,14 +2818,13 @@ def train(
             log["throughput/log_build_s"] = time.monotonic() - log_started
             log["throughput/pre_wandb_loop_s"] = time.monotonic() - update_started
             wandb_started = time.monotonic()
-            with torch.profiler.record_function("train/wandb_log"):
-                wandb.log(log)
+            wandb.log(log)
             previous_wandb_log_s = time.monotonic() - wandb_started
             if update <= 10 or update % 50 == 0:
                 print(
                     f"[t+{time.monotonic() - run_started:.0f}s] update {update}: "
-                    f"{float(step_metrics['train/loss']):.3f} bits objective, "
-                    f"{cfg.batch_size / stopwatch.elapsed:.0f} samples/s",
+                    f"{step_metric_values['train/loss']:.3f} bits objective, "
+                    f"{cfg.batch_size / step_s:.0f} samples/s",
                     flush=True,
                 )
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
@@ -2691,67 +2868,29 @@ def train(
                 ):
                     print(f"[eval] warning: update {update} evaluation was incomplete: {values}", flush=True)
                 wandb.log({"global_step": update, **{f"eval/{name}": value for name, value in values.items()}})
-            if training_profiler is not None:
-                training_profiler.step()
-
-        if profile_steps:
-            print(
-                f"[profile] completed {profile_steps} diagnostic updates; skipping checkpoint and evaluation",
-                flush=True,
-            )
-            return
-
-        final_snapshot = save_boundary_checkpoint(
-            run_dir,
-            update=run_stop,
+        _finalize_training(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
             cfg=cfg,
+            stats=stats,
+            val_cache=val_cache,
+            run_dir=run_dir,
+            replay_dir=replay_dir,
             uploader=uploader,
-            milestone=cfg.ckpt_every > 0 and run_stop % cfg.ckpt_every == 0,
-            wandb_id=None if wandb.run is None else wandb.run.id,
+            eval_inference=eval_inference,
+            loader_wait_fractions=loader_wait_fractions,
+            update=run_stop,
             actual_loss_positions=actual_positions,
+            smoke=smoke,
+            smoke_eval_matchups=smoke_eval_matchups,
         )
-        final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
-        _replace_link(final_snapshot, final_path)
-        if uploader is not None:
-            uploader.upload(final_snapshot, key=final_path.name)
-        checkpoint_sha = _checkpoint_sha256(final_path)
-        final_val = val_metrics(model, val_cache, cfg)
-        wandb.log({"global_step": run_stop, **{f"val/{name}": value for name, value in final_val.items()}})
-        final_matchups = smoke_eval_matchups if smoke else cfg.final_eval_n_matchups
-        if final_matchups:
-            if eval_inference is None:
-                eval_inference = BF16Inference(model, cfg)
-            final_eval = eval_vs_cpu(
-                model,
-                stats,
-                cfg,
-                n_matchups=final_matchups,
-                replay_dir=replay_dir / ("smoke-final" if smoke else "final"),
-                checkpoint_sha256=checkpoint_sha,
-                inference=eval_inference,
-            )
-            if not smoke:
-                require_complete_eval(final_eval, cfg.final_eval_n_matchups)
-            wandb.log({"global_step": run_stop, **{f"eval/{name}": value for name, value in final_eval.items()}})
-        mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
-        p95_wait = float(np.percentile(loader_wait_fractions, 95)) if loader_wait_fractions else 0.0
-        print(f"[loader] mean wait={100 * mean_wait:.2f}%, p95={100 * p95_wait:.2f}%", flush=True)
-        if smoke and (mean_wait > 0.05 or p95_wait > 0.10):
-            raise RuntimeError("smoke loader gate failed: require mean wait <=5% and p95 <=10%")
     finally:
-        try:
-            if training_profiler is not None:
-                training_profiler.stop()
-        finally:
-            host_metrics.close()
-            if uploader is not None:
-                uploader.upload_tree(replay_dir, base=run_dir)
-                uploader.upload_tree(profile_dir, base=run_dir)
-                uploader.close()
-            wandb.finish()
+        host_metrics.close()
+        if uploader is not None:
+            uploader.upload_tree(replay_dir, base=run_dir)
+            uploader.close()
+        wandb.finish()
 
 
 _CHECKPOINT_ARCH_FIELDS = {
@@ -2960,7 +3099,6 @@ class Args:
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
-    profile_steps: int = 0
 
 
 def main(args: Args) -> None:
@@ -2969,7 +3107,6 @@ def main(args: Args) -> None:
         "--eval": args.eval is not None,
         "--self-play-eval": args.self_play_eval is not None,
         "--resume": args.resume is not None,
-        "--profile-steps": args.profile_steps > 0,
     }
     selected_modes = [name for name, selected in modes.items() if selected]
     if len(selected_modes) > 1:
@@ -3021,7 +3158,6 @@ def main(args: Args) -> None:
         smoke=args.smoke,
         stop_after_update=args.stop_after_update,
         smoke_eval_matchups=args.smoke_eval_matchups,
-        profile_steps=args.profile_steps,
     )
 
 
