@@ -26,6 +26,7 @@ WANDB_GROUP: Final[str] = "026-capacity-scaling-data-delay"
 DELAYS: Final[tuple[int, ...]] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 D_EXPONENTS: Final[tuple[int, ...]] = (26, 27, 28, 29, 30)
 MODEL_ORDER: Final[tuple[str, ...]] = ("026base", "L5", "L7", "L10", "L13", "L16", "L18")
+RESULT_MODEL_ORDER: Final[tuple[str, ...]] = ("L3", "L4", *MODEL_ORDER)
 PRIMARY_METRIC: Final[str] = "stock_lcb"
 LATENCY_ARTIFACT_SCHEMA: Final[int] = 3
 LATENCY_START_BOUNDARY: Final[str] = "earliest_worker_observation_preprocessing"
@@ -67,6 +68,10 @@ def _metric(summary: dict[str, Any], delay: int, name: str) -> float:
     return _summary_number(summary, f"eval_d{delay}/{name}")
 
 
+def _power_of_two_exponent(value: int) -> int | None:
+    return value.bit_length() - 1 if value > 0 and value & (value - 1) == 0 else None
+
+
 def _terminal_row(run: Any) -> dict[str, Any] | None:
     config = dict(run.config)
     if config.get("phase") != "cooldown":
@@ -76,6 +81,9 @@ def _terminal_row(run: Any) -> dict[str, Any] | None:
     processed = int(summary.get("training/processed_positions", -1))
     complete = run.state == "finished" and processed == target
     label = _model_label(config)
+    if label not in RESULT_MODEL_ORDER:
+        raise ValueError(f"unsupported experiment-039 model label {label!r}")
+    d_exp = _power_of_two_exponent(target)
     row: dict[str, Any] = {
         "run_id": run.id,
         "run_name": run.name,
@@ -83,7 +91,7 @@ def _terminal_row(run: Any) -> dict[str, Any] | None:
         "run_state": run.state,
         "endpoint_complete": complete,
         "model": label,
-        "model_order": MODEL_ORDER.index(label),
+        "model_order": RESULT_MODEL_ORDER.index(label),
         "model_family": config["model_family"],
         "L": int(config["n_layers"]),
         "d_model": int(config["d_model"]),
@@ -91,7 +99,8 @@ def _terminal_row(run: Any) -> dict[str, Any] | None:
         "decoder_parameters": int(config["decoder_parameters"]),
         "total_parameters": int(config["total_parameters"]),
         "D": target,
-        "D_exp": int(math.log2(target)),
+        "D_exp": d_exp,
+        "endpoint_kind": "standard" if d_exp in D_EXPONENTS else "exact-isoflop",
         "U_divisor": int(config["unique_data_divisor"]),
         "unique_replays": int(config["unique_replays"]),
         "episode_hash": config["episode_hash"],
@@ -209,6 +218,11 @@ def _matrix(
 
 def _save_matrix_artifacts(frame: pd.DataFrame, args: Args, output: Path) -> dict[str, list[str]]:
     selected = frame[frame["U_divisor"] == args.unique_data_divisor] if not frame.empty else frame
+    selected = (
+        selected[selected["model"].isin(MODEL_ORDER) & selected["D_exp"].isin(D_EXPONENTS)]
+        if not selected.empty
+        else selected
+    )
     missing: dict[str, list[str]] = {}
     at_d = selected[selected["D_exp"] == args.fixed_d_exp] if not selected.empty else selected
     delay_values = pd.DataFrame(index=MODEL_ORDER, columns=DELAYS, dtype=float)
@@ -463,6 +477,8 @@ def main(args: Args) -> None:
     frame = _join_native_latency(frame, latency)
     capacity_path = output / "capacity_table.csv"
     frame.drop(columns=["model_order"], errors="ignore").to_csv(capacity_path, index=False)
+    exact = frame[frame["endpoint_kind"] == "exact-isoflop"] if not frame.empty else frame
+    exact.drop(columns=["model_order"], errors="ignore").to_csv(output / "isoflop_exact_endpoints.csv", index=False)
     missing = _save_matrix_artifacts(frame, args, output)
     frontier = _save_latency_frontier(latency, output)
     decision = _decision_support(frame, args)
@@ -470,8 +486,13 @@ def main(args: Args) -> None:
     _save_plots(frame, latency, args, output)
 
     selected = frame[frame["U_divisor"] == args.unique_data_divisor] if not frame.empty else frame
+    standard = (
+        selected[selected["model"].isin(MODEL_ORDER) & selected["D_exp"].isin(D_EXPONENTS)]
+        if not selected.empty
+        else selected
+    )
     expected = len(MODEL_ORDER) * len(D_EXPONENTS)
-    complete_endpoints = int(selected["endpoint_complete"].sum()) if not selected.empty else 0
+    complete_endpoints = int(standard["endpoint_complete"].sum()) if not standard.empty else 0
     report = {
         "schema_version": 1,
         "wandb_path": args.wandb_path,
@@ -482,7 +503,8 @@ def main(args: Args) -> None:
         "expected_terminal_endpoints": expected,
         "complete_terminal_endpoints": complete_endpoints,
         "missing_or_invalid_cells": missing,
-        "local_latency_models": sorted(latency, key=MODEL_ORDER.index),
+        "local_latency_models": sorted(latency, key=RESULT_MODEL_ORDER.index),
+        "exact_isoflop_endpoints": len(exact),
         "delay_buckets_with_local_frontier": int(frontier["valid"].sum()),
     }
     (output / "completeness.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

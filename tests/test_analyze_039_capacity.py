@@ -81,6 +81,32 @@ def test_terminal_row_masks_invalid_closed_loop_cells() -> None:
     assert row["incremental_branch_time_seconds"] == 10.0
 
 
+def test_exact_isoflop_endpoint_is_not_assigned_to_power_of_two_matrix(tmp_path: Path) -> None:
+    run = _run()
+    target = 723_491_896
+    run.config |= {
+        "n_layers": 13,
+        "d_model": 832,
+        "target_processed_positions": target,
+        "total_parameters": 111_720_303,
+    }
+    run.summary["training/processed_positions"] = target
+    row = analysis._terminal_row(run)
+
+    assert row is not None
+    assert row["model"] == "L13"
+    assert row["D_exp"] is None
+    assert row["endpoint_kind"] == "exact-isoflop"
+
+    args = analysis.Args(output_dir=str(tmp_path))
+    missing = analysis._save_matrix_artifacts(pd.DataFrame([row]), args, tmp_path)
+
+    matrix = pd.read_csv(tmp_path / "nx_d_d1.csv", index_col="model")
+    assert "L13" in matrix.index
+    assert matrix.loc["L13"].isna().all()
+    assert all(len(cells) == len(analysis.MODEL_ORDER) * len(analysis.D_EXPONENTS) for cells in missing.values())
+
+
 def test_native_curve_uses_local_valid_delay_and_masked_performance() -> None:
     row = analysis._terminal_row(_run())
     assert row is not None

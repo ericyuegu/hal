@@ -99,10 +99,18 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-CAPACITY_LEVELS: tuple[int, ...] = (5, 7, 10, 13, 16, 18)
-GRAD_ACCUM_BY_LEVEL: dict[int, int] = {5: 32, 7: 32, 10: 32, 13: 64, 16: 64, 18: 128}
+CAPACITY_LEVELS: tuple[int, ...] = (3, 4, 5, 7, 10, 13, 16, 18)
+GRAD_ACCUM_BY_LEVEL: dict[int, int] = {3: 32, 4: 32, 5: 32, 7: 32, 10: 32, 13: 64, 16: 64, 18: 128}
 BASELINE_026_GRAD_ACCUM = 32
 PROCESSED_POSITION_EXPONENTS: tuple[int, ...] = (26, 27, 28, 29, 30)
+EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL: dict[int, int] = {
+    3: 350_981_584,
+    4: 312_145_120,
+    13: 723_491_896,
+}
+EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL: dict[int, int] = {
+    13: 2**30,
+}
 DELAY_BUCKETS: tuple[int, ...] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 HEAD_OFFSETS: tuple[int, ...] = tuple(range(1, 37))
 FRAME_TIME_MS = 1000.0 / 60.0
@@ -295,6 +303,22 @@ def branch_position(target: int, fraction: float) -> int:
     return target - cooldown_positions(target, fraction)
 
 
+def _standard_endpoints() -> tuple[int, ...]:
+    return tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS)
+
+
+def _exact_isoflop_endpoint(cfg: TrainConfig) -> int | None:
+    if cfg.model_family != "scaled":
+        return None
+    return EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL.get(cfg.n_layers)
+
+
+def _adam_weight_decay_endpoint(cfg: TrainConfig) -> int:
+    if cfg.target_processed_positions in _standard_endpoints():
+        return 2**30
+    return EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL.get(cfg.n_layers, cfg.target_processed_positions)
+
+
 def decode_horizon(delay: int, replan_interval: int) -> int:
     """Last dense offset needed for frames t+d through t+d+R-1."""
     return delay + replan_interval - 1
@@ -418,8 +442,18 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("phase must be 'prefix' or 'cooldown'")
     if cfg.unique_data_divisor not in (1, 2, 4):
         raise ValueError("unique_data_divisor must be 1, 2, or 4")
-    if cfg.target_processed_positions not in tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS):
+    standard_endpoints = _standard_endpoints()
+    if (
+        cfg.target_processed_positions not in standard_endpoints
+        and cfg.target_processed_positions != _exact_isoflop_endpoint(cfg)
+    ):
         raise ValueError("target_processed_positions is not a study endpoint")
+    expected_decay_endpoint = _adam_weight_decay_endpoint(cfg)
+    if cfg.adam_weight_decay_endpoint != expected_decay_endpoint:
+        raise ValueError(
+            f"adam_weight_decay_endpoint must be {expected_decay_endpoint} for this endpoint, "
+            f"got {cfg.adam_weight_decay_endpoint}"
+        )
     for name, value in (("warmup_fraction", cfg.warmup_fraction), ("cooldown_fraction", cfg.cooldown_fraction)):
         if not math.isfinite(value) or not 0 < value < 1:
             raise ValueError(f"{name} must be finite and strictly between zero and one")
@@ -2397,8 +2431,20 @@ def _checkpoint_extra(
     }
 
 
+def _prefix_branch_targets(cfg: TrainConfig) -> tuple[int, ...]:
+    if cfg.target_processed_positions not in _standard_endpoints():
+        return (cfg.target_processed_positions,)
+    targets = list(_standard_endpoints())
+    exact_target = _exact_isoflop_endpoint(cfg)
+    if EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL.get(cfg.n_layers) == cfg.target_processed_positions:
+        if exact_target is None:
+            raise ValueError(f"missing exact IsoFLOP endpoint for L={cfg.n_layers}")
+        targets.append(exact_target)
+    return tuple(sorted(targets))
+
+
 def _prefix_branch_positions(cfg: TrainConfig) -> tuple[int, ...]:
-    return tuple(branch_position(2**exponent, cfg.cooldown_fraction) for exponent in PROCESSED_POSITION_EXPONENTS)
+    return tuple(branch_position(target, cfg.cooldown_fraction) for target in _prefix_branch_targets(cfg))
 
 
 def _training_stop(cfg: TrainConfig) -> int:
@@ -2412,10 +2458,20 @@ def run_name_for(cfg: TrainConfig, total_parameters: int) -> str:
     unique_label = "U1" if cfg.unique_data_divisor == 1 else f"U1d{cfg.unique_data_divisor}"
     tau_label = "tauPL" if cfg.adam_tau_scaling == "powerlines" else "tauFixed"
     if cfg.phase == "prefix":
-        exposure = "prefix-D2p30"
+        exposure = f"prefix-{endpoint_label(max(_prefix_branch_targets(cfg)))}"
     else:
-        exposure = f"D2p{int(math.log2(cfg.target_processed_positions))}"
+        exposure = endpoint_label(cfg.target_processed_positions)
     return f"cap-{capacity}-{width_label}-{parameter_label}-{unique_label}-{exposure}-{tau_label}"
+
+
+def endpoint_label(target: int) -> str:
+    if target > 0 and target & (target - 1) == 0:
+        return f"D2p{target.bit_length() - 1}"
+    return f"D{target}"
+
+
+def branch_checkpoint_name(target: int) -> str:
+    return f"branch_{endpoint_label(target)}.pt"
 
 
 def _configs_match_for_branch(source: TrainConfig, target: TrainConfig) -> None:
@@ -2435,6 +2491,62 @@ def _configs_match_for_branch(source: TrainConfig, target: TrainConfig) -> None:
         raise ValueError("terminal cooldown branch must be positive")
 
 
+def _configs_match_for_prefix_fork(
+    source: TrainConfig,
+    target: TrainConfig,
+    processed_positions: int,
+) -> None:
+    if source.phase != "prefix" or target.phase != "prefix":
+        raise ValueError("an exact prefix fork requires prefix source and target configurations")
+    if target.target_processed_positions != _exact_isoflop_endpoint(target):
+        raise ValueError("an exact prefix fork target must be the model's registered IsoFLOP endpoint")
+    expected_source_target = EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL.get(target.n_layers)
+    if source.target_processed_positions != expected_source_target:
+        raise ValueError(
+            f"exact prefix fork for L={target.n_layers} requires source target {expected_source_target}, "
+            f"got {source.target_processed_positions}"
+        )
+    allowed = {"target_processed_positions", "evaluation_delays"}
+    for field in fields(TrainConfig):
+        if field.name in allowed:
+            continue
+        if getattr(source, field.name) != getattr(target, field.name):
+            raise ValueError(
+                f"prefix fork changed {field.name}: source={getattr(source, field.name)!r}, "
+                f"target={getattr(target, field.name)!r}"
+            )
+    if processed_positions not in _prefix_branch_positions(source):
+        raise ValueError(f"prefix fork source position {processed_positions} is not a saved branch boundary")
+    stop = branch_position(target.target_processed_positions, target.cooldown_fraction)
+    if processed_positions >= stop:
+        raise ValueError(f"prefix fork source position {processed_positions} must precede target branch {stop}")
+
+
+def _validate_prefix_fork_state(state: dict, target: TrainConfig, total_parameters: int) -> None:
+    required = {
+        "cfg",
+        "checkpoint_schema",
+        "cuda_rng_state",
+        "data_state",
+        "model",
+        "numpy_rng_state",
+        "opt",
+        "pending_batches",
+        "processed_positions",
+        "torch_rng_state",
+        "update",
+    }
+    missing = sorted(required - state.keys())
+    if missing:
+        raise ValueError(f"prefix fork checkpoint is missing state: {missing}")
+    if state["checkpoint_schema"] != 2:
+        raise ValueError("checkpoint predates exact position/dataloader resumption")
+    scale = adam_scale(target, total_parameters)
+    resolved_target = replace(target, adam_weight_decay=scale.weight_decay)
+    source = config_from_state(state["cfg"])
+    _configs_match_for_prefix_fork(source, resolved_target, int(state["processed_positions"]))
+
+
 def train(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
@@ -2443,10 +2555,12 @@ def train(
     requested_run_name: str,
     resume_state: dict | None = None,
     branch_state: dict | None = None,
+    prefix_fork_state: dict | None = None,
 ) -> None:
     """Train a shared stable prefix or one exact terminal-cooldown endpoint."""
-    if resume_state is not None and branch_state is not None:
-        raise ValueError("a run cannot both resume and branch")
+    states = [state for state in (resume_state, branch_state, prefix_fork_state) if state is not None]
+    if len(states) > 1:
+        raise ValueError("a run cannot resume, branch, and fork at the same time")
     validate_config(cfg)
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -2458,7 +2572,7 @@ def train(
     validate_config(cfg)
     run_name = requested_run_name
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
-    state = resume_state if resume_state is not None else branch_state
+    state = states[0] if states else None
     resume_wandb_id = None if resume_state is None else resume_state.get("wandb_id")
     wandb.init(
         project="hal",
@@ -2505,25 +2619,29 @@ def train(
     update = 0
     pending: list[PendingBatch] = []
     if state is not None:
-        source_cfg = config_from_state(state["cfg"])
-        if branch_state is not None:
-            _configs_match_for_branch(source_cfg, cfg)
-        elif source_cfg != cfg:
-            raise ValueError("run configuration changed across exact resume")
         if state.get("checkpoint_schema") != 2:
             raise ValueError("checkpoint predates exact position/dataloader resumption")
+        source_cfg = config_from_state(state["cfg"])
+        processed_positions = int(state["processed_positions"])
+        if branch_state is not None:
+            _configs_match_for_branch(source_cfg, cfg)
+        elif prefix_fork_state is not None:
+            _validate_prefix_fork_state(prefix_fork_state, cfg, counts["total"])
+        elif source_cfg != cfg:
+            raise ValueError("run configuration changed across exact resume")
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["opt"])
-        processed_positions = int(state["processed_positions"])
         prior_training_wall_seconds = float(state.get("training_wall_seconds", 0.0))
         update = int(state["update"])
         pending = state["pending_batches"]
         if resume_state is not None:
             scheduler.load_state_dict(state["sched"])
-        else:
+        elif branch_state is not None:
             expected = branch_position(cfg.target_processed_positions, cfg.cooldown_fraction)
             if processed_positions != expected:
                 raise ValueError(f"cooldown needs branch at {expected}, got {processed_positions}")
+            scheduler.step(processed_positions)
+        else:
             scheduler.step(processed_positions)
 
     def trunk_fn(features, pad, actions):
@@ -2543,10 +2661,8 @@ def train(
         _restore_rng(state)
     copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     stop_position = _training_stop(cfg)
-    branch_exponents = {
-        branch_position(2**exponent, cfg.cooldown_fraction): exponent for exponent in PROCESSED_POSITION_EXPONENTS
-    }
-    branches = set(branch_exponents) if cfg.phase == "prefix" else set()
+    branch_targets = {branch_position(target, cfg.cooldown_fraction): target for target in _prefix_branch_targets(cfg)}
+    branches = set(branch_targets) if cfg.phase == "prefix" else set()
     completed_branches = {position for position in branches if position <= processed_positions}
     run_started = time.monotonic()
     model.train()
@@ -2655,8 +2771,8 @@ def train(
                 )
 
             if cfg.phase == "prefix" and processed_positions in branches - completed_branches:
-                exponent = branch_exponents[processed_positions]
-                save(run_dir / f"branch_D2p{exponent}.pt")
+                target = branch_targets[processed_positions]
+                save(run_dir / branch_checkpoint_name(target))
                 completed_branches.add(processed_positions)
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0
@@ -3119,10 +3235,13 @@ class Args:
     baseline_026: bool = False
     phase: str = "prefix"
     target_d_exp: int = 30
+    target_positions: int | None = None
     unique_data_divisor: int = 1
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
     resume_as: str | None = None
+    prefix_fork_from_run: str | None = None
+    prefix_fork_checkpoint: str | None = None
     branch_from_run: str | None = None
     repair_evals: str | None = None
     repair_eval_delays: str = ""
@@ -3142,16 +3261,37 @@ class Args:
 
 
 def requested_config(args: Args) -> TrainConfig:
+    target = 2**args.target_d_exp if args.target_positions is None else args.target_positions
     base = replace(
         args.cfg,
         phase=args.phase,
-        target_processed_positions=2**args.target_d_exp,
+        target_processed_positions=target,
         unique_data_divisor=args.unique_data_divisor,
     )
-    return baseline_026_config(base) if args.baseline_026 else scaled_config(args.model_l, base)
+    cfg = baseline_026_config(base) if args.baseline_026 else scaled_config(args.model_l, base)
+    return replace(cfg, adam_weight_decay_endpoint=_adam_weight_decay_endpoint(cfg))
 
 
 def main(args: Args) -> None:
+    has_prefix_fork = args.prefix_fork_from_run is not None or args.prefix_fork_checkpoint is not None
+    if (args.prefix_fork_from_run is None) != (args.prefix_fork_checkpoint is None):
+        raise SystemExit("--prefix-fork-from-run and --prefix-fork-checkpoint must be provided together")
+    if has_prefix_fork and (
+        args.resume is not None
+        or args.branch_from_run is not None
+        or args.repair_evals is not None
+        or args.eval is not None
+        or args.benchmark
+        or args.training_smoke
+        or args.audit_only
+    ):
+        raise SystemExit("an exact prefix fork cannot be combined with another execution mode")
+    if args.target_positions is not None and (
+        args.resume is not None or args.repair_evals is not None or args.eval is not None
+    ):
+        raise SystemExit(
+            "--target-positions is only valid for fresh training, prefix forks, benchmark, smoke, or audit"
+        )
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
     if args.repair_evals is None and args.repair_eval_delays:
@@ -3160,6 +3300,7 @@ def main(args: Args) -> None:
         if (
             args.eval is not None
             or args.resume is not None
+            or has_prefix_fork
             or args.branch_from_run is not None
             or args.benchmark
             or args.training_smoke
@@ -3172,7 +3313,7 @@ def main(args: Args) -> None:
         return
 
     if args.eval is not None:
-        if args.benchmark or args.training_smoke or args.resume is not None or args.audit_only:
+        if args.benchmark or args.training_smoke or args.resume is not None or has_prefix_fork or args.audit_only:
             raise SystemExit("--eval cannot be combined with benchmark, training smoke, resume, or audit")
         eval_checkpoint(
             args.eval,
@@ -3186,7 +3327,13 @@ def main(args: Args) -> None:
         return
 
     if args.resume is not None:
-        if args.benchmark or args.training_smoke or args.audit_only or args.branch_from_run is not None:
+        if (
+            args.benchmark
+            or args.training_smoke
+            or args.audit_only
+            or has_prefix_fork
+            or args.branch_from_run is not None
+        ):
             raise SystemExit("--resume cannot be combined with benchmark, training smoke, audit, or a fresh branch")
         if Path(args.resume_checkpoint).name != args.resume_checkpoint or not args.resume_checkpoint.endswith(".pt"):
             raise SystemExit("--resume-checkpoint must be one checkpoint filename ending in .pt")
@@ -3216,6 +3363,7 @@ def main(args: Args) -> None:
                 )
             resume_state = {**resume_state, "wandb_id": None}
         branch_state = None
+        prefix_fork_state = None
     else:
         resume_state = None
         cfg = requested_config(args)
@@ -3223,18 +3371,49 @@ def main(args: Args) -> None:
         counts = parameter_counts_for_config(cfg)
         requested_run_name = run_name_for(cfg, counts["total"])
         branch_state = None
-        if cfg.phase == "cooldown":
-            prefix_cfg = replace(cfg, phase="prefix", target_processed_positions=2**30)
+        prefix_fork_state = None
+        if has_prefix_fork:
+            if cfg.phase != "prefix" or args.target_positions is None:
+                raise SystemExit("an exact prefix fork requires --phase prefix and --target-positions")
+            prefix_source = args.prefix_fork_from_run
+            prefix_checkpoint = args.prefix_fork_checkpoint
+            if prefix_source is None or prefix_checkpoint is None:
+                raise SystemExit("an exact prefix fork requires a source run and checkpoint")
+            try:
+                validate_run_component(prefix_source, flag="--prefix-fork-from-run")
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
+            if Path(prefix_checkpoint).name != prefix_checkpoint or not prefix_checkpoint.endswith(".pt"):
+                raise SystemExit("--prefix-fork-checkpoint must be one checkpoint filename ending in .pt")
+            destination_exists = (Path("runs") / requested_run_name).exists()
+            if cfg.push_to_r2:
+                destination_exists = destination_exists or remote_run_exists(requested_run_name)
+            if destination_exists:
+                raise SystemExit(f"prefix fork destination {requested_run_name!r} already exists")
+            prefix_fork_state = load_for_resume(
+                prefix_source,
+                Path("runs") / prefix_source,
+                device="cpu",
+                name=prefix_checkpoint,
+            )
+            if prefix_fork_state is None:
+                raise SystemExit(f"no {prefix_checkpoint} for prefix source {prefix_source!r}")
+            _validate_prefix_fork_state(prefix_fork_state, cfg, counts["total"])
+        elif cfg.phase == "cooldown":
+            prefix_target = (
+                2**30 if cfg.target_processed_positions in _standard_endpoints() else cfg.target_processed_positions
+            )
+            prefix_cfg = replace(cfg, phase="prefix", target_processed_positions=prefix_target)
             prefix_name = args.branch_from_run or run_name_for(prefix_cfg, counts["total"])
-            exponent = int(math.log2(cfg.target_processed_positions))
+            checkpoint_name = branch_checkpoint_name(cfg.target_processed_positions)
             branch_state = load_for_resume(
                 prefix_name,
                 Path("runs") / prefix_name,
                 device="cpu",
-                name=f"branch_D2p{exponent}.pt",
+                name=checkpoint_name,
             )
             if branch_state is None:
-                raise SystemExit(f"no branch_D2p{exponent}.pt for shared-prefix run {prefix_name!r}")
+                raise SystemExit(f"no {checkpoint_name} for shared-prefix run {prefix_name!r}")
 
     validate_config(cfg)
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
@@ -3288,6 +3467,7 @@ def main(args: Args) -> None:
         requested_run_name=requested_run_name,
         resume_state=resume_state,
         branch_state=branch_state,
+        prefix_fork_state=prefix_fork_state,
     )
 
 

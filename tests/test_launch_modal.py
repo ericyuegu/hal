@@ -178,6 +178,117 @@ def test_resume_as_retry_without_destination_checkpoint_retries_original_fork() 
     assert retried.state == running
 
 
+@pytest.mark.parametrize(
+    "fork_flags",
+    [
+        (
+            "--prefix-fork-from-run",
+            "source-run",
+            "--prefix-fork-checkpoint",
+            "branch_D2p29.pt",
+        ),
+        (
+            "--prefix-fork-from-run=source-run",
+            "--prefix-fork-checkpoint=branch_D2p29.pt",
+        ),
+    ],
+)
+def test_prefix_fork_first_attempt_waits_for_destination_name(fork_flags: tuple[str, ...]) -> None:
+    command = (
+        "uv",
+        "run",
+        EXPERIMENT,
+        "--model-l",
+        "13",
+        "--target-positions",
+        "723491896",
+        *fork_flags,
+    )
+
+    attempt = plan_attempt(None, command, auto_resume=True, checkpoint_found=False)
+
+    assert attempt.argv == command
+    assert attempt.state == RunState(status="running")
+
+
+@pytest.mark.parametrize(
+    "fork_flags",
+    [
+        (
+            "--prefix-fork-from-run",
+            "source-run",
+            "--prefix-fork-checkpoint",
+            "branch_D2p29.pt",
+        ),
+        (
+            "--prefix-fork-from-run=source-run",
+            "--prefix-fork-checkpoint=branch_D2p29.pt",
+        ),
+    ],
+)
+def test_prefix_fork_retry_before_checkpoint_repeats_source_fork(
+    fork_flags: tuple[str, ...],
+) -> None:
+    command = (
+        "uv",
+        "run",
+        EXPERIMENT,
+        "--model-l",
+        "13",
+        "--target-positions",
+        "723491896",
+        *fork_flags,
+    )
+    running = RunState(status="running", run_name="cap-L13-prefix-D723491896")
+
+    attempt = plan_attempt(running, command, auto_resume=True, checkpoint_found=False)
+
+    assert attempt.argv == command
+    assert attempt.state == running
+
+
+@pytest.mark.parametrize(
+    "fork_flags",
+    [
+        (
+            "--prefix-fork-from-run",
+            "source-run",
+            "--prefix-fork-checkpoint",
+            "branch_D2p29.pt",
+        ),
+        (
+            "--prefix-fork-from-run=source-run",
+            "--prefix-fork-checkpoint=branch_D2p29.pt",
+        ),
+    ],
+)
+def test_prefix_fork_retry_resumes_only_destination(fork_flags: tuple[str, ...]) -> None:
+    command = (
+        "uv",
+        "run",
+        EXPERIMENT,
+        "--model-l",
+        "13",
+        "--target-positions",
+        "723491896",
+        *fork_flags,
+    )
+    running = RunState(status="running", run_name="cap-L13-prefix-D723491896")
+
+    resumed = plan_attempt(running, command, auto_resume=True, checkpoint_found=True)
+
+    assert resumed.argv == (
+        "uv",
+        "run",
+        EXPERIMENT,
+        "--model-l",
+        "13",
+        "--resume",
+        "cap-L13-prefix-D723491896",
+    )
+    assert resumed.state == running
+
+
 def test_state_round_trip_and_validation(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     state = RunState(status="failed", run_name="run-1", exit_code=7)

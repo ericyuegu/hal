@@ -250,7 +250,14 @@ def explicit_resume_as(argv: list[str] | tuple[str, ...]) -> str | None:
 
 def resume_fork_from_destination(argv: tuple[str, ...], run_name: str) -> tuple[str, ...]:
     """Replace source-fork flags with one resume from the fork destination."""
-    source_flags = {"--resume", "--resume-checkpoint", "--resume-as"}
+    source_flags = {
+        "--prefix-fork-checkpoint",
+        "--prefix-fork-from-run",
+        "--resume",
+        "--resume-as",
+        "--resume-checkpoint",
+        "--target-positions",
+    }
     command: list[str] = []
     i = 0
     while i < len(argv):
@@ -265,6 +272,11 @@ def resume_fork_from_destination(argv: tuple[str, ...], run_name: str) -> tuple[
         else:
             i += 1
     return (*command, "--resume", run_name)
+
+
+def has_prefix_fork(argv: list[str] | tuple[str, ...]) -> bool:
+    """Return whether a command creates a new prefix from a source run."""
+    return any(token.partition("=")[0] == "--prefix-fork-from-run" for token in argv)
 
 
 def plan_attempt(
@@ -284,10 +296,12 @@ def plan_attempt(
 
     run_name = resume_as or resume or (state.run_name if state is not None else None)
     command = argv
-    retrying_fork = state is not None and state.status == "running" and resume_as is not None
+    retrying_fork = (
+        state is not None and state.status == "running" and (resume_as is not None or has_prefix_fork(argv))
+    )
     if auto_resume and retrying_fork and checkpoint_found and run_name is not None:
         command = resume_fork_from_destination(argv, run_name)
-    elif auto_resume and resume is None and run_name is not None:
+    elif auto_resume and not retrying_fork and resume is None and run_name is not None:
         if checkpoint_found:
             command = (*argv, "--resume", run_name)
         else:
@@ -625,7 +639,9 @@ def _run_remote(spec: LaunchSpec) -> int:
     resume = explicit_resume(spec.argv)
     resume_as = explicit_resume_as(spec.argv)
     run_name = resume_as or resume or (state.run_name if state is not None else None)
-    retrying_fork = state is not None and state.status == "running" and resume_as is not None
+    retrying_fork = (
+        state is not None and state.status == "running" and (resume_as is not None or has_prefix_fork(spec.argv))
+    )
     can_resume = resume is None or retrying_fork
     checkpoint_found = bool(spec.auto_resume and can_resume and run_name and _checkpoint_exists(run_name))
     attempt = plan_attempt(state, spec.argv, auto_resume=spec.auto_resume, checkpoint_found=checkpoint_found)
