@@ -192,7 +192,8 @@ def test_short_causal_attention_matches_sdpa() -> None:
     value = torch.randn(3, 2, 5, 8, generator=generator)
 
     expected = torch.nn.functional.scaled_dot_product_attention(query, key, value, is_causal=True)
-    actual = exp.short_causal_attention(query, key, value)
+    compiled = torch.compile(exp.short_causal_attention, backend="eager", fullgraph=True)
+    actual = compiled(query, key, value)
 
     torch.testing.assert_close(actual, expected)
 

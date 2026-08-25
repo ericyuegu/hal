@@ -655,7 +655,6 @@ class NonlinearActionHead(nn.Module):
 TEMPORAL_SDPA_BATCH_LIMIT = 32_768
 
 
-@jaxtyped(typechecker=beartype)
 def short_causal_attention(
     query: Float[Tensor, "B H L D"],
     key: Float[Tensor, "B H L D"],
