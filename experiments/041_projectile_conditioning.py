@@ -158,7 +158,6 @@ _PRODUCTION_TREATMENT_FIELDS = frozenset(
         "lr_floor_ratio",
         "mds_schema_version",
         "muon_adjust_lr_fn",
-        "muon_lr",
         "muon_weight_decay",
         "n_heads",
         "n_layers",
