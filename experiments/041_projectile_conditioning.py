@@ -115,77 +115,29 @@ _INFERENCE_PARITY_MAX_ABS = 1 / 16
 _INFERENCE_PARITY_RELATIVE_RMS = 2e-2
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
-_AWR_CONSTANTS_CALIBRATED = True
-_PRODUCTION_TREATMENT_FIELDS = frozenset(
+_N_NEAR = 6
+_PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
-        "L_ctx",
-        "action_embed_dim",
-        "action_state_embed_dim",
-        "action_vocab",
-        "adam_lr",
-        "adam_weight_decay",
-        "allow_tf32",
-        "amp_dtype",
-        "attn_window",
-        "aux_loss_weight",
-        "awr_beta",
-        "awr_damage_shaping",
-        "awr_gamma",
-        "awr_return_baseline",
-        "awr_stock_value",
-        "awr_weight_max",
-        "awr_weight_norm",
-        "awr_win_reward",
-        "batch_size",
-        "char_dim",
-        "char_vocab",
-        "ckpt_every",
-        "d_model",
-        "eval_every",
-        "grad_clip",
-        "eval_max_frames",
-        "eval_max_parallel",
-        "eval_n_matchups",
-        "eval_seed",
-        "exec_horizon",
-        "final_eval_n_matchups",
-        "group_head_dim",
-        "head_offsets",
-        "inference_mode",
-        "item_dim",
-        "item_hidden_dim",
-        "item_state_dim",
-        "item_type_dim",
-        "lr_floor_ratio",
-        "mds_schema_version",
-        "muon_weight_decay",
-        "n_heads",
-        "n_layers",
-        "n_near",
-        "observation_bundle",
-        "offset_embed_dim",
-        "policy_world_schema_version",
-        "reservoir_capacity",
-        "sample_chunk_length",
-        "seed",
-        "shuffle_block_size",
-        "source_names",
-        "source_weights",
-        "stable_fraction",
-        "stage_dim",
-        "stage_vocab",
-        "target_loss_positions",
-        "temporal_d_model",
-        "temporal_ff_dim",
-        "temporal_heads",
-        "temporal_layers",
-        "temporal_state_film",
-        "val_batch_size",
-        "val_every",
-        "val_n_samples",
-        "val_split",
-        "warmup_fraction",
-        "windows_per_replay",
+        "cache_limit_gb",
+        "cache_metrics_interval_s",
+        "compile_temporal",
+        "compile_trunk",
+        "compiled_inference_bucket",
+        "gradient_hist_every",
+        "item_conditioning",
+        "layer_rms_batch_size",
+        "layer_rms_every",
+        "muon_lr",
+        "num_workers",
+        "phase_timing_every",
+        "predownload",
+        "prefetch_batches",
+        "process_metrics_interval_s",
+        "push_to_r2",
+        "system_metrics_every",
+        "system_metrics_interval_s",
+        "wandb_log_code",
+        "weight_hist_every",
     }
 )
 
@@ -242,7 +194,6 @@ class TrainConfig:
 
     sample_chunk_length: int = 24
     head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20, 24)
-    n_near: int = 6
     temporal_d_model: int = 256
     temporal_layers: int = 4
     temporal_heads: int = 8
@@ -295,7 +246,8 @@ class TrainConfig:
     compile_temporal: bool = True
 
     wandb_log_code: bool = True
-    wandb_hist_every: int = 4096
+    gradient_hist_every: int = 4096
+    weight_hist_every: int = 2**11
     layer_rms_every: int = 4096
     layer_rms_batch_size: int = 8
     val_every: int = 8192
@@ -319,7 +271,7 @@ class TrainConfig:
     reservoir_capacity: int = 8192
     val_split: str = "val"
     num_workers: int = 32
-    prefetch_samples: int = 8 * batch_size
+    prefetch_batches: int = 8
     push_to_r2: bool = True
     system_metrics_every: int = 25
     system_metrics_interval_s: float = 5.0
@@ -353,10 +305,6 @@ class TrainConfig:
     def stable_steps(self) -> int:
         return int(self.stable_fraction * self.max_steps)
 
-    @property
-    def awr_warmup_steps(self) -> int:
-        return self.warmup_steps
-
 
 def validate_config(cfg: TrainConfig) -> None:
     positive = {
@@ -378,9 +326,8 @@ def validate_config(cfg: TrainConfig) -> None:
         "item_dim": cfg.item_dim,
         "batch_size": cfg.batch_size,
         "target_loss_positions": cfg.target_loss_positions,
-        "n_near": cfg.n_near,
         "layer_rms_batch_size": cfg.layer_rms_batch_size,
-        "prefetch_samples": cfg.prefetch_samples,
+        "prefetch_batches": cfg.prefetch_batches,
         "windows_per_replay": cfg.windows_per_replay,
     }
     for name, value in positive.items():
@@ -397,7 +344,7 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(f"head_offsets must be sorted, unique, and start at 1, got {offsets}")
     if offsets[-1] > cfg.sample_chunk_length:
         raise ValueError("head_offsets extend beyond sample_chunk_length")
-    if offsets[: cfg.n_near] != tuple(range(1, cfg.n_near + 1)) or cfg.n_near != 6:
+    if offsets[:_N_NEAR] != tuple(range(1, _N_NEAR + 1)):
         raise ValueError("the near bucket must be the dense offset prefix 1..6")
     if cfg.exec_horizon not in (4, 6):
         raise ValueError("exec_horizon must be 4 or 6")
@@ -427,9 +374,10 @@ def validate_config(cfg: TrainConfig) -> None:
         )
     if not math.isfinite(cfg.aux_loss_weight) or cfg.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be finite and non-negative")
-    if not isinstance(cfg.layer_rms_every, int) or isinstance(cfg.layer_rms_every, bool) or cfg.layer_rms_every < 0:
-        raise ValueError(f"layer_rms_every must be a non-negative integer, got {cfg.layer_rms_every!r}")
     for name, value in (
+        ("gradient_hist_every", cfg.gradient_hist_every),
+        ("weight_hist_every", cfg.weight_hist_every),
+        ("layer_rms_every", cfg.layer_rms_every),
         ("system_metrics_every", cfg.system_metrics_every),
         ("phase_timing_every", cfg.phase_timing_every),
     ):
@@ -483,10 +431,13 @@ def validate_production_config(cfg: TrainConfig) -> None:
     """Require frozen scientific settings while allowing operational tuning."""
     expected = asdict(TrainConfig())
     actual = asdict(cfg)
+    unknown_overrides = _PRODUCTION_OVERRIDE_FIELDS - actual.keys()
+    if unknown_overrides:
+        raise RuntimeError(f"production overrides are not config fields: {sorted(unknown_overrides)}")
     changed = {
         name: (actual[name], expected_value)
         for name, expected_value in expected.items()
-        if name in _PRODUCTION_TREATMENT_FIELDS and actual[name] != expected_value
+        if name not in _PRODUCTION_OVERRIDE_FIELDS and actual[name] != expected_value
     }
     if changed:
         details = ", ".join(
@@ -1416,15 +1367,14 @@ def temporal_objective_parts(
     *,
     valid_prefixes: int,
     aux_loss_weight: float,
-    n_near: int,
     valid: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Return weighted near loss, unweighted far loss, and normalized total."""
     if nll.ndim < 3 or nll.shape[-1] != N_GROUPS:
         raise ValueError(f"per-prefix NLL must end in [n_offsets, {N_GROUPS}], got {tuple(nll.shape)}")
     n_offsets = nll.shape[-2]
-    if not 0 < n_near < n_offsets:
-        raise ValueError(f"n_near must split {n_offsets} offsets, got {n_near}")
+    if n_offsets <= _N_NEAR:
+        raise ValueError(f"the {_N_NEAR} near offsets must leave at least one far offset, got {n_offsets}")
     if valid_prefixes <= 0:
         raise ValueError("valid_prefixes must be positive")
     prefix_shape = nll.shape[:-2]
@@ -1439,27 +1389,10 @@ def temporal_objective_parts(
     joint_nll = nll.float().sum(dim=-1)
     joint_nll = torch.where(valid[..., None], joint_nll, 0)
     weights = weight.float()[..., None]
-    near = (joint_nll[..., :n_near] * weights).sum() / (valid_prefixes * n_near)
-    far = joint_nll[..., n_near:].sum() / (valid_prefixes * (n_offsets - n_near))
+    near = (joint_nll[..., :_N_NEAR] * weights).sum() / (valid_prefixes * _N_NEAR)
+    far = joint_nll[..., _N_NEAR:].sum() / (valid_prefixes * (n_offsets - _N_NEAR))
     total = (near + aux_loss_weight * far) / (1.0 + aux_loss_weight)
     return near, far, total
-
-
-def advantage_weighted_objective(
-    nll: Tensor,
-    weight: Tensor,
-    *,
-    valid_prefixes: int,
-    aux_loss_weight: float,
-    n_near: int,
-) -> Tensor:
-    return temporal_objective_parts(
-        nll,
-        weight,
-        valid_prefixes=valid_prefixes,
-        aux_loss_weight=aux_loss_weight,
-        n_near=n_near,
-    )[2]
 
 
 def microbatch_loss(
@@ -1490,7 +1423,7 @@ def microbatch_loss(
         dense_nll = temporal_fn(hidden, history, targets)
         if phase_timer is not None:
             phase_timer.record("temporal_end")
-    active = step >= cfg.awr_warmup_steps
+    active = step >= cfg.warmup_steps
     weights, stats = advantage_weights(
         batch.returns.detach(),
         batch.eligible,
@@ -1507,7 +1440,6 @@ def microbatch_loss(
         weights,
         valid_prefixes=valid_prefixes,
         aux_loss_weight=cfg.aux_loss_weight,
-        n_near=cfg.n_near,
         valid=valid,
     )
     nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
@@ -1515,7 +1447,6 @@ def microbatch_loss(
         "train/loss": loss.detach() / _LN2,
         "train/temporal_loss_near": near.detach() / _LN2,
         "train/temporal_loss_far": far.detach() / _LN2,
-        "train/temporal_loss_total": loss.detach() / _LN2,
         "awr/active": torch.ones_like(loss) if active else torch.zeros_like(loss),
         **{f"train/{name}": value.detach() for name, value in stats.items()},
     }
@@ -1525,35 +1456,29 @@ def microbatch_loss(
 
 
 def nll_mean_metrics(
-    mean_nll: Tensor, offsets: tuple[int, ...], *, n_near: int = 6, aux_loss_weight: float = 0.5
+    mean_nll: Tensor,
+    offsets: tuple[int, ...],
+    *,
+    aux_loss_weight: float = 0.5,
 ) -> dict[str, float]:
     if mean_nll.shape != (len(offsets), N_GROUPS):
         raise ValueError(f"mean NLL has shape {tuple(mean_nll.shape)}")
     joint = mean_nll.sum(dim=-1) / _LN2
-    if not 0 < n_near < len(offsets):
-        raise ValueError(f"n_near must split {len(offsets)} offsets, got {n_near}")
-    near = joint[:n_near].mean()
-    far = joint[n_near:].mean()
+    if len(offsets) <= _N_NEAR:
+        raise ValueError(f"the {_N_NEAR} near offsets must leave at least one far offset, got {len(offsets)}")
+    near = joint[:_N_NEAR].mean()
+    far = joint[_N_NEAR:].mean()
     total = (near + aux_loss_weight * far) / (1.0 + aux_loss_weight)
     out = {
         "loss_unweighted": float(total),
         "temporal_loss_near_unweighted": float(near),
         "temporal_loss_far_unweighted": float(far),
-        "temporal_loss_total_unweighted": float(total),
-        "primary_nll": float(near),
-        "auxiliary_nll": float(far),
     }
     for depth, offset in enumerate(offsets):
         out[f"nll_o{offset:02d}"] = float(joint[depth])
         for group, name in enumerate(GROUP_NAMES):
             out[f"nll_o{offset:02d}_{name}"] = float(mean_nll[depth, group] / _LN2)
     return out
-
-
-def nll_metrics(
-    nll: Tensor, offsets: tuple[int, ...], *, n_near: int = 6, aux_loss_weight: float = 0.5
-) -> dict[str, float]:
-    return nll_mean_metrics(nll.mean(dim=0), offsets, n_near=n_near, aux_loss_weight=aux_loss_weight)
 
 
 def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) -> dict[str, float]:
@@ -1667,7 +1592,6 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
     out = nll_mean_metrics(
         nll_sum / count,
         model.head_offsets,
-        n_near=cfg.n_near,
         aux_loss_weight=cfg.aux_loss_weight,
     )
     for depth, offset in enumerate(model.head_offsets):
@@ -1936,21 +1860,6 @@ class BF16Inference:
             else:
                 indices = self._decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
         return self.model.codec.dequantize(indices[:rows])
-
-
-@torch.no_grad()
-def decode_chunk(
-    model: GPT,
-    ctx: Context,
-    n_frames: int,
-    *,
-    argmax: bool = False,
-    gen: torch.Generator | None = None,
-) -> Tensor:
-    cfg = model.cfg
-    return BF16Inference(model, replace(cfg, inference_mode="eager"), compiled=False).decode(
-        ctx, n_frames, argmax=argmax, gen=gen
-    )
 
 
 def make_policy(
@@ -2254,7 +2163,7 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
 
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.head_offsets))
-    treatment = f"awr-near-b{cfg.awr_beta:g}-g{cfg.awr_gamma:g}-wu{cfg.awr_warmup_steps}"
+    treatment = f"awr-near-b{cfg.awr_beta:g}-g{cfg.awr_gamma:g}-wu{cfg.warmup_steps}"
     if cfg.temporal_state_film:
         treatment = f"{treatment}-film"
     items = "items" if cfg.item_conditioning else "noitems"
@@ -2295,7 +2204,7 @@ def _wandb_parameter_group(name: str) -> str:
 
 
 def wandb_weight_log(model: nn.Module, sample_limit: int = 65_536) -> dict[str, object]:
-    """Return sampled parameter histograms and norms grouped by subsystem."""
+    """Return sampled parameter histograms grouped by subsystem."""
     buckets: dict[str, list[Tensor]] = {}
     for name, parameter in model.named_parameters():
         value = parameter
@@ -2308,9 +2217,7 @@ def wandb_weight_log(model: nn.Module, sample_limit: int = 65_536) -> dict[str, 
         count = sum(value.numel() for value in values)
         stride = max(1, math.ceil(count / sample_limit))
         samples = torch.cat([value.reshape(-1)[::stride] for value in values])[:sample_limit]
-        squared_norm = torch.stack([value.float().square().sum() for value in values]).sum()
         payload[f"weights/{group}"] = wandb.Histogram(samples.float().cpu().numpy())
-        payload[f"weight_norm/{group}"] = float(squared_norm.sqrt())
     return payload
 
 
@@ -2402,27 +2309,6 @@ def layer_activation_rms_log(
     nonfinite = {name: value for name, value in payload.items() if not math.isfinite(value)}
     if nonfinite:
         raise FloatingPointError(f"layer activation diagnostic produced non-finite metrics: {nonfinite}")
-    return payload
-
-
-@torch.no_grad()
-def layer_gradient_rms_log(model: GPT) -> dict[str, float]:
-    """Return parameter-gradient RMS for every monitored residual block."""
-    names: list[str] = []
-    values: list[Tensor] = []
-    for name, layer in _residual_layers(model):
-        gradients = [parameter.grad.detach() for parameter in layer.parameters() if parameter.grad is not None]
-        if not gradients:
-            raise RuntimeError(f"residual layer {name} has no parameter gradients")
-        squared_sum = torch.stack([gradient.float().square().sum() for gradient in gradients]).sum()
-        count = sum(gradient.numel() for gradient in gradients)
-        names.append(name)
-        values.append(torch.sqrt(squared_sum / count))
-    cpu_values = torch.stack(values).double().cpu()
-    payload = {f"gradient_rms/{name}": float(value) for name, value in zip(names, cpu_values, strict=True)}
-    nonfinite = {name: value for name, value in payload.items() if not math.isfinite(value)}
-    if nonfinite:
-        raise FloatingPointError(f"layer gradient diagnostic produced non-finite metrics: {nonfinite}")
     return payload
 
 
@@ -2593,14 +2479,13 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
 
 def _loader_prefetch_depths(cfg: TrainConfig) -> tuple[int, int]:
     """Split one sample budget across worker and ready-batch queues."""
-    total_batches = math.ceil(cfg.prefetch_samples / cfg.batch_size)
     if cfg.num_workers == 0:
-        return 1, total_batches
+        return 1, cfg.prefetch_batches
 
     # Keep one batch-equivalent of decoded windows flowing out of the workers;
     # spend the rest of the budget on fully collated batches nearest the GPU.
     worker_prefetch = math.ceil(cfg.batch_size / (cfg.num_workers * cfg.windows_per_replay))
-    return max(1, worker_prefetch), max(0, total_batches - 1)
+    return max(1, worker_prefetch), max(0, cfg.prefetch_batches - 1)
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
@@ -2632,11 +2517,11 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
 
 def _watch_gradients(model: nn.Module, cfg: TrainConfig) -> None:
     """Ask W&B to log per-parameter gradient histograms during training."""
-    if wandb.run is not None and cfg.wandb_hist_every > 0:
+    if wandb.run is not None and cfg.gradient_hist_every > 0:
         wandb.watch(
             model,
             log="gradients",
-            log_freq=cfg.wandb_hist_every,
+            log_freq=cfg.gradient_hist_every,
             log_graph=False,
         )
 
@@ -2682,11 +2567,10 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
 def _training_diagnostics(model: GPT, batch: AWRBatch, cfg: TrainConfig, update: int) -> dict[str, object]:
     """Collect the infrequent parameter and layer diagnostics due this update."""
     metrics: dict[str, object] = {}
-    if histogram_due(update, cfg.wandb_hist_every):
+    if histogram_due(update, cfg.weight_hist_every):
         metrics.update(wandb_weight_log(model))
     if histogram_due(update, cfg.layer_rms_every):
         metrics.update(layer_activation_rms_log(model, batch, cfg, max_rows=cfg.layer_rms_batch_size))
-        metrics.update(layer_gradient_rms_log(model))
     return metrics
 
 
@@ -2715,18 +2599,9 @@ def _download_step_metrics(
     nll_values_by_offset = nll_mean_metrics(
         mean_nll,
         cfg.head_offsets,
-        n_near=cfg.n_near,
         aux_loss_weight=cfg.aux_loss_weight,
     )
     return gradient_norm_value, nll_values_by_offset, step_metric_values
-
-
-def _prefix_metrics(namespace: str, metrics: dict[str, float]) -> dict[str, float]:
-    return {f"{namespace}/{name}": value for name, value in metrics.items()}
-
-
-def _log_metrics(update: int, metrics: dict[str, float | int]) -> None:
-    wandb.log({"global_step": update, **metrics})
 
 
 def _finalize_training(
@@ -2766,7 +2641,7 @@ def _finalize_training(
         uploader.upload(snapshot, key=final_path.name)
 
     checkpoint_sha = _checkpoint_sha256(final_path)
-    final_metrics = _prefix_metrics("val", val_metrics(model, val_cache, cfg))
+    final_metrics = {f"val/{name}": value for name, value in val_metrics(model, val_cache, cfg).items()}
     final_matchups = smoke_eval_matchups if smoke else cfg.final_eval_n_matchups
     if final_matchups:
         if eval_inference is None:
@@ -2782,8 +2657,8 @@ def _finalize_training(
         )
         if not smoke:
             require_complete_eval(final_eval, cfg.final_eval_n_matchups)
-        final_metrics.update(_prefix_metrics("eval", final_eval))
-    _log_metrics(update, final_metrics)
+        final_metrics.update({f"eval/{name}": value for name, value in final_eval.items()})
+    wandb.log({"global_step": update, **final_metrics})
 
     mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
     p95_wait = float(np.percentile(loader_wait_fractions, 95)) if loader_wait_fractions else 0.0
@@ -2808,8 +2683,6 @@ def train(
         validate_production_config(cfg)
         if stop_after_update is not None:
             raise ValueError("stop_after_update is a smoke-only control")
-        if not _AWR_CONSTANTS_CALIBRATED:
-            raise ValueError("run notebooks/040_awr_constants.py and freeze its constants before production")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
         raise ValueError(f"stop_after_update must be in [1, {cfg.max_steps}], got {stop_after_update}")
     if smoke_eval_matchups < 0:
@@ -2975,7 +2848,7 @@ def train(
                 log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             log["throughput/log_build_s"] = time.monotonic() - log_started
             wandb_started = time.monotonic()
-            _log_metrics(update, log)
+            wandb.log({"global_step": update, **log})
             previous_wandb_log_s = time.monotonic() - wandb_started
             if update <= 10 or update % 50 == 0:
                 print(
@@ -3007,7 +2880,7 @@ def train(
             boundary_metrics: dict[str, float] = {}
             if val_due:
                 values = val_metrics(model, val_cache, cfg)
-                boundary_metrics.update(_prefix_metrics("val", values))
+                boundary_metrics.update({f"val/{name}": value for name, value in values.items()})
             if eval_due:
                 assert checkpoint_path is not None
                 if eval_inference is None:
@@ -3026,9 +2899,9 @@ def train(
                     int(values.get(name, 0.0)) != expected for name in ("scheduled_boots", "completed_boots", "boots")
                 ):
                     print(f"[eval] warning: update {update} evaluation was incomplete: {values}", flush=True)
-                boundary_metrics.update(_prefix_metrics("eval", values))
+                boundary_metrics.update({f"eval/{name}": value for name, value in values.items()})
             if boundary_metrics:
-                _log_metrics(update, boundary_metrics)
+                wandb.log({"global_step": update, **boundary_metrics})
         _finalize_training(
             model=model,
             optimizer=optimizer,
@@ -3056,7 +2929,6 @@ def train(
 
 _CHECKPOINT_ARCH_FIELDS = {
     "head_offsets",
-    "n_near",
     "sample_chunk_length",
     "temporal_d_model",
     "temporal_layers",
@@ -3101,6 +2973,11 @@ def config_from_state(values: dict) -> TrainConfig:
         raise ValueError(f"checkpoint is not experiment 041; missing {sorted(missing)}")
     if values["experiment_id"] != _EXPERIMENT_ID:
         raise ValueError(f"checkpoint experiment_id {values['experiment_id']!r} != required {_EXPERIMENT_ID!r}")
+    values = dict(values)
+    if "gradient_hist_every" not in values and "wandb_hist_every" in values:
+        values["gradient_hist_every"] = values["wandb_hist_every"]
+    if "prefetch_batches" not in values and "prefetch_samples" in values:
+        values["prefetch_batches"] = math.ceil(values["prefetch_samples"] / values["batch_size"])
     known = {item.name for item in fields(TrainConfig)}
     return TrainConfig(**{name: value for name, value in values.items() if name in known})
 

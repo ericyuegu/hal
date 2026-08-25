@@ -95,7 +95,6 @@ def test_production_awr_constants_match_calibration_artifact() -> None:
     artifact = json.loads(artifact_path.read_text())
     cfg = exp.TrainConfig()
 
-    assert exp._AWR_CONSTANTS_CALIBRATED
     assert cfg.awr_return_baseline == artifact["return_baseline"]
     assert cfg.awr_weight_norm == artifact["weight_norm"]
 
@@ -119,7 +118,7 @@ def _cfg(**overrides) -> exp.TrainConfig:
         "compile_trunk": False,
         "compile_temporal": False,
         "num_workers": 0,
-        "prefetch_samples": 16,
+        "prefetch_batches": 8,
         "push_to_r2": False,
         "inference_mode": "eager",
         "awr_return_baseline": 10.0,
@@ -326,7 +325,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight,
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
         valid=valid,
     )
     selected_parts = exp.temporal_objective_parts(
@@ -334,7 +332,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight[valid],
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
     )
 
     for dense, selected in zip(dense_parts, selected_parts, strict=True):
@@ -347,7 +344,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight,
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
         valid=valid,
     )
     for masked, selected in zip(nan_masked_parts, selected_parts, strict=True):
@@ -360,7 +356,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight,
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
         valid=valid,
     )[2].backward()
     exp.temporal_objective_parts(
@@ -368,7 +363,6 @@ def test_dense_temporal_objective_matches_selected_prefixes() -> None:
         weight[valid],
         valid_prefixes=int(valid.sum()),
         aux_loss_weight=0.5,
-        n_near=6,
     )[2].backward()
 
     torch.testing.assert_close(dense_nll.grad[valid], selected_nll.grad)
@@ -422,7 +416,6 @@ def test_near_far_objective_matches_hand_computation() -> None:
         weight,
         valid_prefixes=2,
         aux_loss_weight=0.5,
-        n_near=6,
     )
 
     # Four controller groups: near=(4*1*2 + 4*2*.5)/2=6,
@@ -430,25 +423,14 @@ def test_near_far_objective_matches_hand_computation() -> None:
     torch.testing.assert_close(near, torch.tensor(6.0))
     torch.testing.assert_close(far, torch.tensor(16.0))
     torch.testing.assert_close(total, torch.tensor(14 / 1.5))
-    torch.testing.assert_close(
-        exp.advantage_weighted_objective(
-            nll,
-            weight,
-            valid_prefixes=2,
-            aux_loss_weight=0.5,
-            n_near=6,
-        ),
-        total,
-    )
 
 
 def test_unweighted_metric_uses_the_same_near_far_normalization() -> None:
     mean_nll = torch.ones(15, exp.N_GROUPS)
     mean_nll[6:] *= 3
-    metrics = exp.nll_mean_metrics(mean_nll, tuple(range(1, 16)), n_near=6, aux_loss_weight=0.5)
+    metrics = exp.nll_mean_metrics(mean_nll, tuple(range(1, 16)), aux_loss_weight=0.5)
     expected = (4 / exp._LN2 + 0.5 * 12 / exp._LN2) / 1.5
     assert metrics["loss_unweighted"] == pytest.approx(expected)
-    assert metrics["temporal_loss_total_unweighted"] == pytest.approx(expected)
 
 
 def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
@@ -593,8 +575,11 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
             num_workers=8,
             cache_limit_gb=512,
             push_to_r2=False,
+            gradient_hist_every=128,
+            weight_hist_every=256,
             layer_rms_every=0,
             layer_rms_batch_size=4,
+            prefetch_batches=4,
         )
     )
 
@@ -604,12 +589,12 @@ def test_production_loader_and_eval_defaults() -> None:
 
     assert cfg.windows_per_replay == 2
     assert cfg.num_workers == 32
-    assert cfg.prefetch_samples == 8 * cfg.batch_size
+    assert cfg.prefetch_batches == 8
     worker_prefetch, batch_prefetch = exp._loader_prefetch_depths(cfg)
     assert (worker_prefetch, batch_prefetch) == (8, 7)
     queued_worker_samples = cfg.num_workers * worker_prefetch * cfg.windows_per_replay
     queued_batch_samples = batch_prefetch * cfg.batch_size
-    assert queued_worker_samples + queued_batch_samples == cfg.prefetch_samples
+    assert queued_worker_samples + queued_batch_samples == cfg.prefetch_batches * cfg.batch_size
     assert cfg.eval_every == 2**14
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
@@ -621,6 +606,9 @@ def test_production_loader_and_eval_defaults() -> None:
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:
+    cfg = exp.TrainConfig()
+    assert cfg.gradient_hist_every == 2**12
+    assert cfg.weight_hist_every == 2**11
     assert exp.histogram_due(1, 4096)
     assert exp.histogram_due(4096, 4096)
     assert not exp.histogram_due(1001, 4096)
@@ -632,22 +620,28 @@ def test_wandb_watch_logs_gradient_histograms(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(exp.wandb, "run", object())
     monkeypatch.setattr(exp.wandb, "watch", lambda watched, **kwargs: calls.append((watched, kwargs)))
 
-    exp._watch_gradients(model, _cfg(wandb_hist_every=17))
-    exp._watch_gradients(model, _cfg(wandb_hist_every=0))
+    exp._watch_gradients(model, _cfg(gradient_hist_every=17))
+    exp._watch_gradients(model, _cfg(gradient_hist_every=0))
 
     assert calls == [(model, {"log": "gradients", "log_freq": 17, "log_graph": False})]
+
+
+def test_weight_histograms_use_their_own_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(weight_hist_every=2**11, layer_rms_every=0)
+    model = exp.GPT(cfg)
+    batch = _awr_batch(cfg)
+    monkeypatch.setattr(exp, "wandb_weight_log", lambda _model: {"weights/test": "histogram"})
+
+    assert exp._training_diagnostics(model, batch, cfg, 2**11) == {"weights/test": "histogram"}
+    assert exp._training_diagnostics(model, batch, cfg, 2**11 + 1) == {}
 
 
 def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
     cfg = _cfg(n_layers=2, temporal_layers=2)
     model = exp.GPT(cfg)
     batch = _awr_batch(cfg)
-    history, targets, _ = exp.prepared_targets(model, batch)
-    hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
-    model.temporal.teacher_forced_nll(hidden, history, targets).mean().backward()
 
     activations = exp.layer_activation_rms_log(model, batch, cfg, max_rows=1)
-    gradients = exp.layer_gradient_rms_log(model)
     layer_names = {
         "trunk_block_00",
         "trunk_block_01",
@@ -659,8 +653,7 @@ def test_layer_rms_diagnostics_cover_every_residual_block() -> None:
         for metric in ("activation_rms", "residual_branch_rms", "residual_ratio")
         for name in layer_names
     }
-    assert set(gradients) == {f"gradient_rms/{name}" for name in layer_names}
-    assert all(math.isfinite(value) and value >= 0 for value in (*activations.values(), *gradients.values()))
+    assert all(math.isfinite(value) and value >= 0 for value in activations.values())
     for name in layer_names:
         expected_ratio = activations[f"residual_branch_rms/{name}"] / activations[f"activation_rms/{name}"]
         assert activations[f"residual_ratio/{name}"] == pytest.approx(expected_ratio)
@@ -827,7 +820,8 @@ def test_inference_parity_uses_scale_aware_bf16_tolerances() -> None:
 
 def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = _cfg(
-        wandb_hist_every=0,
+        gradient_hist_every=0,
+        weight_hist_every=0,
         val_every=0,
         ckpt_every=0,
         eval_every=0,
@@ -882,11 +876,22 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
 
 def _cfg040(**overrides) -> object:
     """The same tiny geometry on experiment 040, which knows no item fields."""
+    cfg = _cfg(**overrides)
     values = {
         name: value
-        for name, value in asdict(_cfg(**overrides)).items()
-        if not name.startswith("item_") and name not in ("source_weights", "grad_clip")
+        for name, value in asdict(cfg).items()
+        if not name.startswith("item_")
+        and name
+        not in (
+            "gradient_hist_every",
+            "source_weights",
+            "grad_clip",
+            "prefetch_batches",
+            "weight_hist_every",
+        )
     }
+    values["wandb_hist_every"] = cfg.gradient_hist_every
+    values["prefetch_samples"] = cfg.prefetch_batches * cfg.batch_size
     return exp040.TrainConfig(**values)
 
 
@@ -1296,6 +1301,18 @@ def test_config_round_trips_and_rejects_an_040_checkpoint() -> None:
 
     assert item_fields <= exp._CHECKPOINT_ARCH_FIELDS
     assert exp.config_from_state(values) == cfg
+
+    legacy = dict(values)
+    del legacy["gradient_hist_every"]
+    del legacy["prefetch_batches"]
+    del legacy["weight_hist_every"]
+    legacy["wandb_hist_every"] = 17
+    legacy["prefetch_samples"] = 6 * cfg.batch_size
+    restored = exp.config_from_state(legacy)
+    assert restored.gradient_hist_every == 17
+    assert restored.prefetch_batches == 6
+    assert restored.weight_hist_every == 2**11
+
     with pytest.raises(ValueError, match="item_dim"):
         exp.config_from_state({name: value for name, value in values.items() if name not in item_fields})
 
