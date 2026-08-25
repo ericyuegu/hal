@@ -2634,12 +2634,20 @@ def train_step(
     return TrainStepResult(nll_sum, gradient_norm, metrics, diagnostics, muon_lr, adam_lr)
 
 
-def benchmark_train_step(*, warmup_steps: int = 3, measured_steps: int = 20) -> dict[str, float]:
+def benchmark_train_step(
+    *,
+    warmup_steps: int = 3,
+    measured_steps: int = 20,
+    profile_steps: int = 0,
+    trace_path: str | None = None,
+) -> dict[str, float]:
     """Benchmark the frozen production train step on a synthetic device batch."""
     if DEVICE != "cuda":
         raise RuntimeError("the production train-step benchmark requires CUDA")
-    if warmup_steps < 1 or measured_steps < 1:
-        raise ValueError("warmup_steps and measured_steps must be positive")
+    if warmup_steps < 1 or measured_steps < 1 or profile_steps < 0:
+        raise ValueError("warmup_steps and measured_steps must be positive; profile_steps cannot be negative")
+    if trace_path is not None and profile_steps == 0:
+        raise ValueError("trace_path requires at least one profile step")
 
     cfg = replace(
         TrainConfig(),
@@ -2735,6 +2743,38 @@ def benchmark_train_step(*, warmup_steps: int = 3, measured_steps: int = 20) -> 
         **{f"{name}_median": float(np.median(values)) for name, values in phase_samples.items()},
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
+    if profile_steps:
+        print(f"[benchmark] profiling {profile_steps} additional train steps", flush=True)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+        ) as profiler:
+            for index in range(profile_steps):
+                train_step(
+                    model,
+                    batch,
+                    cfg,
+                    step=warmup_steps + measured_steps + index,
+                    update=warmup_steps + measured_steps + index + 2,
+                    valid_prefixes=valid_prefixes,
+                    trunk_fn=trunk_fn,
+                    temporal_fn=temporal_fn,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                )
+        torch.cuda.synchronize()
+        print(
+            profiler.key_averages(group_by_input_shape=True).table(
+                sort_by="self_cuda_time_total",
+                row_limit=50,
+            ),
+            flush=True,
+        )
+        if trace_path is not None:
+            trace = Path(trace_path)
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            profiler.export_chrome_trace(str(trace))
+            print(f"[benchmark] wrote GPU trace to {trace}", flush=True)
     return metrics
 
 
@@ -3225,6 +3265,8 @@ class SelfPlayArgs:
 class BenchmarkTrainStepArgs:
     warmup_steps: int = 3
     measured_steps: int = 20
+    profile_steps: int = 0
+    trace_path: str | None = None
 
 
 type Command = (
@@ -3237,7 +3279,12 @@ type Command = (
 
 def main(args: Command) -> None:
     if isinstance(args, BenchmarkTrainStepArgs):
-        benchmark_train_step(warmup_steps=args.warmup_steps, measured_steps=args.measured_steps)
+        benchmark_train_step(
+            warmup_steps=args.warmup_steps,
+            measured_steps=args.measured_steps,
+            profile_steps=args.profile_steps,
+            trace_path=args.trace_path,
+        )
         return
     if isinstance(args, EvalArgs):
         eval_checkpoint(
