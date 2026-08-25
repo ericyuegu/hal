@@ -312,7 +312,7 @@ class TrainConfig:
     source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
-    cache_limit_gb: int = 1024
+    cache_limit_gb: int = 700
     shuffle_block_size: int = 2000
     predownload: int = 1024
     windows_per_replay: int = 2
