@@ -32,7 +32,6 @@ from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
-from typing import ClassVar
 
 import melee
 import numpy as np
@@ -61,7 +60,7 @@ from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.self_play import DecodeTelemetry
 from hal.eval.self_play import benchmark_checkpoint as benchmark_self_play
 from hal.eval.self_play import canonical_context
-from hal.eval.self_play import synthetic_context
+from hal.eval.self_play import synthetic_context as build_synthetic_context
 from hal.sim.rollout import covering_power_of_two
 from hal.training import returns as returns_lib
 from hal.training import scoring
@@ -219,8 +218,6 @@ AWR_CALIBRATION = AWRCalibration()
 
 @dataclass(frozen=True)
 class TrainConfig:
-    observation_bundle: ClassVar[str] = "base"
-    item_conditioning: ClassVar[bool] = True
     arch: Annotated[Architecture, tyro.conf.Suppress] = ARCHITECTURE
     awr: Annotated[AWRCalibration, tyro.conf.Suppress] = AWR_CALIBRATION
 
@@ -280,11 +277,6 @@ class TrainConfig:
     process_metrics_interval_s: float = 30.0
     cache_metrics_interval_s: float = 30.0
     phase_timing_every: int = 10
-
-    @property
-    def L_ctx(self) -> int:
-        """Context length expected by the shared synthetic-context helper."""
-        return self.arch.L_ctx
 
     @property
     def max_steps(self) -> int:
@@ -434,6 +426,18 @@ def validate_production_config(cfg: TrainConfig) -> None:
             for name, (value, expected_value) in sorted(changed.items())
         )
         raise ValueError(f"production config differs from the frozen treatment: {details}")
+
+
+def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
+    """Build the fixed base observation with projectile columns."""
+    return build_synthetic_context(
+        cfg,
+        batch_size,
+        device,
+        context_length=cfg.arch.L_ctx,
+        observation_bundle="base",
+        items=True,
+    )
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int) -> int:
@@ -1102,7 +1106,7 @@ class DeviceBatchPrefetcher:
         if not isinstance(cpu_batch, AWRBatch):
             raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
         validate_batch_geometry(cpu_batch, self._cfg, self._cfg.batch_size)
-        valid_prefixes = int((self._cfg.L_ctx - cpu_batch.context.ctx_pad).sum())
+        valid_prefixes = int((self._cfg.arch.L_ctx - cpu_batch.context.ctx_pad).sum())
         if valid_prefixes <= 0:
             raise RuntimeError("training batch contains no valid context prefixes")
         loader_wait = time.monotonic() - started

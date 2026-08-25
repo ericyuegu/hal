@@ -70,42 +70,53 @@ class DecodeTelemetry:
         }
 
 
-def synthetic_context(cfg: Any, batch_size: int, device: torch.device) -> Context:
+def synthetic_context(
+    cfg: Any,
+    batch_size: int,
+    device: torch.device,
+    *,
+    context_length: int | None = None,
+    observation_bundle: str | None = None,
+    items: bool | None = None,
+) -> Context:
     """Build an all-zero context with the feature layout selected by ``cfg``."""
+    length = cfg.L_ctx if context_length is None else context_length
+    bundle = cfg.observation_bundle if observation_bundle is None else observation_bundle
+    include_items = getattr(cfg, "item_conditioning", False) if items is None else items
     features: dict[str, torch.Tensor] = {}
     v6_floats = tuple(V6_PLAYER_COLUMNS.floats)
     v6_categories = V6_PLAYER_COLUMNS.cats
-    floats = FLOAT_FEATURES if cfg.observation_bundle == "base" else FLOAT_FEATURES + v6_floats
+    floats = FLOAT_FEATURES if bundle == "base" else FLOAT_FEATURES + v6_floats
     for prefix in BASE_PLAYER_PREFIXES:
         for name in floats:
-            features[f"{prefix}_{name}"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-            features[f"{prefix}_{name}_mask"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
+            features[f"{prefix}_{name}"] = torch.zeros(batch_size, length, device=device)
+            features[f"{prefix}_{name}_mask"] = torch.zeros(batch_size, length, device=device)
         for name in CAT_FEATURES:
-            features[f"{prefix}_{name}"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-        if cfg.observation_bundle == "v6_lean":
+            features[f"{prefix}_{name}"] = torch.zeros(batch_size, length, dtype=torch.long, device=device)
+        if bundle == "v6_lean":
             for name in v6_categories:
                 features[f"{prefix}_{name}"] = torch.zeros(
                     batch_size,
-                    cfg.L_ctx,
+                    length,
                     dtype=torch.long,
                     device=device,
                 )
     for name in ACTION_CHANNELS:
-        features[f"ego_{name}"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-    features["ego_character"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-    features["opp_character"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-    features["stage"] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
-    if cfg.observation_bundle == "v6_lean":
+        features[f"ego_{name}"] = torch.zeros(batch_size, length, device=device)
+    features["ego_character"] = torch.zeros(batch_size, length, dtype=torch.long, device=device)
+    features["opp_character"] = torch.zeros(batch_size, length, dtype=torch.long, device=device)
+    features["stage"] = torch.zeros(batch_size, length, dtype=torch.long, device=device)
+    if bundle == "v6_lean":
         for name in SPATIAL_COLUMNS_LEAN:
-            features[name] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-    if getattr(cfg, "item_conditioning", False):
+            features[name] = torch.zeros(batch_size, length, device=device)
+    if include_items:
         for slot in range(ITEM_SLOTS):
             for name in ITEM_COLUMNS.cats:
-                features[item_column(slot, name)] = torch.zeros(batch_size, cfg.L_ctx, dtype=torch.long, device=device)
+                features[item_column(slot, name)] = torch.zeros(batch_size, length, dtype=torch.long, device=device)
             for name in ITEM_COLUMNS.floats:
                 column = item_column(slot, name)
-                features[column] = torch.zeros(batch_size, cfg.L_ctx, device=device)
-                features[f"{column}_mask"] = torch.zeros(batch_size, cfg.L_ctx, device=device)
+                features[column] = torch.zeros(batch_size, length, device=device)
+                features[f"{column}_mask"] = torch.zeros(batch_size, length, device=device)
     return Context(
         features=features,
         ctx_pad=torch.zeros(batch_size, dtype=torch.long, device=device),
