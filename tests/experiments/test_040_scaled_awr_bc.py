@@ -912,7 +912,17 @@ def test_every_policy_mlp_uses_swiglu() -> None:
     assert isinstance(model.item_encoder, exp.SwiGLU)
     assert all(isinstance(block.mlp, exp.SwiGLU) for block in model.temporal.blocks)
     assert all(isinstance(head.mlp, exp.SwiGLU) for head in model.temporal.outputs.values())
-    assert not hasattr(model.temporal, "group_condition")
+
+
+def test_group_film_conditioning_is_same_frame_autoregressive() -> None:
+    cfg = _cfg()
+    decoder = exp.GPT(cfg).temporal
+
+    assert tuple(decoder.group_condition) == exp.GROUP_ORDER[1:]
+    for position, name in enumerate(exp.GROUP_ORDER[1:], start=1):
+        condition = decoder.group_condition[name]
+        assert condition.in_features == position * cfg.arch.action_embed_dim
+        assert condition.out_features == 2 * cfg.arch.temporal_d_model
 
 
 # --- the pooled set encoder ---------------------------------------------------

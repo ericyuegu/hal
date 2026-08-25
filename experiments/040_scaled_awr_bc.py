@@ -712,6 +712,13 @@ class CausalTemporalDecoder(nn.Module):
             cfg.arch.d_model + controller_width + cfg.arch.offset_embed_dim, self.d_model
         )
         self.blocks = nn.ModuleList([TemporalBlock(cfg) for _ in range(cfg.arch.temporal_layers)])
+        self.group_condition = nn.ModuleDict(
+            {
+                name: nn.Linear(position * cfg.arch.action_embed_dim, 2 * self.d_model)
+                for position, name in enumerate(GROUP_ORDER)
+                if position
+            }
+        )
         self.outputs = nn.ModuleDict(
             {
                 name: NonlinearActionHead(self.d_model, cfg.arch.group_head_dim, GROUP_VOCABS[GROUP_INDEX[name]])
@@ -777,11 +784,22 @@ class CausalTemporalDecoder(nn.Module):
             x = block(x)
         return decoder_rmsnorm(x.view(*hidden.shape[:2], len(self.head_offsets), self.d_model))
 
+    def group_features(self, states: Tensor, name: str, embedded: dict[str, Tensor]) -> Tensor:
+        position = GROUP_ORDER.index(name)
+        if position == 0:
+            return states
+        prefix = torch.cat([embedded[group] for group in GROUP_ORDER[:position]], dim=-1)
+        scale, shift = self.group_condition[name](prefix).chunk(2, dim=-1)
+        return states * (1.0 + torch.tanh(scale)) + shift
+
     def teacher_forced_logits_by_group(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> dict[str, Tensor]:
         states = self.teacher_forced_states(hidden, observed, targets)
+        embedded = self.codec.embed_groups(targets)
         trunk = decoder_rmsnorm(hidden)
         logits = {
-            name: self.outputs[name](states) + self.trunk_outputs[name](trunk)[:, :, None] for name in GROUP_NAMES
+            name: self.outputs[name](self.group_features(states, name, embedded))
+            + self.trunk_outputs[name](trunk)[:, :, None]
+            for name in GROUP_NAMES
         }
         logits["buttons"] = logits["buttons"].masked_fill(self.codec.button_mask(targets[..., TRIG_G]), float("-inf"))
         return logits
@@ -820,7 +838,11 @@ class CausalTemporalDecoder(nn.Module):
         for depth, offset in enumerate(self.head_offsets):
             state, caches = self._decode_step(previous, offset, state_bias, caches)
             target = targets[:, depth]
-            group_logits = {name: self.outputs[name](state) + trunk_logits[name] for name in GROUP_NAMES}
+            embedded = self.codec.embed_groups(target)
+            group_logits = {
+                name: self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
+                for name in GROUP_NAMES
+            }
             group_logits["buttons"] = group_logits["buttons"].masked_fill(
                 self.codec.button_mask(target[:, TRIG_G]), float("-inf")
             )
@@ -850,15 +872,17 @@ class CausalTemporalDecoder(nn.Module):
         frames: list[Tensor] = []
         for depth, offset in enumerate(offsets):
             state, caches = self._decode_step(previous, offset, state_bias, caches)
+            embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
-                logits = self.outputs[name](state) + trunk_logits[name]
+                logits = self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 group = GROUP_INDEX[name]
                 uniform = None if uniforms is None else uniforms[depth, group]
                 pick = sample_categorical(logits, argmax=argmax, uniform=uniform, gen=gen)
                 picks[name] = pick
+                embedded[name] = self.codec.group_embedding(name, pick)
             indices = torch.stack([picks[name] for name in GROUP_NAMES], dim=-1)
             frames.append(indices)
             previous = indices
@@ -880,15 +904,17 @@ class CausalTemporalDecoder(nn.Module):
         all_logits: list[dict[str, Tensor]] = []
         for offset in self.head_offsets:
             state, caches = self._decode_step(previous, offset, state_bias, caches)
+            embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             frame_logits: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
-                logits = self.outputs[name](state) + trunk_logits[name]
+                logits = self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 pick = logits.argmax(dim=-1)
                 frame_logits[name] = logits
                 picks[name] = pick
+                embedded[name] = self.codec.group_embedding(name, pick)
             previous = torch.stack([picks[name] for name in GROUP_NAMES], dim=-1)
             frames.append(previous)
             all_logits.append(frame_logits)
