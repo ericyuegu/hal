@@ -148,6 +148,7 @@ _EXTRA_ALIASES: dict[str, set[str]] = {
     "friend": {"regularfriend", "ybfriend"},
     "iliketurtles": {"iliketurtles", "turtles"},
     "krudo": {"kylekrudo"},
+    "trif": {"trifit"},
 }
 
 # Franz's archive contains many anonymous offline sets. The archive owner is a

@@ -145,6 +145,26 @@ def test_friend_alias_prefers_dominant_matching_component(tmp_path: Path) -> Non
     assert "name:regularfriend" in report["owner_tokens"]
 
 
+def test_trif_alias_resolves_archive_identity(tmp_path: Path) -> None:
+    index = tmp_path / "index.jsonl"
+    paths = tmp_path / "paths.txt"
+    overrides = tmp_path / "ranks.jsonl"
+    entries = [
+        _entry(
+            "archive://one!1.slp",
+            "one",
+            [_player(1, "Trifit", "TRIF#0"), _player(2, "Opponent", None)],
+        )
+    ]
+    write_jsonl(index, entries)
+    paths.write_text(entries[0].path + "\n")
+
+    report = write_owner_rank_overrides("trif", index, paths, overrides)
+
+    assert report["owner_labeled_replays"] == 1
+    assert "code:trif0" in report["owner_tokens"]
+
+
 def test_franz_uses_pro_owner_and_master_corpus_fallback(tmp_path: Path) -> None:
     index = tmp_path / "index.jsonl"
     paths = tmp_path / "paths.txt"
