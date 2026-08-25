@@ -590,7 +590,7 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
         exp.config_from_state({**checkpoint, "experiment_id": "040_scaled_awr_bc_v1"})
 
 
-def test_temporal_decoder_matrices_use_muon() -> None:
+def test_temporal_hidden_matrices_use_muon_and_boundary_matrices_use_adamw() -> None:
     cfg = _cfg()
     model = exp.GPT(cfg)
     groups = {
@@ -601,16 +601,22 @@ def test_temporal_decoder_matrices_use_muon() -> None:
         for module in (model.temporal.offset_embedding, model.codec.class_embeddings)
         for parameter in module.parameters()
     }
-    temporal_matrices = [
-        parameter
-        for parameter in model.temporal.parameters()
-        if parameter.ndim >= 2 and id(parameter) not in embedding_ids
+    hidden_matrices = [parameter for parameter in model.temporal.blocks.parameters() if parameter.ndim >= 2]
+    boundary_modules = (
+        model.temporal.token_projection,
+        model.temporal.group_condition,
+        model.temporal.outputs,
+        model.temporal.trunk_outputs,
+    )
+    boundary_matrices = [
+        parameter for module in boundary_modules for parameter in module.parameters() if parameter.ndim >= 2
     ]
 
     assert exp.ARCHITECTURE.temporal_d_model == 512
     assert exp.ARCHITECTURE.temporal_ff_dim == 1536
-    assert temporal_matrices
-    assert all(groups[id(parameter)]["use_muon"] for parameter in temporal_matrices)
+    assert hidden_matrices and boundary_matrices
+    assert all(groups[id(parameter)]["use_muon"] for parameter in hidden_matrices)
+    assert all(not groups[id(parameter)]["use_muon"] for parameter in boundary_matrices)
     assert all(not groups[parameter_id]["use_muon"] for parameter_id in embedding_ids)
 
 

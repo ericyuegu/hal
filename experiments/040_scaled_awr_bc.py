@@ -2035,7 +2035,7 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     # The item encoder's linears stay in the decayed bucket; only the tables here.
     embedding_modules += [model.item_type_emb, model.item_state_emb]
     embedding_ids = {id(parameter) for module in embedding_modules for parameter in module.parameters()}
-    muon_modules = (model.trunk.blocks, model.temporal)
+    muon_modules = (model.trunk.blocks, model.temporal.blocks)
     muon = [
         parameter
         for module in muon_modules
