@@ -553,9 +553,9 @@ def test_production_loader_and_eval_defaults() -> None:
     queued_batch_samples = batch_prefetch * cfg.batch_size
     assert queued_worker_samples + queued_batch_samples == cfg.prefetch_samples
     assert cfg.eval_every == 2**14
-    assert cfg.eval_max_parallel == 48
-    assert exp._eval_parallelism(cfg, 96) == 48
-    assert exp._eval_inference_bucket(cfg, 96) == 64
+    assert cfg.eval_max_parallel == 32
+    assert exp._eval_parallelism(cfg, 96) == 32
+    assert exp._eval_inference_bucket(cfg, 96) == 32
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:

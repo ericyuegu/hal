@@ -260,7 +260,7 @@ class TrainConfig:
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
     final_eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
-    eval_max_parallel: int | None = 48
+    eval_max_parallel: int | None = 32
 
     source_names: tuple[str, ...] = tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
     mds_schema_version: int = 7
