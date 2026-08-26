@@ -45,6 +45,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -53,7 +54,6 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
@@ -81,6 +81,7 @@ from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
+from hal.training.dataloader import ResumableStreamingDataLoader
 from hal.training.dataloader import make_loader
 from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.features import A_DIM
@@ -1236,7 +1237,7 @@ def prepared_targets(
 class DeviceBatchPrefetcher:
     """Coalesce and overlap transfer of one training batch ahead."""
 
-    def __init__(self, loader: Iterable[AWRBatch], cfg: TrainConfig, device: str | torch.device) -> None:
+    def __init__(self, loader: Iterable[object], cfg: TrainConfig, device: str | torch.device) -> None:
         self._loader = loader
         self._iterator = iter(loader)
         self._cfg = cfg
@@ -2476,6 +2477,7 @@ def save_boundary_checkpoint(
     milestone: bool,
     wandb_id: str | None,
     actual_loss_positions: int,
+    data_loader_state: dict[str, object],
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
@@ -2492,7 +2494,10 @@ def save_boundary_checkpoint(
         cfg=_checkpoint_config(cfg),
         wandb_id=wandb_id,
         uploader=None,
-        extra_state={"actual_loss_positions": actual_loss_positions},
+        extra_state={
+            "actual_loss_positions": actual_loss_positions,
+            "data_loader": data_loader_state,
+        },
     )
     os.replace(temporary, snapshot)
     latest = run_dir / "latest.pt"
@@ -2513,7 +2518,9 @@ def load_stats(cfg: TrainConfig) -> dict[str, FeatureStats]:
     )
 
 
-def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
+def _make_loaders(
+    cfg: TrainConfig, stats: dict[str, FeatureStats]
+) -> tuple[ResumableStreamingDataLoader, list[TrainBatch]]:
     common = loader_kwargs(cfg, stats)
     projection = common["projection"]
     if projection is not None:
@@ -2565,6 +2572,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     if wandb.run is None:
         return
+    wandb.define_metric("global_step")
+    wandb.define_metric("*", step_metric="global_step")
     wandb.define_metric("optimizer/*", step_metric="global_step")
     wandb.define_metric("button_activation/*", step_metric="global_step")
     wandb.define_metric("button_logits/*", step_metric="global_step")
@@ -2945,6 +2954,7 @@ def _finalize_training(
     loader_wait_fractions: list[float],
     update: int,
     actual_loss_positions: int,
+    data_loader_state: dict[str, object],
     smoke: bool,
     smoke_eval_matchups: int,
 ) -> None:
@@ -2960,6 +2970,7 @@ def _finalize_training(
         milestone=cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0,
         wandb_id=None if wandb.run is None else wandb.run.id,
         actual_loss_positions=actual_loss_positions,
+        data_loader_state=data_loader_state,
     )
     final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
     _replace_link(snapshot, final_path)
@@ -3042,6 +3053,14 @@ def train(
     trunk_fn, temporal_fn = _training_functions(model, cfg)
 
     train_loader, val_cache = _make_loaders(cfg, stats)
+    if resume_state is not None:
+        data_loader_state = resume_state.get("data_loader")
+        if data_loader_state is None:
+            print("[loader] checkpoint has no Mosaic Streaming state; data order will restart", flush=True)
+        elif not isinstance(data_loader_state, dict):
+            raise TypeError("checkpoint data_loader state must be a dict")
+        else:
+            train_loader.load_state_dict(data_loader_state)
     run_started = time.monotonic()
     batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE)
     loader_wait_fractions: list[float] = []
@@ -3068,6 +3087,7 @@ def train(
     # deadlocked training on both H100 and L40S hosts.
     eval_inference: BF16Inference | None = None
     model.train()
+    final_data_loader_state: dict[str, object] | None = None
     try:
         for step in range(start_step, run_stop):
             update = step + 1
@@ -3108,6 +3128,13 @@ def train(
                 )
                 if step_events is not None:
                     step_events[1].record()
+            val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
+            eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
+            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
+            boundary_due = val_due or eval_due or ckpt_due or update == run_stop
+            boundary_data_loader_state = train_loader.state_dict() if boundary_due else None
+            if update == run_stop:
+                final_data_loader_state = boundary_data_loader_state
             if update < run_stop:
                 batch_prefetcher.preload()
             actual_positions += valid_prefixes
@@ -3210,11 +3237,9 @@ def train(
                 window_peak_allocated_gb = 0.0
                 window_peak_reserved_gb = 0.0
                 metrics_window_started = wandb_started
-            val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
-            eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
-            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
             checkpoint_path: Path | None = None
             if val_due or eval_due or ckpt_due:
+                assert boundary_data_loader_state is not None
                 checkpoint_started = time.monotonic()
                 checkpoint_path = save_boundary_checkpoint(
                     run_dir,
@@ -3227,6 +3252,7 @@ def train(
                     milestone=ckpt_due,
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
+                    data_loader_state=boundary_data_loader_state,
                 )
                 previous_checkpoint_s = time.monotonic() - checkpoint_started
             boundary_metrics: dict[str, float] = {}
@@ -3254,6 +3280,8 @@ def train(
                 boundary_metrics.update({f"eval/{name}": value for name, value in values.items()})
             if boundary_metrics:
                 wandb.log({"global_step": update, **boundary_metrics})
+        if final_data_loader_state is None:
+            raise RuntimeError("training ended without capturing Mosaic Streaming state")
         _finalize_training(
             model=model,
             optimizer=optimizer,
@@ -3268,6 +3296,7 @@ def train(
             loader_wait_fractions=loader_wait_fractions,
             update=run_stop,
             actual_loss_positions=actual_positions,
+            data_loader_state=final_data_loader_state,
             smoke=smoke,
             smoke_eval_matchups=smoke_eval_matchups,
         )

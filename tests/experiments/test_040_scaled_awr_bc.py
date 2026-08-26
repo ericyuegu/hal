@@ -510,6 +510,24 @@ def test_training_metrics_log_every_update() -> None:
     assert [update for update in range(1, 4) if update % exp._TRAIN_METRICS_EVERY == 0] == [1, 2, 3]
 
 
+def test_wandb_uses_global_optimizer_step_for_every_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Run:
+        summary: dict[str, object] = {}
+
+    monkeypatch.setattr(exp.wandb, "init", lambda **_kwargs: None)
+    monkeypatch.setattr(exp.wandb, "run", Run())
+    monkeypatch.setattr(exp.wandb, "define_metric", lambda name, **kwargs: calls.append((name, kwargs)))
+
+    exp._init_wandb(_cfg(wandb_log_code=False), "run", None)
+
+    assert calls[:2] == [
+        ("global_step", {}),
+        ("*", {"step_metric": "global_step"}),
+    ]
+
+
 def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
     cfg = _cfg()
     torch.manual_seed(0)
@@ -1000,6 +1018,12 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
         def __iter__(self):
             return iter((batch,))
 
+        def state_dict(self) -> dict[str, object]:
+            return {"epoch": 0, "sample_in_epoch": 1}
+
+        def load_state_dict(self, state: dict[str, object]) -> None:
+            assert state == {"epoch": 0, "sample_in_epoch": 1}
+
     monkeypatch.setattr(exp, "_make_loaders", lambda _cfg, _stats: (Loader(), [batch.batch]))
     monkeypatch.setattr(exp, "make_run_name", lambda *args: "tiny-040")
     monkeypatch.setattr(exp, "setup_run_dir", lambda _name: (tmp_path, tmp_path / "replays"))
@@ -1018,6 +1042,7 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     first = torch.load(tmp_path / "latest.pt", map_location="cpu", weights_only=False)
     assert first["step"] == 0
     assert first["actual_loss_positions"] == 7
+    assert first["data_loader"] == {"epoch": 0, "sample_in_epoch": 1}
     assert (tmp_path / "boundary-step-0000001.pt").is_file()
 
     exp.train(

@@ -1,11 +1,14 @@
 """MDS loaders shared by training experiments."""
 
 import functools
+import hashlib
 import math
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Sized
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -13,8 +16,9 @@ from typing import Literal
 import numpy as np
 import torch
 from streaming import Stream
+from streaming import StreamingDataLoader
 from streaming import StreamingDataset
-from torch.utils.data import DataLoader
+from streaming.base.world import World
 from torch.utils.data import IterableDataset
 from torch.utils.data import get_worker_info
 
@@ -52,6 +56,10 @@ type Window = dict[str, np.ndarray | np.integer]
 type BatchTransform = Callable[[list[Window], TrainBatch], object]
 type ReplayFormat = Literal["full", "policy", "policy-world"]
 
+_STREAMING_EPOCH = "_hal_streaming_epoch"
+_REPLAY_SEED_LOW = "_hal_replay_seed_low"
+_REPLAY_SEED_HIGH = "_hal_replay_seed_high"
+
 
 def _loader_generator(seed: int) -> torch.Generator:
     return torch.Generator().manual_seed(seed)
@@ -66,7 +74,15 @@ class PolicyReplayDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[dict[str, np.ndarray | int]]:
         for sample in self._dataset:
-            yield self._decode(sample)
+            replay_id = sample.get("replay_id")
+            if not isinstance(replay_id, str):
+                raise TypeError(f"policy replay_id must be a string, got {type(replay_id).__name__}")
+            digest = hashlib.blake2b(replay_id.encode(), digest_size=8).digest()
+            decoded = self._decode(sample)
+            decoded[_STREAMING_EPOCH] = int(self._dataset.next_epoch) - 1
+            decoded[_REPLAY_SEED_LOW] = int.from_bytes(digest[:4], "little")
+            decoded[_REPLAY_SEED_HIGH] = int.from_bytes(digest[4:], "little")
+            yield decoded
 
 
 def _resolve_replay_format(replay_format: ReplayFormat | None, compact: bool) -> ReplayFormat:
@@ -257,14 +273,24 @@ class WindowDataset(IterableDataset):
     def __iter__(self) -> Iterator[Window]:
         # Seed per (seed, worker, epoch): reproducible across runs (fixed seed),
         # distinct per worker, and still varying each epoch so a fixed seed
-        # doesn't freeze train to one window per replay. Persistent workers keep
-        # _epoch advancing across epochs.
+        # doesn't freeze train to one window per replay. Compact streaming rows
+        # replace this fallback with a replay-and-epoch seed so a resumed worker
+        # chooses the same window without replaying earlier RNG draws.
         worker = get_worker_info()
         worker_id = worker.id if worker is not None else 0
         rng = np.random.default_rng((self._seed, worker_id, self._epoch))
         self._epoch += 1
         for sample in self._mds:
             check_schema_version(sample, expected=self._schema_version)
+            streaming_seed = tuple(
+                sample.pop(name, None) for name in (_STREAMING_EPOCH, _REPLAY_SEED_LOW, _REPLAY_SEED_HIGH)
+            )
+            if any(value is not None for value in streaming_seed):
+                if not all(isinstance(value, int) for value in streaming_seed):
+                    raise ValueError("streaming replay metadata is incomplete")
+                sample_rng = np.random.default_rng((self._seed, *streaming_seed))
+            else:
+                sample_rng = rng
             if self._replay_transform is not None:
                 sample = self._replay_transform(sample)
             frame = sample["frame"]
@@ -275,11 +301,11 @@ class WindowDataset(IterableDataset):
             # before it. The K chunk-starts keep >=1 real context frame (the
             # cold-start floor: inference always has the just-observed frame), the
             # L_chunk-long chunk inside the episode, and their windows disjoint.
-            for cs in _choose_chunk_starts(T, self.L_ctx, self.L_chunk, self._K, rng):
+            for cs in _choose_chunk_starts(T, self.L_ctx, self.L_chunk, self._K, sample_rng):
                 cs = int(cs)
                 start = cs - self.L_ctx  # virtual window start; < 0 ⇒ left-pad
                 pad = max(0, -start)
-                ego_prefix = "p1" if rng.random() < 0.5 else "p2"
+                ego_prefix = "p1" if sample_rng.random() < 0.5 else "p2"
                 window = _make_window(
                     sample,
                     ego_prefix=ego_prefix,
@@ -346,6 +372,49 @@ def _collate_with_batch_transform(
     return batch_transform(batch, train_batch) if batch_transform is not None else train_batch
 
 
+class ResumableStreamingDataLoader(StreamingDataLoader):
+    """A transformed DataLoader with Mosaic Streaming checkpoint state."""
+
+    def __init__(self, *args, streaming_dataset: StreamingDataset, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._streaming_dataset = streaming_dataset
+        self.num_samples_yielded = 0
+
+    def _get_batch_size(self, batch: object) -> int:
+        if isinstance(batch, TrainBatch):
+            return batch.target.shape[0]
+        transformed = getattr(batch, "batch", None)
+        if isinstance(transformed, TrainBatch):
+            return transformed.target.shape[0]
+        if isinstance(batch, Mapping):
+            try:
+                value = next(iter(batch.values()))
+            except StopIteration as error:
+                raise ValueError("batch is empty") from error
+            if not isinstance(value, Sized):
+                raise TypeError(f"batch value {type(value).__name__} has no length")
+            return len(value)
+        if isinstance(batch, torch.Tensor):
+            return len(batch)
+        if isinstance(batch, Sequence) and batch:
+            value = batch[0]
+            if isinstance(value, Sized):
+                return len(value)
+        raise TypeError(f"cannot determine batch size from {type(batch).__name__}")
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return Mosaic's deterministic position for samples yielded this epoch."""
+        world = World.detect()
+        num_samples = self.num_samples_yielded * world.num_ranks
+        if self._streaming_dataset.replication is not None:
+            num_samples //= self._streaming_dataset.replication
+        return self._streaming_dataset.state_dict(num_samples, False)
+
+    def load_state_dict(self, obj: dict[str, Any]) -> None:
+        """Restore Mosaic's position before workers create their next iterator."""
+        self._streaming_dataset.load_state_dict(obj)
+
+
 def make_loader(
     data_root: str | None,
     split: str,
@@ -375,7 +444,7 @@ def make_loader(
     replay_format: ReplayFormat | None = None,
     replay_transform: ReplayTransform | None = None,
     batch_transform: BatchTransform | None = None,
-) -> DataLoader:
+) -> ResumableStreamingDataLoader:
     """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` by default (preprocessing runs in the
     workers). ``replay_transform`` runs after schema validation and before
@@ -402,12 +471,10 @@ def make_loader(
     before the first batch. Set it to a few shards' worth of samples to start fast;
     smaller trades global-shuffle quality for a lighter startup.
 
-    A plain ``DataLoader`` rather than ``StreamingDataLoader``: the latter's
-    mid-epoch resumption only engages when its dataset *is* a StreamingDataset,
-    but here that dataset is wrapped by ``WindowDataset``, so the wrapper's only
-    live behavior would be a per-batch ``len(batch[0])`` sample count — which a
-    ``TrainBatch`` (not dict/Tensor) can't satisfy. StreamingDataset still owns
-    sharding/shuffle; it's iterated inside the sampler."""
+    ``ResumableStreamingDataLoader`` bridges the transformed ``WindowDataset``
+    back to its underlying ``StreamingDataset``. Its state uses Mosaic's own
+    epoch and sample offset while counting ``TrainBatch`` and experiment batch
+    sizes, so checkpoints retain the exact shuffled replay position."""
     # ``predownload`` is how many samples each worker fetches ahead — the shard-prefetch
     # depth that pipelines remote (R2) downloads. StreamingDataset ties its default to
     # batch_size (``8 * batch_size``) and we pass batch_size=1, so it was only 8: the fast
@@ -462,8 +529,9 @@ def make_loader(
     # once in the main process before workers spawn (module stays import-clean for workers).
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
-    return DataLoader(
+    return ResumableStreamingDataLoader(
         sampler,
+        streaming_dataset=mds,
         batch_size=batch_size,
         num_workers=num_workers,
         collate_fn=collate,

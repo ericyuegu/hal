@@ -1,3 +1,4 @@
+import gc
 import hashlib
 import json
 import subprocess
@@ -13,12 +14,14 @@ import numpy as np
 import pytest
 import torch
 from streaming import MDSWriter
+from streaming import StreamingDataset
 from streaming.base.shared.memory import SharedMemory
 from torch.utils.data import DataLoader
 
 import hal.training.dataloader as dataloader
 from hal.data.schema import SCHEMA_VERSION
 from hal.streams import StreamSource
+from hal.training.dataloader import ResumableStreamingDataLoader
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
@@ -220,6 +223,62 @@ def test_data_loader_iteration_uses_only_its_private_rng() -> None:
     list(val)
 
     assert torch.equal(torch.random.get_rng_state(), before)
+
+
+@pytest.mark.parametrize("num_workers", [0, 2])
+def test_resumable_loader_restores_mosaic_sample_order(tmp_path: Path, num_workers: int) -> None:
+    _write_scalar_mds(tmp_path, "train", range(24))
+
+    def make_resumable_loader() -> tuple[StreamingDataset, ResumableStreamingDataLoader]:
+        dataset = StreamingDataset(
+            local=str(tmp_path / "train"),
+            batch_size=1,
+            shuffle=True,
+            shuffle_seed=17,
+            shuffle_block_size=8,
+        )
+        loader = ResumableStreamingDataLoader(
+            dataset,
+            streaming_dataset=dataset,
+            batch_size=4,
+            num_workers=num_workers,
+        )
+        return dataset, loader
+
+    baseline_dataset, baseline_loader = make_resumable_loader()
+    baseline = [int(value) for batch in baseline_loader for value in batch["value"]]
+    del baseline_loader, baseline_dataset
+    gc.collect()
+
+    partial_dataset, partial_loader = make_resumable_loader()
+    partial_iterator = iter(partial_loader)
+    prefix = [int(value) for _ in range(2) for value in next(partial_iterator)["value"]]
+    state = partial_loader.state_dict()
+    del partial_iterator, partial_loader, partial_dataset
+    gc.collect()
+
+    resumed_dataset, resumed_loader = make_resumable_loader()
+    resumed_loader.load_state_dict(state)
+    suffix = [int(value) for batch in resumed_loader for value in batch["value"]]
+
+    assert prefix + suffix == baseline
+
+
+def _streaming_fake_mds(start: int = 0) -> list[dict[str, np.ndarray | int]]:
+    samples = _fake_mds()
+    for index, sample in enumerate(samples):
+        digest = hashlib.blake2b(f"replay-{index}".encode(), digest_size=8).digest()
+        sample[dataloader._STREAMING_EPOCH] = 0
+        sample[dataloader._REPLAY_SEED_LOW] = int.from_bytes(digest[:4], "little")
+        sample[dataloader._REPLAY_SEED_HIGH] = int.from_bytes(digest[4:], "little")
+    return samples[start:]
+
+
+def test_streaming_window_randomness_is_stable_after_resume() -> None:
+    baseline = _fingerprint(WindowDataset(_streaming_fake_mds(), L_CTX, L_CHUNK, seed=7))
+    resumed = _fingerprint(WindowDataset(_streaming_fake_mds(start=3), L_CTX, L_CHUNK, seed=7))
+
+    assert resumed == baseline[3:]
 
 
 def _train_batch(index: int) -> TrainBatch:
