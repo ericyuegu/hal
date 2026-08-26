@@ -1,6 +1,7 @@
 """MDS loaders shared by training experiments."""
 
 import functools
+import hashlib
 import math
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -9,11 +10,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Literal
+from typing import cast
 
 import numpy as np
 import torch
 from streaming import Stream
+from streaming import StreamingDataLoader
 from streaming import StreamingDataset
+from streaming.base.world import World
 from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 from torch.utils.data import get_worker_info
@@ -46,11 +50,13 @@ VAL_L_CHUNK = 16
 # Public loader seams. A replay transform receives a schema-checked full replay
 # and returns the replay that the window sampler reads. A batch transform receives
 # the source windows and the normal TrainBatch. It can return an experiment batch.
-type ReplayRow = dict[str, np.ndarray | int]
+type ReplayRow = dict[str, np.ndarray | int | str]
 type ReplayTransform = Callable[[ReplayRow], ReplayRow]
 type Window = dict[str, np.ndarray | np.integer]
 type BatchTransform = Callable[[list[Window], TrainBatch], object]
 type ReplayFormat = Literal["full", "policy", "policy-world"]
+
+_STREAMING_REPLAY_ID = "_streaming_replay_id"
 
 
 def _loader_generator(seed: int) -> torch.Generator:
@@ -64,9 +70,51 @@ class PolicyReplayDataset(IterableDataset):
         self._dataset = dataset
         self._decode = decode_policy_replay if replay_format == "policy" else decode_policy_world_replay
 
-    def __iter__(self) -> Iterator[dict[str, np.ndarray | int]]:
+    def __iter__(self) -> Iterator[ReplayRow]:
         for sample in self._dataset:
-            yield self._decode(sample)
+            decoded = cast(ReplayRow, self._decode(sample))
+            decoded[_STREAMING_REPLAY_ID] = str(sample["replay_id"])
+            yield decoded
+
+
+class ResumableStreamingDataLoader(StreamingDataLoader):
+    """Mosaic loader state for a deterministic one-window wrapper pipeline."""
+
+    def __init__(
+        self,
+        *args,
+        streaming_dataset: StreamingDataset,
+        window_dataset: WindowDataset,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.streaming_dataset = streaming_dataset
+        self.window_dataset = window_dataset
+
+    def _get_batch_size(self, batch: object) -> int:
+        target = getattr(batch, "target", None)
+        if isinstance(target, torch.Tensor):
+            return len(target)
+        return super()._get_batch_size(batch)
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return Mosaic's cursor at the last batch yielded to the caller."""
+        world = World.detect()
+        num_samples = self.num_samples_yielded * world.num_ranks
+        if self.streaming_dataset.replication is not None:
+            num_samples //= self.streaming_dataset.replication
+        return {
+            "schema": 1,
+            "mds": self.streaming_dataset.state_dict(num_samples, from_beginning=False),
+        }
+
+    def load_state_dict(self, obj: dict[str, Any]) -> None:
+        """Restore Mosaic's cursor before workers and their window RNGs start."""
+        if obj.get("schema") != 1:
+            raise ValueError(f"unsupported streaming-loader state schema {obj.get('schema')!r}")
+        mds_state = obj["mds"]
+        self.streaming_dataset.load_state_dict(mds_state)
+        self.window_dataset.resume_epoch(int(mds_state["epoch"]))
 
 
 def _resolve_replay_format(replay_format: ReplayFormat | None, compact: bool) -> ReplayFormat:
@@ -91,6 +139,7 @@ def _make_streaming_dataset(
     shuffle_block_size: int | None,
     predownload: int | None,
     source_weights: Sequence[float] | None = None,
+    download_retry: int = 2,
 ) -> tuple[StreamingDataset, tuple[str, ...]]:
     """Build one single- or multi-stream MDS dataset with strict mode selection."""
     if sources is not None:
@@ -116,6 +165,7 @@ def _make_streaming_dataset(
                 local=str(source.local_root),
                 split=split,
                 proportion=proportion,
+                download_retry=download_retry,
             )
             for source, proportion in zip(sources, proportions, strict=True)
         ]
@@ -135,6 +185,7 @@ def _make_streaming_dataset(
             "local": str(Path(data_root) / split),
             "cache_limit": cache_limit if remote else None,
             "predownload": predownload if remote else None,
+            "download_retry": download_retry,
         }
     if shuffle_seed is not None:
         kwargs["shuffle_seed"] = shuffle_seed
@@ -242,6 +293,7 @@ class WindowDataset(IterableDataset):
         schema_version: int = SCHEMA_VERSION,
         projection: FeatureProjection | None = None,
         replay_transform: ReplayTransform | None = None,
+        require_one_window_per_replay: bool = False,
     ) -> None:
         self._mds = mds
         self.L_ctx = L_ctx
@@ -252,18 +304,28 @@ class WindowDataset(IterableDataset):
         self._schema_version = schema_version
         self._projection = projection
         self._replay_transform = replay_transform
+        self._require_one_window_per_replay = require_one_window_per_replay
         self._epoch = 0
 
+    def resume_epoch(self, epoch: int) -> None:
+        """Set the Mosaic epoch used by replay-stable window sampling."""
+        if epoch < 0:
+            raise ValueError(f"epoch must be non-negative, got {epoch}")
+        self._epoch = epoch
+
     def __iter__(self) -> Iterator[Window]:
-        # Seed per (seed, worker, epoch): reproducible across runs (fixed seed),
-        # distinct per worker, and still varying each epoch so a fixed seed
-        # doesn't freeze train to one window per replay. Persistent workers keep
-        # _epoch advancing across epochs.
+        # Compact rows use replay identity plus Mosaic epoch, so mid-epoch resume
+        # reproduces augmentation independently of worker scheduling. Full rows
+        # retain the historical per-worker stream. Persistent workers keep the
+        # epoch advancing when the DataLoader is iterated again.
         worker = get_worker_info()
         worker_id = worker.id if worker is not None else 0
-        rng = np.random.default_rng((self._seed, worker_id, self._epoch))
+        worker_rng = np.random.default_rng((self._seed, worker_id, self._epoch))
+        epoch = self._epoch
         self._epoch += 1
         for sample in self._mds:
+            sample = dict(sample)
+            replay_id = sample.pop(_STREAMING_REPLAY_ID, None)
             check_schema_version(sample, expected=self._schema_version)
             if self._replay_transform is not None:
                 sample = self._replay_transform(sample)
@@ -275,7 +337,14 @@ class WindowDataset(IterableDataset):
             # before it. The K chunk-starts keep >=1 real context frame (the
             # cold-start floor: inference always has the just-observed frame), the
             # L_chunk-long chunk inside the episode, and their windows disjoint.
-            for cs in _choose_chunk_starts(T, self.L_ctx, self.L_chunk, self._K, rng):
+            rng = _stable_window_rng(self._seed, epoch, replay_id) if replay_id is not None else worker_rng
+            chunk_starts = _choose_chunk_starts(T, self.L_ctx, self.L_chunk, self._K, rng)
+            if self._require_one_window_per_replay and len(chunk_starts) != 1:
+                raise ValueError(
+                    f"resumable loader requires exactly one window per replay, got {len(chunk_starts)} "
+                    f"for replay {replay_id!r} with {T} frames"
+                )
+            for cs in chunk_starts:
                 cs = int(cs)
                 start = cs - self.L_ctx  # virtual window start; < 0 ⇒ left-pad
                 pad = max(0, -start)
@@ -290,6 +359,13 @@ class WindowDataset(IterableDataset):
                 )
                 window["ctx_pad"] = np.int64(min(pad, self.L_ctx))
                 yield window
+
+
+def _stable_window_rng(seed: int, epoch: int, replay_id: str) -> np.random.Generator:
+    """Return a process-independent RNG for one replay in one Mosaic epoch."""
+    digest = hashlib.blake2b(replay_id.encode(), digest_size=8).digest()
+    identity = int.from_bytes(digest, "little")
+    return np.random.default_rng((seed, epoch, identity & 0xFFFFFFFF, identity >> 32))
 
 
 def collate_windows(batch: list[dict]) -> dict[str, np.ndarray]:
@@ -366,6 +442,9 @@ def make_loader(
     prefetch_factor: int = 4,
     drop_last: bool = False,
     predownload: int | None = None,
+    download_retry: int = 2,
+    timeout: float = 0,
+    resumable: bool = False,
     pin_memory: bool | None = None,
     windows_per_replay: int = 1,
     schema_version: int = SCHEMA_VERSION,
@@ -402,12 +481,10 @@ def make_loader(
     before the first batch. Set it to a few shards' worth of samples to start fast;
     smaller trades global-shuffle quality for a lighter startup.
 
-    A plain ``DataLoader`` rather than ``StreamingDataLoader``: the latter's
-    mid-epoch resumption only engages when its dataset *is* a StreamingDataset,
-    but here that dataset is wrapped by ``WindowDataset``, so the wrapper's only
-    live behavior would be a per-batch ``len(batch[0])`` sample count — which a
-    ``TrainBatch`` (not dict/Tensor) can't satisfy. StreamingDataset still owns
-    sharding/shuffle; it's iterated inside the sampler."""
+    ``resumable=True`` routes Mosaic's epoch/sample cursor through the compact
+    replay wrappers. It requires one output window per replay; the custom Mosaic
+    loader counts custom ``TrainBatch`` objects and restores the window epoch as
+    well as StreamingDataset's raw sample position."""
     # ``predownload`` is how many samples each worker fetches ahead — the shard-prefetch
     # depth that pipelines remote (R2) downloads. StreamingDataset ties its default to
     # batch_size (``8 * batch_size``) and we pass batch_size=1, so it was only 8: the fast
@@ -418,6 +495,10 @@ def make_loader(
     if predownload is None:
         predownload = 8 * batch_size if remote or sources is not None else None
     resolved_format = _resolve_replay_format(replay_format, compact)
+    if resumable and resolved_format == "full":
+        raise ValueError("resumable window loading requires a compact replay format with replay identities")
+    if resumable and windows_per_replay != 1:
+        raise ValueError("resumable window loading requires windows_per_replay=1")
     mds, _ = _make_streaming_dataset(
         data_root,
         split,
@@ -429,6 +510,7 @@ def make_loader(
         cache_limit=cache_limit,
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
+        download_retry=download_retry,
     )
     rows = PolicyReplayDataset(mds, resolved_format) if resolved_format != "full" else mds
     sampler = WindowDataset(
@@ -440,6 +522,7 @@ def make_loader(
         schema_version=schema_version,
         projection=projection,
         replay_transform=replay_transform,
+        require_one_window_per_replay=resumable,
     )
     collate = functools.partial(
         _collate_with_batch_transform,
@@ -462,6 +545,21 @@ def make_loader(
     # once in the main process before workers spawn (module stays import-clean for workers).
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
+    if resumable:
+        return ResumableStreamingDataLoader(
+            sampler,
+            streaming_dataset=mds,
+            window_dataset=sampler,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            collate_fn=collate,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+            generator=_loader_generator(seed),
+            timeout=timeout if num_workers > 0 else 0,
+        )
     return DataLoader(
         sampler,
         batch_size=batch_size,
@@ -472,4 +570,5 @@ def make_loader(
         drop_last=drop_last,
         pin_memory=pin_memory,
         generator=_loader_generator(seed),
+        timeout=timeout if num_workers > 0 else 0,
     )

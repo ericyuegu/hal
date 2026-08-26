@@ -267,4 +267,12 @@ def test_optimizer_hyperparameters_remain_the_040_baseline() -> None:
     assert cfg.adam_weight_decay == 0.0071
     assert exp._ADAM_UPDATE_CLIP_THRESHOLD == 1.0
     assert cfg.grad_clip == 1.0
-    assert exp._EXPERIMENT_ID == "041_architectural_stability_v1"
+    assert exp._EXPERIMENT_ID == "041_architectural_stability_v2"
+
+
+def test_training_checkpoints_are_resumable_every_two_thousand_updates() -> None:
+    cfg = exp.TrainConfig()
+
+    assert cfg.ckpt_every == 2000
+    assert cfg.download_retry == 8
+    assert cfg.loader_timeout_s == 300.0

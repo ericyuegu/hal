@@ -6,8 +6,11 @@ from multiprocessing import resource_tracker
 from typing import Any
 
 import streaming.base.constant as streaming_constants
+import streaming.base.dataset as streaming_dataset
 import streaming.base.shared.memory as streaming_memory
 import streaming.base.shared.prefix as streaming_prefix
+
+_ORIGINAL_PREPARE_SHARD = streaming_dataset.StreamingDataset.prepare_shard
 
 
 def _register(self: streaming_memory.SharedMemory, name: str, resource_type: str) -> Any:
@@ -78,8 +81,25 @@ def _check_and_find_without_fd_leak(
     return prefix_int
 
 
+def _prepare_shard_without_poisoned_state(
+    self: streaming_dataset.StreamingDataset,
+    shard_id: int,
+    blocking: bool = True,
+) -> None:
+    """Return a failed download to REMOTE instead of stranding waiters."""
+    try:
+        _ORIGINAL_PREPARE_SHARD(self, shard_id, blocking)
+    except BaseException:
+        if self._shard_states[shard_id] == streaming_dataset._ShardState.PREPARING:
+            self._shard_states[shard_id] = streaming_dataset._ShardState.REMOTE
+        raise
+
+
 def patch_streaming() -> None:
     """Apply HAL's Python 3.14 and shared-memory compatibility fixes."""
-    streaming_memory.SharedMemory.fix_register = _register
-    streaming_memory.SharedMemory.fix_unregister = _unregister
-    streaming_prefix._check_and_find = _check_and_find_without_fd_leak
+    streaming_memory.SharedMemory.fix_register = _register  # ty: ignore[invalid-assignment]
+    streaming_memory.SharedMemory.fix_unregister = _unregister  # ty: ignore[invalid-assignment]
+    streaming_prefix._check_and_find = _check_and_find_without_fd_leak  # ty: ignore[invalid-assignment]
+    streaming_dataset.StreamingDataset.prepare_shard = (  # ty: ignore[invalid-assignment]
+        _prepare_shard_without_poisoned_state
+    )

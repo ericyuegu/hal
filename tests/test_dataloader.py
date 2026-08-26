@@ -13,12 +13,15 @@ import numpy as np
 import pytest
 import torch
 from streaming import MDSWriter
+from streaming import StreamingDataset
 from streaming.base.shared.memory import SharedMemory
 from torch.utils.data import DataLoader
 
+import hal.data.streaming_compat as streaming_compat
 import hal.training.dataloader as dataloader
 from hal.data.schema import SCHEMA_VERSION
 from hal.streams import StreamSource
+from hal.training.dataloader import ResumableStreamingDataLoader
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
@@ -386,6 +389,144 @@ def test_windows_vary_across_epochs() -> None:
     epoch0 = _fingerprint(s)
     epoch1 = _fingerprint(s)
     assert epoch0 != epoch1
+
+
+def test_replay_identity_makes_mid_epoch_window_resume_exact() -> None:
+    rows = _fake_mds(n_samples=8)
+    for index, row in enumerate(rows):
+        row[dataloader._STREAMING_REPLAY_ID] = f"replay-{index}"  # type: ignore[assignment]
+
+    expected = _fingerprint(WindowDataset(rows, L_CTX, L_CHUNK, seed=17))[3:]
+    resumed = WindowDataset(rows[3:], L_CTX, L_CHUNK, seed=17)
+    resumed.resume_epoch(0)
+
+    assert _fingerprint(resumed) == expected
+
+
+class _StatefulRows(torch.utils.data.IterableDataset):
+    def __init__(self) -> None:
+        self.resumed_epoch: int | None = None
+
+    def __iter__(self):
+        yield from range(8)
+
+    def resume_epoch(self, epoch: int) -> None:
+        self.resumed_epoch = epoch
+
+
+class _ValueRows(torch.utils.data.IterableDataset):
+    def __init__(self, dataset: StreamingDataset) -> None:
+        self.dataset = dataset
+        self.resumed_epoch: int | None = None
+
+    def __iter__(self):
+        for sample in self.dataset:
+            yield int(sample["value"])
+
+    def resume_epoch(self, epoch: int) -> None:
+        self.resumed_epoch = epoch
+
+
+class _MosaicStateStub:
+    replication = None
+
+    def __init__(self) -> None:
+        self.saved_num_samples: int | None = None
+        self.loaded: dict | None = None
+
+    def state_dict(self, num_samples: int, from_beginning: bool) -> dict:
+        assert not from_beginning
+        self.saved_num_samples = num_samples
+        return {"epoch": 3, "sample_in_epoch": 11}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.loaded = state
+
+
+def test_resumable_streaming_loader_routes_mosaic_cursor_through_wrapper() -> None:
+    rows = _StatefulRows()
+    mds = _MosaicStateStub()
+    loader = ResumableStreamingDataLoader(
+        rows,
+        streaming_dataset=mds,  # type: ignore[arg-type]
+        window_dataset=rows,  # type: ignore[arg-type]
+        batch_size=2,
+        num_workers=0,
+    )
+    next(iter(loader))
+
+    state = loader.state_dict()
+
+    assert mds.saved_num_samples == 2
+    restored_rows = _StatefulRows()
+    restored_mds = _MosaicStateStub()
+    restored = ResumableStreamingDataLoader(
+        restored_rows,
+        streaming_dataset=restored_mds,  # type: ignore[arg-type]
+        window_dataset=restored_rows,  # type: ignore[arg-type]
+        batch_size=2,
+        num_workers=0,
+    )
+    restored.load_state_dict(state)
+    assert restored_mds.loaded == state["mds"]
+    assert restored_rows.resumed_epoch == 3
+
+
+def test_resumable_streaming_loader_restores_exact_mosaic_sequence(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _write_scalar_mds(first_root, "train", range(40))
+    _write_scalar_mds(second_root, "train", range(40))
+
+    def make(root: Path) -> ResumableStreamingDataLoader:
+        mds = StreamingDataset(
+            local=str(root / "train"),
+            batch_size=1,
+            shuffle=True,
+            shuffle_seed=91,
+            shuffle_block_size=16,
+        )
+        rows = _ValueRows(mds)
+        return ResumableStreamingDataLoader(
+            rows,
+            streaming_dataset=mds,
+            window_dataset=rows,  # type: ignore[arg-type]
+            batch_size=2,
+            num_workers=0,
+        )
+
+    uninterrupted = make(first_root)
+    iterator = iter(uninterrupted)
+    for _ in range(3):
+        next(iterator)
+    state = uninterrupted.state_dict()
+    expected = [next(iterator) for _ in range(4)]
+
+    resumed = make(second_root)
+    resumed.load_state_dict(state)
+    actual_iterator = iter(resumed)
+    actual = [next(actual_iterator) for _ in range(4)]
+
+    for got, want in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, want)
+
+
+def test_failed_streaming_download_does_not_poison_shared_shard_state(monkeypatch) -> None:
+    remote = streaming_compat.streaming_dataset._ShardState.REMOTE
+    preparing = streaming_compat.streaming_dataset._ShardState.PREPARING
+
+    class Dataset:
+        _shard_states = np.array([remote], dtype=np.uint8)
+
+    def fail(dataset, shard_id, blocking):
+        del blocking
+        dataset._shard_states[shard_id] = preparing
+        raise RuntimeError("transient object-store failure")
+
+    monkeypatch.setattr(streaming_compat, "_ORIGINAL_PREPARE_SHARD", fail)
+    with pytest.raises(RuntimeError, match="object-store"):
+        streaming_compat._prepare_shard_without_poisoned_state(Dataset(), 0)  # type: ignore[arg-type]
+    assert Dataset._shard_states[0] == remote
 
 
 def test_replay_transform_runs_after_validation_and_before_windowing() -> None:
