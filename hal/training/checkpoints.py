@@ -138,8 +138,8 @@ def download_latest(run_name: str, dest_dir: Path, *, name: str = "latest.pt", p
     Returns the local path, or ``None`` if the object doesn't exist (fresh run).
     """
     client = r2.client()
-    dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         client.download_file(r2.bucket(), f"{prefix}/{run_name}/{name}", str(dest))
     except ClientError as e:

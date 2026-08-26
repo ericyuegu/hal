@@ -91,6 +91,27 @@ def test_uploader_treats_remote_keys_as_distinct(tmp_path: Path, monkeypatch: py
     assert len(client.uploaded) == 2
 
 
+def test_download_latest_creates_nested_checkpoint_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Client:
+        def download_file(self, bucket: str, key: str, destination: str) -> None:
+            assert bucket == "test-bucket"
+            assert key == "runs/run/checkpoints/step-0008192.pt"
+            Path(destination).write_bytes(b"checkpoint")
+
+    monkeypatch.setattr(checkpoints.r2, "bucket", lambda: "test-bucket")
+    monkeypatch.setattr(checkpoints.r2, "client", Client)
+
+    path = checkpoints.download_latest(
+        "run",
+        tmp_path / "run",
+        name="checkpoints/step-0008192.pt",
+    )
+
+    assert path is not None
+    assert path == tmp_path / "run/checkpoints/step-0008192.pt"
+    assert path.read_bytes() == b"checkpoint"
+
+
 def test_upload_tree_only_queues_new_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _Client()
     uploader = _uploader(monkeypatch, client)

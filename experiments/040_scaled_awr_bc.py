@@ -15,6 +15,7 @@ Run:
     uv run experiments/040_scaled_awr_bc.py train
     uv run experiments/040_scaled_awr_bc.py benchmark-train-step
     uv run experiments/040_scaled_awr_bc.py eval --checkpoint runs/<run>/final.pt
+    uv run experiments/040_scaled_awr_bc.py eval --run <run> --checkpoint checkpoints/<step>.pt
 """
 
 import contextlib
@@ -44,7 +45,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
-import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -53,6 +53,7 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
+import wandb
 from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
@@ -75,6 +76,7 @@ from hal.sim.rollout import covering_power_of_two
 from hal.training import returns as returns_lib
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
+from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
@@ -127,6 +129,7 @@ _PRODUCTION_OVERRIDE_FIELDS = frozenset(
         "compile_temporal",
         "compile_trunk",
         "compiled_inference_bucket",
+        "eval_max_parallel",
         "gradient_hist_every",
         "layer_rms_batch_size",
         "layer_rms_every",
@@ -2440,8 +2443,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     if wandb.run is None:
         return
-    wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
-    wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
+    wandb.define_metric("eval/*", step_metric="global_step")
     wandb.run.summary["nll_semantics"] = (
         "train/loss is the weighted policy loss in bits; train/total_objective adds the beta-normalized "
         "value MSE; *_unweighted and val metrics are unweighted"
@@ -3194,6 +3196,22 @@ def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfi
     return model, cfg, stats, state
 
 
+def _upload_eval_evidence(run_name: str, replay_dir: Path) -> None:
+    uploader = BackgroundUploader(run_name)
+    uploader.upload_tree(replay_dir, base=(Path("runs") / run_name).resolve())
+    uploader.close()
+
+
+def _backfill_eval_metrics(wandb_id: str, update: int, values: dict[str, float]) -> None:
+    wandb.init(project="hal", id=wandb_id, resume="must")
+    try:
+        wandb.define_metric("eval/*", step_metric="global_step")
+        metrics = {f"eval/{name}": value for name, value in values.items()}
+        wandb.log({"global_step": update, "eval/backfilled": 1, **metrics})
+    finally:
+        wandb.finish()
+
+
 def eval_checkpoint(
     path: str,
     *,
@@ -3202,6 +3220,8 @@ def eval_checkpoint(
     eager: bool = False,
     max_parallel: int | None = None,
     output_name: str | None = None,
+    upload_run: str | None = None,
+    backfill_wandb: bool = False,
 ) -> dict[str, float]:
     model, cfg, stats, state = load_checkpoint(path)
     cfg = replace(
@@ -3211,7 +3231,11 @@ def eval_checkpoint(
     )
     validate_config(cfg)
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    default_name = "eval_replays_s6" if horizon == 6 else "eval_replays"
+    update = int(state["step"]) + 1
+    if upload_run is not None:
+        default_name = f"eval_backfill_step_{update:07d}_s{horizon}"
+    else:
+        default_name = "eval_replays_s6" if horizon == 6 else "eval_replays"
     if output_name is not None and (Path(output_name).name != output_name or output_name in ("", ".", "..")):
         raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
     replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
@@ -3225,8 +3249,24 @@ def eval_checkpoint(
         checkpoint_sha256=_checkpoint_sha256(Path(path)),
     )
     require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
-    print(f"[eval] step={state['step']} horizon={horizon}: {values}", flush=True)
+    if upload_run is not None:
+        _upload_eval_evidence(upload_run, replay_dir)
+    if backfill_wandb:
+        wandb_id = state.get("wandb_id")
+        if not isinstance(wandb_id, str):
+            raise RuntimeError("checkpoint has no W&B run id to backfill")
+        _backfill_eval_metrics(wandb_id, update, values)
+    print(f"[eval] step={update} horizon={horizon}: {values}", flush=True)
     return values
+
+
+def _resolve_eval_checkpoint(checkpoint: str, run: str | None) -> Path:
+    if run is None:
+        return Path(checkpoint)
+    path = download_latest(run, Path("runs") / run, name=checkpoint)
+    if path is None:
+        raise SystemExit(f"no {checkpoint!r} for run {run!r}")
+    return path
 
 
 @dataclass
@@ -3237,16 +3277,19 @@ class TrainArgs:
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
+    eval_max_parallel: int | None = None
 
 
 @dataclass
 class EvalArgs:
     checkpoint: str
+    run: str | None = None
     exec_horizon: int | None = None
     n_matchups: int | None = None
     eager: bool = False
     max_parallel: int | None = None
     output_name: str | None = None
+    backfill_wandb: bool = False
 
 
 @dataclass
@@ -3286,13 +3329,16 @@ def main(args: Command) -> None:
         )
         return
     if isinstance(args, EvalArgs):
+        checkpoint = _resolve_eval_checkpoint(args.checkpoint, args.run)
         eval_checkpoint(
-            args.checkpoint,
+            str(checkpoint),
             exec_horizon=args.exec_horizon,
             n_matchups=args.n_matchups,
             eager=args.eager,
             max_parallel=args.max_parallel,
             output_name=args.output_name,
+            upload_run=args.run,
+            backfill_wandb=args.backfill_wandb,
         )
         return
     if isinstance(args, SelfPlayArgs):
@@ -3318,6 +3364,8 @@ def main(args: Command) -> None:
             raise SystemExit(f"no latest.pt for run {args.resume!r}")
         resume_run = args.resume
         cfg = config_from_state(resume_state["cfg"])
+    if args.eval_max_parallel is not None:
+        cfg = replace(cfg, eval_max_parallel=args.eval_max_parallel)
     stats = load_stats(cfg)
     train(
         cfg,

@@ -626,6 +626,57 @@ def test_training_loader_uses_standard_worker_collation(monkeypatch: pytest.Monk
     assert {exp.EGO_RETURN, exp.EGO_RETURN_VALID} <= projection.columns
 
 
+def test_resume_can_reduce_eval_parallelism(monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint = {
+        "cfg": exp._checkpoint_config(_cfg(eval_max_parallel=32)),
+        "step": 7,
+    }
+    calls: list[tuple[exp.TrainConfig, str | None, dict | None]] = []
+    monkeypatch.setattr(exp, "load_for_resume", lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+
+    def record_train(cfg, _stats, **kwargs):
+        calls.append((cfg, kwargs["resume_run"], kwargs["resume_state"]))
+
+    monkeypatch.setattr(exp, "train", record_train)
+
+    exp.main(exp.TrainArgs(resume="run", eval_max_parallel=16))
+
+    expected = replace(_cfg(eval_max_parallel=32), eval_max_parallel=16)
+    assert calls == [(expected, "run", checkpoint)]
+
+
+def test_eval_can_download_upload_and_backfill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    checkpoint = tmp_path / "step.pt"
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(exp, "_resolve_eval_checkpoint", lambda *_args: checkpoint)
+    monkeypatch.setattr(exp, "eval_checkpoint", lambda path, **kwargs: calls.append((path, kwargs)))
+
+    exp.main(
+        exp.EvalArgs(
+            checkpoint="checkpoints/step-0008192.pt",
+            run="run",
+            max_parallel=16,
+            backfill_wandb=True,
+        )
+    )
+
+    assert calls == [
+        (
+            str(checkpoint),
+            {
+                "exec_horizon": None,
+                "n_matchups": None,
+                "eager": False,
+                "max_parallel": 16,
+                "output_name": None,
+                "upload_run": "run",
+                "backfill_wandb": True,
+            },
+        )
+    ]
+
+
 def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
     with pytest.raises(ValueError, match="batch_size must be a positive integer"):
         exp.validate_config(_cfg(batch_size=0))
@@ -645,6 +696,7 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
     exp.validate_production_config(
         exp.TrainConfig(
             num_workers=8,
+            eval_max_parallel=16,
             cache_limit_gb=512,
             push_to_r2=False,
             gradient_hist_every=128,
