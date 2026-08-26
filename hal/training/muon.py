@@ -1,3 +1,6 @@
+import math
+from collections.abc import Mapping
+
 import torch
 import torch.distributed as dist
 from torch import Tensor
@@ -188,8 +191,10 @@ def _foreach_adam_step(
     betas: tuple[float, float],
     eps: float,
     weight_decay: float,
-) -> None:
-    """Apply the existing AdamW formula with multi-tensor CUDA kernels."""
+    update_clip_threshold: float | None,
+    diagnostic_names: Mapping[int, str],
+) -> dict[str, Tensor]:
+    """Apply AdamW, optionally clipping each tensor's adaptive update."""
     parameter_tensors: list[Tensor] = list(parameters)
     gradients = [parameter.grad for parameter in parameters]
     if any(gradient is None for gradient in gradients):
@@ -197,6 +202,24 @@ def _foreach_adam_step(
     gradients = [gradient for gradient in gradients if gradient is not None]
     first_moments = [state["exp_avg"] for state in states]
     second_moments = [state["exp_avg_sq"] for state in states]
+
+    previous_step = step - 1
+    previous_bias_correction = 1 - betas[1] ** previous_step
+    previous_rms_ratios = {
+        id(parameter): _adam_rms_ratio(
+            gradient,
+            second_moment,
+            bias_correction=previous_bias_correction,
+            eps=eps,
+        )
+        for parameter, gradient, second_moment in zip(
+            parameters,
+            gradients,
+            second_moments,
+            strict=True,
+        )
+        if id(parameter) in diagnostic_names
+    }
 
     torch._foreach_lerp_(first_moments, gradients, 1 - betas[0])
     squared_gradients = torch._foreach_mul(gradients, gradients)
@@ -207,9 +230,101 @@ def _foreach_adam_step(
     torch._foreach_add_(denominators, eps)
     updates = torch._foreach_div(updates, denominators)
 
+    tracked = any(id(parameter) in diagnostic_names for parameter in parameters)
+    if update_clip_threshold is None and not tracked:
+        if weight_decay:
+            torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
+        torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
+        return {}
+
+    second_moment_bias_correction = 1 - betas[1] ** step
+    rms_ratios = [
+        _adam_rms_ratio(
+            gradient,
+            second_moment,
+            bias_correction=second_moment_bias_correction,
+            eps=eps,
+        )
+        for gradient, second_moment in zip(gradients, second_moments, strict=True)
+    ]
+    if update_clip_threshold is None:
+        clip_factors = [torch.ones((), device=parameter.device) for parameter in parameters]
+    else:
+        clip_factors = [(update_clip_threshold / rms_ratio).clamp(max=1.0) for rms_ratio in rms_ratios]
+
+    diagnostics: dict[str, Tensor] = {}
+    for parameter, gradient, update, rms_ratio, clip_factor in zip(
+        parameters,
+        gradients,
+        updates,
+        rms_ratios,
+        clip_factors,
+        strict=True,
+    ):
+        name = diagnostic_names.get(id(parameter))
+        if name is None:
+            continue
+        parameter_rms = _tensor_rms(parameter)
+        full_update = update + weight_decay * parameter
+        prospective_unclipped_update_rms = lr * _tensor_rms(full_update)
+        prospective_update_rms = clip_factor * prospective_unclipped_update_rms
+        prefix = f"optimizer/{name}"
+        diagnostics.update(
+            {
+                f"{prefix}/grad_rms": _tensor_rms(gradient),
+                f"{prefix}/grad_abs_max": gradient.detach().float().abs().amax(),
+                f"{prefix}/rms_ratio_previous": previous_rms_ratios[id(parameter)],
+                f"{prefix}/rms_ratio_updated": rms_ratio,
+                f"{prefix}/adam_direction_rms": _tensor_rms(update),
+                f"{prefix}/parameter_rms": parameter_rms,
+                f"{prefix}/prospective_unclipped_update_rms": prospective_unclipped_update_rms,
+                f"{prefix}/prospective_update_rms": prospective_update_rms,
+                f"{prefix}/update_parameter_rms_ratio": prospective_update_rms
+                / parameter_rms.clamp_min(torch.finfo(torch.float32).tiny),
+                f"{prefix}/update_clip_active": (clip_factor < 1).float(),
+                f"{prefix}/update_clip_factor": clip_factor,
+            }
+        )
+
+    if update_clip_threshold is None:
+        if weight_decay:
+            torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
+        torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
+        return diagnostics
+
     if weight_decay:
-        torch._foreach_mul_(parameter_tensors, 1 - lr * weight_decay)
-    torch._foreach_add_(parameter_tensors, updates, alpha=-lr)
+        updates = torch._foreach_add(updates, parameter_tensors, alpha=weight_decay)
+    clipped_updates = [update * clip_factor for update, clip_factor in zip(updates, clip_factors, strict=True)]
+    torch._foreach_add_(parameter_tensors, clipped_updates, alpha=-lr)
+    return diagnostics
+
+
+def _tensor_rms(tensor: Tensor) -> Tensor:
+    """Return a float32 root-mean-square scalar."""
+    return tensor.detach().float().square().mean().sqrt()
+
+
+def _adam_rms_ratio(
+    gradient: Tensor,
+    second_moment: Tensor,
+    *,
+    bias_correction: float,
+    eps: float,
+) -> Tensor:
+    """Measure gradient scale against a bias-corrected second moment."""
+    corrected = second_moment.detach().float()
+    if bias_correction > 0:
+        corrected = corrected / bias_correction
+    denominator = corrected.clamp_min(eps**2)
+    return (gradient.detach().float().square() / denominator).mean().sqrt()
+
+
+def _validate_update_clip_threshold(group: dict) -> None:
+    threshold = group.get("update_clip_threshold")
+    if threshold is not None and (
+        not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or threshold <= 0
+    ):
+        raise ValueError(f"update_clip_threshold must be positive or None, got {threshold!r}")
 
 
 class MuonWithAuxAdam(torch.optim.Optimizer):
@@ -328,8 +443,33 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["betas"] = group.get("betas", (0.9, 0.95))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+                _validate_update_clip_threshold(group)
+                required = {"params", "lr", "betas", "eps", "weight_decay", "use_muon"}
+                assert required <= group.keys() <= required | {"update_clip_threshold"}
         super().__init__(param_groups, dict())
+        self._adam_diagnostic_names: dict[int, str] = {}
+        self.last_adam_diagnostics: dict[str, Tensor] = {}
+
+    def set_adam_diagnostic_parameters(self, parameters: Mapping[str, nn.Parameter]) -> None:
+        """Select Adam tensors whose step diagnostics should be retained."""
+        adam_parameter_ids = {
+            id(parameter) for group in self.param_groups if not group["use_muon"] for parameter in group["params"]
+        }
+        unknown = {name for name, parameter in parameters.items() if id(parameter) not in adam_parameter_ids}
+        if unknown:
+            raise ValueError(f"Adam diagnostics requested for non-Adam parameters: {sorted(unknown)}")
+        if len({id(parameter) for parameter in parameters.values()}) != len(parameters):
+            raise ValueError("Adam diagnostic parameters must be unique")
+        self._adam_diagnostic_names = {id(parameter): name for name, parameter in parameters.items()}
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """Load state while retaining newly configured update clipping."""
+        clipping = [group.get("update_clip_threshold") for group in self.param_groups]
+        clipping_missing = ["update_clip_threshold" not in group for group in state_dict["param_groups"]]
+        super().load_state_dict(state_dict)
+        for group, threshold, missing in zip(self.param_groups, clipping, clipping_missing, strict=True):
+            if missing and threshold is not None:
+                group["update_clip_threshold"] = threshold
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -338,6 +478,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        self.last_adam_diagnostics = {}
         for group in self.param_groups:
             if group["use_muon"]:
                 buckets: dict[tuple[torch.device, torch.dtype, tuple[int, ...]], list[nn.Parameter]] = {}
@@ -371,14 +512,18 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     state["step"] += 1
                     parameters_by_step.setdefault(state["step"], []).append(parameter)
                 for step, parameters in parameters_by_step.items():
-                    _foreach_adam_step(
-                        parameters,
-                        states=[self.state[parameter] for parameter in parameters],
-                        step=step,
-                        lr=group["lr"],
-                        betas=group["betas"],
-                        eps=group["eps"],
-                        weight_decay=group["weight_decay"],
+                    self.last_adam_diagnostics.update(
+                        _foreach_adam_step(
+                            parameters,
+                            states=[self.state[parameter] for parameter in parameters],
+                            step=step,
+                            lr=group["lr"],
+                            betas=group["betas"],
+                            eps=group["eps"],
+                            weight_decay=group["weight_decay"],
+                            update_clip_threshold=group.get("update_clip_threshold"),
+                            diagnostic_names=self._adam_diagnostic_names,
+                        )
                     )
 
         return loss

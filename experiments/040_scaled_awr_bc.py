@@ -54,6 +54,7 @@ from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
+from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
@@ -118,10 +119,12 @@ _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
-_TRAIN_METRICS_EVERY = 10
+_TRAIN_METRICS_EVERY = 1
 _TRAIN_PREFETCH_FACTOR = 1
 _TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
+_ADAM_UPDATE_CLIP_THRESHOLD = 1.0
+_ACTIVATION_PERCENTILE_SAMPLE_SIZE = 65_536
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
         "cache_limit_gb",
@@ -634,9 +637,15 @@ class SwiGLU(nn.Module):
         self.up = nn.Linear(d_input, 2 * d_hidden, bias=False)
         self.down = nn.Linear(d_hidden, d_output, bias=output_bias)
 
+    def activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Return the activated gate, value branch, and their product."""
+        gate_projection, value = self.up(x).chunk(2, dim=-1)
+        gate = F.silu(gate_projection)
+        return gate, value, gate * value
+
     def forward(self, x: Float[Tensor, "... d_input"]) -> Float[Tensor, "... d_output"]:
-        gate, value = self.up(x).chunk(2, dim=-1)
-        return self.down(F.silu(gate) * value)
+        _, _, product = self.activations(x)
+        return self.down(product)
 
 
 class NonlinearActionHead(nn.Module):
@@ -646,6 +655,33 @@ class NonlinearActionHead(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.mlp(decoder_rmsnorm(x))
+
+    def forward_with_activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Return logits and the SwiGLU tensors used to produce them."""
+        gate, value, product = self.mlp.activations(decoder_rmsnorm(x))
+        return self.mlp.down(product), gate, value, product
+
+
+def _sampled_abs_p99(tensor: Tensor) -> Tensor:
+    """Estimate an absolute p99 from a deterministic bounded-size sample."""
+    values = tensor.detach().reshape(-1, tensor.shape[-1])
+    sampled_rows = max(_ACTIVATION_PERCENTILE_SAMPLE_SIZE // values.shape[-1], 1)
+    stride = max((values.shape[0] + sampled_rows - 1) // sampled_rows, 1)
+    if stride > 1:
+        stride += 1
+    sample = values[::stride].float().abs().flatten()
+    rank = max((99 * sample.numel() + 99) // 100, 1)
+    return torch.kthvalue(sample, rank).values
+
+
+def _activation_metrics(name: str, tensor: Tensor) -> dict[str, Tensor]:
+    """Return magnitude diagnostics for one button-head activation."""
+    values = tensor.detach()
+    return {
+        f"button_activation/{name}_rms": torch.mean(values.square(), dtype=torch.float32).sqrt(),
+        f"button_activation/{name}_abs_max": values.abs().amax().float(),
+        f"button_activation/{name}_abs_p99": _sampled_abs_p99(values),
+    }
 
 
 def short_causal_attention(
@@ -845,16 +881,37 @@ class CausalTemporalDecoder(nn.Module):
         scale, shift = self.group_condition[name](prefix).chunk(2, dim=-1)
         return states * (1.0 + torch.tanh(scale)) + shift
 
-    def teacher_forced_logits_by_group(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> dict[str, Tensor]:
+    def _teacher_forced_outputs(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+    ) -> tuple[dict[str, Tensor], tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]:
+        """Return group logits and the button tensors used for diagnostics."""
         states = self.teacher_forced_states(hidden, observed, targets)
         embedded = self.codec.embed_groups(targets)
         trunk = decoder_rmsnorm(hidden)
-        logits = {
-            name: self.outputs[name](self.group_features(states, name, embedded))
-            + self.trunk_outputs[name](trunk)[:, :, None]
-            for name in GROUP_NAMES
-        }
-        logits["buttons"] = logits["buttons"].masked_fill(self.codec.button_mask(targets[..., TRIG_G]), float("-inf"))
+        logits: dict[str, Tensor] = {}
+        button_values: tuple[Tensor, Tensor, Tensor, Tensor, Tensor] | None = None
+        for name in GROUP_NAMES:
+            features = self.group_features(states, name, embedded)
+            skip_logits = self.trunk_outputs[name](trunk)[:, :, None]
+            if name == "buttons":
+                head = cast(NonlinearActionHead, self.outputs[name])
+                head_logits, gate, value, product = head.forward_with_activations(features)
+                combined_logits = head_logits + skip_logits
+                button_values = (features, gate, value, product, combined_logits)
+            else:
+                combined_logits = self.outputs[name](features) + skip_logits
+            logits[name] = combined_logits
+        if button_values is None:
+            raise RuntimeError("button head was not evaluated")
+        button_mask = self.codec.button_mask(targets[..., TRIG_G])
+        logits["buttons"] = logits["buttons"].masked_fill(button_mask, float("-inf"))
+        return logits, (*button_values, button_mask)
+
+    def teacher_forced_logits_by_group(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> dict[str, Tensor]:
+        logits, _ = self._teacher_forced_outputs(hidden, observed, targets)
         return logits
 
     @staticmethod
@@ -872,6 +929,35 @@ class CausalTemporalDecoder(nn.Module):
     def teacher_forced_nll(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> Tensor:
         logits = self.teacher_forced_logits_by_group(hidden, observed, targets)
         return self.nll_from_logits(logits, targets)
+
+    def teacher_forced_nll_with_diagnostics(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Return NLL plus every-step button activation and logit metrics."""
+        logits, button_values = self._teacher_forced_outputs(hidden, observed, targets)
+        features, gate, value, product, raw_logits, button_mask = button_values
+        raw_logits_values = raw_logits.detach()
+        button_targets = targets[..., BUTTONS_G, None]
+        target_logits = raw_logits_values.gather(-1, button_targets).squeeze(-1).float()
+        logit_max = raw_logits_values.amax().float()
+        logit_min = raw_logits_values.amin().float()
+        metrics = {
+            "button_activation/input_rms": torch.mean(features.detach().square(), dtype=torch.float32).sqrt(),
+            "button_activation/input_abs_max": features.detach().abs().amax().float(),
+            **_activation_metrics("gate", gate),
+            **_activation_metrics("value", value),
+            **_activation_metrics("product", product),
+            "button_logits/max": logit_max,
+            "button_logits/min": logit_min,
+            "button_logits/span": logit_max - logit_min,
+            "button_logits/target_mean": target_logits.mean(),
+            "button_logits/target_min": target_logits.amin(),
+            "button_logits/target_masked_frac": button_mask.gather(-1, button_targets).float().mean(),
+        }
+        return self.nll_from_logits(logits, targets), metrics
 
     def teacher_forced_logits(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> list[dict[str, Tensor]]:
         values = self.teacher_forced_logits_by_group(hidden, observed, targets)
@@ -1343,7 +1429,12 @@ def microbatch_loss(
         hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
         if phase_timer is not None:
             phase_timer.record("trunk_end")
-        dense_nll = temporal_fn(hidden, history, targets)
+        temporal_output = temporal_fn(hidden, history, targets)
+        if isinstance(temporal_output, Tensor):
+            dense_nll = temporal_output
+            button_diagnostics: dict[str, Tensor] = {}
+        else:
+            dense_nll, button_diagnostics = temporal_output
         if phase_timer is not None:
             phase_timer.record("temporal_end")
     value = model.value_head(hidden.float()).squeeze(-1)
@@ -1378,6 +1469,7 @@ def microbatch_loss(
         "train/temporal_loss_far": far.detach() / _LN2,
         "train/total_objective": loss.detach(),
         "awr/active": torch.ones_like(loss) if active else torch.zeros_like(loss),
+        **button_diagnostics,
         **{f"train/{name}": metric for name, metric in value_stats.items()},
         **{f"train/{name}": value.detach() for name, value in stats.items()},
     }
@@ -2054,8 +2146,13 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
         (no_decay if parameter.ndim < 2 or id(parameter) in embedding_ids else decay).append(parameter)
     if len(muon) + len(decay) + len(no_decay) != sum(1 for _ in model.parameters()):
         raise RuntimeError("optimizer parameter partition is incomplete")
-    adam = dict(betas=(0.9, 0.95), eps=1e-10, use_muon=False)
-    return SingleDeviceMuonWithAuxAdam(
+    adam = dict(
+        betas=(0.9, 0.95),
+        eps=1e-10,
+        update_clip_threshold=_ADAM_UPDATE_CLIP_THRESHOLD,
+        use_muon=False,
+    )
+    optimizer = SingleDeviceMuonWithAuxAdam(
         [
             dict(
                 params=muon,
@@ -2068,6 +2165,31 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
             dict(params=no_decay, lr=cfg.adam_lr, weight_decay=0.0, **adam),
         ]
     )
+    optimizer.set_adam_diagnostic_parameters(_button_adam_parameters(model))
+    return optimizer
+
+
+def _button_adam_parameters(model: GPT) -> dict[str, nn.Parameter]:
+    """Return the three AdamW button matrices monitored every update."""
+    button_head = cast(NonlinearActionHead, model.temporal.outputs["buttons"])
+    return {
+        "buttons_output_down_weight": cast(nn.Parameter, button_head.mlp.down.weight),
+        "buttons_condition_weight": cast(nn.Parameter, model.temporal.group_condition["buttons"].weight),
+        "buttons_skip_weight": cast(nn.Parameter, model.temporal.trunk_outputs["buttons"].weight),
+    }
+
+
+def _raw_button_gradient_metrics(model: GPT) -> dict[str, Tensor]:
+    """Measure button gradients before global norm clipping."""
+    metrics: dict[str, Tensor] = {}
+    for name, parameter in _button_adam_parameters(model).items():
+        if parameter.grad is None:
+            raise RuntimeError(f"button parameter {name!r} has no gradient")
+        gradient = parameter.grad.detach().float()
+        prefix = f"optimizer/{name}"
+        metrics[f"{prefix}/raw_grad_rms"] = gradient.square().mean().sqrt()
+        metrics[f"{prefix}/raw_grad_abs_max"] = gradient.abs().amax()
+    return metrics
 
 
 def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
@@ -2443,6 +2565,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     if wandb.run is None:
         return
+    wandb.define_metric("optimizer/*", step_metric="global_step")
+    wandb.define_metric("button_activation/*", step_metric="global_step")
+    wandb.define_metric("button_logits/*", step_metric="global_step")
     wandb.define_metric("eval/*", step_metric="global_step")
     wandb.run.summary["nll_semantics"] = (
         "train/loss is the weighted policy loss in bits; train/total_objective adds the beta-normalized "
@@ -2451,6 +2576,11 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["layer_rms_semantics"] = (
         "activation=block input; residual_branch=block output-input; "
         "residual_ratio=residual_branch/activation; gradient=parameter-gradient RMS"
+    )
+    wandb.run.summary["optimizer/adam_update_clip_threshold"] = _ADAM_UPDATE_CLIP_THRESHOLD
+    wandb.run.summary["optimizer/update_clip_semantics"] = (
+        "per-tensor StableAdamW factor=min(1, threshold/R_updated); raw_grad is before global clipping, "
+        "grad is after global clipping, and prospective_update includes learning rate, clipping, and weight decay"
     )
     if cfg.wandb_log_code:
         log_wandb_code(wandb.run)
@@ -2490,7 +2620,7 @@ def _log_training_summary(cfg: TrainConfig, parameter_counts: dict[str, int]) ->
 def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
-    temporal_fn: Callable = model.temporal.teacher_forced_nll
+    temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.
@@ -2624,6 +2754,7 @@ def train_step(
     loss.backward()
     if phase_timer is not None:
         phase_timer.record("backward_end")
+    metrics.update(_raw_button_gradient_metrics(model))
     gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
     if phase_timer is not None:
         phase_timer.record("grad_norm_end")
@@ -2633,6 +2764,7 @@ def train_step(
     muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
     adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
     optimizer.step()
+    metrics.update(optimizer.last_adam_diagnostics)
     scheduler.step()
     if phase_timer is not None:
         phase_timer.record("optimizer_end")
@@ -3269,11 +3401,19 @@ def _resolve_eval_checkpoint(checkpoint: str, run: str | None) -> Path:
     return path
 
 
+def _remote_run_exists(run_name: str) -> bool:
+    """Return whether R2 contains an object for a run name."""
+    response = r2.client().list_objects_v2(Bucket=r2.bucket(), Prefix=f"runs/{run_name}/", MaxKeys=1)
+    return bool(response.get("KeyCount", len(response.get("Contents", ()))))
+
+
 @dataclass
 class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
     comment: str = ""
     resume: str | None = None
+    resume_checkpoint: str = "latest.pt"
+    resume_as: str | None = None
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
@@ -3358,12 +3498,40 @@ def main(args: Command) -> None:
         return
     resume_run = resume_state = None
     cfg = args.cfg
+    if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
+        raise SystemExit("--resume-checkpoint and --resume-as require --resume")
     if args.resume is not None:
-        resume_state = load_for_resume(args.resume, Path("runs") / args.resume, device=DEVICE)
+        checkpoint = Path(args.resume_checkpoint)
+        if (
+            checkpoint.is_absolute()
+            or ".." in checkpoint.parts
+            or checkpoint.suffix != ".pt"
+            or args.resume_checkpoint in ("", ".")
+        ):
+            raise SystemExit("--resume-checkpoint must be a relative .pt object within the run")
+        resume_state = load_for_resume(
+            args.resume,
+            Path("runs") / args.resume,
+            device=DEVICE,
+            name=args.resume_checkpoint,
+        )
         if resume_state is None:
-            raise SystemExit(f"no latest.pt for run {args.resume!r}")
-        resume_run = args.resume
+            raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
+        resume_run = args.resume_as or args.resume
         cfg = config_from_state(resume_state["cfg"])
+        if args.resume_as is not None:
+            if Path(args.resume_as).name != args.resume_as or args.resume_as in ("", ".", ".."):
+                raise SystemExit("--resume-as must be one run-name component")
+            if args.resume_as == args.resume:
+                raise SystemExit("--resume-as must differ from the source run")
+            destination_exists = (Path("runs") / args.resume_as).exists()
+            if cfg.push_to_r2:
+                destination_exists = destination_exists or _remote_run_exists(args.resume_as)
+            if destination_exists:
+                raise SystemExit(
+                    f"resume destination {args.resume_as!r} already exists; continue it with --resume {args.resume_as}"
+                )
+            resume_state = {**resume_state, "wandb_id": None}
     if args.eval_max_parallel is not None:
         cfg = replace(cfg, eval_max_parallel=args.eval_max_parallel)
     stats = load_stats(cfg)

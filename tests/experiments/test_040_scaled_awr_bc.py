@@ -505,9 +505,9 @@ def test_training_metric_flush_rejects_accumulated_nonfinite_values() -> None:
         accumulator.flush(cfg, update=1)
 
 
-def test_training_metrics_log_every_ten_updates() -> None:
-    assert exp._TRAIN_METRICS_EVERY == 10
-    assert [update for update in range(1, 31) if update % exp._TRAIN_METRICS_EVERY == 0] == [10, 20, 30]
+def test_training_metrics_log_every_update() -> None:
+    assert exp._TRAIN_METRICS_EVERY == 1
+    assert [update for update in range(1, 4) if update % exp._TRAIN_METRICS_EVERY == 0] == [1, 2, 3]
 
 
 def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
@@ -556,6 +556,11 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
         id(parameter): group for group in exp.make_optimizer(model, cfg).param_groups for parameter in group["params"]
     }
     assert all(not groups[id(parameter)]["use_muon"] for parameter in model.value_head.parameters())
+    assert all(
+        group["update_clip_threshold"] == exp._ADAM_UPDATE_CLIP_THRESHOLD
+        for group in exp.make_optimizer(model, cfg).param_groups
+        if not group["use_muon"]
+    )
 
     checkpoint = exp._checkpoint_config(cfg)
     assert all(isinstance(name, str) for name in checkpoint["source_names"])
@@ -644,6 +649,56 @@ def test_resume_can_reduce_eval_parallelism(monkeypatch: pytest.MonkeyPatch) -> 
 
     expected = replace(_cfg(eval_max_parallel=32), eval_max_parallel=16)
     assert calls == [(expected, "run", checkpoint)]
+
+
+def test_resume_can_select_an_exact_run_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint = {
+        "cfg": exp._checkpoint_config(_cfg()),
+        "step": 16_399,
+    }
+    load_calls: list[tuple[str, str]] = []
+
+    def load(run: str, _path: Path, *, device: str, name: str):
+        del device
+        load_calls.append((run, name))
+        return checkpoint
+
+    monkeypatch.setattr(exp, "load_for_resume", load)
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+    monkeypatch.setattr(exp, "train", lambda *_args, **_kwargs: None)
+
+    exp.main(
+        exp.TrainArgs(
+            resume="run",
+            resume_checkpoint="checkpoints/step-0016400.pt",
+        )
+    )
+
+    assert load_calls == [("run", "checkpoints/step-0016400.pt")]
+
+
+def test_resume_as_branches_from_source_and_starts_a_new_wandb_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint = {
+        "cfg": exp._checkpoint_config(_cfg()),
+        "step": 16_383,
+        "wandb_id": "source-id",
+    }
+    train_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(exp, "load_for_resume", lambda *_args, **_kwargs: checkpoint)
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+    monkeypatch.setattr(exp, "_remote_run_exists", lambda _run: False)
+    monkeypatch.setattr(exp, "train", lambda *_args, **kwargs: train_calls.append(kwargs))
+
+    exp.main(
+        exp.TrainArgs(
+            resume="source-run",
+            resume_checkpoint="checkpoints/step-0016384.pt",
+            resume_as="stableadamw-run",
+        )
+    )
+
+    assert train_calls[0]["resume_run"] == "stableadamw-run"
+    assert train_calls[0]["resume_state"] == {**checkpoint, "wandb_id": None}
 
 
 def test_eval_can_download_upload_and_backfill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -789,6 +844,35 @@ def test_temporal_nll_from_existing_logits_matches_direct_path() -> None:
     direct = model.temporal.teacher_forced_nll(hidden, history, targets)
 
     torch.testing.assert_close(reused, direct)
+
+
+def test_button_forward_diagnostics_are_finite_and_cover_requested_tensors() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg)
+    batch = _awr_batch(cfg)
+    history, targets, _ = exp.prepared_targets(model, batch)
+    hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, history)
+
+    nll, metrics = model.temporal.teacher_forced_nll_with_diagnostics(hidden, history, targets)
+
+    assert nll.shape == (*targets.shape[:-1], exp.N_GROUPS)
+    assert set(metrics) == {
+        "button_activation/input_rms",
+        "button_activation/input_abs_max",
+        *{
+            f"button_activation/{part}_{stat}"
+            for part in ("gate", "value", "product")
+            for stat in ("rms", "abs_max", "abs_p99")
+        },
+        "button_logits/max",
+        "button_logits/min",
+        "button_logits/span",
+        "button_logits/target_mean",
+        "button_logits/target_min",
+        "button_logits/target_masked_frac",
+    }
+    assert all(torch.isfinite(value) for value in metrics.values())
+    assert metrics["button_logits/target_masked_frac"] == 0
 
 
 def test_eval_prewarms_before_starting_dolphin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

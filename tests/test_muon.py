@@ -1,6 +1,7 @@
 """Tests for the single-device Muon optimizer."""
 
 import copy
+import math
 
 import pytest
 import torch
@@ -143,6 +144,83 @@ def test_batched_optimizer_state_dict_resumes_exactly() -> None:
         strict=True,
     ):
         torch.testing.assert_close(resumed_parameter, first_parameter)
+
+
+def test_stable_adamw_clips_each_tensor_from_the_updated_second_moment() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([1.0, -1.0]))
+    optimizer = muon.SingleDeviceMuonWithAuxAdam(
+        [
+            {
+                "params": [parameter],
+                "lr": 0.1,
+                "betas": (0.9, 0.95),
+                "eps": 1e-10,
+                "weight_decay": 0.1,
+                "update_clip_threshold": 1.0,
+                "use_muon": False,
+            }
+        ]
+    )
+    optimizer.set_adam_diagnostic_parameters({"test_tensor": parameter})
+    state = optimizer.state[parameter]
+    state["exp_avg"] = torch.zeros_like(parameter)
+    state["exp_avg_sq"] = torch.full_like(parameter, 1e-6)
+    state["step"] = 100
+    parameter.grad = torch.ones_like(parameter)
+
+    before = parameter.detach().clone()
+    optimizer.step()
+
+    updated_second_moment = 0.95e-6 + 0.05
+    updated_bias_correction = 1 - 0.95**101
+    rms_ratio = math.sqrt(1 / (updated_second_moment / updated_bias_correction))
+    clip_factor = 1 / rms_ratio
+    first_moment = 0.1
+    adam_direction = (first_moment / (1 - 0.9**101)) / (
+        math.sqrt(updated_second_moment / updated_bias_correction) + 1e-10
+    )
+    expected = before - 0.1 * clip_factor * (adam_direction + 0.1 * before)
+    diagnostics = optimizer.last_adam_diagnostics
+    previous_rms_ratio = math.sqrt((1 - 0.95**100) / 1e-6)
+
+    torch.testing.assert_close(parameter, expected)
+    assert diagnostics["optimizer/test_tensor/rms_ratio_previous"] == pytest.approx(previous_rms_ratio)
+    assert diagnostics["optimizer/test_tensor/rms_ratio_updated"] == pytest.approx(rms_ratio)
+    assert diagnostics["optimizer/test_tensor/update_clip_factor"] == pytest.approx(clip_factor)
+    assert diagnostics["optimizer/test_tensor/update_clip_active"] == 1
+
+
+def test_loading_old_optimizer_state_retains_configured_update_clipping() -> None:
+    source_parameters = _parameters()
+    source = _optimizer(*source_parameters)
+    state_dict = copy.deepcopy(source.state_dict())
+    assert all("update_clip_threshold" not in group for group in state_dict["param_groups"])
+
+    target_parameters = _parameters()
+    target = muon.SingleDeviceMuonWithAuxAdam(
+        [
+            {
+                "params": target_parameters[0],
+                "lr": 0.02,
+                "momentum": 0.95,
+                "weight_decay": 0.01,
+                "use_muon": True,
+            },
+            {
+                "params": target_parameters[1],
+                "lr": 3e-4,
+                "betas": (0.9, 0.95),
+                "eps": 1e-10,
+                "weight_decay": 0.1,
+                "update_clip_threshold": 1.0,
+                "use_muon": False,
+            },
+        ]
+    )
+    target.load_state_dict(state_dict)
+
+    adam_group = next(group for group in target.param_groups if not group["use_muon"])
+    assert adam_group["update_clip_threshold"] == 1.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for batched Muon parity")
