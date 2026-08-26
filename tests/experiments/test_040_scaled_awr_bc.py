@@ -205,16 +205,16 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     cfg = exp.TrainConfig()
     schedule = exp.lr_schedule(cfg)
 
-    assert cfg.max_steps == 262_144
+    assert cfg.max_steps == 524_288
     assert cfg.ckpt_every == 4096
-    assert cfg.warmup_steps == 7_864
-    assert cfg.stable_steps == 209_715
+    assert cfg.warmup_steps == 15_728
+    assert cfg.stable_steps == 419_430
     assert cfg.batch_size * cfg.arch.L_ctx * cfg.max_steps == 2**35
     assert schedule(0) == 0.0
-    assert schedule(7_864) == 1.0
+    assert schedule(15_728) == 1.0
     assert schedule(100_000) == 1.0
-    assert schedule(209_715) == 1.0
-    assert schedule(262_143) == pytest.approx(1 / 170)
+    assert schedule(419_430) == 1.0
+    assert schedule(524_287) == pytest.approx(1 / 170)
 
     parameter = torch.nn.Parameter(torch.ones(()))
     optimizer = torch.optim.SGD([parameter], lr=2.0)

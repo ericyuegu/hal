@@ -242,7 +242,7 @@ class TrainConfig:
 
     seed: int = 0
     eval_seed: int = 0
-    batch_size: int = 1024
+    batch_size: int = 512
     target_loss_positions: int = _PRODUCTION_LOSS_POSITIONS
     muon_lr: float = 0.028
     muon_weight_decay: float = 0.1
