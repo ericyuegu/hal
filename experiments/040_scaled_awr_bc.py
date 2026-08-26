@@ -272,7 +272,7 @@ class TrainConfig:
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
-    ckpt_every: int = 4096
+    ckpt_every: int = 2000
     eval_every: int = 8192
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
@@ -283,7 +283,7 @@ class TrainConfig:
     source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
-    cache_limit_gb: int = 2048
+    cache_limit_gb: int = 1792
     shuffle_block_size: int = 8192
     predownload: int = 1024
     val_split: str = "val"

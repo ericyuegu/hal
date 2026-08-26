@@ -206,7 +206,7 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     schedule = exp.lr_schedule(cfg)
 
     assert cfg.max_steps == 524_288
-    assert cfg.ckpt_every == 4096
+    assert cfg.ckpt_every == 2000
     assert cfg.warmup_steps == 15_728
     assert cfg.stable_steps == 419_430
     assert cfg.batch_size * cfg.arch.L_ctx * cfg.max_steps == 2**35
@@ -784,8 +784,9 @@ def test_production_loader_and_eval_defaults() -> None:
     cfg = exp.TrainConfig()
 
     assert cfg.num_workers == 32
+    assert cfg.cache_limit_gb == 1792
     assert exp._TRAIN_PREFETCH_FACTOR == 1
-    assert cfg.ckpt_every == 2**12
+    assert cfg.ckpt_every == 2000
     assert cfg.eval_every == 2**13
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
