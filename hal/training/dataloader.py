@@ -364,6 +364,7 @@ def make_loader(
     shuffle_seed: int | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 4,
+    drop_last: bool = False,
     predownload: int | None = None,
     pin_memory: bool | None = None,
     windows_per_replay: int = 1,
@@ -468,6 +469,7 @@ def make_loader(
         collate_fn=collate,
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        drop_last=drop_last,
         pin_memory=pin_memory,
         generator=_loader_generator(seed),
     )

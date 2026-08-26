@@ -5,6 +5,7 @@ observation paths must deliver the same item tensors, and the configured sources
 must be ones that carry the projectile block at all.
 """
 
+import functools
 import importlib.util
 import json
 import math
@@ -14,7 +15,6 @@ from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
-from typing import cast
 
 import melee
 import numpy as np
@@ -25,16 +25,12 @@ from streaming import StreamingDataset
 from torch import Tensor
 
 from hal.data.feature_stats import FeatureStats
-from hal.data.policy_schema import POLICY_SCHEMA_VERSION
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
-from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.data.policy_world_schema import encode_policy_world_replay
-from hal.streams import StreamSource
 from hal.training import returns as returns_lib
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.closed_loop import _build_layout
 from hal.training.closed_loop import _Rings
-from hal.training.dataloader import _make_streaming_dataset
 from hal.training.dataloader import make_loader
 from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
@@ -46,7 +42,6 @@ from hal.training.features import Context
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 from hal.training.features import preprocess
-from hal.training.replay_reservoir import PolicyReplayPackDataset
 from hal.wire import ITEM_SLOTS
 from hal.wire import MASK_INT32
 from hal.wire import item_column
@@ -88,11 +83,6 @@ _V7_TRAIN = (
 )
 
 
-def _local_stream_source(name: str, path: Path) -> StreamSource:
-    """Construct the local-only source form supported by Mosaic Streaming."""
-    return StreamSource(name, cast(str, None), path)
-
-
 def test_production_return_scale_matches_calibration_artifact() -> None:
     artifact_path = Path(__file__).resolve().parents[2] / "notebooks" / "040_awr_constants.json"
     artifact = json.loads(artifact_path.read_text())
@@ -123,13 +113,11 @@ def _cfg(**overrides) -> exp.TrainConfig:
     values = {
         "batch_size": 2,
         "target_loss_positions": 16,
-        "reservoir_capacity": 4,
         "warmup_fraction": 0.5,
         "stable_fraction": 0.75,
         "compile_trunk": False,
         "compile_temporal": False,
         "num_workers": 0,
-        "prefetch_batches": 8,
         "push_to_r2": False,
         "inference_mode": "eager",
     }
@@ -181,8 +169,8 @@ def test_synthetic_train_step_benchmark_batch_has_frozen_geometry() -> None:
     exp.validate_batch_geometry(batch, cfg, cfg.batch_size)
 
 
-def test_training_compile_mode_autotunes_production_kernels() -> None:
-    assert exp._TRAIN_COMPILE_MODE == "max-autotune"
+def test_training_compile_mode_reduces_launch_overhead() -> None:
+    assert exp._TRAIN_COMPILE_MODE == "reduce-overhead"
     assert exp._TRUNK_ATTENTION_BACKEND == "varlen_flash"
     model = exp.GPT(_cfg())
     assert model.trunk.attention_backend == "varlen_flash"
@@ -213,49 +201,20 @@ def test_temporal_attention_chunking_preserves_block_output(monkeypatch: pytest.
     torch.testing.assert_close(chunked, unchunked)
 
 
-def _write_policy_world(root: Path, replay_id: str, *, source_schema_version: int = 7) -> None:
-    frames = 40
-    sample: dict[str, object] = {
-        "policy_schema_version": POLICY_SCHEMA_VERSION,
-        "policy_world_schema_version": POLICY_WORLD_SCHEMA_VERSION,
-        "source_schema_version": source_schema_version,
-        "replay_id": replay_id,
-        "num_frames": frames,
-        "stage": 2,
-        "p1_character": 1,
-        "p2_character": 22,
-        "p1_rank": 1,
-        "p2_rank": 4,
-        "p1_nana_present": 0,
-        "p2_nana_present": 0,
-    }
-    for name, encoding in POLICY_WORLD_MDS_COLUMNS.items():
-        if name in sample:
-            continue
-        dtype = np.dtype(encoding.removeprefix("ndarray:"))
-        length = 1 if "nana" in name else frames
-        values = np.zeros(length, dtype=dtype)
-        if name.startswith("item") and dtype.kind == "f":
-            values.fill(np.nan)
-        sample[name] = values
-    with MDSWriter(out=str(root / "train"), columns=POLICY_WORLD_MDS_COLUMNS, compression="zstd") as writer:
-        writer.write(sample)
-
-
 def test_production_geometry_and_schedule_endpoints() -> None:
     cfg = exp.TrainConfig()
     schedule = exp.lr_schedule(cfg)
 
-    assert cfg.max_steps == 524_288
-    assert cfg.ckpt_every == 2048
-    assert cfg.warmup_steps == 15_728
-    assert cfg.stable_steps == 419_430
+    assert cfg.max_steps == 262_144
+    assert cfg.ckpt_every == 4096
+    assert cfg.warmup_steps == 7_864
+    assert cfg.stable_steps == 209_715
     assert cfg.batch_size * cfg.arch.L_ctx * cfg.max_steps == 2**35
     assert schedule(0) == 0.0
-    assert schedule(15_728) == 1.0
+    assert schedule(7_864) == 1.0
     assert schedule(100_000) == 1.0
-    assert schedule(419_430) == 1.0
-    assert schedule(524_287) == pytest.approx(1 / 170)
+    assert schedule(209_715) == 1.0
+    assert schedule(262_143) == pytest.approx(1 / 170)
 
     parameter = torch.nn.Parameter(torch.ones(()))
     optimizer = torch.optim.SGD([parameter], lr=2.0)
@@ -635,76 +594,36 @@ def test_temporal_hidden_matrices_use_muon_and_boundary_matrices_use_adamw() -> 
     assert all(not groups[parameter_id]["use_muon"] for parameter_id in embedding_ids)
 
 
-def test_two_policy_world_streams_label_returns_and_keep_schema_checks(tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    _write_policy_world(first, "first")
-    _write_policy_world(second, "second")
-    sources = (
-        _local_stream_source("first", first),
-        _local_stream_source("second", second),
-    )
-    dataset, names = _make_streaming_dataset(
-        None,
-        "train",
-        sources=sources,
-        remote=None,
-        shuffle=False,
-        shuffle_seed=0,
-        cache_limit=None,
-        shuffle_block_size=16,
-        predownload=None,
-    )
-    projection = FeatureProjection(frozenset({exp.EGO_RETURN, exp.EGO_RETURN_VALID}), derive_spatial=False)
-    packs = PolicyReplayPackDataset(
-        dataset,
-        L_ctx=4,
-        L_chunk=2,
-        seed=0,
-        windows_per_replay=1,
-        schema_version=7,
-        projection=projection,
-        replay_format="policy-world",
-        replay_labels=lambda replay: returns_lib.compact_policy_returns(
-            replay,
-            gamma=0.9,
-            damage_shaping=1.0,
-            win_reward=50.0,
-            stock_value=120.0,
-            suffix=exp._RETURN_SUFFIX,
-        ),
-    )
+def test_training_loader_uses_standard_worker_collation(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg()
+    calls: list[dict[str, object]] = []
 
-    emitted = list(packs)
-    assert names == ("first", "second")
-    assert {pack.replay_id for pack in emitted} == {"first", "second"}
-    assert all({exp.EGO_RETURN, exp.EGO_RETURN_VALID, "ctx_pad"} == pack.windows[0].keys() for pack in emitted)
+    def fake_loader(**kwargs):
+        calls.append(kwargs)
+        return [len(calls)]
 
-    invalid = tmp_path / "invalid"
-    _write_policy_world(invalid, "invalid", source_schema_version=6)
-    bad_dataset, _ = _make_streaming_dataset(
-        None,
-        "train",
-        sources=(_local_stream_source("invalid", invalid),),
-        remote=None,
-        shuffle=False,
-        shuffle_seed=0,
-        cache_limit=None,
-        shuffle_block_size=16,
-        predownload=None,
-    )
-    bad_packs = PolicyReplayPackDataset(
-        bad_dataset,
-        L_ctx=4,
-        L_chunk=2,
-        seed=0,
-        windows_per_replay=1,
-        schema_version=7,
-        projection=None,
-        replay_format="policy-world",
-    )
-    with pytest.raises(ValueError, match="schema_version"):
-        list(bad_packs)
+    monkeypatch.setattr(exp, "make_loader", fake_loader)
+    monkeypatch.setattr(exp, "cache_validation", lambda loader, _: loader)
+
+    train_loader, validation = exp._make_loaders(cfg, stats={})
+
+    assert train_loader == [1]
+    assert validation == [2]
+    train = calls[0]
+    assert train["num_workers"] == cfg.num_workers
+    assert train["prefetch_factor"] == exp._TRAIN_PREFETCH_FACTOR == 1
+    assert train["drop_last"] is True
+    assert train["windows_per_replay"] == 1
+    assert train["replay_format"] == "policy-world"
+    replay_transform = train["replay_transform"]
+    batch_transform = train["batch_transform"]
+    projection = train["projection"]
+    assert isinstance(replay_transform, functools.partial)
+    assert isinstance(batch_transform, functools.partial)
+    assert isinstance(projection, FeatureProjection)
+    assert replay_transform.func is returns_lib.label_replay
+    assert batch_transform.func is exp.collate_awr_batch
+    assert {exp.EGO_RETURN, exp.EGO_RETURN_VALID} <= projection.columns
 
 
 def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
@@ -732,7 +651,6 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
             weight_hist_every=256,
             layer_rms_every=0,
             layer_rms_batch_size=4,
-            prefetch_batches=4,
         )
     )
 
@@ -740,15 +658,10 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
 def test_production_loader_and_eval_defaults() -> None:
     cfg = exp.TrainConfig()
 
-    assert cfg.windows_per_replay == 2
     assert cfg.num_workers == 32
-    assert cfg.prefetch_batches == 8
-    worker_prefetch, batch_prefetch = exp._loader_prefetch_depths(cfg)
-    assert (worker_prefetch, batch_prefetch) == (8, 7)
-    queued_worker_samples = cfg.num_workers * worker_prefetch * cfg.windows_per_replay
-    queued_batch_samples = batch_prefetch * cfg.batch_size
-    assert queued_worker_samples + queued_batch_samples == cfg.prefetch_batches * cfg.batch_size
-    assert cfg.eval_every == 2**14
+    assert exp._TRAIN_PREFETCH_FACTOR == 1
+    assert cfg.ckpt_every == 2**12
+    assert cfg.eval_every == 2**13
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
     assert exp._eval_inference_bucket(cfg, 96) == 32
@@ -948,8 +861,6 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     batch = _awr_batch(cfg)
 
     class Loader:
-        source_sample_counts = {name: exp.streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names}
-
         def __iter__(self):
             return iter((batch,))
 

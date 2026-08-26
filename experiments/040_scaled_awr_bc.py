@@ -93,7 +93,6 @@ from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
-from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
@@ -109,7 +108,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID = "040_scaled_awr_bc_v4"
+_EXPERIMENT_ID = "040_scaled_awr_bc_v5"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -118,7 +117,8 @@ _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
 _TRAIN_METRICS_EVERY = 10
-_TRAIN_COMPILE_MODE = "max-autotune"
+_TRAIN_PREFETCH_FACTOR = 1
+_TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
@@ -134,7 +134,6 @@ _PRODUCTION_OVERRIDE_FIELDS = frozenset(
         "num_workers",
         "phase_timing_every",
         "predownload",
-        "prefetch_batches",
         "process_metrics_interval_s",
         "push_to_r2",
         "system_metrics_every",
@@ -243,7 +242,7 @@ class TrainConfig:
 
     seed: int = 0
     eval_seed: int = 0
-    batch_size: int = 512
+    batch_size: int = 1024
     target_loss_positions: int = _PRODUCTION_LOSS_POSITIONS
     muon_lr: float = 0.028
     muon_weight_decay: float = 0.1
@@ -267,7 +266,7 @@ class TrainConfig:
     val_n_samples: int = 2048
     val_batch_size: int = 128
     ckpt_every: int = 4096
-    eval_every: int = 16_384
+    eval_every: int = 8192
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
     final_eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
@@ -280,11 +279,8 @@ class TrainConfig:
     cache_limit_gb: int = 2048
     shuffle_block_size: int = 8192
     predownload: int = 1024
-    windows_per_replay: int = 2
-    reservoir_capacity: int = 16_384
     val_split: str = "val"
     num_workers: int = 32
-    prefetch_batches: int = 8
     push_to_r2: bool = True
     system_metrics_every: int = 25
     system_metrics_interval_s: float = 5.0
@@ -330,8 +326,6 @@ def validate_config(cfg: TrainConfig) -> None:
         "batch_size": cfg.batch_size,
         "target_loss_positions": cfg.target_loss_positions,
         "layer_rms_batch_size": cfg.layer_rms_batch_size,
-        "prefetch_batches": cfg.prefetch_batches,
-        "windows_per_replay": cfg.windows_per_replay,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -388,8 +382,6 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError(f"{name} must be finite and positive, got {value!r}")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
-    if cfg.reservoir_capacity < 2 * cfg.batch_size:
-        raise ValueError("reservoir_capacity must be at least twice the batch size")
     if not isinstance(cfg.num_workers, int) or isinstance(cfg.num_workers, bool) or not 0 <= cfg.num_workers <= 32:
         raise ValueError(f"num_workers must be an integer in [0, 32], got {cfg.num_workers!r}")
     if not 0.0 < cfg.awr.gamma < 1.0:
@@ -2401,25 +2393,23 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
     projection = common["projection"]
     if projection is not None:
         common["projection"] = replace(projection, columns=projection.columns | {EGO_RETURN, EGO_RETURN_VALID})
-    replay_labels = functools.partial(
-        returns_lib.compact_policy_returns,
+    replay_transform = functools.partial(
+        returns_lib.label_replay,
         gamma=cfg.awr.gamma,
         damage_shaping=cfg.awr.damage_shaping,
         win_reward=cfg.awr.win_reward,
         stock_value=cfg.awr.stock_value,
         suffix=_RETURN_SUFFIX,
     )
-    worker_prefetch, batch_prefetch = _loader_prefetch_depths(cfg)
-    train_loader = make_reservoir_loader(
+    train_loader = make_loader(
         split="train",
         num_workers=cfg.num_workers,
-        prefetch_factor=worker_prefetch,
+        prefetch_factor=_TRAIN_PREFETCH_FACTOR,
+        drop_last=True,
         predownload=cfg.predownload,
-        windows_per_replay=cfg.windows_per_replay,
-        reservoir_capacity=cfg.reservoir_capacity,
-        prefetch_batches=batch_prefetch,
+        windows_per_replay=1,
         replay_format="policy-world",
-        replay_labels=replay_labels,
+        replay_transform=replay_transform,
         batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx),
         **common,
     )
@@ -2432,17 +2422,6 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         **validation,
     )
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
-
-
-def _loader_prefetch_depths(cfg: TrainConfig) -> tuple[int, int]:
-    """Split one sample budget across worker and ready-batch queues."""
-    if cfg.num_workers == 0:
-        return 1, cfg.prefetch_batches
-
-    # Keep one batch-equivalent of decoded windows flowing out of the workers;
-    # spend the rest of the budget on fully collated batches nearest the GPU.
-    worker_prefetch = math.ceil(cfg.batch_size / (cfg.num_workers * cfg.windows_per_replay))
-    return max(1, worker_prefetch), max(0, cfg.prefetch_batches - 1)
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
@@ -2929,10 +2908,6 @@ def train(
     trunk_fn, temporal_fn = _training_functions(model, cfg)
 
     train_loader, val_cache = _make_loaders(cfg, stats)
-    source_counts = train_loader.source_sample_counts
-    expected_counts = {name: streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names}
-    if source_counts != expected_counts:
-        raise RuntimeError(f"train stream counts changed: got {source_counts}, expected {expected_counts}")
     run_started = time.monotonic()
     batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE)
     loader_wait_fractions: list[float] = []
