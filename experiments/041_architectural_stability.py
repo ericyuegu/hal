@@ -3120,10 +3120,14 @@ def benchmark_train_step(
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model_dtype = torch.bfloat16 if parameter_dtype == "bfloat16" else torch.float32
     model = GPT(cfg).to(device=DEVICE, dtype=model_dtype).train()
+    if model_dtype == torch.bfloat16:
+        model.value_head.float()
     if float8_recipe != "none":
         float8_config = Float8LinearConfig.from_recipe_name(float8_recipe)
 
-        def eligible_for_float8(module: nn.Module, _: str) -> bool:
+        def eligible_for_float8(module: nn.Module, name: str) -> bool:
+            if name.startswith("value_head"):
+                return False
             if not isinstance(module, nn.Linear):
                 return True
             aligned = module.in_features % 16 == 0 and module.out_features % 16 == 0
