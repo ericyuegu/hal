@@ -401,10 +401,10 @@ def test_production_source_mix_uses_native_replay_lengths() -> None:
     assert weights == tuple(float(exp.streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name]) for name in cfg.source_names)
 
 
-def test_training_checkpoints_are_resumable_every_two_thousand_updates() -> None:
+def test_training_checkpoints_are_resumable_every_2048_updates() -> None:
     cfg = exp.TrainConfig()
 
-    assert cfg.ckpt_every == 2000
+    assert cfg.ckpt_every == 2048
     assert exp._TRAIN_PREFETCH_FACTOR == 4
     assert cfg.download_retry == 8
     assert cfg.loader_timeout_s == 300.0

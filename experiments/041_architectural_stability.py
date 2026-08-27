@@ -285,7 +285,7 @@ class TrainConfig:
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
-    ckpt_every: int = 2000
+    ckpt_every: int = 2048
     eval_every: int = 8192
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
