@@ -493,6 +493,7 @@ def make_loader(
     download_retry: int = 2,
     timeout: float = 0,
     resumable: bool = False,
+    in_order: bool = False,
     pin_memory: bool | None = None,
     windows_per_replay: int = 1,
     schema_version: int = SCHEMA_VERSION,
@@ -535,7 +536,9 @@ def make_loader(
     ``resumable=True`` routes Mosaic's epoch/sample cursor through the compact
     replay wrappers. It requires one output window per replay; the custom Mosaic
     loader counts custom ``TrainBatch`` objects and restores the window epoch as
-    well as StreamingDataset's raw sample position."""
+    well as StreamingDataset's raw sample position. ``in_order=False`` prevents
+    one slow worker or shard from blocking ready batches produced by other
+    workers. Set it to True only when strict FIFO batch delivery is required."""
     # ``predownload`` is how many samples each worker fetches ahead — the shard-prefetch
     # depth that pipelines remote (R2) downloads. StreamingDataset ties its default to
     # batch_size (``8 * batch_size``) and we pass batch_size=1, so it was only 8: the fast
@@ -610,6 +613,7 @@ def make_loader(
             pin_memory=pin_memory,
             generator=_loader_generator(seed),
             timeout=timeout if num_workers > 0 else 0,
+            in_order=in_order,
         )
     return DataLoader(
         sampler,
@@ -622,4 +626,5 @@ def make_loader(
         pin_memory=pin_memory,
         generator=_loader_generator(seed),
         timeout=timeout if num_workers > 0 else 0,
+        in_order=in_order,
     )

@@ -3,6 +3,7 @@
 import importlib.util
 import math
 import sys
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from types import ModuleType
@@ -268,6 +269,37 @@ def test_optimizer_hyperparameters_remain_the_040_baseline() -> None:
     assert exp._ADAM_UPDATE_CLIP_THRESHOLD == 1.0
     assert cfg.grad_clip == 1.0
     assert exp._EXPERIMENT_ID == "041_architectural_stability_v3"
+
+
+def test_device_prefetch_loads_next_batch_in_background() -> None:
+    cfg = _cfg()
+    first = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    second = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    first.returns.fill_(1.0)
+    second.returns.fill_(2.0)
+    requested = threading.Event()
+    release = threading.Event()
+
+    def batches():
+        yield first
+        requested.set()
+        assert release.wait(timeout=2.0)
+        yield second
+
+    prefetcher = exp.DeviceBatchPrefetcher(batches(), cfg, "cpu")
+    try:
+        actual_first, _, _ = prefetcher.next()
+        prefetcher.start_preload()
+        assert requested.wait(timeout=2.0)
+        release.set()
+        prefetcher.finish_preload()
+        actual_second, _, _ = prefetcher.next()
+    finally:
+        release.set()
+        prefetcher.close()
+
+    torch.testing.assert_close(actual_first.returns, torch.ones_like(actual_first.returns))
+    torch.testing.assert_close(actual_second.returns, torch.full_like(actual_second.returns, 2.0))
 
 
 def test_cosine_schedule_is_a_named_ablation() -> None:

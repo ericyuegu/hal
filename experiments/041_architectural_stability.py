@@ -35,6 +35,8 @@ import os
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -1258,7 +1260,7 @@ def prepared_targets(
 
 
 class DeviceBatchPrefetcher:
-    """Coalesce and overlap transfer of one training batch ahead."""
+    """Fetch the next CPU batch during GPU compute and stage it for transfer."""
 
     def __init__(self, loader: Iterable[AWRBatch], cfg: TrainConfig, device: str | torch.device) -> None:
         self._loader = loader
@@ -1267,13 +1269,11 @@ class DeviceBatchPrefetcher:
         self._device = torch.device(device)
         self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
         self._staged: tuple[AWRBatch, AWRBatch, int, float] | None = None
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
+        self._future: Future[AWRBatch] | None = None
         self.preload()
 
-    def preload(self) -> None:
-        """Load and enqueue the next transfer while current GPU work runs."""
-        if self._staged is not None:
-            raise RuntimeError("consume the staged batch before preloading another")
-        started = time.monotonic()
+    def _load_cpu_batch(self) -> AWRBatch:
         try:
             cpu_batch = next(self._iterator)
         except StopIteration:
@@ -1282,16 +1282,45 @@ class DeviceBatchPrefetcher:
         if not isinstance(cpu_batch, AWRBatch):
             raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
         validate_batch_geometry(cpu_batch, self._cfg, self._cfg.batch_size)
+        return cpu_batch
+
+    def _stage(self, cpu_batch: AWRBatch, loader_wait: float) -> None:
         valid_prefixes = int((self._cfg.arch.L_ctx - cpu_batch.context.ctx_pad).sum())
         if valid_prefixes <= 0:
             raise RuntimeError("training batch contains no valid context prefixes")
-        loader_wait = time.monotonic() - started
         if self._copy_stream is None:
             device_batch = cpu_batch.to(self._device)
         else:
             with torch.cuda.stream(self._copy_stream):
                 device_batch = cpu_batch.to(self._device)
         self._staged = (device_batch, cpu_batch, valid_prefixes, loader_wait)
+
+    def preload(self) -> None:
+        """Synchronously stage a batch at startup and checkpoint boundaries."""
+        if self._staged is not None:
+            raise RuntimeError("consume the staged batch before preloading another")
+        if self._future is not None:
+            raise RuntimeError("finish the background preload before preloading synchronously")
+        started = time.monotonic()
+        cpu_batch = self._load_cpu_batch()
+        self._stage(cpu_batch, time.monotonic() - started)
+
+    def start_preload(self) -> None:
+        """Start loading the next CPU batch on a background thread."""
+        if self._staged is not None:
+            raise RuntimeError("consume the staged batch before starting another preload")
+        if self._future is not None:
+            raise RuntimeError("a background preload is already running")
+        self._future = self._pool.submit(self._load_cpu_batch)
+
+    def finish_preload(self) -> None:
+        """Stage a background-loaded batch and measure only its uncovered wait."""
+        if self._future is None:
+            raise RuntimeError("no background preload is running")
+        started = time.monotonic()
+        future, self._future = self._future, None
+        cpu_batch = future.result()
+        self._stage(cpu_batch, time.monotonic() - started)
 
     def next(self) -> tuple[AWRBatch, int, float]:
         """Wait only for the uncovered tail of the staged transfer."""
@@ -1305,6 +1334,10 @@ class DeviceBatchPrefetcher:
         self._staged = None
         del cpu_batch
         return device_batch, valid_prefixes, loader_wait
+
+    def close(self) -> None:
+        """Release the background loader thread."""
+        self._pool.shutdown(wait=True, cancel_futures=True)
 
 
 def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> AWRBatch:
@@ -3363,6 +3396,12 @@ def train(
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
 
+            val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
+            eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
+            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
+            boundary_due = val_due or eval_due or ckpt_due
+            overlap_preload = update < run_stop and not boundary_due
+
             phase_due = (
                 DEVICE == "cuda"
                 and cfg.phase_timing_every > 0
@@ -3382,6 +3421,8 @@ def train(
                 batch, valid_prefixes, loader_wait = batch_prefetcher.next()
                 if phase_timer is not None:
                     phase_timer.record("h2d_end")
+                if overlap_preload:
+                    batch_prefetcher.start_preload()
                 result = train_step(
                     model,
                     batch,
@@ -3397,12 +3438,8 @@ def train(
                 )
                 if step_events is not None:
                     step_events[1].record()
-            val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
-            eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
-            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
-            boundary_due = val_due or eval_due or ckpt_due
-            if update < run_stop and not boundary_due:
-                batch_prefetcher.preload()
+            if overlap_preload:
+                batch_prefetcher.finish_preload()
             actual_positions += valid_prefixes
             metric_accumulator.add(result, valid_prefixes)
             window_loader_wait_seconds.append(loader_wait)
@@ -3460,11 +3497,9 @@ def train(
                     "throughput/log_every_updates": window_updates,
                     "throughput/step_s": step_s,
                     "throughput/loader_wait_s": loader_wait_s,
-                    "throughput/samples_per_s": cfg.batch_size * window_updates / step_s_total,
-                    "throughput/prefixes_per_s": window_valid_prefixes / step_s_total,
                     "throughput/metrics_d2h_s": metrics_d2h_s,
-                    "throughput/loop_s": window_wall_s / window_updates,
-                    "throughput/samples_per_wall_s": cfg.batch_size * window_updates / window_wall_s,
+                    "throughput/wall_s": window_wall_s / window_updates,
+                    "throughput/samples_per_s": cfg.batch_size * window_updates / window_wall_s,
                     "training/elapsed_wall_s": training_elapsed_wall_s,
                     "training/projected_remaining_s": projected_training_remaining_s,
                     "lr/muon": result.muon_lr,
@@ -3474,13 +3509,12 @@ def train(
                     **_mean_phase_metrics(window_phase_timers),
                 }
                 if peak_flops is not None:
-                    log["throughput/achieved_tflops"] = flops_per_update / step_s / 1e12
-                    log["throughput/mfu"] = model_flops_utilization(
+                    log["throughput/mfu_compute"] = model_flops_utilization(
                         flops_per_update,
                         step_s,
                         peak_flops,
                     )
-                    log["throughput/mfu_wall"] = model_flops_utilization(
+                    log["throughput/mfu"] = model_flops_utilization(
                         flops_per_update,
                         window_wall_s / window_updates,
                         peak_flops,
@@ -3578,6 +3612,7 @@ def train(
             smoke_eval_matchups=smoke_eval_matchups,
         )
     finally:
+        batch_prefetcher.close()
         host_metrics.close()
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)

@@ -619,6 +619,37 @@ def test_batch_transform_receives_windows_and_normal_train_batch() -> None:
     assert result[1] is normal
 
 
+@pytest.mark.parametrize("resumable", [False, True])
+def test_make_loader_forwards_out_of_order_delivery(
+    resumable: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class CapturingLoader:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(dataloader, "DataLoader", CapturingLoader)
+    monkeypatch.setattr(dataloader, "ResumableStreamingDataLoader", CapturingLoader)
+    monkeypatch.setattr(dataloader, "_make_streaming_dataset", lambda *_args, **_kwargs: (_fake_mds(), ()))
+
+    dataloader.make_loader(
+        "unused",
+        "train",
+        stats={},
+        L_ctx=L_CTX,
+        L_chunk=L_CHUNK,
+        batch_size=2,
+        seed=0,
+        num_workers=0,
+        resumable=resumable,
+        replay_format="policy" if resumable else "full",
+    )
+
+    assert captured["in_order"] is False
+
+
 def test_window_length_and_ctx_pad() -> None:
     """Every emitted window is exactly L_ctx + L_chunk frames and carries an int
     ctx_pad — the neutral [ctx | chunk] contract, no bridge frames."""

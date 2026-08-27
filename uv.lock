@@ -1141,7 +1141,7 @@ requires-dist = [
     { name = "seaborn" },
     { name = "tabulate" },
     { name = "tensordict" },
-    { name = "torch" },
+    { name = "torch", specifier = ">=2.6" },
     { name = "torchvision" },
     { name = "tqdm" },
     { name = "tyro" },
