@@ -52,6 +52,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -60,7 +61,6 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
@@ -131,7 +131,7 @@ _TRAIN_METRICS_EVERY = 10
 _TRAIN_PREFETCH_FACTOR = 1
 _TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
-_ADAM_UPDATE_CLIP_THRESHOLD = 1.0
+_ADAM_UPDATE_CLIP_THRESHOLD = None
 _ACTIVATION_PERCENTILE_SAMPLE_SIZE = 65_536
 _ARCHITECTURE_POWER_ITERATIONS = 8
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
@@ -2811,8 +2811,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = _ADAM_UPDATE_CLIP_THRESHOLD
     wandb.run.summary["optimizer/update_clip_semantics"] = (
-        "per-tensor StableAdamW factor=min(1, threshold/R_updated); raw_grad is before global clipping, "
-        "grad is after global clipping, and prospective_update includes learning rate, clipping, and weight decay"
+        "disabled for the architecture-only control; raw_grad is before global clipping, grad is after global "
+        "clipping, and prospective_update includes learning rate and weight decay"
     )
     if cfg.wandb_log_code:
         log_wandb_code(wandb.run)

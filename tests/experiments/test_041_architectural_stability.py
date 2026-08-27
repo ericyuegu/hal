@@ -260,12 +260,15 @@ def test_wandb_uses_global_optimizer_step_for_every_series(monkeypatch: pytest.M
     assert [update for update in range(1, 31) if update % exp._TRAIN_METRICS_EVERY == 0] == [10, 20, 30]
 
 
-def test_optimizer_hyperparameters_remain_the_040_baseline() -> None:
+def test_architecture_only_control_disables_adam_update_clipping() -> None:
     cfg = exp.TrainConfig()
+    optimizer = exp.make_optimizer(exp.GPT(_cfg()), _cfg())
+    adam_groups = [group for group in optimizer.param_groups if not group["use_muon"]]
 
     assert cfg.adam_lr == 8.5e-4
     assert cfg.adam_weight_decay == 0.0071
-    assert exp._ADAM_UPDATE_CLIP_THRESHOLD == 1.0
+    assert exp._ADAM_UPDATE_CLIP_THRESHOLD is None
+    assert all(group["update_clip_threshold"] is None for group in adam_groups)
     assert cfg.grad_clip == 1.0
     assert exp._EXPERIMENT_ID == "041_architectural_stability_v2"
 
