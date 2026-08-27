@@ -288,18 +288,19 @@ def test_device_prefetch_loads_next_batch_in_background() -> None:
 
     prefetcher = exp.DeviceBatchPrefetcher(batches(), cfg, "cpu")
     try:
-        actual_first, _, _ = prefetcher.next()
+        actual_first, _ = prefetcher.next()
         prefetcher.start_preload()
         assert requested.wait(timeout=2.0)
         release.set()
-        prefetcher.finish_preload()
-        actual_second, _, _ = prefetcher.next()
+        loader_wait = prefetcher.finish_preload()
+        actual_second, _ = prefetcher.next()
     finally:
         release.set()
         prefetcher.close()
 
     torch.testing.assert_close(actual_first.returns, torch.ones_like(actual_first.returns))
     torch.testing.assert_close(actual_second.returns, torch.full_like(actual_second.returns, 2.0))
+    assert loader_wait >= 0.0
 
 
 def test_cosine_schedule_is_a_named_ablation() -> None:

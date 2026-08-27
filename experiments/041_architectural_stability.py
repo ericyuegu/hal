@@ -300,7 +300,7 @@ class TrainConfig:
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
     cache_limit_gb: int = 1792
     shuffle_block_size: int = 8192
-    predownload: int = 1024
+    predownload: int = 8192
     download_retry: int = 8
     loader_timeout_s: float = 300.0
     val_split: str = "val"
@@ -1270,7 +1270,7 @@ class DeviceBatchPrefetcher:
         self._cfg = cfg
         self._device = torch.device(device)
         self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
-        self._staged: tuple[AWRBatch, AWRBatch, int, float] | None = None
+        self._staged: tuple[AWRBatch, AWRBatch, int] | None = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
         self._future: Future[AWRBatch] | None = None
         self.preload()
@@ -1286,7 +1286,7 @@ class DeviceBatchPrefetcher:
         validate_batch_geometry(cpu_batch, self._cfg, self._cfg.batch_size)
         return cpu_batch
 
-    def _stage(self, cpu_batch: AWRBatch, loader_wait: float) -> None:
+    def _stage(self, cpu_batch: AWRBatch) -> None:
         valid_prefixes = int((self._cfg.arch.L_ctx - cpu_batch.context.ctx_pad).sum())
         if valid_prefixes <= 0:
             raise RuntimeError("training batch contains no valid context prefixes")
@@ -1295,7 +1295,7 @@ class DeviceBatchPrefetcher:
         else:
             with torch.cuda.stream(self._copy_stream):
                 device_batch = cpu_batch.to(self._device)
-        self._staged = (device_batch, cpu_batch, valid_prefixes, loader_wait)
+        self._staged = (device_batch, cpu_batch, valid_prefixes)
 
     def preload(self) -> None:
         """Synchronously stage a batch at startup and checkpoint boundaries."""
@@ -1303,9 +1303,8 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("consume the staged batch before preloading another")
         if self._future is not None:
             raise RuntimeError("finish the background preload before preloading synchronously")
-        started = time.monotonic()
         cpu_batch = self._load_cpu_batch()
-        self._stage(cpu_batch, time.monotonic() - started)
+        self._stage(cpu_batch)
 
     def start_preload(self) -> None:
         """Start loading the next CPU batch on a background thread."""
@@ -1315,27 +1314,29 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("a background preload is already running")
         self._future = self._pool.submit(self._load_cpu_batch)
 
-    def finish_preload(self) -> None:
+    def finish_preload(self) -> float:
         """Stage a background-loaded batch and measure only its uncovered wait."""
         if self._future is None:
             raise RuntimeError("no background preload is running")
         started = time.monotonic()
         future, self._future = self._future, None
         cpu_batch = future.result()
-        self._stage(cpu_batch, time.monotonic() - started)
+        loader_wait = time.monotonic() - started
+        self._stage(cpu_batch)
+        return loader_wait
 
-    def next(self) -> tuple[AWRBatch, int, float]:
+    def next(self) -> tuple[AWRBatch, int]:
         """Wait only for the uncovered tail of the staged transfer."""
         if self._staged is None:
             raise RuntimeError("preload a batch before consuming it")
-        device_batch, cpu_batch, valid_prefixes, loader_wait = self._staged
+        device_batch, cpu_batch, valid_prefixes = self._staged
         if self._copy_stream is not None:
             compute_stream = torch.cuda.current_stream(self._device)
             compute_stream.wait_stream(self._copy_stream)
             device_batch.record_stream(compute_stream)
         self._staged = None
         del cpu_batch
-        return device_batch, valid_prefixes, loader_wait
+        return device_batch, valid_prefixes
 
     def close(self) -> None:
         """Release the background loader thread."""
@@ -3459,7 +3460,7 @@ def train(
                     step_events[0].record()
                 if phase_timer is not None:
                     phase_timer.record("start")
-                batch, valid_prefixes, loader_wait = batch_prefetcher.next()
+                batch, valid_prefixes = batch_prefetcher.next()
                 if phase_timer is not None:
                     phase_timer.record("h2d_end")
                 if overlap_preload:
@@ -3479,8 +3480,7 @@ def train(
                 )
                 if step_events is not None:
                     step_events[1].record()
-            if overlap_preload:
-                batch_prefetcher.finish_preload()
+            loader_wait = batch_prefetcher.finish_preload() if overlap_preload else 0.0
             actual_positions += valid_prefixes
             metric_accumulator.add(result, valid_prefixes)
             window_loader_wait_seconds.append(loader_wait)
@@ -3634,6 +3634,7 @@ def train(
                 wandb.log({"global_step": update, **boundary_metrics})
             if update < run_stop and boundary_due:
                 batch_prefetcher.preload()
+                metrics_window_started = time.monotonic()
         _finalize_training(
             model=model,
             optimizer=optimizer,
