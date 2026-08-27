@@ -3091,6 +3091,10 @@ def benchmark_train_step(
     compile_mode: str = _TRAIN_COMPILE_MODE,
     float8_recipe: Literal["none", "tensorwise", "rowwise", "rowwise_with_gw_hp"] = "none",
     parameter_dtype: Literal["float32", "bfloat16"] = "float32",
+    temporal_layers: int = 4,
+    temporal_width: int = 512,
+    trunk_layers: int = 16,
+    trunk_width: int = 1024,
     warmup_steps: int = 3,
     measured_steps: int = 20,
     profile_steps: int = 0,
@@ -3104,8 +3108,21 @@ def benchmark_train_step(
     if trace_path is not None and profile_steps == 0:
         raise ValueError("trace_path requires at least one profile step")
 
+    if trunk_width % 64 != 0 or temporal_width % 64 != 0:
+        raise ValueError("benchmark widths must be divisible by the 64-element attention head width")
+    arch = replace(
+        ARCHITECTURE,
+        d_model=trunk_width,
+        n_layers=trunk_layers,
+        n_heads=trunk_width // 64,
+        temporal_d_model=temporal_width,
+        temporal_layers=temporal_layers,
+        temporal_heads=temporal_width // 64,
+        temporal_ff_dim=3 * temporal_width,
+    )
     cfg = replace(
         TrainConfig(),
+        arch=arch,
         batch_size=batch_size,
         gradient_hist_every=0,
         weight_hist_every=0,
@@ -3209,6 +3226,10 @@ def benchmark_train_step(
         "compile_mode": compile_mode,
         "float8_recipe": float8_recipe,
         "parameter_dtype": parameter_dtype,
+        "temporal_layers": float(temporal_layers),
+        "temporal_width": float(temporal_width),
+        "trunk_layers": float(trunk_layers),
+        "trunk_width": float(trunk_width),
         "measured_steps": float(measured_steps),
         "muon_bucket_count": float(len(muon_shapes)),
         "muon_matrix_count": float(len(muon_parameters)),
@@ -3834,6 +3855,10 @@ class BenchmarkTrainStepArgs:
     compile_mode: str = _TRAIN_COMPILE_MODE
     float8_recipe: Literal["none", "tensorwise", "rowwise", "rowwise_with_gw_hp"] = "none"
     parameter_dtype: Literal["float32", "bfloat16"] = "float32"
+    temporal_layers: int = 4
+    temporal_width: int = 512
+    trunk_layers: int = 16
+    trunk_width: int = 1024
     warmup_steps: int = 3
     measured_steps: int = 20
     profile_steps: int = 0
@@ -3855,6 +3880,10 @@ def main(args: Command) -> None:
             compile_mode=args.compile_mode,
             float8_recipe=args.float8_recipe,
             parameter_dtype=args.parameter_dtype,
+            temporal_layers=args.temporal_layers,
+            temporal_width=args.temporal_width,
+            trunk_layers=args.trunk_layers,
+            trunk_width=args.trunk_width,
             warmup_steps=args.warmup_steps,
             measured_steps=args.measured_steps,
             profile_steps=args.profile_steps,
