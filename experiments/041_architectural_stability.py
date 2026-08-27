@@ -3086,6 +3086,7 @@ def benchmark_train_step(
     *,
     batch_size: int = 512,
     compile_mode: str = _TRAIN_COMPILE_MODE,
+    parameter_dtype: Literal["float32", "bfloat16"] = "float32",
     warmup_steps: int = 3,
     measured_steps: int = 20,
     profile_steps: int = 0,
@@ -3112,7 +3113,8 @@ def benchmark_train_step(
     validate_config(cfg)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
-    model = GPT(cfg).to(DEVICE).train()
+    model_dtype = torch.bfloat16 if parameter_dtype == "bfloat16" else torch.float32
+    model = GPT(cfg).to(device=DEVICE, dtype=model_dtype).train()
     optimizer = make_optimizer(model, cfg)
     muon_parameters = next(group["params"] for group in optimizer.param_groups if group["use_muon"])
     muon_shapes = {
@@ -3185,6 +3187,7 @@ def benchmark_train_step(
     metrics = {
         "batch_size": float(cfg.batch_size),
         "compile_mode": compile_mode,
+        "parameter_dtype": parameter_dtype,
         "measured_steps": float(measured_steps),
         "muon_bucket_count": float(len(muon_shapes)),
         "muon_matrix_count": float(len(muon_parameters)),
@@ -3808,6 +3811,7 @@ class SelfPlayArgs:
 class BenchmarkTrainStepArgs:
     batch_size: int = 512
     compile_mode: str = _TRAIN_COMPILE_MODE
+    parameter_dtype: Literal["float32", "bfloat16"] = "float32"
     warmup_steps: int = 3
     measured_steps: int = 20
     profile_steps: int = 0
@@ -3827,6 +3831,7 @@ def main(args: Command) -> None:
         benchmark_train_step(
             batch_size=args.batch_size,
             compile_mode=args.compile_mode,
+            parameter_dtype=args.parameter_dtype,
             warmup_steps=args.warmup_steps,
             measured_steps=args.measured_steps,
             profile_steps=args.profile_steps,
