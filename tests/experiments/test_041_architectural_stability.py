@@ -184,27 +184,12 @@ def test_button_forward_diagnostics_cover_stable_head_boundary() -> None:
 
     assert nll.shape == (*targets.shape[:-1], exp.N_GROUPS)
     assert set(metrics) == {
-        "button_activation/pre_norm_rms_mean",
-        "button_activation/pre_norm_rms_min",
-        "button_activation/pre_norm_rms_p01",
-        "button_activation/input_rms_mean",
-        "button_activation/input_rms_min",
-        "button_activation/input_abs_max",
-        "button_activation/input_abs_p999",
-        "button_logits/max",
-        "button_logits/min",
-        "button_logits/span",
-        "button_logits/abs_p999",
-        "button_logits/target_mean",
-        "button_logits/target_min",
-        "button_logits/correct_margin_mean",
-        "button_logits/correct_margin_min",
-        "button_logits/legal_support_mean",
-        "button_logits/legal_support_min",
-        "button_logits/target_masked_frac",
+        "stability/button_pre_norm_rms_min",
+        "stability/button_input_abs_p999",
+        "stability/button_logit_abs_p999",
+        "stability/button_margin_mean",
     }
     assert all(torch.isfinite(value) for value in metrics.values())
-    assert metrics["button_logits/target_masked_frac"] == 0
 
 
 def test_architecture_diagnostics_cover_geometry_and_objective_gradients() -> None:
@@ -257,8 +242,99 @@ def test_wandb_uses_global_optimizer_step_for_every_series(monkeypatch: pytest.M
         ("global_step", {}),
         ("*", {"step_metric": "global_step"}),
     ]
-    assert exp._TRAIN_METRICS_EVERY == 10
-    assert [update for update in range(1, 31) if update % exp._TRAIN_METRICS_EVERY == 0] == [10, 20, 30]
+    assert exp._TRAIN_METRICS_EVERY == 1
+    assert [update for update in range(1, 4) if update % exp._TRAIN_METRICS_EVERY == 0] == [1, 2, 3]
+
+
+def test_training_metric_schema_is_compact_and_grouped() -> None:
+    cfg = _cfg()
+    accumulator = exp._TrainingMetricAccumulator()
+    accumulator.add(
+        exp.TrainStepResult(
+            nll_sum=torch.ones(len(cfg.arch.head_offsets), exp.N_GROUPS),
+            gradient_norm=torch.tensor(2.0),
+            metrics={
+                "train/loss": torch.tensor(1.0),
+                "aux/total_loss": torch.tensor(1.5),
+                "value/loss": torch.tensor(0.5),
+                "awr/ess": torch.tensor(0.8),
+                "stability/action_grad_abs_max": torch.tensor(3.0),
+            },
+            diagnostics={},
+            muon_lr=1e-3,
+            adam_lr=1e-4,
+        ),
+        valid_prefixes=1,
+    )
+
+    metrics, updates, _ = accumulator.flush(cfg, update=1)
+
+    assert updates == 1
+    assert set(metrics) == {
+        "train/loss",
+        "train/nll",
+        "aux/total_loss",
+        "value/loss",
+        "awr/ess",
+        "optimizer/grad_norm",
+        "stability/action_grad_abs_max",
+    }
+
+
+def test_stable_adam_metrics_collapse_per_tensor_replicas() -> None:
+    metrics = exp._stable_adam_metrics(
+        {
+            "optimizer/head/prospective_update_rms": torch.tensor(0.2),
+            "optimizer/head/update_clip_factor": torch.tensor(0.8),
+            "optimizer/condition/prospective_update_rms": torch.tensor(0.1),
+            "optimizer/condition/update_clip_factor": torch.tensor(1.0),
+            "optimizer/head/parameter_rms": torch.tensor(2.0),
+        }
+    )
+
+    assert metrics == {
+        "stability/action_update_rms_max": torch.tensor(0.2),
+        "stability/action_update_clip_factor_min": torch.tensor(0.8),
+    }
+
+
+def test_boundary_metric_schemas_keep_a_minimal_spanning_set() -> None:
+    cfg = _cfg()
+    validation = {
+        "loss_unweighted": 1.0,
+        "temporal_loss_near_unweighted": 0.8,
+        "temporal_loss_far_unweighted": 1.2,
+        "exact_frame_acc": 0.5,
+        "dense_four_sequence_acc": 0.4,
+        "change_f1": 0.3,
+        "sampled_transition_rate": 0.2,
+    }
+    for name in exp.GROUP_NAMES:
+        validation[f"rollout_nll_o{cfg.exec_horizon:02d}_{name}"] = 1.0
+        validation[f"exposure_gap_o{cfg.exec_horizon:02d}_{name}"] = 0.1
+    assert set(exp._validation_wandb_metrics(validation, cfg)) == {
+        "nll",
+        "near_nll",
+        "far_nll",
+        "rollout_nll",
+        "exposure_gap",
+        "exact_frame_acc",
+        "sequence_acc",
+        "change_f1",
+        "sampled_transition_rate",
+    }
+
+    closed_loop = {
+        "net_stock_per_min": 1.0,
+        "net_stock_per_min_ci_lo": -1.0,
+        "decode_p95_ms": 4.0,
+        "crashed": 0.0,
+    }
+    assert exp._eval_wandb_metrics(closed_loop) == {
+        "net_stock_per_min": 1.0,
+        "crashed": 0.0,
+        "decode_p95_ms": 4.0,
+    }
 
 
 def test_optimizer_hyperparameters_remain_the_040_baseline() -> None:

@@ -61,8 +61,6 @@ from jaxtyping import Int
 from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
-from torchao.float8 import Float8LinearConfig
-from torchao.float8 import convert_to_float8_training
 
 import wandb
 from hal import r2
@@ -112,7 +110,6 @@ from hal.training.mfu import bf16_peak_source
 from hal.training.mfu import model_flops_utilization
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.runs import make_run_name
-from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
 from hal.training.system_metrics import HostMetricsSampler
 from hal.training.trunk import Rotary
@@ -134,7 +131,7 @@ _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
-_TRAIN_METRICS_EVERY = 10
+_TRAIN_METRICS_EVERY = 1
 _TRAIN_PREFETCH_FACTOR = 4
 _TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
@@ -280,11 +277,11 @@ class TrainConfig:
     compile_temporal: bool = True
 
     wandb_log_code: bool = True
-    gradient_hist_every: int = 4096
-    weight_hist_every: int = 2**11
-    layer_rms_every: int = 4096
+    gradient_hist_every: int = 0
+    weight_hist_every: int = 0
+    layer_rms_every: int = 0
     layer_rms_batch_size: int = 8
-    architecture_metrics_every: int = 1024
+    architecture_metrics_every: int = 0
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
@@ -310,7 +307,7 @@ class TrainConfig:
     system_metrics_interval_s: float = 5.0
     process_metrics_interval_s: float = 30.0
     cache_metrics_interval_s: float = 30.0
-    phase_timing_every: int = 10
+    phase_timing_every: int = 0
 
     @property
     def max_steps(self) -> int:
@@ -537,7 +534,7 @@ class CudaPhaseTimer:
         metrics: dict[str, float] = {}
         for metric, start, end in _CUDA_PHASES:
             if start in self._events and end in self._events:
-                metrics[f"throughput/phase_{metric}_s"] = self._events[start].elapsed_time(self._events[end]) / 1000
+                metrics[f"profile/{metric}_s"] = self._events[start].elapsed_time(self._events[end]) / 1000
         return metrics
 
 
@@ -954,40 +951,22 @@ class CausalTemporalDecoder(nn.Module):
         observed: Tensor,
         targets: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Return NLL plus every-step button activation and logit metrics."""
+        """Return NLL plus a compact button-boundary stability signal."""
         logits, button_values = self._teacher_forced_outputs(hidden, observed, targets)
         features, head_input, raw_logits, button_mask = button_values
         feature_rms = features.detach().float().square().mean(dim=-1).sqrt()
         input_values = head_input.detach()
-        input_rms = input_values.float().square().mean(dim=-1).sqrt()
         raw_logits_values = raw_logits.detach()
         button_targets = targets[..., BUTTONS_G, None]
         target_logits = raw_logits_values.gather(-1, button_targets).squeeze(-1).float()
         legal_logits = raw_logits_values.masked_fill(button_mask, float("-inf"))
         competing_logits = legal_logits.scatter(-1, button_targets, float("-inf")).amax(dim=-1).float()
         margin = target_logits - competing_logits
-        legal_support = (~button_mask).sum(dim=-1).float()
-        logit_max = raw_logits_values.amax().float()
-        logit_min = raw_logits_values.amin().float()
         metrics = {
-            "button_activation/pre_norm_rms_mean": feature_rms.mean(),
-            "button_activation/pre_norm_rms_min": feature_rms.amin(),
-            "button_activation/pre_norm_rms_p01": _sampled_quantile(feature_rms, 1.0),
-            "button_activation/input_rms_mean": input_rms.mean(),
-            "button_activation/input_rms_min": input_rms.amin(),
-            "button_activation/input_abs_max": input_values.abs().amax().float(),
-            "button_activation/input_abs_p999": _sampled_quantile(input_values, 99.9, absolute=True),
-            "button_logits/max": logit_max,
-            "button_logits/min": logit_min,
-            "button_logits/span": logit_max - logit_min,
-            "button_logits/abs_p999": _sampled_quantile(raw_logits_values, 99.9, absolute=True),
-            "button_logits/target_mean": target_logits.mean(),
-            "button_logits/target_min": target_logits.amin(),
-            "button_logits/correct_margin_mean": margin.mean(),
-            "button_logits/correct_margin_min": margin.amin(),
-            "button_logits/legal_support_mean": legal_support.mean(),
-            "button_logits/legal_support_min": legal_support.amin(),
-            "button_logits/target_masked_frac": button_mask.gather(-1, button_targets).float().mean(),
+            "stability/button_pre_norm_rms_min": feature_rms.amin(),
+            "stability/button_input_abs_p999": _sampled_quantile(input_values, 99.9, absolute=True),
+            "stability/button_logit_abs_p999": _sampled_quantile(raw_logits_values, 99.9, absolute=True),
+            "stability/button_margin_mean": margin.mean(),
         }
         return self.nll_from_logits(logits, targets), metrics
 
@@ -1552,13 +1531,17 @@ def microbatch_loss(
     nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
     extra = {
         "train/loss": policy_loss.detach() / _LN2,
-        "train/temporal_loss_near": near.detach() / _LN2,
-        "train/temporal_loss_far": far.detach() / _LN2,
-        "train/total_objective": loss.detach(),
+        "aux/near_loss": near.detach() / _LN2,
+        "aux/far_loss": far.detach() / _LN2,
+        "aux/total_loss": loss.detach(),
+        "value/loss": value_stats["value_loss"],
+        "value/rmse": value_stats["value_rmse"],
         "awr/active": torch.ones_like(loss) if active else torch.zeros_like(loss),
+        "awr/ess": stats["weight_ess"],
+        "awr/max_weight": stats["weight_max"],
+        "awr/clip_fraction": stats["weight_clip_frac"],
+        "awr/button_loss_correlation": stats["weight_button_loss_correlation"],
         **button_diagnostics,
-        **{f"train/{name}": metric for name, metric in value_stats.items()},
-        **{f"train/{name}": value.detach() for name, value in stats.items()},
     }
     if phase_timer is not None:
         phase_timer.record("objective_end")
@@ -1733,6 +1716,24 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
     if nonfinite:
         raise FloatingPointError(f"validation produced non-finite metrics: {nonfinite}")
     return out
+
+
+def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dict[str, float]:
+    """Reduce detailed validation evidence to orthogonal W&B signals."""
+    horizon = cfg.exec_horizon
+    rollout_nll = sum(values[f"rollout_nll_o{horizon:02d}_{name}"] for name in GROUP_NAMES)
+    exposure_gap = sum(values[f"exposure_gap_o{horizon:02d}_{name}"] for name in GROUP_NAMES)
+    return {
+        "nll": values["loss_unweighted"],
+        "near_nll": values["temporal_loss_near_unweighted"],
+        "far_nll": values["temporal_loss_far_unweighted"],
+        "rollout_nll": rollout_nll,
+        "exposure_gap": exposure_gap,
+        "exact_frame_acc": values["exact_frame_acc"],
+        "sequence_acc": values["dense_four_sequence_acc"],
+        "change_f1": values["change_f1"],
+        "sampled_transition_rate": values["sampled_transition_rate"],
+    }
 
 
 _UINT64_MASK = (1 << 64) - 1
@@ -2180,6 +2181,27 @@ def eval_vs_cpu(
     return metrics
 
 
+def _eval_wandb_metrics(values: dict[str, float]) -> dict[str, float]:
+    """Keep closed-loop quality, uncertainty, reliability, and latency."""
+    names = {
+        "stocks_taken_per_min": "stocks_taken_per_min",
+        "stocks_lost_per_min": "stocks_lost_per_min",
+        "damage_dealt_per_min": "damage_dealt_per_min",
+        "damage_taken_per_min": "damage_taken_per_min",
+        "net_stock_per_min": "net_stock_per_min",
+        "net_dmg_per_min": "net_dmg_per_min",
+        "net_stock_cluster_bootstrap_lcb": "net_stock_lcb",
+        "net_dmg_cluster_bootstrap_lcb": "net_dmg_lcb",
+        "boots": "boots",
+        "crashed": "crashed",
+        "dead_frame_frac": "dead_frame_fraction",
+        "decode_p95_ms": "decode_p95_ms",
+        "eval_total_wall_seconds": "wall_s",
+        "exec_horizon": "horizon",
+    }
+    return {output: values[source] for source, output in names.items() if source in values}
+
+
 def require_complete_eval(metrics: dict[str, float], expected_boots: int) -> None:
     """Fail unless every scheduled boot reached active gameplay."""
     scheduled = int(metrics.get("scheduled_boots", 0.0))
@@ -2267,17 +2289,26 @@ def _button_adam_parameters(model: GPT) -> dict[str, nn.Parameter]:
     }
 
 
-def _raw_button_gradient_metrics(model: GPT) -> dict[str, Tensor]:
-    """Measure button gradients before global norm clipping."""
-    metrics: dict[str, Tensor] = {}
+def _button_gradient_abs_max(model: GPT) -> Tensor:
+    """Return one pre-clipping action-path gradient guardrail."""
+    maxima: list[Tensor] = []
     for name, parameter in _button_adam_parameters(model).items():
         if parameter.grad is None:
             raise RuntimeError(f"button parameter {name!r} has no gradient")
-        gradient = parameter.grad.detach().float()
-        prefix = f"optimizer/{name}"
-        metrics[f"{prefix}/raw_grad_rms"] = gradient.square().mean().sqrt()
-        metrics[f"{prefix}/raw_grad_abs_max"] = gradient.abs().amax()
-    return metrics
+        maxima.append(parameter.grad.detach().float().abs().amax())
+    return torch.stack(maxima).amax()
+
+
+def _stable_adam_metrics(diagnostics: dict[str, Tensor]) -> dict[str, Tensor]:
+    """Collapse per-tensor Adam telemetry into two actionable guardrails."""
+    update_rms = [value for name, value in diagnostics.items() if name.endswith("/prospective_update_rms")]
+    clip_factors = [value for name, value in diagnostics.items() if name.endswith("/update_clip_factor")]
+    if not update_rms or not clip_factors:
+        raise RuntimeError("StableAdamW action-path diagnostics are missing")
+    return {
+        "stability/action_update_rms_max": torch.stack(update_rms).amax(),
+        "stability/action_update_clip_factor_min": torch.stack(clip_factors).amin(),
+    }
 
 
 def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
@@ -2842,13 +2873,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         return
     wandb.define_metric("global_step")
     wandb.define_metric("*", step_metric="global_step")
-    wandb.define_metric("optimizer/*", step_metric="global_step")
-    wandb.define_metric("button_activation/*", step_metric="global_step")
-    wandb.define_metric("button_logits/*", step_metric="global_step")
-    wandb.define_metric("eval/*", step_metric="global_step")
     wandb.run.summary["nll_semantics"] = (
-        "train/loss is the weighted policy loss in bits; train/total_objective adds the beta-normalized "
-        "value MSE; *_unweighted and val metrics are unweighted"
+        "train/loss is weighted policy loss in bits; train/nll is its unweighted counterpart; "
+        "aux/total_loss is the optimized policy-plus-value objective"
     )
     wandb.run.summary["layer_rms_semantics"] = (
         "activation=block input; residual_branch=block output-input; "
@@ -2862,8 +2889,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = _ADAM_UPDATE_CLIP_THRESHOLD
     wandb.run.summary["optimizer/lr_schedule"] = cfg.lr_schedule_kind
     wandb.run.summary["optimizer/update_clip_semantics"] = (
-        "per-tensor StableAdamW factor=min(1, threshold/R_updated); raw_grad is before global clipping, "
-        "grad is after global clipping, and prospective_update includes learning rate, clipping, and weight decay"
+        "per-tensor StableAdamW factor=min(1, threshold/R_updated); stability metrics aggregate the monitored "
+        "action-path tensors"
     )
     if cfg.wandb_log_code:
         log_wandb_code(wandb.run)
@@ -2921,12 +2948,7 @@ def _log_training_summary(
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
-def _training_functions(
-    model: GPT,
-    cfg: TrainConfig,
-    *,
-    compile_mode: str = _TRAIN_COMPILE_MODE,
-) -> tuple[Callable, Callable]:
+def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
     temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
@@ -2942,14 +2964,14 @@ def _training_functions(
             trunk_fn,
             dynamic=False,
             fullgraph=True,
-            mode=compile_mode,
+            mode=_TRAIN_COMPILE_MODE,
         )
     if DEVICE == "cuda" and cfg.compile_temporal:
         temporal_fn = torch.compile(
             temporal_fn,
             dynamic=False,
             fullgraph=True,
-            mode=compile_mode,
+            mode=_TRAIN_COMPILE_MODE,
         )
     return trunk_fn, temporal_fn
 
@@ -3014,15 +3036,15 @@ class _TrainingMetricAccumulator:
         nll_values = len(cfg.arch.head_offsets) * N_GROUPS
         mean_nll = payload[:nll_values].reshape(len(cfg.arch.head_offsets), N_GROUPS) / self.valid_prefixes
         scalar_values = payload[nll_values:] / self.updates
+        nll_metrics = nll_mean_metrics(
+            mean_nll,
+            cfg.arch.head_offsets,
+            aux_loss_weight=cfg.awr.auxiliary_loss_weight,
+        )
         values = {
-            f"train/{name}": value
-            for name, value in nll_mean_metrics(
-                mean_nll,
-                cfg.arch.head_offsets,
-                aux_loss_weight=cfg.awr.auxiliary_loss_weight,
-            ).items()
+            "train/nll": nll_metrics["loss_unweighted"],
+            "optimizer/grad_norm": float(scalar_values[0]),
         }
-        values["train/grad_norm"] = float(scalar_values[0])
         values.update({name: float(value) for name, value in zip(self._metric_names, scalar_values[1:], strict=True)})
 
         updates = self.updates
@@ -3065,11 +3087,8 @@ def train_step(
     loss.backward()
     if phase_timer is not None:
         phase_timer.record("backward_end")
-    metrics.update(_raw_button_gradient_metrics(model))
+    metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
     gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-    metrics["optimizer/global_clip_factor"] = (
-        cfg.grad_clip / gradient_norm.detach().float().clamp_min(torch.finfo(torch.float32).tiny)
-    ).clamp_max(1.0)
     if phase_timer is not None:
         phase_timer.record("grad_norm_end")
     diagnostics = _training_diagnostics(model, batch, cfg, update)
@@ -3078,7 +3097,7 @@ def train_step(
     muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
     adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
     optimizer.step()
-    metrics.update(optimizer.last_adam_diagnostics)
+    metrics.update(_stable_adam_metrics(optimizer.last_adam_diagnostics))
     scheduler.step()
     if phase_timer is not None:
         phase_timer.record("optimizer_end")
@@ -3087,19 +3106,11 @@ def train_step(
 
 def benchmark_train_step(
     *,
-    batch_size: int = 512,
-    compile_mode: str = _TRAIN_COMPILE_MODE,
-    float8_recipe: Literal["none", "tensorwise", "rowwise", "rowwise_with_gw_hp"] = "none",
-    parameter_dtype: Literal["float32", "bfloat16"] = "float32",
-    temporal_layers: int = 4,
-    temporal_width: int = 512,
-    trunk_layers: int = 16,
-    trunk_width: int = 1024,
     warmup_steps: int = 3,
     measured_steps: int = 20,
     profile_steps: int = 0,
     trace_path: str | None = None,
-) -> dict[str, float | str]:
+) -> dict[str, float]:
     """Benchmark the frozen production train step on a synthetic device batch."""
     if DEVICE != "cuda":
         raise RuntimeError("the production train-step benchmark requires CUDA")
@@ -3108,22 +3119,8 @@ def benchmark_train_step(
     if trace_path is not None and profile_steps == 0:
         raise ValueError("trace_path requires at least one profile step")
 
-    if trunk_width % 64 != 0 or temporal_width % 64 != 0:
-        raise ValueError("benchmark widths must be divisible by the 64-element attention head width")
-    arch = replace(
-        ARCHITECTURE,
-        d_model=trunk_width,
-        n_layers=trunk_layers,
-        n_heads=trunk_width // 64,
-        temporal_d_model=temporal_width,
-        temporal_layers=temporal_layers,
-        temporal_heads=temporal_width // 64,
-        temporal_ff_dim=3 * temporal_width,
-    )
     cfg = replace(
         TrainConfig(),
-        arch=arch,
-        batch_size=batch_size,
         gradient_hist_every=0,
         weight_hist_every=0,
         layer_rms_every=0,
@@ -3132,26 +3129,9 @@ def benchmark_train_step(
         wandb_log_code=False,
     )
     validate_config(cfg)
-    if float8_recipe != "none" and parameter_dtype != "bfloat16":
-        raise ValueError("float8 training requires --parameter-dtype bfloat16")
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
-    model_dtype = torch.bfloat16 if parameter_dtype == "bfloat16" else torch.float32
-    model = GPT(cfg).to(device=DEVICE, dtype=model_dtype).train()
-    if model_dtype == torch.bfloat16:
-        model.value_head.float()
-    if float8_recipe != "none":
-        float8_config = Float8LinearConfig.from_recipe_name(float8_recipe)
-
-        def eligible_for_float8(module: nn.Module, name: str) -> bool:
-            if name.startswith("value_head"):
-                return False
-            if not isinstance(module, nn.Linear):
-                return True
-            aligned = module.in_features % 16 == 0 and module.out_features % 16 == 0
-            return aligned and module.in_features * module.out_features >= 2**18
-
-        convert_to_float8_training(model, config=float8_config, module_filter_fn=eligible_for_float8)
+    model = GPT(cfg).to(DEVICE).train()
     optimizer = make_optimizer(model, cfg)
     muon_parameters = next(group["params"] for group in optimizer.param_groups if group["use_muon"])
     muon_shapes = {
@@ -3159,7 +3139,7 @@ def benchmark_train_step(
         for parameter in muon_parameters
     }
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
-    trunk_fn, temporal_fn = _training_functions(model, cfg, compile_mode=compile_mode)
+    trunk_fn, temporal_fn = _training_functions(model, cfg)
     batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
     valid_prefixes = cfg.batch_size * cfg.arch.L_ctx
 
@@ -3184,14 +3164,10 @@ def benchmark_train_step(
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
 
-    step_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
     phase_timers: list[CudaPhaseTimer] = []
     wall_started = time.monotonic()
     for index in range(measured_steps):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
         timer = CudaPhaseTimer()
-        start.record()
         timer.record("start")
         timer.record("h2d_end")
         train_step(
@@ -3207,45 +3183,23 @@ def benchmark_train_step(
             scheduler=scheduler,
             phase_timer=timer,
         )
-        end.record()
-        step_events.append((start, end))
         phase_timers.append(timer)
     torch.cuda.synchronize()
     wall_seconds = time.monotonic() - wall_started
 
-    step_seconds = np.asarray([start.elapsed_time(end) / 1000 for start, end in step_events])
     phase_samples: dict[str, list[float]] = {}
     for timer in phase_timers:
         for name, value in timer.metrics().items():
             phase_samples.setdefault(name, []).append(value)
-    parameter_counts = subsystem_parameter_counts(model)
-    approximate_flops = approximate_training_flops_per_update(cfg, parameter_counts)
-    peak_flops = bf16_dense_peak_flops(torch.cuda.get_device_name())
     metrics = {
         "batch_size": float(cfg.batch_size),
-        "compile_mode": compile_mode,
-        "float8_recipe": float8_recipe,
-        "parameter_dtype": parameter_dtype,
-        "temporal_layers": float(temporal_layers),
-        "temporal_width": float(temporal_width),
-        "trunk_layers": float(trunk_layers),
-        "trunk_width": float(trunk_width),
         "measured_steps": float(measured_steps),
         "muon_bucket_count": float(len(muon_shapes)),
         "muon_matrix_count": float(len(muon_parameters)),
-        "step_s_mean": float(step_seconds.mean()),
-        "step_s_median": float(np.median(step_seconds)),
-        "step_s_p95": float(np.percentile(step_seconds, 95)),
-        "samples_per_s": cfg.batch_size / float(step_seconds.mean()),
-        "samples_per_wall_s": cfg.batch_size * measured_steps / wall_seconds,
+        "update_s": wall_seconds / measured_steps,
+        "samples_per_s": cfg.batch_size * measured_steps / wall_seconds,
         "peak_allocated_gb": torch.cuda.max_memory_allocated() / 2**30,
         "peak_reserved_gb": torch.cuda.max_memory_reserved() / 2**30,
-        "approximate_flops_per_update": float(approximate_flops),
-        "mfu_compute": (
-            model_flops_utilization(approximate_flops, float(step_seconds.mean()), peak_flops)
-            if peak_flops is not None
-            else float("nan")
-        ),
         **{f"{name}_median": float(np.median(values)) for name, values in phase_samples.items()},
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
@@ -3299,6 +3253,18 @@ def _mean_phase_metrics(timers: list[CudaPhaseTimer]) -> dict[str, float]:
     return {name: value / len(timers) for name, value in totals.items()} if timers else {}
 
 
+def _minimal_system_metrics(metrics: dict[str, float]) -> dict[str, float]:
+    """Keep one host metric for each distinct resource constraint."""
+    names = {
+        "system/cgroup/current_gib": "system/memory_gb",
+        "system/cgroup/usage_fraction": "system/memory_fraction",
+        "system/process_tree/pss_gib": "system/process_memory_gb",
+        "system/cache/allocated_gib": "system/cache_gb",
+        "system/telemetry_errors": "system/telemetry_errors",
+    }
+    return {output: metrics[source] for source, output in names.items() if source in metrics}
+
+
 def _finalize_training(
     *,
     model: GPT,
@@ -3338,7 +3304,8 @@ def _finalize_training(
         uploader.upload(snapshot, key=final_path.name)
 
     checkpoint_sha = _checkpoint_sha256(final_path)
-    final_metrics = {f"val/{name}": value for name, value in val_metrics(model, val_cache, cfg).items()}
+    validation = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
+    final_metrics = {f"val/{name}": value for name, value in validation.items()}
     final_matchups = smoke_eval_matchups if smoke else cfg.final_eval_n_matchups
     if final_matchups:
         if eval_inference is None:
@@ -3354,7 +3321,7 @@ def _finalize_training(
         )
         if not smoke:
             require_complete_eval(final_eval, cfg.final_eval_n_matchups)
-        final_metrics.update({f"eval/{name}": value for name, value in final_eval.items()})
+        final_metrics.update({f"eval/{name}": value for name, value in _eval_wandb_metrics(final_eval).items()})
     wandb.log({"global_step": update, **final_metrics})
 
     mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
@@ -3439,18 +3406,13 @@ def train(
     )
     host_metrics.start()
     metric_accumulator = _TrainingMetricAccumulator()
-    window_step_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
-    window_cpu_step_seconds: list[float] = []
     window_loader_wait_seconds: list[float] = []
     window_phase_timers: list[CudaPhaseTimer] = []
     window_diagnostics: dict[str, object] = {}
     window_peak_allocated_gb = 0.0
-    window_peak_reserved_gb = 0.0
     metrics_window_started = time.monotonic()
-    previous_wandb_log_s: float | None = None
-    previous_checkpoint_s: float | None = None
     # CUDA compilation must remain on the training thread. Background compilation
-    # deadlocked training on both H100 and L40S hosts.
+    # deadlocked training on both H100 and B200 hosts.
     eval_inference: BF16Inference | None = None
     model.train()
     try:
@@ -3471,45 +3433,31 @@ def train(
                 and (update == 1 or update % cfg.phase_timing_every == 0)
             )
             phase_timer = CudaPhaseTimer() if phase_due else None
-            step_events = (
-                (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
-                if DEVICE == "cuda"
-                else None
+            if phase_timer is not None:
+                phase_timer.record("start")
+            batch, valid_prefixes = batch_prefetcher.next()
+            if phase_timer is not None:
+                phase_timer.record("h2d_end")
+            if overlap_preload:
+                batch_prefetcher.start_preload()
+            result = train_step(
+                model,
+                batch,
+                cfg,
+                step=step,
+                update=update,
+                valid_prefixes=valid_prefixes,
+                trunk_fn=trunk_fn,
+                temporal_fn=temporal_fn,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                phase_timer=phase_timer,
             )
-            with profile("step") as stopwatch:
-                if step_events is not None:
-                    step_events[0].record()
-                if phase_timer is not None:
-                    phase_timer.record("start")
-                batch, valid_prefixes = batch_prefetcher.next()
-                if phase_timer is not None:
-                    phase_timer.record("h2d_end")
-                if overlap_preload:
-                    batch_prefetcher.start_preload()
-                result = train_step(
-                    model,
-                    batch,
-                    cfg,
-                    step=step,
-                    update=update,
-                    valid_prefixes=valid_prefixes,
-                    trunk_fn=trunk_fn,
-                    temporal_fn=temporal_fn,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    phase_timer=phase_timer,
-                )
-                if step_events is not None:
-                    step_events[1].record()
             loader_wait = batch_prefetcher.finish_preload() if overlap_preload else 0.0
             actual_positions += valid_prefixes
             metric_accumulator.add(result, valid_prefixes)
             window_loader_wait_seconds.append(loader_wait)
             window_diagnostics.update(result.diagnostics)
-            if step_events is None:
-                window_cpu_step_seconds.append(stopwatch.elapsed)
-            else:
-                window_step_events.append(step_events)
             if phase_timer is not None:
                 window_phase_timers.append(phase_timer)
             if DEVICE == "cuda":
@@ -3517,103 +3465,66 @@ def train(
                     window_peak_allocated_gb,
                     torch.cuda.max_memory_allocated() / 2**30,
                 )
-                window_peak_reserved_gb = max(
-                    window_peak_reserved_gb,
-                    torch.cuda.max_memory_reserved() / 2**30,
-                )
 
             metrics_due = update % _TRAIN_METRICS_EVERY == 0 or update == run_stop
             if metrics_due:
-                metrics_started = time.monotonic()
                 window_metric_values, window_updates, window_valid_prefixes = metric_accumulator.flush(
                     cfg,
                     update=update,
                 )
-                metrics_d2h_s = time.monotonic() - metrics_started
-                step_seconds = (
-                    [start.elapsed_time(end) / 1000 for start, end in window_step_events]
-                    if window_step_events
-                    else window_cpu_step_seconds
-                )
-                if len(step_seconds) != window_updates or len(window_loader_wait_seconds) != window_updates:
+                if len(window_loader_wait_seconds) != window_updates:
                     raise RuntimeError("training telemetry window lost an update")
-                step_s_total = sum(step_seconds)
-                step_s = step_s_total / window_updates
                 loader_wait_s = sum(window_loader_wait_seconds) / window_updates
-                loader_wait_fractions.extend(
-                    wait / max(wait + elapsed, 1e-12)
-                    for wait, elapsed in zip(window_loader_wait_seconds, step_seconds, strict=True)
-                )
-
                 training_elapsed_wall_s = time.monotonic() - run_started
                 completed_updates = update - start_step
                 projected_training_remaining_s = training_elapsed_wall_s * (run_stop - update) / completed_updates
-                window_wall_s = time.monotonic() - metrics_window_started
                 first_window_update = update - window_updates + 1
-                log_started = time.monotonic()
                 log: dict[str, object] = {
-                    "samples": update * cfg.batch_size,
-                    "data/actual_loss_positions": actual_positions,
-                    "data/actual_loss_positions_this_log": window_valid_prefixes,
-                    "data/actual_loss_positions_this_update": window_valid_prefixes / window_updates,
-                    "throughput/log_every_updates": window_updates,
-                    "throughput/step_s": step_s,
-                    "throughput/loader_wait_s": loader_wait_s,
-                    "throughput/metrics_d2h_s": metrics_d2h_s,
-                    "throughput/wall_s": window_wall_s / window_updates,
-                    "throughput/samples_per_s": cfg.batch_size * window_updates / window_wall_s,
-                    "training/elapsed_wall_s": training_elapsed_wall_s,
-                    "training/projected_remaining_s": projected_training_remaining_s,
-                    "lr/muon": result.muon_lr,
-                    "lr/adam": result.adam_lr,
+                    "data/loss_positions": actual_positions,
+                    "data/valid_prefixes": window_valid_prefixes / window_updates,
+                    "loader/wait_s": loader_wait_s,
+                    "progress/elapsed_s": training_elapsed_wall_s,
+                    "progress/remaining_s": projected_training_remaining_s,
+                    "schedule/muon_lr": result.muon_lr,
+                    "schedule/adam_lr": result.adam_lr,
                     **window_metric_values,
                     **window_diagnostics,
                     **_mean_phase_metrics(window_phase_timers),
                 }
+                if _cadence_in_window(first_window_update, update, cfg.system_metrics_every):
+                    log.update(_minimal_system_metrics(host_metrics.snapshot()))
+                if DEVICE == "cuda":
+                    log["system/gpu_memory_gb"] = window_peak_allocated_gb
+
+                update_s = (time.monotonic() - metrics_window_started) / window_updates
+                samples_per_s = cfg.batch_size / update_s
+                loader_wait_fraction = loader_wait_s / max(update_s, 1e-12)
+                loader_wait_fractions.extend([loader_wait_fraction] * window_updates)
+                log["throughput/update_s"] = update_s
+                log["throughput/samples_per_s"] = samples_per_s
                 if peak_flops is not None:
-                    log["throughput/mfu_compute"] = model_flops_utilization(
-                        flops_per_update,
-                        step_s,
-                        peak_flops,
-                    )
                     log["throughput/mfu"] = model_flops_utilization(
                         flops_per_update,
-                        window_wall_s / window_updates,
+                        update_s,
                         peak_flops,
                     )
-                if previous_wandb_log_s is not None:
-                    log["throughput/wandb_log_s"] = previous_wandb_log_s
-                if previous_checkpoint_s is not None:
-                    log["throughput/checkpoint_save_s"] = previous_checkpoint_s
-                    previous_checkpoint_s = None
-                if _cadence_in_window(first_window_update, update, cfg.system_metrics_every):
-                    log.update(host_metrics.snapshot())
-                if DEVICE == "cuda":
-                    log["hardware/peak_allocated_gb"] = window_peak_allocated_gb
-                    log["hardware/peak_reserved_gb"] = window_peak_reserved_gb
-                log["throughput/log_build_s"] = time.monotonic() - log_started
                 wandb_started = time.monotonic()
                 wandb.log({"global_step": update, **log})
-                previous_wandb_log_s = time.monotonic() - wandb_started
                 if update <= _TRAIN_METRICS_EVERY or update % 50 == 0 or update == run_stop:
                     print(
                         f"[t+{time.monotonic() - run_started:.0f}s] update {update}: "
                         f"{window_metric_values['train/loss']:.3f} bits objective, "
-                        f"{cfg.batch_size * window_updates / step_s_total:.0f} samples/s, "
+                        f"{samples_per_s:.0f} samples/s, "
                         f"projected training remaining {projected_training_remaining_s / 60:.1f}m",
                         flush=True,
                     )
-                window_step_events.clear()
-                window_cpu_step_seconds.clear()
                 window_loader_wait_seconds.clear()
                 window_phase_timers.clear()
                 window_diagnostics.clear()
                 window_peak_allocated_gb = 0.0
-                window_peak_reserved_gb = 0.0
                 metrics_window_started = wandb_started
             checkpoint_path: Path | None = None
             if val_due or eval_due or ckpt_due:
-                checkpoint_started = time.monotonic()
                 checkpoint_path = save_boundary_checkpoint(
                     run_dir,
                     update=update,
@@ -3627,10 +3538,9 @@ def train(
                     actual_loss_positions=actual_positions,
                     loader_state=train_loader.state_dict(),
                 )
-                previous_checkpoint_s = time.monotonic() - checkpoint_started
             boundary_metrics: dict[str, float] = {}
             if val_due:
-                values = val_metrics(model, val_cache, cfg)
+                values = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
                 boundary_metrics.update({f"val/{name}": value for name, value in values.items()})
             if eval_due:
                 assert checkpoint_path is not None
@@ -3650,7 +3560,7 @@ def train(
                     int(values.get(name, 0.0)) != expected for name in ("scheduled_boots", "completed_boots", "boots")
                 ):
                     print(f"[eval] warning: update {update} evaluation was incomplete: {values}", flush=True)
-                boundary_metrics.update({f"eval/{name}": value for name, value in values.items()})
+                boundary_metrics.update({f"eval/{name}": value for name, value in _eval_wandb_metrics(values).items()})
             if boundary_metrics:
                 wandb.log({"global_step": update, **boundary_metrics})
             if update < run_stop and boundary_due:
@@ -3744,7 +3654,7 @@ def _backfill_eval_metrics(wandb_id: str, update: int, values: dict[str, float])
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
         wandb.define_metric("eval/*", step_metric="global_step")
-        metrics = {f"eval/{name}": value for name, value in values.items()}
+        metrics = {f"eval/{name}": value for name, value in _eval_wandb_metrics(values).items()}
         wandb.log({"global_step": update, "eval/backfilled": 1, **metrics})
     finally:
         wandb.finish()
@@ -3851,14 +3761,6 @@ class SelfPlayArgs:
 
 @dataclass
 class BenchmarkTrainStepArgs:
-    batch_size: int = 512
-    compile_mode: str = _TRAIN_COMPILE_MODE
-    float8_recipe: Literal["none", "tensorwise", "rowwise", "rowwise_with_gw_hp"] = "none"
-    parameter_dtype: Literal["float32", "bfloat16"] = "float32"
-    temporal_layers: int = 4
-    temporal_width: int = 512
-    trunk_layers: int = 16
-    trunk_width: int = 1024
     warmup_steps: int = 3
     measured_steps: int = 20
     profile_steps: int = 0
@@ -3876,14 +3778,6 @@ type Command = (
 def main(args: Command) -> None:
     if isinstance(args, BenchmarkTrainStepArgs):
         benchmark_train_step(
-            batch_size=args.batch_size,
-            compile_mode=args.compile_mode,
-            float8_recipe=args.float8_recipe,
-            parameter_dtype=args.parameter_dtype,
-            temporal_layers=args.temporal_layers,
-            temporal_width=args.temporal_width,
-            trunk_layers=args.trunk_layers,
-            trunk_width=args.trunk_width,
             warmup_steps=args.warmup_steps,
             measured_steps=args.measured_steps,
             profile_steps=args.profile_steps,

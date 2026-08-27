@@ -37,7 +37,6 @@ dependencies = [
     "tabulate",
     "tensordict",
     "torch>=2.6",
-    "torchao>=0.18.0",
     "torchvision",
     "tqdm",
     "tyro",
