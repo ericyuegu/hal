@@ -2918,7 +2918,12 @@ def _log_training_summary(
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
-def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
+def _training_functions(
+    model: GPT,
+    cfg: TrainConfig,
+    *,
+    compile_mode: str = _TRAIN_COMPILE_MODE,
+) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
     temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
@@ -2934,14 +2939,14 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
             trunk_fn,
             dynamic=False,
             fullgraph=True,
-            mode=_TRAIN_COMPILE_MODE,
+            mode=compile_mode,
         )
     if DEVICE == "cuda" and cfg.compile_temporal:
         temporal_fn = torch.compile(
             temporal_fn,
             dynamic=False,
             fullgraph=True,
-            mode=_TRAIN_COMPILE_MODE,
+            mode=compile_mode,
         )
     return trunk_fn, temporal_fn
 
@@ -3079,11 +3084,13 @@ def train_step(
 
 def benchmark_train_step(
     *,
+    batch_size: int = 512,
+    compile_mode: str = _TRAIN_COMPILE_MODE,
     warmup_steps: int = 3,
     measured_steps: int = 20,
     profile_steps: int = 0,
     trace_path: str | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | str]:
     """Benchmark the frozen production train step on a synthetic device batch."""
     if DEVICE != "cuda":
         raise RuntimeError("the production train-step benchmark requires CUDA")
@@ -3094,6 +3101,7 @@ def benchmark_train_step(
 
     cfg = replace(
         TrainConfig(),
+        batch_size=batch_size,
         gradient_hist_every=0,
         weight_hist_every=0,
         layer_rms_every=0,
@@ -3112,7 +3120,7 @@ def benchmark_train_step(
         for parameter in muon_parameters
     }
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
-    trunk_fn, temporal_fn = _training_functions(model, cfg)
+    trunk_fn, temporal_fn = _training_functions(model, cfg, compile_mode=compile_mode)
     batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
     valid_prefixes = cfg.batch_size * cfg.arch.L_ctx
 
@@ -3171,8 +3179,12 @@ def benchmark_train_step(
     for timer in phase_timers:
         for name, value in timer.metrics().items():
             phase_samples.setdefault(name, []).append(value)
+    parameter_counts = subsystem_parameter_counts(model)
+    approximate_flops = approximate_training_flops_per_update(cfg, parameter_counts)
+    peak_flops = bf16_dense_peak_flops(torch.cuda.get_device_name())
     metrics = {
         "batch_size": float(cfg.batch_size),
+        "compile_mode": compile_mode,
         "measured_steps": float(measured_steps),
         "muon_bucket_count": float(len(muon_shapes)),
         "muon_matrix_count": float(len(muon_parameters)),
@@ -3183,6 +3195,12 @@ def benchmark_train_step(
         "samples_per_wall_s": cfg.batch_size * measured_steps / wall_seconds,
         "peak_allocated_gb": torch.cuda.max_memory_allocated() / 2**30,
         "peak_reserved_gb": torch.cuda.max_memory_reserved() / 2**30,
+        "approximate_flops_per_update": float(approximate_flops),
+        "mfu_compute": (
+            model_flops_utilization(approximate_flops, float(step_seconds.mean()), peak_flops)
+            if peak_flops is not None
+            else float("nan")
+        ),
         **{f"{name}_median": float(np.median(values)) for name, values in phase_samples.items()},
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
@@ -3788,6 +3806,8 @@ class SelfPlayArgs:
 
 @dataclass
 class BenchmarkTrainStepArgs:
+    batch_size: int = 512
+    compile_mode: str = _TRAIN_COMPILE_MODE
     warmup_steps: int = 3
     measured_steps: int = 20
     profile_steps: int = 0
@@ -3805,6 +3825,8 @@ type Command = (
 def main(args: Command) -> None:
     if isinstance(args, BenchmarkTrainStepArgs):
         benchmark_train_step(
+            batch_size=args.batch_size,
+            compile_mode=args.compile_mode,
             warmup_steps=args.warmup_steps,
             measured_steps=args.measured_steps,
             profile_steps=args.profile_steps,
