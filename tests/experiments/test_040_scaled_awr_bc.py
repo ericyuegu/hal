@@ -649,7 +649,7 @@ def test_training_loader_uses_standard_worker_collation(monkeypatch: pytest.Monk
     assert validation == [2]
     train = calls[0]
     assert train["num_workers"] == cfg.num_workers
-    assert train["prefetch_factor"] == exp._TRAIN_PREFETCH_FACTOR == 1
+    assert train["prefetch_factor"] == exp._TRAIN_PREFETCH_FACTOR == 2
     assert train["drop_last"] is True
     assert train["resumable"] is True
     assert train["windows_per_replay"] == 1
@@ -802,7 +802,7 @@ def test_production_loader_and_eval_defaults() -> None:
 
     assert cfg.num_workers == 32
     assert cfg.cache_limit_gb == 1792
-    assert exp._TRAIN_PREFETCH_FACTOR == 1
+    assert exp._TRAIN_PREFETCH_FACTOR == 2
     assert cfg.ckpt_every == 2000
     assert cfg.eval_every == 2**13
     assert cfg.eval_max_parallel == 32

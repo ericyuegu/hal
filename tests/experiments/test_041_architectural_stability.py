@@ -274,5 +274,23 @@ def test_training_checkpoints_are_resumable_every_two_thousand_updates() -> None
     cfg = exp.TrainConfig()
 
     assert cfg.ckpt_every == 2000
+    assert exp._TRAIN_PREFETCH_FACTOR == 2
     assert cfg.download_retry == 8
     assert cfg.loader_timeout_s == 300.0
+
+
+def test_training_flop_estimate_repeats_only_temporal_parameters() -> None:
+    cfg = _cfg()
+    counts = {
+        "trunk": 10,
+        "other": 20,
+        "value_head": 30,
+        "temporal_decoder": 40,
+        "group_heads": 50,
+    }
+
+    estimate = exp.approximate_training_flops_per_update(cfg, counts)
+
+    positions = cfg.batch_size * cfg.arch.L_ctx
+    expected = 6 * positions * (60 + len(cfg.arch.head_offsets) * 90)
+    assert estimate == expected

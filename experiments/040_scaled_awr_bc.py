@@ -96,6 +96,9 @@ from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
+from hal.training.mfu import bf16_dense_peak_flops
+from hal.training.mfu import bf16_peak_source
+from hal.training.mfu import model_flops_utilization
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
@@ -121,7 +124,7 @@ _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
 _TRAIN_METRICS_EVERY = 1
-_TRAIN_PREFETCH_FACTOR = 1
+_TRAIN_PREFETCH_FACTOR = 2
 _TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _ADAM_UPDATE_CLIP_THRESHOLD = 1.0
@@ -2219,6 +2222,14 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     return counts
 
 
+def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
+    """Estimate forward-backward FLOPs from each subsystem's parameter uses."""
+    shared_parameters = parameter_counts["trunk"] + parameter_counts["other"] + parameter_counts["value_head"]
+    temporal_parameters = parameter_counts["temporal_decoder"] + parameter_counts["group_heads"]
+    positions = cfg.batch_size * cfg.arch.L_ctx
+    return 6 * positions * (shared_parameters + len(cfg.arch.head_offsets) * temporal_parameters)
+
+
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
     treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
@@ -2623,7 +2634,14 @@ def _watch_gradients(model: nn.Module, cfg: TrainConfig) -> None:
         )
 
 
-def _log_training_summary(cfg: TrainConfig, parameter_counts: dict[str, int]) -> None:
+def _log_training_summary(
+    cfg: TrainConfig,
+    parameter_counts: dict[str, int],
+    *,
+    flops_per_update: int,
+    device_name: str | None,
+    peak_flops: float | None,
+) -> None:
     """Record the fixed model and corpus accounting for this run."""
     if wandb.run is None:
         return
@@ -2639,6 +2657,18 @@ def _log_training_summary(cfg: TrainConfig, parameter_counts: dict[str, int]) ->
     wandb.run.summary["data/effective_epochs"] = cfg.target_loss_positions / unique_frames
     wandb.run.summary["data/D_over_N"] = cfg.target_loss_positions / parameter_counts["total"]
     wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * cfg.arch.L_ctx
+    wandb.run.summary["data/train_prefetch_factor"] = _TRAIN_PREFETCH_FACTOR
+    wandb.run.summary["training/approx_flops_per_update"] = flops_per_update
+    wandb.run.summary["training/flops_formula"] = (
+        "6*B*L_ctx*(N_trunk+N_other+N_value+n_offsets*(N_temporal+N_group_heads))"
+    )
+    if device_name is not None:
+        wandb.run.summary["hardware/gpu_name"] = device_name
+    if peak_flops is not None:
+        wandb.run.summary["hardware/bf16_dense_peak_tflops"] = peak_flops / 1e12
+        source = bf16_peak_source(device_name or "")
+        if source is not None:
+            wandb.run.summary["hardware/bf16_dense_peak_source"] = source
     for name, weight in zip(cfg.source_names, cfg.source_weights, strict=True):
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
@@ -3051,7 +3081,16 @@ def train(
     model = GPT(cfg).to(DEVICE)
     _watch_gradients(model, cfg)
     counts = subsystem_parameter_counts(model)
-    _log_training_summary(cfg, counts)
+    flops_per_update = approximate_training_flops_per_update(cfg, counts)
+    device_name = torch.cuda.get_device_name() if DEVICE == "cuda" else None
+    peak_flops = bf16_dense_peak_flops(device_name or "")
+    _log_training_summary(
+        cfg,
+        counts,
+        flops_per_update=flops_per_update,
+        device_name=device_name,
+        peak_flops=peak_flops,
+    )
     optimizer = make_optimizer(model, cfg)
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
     start_step = 0
@@ -3218,6 +3257,18 @@ def train(
                     **window_diagnostics,
                     **_mean_phase_metrics(window_phase_timers),
                 }
+                if peak_flops is not None:
+                    log["throughput/achieved_tflops"] = flops_per_update / step_s / 1e12
+                    log["throughput/mfu"] = model_flops_utilization(
+                        flops_per_update,
+                        step_s,
+                        peak_flops,
+                    )
+                    log["throughput/mfu_wall"] = model_flops_utilization(
+                        flops_per_update,
+                        window_wall_s / window_updates,
+                        peak_flops,
+                    )
                 if previous_wandb_log_s is not None:
                     log["throughput/wandb_log_s"] = previous_wandb_log_s
                 if previous_checkpoint_s is not None:
