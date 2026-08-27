@@ -206,7 +206,7 @@ def test_production_geometry_and_schedule_endpoints() -> None:
     schedule = exp.lr_schedule(cfg)
 
     assert cfg.max_steps == 524_288
-    assert cfg.ckpt_every == 4096
+    assert cfg.ckpt_every == 2000
     assert cfg.warmup_steps == 15_728
     assert cfg.stable_steps == 419_430
     assert cfg.batch_size * cfg.arch.L_ctx * cfg.max_steps == 2**35
@@ -510,6 +510,24 @@ def test_training_metrics_log_every_update() -> None:
     assert [update for update in range(1, 4) if update % exp._TRAIN_METRICS_EVERY == 0] == [1, 2, 3]
 
 
+def test_wandb_uses_global_optimizer_step_for_every_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Run:
+        summary: dict[str, object] = {}
+
+    monkeypatch.setattr(exp.wandb, "init", lambda **_kwargs: None)
+    monkeypatch.setattr(exp.wandb, "run", Run())
+    monkeypatch.setattr(exp.wandb, "define_metric", lambda name, **kwargs: calls.append((name, kwargs)))
+
+    exp._init_wandb(_cfg(wandb_log_code=False), "run", None)
+
+    assert calls[:2] == [
+        ("global_step", {}),
+        ("*", {"step_metric": "global_step"}),
+    ]
+
+
 def test_rollout_button_mismatch_is_finite_and_uses_compatible_rows() -> None:
     cfg = _cfg()
     torch.manual_seed(0)
@@ -569,6 +587,17 @@ def test_parameter_partition_and_checkpoint_config_are_complete() -> None:
         exp.config_from_state({**checkpoint, "experiment_id": "040_scaled_awr_bc_v1"})
 
 
+def test_checkpoint_loader_state_accepts_canonical_and_legacy_keys() -> None:
+    canonical = {"schema": 1, "mds": {"epoch": 4}}
+    legacy = {"epoch": 3, "sample_in_epoch": 11}
+
+    assert exp._checkpoint_loader_state({"loader": canonical, "data_loader": legacy}) is canonical
+    assert exp._checkpoint_loader_state({"data_loader": legacy}) is legacy
+    assert exp._checkpoint_loader_state({}) is None
+    with pytest.raises(TypeError, match="must be a dict"):
+        exp._checkpoint_loader_state({"loader": "invalid"})
+
+
 def test_temporal_hidden_matrices_use_muon_and_boundary_matrices_use_adamw() -> None:
     cfg = _cfg()
     model = exp.GPT(cfg)
@@ -603,11 +632,15 @@ def test_training_loader_uses_standard_worker_collation(monkeypatch: pytest.Monk
     cfg = _cfg()
     calls: list[dict[str, object]] = []
 
+    class FakeLoader(list[int]):
+        pass
+
     def fake_loader(**kwargs):
         calls.append(kwargs)
-        return [len(calls)]
+        return FakeLoader([len(calls)])
 
     monkeypatch.setattr(exp, "make_loader", fake_loader)
+    monkeypatch.setattr(exp, "ResumableStreamingDataLoader", FakeLoader)
     monkeypatch.setattr(exp, "cache_validation", lambda loader, _: loader)
 
     train_loader, validation = exp._make_loaders(cfg, stats={})
@@ -618,6 +651,7 @@ def test_training_loader_uses_standard_worker_collation(monkeypatch: pytest.Monk
     assert train["num_workers"] == cfg.num_workers
     assert train["prefetch_factor"] == exp._TRAIN_PREFETCH_FACTOR == 1
     assert train["drop_last"] is True
+    assert train["resumable"] is True
     assert train["windows_per_replay"] == 1
     assert train["replay_format"] == "policy-world"
     replay_transform = train["replay_transform"]
@@ -753,6 +787,7 @@ def test_config_rejects_bad_chunk_dense_prefix_and_dose() -> None:
             num_workers=8,
             eval_max_parallel=16,
             cache_limit_gb=512,
+            ckpt_every=4096,
             push_to_r2=False,
             gradient_hist_every=128,
             weight_hist_every=256,
@@ -766,8 +801,9 @@ def test_production_loader_and_eval_defaults() -> None:
     cfg = exp.TrainConfig()
 
     assert cfg.num_workers == 32
+    assert cfg.cache_limit_gb == 1792
     assert exp._TRAIN_PREFETCH_FACTOR == 1
-    assert cfg.ckpt_every == 2**12
+    assert cfg.ckpt_every == 2000
     assert cfg.eval_every == 2**13
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
@@ -995,10 +1031,19 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
         wandb_log_code=False,
     )
     batch = _awr_batch(cfg)
+    loaded_states: list[dict[str, object]] = []
 
     class Loader:
+        state = {"schema": 1, "mds": {"epoch": 0, "sample_in_epoch": 1}}
+
         def __iter__(self):
             return iter((batch,))
+
+        def state_dict(self) -> dict[str, object]:
+            return self.state
+
+        def load_state_dict(self, state: dict[str, object]) -> None:
+            loaded_states.append(state)
 
     monkeypatch.setattr(exp, "_make_loaders", lambda _cfg, _stats: (Loader(), [batch.batch]))
     monkeypatch.setattr(exp, "make_run_name", lambda *args: "tiny-040")
@@ -1018,13 +1063,16 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     first = torch.load(tmp_path / "latest.pt", map_location="cpu", weights_only=False)
     assert first["step"] == 0
     assert first["actual_loss_positions"] == 7
+    assert first["loader"] == Loader.state
     assert (tmp_path / "boundary-step-0000001.pt").is_file()
 
+    legacy_first = {**first, "data_loader": Loader.state["mds"]}
+    del legacy_first["loader"]
     exp.train(
         cfg,
         {},
         resume_run="tiny-040",
-        resume_state=first,
+        resume_state=legacy_first,
         smoke=True,
         stop_after_update=2,
         smoke_eval_matchups=0,
@@ -1032,6 +1080,8 @@ def test_tiny_smoke_trains_checkpoints_and_resumes(monkeypatch: pytest.MonkeyPat
     second = torch.load(tmp_path / "latest.pt", map_location="cpu", weights_only=False)
     assert second["step"] == 1
     assert second["actual_loss_positions"] == 14
+    assert second["loader"] == Loader.state
+    assert loaded_states == [Loader.state["mds"]]
     assert (tmp_path / "boundary-step-0000002.pt").is_file()
     assert (tmp_path / "smoke-final.pt").is_file()
 

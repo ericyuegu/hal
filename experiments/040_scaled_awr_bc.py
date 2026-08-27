@@ -81,6 +81,7 @@ from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
+from hal.training.dataloader import ResumableStreamingDataLoader
 from hal.training.dataloader import make_loader
 from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.features import A_DIM
@@ -129,6 +130,7 @@ _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
         "cache_limit_gb",
         "cache_metrics_interval_s",
+        "ckpt_every",
         "compile_temporal",
         "compile_trunk",
         "compiled_inference_bucket",
@@ -271,7 +273,7 @@ class TrainConfig:
     val_every: int = 8192
     val_n_samples: int = 2048
     val_batch_size: int = 128
-    ckpt_every: int = 4096
+    ckpt_every: int = 2000
     eval_every: int = 8192
     eval_max_frames: int = 7200
     eval_n_matchups: int = _PRODUCTION_EVAL_MATCHUPS
@@ -282,7 +284,7 @@ class TrainConfig:
     source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
-    cache_limit_gb: int = 2048
+    cache_limit_gb: int = 1792
     shuffle_block_size: int = 8192
     predownload: int = 1024
     val_split: str = "val"
@@ -2476,6 +2478,7 @@ def save_boundary_checkpoint(
     milestone: bool,
     wandb_id: str | None,
     actual_loss_positions: int,
+    loader_state: dict[str, object],
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
@@ -2492,7 +2495,10 @@ def save_boundary_checkpoint(
         cfg=_checkpoint_config(cfg),
         wandb_id=wandb_id,
         uploader=None,
-        extra_state={"actual_loss_positions": actual_loss_positions},
+        extra_state={
+            "actual_loss_positions": actual_loss_positions,
+            "loader": loader_state,
+        },
     )
     os.replace(temporary, snapshot)
     latest = run_dir / "latest.pt"
@@ -2513,7 +2519,10 @@ def load_stats(cfg: TrainConfig) -> dict[str, FeatureStats]:
     )
 
 
-def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
+def _make_loaders(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+) -> tuple[ResumableStreamingDataLoader, list[TrainBatch]]:
     common = loader_kwargs(cfg, stats)
     projection = common["projection"]
     if projection is not None:
@@ -2532,6 +2541,7 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         prefetch_factor=_TRAIN_PREFETCH_FACTOR,
         drop_last=True,
         predownload=cfg.predownload,
+        resumable=True,
         windows_per_replay=1,
         replay_format="policy-world",
         replay_transform=replay_transform,
@@ -2546,7 +2556,21 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         shuffle=True,
         **validation,
     )
+    if not isinstance(train_loader, ResumableStreamingDataLoader):
+        raise TypeError("training loader must expose Mosaic deterministic resumption")
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
+
+
+def _checkpoint_loader_state(resume_state: dict[str, object]) -> dict[str, object] | None:
+    """Read canonical loader state or the short-lived 040 legacy key."""
+    loader_state = resume_state.get("loader")
+    if loader_state is None:
+        loader_state = resume_state.get("data_loader")
+    if loader_state is None:
+        return None
+    if not isinstance(loader_state, dict):
+        raise TypeError("checkpoint loader state must be a dict")
+    return cast(dict[str, object], loader_state)
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
@@ -2565,6 +2589,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     if wandb.run is None:
         return
+    wandb.define_metric("global_step")
+    wandb.define_metric("*", step_metric="global_step")
     wandb.define_metric("optimizer/*", step_metric="global_step")
     wandb.define_metric("button_activation/*", step_metric="global_step")
     wandb.define_metric("button_logits/*", step_metric="global_step")
@@ -2943,6 +2969,7 @@ def _finalize_training(
     uploader: BackgroundUploader | None,
     eval_inference: BF16Inference | None,
     loader_wait_fractions: list[float],
+    loader_state: dict[str, object],
     update: int,
     actual_loss_positions: int,
     smoke: bool,
@@ -2960,6 +2987,7 @@ def _finalize_training(
         milestone=cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0,
         wandb_id=None if wandb.run is None else wandb.run.id,
         actual_loss_positions=actual_loss_positions,
+        loader_state=loader_state,
     )
     final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
     _replace_link(snapshot, final_path)
@@ -3042,6 +3070,12 @@ def train(
     trunk_fn, temporal_fn = _training_functions(model, cfg)
 
     train_loader, val_cache = _make_loaders(cfg, stats)
+    if resume_state is not None:
+        loader_state = _checkpoint_loader_state(resume_state)
+        if loader_state is None:
+            print("[loader] checkpoint has no Mosaic Streaming state; data order will restart", flush=True)
+        else:
+            train_loader.load_state_dict(loader_state)
     run_started = time.monotonic()
     batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE)
     loader_wait_fractions: list[float] = []
@@ -3108,7 +3142,11 @@ def train(
                 )
                 if step_events is not None:
                     step_events[1].record()
-            if update < run_stop:
+            val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
+            eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
+            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
+            boundary_due = val_due or eval_due or ckpt_due
+            if update < run_stop and not boundary_due:
                 batch_prefetcher.preload()
             actual_positions += valid_prefixes
             metric_accumulator.add(result, valid_prefixes)
@@ -3210,9 +3248,6 @@ def train(
                 window_peak_allocated_gb = 0.0
                 window_peak_reserved_gb = 0.0
                 metrics_window_started = wandb_started
-            val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
-            eval_due = cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
-            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
             checkpoint_path: Path | None = None
             if val_due or eval_due or ckpt_due:
                 checkpoint_started = time.monotonic()
@@ -3227,6 +3262,7 @@ def train(
                     milestone=ckpt_due,
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
+                    loader_state=train_loader.state_dict(),
                 )
                 previous_checkpoint_s = time.monotonic() - checkpoint_started
             boundary_metrics: dict[str, float] = {}
@@ -3254,6 +3290,8 @@ def train(
                 boundary_metrics.update({f"eval/{name}": value for name, value in values.items()})
             if boundary_metrics:
                 wandb.log({"global_step": update, **boundary_metrics})
+            if update < run_stop and boundary_due:
+                batch_prefetcher.preload()
         _finalize_training(
             model=model,
             optimizer=optimizer,
@@ -3266,6 +3304,7 @@ def train(
             uploader=uploader,
             eval_inference=eval_inference,
             loader_wait_fractions=loader_wait_fractions,
+            loader_state=train_loader.state_dict(),
             update=run_stop,
             actual_loss_positions=actual_positions,
             smoke=smoke,

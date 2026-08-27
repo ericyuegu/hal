@@ -109,12 +109,23 @@ class ResumableStreamingDataLoader(StreamingDataLoader):
         }
 
     def load_state_dict(self, obj: dict[str, Any]) -> None:
-        """Restore Mosaic's cursor before workers and their window RNGs start."""
-        if obj.get("schema") != 1:
-            raise ValueError(f"unsupported streaming-loader state schema {obj.get('schema')!r}")
-        mds_state = obj["mds"]
+        """Restore a canonical or legacy Mosaic cursor before workers start."""
+        schema = obj.get("schema")
+        if schema == 1:
+            mds_state = obj.get("mds")
+            if not isinstance(mds_state, dict):
+                raise TypeError("streaming-loader state 'mds' must be a dict")
+        elif schema is None and "epoch" in obj:
+            # Experiment 040 briefly wrote Mosaic's unwrapped state under
+            # ``data_loader``. Accept it so those in-flight runs can move to main.
+            mds_state = obj
+        else:
+            raise ValueError(f"unsupported streaming-loader state schema {schema!r}")
+        epoch = mds_state.get("epoch")
+        if not isinstance(epoch, int):
+            raise TypeError("Mosaic streaming state 'epoch' must be an int")
         self.streaming_dataset.load_state_dict(mds_state)
-        self.window_dataset.resume_epoch(int(mds_state["epoch"]))
+        self.window_dataset.resume_epoch(epoch)
 
 
 def _resolve_replay_format(replay_format: ReplayFormat | None, compact: bool) -> ReplayFormat:
@@ -142,6 +153,7 @@ def _make_streaming_dataset(
     download_retry: int = 2,
 ) -> tuple[StreamingDataset, tuple[str, ...]]:
     """Build one single- or multi-stream MDS dataset with strict mode selection."""
+    should_shuffle = (split == "train") if shuffle is None else shuffle
     if sources is not None:
         if data_root is not None or remote is not None:
             raise ValueError("sources cannot be combined with data_root or remote")
@@ -169,32 +181,58 @@ def _make_streaming_dataset(
             )
             for source, proportion in zip(sources, proportions, strict=True)
         ]
-        kwargs: dict[str, Any] = {
-            "streams": selected_streams,
-            "cache_limit": cache_limit,
-            "predownload": predownload,
-        }
+        if shuffle_seed is None:
+            dataset = StreamingDataset(
+                streams=selected_streams,
+                cache_limit=cache_limit,
+                predownload=predownload,
+                batch_size=1,
+                shuffle=should_shuffle,
+                shuffle_block_size=shuffle_block_size,
+            )
+        else:
+            dataset = StreamingDataset(
+                streams=selected_streams,
+                cache_limit=cache_limit,
+                predownload=predownload,
+                batch_size=1,
+                shuffle=should_shuffle,
+                shuffle_seed=shuffle_seed,
+                shuffle_block_size=shuffle_block_size,
+            )
     else:
         if source_weights is not None:
             raise ValueError("source_weights requires sources")
         if data_root is None:
             raise ValueError("data_root is required when sources are not provided")
         names = ()
-        kwargs = {
-            "remote": f"{remote}/{split}" if remote else None,
-            "local": str(Path(data_root) / split),
-            "cache_limit": cache_limit if remote else None,
-            "predownload": predownload if remote else None,
-            "download_retry": download_retry,
-        }
-    if shuffle_seed is not None:
-        kwargs["shuffle_seed"] = shuffle_seed
-    dataset = StreamingDataset(
-        **kwargs,
-        batch_size=1,
-        shuffle=(split == "train") if shuffle is None else shuffle,
-        shuffle_block_size=shuffle_block_size,
-    )
+        dataset_remote = f"{remote}/{split}" if remote else None
+        dataset_local = str(Path(data_root) / split)
+        dataset_cache_limit = cache_limit if remote else None
+        dataset_predownload = predownload if remote else None
+        if shuffle_seed is None:
+            dataset = StreamingDataset(
+                remote=dataset_remote,
+                local=dataset_local,
+                cache_limit=dataset_cache_limit,
+                predownload=dataset_predownload,
+                download_retry=download_retry,
+                batch_size=1,
+                shuffle=should_shuffle,
+                shuffle_block_size=shuffle_block_size,
+            )
+        else:
+            dataset = StreamingDataset(
+                remote=dataset_remote,
+                local=dataset_local,
+                cache_limit=dataset_cache_limit,
+                predownload=dataset_predownload,
+                download_retry=download_retry,
+                batch_size=1,
+                shuffle=should_shuffle,
+                shuffle_seed=shuffle_seed,
+                shuffle_block_size=shuffle_block_size,
+            )
     return dataset, names
 
 

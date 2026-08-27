@@ -472,6 +472,50 @@ def test_resumable_streaming_loader_routes_mosaic_cursor_through_wrapper() -> No
     assert restored_rows.resumed_epoch == 3
 
 
+def test_resumable_streaming_loader_accepts_legacy_unwrapped_state() -> None:
+    rows = _StatefulRows()
+    mds = _MosaicStateStub()
+    loader = ResumableStreamingDataLoader(
+        rows,
+        streaming_dataset=mds,  # type: ignore[arg-type]
+        window_dataset=rows,  # type: ignore[arg-type]
+        batch_size=2,
+        num_workers=0,
+    )
+    legacy_state = {"epoch": 3, "sample_in_epoch": 11}
+
+    loader.load_state_dict(legacy_state)
+
+    assert mds.loaded == legacy_state
+    assert rows.resumed_epoch == 3
+
+
+@pytest.mark.parametrize(
+    ("state", "error", "message"),
+    [
+        ({"schema": 2, "mds": {}}, ValueError, "unsupported"),
+        ({"schema": 1, "mds": None}, TypeError, "mds"),
+        ({"schema": 1, "mds": {}}, TypeError, "epoch"),
+    ],
+)
+def test_resumable_streaming_loader_rejects_invalid_state(
+    state: dict[str, object],
+    error: type[Exception],
+    message: str,
+) -> None:
+    rows = _StatefulRows()
+    loader = ResumableStreamingDataLoader(
+        rows,
+        streaming_dataset=_MosaicStateStub(),  # type: ignore[arg-type]
+        window_dataset=rows,  # type: ignore[arg-type]
+        batch_size=2,
+        num_workers=0,
+    )
+
+    with pytest.raises(error, match=message):
+        loader.load_state_dict(state)
+
+
 def test_resumable_streaming_loader_restores_exact_mosaic_sequence(tmp_path: Path) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
