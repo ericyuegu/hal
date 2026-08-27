@@ -39,38 +39,43 @@ write_state = _MODULE.write_state
 EXPERIMENT = "experiments/028_onehot_controller.py"
 
 
-def test_defaults_request_l40s_with_burst_cpu_and_ephemeral_ssd() -> None:
+def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
     args = Args(cmd=["uv", "run", EXPERIMENT])
 
     assert function_resources(args) == {
-        "gpu": "L40S",
-        "cpu": (8.0, 16.0),
-        "memory": 64 * 1024,
-        "ephemeral_disk": 512 * 1024,
+        "gpu": "B200",
+        "cpu": (32.0, 48.0),
+        "memory": (128 * 1024, 384 * 1024),
+        "ephemeral_disk": 2048 * 1024,
         "timeout": 24 * 60 * 60,
         "startup_timeout": 30 * 60,
         "cloud": None,
         "region": None,
     }
-    assert args.compile_cache_volume == "hal-modal-compile-cache-v1"
+    assert args.gpu_memory_snapshot
 
 
-def test_compiler_cache_persists_programs_but_keeps_scratch_local(
+def test_memory_limit_must_cover_the_request() -> None:
+    validate_args(Args(cmd=["uv", "run", EXPERIMENT], memory_gib=128, memory_limit_gib=384))
+
+    with pytest.raises(SystemExit, match="at least"):
+        validate_args(Args(cmd=["uv", "run", EXPERIMENT], memory_gib=128, memory_limit_gib=64))
+
+
+def test_compiler_cache_uses_only_ephemeral_ssd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    persistent_root = tmp_path / "persistent"
     local_root = tmp_path / "local"
-    monkeypatch.setattr(_MODULE, "COMPILE_CACHE_ROOT", persistent_root)
     monkeypatch.setattr(_MODULE, "LOCAL_CACHE_ROOT", local_root)
     env: dict[str, str] = {}
 
     configure_compiler_cache(env)
 
     assert env == {
-        "TORCHINDUCTOR_CACHE_DIR": str(persistent_root / "torchinductor"),
-        "TRITON_CACHE_DIR": str(persistent_root / "triton"),
-        "CUDA_CACHE_PATH": str(persistent_root / "cuda"),
+        "TORCHINDUCTOR_CACHE_DIR": str(local_root / "torchinductor"),
+        "TRITON_CACHE_DIR": str(local_root / "triton"),
+        "CUDA_CACHE_PATH": str(local_root / "cuda"),
         "TMPDIR": str(local_root / "tmp"),
         "TORCHINDUCTOR_FX_GRAPH_CACHE": "1",
         "TORCHINDUCTOR_AUTOGRAD_CACHE": "1",

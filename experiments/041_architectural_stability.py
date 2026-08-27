@@ -122,7 +122,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID = "041_architectural_stability_v2"
+_EXPERIMENT_ID = "041_architectural_stability_v3"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -131,7 +131,7 @@ _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
 _TRAIN_METRICS_EVERY = 10
-_TRAIN_PREFETCH_FACTOR = 2
+_TRAIN_PREFETCH_FACTOR = 4
 _TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _ADAM_UPDATE_CLIP_THRESHOLD = 1.0
@@ -292,10 +292,9 @@ class TrainConfig:
     eval_max_parallel: int | None = 32
 
     source_names: tuple[str, ...] = _DEFAULT_SOURCE_NAMES
-    source_weights: tuple[float, ...] | None = None
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
-    cache_limit_gb: int = 2048
+    cache_limit_gb: int = 1792
     shuffle_block_size: int = 8192
     predownload: int = 1024
     download_retry: int = 8
@@ -426,13 +425,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("lr_schedule_kind must be 'late-cosine' or 'cosine'")
     if not cfg.source_names or len(set(cfg.source_names)) != len(cfg.source_names):
         raise ValueError("source_names must be non-empty and unique")
-    if cfg.source_weights is not None:
-        if len(cfg.source_weights) != len(cfg.source_names):
-            raise ValueError(
-                f"source_weights length {len(cfg.source_weights)} != source count {len(cfg.source_names)}"
-            )
-        if any(not math.isfinite(weight) or weight <= 0 for weight in cfg.source_weights):
-            raise ValueError("source_weights must be finite and positive")
     unknown = set(cfg.source_names) - streams.BY_NAME.keys()
     if unknown:
         raise ValueError(f"unknown source names: {sorted(unknown)}")
@@ -442,13 +434,11 @@ def validate_config(cfg: TrainConfig) -> None:
         )
 
 
-def validate_production_config(cfg: TrainConfig, *, resumed: bool = False) -> None:
-    """Require frozen settings, schedule ablations, and compatible resumes."""
+def validate_production_config(cfg: TrainConfig) -> None:
+    """Require frozen settings apart from operations and schedule ablations."""
     expected = asdict(TrainConfig())
     actual = asdict(cfg)
     allowed_overrides = _PRODUCTION_OVERRIDE_FIELDS | _PRODUCTION_ABLATION_FIELDS
-    if resumed:
-        allowed_overrides = allowed_overrides | {"source_weights"}
     unknown_overrides = allowed_overrides - actual.keys()
     if unknown_overrides:
         raise RuntimeError(f"production overrides are not config fields: {sorted(unknown_overrides)}")
@@ -2290,11 +2280,10 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
     treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
-    mixture = "mix-r1" if cfg.source_weights is None else "mix-explicit"
     return (
         f"stable041-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-"
-        f"linear-head-no-skip-projectiles-{mixture}-{cfg.lr_schedule_kind}-{treatment}"
+        f"linear-head-no-skip-projectiles-mix-r1-{cfg.lr_schedule_kind}-{treatment}"
     )
 
 
@@ -2598,7 +2587,6 @@ def layer_activation_rms_log(
 class _LoaderKwargs(TypedDict):
     data_root: str | None
     sources: tuple[streams.StreamSource, ...]
-    source_weights: tuple[float, ...] | None
     cache_limit: str
     shuffle_block_size: int
     shuffle_seed: int
@@ -2617,7 +2605,6 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKw
     return dict(
         data_root=None,
         sources=sources,
-        source_weights=cfg.source_weights,
         cache_limit=f"{cfg.cache_limit_gb}gb",
         shuffle_block_size=cfg.shuffle_block_size,
         shuffle_seed=cfg.seed,
@@ -2633,9 +2620,7 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKw
 
 
 def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
-    """Return the configured proportions or natural MDS replay counts."""
-    if cfg.source_weights is not None:
-        return cfg.source_weights
+    """Return the natural MDS replay-count mixture."""
     return tuple(float(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name]) for name in cfg.source_names)
 
 
@@ -2808,7 +2793,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "041",
             "architecture-stability",
             "projectiles",
-            "length-weighted-mix" if cfg.source_weights is None else "explicit-source-mix",
+            "length-weighted-mix",
             cfg.lr_schedule_kind,
         ],
         config=asdict(cfg),
@@ -2895,7 +2880,7 @@ def _log_training_summary(
         source = bf16_peak_source(device_name or "")
         if source is not None:
             wandb.run.summary["hardware/bf16_dense_peak_source"] = source
-    wandb.run.summary["data/source_mixing"] = "explicit_proportion" if cfg.source_weights is not None else "repeat_1"
+    wandb.run.summary["data/source_mixing"] = "repeat_1"
     for name, weight in zip(cfg.source_names, source_weights, strict=True):
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
@@ -3296,7 +3281,7 @@ def train(
 ) -> None:
     validate_config(cfg)
     if not smoke:
-        validate_production_config(cfg, resumed=resume_state is not None)
+        validate_production_config(cfg)
         if stop_after_update is not None:
             raise ValueError("stop_after_update is a smoke-only control")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
@@ -3619,10 +3604,6 @@ def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
 
 def config_from_state(values: dict) -> TrainConfig:
     """Restore a checkpoint written by the current experiment definition."""
-    if "lr_schedule_kind" not in values:
-        # All 041 checkpoints written before the named ablation used the long
-        # stable phase followed by cosine decay.
-        values = {**values, "lr_schedule_kind": "late-cosine"}
     expected = {"experiment_id", "architecture", "awr_calibration", *_RUNTIME_CONFIG_FIELDS}
     missing = expected - values.keys()
     unexpected = values.keys() - expected

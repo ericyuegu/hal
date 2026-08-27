@@ -11,7 +11,9 @@ attempt can add ``--resume <run>`` after the checkpoint reaches R2.
 The default ``hal`` Modal Secret must contain the R2 ``AWS_*`` variables and
 ``WANDB_API_KEY``. Immutable integration fixtures are fetched into a cached
 image layer during the build. Dataset shards and compiler scratch use ephemeral
-SSD; compiled training and inference programs persist in a Modal Volume.
+SSD. Modal memory snapshots accelerate Python container restoration and opt in
+to GPU-state capture; training programs still compile into ephemeral SSD once
+per Function attempt because model setup happens after input dispatch.
 """
 
 import json
@@ -45,7 +47,6 @@ ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 EXPERIMENTS_ROOT: Final[Path] = ROOT / "experiments"
 REMOTE_ROOT: Final[Path] = Path("/opt/hal")
 STATE_ROOT: Final[Path] = Path("/modal-state")
-COMPILE_CACHE_ROOT: Final[Path] = Path("/modal-compile-cache")
 LOCAL_CACHE_ROOT: Final[Path] = Path("/opt/hal-cache")
 IMAGE: Final[str] = "ghcr.io/ericyuegu/hal:cuda13"
 PYPI_INDEX: Final[str] = "https://pypi.org/simple"
@@ -85,15 +86,17 @@ INTERRUPT_GRACE_S: Final[int] = 20
 class Args:
     cmd: tyro.conf.Positional[list[str]] = field(default_factory=list)
     """Command after ``--``. Automatic recovery requires an ``experiments/*.py`` command."""
-    gpu: str = "L40S"
+    gpu: str = "B200"
     """Modal GPU type. A comma-separated fallback list is also accepted."""
-    cpu: float = 8.0
+    cpu: float = 32.0
     """Requested physical CPU cores."""
-    cpu_limit: float = 16.0
+    cpu_limit: float = 48.0
     """CPU hard limit. Modal can burst above the request when capacity is available."""
-    memory_gib: int = 64
+    memory_gib: int = 128
     """Requested system memory in GiB."""
-    disk_gib: int = 512
+    memory_limit_gib: int | None = 384
+    """Hard system-memory limit in GiB; None leaves the Modal default."""
+    disk_gib: int = 2048
     """Ephemeral SSD in GiB for datasets, the emulator, and compiler scratch."""
     image: str = IMAGE
     """Dependency image imported from a registry. The clean local source is copied on top."""
@@ -111,8 +114,8 @@ class Args:
     """Modal Secret containing R2 AWS_* values and WANDB_API_KEY."""
     state_volume: str = "hal-modal-state"
     """Small Modal Volume used only for retry state."""
-    compile_cache_volume: str = "hal-modal-compile-cache-v1"
-    """Modal Volume shared by training and inference compiler caches."""
+    gpu_memory_snapshot: bool = True
+    """Enable Modal CPU snapshots and alpha GPU-state capture."""
     app_name: str | None = None
     """Modal App name. The default includes the UTC time and Git SHA."""
     stall_minutes: int = 60
@@ -130,7 +133,7 @@ class Args:
 class FunctionResources(TypedDict):
     gpu: str | list[str]
     cpu: tuple[float, float]
-    memory: int
+    memory: int | tuple[int, int]
     ephemeral_disk: int
     timeout: int
     startup_timeout: int
@@ -144,7 +147,6 @@ class LaunchSpec:
     launch_id: str
     git_sha: str
     state_volume: str
-    compile_cache_volume: str
     auto_resume: bool
     stall_s: int
     skip_sm120_probe: bool
@@ -217,6 +219,8 @@ def validate_args(args: Args) -> None:
         raise SystemExit("--cpu must be positive and --cpu-limit must be at least --cpu.")
     if args.memory_gib <= 0 or args.disk_gib <= 0:
         raise SystemExit("--memory-gib and --disk-gib must be positive.")
+    if args.memory_limit_gib is not None and args.memory_limit_gib < args.memory_gib:
+        raise SystemExit("--memory-limit-gib must be at least --memory-gib.")
     if not 1 <= args.timeout_hours <= 24:
         raise SystemExit("--timeout-hours must be between 1 and Modal's 24-hour Function limit.")
     if args.startup_timeout_minutes <= 0 or args.max_retries < 0 or args.stall_minutes <= 0:
@@ -351,10 +355,12 @@ def gpu_request(gpu: str) -> str | list[str]:
 
 def function_resources(args: Args) -> FunctionResources:
     """Modal resource values in the units expected by ``App.function``."""
+    memory_request = args.memory_gib * 1024
+    memory = memory_request if args.memory_limit_gib is None else (memory_request, args.memory_limit_gib * 1024)
     return {
         "gpu": gpu_request(args.gpu),
         "cpu": (args.cpu, args.cpu_limit),
-        "memory": args.memory_gib * 1024,
+        "memory": memory,
         "ephemeral_disk": args.disk_gib * 1024,
         "timeout": args.timeout_hours * 60 * 60,
         "startup_timeout": args.startup_timeout_minutes * 60,
@@ -441,11 +447,11 @@ def _run_checked(
 
 
 def _configure_compiler_cache(env: dict[str, str]) -> None:
-    """Point persistent compiler caches at the Volume and scratch at local SSD."""
+    """Keep compiler caches and scratch on the attempt's ephemeral SSD."""
     cache_paths = {
-        "TORCHINDUCTOR_CACHE_DIR": COMPILE_CACHE_ROOT / "torchinductor",
-        "TRITON_CACHE_DIR": COMPILE_CACHE_ROOT / "triton",
-        "CUDA_CACHE_PATH": COMPILE_CACHE_ROOT / "cuda",
+        "TORCHINDUCTOR_CACHE_DIR": LOCAL_CACHE_ROOT / "torchinductor",
+        "TRITON_CACHE_DIR": LOCAL_CACHE_ROOT / "triton",
+        "CUDA_CACHE_PATH": LOCAL_CACHE_ROOT / "cuda",
         "TMPDIR": LOCAL_CACHE_ROOT / "tmp",
     }
     for key, path in cache_paths.items():
@@ -508,7 +514,7 @@ def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     if compute_capability == "120":
         env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
     free_gib = shutil.disk_usage(LOCAL_CACHE_ROOT).free / 2**30
-    loguru.logger.info(f"persistent compile cache = {COMPILE_CACHE_ROOT}; local scratch free = {free_gib:.1f} GiB")
+    loguru.logger.info(f"ephemeral compile cache = {LOCAL_CACHE_ROOT}; free = {free_gib:.1f} GiB")
     if free_gib < 10:
         raise RuntimeError(f"compiler scratch has {free_gib:.1f} GiB free; training requires at least 10 GiB")
     _run_checked(
@@ -703,24 +709,16 @@ def _run_remote(spec: LaunchSpec) -> int:
             f"launch {spec.launch_id} already failed with exit code {attempt.state.exit_code}; refusing to rerun"
         )
     _commit_state(state_path, attempt.state, spec.state_volume)
-    try:
-        env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe)
-        _configure_tracking_context(env, spec.modal_app_url)
-        return _run_training(
-            attempt.argv,
-            attempt.state,
-            env=env,
-            state_path=state_path,
-            state_volume_name=spec.state_volume,
-            stall_s=spec.stall_s,
-        )
-    finally:
-        try:
-            modal.Volume.from_name(spec.compile_cache_volume).commit()
-            loguru.logger.info(f"committed compiler cache Volume {spec.compile_cache_volume!r}")
-        except Exception:
-            # Compiler caching is an optimization and must not hide the training result.
-            loguru.logger.exception(f"could not commit compiler cache Volume {spec.compile_cache_volume!r}")
+    env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe)
+    _configure_tracking_context(env, spec.modal_app_url)
+    return _run_training(
+        attempt.argv,
+        attempt.state,
+        env=env,
+        state_path=state_path,
+        state_volume_name=spec.state_volume,
+        stall_s=spec.stall_s,
+    )
 
 
 def _ignored_python_commands(
@@ -814,12 +812,13 @@ def _print_request(
 ) -> None:
     loguru.logger.info(f"app={name} launch={launch_id} git={sha[:10]} image={args.image}")
     loguru.logger.info(
-        f"gpu={resources['gpu']} cpu={resources['cpu']} memory={args.memory_gib}GiB "
+        f"gpu={resources['gpu']} cpu={resources['cpu']} "
+        f"memory=({args.memory_gib},{args.memory_limit_gib})GiB "
         f"ephemeral_ssd={args.disk_gib}GiB cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
     )
     loguru.logger.info(
         f"attempt_timeout={args.timeout_hours}h retries={args.max_retries} secret={args.secret!r} "
-        f"state_volume={args.state_volume!r} compile_cache_volume={args.compile_cache_volume!r} "
+        f"state_volume={args.state_volume!r} gpu_memory_snapshot={args.gpu_memory_snapshot} "
         f"auto_resume={args.auto_resume}"
     )
     loguru.logger.info(f"command: {redact_argv(args.cmd)}")
@@ -838,20 +837,20 @@ def main(args: Args) -> None:
         return
 
     state_volume = modal.Volume.from_name(args.state_volume, create_if_missing=True)
-    compile_cache_volume = modal.Volume.from_name(args.compile_cache_volume, create_if_missing=True)
     app = modal.App(name=name, tags={"provider": "modal", "git_sha": sha, "launch_id": launch_id})
     function = app.function(
         image=_image(args.image, args.cmd, secret),
         secrets=[secret],
         volumes={
             str(STATE_ROOT): state_volume,
-            str(COMPILE_CACHE_ROOT): compile_cache_volume,
         },
         retries=retry_policy(args.max_retries),
         max_containers=1,
         single_use_containers=True,
         serialized=True,
         include_source=False,
+        enable_memory_snapshot=args.gpu_memory_snapshot,
+        experimental_options={"enable_gpu_snapshot": True} if args.gpu_memory_snapshot else None,
         name="train",
         **resources,
     )(_run_remote)
@@ -861,7 +860,6 @@ def main(args: Args) -> None:
             launch_id=launch_id,
             git_sha=sha,
             state_volume=args.state_volume,
-            compile_cache_volume=args.compile_cache_volume,
             auto_resume=args.auto_resume,
             stall_s=args.stall_minutes * 60,
             skip_sm120_probe=args.skip_sm120_probe,

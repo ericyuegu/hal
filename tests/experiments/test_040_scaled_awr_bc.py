@@ -649,7 +649,7 @@ def test_training_loader_uses_standard_worker_collation(monkeypatch: pytest.Monk
     assert validation == [2]
     train = calls[0]
     assert train["num_workers"] == cfg.num_workers
-    assert train["prefetch_factor"] == exp._TRAIN_PREFETCH_FACTOR == 2
+    assert train["prefetch_factor"] == exp._TRAIN_PREFETCH_FACTOR == 4
     assert train["drop_last"] is True
     assert train["resumable"] is True
     assert train["windows_per_replay"] == 1
@@ -802,14 +802,13 @@ def test_production_loader_and_eval_defaults() -> None:
 
     assert cfg.num_workers == 32
     assert cfg.cache_limit_gb == 1792
-    assert exp._TRAIN_PREFETCH_FACTOR == 2
+    assert exp._TRAIN_PREFETCH_FACTOR == 4
     assert cfg.ckpt_every == 2000
     assert cfg.eval_every == 2**13
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
     assert exp._eval_inference_bucket(cfg, 96) == 32
     assert len(cfg.source_names) == 44
-    assert cfg.source_weights is None
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:
@@ -1281,7 +1280,7 @@ def test_projectile_model_rejects_a_source_that_drops_items() -> None:
     assert compact in exp.streams.BY_NAME and compact not in exp._POLICY_WORLD_NAMES
 
     with pytest.raises(ValueError, match="policy-world sources"):
-        exp.validate_config(_cfg(source_names=(compact,), source_weights=(1.0,)))
+        exp.validate_config(_cfg(source_names=(compact,)))
 
 
 def test_a_batch_without_item_columns_fails_loud() -> None:
@@ -1333,7 +1332,6 @@ def test_a_real_policy_world_window_reaches_context_tokens(tmp_path: Path) -> No
     kwargs |= {
         "data_root": str(tmp_path),
         "sources": None,
-        "source_weights": None,
         "remote": None,
         "batch_size": 1,
     }
