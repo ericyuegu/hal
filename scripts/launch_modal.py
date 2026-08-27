@@ -148,6 +148,7 @@ class LaunchSpec:
     auto_resume: bool
     stall_s: int
     skip_sm120_probe: bool
+    modal_app_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +458,17 @@ def _configure_compiler_cache(env: dict[str, str]) -> None:
     env["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "1"
 
 
+def _configure_tracking_context(env: dict[str, str], modal_app_url: str | None) -> None:
+    """Expose the Modal dashboard in every W&B run launched by this process."""
+    if modal_app_url is None:
+        return
+    env["HAL_MODAL_APP_URL"] = modal_app_url
+    modal_note = f"Modal: {modal_app_url}"
+    existing_notes = env.get("WANDB_NOTES", "").strip()
+    if modal_app_url not in existing_notes:
+        env["WANDB_NOTES"] = f"{existing_notes}\n\n{modal_note}" if existing_notes else modal_note
+
+
 def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
     """Fail before data download if the GPU, shared memory, or SSD is unsuitable."""
     subprocess.run(["mount", "-o", "remount,size=16g", "/dev/shm"], check=False, capture_output=True)
@@ -693,6 +705,7 @@ def _run_remote(spec: LaunchSpec) -> int:
     _commit_state(state_path, attempt.state, spec.state_volume)
     try:
         env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe)
+        _configure_tracking_context(env, spec.modal_app_url)
         return _run_training(
             attempt.argv,
             attempt.state,
@@ -842,19 +855,21 @@ def main(args: Args) -> None:
         name="train",
         **resources,
     )(_run_remote)
-    spec = LaunchSpec(
-        argv=tuple(args.cmd),
-        launch_id=launch_id,
-        git_sha=sha,
-        state_volume=args.state_volume,
-        compile_cache_volume=args.compile_cache_volume,
-        auto_resume=args.auto_resume,
-        stall_s=args.stall_minutes * 60,
-        skip_sm120_probe=args.skip_sm120_probe,
-    )
     with modal.enable_output(), app.run(name=name, client=client, detach=not args.wait):
+        spec = LaunchSpec(
+            argv=tuple(args.cmd),
+            launch_id=launch_id,
+            git_sha=sha,
+            state_volume=args.state_volume,
+            compile_cache_volume=args.compile_cache_volume,
+            auto_resume=args.auto_resume,
+            stall_s=args.stall_minutes * 60,
+            skip_sm120_probe=args.skip_sm120_probe,
+            modal_app_url=f"https://modal.com/apps/{app.app_id}",
+        )
         call = function.spawn(spec)
         loguru.logger.success(f"submitted Modal App {app.app_id}, Function call {call.object_id}, Git {sha[:10]}")
+        loguru.logger.info(f"dashboard: {spec.modal_app_url}")
         loguru.logger.info(f"logs: uv run modal app logs {app.app_id} -f")
         loguru.logger.info(f"stop: uv run modal app stop {app.app_id}")
         if args.wait:

@@ -23,6 +23,7 @@ Args = _MODULE.Args
 RunState = _MODULE.RunState
 drain_run_names = _MODULE._drain_run_names
 configure_compiler_cache = _MODULE._configure_compiler_cache
+configure_tracking_context = _MODULE._configure_tracking_context
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
 plan_attempt = _MODULE.plan_attempt
@@ -75,6 +76,24 @@ def test_compiler_cache_persists_programs_but_keeps_scratch_local(
         "TORCHINDUCTOR_AUTOGRAD_CACHE": "1",
     }
     assert all(Path(path).is_dir() for key, path in env.items() if key.endswith(("DIR", "PATH")))
+
+
+def test_tracking_context_adds_modal_dashboard_to_wandb_notes() -> None:
+    env = {"WANDB_NOTES": "Existing notes"}
+
+    configure_tracking_context(env, "https://modal.com/apps/ap-example")
+    configure_tracking_context(env, "https://modal.com/apps/ap-example")
+
+    assert env["HAL_MODAL_APP_URL"] == "https://modal.com/apps/ap-example"
+    assert env["WANDB_NOTES"] == "Existing notes\n\nModal: https://modal.com/apps/ap-example"
+
+
+def test_tracking_context_ignores_non_modal_launches() -> None:
+    env: dict[str, str] = {}
+
+    configure_tracking_context(env, None)
+
+    assert env == {}
 
 
 def test_gpu_request_accepts_fallbacks_and_rejects_empty() -> None:
