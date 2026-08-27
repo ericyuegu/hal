@@ -61,6 +61,8 @@ from jaxtyping import Int
 from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
+from torchao.float8 import Float8LinearConfig
+from torchao.float8 import convert_to_float8_training
 
 import wandb
 from hal import r2
@@ -3086,6 +3088,7 @@ def benchmark_train_step(
     *,
     batch_size: int = 512,
     compile_mode: str = _TRAIN_COMPILE_MODE,
+    float8_recipe: Literal["none", "tensorwise", "rowwise", "rowwise_with_gw_hp"] = "none",
     parameter_dtype: Literal["float32", "bfloat16"] = "float32",
     warmup_steps: int = 3,
     measured_steps: int = 20,
@@ -3111,10 +3114,22 @@ def benchmark_train_step(
         wandb_log_code=False,
     )
     validate_config(cfg)
+    if float8_recipe != "none" and parameter_dtype != "bfloat16":
+        raise ValueError("float8 training requires --parameter-dtype bfloat16")
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model_dtype = torch.bfloat16 if parameter_dtype == "bfloat16" else torch.float32
     model = GPT(cfg).to(device=DEVICE, dtype=model_dtype).train()
+    if float8_recipe != "none":
+        float8_config = Float8LinearConfig.from_recipe_name(float8_recipe)
+
+        def eligible_for_float8(module: nn.Module, _: str) -> bool:
+            if not isinstance(module, nn.Linear):
+                return True
+            aligned = module.in_features % 16 == 0 and module.out_features % 16 == 0
+            return aligned and module.in_features * module.out_features >= 2**18
+
+        convert_to_float8_training(model, config=float8_config, module_filter_fn=eligible_for_float8)
     optimizer = make_optimizer(model, cfg)
     muon_parameters = next(group["params"] for group in optimizer.param_groups if group["use_muon"])
     muon_shapes = {
@@ -3187,6 +3202,7 @@ def benchmark_train_step(
     metrics = {
         "batch_size": float(cfg.batch_size),
         "compile_mode": compile_mode,
+        "float8_recipe": float8_recipe,
         "parameter_dtype": parameter_dtype,
         "measured_steps": float(measured_steps),
         "muon_bucket_count": float(len(muon_shapes)),
@@ -3811,6 +3827,7 @@ class SelfPlayArgs:
 class BenchmarkTrainStepArgs:
     batch_size: int = 512
     compile_mode: str = _TRAIN_COMPILE_MODE
+    float8_recipe: Literal["none", "tensorwise", "rowwise", "rowwise_with_gw_hp"] = "none"
     parameter_dtype: Literal["float32", "bfloat16"] = "float32"
     warmup_steps: int = 3
     measured_steps: int = 20
@@ -3831,6 +3848,7 @@ def main(args: Command) -> None:
         benchmark_train_step(
             batch_size=args.batch_size,
             compile_mode=args.compile_mode,
+            float8_recipe=args.float8_recipe,
             parameter_dtype=args.parameter_dtype,
             warmup_steps=args.warmup_steps,
             measured_steps=args.measured_steps,
