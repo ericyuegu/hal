@@ -3,12 +3,27 @@
 import multiprocessing as mp
 import os
 import time
+from collections.abc import Mapping
+from collections.abc import Sequence
+from multiprocessing.connection import Connection
+from pathlib import Path
+from typing import Any
 
 import melee
 import numpy as np
 import pytest
 
 import hal.sim.process_vec as process_vec
+from hal.eval.harness import SessionConfig
+from hal.eval.harness import _session_kwargs
+from hal.paths import EMULATOR_PATH
+from hal.paths import ISO_PATH
+from hal.sim.ipc import LIVE_FLOAT_COLUMNS
+from hal.sim.ipc import LIVE_INT_COLUMNS
+from hal.sim.ipc import ControlMessage
+from hal.sim.ipc import MessageType
+from hal.sim.ipc import RolloutArena
+from hal.sim.ipc import send_control
 from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
@@ -29,6 +44,14 @@ class _UnusedPolicy:
 
     def plan_rows(self, rows):
         raise AssertionError(f"failed workers must not reach policy inference: {rows}")
+
+
+class _NeutralPolicy:
+    runtime_spec = _UnusedPolicy.runtime_spec
+
+    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> dict[Slot, np.ndarray]:
+        shape = (self.runtime_spec.prediction_frames, self.runtime_spec.action_dim)
+        return {slot: np.zeros(shape, dtype=np.float32) for slot in rows}
 
 
 def _match() -> VecMatch:
@@ -53,6 +76,51 @@ def _abrupt_worker(*_args) -> None:
     os._exit(7)
 
 
+def _ready_worker(
+    worker_id: int,
+    connection: Connection,
+    arena_descriptor: Any,
+    session_kwargs: dict[str, Any],
+    _matchup: Matchup,
+    model_ports: tuple[int, ...],
+    arena_slots: tuple[int, ...],
+    runtime: PolicyRuntimeSpec,
+    _max_frames: int,
+    _instant_restart: bool,
+) -> None:
+    starts = session_kwargs["starts"]
+    starts.put((worker_id, time.monotonic()))
+    time.sleep(session_kwargs["ready_delay"])
+    arena = RolloutArena.attach(arena_descriptor)
+    try:
+        flat = {name: 0.0 for name in LIVE_FLOAT_COLUMNS}
+        flat.update({name: 0 for name in LIVE_INT_COLUMNS})
+        for port, arena_slot in zip(model_ports, arena_slots, strict=True):
+            arena.write_observation(
+                arena_slot,
+                1,
+                0,
+                flat,
+                np.zeros(runtime.action_dim, dtype=np.float32),
+                reset=True,
+            )
+            send_control(
+                connection,
+                ControlMessage(
+                    message_type=MessageType.PLAN_REQUEST,
+                    worker_id=worker_id,
+                    task_id=arena_slot,
+                    sequence=1,
+                    count=1,
+                    port_or_slot=port,
+                ),
+            )
+        while True:
+            time.sleep(10)
+    finally:
+        arena.close()
+
+
 def _use_forked_fake_worker(monkeypatch: pytest.MonkeyPatch, target) -> None:
     context = mp.get_context("fork")
     monkeypatch.setattr(process_vec.mp, "get_context", lambda _method: context)
@@ -69,6 +137,7 @@ def test_silent_worker_is_named_killed_and_reaped(monkeypatch: pytest.MonkeyPatc
         _UnusedPolicy(),
         max_frames=8,
         worker_timeout_seconds=0.1,
+        startup_timeout_seconds=0.1,
         telemetry=telemetry,
     )
     assert time.monotonic() - started < 2.0
@@ -105,6 +174,87 @@ def test_worker_timeout_must_be_positive_and_finite() -> None:
                 max_frames=8,
                 worker_timeout_seconds=value,
             )
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_startup_parallelism_must_be_a_positive_integer(value: object) -> None:
+    with pytest.raises(ValueError, match="startup_parallelism"):
+        process_vec.drive_process_vec(
+            [{}],
+            [_match()],
+            _UnusedPolicy(),
+            max_frames=8,
+            startup_parallelism=value,
+        )
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("inf"), float("nan")])
+def test_startup_timeout_must_be_positive_and_finite(value: float) -> None:
+    with pytest.raises(ValueError, match="startup_timeout_seconds"):
+        process_vec.drive_process_vec(
+            [{}],
+            [_match()],
+            _UnusedPolicy(),
+            max_frames=8,
+            startup_timeout_seconds=value,
+        )
+
+
+def test_startup_admission_waits_for_ready_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = mp.get_context("fork")
+    _use_forked_fake_worker(monkeypatch, _ready_worker)
+    starts = context.Queue()
+    kwargs = [{"starts": starts, "ready_delay": 0.08} for _ in range(5)]
+
+    with pytest.raises(process_vec.PolicyExecutionError):
+        process_vec.drive_process_vec(
+            kwargs,
+            [_match() for _ in kwargs],
+            _UnusedPolicy(),
+            max_frames=8,
+            startup_parallelism=2,
+            startup_timeout_seconds=1.0,
+        )
+
+    launched = dict(starts.get(timeout=1.0) for _ in kwargs)
+    first_batch = min(launched[0], launched[1])
+    second_batch = min(launched[2], launched[3])
+    assert second_batch - first_batch >= 0.05
+    assert launched[4] - second_batch >= 0.05
+
+
+@pytest.mark.integration
+def test_bounded_startup_with_real_dolphins() -> None:
+    iso_path = Path(ISO_PATH)
+    dolphin_path = Path(EMULATOR_PATH)
+    if not iso_path.is_file():
+        pytest.skip(f"ISO missing at {iso_path}")
+    if not dolphin_path.is_file():
+        pytest.skip(f"Dolphin missing at {dolphin_path}")
+    matches = [_match() for _ in range(4)]
+    cfg = SessionConfig(
+        iso_path=iso_path,
+        dolphin_path=dolphin_path,
+        use_exi_inputs=True,
+        enable_ffw=True,
+        emulation_speed=0.0,
+        blocking_input=True,
+        step_timeout_seconds=30.0,
+        tmp_home_directory=True,
+    )
+    kwargs = [_session_kwargs(cfg, slippi_port=52000 + worker, replay_dir=None) for worker in range(len(matches))]
+
+    results = process_vec.drive_process_vec(
+        kwargs,
+        matches,
+        _NeutralPolicy(),
+        max_frames=120,
+        startup_parallelism=2,
+        startup_timeout_seconds=120.0,
+    )
+
+    assert all(len(boots) == 1 for boots in results)
+    assert all(len(boots[0]) == 120 for boots in results)
 
 
 def test_policy_fault_capsule_round_trips_host_snapshot(tmp_path) -> None:
