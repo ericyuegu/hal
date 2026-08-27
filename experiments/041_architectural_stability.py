@@ -131,6 +131,7 @@ _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
 _PRODUCTION_LOSS_POSITIONS = 2**35
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
+EVAL_HORIZONS = (1, 2, 4, 6)
 _TRAIN_METRICS_EVERY = 1
 _TRAIN_PREFETCH_FACTOR = 4
 _TRAIN_COMPILE_MODE = "reduce-overhead"
@@ -1008,8 +1009,9 @@ class CausalTemporalDecoder(nn.Module):
         uniforms: Tensor | None = None,
         gen: torch.Generator | None = None,
     ) -> Tensor:
-        if offsets not in (self.head_offsets[:4], self.head_offsets[:6]):
-            raise ValueError("live decode may compute only the dense four- or six-offset prefix")
+        allowed = tuple(self.head_offsets[:horizon] for horizon in EVAL_HORIZONS)
+        if offsets not in allowed:
+            raise ValueError(f"live decode offsets must select one of the dense prefixes {allowed}")
         if uniforms is not None and uniforms.shape != (len(offsets), N_GROUPS, hidden.shape[0]):
             raise ValueError("uniform table must be [frames, groups, batch]")
         trunk = decoder_rmsnorm(hidden[:, -1])
@@ -1935,8 +1937,8 @@ class BF16Inference:
         argmax: bool = False,
         gen: torch.Generator | None = None,
     ) -> Tensor:
-        if horizon not in (4, 6):
-            raise ValueError("only the unrolled four- and six-frame decoders exist")
+        if horizon not in EVAL_HORIZONS:
+            raise ValueError(f"horizon must be one of {EVAL_HORIZONS}")
         rows = ctx.ctx_pad.shape[0]
         bucket = self._bucket(rows)
         padded = canonical_context(_pad_context(ctx, bucket), "base", items=True)
@@ -1983,8 +1985,8 @@ def make_policy(
     device: str = DEVICE,
 ) -> RecedingHorizon:
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    if horizon not in (4, 6):
-        raise ValueError("execution horizon must be four or six")
+    if horizon not in EVAL_HORIZONS:
+        raise ValueError(f"execution horizon must be one of {EVAL_HORIZONS}")
     engine = BF16Inference(model, cfg) if inference is None else inference
     random_streams = None if decode_seed is None else SlotGroupRandom(decode_seed)
     generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)

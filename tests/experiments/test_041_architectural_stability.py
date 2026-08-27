@@ -74,6 +74,17 @@ def _indices(cfg: exp.TrainConfig, *shape: int) -> torch.Tensor:
     return torch.zeros(*shape, exp.N_GROUPS, dtype=torch.long)
 
 
+def test_delay_one_inference_decodes_the_dense_offset_one_head() -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+    context = exp.synthetic_context(cfg, batch_size=2, device=torch.device("cpu"))
+    inference = exp.BF16Inference(model, cfg, compiled=False)
+
+    actions = inference.decode(context, horizon=1)
+
+    assert actions.shape == (2, 1, exp.A_DIM)
+
+
 def test_action_heads_are_normalized_linear_readouts_without_skip() -> None:
     cfg = _cfg()
     decoder = exp.GPT(cfg).temporal
