@@ -168,19 +168,29 @@ def _make_streaming_dataset(
             if any(not math.isfinite(weight) or weight <= 0 for weight in source_weights):
                 raise ValueError("source_weights must be finite and positive")
             weight_total = sum(source_weights)
-            proportions: Sequence[float | None] = tuple(weight / weight_total for weight in source_weights)
+            selected_streams = [
+                Stream(
+                    remote=source.remote,
+                    local=str(source.local_root),
+                    split=split,
+                    proportion=weight / weight_total,
+                    download_retry=download_retry,
+                )
+                for source, weight in zip(sources, source_weights, strict=True)
+            ]
         else:
-            proportions = (None,) * len(sources)
-        selected_streams = [
-            Stream(
-                remote=source.remote,
-                local=str(source.local_root),
-                split=split,
-                proportion=proportion,
-                download_retry=download_retry,
-            )
-            for source, proportion in zip(sources, proportions, strict=True)
-        ]
+            # One selection per MDS sample makes the natural epoch the concatenation
+            # of all streams, so source sampling is proportional to stream length.
+            selected_streams = [
+                Stream(
+                    remote=source.remote,
+                    local=str(source.local_root),
+                    split=split,
+                    repeat=1,
+                    download_retry=download_retry,
+                )
+                for source in sources
+            ]
         if shuffle_seed is None:
             dataset = StreamingDataset(
                 streams=selected_streams,
@@ -505,6 +515,9 @@ def make_loader(
     ``data_root`` or ``remote``. Otherwise, ``remote`` is the dataset's R2 root
     URI; when set, StreamingDataset pulls the split's shards on demand into the
     ``data_root`` cache. Without it, ``data_root`` must already hold the shards.
+    Multi-stream mode defaults to ``Stream(repeat=1)``, sampling sources in
+    proportion to their MDS sample counts. ``source_weights`` is the explicit
+    proportion override retained for historical experiment reproduction.
 
     ``cache_limit`` bounds that local shard cache (e.g. ``"100gb"``) so a dataset
     far larger than disk streams without filling it — StreamingDataset evicts

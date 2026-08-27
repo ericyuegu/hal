@@ -67,6 +67,8 @@ def test_multistream_dataset_uses_every_source_and_exposes_counts(tmp_path: Path
     )
 
     assert names == ("first", "second")
+    assert [stream.repeat for stream in dataset.streams] == [1, 1]
+    assert [stream.proportion for stream in dataset.streams] == pytest.approx([3 / 8, 5 / 8])
     assert dataset.samples_per_stream.tolist() == [3, 5]
     assert dataset.shuffle and dataset.shuffle_seed == 123
     assert sorted(int(sample["value"]) for sample in dataset) == [0, 1, 2, 10, 11, 12, 13, 14]

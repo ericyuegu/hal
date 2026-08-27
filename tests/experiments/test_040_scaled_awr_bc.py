@@ -808,10 +808,8 @@ def test_production_loader_and_eval_defaults() -> None:
     assert cfg.eval_max_parallel == 32
     assert exp._eval_parallelism(cfg, 96) == 32
     assert exp._eval_inference_bucket(cfg, 96) == 32
-    assert len(cfg.source_names) == len(cfg.source_weights) == 44
-    assert dict(zip(cfg.source_names, cfg.source_weights, strict=True)) == {
-        name: 2.0 if name == "professional-zain-policy-world-v7" else 1.0 for name in cfg.source_names
-    }
+    assert len(cfg.source_names) == 44
+    assert cfg.source_weights is None
 
 
 def test_histogram_cadence_does_not_restart_on_resume() -> None:
@@ -1515,7 +1513,7 @@ def test_validate_config_rejects_non_positive_item_dims() -> None:
 
 def test_model_tag_records_projectiles() -> None:
     assert exp.model_tag(_cfg()).startswith("scaled040-")
-    assert "-projectiles-awr-v-near-" in exp.model_tag(_cfg())
+    assert "-projectiles-mix-r1-awr-v-near-" in exp.model_tag(_cfg())
 
 
 def test_the_item_dims_are_frozen() -> None:

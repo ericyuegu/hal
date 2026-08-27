@@ -270,6 +270,38 @@ def test_optimizer_hyperparameters_remain_the_040_baseline() -> None:
     assert exp._EXPERIMENT_ID == "041_architectural_stability_v2"
 
 
+def test_cosine_schedule_is_a_named_ablation_with_legacy_checkpoint_migration() -> None:
+    cfg = exp.TrainConfig()
+    cosine = exp.lr_schedule(cfg)
+    late_cfg = exp.replace(cfg, lr_schedule_kind="late-cosine")
+    late_cosine = exp.lr_schedule(late_cfg)
+
+    assert cfg.lr_schedule_kind == "cosine"
+    assert cosine(cfg.warmup_steps) == 1.0
+    assert cosine(100_000) < 1.0
+    assert late_cosine(100_000) == 1.0
+    assert cosine(cfg.max_steps - 1) == pytest.approx(cfg.lr_floor_ratio)
+    assert late_cosine(cfg.max_steps - 1) == pytest.approx(cfg.lr_floor_ratio)
+    exp.validate_production_config(late_cfg)
+
+    checkpoint = exp._checkpoint_config(late_cfg)
+    del checkpoint["lr_schedule_kind"]
+    assert exp.config_from_state(checkpoint) == late_cfg
+
+
+def test_production_source_mix_uses_native_replay_lengths() -> None:
+    cfg = exp.TrainConfig()
+    weights = exp.source_mixture_weights(cfg)
+
+    assert cfg.source_weights is None
+    assert weights == tuple(float(exp.streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name]) for name in cfg.source_names)
+
+    historical = exp.replace(cfg, source_weights=(1.0,) * len(cfg.source_names))
+    with pytest.raises(ValueError, match="frozen treatment"):
+        exp.validate_production_config(historical)
+    exp.validate_production_config(historical, resumed=True)
+
+
 def test_training_checkpoints_are_resumable_every_two_thousand_updates() -> None:
     cfg = exp.TrainConfig()
 

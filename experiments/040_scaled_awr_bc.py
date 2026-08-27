@@ -187,9 +187,6 @@ _ITEM_PROBE_COLUMN = item_column(0, _ITEM_PRESENCE_SUFFIX)
 # decoder builds its dict from POLICY_MDS_COLUMNS, which carries no item columns.
 _POLICY_WORLD_NAMES = frozenset(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
 _DEFAULT_SOURCE_NAMES = tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
-_DEFAULT_SOURCE_WEIGHTS = tuple(
-    2.0 if source.name == "professional-zain-policy-world-v7" else 1.0 for source in streams.POLICY_WORLD_V7_SOURCES
-)
 
 
 @dataclass(frozen=True)
@@ -284,7 +281,7 @@ class TrainConfig:
     eval_max_parallel: int | None = 32
 
     source_names: tuple[str, ...] = _DEFAULT_SOURCE_NAMES
-    source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
+    source_weights: tuple[float, ...] | None = None
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
     cache_limit_gb: int = 1792
@@ -411,10 +408,13 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("lr_floor_ratio must be in (0, 1]")
     if not cfg.source_names or len(set(cfg.source_names)) != len(cfg.source_names):
         raise ValueError("source_names must be non-empty and unique")
-    if len(cfg.source_weights) != len(cfg.source_names):
-        raise ValueError(f"source_weights length {len(cfg.source_weights)} != source count {len(cfg.source_names)}")
-    if any(not math.isfinite(weight) or weight <= 0 for weight in cfg.source_weights):
-        raise ValueError("source_weights must be finite and positive")
+    if cfg.source_weights is not None:
+        if len(cfg.source_weights) != len(cfg.source_names):
+            raise ValueError(
+                f"source_weights length {len(cfg.source_weights)} != source count {len(cfg.source_names)}"
+            )
+        if any(not math.isfinite(weight) or weight <= 0 for weight in cfg.source_weights):
+            raise ValueError("source_weights must be finite and positive")
     unknown = set(cfg.source_names) - streams.BY_NAME.keys()
     if unknown:
         raise ValueError(f"unknown source names: {sorted(unknown)}")
@@ -424,17 +424,18 @@ def validate_config(cfg: TrainConfig) -> None:
         )
 
 
-def validate_production_config(cfg: TrainConfig) -> None:
-    """Require frozen scientific settings while allowing operational tuning."""
+def validate_production_config(cfg: TrainConfig, *, resumed: bool = False) -> None:
+    """Require frozen settings, accepting a historical mix only on resume."""
     expected = asdict(TrainConfig())
     actual = asdict(cfg)
+    allowed_overrides = _PRODUCTION_OVERRIDE_FIELDS | ({"source_weights"} if resumed else set())
     unknown_overrides = _PRODUCTION_OVERRIDE_FIELDS - actual.keys()
     if unknown_overrides:
         raise RuntimeError(f"production overrides are not config fields: {sorted(unknown_overrides)}")
     changed = {
         name: (actual[name], expected_value)
         for name, expected_value in expected.items()
-        if name not in _PRODUCTION_OVERRIDE_FIELDS and actual[name] != expected_value
+        if name not in allowed_overrides and actual[name] != expected_value
     }
     if changed:
         details = ", ".join(
@@ -2233,10 +2234,11 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
     treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
+    mixture = "mix-r1" if cfg.source_weights is None else "mix-explicit"
     return (
         f"scaled040-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-"
-        f"projectiles-{treatment}"
+        f"projectiles-{mixture}-{treatment}"
     )
 
 
@@ -2383,7 +2385,7 @@ def layer_activation_rms_log(
 class _LoaderKwargs(TypedDict):
     data_root: str | None
     sources: tuple[streams.StreamSource, ...]
-    source_weights: tuple[float, ...]
+    source_weights: tuple[float, ...] | None
     cache_limit: str
     shuffle_block_size: int
     shuffle_seed: int
@@ -2415,6 +2417,13 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKw
         extra=ITEM_COLUMNS,
         projection=BASE_ITEMS_PROJECTION,
     )
+
+
+def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
+    """Return the configured proportions or natural MDS replay counts."""
+    if cfg.source_weights is not None:
+        return cfg.source_weights
+    return tuple(float(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name]) for name in cfg.source_names)
 
 
 def validate_batch_geometry(
@@ -2525,7 +2534,7 @@ def load_stats(cfg: TrainConfig) -> dict[str, FeatureStats]:
     sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
     return load_consolidated_mixture_stats(
         [source.local_root / "stats.json" for source in sources],
-        cfg.source_weights,
+        source_mixture_weights(cfg),
         expected_mds_schema_version=cfg.mds_schema_version,
     )
 
@@ -2650,7 +2659,8 @@ def _log_training_summary(
 
     unique_replays = sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names)
     unique_frames = sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES[name] for name in cfg.source_names)
-    source_weight_total = sum(cfg.source_weights)
+    source_weights = source_mixture_weights(cfg)
+    source_weight_total = sum(source_weights)
     wandb.run.summary["data/unique_replays"] = unique_replays
     wandb.run.summary["data/unique_frames"] = unique_frames
     wandb.run.summary["data/processed_loss_positions"] = cfg.target_loss_positions
@@ -2669,7 +2679,8 @@ def _log_training_summary(
         source = bf16_peak_source(device_name or "")
         if source is not None:
             wandb.run.summary["hardware/bf16_dense_peak_source"] = source
-    for name, weight in zip(cfg.source_names, cfg.source_weights, strict=True):
+    wandb.run.summary["data/source_mixing"] = "explicit_proportion" if cfg.source_weights is not None else "repeat_1"
+    for name, weight in zip(cfg.source_names, source_weights, strict=True):
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
@@ -3064,7 +3075,7 @@ def train(
 ) -> None:
     validate_config(cfg)
     if not smoke:
-        validate_production_config(cfg)
+        validate_production_config(cfg, resumed=resume_state is not None)
         if stop_after_update is not None:
             raise ValueError("stop_after_update is a smoke-only control")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:

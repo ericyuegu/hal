@@ -137,6 +137,7 @@ _TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _ADAM_UPDATE_CLIP_THRESHOLD = 1.0
 _ACTIVATION_PERCENTILE_SAMPLE_SIZE = 65_536
 _ARCHITECTURE_POWER_ITERATIONS = 8
+_PRODUCTION_ABLATION_FIELDS = frozenset({"lr_schedule_kind"})
 _PRODUCTION_OVERRIDE_FIELDS = frozenset(
     {
         "cache_limit_gb",
@@ -195,9 +196,6 @@ _ITEM_PROBE_COLUMN = item_column(0, _ITEM_PRESENCE_SUFFIX)
 # decoder builds its dict from POLICY_MDS_COLUMNS, which carries no item columns.
 _POLICY_WORLD_NAMES = frozenset(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
 _DEFAULT_SOURCE_NAMES = tuple(source.name for source in streams.POLICY_WORLD_V7_SOURCES)
-_DEFAULT_SOURCE_WEIGHTS = tuple(
-    2.0 if source.name == "professional-zain-policy-world-v7" else 1.0 for source in streams.POLICY_WORLD_V7_SOURCES
-)
 
 
 @dataclass(frozen=True)
@@ -271,6 +269,7 @@ class TrainConfig:
     warmup_fraction: float = 0.03
     stable_fraction: float = 0.80
     lr_floor_ratio: float = 1 / 170
+    lr_schedule_kind: Literal["late-cosine", "cosine"] = "cosine"
     amp_dtype: str = "bfloat16"
     allow_tf32: bool = True
     compile_trunk: bool = True
@@ -293,7 +292,7 @@ class TrainConfig:
     eval_max_parallel: int | None = 32
 
     source_names: tuple[str, ...] = _DEFAULT_SOURCE_NAMES
-    source_weights: tuple[float, ...] = _DEFAULT_SOURCE_WEIGHTS
+    source_weights: tuple[float, ...] | None = None
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
     cache_limit_gb: int = 2048
@@ -423,12 +422,17 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("schedule fractions must satisfy 0 <= warmup < stable < 1")
     if not 0.0 < cfg.lr_floor_ratio <= 1.0:
         raise ValueError("lr_floor_ratio must be in (0, 1]")
+    if cfg.lr_schedule_kind not in ("late-cosine", "cosine"):
+        raise ValueError("lr_schedule_kind must be 'late-cosine' or 'cosine'")
     if not cfg.source_names or len(set(cfg.source_names)) != len(cfg.source_names):
         raise ValueError("source_names must be non-empty and unique")
-    if len(cfg.source_weights) != len(cfg.source_names):
-        raise ValueError(f"source_weights length {len(cfg.source_weights)} != source count {len(cfg.source_names)}")
-    if any(not math.isfinite(weight) or weight <= 0 for weight in cfg.source_weights):
-        raise ValueError("source_weights must be finite and positive")
+    if cfg.source_weights is not None:
+        if len(cfg.source_weights) != len(cfg.source_names):
+            raise ValueError(
+                f"source_weights length {len(cfg.source_weights)} != source count {len(cfg.source_names)}"
+            )
+        if any(not math.isfinite(weight) or weight <= 0 for weight in cfg.source_weights):
+            raise ValueError("source_weights must be finite and positive")
     unknown = set(cfg.source_names) - streams.BY_NAME.keys()
     if unknown:
         raise ValueError(f"unknown source names: {sorted(unknown)}")
@@ -438,17 +442,20 @@ def validate_config(cfg: TrainConfig) -> None:
         )
 
 
-def validate_production_config(cfg: TrainConfig) -> None:
-    """Require frozen scientific settings while allowing operational tuning."""
+def validate_production_config(cfg: TrainConfig, *, resumed: bool = False) -> None:
+    """Require frozen settings, schedule ablations, and compatible resumes."""
     expected = asdict(TrainConfig())
     actual = asdict(cfg)
-    unknown_overrides = _PRODUCTION_OVERRIDE_FIELDS - actual.keys()
+    allowed_overrides = _PRODUCTION_OVERRIDE_FIELDS | _PRODUCTION_ABLATION_FIELDS
+    if resumed:
+        allowed_overrides = allowed_overrides | {"source_weights"}
+    unknown_overrides = allowed_overrides - actual.keys()
     if unknown_overrides:
         raise RuntimeError(f"production overrides are not config fields: {sorted(unknown_overrides)}")
     changed = {
         name: (actual[name], expected_value)
         for name, expected_value in expected.items()
-        if name not in _PRODUCTION_OVERRIDE_FIELDS and actual[name] != expected_value
+        if name not in allowed_overrides and actual[name] != expected_value
     }
     if changed:
         details = ", ".join(
@@ -2164,9 +2171,10 @@ def lr_schedule(cfg: TrainConfig):
     def schedule(step: int) -> float:
         if step <= cfg.warmup_steps:
             return step / max(cfg.warmup_steps, 1)
-        if step <= cfg.stable_steps:
+        decay_start = cfg.stable_steps if cfg.lr_schedule_kind == "late-cosine" else cfg.warmup_steps
+        if step <= decay_start:
             return 1.0
-        progress = (step - cfg.stable_steps) / max(cfg.max_steps - 1 - cfg.stable_steps, 1)
+        progress = (step - decay_start) / max(cfg.max_steps - 1 - decay_start, 1)
         cosine = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
         return cfg.lr_floor_ratio + (1.0 - cfg.lr_floor_ratio) * cosine
 
@@ -2282,10 +2290,11 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
     treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
+    mixture = "mix-r1" if cfg.source_weights is None else "mix-explicit"
     return (
         f"stable041-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-"
-        f"linear-head-no-skip-projectiles-{treatment}"
+        f"linear-head-no-skip-projectiles-{mixture}-{cfg.lr_schedule_kind}-{treatment}"
     )
 
 
@@ -2589,7 +2598,7 @@ def layer_activation_rms_log(
 class _LoaderKwargs(TypedDict):
     data_root: str | None
     sources: tuple[streams.StreamSource, ...]
-    source_weights: tuple[float, ...]
+    source_weights: tuple[float, ...] | None
     cache_limit: str
     shuffle_block_size: int
     shuffle_seed: int
@@ -2621,6 +2630,13 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKw
         extra=ITEM_COLUMNS,
         projection=BASE_ITEMS_PROJECTION,
     )
+
+
+def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
+    """Return the configured proportions or natural MDS replay counts."""
+    if cfg.source_weights is not None:
+        return cfg.source_weights
+    return tuple(float(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name]) for name in cfg.source_names)
 
 
 def validate_batch_geometry(
@@ -2731,7 +2747,7 @@ def load_stats(cfg: TrainConfig) -> dict[str, FeatureStats]:
     sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
     return load_consolidated_mixture_stats(
         [source.local_root / "stats.json" for source in sources],
-        cfg.source_weights,
+        source_mixture_weights(cfg),
         expected_mds_schema_version=cfg.mds_schema_version,
     )
 
@@ -2792,6 +2808,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "041",
             "architecture-stability",
             "projectiles",
+            "length-weighted-mix" if cfg.source_weights is None else "explicit-source-mix",
+            cfg.lr_schedule_kind,
         ],
         config=asdict(cfg),
         settings=wandb.Settings(
@@ -2821,6 +2839,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         "residuals; bounded identity-initialized group conditioning; detached normalized critic input"
     )
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = _ADAM_UPDATE_CLIP_THRESHOLD
+    wandb.run.summary["optimizer/lr_schedule"] = cfg.lr_schedule_kind
     wandb.run.summary["optimizer/update_clip_semantics"] = (
         "per-tensor StableAdamW factor=min(1, threshold/R_updated); raw_grad is before global clipping, "
         "grad is after global clipping, and prospective_update includes learning rate, clipping, and weight decay"
@@ -2856,7 +2875,8 @@ def _log_training_summary(
 
     unique_replays = sum(streams.POLICY_WORLD_V7_TRAIN_REPLAYS[name] for name in cfg.source_names)
     unique_frames = sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES[name] for name in cfg.source_names)
-    source_weight_total = sum(cfg.source_weights)
+    source_weights = source_mixture_weights(cfg)
+    source_weight_total = sum(source_weights)
     wandb.run.summary["data/unique_replays"] = unique_replays
     wandb.run.summary["data/unique_frames"] = unique_frames
     wandb.run.summary["data/processed_loss_positions"] = cfg.target_loss_positions
@@ -2875,7 +2895,8 @@ def _log_training_summary(
         source = bf16_peak_source(device_name or "")
         if source is not None:
             wandb.run.summary["hardware/bf16_dense_peak_source"] = source
-    for name, weight in zip(cfg.source_names, cfg.source_weights, strict=True):
+    wandb.run.summary["data/source_mixing"] = "explicit_proportion" if cfg.source_weights is not None else "repeat_1"
+    for name, weight in zip(cfg.source_names, source_weights, strict=True):
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
@@ -3275,7 +3296,7 @@ def train(
 ) -> None:
     validate_config(cfg)
     if not smoke:
-        validate_production_config(cfg)
+        validate_production_config(cfg, resumed=resume_state is not None)
         if stop_after_update is not None:
             raise ValueError("stop_after_update is a smoke-only control")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
@@ -3598,6 +3619,10 @@ def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
 
 def config_from_state(values: dict) -> TrainConfig:
     """Restore a checkpoint written by the current experiment definition."""
+    if "lr_schedule_kind" not in values:
+        # All 041 checkpoints written before the named ablation used the long
+        # stable phase followed by cosine decay.
+        values = {**values, "lr_schedule_kind": "late-cosine"}
     expected = {"experiment_id", "architecture", "awr_calibration", *_RUNTIME_CONFIG_FIELDS}
     missing = expected - values.keys()
     unexpected = values.keys() - expected
