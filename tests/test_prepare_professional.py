@@ -9,6 +9,7 @@ from hal.data.replay_stats import PlayerStats
 from hal.data.replay_stats import ReplayStats
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
+from hal.scripts.filter import filter_index
 from hal.scripts.prepare_professional import dedupe_index
 from hal.scripts.prepare_professional import write_corpus_rank_overrides
 from hal.scripts.prepare_professional import write_filterable_index
@@ -84,6 +85,36 @@ def test_filterable_index_ledgers_rows_without_stats(tmp_path: Path) -> None:
     failure = json.loads(failures.read_text())
     assert failure["phase"] == "filter_prerequisite"
     assert "missing.slp" in failure["path"]
+
+
+def test_stock_zero_filter_restores_historical_completion_rule(tmp_path: Path) -> None:
+    index = tmp_path / "index.jsonl"
+    output = tmp_path / "paths.txt"
+    players = [_player(1, "A", "A#1"), _player(2, "B", "B#1")]
+
+    def with_final_stocks(path: str, sha1: str, stocks: tuple[int, int]) -> ReplayIndexEntry:
+        return dataclasses.replace(
+            _entry(path, sha1, players),
+            stats=ReplayStats(
+                players=(
+                    PlayerStats(1, 100.0, 100.0, stocks[0], 10, (50.0,)),
+                    PlayerStats(2, 100.0, 100.0, stocks[1], 10, (50.0,)),
+                )
+            ),
+        )
+
+    write_jsonl(
+        index,
+        [
+            with_final_stocks("archive://one!finished.slp", "finished", (0, 2)),
+            with_final_stocks("archive://one!unfinished.slp", "unfinished", (1, 2)),
+        ],
+    )
+
+    kept = filter_index(index, output, stock_zero_only=True)
+
+    assert kept == 1
+    assert output.read_text().splitlines() == ["archive://one!finished.slp"]
 
 
 def test_owner_rank_uses_logical_port_order_and_leaves_missing_unknown(tmp_path: Path) -> None:

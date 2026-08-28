@@ -1,8 +1,10 @@
-"""Experiment 026 with the historical five-button controller codec.
+"""Experiment 026 with the historical controller codec.
 
-Architecture, objective, optimization, and data match the ranked-anonymous-1
-O26 baseline. Only the raw-controller/categorical boundary changes. The legacy
-codec intentionally collapses simultaneous face-button holds to one class.
+The trainable architecture and optimization match the ranked-anonymous-1 O26
+baseline. Codec version 2 restores the old controller classes and early-release
+reducer. The default treatment evaluates one frame at a time and gives offset 1
+half of the action objective; both settings can be reverted for the forensic
+ladder documented in ``docs/experiments/043_legacy_codec.md``.
 
 Run:
     uv run experiments/043_legacy_codec.py
@@ -41,6 +43,7 @@ import wandb
 from hal import streams
 from hal.data.behavior import HITSTUN_ACTIONS
 from hal.data.feature_stats import FeatureStats
+from hal.data.policy_schema import policy_replay_identity
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
@@ -109,7 +112,7 @@ GROUP_ORDER: tuple[str, ...] = ("c_stick", "main_stick", "triggers", "buttons")
 
 # Historical class counts. The O26-sized tables and output layers remain in
 # place so this treatment changes the codec without changing a trainable tensor.
-LEGACY_GROUP_VOCABS: tuple[int, ...] = (5, 37, 9, 3)
+LEGACY_GROUP_VOCABS: tuple[int, ...] = (6, 37, 9, 5)
 
 # Signed equivalents of ae29e3f's [0, 1] controller centers, in historical
 # class order. Quantization below recreates the old float32-data/float64-center
@@ -164,7 +167,8 @@ _LEGACY_C_SIGNED = (
     (0.7, 0.7),
     (-0.7, 0.7),
 )
-_LEGACY_TRIGGER_VALUES = (0.0, 0.4, 1.0)
+_LEGACY_TRIGGER_VALUES = (0.0, 0.35, 0.6, 0.85, 1.0)
+_LIVE_HORIZONS = (1, 4, 6)
 
 LEGACY_MAIN_CENTERS = torch.tensor(_LEGACY_MAIN_SIGNED, dtype=torch.float32)
 LEGACY_C_CENTERS = torch.tensor(_LEGACY_C_SIGNED, dtype=torch.float32)
@@ -174,6 +178,7 @@ TRIGGER_L_CH = ACTION_CHANNELS.index("trigger_l")
 TRIGGER_R_CH = ACTION_CHANNELS.index("trigger_r")
 BUTTON_L_CH = ACTION_CHANNELS.index("button_l")
 BUTTON_R_CH = ACTION_CHANNELS.index("button_r")
+_BUTTON_L_SEMANTIC_CH = ACTION_CHANNELS[6:].index("button_l")
 
 _V6_FLOATS = tuple(V6_PLAYER_COLUMNS.floats)
 _V6_CATS = {name: spec for name, spec in V6_PLAYER_COLUMNS.cats.items() if spec is not None}
@@ -193,6 +198,7 @@ class TrainConfig:
     L_ctx: int = 128
 
     decoder_arch_version: int = 3
+    codec_version: int = 2
     sample_chunk_length: int = 20
     head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     temporal_d_model: int = 128
@@ -203,6 +209,9 @@ class TrainConfig:
     action_embed_dim: int = 16
     offset_embed_dim: int = 16
     aux_loss_weight: float = 1.0
+    # None restores O26's dense-four-plus-auxiliary objective. A numeric value
+    # is the share of the action objective assigned to offset 1.
+    next_frame_loss_share: float | None = 0.5
     group_order: tuple[str, ...] = GROUP_ORDER
 
     action_vocab: int = 1024
@@ -213,8 +222,8 @@ class TrainConfig:
     stage_dim: int = 4
     observation_bundle: str = "base"  # or v6_lean
 
-    exec_horizon: int = 4
-    final_diag_exec_horizon: int = 6
+    exec_horizon: int = 1
+    final_diag_exec_horizon: int = 1
     decode_temp: float = 1.0
     inference_mode: str = "compiled"  # explicit "eager" is for debugging
     inference_buckets: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
@@ -248,12 +257,13 @@ class TrainConfig:
     eval_max_frames: int = 7200
     eval_n_matchups: int = 32
     final_eval_n_matchups: int = 96
-    final_diag_n_matchups: int = 32
+    final_diag_n_matchups: int = 0
     # Match the reference's 32-wide waves. The spawned evaluator admits at most
     # eight cold Dolphin startups at once, as in O41, avoiding a CPU thundering herd.
     eval_max_parallel: int | None = 32
 
     data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
+    train_replay_paths: str | None = None
     replay_format: Literal["policy", "policy-world"] = "policy"
     val_data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
     val_replay_format: Literal["policy", "policy-world"] = "policy"
@@ -298,6 +308,8 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
     if cfg.decoder_arch_version != 3:
         raise ValueError(f"unsupported decoder_arch_version={cfg.decoder_arch_version}")
+    if cfg.codec_version != 2:
+        raise ValueError(f"unsupported codec_version={cfg.codec_version}")
     if cfg.d_model % cfg.n_heads or cfg.temporal_d_model % cfg.temporal_heads:
         raise ValueError("model dimensions must be divisible by their head counts")
     if (cfg.temporal_d_model // cfg.temporal_heads) % 2:
@@ -308,13 +320,13 @@ def validate_config(cfg: TrainConfig) -> None:
     if offsets[-1] > cfg.sample_chunk_length:
         raise ValueError("head_offsets extend beyond sample_chunk_length")
     if offsets[:6] != (1, 2, 3, 4, 5, 6):
-        raise ValueError("the live four/six-frame decoders require a dense 1..6 prefix")
+        raise ValueError("the live one/four/six-frame decoders require a dense 1..6 prefix")
     if cfg.group_order != GROUP_ORDER:
         raise ValueError(f"group_order must be {GROUP_ORDER}, got {cfg.group_order}")
     if cfg.batch_size % cfg.grad_accum_steps:
         raise ValueError("batch_size must be divisible by grad_accum_steps")
-    if cfg.exec_horizon not in (4, 6) or cfg.final_diag_exec_horizon != 6:
-        raise ValueError("execution horizons are restricted to the unrolled four/six-frame decoders")
+    if cfg.exec_horizon not in _LIVE_HORIZONS or cfg.final_diag_exec_horizon not in _LIVE_HORIZONS:
+        raise ValueError(f"execution horizons must be one of {_LIVE_HORIZONS}")
     if cfg.decode_temp != 1.0:
         raise ValueError("experiment 043 freezes sampling temperature at 1")
     if cfg.inference_mode not in ("compiled", "eager"):
@@ -333,6 +345,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
     if cfg.replay_format not in ("policy", "policy-world"):
         raise ValueError("replay_format must be 'policy' or 'policy-world'")
+    if cfg.train_replay_paths is not None and not cfg.compact_data:
+        raise ValueError("train_replay_paths requires compact_data")
     if cfg.val_replay_format not in ("policy", "policy-world"):
         raise ValueError("val_replay_format must be 'policy' or 'policy-world'")
     if cfg.final_diag_n_matchups < 0:
@@ -345,6 +359,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("lr_floor_ratio must be finite and between zero and one")
     if not math.isfinite(cfg.aux_loss_weight) or cfg.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be finite and non-negative")
+    if cfg.next_frame_loss_share is not None and (
+        not math.isfinite(cfg.next_frame_loss_share) or not 0 <= cfg.next_frame_loss_share <= 1
+    ):
+        raise ValueError("next_frame_loss_share must be None or finite and between zero and one")
     if cfg.amp_dtype not in ("bfloat16", "float32"):
         raise ValueError("amp_dtype must be bfloat16 or float32")
     if cfg.reservoir_capacity < 2 * micro_batch_size(cfg):
@@ -408,43 +426,35 @@ def decoder_rmsnorm(x: Tensor) -> Tensor:
 
 
 def legacy_button_classes(actions: Tensor) -> Tensor:
-    """Apply ae29e3f's stateful multi-button reduction to action sequences."""
+    """Apply ae29e3f's early-release reducer to action sequences."""
     if actions.ndim < 2 or actions.shape[-1] != A_DIM:
         raise ValueError(f"legacy button input must end in [length, {A_DIM}]")
-    button = {name: ACTION_CHANNELS.index(f"button_{name}") for name in ("a", "b", "x", "y", "z")}
+    button = {name: ACTION_CHANNELS.index(f"button_{name}") for name in ("a", "b", "x", "y", "z", "l", "r")}
     pressed = torch.stack(
         (
             actions[..., button["a"]] > 0.5,
             actions[..., button["b"]] > 0.5,
             (actions[..., button["x"]] > 0.5) | (actions[..., button["y"]] > 0.5),
             actions[..., button["z"]] > 0.5,
+            (actions[..., button["l"]] > 0.5) | (actions[..., button["r"]] > 0.5),
         ),
         dim=-1,
     )
     length = pressed.shape[-2]
-    flat = pressed.reshape(-1, length, 4)
-    count = flat.sum(-1)
-    multi = count > 1
+    flat = pressed.reshape(-1, length, 5)
     time = torch.arange(length, device=actions.device).expand(flat.shape[0], -1)
 
-    # Each multi-button frame compares against the prior multi-button set. The
-    # first one compares against the immediately preceding raw frame instead.
-    multi_time = torch.where(multi, time, -1)
-    prior_multi = F.pad(multi_time[:, :-1].cummax(-1).values, (1, 0), value=-1)
-    gathered = flat.gather(1, prior_multi.clamp_min(0)[..., None].expand(-1, -1, 4))
-    prior_frame = F.pad(flat[:, :-1], (0, 0, 1, 0))
-    reference = torch.where((prior_multi >= 0)[..., None], gathered, prior_frame)
-
-    same = multi & (flat == reference).all(-1)
-    strict_superset = (flat | reference).eq(flat).all(-1) & (flat != reference).any(-1)
-    candidates = torch.where(strict_superset[..., None], flat & ~reference, flat)
-    selected = candidates.to(torch.int64).argmax(-1)
-    ordinary = torch.where(count == 0, torch.full_like(selected, 4), flat.to(torch.int64).argmax(-1))
-    base = torch.where(multi, selected, ordinary)
-
-    # The equal-set branch copies the immediately previous reduced row. Forward
-    # filling from the last non-copy row handles arbitrary consecutive runs.
-    anchor = torch.where(~same, time, -1).cummax(-1).values
+    # The original routine compares each raw set with the preceding raw set.
+    # A changed set emits its lowest-index new button. A pure release emits
+    # None. An unchanged set copies the previous reduced output.
+    previous = F.pad(flat[:, :-1], (0, 0, 1, 0))
+    same = (flat == previous).all(-1)
+    new = flat & ~previous
+    selected = new.to(torch.int64).argmax(-1)
+    none = torch.full_like(selected, LEGACY_GROUP_VOCABS[BUTTONS_G] - 1)
+    base = torch.where(new.any(-1), selected, none)
+    changed = ~same | ~flat.any(-1)
+    anchor = torch.where(changed, time, -1).cummax(-1).values
     output = base.gather(1, anchor)
     return output.reshape(pressed.shape[:-1])
 
@@ -508,8 +518,6 @@ class StructuredControllerCodec(nn.Module):
             raise ValueError(f"controller actions must end in {A_DIM} channels, got {tuple(actions.shape)}")
         out = actions.clone()
         fused = out[..., TRIGGER_L_CH : TRIGGER_R_CH + 1].amax(-1)
-        clicked = (out[..., BUTTON_L_CH] > 0.5) | (out[..., BUTTON_R_CH] > 0.5)
-        fused = torch.where(clicked, torch.ones_like(fused), fused)
         out[..., TRIGGER_L_CH] = fused
         out[..., TRIGGER_R_CH] = 0
         return out
@@ -520,8 +528,7 @@ class StructuredControllerCodec(nn.Module):
         main = self._nearest_stick(actions[..., :2], self._main_quant_centers)
         c_stick = self._nearest_stick(actions[..., 2:4], self._c_quant_centers)
         fused = actions[..., TRIGGER_L_CH : TRIGGER_R_CH + 1].amax(-1)
-        clicked = (actions[..., BUTTON_L_CH] > 0.5) | (actions[..., BUTTON_R_CH] > 0.5)
-        fused = torch.where(clicked, torch.ones_like(fused), fused).to(torch.float32).to(torch.float64)
+        fused = fused.to(torch.float32).to(torch.float64)
         triggers = (fused[..., None] - self._trigger_quant_centers).square().argmin(-1)
         return torch.stack((legacy_button_classes(actions), main, c_stick, triggers), dim=-1)
 
@@ -537,6 +544,7 @@ class StructuredControllerCodec(nn.Module):
         buttons[..., 1] = (classes == 1).to(dtype)
         buttons[..., 2] = (classes == 2).to(dtype)
         buttons[..., 4] = (classes == 3).to(dtype)
+        buttons[..., _BUTTON_L_SEMANTIC_CH] = (classes == 4).to(dtype)
         triggers = torch.stack((fused, torch.zeros_like(fused)), dim=-1)
         return torch.cat((main, c_stick, triggers, buttons), dim=-1)
 
@@ -549,6 +557,7 @@ class StructuredControllerCodec(nn.Module):
             values[..., 1] = (indices == 1).to(dtype)
             values[..., 2] = (indices == 2).to(dtype)
             values[..., 4] = (indices == 3).to(dtype)
+            values[..., _BUTTON_L_SEMANTIC_CH] = (indices == 4).to(dtype)
             return values
         if name == "main_stick":
             return self.main_centers[: LEGACY_GROUP_VOCABS[MAIN_G]].to(dtype)[indices]
@@ -809,8 +818,9 @@ class CausalTemporalDecoder(nn.Module):
         uniforms: Tensor | None = None,
         gen: torch.Generator | None = None,
     ) -> Tensor:
-        if offsets not in (self.head_offsets[:4], self.head_offsets[:6]):
-            raise ValueError("live decode may compute only the dense four- or six-offset prefix")
+        allowed = tuple(self.head_offsets[:horizon] for horizon in _LIVE_HORIZONS)
+        if offsets not in allowed:
+            raise ValueError(f"live decode may compute only dense prefixes {_LIVE_HORIZONS}")
         if uniforms is not None and uniforms.shape != (len(offsets), N_GROUPS, hidden.shape[0]):
             raise ValueError("uniform table must be [frames, groups, batch]")
         trunk = decoder_rmsnorm(hidden[:, -1])
@@ -1040,22 +1050,61 @@ def action_loss(model: GPT, batch: TrainBatch) -> ActionLoss:
     return ActionLoss(nll=nll, targets=target_valid)
 
 
-def objective(parts: ActionLoss, aux_loss_weight: float = 1.0) -> Tensor:
-    """Primary dense-four joint NLL plus the mean auxiliary joint NLL."""
-    joint = parts.nll.sum(dim=-1)
-    primary = joint[:, :4].mean()
-    auxiliary = joint[:, 4:].mean()
-    return primary + aux_loss_weight * auxiliary
+def _joint_objective(
+    joint_nll: Tensor,
+    valid_prefixes: int,
+    *,
+    aux_loss_weight: float,
+    next_frame_loss_share: float | None,
+) -> Tensor:
+    """Compute one micro-batch's contribution to the action objective."""
+    if next_frame_loss_share is None:
+        primary = joint_nll[:, :4].sum() / (valid_prefixes * 4)
+        auxiliary = joint_nll[:, 4:].sum() / (valid_prefixes * (joint_nll.shape[1] - 4))
+        return primary + aux_loss_weight * auxiliary
+
+    next_frame = joint_nll[:, 0].sum() / valid_prefixes
+    remaining = joint_nll[:, 1:].sum() / (valid_prefixes * (joint_nll.shape[1] - 1))
+    # O26's primary + auxiliary objective has total scale 2 when the auxiliary
+    # weight is 1. Keep that scale while changing the relative allocation.
+    return 2 * (next_frame_loss_share * next_frame + (1 - next_frame_loss_share) * remaining)
 
 
-def nll_mean_metrics(mean_nll: Tensor, offsets: tuple[int, ...]) -> dict[str, float]:
+def objective(
+    parts: ActionLoss,
+    aux_loss_weight: float = 1.0,
+    next_frame_loss_share: float | None = 0.5,
+) -> Tensor:
+    """Return the configured mean joint controller NLL."""
+    joint_nll = parts.nll.sum(dim=-1)
+    return _joint_objective(
+        joint_nll,
+        joint_nll.shape[0],
+        aux_loss_weight=aux_loss_weight,
+        next_frame_loss_share=next_frame_loss_share,
+    )
+
+
+def nll_mean_metrics(
+    mean_nll: Tensor,
+    offsets: tuple[int, ...],
+    *,
+    aux_loss_weight: float = 1.0,
+    next_frame_loss_share: float | None = 0.5,
+) -> dict[str, float]:
     if mean_nll.shape != (len(offsets), N_GROUPS):
         raise ValueError(f"mean NLL has shape {tuple(mean_nll.shape)}")
     joint = mean_nll.sum(dim=-1) / _LN2
+    if next_frame_loss_share is None:
+        loss = joint[:4].mean() + aux_loss_weight * joint[4:].mean()
+    else:
+        loss = 2 * (next_frame_loss_share * joint[0] + (1 - next_frame_loss_share) * joint[1:].mean())
     out = {
-        "loss": float(joint[:4].mean() + joint[4:].mean()),
+        "loss": float(loss),
         "primary_nll": float(joint[:4].mean()),
         "auxiliary_nll": float(joint[4:].mean()),
+        "next_frame_nll": float(joint[0]),
+        "remaining_nll": float(joint[1:].mean()),
     }
     for depth, offset in enumerate(offsets):
         out[f"nll_o{offset:02d}"] = float(joint[depth])
@@ -1064,8 +1113,19 @@ def nll_mean_metrics(mean_nll: Tensor, offsets: tuple[int, ...]) -> dict[str, fl
     return out
 
 
-def nll_metrics(nll: Tensor, offsets: tuple[int, ...]) -> dict[str, float]:
-    return nll_mean_metrics(nll.mean(dim=0), offsets)
+def nll_metrics(
+    nll: Tensor,
+    offsets: tuple[int, ...],
+    *,
+    aux_loss_weight: float = 1.0,
+    next_frame_loss_share: float | None = 0.5,
+) -> dict[str, float]:
+    return nll_mean_metrics(
+        nll.mean(dim=0),
+        offsets,
+        aux_loss_weight=aux_loss_weight,
+        next_frame_loss_share=next_frame_loss_share,
+    )
 
 
 def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) -> dict[str, float]:
@@ -1153,7 +1213,12 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
         model.train(was_training)
     if count == 0:
         raise RuntimeError("validation contained no valid prefixes")
-    out = nll_mean_metrics(nll_sum / count, model.head_offsets)
+    out = nll_mean_metrics(
+        nll_sum / count,
+        model.head_offsets,
+        aux_loss_weight=cfg.aux_loss_weight,
+        next_frame_loss_share=cfg.next_frame_loss_share,
+    )
     for depth, offset in enumerate(model.head_offsets):
         for group, name in enumerate(GROUP_NAMES):
             out[f"acc_o{offset:02d}_{name}"] = float(correct[depth, group] / count)
@@ -1351,8 +1416,8 @@ class BF16Inference:
         argmax: bool = False,
         gen: torch.Generator | None = None,
     ) -> Tensor:
-        if horizon not in (4, 6):
-            raise ValueError("only the unrolled four- and six-frame decoders exist")
+        if horizon not in _LIVE_HORIZONS:
+            raise ValueError(f"execution horizon must be one of {_LIVE_HORIZONS}")
         rows = ctx.ctx_pad.shape[0]
         bucket = self._bucket(rows)
         padded = canonical_context(_pad_context(ctx, bucket), self.cfg.observation_bundle)
@@ -1414,8 +1479,8 @@ def make_policy(
     device: str = DEVICE,
 ) -> RecedingHorizon:
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    if horizon not in (4, 6):
-        raise ValueError("execution horizon must be four or six")
+    if horizon not in _LIVE_HORIZONS:
+        raise ValueError(f"execution horizon must be one of {_LIVE_HORIZONS}")
     engine = BF16Inference(model, cfg) if inference is None else inference
     random_streams = None if decode_seed is None else SlotGroupRandom(decode_seed)
     generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)
@@ -1824,9 +1889,13 @@ def _log_training_summary(
 
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.head_offsets))
+    loss_tag = (
+        "legacy-loss" if cfg.next_frame_loss_share is None else f"o1w{round(100 * cfg.next_frame_loss_share):02d}"
+    )
     return (
-        f"mtp043-legacy-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-"
-        f"t{cfg.temporal_d_model}x{cfg.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-{cfg.observation_bundle}"
+        f"mtp043-legacy-v{cfg.codec_version}-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-"
+        f"t{cfg.temporal_d_model}x{cfg.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-{loss_tag}-"
+        f"{cfg.observation_bundle}"
     )
 
 
@@ -1864,6 +1933,22 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> dict:
         extra=V6_PLAYER_COLUMNS if v6 else None,
         projection=None if v6 else BASE_ACTION_PROJECTION,
     )
+
+
+class ReplayAllowlist:
+    """Accept compact replay IDs derived from a materialization paths file."""
+
+    def __init__(self, paths_file: str) -> None:
+        path = Path(paths_file)
+        if not path.is_file():
+            raise FileNotFoundError(f"train replay paths file not found: {path}")
+        source_paths = {line.strip() for line in path.read_text().splitlines() if line.strip()}
+        if not source_paths:
+            raise ValueError(f"train replay paths file is empty: {path}")
+        self.replay_ids = frozenset(policy_replay_identity(source_path) for source_path in source_paths)
+
+    def __call__(self, replay_id: str) -> bool:
+        return replay_id in self.replay_ids
 
 
 def validate_batch_geometry(batch: TrainBatch, cfg: TrainConfig, expected_batch_size: int | None = None) -> None:
@@ -1942,6 +2027,7 @@ def _checkpoint_sha256(path: Path) -> str:
 def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
     kwargs = loader_kwargs(cfg, stats)
     if cfg.compact_data:
+        replay_filter = None if cfg.train_replay_paths is None else ReplayAllowlist(cfg.train_replay_paths)
         train_loader = make_reservoir_loader(
             split="train",
             num_workers=cfg.num_workers,
@@ -1951,6 +2037,7 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
             reservoir_capacity=cfg.reservoir_capacity,
             prefetch_batches=cfg.prefetch_batches,
             replay_format=cfg.replay_format,
+            replay_filter=replay_filter,
             **kwargs,
         )
     else:
@@ -2069,9 +2156,12 @@ def train(
                         dense_nll = temporal_fn(hidden, history, targets)
                         parts = ActionLoss(nll=dense_nll[valid], targets=targets[valid])
                         joint_nll = parts.nll.sum(dim=-1)
-                        primary = joint_nll[:, :4].sum() / (valid_prefixes * 4)
-                        auxiliary = joint_nll[:, 4:].sum() / (valid_prefixes * (len(cfg.head_offsets) - 4))
-                        loss = primary + cfg.aux_loss_weight * auxiliary
+                        loss = _joint_objective(
+                            joint_nll,
+                            valid_prefixes,
+                            aux_loss_weight=cfg.aux_loss_weight,
+                            next_frame_loss_share=cfg.next_frame_loss_share,
+                        )
                     loss.backward()
                     nll_sum += parts.nll.detach().sum(dim=0)
                     n_prefixes += parts.nll.shape[0]
@@ -2082,7 +2172,12 @@ def train(
                 scheduler.step()
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
-            metrics = nll_mean_metrics((nll_sum / n_prefixes).cpu(), cfg.head_offsets)
+            metrics = nll_mean_metrics(
+                (nll_sum / n_prefixes).cpu(),
+                cfg.head_offsets,
+                aux_loss_weight=cfg.aux_loss_weight,
+                next_frame_loss_share=cfg.next_frame_loss_share,
+            )
             elapsed = time.monotonic() - run_started
             completed_since_start = step - start_step + 1
             remaining_updates = cfg.max_steps - (step + 1)
@@ -2192,12 +2287,12 @@ def train(
         for values in final_suites.values():
             require_complete_eval(values, cfg.final_eval_n_matchups)
         if cfg.final_diag_n_matchups > 0:
-            stride6_suites = eval_suites(
+            diagnostic_suites = eval_suites(
                 model,
                 stats,
                 cfg,
                 n_matchups=cfg.final_diag_n_matchups,
-                replay_dir=replay_dir / "final_s6",
+                replay_dir=replay_dir / f"final_s{cfg.final_diag_exec_horizon}",
                 exec_horizon=cfg.final_diag_exec_horizon,
                 checkpoint_sha256=checkpoint_sha,
                 inference=eval_inference,
@@ -2205,10 +2300,13 @@ def train(
             wandb.log(
                 {
                     "global_step": cfg.max_steps,
-                    **eval_suite_wandb_metrics(stride6_suites, suffix="_s6"),
+                    **eval_suite_wandb_metrics(
+                        diagnostic_suites,
+                        suffix=f"_s{cfg.final_diag_exec_horizon}",
+                    ),
                 }
             )
-            for values in stride6_suites.values():
+            for values in diagnostic_suites.values():
                 require_complete_eval(values, cfg.final_diag_n_matchups)
     except BaseException as error:
         failure = error
@@ -2228,6 +2326,7 @@ def train(
 
 
 _CHECKPOINT_ARCH_FIELDS = {
+    "codec_version",
     "decoder_arch_version",
     "head_offsets",
     "sample_chunk_length",
@@ -2283,7 +2382,7 @@ def eval_checkpoint(
     )
     validate_config(cfg)
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    default_name = "eval_replays_s6" if horizon == 6 else "eval_replays"
+    default_name = f"eval_replays_s{horizon}"
     if output_name is not None and (Path(output_name).name != output_name or output_name in ("", ".", "..")):
         raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
     replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
@@ -2329,7 +2428,7 @@ def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]
 
     out: dict[str, float] = {}
     for rows in (1, min(32, ctx.ctx_pad.shape[0])):
-        for horizon in (4, 6):
+        for horizon in _LIVE_HORIZONS:
             eager_s = measure(eager, rows, horizon)
             compiled_s = measure(compiled, rows, horizon)
             out[f"eager_b{rows}_s{horizon}_ms"] = eager_s * 1000

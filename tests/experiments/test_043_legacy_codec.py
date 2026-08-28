@@ -99,7 +99,12 @@ def test_defaults_match_the_named_o26_reference_run() -> None:
     assert cfg.val_data_root == cfg.data_root
     assert cfg.val_replay_format == "policy"
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
+    assert cfg.codec_version == 2
+    assert cfg.exec_horizon == cfg.final_diag_exec_horizon == 1
+    assert cfg.final_diag_n_matchups == 0
+    assert cfg.next_frame_loss_share == 0.5
     assert "mtp043-legacy" in exp.model_tag(cfg)
+    assert "s1-o1w50" in exp.model_tag(cfg)
 
 
 def test_o43_preserves_o26_trainable_architecture_and_initialization() -> None:
@@ -127,17 +132,21 @@ def test_o43_preserves_o26_trainable_architecture_and_initialization() -> None:
 
 
 def test_historical_centers_and_complete_controller_grid_round_trip() -> None:
+    assert exp.LEGACY_GROUP_VOCABS == (6, 37, 9, 5)
+    assert exp.LEGACY_TRIGGER_CENTERS.tolist() == pytest.approx([0.0, 0.35, 0.6, 0.85, 1.0])
     codec = exp.StructuredControllerCodec(16)
     grid = torch.cartesian_prod(*(torch.arange(size) for size in exp.LEGACY_GROUP_VOCABS))
     restored = codec.quantize(codec.dequantize(grid[:, None]))[:, 0]
     assert torch.equal(restored, grid)
 
-    buttons = torch.zeros(5, 4, dtype=torch.long)
-    buttons[:, exp.BUTTONS_G] = torch.arange(5)
+    buttons = torch.zeros(6, 4, dtype=torch.long)
+    buttons[:, exp.BUTTONS_G] = torch.arange(6)
     decoded = codec.dequantize(buttons)
-    assert decoded[:, 6:].sum(-1).tolist() == [1.0, 1.0, 1.0, 1.0, 0.0]
+    assert decoded[:, 6:].sum(-1).tolist() == [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
     assert decoded[2, ACTION_CHANNELS.index("button_x")] == 1
     assert decoded[2, ACTION_CHANNELS.index("button_y")] == 0
+    assert decoded[4, ACTION_CHANNELS.index("button_l")] == 1
+    assert decoded[4, ACTION_CHANNELS.index("button_r")] == 0
 
 
 def test_historical_quantization_matches_pinned_numpy_golden_hashes() -> None:
@@ -164,42 +173,40 @@ def test_historical_quantization_matches_pinned_numpy_golden_hashes() -> None:
     actions[:, 0, exp.TRIGGER_L_CH] = torch.arange(141, dtype=torch.float32) / 140
     trigger = codec.quantize(actions)[:, 0, exp.TRIG_G].to(torch.uint8).numpy()
     assert hashlib.sha256(trigger.tobytes()).hexdigest() == (
-        "ee33ad55936406fa958d3046bb6f966efcfbe7f5eb14fb7be944848e25b3f1e4"
+        "d53bbb5472b9e9e5e3b6641e565ee628d0061fbe6047f4d11344af9ec7356390"
     )
 
 
 def test_chord_reducer_matches_the_pinned_numpy_implementation() -> None:
     rng = np.random.default_rng(42)
-    pressed = rng.integers(0, 2, size=(16, 31, 4), dtype=np.int64)
+    pressed = rng.integers(0, 2, size=(16, 31, 5), dtype=np.int64)
     actions = torch.zeros(16, 31, A_DIM)
-    actions[..., (6, 7, 8, 10)] = torch.from_numpy(pressed).float()
+    channels = tuple(
+        ACTION_CHANNELS.index(name) for name in ("button_a", "button_b", "button_x", "button_z", "button_l")
+    )
+    actions[..., channels] = torch.from_numpy(pressed).float()
 
     expected = []
     for sequence in pressed:
         no_button = (sequence.sum(axis=1, keepdims=True) == 0).astype(np.int64)
         buttons = np.concatenate((sequence.copy(), no_button), axis=1)
-        row_sums = buttons.sum(axis=1)
-        multi = np.flatnonzero(row_sums > 1)
         previous: set[int] = set()
-        if len(multi):
-            first = int(multi[0])
-            previous = set(np.flatnonzero(buttons[first - 1])) if first else set()
-        for index in multi:
+        for index in range(len(buttons)):
             current = set(np.flatnonzero(buttons[index]))
-            if current == previous:
+            if current and current == previous:
                 buttons[index] = buttons[index - 1]
                 continue
-            selected = min(current - previous) if current > previous else min(current)
+            new = current - previous
+            selected = min(new) if new else -1
             buttons[index] = 0
             buttons[index, selected] = 1
             previous = current
-        buttons[row_sums == 0, -1] = 1
         expected.append(buttons.argmax(axis=1))
 
     assert np.array_equal(exp.legacy_button_classes(actions).numpy(), np.stack(expected))
 
 
-def test_held_b_plus_a_reproduces_legacy_release_and_repress() -> None:
+def test_held_b_plus_a_reproduces_legacy_early_release() -> None:
     actions = torch.zeros(1, 5, A_DIM)
     a = ACTION_CHANNELS.index("button_a")
     b = ACTION_CHANNELS.index("button_b")
@@ -208,7 +215,7 @@ def test_held_b_plus_a_reproduces_legacy_release_and_repress() -> None:
 
     codec = exp.StructuredControllerCodec(16)
     indices = codec.quantize(actions)
-    assert indices[0, :, exp.BUTTONS_G].tolist() == [1, 1, 0, 0, 1]
+    assert indices[0, :, exp.BUTTONS_G].tolist() == [1, 1, 0, 0, 5]
 
     decoded = codec.dequantize(indices)[0].numpy()
     controller = [action_vec_to_controller(frame) for frame in decoded]
@@ -217,11 +224,11 @@ def test_held_b_plus_a_reproduces_legacy_release_and_repress() -> None:
         BUTTON_BITS["b"],
         BUTTON_BITS["a"],
         BUTTON_BITS["a"],
-        BUTTON_BITS["b"],
+        0,
     ]
 
 
-def test_v7_shoulder_reconstruction_is_fused_and_decodes_on_l() -> None:
+def test_analog_and_digital_shoulders_remain_separate() -> None:
     actions = torch.zeros(1, 3, A_DIM)
     actions[0, 0, exp.TRIGGER_R_CH] = 0.39
     actions[0, 1, exp.TRIGGER_R_CH] = 0.41
@@ -229,11 +236,12 @@ def test_v7_shoulder_reconstruction_is_fused_and_decodes_on_l() -> None:
 
     codec = exp.StructuredControllerCodec(16)
     indices = codec.quantize(actions)
-    assert indices[0, :, exp.TRIG_G].tolist() == [1, 1, 2]
+    assert indices[0, :, exp.TRIG_G].tolist() == [1, 1, 0]
+    assert indices[0, :, exp.BUTTONS_G].tolist() == [5, 5, 4]
     decoded = codec.dequantize(indices)
-    assert decoded[0, :, exp.TRIGGER_L_CH].tolist() == pytest.approx([0.4, 0.4, 1.0])
+    assert decoded[0, :, exp.TRIGGER_L_CH].tolist() == pytest.approx([0.35, 0.35, 0.0])
     assert not decoded[..., exp.TRIGGER_R_CH].any()
-    assert not decoded[..., exp.BUTTON_L_CH].any()
+    assert decoded[0, :, exp.BUTTON_L_CH].tolist() == [0.0, 0.0, 1.0]
     assert not decoded[..., exp.BUTTON_R_CH].any()
 
 
@@ -249,6 +257,9 @@ def test_unused_classes_are_masked_in_every_training_and_inference_path() -> Non
 
     for logits in model.temporal.forced_stepwise_logits(hidden, observed[:, -1], targets[:, -1]):
         _assert_unused_are_masked(logits)
+
+    single = model.temporal.sample_indices(hidden, observed[:, -1], cfg.head_offsets[:1], argmax=True)
+    assert single.shape == (2, 1, exp.N_GROUPS)
 
     sampled = model.temporal.sample_indices(hidden, observed[:, -1], cfg.head_offsets[:4], argmax=True)
     for group, valid in enumerate(exp.LEGACY_GROUP_VOCABS):
@@ -300,7 +311,11 @@ def test_masked_output_rows_receive_zero_gradient() -> None:
 def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path) -> None:
     cfg = _cfg()
     model = exp.GPT(cfg)
-    loss = exp.objective(exp.action_loss(model, _batch(cfg)), cfg.aux_loss_weight)
+    loss = exp.objective(
+        exp.action_loss(model, _batch(cfg)),
+        cfg.aux_loss_weight,
+        cfg.next_frame_loss_share,
+    )
     loss.backward()
     assert torch.isfinite(loss)
     assert all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in model.parameters())
@@ -313,11 +328,39 @@ def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path) -> None:
         torch.testing.assert_close(restored.state_dict()[name], expected)
 
 
+def test_next_frame_receives_half_of_total_action_loss_weight() -> None:
+    nll = torch.ones(1, 10, exp.N_GROUPS, requires_grad=True)
+    parts = exp.ActionLoss(nll=nll, targets=torch.empty(0))
+
+    exp.objective(parts, next_frame_loss_share=0.5).backward()
+
+    coefficient = nll.grad[0, :, 0]
+    assert coefficient[0] == pytest.approx(1.0)
+    assert coefficient[1:].tolist() == pytest.approx([1 / 9] * 9)
+    assert coefficient[0] / coefficient.sum() == pytest.approx(0.5)
+
+
+def test_none_loss_share_restores_dense_four_plus_auxiliary_weights() -> None:
+    nll = torch.ones(1, 10, exp.N_GROUPS, requires_grad=True)
+    parts = exp.ActionLoss(nll=nll, targets=torch.empty(0))
+
+    exp.objective(parts, next_frame_loss_share=None).backward()
+
+    coefficient = nll.grad[0, :, 0]
+    assert coefficient[:4].tolist() == pytest.approx([1 / 4] * 4)
+    assert coefficient[4:].tolist() == pytest.approx([1 / 6] * 6)
+
+
 def test_cody_config_uses_policy_world_train_and_fixed_baseline_validation(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    source_path = "archive:///tmp/cody.zip!game.slp"
+    replay_paths = tmp_path / "paths.txt"
+    replay_paths.write_text(f"{source_path}\n")
     cfg = _cfg(
         data_root="data/processed/professional/cody/mds-policy-world-v7",
+        train_replay_paths=str(replay_paths),
         replay_format="policy-world",
         val_n_samples=2,
     )
@@ -339,6 +382,9 @@ def test_cody_config_uses_policy_world_train_and_fixed_baseline_validation(
     assert list(train_loader) == [batch]
     assert val_cache == [batch]
     assert calls["train"]["replay_format"] == "policy-world"
+    replay_filter = calls["train"]["replay_filter"]
+    assert replay_filter(exp.policy_replay_identity(source_path))
+    assert not replay_filter(exp.policy_replay_identity("archive:///tmp/cody.zip!other.slp"))
     assert calls["val"]["data_root"] == "data/processed/ranked-anonymized-1/mds-policy-v7"
     assert calls["val"]["replay_format"] == "policy"
 

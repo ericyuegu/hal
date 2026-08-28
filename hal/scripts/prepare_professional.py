@@ -360,6 +360,7 @@ class PrepareProfessionalConfig:
     queue_size: int = 8
     tmpfs_root: Path = Path("/dev/shm/hal_professional_index")
     rank_mode: Literal["owner", "corpus"] = "owner"
+    stock_zero_only: bool = False
 
 
 def prepare_professional(cfg: PrepareProfessionalConfig) -> None:
@@ -414,7 +415,13 @@ def prepare_professional(cfg: PrepareProfessionalConfig) -> None:
         filter_failures = player_root / "filter.failures.jsonl"
         _, filterable_count = write_filterable_index(deduped, filterable, filter_failures)
         paths = player_root / "paths.txt"
-        kept = filter_replays(FilterConfig(index=filterable, output=paths))
+        kept = filter_replays(
+            FilterConfig(
+                index=filterable,
+                output=paths,
+                stock_zero_only=cfg.stock_zero_only,
+            )
+        )
         rank_path = player_root / "rank-overrides.jsonl"
         rank_report = (
             write_owner_rank_overrides(slug, deduped, paths, rank_path)
@@ -430,6 +437,7 @@ def prepare_professional(cfg: PrepareProfessionalConfig) -> None:
             "filterable": filterable_count,
             "missing_stats": after - filterable_count,
             "quality_filtered": kept,
+            "filter": {"stock_zero_only": cfg.stock_zero_only},
             "rank": rank_report,
         }
         (player_root / "professional-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

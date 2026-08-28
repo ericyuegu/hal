@@ -11,6 +11,11 @@ CLI defaults bake in the "sensible" filter for tournament-style training:
   - some player loses >= 3 stocks
   - no player loses >= 2 stocks at <= 10% (cheap-death sniff for AFK / griefing)
 
+`--stock-zero-only` restores the historical HAL completion rule: at least one
+player must have zero stocks in the final parsed frame. This is stricter than
+`--completed-only`, which also accepts games completed by time or other parsed
+outcomes.
+
 Override or disable any of these via flags. Pass `--stages` an empty list
 (or a different list) to drop the stage filter; `--no-completed-only` to
 include unfinished games; `--min-frames 0` to keep everything; set the stats
@@ -87,6 +92,7 @@ def build_predicates(
     min_frames: int | None = None,
     max_frames: int | None = None,
     completed_only: bool = False,
+    stock_zero_only: bool = False,
     stages: set[melee.Stage] | None = None,
     characters: set[int] | None = None,
     ranks: set[str] | None = None,
@@ -112,6 +118,13 @@ def build_predicates(
         preds.append((f"max_frames={max_frames}", lambda e: e.frame_count <= max_frames))
     if completed_only:
         preds.append(("completed_only", lambda e: e.outcome is not None and e.outcome.completed))
+    if stock_zero_only:
+        preds.append(
+            (
+                "stock_zero_only",
+                lambda e: any(player.stocks_remaining == 0 for player in e.stats.players),
+            )
+        )
     if stages:
 
         def _stage_in_set(e: ReplayIndexEntry, s: set[melee.Stage] = stages) -> bool:
@@ -168,6 +181,7 @@ def filter_index(
     min_frames: int | None = None,
     max_frames: int | None = None,
     completed_only: bool = False,
+    stock_zero_only: bool = False,
     stages: set[melee.Stage] | None = None,
     characters: set[int] | None = None,
     ranks: set[str] | None = None,
@@ -184,6 +198,7 @@ def filter_index(
         min_frames=min_frames,
         max_frames=max_frames,
         completed_only=completed_only,
+        stock_zero_only=stock_zero_only,
         stages=stages,
         characters=characters,
         ranks=ranks,
@@ -193,7 +208,12 @@ def filter_index(
         cheap_death_pct=cheap_death_pct,
     )
 
-    needs_stats = (mins is not None and mins.any_set()) or min_death_count is not None or max_cheap_deaths is not None
+    needs_stats = (
+        stock_zero_only
+        or (mins is not None and mins.any_set())
+        or min_death_count is not None
+        or max_cheap_deaths is not None
+    )
 
     paths: list[str] = []
     total = 0
@@ -254,6 +274,12 @@ class FilterConfig:
     completed_only: bool = False
     """Keep only replays that ended via stocks / time / sudden-death.
     Pass --no-completed-only to include NO_CONTEST and unresolved games."""
+
+    stock_zero_only: bool = False
+    """Keep only replays where a player ends with zero stocks.
+
+    This is the completion predicate used by the historical Cody build.
+    """
 
     stages: list[str] = field(
         default_factory=lambda: [
@@ -317,6 +343,7 @@ def run(cfg: FilterConfig) -> int:
         min_frames=cfg.min_frames if cfg.min_frames > 0 else None,
         max_frames=cfg.max_frames,
         completed_only=cfg.completed_only,
+        stock_zero_only=cfg.stock_zero_only,
         stages=stages,
         characters=chars,
         ranks=ranks,
