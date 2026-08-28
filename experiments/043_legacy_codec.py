@@ -255,6 +255,8 @@ class TrainConfig:
 
     data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
     replay_format: Literal["policy", "policy-world"] = "policy"
+    val_data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
+    val_replay_format: Literal["policy", "policy-world"] = "policy"
     compact_data: bool = True
     mds_schema_version: int = 7
     cache_limit_gb: int = 160
@@ -331,6 +333,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
     if cfg.replay_format not in ("policy", "policy-world"):
         raise ValueError("replay_format must be 'policy' or 'policy-world'")
+    if cfg.val_replay_format not in ("policy", "policy-world"):
+        raise ValueError("val_replay_format must be 'policy' or 'policy-world'")
     if cfg.final_diag_n_matchups < 0:
         raise ValueError("final_diag_n_matchups must be non-negative")
     if not math.isfinite(cfg.muon_weight_decay) or cfg.muon_weight_decay < 0:
@@ -1785,6 +1789,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["data/sampler"] = "O26 replay reservoir"
     wandb.run.summary["data/source"] = cfg.data_root
     wandb.run.summary["data/replay_format"] = cfg.replay_format
+    wandb.run.summary["data/validation_source"] = cfg.val_data_root
+    wandb.run.summary["data/validation_replay_format"] = cfg.val_replay_format
     wandb.run.summary["evaluation/suites"] = "char_matchup,fox"
     wandb.run.summary["training/updates"] = cfg.max_steps
     wandb.run.summary["data/nominal_samples"] = cfg.max_steps * cfg.batch_size
@@ -1956,11 +1962,16 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
             compact=False,
             **kwargs,
         )
-    val_kwargs = {**kwargs, "batch_size": cfg.val_batch_size}
+    val_kwargs = {
+        **kwargs,
+        "data_root": cfg.val_data_root,
+        "remote": streams.remote_for_local(cfg.val_data_root),
+        "batch_size": cfg.val_batch_size,
+    }
     val_loader = make_loader(
         split=cfg.val_split,
         num_workers=0,
-        replay_format=cfg.replay_format if cfg.compact_data else None,
+        replay_format=cfg.val_replay_format if cfg.compact_data else None,
         **val_kwargs,
     )
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)

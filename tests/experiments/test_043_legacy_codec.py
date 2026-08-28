@@ -96,6 +96,8 @@ def test_defaults_match_the_named_o26_reference_run() -> None:
     assert (cfg.cache_limit_gb, cfg.eval_max_parallel) == (160, 32)
     assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-policy-v7"
     assert cfg.replay_format == "policy"
+    assert cfg.val_data_root == cfg.data_root
+    assert cfg.val_replay_format == "policy"
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
     assert "mtp043-legacy" in exp.model_tag(cfg)
 
@@ -311,7 +313,9 @@ def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path) -> None:
         torch.testing.assert_close(restored.state_dict()[name], expected)
 
 
-def test_cody_config_uses_policy_world_for_train_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cody_config_uses_policy_world_train_and_fixed_baseline_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfg = _cfg(
         data_root="data/processed/professional/cody/mds-policy-world-v7",
         replay_format="policy-world",
@@ -335,7 +339,8 @@ def test_cody_config_uses_policy_world_for_train_and_validation(monkeypatch: pyt
     assert list(train_loader) == [batch]
     assert val_cache == [batch]
     assert calls["train"]["replay_format"] == "policy-world"
-    assert calls["val"]["replay_format"] == "policy-world"
+    assert calls["val"]["data_root"] == "data/processed/ranked-anonymized-1/mds-policy-v7"
+    assert calls["val"]["replay_format"] == "policy"
 
 
 def test_eval_suites_are_separate_and_named_in_wandb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
