@@ -95,6 +95,7 @@ def test_defaults_match_the_named_o26_reference_run() -> None:
     assert (cfg.batch_size, cfg.max_steps, cfg.warmup_steps) == (512, 16_384, 500)
     assert (cfg.cache_limit_gb, cfg.eval_max_parallel) == (160, 32)
     assert cfg.data_root == "data/processed/ranked-anonymized-1/mds-policy-v7"
+    assert cfg.replay_format == "policy"
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
     assert "mtp043-legacy" in exp.model_tag(cfg)
 
@@ -308,6 +309,62 @@ def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path) -> None:
     restored.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
     for name, expected in model.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], expected)
+
+
+def test_cody_config_uses_policy_world_for_train_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(
+        data_root="data/processed/professional/cody/mds-policy-world-v7",
+        replay_format="policy-world",
+        val_n_samples=2,
+    )
+    batch = _batch(cfg)
+    calls: dict[str, dict[str, object]] = {}
+
+    def reservoir_loader(**kwargs):
+        calls["train"] = kwargs
+        return [batch]
+
+    def validation_loader(**kwargs):
+        calls["val"] = kwargs
+        return [batch]
+
+    monkeypatch.setattr(exp, "make_reservoir_loader", reservoir_loader)
+    monkeypatch.setattr(exp, "make_loader", validation_loader)
+    train_loader, val_cache = exp._make_loaders(cfg, {})
+
+    assert list(train_loader) == [batch]
+    assert val_cache == [batch]
+    assert calls["train"]["replay_format"] == "policy-world"
+    assert calls["val"]["replay_format"] == "policy-world"
+
+
+def test_eval_suites_are_separate_and_named_in_wandb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg)
+    calls: list[tuple[Path, object]] = []
+
+    def fake_eval(*_args, replay_dir, fixed_ego_character, **_kwargs):
+        calls.append((replay_dir, fixed_ego_character))
+        return {"boots": 2.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
+    suites = exp.eval_suites(
+        model,
+        {},
+        cfg,
+        n_matchups=2,
+        replay_dir=tmp_path,
+        checkpoint_sha256="a" * 64,
+        inference=object(),
+    )
+
+    assert [path.name for path, _ in calls] == ["char_matchup", "fox"]
+    assert calls[0][1] is None
+    assert calls[1][1] == exp.melee.Character.FOX
+    assert exp.eval_suite_wandb_metrics(suites) == {
+        "eval_char_matchup/boots": 2.0,
+        "eval_fox/boots": 2.0,
+    }
 
 
 def test_tiny_training_entrypoint_uses_legacy_codec(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

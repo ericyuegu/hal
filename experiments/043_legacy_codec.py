@@ -26,6 +26,7 @@ from dataclasses import field as dataclass_field
 from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import melee
 import numpy as np
@@ -253,6 +254,7 @@ class TrainConfig:
     eval_max_parallel: int | None = 32
 
     data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
+    replay_format: Literal["policy", "policy-world"] = "policy"
     compact_data: bool = True
     mds_schema_version: int = 7
     cache_limit_gb: int = 160
@@ -327,6 +329,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("eval_max_parallel must be a positive power of two")
     if cfg.observation_bundle not in ("base", "v6_lean"):
         raise ValueError("observation_bundle must be 'base' or 'v6_lean'")
+    if cfg.replay_format not in ("policy", "policy-world"):
+        raise ValueError("replay_format must be 'policy' or 'policy-world'")
     if cfg.final_diag_n_matchups < 0:
         raise ValueError("final_diag_n_matchups must be non-negative")
     if not math.isfinite(cfg.muon_weight_decay) or cfg.muon_weight_decay < 0:
@@ -1439,6 +1443,8 @@ def make_policy(
 
 @dataclass(frozen=True, slots=True)
 class EvalProtocol:
+    suite: str
+    fixed_ego_character: int | None
     n_matchups: int
     allowed_cpus: int
     hardware_wave_bucket: int
@@ -1462,8 +1468,11 @@ class EvalProtocol:
     start_retries: int = DEFAULT_START_RETRIES
 
 
-def matchup_diversity(n_matchups: int) -> tuple[int, int, int, str]:
-    matchups = matchups_for_vs_cpu(n_matchups)
+def matchup_diversity(
+    n_matchups: int,
+    fixed_ego_character: melee.Character | None = None,
+) -> tuple[int, int, int, str]:
+    matchups = [(fixed_ego_character or scheduled_ego, cpu) for scheduled_ego, cpu in matchups_for_vs_cpu(n_matchups)]
     schedule = [(int(ego.value), int(cpu.value)) for ego, cpu in matchups]
     sha = hashlib.sha256(json.dumps(schedule, separators=(",", ":")).encode()).hexdigest()
     return len(set(schedule)), len({ego for ego, _ in schedule}), len({cpu for _, cpu in schedule}), sha
@@ -1487,9 +1496,15 @@ def _eval_protocol(
     exec_horizon: int,
     checkpoint_sha256: str,
     inference_compile_mode: str = "reduce-overhead",
+    fixed_ego_character: melee.Character | None = None,
 ) -> EvalProtocol:
-    pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
+    if fixed_ego_character is None:
+        pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
+    else:
+        pairs, egos, cpus, schedule_sha = matchup_diversity(n_matchups, fixed_ego_character)
     return EvalProtocol(
+        suite="char_matchup" if fixed_ego_character is None else "fox",
+        fixed_ego_character=None if fixed_ego_character is None else int(fixed_ego_character.value),
         n_matchups=n_matchups,
         allowed_cpus=usable_cpus(),
         hardware_wave_bucket=automatic_parallelism(),
@@ -1553,6 +1568,7 @@ def eval_vs_cpu(
     exec_horizon: int | None = None,
     checkpoint_sha256: str = "unavailable",
     inference: BF16Inference | None = None,
+    fixed_ego_character: melee.Character | None = None,
 ) -> dict[str, float]:
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
     inference = BF16Inference(model, cfg) if inference is None else inference
@@ -1565,6 +1581,7 @@ def eval_vs_cpu(
         exec_horizon=horizon,
         checkpoint_sha256=checkpoint_sha256,
         inference_compile_mode=inference.compile_mode,
+        fixed_ego_character=fixed_ego_character,
     )
     if next(model.parameters()).device.type == "cuda" and (
         protocol.inference_mode != "compiled" or not inference.compiled
@@ -1598,6 +1615,7 @@ def eval_vs_cpu(
             ego_port=protocol.ego_port,
             seed_stage=melee.Stage(protocol.seed_stage),
             start_retries=protocol.start_retries,
+            fixed_ego_character=fixed_ego_character,
         )
     finally:
         model.train(was_training)
@@ -1607,6 +1625,50 @@ def eval_vs_cpu(
     metrics.update(telemetry.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)
     return metrics
+
+
+_EVAL_SUITES: tuple[tuple[str, melee.Character | None], ...] = (
+    ("char_matchup", None),
+    ("fox", melee.Character.FOX),
+)
+
+
+def eval_suites(
+    model: GPT,
+    stats: dict[str, FeatureStats],
+    cfg: TrainConfig,
+    *,
+    n_matchups: int,
+    replay_dir: Path,
+    checkpoint_sha256: str,
+    inference: BF16Inference,
+    exec_horizon: int | None = None,
+) -> dict[str, dict[str, float]]:
+    """Run the fixed character schedule and Fox-only schedule sequentially."""
+    return {
+        name: eval_vs_cpu(
+            model,
+            stats,
+            cfg,
+            n_matchups=n_matchups,
+            replay_dir=replay_dir / name,
+            exec_horizon=exec_horizon,
+            checkpoint_sha256=checkpoint_sha256,
+            inference=inference,
+            fixed_ego_character=fixed_ego_character,
+        )
+        for name, fixed_ego_character in _EVAL_SUITES
+    }
+
+
+def eval_suite_wandb_metrics(
+    suites: dict[str, dict[str, float]],
+    *,
+    suffix: str = "",
+) -> dict[str, float]:
+    return {
+        f"eval_{suite}{suffix}/{name}": value for suite, metrics in suites.items() for name, value in metrics.items()
+    }
 
 
 def lr_schedule(cfg: TrainConfig):
@@ -1721,7 +1783,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     wandb.run.summary["architecture/treatment"] = "O26 architecture and objective; exact historical legacy codec"
     wandb.run.summary["data/sampler"] = "O26 replay reservoir"
-    wandb.run.summary["data/source"] = "ranked-anonymized-1 policy-v7"
+    wandb.run.summary["data/source"] = cfg.data_root
+    wandb.run.summary["data/replay_format"] = cfg.replay_format
+    wandb.run.summary["evaluation/suites"] = "char_matchup,fox"
     wandb.run.summary["training/updates"] = cfg.max_steps
     wandb.run.summary["data/nominal_samples"] = cfg.max_steps * cfg.batch_size
     wandb.run.summary["data/max_context_prefixes"] = cfg.max_steps * cfg.batch_size * cfg.L_ctx
@@ -1880,6 +1944,7 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
             windows_per_replay=cfg.windows_per_replay,
             reservoir_capacity=cfg.reservoir_capacity,
             prefetch_batches=cfg.prefetch_batches,
+            replay_format=cfg.replay_format,
             **kwargs,
         )
     else:
@@ -1892,7 +1957,12 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
             **kwargs,
         )
     val_kwargs = {**kwargs, "batch_size": cfg.val_batch_size}
-    val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **val_kwargs)
+    val_loader = make_loader(
+        split=cfg.val_split,
+        num_workers=0,
+        replay_format=cfg.replay_format if cfg.compact_data else None,
+        **val_kwargs,
+    )
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
 
 
@@ -2071,7 +2141,7 @@ def train(
             if eval_due:
                 if eval_inference is None:
                     eval_inference = BF16Inference(model, cfg)
-                values = eval_vs_cpu(
+                suites = eval_suites(
                     model,
                     stats,
                     cfg,
@@ -2080,7 +2150,7 @@ def train(
                     checkpoint_sha256=_checkpoint_sha256(checkpoint_path),
                     inference=eval_inference,
                 )
-                wandb.log({"global_step": step, **{f"eval/{name}": value for name, value in values.items()}})
+                wandb.log({"global_step": step, **eval_suite_wandb_metrics(suites)})
 
         final_path = run_dir / "final.pt"
         save_checkpoint(
@@ -2098,7 +2168,7 @@ def train(
         wandb.log({"global_step": cfg.max_steps, **{f"val/{name}": value for name, value in final_val.items()}})
         if eval_inference is None:
             eval_inference = BF16Inference(model, cfg)
-        final_eval = eval_vs_cpu(
+        final_suites = eval_suites(
             model,
             stats,
             cfg,
@@ -2107,10 +2177,11 @@ def train(
             checkpoint_sha256=checkpoint_sha,
             inference=eval_inference,
         )
-        wandb.log({"global_step": cfg.max_steps, **{f"eval/{name}": value for name, value in final_eval.items()}})
-        require_complete_eval(final_eval, cfg.final_eval_n_matchups)
+        wandb.log({"global_step": cfg.max_steps, **eval_suite_wandb_metrics(final_suites)})
+        for values in final_suites.values():
+            require_complete_eval(values, cfg.final_eval_n_matchups)
         if cfg.final_diag_n_matchups > 0:
-            stride6 = eval_vs_cpu(
+            stride6_suites = eval_suites(
                 model,
                 stats,
                 cfg,
@@ -2120,8 +2191,14 @@ def train(
                 checkpoint_sha256=checkpoint_sha,
                 inference=eval_inference,
             )
-            wandb.log({"global_step": cfg.max_steps, **{f"eval_s6/{name}": value for name, value in stride6.items()}})
-            require_complete_eval(stride6, cfg.final_diag_n_matchups)
+            wandb.log(
+                {
+                    "global_step": cfg.max_steps,
+                    **eval_suite_wandb_metrics(stride6_suites, suffix="_s6"),
+                }
+            )
+            for values in stride6_suites.values():
+                require_complete_eval(values, cfg.final_diag_n_matchups)
     except BaseException as error:
         failure = error
         if wandb.run is not None:

@@ -485,6 +485,7 @@ def _prior_vec_matches(
     cpu_level: int,
     ego_port: Literal[1, 2],
     seed_stage: melee.Stage,
+    fixed_ego_character: melee.Character | None = None,
 ) -> list[VecMatch]:
     """``n_matchups`` prior-drawn vs-CPU ``VecMatch`` boots.
 
@@ -498,13 +499,17 @@ def _prior_vec_matches(
             matchup=Matchup(
                 stage=seed_stage,
                 players=(
-                    PlayerSetup(port=ego_port, character=ego_char, cpu_level=0),
+                    PlayerSetup(
+                        port=ego_port,
+                        character=fixed_ego_character or scheduled_ego_char,
+                        cpu_level=0,
+                    ),
                     PlayerSetup(port=cpu_port, character=opp_char, cpu_level=cpu_level),
                 ),
             ),
             model_ports=(ego_port,),
         )
-        for ego_char, opp_char in matchups_for_vs_cpu(n_matchups)
+        for scheduled_ego_char, opp_char in matchups_for_vs_cpu(n_matchups)
     ]
 
 
@@ -519,12 +524,19 @@ def _drive_prior(
     seed_stage: melee.Stage,
     max_frames: int,
     start_retries: int,
+    fixed_ego_character: melee.Character | None = None,
     process_telemetry: ProcessVecTelemetry | None = None,
 ) -> tuple[list[VecMatch], list[list[Trajectory]]]:
     """Drive the prior-distribution instant-restart sweep, returning the boot matches
     and their per-boot trajectory lists (aligned). Shared by the pooled-metric and
     per-row entry points so both see the identical schedule and boots."""
-    matches = _prior_vec_matches(n_matchups, cpu_level=cpu_level, ego_port=ego_port, seed_stage=seed_stage)
+    matches = _prior_vec_matches(
+        n_matchups,
+        cpu_level=cpu_level,
+        ego_port=ego_port,
+        seed_stage=seed_stage,
+        fixed_ego_character=fixed_ego_character,
+    )
     boots = run_matches_vec(
         session_cfg,
         matches,
@@ -548,6 +560,7 @@ def sweep_vs_cpu_prior(
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
     start_retries: int = DEFAULT_START_RETRIES,
+    fixed_ego_character: melee.Character | None = None,
     process_telemetry: ProcessVecTelemetry | None = None,
 ) -> SweepResult:
     """Prior-distribution vs-CPU sweep for instant-restart sessions.
@@ -570,6 +583,7 @@ def sweep_vs_cpu_prior(
         seed_stage=seed_stage,
         max_frames=max_frames,
         start_retries=start_retries,
+        fixed_ego_character=fixed_ego_character,
         process_telemetry=process_telemetry,
     )
     return _prior_sweep_result(boots, seed_stage)
@@ -597,6 +611,7 @@ def sweep_vs_cpu_prior_with_rows(
     seed_stage: melee.Stage = PRIOR_SWEEP_SEED_STAGE,
     max_frames: int = 15_000,
     start_retries: int = DEFAULT_START_RETRIES,
+    fixed_ego_character: melee.Character | None = None,
     process_telemetry: ProcessVecTelemetry | None = None,
 ) -> tuple[SweepResult, list[MatchRow]]:
     """Run the prior sweep once and retain both pooled-metric input and exact rows.
@@ -615,6 +630,7 @@ def sweep_vs_cpu_prior_with_rows(
         seed_stage=seed_stage,
         max_frames=max_frames,
         start_retries=start_retries,
+        fixed_ego_character=fixed_ego_character,
         process_telemetry=process_telemetry,
     )
     return _prior_sweep_result(boots, seed_stage), match_rows(boots, matches, ego_port=ego_port)
