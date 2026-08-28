@@ -21,6 +21,7 @@ def _parse() -> argparse.Namespace:
     parser.add_argument("--cuda-sync-debug", action="store_true")
     parser.add_argument("--eager", action="store_true")
     parser.add_argument("--compile-mode", default="default")
+    parser.add_argument("--horizon", type=int)
     parser.add_argument("--repeats", type=int, default=1)
     return parser.parse_args()
 
@@ -82,12 +83,13 @@ def main() -> None:
         cfg = experiment.replace(cfg, inference_mode="eager")
     rows = len(meta["slots"])
     bucket = int(meta.get("inference_bucket") or 1 << (rows - 1).bit_length())
+    horizon = args.horizon if args.horizon is not None else int(meta.get("exec_horizon", cfg.exec_horizon))
     engine = experiment.BF16Inference(model, cfg, bucket=bucket, compile_mode=args.compile_mode)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     out = None
     for repeat in range(args.repeats):
-        out = engine.decode(context, int(meta["exec_horizon"]))
+        out = engine.decode(context, horizon)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         if repeat == 0 or (repeat + 1) % 100 == 0:
