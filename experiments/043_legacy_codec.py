@@ -75,11 +75,15 @@ from hal.training.features import V6_PLAYER_COLUMNS
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.features import stack_actions
+from hal.training.mfu import bf16_dense_peak_flops
+from hal.training.mfu import bf16_peak_source
+from hal.training.mfu import model_flops_utilization
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.runs import make_run_name
 from hal.training.runs import profile
 from hal.training.runs import setup_run_dir
+from hal.training.system_metrics import HostMetricsSampler
 from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
@@ -261,6 +265,10 @@ class TrainConfig:
     prefetch_factor: int = 2
     prefetch_batches: int = 4
     push_to_r2: bool = True
+    system_metrics_every: int = 25
+    system_metrics_interval_s: float = 5.0
+    process_metrics_interval_s: float = 30.0
+    cache_metrics_interval_s: float = 30.0
 
 
 def validate_config(cfg: TrainConfig) -> None:
@@ -333,6 +341,15 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("amp_dtype must be bfloat16 or float32")
     if cfg.reservoir_capacity < 2 * micro_batch_size(cfg):
         raise ValueError("reservoir_capacity must be at least twice the micro-batch size")
+    if cfg.system_metrics_every < 0:
+        raise ValueError("system_metrics_every must be non-negative")
+    telemetry_intervals = (
+        cfg.system_metrics_interval_s,
+        cfg.process_metrics_interval_s,
+        cfg.cache_metrics_interval_s,
+    )
+    if any(not math.isfinite(value) or value <= 0 for value in telemetry_intervals):
+        raise ValueError("system telemetry intervals must be finite and positive")
 
 
 def micro_batch_size(cfg: TrainConfig) -> int:
@@ -815,7 +832,12 @@ class CausalTemporalDecoder(nn.Module):
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 group = GROUP_INDEX[name]
                 uniform = None if uniforms is None else uniforms[depth, group]
-                pick = sample_categorical(logits, argmax=argmax, uniform=uniform, gen=gen)
+                # Training keeps O26's full output tensors, but closed loop only
+                # samples real legacy classes. Besides avoiding meaningless work,
+                # this prevents Inductor from lowering a mostly-masked 256-wide
+                # button CDF to an unsupported split scan on L40S.
+                valid_logits = logits[..., : LEGACY_GROUP_VOCABS[group]]
+                pick = sample_categorical(valid_logits, argmax=argmax, uniform=uniform, gen=gen)
                 picks[name] = pick
                 embedded[name] = self.codec.group_embedding(name, pick)
             indices = torch.stack([picks[name] for name in GROUP_NAMES], dim=-1)
@@ -1635,14 +1657,99 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
 
 
 def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
-    groups = {
-        "trunk": model.trunk,
-        "observation": model.ctx_proj,
-        "codec": model.codec,
-        "temporal": model.temporal.blocks,
-        "heads": nn.ModuleList([model.temporal.outputs, model.temporal.trunk_outputs]),
+    parameters = tuple(model.parameters())
+    trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
+    head_ids = {id(parameter) for parameter in model.temporal.outputs.parameters()}
+    temporal_ids = {id(parameter) for parameter in model.temporal.parameters() if id(parameter) not in head_ids}
+    other_ids = {id(parameter) for parameter in parameters} - trunk_ids - temporal_ids - head_ids
+    partitions = {
+        "trunk": trunk_ids,
+        "temporal_decoder": temporal_ids,
+        "group_heads": head_ids,
+        "other": other_ids,
     }
-    return {name: sum(parameter.numel() for parameter in module.parameters()) for name, module in groups.items()}
+    counts = {
+        name: sum(parameter.numel() for parameter in parameters if id(parameter) in parameter_ids)
+        for name, parameter_ids in partitions.items()
+    }
+    counts["total"] = sum(parameter.numel() for parameter in parameters)
+    if sum(value for name, value in counts.items() if name != "total") != counts["total"]:
+        raise RuntimeError("parameter subsystem partition is incomplete")
+    return counts
+
+
+def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
+    """Estimate forward-backward FLOPs using O42's parameter-use formula."""
+    shared = parameter_counts["trunk"] + parameter_counts["other"]
+    temporal = parameter_counts["temporal_decoder"] + parameter_counts["group_heads"]
+    positions = cfg.batch_size * cfg.L_ctx
+    return 6 * positions * (shared + len(cfg.head_offsets) * temporal)
+
+
+def _minimal_system_metrics(metrics: dict[str, float]) -> dict[str, float]:
+    """Keep one host metric for each distinct resource constraint."""
+    names = {
+        "system/cgroup/current_gib": "system/memory_gb",
+        "system/cgroup/usage_fraction": "system/memory_fraction",
+        "system/process_tree/pss_gib": "system/process_memory_gb",
+        "system/cache/allocated_gib": "system/cache_gb",
+        "system/telemetry_errors": "system/telemetry_errors",
+    }
+    return {output: metrics[source] for source, output in names.items() if source in metrics}
+
+
+def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
+    """Start W&B with the same metric conventions as O42."""
+    wandb.init(
+        project="hal",
+        name=run_name,
+        id=None if resume_state is None else resume_state.get("wandb_id"),
+        resume="allow" if resume_state is not None else None,
+        tags=["gpt", "temporal-mtp", "sparse-offset", "043", "legacy-codec"],
+        config=asdict(cfg),
+        settings=wandb.Settings(
+            x_stats_sampling_interval=5.0,
+            x_stats_track_process_tree=True,
+        ),
+    )
+    if wandb.run is None:
+        return
+    wandb.define_metric("global_step")
+    wandb.define_metric("*", step_metric="global_step")
+    wandb.run.summary["nll_semantics"] = (
+        "O26 BC objective: mean joint NLL at offsets 1-4 plus mean joint NLL at offsets 5,6,9,12,16,20"
+    )
+    wandb.run.summary["architecture/treatment"] = "O26 architecture and objective; exact historical legacy codec"
+    wandb.run.summary["data/sampler"] = "O26 replay reservoir"
+    wandb.run.summary["data/source"] = "ranked-anonymized-1 policy-v7"
+    wandb.run.summary["training/updates"] = cfg.max_steps
+    wandb.run.summary["data/nominal_samples"] = cfg.max_steps * cfg.batch_size
+    wandb.run.summary["data/max_context_prefixes"] = cfg.max_steps * cfg.batch_size * cfg.L_ctx
+    if cfg.wandb_log_code:
+        log_wandb_code(wandb.run)
+
+
+def _log_training_summary(
+    cfg: TrainConfig,
+    parameter_counts: dict[str, int],
+    *,
+    flops_per_update: int,
+    device_name: str | None,
+    peak_flops: float | None,
+) -> None:
+    if wandb.run is None:
+        return
+    for name, value in parameter_counts.items():
+        wandb.run.summary[f"parameters/{name}"] = value
+    wandb.run.summary["training/approx_flops_per_update"] = flops_per_update
+    wandb.run.summary["training/flops_formula"] = "6*B*L_ctx*(N_trunk+N_other+n_offsets*(N_temporal+N_group_heads))"
+    if device_name is not None:
+        wandb.run.summary["hardware/gpu_name"] = device_name
+    if peak_flops is not None:
+        wandb.run.summary["hardware/bf16_dense_peak_tflops"] = peak_flops / 1e12
+        source = bf16_peak_source(device_name or "")
+        if source is not None:
+            wandb.run.summary["hardware/bf16_dense_peak_source"] = source
 
 
 def model_tag(cfg: TrainConfig) -> str:
@@ -1800,28 +1907,22 @@ def train(
     validate_config(cfg)
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), cfg.data_root, comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
-    wandb.init(
-        project="hal",
-        name=run_name,
-        id=None if resume_state is None else resume_state.get("wandb_id"),
-        resume="allow" if resume_state is not None else None,
-        tags=["gpt", "temporal-mtp", "sparse-offset", "043", "legacy-codec"],
-        config=asdict(cfg),
-    )
-    if wandb.run is not None:
-        wandb.define_metric("eval/net_stock_lcb", step_metric="global_step")
-        wandb.define_metric("eval/net_dmg_lcb", step_metric="global_step")
-        if cfg.wandb_log_code:
-            log_wandb_code(wandb.run)
+    _init_wandb(cfg, run_name, resume_state)
     run_dir, replay_dir = setup_run_dir(run_name)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model = GPT(cfg).to(DEVICE)
     counts = subsystem_parameter_counts(model)
-    if wandb.run is not None:
-        for name, value in counts.items():
-            wandb.run.summary[f"parameters/{name}"] = value
-        wandb.run.summary["parameters/total"] = sum(parameter.numel() for parameter in model.parameters())
+    flops_per_update = approximate_training_flops_per_update(cfg, counts)
+    device_name = torch.cuda.get_device_name() if DEVICE == "cuda" else None
+    peak_flops = bf16_dense_peak_flops(device_name or "")
+    _log_training_summary(
+        cfg,
+        counts,
+        flops_per_update=flops_per_update,
+        device_name=device_name,
+        peak_flops=peak_flops,
+    )
     optimizer = make_optimizer(model, cfg)
     scheduler = LambdaLR(optimizer, lr_schedule(cfg))
     start_step = 0
@@ -1846,9 +1947,17 @@ def train(
     iterator = iter(train_loader)
     copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     run_started = time.monotonic()
+    host_metrics = HostMetricsSampler(
+        (Path(cfg.data_root),),
+        interval_s=cfg.system_metrics_interval_s,
+        process_interval_s=cfg.process_metrics_interval_s,
+        cache_interval_s=cfg.cache_metrics_interval_s,
+    )
+    host_metrics.start()
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and L40S hosts.
     eval_inference: BF16Inference | None = None
+    failure: BaseException | None = None
     model.train()
     try:
         for step in range(start_step, cfg.max_steps):
@@ -1893,27 +2002,52 @@ def train(
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
             metrics = nll_mean_metrics((nll_sum / n_prefixes).cpu(), cfg.head_offsets)
+            elapsed = time.monotonic() - run_started
+            completed_since_start = step - start_step + 1
+            remaining_updates = cfg.max_steps - (step + 1)
+            projected_remaining = elapsed * remaining_updates / completed_since_start
+            update_seconds = stopwatch.elapsed + loader_wait
             log = {
                 "global_step": step,
                 "samples": (step + 1) * cfg.batch_size,
+                "data/samples": (step + 1) * cfg.batch_size,
+                "data/valid_prefixes": n_prefixes,
+                "loader/wait_s": loader_wait,
+                "progress/update": step + 1,
+                "progress/fraction": (step + 1) / cfg.max_steps,
+                "progress/elapsed_s": elapsed,
+                "progress/remaining_s": projected_remaining,
                 **{f"train/{name}": value for name, value in metrics.items()},
                 "train/grad_norm": float(gradient_norm),
                 "throughput/step_s": stopwatch.elapsed,
                 "throughput/loader_wait_s": loader_wait,
+                "throughput/update_s": update_seconds,
                 "throughput/samples_per_s": cfg.batch_size / stopwatch.elapsed,
                 "throughput/samples_per_wall_s": cfg.batch_size / (stopwatch.elapsed + loader_wait),
                 "throughput/prefixes_per_s": n_prefixes / stopwatch.elapsed,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
+                "schedule/muon_lr": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
+                "schedule/adam_lr": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
             }
+            if cfg.system_metrics_every > 0 and (step == start_step or (step + 1) % cfg.system_metrics_every == 0):
+                log.update(_minimal_system_metrics(host_metrics.snapshot()))
             if DEVICE == "cuda":
                 log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
                 log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
+                log["system/gpu_memory_gb"] = log["hardware/peak_allocated_gb"]
+            if peak_flops is not None:
+                log["throughput/mfu"] = model_flops_utilization(
+                    flops_per_update,
+                    update_seconds,
+                    peak_flops,
+                )
             wandb.log(log)
             if step < 10 or step % 50 == 0:
                 print(
                     f"[t+{time.monotonic() - run_started:.0f}s] step {step}: "
-                    f"{metrics['loss']:.3f} bits objective, {cfg.batch_size / stopwatch.elapsed:.0f} samples/s",
+                    f"{metrics['loss']:.3f} bits objective, {cfg.batch_size / update_seconds:.0f} samples/s, "
+                    f"projected training remaining {projected_remaining / 60:.1f}m",
                     flush=True,
                 )
             val_due = cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0
@@ -1988,11 +2122,21 @@ def train(
             )
             wandb.log({"global_step": cfg.max_steps, **{f"eval_s6/{name}": value for name, value in stride6.items()}})
             require_complete_eval(stride6, cfg.final_diag_n_matchups)
+    except BaseException as error:
+        failure = error
+        if wandb.run is not None:
+            wandb.run.summary["run/status"] = "failed"
+            wandb.run.summary["run/failure_type"] = type(error).__name__
+            wandb.run.summary["run/failure_message"] = str(error)[:2000]
+        raise
     finally:
+        host_metrics.close()
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
             uploader.close()
-        wandb.finish()
+        if wandb.run is not None and failure is None:
+            wandb.run.summary["run/status"] = "finished"
+        wandb.finish(exit_code=1 if failure is not None else 0)
 
 
 _CHECKPOINT_ARCH_FIELDS = {

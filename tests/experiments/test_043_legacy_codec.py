@@ -258,6 +258,25 @@ def test_unused_classes_are_masked_in_every_training_and_inference_path() -> Non
         assert (rollout[..., group] < valid).all()
 
 
+def test_live_sampler_only_receives_real_legacy_classes(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg()
+    model = exp.GPT(cfg).eval()
+    hidden = torch.randn(2, cfg.L_ctx, cfg.d_model)
+    observed = torch.zeros(2, exp.N_GROUPS, dtype=torch.long)
+    vocab_sizes: list[int] = []
+    original = exp.sample_categorical
+
+    def record_vocab(logits: torch.Tensor, **kwargs) -> torch.Tensor:
+        vocab_sizes.append(logits.shape[-1])
+        return original(logits, **kwargs)
+
+    monkeypatch.setattr(exp, "sample_categorical", record_vocab)
+    model.temporal.sample_indices(hidden, observed, cfg.head_offsets[:4], argmax=False)
+
+    expected_per_frame = [exp.LEGACY_GROUP_VOCABS[exp.GROUP_INDEX[name]] for name in exp.GROUP_ORDER]
+    assert vocab_sizes == expected_per_frame * 4
+
+
 def test_masked_output_rows_receive_zero_gradient() -> None:
     cfg = _cfg()
     model = exp.GPT(cfg)
@@ -327,7 +346,7 @@ def test_tiny_training_entrypoint_uses_legacy_codec(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(exp.wandb, "init", lambda **kwargs: None)
     monkeypatch.setattr(exp.wandb, "define_metric", lambda *args, **kwargs: None)
     monkeypatch.setattr(exp.wandb, "log", lambda *args, **kwargs: None)
-    monkeypatch.setattr(exp.wandb, "finish", lambda: None)
+    monkeypatch.setattr(exp.wandb, "finish", lambda **kwargs: None)
 
     exp.train(cfg, {}, comment="tiny")
 
