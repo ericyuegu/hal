@@ -80,7 +80,8 @@ def main() -> None:
     model, cfg, _stats, _state = experiment.load_checkpoint(str(args.checkpoint))
     if args.eager:
         cfg = experiment.replace(cfg, inference_mode="eager")
-    bucket = int(meta.get("inference_bucket") or len(meta["slots"]))
+    rows = len(meta["slots"])
+    bucket = int(meta.get("inference_bucket") or 1 << (rows - 1).bit_length())
     engine = experiment.BF16Inference(model, cfg, bucket=bucket, compile_mode=args.compile_mode)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
