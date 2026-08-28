@@ -1,4 +1,4 @@
-"""Replay an experiment-029 parent-policy crash capsule on one CUDA process."""
+"""Replay a parent-policy crash capsule on one CUDA process."""
 
 import argparse
 import importlib.util
@@ -12,13 +12,23 @@ def _parse() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("capsule", type=Path)
     parser.add_argument("checkpoint", type=Path)
+    parser.add_argument(
+        "--experiment",
+        type=Path,
+        default=Path("experiments/029_game_state_flow.py"),
+        help="experiment module that owns the checkpoint and inference engine",
+    )
     parser.add_argument("--cuda-sync-debug", action="store_true")
     parser.add_argument("--eager", action="store_true")
+    parser.add_argument("--compile-mode", default="default")
+    parser.add_argument("--repeats", type=int, default=1)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse()
+    if args.repeats < 1:
+        raise ValueError("--repeats must be positive")
     if args.cuda_sync_debug and os.environ.get("CUDA_LAUNCH_BLOCKING") != "1":
         env = dict(os.environ)
         env["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -30,8 +40,10 @@ def main() -> None:
     from hal.training.features import Context
 
     root = Path(__file__).resolve().parents[1]
-    experiment_path = root / "experiments" / "029_game_state_flow.py"
-    spec = importlib.util.spec_from_file_location("hal_replay_exp029", experiment_path)
+    experiment_path = args.experiment
+    if not experiment_path.is_absolute():
+        experiment_path = root / experiment_path
+    spec = importlib.util.spec_from_file_location("hal_replay_experiment", experiment_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {experiment_path}")
     experiment = importlib.util.module_from_spec(spec)
@@ -69,12 +81,17 @@ def main() -> None:
     if args.eager:
         cfg = experiment.replace(cfg, inference_mode="eager")
     bucket = int(meta.get("inference_bucket") or len(meta["slots"]))
-    engine = experiment.BF16Inference(model, cfg, bucket=bucket)
+    engine = experiment.BF16Inference(model, cfg, bucket=bucket, compile_mode=args.compile_mode)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    out = engine.decode(context, int(meta["exec_horizon"]))
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    out = None
+    for repeat in range(args.repeats):
+        out = engine.decode(context, int(meta["exec_horizon"]))
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        if repeat == 0 or (repeat + 1) % 100 == 0:
+            print(f"completed replay {repeat + 1}/{args.repeats}", flush=True)
+    assert out is not None
     print(f"replay completed: output={tuple(out.shape)} finite={bool(torch.isfinite(out).all())}")
 
 
