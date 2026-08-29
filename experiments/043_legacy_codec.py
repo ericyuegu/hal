@@ -9,6 +9,7 @@ ladder documented in ``docs/experiments/043_legacy_codec.md``.
 Run:
     uv run experiments/043_legacy_codec.py
     uv run experiments/043_legacy_codec.py --eval runs/<run>/final.pt
+    uv run experiments/043_legacy_codec.py --eval final.pt --eval-run <run> --eval-backfill-wandb
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ from hal.eval.self_play import synthetic_context
 from hal.sim.rollout import covering_power_of_two
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
+from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
@@ -2365,6 +2367,25 @@ def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfi
     return model, cfg, stats, state
 
 
+def _upload_eval_evidence(run_name: str, replay_dir: Path) -> None:
+    uploader = BackgroundUploader(run_name)
+    uploader.upload_tree(replay_dir, base=(Path("runs") / run_name).resolve())
+    uploader.close()
+
+
+def _backfill_eval_metrics(wandb_id: str, step: int, suites: dict[str, dict[str, float]]) -> None:
+    wandb.init(project="hal", id=wandb_id, resume="must")
+    try:
+        wandb.define_metric("global_step")
+        wandb.define_metric("*", step_metric="global_step")
+        wandb.log({"global_step": step, "eval/backfilled": 1, **eval_suite_wandb_metrics(suites)})
+        if wandb.run is not None:
+            wandb.run.summary["run/status"] = "finished"
+            wandb.run.summary["evaluation/backfilled_step"] = step
+    finally:
+        wandb.finish()
+
+
 def eval_checkpoint(
     path: str,
     *,
@@ -2373,7 +2394,9 @@ def eval_checkpoint(
     eager: bool = False,
     max_parallel: int | None = None,
     output_name: str | None = None,
-) -> dict[str, float]:
+    upload_run: str | None = None,
+    backfill_wandb: bool = False,
+) -> dict[str, dict[str, float]]:
     model, cfg, stats, state = load_checkpoint(path)
     cfg = replace(
         cfg,
@@ -2382,22 +2405,46 @@ def eval_checkpoint(
     )
     validate_config(cfg)
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
-    default_name = f"eval_replays_s{horizon}"
+    step = int(state["step"])
+    matchups = cfg.final_eval_n_matchups if n_matchups is None else n_matchups
+    if upload_run is not None:
+        default_name = f"eval_backfill_step_{step:07d}_s{horizon}"
+    else:
+        default_name = f"eval_replays_s{horizon}"
     if output_name is not None and (Path(output_name).name != output_name or output_name in ("", ".", "..")):
         raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
     replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
-    values = eval_vs_cpu(
+    inference = BF16Inference(model, cfg)
+    suites = eval_suites(
         model,
         stats,
         cfg,
-        n_matchups=cfg.final_eval_n_matchups if n_matchups is None else n_matchups,
+        n_matchups=matchups,
         replay_dir=replay_dir,
-        exec_horizon=horizon,
         checkpoint_sha256=_checkpoint_sha256(Path(path)),
+        inference=inference,
+        exec_horizon=horizon,
     )
-    print(f"[eval] step={state['step']} horizon={horizon}: {values}", flush=True)
-    require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
-    return values
+    for values in suites.values():
+        require_complete_eval(values, matchups)
+    if upload_run is not None:
+        _upload_eval_evidence(upload_run, replay_dir)
+    if backfill_wandb:
+        wandb_id = state.get("wandb_id")
+        if not isinstance(wandb_id, str):
+            raise RuntimeError("checkpoint has no W&B run id to backfill")
+        _backfill_eval_metrics(wandb_id, step, suites)
+    print(f"[eval] step={step} horizon={horizon}: {suites}", flush=True)
+    return suites
+
+
+def _resolve_eval_checkpoint(checkpoint: str, run: str | None) -> Path:
+    if run is None:
+        return Path(checkpoint)
+    path = download_latest(run, Path("runs") / run, name=checkpoint)
+    if path is None:
+        raise SystemExit(f"no {checkpoint!r} for run {run!r}")
+    return path
 
 
 def run_benchmark(cfg: TrainConfig, *, iterations: int = 20) -> dict[str, float]:
@@ -2444,11 +2491,13 @@ class Args:
     comment: str = ""
     resume: str | None = None
     eval: str | None = None
+    eval_run: str | None = None
     eval_exec_horizon: int | None = None
     eval_n_matchups: int | None = None
     eval_eager: bool = False
     eval_max_parallel: int | None = None
     eval_output_name: str | None = None
+    eval_backfill_wandb: bool = False
     self_play_eval: str | None = None
     self_play_matches: int = 12
     self_play_frames: int = 14_400
@@ -2470,13 +2519,16 @@ def main(args: Args) -> None:
     if selected > 1:
         raise SystemExit("pass only one of --eval, --self-play-eval, or --resume")
     if args.eval is not None:
+        checkpoint = _resolve_eval_checkpoint(args.eval, args.eval_run)
         eval_checkpoint(
-            args.eval,
+            str(checkpoint),
             exec_horizon=args.eval_exec_horizon,
             n_matchups=args.eval_n_matchups,
             eager=args.eval_eager,
             max_parallel=args.eval_max_parallel,
             output_name=args.eval_output_name,
+            upload_run=args.eval_run,
+            backfill_wandb=args.eval_backfill_wandb,
         )
         return
     if args.self_play_eval is not None:

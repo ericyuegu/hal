@@ -418,6 +418,81 @@ def test_eval_suites_are_separate_and_named_in_wandb(monkeypatch: pytest.MonkeyP
     }
 
 
+def test_eval_can_download_upload_and_backfill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    checkpoint = tmp_path / "final.pt"
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(exp, "_resolve_eval_checkpoint", lambda *_args: checkpoint)
+    monkeypatch.setattr(exp, "eval_checkpoint", lambda path, **kwargs: calls.append((path, kwargs)))
+
+    exp.main(
+        exp.Args(
+            eval="final.pt",
+            eval_run="run",
+            eval_max_parallel=16,
+            eval_output_name="eval_backfill_step_0016384_s1",
+            eval_backfill_wandb=True,
+        )
+    )
+
+    assert calls == [
+        (
+            str(checkpoint),
+            {
+                "exec_horizon": None,
+                "n_matchups": None,
+                "eager": False,
+                "max_parallel": 16,
+                "output_name": "eval_backfill_step_0016384_s1",
+                "upload_run": "run",
+                "backfill_wandb": True,
+            },
+        )
+    ]
+
+
+def test_eval_backfills_both_suites_at_the_checkpoint_step(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    checkpoint = tmp_path / "final.pt"
+    checkpoint.touch()
+    cfg = _cfg(final_eval_n_matchups=2)
+    model = exp.GPT(cfg)
+    suites = {
+        "char_matchup": {"scheduled_boots": 2.0, "completed_boots": 2.0, "boots": 2.0},
+        "fox": {"scheduled_boots": 2.0, "completed_boots": 2.0, "boots": 2.0},
+    }
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _path: (model, cfg, {}, {"step": 16_384, "wandb_id": "id"}))
+    monkeypatch.setattr(exp, "BF16Inference", lambda _model, _cfg: "inference")
+    monkeypatch.setattr(exp, "_checkpoint_sha256", lambda _path: "a" * 64)
+
+    def fake_eval_suites(*_args, **kwargs):
+        calls["eval"] = kwargs
+        return suites
+
+    monkeypatch.setattr(exp, "eval_suites", fake_eval_suites)
+    monkeypatch.setattr(exp, "_upload_eval_evidence", lambda run, path: calls.update(upload=(run, path)))
+    monkeypatch.setattr(
+        exp,
+        "_backfill_eval_metrics",
+        lambda wandb_id, step, values: calls.update(backfill=(wandb_id, step, values)),
+    )
+
+    result = exp.eval_checkpoint(
+        str(checkpoint),
+        max_parallel=16,
+        upload_run="run",
+        backfill_wandb=True,
+    )
+
+    eval_kwargs = calls["eval"]
+    assert eval_kwargs["n_matchups"] == 2
+    assert eval_kwargs["inference"] == "inference"
+    assert eval_kwargs["replay_dir"].name == "eval_backfill_step_0016384_s1"
+    assert calls["upload"] == ("run", eval_kwargs["replay_dir"])
+    assert calls["backfill"] == ("id", 16_384, suites)
+    assert result == suites
+
+
 def test_tiny_training_entrypoint_uses_legacy_codec(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = _cfg(
         d_model=64,
