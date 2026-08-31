@@ -497,6 +497,31 @@ def test_encoder_omits_broadcast_stage_and_character_inputs() -> None:
     assert torch.equal(first, second)
 
 
+def test_concat_contexts_fills_batch_local_mask_sidecars() -> None:
+    cfg = _cfg()
+    first = exp.synthetic_context(cfg, 1, seed=1)
+    second = exp.synthetic_context(cfg, 1, seed=2)
+    mask_name = "ego_position_x_mask"
+    second_features = dict(second.features)
+    second_features[mask_name] = torch.ones(1, cfg.window_length)
+
+    combined = exp._concat_contexts([first, exp.Context(second_features, second.ctx_pad)])
+
+    assert torch.equal(combined.features[mask_name][0], torch.zeros(cfg.window_length))
+    assert torch.equal(combined.features[mask_name][1], torch.ones(cfg.window_length))
+
+
+def test_concat_contexts_rejects_missing_required_features() -> None:
+    cfg = _cfg()
+    first = exp.synthetic_context(cfg, 1, seed=1)
+    second = exp.synthetic_context(cfg, 1, seed=2)
+    second_features = dict(second.features)
+    del second_features["ego_position_x"]
+
+    with pytest.raises(ValueError, match="required context feature sets"):
+        exp._concat_contexts([first, exp.Context(second_features, second.ctx_pad)])
+
+
 def test_preprojector_export_is_independent_of_training_heads() -> None:
     cfg = _cfg()
     model = exp.BYOL(cfg, prefer_flex=False).eval()

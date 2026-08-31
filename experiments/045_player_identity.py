@@ -107,6 +107,9 @@ IDENTITY_FEATURE_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     ),
     derive_spatial=False,
 )
+IDENTITY_MASK_COLUMNS: Final[frozenset[str]] = frozenset(
+    f"{prefix}_{name}_mask" for prefix in BASE_PLAYER_PREFIXES for name in FLOAT_FEATURES
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1308,11 +1311,24 @@ def make_professional_loader(
 def _concat_contexts(contexts: Sequence[Context]) -> Context:
     if not contexts:
         raise ValueError("cannot concatenate an empty context sequence")
-    names = contexts[0].features.keys()
-    if any(context.features.keys() != names for context in contexts[1:]):
-        raise ValueError("context feature sets do not match")
+
+    names = tuple(dict.fromkeys(name for context in contexts for name in context.features))
+    required_names = set(names) - IDENTITY_MASK_COLUMNS
+    if any(not required_names.issubset(context.features) for context in contexts):
+        raise ValueError("required context feature sets do not match")
+
+    features: dict[str, Tensor] = {}
+    for name in names:
+        reference = next(context.features[name] for context in contexts if name in context.features)
+        values = []
+        for context in contexts:
+            value = context.features.get(name)
+            if value is None:
+                value = reference.new_zeros((context.batch, *reference.shape[1:]))
+            values.append(value)
+        features[name] = torch.cat(values)
     return Context(
-        features={name: torch.cat([context.features[name] for context in contexts]) for name in names},
+        features=features,
         ctx_pad=torch.cat([context.ctx_pad for context in contexts]),
     )
 
