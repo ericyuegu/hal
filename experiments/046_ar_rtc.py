@@ -35,6 +35,7 @@ from typing import Literal
 
 import numpy as np
 import torch
+import torch._inductor.config
 import torch.nn.functional as F
 import tyro
 from torch import Tensor
@@ -69,6 +70,12 @@ _O43_TRAIN_CONFIG = _o43.TrainConfig
 PREDICTION_HORIZON_FRAMES = 20
 ACTION_OFFSETS_FRAMES = tuple(range(1, PREDICTION_HORIZON_FRAMES + 1))
 RTC_OBJECTIVE_VERSION = 1
+
+
+def _disable_triton_pointwise_autotuning() -> None:
+    # The first B32 evaluation graph failed in this autotuning path after
+    # compiled training on an L40S.
+    torch._inductor.config.triton.autotune_pointwise = False
 
 
 @dataclass
@@ -527,6 +534,10 @@ class RTCDecodeTelemetry(_o43.DecodeTelemetry):
 class BF16Inference(_o43.BF16Inference):
     """O43's compiled trunk with a fixed-prefix, full-horizon decoder."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        _disable_triton_pointwise_autotuning()
+        super().__init__(*args, **kwargs)
+
     def _decoder(self, bucket: int, delay: int) -> Callable:
         key = (bucket, delay)
         if key not in self._decoders:
@@ -857,6 +868,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["evaluation/inference_delay_frames"] = cfg.inference_delay_frames
     wandb.run.summary["evaluation/execution_stride_frames"] = cfg.execution_stride_frames
     wandb.run.summary["evaluation/suites"] = "char_matchup,fox"
+    wandb.run.summary["compiler/triton_autotune_pointwise"] = False
     wandb.run.summary["training/updates"] = cfg.max_steps
     wandb.run.summary["data/nominal_samples"] = cfg.max_steps * cfg.batch_size
     wandb.run.summary["data/max_context_prefixes"] = cfg.max_steps * cfg.batch_size * cfg.L_ctx
@@ -975,6 +987,7 @@ def train(
     resume_run: str | None = None,
     resume_state: dict | None = None,
 ) -> None:
+    _disable_triton_pointwise_autotuning()
     with _training_delays(cfg.training_delay_frames):
         _O43_TRAIN(
             cfg,

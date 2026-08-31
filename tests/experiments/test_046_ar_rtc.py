@@ -100,6 +100,14 @@ def test_public_config_names_dense_chain_and_paper_timing() -> None:
     exp.validate_config(cfg)
 
 
+def test_triton_pointwise_autotuning_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch._inductor.config.triton, "autotune_pointwise", True)
+
+    exp._disable_triton_pointwise_autotuning()
+
+    assert torch._inductor.config.triton.autotune_pointwise is False
+
+
 def test_dense_offsets_keep_o43_parameter_geometry_and_initialization() -> None:
     cfg = _cfg()
     baseline_cfg = exp043.TrainConfig(
