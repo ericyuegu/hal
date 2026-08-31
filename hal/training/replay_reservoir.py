@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 from streaming import StreamingDataset
+from streaming.base.world import World
 from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 
@@ -395,6 +396,8 @@ class ReservoirLoader:
         self._source_names = source_names
         self._packs = packs
         self._epoch = 0
+        self._pack_epoch: int | None = None
+        self._delivered_packs = 0
         self._reservoir: ReplayReservoir | None = None
         self._resume_state: dict[str, Any] | None = None
         self.last_epoch_stats: dict[str, int] | None = None
@@ -409,8 +412,18 @@ class ReservoirLoader:
         }
 
     def __iter__(self) -> Iterator[object]:
+        pack_epoch = self._epoch
+        self._packs.resume_epoch(pack_epoch)
+        self._pack_epoch = pack_epoch
+        self._delivered_packs = 0
+
+        def delivered_packs() -> Iterator[ReplayPack]:
+            for pack in self._pack_loader:
+                self._delivered_packs += 1
+                yield pack
+
         reservoir = ReplayReservoir(
-            iter(self._pack_loader),
+            delivered_packs(),
             batch_size=self._batch_size,
             capacity=self._capacity,
             seed=self._seed + self._epoch,
@@ -426,25 +439,30 @@ class ReservoirLoader:
         return batches
 
     def state_dict(self) -> dict[str, Any]:
-        """Return an exact cursor when workers and background prefetch are off."""
-        if self._pack_loader.num_workers != 0 or self._prefetch_batches:
-            raise RuntimeError("exact reservoir checkpoints require num_workers=0 and prefetch_batches=0")
-        if self._reservoir is None or self._packs.current_epoch is None:
+        """Return the reservoir and the last replay pack delivered in order."""
+        if self._prefetch_batches:
+            raise RuntimeError("exact reservoir checkpoints require prefetch_batches=0")
+        if self._reservoir is None or self._pack_epoch is None:
             raise RuntimeError("the reservoir loader has not emitted a batch")
+        world = World.detect()
+        num_samples = self._delivered_packs * world.num_ranks
+        if self._dataset.replication is not None:
+            num_samples //= self._dataset.replication
         return {
-            "schema": 1,
+            "schema": 2,
             "loader_epoch": self._epoch,
-            "pack_epoch": self._packs.current_epoch,
-            "mds": self._dataset.state_dict(self._packs.source_samples, from_beginning=False),
+            "pack_epoch": self._pack_epoch,
+            "delivered_packs": self._delivered_packs,
+            "mds": self._dataset.state_dict(num_samples, from_beginning=False),
             "reservoir": self._reservoir.state_dict(),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Schedule an exact restore before the next iterator is created."""
-        if state.get("schema") != 1:
+        if state.get("schema") not in (1, 2):
             raise ValueError(f"unsupported reservoir-loader state schema {state.get('schema')!r}")
-        if self._pack_loader.num_workers != 0 or self._prefetch_batches:
-            raise RuntimeError("exact reservoir checkpoints require num_workers=0 and prefetch_batches=0")
+        if self._prefetch_batches:
+            raise RuntimeError("exact reservoir checkpoints require prefetch_batches=0")
         if self._reservoir is not None:
             raise RuntimeError("load reservoir state before creating its iterator")
         self._dataset.load_state_dict(state["mds"])
@@ -560,6 +578,7 @@ def make_reservoir_loader(
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=False,
         generator=generator,
+        in_order=True,
     )
     return ReservoirLoader(
         pack_loader,

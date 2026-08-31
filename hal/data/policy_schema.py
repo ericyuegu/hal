@@ -318,17 +318,13 @@ def _select_ranges(
     present: bool,
     name: str,
     ranges: tuple[tuple[int, int], ...],
-) -> np.ndarray:
+) -> tuple[np.ndarray, ...]:
     expected = frames if present else 1
     if values.shape != (expected,):
         raise ValueError(f"{name} has shape {values.shape}; expected {(expected,)}")
-    length = sum(stop - start for start, stop in ranges)
     if not present:
-        return np.full(length, values[0], dtype=values.dtype)
-    if len(ranges) == 1:
-        start, stop = ranges[0]
-        return values[start:stop]
-    return np.concatenate([values[start:stop] for start, stop in ranges])
+        return tuple(np.full(stop - start, values[0], dtype=values.dtype) for start, stop in ranges)
+    return tuple(values[start:stop] for start, stop in ranges)
 
 
 def _policy_frames(source: Mapping[str, object]) -> int:
@@ -353,7 +349,6 @@ def decode_policy_replay_slices(
     if not ranges:
         return ()
     lengths = [stop - start for start, stop in ranges]
-    boundaries = np.cumsum(lengths)[:-1]
     outs: list[dict[str, np.ndarray | int]] = []
     for (start, stop), length in zip(ranges, lengths, strict=True):
         out: dict[str, np.ndarray | int] = {
@@ -364,8 +359,8 @@ def decode_policy_replay_slices(
             out[name] = np.full(length, _scalar_int(source, name), dtype=np.int32)
         outs.append(out)
 
-    def assign(name: str, values: np.ndarray) -> None:
-        for out, part in zip(outs, np.split(values, boundaries), strict=True):
+    def assign(name: str, parts: tuple[np.ndarray, ...]) -> None:
+        for out, part in zip(outs, parts, strict=True):
             out[name] = part
 
     for prefix in PLAYER_PREFIXES:
@@ -377,12 +372,13 @@ def decode_policy_replay_slices(
             present = bool(flag)
         for name in FLOAT_STATE_SUFFIXES:
             key = f"{prefix}_{name}"
-            values = _select_ranges(np.asarray(source[key], dtype=np.float32), frames, present, key, ranges)
-            assign(key, values)
+            parts = _select_ranges(np.asarray(source[key], dtype=np.float32), frames, present, key, ranges)
+            assign(key, parts)
         state_key = f"{prefix}_state"
-        packed = _select_ranges(np.asarray(source[state_key]), frames, present, state_key, ranges)
-        for name, values in unpack_player_state(packed).items():
-            assign(f"{prefix}_{name}", values)
+        packed_parts = _select_ranges(np.asarray(source[state_key]), frames, present, state_key, ranges)
+        decoded_parts = tuple(unpack_player_state(packed) for packed in packed_parts)
+        for name in PACKED_STATE_SUFFIXES:
+            assign(f"{prefix}_{name}", tuple(decoded[name] for decoded in decoded_parts))
 
     for prefix in LEADER_PREFIXES:
         for name in ACTION_CHANNELS[:4]:
@@ -390,20 +386,21 @@ def decode_policy_replay_slices(
             values = np.asarray(source[key])
             if values.shape != (frames,):
                 raise ValueError(f"{key} has shape {values.shape}; expected {(frames,)}")
-            assign(key, unpack_stick(_select_ranges(values, frames, True, key, ranges)))
+            assign(key, tuple(unpack_stick(part) for part in _select_ranges(values, frames, True, key, ranges)))
         for name in ACTION_CHANNELS[4:6]:
             key = f"{prefix}_{name}"
             values = np.asarray(source[key])
             if values.shape != (frames,):
                 raise ValueError(f"{key} has shape {values.shape}; expected {(frames,)}")
-            assign(key, unpack_trigger(_select_ranges(values, frames, True, key, ranges)))
+            assign(key, tuple(unpack_trigger(part) for part in _select_ranges(values, frames, True, key, ranges)))
         button_key = f"{prefix}_buttons"
         packed_buttons = np.asarray(source[button_key])
         if packed_buttons.shape != (frames,):
             raise ValueError(f"{button_key} has shape {packed_buttons.shape}; expected {(frames,)}")
         selected_buttons = _select_ranges(packed_buttons, frames, True, button_key, ranges)
-        for name, values in unpack_buttons(selected_buttons).items():
-            assign(f"{prefix}_button_{name}", values)
+        decoded_buttons = tuple(unpack_buttons(part) for part in selected_buttons)
+        for name in BUTTON_SUFFIXES:
+            assign(f"{prefix}_button_{name}", tuple(decoded[name] for decoded in decoded_buttons))
     return tuple(outs)
 
 

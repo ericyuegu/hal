@@ -78,10 +78,10 @@ def test_scaled_family_and_distinct_026_baseline_geometry() -> None:
 
 
 @pytest.mark.parametrize(
-    ("level", "target", "total_parameters", "effective_parameters"),
+    ("level", "target", "total_parameters", "effective_parameters", "decay_endpoint"),
     [
-        (3, 350_981_584, 2_064_111, 23_742_936),
-        (4, 312_145_120, 3_936_239, 26_696_984),
+        (3, 701_963_168, 2_064_111, 23_742_936, 350_981_584),
+        (4, 624_290_248, 3_936_239, 26_696_984, 312_145_120),
     ],
 )
 def test_small_isoflop_configs_have_exact_geometry_and_endpoint(
@@ -89,29 +89,25 @@ def test_small_isoflop_configs_have_exact_geometry_and_endpoint(
     target: int,
     total_parameters: int,
     effective_parameters: int,
+    decay_endpoint: int,
 ) -> None:
-    cfg = exp.scaled_config(
-        level,
-        exp.replace(
-            exp.TrainConfig(),
-            target_processed_positions=target,
-            adam_weight_decay_endpoint=target,
-        ),
-    )
+    cfg = exp.requested_config(exp.Args(model_l=level, phase="prefix", target_positions=target))
     counts = exp.parameter_counts_for_config(cfg)
 
     assert counts["total"] == total_parameters
     assert counts["trunk"] + 36 * counts["decoder"] == effective_parameters
-    assert 6 * effective_parameters * target == pytest.approx(5e16, rel=1e-8)
-    assert exp._prefix_branch_targets(cfg) == (target,)
-    assert exp._prefix_branch_positions(cfg) == (exp.branch_position(target, 0.125),)
+    assert 6 * effective_parameters * target == pytest.approx(1e17, rel=1e-8)
+    assert cfg.adam_weight_decay_endpoint == decay_endpoint
+    expected_targets = tuple(value for value in exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[level] if value <= target)
+    assert exp._prefix_branch_targets(cfg) == expected_targets
+    assert exp._prefix_branch_positions(cfg) == tuple(exp.branch_position(value, 0.125) for value in expected_targets)
     assert exp.branch_checkpoint_name(target) == f"branch_D{target}.pt"
     assert f"D{target}" in exp.run_name_for(exp.replace(cfg, phase="cooldown"), counts["total"])
     exp.validate_config(cfg)
 
 
-def test_small_isoflop_endpoint_is_bound_to_its_capacity() -> None:
-    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3]
+def test_exact_isoflop_endpoint_is_bound_to_its_capacity() -> None:
+    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3][0]
     cfg = exp.scaled_config(
         4,
         exp.replace(
@@ -126,16 +122,25 @@ def test_small_isoflop_endpoint_is_bound_to_its_capacity() -> None:
 
 @pytest.mark.parametrize("level", [3, 4])
 def test_small_isoflop_cli_sets_exact_powerlines_endpoint(level: int) -> None:
-    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[level]
+    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[level][0]
     cfg = exp.requested_config(exp.Args(model_l=level, phase="prefix", target_positions=target))
     counts = exp.parameter_counts_for_config(cfg)
 
     assert cfg.target_processed_positions == target
-    assert cfg.adam_weight_decay_endpoint == target
+    assert cfg.adam_weight_decay_endpoint == exp.EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL[level]
     assert exp.run_name_for(cfg, counts["total"]) == (
         f"cap-L{level}-d{64 * level}-{round(counts['total'] / 1_000_000)}M-U1-prefix-D{target}-tauPL"
     )
     exp.validate_config(cfg)
+
+
+def test_addition_cooldown_boundaries_match_the_production_matrix() -> None:
+    expected = {
+        701_963_168: 614_217_772,
+        624_290_248: 546_253_967,
+    }
+
+    assert {target: exp.branch_position(target, 0.125) for target in expected} == expected
 
 
 def test_standard_prefix_name_remains_canonical_d2p30() -> None:
@@ -144,6 +149,156 @@ def test_standard_prefix_name_remains_canonical_d2p30() -> None:
 
     assert exp._training_stop(cfg) == exp.branch_position(2**30, cfg.cooldown_fraction)
     assert exp.run_name_for(cfg, counts["total"]) == "cap-L5-d320-7M-U1-prefix-D2p30-tauPL"
+
+
+def test_small_prefix_fork_requires_compatible_saved_source_branch() -> None:
+    source_target = exp.EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL[3]
+    source = exp.requested_config(exp.Args(model_l=3, phase="prefix", target_positions=source_target))
+    target = exp.requested_config(
+        exp.Args(
+            model_l=3,
+            phase="prefix",
+            target_positions=exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3][0],
+        )
+    )
+    source_scale = exp.adam_scale(source, exp.parameter_counts_for_config(source)["total"])
+    target_scale = exp.adam_scale(target, exp.parameter_counts_for_config(target)["total"])
+    source = exp.replace(source, adam_weight_decay=source_scale.weight_decay)
+    target = exp.replace(target, adam_weight_decay=target_scale.weight_decay)
+    source_position = exp.branch_position(source_target, source.cooldown_fraction)
+
+    exp._configs_match_for_prefix_fork(source, target, source_position)
+    assert source_position == 307_108_886
+    with pytest.raises(ValueError, match="not a saved branch boundary"):
+        exp._configs_match_for_prefix_fork(
+            source,
+            target,
+            exp.branch_position(target.target_processed_positions, target.cooldown_fraction),
+        )
+    with pytest.raises(ValueError, match="prefix fork changed muon_lr"):
+        exp._configs_match_for_prefix_fork(source, exp.replace(target, muon_lr=0.02), source_position)
+
+
+def test_prefix_fork_requires_cuda_rng_state() -> None:
+    source_target = exp.EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL[3]
+    source = exp.requested_config(exp.Args(model_l=3, phase="prefix", target_positions=source_target))
+    counts = exp.parameter_counts_for_config(source)
+    scale = exp.adam_scale(source, counts["total"])
+    source = exp.replace(source, adam_weight_decay=scale.weight_decay)
+    target = exp.requested_config(
+        exp.Args(
+            model_l=3,
+            phase="prefix",
+            target_positions=exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3][0],
+        )
+    )
+    state = {
+        "cfg": asdict(source),
+        "checkpoint_schema": 2,
+        "data_state": {},
+        "model": {},
+        "numpy_rng_state": None,
+        "opt": {},
+        "pending_batches": [],
+        "processed_positions": exp.branch_position(source_target, source.cooldown_fraction),
+        "torch_rng_state": None,
+        "update": 1,
+    }
+
+    with pytest.raises(ValueError, match="cuda_rng_state"):
+        exp._validate_prefix_fork_state(state, target, counts["total"])
+
+
+def test_restore_rng_restores_cuda_state_when_available(monkeypatch) -> None:
+    events = []
+    state = {
+        "numpy_rng_state": object(),
+        "torch_rng_state": object(),
+        "cuda_rng_state": object(),
+    }
+    monkeypatch.setattr(exp.np.random, "set_state", lambda value: events.append(("numpy", value)))
+    monkeypatch.setattr(exp.torch, "set_rng_state", lambda value: events.append(("torch", value)))
+    monkeypatch.setattr(exp.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        exp.torch.cuda,
+        "set_rng_state_all",
+        lambda value: events.append(("cuda", value)),
+    )
+
+    exp._restore_rng(state)
+
+    assert events == [
+        ("numpy", state["numpy_rng_state"]),
+        ("torch", state["torch_rng_state"]),
+        ("cuda", state["cuda_rng_state"]),
+    ]
+
+
+def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypatch) -> None:
+    source_name = "cap-L3-d192-2M-U1-prefix-D350981584-tauPL"
+    checkpoint_name = "branch_D350981584.pt"
+    source_target = exp.EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL[3]
+    source = exp.requested_config(
+        exp.Args(
+            cfg=exp.replace(exp.TrainConfig(), push_to_r2=False),
+            model_l=3,
+            phase="prefix",
+            target_positions=source_target,
+        )
+    )
+    source_scale = exp.adam_scale(source, exp.parameter_counts_for_config(source)["total"])
+    source = exp.replace(source, adam_weight_decay=source_scale.weight_decay)
+    source_state = {
+        "cfg": asdict(source),
+        "checkpoint_schema": 2,
+        "cuda_rng_state": None,
+        "data_state": {},
+        "model": {},
+        "numpy_rng_state": None,
+        "opt": {},
+        "pending_batches": [],
+        "processed_positions": exp.branch_position(source_target, source.cooldown_fraction),
+        "torch_rng_state": None,
+        "update": 1,
+        "wandb_id": "source-wandb-id",
+    }
+    loads = []
+    trains = []
+
+    def fake_load(run_name, run_dir, *, device, name):
+        loads.append((run_name, run_dir, device, name))
+        return source_state
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(exp, "load_for_resume", fake_load)
+    monkeypatch.setattr(exp, "load_consolidated_stats", lambda _: {})
+    monkeypatch.setattr(
+        exp,
+        "dataset_audit",
+        lambda _: SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
+    )
+    monkeypatch.setattr(exp, "train", lambda *args, **kwargs: trains.append((args, kwargs)))
+
+    exp.main(
+        exp.Args(
+            cfg=exp.replace(exp.TrainConfig(), push_to_r2=False),
+            model_l=3,
+            phase="prefix",
+            target_positions=701_963_168,
+            prefix_fork_from_run=source_name,
+            prefix_fork_checkpoint=checkpoint_name,
+        )
+    )
+
+    assert loads == [(source_name, Path("runs") / source_name, "cpu", checkpoint_name)]
+    assert len(trains) == 1
+    _, kwargs = trains[0]
+    assert kwargs["requested_run_name"] == "cap-L3-d192-2M-U1-prefix-D701963168-tauPL"
+    assert kwargs["resume_state"] is None
+    assert kwargs["branch_state"] is None
+    assert kwargs["prefix_fork_state"] is source_state
+    assert kwargs["loader_workers"] == 8
+    assert kwargs["loader_prefetch_updates"] == 1
 
 
 def test_026_observation_trunk_codec_and_optimizer_partition_are_frozen() -> None:
