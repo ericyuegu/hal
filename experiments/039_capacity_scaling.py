@@ -20,6 +20,7 @@ import math
 import re
 import tempfile
 import time
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -40,10 +41,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from botocore.exceptions import ClientError
 from torch import Tensor
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.behavior import HITSTUN_ACTIONS
