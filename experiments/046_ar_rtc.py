@@ -193,7 +193,8 @@ class TrainConfig:
 
 
 def _as_o43_config(cfg: TrainConfig) -> Any:
-    values = {item.name: getattr(cfg, item.name) for item in fields(_O43_TRAIN_CONFIG)}
+    values = {item.name: getattr(cfg, item.name) for item in fields(_O43_TRAIN_CONFIG) if item.name != "ablation_arm"}
+    values["ablation_arm"] = "A"
     # O46 changes decoder semantics but not parameter geometry.  Use values that
     # pass O43's frozen validation for fields O46 validates under clearer names.
     values.update(

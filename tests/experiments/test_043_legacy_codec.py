@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import inspect
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from types import ModuleType
 
@@ -100,11 +101,35 @@ def test_defaults_match_the_named_o26_reference_run() -> None:
     assert cfg.val_replay_format == "policy"
     assert cfg.group_order == ("c_stick", "main_stick", "triggers", "buttons")
     assert cfg.codec_version == 2
-    assert cfg.exec_horizon == cfg.final_diag_exec_horizon == 1
-    assert cfg.final_diag_n_matchups == 0
+    assert cfg.ablation_arm == "A"
+    assert cfg.exec_horizon == 1
+    assert cfg.final_diag_exec_horizon == 4
+    assert cfg.final_eval_n_matchups == cfg.final_diag_n_matchups == 96
     assert cfg.next_frame_loss_share == 0.5
     assert "mtp043-legacy" in exp.model_tag(cfg)
     assert "s1-o1w50" in exp.model_tag(cfg)
+    assert exp._planned_inference_programs(cfg) == ((32, 1), (32, 4))
+
+
+def test_ablation_arms_have_distinct_tags_and_checkpoint_identity() -> None:
+    tags = {}
+    for arm in ("A", "B", "C", "D"):
+        cfg = _cfg(ablation_arm=arm)
+        restored = exp.config_from_state(asdict(cfg))
+        assert restored == cfg
+        tags[arm] = exp.model_tag(cfg)
+
+    assert len(set(tags.values())) == 4
+    assert tags["A"].endswith("-base")
+    assert tags["B"].endswith("-ablB-film0")
+    assert tags["C"].endswith("-ablC-linear-head")
+    assert tags["D"].endswith("-ablD-no-trunk-skip")
+
+    legacy = asdict(_cfg())
+    legacy.pop("ablation_arm")
+    assert exp.config_from_state(legacy).ablation_arm == "A"
+    with pytest.raises(ValueError, match="unknown ablation_arm"):
+        exp.validate_config(_cfg(ablation_arm="Z"))
 
 
 def test_o43_preserves_o26_trainable_architecture_and_initialization() -> None:
@@ -129,6 +154,78 @@ def test_o43_preserves_o26_trainable_architecture_and_initialization() -> None:
     )
     assert sum(parameter.numel() for parameter in treatment.parameters()) == 15_053_039
     assert len(treatment.state_dict()) == 111
+
+
+def test_ablation_arms_preserve_shared_initialization_and_rng_state() -> None:
+    def initialized(arm: str) -> tuple[torch.nn.Module, torch.Tensor]:
+        torch.manual_seed(123)
+        model = exp.GPT(_cfg(ablation_arm=arm))
+        return model, torch.get_rng_state()
+
+    baseline, baseline_rng = initialized("A")
+    baseline_parameters = dict(baseline.named_parameters())
+    for arm in ("B", "C", "D"):
+        treatment, treatment_rng = initialized(arm)
+        torch.testing.assert_close(treatment_rng, baseline_rng)
+        for name, parameter in treatment.named_parameters():
+            if arm == "B" and name.startswith("temporal.group_condition."):
+                continue
+            if name in baseline_parameters:
+                assert torch.equal(parameter, baseline_parameters[name]), (arm, name)
+
+
+def test_zero_initialized_film_keeps_the_o43_equation() -> None:
+    cfg = _cfg(ablation_arm="B")
+    decoder = exp.GPT(cfg).temporal
+    states = torch.randn(2, 3, cfg.temporal_d_model)
+    embedded = {name: torch.randn(2, 3, cfg.action_embed_dim) for name in exp.GROUP_ORDER}
+
+    for condition in decoder.group_condition.values():
+        torch.testing.assert_close(condition.weight, torch.zeros_like(condition.weight))
+        torch.testing.assert_close(condition.bias, torch.zeros_like(condition.bias))
+    torch.testing.assert_close(decoder.group_features(states, "buttons", embedded), states)
+
+    condition = decoder.group_condition["buttons"]
+    with torch.no_grad():
+        condition.bias[: decoder.d_model].fill_(100.0)
+        condition.bias[decoder.d_model :].fill_(100.0)
+    torch.testing.assert_close(decoder.group_features(states, "buttons", embedded), 2 * states + 100)
+
+
+def test_linear_head_arm_uses_the_exact_o42_readout() -> None:
+    cfg = _cfg(ablation_arm="C")
+    decoder = exp.GPT(cfg).temporal
+    assert all(isinstance(head, exp.LinearActionHead) for head in decoder.outputs.values())
+    assert all(head.output.bias is None for head in decoder.outputs.values())
+    assert decoder.trunk_outputs is not None
+
+    head = decoder.outputs["buttons"]
+    features = torch.randn(3, 5, cfg.temporal_d_model)
+    expected = torch.nn.functional.linear(
+        torch.nn.functional.rms_norm(features, (cfg.temporal_d_model,), eps=1e-5),
+        head.output.weight,
+    )
+    torch.testing.assert_close(head(features), expected)
+
+
+def test_no_skip_arm_removes_only_trunk_output_parameters() -> None:
+    decoder = exp.GPT(_cfg(ablation_arm="D")).temporal
+    assert decoder.trunk_outputs is None
+    assert not any(name.startswith("temporal.trunk_outputs.") for name in exp.GPT(_cfg(ablation_arm="D")).state_dict())
+
+
+def test_ablation_parameter_and_flop_counts_reflect_the_active_model() -> None:
+    reports = {}
+    for arm in ("A", "B", "C", "D"):
+        cfg = _cfg(ablation_arm=arm)
+        counts = exp.subsystem_parameter_counts(exp.GPT(cfg))
+        reports[arm] = (counts["total"], exp.approximate_training_flops_per_update(cfg, counts))
+
+    assert reports["B"] == reports["A"]
+    assert reports["C"][0] < reports["A"][0]
+    assert reports["C"][1] < reports["A"][1]
+    assert reports["D"][0] < reports["A"][0]
+    assert reports["D"][1] < reports["A"][1]
 
 
 def test_historical_centers_and_complete_controller_grid_round_trip() -> None:
@@ -245,8 +342,9 @@ def test_analog_and_digital_shoulders_remain_separate() -> None:
     assert not decoded[..., exp.BUTTON_R_CH].any()
 
 
-def test_unused_classes_are_masked_in_every_training_and_inference_path() -> None:
-    cfg = _cfg()
+@pytest.mark.parametrize("arm", ("A", "B", "C", "D"))
+def test_unused_classes_are_masked_in_every_training_and_inference_path(arm: str) -> None:
+    cfg = _cfg(ablation_arm=arm)
     model = exp.GPT(cfg).eval()
     hidden = torch.randn(2, cfg.L_ctx, cfg.d_model)
     observed = torch.zeros(2, cfg.L_ctx, exp.N_GROUPS, dtype=torch.long)
@@ -270,6 +368,22 @@ def test_unused_classes_are_masked_in_every_training_and_inference_path() -> Non
         _assert_unused_are_masked(logits)
     for group, valid in enumerate(exp.LEGACY_GROUP_VOCABS):
         assert (rollout[..., group] < valid).all()
+
+
+@pytest.mark.parametrize("arm", ("A", "B", "C", "D"))
+def test_parallel_teacher_forcing_matches_stepwise_logits(arm: str) -> None:
+    cfg = _cfg(ablation_arm=arm)
+    model = exp.GPT(cfg).eval()
+    generator = torch.Generator().manual_seed(7)
+    hidden = torch.randn(2, cfg.L_ctx, cfg.d_model, generator=generator)
+    observed = torch.zeros(2, cfg.L_ctx, exp.N_GROUPS, dtype=torch.long)
+    targets = torch.zeros(2, cfg.L_ctx, len(cfg.head_offsets), exp.N_GROUPS, dtype=torch.long)
+
+    parallel = model.temporal.teacher_forced_logits_by_group(hidden, observed, targets)
+    stepwise = model.temporal.forced_stepwise_logits(hidden, observed[:, -1], targets[:, -1])
+    for depth, logits in enumerate(stepwise):
+        for name in exp.GROUP_NAMES:
+            torch.testing.assert_close(parallel[name][:, -1, depth], logits[name], atol=2e-5, rtol=2e-5)
 
 
 def test_live_sampler_only_receives_real_legacy_classes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -308,8 +422,9 @@ def test_masked_output_rows_receive_zero_gradient() -> None:
         assert trunk.weight.grad is not None and not trunk.weight.grad[valid:].any()
 
 
-def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path) -> None:
-    cfg = _cfg()
+@pytest.mark.parametrize("arm", ("A", "B", "C", "D"))
+def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path, arm: str) -> None:
+    cfg = _cfg(ablation_arm=arm)
     model = exp.GPT(cfg)
     loss = exp.objective(
         exp.action_loss(model, _batch(cfg)),
@@ -320,7 +435,7 @@ def test_cpu_loss_backward_and_checkpoint_round_trip(tmp_path: Path) -> None:
     assert torch.isfinite(loss)
     assert all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in model.parameters())
 
-    checkpoint = tmp_path / "state.pt"
+    checkpoint = tmp_path / f"state-{arm}.pt"
     torch.save(model.state_dict(), checkpoint)
     restored = exp.GPT(cfg)
     restored.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
@@ -474,11 +589,12 @@ def test_eval_backfills_both_suites_at_the_checkpoint_step(monkeypatch: pytest.M
     monkeypatch.setattr(
         exp,
         "_backfill_eval_metrics",
-        lambda wandb_id, step, values: calls.update(backfill=(wandb_id, step, values)),
+        lambda wandb_id, step, values, **kwargs: calls.update(backfill=(wandb_id, step, values, kwargs)),
     )
 
     result = exp.eval_checkpoint(
         str(checkpoint),
+        exec_horizon=4,
         max_parallel=16,
         upload_run="run",
         backfill_wandb=True,
@@ -487,10 +603,35 @@ def test_eval_backfills_both_suites_at_the_checkpoint_step(monkeypatch: pytest.M
     eval_kwargs = calls["eval"]
     assert eval_kwargs["n_matchups"] == 2
     assert eval_kwargs["inference"] == "inference"
-    assert eval_kwargs["replay_dir"].name == "eval_backfill_step_0016384_s1"
+    assert eval_kwargs["exec_horizon"] == 4
+    assert eval_kwargs["replay_dir"].name == "eval_backfill_step_0016384_s4"
     assert calls["upload"] == ("run", eval_kwargs["replay_dir"])
-    assert calls["backfill"] == ("id", 16_384, suites)
+    assert calls["backfill"] == ("id", 16_384, suites, {"suffix": "_s4"})
     assert result == suites
+
+
+def test_horizon_backfill_writes_suffixed_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, float]] = []
+
+    class Run:
+        summary: dict[str, object] = {}
+
+    monkeypatch.setattr(exp.wandb, "run", Run())
+    monkeypatch.setattr(exp.wandb, "init", lambda **kwargs: None)
+    monkeypatch.setattr(exp.wandb, "define_metric", lambda *args, **kwargs: None)
+    monkeypatch.setattr(exp.wandb, "log", lambda values: calls.append(values))
+    monkeypatch.setattr(exp.wandb, "finish", lambda: None)
+
+    exp._backfill_eval_metrics("id", 16_384, {"fox": {"boots": 96.0}}, suffix="_s4")
+
+    assert calls == [
+        {
+            "global_step": 16_384,
+            "eval/backfilled_s4": 1,
+            "eval_fox_s4/boots": 96.0,
+        }
+    ]
+    assert exp.wandb.run.summary["evaluation/backfilled_step_s4"] == 16_384
 
 
 def test_tiny_training_entrypoint_uses_legacy_codec(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

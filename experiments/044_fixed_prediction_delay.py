@@ -203,7 +203,8 @@ def prediction_target_offsets(cfg: TrainConfig) -> tuple[int, ...]:
 
 
 def _as_o43_config(cfg: TrainConfig, *, model_geometry: bool = False) -> Any:
-    values = {item.name: getattr(cfg, item.name) for item in fields(_O43_TRAIN_CONFIG)}
+    values = {item.name: getattr(cfg, item.name) for item in fields(_O43_TRAIN_CONFIG) if item.name != "ablation_arm"}
+    values["ablation_arm"] = "A"
     if model_geometry:
         values["sample_chunk_length"] = PREDICTION_STEPS[-1] + 1
     return _O43_TRAIN_CONFIG(**values)

@@ -6,6 +6,10 @@ reducer. The default treatment evaluates one frame at a time and gives offset 1
 half of the action objective; both settings can be reverted for the forensic
 ladder documented in ``docs/experiments/043_legacy_codec.md``.
 
+Architecture arms B-D separately test zero-initialized FiLM, linear action
+heads, and removal of the trunk-logit skip. Final evaluation runs at execution
+horizons 1 and 4.
+
 Run:
     uv run experiments/043_legacy_codec.py
     uv run experiments/043_legacy_codec.py --eval runs/<run>/final.pt
@@ -172,6 +176,20 @@ _LEGACY_C_SIGNED = (
 _LEGACY_TRIGGER_VALUES = (0.0, 0.35, 0.6, 0.85, 1.0)
 _LIVE_HORIZONS = (1, 4, 6)
 
+AblationArm = Literal["A", "B", "C", "D"]
+_ABLATION_DESCRIPTIONS: dict[AblationArm, str] = {
+    "A": "O43 baseline",
+    "B": "zero-initialized FiLM projections",
+    "C": "O42 normalized linear action heads",
+    "D": "trunk-logit skip removed",
+}
+_ABLATION_TAGS: dict[AblationArm, str] = {
+    "A": "",
+    "B": "-ablB-film0",
+    "C": "-ablC-linear-head",
+    "D": "-ablD-no-trunk-skip",
+}
+
 LEGACY_MAIN_CENTERS = torch.tensor(_LEGACY_MAIN_SIGNED, dtype=torch.float32)
 LEGACY_C_CENTERS = torch.tensor(_LEGACY_C_SIGNED, dtype=torch.float32)
 LEGACY_TRIGGER_CENTERS = torch.tensor(_LEGACY_TRIGGER_VALUES, dtype=torch.float32)
@@ -201,6 +219,7 @@ class TrainConfig:
 
     decoder_arch_version: int = 3
     codec_version: int = 2
+    ablation_arm: AblationArm = "A"
     sample_chunk_length: int = 20
     head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     temporal_d_model: int = 128
@@ -225,7 +244,7 @@ class TrainConfig:
     observation_bundle: str = "base"  # or v6_lean
 
     exec_horizon: int = 1
-    final_diag_exec_horizon: int = 1
+    final_diag_exec_horizon: int = 4
     decode_temp: float = 1.0
     inference_mode: str = "compiled"  # explicit "eager" is for debugging
     inference_buckets: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
@@ -259,7 +278,7 @@ class TrainConfig:
     eval_max_frames: int = 7200
     eval_n_matchups: int = 32
     final_eval_n_matchups: int = 96
-    final_diag_n_matchups: int = 0
+    final_diag_n_matchups: int = 96
     # Match the reference's 32-wide waves. The spawned evaluator admits at most
     # eight cold Dolphin startups at once, as in O41, avoiding a CPU thundering herd.
     eval_max_parallel: int | None = 32
@@ -312,6 +331,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(f"unsupported decoder_arch_version={cfg.decoder_arch_version}")
     if cfg.codec_version != 2:
         raise ValueError(f"unsupported codec_version={cfg.codec_version}")
+    if cfg.ablation_arm not in _ABLATION_DESCRIPTIONS:
+        raise ValueError(f"unknown ablation_arm={cfg.ablation_arm!r}")
     if cfg.d_model % cfg.n_heads or cfg.temporal_d_model % cfg.temporal_heads:
         raise ValueError("model dimensions must be divisible by their head counts")
     if (cfg.temporal_d_model // cfg.temporal_heads) % 2:
@@ -425,6 +446,11 @@ def amp_context(cfg: TrainConfig, device: torch.device | str):
 
 def decoder_rmsnorm(x: Tensor) -> Tensor:
     return F.rms_norm(x, (x.shape[-1],), eps=1e-6)
+
+
+def action_rmsnorm(x: Tensor) -> Tensor:
+    """Normalize an action-head input with O42's near-zero stability epsilon."""
+    return F.rms_norm(x, (x.shape[-1],), eps=1e-5)
 
 
 def legacy_button_classes(actions: Tensor) -> Tensor:
@@ -601,6 +627,17 @@ class NonlinearActionHead(nn.Module):
         return self.down(F.silu(self.up(decoder_rmsnorm(x))))
 
 
+class LinearActionHead(nn.Module):
+    """O42's scale-controlled linear action readout."""
+
+    def __init__(self, d_model: int, vocab: int) -> None:
+        super().__init__()
+        self.output = nn.Linear(d_model, vocab, bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.output(action_rmsnorm(x))
+
+
 TEMPORAL_SDPA_BATCH_LIMIT = 32_768
 
 
@@ -710,6 +747,19 @@ class CausalTemporalDecoder(nn.Module):
         self.trunk_outputs = nn.ModuleDict(
             {name: nn.Linear(cfg.d_model, GROUP_VOCABS[GROUP_INDEX[name]], bias=False) for name in GROUP_NAMES}
         )
+        # Build the complete A model before applying an arm. This keeps every
+        # retained parameter and the caller's RNG state identical to A.
+        if cfg.ablation_arm == "B":
+            for condition in self.group_condition.values():
+                nn.init.zeros_(condition.weight)
+                nn.init.zeros_(condition.bias)
+        elif cfg.ablation_arm == "C":
+            with torch.random.fork_rng(devices=[]):
+                self.outputs = nn.ModuleDict(
+                    {name: LinearActionHead(self.d_model, GROUP_VOCABS[GROUP_INDEX[name]]) for name in GROUP_NAMES}
+                )
+        elif cfg.ablation_arm == "D":
+            self.trunk_outputs = None
 
     def _tokens(self, hidden: Tensor, previous: Tensor) -> Tensor:
         batch, length = hidden.shape[:2]
@@ -742,17 +792,24 @@ class CausalTemporalDecoder(nn.Module):
         scale, shift = self.group_condition[name](prefix).chunk(2, dim=-1)
         return states * (1.0 + torch.tanh(scale)) + shift
 
+    def _group_logits(self, name: str, features: Tensor, trunk: Tensor | None) -> Tensor:
+        """Apply one action head and the optional O43 trunk-logit skip."""
+        logits = self.outputs[name](features)
+        if self.trunk_outputs is not None:
+            if trunk is None:
+                raise ValueError("trunk features are required when the trunk-logit skip is enabled")
+            trunk_logits = self.trunk_outputs[name](trunk)
+            if trunk_logits.ndim + 1 == logits.ndim:
+                trunk_logits = trunk_logits.unsqueeze(-2)
+            logits = logits + trunk_logits
+        return self.codec.mask_logits(name, logits)
+
     def teacher_forced_logits_by_group(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> dict[str, Tensor]:
         states = self.teacher_forced_states(hidden, observed, targets)
         embedded = self.codec.embed_groups(targets)
-        trunk = decoder_rmsnorm(hidden)
+        trunk = None if self.trunk_outputs is None else decoder_rmsnorm(hidden)
         logits = {
-            name: self.codec.mask_logits(
-                name,
-                self.outputs[name](self.group_features(states, name, embedded))
-                + self.trunk_outputs[name](trunk)[:, :, None],
-            )
-            for name in GROUP_NAMES
+            name: self._group_logits(name, self.group_features(states, name, embedded), trunk) for name in GROUP_NAMES
         }
         logits["buttons"] = logits["buttons"].masked_fill(self.codec.button_mask(targets[..., TRIG_G]), float("-inf"))
         return logits
@@ -779,7 +836,6 @@ class CausalTemporalDecoder(nn.Module):
         if targets.shape != (hidden.shape[0], len(self.head_offsets), N_GROUPS):
             raise ValueError("stepwise targets have the wrong shape")
         trunk = decoder_rmsnorm(hidden[:, -1])
-        trunk_logits = {name: self.trunk_outputs[name](trunk) for name in GROUP_NAMES}
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         out: list[dict[str, Tensor]] = []
@@ -797,10 +853,7 @@ class CausalTemporalDecoder(nn.Module):
             target = targets[:, depth]
             embedded = self.codec.embed_groups(target)
             group_logits = {
-                name: self.codec.mask_logits(
-                    name,
-                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name],
-                )
+                name: self._group_logits(name, self.group_features(state, name, embedded), trunk)
                 for name in GROUP_NAMES
             }
             group_logits["buttons"] = group_logits["buttons"].masked_fill(
@@ -826,7 +879,6 @@ class CausalTemporalDecoder(nn.Module):
         if uniforms is not None and uniforms.shape != (len(offsets), N_GROUPS, hidden.shape[0]):
             raise ValueError("uniform table must be [frames, groups, batch]")
         trunk = decoder_rmsnorm(hidden[:, -1])
-        trunk_logits = {name: self.trunk_outputs[name](trunk) for name in GROUP_NAMES}
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         frames: list[Tensor] = []
@@ -844,10 +896,7 @@ class CausalTemporalDecoder(nn.Module):
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
-                logits = self.codec.mask_logits(
-                    name,
-                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name],
-                )
+                logits = self._group_logits(name, self.group_features(state, name, embedded), trunk)
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 group = GROUP_INDEX[name]
@@ -873,7 +922,6 @@ class CausalTemporalDecoder(nn.Module):
         reachable from the closed-loop inference wrapper.
         """
         trunk = decoder_rmsnorm(hidden[:, -1])
-        trunk_logits = {name: self.trunk_outputs[name](trunk) for name in GROUP_NAMES}
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         frames: list[Tensor] = []
@@ -893,10 +941,7 @@ class CausalTemporalDecoder(nn.Module):
             picks: dict[str, Tensor] = {}
             frame_logits: dict[str, Tensor] = {}
             for name in GROUP_ORDER:
-                logits = self.codec.mask_logits(
-                    name,
-                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name],
-                )
+                logits = self._group_logits(name, self.group_features(state, name, embedded), trunk)
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 pick = logits.argmax(dim=-1)
@@ -1838,7 +1883,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         name=run_name,
         id=None if resume_state is None else resume_state.get("wandb_id"),
         resume="allow" if resume_state is not None else None,
-        tags=["gpt", "temporal-mtp", "sparse-offset", "043", "legacy-codec"],
+        tags=["gpt", "temporal-mtp", "sparse-offset", "043", "legacy-codec", f"arm-{cfg.ablation_arm}"],
         config=asdict(cfg),
         settings=wandb.Settings(
             x_stats_sampling_interval=5.0,
@@ -1852,13 +1897,15 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["nll_semantics"] = (
         "O26 BC objective: mean joint NLL at offsets 1-4 plus mean joint NLL at offsets 5,6,9,12,16,20"
     )
-    wandb.run.summary["architecture/treatment"] = "O26 architecture and objective; exact historical legacy codec"
+    wandb.run.summary["architecture/ablation_arm"] = cfg.ablation_arm
+    wandb.run.summary["architecture/treatment"] = _ABLATION_DESCRIPTIONS[cfg.ablation_arm]
     wandb.run.summary["data/sampler"] = "O26 replay reservoir"
     wandb.run.summary["data/source"] = cfg.data_root
     wandb.run.summary["data/replay_format"] = cfg.replay_format
     wandb.run.summary["data/validation_source"] = cfg.val_data_root
     wandb.run.summary["data/validation_replay_format"] = cfg.val_replay_format
     wandb.run.summary["evaluation/suites"] = "char_matchup,fox"
+    wandb.run.summary["evaluation/final_horizons"] = f"{cfg.exec_horizon},{cfg.final_diag_exec_horizon}"
     wandb.run.summary["training/updates"] = cfg.max_steps
     wandb.run.summary["data/nominal_samples"] = cfg.max_steps * cfg.batch_size
     wandb.run.summary["data/max_context_prefixes"] = cfg.max_steps * cfg.batch_size * cfg.L_ctx
@@ -1894,11 +1941,12 @@ def model_tag(cfg: TrainConfig) -> str:
     loss_tag = (
         "legacy-loss" if cfg.next_frame_loss_share is None else f"o1w{round(100 * cfg.next_frame_loss_share):02d}"
     )
-    return (
+    baseline = (
         f"mtp043-legacy-v{cfg.codec_version}-d{cfg.d_model}-L{cfg.n_layers}-h{cfg.n_heads}-Lc{cfg.L_ctx}-"
         f"t{cfg.temporal_d_model}x{cfg.temporal_layers}-o{offsets}-s{cfg.exec_horizon}-{loss_tag}-"
         f"{cfg.observation_bundle}"
     )
+    return baseline + _ABLATION_TAGS[cfg.ablation_arm]
 
 
 def log_wandb_code(run: wandb.Run) -> None:
@@ -2328,6 +2376,7 @@ def train(
 
 
 _CHECKPOINT_ARCH_FIELDS = {
+    "ablation_arm",
     "codec_version",
     "decoder_arch_version",
     "head_offsets",
@@ -2345,10 +2394,12 @@ _CHECKPOINT_ARCH_FIELDS = {
 
 
 def config_from_state(values: dict) -> TrainConfig:
+    values = dict(values)
+    # O43 checkpoints written before the ablation matrix are Arm A by definition.
+    values.setdefault("ablation_arm", "A")
     missing = _CHECKPOINT_ARCH_FIELDS - values.keys()
     if missing:
         raise ValueError(f"checkpoint is not an experiment-043 architecture; missing {sorted(missing)}")
-    values = dict(values)
     if "weight_decay" in values:
         values.setdefault("muon_weight_decay", values["weight_decay"])
         values.setdefault("adam_weight_decay", values["weight_decay"])
@@ -2373,15 +2424,27 @@ def _upload_eval_evidence(run_name: str, replay_dir: Path) -> None:
     uploader.close()
 
 
-def _backfill_eval_metrics(wandb_id: str, step: int, suites: dict[str, dict[str, float]]) -> None:
+def _backfill_eval_metrics(
+    wandb_id: str,
+    step: int,
+    suites: dict[str, dict[str, float]],
+    *,
+    suffix: str = "",
+) -> None:
     wandb.init(project="hal", id=wandb_id, resume="must")
     try:
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
-        wandb.log({"global_step": step, "eval/backfilled": 1, **eval_suite_wandb_metrics(suites)})
+        wandb.log(
+            {
+                "global_step": step,
+                f"eval/backfilled{suffix}": 1,
+                **eval_suite_wandb_metrics(suites, suffix=suffix),
+            }
+        )
         if wandb.run is not None:
             wandb.run.summary["run/status"] = "finished"
-            wandb.run.summary["evaluation/backfilled_step"] = step
+            wandb.run.summary[f"evaluation/backfilled_step{suffix}"] = step
     finally:
         wandb.finish()
 
@@ -2433,7 +2496,8 @@ def eval_checkpoint(
         wandb_id = state.get("wandb_id")
         if not isinstance(wandb_id, str):
             raise RuntimeError("checkpoint has no W&B run id to backfill")
-        _backfill_eval_metrics(wandb_id, step, suites)
+        suffix = "" if horizon == cfg.exec_horizon else f"_s{horizon}"
+        _backfill_eval_metrics(wandb_id, step, suites, suffix=suffix)
     print(f"[eval] step={step} horizon={horizon}: {suites}", flush=True)
     return suites
 

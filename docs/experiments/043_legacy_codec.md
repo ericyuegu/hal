@@ -36,10 +36,68 @@ of its total action-loss weight to offset 1. The other nine offsets share the
 remaining 50%. The objective retains the former total scale of 2, so this
 change does not halve the gradient scale.
 
+Periodic evaluation remains at H1. Final evaluation runs both H1 and H4, with
+96 matchups in each of the `char_matchup` and `fox` suites.
+
 Set `--cfg.next-frame-loss-share None` to restore the former O26 objective:
 the mean of offsets 1-4 plus the mean of offsets 5-20. Set
 `--cfg.exec-horizon 4` to restore H4 evaluation. These switches exist for the
 ladder below.
+
+## Architecture ablation matrix
+
+The completed default O43 run is Arm A. Three new runs separately test the
+architecture changes; no arm combines them.
+
+| Arm | Only change from A | Comparison |
+|---|---|---|
+| A | None; reuse the existing O43 run | Control |
+| B | Zero-initialize the existing FiLM projections | B - A: FiLM initialization |
+| C | Replace nonlinear action heads with O42's normalized, bias-free linear heads | C - A: linear heads |
+| D | Remove the trunk-logit skip | D - A: skip removal |
+
+Arm B keeps O43's FiLM equation exactly:
+
+```text
+state * (1 + tanh(scale)) + shift
+```
+
+It does not add O42's bounded scale or shift. Arm C retains the FiLM behavior
+and trunk skip. Arm D retains the nonlinear action heads and original FiLM
+initialization.
+
+Launch only the three treatment runs:
+
+```bash
+uv run experiments/043_legacy_codec.py \
+  --cfg.ablation-arm B \
+  --comment abl-b-zero-init-film
+
+uv run experiments/043_legacy_codec.py \
+  --cfg.ablation-arm C \
+  --comment abl-c-linear-head
+
+uv run experiments/043_legacy_codec.py \
+  --cfg.ablation-arm D \
+  --comment abl-d-no-trunk-skip
+```
+
+Arm A is W&B run `1imfy8v3` and R2 run
+`260828-203353_043_legacy_codec_mtp043-legacy-v2-d384-L8-h6-Lc128-t128x2-o1-2-3-4-5-6-9-12-16-20-s1-o1w50-base_ranked-anon-1_forensic-ranked-legacy-codec-h1-next50`.
+Its existing checkpoint supplies H1. Backfill only its H4 final evaluation:
+
+```bash
+uv run experiments/043_legacy_codec.py \
+  --eval final.pt \
+  --eval-run 260828-203353_043_legacy_codec_mtp043-legacy-v2-d384-L8-h6-Lc128-t128x2-o1-2-3-4-5-6-9-12-16-20-s1-o1w50-base_ranked-anon-1_forensic-ranked-legacy-codec-h1-next50 \
+  --eval-exec-horizon 4 \
+  --eval-n-matchups 96 \
+  --eval-backfill-wandb
+```
+
+The backfill writes H4 metrics with `_s4`; it does not replace A's H1 metrics.
+Use the saved `match_rows.json` files for the B - A, C - A, and D - A
+matched comparisons at each horizon.
 
 ## Cody membership finding
 
