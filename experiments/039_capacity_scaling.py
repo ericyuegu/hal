@@ -19,6 +19,7 @@ import json
 import math
 import tempfile
 import time
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
