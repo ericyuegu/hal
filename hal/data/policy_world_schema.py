@@ -194,13 +194,15 @@ def _world_frames(source: Mapping[str, object]) -> int:
     return frames
 
 
-def _select(values: np.ndarray, frames: int, name: str, ranges: tuple[tuple[int, int], ...]) -> np.ndarray:
+def _select(
+    values: np.ndarray,
+    frames: int,
+    name: str,
+    ranges: tuple[tuple[int, int], ...],
+) -> tuple[np.ndarray, ...]:
     if values.shape != (frames,):
         raise ValueError(f"{name} has shape {values.shape}; expected {(frames,)}")
-    if len(ranges) == 1:
-        start, stop = ranges[0]
-        return values[start:stop]
-    return np.concatenate([values[start:stop] for start, stop in ranges])
+    return tuple(values[start:stop] for start, stop in ranges)
 
 
 def decode_policy_world_replay_slices(
@@ -211,10 +213,9 @@ def decode_policy_world_replay_slices(
     if not outs:
         return ()
     lengths = [stop - start for start, stop in ranges]
-    boundaries = np.cumsum(lengths)[:-1]
 
-    def assign(name: str, values: np.ndarray) -> None:
-        for out, part in zip(outs, np.split(values, boundaries), strict=True):
+    def assign(name: str, parts: tuple[np.ndarray, ...]) -> None:
+        for out, part in zip(outs, parts, strict=True):
             out[name] = part
 
     for prefix in ("p1", "p2"):
@@ -224,23 +225,28 @@ def decode_policy_world_replay_slices(
         for out, length in zip(outs, lengths, strict=True):
             out[f"{prefix}_rank"] = np.full(length, rank, dtype=np.uint8)
 
-    presence = _select(np.asarray(source["item_present"]), frames, "item_present", ranges)
-    if presence.dtype != np.uint8:
-        raise TypeError(f"item_present must be uint8, got {presence.dtype}")
-    if (presence & ~np.uint8((1 << ITEM_SLOTS) - 1)).any():
-        raise ValueError("item_present uses reserved bits")
+    presence_parts = _select(np.asarray(source["item_present"]), frames, "item_present", ranges)
+    for presence in presence_parts:
+        if presence.dtype != np.uint8:
+            raise TypeError(f"item_present must be uint8, got {presence.dtype}")
+        if (presence & ~np.uint8((1 << ITEM_SLOTS) - 1)).any():
+            raise ValueError("item_present uses reserved bits")
     for slot in range(ITEM_SLOTS):
-        present = ((presence >> slot) & 1).astype(bool)
+        present_parts = tuple(((presence >> slot) & 1).astype(bool) for presence in presence_parts)
         meta_name = f"item{slot}_meta"
-        meta = _select(np.asarray(source[meta_name]), frames, meta_name, ranges)
-        for suffix, values in _unpack_item_meta(meta, present).items():
-            assign(item_column(slot, suffix), values)
+        meta_parts = _select(np.asarray(source[meta_name]), frames, meta_name, ranges)
+        decoded_meta = tuple(
+            _unpack_item_meta(meta, present) for meta, present in zip(meta_parts, present_parts, strict=True)
+        )
+        for suffix in ITEM_INT_SUFFIXES:
+            assign(item_column(slot, suffix), tuple(decoded[suffix] for decoded in decoded_meta))
         for suffix in ITEM_FLOAT_SUFFIXES:
             name = item_column(slot, suffix)
-            values = _select(np.asarray(source[name], dtype=np.float32), frames, name, ranges)
-            if (~present & ~np.isnan(values)).any():
-                raise ValueError(f"{name} is populated for an absent item slot")
-            assign(name, values)
+            parts = _select(np.asarray(source[name], dtype=np.float32), frames, name, ranges)
+            for values, present in zip(parts, present_parts, strict=True):
+                if (~present & ~np.isnan(values)).any():
+                    raise ValueError(f"{name} is populated for an absent item slot")
+            assign(name, parts)
     return tuple(outs)
 
 

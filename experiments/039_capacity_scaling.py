@@ -24,6 +24,8 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -37,10 +39,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from botocore.exceptions import ClientError
 from torch import Tensor
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.behavior import HITSTUN_ACTIONS
@@ -102,6 +104,16 @@ CAPACITY_LEVELS: tuple[int, ...] = (5, 7, 10, 13, 16, 18)
 GRAD_ACCUM_BY_LEVEL: dict[int, int] = {5: 32, 7: 32, 10: 32, 13: 64, 16: 64, 18: 128}
 BASELINE_026_GRAD_ACCUM = 32
 PROCESSED_POSITION_EXPONENTS: tuple[int, ...] = (26, 27, 28, 29, 30)
+EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL: dict[int, tuple[int, ...]] = {
+    5: (1_621_761_184,),
+    7: (1_141_118_368, 3_803_727_888),
+    10: (1_493_689_000,),
+}
+EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL: dict[int, int] = {
+    5: 2**30,
+    7: 2**30,
+    10: 2**30,
+}
 DELAY_BUCKETS: tuple[int, ...] = (1, 2, 4, 6, 8, 10, 12, 14, 16)
 HEAD_OFFSETS: tuple[int, ...] = tuple(range(1, 37))
 FRAME_TIME_MS = 1000.0 / 60.0
@@ -168,7 +180,7 @@ class TrainConfig:
     control_delay: int = 1
     replan_interval: int = 1
     delay_buckets: tuple[int, ...] = DELAY_BUCKETS
-    evaluation_delays: tuple[int, ...] = DELAY_BUCKETS
+    evaluation_delays: tuple[int, ...] = (1,)
     decode_temp: float = 1.0
     inference_mode: str = "compiled"  # explicit "eager" is for debugging
     inference_buckets: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
@@ -291,6 +303,28 @@ def cooldown_positions(target: int, fraction: float) -> int:
 
 def branch_position(target: int, fraction: float) -> int:
     return target - cooldown_positions(target, fraction)
+
+
+def _standard_endpoints() -> tuple[int, ...]:
+    return tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS)
+
+
+def _exact_isoflop_endpoints(cfg: TrainConfig) -> tuple[int, ...]:
+    if cfg.model_family != "scaled":
+        return ()
+    return EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL.get(cfg.n_layers, ())
+
+
+def _is_exact_isoflop_endpoint(cfg: TrainConfig) -> bool:
+    return cfg.target_processed_positions in _exact_isoflop_endpoints(cfg)
+
+
+def _adam_weight_decay_endpoint(cfg: TrainConfig) -> int:
+    if cfg.target_processed_positions in _standard_endpoints():
+        return 2**30
+    if _is_exact_isoflop_endpoint(cfg):
+        return EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL[cfg.n_layers]
+    return cfg.target_processed_positions
 
 
 def decode_horizon(delay: int, replan_interval: int) -> int:
@@ -416,8 +450,15 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("phase must be 'prefix' or 'cooldown'")
     if cfg.unique_data_divisor not in (1, 2, 4):
         raise ValueError("unique_data_divisor must be 1, 2, or 4")
-    if cfg.target_processed_positions not in tuple(2**exponent for exponent in PROCESSED_POSITION_EXPONENTS):
+    standard_endpoints = _standard_endpoints()
+    if cfg.target_processed_positions not in standard_endpoints and not _is_exact_isoflop_endpoint(cfg):
         raise ValueError("target_processed_positions is not a study endpoint")
+    expected_decay_endpoint = _adam_weight_decay_endpoint(cfg)
+    if cfg.adam_weight_decay_endpoint != expected_decay_endpoint:
+        raise ValueError(
+            f"adam_weight_decay_endpoint must be {expected_decay_endpoint} for this endpoint, "
+            f"got {cfg.adam_weight_decay_endpoint}"
+        )
     for name, value in (("warmup_fraction", cfg.warmup_fraction), ("cooldown_fraction", cfg.cooldown_fraction)):
         if not math.isfinite(value) or not 0 < value < 1:
             raise ValueError(f"{name} must be finite and strictly between zero and one")
@@ -2213,12 +2254,18 @@ def _write_eval_progress(
         uploader.upload(path)
 
 
-def _make_train_loader(cfg: TrainConfig, stats: dict[str, FeatureStats], audit: DatasetAudit):
+def _make_train_loader(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    audit: DatasetAudit,
+    *,
+    loader_workers: int = 0,
+):
     kwargs = loader_kwargs(cfg, stats)
     if cfg.compact_data:
         return make_reservoir_loader(
             split="train",
-            num_workers=cfg.num_workers,
+            num_workers=loader_workers,
             prefetch_factor=cfg.prefetch_factor,
             predownload=cfg.predownload,
             windows_per_replay=cfg.windows_per_replay,
@@ -2229,7 +2276,7 @@ def _make_train_loader(cfg: TrainConfig, stats: dict[str, FeatureStats], audit: 
         )
     return make_loader(
         split="train",
-        num_workers=cfg.num_workers,
+        num_workers=loader_workers,
         prefetch_factor=cfg.prefetch_factor,
         windows_per_replay=cfg.windows_per_replay,
         compact=False,
@@ -2237,9 +2284,15 @@ def _make_train_loader(cfg: TrainConfig, stats: dict[str, FeatureStats], audit: 
     )
 
 
-def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats], audit: DatasetAudit):
+def _make_loaders(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    audit: DatasetAudit,
+    *,
+    loader_workers: int = 0,
+):
     kwargs = loader_kwargs(cfg, stats)
-    train_loader = _make_train_loader(cfg, stats, audit)
+    train_loader = _make_train_loader(cfg, stats, audit, loader_workers=loader_workers)
     val_kwargs = {**kwargs, "batch_size": cfg.val_batch_size}
     val_loader = make_loader(split=cfg.val_split, num_workers=0, compact=cfg.compact_data, **val_kwargs)
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
@@ -2330,6 +2383,37 @@ def _valid_position_mask(batch: TrainBatch, cfg: TrainConfig) -> Tensor:
 type PendingBatch = tuple[TrainBatch, Tensor]
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedUpdate:
+    work: list[PendingBatch]
+    service_seconds: float
+
+
+class OrderedUpdateSource:
+    """Load complete optimizer updates while keeping iterator rollover ordered."""
+
+    def __init__(self, train_loader, cfg: TrainConfig) -> None:
+        self._train_loader = train_loader
+        self._cfg = cfg
+        self._iterator = iter(train_loader)
+
+    def load(self, count: int) -> list[LoadedUpdate]:
+        loaded = []
+        for _ in range(count):
+            started = time.monotonic()
+            work = []
+            while len(work) < self._cfg.grad_accum_steps:
+                try:
+                    batch = next(self._iterator)
+                except StopIteration:
+                    self._iterator = iter(self._train_loader)
+                    batch = next(self._iterator)
+                validate_batch_geometry(batch, self._cfg, micro_batch_size(self._cfg))
+                work.append((batch, _valid_position_mask(batch, self._cfg).cpu()))
+            loaded.append(LoadedUpdate(work=work, service_seconds=time.monotonic() - started))
+        return loaded
+
+
 def _select_position_work(
     work: list[PendingBatch], maximum_positions: int
 ) -> tuple[list[PendingBatch], list[PendingBatch], int]:
@@ -2395,8 +2479,18 @@ def _checkpoint_extra(
     }
 
 
+def _prefix_branch_targets(cfg: TrainConfig) -> tuple[int, ...]:
+    if not _is_exact_isoflop_endpoint(cfg):
+        return (
+            _standard_endpoints()
+            if cfg.target_processed_positions in _standard_endpoints()
+            else (cfg.target_processed_positions,)
+        )
+    return tuple(target for target in _exact_isoflop_endpoints(cfg) if target <= cfg.target_processed_positions)
+
+
 def _prefix_branch_positions(cfg: TrainConfig) -> tuple[int, ...]:
-    return tuple(branch_position(2**exponent, cfg.cooldown_fraction) for exponent in PROCESSED_POSITION_EXPONENTS)
+    return tuple(branch_position(target, cfg.cooldown_fraction) for target in _prefix_branch_targets(cfg))
 
 
 def _training_stop(cfg: TrainConfig) -> int:
@@ -2410,10 +2504,20 @@ def run_name_for(cfg: TrainConfig, total_parameters: int) -> str:
     unique_label = "U1" if cfg.unique_data_divisor == 1 else f"U1d{cfg.unique_data_divisor}"
     tau_label = "tauPL" if cfg.adam_tau_scaling == "powerlines" else "tauFixed"
     if cfg.phase == "prefix":
-        exposure = "prefix-D2p30"
+        exposure = f"prefix-{endpoint_label(max(_prefix_branch_targets(cfg)))}"
     else:
-        exposure = f"D2p{int(math.log2(cfg.target_processed_positions))}"
+        exposure = endpoint_label(cfg.target_processed_positions)
     return f"cap-{capacity}-{width_label}-{parameter_label}-{unique_label}-{exposure}-{tau_label}"
+
+
+def endpoint_label(target: int) -> str:
+    if target > 0 and target & (target - 1) == 0:
+        return f"D2p{target.bit_length() - 1}"
+    return f"D{target}"
+
+
+def branch_checkpoint_name(target: int) -> str:
+    return f"branch_{endpoint_label(target)}.pt"
 
 
 def _configs_match_for_branch(source: TrainConfig, target: TrainConfig) -> None:
@@ -2433,6 +2537,62 @@ def _configs_match_for_branch(source: TrainConfig, target: TrainConfig) -> None:
         raise ValueError("terminal cooldown branch must be positive")
 
 
+def _configs_match_for_prefix_fork(
+    source: TrainConfig,
+    target: TrainConfig,
+    processed_positions: int,
+) -> None:
+    if source.phase != "prefix" or target.phase != "prefix":
+        raise ValueError("an exact prefix fork requires prefix source and target configurations")
+    if not _is_exact_isoflop_endpoint(target):
+        raise ValueError("an exact prefix fork target must be the model's registered IsoFLOP endpoint")
+    expected_source_target = EXACT_ISOFLOP_PREFIX_SOURCE_BY_LEVEL.get(target.n_layers)
+    if source.target_processed_positions != expected_source_target:
+        raise ValueError(
+            f"exact prefix fork for L={target.n_layers} requires source target {expected_source_target}, "
+            f"got {source.target_processed_positions}"
+        )
+    allowed = {"target_processed_positions", "evaluation_delays"}
+    for field in fields(TrainConfig):
+        if field.name in allowed:
+            continue
+        if getattr(source, field.name) != getattr(target, field.name):
+            raise ValueError(
+                f"prefix fork changed {field.name}: source={getattr(source, field.name)!r}, "
+                f"target={getattr(target, field.name)!r}"
+            )
+    if processed_positions not in _prefix_branch_positions(source):
+        raise ValueError(f"prefix fork source position {processed_positions} is not a saved branch boundary")
+    stop = branch_position(target.target_processed_positions, target.cooldown_fraction)
+    if processed_positions >= stop:
+        raise ValueError(f"prefix fork source position {processed_positions} must precede target branch {stop}")
+
+
+def _validate_prefix_fork_state(state: dict, target: TrainConfig, total_parameters: int) -> None:
+    required = {
+        "cfg",
+        "checkpoint_schema",
+        "cuda_rng_state",
+        "data_state",
+        "model",
+        "numpy_rng_state",
+        "opt",
+        "pending_batches",
+        "processed_positions",
+        "torch_rng_state",
+        "update",
+    }
+    missing = sorted(required - state.keys())
+    if missing:
+        raise ValueError(f"prefix fork checkpoint is missing state: {missing}")
+    if state["checkpoint_schema"] != 2:
+        raise ValueError("checkpoint predates exact position/dataloader resumption")
+    scale = adam_scale(target, total_parameters)
+    resolved_target = replace(target, adam_weight_decay=scale.weight_decay)
+    source = config_from_state(state["cfg"])
+    _configs_match_for_prefix_fork(source, resolved_target, int(state["processed_positions"]))
+
+
 def train(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
@@ -2441,10 +2601,28 @@ def train(
     requested_run_name: str,
     resume_state: dict | None = None,
     branch_state: dict | None = None,
-) -> None:
+    prefix_fork_state: dict | None = None,
+    loader_workers: int = 0,
+    loader_prefetch_updates: int = 1,
+    throughput_probe_warmup: int | None = None,
+    throughput_probe_updates: int | None = None,
+) -> dict[str, object] | None:
     """Train a shared stable prefix or one exact terminal-cooldown endpoint."""
-    if resume_state is not None and branch_state is not None:
-        raise ValueError("a run cannot both resume and branch")
+    states = [state for state in (resume_state, branch_state, prefix_fork_state) if state is not None]
+    if len(states) > 1:
+        raise ValueError("a run cannot resume, branch, and fork at the same time")
+    if loader_workers < 0:
+        raise ValueError("loader_workers must be non-negative")
+    if loader_prefetch_updates not in (1, 2):
+        raise ValueError("loader_prefetch_updates must be 1 or 2")
+    probe = throughput_probe_warmup is not None or throughput_probe_updates is not None
+    if probe and (
+        throughput_probe_warmup is None
+        or throughput_probe_updates is None
+        or throughput_probe_warmup < 0
+        or throughput_probe_updates < 1
+    ):
+        raise ValueError("a throughput probe requires non-negative warmup and positive measured updates")
     validate_config(cfg)
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -2455,8 +2633,9 @@ def train(
     cfg = replace(cfg, adam_weight_decay=scale.weight_decay)
     validate_config(cfg)
     run_name = requested_run_name
-    uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
-    state = resume_state if resume_state is not None else branch_state
+    uploader = BackgroundUploader(run_name) if cfg.push_to_r2 and not probe else None
+    state = states[0] if states else None
+    resume_wandb_id = None if resume_state is None else resume_state.get("wandb_id")
     wandb.init(
         project="hal",
         group=WANDB_GROUP,
@@ -2476,6 +2655,7 @@ def train(
             "adam_tau": scale.tau,
             "adam_weight_decay": scale.weight_decay,
         },
+        mode="disabled" if probe else None,
     )
     if wandb.run is not None:
         wandb.define_metric("processed_positions")
@@ -2505,6 +2685,8 @@ def train(
         source_cfg = config_from_state(state["cfg"])
         if branch_state is not None:
             _configs_match_for_branch(source_cfg, cfg)
+        elif prefix_fork_state is not None:
+            _validate_prefix_fork_state(prefix_fork_state, cfg, counts["total"])
         elif source_cfg != cfg:
             raise ValueError("run configuration changed across exact resume")
         if state.get("checkpoint_schema") != 2:
@@ -2517,10 +2699,12 @@ def train(
         pending = state["pending_batches"]
         if resume_state is not None:
             scheduler.load_state_dict(state["sched"])
-        else:
+        elif branch_state is not None:
             expected = branch_position(cfg.target_processed_positions, cfg.cooldown_fraction)
             if processed_positions != expected:
                 raise ValueError(f"cooldown needs branch at {expected}, got {processed_positions}")
+            scheduler.step(processed_positions)
+        else:
             scheduler.step(processed_positions)
 
     def trunk_fn(features, pad, actions):
@@ -2532,21 +2716,30 @@ def train(
     if DEVICE == "cuda" and cfg.compile_temporal:
         temporal_fn = torch.compile(temporal_fn, dynamic=False)
 
-    train_loader, val_cache = _make_loaders(cfg, stats, audit)
+    train_loader, val_cache = _make_loaders(cfg, stats, audit, loader_workers=loader_workers)
     if state is not None:
         train_loader.load_state_dict(state["data_state"])
-    iterator = iter(train_loader)
+    update_source = OrderedUpdateSource(train_loader, cfg)
     if state is not None:
         _restore_rng(state)
     copy_stream = torch.cuda.Stream() if DEVICE == "cuda" else None
     stop_position = _training_stop(cfg)
-    branch_exponents = {
-        branch_position(2**exponent, cfg.cooldown_fraction): exponent for exponent in PROCESSED_POSITION_EXPONENTS
-    }
-    branches = set(branch_exponents) if cfg.phase == "prefix" else set()
+    branch_targets = {branch_position(target, cfg.cooldown_fraction): target for target in _prefix_branch_targets(cfg)}
+    branches = set(branch_targets) if cfg.phase == "prefix" else set()
     completed_branches = {position for position in branches if position <= processed_positions}
     run_started = time.monotonic()
     model.train()
+    prefetch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="optimizer-update")
+    prefetched: deque[Future[list[LoadedUpdate]]] = deque()
+    probe_rows: list[dict[str, float]] = []
+    probe_total = 0 if not probe else throughput_probe_warmup + throughput_probe_updates
+    probe_completed = 0
+    probe_start_positions = processed_positions
+
+    def drain_prefetch() -> None:
+        while prefetched:
+            for loaded in prefetched.popleft().result():
+                pending.extend(loaded.work)
 
     def save(path: Path) -> None:
         save_checkpoint(
@@ -2568,33 +2761,53 @@ def train(
         )
 
     try:
-        while processed_positions < stop_position:
+        while processed_positions < stop_position and (not probe or probe_completed < probe_total):
+            update_started = time.monotonic()
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
-            loader_started = time.monotonic()
-            work = pending
+            available = pending
             pending = []
+            loader_service = 0.0
+            uncovered_started = time.monotonic()
+            if len(available) < cfg.grad_accum_steps:
+                if prefetched:
+                    loaded = prefetched.popleft().result()[0]
+                else:
+                    loaded = update_source.load(1)[0]
+                loader_service = loaded.service_seconds
+                available.extend(loaded.work)
+            loader_wait = time.monotonic() - uncovered_started
+            work = available[: cfg.grad_accum_steps]
+            pending.extend(available[cfg.grad_accum_steps :])
             while len(work) < cfg.grad_accum_steps:
-                try:
-                    batch = next(iterator)
-                except StopIteration:
-                    iterator = iter(train_loader)
-                    batch = next(iterator)
-                validate_batch_geometry(batch, cfg, micro_batch_size(cfg))
-                work.append((batch, _valid_position_mask(batch, cfg).cpu()))
+                loaded = update_source.load(1)[0]
+                loader_service += loaded.service_seconds
+                needed = cfg.grad_accum_steps - len(work)
+                work.extend(loaded.work[:needed])
+                pending.extend(loaded.work[needed:])
 
             upcoming = [stop_position]
-            if cfg.phase == "prefix":
+            if cfg.phase == "prefix" and not probe:
                 upcoming.extend(
                     position for position in branches - completed_branches if position > processed_positions
                 )
             boundary = min(upcoming)
-            selected, pending, valid_prefixes = _select_position_work(work, boundary - processed_positions)
+            selected, boundary_pending, valid_prefixes = _select_position_work(work, boundary - processed_positions)
+            pending = boundary_pending + pending
             if valid_prefixes <= 0:
                 raise RuntimeError("training update contains no loss-bearing positions")
             next_processed = processed_positions + valid_prefixes
             scheduler.step(next_processed)
-            loader_wait = time.monotonic() - loader_started
+            next_update = update + 1
+            branch_due = not probe and cfg.phase == "prefix" and next_processed in branches - completed_branches
+            val_due = not probe and cfg.val_every > 0 and next_update % cfg.val_every == 0
+            ckpt_due = not probe and cfg.ckpt_every > 0 and next_update % cfg.ckpt_every == 0
+            final_due = next_processed >= stop_position or (probe and probe_completed + 1 >= probe_total)
+            boundary_due = branch_due or val_due or ckpt_due or final_due
+            if not boundary_due and not pending:
+                while len(prefetched) < loader_prefetch_updates:
+                    prefetched.append(prefetch_pool.submit(update_source.load, 1))
+            loader_cache_size = len(prefetched)
             optimizer.zero_grad()
             nll_sum = torch.zeros(len(cfg.head_offsets), N_GROUPS, device=DEVICE)
             n_prefixes = 0
@@ -2622,6 +2835,21 @@ def train(
                     torch.cuda.synchronize()
             processed_positions = next_processed
             update += 1
+            if boundary_due:
+                boundary_wait_started = time.monotonic()
+                drain_prefetch()
+                loader_wait += time.monotonic() - boundary_wait_started
+            update_wall = time.monotonic() - update_started
+            if probe and probe_completed >= throughput_probe_warmup:
+                probe_rows.append(
+                    {
+                        "loader_service_s": loader_service,
+                        "uncovered_wait_s": loader_wait,
+                        "update_wall_s": update_wall,
+                        "loss_positions": float(valid_prefixes),
+                    }
+                )
+            probe_completed += 1
             metrics = nll_mean_metrics((nll_sum / n_prefixes).cpu(), cfg.head_offsets)
             log = {
                 "global_step": update,
@@ -2634,7 +2862,13 @@ def train(
                 **{f"train/{name}": value for name, value in metrics.items()},
                 "train/grad_norm": float(gradient_norm),
                 "throughput/step_s": stopwatch.elapsed,
-                "throughput/loader_wait_s": loader_wait,
+                "throughput/loader_service_s": loader_service,
+                "throughput/loader_uncovered_wait_s": loader_wait,
+                "throughput/loader_wait_fraction": loader_wait / max(update_wall, 1e-12),
+                "throughput/update_wall_s": update_wall,
+                "throughput/loader_workers": loader_workers,
+                "throughput/loader_cache_updates": loader_cache_size,
+                "throughput/loader_cache_limit_gb": cfg.cache_limit_gb,
                 "throughput/loss_positions_per_s": valid_prefixes / stopwatch.elapsed,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
@@ -2651,12 +2885,10 @@ def train(
                     flush=True,
                 )
 
-            if cfg.phase == "prefix" and processed_positions in branches - completed_branches:
-                exponent = branch_exponents[processed_positions]
-                save(run_dir / f"branch_D2p{exponent}.pt")
+            if not probe and cfg.phase == "prefix" and processed_positions in branches - completed_branches:
+                target = branch_targets[processed_positions]
+                save(run_dir / branch_checkpoint_name(target))
                 completed_branches.add(processed_positions)
-            val_due = cfg.val_every > 0 and update % cfg.val_every == 0
-            ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0
             if val_due or ckpt_due:
                 save(run_dir / "latest.pt")
             if val_due:
@@ -2670,6 +2902,47 @@ def train(
                 )
                 model.train()
 
+        drain_prefetch()
+        if probe:
+            waits = np.array([row["uncovered_wait_s"] for row in probe_rows])
+            walls = np.array([row["update_wall_s"] for row in probe_rows])
+            positions = np.array([row["loss_positions"] for row in probe_rows])
+            services = np.array([row["loader_service_s"] for row in probe_rows])
+            measured_seconds = float(walls.sum())
+            rate = float(positions.sum() / measured_seconds)
+            p95_wait = float(np.quantile(waits, 0.95))
+            p95_wait_fraction = float(np.quantile(waits / walls, 0.95))
+            mean_wall = float(walls.mean())
+            forecast_positions = max(cfg.target_processed_positions - probe_start_positions, 0)
+            forecast_hours = forecast_positions / rate / 3600.0
+            payload: dict[str, object] = {
+                "schema_version": 1,
+                "model": model_tag(cfg),
+                "loader_workers": loader_workers,
+                "loader_prefetch_updates": loader_prefetch_updates,
+                "loader_cache_limit_gb": cfg.cache_limit_gb,
+                "warmup_updates": throughput_probe_warmup,
+                "measured_updates": throughput_probe_updates,
+                "mean_loader_service_s": float(services.mean()),
+                "std_loader_service_s": float(services.std()),
+                "p95_uncovered_wait_s": p95_wait,
+                "mean_update_wall_s": mean_wall,
+                "std_update_wall_s": float(walls.std()),
+                "uncovered_wait_fraction": float(waits.sum() / measured_seconds),
+                "p95_uncovered_wait_fraction": p95_wait_fraction,
+                "loss_positions_per_s": rate,
+                "forecast_loss_positions": forecast_positions,
+                "remaining_path_forecast_hours": forecast_hours,
+                "loader_gate_pass": p95_wait <= 0.10 and p95_wait_fraction <= 0.10,
+                "forecast_gate_pass": forecast_hours < 20.0,
+                "cuda_device": torch.cuda.get_device_name() if DEVICE == "cuda" else "cpu",
+            }
+            probe_path = run_dir / "loader_probe.json"
+            temporary = probe_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            temporary.replace(probe_path)
+            print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+            return payload
         save(run_dir / "latest.pt")
         final_path = run_dir / "final.pt"
         save(final_path)
@@ -2744,6 +3017,7 @@ def train(
                     for name, value in values.items():
                         wandb.run.summary[f"eval_d{delay}/{name}"] = value
     finally:
+        prefetch_pool.shutdown(wait=True, cancel_futures=True)
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
             uploader.close()
@@ -3018,8 +3292,12 @@ class Args:
     baseline_026: bool = False
     phase: str = "prefix"
     target_d_exp: int = 30
+    target_positions: int | None = None
     unique_data_divisor: int = 1
     resume: str | None = None
+    resume_checkpoint: str = "latest.pt"
+    prefix_fork_from_run: str | None = None
+    prefix_fork_checkpoint: str | None = None
     branch_from_run: str | None = None
     eval: str | None = None
     eval_delay: int | None = None
@@ -3034,21 +3312,65 @@ class Args:
     training_smoke: bool = False
     training_smoke_output_dir: str = "results/039_training_smoke"
     audit_only: bool = False
+    loader_workers: int = 8
+    loader_prefetch_updates: int = 1
+    throughput_probe_from_run: str | None = None
+    throughput_probe_checkpoint: str = "latest.pt"
+    throughput_probe_warmup: int = 32
+    throughput_probe_updates: int = 256
 
 
 def requested_config(args: Args) -> TrainConfig:
+    target = 2**args.target_d_exp if args.target_positions is None else args.target_positions
     base = replace(
         args.cfg,
         phase=args.phase,
-        target_processed_positions=2**args.target_d_exp,
+        target_processed_positions=target,
         unique_data_divisor=args.unique_data_divisor,
     )
-    return baseline_026_config(base) if args.baseline_026 else scaled_config(args.model_l, base)
+    cfg = baseline_026_config(base) if args.baseline_026 else scaled_config(args.model_l, base)
+    return replace(cfg, adam_weight_decay_endpoint=_adam_weight_decay_endpoint(cfg))
 
 
 def main(args: Args) -> None:
+    if args.loader_workers < 0:
+        raise SystemExit("--loader-workers must be non-negative")
+    if args.loader_prefetch_updates not in (1, 2):
+        raise SystemExit("--loader-prefetch-updates must be 1 or 2")
+    if args.throughput_probe_warmup < 0 or args.throughput_probe_updates < 1:
+        raise SystemExit("throughput probe warmup must be non-negative and measured updates must be positive")
+    if Path(args.throughput_probe_checkpoint).name != args.throughput_probe_checkpoint or not (
+        args.throughput_probe_checkpoint.endswith(".pt")
+    ):
+        raise SystemExit("--throughput-probe-checkpoint must be one checkpoint filename ending in .pt")
+    probe_mode = args.throughput_probe_from_run is not None
+    has_prefix_fork = args.prefix_fork_from_run is not None or args.prefix_fork_checkpoint is not None
+    if (args.prefix_fork_from_run is None) != (args.prefix_fork_checkpoint is None):
+        raise SystemExit("--prefix-fork-from-run and --prefix-fork-checkpoint must be provided together")
+    if has_prefix_fork and (
+        args.resume is not None
+        or args.branch_from_run is not None
+        or args.eval is not None
+        or args.benchmark
+        or args.training_smoke
+        or args.audit_only
+        or probe_mode
+    ):
+        raise SystemExit("an exact prefix fork cannot be combined with another execution mode")
+    if args.target_positions is not None and (args.resume is not None or args.eval is not None):
+        raise SystemExit("--target-positions is only valid for fresh training, probes, smoke, or audit")
+    if args.resume is None and args.resume_checkpoint != "latest.pt":
+        raise SystemExit("--resume-checkpoint requires --resume")
+
     if args.eval is not None:
-        if args.benchmark or args.training_smoke or args.resume is not None or args.audit_only:
+        if (
+            args.benchmark
+            or args.training_smoke
+            or args.resume is not None
+            or has_prefix_fork
+            or args.audit_only
+            or probe_mode
+        ):
             raise SystemExit("--eval cannot be combined with benchmark, training smoke, resume, or audit")
         eval_checkpoint(
             args.eval,
@@ -3061,15 +3383,72 @@ def main(args: Args) -> None:
         )
         return
 
+    if probe_mode:
+        if (
+            args.resume is not None
+            or has_prefix_fork
+            or args.branch_from_run is not None
+            or args.benchmark
+            or args.training_smoke
+            or args.audit_only
+        ):
+            raise SystemExit("--throughput-probe-from-run cannot be combined with another execution mode")
+        probe_run = args.throughput_probe_from_run
+        if probe_run is None:
+            raise AssertionError("probe mode lost its source run")
+        if args.target_positions is None:
+            raise SystemExit("--throughput-probe-from-run requires the addition's --target-positions")
+        probe_state = load_for_resume(
+            probe_run,
+            Path("runs") / probe_run,
+            device="cpu",
+            name=args.throughput_probe_checkpoint,
+        )
+        if probe_state is None:
+            raise SystemExit(f"no {args.throughput_probe_checkpoint} for run {probe_run!r}")
+        if args.phase != "prefix":
+            raise SystemExit("an endpoint throughput probe requires --phase prefix")
+        cfg = requested_config(args)
+        _validate_prefix_fork_state(probe_state, cfg, parameter_counts_for_config(cfg)["total"])
+        validate_config(cfg)
+        stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
+        audit = dataset_audit(cfg)
+        train(
+            cfg,
+            stats,
+            audit,
+            requested_run_name=(f"{probe_run}-loader-probe-w{args.loader_workers}-p{args.loader_prefetch_updates}"),
+            prefix_fork_state=probe_state,
+            loader_workers=args.loader_workers,
+            loader_prefetch_updates=args.loader_prefetch_updates,
+            throughput_probe_warmup=args.throughput_probe_warmup,
+            throughput_probe_updates=args.throughput_probe_updates,
+        )
+        return
+
     if args.resume is not None:
-        if args.benchmark or args.training_smoke or args.audit_only or args.branch_from_run is not None:
+        if (
+            args.benchmark
+            or args.training_smoke
+            or args.audit_only
+            or has_prefix_fork
+            or args.branch_from_run is not None
+        ):
             raise SystemExit("--resume cannot be combined with benchmark, training smoke, audit, or a fresh branch")
-        resume_state = load_for_resume(args.resume, Path("runs") / args.resume, device="cpu")
+        if Path(args.resume_checkpoint).name != args.resume_checkpoint or not args.resume_checkpoint.endswith(".pt"):
+            raise SystemExit("--resume-checkpoint must be one checkpoint filename ending in .pt")
+        resume_state = load_for_resume(
+            args.resume,
+            Path("runs") / args.resume,
+            device="cpu",
+            name=args.resume_checkpoint,
+        )
         if resume_state is None:
-            raise SystemExit(f"no latest.pt for run {args.resume!r}")
+            raise SystemExit(f"no {args.resume_checkpoint} for run {args.resume!r}")
         cfg = config_from_state(resume_state["cfg"])
         requested_run_name = args.resume
         branch_state = None
+        prefix_fork_state = None
     else:
         resume_state = None
         cfg = requested_config(args)
@@ -3077,18 +3456,42 @@ def main(args: Args) -> None:
         counts = parameter_counts_for_config(cfg)
         requested_run_name = run_name_for(cfg, counts["total"])
         branch_state = None
-        if cfg.phase == "cooldown":
-            prefix_cfg = replace(cfg, phase="prefix", target_processed_positions=2**30)
+        prefix_fork_state = None
+        if has_prefix_fork:
+            if cfg.phase != "prefix" or args.target_positions is None:
+                raise SystemExit("an exact prefix fork requires --phase prefix and --target-positions")
+            prefix_source = args.prefix_fork_from_run
+            prefix_checkpoint = args.prefix_fork_checkpoint
+            if prefix_source is None or prefix_checkpoint is None:
+                raise AssertionError("prefix-fork arguments lost after validation")
+            if Path(prefix_source).name != prefix_source:
+                raise SystemExit("--prefix-fork-from-run must be one run name")
+            if Path(prefix_checkpoint).name != prefix_checkpoint or not prefix_checkpoint.endswith(".pt"):
+                raise SystemExit("--prefix-fork-checkpoint must be one checkpoint filename ending in .pt")
+            prefix_fork_state = load_for_resume(
+                prefix_source,
+                Path("runs") / prefix_source,
+                device="cpu",
+                name=prefix_checkpoint,
+            )
+            if prefix_fork_state is None:
+                raise SystemExit(f"no {prefix_checkpoint} for prefix source {prefix_source!r}")
+            _validate_prefix_fork_state(prefix_fork_state, cfg, counts["total"])
+        elif cfg.phase == "cooldown":
+            prefix_target = (
+                2**30 if cfg.target_processed_positions in _standard_endpoints() else cfg.target_processed_positions
+            )
+            prefix_cfg = replace(cfg, phase="prefix", target_processed_positions=prefix_target)
             prefix_name = args.branch_from_run or run_name_for(prefix_cfg, counts["total"])
-            exponent = int(math.log2(cfg.target_processed_positions))
+            checkpoint_name = branch_checkpoint_name(cfg.target_processed_positions)
             branch_state = load_for_resume(
                 prefix_name,
                 Path("runs") / prefix_name,
                 device="cpu",
-                name=f"branch_D2p{exponent}.pt",
+                name=checkpoint_name,
             )
             if branch_state is None:
-                raise SystemExit(f"no branch_D2p{exponent}.pt for shared-prefix run {prefix_name!r}")
+                raise SystemExit(f"no {checkpoint_name} for shared-prefix run {prefix_name!r}")
 
     validate_config(cfg)
     stats = load_consolidated_stats(Path(cfg.data_root) / "stats.json")
@@ -3142,6 +3545,9 @@ def main(args: Args) -> None:
         requested_run_name=requested_run_name,
         resume_state=resume_state,
         branch_state=branch_state,
+        prefix_fork_state=prefix_fork_state,
+        loader_workers=args.loader_workers,
+        loader_prefetch_updates=args.loader_prefetch_updates,
     )
 
 
