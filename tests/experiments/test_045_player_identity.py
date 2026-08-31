@@ -681,7 +681,10 @@ def test_train_step_has_only_one_online_and_one_target_pass_per_example() -> Non
     assert counts == {"online": cfg.logical_batch_size, "target": cfg.logical_batch_size}
 
 
-def test_checkpoint_contains_complete_training_state(tmp_path: Path) -> None:
+def test_checkpoint_contains_complete_training_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfg = _cfg()
     model = exp.BYOL(cfg, prefer_flex=False)
     optimizer = exp.make_optimizer(model, cfg)
@@ -723,7 +726,16 @@ def test_checkpoint_contains_complete_training_state(tmp_path: Path) -> None:
     assert state["pair_loader"]["professional_mds"] == {"cursor": 2}
     assert state["ema_schedule_position"] == 1
     assert state["wandb_id"] == "run-id"
+    original_load = torch.load
+    map_locations = []
+
+    def tracked_load(*args, **kwargs):
+        map_locations.append(kwargs.get("map_location"))
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", tracked_load)
     _, _, loaded_cfg, loaded_stats, loaded_state = exp.load_checkpoint(path, device=torch.device("cpu"))
+    assert map_locations == ["cpu"]
     assert loaded_cfg == cfg
     assert loaded_stats == stats
     assert loaded_state["step"] == 1

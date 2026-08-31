@@ -1573,7 +1573,7 @@ def load_checkpoint(
     *,
     device: torch.device,
 ) -> tuple[BYOL, AdamW, TrainConfig, dict[str, FeatureStats], dict[str, Any]]:
-    state = torch.load(path, map_location=device, weights_only=False)
+    state = torch.load(path, map_location="cpu", weights_only=False)
     if state.get("schema") != 2:
         raise ValueError(f"unsupported O45 checkpoint schema {state.get('schema')!r}")
     cfg = TrainConfig(**state["config"])
