@@ -80,7 +80,7 @@ WINDOW_LENGTH: Final[int] = 256
 DESCRIPTOR_DIM: Final[int] = 80
 ANONYMOUS_IO_BATCH: Final[int] = 64
 ANONYMOUS_BATCHES_PER_UPDATE: Final[int] = 12
-PROFESSIONAL_INPUT_BATCH: Final[int] = 28
+PROFESSIONAL_STRATA_PER_IO_BATCH: Final[int] = 4
 PROFESSIONAL_QUEUE_LIMIT: Final[int] = 32
 LOADER_WORKERS: Final[int] = 8
 LOADER_PREFETCH_FACTOR: Final[int] = 2
@@ -100,6 +100,7 @@ SEALED_IDENTITIES: Final[tuple[str, ...]] = (
 DEVELOPMENT_IDENTITIES: Final[tuple[str, ...]] = tuple(
     identity for identity in streams.PROFESSIONAL_PLAYER_SLUGS if identity not in SEALED_IDENTITIES
 )
+PROFESSIONAL_INPUT_BATCH: Final[int] = len(DEVELOPMENT_IDENTITIES) * PROFESSIONAL_STRATA_PER_IO_BATCH
 IDENTITY_FEATURE_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     columns=frozenset(
         {f"{prefix}_{name}" for prefix in BASE_PLAYER_PREFIXES for name in (*FLOAT_FEATURES, *CAT_FEATURES)}

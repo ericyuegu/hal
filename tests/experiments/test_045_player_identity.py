@@ -155,7 +155,8 @@ def test_frozen_loader_geometry() -> None:
     assert exp.ANONYMOUS_IO_BATCH == 64
     assert exp.ANONYMOUS_BATCHES_PER_UPDATE == 12
     assert cfg.anonymous_pairs == exp.ANONYMOUS_IO_BATCH * exp.ANONYMOUS_BATCHES_PER_UPDATE
-    assert exp.PROFESSIONAL_INPUT_BATCH == len(exp.DEVELOPMENT_IDENTITIES) == 28
+    assert exp.PROFESSIONAL_STRATA_PER_IO_BATCH == 4
+    assert exp.PROFESSIONAL_INPUT_BATCH == 4 * len(exp.DEVELOPMENT_IDENTITIES) == 112
     assert cfg.professional_pairs == 16 * 16
     assert exp.LOADER_WORKERS == 8
     assert exp.LOADER_PREFETCH_FACTOR == 2
@@ -166,29 +167,30 @@ def test_source_tagging_and_stratified_batches_use_both_toy_mds_streams(tmp_path
     roots = (tmp_path / "first", tmp_path / "second")
     for source_index, root in enumerate(roots):
         with MDSWriter(out=str(root / "train"), columns={"value": "int"}) as writer:
-            for value in range(3):
+            for value in range(8):
                 writer.write({"value": 10 * source_index + value})
     dataset = exp.SourceTaggedStreamingDataset(
         streams=[exp.Stream(local=str(root), split="train", proportion=0.5, keep_zip=False) for root in roots],
         source_slugs=("first", "second"),
-        batch_size=2,
+        batch_size=8,
         batching_method="stratified",
         shuffle=True,
         shuffle_algo="py1e",
         shuffle_seed=5,
-        shuffle_block_size=8,
+        shuffle_block_size=64,
         cache_limit=None,
         keep_zip=False,
     )
 
     rows = list(dataset)
 
-    assert len(rows) == 6
-    for start in range(0, len(rows), 2):
-        assert {row["_o45_source"] for row in rows[start : start + 2]} == {"first", "second"}
+    assert len(rows) == 16
+    for start in range(0, len(rows), 8):
+        sources = [row["_o45_source"] for row in rows[start : start + 8]]
+        assert sources.count("first") == sources.count("second") == 4
     assert dataset.batching_method == "stratified"
     assert dataset.shuffle_algo == "py1e"
-    assert dataset.shuffle_block_size == 8
+    assert dataset.shuffle_block_size == 64
 
 
 def test_tagged_stratified_mds_cursor_resumes_exactly(tmp_path: Path) -> None:
@@ -224,6 +226,37 @@ def test_tagged_stratified_mds_cursor_resumes_exactly(tmp_path: Path) -> None:
     for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got["value"], want["value"])
         assert got["_o45_source"] == want["_o45_source"]
+
+
+def test_tagged_stratified_mds_cursor_accepts_larger_io_batches(tmp_path: Path) -> None:
+    roots = (tmp_path / "first", tmp_path / "second")
+    for source_index, root in enumerate(roots):
+        with MDSWriter(out=str(root / "train"), columns={"value": "int"}) as writer:
+            for value in range(32):
+                writer.write({"value": 100 * source_index + value})
+
+    def make(batch_size: int) -> exp.O45StreamingDataLoader:
+        dataset = exp.SourceTaggedStreamingDataset(
+            streams=[exp.Stream(local=str(root), split="train", proportion=0.5) for root in roots],
+            source_slugs=("first", "second"),
+            batch_size=batch_size,
+            batching_method="stratified",
+            shuffle=True,
+            shuffle_seed=19,
+            shuffle_block_size=64,
+        )
+        return exp.O45StreamingDataLoader(dataset, batch_size=batch_size, num_workers=0)
+
+    original = make(2)
+    next(iter(original))
+    state = original.state_dict()
+    resumed = make(8)
+    resumed.load_state_dict(state)
+    with pytest.warns(UserWarning, match="resumption may.*multiple"):
+        batch = next(iter(resumed))
+
+    assert len(batch["value"]) == 8
+    assert batch["_o45_source"].count("first") == batch["_o45_source"].count("second") == 4
 
 
 def test_replay_window_randomness_uses_seed_epoch_replay_and_source() -> None:
