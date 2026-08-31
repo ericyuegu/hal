@@ -88,8 +88,9 @@ def test_reservoir_state_resumes_exact_next_batches() -> None:
             np.testing.assert_array_equal(got_window["value"], want_window["value"])
 
 
-def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path) -> None:
-    frames = 12
+@pytest.mark.parametrize("num_workers", [0, 2])
+def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path, num_workers: int) -> None:
+    frames = 40
     with MDSWriter(out=str(tmp_path / "train"), columns=POLICY_MDS_COLUMNS, compression="zstd") as writer:
         for replay in range(20):
             sample: dict[str, object] = {
@@ -108,10 +109,16 @@ def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path) -> None
                     continue
                 dtype = np.dtype(encoding.removeprefix("ndarray:"))
                 sample[name] = np.zeros(1 if "nana" in name else frames, dtype=dtype)
+            positions = np.arange(frames, dtype=np.float32) + replay * frames
+            sticks = (np.arange(frames) % 5).astype(np.int8)
+            sample["p1_position_x"] = positions
+            sample["p2_position_x"] = -positions
+            sample["p1_main_stick_x"] = sticks
+            sample["p2_main_stick_x"] = -sticks
             writer.write(sample)
     stats = load_consolidated_stats(_DEV_STATS)
 
-    def loader():
+    def loader(workers: int = num_workers):
         return make_reservoir_loader(
             str(tmp_path),
             "train",
@@ -124,9 +131,9 @@ def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path) -> None
             remote=None,
             shuffle_block_size=32,
             predownload=1,
-            windows_per_replay=1,
+            windows_per_replay=4,
             prefetch_batches=0,
-            num_workers=0,
+            num_workers=workers,
             pin_memory=False,
             schema_version=7,
         )
@@ -136,19 +143,36 @@ def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path) -> None
     for _ in range(3):
         next(source_iterator)
     state = source.state_dict()
+    assert state["schema"] == 2
     expected = [next(source_iterator) for _ in range(3)]
 
-    resumed = loader()
-    resumed.load_state_dict(state)
-    resumed_iterator = iter(resumed)
-    actual = [next(resumed_iterator) for _ in range(3)]
-    for got, want in zip(actual, expected, strict=True):
-        assert got.replay_ids == want.replay_ids
-        assert torch.equal(got.context.ctx_pad, want.context.ctx_pad)
-        assert torch.equal(got.target, want.target)
-        assert got.context.features.keys() == want.context.features.keys()
-        for name in got.context.features:
-            assert torch.equal(got.context.features[name], want.context.features[name])
+    for resume_state in (state, {**state, "schema": 1}):
+        resumed = loader()
+        resumed.load_state_dict(resume_state)
+        resumed_iterator = iter(resumed)
+        actual = [next(resumed_iterator) for _ in range(3)]
+        for got, want in zip(actual, expected, strict=True):
+            assert got.replay_ids == want.replay_ids
+            assert torch.equal(got.context.ctx_pad, want.context.ctx_pad)
+            assert torch.equal(got.target, want.target)
+            assert got.context.features.keys() == want.context.features.keys()
+            for name in got.context.features:
+                assert torch.equal(got.context.features[name], want.context.features[name])
+
+    if num_workers == 2:
+
+        def replay_sequence(workers: int) -> list[tuple[str, ...]]:
+            candidate = loader(workers)
+            iterator = iter(candidate)
+            sequence = []
+            while len(sequence) < 45:
+                try:
+                    sequence.append(next(iterator).replay_ids)
+                except StopIteration:
+                    iterator = iter(candidate)
+            return sequence
+
+        assert replay_sequence(2) == replay_sequence(0)
 
 
 def test_stable_replay_rng_depends_on_identity_and_epoch() -> None:

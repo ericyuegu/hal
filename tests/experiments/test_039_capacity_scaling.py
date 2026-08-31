@@ -80,9 +80,12 @@ def test_scaled_family_and_distinct_026_baseline_geometry() -> None:
 @pytest.mark.parametrize(
     ("level", "target", "total_parameters", "effective_parameters", "decay_endpoint"),
     [
-        (3, 350_981_584, 2_064_111, 23_742_936, 350_981_584),
-        (4, 312_145_120, 3_936_239, 26_696_984, 312_145_120),
-        (13, 723_491_896, 111_720_303, 230_364_248, 2**30),
+        (3, 701_963_168, 2_064_111, 23_742_936, 350_981_584),
+        (4, 624_290_248, 3_936_239, 26_696_984, 312_145_120),
+        (5, 1_621_761_184, 6_988_015, 30_830_680, 2**30),
+        (7, 1_141_118_368, 17_810_159, 43_816_664, 2**30),
+        (7, 3_803_727_888, 17_810_159, 43_816_664, 2**30),
+        (10, 1_493_689_000, 51_154_223, 111_580_568, 2**30),
     ],
 )
 def test_exact_isoflop_configs_have_expected_geometry_and_endpoint(
@@ -97,17 +100,19 @@ def test_exact_isoflop_configs_have_expected_geometry_and_endpoint(
 
     assert counts["total"] == total_parameters
     assert counts["trunk"] + 36 * counts["decoder"] == effective_parameters
-    assert 6 * effective_parameters * target == pytest.approx(5e16 if level < 13 else 1e18, rel=1e-8)
+    expected_flops = 1e17 if level in (3, 4) else 3e17 if level < 10 and target < 2e9 else 1e18
+    assert 6 * effective_parameters * target == pytest.approx(expected_flops, rel=1e-8)
     assert cfg.adam_weight_decay_endpoint == decay_endpoint
-    assert exp._prefix_branch_targets(cfg) == (target,)
-    assert exp._prefix_branch_positions(cfg) == (exp.branch_position(target, 0.125),)
+    expected_targets = tuple(value for value in exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[level] if value <= target)
+    assert exp._prefix_branch_targets(cfg) == expected_targets
+    assert exp._prefix_branch_positions(cfg) == tuple(exp.branch_position(value, 0.125) for value in expected_targets)
     assert exp.branch_checkpoint_name(target) == f"branch_D{target}.pt"
     assert f"D{target}" in exp.run_name_for(exp.replace(cfg, phase="cooldown"), counts["total"])
     exp.validate_config(cfg)
 
 
 def test_exact_isoflop_endpoint_is_bound_to_its_capacity() -> None:
-    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3]
+    target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[3][0]
     cfg = exp.scaled_config(
         4,
         exp.replace(
@@ -120,13 +125,25 @@ def test_exact_isoflop_endpoint_is_bound_to_its_capacity() -> None:
         exp.validate_config(cfg)
 
 
-def test_l13_standard_prefix_includes_recoverable_exact_branch() -> None:
-    cfg = exp.scaled_config(13)
-    exact_target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[13]
+def test_long_l7_prefix_includes_both_exact_branches() -> None:
+    exact_target = exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[7][-1]
+    cfg = exp.requested_config(exp.Args(model_l=7, phase="prefix", target_positions=exact_target))
 
-    assert exact_target in exp._prefix_branch_targets(cfg)
-    assert exp.branch_position(exact_target, cfg.cooldown_fraction) == 633_055_409
-    assert exp._training_stop(cfg) == exp.branch_position(2**30, cfg.cooldown_fraction)
+    assert exp._prefix_branch_targets(cfg) == exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[7]
+    assert exp._training_stop(cfg) == 3_328_261_902
+
+
+def test_addition_cooldown_boundaries_match_the_production_matrix() -> None:
+    expected = {
+        701_963_168: 614_217_772,
+        624_290_248: 546_253_967,
+        1_621_761_184: 1_419_041_036,
+        1_141_118_368: 998_478_572,
+        3_803_727_888: 3_328_261_902,
+        1_493_689_000: 1_306_977_875,
+    }
+
+    assert {target: exp.branch_position(target, 0.125) for target in expected} == expected
 
 
 def test_standard_prefix_name_remains_canonical_d2p30() -> None:
@@ -137,25 +154,25 @@ def test_standard_prefix_name_remains_canonical_d2p30() -> None:
     assert exp.run_name_for(cfg, counts["total"]) == "cap-L5-d320-7M-U1-prefix-D2p30-tauPL"
 
 
-def test_l13_prefix_fork_requires_compatible_saved_source_branch() -> None:
-    source = exp.scaled_config(13)
+def test_l7_prefix_fork_requires_compatible_saved_source_branch() -> None:
+    source = exp.scaled_config(7)
     target = exp.requested_config(
         exp.Args(
-            model_l=13,
+            model_l=7,
             phase="prefix",
-            target_positions=exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[13],
+            target_positions=exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[7][-1],
         )
     )
     source_scale = exp.adam_scale(source, exp.parameter_counts_for_config(source)["total"])
     target_scale = exp.adam_scale(target, exp.parameter_counts_for_config(target)["total"])
     source = exp.replace(source, adam_weight_decay=source_scale.weight_decay)
     target = exp.replace(target, adam_weight_decay=target_scale.weight_decay)
-    source_position = exp.branch_position(2**29, source.cooldown_fraction)
+    source_position = exp.branch_position(2**30, source.cooldown_fraction)
 
     exp._configs_match_for_prefix_fork(source, target, source_position)
-    assert source_position == 469_762_048
-    assert exp.branch_position(target.target_processed_positions, target.cooldown_fraction) == 633_055_409
-    with pytest.raises(ValueError, match="must precede"):
+    assert source_position == 939_524_096
+    assert exp.branch_position(target.target_processed_positions, target.cooldown_fraction) == 3_328_261_902
+    with pytest.raises(ValueError, match="not a saved branch boundary"):
         exp._configs_match_for_prefix_fork(
             source,
             target,
@@ -166,15 +183,15 @@ def test_l13_prefix_fork_requires_compatible_saved_source_branch() -> None:
 
 
 def test_prefix_fork_requires_cuda_rng_state() -> None:
-    source = exp.scaled_config(13)
+    source = exp.scaled_config(7)
     counts = exp.parameter_counts_for_config(source)
     scale = exp.adam_scale(source, counts["total"])
     source = exp.replace(source, adam_weight_decay=scale.weight_decay)
     target = exp.requested_config(
         exp.Args(
-            model_l=13,
+            model_l=7,
             phase="prefix",
-            target_positions=exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[13],
+            target_positions=exp.EXACT_ISOFLOP_ENDPOINTS_BY_LEVEL[7][-1],
         )
     )
     state = {
@@ -185,7 +202,7 @@ def test_prefix_fork_requires_cuda_rng_state() -> None:
         "numpy_rng_state": None,
         "opt": {},
         "pending_batches": [],
-        "processed_positions": exp.branch_position(2**29, source.cooldown_fraction),
+        "processed_positions": exp.branch_position(2**30, source.cooldown_fraction),
         "torch_rng_state": None,
         "update": 1,
     }
@@ -220,9 +237,9 @@ def test_restore_rng_restores_cuda_state_when_available(monkeypatch) -> None:
 
 
 def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypatch) -> None:
-    source_name = "cap-L13-d832-112M-U1-prefix-D2p30-tauPL"
-    checkpoint_name = "branch_D2p29.pt"
-    source = exp.scaled_config(13, exp.replace(exp.TrainConfig(), push_to_r2=False))
+    source_name = "cap-L7-d448-18M-U1-prefix-D2p30-tauPL"
+    checkpoint_name = "branch_D2p30.pt"
+    source = exp.scaled_config(7, exp.replace(exp.TrainConfig(), push_to_r2=False))
     source_scale = exp.adam_scale(source, exp.parameter_counts_for_config(source)["total"])
     source = exp.replace(source, adam_weight_decay=source_scale.weight_decay)
     source_state = {
@@ -234,7 +251,7 @@ def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypa
         "numpy_rng_state": None,
         "opt": {},
         "pending_batches": [],
-        "processed_positions": exp.branch_position(2**29, source.cooldown_fraction),
+        "processed_positions": exp.branch_position(2**30, source.cooldown_fraction),
         "torch_rng_state": None,
         "update": 1,
         "wandb_id": "source-wandb-id",
@@ -259,9 +276,9 @@ def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypa
     exp.main(
         exp.Args(
             cfg=exp.replace(exp.TrainConfig(), push_to_r2=False),
-            model_l=13,
+            model_l=7,
             phase="prefix",
-            target_positions=723_491_896,
+            target_positions=3_803_727_888,
             prefix_fork_from_run=source_name,
             prefix_fork_checkpoint=checkpoint_name,
         )
@@ -270,10 +287,12 @@ def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypa
     assert loads == [(source_name, Path("runs") / source_name, "cpu", checkpoint_name)]
     assert len(trains) == 1
     _, kwargs = trains[0]
-    assert kwargs["requested_run_name"] == "cap-L13-d832-112M-U1-prefix-D723491896-tauPL"
+    assert kwargs["requested_run_name"] == "cap-L7-d448-18M-U1-prefix-D3803727888-tauPL"
     assert kwargs["resume_state"] is None
     assert kwargs["branch_state"] is None
     assert kwargs["prefix_fork_state"] is source_state
+    assert kwargs["loader_workers"] == 8
+    assert kwargs["loader_prefetch_updates"] == 1
 
 
 def test_026_observation_trunk_codec_and_optimizer_partition_are_frozen() -> None:

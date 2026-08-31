@@ -948,8 +948,8 @@ LEVEL_COLOR = dict(zip(FLOP_LEVELS, ["#88b5ef", "#457abc", "#225491", "#042246"]
 def isoflop_nll(model: str, c: float) -> float:
     """NLL of ``model`` at compute budget ``c``.
 
-    L3, L4, and the 1e18-FLOP L13 were trained to land exactly on a level, so an exact hit is
-    read straight off the run; anything else is interpolated inside the model's observed range.
+    The six O39 additions were trained to land exactly on a level, so exact hits are read
+    straight off the run; older interior points are interpolated inside the observed range.
     """
     sub = ckpt[(ckpt.model == model) & ~ckpt.diverged].sort_values("training_flops")
     exact = sub[np.isclose(sub.training_flops, c, rtol=0.01)]
@@ -1034,36 +1034,61 @@ d_fit = fit_df.processed_positions.to_numpy()
 y_fit = fit_df.validation_nll.to_numpy()
 
 
-def huber_objective(p: np.ndarray) -> float:
-    log_e, log_a, log_b, alpha, beta = p
-    with np.errstate(over="ignore", invalid="ignore"):
-        pred = np.exp(log_e) + np.exp(log_a) * n_fit**-alpha + np.exp(log_b) * d_fit**-beta
-        r = pred - y_fit
-        delta = 1e-3
-        return float(np.sum(np.where(np.abs(r) < delta, 0.5 * r**2, delta * (np.abs(r) - 0.5 * delta))))
+def scaling_fit(exposure: np.ndarray) -> tuple[float, float, float, float, float, np.ndarray]:
+    """Fit the fixed primary form against one exposure coordinate."""
+
+    def huber_objective(p: np.ndarray) -> float:
+        log_e, log_a, log_b, alpha, beta = p
+        with np.errstate(over="ignore", invalid="ignore"):
+            pred = np.exp(log_e) + np.exp(log_a) * n_fit**-alpha + np.exp(log_b) * exposure**-beta
+            residual = pred - y_fit
+            delta = 1e-3
+            return float(
+                np.sum(
+                    np.where(
+                        np.abs(residual) < delta,
+                        0.5 * residual**2,
+                        delta * (np.abs(residual) - 0.5 * delta),
+                    )
+                )
+            )
+
+    best = min(
+        (
+            minimize(
+                huber_objective,
+                [np.log(e0), la, lb, a0, b0],
+                method="Nelder-Mead",
+                options={"maxiter": 20000, "xatol": 1e-8, "fatol": 1e-12},
+            )
+            for e0 in [1.2, 1.5, 1.7]
+            for a0 in [0.1, 0.3, 0.5]
+            for b0 in [0.1, 0.3, 0.5]
+            for la in [0.0, 3.0, 6.0]
+            for lb in [0.0, 3.0, 6.0]
+        ),
+        key=lambda result: result.fun,
+    )
+    e_fit, a_fit, b_fit = np.exp(best.x[0]), np.exp(best.x[1]), np.exp(best.x[2])
+    alpha, beta = best.x[3], best.x[4]
+    residual = e_fit + a_fit * n_fit**-alpha + b_fit * exposure**-beta - y_fit
+    return e_fit, a_fit, b_fit, alpha, beta, residual
 
 
-best = min(
-    (
-        minimize(
-            huber_objective,
-            [np.log(e0), la, lb, a0, b0],
-            method="Nelder-Mead",
-            options={"maxiter": 20000, "xatol": 1e-8, "fatol": 1e-12},
-        )
-        for e0 in [1.2, 1.5, 1.7]
-        for a0 in [0.1, 0.3, 0.5]
-        for b0 in [0.1, 0.3, 0.5]
-        for la in [0.0, 3.0, 6.0]
-        for lb in [0.0, 3.0, 6.0]
-    ),
-    key=lambda r: r.fun,
-)
-E_FIT, A_FIT, B_FIT = np.exp(best.x[0]), np.exp(best.x[1]), np.exp(best.x[2])
-ALPHA, BETA = best.x[3], best.x[4]
-resid = E_FIT + A_FIT * n_fit**-ALPHA + B_FIT * d_fit**-BETA - y_fit
+E_FIT, A_FIT, B_FIT, ALPHA, BETA, resid = scaling_fit(d_fit)
 print(f"\nL(N_eff, D) = {E_FIT:.4f} + {A_FIT:.4g}/N^{ALPHA:.3f} + {B_FIT:.4g}/D^{BETA:.3f}")
 print(f"rms residual {np.sqrt(np.mean(resid**2)):.4f} NLL, max {np.max(np.abs(resid)):.4f}, {len(fit_df)} points")
+
+u_fit = np.asarray(distinct_positions(d_fit))
+E_U, A_U, B_U, ALPHA_U, BETA_U, resid_u = scaling_fit(u_fit)
+print(f"sensitivity L(N_eff, U_seen) = {E_U:.4f} + {A_U:.4g}/N^{ALPHA_U:.3f} + {B_U:.4g}/U_seen^{BETA_U:.3f}")
+print(f"sensitivity rms residual {np.sqrt(np.mean(resid_u**2)):.4f} NLL")
+
+L7_1E18_D = 3_803_727_888
+print(
+    f"L7@1e18: D/U = {L7_1E18_D / U_TOTAL:.3f}; estimated distinct coverage "
+    f"{distinct_positions(L7_1E18_D) / U_TOTAL:.1%}; included in both fits"
+)
 
 
 def loss_at(n_eff: np.ndarray, c: float) -> np.ndarray:
