@@ -14,10 +14,12 @@ Run training:
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import math
 import random
 import time
+from collections import deque
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -28,6 +30,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import Literal
+from typing import cast
 
 import numpy as np
 import torch
@@ -39,6 +42,8 @@ from melee.stages import EDGE_POSITION
 from scipy.optimize import linear_sum_assignment
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from streaming import Stream
+from streaming import StreamingDataLoader
 from streaming import StreamingDataset
 from torch import Tensor
 from torch.optim import AdamW
@@ -49,6 +54,7 @@ from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import decode_policy_replay_slices
 from hal.data.policy_world_schema import decode_policy_world_replay_slices
 from hal.data.schema import Rank
+from hal.data.streaming_compat import patch_streaming
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import download_latest
 from hal.training.dataloader import collate_windows
@@ -66,9 +72,19 @@ from hal.training.runs import setup_run_dir
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 from hal.training.trunk import rmsnorm
+from hal.training.trunk import varlen_flash_is_usable
+
+patch_streaming()
 
 WINDOW_LENGTH: Final[int] = 256
 DESCRIPTOR_DIM: Final[int] = 80
+ANONYMOUS_IO_BATCH: Final[int] = 64
+ANONYMOUS_BATCHES_PER_UPDATE: Final[int] = 12
+PROFESSIONAL_INPUT_BATCH: Final[int] = 28
+PROFESSIONAL_QUEUE_LIMIT: Final[int] = 32
+LOADER_WORKERS: Final[int] = 8
+LOADER_PREFETCH_FACTOR: Final[int] = 2
+HELDOUT_REPLAYS_PER_IDENTITY: Final[int] = 16
 SEALED_IDENTITIES: Final[tuple[str, ...]] = (
     "cookbook",
     "solobattle",
@@ -124,11 +140,9 @@ class TrainConfig:
     seed: int = 0
     allow_tf32: bool = True
     amp_dtype: str = "bfloat16"
-    attention_backend: str = "auto_flex"
+    attention_backend: str = "varlen_flash"
     anonymous_data_root: str = "data/processed/ranked-anonymized-1/mds-policy-v7"
     professional_data_root: str = "data/processed/professional"
-    cache_limit: str = "160gb"
-    predownload: int = 512
     checkpoint_every: int = 512
     wandb_project: str = "hal"
     wandb_mode: Literal["online", "offline", "disabled", "shared"] = "online"
@@ -202,6 +216,57 @@ class PairBatch:
     @property
     def batch_size(self) -> int:
         return len(self.metadata.online)
+
+    def pin_memory(self) -> PairBatch:
+        return PairBatch(self.online.pin_memory(), self.target.pin_memory(), self.metadata)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPair:
+    """Two anonymous views prepared from one replay in a loader worker."""
+
+    online: dict[str, np.ndarray]
+    target: dict[str, np.ndarray]
+    online_metadata: WindowMetadata
+    target_metadata: WindowMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class ProfessionalCandidates:
+    """Eligible professional windows from one stratified MDS input batch."""
+
+    context: Context | None
+    metadata: tuple[WindowMetadata, ...]
+    raw_count: int
+
+    def pin_memory(self) -> ProfessionalCandidates:
+        context = None if self.context is None else self.context.pin_memory()
+        return ProfessionalCandidates(context, self.metadata, self.raw_count)
+
+
+@dataclass(frozen=True, slots=True)
+class ProfessionalExample:
+    """One queued professional replay window."""
+
+    context: Context
+    metadata: WindowMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class HeldoutCache:
+    """Fixed development-identity gallery and query windows."""
+
+    gallery: tuple[ProfessionalExample, ...]
+    query: tuple[ProfessionalExample, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LoaderMetrics:
+    """Time spent waiting for the two input pipelines."""
+
+    anonymous_wait_s: float
+    professional_wait_s: float
+    cache_gib: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -1023,46 +1088,32 @@ def _context_from_windows(
     return Context(features=features, ctx_pad=torch.zeros(len(windows), dtype=torch.long))
 
 
-class PairSampler:
-    """IID compact-replay sampler with serializable NumPy state."""
+def _stable_replay_rng(seed: int, epoch: int, replay_id: str, source: str) -> np.random.Generator:
+    """Return replay-local randomness that is exact after an MDS cursor resume."""
+    digest = hashlib.blake2b(
+        f"{seed}\0{epoch}\0{source}\0{replay_id}".encode(),
+        digest_size=16,
+        person=b"hal-o45-window",
+    ).digest()
+    return np.random.default_rng(int.from_bytes(digest, "little"))
 
-    def __init__(self, cfg: TrainConfig, stats: Mapping[str, FeatureStats]) -> None:
-        self.cfg = cfg
-        self.stats = dict(stats)
-        self.rng = np.random.default_rng(cfg.seed)
-        anonymous_source = streams.RANKED_ANONYMIZED_1_POLICY_V7
-        anonymous_remote, _ = anonymous_source.for_split("train")
-        self.anonymous = StreamingDataset(
-            remote=anonymous_remote,
-            local=str(Path(cfg.anonymous_data_root) / "train"),
-            batch_size=1,
-            shuffle=False,
-            cache_limit=cfg.cache_limit,
-            predownload=cfg.predownload,
-        )
-        self.professional: dict[str, StreamingDataset] = {}
 
-    def _professional_dataset(self, identity: str) -> StreamingDataset:
-        dataset = self.professional.get(identity)
-        if dataset is not None:
-            return dataset
-        source = streams.PROFESSIONAL_POLICY_WORLD_V7[identity]
-        remote, _ = source.for_split("train")
-        dataset = StreamingDataset(
-            remote=remote,
-            local=str(Path(self.cfg.professional_data_root) / identity / "mds-policy-world-v7" / "train"),
-            batch_size=1,
-            shuffle=False,
-            cache_limit=max(1, int(160 * 2**30 / len(DEVELOPMENT_IDENTITIES))),
-            predownload=max(8, self.cfg.predownload // len(DEVELOPMENT_IDENTITIES)),
-        )
-        self.professional[identity] = dataset
-        return dataset
+def _streaming_epoch(dataset: StreamingDataset) -> int:
+    return max(0, dataset.next_epoch - 1)
 
-    def _anonymous_pair(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], WindowMetadata, WindowMetadata]:
-        row = self.anonymous[int(self.rng.integers(len(self.anonymous)))]
+
+class AnonymousPairDataset(StreamingDataset):
+    """MDS dataset that prepares both anonymous views in its loader worker."""
+
+    def __init__(self, *args: Any, seed: int, **kwargs: Any) -> None:
+        self._window_seed = seed
+        super().__init__(*args, **kwargs)
+
+    def get_item(self, sample_id: int, retry: int = 7) -> PreparedPair:
+        row = super().get_item(sample_id, retry)
         replay_id = str(row["replay_id"])
-        online_start, target_start = sample_anonymous_starts(int(row["num_frames"]), self.rng)
+        rng = _stable_replay_rng(self._window_seed, _streaming_epoch(self), replay_id, "anonymous")
+        online_start, target_start = sample_anonymous_starts(int(row["num_frames"]), rng)
         decoded = decode_policy_replay_slices(
             row,
             (
@@ -1070,89 +1121,374 @@ class PairSampler:
                 (target_start, target_start + WINDOW_LENGTH),
             ),
         )
-        ego_side = "p1" if self.rng.random() < 0.5 else "p2"
+        ego_side = "p1" if rng.random() < 0.5 else "p2"
         online = relabel_ego(_array_columns(decoded[0]), ego_side)
         target = relabel_ego(_array_columns(decoded[1]), ego_side)
-        return (
+        return PreparedPair(
             online,
             target,
             _window_metadata(online, replay_id, None),
             _window_metadata(target, replay_id, None),
         )
 
-    def _professional_windows(self, identity: str) -> tuple[list[dict[str, np.ndarray]], list[WindowMetadata]]:
-        dataset = self._professional_dataset(identity)
-        windows: list[dict[str, np.ndarray]] = []
-        metadata: list[WindowMetadata] = []
-        replay_ids: set[str] = set()
+
+class SourceTaggedStreamingDataset(StreamingDataset):
+    """Attach a professional source slug to each row."""
+
+    def __init__(self, *args: Any, source_slugs: Sequence[str], **kwargs: Any) -> None:
+        self._source_slugs = tuple(source_slugs)
+        super().__init__(*args, **kwargs)
+        if len(self._source_slugs) != self.num_streams:
+            raise ValueError("source slug count must match MDS stream count")
+
+    def get_item(self, sample_id: int, retry: int = 7) -> dict[str, Any]:
+        shard_id, _ = self.spanner[sample_id]
+        row = dict(super().get_item(sample_id, retry))
+        row["_o45_source"] = self._source_slugs[int(self.stream_per_shard[shard_id])]
+        row["_o45_epoch"] = _streaming_epoch(self)
+        return row
+
+
+class O45StreamingDataLoader(StreamingDataLoader):
+    """Count raw MDS rows for O45's custom worker-collated batch types."""
+
+    def _get_batch_size(self, batch: object) -> int:
+        if isinstance(batch, PairBatch):
+            return batch.batch_size
+        if isinstance(batch, ProfessionalCandidates):
+            return batch.raw_count
+        return super()._get_batch_size(batch)
+
+    def close(self) -> None:
+        """Stop persistent workers when a pipeline is no longer needed."""
+        if self._iterator is not None:
+            cast(Any, self._iterator)._shutdown_workers()
+            self._iterator = None
+
+
+def _collate_anonymous(
+    pairs: Sequence[PreparedPair],
+    *,
+    stats: Mapping[str, FeatureStats],
+) -> PairBatch:
+    online = [pair.online for pair in pairs]
+    target = [pair.target for pair in pairs]
+    mask = torch.zeros(len(pairs), dtype=torch.bool)
+    return PairBatch(
+        _context_from_windows(online, stats),
+        _context_from_windows(target, stats),
+        PairMetadata(
+            tuple(pair.online_metadata for pair in pairs),
+            tuple(pair.target_metadata for pair in pairs),
+            mask,
+        ),
+    )
+
+
+def _collate_professional(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    stats: Mapping[str, FeatureStats],
+    seed: int,
+    allowed_splits: tuple[str, ...],
+) -> ProfessionalCandidates:
+    windows: list[dict[str, np.ndarray]] = []
+    metadata: list[WindowMetadata] = []
+    for row in rows:
+        identity = str(row["_o45_source"])
+        replay_id = str(row["replay_id"])
+        if professional_split(identity, replay_id) not in allowed_splits:
+            continue
+        ego_side = professional_ego_side(row)
+        frames = int(row["num_frames"])
+        if ego_side is None or frames < WINDOW_LENGTH:
+            continue
+        rng = _stable_replay_rng(seed, int(row["_o45_epoch"]), replay_id, identity)
+        start = int(rng.integers(frames - WINDOW_LENGTH + 1))
+        decoded = decode_policy_world_replay_slices(row, ((start, start + WINDOW_LENGTH),))[0]
+        window = relabel_ego(_array_columns(decoded), ego_side)
+        windows.append(window)
+        metadata.append(_window_metadata(window, replay_id, identity))
+    context = _context_from_windows(windows, stats) if windows else None
+    return ProfessionalCandidates(context, tuple(metadata), len(rows))
+
+
+def _professional_streams(cfg: TrainConfig) -> list[Stream]:
+    proportion = 1.0 / len(DEVELOPMENT_IDENTITIES)
+    selected = []
+    for identity in DEVELOPMENT_IDENTITIES:
+        source = streams.PROFESSIONAL_POLICY_WORLD_V7[identity]
+        selected.append(
+            Stream(
+                remote=source.remote,
+                local=str(Path(cfg.professional_data_root) / identity / "mds-policy-world-v7"),
+                split="train",
+                proportion=proportion,
+                keep_zip=False,
+            )
+        )
+    return selected
+
+
+def make_anonymous_loader(
+    cfg: TrainConfig,
+    stats: Mapping[str, FeatureStats],
+    *,
+    num_workers: int = LOADER_WORKERS,
+) -> O45StreamingDataLoader:
+    """Build the normal shuffled anonymous MDS pipeline."""
+    source = streams.RANKED_ANONYMIZED_1_POLICY_V7
+    remote, _ = source.for_split("train")
+    dataset = AnonymousPairDataset(
+        seed=cfg.seed,
+        remote=remote,
+        local=str(Path(cfg.anonymous_data_root) / "train"),
+        batch_size=ANONYMOUS_IO_BATCH,
+        shuffle=True,
+        shuffle_algo="py1e",
+        shuffle_seed=cfg.seed,
+        shuffle_block_size=8192,
+        cache_limit=None,
+        keep_zip=False,
+    )
+    return O45StreamingDataLoader(
+        dataset,
+        batch_size=ANONYMOUS_IO_BATCH,
+        num_workers=num_workers,
+        collate_fn=functools.partial(_collate_anonymous, stats=dict(stats)),
+        persistent_workers=num_workers > 0,
+        prefetch_factor=LOADER_PREFETCH_FACTOR if num_workers > 0 else None,
+        pin_memory=True,
+        in_order=True,
+        drop_last=True,
+        generator=torch.Generator().manual_seed(cfg.seed),
+    )
+
+
+def make_professional_loader(
+    cfg: TrainConfig,
+    stats: Mapping[str, FeatureStats],
+    *,
+    allowed_splits: tuple[str, ...] = ("train",),
+    num_workers: int = LOADER_WORKERS,
+    shuffle: bool = True,
+) -> O45StreamingDataLoader:
+    """Build one equally mixed, stratified professional MDS pipeline."""
+    dataset = SourceTaggedStreamingDataset(
+        streams=_professional_streams(cfg),
+        source_slugs=DEVELOPMENT_IDENTITIES,
+        batch_size=PROFESSIONAL_INPUT_BATCH,
+        batching_method="stratified",
+        shuffle=shuffle,
+        shuffle_algo="py1e",
+        shuffle_seed=cfg.seed,
+        shuffle_block_size=65536,
+        cache_limit=None,
+        keep_zip=False,
+    )
+    return O45StreamingDataLoader(
+        dataset,
+        batch_size=PROFESSIONAL_INPUT_BATCH,
+        num_workers=num_workers,
+        collate_fn=functools.partial(
+            _collate_professional,
+            stats=dict(stats),
+            seed=cfg.seed,
+            allowed_splits=allowed_splits,
+        ),
+        persistent_workers=num_workers > 0,
+        prefetch_factor=LOADER_PREFETCH_FACTOR if num_workers > 0 else None,
+        pin_memory=True,
+        in_order=True,
+        drop_last=True,
+        generator=torch.Generator().manual_seed(cfg.seed + 1),
+    )
+
+
+def _concat_contexts(contexts: Sequence[Context]) -> Context:
+    if not contexts:
+        raise ValueError("cannot concatenate an empty context sequence")
+    names = contexts[0].features.keys()
+    if any(context.features.keys() != names for context in contexts[1:]):
+        raise ValueError("context feature sets do not match")
+    return Context(
+        features={name: torch.cat([context.features[name] for context in contexts]) for name in names},
+        ctx_pad=torch.cat([context.ctx_pad for context in contexts]),
+    )
+
+
+def _context_row(context: Context, index: int) -> Context:
+    return Context(
+        features={name: value[index : index + 1].clone() for name, value in context.features.items()},
+        ctx_pad=context.ctx_pad[index : index + 1].clone(),
+    )
+
+
+def _candidate_examples(batch: ProfessionalCandidates) -> tuple[ProfessionalExample, ...]:
+    if batch.context is None:
+        return ()
+    if batch.context.batch != len(batch.metadata):
+        raise ValueError("professional contexts and metadata are not aligned")
+    return tuple(
+        ProfessionalExample(_context_row(batch.context, index), metadata)
+        for index, metadata in enumerate(batch.metadata)
+    )
+
+
+class PairLoader:
+    """Join two MDS pipelines and own only experiment-level sampling state."""
+
+    def __init__(
+        self,
+        cfg: TrainConfig,
+        anonymous_loader: O45StreamingDataLoader,
+        professional_loader: O45StreamingDataLoader,
+        *,
+        identities: Sequence[str] = DEVELOPMENT_IDENTITIES,
+        anonymous_batches_per_update: int = ANONYMOUS_BATCHES_PER_UPDATE,
+    ) -> None:
+        self.cfg = cfg
+        self.anonymous_loader = anonymous_loader
+        self.professional_loader = professional_loader
+        self.identities = tuple(identities)
+        self.anonymous_batches_per_update = anonymous_batches_per_update
+        self.rng = np.random.default_rng(cfg.seed)
+        self.queues = {identity: deque[ProfessionalExample]() for identity in self.identities}
+        self._anonymous_iterator = None
+        self._professional_iterator = None
+        self.last_metrics = LoaderMetrics(0.0, 0.0, self.cache_gib)
+
+    @property
+    def cache_gib(self) -> float:
+        datasets = (
+            cast(StreamingDataset, self.anonymous_loader.dataset),
+            cast(StreamingDataset, self.professional_loader.dataset),
+        )
+        return sum(dataset.cache_usage for dataset in datasets) / 2**30
+
+    def _next_anonymous(self) -> PairBatch:
+        if self._anonymous_iterator is None:
+            self._anonymous_iterator = iter(self.anonymous_loader)
+        try:
+            return next(self._anonymous_iterator)
+        except StopIteration:
+            self._anonymous_iterator = iter(self.anonymous_loader)
+            return next(self._anonymous_iterator)
+
+    def _next_professional(self) -> ProfessionalCandidates:
+        if self._professional_iterator is None:
+            self._professional_iterator = iter(self.professional_loader)
+        try:
+            return next(self._professional_iterator)
+        except StopIteration:
+            self._professional_iterator = iter(self.professional_loader)
+            return next(self._professional_iterator)
+
+    def _add_candidates(self, batch: ProfessionalCandidates) -> None:
+        for example in _candidate_examples(batch):
+            identity = example.metadata.identity
+            if identity not in self.queues:
+                raise ValueError(f"professional pipeline returned unexpected identity {identity!r}")
+            queue = self.queues[identity]
+            replay_id = example.metadata.replay_id
+            if len(queue) >= PROFESSIONAL_QUEUE_LIMIT:
+                continue
+            if any(item.metadata.replay_id == replay_id for item in queue):
+                continue
+            queue.append(example)
+
+    def _fill_professional_queues(self) -> None:
+        required = self.cfg.professional_replays_per_identity
         attempts = 0
-        while len(windows) < self.cfg.professional_replays_per_identity:
+        while any(len(self.queues[identity]) < required for identity in self.identities):
             attempts += 1
             if attempts > 10_000:
-                raise RuntimeError(f"could not sample enough eligible train replays for {identity}")
-            row = dataset[int(self.rng.integers(len(dataset)))]
-            replay_id = str(row["replay_id"])
-            if replay_id in replay_ids or professional_split(identity, replay_id) != "train":
-                continue
-            ego_side = professional_ego_side(row)
-            if ego_side is None:
-                continue
-            frames = int(row["num_frames"])
-            if frames < WINDOW_LENGTH:
-                continue
-            start = int(self.rng.integers(frames - WINDOW_LENGTH + 1))
-            decoded = decode_policy_world_replay_slices(row, ((start, start + WINDOW_LENGTH),))[0]
-            window = relabel_ego(_array_columns(decoded), ego_side)
-            replay_ids.add(replay_id)
-            windows.append(window)
-            metadata.append(_window_metadata(window, replay_id, identity))
-        return windows, metadata
+                missing = {identity: len(queue) for identity, queue in self.queues.items() if len(queue) < required}
+                raise RuntimeError(f"professional stream could not fill replay queues: {missing}")
+            self._add_candidates(self._next_professional())
 
     def sample(self) -> PairBatch:
-        """Sample one 768/256 logical batch without cross-replay anonymous use."""
-        online_windows: list[dict[str, np.ndarray]] = []
-        target_windows: list[dict[str, np.ndarray]] = []
-        online_metadata: list[WindowMetadata] = []
-        target_metadata: list[WindowMetadata] = []
-        for _ in range(self.cfg.anonymous_pairs):
-            online, target, online_meta, target_meta = self._anonymous_pair()
-            online_windows.append(online)
-            target_windows.append(target)
-            online_metadata.append(online_meta)
-            target_metadata.append(target_meta)
+        """Assemble one exact anonymous/professional logical batch."""
+        anonymous_started = time.monotonic()
+        anonymous = [self._next_anonymous() for _ in range(self.anonymous_batches_per_update)]
+        anonymous_wait = time.monotonic() - anonymous_started
 
-        identities = self.rng.choice(
-            DEVELOPMENT_IDENTITIES,
+        professional_started = time.monotonic()
+        self._fill_professional_queues()
+        professional_wait = time.monotonic() - professional_started
+        selected = self.rng.choice(
+            self.identities,
             self.cfg.professional_identities_per_batch,
             replace=False,
         )
-        for identity_value in identities:
+        professional: list[ProfessionalExample] = []
+        target_professional: list[ProfessionalExample] = []
+        for identity_value in selected:
             identity = str(identity_value)
-            windows, metadata = self._professional_windows(identity)
+            examples = [self.queues[identity].popleft() for _ in range(self.cfg.professional_replays_per_identity)]
+            metadata = [example.metadata for example in examples]
             pairing = professional_derangement(metadata)
-            online_windows.extend(windows)
-            target_windows.extend(windows[index] for index in pairing)
-            online_metadata.extend(metadata)
-            target_metadata.extend(metadata[index] for index in pairing)
-        professional_mask = torch.zeros(self.cfg.logical_batch_size, dtype=torch.bool)
-        professional_mask[self.cfg.anonymous_pairs :] = True
-        return PairBatch(
-            online=_context_from_windows(online_windows, self.stats),
-            target=_context_from_windows(target_windows, self.stats),
-            metadata=PairMetadata(tuple(online_metadata), tuple(target_metadata), professional_mask),
+            professional.extend(examples)
+            target_professional.extend(examples[index] for index in pairing)
+
+        online_contexts = [batch.online for batch in anonymous]
+        online_contexts.extend(example.context for example in professional)
+        target_contexts = [batch.target for batch in anonymous]
+        target_contexts.extend(example.context for example in target_professional)
+        online_metadata = tuple(item for batch in anonymous for item in batch.metadata.online)
+        online_metadata += tuple(example.metadata for example in professional)
+        target_metadata = tuple(item for batch in anonymous for item in batch.metadata.target)
+        target_metadata += tuple(example.metadata for example in target_professional)
+        mask = torch.zeros(len(online_metadata), dtype=torch.bool)
+        mask[self.cfg.anonymous_pairs :] = True
+        result = PairBatch(
+            _concat_contexts(online_contexts),
+            _concat_contexts(target_contexts),
+            PairMetadata(online_metadata, target_metadata, mask),
         )
+        if result.batch_size != self.cfg.logical_batch_size:
+            raise RuntimeError(
+                f"pair loader assembled {result.batch_size} pairs, expected {self.cfg.logical_batch_size}"
+            )
+        self.last_metrics = LoaderMetrics(anonymous_wait, professional_wait, self.cache_gib)
+        return result
 
     def state_dict(self) -> dict[str, Any]:
         return {
             "schema": 1,
+            "anonymous_mds": self.anonymous_loader.state_dict(),
+            "professional_mds": self.professional_loader.state_dict(),
+            "professional_queues": {identity: tuple(queue) for identity, queue in self.queues.items()},
             "rng": copy.deepcopy(self.rng.bit_generator.state),
-            "professional_split": "blake2b-hal-o45-split-80-10-10",
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         if state.get("schema") != 1:
-            raise ValueError(f"unsupported pair sampler schema {state.get('schema')!r}")
+            raise ValueError(f"unsupported pair loader schema {state.get('schema')!r}")
+        if self._anonymous_iterator is not None or self._professional_iterator is not None:
+            raise RuntimeError("pair loader state must be restored before iteration starts")
+        anonymous_state = state.get("anonymous_mds")
+        professional_state = state.get("professional_mds")
+        if not isinstance(anonymous_state, dict) or not isinstance(professional_state, dict):
+            raise TypeError("pair loader state must contain both MDS cursors")
+        self.anonymous_loader.load_state_dict(anonymous_state)
+        self.professional_loader.load_state_dict(professional_state)
+        saved_queues = state.get("professional_queues")
+        if not isinstance(saved_queues, dict) or set(saved_queues) != set(self.identities):
+            raise ValueError("checkpoint professional queue identities do not match")
+        restored: dict[str, deque[ProfessionalExample]] = {}
+        for identity in self.identities:
+            values = tuple(saved_queues[identity])
+            replay_ids = [example.metadata.replay_id for example in values]
+            if len(values) > PROFESSIONAL_QUEUE_LIMIT or len(replay_ids) != len(set(replay_ids)):
+                raise ValueError(f"checkpoint queue for {identity} is invalid")
+            restored[identity] = deque(values)
+        self.queues = restored
         self.rng.bit_generator.state = copy.deepcopy(state["rng"])
+
+    def close(self) -> None:
+        self.anonymous_loader.close()
+        self.professional_loader.close()
 
 
 def capture_rng_state() -> dict[str, Any]:
@@ -1180,14 +1516,14 @@ def save_checkpoint(
     cfg: TrainConfig,
     stats: Mapping[str, FeatureStats],
     step: int,
-    sampler: PairSampler | None,
+    pair_loader: PairLoader | None,
     wandb_id: str | None,
     uploader: BackgroundUploader | None = None,
 ) -> None:
     """Save every model, optimizer, schedule, RNG, and split state."""
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
-        "schema": 1,
+        "schema": 2,
         "online_encoder": model.online_encoder.state_dict(),
         "online_projector": model.online_projector.state_dict(),
         "predictor": model.predictor.state_dict(),
@@ -1197,7 +1533,7 @@ def save_checkpoint(
         "scheduler": {"name": "o45-explicit", "next_step": step + 1},
         "ema_schedule_position": step,
         "rng": capture_rng_state(),
-        "sampler": None if sampler is None else sampler.state_dict(),
+        "pair_loader": None if pair_loader is None else pair_loader.state_dict(),
         "professional_split": {
             "sealed": SEALED_IDENTITIES,
             "development": DEVELOPMENT_IDENTITIES,
@@ -1222,7 +1558,7 @@ def load_checkpoint(
     device: torch.device,
 ) -> tuple[BYOL, AdamW, TrainConfig, dict[str, FeatureStats], dict[str, Any]]:
     state = torch.load(path, map_location=device, weights_only=False)
-    if state.get("schema") != 1:
+    if state.get("schema") != 2:
         raise ValueError(f"unsupported O45 checkpoint schema {state.get('schema')!r}")
     cfg = TrainConfig(**state["config"])
     cfg.validate()
@@ -1237,6 +1573,183 @@ def load_checkpoint(
     stats = {name: FeatureStats(**values) for name, values in state["feature_statistics"].items()}
     restore_rng_state(state["rng"])
     return model, optimizer, cfg, stats, state
+
+
+def build_heldout_cache(
+    cfg: TrainConfig,
+    stats: Mapping[str, FeatureStats],
+    *,
+    num_workers: int = LOADER_WORKERS,
+) -> HeldoutCache:
+    """Collect fixed 16-replay gallery and query sets for each development identity."""
+    loader = make_professional_loader(
+        cfg,
+        stats,
+        allowed_splits=("gallery", "query"),
+        num_workers=num_workers,
+        shuffle=False,
+    )
+    selected = {split: {identity: [] for identity in DEVELOPMENT_IDENTITIES} for split in ("gallery", "query")}
+    replay_ids = {split: {identity: set() for identity in DEVELOPMENT_IDENTITIES} for split in ("gallery", "query")}
+    iterator = iter(loader)
+    batches = 0
+    try:
+        while any(
+            len(selected[split][identity]) < HELDOUT_REPLAYS_PER_IDENTITY
+            for split in ("gallery", "query")
+            for identity in DEVELOPMENT_IDENTITIES
+        ):
+            batches += 1
+            if batches > 10_000:
+                missing = {
+                    f"{identity}/{split}": len(selected[split][identity])
+                    for split in ("gallery", "query")
+                    for identity in DEVELOPMENT_IDENTITIES
+                    if len(selected[split][identity]) < HELDOUT_REPLAYS_PER_IDENTITY
+                }
+                raise RuntimeError(f"could not build the fixed O45 held-out cache: {missing}")
+            try:
+                batch = next(iterator)
+            except StopIteration as error:
+                raise RuntimeError("professional MDS epoch ended before the held-out cache was complete") from error
+            for example in _candidate_examples(batch):
+                identity = example.metadata.identity
+                if identity is None:
+                    raise RuntimeError("held-out professional window has no identity")
+                split = professional_split(identity, example.metadata.replay_id)
+                identity_replays = replay_ids[split][identity]
+                identity_examples = selected[split][identity]
+                if len(identity_examples) >= HELDOUT_REPLAYS_PER_IDENTITY:
+                    continue
+                if example.metadata.replay_id in identity_replays:
+                    continue
+                identity_replays.add(example.metadata.replay_id)
+                identity_examples.append(example)
+    finally:
+        loader.close()
+    gallery = tuple(example for identity in DEVELOPMENT_IDENTITIES for example in selected["gallery"][identity])
+    query = tuple(example for identity in DEVELOPMENT_IDENTITIES for example in selected["query"][identity])
+    return HeldoutCache(gallery, query)
+
+
+def _encode_examples(
+    encoder: PlayerEncoder,
+    examples: Sequence[ProfessionalExample],
+    *,
+    device: torch.device,
+    microbatch: int,
+) -> np.ndarray:
+    output = []
+    amp = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
+    with torch.no_grad(), amp:
+        for start in range(0, len(examples), microbatch):
+            context = _concat_contexts([example.context for example in examples[start : start + microbatch]])
+            output.append(encoder.normalized(context.to(device)).float().cpu().numpy())
+    return np.concatenate(output)
+
+
+def heldout_metrics(
+    model: BYOL,
+    cache: HeldoutCache,
+    cfg: TrainConfig,
+    device: torch.device,
+) -> dict[str, float]:
+    """Run the existing development-identity metrics on the fixed cache."""
+    was_training = model.online_encoder.training
+    model.online_encoder.eval()
+    try:
+        gallery_z = _encode_examples(
+            model.online_encoder,
+            cache.gallery,
+            device=device,
+            microbatch=cfg.target_microbatch,
+        )
+        query_z = _encode_examples(
+            model.online_encoder,
+            cache.query,
+            device=device,
+            microbatch=cfg.target_microbatch,
+        )
+    finally:
+        model.online_encoder.train(was_training)
+
+    gallery_metadata = [example.metadata for example in cache.gallery]
+    query_metadata = [example.metadata for example in cache.query]
+    gallery_identities = [str(item.identity) for item in gallery_metadata]
+    query_identities = [str(item.identity) for item in query_metadata]
+    gallery_replays = [item.replay_id for item in gallery_metadata]
+    query_replays = [item.replay_id for item in query_metadata]
+    values = {
+        f"retrieval/{name}": value
+        for name, value in retrieval_metrics(
+            gallery_z,
+            gallery_identities,
+            gallery_replays,
+            query_z,
+            query_identities,
+            query_replays,
+        ).items()
+    }
+    values.update(
+        {
+            f"identification/{name}": value
+            for name, value in knn_identification(
+                gallery_z,
+                gallery_identities,
+                query_z,
+                query_identities,
+            ).items()
+        }
+    )
+    values.update(
+        {
+            f"identification/{name}": value
+            for name, value in linear_probe_metrics(
+                gallery_z,
+                gallery_identities,
+                query_z,
+                query_identities,
+            ).items()
+        }
+    )
+    values.update(
+        {
+            f"identification/{name}": value
+            for name, value in prototype_identification(
+                gallery_z,
+                gallery_identities,
+                gallery_replays,
+                query_z,
+                query_identities,
+            ).items()
+        }
+    )
+
+    all_z = np.concatenate((gallery_z, query_z))
+    all_metadata = [*gallery_metadata, *query_metadata]
+    query_indices = range(len(gallery_metadata), len(all_metadata))
+    nuisance_query, nuisance_positive, nuisance_negative = select_nuisance_triplets(all_metadata, query_indices)
+    nuisance = nuisance_controlled_metrics(
+        all_z[nuisance_query],
+        all_z[nuisance_positive],
+        all_z[nuisance_negative],
+        [all_metadata[index] for index in nuisance_query],
+        [all_metadata[index] for index in nuisance_positive],
+    )
+    values.update({f"nuisance/{name}": value for name, value in nuisance.items()})
+    normalized = _normalize_numpy(all_z)
+    same_distance = 1.0 - np.sum(normalized[nuisance_query] * normalized[nuisance_positive], axis=1)
+    different_distance = 1.0 - np.sum(normalized[nuisance_query] * normalized[nuisance_negative], axis=1)
+    values["nuisance/distance_gap_lower_95"] = bootstrap_lower_bound(different_distance - same_distance)
+    values["nuisance/triplet_accuracy_lower_95"] = bootstrap_lower_bound(
+        (same_distance < different_distance).astype(np.float64),
+        chance=0.5,
+    )
+    values.update({f"collapse/{name}": value for name, value in collapse_diagnostics(all_z).items()})
+    distributions = distance_distributions(all_z, gallery_identities + query_identities)
+    values["distance/same_player_mean"] = float(distributions["same_player"].mean())
+    values["distance/different_player_mean"] = float(distributions["different_player"].mean())
+    return values
 
 
 def synthetic_context(cfg: TrainConfig, batch_size: int, seed: int = 0) -> Context:
@@ -1287,6 +1800,10 @@ def train(cfg: TrainConfig, *, resume: str | None = None) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("the full O45 run requires CUDA; use --cpu-smoke for a local contract test")
+    if cfg.attention_backend != "varlen_flash":
+        raise ValueError("CUDA O45 training requires attention_backend='varlen_flash'")
+    if not varlen_flash_is_usable("cuda", cfg.window_length, cfg.n_heads, cfg.d_model // cfg.n_heads):
+        raise RuntimeError("native variable-length FlashAttention is unavailable for the O45 geometry")
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
@@ -1311,9 +1828,14 @@ def train(cfg: TrainConfig, *, resume: str | None = None) -> None:
         if loaded_cfg != cfg:
             raise ValueError("resume configuration differs from the requested configuration")
         start_step = int(resume_state["step"]) + 1
-    sampler = PairSampler(cfg, stats)
-    if resume_state is not None and resume_state["sampler"] is not None:
-        sampler.load_state_dict(resume_state["sampler"])
+    heldout = build_heldout_cache(cfg, stats)
+    pair_loader = PairLoader(
+        cfg,
+        make_anonymous_loader(cfg, stats),
+        make_professional_loader(cfg, stats),
+    )
+    if resume_state is not None and resume_state["pair_loader"] is not None:
+        pair_loader.load_state_dict(resume_state["pair_loader"])
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     wandb.init(
         project=cfg.wandb_project,
@@ -1324,20 +1846,40 @@ def train(cfg: TrainConfig, *, resume: str | None = None) -> None:
         config=asdict(cfg),
     )
     try:
+        if start_step == 0:
+            initial_eval = heldout_metrics(model, heldout, cfg, device)
+            wandb.log({**{f"heldout/{name}": value for name, value in initial_eval.items()}, "global_step": 0})
+            print(
+                f"update 0: heldout gap={initial_eval['nuisance/distance_gap']:.4f} "
+                f"rank={initial_eval['collapse/effective_rank']:.1f}",
+                flush=True,
+            )
         for step in range(start_step, cfg.max_updates):
             started = time.monotonic()
-            batch = sampler.sample()
+            batch = pair_loader.sample()
             metrics = train_step(model, batch, optimizer, cfg, step, device)
+            completed_updates = step + 1
             values = {f"train/{name}": value for name, value in asdict(metrics).items()}
-            values.update({"global_step": step, "throughput/update_s": time.monotonic() - started})
+            values.update(
+                {
+                    "global_step": completed_updates,
+                    "throughput/complete_update_s": time.monotonic() - started,
+                    "throughput/anonymous_wait_s": pair_loader.last_metrics.anonymous_wait_s,
+                    "throughput/professional_wait_s": pair_loader.last_metrics.professional_wait_s,
+                    "system/cache_gib": pair_loader.last_metrics.cache_gib,
+                }
+            )
+            if completed_updates in (512, 1024, cfg.max_updates):
+                evaluation = heldout_metrics(model, heldout, cfg, device)
+                values.update({f"heldout/{name}": value for name, value in evaluation.items()})
             wandb.log(values)
-            if step in (0, 512, 1024) or (step + 1) % 50 == 0:
+            if completed_updates in (1, 512, 1024) or completed_updates % 50 == 0:
                 print(
-                    f"step {step}: loss={metrics.loss:.4f} byol={metrics.byol_loss:.4f} "
+                    f"update {completed_updates}: loss={metrics.loss:.4f} byol={metrics.byol_loss:.4f} "
                     f"triplet={metrics.triplet_loss:.4f} valid={metrics.valid_triplets}",
                     flush=True,
                 )
-            if step in (0, 512, 1024) or (step + 1) % cfg.checkpoint_every == 0:
+            if completed_updates % cfg.checkpoint_every == 0:
                 save_checkpoint(
                     run_dir / "latest.pt",
                     model=model,
@@ -1345,7 +1887,7 @@ def train(cfg: TrainConfig, *, resume: str | None = None) -> None:
                     cfg=cfg,
                     stats=stats,
                     step=step,
-                    sampler=sampler,
+                    pair_loader=pair_loader,
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     uploader=uploader,
                 )
@@ -1356,11 +1898,12 @@ def train(cfg: TrainConfig, *, resume: str | None = None) -> None:
             cfg=cfg,
             stats=stats,
             step=cfg.max_updates - 1,
-            sampler=sampler,
+            pair_loader=pair_loader,
             wandb_id=None if wandb.run is None else wandb.run.id,
             uploader=uploader,
         )
     finally:
+        pair_loader.close()
         if uploader is not None:
             uploader.close()
         wandb.finish()

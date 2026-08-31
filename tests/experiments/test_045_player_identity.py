@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from melee import Stage
+from streaming import MDSWriter
 
 
 def _load() -> ModuleType:
@@ -80,6 +81,63 @@ def _raw_window() -> dict[str, np.ndarray]:
     }
 
 
+class _FakeDataset:
+    cache_usage = 2**30
+
+
+class _FakeLoader:
+    """Cursor-bearing loader used to isolate PairLoader's experiment state."""
+
+    def __init__(self, make_batch) -> None:
+        self.dataset = _FakeDataset()
+        self._make_batch = make_batch
+        self._cursor = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch = self._make_batch(self._cursor)
+        self._cursor += 1
+        return batch
+
+    def state_dict(self) -> dict[str, int]:
+        return {"cursor": self._cursor}
+
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        self._cursor = state["cursor"]
+
+
+def _fake_pair_loader(cfg: exp.TrainConfig, identities: tuple[str, ...]) -> exp.PairLoader:
+    anonymous_context = exp.synthetic_context(cfg, 2, seed=41)
+
+    def anonymous_batch(cursor: int) -> exp.PairBatch:
+        online = tuple(_metadata(2 * cursor + index, identity=None) for index in range(2))
+        target = tuple(_metadata(10_000 + 2 * cursor + index, identity=None) for index in range(2))
+        return exp.PairBatch(
+            anonymous_context,
+            anonymous_context,
+            exp.PairMetadata(online, target, torch.zeros(2, dtype=torch.bool)),
+        )
+
+    professional_context = exp.synthetic_context(cfg, len(identities), seed=42)
+
+    def professional_batch(cursor: int) -> exp.ProfessionalCandidates:
+        metadata = tuple(
+            _metadata(cursor * len(identities) + index, identity, character=index)
+            for index, identity in enumerate(identities)
+        )
+        return exp.ProfessionalCandidates(professional_context, metadata, len(identities))
+
+    return exp.PairLoader(
+        cfg,
+        _FakeLoader(anonymous_batch),
+        _FakeLoader(professional_batch),
+        identities=identities,
+        anonymous_batches_per_update=2,
+    )
+
+
 def test_frozen_configuration_and_identity_partition() -> None:
     cfg = exp.TrainConfig()
     cfg.validate()
@@ -90,6 +148,142 @@ def test_frozen_configuration_and_identity_partition() -> None:
     assert len(exp.SEALED_IDENTITIES) == 10
     assert not set(exp.SEALED_IDENTITIES) & set(exp.DEVELOPMENT_IDENTITIES)
     assert set(exp.SEALED_IDENTITIES) | set(exp.DEVELOPMENT_IDENTITIES) == set(exp.streams.PROFESSIONAL_PLAYER_SLUGS)
+
+
+def test_frozen_loader_geometry() -> None:
+    cfg = exp.TrainConfig()
+    assert exp.ANONYMOUS_IO_BATCH == 64
+    assert exp.ANONYMOUS_BATCHES_PER_UPDATE == 12
+    assert cfg.anonymous_pairs == exp.ANONYMOUS_IO_BATCH * exp.ANONYMOUS_BATCHES_PER_UPDATE
+    assert exp.PROFESSIONAL_INPUT_BATCH == len(exp.DEVELOPMENT_IDENTITIES) == 28
+    assert cfg.professional_pairs == 16 * 16
+    assert exp.LOADER_WORKERS == 8
+    assert exp.LOADER_PREFETCH_FACTOR == 2
+    assert cfg.attention_backend == "varlen_flash"
+
+
+def test_source_tagging_and_stratified_batches_use_both_toy_mds_streams(tmp_path: Path) -> None:
+    roots = (tmp_path / "first", tmp_path / "second")
+    for source_index, root in enumerate(roots):
+        with MDSWriter(out=str(root / "train"), columns={"value": "int"}) as writer:
+            for value in range(3):
+                writer.write({"value": 10 * source_index + value})
+    dataset = exp.SourceTaggedStreamingDataset(
+        streams=[exp.Stream(local=str(root), split="train", proportion=0.5, keep_zip=False) for root in roots],
+        source_slugs=("first", "second"),
+        batch_size=2,
+        batching_method="stratified",
+        shuffle=True,
+        shuffle_algo="py1e",
+        shuffle_seed=5,
+        shuffle_block_size=8,
+        cache_limit=None,
+        keep_zip=False,
+    )
+
+    rows = list(dataset)
+
+    assert len(rows) == 6
+    for start in range(0, len(rows), 2):
+        assert {row["_o45_source"] for row in rows[start : start + 2]} == {"first", "second"}
+    assert dataset.batching_method == "stratified"
+    assert dataset.shuffle_algo == "py1e"
+    assert dataset.shuffle_block_size == 8
+
+
+def test_tagged_stratified_mds_cursor_resumes_exactly(tmp_path: Path) -> None:
+    def make(root: Path) -> exp.O45StreamingDataLoader:
+        source_roots = (root / "first", root / "second")
+        for source_index, source_root in enumerate(source_roots):
+            with MDSWriter(out=str(source_root / "train"), columns={"value": "int"}) as writer:
+                for value in range(8):
+                    writer.write({"value": 100 * source_index + value})
+        dataset = exp.SourceTaggedStreamingDataset(
+            streams=[
+                exp.Stream(local=str(source_root), split="train", proportion=0.5) for source_root in source_roots
+            ],
+            source_slugs=("first", "second"),
+            batch_size=2,
+            batching_method="stratified",
+            shuffle=True,
+            shuffle_seed=19,
+            shuffle_block_size=32,
+        )
+        return exp.O45StreamingDataLoader(dataset, batch_size=2, num_workers=0)
+
+    uninterrupted = make(tmp_path / "uninterrupted")
+    iterator = iter(uninterrupted)
+    next(iterator)
+    state = uninterrupted.state_dict()
+    expected = [next(iterator) for _ in range(3)]
+    resumed = make(tmp_path / "resumed")
+    resumed.load_state_dict(state)
+    actual_iterator = iter(resumed)
+    actual = [next(actual_iterator) for _ in range(3)]
+
+    for got, want in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got["value"], want["value"])
+        assert got["_o45_source"] == want["_o45_source"]
+
+
+def test_replay_window_randomness_uses_seed_epoch_replay_and_source() -> None:
+    first = exp._stable_replay_rng(3, 4, "replay", "aklo").integers(2**31, size=8)
+    same = exp._stable_replay_rng(3, 4, "replay", "aklo").integers(2**31, size=8)
+    assert np.array_equal(first, same)
+    assert not np.array_equal(first, exp._stable_replay_rng(3, 5, "replay", "aklo").integers(2**31, size=8))
+    assert not np.array_equal(first, exp._stable_replay_rng(3, 4, "replay", "amsa").integers(2**31, size=8))
+
+
+def test_pair_loader_assembles_exact_batch_with_distinct_professional_replays() -> None:
+    identities = tuple(exp.DEVELOPMENT_IDENTITIES[:4])
+    cfg = _cfg(professional_identities_per_batch=2, professional_replays_per_identity=2)
+    loader = _fake_pair_loader(cfg, identities)
+
+    batch = loader.sample()
+
+    assert batch.batch_size == 8
+    assert batch.metadata.professional_mask.tolist() == [False] * 4 + [True] * 4
+    for identity in set(item.identity for item in batch.metadata.online[4:]):
+        replays = [item.replay_id for item in batch.metadata.online[4:] if item.identity == identity]
+        assert len(replays) == len(set(replays)) == 2
+    assert all(len(queue) <= exp.PROFESSIONAL_QUEUE_LIMIT for queue in loader.queues.values())
+    assert loader.last_metrics.cache_gib == 2
+
+
+def test_pair_loader_selects_identities_uniformly() -> None:
+    identities = tuple(exp.DEVELOPMENT_IDENTITIES[:4])
+    cfg = _cfg(professional_identities_per_batch=2, professional_replays_per_identity=2)
+    loader = _fake_pair_loader(cfg, identities)
+    counts = {identity: 0 for identity in identities}
+
+    for _ in range(200):
+        batch = loader.sample()
+        for identity in set(item.identity for item in batch.metadata.online[4:]):
+            counts[str(identity)] += 1
+
+    assert all(75 < count < 125 for count in counts.values())
+
+
+def test_pair_loader_state_resumes_exactly() -> None:
+    identities = tuple(exp.DEVELOPMENT_IDENTITIES[:4])
+    cfg = _cfg(professional_identities_per_batch=2, professional_replays_per_identity=2)
+    uninterrupted = _fake_pair_loader(cfg, identities)
+    uninterrupted.sample()
+    state = uninterrupted.state_dict()
+    expected = uninterrupted.sample()
+
+    resumed = _fake_pair_loader(cfg, identities)
+    resumed.load_state_dict(state)
+    actual = resumed.sample()
+
+    def fingerprint(metadata) -> list[tuple[str, str | None]]:
+        return [(item.replay_id, item.identity) for item in metadata]
+
+    assert fingerprint(actual.metadata.online) == fingerprint(expected.metadata.online)
+    assert fingerprint(actual.metadata.target) == fingerprint(expected.metadata.target)
+    for name in actual.online.features:
+        torch.testing.assert_close(actual.online.features[name], expected.online.features[name])
+        torch.testing.assert_close(actual.target.features[name], expected.target.features[name])
 
 
 def test_uniform_anchor_support_includes_middle_and_endpoints() -> None:
@@ -388,6 +582,33 @@ def test_collapse_diagnostics_distinguish_full_rank_from_collapse() -> None:
     assert healthy["mean_coordinate_std"] > failed["mean_coordinate_std"]
 
 
+def test_fixed_heldout_cache_runs_existing_metrics_on_cpu() -> None:
+    cfg = _cfg(target_microbatch=16)
+    identities = exp.DEVELOPMENT_IDENTITIES[:2]
+    context = exp.synthetic_context(cfg, 64, seed=71)
+    examples = []
+    for identity_index, identity in enumerate(identities):
+        for split_index in range(32):
+            index = identity_index * 32 + split_index
+            metadata = _metadata(
+                index,
+                identity,
+                character=split_index % 2,
+                stage=2 + split_index % 2,
+                descriptor_offset=identity_index / 10,
+            )
+            examples.append(exp.ProfessionalExample(exp._context_row(context, index), metadata))
+    gallery = tuple(examples[identity_index * 32 + offset] for identity_index in range(2) for offset in range(16))
+    query = tuple(examples[identity_index * 32 + offset] for identity_index in range(2) for offset in range(16, 32))
+    model = exp.BYOL(cfg, prefer_flex=False)
+
+    metrics = exp.heldout_metrics(model, exp.HeldoutCache(gallery, query), cfg, torch.device("cpu"))
+
+    assert metrics["retrieval/queries"] == 32
+    assert math_is_finite(metrics["nuisance/distance_gap"])
+    assert math_is_finite(metrics["collapse/effective_rank"])
+
+
 def test_bootstrap_lower_bound() -> None:
     assert exp.bootstrap_lower_bound(np.ones(100), samples=1000) == 1
     assert exp.bootstrap_lower_bound(np.ones(100), chance=0.5, samples=1000) == 0.5
@@ -439,6 +660,8 @@ def test_checkpoint_contains_complete_training_state(tmp_path: Path) -> None:
     cfg = _cfg()
     model = exp.BYOL(cfg, prefer_flex=False)
     optimizer = exp.make_optimizer(model, cfg)
+    pair_loader = _fake_pair_loader(cfg, tuple(exp.DEVELOPMENT_IDENTITIES[:4]))
+    pair_loader.sample()
     path = tmp_path / "checkpoint.pt"
     stats = {"position_x": exp.FeatureStats(mean=0, std=1, min=-1, max=1)}
     exp.save_checkpoint(
@@ -448,7 +671,7 @@ def test_checkpoint_contains_complete_training_state(tmp_path: Path) -> None:
         cfg=cfg,
         stats=stats,
         step=1,
-        sampler=None,
+        pair_loader=pair_loader,
         wandb_id="run-id",
     )
     state = torch.load(path, weights_only=False)
@@ -462,7 +685,7 @@ def test_checkpoint_contains_complete_training_state(tmp_path: Path) -> None:
         "scheduler",
         "ema_schedule_position",
         "rng",
-        "sampler",
+        "pair_loader",
         "professional_split",
         "config",
         "feature_statistics",
@@ -470,8 +693,15 @@ def test_checkpoint_contains_complete_training_state(tmp_path: Path) -> None:
         "wandb_id",
     }
     assert required <= state.keys()
+    assert state["schema"] == 2
+    assert state["pair_loader"]["anonymous_mds"] == {"cursor": 2}
+    assert state["pair_loader"]["professional_mds"] == {"cursor": 2}
     assert state["ema_schedule_position"] == 1
     assert state["wandb_id"] == "run-id"
+    _, _, loaded_cfg, loaded_stats, loaded_state = exp.load_checkpoint(path, device=torch.device("cpu"))
+    assert loaded_cfg == cfg
+    assert loaded_stats == stats
+    assert loaded_state["step"] == 1
 
 
 def math_is_finite(value: float) -> bool:

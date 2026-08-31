@@ -14,7 +14,7 @@ Anonymous data comes from `ranked-anonymized-1/mds-policy-v7`. One replay and on
 
 `min(1024, floor((T - 256) / 3))`
 
-frames away and is sampled with probability proportional to squared start distance. Online and target roles are exchanged with probability 0.5. Anonymous replay IDs are sampled IID. Anonymous examples only appear in their own BYOL pair.
+frames away and is sampled with probability proportional to squared start distance. Online and target roles are exchanged with probability 0.5. Native MDS `py1e` shuffling supplies replay order. Anonymous examples only appear in their own BYOL pair.
 
 Professional data comes from the 38 player-slug policy-world streams. A row is eligible only when exactly one side has `Rank.PRO`; that side is ego and the stream slug is its identity.
 
@@ -28,15 +28,15 @@ For each of the other 28 identities, BLAKE2b with personalization `hal-o45-split
 - 80–89: held-out gallery and linear-probe training
 - 90–99: held-out query
 
-One update samples 16 identities uniformly and 16 distinct training replays from each identity. A maximum-weight assignment creates a cross-replay derangement. Its weights are 8 for a different ego character, 4 for a different stage, 2 for a different opponent character, and 1 for game-state descriptor distance.
+One stratified MDS input batch contains one replay candidate from each development identity. Bounded queues retain at most 32 eligible, distinct replay windows per identity. One update samples 16 identities uniformly and takes 16 windows from each. A maximum-weight assignment creates a cross-replay derangement. Its weights are 8 for a different ego character, 4 for a different stage, 2 for a different opponent character, and 1 for game-state descriptor distance.
 
 The game-state descriptor contains eight 32-frame means of ego/opponent stage-normalized x, y divided by 100, percent divided by 100, stock count, relative stage-normalized x, and relative y divided by 100. It has 80 values. It contains no input, action ID, learned feature, or identity.
 
-Each logical update has 768 anonymous pairs and 256 professional pairs. It therefore runs 1,024 online examples and 1,024 EMA-target examples. Device microbatches are 64 online and 128 target.
+Each logical update joins twelve 64-replay anonymous loader batches with 256 professional pairs. It therefore runs 1,024 online examples and 1,024 EMA-target examples. Both MDS pipelines use eight persistent ordered workers, pinned memory, and a prefetch factor of two. MDS owns shuffling, source mixing, shard retrieval, decompression, worker partitioning, and prefetch depth. The local cache has no eviction limit and removes compressed shards after decompression. Device microbatches are 64 online and 128 target.
 
 ## Model and objective
 
-The encoder uses the shared causal Transformer implementation with a 256-frame context, width 256, four layers, four heads, and full causal attention. Each frame contains ego, opponent, both Nana state blocks, and raw ego controller inputs. Broadcast stage and character fields do not enter the encoder.
+The encoder uses the shared causal Transformer implementation with a 256-frame context, width 256, four layers, four heads, and full causal attention. CUDA uses native variable-length FlashAttention; CPU contract tests use dense SDPA. Each frame contains ego, opponent, both Nana state blocks, and raw ego controller inputs. Broadcast stage and character fields do not enter the encoder.
 
 All trunk states are mean-pooled. A learned 256-to-128 layer followed by RMS normalization produces `z`. Retrieval and distance metrics L2-normalize `z`.
 
@@ -62,13 +62,13 @@ AdamW uses learning rate `3e-4`, betas `(0.9, 0.95)`, weight decay `0.05`, gradi
 
 ## Checkpoints
 
-Each checkpoint contains the online encoder, projector, predictor, EMA encoder and projector, optimizer, explicit learning-rate and EMA schedule positions, all Python/NumPy/Torch/CUDA RNG states, pair-sampler state, split definition, configuration, feature statistics, completed step, and W&B ID.
+Each schema-2 checkpoint contains the online encoder, projector, predictor, EMA encoder and projector, optimizer, explicit learning-rate and EMA schedule positions, all Python/NumPy/Torch/CUDA RNG states, both MDS cursors, professional queues, experiment RNG state, split definition, configuration, feature statistics, completed step, and W&B ID. The failed schema-1 step-0 checkpoint is intentionally incompatible.
 
 Only `BYOL.export_encoder()` is a downstream model. It returns a separate encoder with no projector or predictor.
 
 ## Evaluation
 
-Checkpoint selection uses only the 28 development identities. Gallery replays train the fixed `C=1` multinomial probe and supply retrieval neighbors. Query replays remain separate. Report cross-replay Recall@1, Recall@5, MRR, mAP, cosine kNN at 1/5/15, the linear probe, one/four/sixteen-shot prototypes, and same/different-player distance distributions.
+Checkpoint selection uses only the 28 development identities. A fixed cache contains 16 gallery and 16 query replays per identity. Gallery replays train the fixed `C=1` multinomial probe and supply retrieval neighbors. Query replays remain separate. Report cross-replay Recall@1, Recall@5, MRR, mAP, cosine kNN at 1/5/15, the linear probe, one/four/sixteen-shot prototypes, and same/different-player distance distributions. Run these metrics before training and after updates 512, 1,024, and 8,192.
 
 For nuisance control, each query is paired with a same-player, different-replay positive, preferentially crossing ego character, opponent character, stage, and then game state. Its different-player comparison has the same ego character and nearest available game-state descriptor. Report the mean distance gap, pairwise ROC AUC, triplet accuracy, and coverage and separate results for character crossing, stage crossing, opponent crossing, and high state distance. The primary selection metric is the distance gap.
 
@@ -98,4 +98,4 @@ Symmetric BYOL, 512-frame windows, and other professional-loss weights are later
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | Not run | 0 | 0 | — | — | — | — | — | — | Pending |
 
-Implementation checks cover sampler geometry, stable splits, sealed exclusion, professional derangements, safe negative selection, one-way stop-gradient, EMA endpoints and exact updates, encoder export, evaluation metrics, collapse diagnostics, checkpoint contents, a CPU update, and a CUDA smoke update.
+Implementation checks cover toy-MDS source tagging and stratification, loader geometry, stable replay-local randomness, exact pair assembly, uniform identity selection, bounded queues, state-exact continuation, stable splits, sealed exclusion, professional derangements, safe negative selection, one-way stop-gradient, EMA endpoints and exact updates, encoder export, evaluation metrics, collapse diagnostics, checkpoint contents, a CPU update, and a CUDA smoke update.
