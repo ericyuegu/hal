@@ -1,5 +1,7 @@
 """Iso-FLOP scaling with nested, content-deduplicated replay corpora.
 
+Status: canceled before launch; never run.
+
 This experiment preserves O43's legacy controller codec and loss. It scales one
 architecture dial, trains without learning-rate decay, and exposes only as much
 unique replay data as the endpoint processes.

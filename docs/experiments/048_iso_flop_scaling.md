@@ -1,5 +1,7 @@
 # O48: deduplicated iso-FLOP scaling
 
+Status: canceled before launch; never run
+
 O48 replaces O39/O47 as the capacity-scaling protocol. It keeps O43's legacy
 controller codec, sparse ten-offset objective, 50% next-frame weight, base
 observation bundle, and H=1 execution. The d384 member is exactly O43's
