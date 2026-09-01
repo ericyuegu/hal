@@ -550,7 +550,9 @@ class BF16Inference(_o43.BF16Inference):
 
     Pass ``player_code="MANG#0"`` for a professional style or
     ``player_rank=Rank.MASTER`` for a ranked aggregate. The selectors are
-    mutually exclusive. An unknown explicit code raises ``KeyError``.
+    mutually exclusive. An unknown explicit code raises ``KeyError``. Compiled
+    evaluation uses the trunk's dense-SDPA correctness path because the O43
+    FlexAttention inference kernel can fault after repeated replays on B200.
     """
 
     def __init__(
@@ -575,6 +577,20 @@ class BF16Inference(_o43.BF16Inference):
         self.player_key = player_key
         super().__init__(model, cfg, **kwargs)
 
+    def _trunk(self, bucket: int):
+        if bucket not in self._trunks:
+
+            def forward_dense(features, pad, actions):
+                tokens = self.model.context_tokens(features, actions)
+                return self.model.trunk.forward_dense(tokens, pad)
+
+            self._trunks[bucket] = (
+                torch.compile(forward_dense, dynamic=False, fullgraph=True, mode=self.compile_mode)
+                if self.compiled
+                else forward_dense
+            )
+        return self._trunks[bucket]
+
     def decode(self, ctx: Context, horizon: int, **kwargs) -> Tensor:
         return super().decode(_condition_context(ctx, self.player_id), horizon, **kwargs)
 
@@ -585,6 +601,7 @@ def eval_suites(*args, replay_dir: Path, inference: BF16Inference, **kwargs):
         "schema_version": 1,
         "ego_player_id": inference.player_id,
         "ego_player_key": inference.player_key,
+        "inference_attention_backend": "dense_sdpa",
         "opponent_identity_conditioned": False,
     }
     replay_dir.mkdir(parents=True, exist_ok=True)

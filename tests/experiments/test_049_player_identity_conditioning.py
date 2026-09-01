@@ -181,6 +181,21 @@ def test_inference_accepts_exact_code_or_rank_and_rejects_oov() -> None:
         exp.BF16Inference(model, cfg, player_code="AA#1", player_rank=Rank.MASTER, compiled=False)
 
 
+def test_inference_trunk_uses_dense_sdpa_correctness_path() -> None:
+    cfg = _cfg()
+    _, model = _models(cfg)
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    context = exp._condition_context(context, _vocabulary().id_for_code("AA#1"))
+    actions = model.codec.quantize(exp._o43.stack_actions(context.features))
+    inference = exp.BF16Inference(model, cfg, player_code="AA#1", compiled=False)
+
+    with torch.no_grad():
+        actual = inference._trunk(2)(context.features, context.ctx_pad, actions)
+        expected = model.trunk.forward_dense(model.context_tokens(context.features, actions), context.ctx_pad)
+
+    assert torch.equal(actual, expected)
+
+
 def test_checkpoint_carries_the_exact_ordered_vocabulary() -> None:
     cfg = _cfg()
     _, model = _models(cfg)
