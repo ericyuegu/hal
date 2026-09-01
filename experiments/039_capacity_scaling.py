@@ -2636,6 +2636,8 @@ def train(
     np.random.seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     model = GPT(cfg).to(DEVICE)
+    if throughput_probe_eager:
+        model.trunk.prefer_flex = False
     counts = subsystem_parameter_counts(model)
     scale = adam_scale(cfg, counts["total"])
     cfg = replace(cfg, adam_weight_decay=scale.weight_decay)
@@ -2932,6 +2934,7 @@ def train(
                 "warmup_updates": throughput_probe_warmup,
                 "measured_updates": throughput_probe_updates,
                 "eager_training": throughput_probe_eager,
+                "training_attention_path": "dense_sdpa" if throughput_probe_eager else "configured",
                 "mean_loader_service_s": float(services.mean()),
                 "std_loader_service_s": float(services.std()),
                 "p95_uncovered_wait_s": p95_wait,
