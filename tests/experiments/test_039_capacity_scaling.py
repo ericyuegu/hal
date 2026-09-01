@@ -481,6 +481,40 @@ def test_explicit_eager_checkpoint_eval_disables_only_the_official_compile_guard
     assert calls[0]["require_compiled_cuda"] is False
 
 
+def test_eval_prewarms_before_starting_dolphin(tmp_path, monkeypatch) -> None:
+    cfg = _tiny_scaled(inference_mode="eager", eval_max_parallel=4)
+    model = exp.GPT(cfg)
+    inference = exp.BF16Inference(model, cfg, compiled=False)
+    events = []
+
+    def prewarm(rows, horizon):
+        events.append(("prewarm", rows, horizon))
+        return 1.25
+
+    def sweep(*args, **kwargs):
+        events.append(("sweep",))
+        assert not model.training
+        return [], []
+
+    monkeypatch.setattr(inference, "prewarm", prewarm)
+    monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", sweep)
+    monkeypatch.setattr(exp, "vs_cpu_metrics", lambda *args, **kwargs: {})
+    monkeypatch.setattr(exp, "default_session_cfg", lambda *args, **kwargs: object())
+
+    metrics = exp.eval_vs_cpu(
+        model,
+        {},
+        cfg,
+        n_matchups=4,
+        replay_dir=tmp_path,
+        inference=inference,
+    )
+
+    assert events == [("prewarm", 4, 1), ("sweep",)]
+    assert metrics["inference_compile_seconds"] == pytest.approx(1.25)
+    assert model.training
+
+
 def test_remote_run_exists_checks_any_prefixed_object(monkeypatch) -> None:
     calls = []
 

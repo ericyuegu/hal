@@ -62,6 +62,7 @@ from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.self_play import canonical_context
+from hal.eval.self_play import synthetic_context
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import action_vec_to_controller
 from hal.sim.process_vec import ProcessVecTelemetry
@@ -1327,6 +1328,8 @@ class BF16Inference:
         requested = cfg.inference_mode == "compiled" if compiled is None else compiled
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
         self.compile_mode = compile_mode
+        self.compile_seconds = 0.0
+        self._warmed: set[tuple[int, int]] = set()
         self._trunks: dict[int, Callable] = {}
         self._decoders: dict[tuple[int, int], Callable] = {}
 
@@ -1366,6 +1369,29 @@ class BF16Inference:
 
             self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
         return self._decoders[key]
+
+    @torch.no_grad()
+    def prewarm(self, rows: int, horizon: int) -> float:
+        """Compile and replay the exact evaluation program before Dolphin starts."""
+        bucket = self._bucket(rows)
+        key = (bucket, horizon)
+        if key in self._warmed or not self.compiled:
+            self._warmed.add(key)
+            return 0.0
+        device = next(self.model.parameters()).device
+        started = time.perf_counter()
+        context = synthetic_context(self.cfg, rows, device)
+        self.decode(context, horizon)
+        self.decode(context, horizon)
+        torch.cuda.synchronize(device)
+        elapsed = time.perf_counter() - started
+        self.compile_seconds += elapsed
+        self._warmed.add(key)
+        print(
+            f"[inference] synchronously compiled batch {bucket}, horizon {horizon} in {elapsed:.1f}s",
+            flush=True,
+        )
+        return elapsed
 
     @torch.no_grad()
     def decode(
@@ -1848,8 +1874,10 @@ def eval_vs_cpu(
 
     was_training = model.training
     model.eval()
-    started = time.perf_counter()
+    total_started = time.perf_counter()
     try:
+        compile_seconds = inference.prewarm(protocol.max_parallel, protocol.decode_horizon)
+        started = time.perf_counter()
         results, rows = sweep_vs_cpu_prior_with_rows(
             factory,
             session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
@@ -1866,6 +1894,8 @@ def eval_vs_cpu(
         model.train(was_training)
     metrics = vs_cpu_metrics(results, seed=protocol.seed)
     metrics["eval_wall_seconds"] = time.perf_counter() - started
+    metrics["eval_total_wall_seconds"] = time.perf_counter() - total_started
+    metrics["inference_compile_seconds"] = compile_seconds
     metrics["control_delay"] = float(selected_delay)
     metrics["replan_interval"] = float(selected_interval)
     metrics["decode_horizon"] = float(protocol.decode_horizon)
