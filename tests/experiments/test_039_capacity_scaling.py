@@ -574,10 +574,14 @@ def test_ordered_replay_batches_are_concatenated_for_one_backward() -> None:
     batches = []
     for start in (0, 2):
         rows = torch.arange(start, start + 2)
+        features = {
+            name: rows[:, None, None].expand(-1, 3, 1)
+            for name in (("feature-a", "feature-b") if start == 0 else ("feature-b", "feature-a"))
+        }
         batches.append(
             TrainBatch(
                 context=Context(
-                    features={"feature": rows[:, None, None].expand(-1, 3, 1)},
+                    features=features,
                     ctx_pad=rows,
                 ),
                 target=rows[:, None, None].expand(-1, 36, A_DIM),
@@ -587,7 +591,8 @@ def test_ordered_replay_batches_are_concatenated_for_one_backward() -> None:
 
     combined = exp.concatenate_train_batches(batches)
 
-    assert combined.context.features["feature"][:, 0, 0].tolist() == [0, 1, 2, 3]
+    assert tuple(combined.context.features) == ("feature-a", "feature-b")
+    assert combined.context.features["feature-a"][:, 0, 0].tolist() == [0, 1, 2, 3]
     assert combined.context.ctx_pad.tolist() == [0, 1, 2, 3]
     assert combined.target[:, 0, 0].tolist() == [0, 1, 2, 3]
     assert combined.replay_ids == ("replay-0", "replay-1", "replay-2", "replay-3")

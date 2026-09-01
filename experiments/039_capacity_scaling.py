@@ -2224,7 +2224,8 @@ def concatenate_train_batches(batches: Sequence[TrainBatch]) -> TrainBatch:
         raise ValueError("cannot concatenate an empty batch sequence")
     first = batches[0]
     feature_names = tuple(first.context.features)
-    if any(tuple(batch.context.features) != feature_names for batch in batches[1:]):
+    feature_name_set = set(feature_names)
+    if any(set(batch.context.features) != feature_name_set for batch in batches[1:]):
         raise ValueError("training batches have different context features")
 
     def concatenate(tensors: Sequence[Tensor]) -> Tensor:
