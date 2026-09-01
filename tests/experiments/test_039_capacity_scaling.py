@@ -23,6 +23,7 @@ from hal.sim.vec import VecMatch
 from hal.sim.vec import drive_vec
 from hal.training.features import A_DIM
 from hal.training.features import Context
+from hal.training.features import TrainBatch
 
 
 def _load(name: str, filename: str):
@@ -573,6 +574,29 @@ def test_position_boundary_retains_every_unused_loss_position() -> None:
     pending_mask = pending[0][1]
     assert not (selected_mask & pending_mask).any()
     assert torch.equal(selected_mask | pending_mask, available)
+
+
+def test_ordered_replay_batches_are_concatenated_for_one_backward() -> None:
+    batches = []
+    for start in (0, 2):
+        rows = torch.arange(start, start + 2)
+        batches.append(
+            TrainBatch(
+                context=Context(
+                    features={"feature": rows[:, None, None].expand(-1, 3, 1)},
+                    ctx_pad=rows,
+                ),
+                target=rows[:, None, None].expand(-1, 36, A_DIM),
+                replay_ids=tuple(f"replay-{row}" for row in rows.tolist()),
+            )
+        )
+
+    combined = exp.concatenate_train_batches(batches)
+
+    assert combined.context.features["feature"][:, 0, 0].tolist() == [0, 1, 2, 3]
+    assert combined.context.ctx_pad.tolist() == [0, 1, 2, 3]
+    assert combined.target[:, 0, 0].tolist() == [0, 1, 2, 3]
+    assert combined.replay_ids == ("replay-0", "replay-1", "replay-2", "replay-3")
 
 
 class _FakeContextBuilder:
