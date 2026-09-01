@@ -32,6 +32,7 @@ validate_args = _MODULE.validate_args
 write_state = _MODULE.write_state
 
 EXPERIMENT = "experiments/028_onehot_controller.py"
+O39_EXPERIMENT = "experiments/039_capacity_scaling.py"
 
 
 def test_defaults_request_l40s_with_burst_cpu_and_ephemeral_ssd() -> None:
@@ -84,6 +85,43 @@ def test_plan_attempt_resumes_only_after_checkpoint_exists() -> None:
     fresh = plan_attempt(running, command, auto_resume=True, checkpoint_found=False)
     assert fresh.argv == command
     assert fresh.state == RunState(status="running")
+
+
+def test_plan_attempt_removes_o39_fresh_selectors_on_retry() -> None:
+    command = (
+        "uv",
+        "run",
+        O39_EXPERIMENT,
+        "--model-l",
+        "10",
+        "--phase=prefix",
+        "--target-positions",
+        "1493689000",
+        "--prefix-fork-from-run",
+        "source-run",
+        "--prefix-fork-checkpoint=branch_D2p30.pt",
+        "--loader-workers",
+        "16",
+        "--device-batch-size=512",
+        "--adam-learning-rate-scale",
+        "0.25",
+    )
+    running = RunState(status="running", run_name="target-run")
+
+    attempt = plan_attempt(running, command, auto_resume=True, checkpoint_found=True)
+
+    assert attempt.argv == (
+        "uv",
+        "run",
+        O39_EXPERIMENT,
+        "--loader-workers",
+        "16",
+        "--device-batch-size=512",
+        "--adam-learning-rate-scale",
+        "0.25",
+        "--resume",
+        "target-run",
+    )
 
 
 def test_plan_attempt_does_not_rerun_terminal_states() -> None:
@@ -300,8 +338,8 @@ def test_arbitrary_command_can_emit_multiple_run_names(tmp_path: Path, monkeypat
             command,
             RunState(status="running"),
             env=dict(_MODULE.os.environ),
-            state_path=tmp_path / "state.json",
-            state_volume_name="test-volume",
+            path=tmp_path / "state.json",
+            volume_name="test-volume",
             stall_s=10,
             track_run_name=False,
         )

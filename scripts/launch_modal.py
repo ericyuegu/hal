@@ -63,6 +63,24 @@ SENSITIVE_FLAGS: Final[frozenset[str]] = frozenset(
         "--token",
     }
 )
+O39_FRESH_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        "--branch-from-run",
+        "--model-l",
+        "--phase",
+        "--prefix-fork-checkpoint",
+        "--prefix-fork-from-run",
+        "--target-d-exp",
+        "--target-positions",
+        "--unique-data-divisor",
+    }
+)
+O39_FRESH_BOOLEAN_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        "--baseline-026",
+        "--no-baseline-026",
+    }
+)
 STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
 
@@ -224,6 +242,28 @@ def explicit_resume(argv: list[str] | tuple[str, ...]) -> str | None:
     return found[0] if found else None
 
 
+def resume_command(argv: tuple[str, ...], run_name: str) -> tuple[str, ...]:
+    """Build a retry command while retaining runtime-only overrides."""
+    script = experiment_script(argv)
+    if script is None or script.name != "039_capacity_scaling.py":
+        return (*argv, "--resume", run_name)
+
+    command: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        flag, separator, _ = token.partition("=")
+        if flag in O39_FRESH_VALUE_FLAGS:
+            index += 1 if separator else 2
+            continue
+        if token in O39_FRESH_BOOLEAN_FLAGS:
+            index += 1
+            continue
+        command.append(token)
+        index += 1
+    return (*command, "--resume", run_name)
+
+
 def plan_attempt(
     state: RunState | None,
     argv: tuple[str, ...],
@@ -242,7 +282,7 @@ def plan_attempt(
     command = argv
     if auto_resume and resume is None and run_name is not None:
         if checkpoint_found:
-            command = (*argv, "--resume", run_name)
+            command = resume_command(argv, run_name)
         else:
             run_name = None
     return Attempt(action="run", argv=command, state=RunState(status="running", run_name=run_name))
