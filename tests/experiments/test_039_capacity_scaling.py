@@ -288,6 +288,7 @@ def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypa
             target_positions=701_963_168,
             prefix_fork_from_run=source_name,
             prefix_fork_checkpoint=checkpoint_name,
+            device_batch_size=16,
         )
     )
 
@@ -300,6 +301,7 @@ def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypa
     assert kwargs["prefix_fork_state"] is source_state
     assert kwargs["loader_workers"] == 8
     assert kwargs["loader_prefetch_updates"] == 1
+    assert kwargs["device_batch_size"] == 16
 
 
 def test_026_observation_trunk_codec_and_optimizer_partition_are_frozen() -> None:
@@ -611,6 +613,28 @@ def test_ordered_replay_batches_are_concatenated_for_one_backward() -> None:
     assert combined.context.ctx_pad.tolist() == [0, 1, 2, 3]
     assert combined.target[:, 0, 0].tolist() == [0, 1, 2, 3]
     assert combined.replay_ids == ("replay-0", "replay-1", "replay-2", "replay-3")
+
+
+def test_ordered_replay_batches_can_be_split_across_backwards() -> None:
+    work = []
+    for start in range(4):
+        rows = torch.tensor([start])
+        batch = TrainBatch(
+            context=Context(features={"feature": rows[:, None, None]}, ctx_pad=rows),
+            target=rows[:, None, None].expand(-1, 36, A_DIM),
+            replay_ids=(f"replay-{start}",),
+        )
+        mask = torch.full((1, 36), start < 3)
+        work.append((batch, mask))
+
+    grouped = exp.concatenate_train_work(work, batches_per_device=2)
+
+    assert len(grouped) == 2
+    assert grouped[0][0].replay_ids == ("replay-0", "replay-1")
+    assert grouped[1][0].replay_ids == ("replay-2", "replay-3")
+    assert grouped[0][1].all()
+    assert grouped[1][1][0].all()
+    assert not grouped[1][1][1].any()
 
 
 class _FakeContextBuilder:
