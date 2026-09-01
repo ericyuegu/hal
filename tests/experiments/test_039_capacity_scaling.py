@@ -306,6 +306,7 @@ def test_main_routes_side_effect_free_resume_probe(tmp_path, monkeypatch) -> Non
             resume_probe_updates=256,
             device_batch_size=16,
             gradient_clip_norm=1.0,
+            skip_update_above_grad_norm=2.0,
         )
     )
 
@@ -313,6 +314,7 @@ def test_main_routes_side_effect_free_resume_probe(tmp_path, monkeypatch) -> Non
     _, kwargs = trains[0]
     assert kwargs["resume_state"] is state
     assert kwargs["gradient_clip_norm"] == 1.0
+    assert kwargs["skip_update_above_grad_norm"] == 2.0
     assert kwargs["throughput_probe_warmup"] == 0
     assert kwargs["throughput_probe_updates"] == 256
 
@@ -352,6 +354,17 @@ def test_gradient_clip_norm_must_be_positive() -> None:
             SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
             requested_run_name="invalid-runtime-control",
             gradient_clip_norm=0.0,
+        )
+
+
+def test_skip_update_threshold_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="skip_update_above_grad_norm"):
+        exp.train(
+            _tiny_scaled(),
+            {},
+            SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
+            requested_run_name="invalid-runtime-control",
+            skip_update_above_grad_norm=0.0,
         )
 
 

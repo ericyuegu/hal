@@ -2714,6 +2714,7 @@ def train(
     loader_prefetch_updates: int = 1,
     device_batch_size: int | None = None,
     gradient_clip_norm: float | None = None,
+    skip_update_above_grad_norm: float | None = None,
     throughput_probe_warmup: int | None = None,
     throughput_probe_updates: int | None = None,
     throughput_probe_eager: bool = False,
@@ -2728,6 +2729,10 @@ def train(
         raise ValueError("loader_prefetch_updates must be 1 or 2")
     if gradient_clip_norm is not None and (not math.isfinite(gradient_clip_norm) or gradient_clip_norm <= 0):
         raise ValueError("gradient_clip_norm must be finite and positive")
+    if skip_update_above_grad_norm is not None and (
+        not math.isfinite(skip_update_above_grad_norm) or skip_update_above_grad_norm <= 0
+    ):
+        raise ValueError("skip_update_above_grad_norm must be finite and positive")
     loader_batch_size = micro_batch_size(cfg)
     device_batch_size = cfg.batch_size if device_batch_size is None else device_batch_size
     if device_batch_size < loader_batch_size or device_batch_size > cfg.batch_size:
@@ -2960,7 +2965,11 @@ def train(
                 gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
-                optimizer.step()
+                optimizer_step_skipped = (
+                    skip_update_above_grad_norm is not None and float(gradient_norm) > skip_update_above_grad_norm
+                )
+                if not optimizer_step_skipped:
+                    optimizer.step()
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
             processed_positions = next_processed
@@ -2980,6 +2989,7 @@ def train(
                         "loss_positions": float(valid_prefixes),
                         "loss": metrics["loss"],
                         "gradient_norm": float(gradient_norm),
+                        "optimizer_step_skipped": float(optimizer_step_skipped),
                     }
                 )
             probe_completed += 1
@@ -2993,6 +3003,7 @@ def train(
                 "optimizer/adam_weight_decay": cfg.adam_weight_decay,
                 **{f"train/{name}": value for name, value in metrics.items()},
                 "train/grad_norm": float(gradient_norm),
+                "train/optimizer_step_skipped": int(optimizer_step_skipped),
                 "throughput/step_s": stopwatch.elapsed,
                 "throughput/loader_service_s": loader_service,
                 "throughput/loader_uncovered_wait_s": loader_wait,
@@ -3012,6 +3023,8 @@ def train(
                 log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             if gradient_clip_norm is not None:
                 log["train/gradient_clip_norm"] = gradient_clip_norm
+            if skip_update_above_grad_norm is not None:
+                log["train/skip_update_above_grad_norm"] = skip_update_above_grad_norm
             wandb.log(log)
             if update < 10 or update % 50 == 0:
                 print(
@@ -3046,6 +3059,7 @@ def train(
             services = np.array([row["loader_service_s"] for row in probe_rows])
             losses = np.array([row["loss"] for row in probe_rows])
             gradient_norms = np.array([row["gradient_norm"] for row in probe_rows])
+            skipped_steps = int(sum(row["optimizer_step_skipped"] for row in probe_rows))
             measured_seconds = float(walls.sum())
             rate = float(positions.sum() / measured_seconds)
             p95_wait = float(np.quantile(waits, 0.95))
@@ -3063,10 +3077,12 @@ def train(
                 "measured_updates": throughput_probe_updates,
                 "eager_training": throughput_probe_eager,
                 "gradient_clip_norm": gradient_clip_norm,
+                "skip_update_above_grad_norm": skip_update_above_grad_norm,
                 "training_attention_path": "dense_sdpa" if throughput_probe_eager else "configured",
                 "first_loss": float(losses[0]),
                 "last_loss": float(losses[-1]),
                 "max_gradient_norm": float(gradient_norms.max()),
+                "skipped_optimizer_steps": skipped_steps,
                 "mean_loader_service_s": float(services.mean()),
                 "std_loader_service_s": float(services.std()),
                 "p95_uncovered_wait_s": p95_wait,
@@ -3461,6 +3477,7 @@ class Args:
     loader_prefetch_updates: int = 1
     device_batch_size: int | None = None
     gradient_clip_norm: float | None = None
+    skip_update_above_grad_norm: float | None = None
     resume_probe_updates: int | None = None
     resume_replace_wandb_id: str | None = None
     throughput_probe_from_run: str | None = None
@@ -3493,6 +3510,10 @@ def main(args: Args) -> None:
         not math.isfinite(args.gradient_clip_norm) or args.gradient_clip_norm <= 0
     ):
         raise SystemExit("--gradient-clip-norm must be finite and positive")
+    if args.skip_update_above_grad_norm is not None and (
+        not math.isfinite(args.skip_update_above_grad_norm) or args.skip_update_above_grad_norm <= 0
+    ):
+        raise SystemExit("--skip-update-above-grad-norm must be finite and positive")
     if args.resume_probe_updates is not None and args.resume_probe_updates < 1:
         raise SystemExit("--resume-probe-updates must be positive")
     if args.resume_probe_updates is not None and args.resume is None:
@@ -3587,6 +3608,7 @@ def main(args: Args) -> None:
             loader_prefetch_updates=args.loader_prefetch_updates,
             device_batch_size=args.device_batch_size,
             gradient_clip_norm=args.gradient_clip_norm,
+            skip_update_above_grad_norm=args.skip_update_above_grad_norm,
             throughput_probe_warmup=args.throughput_probe_warmup,
             throughput_probe_updates=args.throughput_probe_updates,
             throughput_probe_eager=args.throughput_probe_eager,
@@ -3719,6 +3741,7 @@ def main(args: Args) -> None:
         loader_prefetch_updates=args.loader_prefetch_updates,
         device_batch_size=args.device_batch_size,
         gradient_clip_norm=args.gradient_clip_norm,
+        skip_update_above_grad_norm=args.skip_update_above_grad_norm,
         throughput_probe_warmup=0 if args.resume_probe_updates is not None else None,
         throughput_probe_updates=args.resume_probe_updates,
     )
