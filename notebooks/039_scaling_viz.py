@@ -105,9 +105,20 @@ D_EXPS = [26, 27, 28, 29, 30]
 # the capacity or data level it was trained at, so it leaves every scaling curve — closed-loop
 # as much as NLL — and the fit. Failed cooldown checkpoints plot as rings; failed prefixes are
 # reported in the compute-figure footers because they have no comparable terminal NLL.
-failed_runs = runs[runs.analysis_excluded].copy()
 ckpt = runs[(runs.phase == "cooldown") & runs.validation_nll.notna() & ~runs.analysis_excluded].copy()
 ckpt = ckpt.drop_duplicates(subset=["model", "processed_positions"], keep="first")
+successful_targets = {(row.model, row.target_processed_positions) for row in ckpt[ckpt.endpoint_exact].itertuples()}
+failed_runs = runs[runs.analysis_excluded].copy()
+failed_runs = failed_runs[
+    [
+        (model, target) not in successful_targets
+        for model, target in zip(failed_runs.model, failed_runs.target_processed_positions)
+    ]
+]
+# A target can have several failed retries. Report only the attempt that progressed furthest.
+failed_runs = failed_runs.sort_values("processed_positions").drop_duplicates(
+    subset=["model", "target_processed_positions"], keep="last"
+)
 floor = ckpt.loc[ckpt.groupby("model").processed_positions.idxmin()].set_index("model").validation_nll
 ckpt["diverged"] = ckpt.validation_nll > ckpt.model.map(floor)
 DIVERGED = {(row.model, row.processed_positions) for row in ckpt[ckpt.diverged].itertuples()} | {
@@ -137,6 +148,30 @@ def failed_endpoint_note() -> str:
             note += f" (target D/U={ratio:.3f}, estimated distinct coverage={coverage:.1%})"
         notes.append(note)
     return "; ".join(notes)
+
+
+def optimizer_exception_note() -> str:
+    """Describe exact endpoints trained with explicit optimizer overrides."""
+    adjusted = ckpt[(ckpt.runtime_muon_learning_rate_scale.notna()) & (ckpt.runtime_muon_learning_rate_scale != 1.0)]
+    notes = []
+    for row in adjusted.sort_values("total_parameters").itertuples():
+        notes.append(
+            f"{row.model} D={row.processed_positions:.3g}: "
+            f"Muon {row.runtime_muon_learning_rate_scale:g}x, "
+            f"Adam {row.runtime_adam_learning_rate_scale:g}x, "
+            f"clip {row.runtime_gradient_clip_norm:g}"
+        )
+    return "; ".join(notes)
+
+
+def compute_figure_note() -> str:
+    """Material endpoint qualifications for compute-scaling figures."""
+    notes = []
+    if failed_endpoint_note():
+        notes.append("unfinished exact endpoints — " + failed_endpoint_note())
+    if optimizer_exception_note():
+        notes.append("optimizer exception — " + optimizer_exception_note())
+    return " | ".join(notes)
 
 
 # Wall time for the time frontier: the cooldown row's cumulative seconds already includes its
@@ -1042,8 +1077,8 @@ direct_label_lines(ax, right=0.22)
 
 fig.suptitle("Compute scaling — cooldown checkpoints, FLOPs from the run's own 6*D*(N_trunk + 36*N_decoder)")
 fig.tight_layout(rect=(0, 0.06, 1, 1))
-if failed_endpoint_note():
-    fig.text(0.008, 0.008, "unfinished exact endpoints — " + failed_endpoint_note(), fontsize=8, color=MUTED)
+if compute_figure_note():
+    fig.text(0.008, 0.008, compute_figure_note(), fontsize=8, color=MUTED)
 fig.savefig(FIGURES / "08_compute_frontier.png")
 
 # %% [markdown]
@@ -1216,8 +1251,8 @@ ax.legend(fontsize=8.5, loc="upper left")
 
 fig.suptitle("Iso-FLOP structure from the parametric fit (minima below the family range are extrapolations)")
 fig.tight_layout(rect=(0, 0.06, 1, 1))
-if failed_endpoint_note():
-    fig.text(0.008, 0.008, "unfinished exact endpoints — " + failed_endpoint_note(), fontsize=8, color=MUTED)
+if compute_figure_note():
+    fig.text(0.008, 0.008, compute_figure_note(), fontsize=8, color=MUTED)
 fig.savefig(FIGURES / "09_isoflop_fit.png")
 
 print("\nRuns that would bracket each iso-FLOP minimum:")
