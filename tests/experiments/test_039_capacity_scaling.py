@@ -241,6 +241,33 @@ def test_checkpoint_records_runtime_controls() -> None:
     assert state["runtime_controls"] == controls
 
 
+def test_runtime_controls_allow_only_branch_learning_rate_change() -> None:
+    saved = {
+        "device_batch_size": 512,
+        "muon_learning_rate_scale": 1.0,
+        "adam_learning_rate_scale": 0.25,
+        "gradient_clip_norm": None,
+        "skip_update_above_grad_norm": None,
+    }
+    requested = {**saved, "adam_learning_rate_scale": 0.125}
+
+    exp._validate_runtime_controls(saved, requested, allow_adam_learning_rate_change=True)
+    with pytest.raises(ValueError, match="runtime controls changed"):
+        exp._validate_runtime_controls(saved, requested, allow_adam_learning_rate_change=False)
+    with pytest.raises(ValueError, match="runtime controls changed"):
+        exp._validate_runtime_controls(
+            saved,
+            {**requested, "device_batch_size": 256},
+            allow_adam_learning_rate_change=True,
+        )
+    with pytest.raises(ValueError, match="runtime controls changed"):
+        exp._validate_runtime_controls(
+            saved,
+            {**requested, "muon_learning_rate_scale": 0.5},
+            allow_adam_learning_rate_change=True,
+        )
+
+
 def test_optimizer_gradient_norms_are_separate_by_family() -> None:
     muon_parameter = torch.nn.Parameter(torch.zeros(2))
     adam_parameter = torch.nn.Parameter(torch.zeros(1))

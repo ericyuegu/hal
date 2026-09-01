@@ -2614,6 +2614,25 @@ def _checkpoint_extra(
     }
 
 
+def _validate_runtime_controls(
+    saved: Mapping[str, object] | None,
+    requested: Mapping[str, object],
+    *,
+    allow_adam_learning_rate_change: bool,
+) -> None:
+    """Require exact controls, except an explicit branch Adam LR change."""
+    if saved is None:
+        return
+    normalized = {"adam_learning_rate_scale": 1.0, **saved}
+    if allow_adam_learning_rate_change:
+        normalized["adam_learning_rate_scale"] = requested["adam_learning_rate_scale"]
+    if normalized != requested:
+        raise ValueError(
+            "runtime controls changed across checkpoint continuation: "
+            f"saved={normalized!r}, requested={dict(requested)!r}"
+        )
+
+
 def _prefix_branch_targets(cfg: TrainConfig) -> tuple[int, ...]:
     if not _is_exact_isoflop_endpoint(cfg):
         return (
@@ -2851,14 +2870,11 @@ def train(
     update = 0
     pending: list[PendingBatch] = []
     if state is not None:
-        saved_runtime_controls = state.get("runtime_controls")
-        if saved_runtime_controls is not None:
-            saved_runtime_controls = {"adam_learning_rate_scale": 1.0, **saved_runtime_controls}
-        if saved_runtime_controls is not None and saved_runtime_controls != runtime_controls:
-            raise ValueError(
-                f"runtime controls changed across checkpoint continuation: "
-                f"saved={saved_runtime_controls!r}, requested={runtime_controls!r}"
-            )
+        _validate_runtime_controls(
+            state.get("runtime_controls"),
+            runtime_controls,
+            allow_adam_learning_rate_change=branch_state is not None,
+        )
         source_cfg = config_from_state(state["cfg"])
         if branch_state is not None:
             _configs_match_for_branch(source_cfg, cfg)
