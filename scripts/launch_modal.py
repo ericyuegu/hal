@@ -520,6 +520,7 @@ def _run_training(
     path: Path,
     volume_name: str,
     stall_s: int,
+    track_run_name: bool = True,
 ) -> int:
     log_path = REMOTE_ROOT / "train.log"
     log_path.write_text("")
@@ -572,7 +573,7 @@ def _run_training(
                 loguru.logger.info(f"training pid={process.pid}: {redact_argv(argv)}")
                 interrupted_at: float | None = None
                 while process.poll() is None:
-                    failure = drain_names()
+                    failure = drain_names() if track_run_name else None
                     if failure is not None:
                         _kill_group(process.pid, signal.SIGKILL)
                         break
@@ -601,7 +602,7 @@ def _run_training(
         tail_stopped.set()
         tail.join(timeout=5)
 
-    failure = failure or drain_names()
+    failure = failure or (drain_names() if track_run_name else None)
     if code is None:
         raise RuntimeError("training process ended without an exit status")
 
@@ -645,6 +646,7 @@ def _run_remote(spec: LaunchSpec) -> int:
         path=path,
         volume_name=spec.state_volume,
         stall_s=spec.stall_s,
+        track_run_name=spec.auto_resume,
     )
 
 

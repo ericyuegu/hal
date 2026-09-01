@@ -2607,6 +2607,7 @@ def train(
     loader_prefetch_updates: int = 1,
     throughput_probe_warmup: int | None = None,
     throughput_probe_updates: int | None = None,
+    throughput_probe_eager: bool = False,
 ) -> dict[str, object] | None:
     """Train a shared stable prefix or one exact terminal-cooldown endpoint."""
     states = [state for state in (resume_state, branch_state, prefix_fork_state) if state is not None]
@@ -2712,9 +2713,9 @@ def train(
         return model(features, pad, actions)
 
     temporal_fn: Callable = model.temporal.teacher_forced_nll
-    if DEVICE == "cuda" and cfg.compile_trunk:
+    if DEVICE == "cuda" and cfg.compile_trunk and not throughput_probe_eager:
         trunk_fn = torch.compile(trunk_fn, dynamic=False)
-    if DEVICE == "cuda" and cfg.compile_temporal:
+    if DEVICE == "cuda" and cfg.compile_temporal and not throughput_probe_eager:
         temporal_fn = torch.compile(temporal_fn, dynamic=False)
 
     train_loader, val_cache = _make_loaders(cfg, stats, audit, loader_workers=loader_workers)
@@ -2924,6 +2925,7 @@ def train(
                 "loader_cache_limit_gb": cfg.cache_limit_gb,
                 "warmup_updates": throughput_probe_warmup,
                 "measured_updates": throughput_probe_updates,
+                "eager_training": throughput_probe_eager,
                 "mean_loader_service_s": float(services.mean()),
                 "std_loader_service_s": float(services.std()),
                 "p95_uncovered_wait_s": p95_wait,
@@ -3420,6 +3422,7 @@ class Args:
     throughput_probe_checkpoint: str = "latest.pt"
     throughput_probe_warmup: int = 32
     throughput_probe_updates: int = 256
+    throughput_probe_eager: bool = False
 
 
 def requested_config(args: Args) -> TrainConfig:
@@ -3548,6 +3551,7 @@ def main(args: Args) -> None:
             loader_prefetch_updates=args.loader_prefetch_updates,
             throughput_probe_warmup=args.throughput_probe_warmup,
             throughput_probe_updates=args.throughput_probe_updates,
+            throughput_probe_eager=args.throughput_probe_eager,
         )
         return
 
