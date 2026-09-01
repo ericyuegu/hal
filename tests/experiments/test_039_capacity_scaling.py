@@ -305,6 +305,7 @@ def test_main_routes_side_effect_free_resume_probe(tmp_path, monkeypatch) -> Non
             resume=run_name,
             resume_probe_updates=256,
             device_batch_size=16,
+            muon_learning_rate_scale=0.5,
             gradient_clip_norm=1.0,
             skip_update_above_grad_norm=2.0,
         )
@@ -313,6 +314,7 @@ def test_main_routes_side_effect_free_resume_probe(tmp_path, monkeypatch) -> Non
     assert len(trains) == 1
     _, kwargs = trains[0]
     assert kwargs["resume_state"] is state
+    assert kwargs["muon_learning_rate_scale"] == 0.5
     assert kwargs["gradient_clip_norm"] == 1.0
     assert kwargs["skip_update_above_grad_norm"] == 2.0
     assert kwargs["throughput_probe_warmup"] == 0
@@ -354,6 +356,17 @@ def test_gradient_clip_norm_must_be_positive() -> None:
             SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
             requested_run_name="invalid-runtime-control",
             gradient_clip_norm=0.0,
+        )
+
+
+def test_muon_learning_rate_scale_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="muon_learning_rate_scale"):
+        exp.train(
+            _tiny_scaled(),
+            {},
+            SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
+            requested_run_name="invalid-runtime-control",
+            muon_learning_rate_scale=0.0,
         )
 
 
@@ -525,6 +538,20 @@ def test_position_boundary_retains_every_unused_loss_position() -> None:
     assert torch.equal(selected_mask | pending_mask, work[0][1])
     assert not selected[1][1].any()
     assert torch.equal(pending[1][1], work[1][1])
+
+
+def test_runtime_muon_scale_does_not_change_adam_rate() -> None:
+    cfg = _tiny_scaled()
+    optimizer = exp.make_optimizer(exp.GPT(cfg), cfg)
+    scheduler = exp.PositionLRScheduler(optimizer, cfg)
+    scheduler.step(exp.warmup_positions(cfg))
+
+    scheduler.scale_muon_learning_rate(0.5)
+
+    muon_rate = next(group["lr"] for group in optimizer.param_groups if group["use_muon"])
+    adam_rate = next(group["lr"] for group in optimizer.param_groups if not group["use_muon"])
+    assert muon_rate == pytest.approx(cfg.muon_lr * 0.5)
+    assert adam_rate == pytest.approx(cfg.adam_lr)
 
 
 def test_ordered_replay_batches_are_concatenated_for_one_backward() -> None:

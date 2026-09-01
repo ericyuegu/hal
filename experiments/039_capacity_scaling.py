@@ -2032,6 +2032,13 @@ class PositionLRScheduler:
             group["lr"] = base_lr * factor
         self.processed_positions = processed_positions
 
+    def scale_muon_learning_rate(self, scale: float) -> None:
+        self.base_lrs = tuple(
+            lr * scale if group["use_muon"] else lr
+            for group, lr in zip(self.optimizer.param_groups, self.base_lrs, strict=True)
+        )
+        self.step(self.processed_positions)
+
     def state_dict(self) -> dict[str, object]:
         return {
             "schema": 1,
@@ -2713,6 +2720,7 @@ def train(
     loader_workers: int = 0,
     loader_prefetch_updates: int = 1,
     device_batch_size: int | None = None,
+    muon_learning_rate_scale: float = 1.0,
     gradient_clip_norm: float | None = None,
     skip_update_above_grad_norm: float | None = None,
     throughput_probe_warmup: int | None = None,
@@ -2727,6 +2735,8 @@ def train(
         raise ValueError("loader_workers must be non-negative")
     if loader_prefetch_updates not in (1, 2):
         raise ValueError("loader_prefetch_updates must be 1 or 2")
+    if not math.isfinite(muon_learning_rate_scale) or muon_learning_rate_scale <= 0:
+        raise ValueError("muon_learning_rate_scale must be finite and positive")
     if gradient_clip_norm is not None and (not math.isfinite(gradient_clip_norm) or gradient_clip_norm <= 0):
         raise ValueError("gradient_clip_norm must be finite and positive")
     if skip_update_above_grad_norm is not None and (
@@ -2833,6 +2843,7 @@ def train(
             scheduler.step(processed_positions)
         else:
             scheduler.step(processed_positions)
+    scheduler.scale_muon_learning_rate(muon_learning_rate_scale)
 
     def trunk_fn(features, pad, actions):
         return model(features, pad, actions)
@@ -3001,6 +3012,7 @@ def train(
                 "scaling/D_over_N": processed_positions / counts["total"],
                 "optimizer/adam_tau": achieved_adam_tau(cfg, processed_positions),
                 "optimizer/adam_weight_decay": cfg.adam_weight_decay,
+                "optimizer/muon_learning_rate_scale": muon_learning_rate_scale,
                 **{f"train/{name}": value for name, value in metrics.items()},
                 "train/grad_norm": float(gradient_norm),
                 "train/optimizer_step_skipped": int(optimizer_step_skipped),
@@ -3076,6 +3088,7 @@ def train(
                 "warmup_updates": throughput_probe_warmup,
                 "measured_updates": throughput_probe_updates,
                 "eager_training": throughput_probe_eager,
+                "muon_learning_rate_scale": muon_learning_rate_scale,
                 "gradient_clip_norm": gradient_clip_norm,
                 "skip_update_above_grad_norm": skip_update_above_grad_norm,
                 "training_attention_path": "dense_sdpa" if throughput_probe_eager else "configured",
@@ -3476,6 +3489,7 @@ class Args:
     loader_workers: int = 8
     loader_prefetch_updates: int = 1
     device_batch_size: int | None = None
+    muon_learning_rate_scale: float = 1.0
     gradient_clip_norm: float | None = None
     skip_update_above_grad_norm: float | None = None
     resume_probe_updates: int | None = None
@@ -3506,6 +3520,8 @@ def main(args: Args) -> None:
         raise SystemExit("--loader-prefetch-updates must be 1 or 2")
     if args.device_batch_size is not None and args.device_batch_size < 1:
         raise SystemExit("--device-batch-size must be positive")
+    if not math.isfinite(args.muon_learning_rate_scale) or args.muon_learning_rate_scale <= 0:
+        raise SystemExit("--muon-learning-rate-scale must be finite and positive")
     if args.gradient_clip_norm is not None and (
         not math.isfinite(args.gradient_clip_norm) or args.gradient_clip_norm <= 0
     ):
@@ -3607,6 +3623,7 @@ def main(args: Args) -> None:
             loader_workers=args.loader_workers,
             loader_prefetch_updates=args.loader_prefetch_updates,
             device_batch_size=args.device_batch_size,
+            muon_learning_rate_scale=args.muon_learning_rate_scale,
             gradient_clip_norm=args.gradient_clip_norm,
             skip_update_above_grad_norm=args.skip_update_above_grad_norm,
             throughput_probe_warmup=args.throughput_probe_warmup,
@@ -3740,6 +3757,7 @@ def main(args: Args) -> None:
         loader_workers=args.loader_workers,
         loader_prefetch_updates=args.loader_prefetch_updates,
         device_batch_size=args.device_batch_size,
+        muon_learning_rate_scale=args.muon_learning_rate_scale,
         gradient_clip_norm=args.gradient_clip_norm,
         skip_update_above_grad_norm=args.skip_update_above_grad_norm,
         throughput_probe_warmup=0 if args.resume_probe_updates is not None else None,
