@@ -1808,6 +1808,7 @@ def eval_vs_cpu(
     replan_interval: int | None = None,
     checkpoint_sha256: str = "unavailable",
     inference: BF16Inference | None = None,
+    require_compiled_cuda: bool = True,
 ) -> dict[str, float]:
     selected_delay = cfg.control_delay if delay is None else delay
     selected_interval = cfg.replan_interval if replan_interval is None else replan_interval
@@ -1823,8 +1824,10 @@ def eval_vs_cpu(
         checkpoint_sha256=checkpoint_sha256,
         inference_compile_mode=inference.compile_mode,
     )
-    if next(model.parameters()).device.type == "cuda" and (
-        protocol.inference_mode != "compiled" or not inference.compiled
+    if (
+        require_compiled_cuda
+        and next(model.parameters()).device.type == "cuda"
+        and (protocol.inference_mode != "compiled" or not inference.compiled)
     ):
         raise RuntimeError("official CUDA evaluation requires compiled BF16 inference")
     telemetry = DelayTelemetry()
@@ -3114,6 +3117,7 @@ def eval_checkpoint(
         delay=selected_delay,
         replan_interval=selected_interval,
         checkpoint_sha256=_checkpoint_sha256(Path(path)),
+        require_compiled_cuda=not eager,
     )
     print(
         f"[eval] update={state['step']} d={selected_delay} R={selected_interval}: {values}",
