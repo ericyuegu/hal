@@ -2578,12 +2578,14 @@ def _checkpoint_extra(
     *,
     pending: list[PendingBatch],
     processed_positions: int,
+    runtime_controls: dict[str, object],
     training_wall_seconds: float,
     update: int,
 ) -> dict[str, object]:
     return {
         "checkpoint_schema": 2,
         "processed_positions": processed_positions,
+        "runtime_controls": runtime_controls,
         "training_wall_seconds": training_wall_seconds,
         "update": update,
         "data_state": train_loader.state_dict(),
@@ -2750,6 +2752,12 @@ def train(
     if device_batch_size % loader_batch_size or cfg.batch_size % device_batch_size:
         raise ValueError("device_batch_size must be a loader-batch multiple that divides the training batch")
     batches_per_device = device_batch_size // loader_batch_size
+    runtime_controls: dict[str, object] = {
+        "device_batch_size": device_batch_size,
+        "muon_learning_rate_scale": muon_learning_rate_scale,
+        "gradient_clip_norm": gradient_clip_norm,
+        "skip_update_above_grad_norm": skip_update_above_grad_norm,
+    }
     probe = throughput_probe_warmup is not None or throughput_probe_updates is not None
     if probe and (
         throughput_probe_warmup is None
@@ -2810,6 +2818,8 @@ def train(
         wandb.run.summary["optimizer/D_over_N"] = scale.d_over_n
         wandb.run.summary["optimizer/adam_tau"] = scale.tau
         wandb.run.summary["optimizer/adam_weight_decay"] = scale.weight_decay
+        for name, value in runtime_controls.items():
+            wandb.run.summary[f"runtime/{name}"] = value
 
     run_dir, replay_dir = setup_run_dir(run_name)
     optimizer = make_optimizer(model, cfg)
@@ -2819,6 +2829,12 @@ def train(
     update = 0
     pending: list[PendingBatch] = []
     if state is not None:
+        saved_runtime_controls = state.get("runtime_controls")
+        if saved_runtime_controls is not None and saved_runtime_controls != runtime_controls:
+            raise ValueError(
+                f"runtime controls changed across checkpoint continuation: "
+                f"saved={saved_runtime_controls!r}, requested={runtime_controls!r}"
+            )
         source_cfg = config_from_state(state["cfg"])
         if branch_state is not None:
             _configs_match_for_branch(source_cfg, cfg)
@@ -2893,6 +2909,7 @@ def train(
                 train_loader,
                 pending=pending,
                 processed_positions=processed_positions,
+                runtime_controls=runtime_controls,
                 training_wall_seconds=prior_training_wall_seconds + time.monotonic() - run_started,
                 update=update,
             ),

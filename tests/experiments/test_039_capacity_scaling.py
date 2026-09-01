@@ -219,6 +219,27 @@ def test_restore_rng_restores_cuda_state_when_available(monkeypatch) -> None:
     ]
 
 
+def test_checkpoint_records_runtime_controls() -> None:
+    controls = {
+        "device_batch_size": 16,
+        "muon_learning_rate_scale": 0.25,
+        "gradient_clip_norm": None,
+        "skip_update_above_grad_norm": None,
+    }
+    loader = SimpleNamespace(state_dict=lambda: {"cursor": 7})
+
+    state = exp._checkpoint_extra(
+        loader,
+        pending=[],
+        processed_positions=11,
+        runtime_controls=controls,
+        training_wall_seconds=13.0,
+        update=17,
+    )
+
+    assert state["runtime_controls"] == controls
+
+
 def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypatch) -> None:
     source_name = "cap-L7-d448-18M-U1-prefix-D2p30-tauPL"
     checkpoint_name = "branch_D2p30.pt"
