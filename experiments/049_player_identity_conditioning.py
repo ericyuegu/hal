@@ -44,9 +44,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import tyro
+import wandb
 from torch import Tensor
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
@@ -595,8 +595,47 @@ class BF16Inference(_o43.BF16Inference):
         return super().decode(_condition_context(ctx, self.player_id), horizon, **kwargs)
 
 
-def eval_suites(*args, replay_dir: Path, inference: BF16Inference, **kwargs):
-    suites = _base_eval_suites(*args, replay_dir=replay_dir, inference=inference, **kwargs)
+def eval_suites(
+    model: GPT,
+    stats: dict[str, FeatureStats],
+    cfg: TrainConfig,
+    *,
+    n_matchups: int,
+    replay_dir: Path,
+    checkpoint_sha256: str,
+    inference: BF16Inference,
+    exec_horizon: int | None = None,
+    suite: Literal["all", "char_matchup", "fox"] = "all",
+) -> dict[str, dict[str, float]]:
+    """Evaluate both standard suites or one explicitly selected suite."""
+    if suite not in ("all", "char_matchup", "fox"):
+        raise ValueError(f"unknown evaluation suite {suite!r}")
+    if suite == "all":
+        suites = _base_eval_suites(
+            model,
+            stats,
+            cfg,
+            n_matchups=n_matchups,
+            replay_dir=replay_dir,
+            checkpoint_sha256=checkpoint_sha256,
+            inference=inference,
+            exec_horizon=exec_horizon,
+        )
+    else:
+        fixed_ego_character = None if suite == "char_matchup" else _o43.melee.Character.FOX
+        suites = {
+            suite: _o43.eval_vs_cpu(
+                model,
+                stats,
+                cfg,
+                n_matchups=n_matchups,
+                replay_dir=replay_dir / suite,
+                exec_horizon=exec_horizon,
+                checkpoint_sha256=checkpoint_sha256,
+                inference=inference,
+                fixed_ego_character=fixed_ego_character,
+            )
+        }
     evidence = {
         "schema_version": 1,
         "ego_player_id": inference.player_id,
@@ -671,6 +710,8 @@ def eval_checkpoint(
     eager: bool = False,
     max_parallel: int | None = None,
     output_name: str | None = None,
+    suite: Literal["all", "char_matchup", "fox"] = "all",
+    upload_run: str | None = None,
 ) -> dict[str, dict[str, float]]:
     model, cfg, stats, state = load_checkpoint(path)
     cfg = replace(
@@ -682,7 +723,8 @@ def eval_checkpoint(
     horizon = cfg.exec_horizon if exec_horizon is None else exec_horizon
     matchups = cfg.final_eval_n_matchups if n_matchups is None else n_matchups
     key = player_code if player_code is not None else (player_rank or Rank[cfg.eval_player_rank]).name.lower()
-    default_name = f"eval_replays_s{horizon}_{key.replace('#', '-')}"
+    suite_suffix = "" if suite == "all" else f"_{suite}"
+    default_name = f"eval_replays_s{horizon}_{key.replace('#', '-')}{suite_suffix}"
     replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
     inference = BF16Inference(
         model,
@@ -699,9 +741,12 @@ def eval_checkpoint(
         checkpoint_sha256=_o43._checkpoint_sha256(Path(path)),
         inference=inference,
         exec_horizon=horizon,
+        suite=suite,
     )
     for metrics in suites.values():
         _o43.require_complete_eval(metrics, matchups)
+    if upload_run is not None:
+        _o43._upload_eval_evidence(upload_run, replay_dir)
     print(f"[eval] step={int(state['step'])} ego={inference.player_key!r}: {suites}", flush=True)
     return suites
 
@@ -739,6 +784,7 @@ class Args:
     eval_eager: bool = False
     eval_max_parallel: int | None = None
     eval_output_name: str | None = None
+    eval_suite: Literal["all", "char_matchup", "fox"] = "all"
     benchmark: bool = False
     benchmark_iterations: int = 20
 
@@ -760,6 +806,8 @@ def main(args: Args) -> None:
             eager=args.eval_eager,
             max_parallel=args.eval_max_parallel,
             output_name=args.eval_output_name,
+            suite=args.eval_suite,
+            upload_run=args.eval_run,
         )
         return
     if args.identity_audit is not None:

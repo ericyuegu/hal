@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from dataclasses import asdict
 from dataclasses import replace
@@ -194,6 +195,50 @@ def test_inference_trunk_uses_dense_sdpa_correctness_path() -> None:
         expected = model.trunk.forward_dense(model.context_tokens(context.features, actions), context.ctx_pad)
 
     assert torch.equal(actual, expected)
+
+
+def test_eval_suites_can_select_fox_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = _cfg()
+    _, model = _models(cfg)
+    inference = exp.BF16Inference(model, cfg, player_rank=Rank.PLATINUM, compiled=False)
+    calls = []
+
+    def fake_eval_vs_cpu(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"boots": 3.0}
+
+    monkeypatch.setattr(exp._o43, "eval_vs_cpu", fake_eval_vs_cpu)
+
+    suites = exp.eval_suites(
+        model,
+        {},
+        cfg,
+        n_matchups=3,
+        replay_dir=tmp_path,
+        checkpoint_sha256="sha",
+        inference=inference,
+        suite="fox",
+    )
+
+    assert suites == {"fox": {"boots": 3.0, "ego_player_id": float(int(Rank.PLATINUM))}}
+    assert len(calls) == 1
+    assert calls[0][1]["fixed_ego_character"] == exp._o43.melee.Character.FOX
+    assert calls[0][1]["replay_dir"] == tmp_path / "fox"
+    evidence = json.loads((tmp_path / "player_identity.json").read_text())
+    assert evidence["ego_player_key"] == "Platinum"
+    assert evidence["opponent_identity_conditioned"] is False
+
+    with pytest.raises(ValueError, match="unknown evaluation suite"):
+        exp.eval_suites(
+            model,
+            {},
+            cfg,
+            n_matchups=3,
+            replay_dir=tmp_path,
+            checkpoint_sha256="sha",
+            inference=inference,
+            suite="invalid",
+        )
 
 
 def test_checkpoint_carries_the_exact_ordered_vocabulary() -> None:
