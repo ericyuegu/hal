@@ -2271,6 +2271,22 @@ def concatenate_train_batches(batches: Sequence[TrainBatch]) -> TrainBatch:
     )
 
 
+def concatenate_train_work(work: Sequence[PendingBatch], batches_per_device: int) -> list[PendingBatch]:
+    """Group ordered loader batches for one or more backward passes."""
+    if batches_per_device < 1:
+        raise ValueError("batches_per_device must be positive")
+    grouped = []
+    for start in range(0, len(work), batches_per_device):
+        chunk = work[start : start + batches_per_device]
+        grouped.append(
+            (
+                concatenate_train_batches([batch for batch, _ in chunk]),
+                torch.cat([mask for _, mask in chunk], dim=0),
+            )
+        )
+    return grouped
+
+
 def _checkpoint_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -2696,6 +2712,7 @@ def train(
     prefix_fork_state: dict | None = None,
     loader_workers: int = 0,
     loader_prefetch_updates: int = 1,
+    device_batch_size: int | None = None,
     throughput_probe_warmup: int | None = None,
     throughput_probe_updates: int | None = None,
     throughput_probe_eager: bool = False,
@@ -2708,6 +2725,13 @@ def train(
         raise ValueError("loader_workers must be non-negative")
     if loader_prefetch_updates not in (1, 2):
         raise ValueError("loader_prefetch_updates must be 1 or 2")
+    loader_batch_size = micro_batch_size(cfg)
+    device_batch_size = cfg.batch_size if device_batch_size is None else device_batch_size
+    if device_batch_size < loader_batch_size or device_batch_size > cfg.batch_size:
+        raise ValueError(f"device_batch_size must be in [{loader_batch_size}, {cfg.batch_size}]")
+    if device_batch_size % loader_batch_size or cfg.batch_size % device_batch_size:
+        raise ValueError("device_batch_size must be a loader-batch multiple that divides the training batch")
+    batches_per_device = device_batch_size // loader_batch_size
     probe = throughput_probe_warmup is not None or throughput_probe_updates is not None
     if probe and (
         throughput_probe_warmup is None
@@ -2908,20 +2932,27 @@ def train(
             optimizer.zero_grad()
             nll_sum = torch.zeros(len(cfg.head_offsets), N_GROUPS, device=DEVICE)
             n_prefixes = 0
-            cpu_batch = concatenate_train_batches([batch for batch, _ in selected])
-            cpu_mask = torch.cat([mask for _, mask in selected], dim=0)
+            device_work = concatenate_train_work(selected, batches_per_device)
+            cpu_batches = [batch for batch, _ in device_work]
+            cpu_masks = [mask for _, mask in device_work]
             with profile("step") as stopwatch:
-                batch = next(device_batches([cpu_batch], DEVICE, copy_stream))
-                history, targets, valid = prepared_targets(model, batch)
-                selected_valid = valid & cpu_mask.to(valid.device)
-                with amp_context(cfg, DEVICE):
-                    hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
-                    dense_nll = temporal_fn(hidden, history, targets)
-                    parts = ActionLoss(nll=dense_nll[selected_valid], targets=targets[selected_valid])
-                    loss = objective(parts, cfg.aux_loss_weight)
-                loss.backward()
-                nll_sum += parts.nll.detach().sum(dim=0)
-                n_prefixes += parts.nll.shape[0]
+                backward_calls = 0
+                for batch, position_mask in zip(
+                    device_batches(cpu_batches, DEVICE, copy_stream), cpu_masks, strict=True
+                ):
+                    if not position_mask.any():
+                        continue
+                    history, targets, valid = prepared_targets(model, batch)
+                    selected_valid = valid & position_mask.to(valid.device)
+                    with amp_context(cfg, DEVICE):
+                        hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
+                        dense_nll = temporal_fn(hidden, history, targets)
+                        parts = ActionLoss(nll=dense_nll[selected_valid], targets=targets[selected_valid])
+                        loss = objective(parts, cfg.aux_loss_weight) * (parts.nll.shape[0] / valid_prefixes)
+                    loss.backward()
+                    backward_calls += 1
+                    nll_sum += parts.nll.detach().sum(dim=0)
+                    n_prefixes += parts.nll.shape[0]
                 gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
@@ -2964,8 +2995,8 @@ def train(
                 "throughput/loader_workers": loader_workers,
                 "throughput/loader_cache_updates": loader_cache_size,
                 "throughput/loader_cache_limit_gb": cfg.cache_limit_gb,
-                "throughput/device_batch_size": batch.target.shape[0],
-                "throughput/backward_calls": 1,
+                "throughput/device_batch_size": device_batch_size,
+                "throughput/backward_calls": backward_calls,
                 "throughput/loss_positions_per_s": valid_prefixes / stopwatch.elapsed,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
@@ -3414,6 +3445,7 @@ class Args:
     audit_only: bool = False
     loader_workers: int = 8
     loader_prefetch_updates: int = 1
+    device_batch_size: int | None = None
     throughput_probe_from_run: str | None = None
     throughput_probe_checkpoint: str = "latest.pt"
     throughput_probe_warmup: int = 32
@@ -3438,6 +3470,8 @@ def main(args: Args) -> None:
         raise SystemExit("--loader-workers must be non-negative")
     if args.loader_prefetch_updates not in (1, 2):
         raise SystemExit("--loader-prefetch-updates must be 1 or 2")
+    if args.device_batch_size is not None and args.device_batch_size < 1:
+        raise SystemExit("--device-batch-size must be positive")
     if args.throughput_probe_warmup < 0 or args.throughput_probe_updates < 1:
         raise SystemExit("throughput probe warmup must be non-negative and measured updates must be positive")
     if Path(args.throughput_probe_checkpoint).name != args.throughput_probe_checkpoint or not (
@@ -3522,6 +3556,7 @@ def main(args: Args) -> None:
             prefix_fork_state=probe_state,
             loader_workers=args.loader_workers,
             loader_prefetch_updates=args.loader_prefetch_updates,
+            device_batch_size=args.device_batch_size,
             throughput_probe_warmup=args.throughput_probe_warmup,
             throughput_probe_updates=args.throughput_probe_updates,
             throughput_probe_eager=args.throughput_probe_eager,
@@ -3650,6 +3685,7 @@ def main(args: Args) -> None:
         prefix_fork_state=prefix_fork_state,
         loader_workers=args.loader_workers,
         loader_prefetch_updates=args.loader_prefetch_updates,
+        device_batch_size=args.device_batch_size,
     )
 
 
