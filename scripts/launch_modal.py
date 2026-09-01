@@ -591,6 +591,7 @@ def _run_training(
     state_path: Path,
     state_volume_name: str,
     stall_s: int,
+    track_run_name: bool = True,
 ) -> int:
     log_path = REMOTE_ROOT / "train.log"
     log_path.write_text("")
@@ -634,12 +635,13 @@ def _run_training(
                 loguru.logger.info(f"training pid={process.pid}: {redact_argv(argv)}")
                 interrupted_at: float | None = None
                 while process.poll() is None:
-                    state, failure = _drain_run_names(
-                        run_names,
-                        state,
-                        state_path=state_path,
-                        state_volume_name=state_volume_name,
-                    )
+                    if track_run_name:
+                        state, failure = _drain_run_names(
+                            run_names,
+                            state,
+                            state_path=state_path,
+                            state_volume_name=state_volume_name,
+                        )
                     if failure is not None:
                         _kill_group(process.pid, signal.SIGKILL)
                         break
@@ -668,7 +670,7 @@ def _run_training(
         follower_stopped.set()
         log_follower.join(timeout=5)
 
-    if failure is None:
+    if failure is None and track_run_name:
         state, failure = _drain_run_names(
             run_names,
             state,
@@ -718,6 +720,7 @@ def _run_remote(spec: LaunchSpec) -> int:
         state_path=state_path,
         state_volume_name=spec.state_volume,
         stall_s=spec.stall_s,
+        track_run_name=spec.auto_resume,
     )
 
 
