@@ -2218,6 +2218,64 @@ def device_batches(
         yield ready
 
 
+def concatenate_train_batches(batches: Sequence[TrainBatch]) -> TrainBatch:
+    """Concatenate ordered replay batches into one device-sized training batch."""
+    if not batches:
+        raise ValueError("cannot concatenate an empty batch sequence")
+    first = batches[0]
+    feature_names = tuple(first.context.features)
+    if any(tuple(batch.context.features) != feature_names for batch in batches[1:]):
+        raise ValueError("training batches have different context features")
+
+    def concatenate(tensors: Sequence[Tensor]) -> Tensor:
+        if len(tensors) == 1:
+            return tensors[0]
+        first_tensor = tensors[0]
+        shape = (sum(tensor.shape[0] for tensor in tensors), *first_tensor.shape[1:])
+        pin_memory = first_tensor.device.type == "cpu" and all(tensor.is_pinned() for tensor in tensors)
+        output = torch.empty(
+            shape,
+            dtype=first_tensor.dtype,
+            device=first_tensor.device,
+            pin_memory=pin_memory,
+        )
+        return torch.cat(tuple(tensors), dim=0, out=output)
+
+    def concatenate_optional(tensors: Sequence[Tensor | None], name: str) -> Tensor | None:
+        if all(tensor is None for tensor in tensors):
+            return None
+        if any(tensor is None for tensor in tensors):
+            raise ValueError(f"training batches disagree about {name}")
+        return concatenate([tensor for tensor in tensors if tensor is not None])
+
+    replay_ids: tuple[str, ...] | None
+    if all(batch.replay_ids is None for batch in batches):
+        replay_ids = None
+    elif any(batch.replay_ids is None for batch in batches):
+        raise ValueError("training batches disagree about replay IDs")
+    else:
+        replay_ids = tuple(itertools.chain.from_iterable(batch.replay_ids or () for batch in batches))
+
+    return TrainBatch(
+        context=Context(
+            features={
+                name: concatenate([batch.context.features[name] for batch in batches]) for name in feature_names
+            },
+            ctx_pad=concatenate([batch.context.ctx_pad for batch in batches]),
+            slot_ids=concatenate_optional(
+                [batch.context.slot_ids for batch in batches],
+                "slot IDs",
+            ),
+            reset=concatenate_optional(
+                [batch.context.reset for batch in batches],
+                "reset flags",
+            ),
+        ),
+        target=concatenate([batch.target for batch in batches]),
+        replay_ids=replay_ids,
+    )
+
+
 def _checkpoint_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -2358,8 +2416,9 @@ def run_training_smoke(
     cfg = replace(cfg, adam_weight_decay=scale.weight_decay)
     optimizer = make_optimizer(model, cfg)
     loader = _make_train_loader(cfg, stats, audit)
-    batch = next(iter(loader))
-    validate_batch_geometry(batch, cfg, micro_batch_size(cfg))
+    loaded = OrderedUpdateSource(loader, cfg).load(1)[0]
+    batch = concatenate_train_batches([batch for batch, _ in loaded.work])
+    validate_batch_geometry(batch, cfg, cfg.batch_size)
     batch = batch.to(DEVICE)
 
     def trunk_fn(features, pad, actions):
@@ -2394,6 +2453,8 @@ def run_training_smoke(
         "effective_batch_size": cfg.batch_size,
         "grad_accum_steps": cfg.grad_accum_steps,
         "micro_batch_size": micro_batch_size(cfg),
+        "device_batch_size": batch.target.shape[0],
+        "backward_calls": 1,
         "loss_positions": int(valid.sum()),
         "objective_nats": float(loss.detach()),
         "gradient_norm": float(gradient_norm),
@@ -2856,22 +2917,20 @@ def train(
             optimizer.zero_grad()
             nll_sum = torch.zeros(len(cfg.head_offsets), N_GROUPS, device=DEVICE)
             n_prefixes = 0
-            cpu_batches = [batch for batch, _ in selected]
-            cpu_masks = [mask for _, mask in selected]
+            cpu_batch = concatenate_train_batches([batch for batch, _ in selected])
+            cpu_mask = torch.cat([mask for _, mask in selected], dim=0)
             with profile("step") as stopwatch:
-                for batch, position_mask in zip(
-                    device_batches(cpu_batches, DEVICE, copy_stream), cpu_masks, strict=True
-                ):
-                    history, targets, valid = prepared_targets(model, batch)
-                    selected_valid = valid & position_mask.to(valid.device)
-                    with amp_context(cfg, DEVICE):
-                        hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
-                        dense_nll = temporal_fn(hidden, history, targets)
-                        parts = ActionLoss(nll=dense_nll[selected_valid], targets=targets[selected_valid])
-                        loss = objective(parts, cfg.aux_loss_weight) * (parts.nll.shape[0] / valid_prefixes)
-                    loss.backward()
-                    nll_sum += parts.nll.detach().sum(dim=0)
-                    n_prefixes += parts.nll.shape[0]
+                batch = next(device_batches([cpu_batch], DEVICE, copy_stream))
+                history, targets, valid = prepared_targets(model, batch)
+                selected_valid = valid & cpu_mask.to(valid.device)
+                with amp_context(cfg, DEVICE):
+                    hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, history)
+                    dense_nll = temporal_fn(hidden, history, targets)
+                    parts = ActionLoss(nll=dense_nll[selected_valid], targets=targets[selected_valid])
+                    loss = objective(parts, cfg.aux_loss_weight)
+                loss.backward()
+                nll_sum += parts.nll.detach().sum(dim=0)
+                n_prefixes += parts.nll.shape[0]
                 gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
@@ -2914,6 +2973,8 @@ def train(
                 "throughput/loader_workers": loader_workers,
                 "throughput/loader_cache_updates": loader_cache_size,
                 "throughput/loader_cache_limit_gb": cfg.cache_limit_gb,
+                "throughput/device_batch_size": batch.target.shape[0],
+                "throughput/backward_calls": 1,
                 "throughput/loss_positions_per_s": valid_prefixes / stopwatch.elapsed,
                 "lr/muon": next(group["lr"] for group in optimizer.param_groups if group["use_muon"]),
                 "lr/adam": next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]),
