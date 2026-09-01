@@ -2914,6 +2914,10 @@ def train(
     probe_total = 0 if not probe else throughput_probe_warmup + throughput_probe_updates
     probe_completed = 0
     probe_start_positions = processed_positions
+    gradient_alerts = 0
+    adam_parameter_ids = {
+        id(parameter) for group in optimizer.param_groups if not group["use_muon"] for parameter in group["params"]
+    }
 
     def drain_prefetch() -> None:
         while prefetched:
@@ -3092,12 +3096,21 @@ def train(
                     flush=True,
                 )
             if probe and float(gradient_norm) > 1.0:
-                print(
-                    f"[gradient] update {update}: D={processed_positions:,}, loss={metrics['loss']:.3f}, "
-                    f"total={float(gradient_norm):.3f}, muon={float(family_gradient_norms['muon']):.3f}, "
-                    f"adam={float(family_gradient_norms['adam']):.3f}",
-                    flush=True,
-                )
+                gradient_alerts += 1
+                if gradient_alerts <= 20 or gradient_alerts % 100 == 0:
+                    adam_gradients = [
+                        (float(parameter.grad.norm(2)), name, float(parameter.detach().norm(2)))
+                        for name, parameter in model.named_parameters()
+                        if id(parameter) in adam_parameter_ids and parameter.grad is not None
+                    ]
+                    top_gradient, top_name, top_parameter_norm = max(adam_gradients)
+                    print(
+                        f"[gradient] update {update}: D={processed_positions:,}, loss={metrics['loss']:.3f}, "
+                        f"total={float(gradient_norm):.3f}, muon={float(family_gradient_norms['muon']):.3f}, "
+                        f"adam={float(family_gradient_norms['adam']):.3f}, top={top_name}, "
+                        f"top_grad={top_gradient:.3f}, top_param={top_parameter_norm:.3f}",
+                        flush=True,
+                    )
 
             if not probe and cfg.phase == "prefix" and processed_positions in branches - completed_branches:
                 target = branch_targets[processed_positions]
