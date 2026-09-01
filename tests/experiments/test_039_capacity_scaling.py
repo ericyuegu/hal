@@ -334,6 +334,26 @@ def test_dense_loss_weighting_is_exact() -> None:
     torch.testing.assert_close(exp.objective(parts), expected, rtol=0, atol=0)
 
 
+def test_explicit_eager_checkpoint_eval_disables_only_the_official_compile_guard(tmp_path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    cfg = _tiny_scaled(inference_mode="compiled")
+    state = {"step": 7}
+    calls = []
+
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _: (object(), cfg, {}, state))
+
+    def fake_eval(*args, **kwargs):
+        calls.append(kwargs)
+        return {"scheduled_boots": 2.0, "completed_boots": 2.0, "boots": 2.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
+
+    exp.eval_checkpoint(str(checkpoint), delay=1, n_matchups=2, eager=True)
+
+    assert calls[0]["require_compiled_cuda"] is False
+
+
 def test_powerlines_decay_and_terminal_schedule_use_exact_position_formula() -> None:
     cfg = _tiny_scaled()
     parameters = 6_988_015
