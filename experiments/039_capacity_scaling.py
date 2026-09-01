@@ -2808,7 +2808,9 @@ def train(
             ckpt_due = not probe and cfg.ckpt_every > 0 and next_update % cfg.ckpt_every == 0
             final_due = next_processed >= stop_position or (probe and probe_completed + 1 >= probe_total)
             boundary_due = branch_due or val_due or ckpt_due or final_due
-            if not boundary_due and not pending:
+            # An exact-D checkpoint can leave one partial batch pending. It must
+            # not disable lookahead for every later update.
+            if not boundary_due:
                 while len(prefetched) < loader_prefetch_updates:
                     prefetched.append(prefetch_pool.submit(update_source.load, 1))
             loader_cache_size = len(prefetched)
