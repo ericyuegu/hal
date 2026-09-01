@@ -36,6 +36,8 @@ PROBES = (
 @dataclass(frozen=True, slots=True)
 class Args:
     worker_counts: tuple[int, ...] = (4, 8, 16)
+    selected_workers: int | None = None
+    levels: tuple[int, ...] = (3, 4, 5, 7, 10)
     warmup_updates: int = 4
     measured_updates: int = 16
     prefetch_updates: int = 1
@@ -101,28 +103,41 @@ def select_workers(results: list[dict[str, Any]]) -> int:
 
 
 def main(args: Args) -> None:
-    if not args.worker_counts or any(workers <= 0 for workers in args.worker_counts):
+    if args.selected_workers is None and (
+        not args.worker_counts or any(workers <= 0 for workers in args.worker_counts)
+    ):
         raise SystemExit("worker counts must be positive")
     if args.warmup_updates < 0 or args.measured_updates < 1:
         raise SystemExit("warmup must be non-negative and measured updates must be positive")
     if args.prefetch_updates not in (1, 2) or args.fallback_prefetch_updates not in (1, 2):
         raise SystemExit("prefetch depths must be 1 or 2")
+    probes = tuple(probe for probe in PROBES if probe.level in args.levels)
+    if not probes or len(probes) != len(args.levels):
+        raise SystemExit("levels must be unique members of 3, 4, 5, 7, and 10")
+    if args.selected_workers is not None and args.selected_workers <= 0:
+        raise SystemExit("selected workers must be positive")
 
-    representative = next(probe for probe in PROBES if probe.level == 7)
-    sweep = [run_probe(representative, workers, args.prefetch_updates, args) for workers in args.worker_counts]
-    selected_workers = select_workers(sweep)
-    selected_l7 = next(result for result in sweep if int(result["loader_workers"]) == selected_workers)
-
-    selected_results = [selected_l7]
-    for probe in PROBES:
-        if probe is representative:
-            continue
-        selected_results.append(run_probe(probe, selected_workers, args.prefetch_updates, args))
+    sweep = []
+    selected_results = []
+    if args.selected_workers is None:
+        representative = next(probe for probe in PROBES if probe.level == 7)
+        sweep = [run_probe(representative, workers, args.prefetch_updates, args) for workers in args.worker_counts]
+        selected_workers = select_workers(sweep)
+        if representative in probes:
+            selected_results.append(
+                next(result for result in sweep if int(result["loader_workers"]) == selected_workers)
+            )
+    else:
+        selected_workers = args.selected_workers
+    completed_levels = {int(result["level"]) for result in selected_results}
+    for probe in probes:
+        if probe.level not in completed_levels:
+            selected_results.append(run_probe(probe, selected_workers, args.prefetch_updates, args))
 
     fallback_results = []
     if args.fallback_prefetch_updates != args.prefetch_updates:
         failed_levels = {int(result["level"]) for result in selected_results if not result["loader_gate_pass"]}
-        for probe in PROBES:
+        for probe in probes:
             if probe.level in failed_levels:
                 fallback_results.append(run_probe(probe, selected_workers, args.fallback_prefetch_updates, args))
 
@@ -134,7 +149,11 @@ def main(args: Args) -> None:
         "warmup_updates": args.warmup_updates,
         "measured_updates": args.measured_updates,
         "selected_workers": selected_workers,
-        "selection_rule": "fastest stable mean; smaller worker count within 5%",
+        "selection_rule": (
+            "preselected"
+            if args.selected_workers is not None
+            else "fastest stable mean; smaller worker count within 5%"
+        ),
         "worker_sweep": sweep,
         "selected_worker_results": selected_results,
         "fallback_results": fallback_results,
