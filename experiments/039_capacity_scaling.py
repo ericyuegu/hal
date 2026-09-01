@@ -2513,7 +2513,7 @@ class OrderedUpdateSource:
 def _select_position_work(
     work: list[PendingBatch], maximum_positions: int
 ) -> tuple[list[PendingBatch], list[PendingBatch], int]:
-    """Select an exact prefix of loss-bearing positions and retain its complement."""
+    """Mask an exact position prefix and retain every unused position."""
     selected: list[PendingBatch] = []
     pending: list[PendingBatch] = []
     remaining = maximum_positions
@@ -2533,17 +2533,13 @@ def _select_position_work(
             chosen_flat[indices[:remaining]] = True
         chosen = chosen_flat.view_as(available)
         leftover = available & ~chosen
-        if chosen.any():
-            selected.append((batch, chosen))
-            selected_count += remaining
+        # Keep every row in the device batch, including the zero-loss suffix.
+        # A fixed batch shape prevents recompilation at exact-D boundaries.
+        selected.append((batch, chosen))
+        selected_count += remaining
         if leftover.any():
             pending.append((batch, leftover))
         remaining = 0
-    if remaining == 0:
-        # A split batch contributes to both lists, so use identity to find all
-        # untouched suffix batches without relying on that count.
-        used_ids = {id(batch) for batch, _ in selected} | {id(batch) for batch, _ in pending}
-        pending.extend((batch, mask) for batch, mask in work if id(batch) not in used_ids)
     return selected, pending, selected_count
 
 

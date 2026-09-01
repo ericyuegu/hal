@@ -417,15 +417,24 @@ def test_powerlines_decay_and_terminal_schedule_use_exact_position_formula() -> 
 
 def test_position_boundary_retains_every_unused_loss_position() -> None:
     cfg = _tiny_scaled(L_ctx=4)
-    context = Context(features={}, ctx_pad=torch.tensor([0, 2]))
-    batch = exp.TrainBatch(context=context, target=torch.zeros(2, 36, A_DIM))
-    available = exp._valid_position_mask(batch, cfg)
-    selected, pending, count = exp._select_position_work([(batch, available)], 3)
+    batches = [
+        exp.TrainBatch(
+            context=Context(features={}, ctx_pad=torch.tensor([0, 2])),
+            target=torch.zeros(2, 36, A_DIM),
+        )
+        for _ in range(2)
+    ]
+    work = [(batch, exp._valid_position_mask(batch, cfg)) for batch in batches]
+    selected, pending, count = exp._select_position_work(work, 3)
+
     assert count == 3
+    assert [id(batch) for batch, _ in selected] == [id(batch) for batch in batches]
     selected_mask = selected[0][1]
     pending_mask = pending[0][1]
     assert not (selected_mask & pending_mask).any()
-    assert torch.equal(selected_mask | pending_mask, available)
+    assert torch.equal(selected_mask | pending_mask, work[0][1])
+    assert not selected[1][1].any()
+    assert torch.equal(pending[1][1], work[1][1])
 
 
 def test_ordered_replay_batches_are_concatenated_for_one_backward() -> None:
