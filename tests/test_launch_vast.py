@@ -43,3 +43,22 @@ def test_compute_capability_bounds_are_disabled_by_default() -> None:
     )
 
     assert "compute_cap" not in query
+
+
+def test_build_query_can_require_gpu_model_and_effective_cpu_count() -> None:
+    cfg = Args(gpu_name="B200", min_cpu_cores=32)
+
+    query = build_query(
+        max_price=cfg.max_price,
+        disk=cfg.disk,
+        min_vram=cfg.min_vram,
+        min_ram=cfg.min_ram,
+        min_dlperf=cfg.min_dlperf,
+        min_compute_cap=cfg.min_compute_cap,
+        max_compute_cap=cfg.max_compute_cap,
+        gpu_name=cfg.gpu_name,
+        min_cpu_cores=cfg.min_cpu_cores,
+    )
+
+    assert "gpu_name=B200" in query
+    assert "cpu_cores_effective>=32" in query

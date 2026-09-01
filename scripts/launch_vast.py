@@ -120,6 +120,8 @@ def build_query(
     min_dlperf: float,
     min_compute_cap: int,
     max_compute_cap: int,
+    gpu_name: str | None = None,
+    min_cpu_cores: int = 0,
 ) -> str:
     # dph_total<max_price is a safe coarse prefilter: effective_dph >= dph_total, so any
     # offer clearing the effective cap also clears this. The real (disk-inclusive) cap is
@@ -133,6 +135,10 @@ def build_query(
         q.append(f"compute_cap>={min_compute_cap}")
     if max_compute_cap > 0:  # 0 = no ceiling
         q.append(f"compute_cap<={max_compute_cap}")
+    if gpu_name:
+        q.append(f"gpu_name={gpu_name.replace(' ', '_')}")
+    if min_cpu_cores > 0:
+        q.append(f"cpu_cores_effective>={min_cpu_cores}")
     return " ".join(q)
 
 
@@ -147,6 +153,8 @@ def search(
     min_dlperf: float,
     min_compute_cap: int,
     max_compute_cap: int,
+    gpu_name: str | None,
+    min_cpu_cores: int,
     data_gb: float,
     upload_gb: float,
     run_hours: float,
@@ -162,6 +170,8 @@ def search(
             min_dlperf,
             min_compute_cap,
             max_compute_cap,
+            gpu_name,
+            min_cpu_cores,
         ),
         order=ORDER,
         limit=limit,
@@ -251,6 +261,8 @@ def queue(
     min_dlperf: float,
     min_compute_cap: int,
     max_compute_cap: int,
+    gpu_name: str | None,
+    min_cpu_cores: int,
     data_gb: float,
     upload_gb: float,
     run_hours: float,
@@ -268,6 +280,8 @@ def queue(
             min_dlperf=min_dlperf,
             min_compute_cap=min_compute_cap,
             max_compute_cap=max_compute_cap,
+            gpu_name=gpu_name,
+            min_cpu_cores=min_cpu_cores,
             data_gb=data_gb,
             upload_gb=upload_gb,
             run_hours=run_hours,
@@ -512,6 +526,10 @@ class Args:
     leaves ``async_compile._wait_futures`` blocked forever, which is the silent stall. That
     probe box ran --disk 40, so the disk pressure was self-inflicted, and an sm_120 run with
     production disk is still unmeasured. Lift the cap once one such run trains steps."""
+    gpu_name: str | None = None
+    """Exact Vast GPU model, such as B200. Spaces are converted to underscores for the query."""
+    min_cpu_cores: int = 0
+    """Minimum effective virtual CPU count. Zero disables the filter."""
     limit: int = 10
     """How many offers to fetch/print."""
     poll_interval_s: int = 30
@@ -547,6 +565,8 @@ def main(args: Args) -> None:
         min_dlperf=args.min_dlperf,
         min_compute_cap=args.min_compute_cap,
         max_compute_cap=args.max_compute_cap,
+        gpu_name=args.gpu_name,
+        min_cpu_cores=args.min_cpu_cores,
         data_gb=args.data_gb,
         upload_gb=args.upload_gb,
         run_hours=args.run_hours,
