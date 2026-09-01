@@ -48,6 +48,8 @@ import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
 
 RESULTS = Path(__file__).resolve().parent.parent / "results" / "039_capacity_scaling"
 FIGURES = RESULTS / "figures"
@@ -71,6 +73,7 @@ raw = pd.read_csv(RESULTS / "experiment_039_raw_outcomes.csv", low_memory=False)
 runs = raw[raw.record_type == "run"].copy()
 runs = runs[runs.processed_positions.notna()]
 runs = runs.drop_duplicates(subset=["model", "processed_positions", "phase"], keep="first")
+runs["analysis_excluded"] = runs.analysis_excluded.eq(True)
 
 U_TOTAL = float(runs.unique_loss_positions.iloc[0])
 assert (runs.unique_loss_positions == U_TOTAL).all(), "runs disagree on corpus size"
@@ -100,15 +103,41 @@ D_EXPS = [26, 27, 28, 29, 30]
 # Cooldown checkpoints carry the comparable NLL. A cooldown whose NLL is worse than the same
 # model's least-trained checkpoint diverged. A diverged run measures a failed optimization, not
 # the capacity or data level it was trained at, so it leaves every scaling curve — closed-loop
-# as much as NLL — and the fit. It still plots, as an unconnected hollow ring, so the failure
-# stays visible rather than disappearing.
-ckpt = runs[(runs.phase == "cooldown") & runs.validation_nll.notna()].copy()
+# as much as NLL — and the fit. Failed cooldown checkpoints plot as rings; failed prefixes are
+# reported in the compute-figure footers because they have no comparable terminal NLL.
+failed_runs = runs[runs.analysis_excluded].copy()
+ckpt = runs[(runs.phase == "cooldown") & runs.validation_nll.notna() & ~runs.analysis_excluded].copy()
 ckpt = ckpt.drop_duplicates(subset=["model", "processed_positions"], keep="first")
 floor = ckpt.loc[ckpt.groupby("model").processed_positions.idxmin()].set_index("model").validation_nll
 ckpt["diverged"] = ckpt.validation_nll > ckpt.model.map(floor)
-DIVERGED = {(row.model, row.processed_positions) for row in ckpt[ckpt.diverged].itertuples()}
+DIVERGED = {(row.model, row.processed_positions) for row in ckpt[ckpt.diverged].itertuples()} | {
+    (row.model, row.processed_positions) for row in failed_runs.itertuples()
+}
 for model, positions in sorted(DIVERGED):
-    print(f"diverged cooldown (off every scaling curve, drawn as a ring): {model} @ D=2^{np.log2(positions):.2f}")
+    print(f"diverged run (off every scaling curve): {model} stopped near D=2^{np.log2(positions):.2f}")
+
+if not failed_runs.empty:
+    print("unfinished exact endpoints:")
+    for row in failed_runs.sort_values("total_parameters").itertuples():
+        print(
+            f"  {row.model}: stopped at D={row.processed_positions:,.0f}; "
+            f"target D={row.target_processed_positions:,.0f}; {row.analysis_exclusion_reason}"
+        )
+
+
+def failed_endpoint_note() -> str:
+    """Short figure note for exact endpoints that failed before completion."""
+    notes = []
+    for row in failed_runs.sort_values("total_parameters").itertuples():
+        target = f"{row.target_processed_positions:.3g}"
+        note = f"{row.model} target D={target} diverged at D={row.processed_positions:.3g}"
+        if row.model == "L7" and np.isclose(row.target_processed_positions, 3_803_727_888):
+            ratio = row.target_processed_positions / U_TOTAL
+            coverage = distinct_positions(row.target_processed_positions) / U_TOTAL
+            note += f" (target D/U={ratio:.3f}, estimated distinct coverage={coverage:.1%})"
+        notes.append(note)
+    return "; ".join(notes)
+
 
 # Wall time for the time frontier: the cooldown row's cumulative seconds already includes its
 # prefix branch.
@@ -1012,7 +1041,9 @@ ax.set_title("Closed-loop compute frontier (best over delay)")
 direct_label_lines(ax, right=0.22)
 
 fig.suptitle("Compute scaling — cooldown checkpoints, FLOPs from the run's own 6*D*(N_trunk + 36*N_decoder)")
-fig.tight_layout()
+fig.tight_layout(rect=(0, 0.06, 1, 1))
+if failed_endpoint_note():
+    fig.text(0.008, 0.008, "unfinished exact endpoints — " + failed_endpoint_note(), fontsize=8, color=MUTED)
 fig.savefig(FIGURES / "08_compute_frontier.png")
 
 # %% [markdown]
@@ -1025,8 +1056,6 @@ fig.savefig(FIGURES / "08_compute_frontier.png")
 # D = U enter the repeated-data regime and are optimistic.
 
 # %%
-from scipy.optimize import minimize
-
 fit_df = ckpt[ckpt.model.isin(SCALED) & ~ckpt.diverged].copy()
 fit_df["n_eff"] = fit_df.training_flops / (6 * fit_df.processed_positions)
 n_fit = fit_df.n_eff.to_numpy()
@@ -1034,36 +1063,55 @@ d_fit = fit_df.processed_positions.to_numpy()
 y_fit = fit_df.validation_nll.to_numpy()
 
 
-def huber_objective(p: np.ndarray) -> float:
-    log_e, log_a, log_b, alpha, beta = p
-    with np.errstate(over="ignore", invalid="ignore"):
-        pred = np.exp(log_e) + np.exp(log_a) * n_fit**-alpha + np.exp(log_b) * d_fit**-beta
-        r = pred - y_fit
-        delta = 1e-3
-        return float(np.sum(np.where(np.abs(r) < delta, 0.5 * r**2, delta * (np.abs(r) - 0.5 * delta))))
+def fit_scaling_law(data_axis: np.ndarray) -> tuple[float, float, float, float, float]:
+    """Fit the robust five-parameter scaling law on one data axis."""
+
+    def huber_objective(parameters: np.ndarray) -> float:
+        log_e, log_a, log_b, alpha, beta = parameters
+        with np.errstate(over="ignore", invalid="ignore"):
+            prediction = np.exp(log_e) + np.exp(log_a) * n_fit**-alpha + np.exp(log_b) * data_axis**-beta
+            residual = prediction - y_fit
+            delta = 1e-3
+            return float(
+                np.sum(
+                    np.where(
+                        np.abs(residual) < delta,
+                        0.5 * residual**2,
+                        delta * (np.abs(residual) - 0.5 * delta),
+                    )
+                )
+            )
+
+    best = min(
+        (
+            minimize(
+                huber_objective,
+                [np.log(e0), log_a, log_b, alpha0, beta0],
+                method="Nelder-Mead",
+                options={"maxiter": 20000, "xatol": 1e-8, "fatol": 1e-12},
+            )
+            for e0 in [1.2, 1.5, 1.7]
+            for alpha0 in [0.1, 0.3, 0.5]
+            for beta0 in [0.1, 0.3, 0.5]
+            for log_a in [0.0, 3.0, 6.0]
+            for log_b in [0.0, 3.0, 6.0]
+        ),
+        key=lambda result: result.fun,
+    )
+    e_fit, a_fit, b_fit = np.exp(best.x[:3])
+    return float(e_fit), float(a_fit), float(b_fit), float(best.x[3]), float(best.x[4])
 
 
-best = min(
-    (
-        minimize(
-            huber_objective,
-            [np.log(e0), la, lb, a0, b0],
-            method="Nelder-Mead",
-            options={"maxiter": 20000, "xatol": 1e-8, "fatol": 1e-12},
-        )
-        for e0 in [1.2, 1.5, 1.7]
-        for a0 in [0.1, 0.3, 0.5]
-        for b0 in [0.1, 0.3, 0.5]
-        for la in [0.0, 3.0, 6.0]
-        for lb in [0.0, 3.0, 6.0]
-    ),
-    key=lambda r: r.fun,
-)
-E_FIT, A_FIT, B_FIT = np.exp(best.x[0]), np.exp(best.x[1]), np.exp(best.x[2])
-ALPHA, BETA = best.x[3], best.x[4]
+E_FIT, A_FIT, B_FIT, ALPHA, BETA = fit_scaling_law(d_fit)
 resid = E_FIT + A_FIT * n_fit**-ALPHA + B_FIT * d_fit**-BETA - y_fit
 print(f"\nL(N_eff, D) = {E_FIT:.4f} + {A_FIT:.4g}/N^{ALPHA:.3f} + {B_FIT:.4g}/D^{BETA:.3f}")
 print(f"rms residual {np.sqrt(np.mean(resid**2)):.4f} NLL, max {np.max(np.abs(resid)):.4f}, {len(fit_df)} points")
+
+u_fit = distinct_positions(d_fit)
+E_U, A_U, B_U, ALPHA_U, BETA_U = fit_scaling_law(u_fit)
+resid_u = E_U + A_U * n_fit**-ALPHA_U + B_U * u_fit**-BETA_U - y_fit
+print(f"coverage sensitivity L(N_eff, U_seen) = {E_U:.4f} + {A_U:.4g}/N^{ALPHA_U:.3f} + {B_U:.4g}/U_seen^{BETA_U:.3f}")
+print(f"coverage-sensitivity rms residual {np.sqrt(np.mean(resid_u**2)):.4f} NLL")
 
 
 def loss_at(n_eff: np.ndarray, c: float) -> np.ndarray:
@@ -1072,6 +1120,24 @@ def loss_at(n_eff: np.ndarray, c: float) -> np.ndarray:
 
 def n_eff_opt(c: float) -> float:
     return float((ALPHA * A_FIT / (BETA * B_FIT)) ** (1 / (ALPHA + BETA)) * (c / 6) ** (BETA / (ALPHA + BETA)))
+
+
+def coverage_loss_at(n_eff: np.ndarray | float, compute: float) -> np.ndarray | float:
+    processed = compute / (6 * np.asarray(n_eff))
+    covered = distinct_positions(processed)
+    return E_U + A_U * np.asarray(n_eff) ** -ALPHA_U + B_U * covered**-BETA_U
+
+
+def coverage_n_eff_opt(compute: float) -> float:
+    """Numerical optimum under the estimated distinct-coverage sensitivity fit."""
+    lower = np.log(n_fit.min() / 32)
+    upper = np.log(n_fit.max() * 32)
+    result = minimize_scalar(
+        lambda log_n: float(coverage_loss_at(np.exp(log_n), compute)),
+        bounds=(lower, upper),
+        method="bounded",
+    )
+    return float(np.exp(result.x))
 
 
 n_eff_by_model = fit_df.groupby("model").n_eff.first()
@@ -1117,11 +1183,20 @@ ax.plot(
     lw=2,
     label=f"$N_{{opt}} \\propto C^{{{BETA / (ALPHA + BETA):.2f}}}$",
 )
+ax.plot(
+    c_grid,
+    [coverage_n_eff_opt(c) for c in c_grid],
+    color=ACCENT,
+    lw=1.8,
+    ls="--",
+    label="distinct-coverage sensitivity",
+)
 ax.set_xscale("log")
 ax.set_yscale("log")
 ax.axhspan(n_eff_by_model.min(), n_eff_by_model.max(), color=GRID, alpha=0.6, zorder=0, label="scaled family range")
 for c in FLOP_LEVELS:
     ax.scatter(c, n_eff_opt(c), color=MODEL_COLOR[MODELS[5]], s=38, zorder=3)
+    ax.scatter(c, coverage_n_eff_opt(c), color=ACCENT, marker="x", s=38, zorder=3)
 n_star = n_eff_opt(C_PREDICT)
 d_star = C_PREDICT / (6 * n_star)
 ax.scatter(C_PREDICT, n_star, marker="*", s=230, color=ACCENT, zorder=4, label=f"C = {C_PREDICT:.1e}")
@@ -1140,7 +1215,9 @@ ax.set_title("Compute-optimal capacity, extrapolated")
 ax.legend(fontsize=8.5, loc="upper left")
 
 fig.suptitle("Iso-FLOP structure from the parametric fit (minima below the family range are extrapolations)")
-fig.tight_layout()
+fig.tight_layout(rect=(0, 0.06, 1, 1))
+if failed_endpoint_note():
+    fig.text(0.008, 0.008, "unfinished exact endpoints — " + failed_endpoint_note(), fontsize=8, color=MUTED)
 fig.savefig(FIGURES / "09_isoflop_fit.png")
 
 print("\nRuns that would bracket each iso-FLOP minimum:")
