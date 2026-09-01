@@ -72,6 +72,7 @@ def run_probe(probe: Probe, workers: int, prefetch_updates: int, args: Args) -> 
         str(args.warmup_updates),
         "--throughput-probe-updates",
         str(args.measured_updates),
+        "--throughput-probe-eager",
     ]
     print(f"[suite] L{probe.level} workers={workers} prefetch={prefetch_updates}", flush=True)
     subprocess.run(command, cwd=ROOT, check=True)

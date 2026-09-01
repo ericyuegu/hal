@@ -284,6 +284,33 @@ def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypat
     assert states[-1] == RunState(status="failed", run_name="run-1", exit_code=3)
 
 
+def test_arbitrary_command_can_emit_multiple_run_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    states: list[RunState] = []
+    monkeypatch.setattr(_MODULE, "REMOTE_ROOT", tmp_path)
+    monkeypatch.setattr(_MODULE, "_commit_state", lambda _path, state, _volume: states.append(state))
+    command = (
+        sys.executable,
+        "-c",
+        "print('[ckpt] writing checkpoints to runs/run-1', flush=True); "
+        "print('[ckpt] writing checkpoints to runs/run-2', flush=True)",
+    )
+
+    assert (
+        _MODULE._run_training(
+            command,
+            RunState(status="running"),
+            env=dict(_MODULE.os.environ),
+            state_path=tmp_path / "state.json",
+            state_volume_name="test-volume",
+            stall_s=10,
+            track_run_name=False,
+        )
+        == 0
+    )
+
+    assert states[-1] == RunState(status="succeeded")
+
+
 def test_training_interrupt_preserves_recoverable_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     states: list[RunState] = []
     timers: list[threading.Timer] = []
