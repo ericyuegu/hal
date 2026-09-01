@@ -240,6 +240,24 @@ def test_checkpoint_records_runtime_controls() -> None:
     assert state["runtime_controls"] == controls
 
 
+def test_optimizer_gradient_norms_are_separate_by_family() -> None:
+    muon_parameter = torch.nn.Parameter(torch.zeros(2))
+    adam_parameter = torch.nn.Parameter(torch.zeros(1))
+    muon_parameter.grad = torch.tensor([3.0, 4.0])
+    adam_parameter.grad = torch.tensor([12.0])
+    optimizer = SimpleNamespace(
+        param_groups=[
+            {"params": [muon_parameter], "use_muon": True},
+            {"params": [adam_parameter], "use_muon": False},
+        ]
+    )
+
+    norms = exp.optimizer_gradient_norms(optimizer)
+
+    assert float(norms["muon"]) == 5.0
+    assert float(norms["adam"]) == 12.0
+
+
 def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypatch) -> None:
     source_name = "cap-L7-d448-18M-U1-prefix-D2p30-tauPL"
     checkpoint_name = "branch_D2p30.pt"

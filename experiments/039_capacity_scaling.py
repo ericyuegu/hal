@@ -1956,6 +1956,17 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     )
 
 
+def optimizer_gradient_norms(optimizer: SingleDeviceMuonWithAuxAdam) -> dict[str, torch.Tensor]:
+    """Return pre-update L2 gradient norms for the Muon and Adam families."""
+    by_family: dict[str, list[torch.Tensor]] = {"muon": [], "adam": []}
+    for group in optimizer.param_groups:
+        family = "muon" if group["use_muon"] else "adam"
+        by_family[family].extend(
+            parameter.grad.detach().norm(2) for parameter in group["params"] if parameter.grad is not None
+        )
+    return {family: torch.linalg.vector_norm(torch.stack(norms), 2) for family, norms in by_family.items() if norms}
+
+
 def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     decoder_ids = {id(parameter) for module in (model.codec, model.temporal) for parameter in module.parameters()}
     decoder = sum(parameter.numel() for parameter in model.parameters() if id(parameter) in decoder_ids)
@@ -2989,6 +3000,7 @@ def train(
                     backward_calls += 1
                     nll_sum += parts.nll.detach().sum(dim=0)
                     n_prefixes += parts.nll.shape[0]
+                family_gradient_norms = optimizer_gradient_norms(optimizer) if probe else {}
                 max_gradient_norm = math.inf if gradient_clip_norm is None else gradient_clip_norm
                 gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
                 if not torch.isfinite(gradient_norm):
@@ -3017,6 +3029,8 @@ def train(
                         "loss_positions": float(valid_prefixes),
                         "loss": metrics["loss"],
                         "gradient_norm": float(gradient_norm),
+                        "muon_gradient_norm": float(family_gradient_norms["muon"]),
+                        "adam_gradient_norm": float(family_gradient_norms["adam"]),
                         "optimizer_step_skipped": float(optimizer_step_skipped),
                     }
                 )
@@ -3062,6 +3076,13 @@ def train(
                     f"{valid_prefixes / stopwatch.elapsed:,.0f} loss positions/s",
                     flush=True,
                 )
+            if probe and float(gradient_norm) > 1.0:
+                print(
+                    f"[gradient] update {update}: D={processed_positions:,}, loss={metrics['loss']:.3f}, "
+                    f"total={float(gradient_norm):.3f}, muon={float(family_gradient_norms['muon']):.3f}, "
+                    f"adam={float(family_gradient_norms['adam']):.3f}",
+                    flush=True,
+                )
 
             if not probe and cfg.phase == "prefix" and processed_positions in branches - completed_branches:
                 target = branch_targets[processed_positions]
@@ -3088,6 +3109,8 @@ def train(
             services = np.array([row["loader_service_s"] for row in probe_rows])
             losses = np.array([row["loss"] for row in probe_rows])
             gradient_norms = np.array([row["gradient_norm"] for row in probe_rows])
+            muon_gradient_norms = np.array([row["muon_gradient_norm"] for row in probe_rows])
+            adam_gradient_norms = np.array([row["adam_gradient_norm"] for row in probe_rows])
             skipped_steps = int(sum(row["optimizer_step_skipped"] for row in probe_rows))
             measured_seconds = float(walls.sum())
             rate = float(positions.sum() / measured_seconds)
@@ -3112,6 +3135,8 @@ def train(
                 "first_loss": float(losses[0]),
                 "last_loss": float(losses[-1]),
                 "max_gradient_norm": float(gradient_norms.max()),
+                "max_muon_gradient_norm": float(muon_gradient_norms.max()),
+                "max_adam_gradient_norm": float(adam_gradient_norms.max()),
                 "skipped_optimizer_steps": skipped_steps,
                 "mean_loader_service_s": float(services.mean()),
                 "std_loader_service_s": float(services.std()),
