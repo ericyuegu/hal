@@ -2713,6 +2713,7 @@ def train(
     loader_workers: int = 0,
     loader_prefetch_updates: int = 1,
     device_batch_size: int | None = None,
+    gradient_clip_norm: float | None = None,
     throughput_probe_warmup: int | None = None,
     throughput_probe_updates: int | None = None,
     throughput_probe_eager: bool = False,
@@ -2725,6 +2726,8 @@ def train(
         raise ValueError("loader_workers must be non-negative")
     if loader_prefetch_updates not in (1, 2):
         raise ValueError("loader_prefetch_updates must be 1 or 2")
+    if gradient_clip_norm is not None and (not math.isfinite(gradient_clip_norm) or gradient_clip_norm <= 0):
+        raise ValueError("gradient_clip_norm must be finite and positive")
     loader_batch_size = micro_batch_size(cfg)
     device_batch_size = cfg.batch_size if device_batch_size is None else device_batch_size
     if device_batch_size < loader_batch_size or device_batch_size > cfg.batch_size:
@@ -2759,8 +2762,8 @@ def train(
         project="hal",
         group=WANDB_GROUP,
         name=run_name,
-        id=None if resume_state is None else resume_state.get("wandb_id"),
-        resume="allow" if resume_state is not None else None,
+        id=resume_wandb_id,
+        resume="allow" if resume_wandb_id is not None else None,
         tags=["gpt", "temporal-mtp", "dense-1-36", "026-capacity-scaling", cfg.phase],
         config={
             **asdict(cfg),
@@ -2953,7 +2956,8 @@ def train(
                     backward_calls += 1
                     nll_sum += parts.nll.detach().sum(dim=0)
                     n_prefixes += parts.nll.shape[0]
-                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+                max_gradient_norm = math.inf if gradient_clip_norm is None else gradient_clip_norm
+                gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"update {update}: non-finite gradient norm {gradient_norm}")
                 optimizer.step()
@@ -2966,6 +2970,7 @@ def train(
                 drain_prefetch()
                 loader_wait += time.monotonic() - boundary_wait_started
             update_wall = time.monotonic() - update_started
+            metrics = nll_mean_metrics((nll_sum / n_prefixes).cpu(), cfg.head_offsets)
             if probe and probe_completed >= throughput_probe_warmup:
                 probe_rows.append(
                     {
@@ -2973,10 +2978,11 @@ def train(
                         "uncovered_wait_s": loader_wait,
                         "update_wall_s": update_wall,
                         "loss_positions": float(valid_prefixes),
+                        "loss": metrics["loss"],
+                        "gradient_norm": float(gradient_norm),
                     }
                 )
             probe_completed += 1
-            metrics = nll_mean_metrics((nll_sum / n_prefixes).cpu(), cfg.head_offsets)
             log = {
                 "global_step": update,
                 "processed_positions": processed_positions,
@@ -3004,6 +3010,8 @@ def train(
             if DEVICE == "cuda":
                 log["hardware/peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
                 log["hardware/peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
+            if gradient_clip_norm is not None:
+                log["train/gradient_clip_norm"] = gradient_clip_norm
             wandb.log(log)
             if update < 10 or update % 50 == 0:
                 print(
@@ -3036,6 +3044,8 @@ def train(
             walls = np.array([row["update_wall_s"] for row in probe_rows])
             positions = np.array([row["loss_positions"] for row in probe_rows])
             services = np.array([row["loader_service_s"] for row in probe_rows])
+            losses = np.array([row["loss"] for row in probe_rows])
+            gradient_norms = np.array([row["gradient_norm"] for row in probe_rows])
             measured_seconds = float(walls.sum())
             rate = float(positions.sum() / measured_seconds)
             p95_wait = float(np.quantile(waits, 0.95))
@@ -3052,7 +3062,11 @@ def train(
                 "warmup_updates": throughput_probe_warmup,
                 "measured_updates": throughput_probe_updates,
                 "eager_training": throughput_probe_eager,
+                "gradient_clip_norm": gradient_clip_norm,
                 "training_attention_path": "dense_sdpa" if throughput_probe_eager else "configured",
+                "first_loss": float(losses[0]),
+                "last_loss": float(losses[-1]),
+                "max_gradient_norm": float(gradient_norms.max()),
                 "mean_loader_service_s": float(services.mean()),
                 "std_loader_service_s": float(services.std()),
                 "p95_uncovered_wait_s": p95_wait,
@@ -3446,6 +3460,9 @@ class Args:
     loader_workers: int = 8
     loader_prefetch_updates: int = 1
     device_batch_size: int | None = None
+    gradient_clip_norm: float | None = None
+    resume_probe_updates: int | None = None
+    resume_replace_wandb_id: str | None = None
     throughput_probe_from_run: str | None = None
     throughput_probe_checkpoint: str = "latest.pt"
     throughput_probe_warmup: int = 32
@@ -3472,6 +3489,18 @@ def main(args: Args) -> None:
         raise SystemExit("--loader-prefetch-updates must be 1 or 2")
     if args.device_batch_size is not None and args.device_batch_size < 1:
         raise SystemExit("--device-batch-size must be positive")
+    if args.gradient_clip_norm is not None and (
+        not math.isfinite(args.gradient_clip_norm) or args.gradient_clip_norm <= 0
+    ):
+        raise SystemExit("--gradient-clip-norm must be finite and positive")
+    if args.resume_probe_updates is not None and args.resume_probe_updates < 1:
+        raise SystemExit("--resume-probe-updates must be positive")
+    if args.resume_probe_updates is not None and args.resume is None:
+        raise SystemExit("--resume-probe-updates requires --resume")
+    if args.resume_replace_wandb_id is not None and args.resume is None:
+        raise SystemExit("--resume-replace-wandb-id requires --resume")
+    if args.resume_probe_updates is not None and args.resume_replace_wandb_id is not None:
+        raise SystemExit("a resume probe cannot replace the production W&B run")
     if args.throughput_probe_warmup < 0 or args.throughput_probe_updates < 1:
         raise SystemExit("throughput probe warmup must be non-negative and measured updates must be positive")
     if Path(args.throughput_probe_checkpoint).name != args.throughput_probe_checkpoint or not (
@@ -3557,6 +3586,7 @@ def main(args: Args) -> None:
             loader_workers=args.loader_workers,
             loader_prefetch_updates=args.loader_prefetch_updates,
             device_batch_size=args.device_batch_size,
+            gradient_clip_norm=args.gradient_clip_norm,
             throughput_probe_warmup=args.throughput_probe_warmup,
             throughput_probe_updates=args.throughput_probe_updates,
             throughput_probe_eager=args.throughput_probe_eager,
@@ -3582,6 +3612,8 @@ def main(args: Args) -> None:
         )
         if resume_state is None:
             raise SystemExit(f"no {args.resume_checkpoint} for run {args.resume!r}")
+        if resume_state.get("wandb_id") == args.resume_replace_wandb_id:
+            resume_state = {**resume_state, "wandb_id": None}
         cfg = config_from_state(resume_state["cfg"])
         requested_run_name = args.resume
         branch_state = None
@@ -3686,6 +3718,9 @@ def main(args: Args) -> None:
         loader_workers=args.loader_workers,
         loader_prefetch_updates=args.loader_prefetch_updates,
         device_batch_size=args.device_batch_size,
+        gradient_clip_norm=args.gradient_clip_norm,
+        throughput_probe_warmup=0 if args.resume_probe_updates is not None else None,
+        throughput_probe_updates=args.resume_probe_updates,
     )
 
 

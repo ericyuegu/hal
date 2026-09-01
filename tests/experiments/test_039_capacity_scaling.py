@@ -280,6 +280,81 @@ def test_main_routes_exact_prefix_fork_without_resuming_wandb(tmp_path, monkeypa
     assert kwargs["device_batch_size"] == 16
 
 
+def test_main_routes_side_effect_free_resume_probe(tmp_path, monkeypatch) -> None:
+    run_name = "cap-L7-d448-18M-U1-prefix-D3803727888-tauPL"
+    cfg = exp.scaled_config(
+        7,
+        exp.replace(exp.TrainConfig(), target_processed_positions=3_803_727_888, push_to_r2=False),
+    )
+    scale = exp.adam_scale(cfg, exp.parameter_counts_for_config(cfg)["total"])
+    state = {"cfg": asdict(exp.replace(cfg, adam_weight_decay=scale.weight_decay)), "wandb_id": "old-id"}
+    trains = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(exp, "load_for_resume", lambda *args, **kwargs: state)
+    monkeypatch.setattr(exp, "load_consolidated_stats", lambda _: {})
+    monkeypatch.setattr(
+        exp,
+        "dataset_audit",
+        lambda _: SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
+    )
+    monkeypatch.setattr(exp, "train", lambda *args, **kwargs: trains.append((args, kwargs)))
+
+    exp.main(
+        exp.Args(
+            resume=run_name,
+            resume_probe_updates=256,
+            device_batch_size=16,
+            gradient_clip_norm=1.0,
+        )
+    )
+
+    assert len(trains) == 1
+    _, kwargs = trains[0]
+    assert kwargs["resume_state"] is state
+    assert kwargs["gradient_clip_norm"] == 1.0
+    assert kwargs["throughput_probe_warmup"] == 0
+    assert kwargs["throughput_probe_updates"] == 256
+
+
+def test_resume_can_replace_only_the_expected_wandb_id(tmp_path, monkeypatch) -> None:
+    run_name = "cap-L7-d448-18M-U1-prefix-D3803727888-tauPL"
+    cfg = exp.scaled_config(
+        7,
+        exp.replace(exp.TrainConfig(), target_processed_positions=3_803_727_888, push_to_r2=False),
+    )
+    scale = exp.adam_scale(cfg, exp.parameter_counts_for_config(cfg)["total"])
+    state = {"cfg": asdict(exp.replace(cfg, adam_weight_decay=scale.weight_decay)), "wandb_id": "old-id"}
+    trains = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(exp, "load_for_resume", lambda *args, **kwargs: state)
+    monkeypatch.setattr(exp, "load_consolidated_stats", lambda _: {})
+    monkeypatch.setattr(
+        exp,
+        "dataset_audit",
+        lambda _: SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
+    )
+    monkeypatch.setattr(exp, "train", lambda *args, **kwargs: trains.append((args, kwargs)))
+
+    exp.main(exp.Args(resume=run_name, resume_replace_wandb_id="old-id"))
+
+    _, kwargs = trains[0]
+    assert kwargs["resume_state"] is not state
+    assert kwargs["resume_state"]["wandb_id"] is None
+
+
+def test_gradient_clip_norm_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="gradient_clip_norm"):
+        exp.train(
+            _tiny_scaled(),
+            {},
+            SimpleNamespace(unique_replays=1, episode_hash="episode", unique_loss_positions=1),
+            requested_run_name="invalid-runtime-control",
+            gradient_clip_norm=0.0,
+        )
+
+
 def test_026_observation_trunk_codec_and_optimizer_partition_are_frozen() -> None:
     cfg = exp.baseline_026_config()
     shared = {field.name: getattr(cfg, field.name) for field in fields(exp026.TrainConfig) if hasattr(cfg, field.name)}
