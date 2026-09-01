@@ -467,6 +467,26 @@ def test_repair_evaluations_reuploads_completed_progress_before_return(tmp_path,
     assert events == ["progress", "close"]
 
 
+def test_explicit_eager_checkpoint_eval_disables_only_the_official_compile_guard(tmp_path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    cfg = _tiny_scaled(inference_mode="compiled")
+    state = {"step": 7}
+    calls = []
+
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _: (object(), cfg, {}, state))
+
+    def fake_eval(*args, **kwargs):
+        calls.append(kwargs)
+        return {"scheduled_boots": 2.0, "completed_boots": 2.0, "boots": 2.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", fake_eval)
+
+    exp.eval_checkpoint(str(checkpoint), delay=1, n_matchups=2, eager=True)
+
+    assert calls[0]["require_compiled_cuda"] is False
+
+
 def test_remote_run_exists_checks_any_prefixed_object(monkeypatch) -> None:
     calls = []
 
