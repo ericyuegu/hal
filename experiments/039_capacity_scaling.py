@@ -2618,14 +2618,26 @@ def _validate_runtime_controls(
     saved: Mapping[str, object] | None,
     requested: Mapping[str, object],
     *,
-    allow_adam_learning_rate_change: bool,
+    allow_branch_overrides: bool,
 ) -> None:
-    """Require exact controls, except an explicit branch Adam LR change."""
+    """Require exact controls, except explicit optimizer branch overrides."""
     if saved is None:
         return
-    normalized = {"adam_learning_rate_scale": 1.0, **saved}
-    if allow_adam_learning_rate_change:
-        normalized["adam_learning_rate_scale"] = requested["adam_learning_rate_scale"]
+    normalized = {
+        "muon_learning_rate_scale": 1.0,
+        "adam_learning_rate_scale": 1.0,
+        "gradient_clip_norm": None,
+        "skip_update_above_grad_norm": None,
+        **saved,
+    }
+    if allow_branch_overrides:
+        for name in (
+            "muon_learning_rate_scale",
+            "adam_learning_rate_scale",
+            "gradient_clip_norm",
+            "skip_update_above_grad_norm",
+        ):
+            normalized[name] = requested[name]
     if normalized != requested:
         raise ValueError(
             "runtime controls changed across checkpoint continuation: "
@@ -2873,7 +2885,7 @@ def train(
         _validate_runtime_controls(
             state.get("runtime_controls"),
             runtime_controls,
-            allow_adam_learning_rate_change=branch_state is not None,
+            allow_branch_overrides=branch_state is not None,
         )
         source_cfg = config_from_state(state["cfg"])
         if branch_state is not None:

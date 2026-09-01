@@ -241,7 +241,7 @@ def test_checkpoint_records_runtime_controls() -> None:
     assert state["runtime_controls"] == controls
 
 
-def test_runtime_controls_allow_only_branch_learning_rate_change() -> None:
+def test_runtime_controls_allow_optimizer_branch_overrides() -> None:
     saved = {
         "device_batch_size": 512,
         "muon_learning_rate_scale": 1.0,
@@ -249,22 +249,22 @@ def test_runtime_controls_allow_only_branch_learning_rate_change() -> None:
         "gradient_clip_norm": None,
         "skip_update_above_grad_norm": None,
     }
-    requested = {**saved, "adam_learning_rate_scale": 0.125}
+    requested = {
+        **saved,
+        "muon_learning_rate_scale": 0.5,
+        "adam_learning_rate_scale": 0.125,
+        "gradient_clip_norm": 0.5,
+        "skip_update_above_grad_norm": 2.0,
+    }
 
-    exp._validate_runtime_controls(saved, requested, allow_adam_learning_rate_change=True)
+    exp._validate_runtime_controls(saved, requested, allow_branch_overrides=True)
     with pytest.raises(ValueError, match="runtime controls changed"):
-        exp._validate_runtime_controls(saved, requested, allow_adam_learning_rate_change=False)
+        exp._validate_runtime_controls(saved, requested, allow_branch_overrides=False)
     with pytest.raises(ValueError, match="runtime controls changed"):
         exp._validate_runtime_controls(
             saved,
             {**requested, "device_batch_size": 256},
-            allow_adam_learning_rate_change=True,
-        )
-    with pytest.raises(ValueError, match="runtime controls changed"):
-        exp._validate_runtime_controls(
-            saved,
-            {**requested, "muon_learning_rate_scale": 0.5},
-            allow_adam_learning_rate_change=True,
+            allow_branch_overrides=True,
         )
 
 
