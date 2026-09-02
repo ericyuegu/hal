@@ -383,6 +383,7 @@ def validate_config(cfg: TrainConfig) -> None:
         "max_steps": cfg.max_steps,
         "layer_rms_batch_size": cfg.layer_rms_batch_size,
         "download_retry": cfg.download_retry,
+        "predownload": cfg.predownload,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -3991,6 +3992,8 @@ class TrainArgs:
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
     resume_as: str | None = None
+    resume_num_workers: int | None = None
+    resume_predownload: int | None = None
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
@@ -4077,6 +4080,8 @@ def main(args: Command) -> None:
     cfg = args.cfg
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
+    if args.resume is None and (args.resume_num_workers is not None or args.resume_predownload is not None):
+        raise SystemExit("--resume-num-workers and --resume-predownload require --resume")
     if args.resume is not None:
         checkpoint = Path(args.resume_checkpoint)
         if (
@@ -4096,6 +4101,11 @@ def main(args: Command) -> None:
             raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
         resume_run = args.resume_as or args.resume
         cfg = config_from_state(resume_state["cfg"])
+        cfg = replace(
+            cfg,
+            num_workers=cfg.num_workers if args.resume_num_workers is None else args.resume_num_workers,
+            predownload=cfg.predownload if args.resume_predownload is None else args.resume_predownload,
+        )
         if args.resume_as is not None:
             if Path(args.resume_as).name != args.resume_as or args.resume_as in ("", ".", ".."):
                 raise SystemExit("--resume-as must be one run-name component")
