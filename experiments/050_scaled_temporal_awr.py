@@ -3960,6 +3960,8 @@ def _log_companion_eval_metrics(wandb_id: str, update: int, values: dict[str, fl
         raise RuntimeError("W&B companion run has no entity")
 
     training_run = wandb.Api().run(f"{entity}/hal/{wandb_id}")
+    training_run.config["eval96_run_url"] = companion_url
+    training_run.config["eval96_companion_id"] = companion_id
     training_run.summary["eval96/run_url"] = companion_url
     training_run.summary["eval96/latest_step"] = update
     for name in ("boots", "crashed", "net_stock_per_min", "net_dmg_per_min"):

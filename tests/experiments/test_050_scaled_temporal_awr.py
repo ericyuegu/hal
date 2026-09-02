@@ -153,6 +153,7 @@ def test_companion_eval_logging_keeps_the_checkpoint_step(monkeypatch: pytest.Mo
     init_kwargs = {}
     logs = []
     summary = {}
+    config = {}
 
     class CompanionRun:
         url = "https://wandb.invalid/eval96"
@@ -161,6 +162,7 @@ def test_companion_eval_logging_keeps_the_checkpoint_step(monkeypatch: pytest.Mo
     class TrainingRun:
         def __init__(self) -> None:
             self.summary = summary
+            self.config = config
 
         def update(self) -> None:
             summary["updated"] = True
@@ -202,4 +204,8 @@ def test_companion_eval_logging_keeps_the_checkpoint_step(monkeypatch: pytest.Mo
         "eval96/latest_crashed": 0.0,
         "eval96/latest_net_stock_per_min": 0.5,
         "updated": True,
+    }
+    assert config == {
+        "eval96_run_url": "https://wandb.invalid/eval96",
+        "eval96_companion_id": "train-id-eval96",
     }
