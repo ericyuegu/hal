@@ -575,7 +575,7 @@ def test_resumable_streaming_loader_restores_exact_mosaic_sequence(tmp_path: Pat
     def make(root: Path) -> ResumableStreamingDataLoader:
         mds = StreamingDataset(
             local=str(root / "train"),
-            batch_size=1,
+            batch_size=2,
             shuffle=True,
             shuffle_seed=91,
             shuffle_block_size=16,
