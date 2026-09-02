@@ -2569,7 +2569,7 @@ def model_tag(cfg: TrainConfig) -> str:
     return (
         f"scaled050-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-d2r2-"
-        f"linear-head-no-skip-projectiles-mix-r1-{cfg.lr_schedule_kind}-{treatment}"
+        f"nonlinear-head-trunk-skip-projectiles-mix-r1-{cfg.lr_schedule_kind}-{treatment}"
     )
 
 

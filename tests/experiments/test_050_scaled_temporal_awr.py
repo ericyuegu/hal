@@ -114,3 +114,9 @@ def test_identity_masker_is_window_wide_and_resumable() -> None:
 def test_parameter_contract_records_action_embedding_width_32() -> None:
     assert exp.ARCHITECTURE.action_embed_dim == 32
     assert exp.EXPECTED_PARAMETER_COUNTS["total"] == 216_496_794
+
+
+def test_model_tag_names_the_actual_head_architecture() -> None:
+    tag = exp.model_tag(exp.TrainConfig())
+    assert "nonlinear-head-trunk-skip" in tag
+    assert "linear-head-no-skip" not in tag
