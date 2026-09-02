@@ -60,7 +60,7 @@ def test_frozen_geometry_schedule_and_accounting() -> None:
     assert cfg.arch.head_offsets == (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     assert cfg.batch_size == 512
     assert cfg.shuffle_block_size == 8192
-    assert cfg.predownload == 2048
+    assert cfg.predownload == 8192
     assert cfg.max_steps == 2**17
     assert (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) == (4, 2, 2)
     schedule = exp.lr_schedule(cfg)
