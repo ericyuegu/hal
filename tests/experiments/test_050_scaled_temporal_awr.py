@@ -1,6 +1,7 @@
 """Frozen contracts for the O50 production program."""
 
 import importlib.util
+import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -62,6 +63,7 @@ def test_frozen_geometry_schedule_and_accounting() -> None:
     assert cfg.shuffle_block_size == 8192
     assert cfg.predownload == 8192
     assert cfg.max_steps == 2**17
+    assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (8192, 96, 96)
     assert (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) == (4, 2, 2)
     schedule = exp.lr_schedule(cfg)
     assert schedule(0) == pytest.approx(1 / 4096)
@@ -123,3 +125,81 @@ def test_model_tag_names_the_actual_head_architecture() -> None:
     tag = exp.model_tag(exp.TrainConfig())
     assert "nonlinear-head-trunk-skip" in tag
     assert "linear-head-no-skip" not in tag
+
+
+def test_eval_request_uses_full_rtx_pro_protocol_and_uploads(tmp_path: Path) -> None:
+    uploads = []
+
+    class Uploader:
+        def upload(self, path: Path, *, key: str) -> None:
+            uploads.append((path, key))
+
+    path = exp._write_eval_request(
+        tmp_path,
+        8192,
+        "a" * 64,
+        96,
+        final=False,
+        uploader=Uploader(),
+    )
+    payload = json.loads(path.read_text())
+    assert payload["n_matchups"] == 96
+    assert payload["gpu"] == "RTX-PRO-6000"
+    assert (payload["prediction_frames"], payload["delay_frames"], payload["replan_interval_frames"]) == (4, 2, 2)
+    assert uploads == [(path, f"eval_requests/{path.name}")]
+
+
+def test_companion_eval_logging_keeps_the_checkpoint_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    init_kwargs = {}
+    logs = []
+    summary = {}
+
+    class CompanionRun:
+        url = "https://wandb.invalid/eval96"
+        entity = "entity"
+
+    class TrainingRun:
+        def __init__(self) -> None:
+            self.summary = summary
+
+        def update(self) -> None:
+            summary["updated"] = True
+
+    class Api:
+        def run(self, path: str) -> TrainingRun:
+            assert path == "entity/hal/train-id"
+            return TrainingRun()
+
+    def init(**kwargs):
+        init_kwargs.update(kwargs)
+        return CompanionRun()
+
+    monkeypatch.setattr(exp.wandb, "init", init)
+    monkeypatch.setattr(exp.wandb, "define_metric", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(exp.wandb, "log", logs.append)
+    monkeypatch.setattr(exp.wandb, "finish", lambda: None)
+    monkeypatch.setattr(exp.wandb, "Api", Api)
+
+    exp._log_companion_eval_metrics(
+        "train-id",
+        16_384,
+        {"boots": 96.0, "crashed": 0.0, "net_stock_per_min": 0.5},
+    )
+
+    assert init_kwargs["id"] == "train-id-eval96"
+    assert logs == [
+        {
+            "global_step": 16_384,
+            "eval/boots": 96.0,
+            "eval/crashed": 0.0,
+            "eval/net_stock_per_min": 0.5,
+        }
+    ]
+    assert summary == {
+        "eval96/run_url": "https://wandb.invalid/eval96",
+        "eval96/latest_step": 16_384,
+        "eval96/latest_boots": 96.0,
+        "eval96/latest_crashed": 0.0,
+        "eval96/latest_net_stock_per_min": 0.5,
+        "updated": True,
+    }

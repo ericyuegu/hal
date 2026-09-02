@@ -3514,8 +3514,9 @@ def _write_eval_request(
     n_matchups: int,
     *,
     final: bool,
+    uploader: BackgroundUploader | None = None,
 ) -> Path:
-    """Atomically queue one SHA-deduplicated request for the L40S evaluator."""
+    """Atomically queue one SHA-deduplicated RTX Pro 6000 request."""
     directory = run_dir / "eval_requests"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"step-{update:07d}-{checkpoint_sha256[:16]}.json"
@@ -3525,7 +3526,7 @@ def _write_eval_request(
         "checkpoint_sha256": checkpoint_sha256,
         "n_matchups": n_matchups,
         "final": final,
-        "gpu": "L40S",
+        "gpu": "RTX-PRO-6000",
         "cpus": 32,
         "memory_gib": 64,
         "disk_gib": 128,
@@ -3538,6 +3539,8 @@ def _write_eval_request(
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True))
     temporary.replace(path)
+    if uploader is not None:
+        uploader.upload(path, key=f"eval_requests/{path.name}")
     return path
 
 
@@ -3582,7 +3585,7 @@ def _finalize_training(
     validation = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
     final_metrics = {f"val/{name}": value for name, value in validation.items()}
     final_matchups = smoke_eval_matchups if smoke else cfg.final_eval_n_matchups
-    _write_eval_request(run_dir, update, checkpoint_sha, final_matchups, final=True)
+    _write_eval_request(run_dir, update, checkpoint_sha, final_matchups, final=True, uploader=uploader)
     wandb.log({"global_step": update, **final_metrics})
 
     mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
@@ -3824,6 +3827,7 @@ def train(
                     _checkpoint_sha256(checkpoint_path),
                     4 if update == 9 else cfg.eval_n_matchups,
                     final=False,
+                    uploader=uploader,
                 )
             if boundary_metrics:
                 wandb.log({"global_step": update, **boundary_metrics})
@@ -3927,6 +3931,43 @@ def _backfill_eval_metrics(wandb_id: str, update: int, values: dict[str, float])
         wandb.finish()
 
 
+def _log_companion_eval_metrics(wandb_id: str, update: int, values: dict[str, float]) -> None:
+    """Log live evals without concurrently resuming the training process."""
+    companion_id = f"{wandb_id}-eval96"
+    run = wandb.init(
+        project="hal",
+        id=companion_id,
+        resume="allow",
+        name=f"{wandb_id} eval96",
+        group=wandb_id,
+        job_type="evaluation",
+        config={"training_wandb_id": wandb_id, "eval_matchups": _PRODUCTION_EVAL_MATCHUPS},
+        allow_val_change=True,
+    )
+    if run is None:
+        raise RuntimeError("W&B companion run initialization returned no run")
+    try:
+        wandb.define_metric("global_step")
+        wandb.define_metric("eval/*", step_metric="global_step")
+        metrics = {f"eval/{name}": value for name, value in _eval_wandb_metrics(values).items()}
+        wandb.log({"global_step": update, **metrics})
+        companion_url = run.url
+        entity = run.entity
+    finally:
+        wandb.finish()
+
+    if not entity:
+        raise RuntimeError("W&B companion run has no entity")
+
+    training_run = wandb.Api().run(f"{entity}/hal/{wandb_id}")
+    training_run.summary["eval96/run_url"] = companion_url
+    training_run.summary["eval96/latest_step"] = update
+    for name in ("boots", "crashed", "net_stock_per_min", "net_dmg_per_min"):
+        if name in values:
+            training_run.summary[f"eval96/latest_{name}"] = values[name]
+    training_run.update()
+
+
 def eval_checkpoint(
     path: str,
     *,
@@ -3936,7 +3977,10 @@ def eval_checkpoint(
     output_name: str | None = None,
     upload_run: str | None = None,
     backfill_wandb: bool = False,
+    companion_wandb: bool = False,
 ) -> dict[str, float]:
+    if backfill_wandb and companion_wandb:
+        raise ValueError("choose either direct W&B backfill or companion W&B logging")
     model, cfg, stats, state = load_checkpoint(path)
     cfg = replace(
         cfg,
@@ -3969,6 +4013,11 @@ def eval_checkpoint(
         if not isinstance(wandb_id, str):
             raise RuntimeError("checkpoint has no W&B run id to backfill")
         _backfill_eval_metrics(wandb_id, update, values)
+    if companion_wandb:
+        wandb_id = state.get("wandb_id")
+        if not isinstance(wandb_id, str):
+            raise RuntimeError("checkpoint has no W&B run id for companion logging")
+        _log_companion_eval_metrics(wandb_id, update, values)
     print(f"[eval] step={update} horizon={horizon}: {values}", flush=True)
     return values
 
@@ -4012,6 +4061,7 @@ class EvalArgs:
     max_parallel: int | None = None
     output_name: str | None = None
     backfill_wandb: bool = False
+    companion_wandb: bool = False
 
 
 @dataclass
@@ -4077,6 +4127,7 @@ def main(args: Command) -> None:
             output_name=args.output_name,
             upload_run=args.run,
             backfill_wandb=args.backfill_wandb,
+            companion_wandb=args.companion_wandb,
         )
         return
     resume_run = resume_state = None
