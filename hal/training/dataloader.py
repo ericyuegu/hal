@@ -168,6 +168,7 @@ def _make_streaming_dataset(
     cache_limit: str | int | None,
     shuffle_block_size: int | None,
     predownload: int | None,
+    batch_size: int,
     source_weights: Sequence[float] | None = None,
     download_retry: int = 2,
 ) -> tuple[StreamingDataset, tuple[str, ...]]:
@@ -215,7 +216,7 @@ def _make_streaming_dataset(
                 streams=selected_streams,
                 cache_limit=cache_limit,
                 predownload=predownload,
-                batch_size=1,
+                batch_size=batch_size,
                 shuffle=should_shuffle,
                 shuffle_block_size=shuffle_block_size,
             )
@@ -224,7 +225,7 @@ def _make_streaming_dataset(
                 streams=selected_streams,
                 cache_limit=cache_limit,
                 predownload=predownload,
-                batch_size=1,
+                batch_size=batch_size,
                 shuffle=should_shuffle,
                 shuffle_seed=shuffle_seed,
                 shuffle_block_size=shuffle_block_size,
@@ -246,7 +247,7 @@ def _make_streaming_dataset(
                 cache_limit=dataset_cache_limit,
                 predownload=dataset_predownload,
                 download_retry=download_retry,
-                batch_size=1,
+                batch_size=batch_size,
                 shuffle=should_shuffle,
                 shuffle_block_size=shuffle_block_size,
             )
@@ -257,7 +258,7 @@ def _make_streaming_dataset(
                 cache_limit=dataset_cache_limit,
                 predownload=dataset_predownload,
                 download_retry=download_retry,
-                batch_size=1,
+                batch_size=batch_size,
                 shuffle=should_shuffle,
                 shuffle_seed=shuffle_seed,
                 shuffle_block_size=shuffle_block_size,
@@ -587,11 +588,9 @@ def make_loader(
     the chunk-start floor to ``L_ctx`` and rejects rows shorter than
     ``L_ctx + L_chunk``; both defaults preserve the historical behavior."""
     # ``predownload`` is how many samples each worker fetches ahead — the shard-prefetch
-    # depth that pipelines remote (R2) downloads. StreamingDataset ties its default to
-    # batch_size (``8 * batch_size``) and we pass batch_size=1, so it was only 8: the fast
-    # GPU stalled on every shard miss. Set it explicitly for the *remote* path. For a
-    # local-only dataset there's no download latency to hide — and over-prefetching a
-    # partial local cache would try to fetch shards that aren't there — so keep streaming's
+    # depth that pipelines remote (R2) downloads. Set it explicitly for the remote path.
+    # For a local-only dataset there's no download latency to hide, and over-prefetching a
+    # partial local cache would try to fetch shards that aren't there, so keep Streaming's
     # conservative default there.
     if predownload is None:
         predownload = 8 * batch_size if remote or sources is not None else None
@@ -613,6 +612,7 @@ def make_loader(
         cache_limit=cache_limit,
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
+        batch_size=batch_size,
         download_retry=download_retry,
     )
     rows = PolicyReplayDataset(mds, resolved_format, replay_labels=replay_labels) if resolved_format != "full" else mds

@@ -64,6 +64,7 @@ def test_multistream_dataset_uses_every_source_and_exposes_counts(tmp_path: Path
         cache_limit=None,
         shuffle_block_size=16,
         predownload=None,
+        batch_size=2,
     )
 
     assert names == ("first", "second")
@@ -95,6 +96,7 @@ def test_multistream_dataset_applies_explicit_source_weights(tmp_path: Path) -> 
         cache_limit=None,
         shuffle_block_size=16,
         predownload=None,
+        batch_size=2,
     )
 
     assert [stream.proportion for stream in dataset.streams] == pytest.approx([1 / 3, 2 / 3])
@@ -111,6 +113,7 @@ def test_source_weights_must_match_multistream_sources(tmp_path: Path) -> None:
         "cache_limit": None,
         "shuffle_block_size": None,
         "predownload": None,
+        "batch_size": 1,
     }
 
     with pytest.raises(ValueError, match="length"):
@@ -131,6 +134,7 @@ def test_streaming_dataset_mode_selection_is_strict(tmp_path: Path) -> None:
         "cache_limit": None,
         "shuffle_block_size": None,
         "predownload": None,
+        "batch_size": 1,
     }
     with pytest.raises(ValueError, match="cannot be combined"):
         _make_streaming_dataset(str(tmp_path), sources=[source], **kwargs)
@@ -669,6 +673,7 @@ def test_make_loader_forwards_out_of_order_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    streaming: dict[str, object] = {}
 
     class CapturingLoader:
         def __init__(self, *_args: object, **kwargs: object) -> None:
@@ -676,7 +681,12 @@ def test_make_loader_forwards_out_of_order_delivery(
 
     monkeypatch.setattr(dataloader, "DataLoader", CapturingLoader)
     monkeypatch.setattr(dataloader, "ResumableStreamingDataLoader", CapturingLoader)
-    monkeypatch.setattr(dataloader, "_make_streaming_dataset", lambda *_args, **_kwargs: (_fake_mds(), ()))
+
+    def capture_streaming(*_args: object, **kwargs: object) -> tuple[object, tuple[str, ...]]:
+        streaming.update(kwargs)
+        return _fake_mds(), ()
+
+    monkeypatch.setattr(dataloader, "_make_streaming_dataset", capture_streaming)
 
     dataloader.make_loader(
         "unused",
@@ -692,6 +702,7 @@ def test_make_loader_forwards_out_of_order_delivery(
     )
 
     assert captured["in_order"] is False
+    assert streaming["batch_size"] == 2
 
 
 def test_window_length_and_ctx_pad() -> None:

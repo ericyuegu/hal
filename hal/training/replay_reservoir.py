@@ -560,6 +560,7 @@ def make_reservoir_loader(
         cache_limit=cache_limit,
         shuffle_block_size=shuffle_block_size,
         predownload=predownload if remote or sources is not None else None,
+        batch_size=1,
     )
     packs = PolicyReplayPackDataset(
         dataset,
