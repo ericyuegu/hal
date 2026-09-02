@@ -605,6 +605,45 @@ def test_resumable_streaming_loader_restores_exact_mosaic_sequence(tmp_path: Pat
         torch.testing.assert_close(got, want)
 
 
+def test_resumable_streaming_loader_can_correct_mosaic_batch_size(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _write_scalar_mds(first_root, "train", range(40))
+    _write_scalar_mds(second_root, "train", range(40))
+
+    def make(root: Path, mosaic_batch_size: int) -> ResumableStreamingDataLoader:
+        mds = StreamingDataset(
+            local=str(root / "train"),
+            batch_size=mosaic_batch_size,
+            shuffle=True,
+            shuffle_seed=91,
+            shuffle_block_size=16,
+        )
+        rows = _ValueRows(mds)
+        return ResumableStreamingDataLoader(
+            rows,
+            streaming_dataset=mds,
+            window_dataset=rows,  # type: ignore[arg-type]
+            batch_size=2,
+            num_workers=0,
+        )
+
+    mismatched = make(first_root, mosaic_batch_size=1)
+    iterator = iter(mismatched)
+    for _ in range(3):
+        next(iterator)
+    state = mismatched.state_dict()
+    expected = [next(iterator) for _ in range(4)]
+
+    corrected = make(second_root, mosaic_batch_size=2)
+    corrected.load_state_dict(state)
+    actual_iterator = iter(corrected)
+    actual = [next(actual_iterator) for _ in range(4)]
+
+    for got, want in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, want)
+
+
 def test_failed_streaming_download_does_not_poison_shared_shard_state(monkeypatch) -> None:
     remote = streaming_compat.streaming_dataset._ShardState.REMOTE
     preparing = streaming_compat.streaming_dataset._ShardState.PREPARING

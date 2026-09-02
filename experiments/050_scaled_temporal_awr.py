@@ -342,7 +342,7 @@ class TrainConfig:
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
     cache_limit_gb: int = 1792
     shuffle_block_size: int = 8192
-    predownload: int = 8192
+    predownload: int = 2048
     download_retry: int = 8
     loader_timeout_s: float = 300.0
     val_split: str = "val"
