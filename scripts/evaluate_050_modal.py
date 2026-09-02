@@ -122,6 +122,7 @@ def _available_checkpoints(client: Any) -> list[tuple[int, str]]:
     memory=2048,
     timeout=300,
     max_containers=1,
+    serialized=True,
     include_source=False,
 )
 def poll() -> list[int]:
