@@ -32,6 +32,7 @@ _CHECKPOINT_EVERY: Final[int] = 8192
 _FINAL_UPDATE: Final[int] = 131_072
 _N_MATCHUPS: Final[int] = 96
 _MAX_PARALLEL: Final[int] = 32
+_DISK_GIB: Final[int] = 512
 _STALE_REQUEST_SECONDS: Final[int] = 8 * 60 * 60
 _EXPERIMENT: Final[str] = "experiments/050_scaled_temporal_awr.py"
 _CHECKPOINT_PREFIX: Final[str] = f"runs/{_RUN_NAME}/checkpoints/"
@@ -152,7 +153,7 @@ def poll() -> list[int]:
     gpu="RTX-PRO-6000",
     cpu=32.0,
     memory=64 * 1024,
-    ephemeral_disk=128 * 1024,
+    ephemeral_disk=_DISK_GIB * 1024,
     timeout=2 * 60 * 60,
     retries=modal.Retries(max_retries=2, initial_delay=1.0, backoff_coefficient=2.0),
     max_containers=1,
