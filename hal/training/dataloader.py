@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ VAL_L_CHUNK = 16
 # the source windows and the normal TrainBatch. It can return an experiment batch.
 type ReplayRow = dict[str, np.ndarray | int | str]
 type ReplayTransform = Callable[[ReplayRow], ReplayRow]
+type ReplayLabels = Callable[[Mapping[str, object]], dict[str, np.ndarray]]
 type Window = dict[str, np.ndarray | np.integer]
 type BatchTransform = Callable[[list[Window], TrainBatch], object]
 type ReplayFormat = Literal["full", "policy", "policy-world"]
@@ -64,15 +66,32 @@ def _loader_generator(seed: int) -> torch.Generator:
 
 
 class PolicyReplayDataset(IterableDataset):
-    def __init__(self, dataset: StreamingDataset, replay_format: ReplayFormat = "policy") -> None:
+    def __init__(
+        self,
+        dataset: StreamingDataset,
+        replay_format: ReplayFormat = "policy",
+        replay_labels: ReplayLabels | None = None,
+    ) -> None:
         if replay_format not in ("policy", "policy-world"):
             raise ValueError(f"compact replay format must be 'policy' or 'policy-world', got {replay_format!r}")
         self._dataset = dataset
         self._decode = decode_policy_replay if replay_format == "policy" else decode_policy_world_replay
+        self._replay_labels = replay_labels
 
     def __iter__(self) -> Iterator[ReplayRow]:
         for sample in self._dataset:
+            labels = {} if self._replay_labels is None else self._replay_labels(sample)
             decoded = cast(ReplayRow, self._decode(sample))
+            frame_count = len(cast(np.ndarray, decoded["frame"]))
+            for name, value in labels.items():
+                array = np.asarray(value)
+                if array.ndim < 1 or len(array) != frame_count:
+                    raise ValueError(
+                        f"replay label {name!r} has length {len(array) if array.ndim else 0}, expected {frame_count}"
+                    )
+                if name in decoded:
+                    raise ValueError(f"replay label {name!r} collides with a decoded column")
+                decoded[name] = array
             decoded[_STREAMING_REPLAY_ID] = str(sample["replay_id"])
             yield decoded
 
@@ -285,7 +304,15 @@ def _make_window(
     return out
 
 
-def _choose_chunk_starts(T: int, L_ctx: int, L_chunk: int, K: int, rng: np.random.Generator) -> np.ndarray:
+def _choose_chunk_starts(
+    T: int,
+    L_ctx: int,
+    L_chunk: int,
+    K: int,
+    rng: np.random.Generator,
+    *,
+    require_full_context: bool = False,
+) -> np.ndarray:
     """Up to ``K`` chunk-start positions in ``[1, T - L_chunk]`` whose windows
     ``[cs - L_ctx, cs + L_chunk)`` are pairwise non-overlapping.
 
@@ -297,7 +324,7 @@ def _choose_chunk_starts(T: int, L_ctx: int, L_chunk: int, K: int, rng: np.rando
     short replays yield fewer than ``K``. ``K=1`` reduces to a single window drawn
     uniformly over the full range (the historical behavior)."""
     L = L_ctx + L_chunk
-    cs_lo, cs_hi = 1, T - L_chunk
+    cs_lo, cs_hi = (L_ctx if require_full_context else 1), T - L_chunk
     span = cs_hi - cs_lo + 1
     if span < 1:
         return np.empty(0, dtype=np.int64)
@@ -342,6 +369,7 @@ class WindowDataset(IterableDataset):
         projection: FeatureProjection | None = None,
         replay_transform: ReplayTransform | None = None,
         require_one_window_per_replay: bool = False,
+        require_full_context: bool = False,
     ) -> None:
         self._mds = mds
         self.L_ctx = L_ctx
@@ -353,6 +381,7 @@ class WindowDataset(IterableDataset):
         self._projection = projection
         self._replay_transform = replay_transform
         self._require_one_window_per_replay = require_one_window_per_replay
+        self._require_full_context = require_full_context
         self._epoch = 0
 
     def resume_epoch(self, epoch: int) -> None:
@@ -386,7 +415,18 @@ class WindowDataset(IterableDataset):
             # cold-start floor: inference always has the just-observed frame), the
             # L_chunk-long chunk inside the episode, and their windows disjoint.
             rng = _stable_window_rng(self._seed, epoch, replay_id) if replay_id is not None else worker_rng
-            chunk_starts = _choose_chunk_starts(T, self.L_ctx, self.L_chunk, self._K, rng)
+            chunk_starts = _choose_chunk_starts(
+                T,
+                self.L_ctx,
+                self.L_chunk,
+                self._K,
+                rng,
+                require_full_context=self._require_full_context,
+            )
+            if self._require_full_context and not len(chunk_starts):
+                raise ValueError(
+                    f"full-context window requires at least {self._L} frames, got {T} for replay {replay_id!r}"
+                )
             if self._require_one_window_per_replay and len(chunk_starts) != 1:
                 raise ValueError(
                     f"resumable loader requires exactly one window per replay, got {len(chunk_starts)} "
@@ -503,6 +543,8 @@ def make_loader(
     replay_format: ReplayFormat | None = None,
     replay_transform: ReplayTransform | None = None,
     batch_transform: BatchTransform | None = None,
+    replay_labels: ReplayLabels | None = None,
+    require_full_context: bool = False,
 ) -> DataLoader:
     """Build the (StreamingDataset → WindowDataset → DataLoader) chain. The
     DataLoader yields ``TrainBatch`` by default (preprocessing runs in the
@@ -538,7 +580,12 @@ def make_loader(
     loader counts custom ``TrainBatch`` objects and restores the window epoch as
     well as StreamingDataset's raw sample position. ``in_order=False`` prevents
     one slow worker or shard from blocking ready batches produced by other
-    workers. Set it to True only when strict FIFO batch delivery is required."""
+    workers. Set it to True only when strict FIFO batch delivery is required.
+
+    ``replay_labels`` reads the compact MDS row before decode and attaches its
+    per-frame arrays to the decoded replay. ``require_full_context=True`` moves
+    the chunk-start floor to ``L_ctx`` and rejects rows shorter than
+    ``L_ctx + L_chunk``; both defaults preserve the historical behavior."""
     # ``predownload`` is how many samples each worker fetches ahead — the shard-prefetch
     # depth that pipelines remote (R2) downloads. StreamingDataset ties its default to
     # batch_size (``8 * batch_size``) and we pass batch_size=1, so it was only 8: the fast
@@ -549,6 +596,8 @@ def make_loader(
     if predownload is None:
         predownload = 8 * batch_size if remote or sources is not None else None
     resolved_format = _resolve_replay_format(replay_format, compact)
+    if replay_labels is not None and resolved_format == "full":
+        raise ValueError("replay_labels requires a compact replay format")
     if resumable and resolved_format == "full":
         raise ValueError("resumable window loading requires a compact replay format with replay identities")
     if resumable and windows_per_replay != 1:
@@ -566,7 +615,7 @@ def make_loader(
         predownload=predownload,
         download_retry=download_retry,
     )
-    rows = PolicyReplayDataset(mds, resolved_format) if resolved_format != "full" else mds
+    rows = PolicyReplayDataset(mds, resolved_format, replay_labels=replay_labels) if resolved_format != "full" else mds
     sampler = WindowDataset(
         rows,
         L_ctx,
@@ -577,6 +626,7 @@ def make_loader(
         projection=projection,
         replay_transform=replay_transform,
         require_one_window_per_replay=resumable,
+        require_full_context=require_full_context,
     )
     collate = functools.partial(
         _collate_with_batch_transform,

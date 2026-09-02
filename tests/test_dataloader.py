@@ -393,6 +393,50 @@ def test_windows_vary_across_epochs() -> None:
     assert epoch0 != epoch1
 
 
+def test_full_context_windows_never_pad_and_reject_short_replays() -> None:
+    rng = np.random.default_rng(7)
+    starts = _choose_chunk_starts(60, L_CTX, L_CHUNK, 4, rng, require_full_context=True)
+    assert starts.min() >= L_CTX
+    assert starts.max() <= 60 - L_CHUNK
+
+    sampler = WindowDataset(
+        _fake_mds(n_samples=1, length=_L - 1),
+        L_CTX,
+        L_CHUNK,
+        seed=0,
+        require_full_context=True,
+    )
+    with pytest.raises(ValueError, match="requires at least"):
+        list(sampler)
+
+
+def test_compact_replay_labels_run_before_decode_and_validate_length(monkeypatch) -> None:
+    compact = {"replay_id": "r1", "num_frames": 3, "marker": "compact"}
+    seen = []
+
+    def decode(row):
+        assert row is compact
+        return {"frame": np.arange(3), "schema_version": SCHEMA_VERSION}
+
+    def labels(row):
+        seen.append(row["marker"])
+        return {"p1_player_id": np.full(3, 7, dtype=np.int32)}
+
+    monkeypatch.setattr(dataloader, "decode_policy_world_replay", decode)
+    rows = dataloader.PolicyReplayDataset([compact], "policy-world", replay_labels=labels)  # type: ignore[arg-type]
+    decoded = next(iter(rows))
+    assert seen == ["compact"]
+    assert decoded["p1_player_id"].tolist() == [7, 7, 7]
+
+    bad = dataloader.PolicyReplayDataset(
+        [compact],  # type: ignore[arg-type]
+        "policy-world",
+        replay_labels=lambda _: {"p1_player_id": np.zeros(2)},
+    )
+    with pytest.raises(ValueError, match="expected 3"):
+        next(iter(bad))
+
+
 def test_replay_identity_makes_mid_epoch_window_resume_exact() -> None:
     rows = _fake_mds(n_samples=8)
     for index, row in enumerate(rows):
