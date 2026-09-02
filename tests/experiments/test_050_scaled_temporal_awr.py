@@ -105,6 +105,7 @@ def test_identity_masker_is_window_wide_and_resumable() -> None:
     )
     first = exp.IdentityMasker(17, 0.5)
     state = first.state_dict()
+    assert state["generator"].device.type == "cpu"
     expected = first(batch).context.features["ego_player_id"]
     resumed = exp.IdentityMasker(999, 0.5)
     resumed.load_state_dict(state)

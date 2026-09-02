@@ -1339,7 +1339,10 @@ class IdentityMasker:
         }
 
     def load_state_dict(self, state: dict[str, object]) -> None:
-        self.generator.set_state(cast(Tensor, state["generator"]))
+        generator_state = state["generator"]
+        if not isinstance(generator_state, Tensor):
+            raise TypeError("identity-mask generator state must be a tensor")
+        self.generator.set_state(generator_state.detach().cpu())
         self.forced = int(state["forced"])
         self.masked = int(state["masked"])
         self.total = int(state["total"])
