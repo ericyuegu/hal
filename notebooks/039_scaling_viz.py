@@ -16,6 +16,8 @@
 # | `09_isoflop_fit.png` | parametric fit and compute-optimal capacity |
 # | `10_wallclock_frontier.png` | capability and NLL against measured training wall time |
 # | `11_match_distributions.png` | per-match outcome distributions and per-character breakdown |
+# | `12_closed_loop_controlled.png` | fixed-d1 and minimum-feasible-delay curves against C and D |
+# | `13_closed_loop_iso_data.png` | capacity at fixed D under the same two delay rules |
 #
 # Closed-loop metric: the rate against the CPU per minute of active play, read three ways from
 # the same matches, each with a 90% CI from a bootstrap over boot clusters.
@@ -58,6 +60,7 @@ FIGURES.mkdir(exist_ok=True)
 FRAME_MS = 1000.0 / 60.0
 FRAMES_PER_MINUTE = 3600.0
 BOOTSTRAP_RESAMPLES = 2000
+DIVERGENCE_NLL_MARGIN = 0.01
 
 raw = pd.read_csv(RESULTS / "experiment_039_raw_outcomes.csv", low_memory=False)
 
@@ -100,13 +103,16 @@ SCALED = [m for m in MODELS if m != "026base"]
 DELAYS = sorted(raw[raw.record_type == "evaluation"].delay_frames.dropna().unique())
 D_EXPS = [26, 27, 28, 29, 30]
 
-# Cooldown checkpoints carry the comparable NLL. A cooldown whose NLL is worse than the same
-# model's least-trained checkpoint diverged. A diverged run measures a failed optimization, not
-# the capacity or data level it was trained at, so it leaves every scaling curve — closed-loop
-# as much as NLL — and the fit. Failed cooldown checkpoints plot as rings; failed prefixes are
-# reported in the compute-figure footers because they have no comparable terminal NLL.
+# Cooldown checkpoints carry the comparable NLL. NLL should fall monotonically with additional
+# training within a model family. We classify a cooldown as diverged when it regresses by more
+# than 0.01 NLL from that model's best earlier checkpoint. A diverged run measures a failed
+# optimization, not the capacity or data level it was trained at, so it leaves every scaling
+# curve — closed-loop as much as NLL — and the fit. Failed cooldown checkpoints plot as rings;
+# failed prefixes are reported in the compute-figure footers because they have no comparable
+# terminal NLL.
 ckpt = runs[(runs.phase == "cooldown") & runs.validation_nll.notna() & ~runs.analysis_excluded].copy()
 ckpt = ckpt.drop_duplicates(subset=["model", "processed_positions"], keep="first")
+ckpt = ckpt.sort_values(["model", "processed_positions"])
 successful_targets = {(row.model, row.target_processed_positions) for row in ckpt[ckpt.endpoint_exact].itertuples()}
 failed_runs = runs[runs.analysis_excluded].copy()
 failed_runs = failed_runs[
@@ -119,8 +125,9 @@ failed_runs = failed_runs[
 failed_runs = failed_runs.sort_values("processed_positions").drop_duplicates(
     subset=["model", "target_processed_positions"], keep="last"
 )
-floor = ckpt.loc[ckpt.groupby("model").processed_positions.idxmin()].set_index("model").validation_nll
-ckpt["diverged"] = ckpt.validation_nll > ckpt.model.map(floor)
+best_so_far = ckpt.groupby("model").validation_nll.cummin()
+best_prior = best_so_far.groupby(ckpt.model).shift(1)
+ckpt["diverged"] = (ckpt.validation_nll - best_prior > DIVERGENCE_NLL_MARGIN).fillna(False)
 DIVERGED = {(row.model, row.processed_positions) for row in ckpt[ckpt.diverged].itertuples()} | {
     (row.model, row.processed_positions) for row in failed_runs.itertuples()
 }
@@ -170,7 +177,7 @@ def compute_figure_note() -> str:
     if failed_endpoint_note():
         notes.append("unfinished exact endpoints — " + failed_endpoint_note())
     if optimizer_exception_note():
-        notes.append("optimizer exception — " + optimizer_exception_note())
+        notes.append("excluded optimizer-failed endpoint — " + optimizer_exception_note())
     return " | ".join(notes)
 
 
@@ -285,6 +292,12 @@ evals["diverged"] = [(m, p) in DIVERGED for m, p in zip(evals.model, evals.proce
 for column in ("validation_nll", "training_flops", "wall_hours"):
     lookup = ckpt.set_index(["model", "processed_positions"])[column]
     evals[column] = [lookup.get((m, p), np.nan) for m, p in zip(evals.model, evals.processed_positions)]
+
+fixed_d1 = evals[(evals.delay_frames == 1) & ~evals.diverged].copy()
+minimum_feasible_delay = latency[latency.local_latency_valid_bucket.astype(bool)].groupby("model").delay_frames.min()
+minimum_feasible = evals[~evals.diverged].copy()
+minimum_feasible["selected_delay"] = minimum_feasible.model.map(minimum_feasible_delay)
+minimum_feasible = minimum_feasible[minimum_feasible.delay_frames == minimum_feasible.selected_delay].copy()
 
 
 def best_by(frame: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
@@ -1030,10 +1043,18 @@ fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.6))
 
 ax = axes[0]
 for model in MODELS:
-    sub = ckpt[(ckpt.model == model) & ~ckpt.diverged].sort_values("training_flops")
+    sub = ckpt[ckpt.model == model].sort_values("training_flops")
     if sub.empty:
         continue
-    ax.plot(sub.training_flops, sub.validation_nll, label=model_label(model), **model_style(model))
+    plot_scaling_line(
+        ax,
+        sub,
+        "training_flops",
+        "validation_nll",
+        MODEL_COLOR[model],
+        label=model_label(model),
+        style=line_style(model),
+    )
 for c in FLOP_LEVELS:
     ax.axvline(c, color=MUTED, lw=0.8, ls=":", zorder=0)
 ax.set_xscale("log")
@@ -1062,17 +1083,17 @@ ax.legend(fontsize=8.5)
 
 ax = axes[2]
 for model in MODELS:
-    sub = evals[(evals.model == model) & evals.training_flops.notna()]
+    sub = fixed_d1[(fixed_d1.model == model) & fixed_d1.training_flops.notna()]
     if sub.empty:
         continue
-    sub = best_by(sub, ["processed_positions"]).sort_values("training_flops")
+    sub = sub.sort_values("training_flops")
     plot_scaling_line(
         ax, sub, "training_flops", "pooled_rate", MODEL_COLOR[model], label=model_label(model), style=line_style(model)
     )
 ax.set_xscale("log")
 ax.set_xlabel("training FLOPs")
 ax.set_ylabel(METRIC_POOLED)
-ax.set_title("Closed-loop compute frontier (best over delay)")
+ax.set_title("Closed-loop compute frontier (fixed d1)")
 direct_label_lines(ax, right=0.22)
 
 fig.suptitle("Compute scaling — cooldown checkpoints, FLOPs from the run's own 6*D*(N_trunk + 36*N_decoder)")
@@ -1292,21 +1313,25 @@ direct_label_lines(ax, right=0.28)
 
 ax = axes[1]
 for model in MODELS:
-    sub = evals[(evals.model == model) & evals.wall_hours.notna()]
+    sub = fixed_d1[(fixed_d1.model == model) & fixed_d1.wall_hours.notna()]
     if sub.empty:
         continue
-    sub = best_by(sub, ["processed_positions"]).sort_values("wall_hours")
+    sub = sub.sort_values("wall_hours")
     whiskers(ax, sub, "wall_hours", MODEL_COLOR[model])
-    plot_scaling_line(
-        ax, sub, "wall_hours", "pooled_rate", MODEL_COLOR[model], label=model_label(model), style=line_style(model)
+    ax.plot(
+        sub.wall_hours,
+        sub.pooled_rate,
+        color=MODEL_COLOR[model],
+        label=model_label(model),
+        **line_style(model),
     )
 ax.set_xscale("log")
 ax.set_xlabel("cumulative training wall time (hours)")
 ax.set_ylabel(METRIC_POOLED)
-ax.set_title("Closed-loop against training time (best over delay)")
+ax.set_title("Closed-loop against training time (fixed d1)")
 direct_label_lines(ax, right=0.28)
 
-fig.suptitle("Time frontier — mixed cloud hardware, indicative rather than a controlled comparison")
+fig.suptitle("Time frontier — fixed-d1 capability; mixed cloud hardware remains uncontrolled")
 fig.tight_layout()
 fig.savefig(FIGURES / "10_wallclock_frontier.png")
 
@@ -1424,6 +1449,145 @@ ax.legend(fontsize=8.5, loc="upper left")
 fig.suptitle("Match-level structure behind the medians")
 fig.tight_layout()
 fig.savefig(FIGURES / "11_match_distributions.png")
+
+# %% [markdown]
+# ## 12 — controlled-delay closed-loop scaling
+#
+# The top row fixes d1 for every model. The bottom row gives each benchmarked model the smallest
+# delay that met the RTX 3060 p95 latency gate. Both views exclude diverged checkpoints and avoid
+# selecting whichever delay happened to score best.
+
+
+# %%
+def plot_controlled_scaling(
+    ax: plt.Axes,
+    frame: pd.DataFrame,
+    x: str,
+    *,
+    label_delay: bool,
+) -> None:
+    """Plot healthy closed-loop curves under one explicit delay-selection rule."""
+    for model in MODELS:
+        sub = frame[frame.model == model].sort_values(x)
+        if sub.empty:
+            continue
+        label = model_label(model)
+        if label_delay:
+            label += f" @ d{int(sub.delay_frames.iloc[0])}"
+        whiskers(ax, sub, x, MODEL_COLOR[model])
+        ax.plot(
+            sub[x],
+            sub.pooled_rate,
+            color=MODEL_COLOR[model],
+            label=label,
+            **line_style(model),
+        )
+    ax.set_ylabel(METRIC_POOLED)
+
+
+fig, axes = plt.subplots(2, 2, figsize=(14.5, 10.0))
+
+plot_controlled_scaling(axes[0, 0], fixed_d1, "training_flops", label_delay=False)
+axes[0, 0].set_xscale("log")
+axes[0, 0].set_xlabel("training FLOPs")
+axes[0, 0].set_title("Fixed d1 — capability against compute")
+direct_label_lines(axes[0, 0], right=0.28, fontsize=7.5)
+
+plot_controlled_scaling(axes[0, 1], fixed_d1, "processed_positions", label_delay=False)
+log2_data_axis(axes[0, 1], fixed_d1.processed_positions, "processed positions D")
+axes[0, 1].set_title("Fixed d1 — capability against D")
+direct_label_lines(axes[0, 1], right=0.28, fontsize=7.5)
+
+plot_controlled_scaling(axes[1, 0], minimum_feasible, "training_flops", label_delay=True)
+axes[1, 0].set_xscale("log")
+axes[1, 0].set_xlabel("training FLOPs")
+axes[1, 0].set_title("Minimum RTX 3060-feasible delay — against compute")
+direct_label_lines(axes[1, 0], right=0.28, fontsize=7.5)
+
+plot_controlled_scaling(axes[1, 1], minimum_feasible, "processed_positions", label_delay=True)
+log2_data_axis(axes[1, 1], minimum_feasible.processed_positions, "processed positions D")
+axes[1, 1].set_title("Minimum RTX 3060-feasible delay — against D")
+direct_label_lines(axes[1, 1], right=0.28, fontsize=7.5)
+
+fig.suptitle("Closed-loop scaling under explicit delay rules (diverged checkpoints excluded)")
+fig.tight_layout(rect=(0, 0.035, 1, 1))
+fig.text(
+    0.008,
+    0.008,
+    "Bottom row omits L3/L4: they have d1 evaluations but no RTX 3060 latency benchmark.",
+    fontsize=8,
+    color=MUTED,
+)
+fig.savefig(FIGURES / "12_closed_loop_controlled.png")
+
+# %% [markdown]
+# ## 13 — controlled-delay capacity at fixed D
+#
+# Parameter count is only interpretable when data is held fixed. These panels therefore use the
+# shared power-of-two D checkpoints rather than mixing every checkpoint on one parameter axis.
+
+
+# %%
+def plot_controlled_iso_data(ax: plt.Axes, frame: pd.DataFrame, title: str) -> None:
+    """Plot closed-loop capacity curves at shared D checkpoints."""
+    visible_models = set()
+    for exponent in D_EXPS[:-1]:
+        target = 2.0**exponent
+        sub = frame[np.isclose(frame.processed_positions, target) & frame.model.isin(SCALED)].sort_values("parameters")
+        if sub.empty:
+            continue
+        visible_models.update(sub.model)
+        ax.vlines(
+            sub.parameters,
+            sub.pooled_ci_lo,
+            sub.pooled_ci_hi,
+            color=DEXP_COLOR[exponent],
+            lw=1.1,
+            alpha=0.45,
+        )
+        ax.plot(
+            sub.parameters,
+            sub.pooled_rate,
+            color=DEXP_COLOR[exponent],
+            marker="o",
+            ms=5,
+            label=f"D = $2^{{{exponent}}}$",
+        )
+
+        reference = frame[np.isclose(frame.processed_positions, target) & (frame.model == "026base")]
+        if not reference.empty:
+            visible_models.add("026base")
+            ax.scatter(
+                reference.parameters,
+                reference.pooled_rate,
+                s=38,
+                marker="D",
+                facecolor=SURFACE,
+                edgecolor=DEXP_COLOR[exponent],
+                lw=1.4,
+                zorder=4,
+            )
+    ax.set_xscale("log")
+    param_axis_ticks(ax, list(visible_models))
+    ax.set_xlabel("total parameters")
+    ax.set_ylabel(METRIC_POOLED)
+    ax.set_title(title)
+    ax.legend(fontsize=8.5)
+
+
+fig, axes = plt.subplots(1, 2, figsize=(14.5, 5.8))
+plot_controlled_iso_data(axes[0], fixed_d1, "Fixed d1")
+plot_controlled_iso_data(axes[1], minimum_feasible, "Minimum RTX 3060-feasible delay")
+fig.suptitle("Closed-loop capacity at fixed D (diverged checkpoints excluded)")
+fig.tight_layout(rect=(0, 0.035, 1, 1))
+fig.text(
+    0.008,
+    0.008,
+    "L3/L4 exact-iso-FLOP endpoints are off the shared D grid; the right panel also requires a 3060 benchmark.",
+    fontsize=8,
+    color=MUTED,
+)
+fig.savefig(FIGURES / "13_closed_loop_iso_data.png")
 
 # %% [markdown]
 # ## Frontier summary
