@@ -33,13 +33,13 @@ _FINAL_UPDATE: Final[int] = 131_072
 _N_MATCHUPS: Final[int] = 96
 _MAX_PARALLEL: Final[int] = 32
 _DISK_GIB: Final[int] = 512
+_SERVICE_GENERATION: Final[int] = 2
 _STALE_REQUEST_SECONDS: Final[int] = 8 * 60 * 60
 _EXPERIMENT: Final[str] = "experiments/050_scaled_temporal_awr.py"
 _CHECKPOINT_PREFIX: Final[str] = f"runs/{_RUN_NAME}/checkpoints/"
 _CHECKPOINT_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_CHECKPOINT_PREFIX) + r"step-(\d{7})\.pt")
 
 _secret = modal.Secret.from_name("hal", required_keys=list(launch_modal.REQUIRED_SECRET_KEYS))
-_cache_volume = modal.Volume.from_name("hal-o50-rtx-pro-6000-eval-cache", create_if_missing=True)
 _image = launch_modal._image(launch_modal.IMAGE, ("uv", "run", _EXPERIMENT), _secret).env(
     {"PYTHONPATH": f"{launch_modal.REMOTE_ROOT}/scripts:{launch_modal.REMOTE_ROOT}"}
 )
@@ -89,7 +89,14 @@ def _read_json(client: Any, key: str) -> dict[str, Any] | None:
 
 
 def _write_request(client: Any, update: int, status: str, **extra: Any) -> None:
-    payload = {"schema": 1, "update": update, "status": status, "time": time.time(), **extra}
+    payload = {
+        "schema": 1,
+        "service_generation": _SERVICE_GENERATION,
+        "update": update,
+        "status": status,
+        "time": time.time(),
+        **extra,
+    }
     client.put_object(
         Bucket=os.environ["AWS_BUCKET"],
         Key=_request_key(update),
@@ -136,7 +143,7 @@ def poll() -> list[int]:
         if _result_complete(client, update):
             continue
         request = _read_json(client, _request_key(update))
-        if request is not None:
+        if request is not None and request.get("service_generation") == _SERVICE_GENERATION:
             status = request.get("status")
             age = now - float(request.get("time", 0.0))
             if status in {"complete", "failed"}:
@@ -152,7 +159,6 @@ def poll() -> list[int]:
 
 @app.function(
     secrets=[_secret],
-    volumes={str(launch_modal.LOCAL_CACHE_ROOT): _cache_volume},
     gpu="RTX-PRO-6000",
     cpu=32.0,
     memory=64 * 1024,
@@ -194,7 +200,6 @@ def evaluate(update: int, checkpoint_key: str) -> None:
         subprocess.run(command, cwd=launch_modal.REMOTE_ROOT, env=env, check=True)
         if not _result_complete(client, update):
             raise RuntimeError(f"evaluation did not publish a complete result for update {update}")
-        _cache_volume.commit()
     except Exception as error:
         _write_request(client, update, "failed", checkpoint_key=checkpoint_key, error=repr(error)[:2000])
         raise
