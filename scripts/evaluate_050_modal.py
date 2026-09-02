@@ -40,7 +40,9 @@ _CHECKPOINT_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_CHECKPOINT_P
 
 _secret = modal.Secret.from_name("hal", required_keys=list(launch_modal.REQUIRED_SECRET_KEYS))
 _cache_volume = modal.Volume.from_name("hal-o50-rtx-pro-6000-eval-cache", create_if_missing=True)
-_image = launch_modal._image(launch_modal.IMAGE, ("uv", "run", _EXPERIMENT), _secret)
+_image = launch_modal._image(launch_modal.IMAGE, ("uv", "run", _EXPERIMENT), _secret).env(
+    {"PYTHONPATH": f"{launch_modal.REMOTE_ROOT}/scripts:{launch_modal.REMOTE_ROOT}"}
+)
 app = modal.App(_APP_NAME, image=_image)
 
 
