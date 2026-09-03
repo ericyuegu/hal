@@ -111,6 +111,47 @@ class ReplayPack:
 
 
 @dataclass(frozen=True, slots=True)
+class _CollatedReplayPackBatch:
+    """Worker-stacked replay windows transferred through shared tensors."""
+
+    replay_ids: tuple[str, ...]
+    pack_sizes: tuple[int, ...]
+    columns: dict[str, torch.Tensor]
+
+    def unpack(self) -> tuple[ReplayPack, ...]:
+        packs: list[ReplayPack] = []
+        offset = 0
+        for replay_id, size in zip(self.replay_ids, self.pack_sizes, strict=True):
+            windows = tuple(
+                {name: values[index].numpy() for name, values in self.columns.items()}
+                for index in range(offset, offset + size)
+            )
+            packs.append(ReplayPack(replay_id, windows))
+            offset += size
+        if offset != next(iter(self.columns.values())).shape[0]:
+            raise RuntimeError("collated replay-pack row count changed during transfer")
+        return tuple(packs)
+
+
+def _collate_replay_packs(packs: list[ReplayPack]) -> _CollatedReplayPackBatch:
+    """Stack worker results so Torch shares storage instead of pickling each array."""
+    if not packs:
+        raise ValueError("cannot collate an empty replay-pack batch")
+    windows = [window for pack in packs for window in pack.windows]
+    keys = tuple(windows[0])
+    if not keys:
+        raise ValueError("cannot collate replay windows without columns")
+    if any(set(window) != set(keys) for window in windows[1:]):
+        raise ValueError("replay windows have inconsistent columns")
+    columns = {name: torch.from_numpy(np.stack([np.asarray(window[name]) for window in windows])) for name in keys}
+    return _CollatedReplayPackBatch(
+        replay_ids=tuple(pack.replay_id for pack in packs),
+        pack_sizes=tuple(len(pack.windows) for pack in packs),
+        columns=columns,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ReservoirBatch:
     replay_ids: tuple[str, ...]
     windows: tuple[dict[str, np.ndarray], ...]
@@ -133,6 +174,8 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
             value = next(self._source)
             if isinstance(value, ReplayPack):
                 batch = (value,)
+            elif isinstance(value, _CollatedReplayPackBatch):
+                batch = value.unpack()
             elif isinstance(value, list | tuple) and all(isinstance(pack, ReplayPack) for pack in value):
                 batch = tuple(value)
             else:
@@ -594,10 +637,6 @@ class ReservoirLoader:
             }
 
 
-def _identity(value: Any) -> Any:
-    return value
-
-
 def _limit_worker_threads(_worker_id: int) -> None:
     """Keep one loader worker from creating a nested Torch/BLAS thread pool."""
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -707,7 +746,7 @@ def make_reservoir_loader(
         packs,
         batch_size=replay_pack_batch_size,
         num_workers=num_workers,
-        collate_fn=_identity,
+        collate_fn=_collate_replay_packs,
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=False,

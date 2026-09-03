@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
@@ -194,7 +193,7 @@ def corpus_selection() -> CorpusSelection:
         for source in source_names:
             excluded = EXCLUDED_SOURCE_ROWS.get(source, ())
             unique_source_replays = raw_counts[source] - len(excluded)
-            selected_replays = math.ceil(scale * unique_source_replays / 8)
+            selected_replays = (scale * unique_source_replays + 7) // 8
             stop = _prefix_stop(selected_replays, excluded)
             selected_exclusions = tuple(row for row in excluded if row < stop)
             source_slice = SourceSlice(source, stop, selected_exclusions)

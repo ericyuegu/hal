@@ -24,6 +24,8 @@ import math
 import sys
 from collections import defaultdict
 from collections.abc import Callable
+from collections.abc import Iterable
+from collections.abc import Mapping
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -1418,7 +1420,6 @@ def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
         "model_level": model_level(cfg.arch),
         "architecture": {name: getattr(cfg.arch, name) for name in _MODEL_GEOMETRY_FIELDS},
         "batch_size": cfg.batch_size,
-        "soak_tier_scale": 8,
         "compile_mode": cfg.compile_mode,
         "temporal_attention_chunk": cfg.temporal_attention_chunk,
         "shuffle_algo": cfg.shuffle_algo,
@@ -1439,17 +1440,9 @@ def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
 @dataclass(frozen=True, slots=True)
 class PreflightReport:
     fingerprint: str
-    soak_tier_scale: int
     synthetic_mfu: float
     compute_only_updates_per_s: float
-    end_to_end_updates_per_s: float
     loader_only_windows_per_s: float
-    gpu_windows_per_s: float
-    loader_wait_mean_fraction: float
-    loader_wait_p95_fraction: float
-    end_to_end_mfu: float
-    soak_seconds: float
-    judged_seconds: float
     raw_bytes_per_window: float
     o50_raw_bytes_per_window: float
     peak_memory_fraction: float
@@ -1459,29 +1452,56 @@ class PreflightReport:
     exact_resume: bool
     memory_passed: bool
     shuffle_passed: bool
-    telemetry: dict[str, float] = dataclass_field(default_factory=dict)
+    telemetry: dict[str, float]
+
+
+@dataclass(frozen=True, slots=True)
+class SoakReport(PreflightReport):
+    """Preflight measurements plus the final U8 endurance evidence."""
+
+    tier_scale: int
+    end_to_end_updates_per_s: float
+    gpu_windows_per_s: float
+    loader_wait_mean_fraction: float
+    loader_wait_p95_fraction: float
+    end_to_end_mfu: float
+    soak_seconds: float
+    judged_seconds: float
+
+
+def _numeric_report_values(
+    report: object,
+    names: tuple[str, ...],
+    unit_fractions: tuple[str, ...],
+    *,
+    label: str,
+) -> tuple[dict[str, float], tuple[str, ...]]:
+    numeric: dict[str, float] = {}
+    invalid: list[str] = []
+    for name in names:
+        value = getattr(report, name)
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            invalid.append(name)
+            continue
+        numeric[name] = float(value)
+        if not math.isfinite(numeric[name]) or numeric[name] < 0:
+            invalid.append(name)
+    invalid.extend(name for name in unit_fractions if numeric.get(name, 0) > 1)
+    if invalid:
+        return numeric, (f"{label} measurements are invalid {sorted(set(invalid))}",)
+    return numeric, ()
 
 
 def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, ...]:
+    """Check the short compute and loader evidence required before long runs."""
     selection = data_selection(cfg)
     failures: list[str] = []
     if report.fingerprint != preflight_fingerprint(cfg, selection):
         failures.append("preflight fingerprint does not match the selected shape and data")
-    if not isinstance(report.soak_tier_scale, int) or isinstance(report.soak_tier_scale, bool):
-        failures.append("preflight soak tier must be an integer")
-    elif report.soak_tier_scale != 8:
-        failures.append("throughput soak did not use the full U8 tier")
     numeric_names = (
         "synthetic_mfu",
         "compute_only_updates_per_s",
-        "end_to_end_updates_per_s",
         "loader_only_windows_per_s",
-        "gpu_windows_per_s",
-        "loader_wait_mean_fraction",
-        "loader_wait_p95_fraction",
-        "end_to_end_mfu",
-        "soak_seconds",
-        "judged_seconds",
         "raw_bytes_per_window",
         "o50_raw_bytes_per_window",
         "peak_memory_fraction",
@@ -1489,47 +1509,27 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         "optimizer_time_fraction",
         "disk_capacity_bytes",
     )
-    numeric: dict[str, float] = {}
-    invalid_numeric: list[str] = []
-    for name in numeric_names:
-        value = getattr(report, name)
-        if not isinstance(value, int | float) or isinstance(value, bool):
-            invalid_numeric.append(name)
-            continue
-        numeric[name] = float(value)
-        if not math.isfinite(numeric[name]) or numeric[name] < 0:
-            invalid_numeric.append(name)
     unit_fractions = (
         "synthetic_mfu",
-        "loader_wait_mean_fraction",
-        "loader_wait_p95_fraction",
-        "end_to_end_mfu",
         "peak_memory_fraction",
         "graph_gap_fraction",
         "optimizer_time_fraction",
     )
-    invalid_numeric.extend(name for name in unit_fractions if numeric.get(name, 0) > 1)
-    invalid_numeric = sorted(set(invalid_numeric))
-    if invalid_numeric:
-        failures.append(f"preflight measurements are invalid {invalid_numeric}")
+    numeric, numeric_failures = _numeric_report_values(
+        report,
+        numeric_names,
+        unit_fractions,
+        label="preflight",
+    )
+    failures.extend(numeric_failures)
+    if numeric_failures:
         return tuple(failures)
-    if numeric["synthetic_mfu"] < _MIN_SYNTHETIC_MFU:
-        failures.append("synthetic compiled MFU is below the measured 15% floor")
-    if numeric["loader_only_windows_per_s"] < 1.25 * numeric["gpu_windows_per_s"]:
-        failures.append("loader-only throughput is below 125% of GPU consumption")
-    if (
-        numeric["compute_only_updates_per_s"] <= 0
-        or numeric["end_to_end_updates_per_s"] < 0.9 * numeric["compute_only_updates_per_s"]
-    ):
-        failures.append("end-to-end throughput retains less than 90% of compute-only throughput")
-    if numeric["loader_wait_mean_fraction"] >= 0.05:
-        failures.append("mean loader wait is not below 5%")
-    if numeric["loader_wait_p95_fraction"] >= 0.10:
-        failures.append("p95 loader wait is not below 10%")
-    if numeric["soak_seconds"] < 7200 or numeric["judged_seconds"] < 1800:
-        failures.append("full-tier soak does not cover two hours with a final 30-minute judgment window")
-    if cfg.tier_scale == 8 and numeric["end_to_end_mfu"] < _MIN_FULL_TIER_MFU:
-        failures.append("full-tier end-to-end MFU is below the revised 13.5% floor")
+    if model_level(cfg.arch) == "mid" and numeric["synthetic_mfu"] < _MIN_SYNTHETIC_MFU:
+        failures.append("55M synthetic compiled MFU is below the measured 15% floor")
+    if numeric["compute_only_updates_per_s"] <= 0:
+        failures.append("compute-only throughput is zero")
+    if numeric["loader_only_windows_per_s"] <= 0:
+        failures.append("loader-only throughput is zero")
     if (
         numeric["o50_raw_bytes_per_window"] <= 0
         or numeric["raw_bytes_per_window"] > 0.35 * numeric["o50_raw_bytes_per_window"]
@@ -1579,8 +1579,169 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
     return tuple(failures)
 
 
+def soak_failures(cfg: TrainConfig, report: SoakReport) -> tuple[str, ...]:
+    """Check the final two-hour 55M run over the full direct U8 view."""
+    failures = list(preflight_failures(cfg, report))
+    if model_level(cfg.arch) != "mid":
+        failures.append("the authoritative soak must use the 55M model")
+    if not isinstance(report.tier_scale, int) or isinstance(report.tier_scale, bool):
+        failures.append("soak tier must be an integer")
+    elif report.tier_scale != 8 or cfg.tier_scale != 8:
+        failures.append("the authoritative soak must use the full U8 tier")
+    numeric, numeric_failures = _numeric_report_values(
+        report,
+        (
+            "compute_only_updates_per_s",
+            "loader_only_windows_per_s",
+            "end_to_end_updates_per_s",
+            "gpu_windows_per_s",
+            "loader_wait_mean_fraction",
+            "loader_wait_p95_fraction",
+            "end_to_end_mfu",
+            "soak_seconds",
+            "judged_seconds",
+        ),
+        (
+            "loader_wait_mean_fraction",
+            "loader_wait_p95_fraction",
+            "end_to_end_mfu",
+        ),
+        label="soak",
+    )
+    failures.extend(numeric_failures)
+    if numeric_failures:
+        return tuple(failures)
+    if numeric["soak_seconds"] < 7200 or numeric["judged_seconds"] < 1800:
+        failures.append("soak does not cover two hours with a final 30-minute judgment window")
+    if numeric["end_to_end_mfu"] < _MIN_FULL_TIER_MFU:
+        failures.append("full-tier end-to-end MFU is below the revised 13.5% floor")
+    if numeric["loader_only_windows_per_s"] < 1.25 * numeric["gpu_windows_per_s"]:
+        failures.append("loader-only throughput is below 125% of GPU consumption")
+    if numeric["end_to_end_updates_per_s"] < 0.9 * numeric["compute_only_updates_per_s"]:
+        failures.append("end-to-end throughput retains less than 90% of compute-only throughput")
+    if numeric["loader_wait_mean_fraction"] >= 0.05:
+        failures.append("mean loader wait is not below 5%")
+    if numeric["loader_wait_p95_fraction"] >= 0.10:
+        failures.append("p95 loader wait is not below 10%")
+    return tuple(failures)
+
+
 def load_preflight(path: Path) -> PreflightReport:
     return PreflightReport(**json.loads(path.read_text()))
+
+
+def load_soak(path: Path) -> SoakReport:
+    return SoakReport(**json.loads(path.read_text()))
+
+
+def _weighted_percentile(values: list[tuple[float, float]], percentile: float) -> float:
+    if not values or not 0 <= percentile <= 1:
+        raise ValueError("weighted percentile needs samples and a percentile in [0, 1]")
+    threshold = percentile * sum(weight for _, weight in values)
+    cumulative = 0.0
+    for value, weight in sorted(values):
+        cumulative += weight
+        if cumulative >= threshold:
+            return value
+    return max(value for value, _ in values)
+
+
+def collect_soak_report(
+    cfg: TrainConfig,
+    preflight: PreflightReport,
+    history: Iterable[Mapping[str, object]],
+    *,
+    judged_seconds: float = 1800.0,
+) -> SoakReport:
+    """Aggregate the final judgment window from a fresh W&B training history."""
+    if not math.isfinite(judged_seconds) or judged_seconds <= 0:
+        raise ValueError("judged_seconds must be finite and positive")
+    rows: list[dict[str, float]] = []
+    for raw in history:
+        names = (
+            "global_step",
+            "progress/elapsed_s",
+            "throughput/update_s",
+            "loader/wait_s",
+        )
+        if any(name not in raw for name in names):
+            continue
+        mfu = raw.get("throughput/mfu_wall_clock", raw.get("throughput/mfu"))
+        values = {name: raw[name] for name in names} | {"throughput/mfu_wall_clock": mfu}
+        if any(
+            not isinstance(value, int | float)
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+            for value in values.values()
+        ):
+            continue
+        row = {name: float(value) for name, value in values.items()}
+        if row["throughput/update_s"] <= 0:
+            continue
+        for name in REQUIRED_PREFLIGHT_TELEMETRY:
+            value = raw.get(name)
+            if (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(value) >= 0
+            ):
+                row[name] = float(value)
+        rows.append(row)
+    rows.sort(key=lambda row: (row["progress/elapsed_s"], row["global_step"]))
+    if len(rows) < 2:
+        raise ValueError("soak history has fewer than two complete throughput windows")
+    last_elapsed = rows[-1]["progress/elapsed_s"]
+    cutoff = last_elapsed - judged_seconds
+    if cutoff < 0 or rows[0]["progress/elapsed_s"] > cutoff:
+        raise ValueError("soak history does not cover the requested judgment window")
+
+    samples: list[tuple[dict[str, float], float]] = []
+    for previous, row in zip(rows, rows[1:], strict=False):
+        start = previous["progress/elapsed_s"]
+        stop = row["progress/elapsed_s"]
+        updates = row["global_step"] - previous["global_step"]
+        if stop <= cutoff or stop <= start or updates <= 0:
+            continue
+        overlap = (stop - max(start, cutoff)) / (stop - start)
+        samples.append((row, updates * overlap))
+    if not samples:
+        raise ValueError("soak history has no training windows in the judgment period")
+
+    total_updates = sum(weight for _, weight in samples)
+
+    def update_mean(name: str) -> float:
+        return sum(row[name] * weight for row, weight in samples) / total_updates
+
+    update_s = update_mean("throughput/update_s")
+    wait_fractions = [
+        (row["loader/wait_s"] / max(row["throughput/update_s"], 1e-12), weight) for row, weight in samples
+    ]
+    elapsed_weights = [
+        (row["throughput/mfu_wall_clock"], weight * row["throughput/update_s"]) for row, weight in samples
+    ]
+    total_elapsed_weight = sum(weight for _, weight in elapsed_weights)
+    telemetry = {
+        name: float(np.mean([row[name] for row, _ in samples if name in row]))
+        for name in REQUIRED_PREFLIGHT_TELEMETRY
+        if any(name in row for row, _ in samples)
+    }
+    telemetry["throughput/mfu_wall_clock"] = (
+        sum(value * weight for value, weight in elapsed_weights) / total_elapsed_weight
+    )
+    report = SoakReport(
+        **{**asdict(preflight), "telemetry": telemetry},
+        tier_scale=cfg.tier_scale,
+        end_to_end_updates_per_s=1.0 / update_s,
+        gpu_windows_per_s=cfg.batch_size / update_s,
+        loader_wait_mean_fraction=sum(value * weight for value, weight in wait_fractions) / total_updates,
+        loader_wait_p95_fraction=_weighted_percentile(wait_fractions, 0.95),
+        end_to_end_mfu=telemetry["throughput/mfu_wall_clock"],
+        soak_seconds=last_elapsed,
+        judged_seconds=judged_seconds,
+    )
+    return report
 
 
 @dataclass(frozen=True, slots=True)
@@ -2253,6 +2414,17 @@ class PreflightArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
 
 
+@dataclass
+class CollectSoakArgs:
+    run: str
+    """Full W&B run path: entity/project/run_id."""
+
+    preflight_report: Path
+    output: Path
+    cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
+    judged_seconds: float = 1800.0
+
+
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
@@ -2262,6 +2434,7 @@ type Command = (
     | Annotated[DescribeArgs, tyro.conf.subcommand(name="describe")]
     | Annotated[AuditDataArgs, tyro.conf.subcommand(name="audit-data")]
     | Annotated[PreflightArgs, tyro.conf.subcommand(name="preflight")]
+    | Annotated[CollectSoakArgs, tyro.conf.subcommand(name="collect-soak")]
 )
 
 
@@ -2398,6 +2571,55 @@ def main(args: Command) -> None:
         if failures:
             raise SystemExit("preflight failed: " + "; ".join(failures))
         print("preflight passed")
+        return
+    if isinstance(args, CollectSoakArgs):
+        validate_config(args.cfg)
+        if args.run.count("/") != 2:
+            raise SystemExit("--run must be entity/project/run_id")
+        run = _o50.wandb.Api().run(args.run)
+        expected = asdict(args.cfg)
+        bound_fields = (
+            "arch",
+            "awr",
+            "target_positions",
+            "tier_scale",
+            "batch_size",
+            "player_sidecar_sha256",
+            "player_vocab_sha256",
+            "compile_mode",
+            "temporal_attention_chunk",
+            "shuffle_algo",
+            "shuffle_block_size",
+            "num_workers",
+            "cache_limit_gb",
+            "reservoir_capacity",
+            "windows_per_replay",
+            "replay_pack_batch_size",
+            "loader_prefetch_factor",
+            "predownload",
+            "download_retry",
+        )
+        mismatched = [
+            name
+            for name in bound_fields
+            if json.dumps(run.config.get(name), sort_keys=True) != json.dumps(expected[name], sort_keys=True)
+        ]
+        if mismatched:
+            raise SystemExit(f"W&B run does not match the selected soak config: {mismatched}")
+        report = collect_soak_report(
+            args.cfg,
+            load_preflight(args.preflight_report),
+            run.scan_history(page_size=1000),
+            judged_seconds=args.judged_seconds,
+        )
+        temporary = args.output.with_name(f".{args.output.name}.tmp")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(asdict(report), indent=2, sort_keys=True) + "\n")
+        temporary.replace(args.output)
+        failures = soak_failures(args.cfg, report)
+        if failures:
+            raise SystemExit("soak failed: " + "; ".join(failures))
+        print(f"soak passed; report written to {args.output}")
         return
     if isinstance(args, BenchmarkArgs):
         cfg = config_for(

@@ -30,7 +30,10 @@ def _load() -> ModuleType:
 exp = _load()
 
 
-@pytest.mark.parametrize("command", ["train", "audit-data", "preflight", "loader-benchmark"])
+@pytest.mark.parametrize(
+    "command",
+    ["train", "audit-data", "preflight", "loader-benchmark", "collect-soak"],
+)
 def test_nested_config_command_help_is_parseable(command: str) -> None:
     script = Path(exp.__file__).resolve()
     result = subprocess.run(
@@ -478,17 +481,9 @@ def _selection() -> CorpusSelection:
 def _passing_preflight(cfg, selection):
     return exp.PreflightReport(
         fingerprint=exp.preflight_fingerprint(cfg, selection),
-        soak_tier_scale=8,
         synthetic_mfu=0.15,
         compute_only_updates_per_s=10.0,
-        end_to_end_updates_per_s=9.0,
         loader_only_windows_per_s=1250.0,
-        gpu_windows_per_s=1000.0,
-        loader_wait_mean_fraction=0.049,
-        loader_wait_p95_fraction=0.099,
-        end_to_end_mfu=0.135,
-        soak_seconds=7200.0,
-        judged_seconds=1800.0,
         raw_bytes_per_window=35.0,
         o50_raw_bytes_per_window=100.0,
         peak_memory_fraction=0.949,
@@ -503,16 +498,14 @@ def _passing_preflight(cfg, selection):
 
 
 def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
-    cfg = exp.TrainConfig()
+    cfg = exp.config_for("base")
     selection = _selection()
     monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
     report = _passing_preflight(cfg, selection)
 
     assert exp.preflight_failures(cfg, report) == ()
-    assert "synthetic compiled MFU" in " ".join(exp.preflight_failures(cfg, replace(report, synthetic_mfu=0.149)))
-    assert "mean loader wait" in " ".join(exp.preflight_failures(cfg, replace(report, loader_wait_mean_fraction=0.05)))
+    assert exp.preflight_failures(cfg, replace(report, synthetic_mfu=0.0)) == ()
     assert "telemetry" in " ".join(exp.preflight_failures(cfg, replace(report, telemetry={})))
-    assert "full U8" in " ".join(exp.preflight_failures(cfg, replace(report, soak_tier_scale=4)))
     assert "invalid" in " ".join(exp.preflight_failures(cfg, replace(report, synthetic_mfu=math.nan)))
     assert "not boolean" in " ".join(
         exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
@@ -525,14 +518,62 @@ def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
     )
     exp.validate_shuffle_config("py1e", 4096)
 
-    full_cfg = replace(cfg, target_positions=8 * exp.D0, tier_scale=8)
-    assert exp.preflight_fingerprint(cfg, selection) == exp.preflight_fingerprint(full_cfg, selection)
-    full_report = replace(
-        report,
-        fingerprint=exp.preflight_fingerprint(full_cfg, selection),
-        end_to_end_mfu=0.134,
+    mid_cfg = exp.config_for("mid")
+    mid_report = replace(report, fingerprint=exp.preflight_fingerprint(mid_cfg, selection))
+    assert "55M synthetic compiled MFU" in " ".join(
+        exp.preflight_failures(mid_cfg, replace(mid_report, synthetic_mfu=0.149))
     )
-    assert "end-to-end MFU" in " ".join(exp.preflight_failures(full_cfg, full_report))
+
+
+def test_soak_is_a_separate_full_u8_gate(monkeypatch) -> None:
+    cfg = exp.config_for("mid", target_positions=8 * exp.D0, tier_scale=8)
+    selection = _selection()
+    monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
+    report = exp.SoakReport(
+        **exp.asdict(_passing_preflight(cfg, selection)),
+        tier_scale=8,
+        end_to_end_updates_per_s=9.0,
+        gpu_windows_per_s=1000.0,
+        loader_wait_mean_fraction=0.049,
+        loader_wait_p95_fraction=0.099,
+        end_to_end_mfu=0.135,
+        soak_seconds=7200.0,
+        judged_seconds=1800.0,
+    )
+
+    assert exp.soak_failures(cfg, report) == ()
+    assert "two hours" in " ".join(exp.soak_failures(cfg, replace(report, soak_seconds=7199.0)))
+    assert "end-to-end MFU" in " ".join(exp.soak_failures(cfg, replace(report, end_to_end_mfu=0.134)))
+    assert "full U8" in " ".join(exp.soak_failures(cfg, replace(report, tier_scale=4)))
+    assert "mean loader wait" in " ".join(exp.soak_failures(cfg, replace(report, loader_wait_mean_fraction=0.05)))
+
+
+def test_soak_collector_uses_only_the_final_judgment_window(monkeypatch) -> None:
+    cfg = exp.config_for("mid", target_positions=8 * exp.D0, tier_scale=8)
+    selection = _selection()
+    monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
+    preflight = _passing_preflight(cfg, selection)
+    history = []
+    for index, elapsed in enumerate(range(0, 7201, 900)):
+        history.append(
+            {
+                **{name: 1.0 for name in exp.REQUIRED_PREFLIGHT_TELEMETRY},
+                "global_step": index * 100,
+                "progress/elapsed_s": elapsed,
+                "throughput/update_s": 0.1,
+                "throughput/mfu_wall_clock": 0.01 if elapsed < 5400 else 0.14,
+                "loader/wait_s": 0.004,
+            }
+        )
+
+    report = exp.collect_soak_report(cfg, preflight, history)
+
+    assert report.end_to_end_mfu == pytest.approx(0.14)
+    assert report.end_to_end_updates_per_s == pytest.approx(10.0)
+    assert report.gpu_windows_per_s == pytest.approx(10 * cfg.batch_size)
+    assert report.loader_wait_mean_fraction == pytest.approx(0.04)
+    assert report.soak_seconds == 7200
+    assert report.judged_seconds == 1800
 
 
 def test_preflight_fingerprint_binds_direct_prefixes() -> None:

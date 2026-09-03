@@ -367,6 +367,20 @@ def test_replay_pack_batch_iterator_persists_worker_lookahead_and_visits() -> No
     assert next(resumed).replay_id == "b"
 
 
+def test_worker_collation_round_trips_replay_packs_through_shared_tensors() -> None:
+    original = tuple(_packs(3, 2))
+    collated = replay_reservoir._collate_replay_packs(list(original))
+    visits: Counter[str] = Counter()
+    restored = ReplayPackBatchIterator(iter((collated,)), visits)
+
+    for expected in original:
+        actual = next(restored)
+        assert actual.replay_id == expected.replay_id
+        for actual_window, expected_window in zip(actual.windows, expected.windows, strict=True):
+            np.testing.assert_array_equal(actual_window["value"], expected_window["value"])
+    assert visits == {"0": 1, "1": 1, "2": 1}
+
+
 def _o51_style_loader(path: Path, *, workers: int, pack_batch: int):
     return make_reservoir_loader(
         str(path),
