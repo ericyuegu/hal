@@ -146,19 +146,30 @@ class _ReplayDecodeTask:
 
 
 @dataclass(frozen=True, slots=True)
+class _TensorColumnGroup:
+    """Columns with one dtype and shape, coalesced into one shared tensor."""
+
+    names: tuple[str, ...]
+    values: torch.Tensor
+
+
+@dataclass(frozen=True, slots=True)
 class _CollatedReplayPackBatch:
-    """Worker-stacked replay windows transferred as a few contiguous arrays."""
+    """Worker-stacked replay windows transferred in coalesced shared tensors."""
 
     replay_ids: tuple[str, ...]
     pack_sizes: tuple[int, ...]
-    columns: dict[str, torch.Tensor]
+    column_groups: tuple[_TensorColumnGroup, ...]
     sample_ids: tuple[int | None, ...]
     epochs: tuple[int | None, ...]
     task_ordinal: int | None = None
     cursor_after: tuple[int, int] | None = None
 
     def unpack(self) -> tuple[ReplayPack, ...]:
-        columns = {name: values.numpy().copy() for name, values in self.columns.items()}
+        columns: dict[str, np.ndarray] = {}
+        for group in self.column_groups:
+            values = group.values.numpy().copy()
+            columns.update({name: values[index] for index, name in enumerate(group.names)})
         packs: list[ReplayPack] = []
         offset = 0
         for replay_id, size, sample_id, epoch in zip(
@@ -191,11 +202,19 @@ def _collate_replay_packs(
         raise ValueError("cannot collate replay windows without columns")
     if any(set(window) != set(keys) for window in windows[1:]):
         raise ValueError("replay windows have inconsistent columns")
-    columns = {name: torch.from_numpy(np.stack([np.asarray(window[name]) for window in windows])) for name in keys}
+    grouped_names: dict[tuple[str, tuple[int, ...]], list[str]] = {}
+    for name in keys:
+        values = np.asarray(windows[0][name])
+        grouped_names.setdefault((values.dtype.str, values.shape), []).append(name)
+    column_groups = []
+    for (_dtype, shape), names in grouped_names.items():
+        values = np.stack([np.asarray(window[name]) for name in names for window in windows])
+        values = values.reshape(len(names), len(windows), *shape)
+        column_groups.append(_TensorColumnGroup(tuple(names), torch.from_numpy(values)))
     return _CollatedReplayPackBatch(
         replay_ids=tuple(pack.replay_id for pack in packs),
         pack_sizes=tuple(len(pack.windows) for pack in packs),
-        columns=columns,
+        column_groups=tuple(column_groups),
         sample_ids=tuple(pack.sample_id for pack in packs),
         epochs=tuple(pack.epoch for pack in packs),
         task_ordinal=None if task is None else task.ordinal,

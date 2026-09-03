@@ -388,9 +388,17 @@ def test_replay_pack_batch_iterator_persists_worker_lookahead_and_visits() -> No
 
 
 def test_worker_collation_round_trips_stacked_replay_packs() -> None:
-    original = tuple(_packs(3, 2))
+    original = tuple(
+        ReplayPack(
+            pack.replay_id,
+            tuple({**window, "other": window["value"] + 10} for window in pack.windows),
+        )
+        for pack in _packs(3, 2)
+    )
     collated = replay_reservoir._collate_replay_packs(list(original))
-    assert all(isinstance(values, torch.Tensor) for values in collated.columns.values())
+    assert len(collated.column_groups) == 1
+    assert collated.column_groups[0].names == ("value", "other")
+    assert isinstance(collated.column_groups[0].values, torch.Tensor)
     visits: Counter[str] = Counter()
     restored = ReplayPackBatchIterator(iter((collated,)), visits)
 
@@ -398,7 +406,8 @@ def test_worker_collation_round_trips_stacked_replay_packs() -> None:
         actual = next(restored)
         assert actual.replay_id == expected.replay_id
         for actual_window, expected_window in zip(actual.windows, expected.windows, strict=True):
-            np.testing.assert_array_equal(actual_window["value"], expected_window["value"])
+            for name in ("value", "other"):
+                np.testing.assert_array_equal(actual_window[name], expected_window[name])
     assert visits == {"0": 1, "1": 1, "2": 1}
 
 
