@@ -1566,7 +1566,7 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
     if report.exact_resume is not True:
         failures.append("tensor-exact resume did not pass")
     if report.loader_turnover_passed is not True:
-        failures.append("loader benchmark did not begin after one complete reservoir turnover")
+        failures.append("loader benchmark did not begin after both buffered cohorts turned over")
     if report.memory_passed is not True:
         failures.append("host/pinned-memory gate did not pass")
     if report.shuffle_passed is not True:
@@ -2235,8 +2235,8 @@ def benchmark_train_step(
 def benchmark_loader(
     cfg: TrainConfig,
     *,
-    warmup_batches: int = 72,
-    measured_batches: int = 192,
+    warmup_batches: int = 144,
+    measured_batches: int = 256,
 ) -> dict[str, object]:
     """Measure the direct-source loader without running the model."""
     if warmup_batches < 1 or measured_batches < 1:
@@ -2288,8 +2288,8 @@ def benchmark_loader(
         "within_batch_unique": True,
         "cooldown_batches": cfg.replay_cooldown_batches,
         "replay_prefetch_capacity": cfg.reservoir_capacity,
-        "initial_reservoir_turnover_batches": cfg.windows_per_replay * (cfg.replay_cooldown_batches + 1),
-        "loader_turnover_passed": warmup_batches >= cfg.windows_per_replay * (cfg.replay_cooldown_batches + 1),
+        "buffered_turnover_batches": 2 * cfg.windows_per_replay * (cfg.replay_cooldown_batches + 1),
+        "loader_turnover_passed": warmup_batches >= 2 * cfg.windows_per_replay * (cfg.replay_cooldown_batches + 1),
         "cooldown_passed": cooldown_passed,
         "source_sample_counts": loader.source_sample_counts,
     }
@@ -2417,8 +2417,8 @@ class LoaderBenchmarkArgs:
     predownload: int = 1024
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
     shuffle_block_size: Literal[4096, 8192] = 8192
-    warmup_batches: int = 72
-    measured_batches: int = 192
+    warmup_batches: int = 144
+    measured_batches: int = 256
 
 
 @dataclass

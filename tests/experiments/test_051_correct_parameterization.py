@@ -515,7 +515,7 @@ def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
     assert "not boolean" in " ".join(
         exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
     )
-    assert "reservoir turnover" in " ".join(exp.preflight_failures(cfg, replace(report, loader_turnover_passed=False)))
+    assert "buffered cohorts" in " ".join(exp.preflight_failures(cfg, replace(report, loader_turnover_passed=False)))
     assert "256 GiB" in " ".join(
         exp.preflight_failures(
             cfg,
