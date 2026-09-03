@@ -1,0 +1,30 @@
+{
+  "compute_only_updates_per_s": 15.188569615524926,
+  "disk_capacity_bytes": 2199023255552,
+  "exact_resume": true,
+  "fingerprint": "d649b9d90b65b13aedb141bcfa7f2951a74681b78167de74f32cd4f670139827",
+  "graph_gap_fraction": 0.017002842289086235,
+  "loader_only_windows_per_s": 4145.930413433439,
+  "memory_passed": true,
+  "o50_raw_bytes_per_window": 1296261.9296936993,
+  "optimizer_time_fraction": 0.04258847368855013,
+  "peak_memory_fraction": 0.1202995217033252,
+  "raw_bytes_per_window": 324065.48242342484,
+  "shuffle_passed": true,
+  "synthetic_mfu": 0.055222486001566325,
+  "telemetry": {
+    "profile/backward_s": 0.04308821830749511,
+    "profile/diagnostics_s": 0.004420587872442168,
+    "profile/grad_norm_s": 0.0001103850667675336,
+    "profile/optimizer_s": 0.002803981860478719,
+    "profile/target_prep_s": 0.00046891946593920393,
+    "profile/temporal_s": 0.007733069864908854,
+    "profile/trunk_s": 0.00609437222480774,
+    "system/cache/allocated_gib": 182.81241611198143,
+    "system/cgroup/current_gib": 27.883297437503014,
+    "system/network/read_mib_s": 20.600250060208253,
+    "system/pinned_memory_gib": 0.0,
+    "throughput/mfu_steady_state": 0.056177665996676784,
+    "throughput/mfu_wall_clock": 0.055222486001566325
+  }
+}
