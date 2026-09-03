@@ -109,6 +109,7 @@ _BASE_BATCH: Final[int] = 512
 _BASE_ADAM_BETAS: Final[tuple[float, float]] = (0.9, 0.95)
 _BASE_ADAM_EPS: Final[float] = 1e-12
 _SUPERVISED_POSITIONS_PER_WINDOW: Final[int] = 128
+_REPLAY_COOLDOWN_BATCHES: Final[int] = 16
 _MIN_FREE_CACHE_GIB: Final[int] = 256
 _LONG_RUN_POSITIONS: Final[int] = D0
 # A 55M batch-1024 B200 benchmark reached 16.73% compiled MFU. Keep enough
@@ -254,7 +255,8 @@ class TrainConfig(_o50.TrainConfig):
     compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
     temporal_attention_chunk: int | None = 16_384
     windows_per_replay: int = 4
-    reservoir_capacity: int = 4096
+    reservoir_capacity: Annotated[int, tyro.conf.Suppress] = _BASE_BATCH * (_REPLAY_COOLDOWN_BATCHES + 1)
+    replay_cooldown_batches: Annotated[int, tyro.conf.Suppress] = _REPLAY_COOLDOWN_BATCHES
     replay_pack_batch_size: Literal[16, 32, 64] = 64
     loader_prefetch_factor: Literal[1, 2, 4] = 2
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
@@ -280,6 +282,11 @@ class TrainConfig(_o50.TrainConfig):
             raise ValueError("D/32 warmup does not land on an optimizer boundary")
         object.__setattr__(self, "max_steps", updates)
         object.__setattr__(self, "warmup_steps", warmup_updates)
+        object.__setattr__(
+            self,
+            "reservoir_capacity",
+            self.batch_size * (self.replay_cooldown_batches + 1),
+        )
 
 
 def config_for(
@@ -432,8 +439,11 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O51 fixes cosine floor=1/170 and global clipping=1.0")
     if cfg.batch_size not in (128, 256, 512, 1024):
         raise ValueError("batch_size is outside the O51 sweep")
-    if cfg.reservoir_capacity < 2 * cfg.batch_size:
-        raise ValueError("replay reservoir capacity must be at least two optimizer batches")
+    if cfg.replay_cooldown_batches != _REPLAY_COOLDOWN_BATCHES:
+        raise ValueError(f"O51 fixes replay cooldown to {_REPLAY_COOLDOWN_BATCHES} batches")
+    expected_capacity = cfg.batch_size * (cfg.replay_cooldown_batches + 1)
+    if cfg.reservoir_capacity != expected_capacity:
+        raise ValueError(f"O51 replay reservoir must contain exactly {expected_capacity} replay IDs")
     if cfg.windows_per_replay != 4:
         raise ValueError("O51 emits four deterministic windows per physical replay read")
     if cfg.replay_pack_batch_size not in (16, 32, 64):
@@ -1314,6 +1324,8 @@ def _make_train_loader(
         batch_transform=functools.partial(_o50.collate_awr_batch, L_ctx=cfg.arch.L_ctx),
         replay_pack_batch_size=cfg.replay_pack_batch_size,
         worker_independent_resume=True,
+        deterministic_out_of_order=True,
+        cooldown_batches=cfg.replay_cooldown_batches,
         limit_worker_threads=True,
         require_full_context=True,
     )
@@ -1423,6 +1435,8 @@ def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
         "num_workers": cfg.num_workers,
         "cache_limit_gb": cfg.cache_limit_gb,
         "reservoir_capacity": cfg.reservoir_capacity,
+        "replay_cooldown_batches": cfg.replay_cooldown_batches,
+        "worker_completion_order": "deterministic-sample-id-tasks-v1",
         "windows_per_replay": cfg.windows_per_replay,
         "replay_pack_batch_size": cfg.replay_pack_batch_size,
         "loader_prefetch_factor": cfg.loader_prefetch_factor,
@@ -2231,8 +2245,10 @@ def benchmark_loader(
 
     batch_seconds: list[float] = []
     replay_ids: set[str] = set()
+    last_seen_batch: dict[str, int] = {}
+    cooldown_passed = True
     started = _o50.time.monotonic()
-    for _ in range(measured_batches):
+    for batch_index in range(measured_batches):
         batch_started = _o50.time.monotonic()
         batch = next(iterator)
         batch_seconds.append(_o50.time.monotonic() - batch_started)
@@ -2240,6 +2256,11 @@ def benchmark_loader(
             raise TypeError("O51 loader benchmark requires replay-aware AWR batches")
         if len(batch.batch.replay_ids) != cfg.batch_size or len(set(batch.batch.replay_ids)) != cfg.batch_size:
             raise RuntimeError("O51 loader emitted a batch with repeated or missing replay IDs")
+        for replay_id in batch.batch.replay_ids:
+            previous = last_seen_batch.get(replay_id)
+            if previous is not None and batch_index - previous <= cfg.replay_cooldown_batches:
+                cooldown_passed = False
+            last_seen_batch[replay_id] = batch_index
         replay_ids.update(batch.batch.replay_ids)
     elapsed = _o50.time.monotonic() - started
     windows = measured_batches * cfg.batch_size
@@ -2259,6 +2280,8 @@ def benchmark_loader(
         "batch_seconds_p95": float(np.percentile(batch_seconds, 95)),
         "distinct_replays": len(replay_ids),
         "within_batch_unique": True,
+        "cooldown_batches": cfg.replay_cooldown_batches,
+        "cooldown_passed": cooldown_passed,
         "source_sample_counts": loader.source_sample_counts,
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
@@ -2589,6 +2612,7 @@ def main(args: Command) -> None:
             "num_workers",
             "cache_limit_gb",
             "reservoir_capacity",
+            "replay_cooldown_batches",
             "windows_per_replay",
             "replay_pack_batch_size",
             "loader_prefetch_factor",

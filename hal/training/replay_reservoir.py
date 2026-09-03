@@ -16,8 +16,12 @@ from typing import Any
 import numpy as np
 import torch
 from streaming import StreamingDataset
+from streaming.base.batching import generate_work
+from streaming.base.world import World
 from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
 from torch.utils.data import IterableDataset
+from torch.utils.data import Sampler
 
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import decode_policy_replay
@@ -41,6 +45,10 @@ type ReplayLabels = Callable[[Mapping[str, object]], dict[str, np.ndarray]]
 
 def _next_item[T](source: Iterator[T]) -> T:
     return next(source)
+
+
+def _identity[T](value: T) -> T:
+    return value
 
 
 class OneBatchPrefetch[T](Iterator[T]):
@@ -104,10 +112,34 @@ class OneBatchPrefetch[T](Iterator[T]):
 class ReplayPack:
     replay_id: str
     windows: tuple[dict[str, np.ndarray], ...]
+    sample_id: int | None = None
+    epoch: int | None = None
 
     def __post_init__(self) -> None:
         if not self.windows:
             raise ValueError("a replay pack must contain at least one window")
+        if (self.sample_id is None) != (self.epoch is None):
+            raise ValueError("replay-pack sample ID and epoch must be present together")
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayWindowSpec:
+    """Enough information to reconstruct one deterministic decoded window."""
+
+    sample_id: int
+    epoch: int
+    window_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayDecodeTask:
+    """One deterministic worker task over explicit MDS sample IDs."""
+
+    ordinal: int
+    epoch: int
+    sample_offset: int
+    sample_ids: tuple[int, ...]
+    cursor_after: tuple[int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,23 +149,36 @@ class _CollatedReplayPackBatch:
     replay_ids: tuple[str, ...]
     pack_sizes: tuple[int, ...]
     columns: dict[str, np.ndarray]
+    sample_ids: tuple[int | None, ...]
+    epochs: tuple[int | None, ...]
+    task_ordinal: int | None = None
+    cursor_after: tuple[int, int] | None = None
 
     def unpack(self) -> tuple[ReplayPack, ...]:
         packs: list[ReplayPack] = []
         offset = 0
-        for replay_id, size in zip(self.replay_ids, self.pack_sizes, strict=True):
+        for replay_id, size, sample_id, epoch in zip(
+            self.replay_ids,
+            self.pack_sizes,
+            self.sample_ids,
+            self.epochs,
+            strict=True,
+        ):
             windows = tuple(
                 {name: values[index] for name, values in self.columns.items()}
                 for index in range(offset, offset + size)
             )
-            packs.append(ReplayPack(replay_id, windows))
+            packs.append(ReplayPack(replay_id, windows, sample_id=sample_id, epoch=epoch))
             offset += size
         if offset != next(iter(self.columns.values())).shape[0]:
             raise RuntimeError("collated replay-pack row count changed during transfer")
         return tuple(packs)
 
 
-def _collate_replay_packs(packs: list[ReplayPack]) -> _CollatedReplayPackBatch:
+def _collate_replay_packs(
+    packs: list[ReplayPack],
+    task: _ReplayDecodeTask | None = None,
+) -> _CollatedReplayPackBatch:
     """Stack worker results to avoid pickling each small window array."""
     if not packs:
         raise ValueError("cannot collate an empty replay-pack batch")
@@ -148,7 +193,113 @@ def _collate_replay_packs(packs: list[ReplayPack]) -> _CollatedReplayPackBatch:
         replay_ids=tuple(pack.replay_id for pack in packs),
         pack_sizes=tuple(len(pack.windows) for pack in packs),
         columns=columns,
+        sample_ids=tuple(pack.sample_id for pack in packs),
+        epochs=tuple(pack.epoch for pack in packs),
+        task_ordinal=None if task is None else task.ordinal,
+        cursor_after=None if task is None else task.cursor_after,
     )
+
+
+class _ReplayTaskSampler(Sampler[_ReplayDecodeTask]):
+    """Issue deterministic MDS sample-ID groups independently of worker timing."""
+
+    def __init__(self, dataset: StreamingDataset, task_size: int) -> None:
+        self._dataset = dataset
+        self._task_size = task_size
+        self._cursor = (0, 0)
+        self._world = World(1, 1, 1, 0)
+        if self._dataset.num_canonical_nodes is None:
+            self._dataset.num_canonical_nodes = 64 if self._dataset.shuffle_algo in ("py1s", "py2s") else 1
+        self._dataset._set_shuffle_block_size(self._world)  # pyright: ignore[reportPrivateUsage]
+
+    @property
+    def cursor(self) -> tuple[int, int]:
+        return self._cursor
+
+    def resume(self, cursor: tuple[int, int]) -> None:
+        epoch, sample_offset = cursor
+        if epoch < 0 or sample_offset < 0:
+            raise ValueError(f"invalid replay-task cursor {cursor}")
+        self._cursor = (epoch, sample_offset)
+
+    def _sample_ids(self, epoch: int) -> np.ndarray:
+        work = generate_work(
+            self._dataset.batching_method,
+            self._dataset,
+            self._world,
+            epoch,
+            0,
+        )
+        sample_ids = work.reshape(-1)
+        return sample_ids[sample_ids >= 0]
+
+    def __iter__(self) -> Iterator[_ReplayDecodeTask]:
+        epoch, sample_offset = self._cursor
+        ordinal = 0
+        while True:
+            sample_ids = self._sample_ids(epoch)
+            if sample_offset > len(sample_ids):
+                raise ValueError(f"replay-task offset {sample_offset} exceeds epoch {epoch} size {len(sample_ids)}")
+            while sample_offset < len(sample_ids):
+                stop = min(sample_offset + self._task_size, len(sample_ids))
+                at_epoch_end = stop == len(sample_ids)
+                cursor_after = (epoch + 1, 0) if at_epoch_end else (epoch, stop)
+                yield _ReplayDecodeTask(
+                    ordinal=ordinal,
+                    epoch=epoch,
+                    sample_offset=sample_offset,
+                    sample_ids=tuple(int(value) for value in sample_ids[sample_offset:stop]),
+                    cursor_after=cursor_after,
+                )
+                ordinal += 1
+                sample_offset = stop
+            epoch += 1
+            sample_offset = 0
+
+
+class _ReplayDecodeDataset(Dataset[_CollatedReplayPackBatch]):
+    """Decode one explicit replay task inside a DataLoader worker."""
+
+    def __init__(self, packs: PolicyReplayPackDataset) -> None:
+        self._packs = packs
+
+    def __getitem__(self, task: _ReplayDecodeTask) -> _CollatedReplayPackBatch:
+        packs = [self._packs.decode_sample(sample_id, task.epoch) for sample_id in task.sample_ids]
+        if any(pack is None for pack in packs):
+            raise RuntimeError("a deterministic replay task did not produce one pack per sample ID")
+        return _collate_replay_packs(
+            [pack for pack in packs if pack is not None],
+            task,
+        )
+
+
+class _OrderedReplayTasks(Iterator[_CollatedReplayPackBatch]):
+    """Release completed worker tasks in their predetermined order."""
+
+    def __init__(self, source: Iterator[object]) -> None:
+        self._source = source
+        self._next_ordinal = 0
+        self._ready: dict[int, _CollatedReplayPackBatch] = {}
+
+    def __iter__(self) -> _OrderedReplayTasks:
+        return self
+
+    def __next__(self) -> _CollatedReplayPackBatch:
+        while self._next_ordinal not in self._ready:
+            try:
+                value = next(self._source)
+            except StopIteration:
+                if self._ready:
+                    raise RuntimeError("replay worker results ended with a task-order gap") from None
+                raise
+            if not isinstance(value, _CollatedReplayPackBatch) or value.task_ordinal is None:
+                raise TypeError("deterministic replay worker returned an untagged result")
+            if value.task_ordinal < self._next_ordinal or value.task_ordinal in self._ready:
+                raise RuntimeError(f"duplicate replay task ordinal {value.task_ordinal}")
+            self._ready[value.task_ordinal] = value
+        value = self._ready.pop(self._next_ordinal)
+        self._next_ordinal += 1
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,11 +311,12 @@ class ReservoirBatch:
 class ReplayPackBatchIterator(Iterator[ReplayPack]):
     """Flatten worker-side pack batches while retaining checkpointable lookahead."""
 
-    def __init__(self, source: Iterator[object], visits: Counter[str]) -> None:
+    def __init__(self, source: Iterator[object], visits: Counter[str] | None) -> None:
         self._source = source
         self._visits = visits
         self._pending: deque[ReplayPack] = deque()
         self.received_packs = 0
+        self.source_cursor: tuple[int, int] | None = None
 
     def __iter__(self) -> ReplayPackBatchIterator:
         return self
@@ -176,6 +328,8 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
                 batch = (value,)
             elif isinstance(value, _CollatedReplayPackBatch):
                 batch = value.unpack()
+                if value.cursor_after is not None:
+                    self.source_cursor = value.cursor_after
             elif isinstance(value, list | tuple) and all(isinstance(pack, ReplayPack) for pack in value):
                 batch = tuple(value)
             else:
@@ -183,20 +337,63 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
             if not batch:
                 continue
             self.received_packs += len(batch)
-            for pack in batch:
-                self._visits[pack.replay_id] += 1
+            if self._visits is not None:
+                for pack in batch:
+                    self._visits[pack.replay_id] += 1
             self._pending.extend(batch)
         return self._pending.popleft()
 
     def state_dict(self) -> dict[str, object]:
         """Return packs fetched by a worker batch but not yet read by the reservoir."""
-        return {"pending": tuple(self._pending)}
+        state: dict[str, object] = {
+            "received_packs": self.received_packs,
+            "source_cursor": self.source_cursor,
+        }
+        if self.source_cursor is not None and all(pack.sample_id is not None for pack in self._pending):
+            state["pending_specs"] = tuple((pack.replay_id, pack.sample_id, pack.epoch) for pack in self._pending)
+        else:
+            state["pending"] = tuple(self._pending)
+        return state
 
-    def load_state_dict(self, state: Mapping[str, object]) -> None:
-        pending = state.get("pending", ())
-        if not isinstance(pending, tuple) or any(not isinstance(pack, ReplayPack) for pack in pending):
-            raise ValueError("pending replay-pack state is invalid")
+    def load_state_dict(
+        self,
+        state: Mapping[str, object],
+        replay_packs: Mapping[tuple[int, int], ReplayPack] | None = None,
+    ) -> None:
+        pending_specs = state.get("pending_specs")
+        if pending_specs is not None:
+            if replay_packs is None or not isinstance(pending_specs, tuple):
+                raise ValueError("pending replay-pack descriptors cannot be restored")
+            pending: list[ReplayPack] = []
+            for value in pending_specs:
+                if (
+                    not isinstance(value, tuple)
+                    or len(value) != 3
+                    or not isinstance(value[0], str)
+                    or not isinstance(value[1], int)
+                    or not isinstance(value[2], int)
+                ):
+                    raise ValueError("pending replay-pack descriptor is invalid")
+                replay_id, sample_id, epoch = value
+                pack = replay_packs.get((sample_id, epoch))
+                if pack is None or pack.replay_id != replay_id:
+                    raise ValueError(f"could not reconstruct pending replay {replay_id!r}")
+                pending.append(pack)
+        else:
+            stored = state.get("pending", ())
+            if not isinstance(stored, tuple) or any(not isinstance(pack, ReplayPack) for pack in stored):
+                raise ValueError("pending replay-pack state is invalid")
+            pending = list(stored)
+        cursor = state.get("source_cursor")
+        if cursor is not None and (
+            not isinstance(cursor, tuple)
+            or len(cursor) != 2
+            or any(not isinstance(value, int) or value < 0 for value in cursor)
+        ):
+            raise ValueError("replay source cursor is invalid")
         self._pending = deque(pending)
+        self.received_packs = int(state.get("received_packs", 0))
+        self.source_cursor = cursor
 
 
 class ReplayReservoir:
@@ -228,6 +425,8 @@ class ReplayReservoir:
         self._capacity = capacity
         self._rng = np.random.default_rng(seed)
         self._active: dict[str, deque[dict[str, np.ndarray]]] = {}
+        self._active_specs: dict[str, deque[_ReplayWindowSpec]] = {}
+        self._descriptor_backed: bool | None = None
         self._cooldown: deque[set[str]] = deque(maxlen=cooldown_batches)
         self._source_done = False
         self._finished = False
@@ -256,11 +455,10 @@ class ReplayReservoir:
 
     def state_dict(self) -> dict[str, Any]:
         """Return the exact between-batch reservoir state."""
-        return {
+        state = {
             "batch_size": self._batch_size,
             "capacity": self._capacity,
             "rng": self._rng.bit_generator.state,
-            "active": tuple((replay_id, tuple(windows)) for replay_id, windows in self._active.items()),
             "cooldown": tuple(tuple(sorted(replays)) for replays in self._cooldown),
             "cooldown_batches": self._cooldown.maxlen,
             "source_done": self._source_done,
@@ -269,15 +467,65 @@ class ReplayReservoir:
             "dropped_windows": self._dropped_windows,
             "dropped_replays": self._dropped_replays,
         }
+        if self._descriptor_backed:
+            state["active_specs"] = tuple(
+                (
+                    replay_id,
+                    tuple((spec.sample_id, spec.epoch, spec.window_index) for spec in specs),
+                )
+                for replay_id, specs in self._active_specs.items()
+            )
+        else:
+            state["active"] = tuple((replay_id, tuple(windows)) for replay_id, windows in self._active.items())
+        return state
 
-    def load_state_dict(self, state: dict[str, Any]) -> None:
+    def load_state_dict(
+        self,
+        state: dict[str, Any],
+        replay_packs: Mapping[tuple[int, int], ReplayPack] | None = None,
+    ) -> None:
         """Restore a state produced after a complete batch was emitted."""
         if state["batch_size"] != self._batch_size or state["capacity"] != self._capacity:
             raise ValueError("reservoir geometry changed across resume")
         if state["cooldown_batches"] != self._cooldown.maxlen:
             raise ValueError("reservoir cooldown changed across resume")
         self._rng.bit_generator.state = state["rng"]
-        self._active = {replay_id: deque(windows) for replay_id, windows in state["active"]}
+        active_specs = state.get("active_specs")
+        if active_specs is not None:
+            if replay_packs is None or not isinstance(active_specs, tuple):
+                raise ValueError("active replay-window descriptors cannot be restored")
+            self._active = {}
+            self._active_specs = {}
+            self._descriptor_backed = True
+            for value in active_specs:
+                if not isinstance(value, tuple) or len(value) != 2 or not isinstance(value[0], str):
+                    raise ValueError("active replay descriptor is invalid")
+                replay_id, stored_specs = value
+                if not isinstance(stored_specs, tuple):
+                    raise ValueError("active replay window descriptors are invalid")
+                windows: deque[dict[str, np.ndarray]] = deque()
+                specs: deque[_ReplayWindowSpec] = deque()
+                for stored_spec in stored_specs:
+                    if (
+                        not isinstance(stored_spec, tuple)
+                        or len(stored_spec) != 3
+                        or any(not isinstance(part, int) or part < 0 for part in stored_spec)
+                    ):
+                        raise ValueError("active replay window descriptor is invalid")
+                    spec = _ReplayWindowSpec(*stored_spec)
+                    pack = replay_packs.get((spec.sample_id, spec.epoch))
+                    if pack is None or pack.replay_id != replay_id:
+                        raise ValueError(f"could not reconstruct active replay {replay_id!r}")
+                    if spec.window_index >= len(pack.windows):
+                        raise ValueError(f"window index changed for active replay {replay_id!r}")
+                    windows.append(pack.windows[spec.window_index])
+                    specs.append(spec)
+                self._active[replay_id] = windows
+                self._active_specs[replay_id] = specs
+        else:
+            self._active = {replay_id: deque(windows) for replay_id, windows in state["active"]}
+            self._active_specs = {}
+            self._descriptor_backed = False
         self._cooldown = deque((set(replays) for replays in state["cooldown"]), maxlen=self._cooldown.maxlen)
         self._source_done = bool(state["source_done"])
         self._finished = bool(state["finished"])
@@ -292,15 +540,29 @@ class ReplayReservoir:
             except StopIteration:
                 self._source_done = True
                 break
-            order = self._rng.permutation(len(pack.windows))
-            windows = (pack.windows[int(index)] for index in order)
+            descriptor_backed = pack.sample_id is not None
+            if self._descriptor_backed is None:
+                self._descriptor_backed = descriptor_backed
+            elif descriptor_backed != self._descriptor_backed:
+                raise RuntimeError("replay source mixed descriptor-backed and anonymous packs")
+            order = tuple(int(index) for index in self._rng.permutation(len(pack.windows)))
+            windows = (pack.windows[index] for index in order)
+            specs = (
+                ()
+                if pack.sample_id is None or pack.epoch is None
+                else tuple(_ReplayWindowSpec(pack.sample_id, pack.epoch, index) for index in order)
+            )
             if pack.replay_id in self._active:
                 # Weighted streams can repeat a small source within one epoch.
                 # Keep its repeated windows, but retain one active replay key so
                 # a batch never contains the same replay more than once.
                 self._active[pack.replay_id].extend(windows)
+                if self._descriptor_backed:
+                    self._active_specs[pack.replay_id].extend(specs)
             else:
                 self._active[pack.replay_id] = deque(windows)
+                if self._descriptor_backed:
+                    self._active_specs[pack.replay_id] = deque(specs)
 
     def _finish(self) -> None:
         if self._finished:
@@ -308,6 +570,7 @@ class ReplayReservoir:
         self._dropped_windows = sum(len(windows) for windows in self._active.values())
         self._dropped_replays = len(self._active)
         self._active.clear()
+        self._active_specs.clear()
         self._finished = True
 
     def __next__(self) -> ReservoirBatch:
@@ -329,8 +592,12 @@ class ReplayReservoir:
         replay_ids = tuple(candidates[int(index)] for index in selected)
         windows = tuple(self._active[replay_id].popleft() for replay_id in replay_ids)
         for replay_id in replay_ids:
+            if self._descriptor_backed:
+                self._active_specs[replay_id].popleft()
             if not self._active[replay_id]:
                 del self._active[replay_id]
+                if self._descriptor_backed:
+                    del self._active_specs[replay_id]
         if self._cooldown.maxlen:
             self._cooldown.append(set(replay_ids))
         self._emitted_windows += self._batch_size
@@ -400,102 +667,124 @@ class PolicyReplayPackDataset(IterableDataset):
     def resume_epoch(self, epoch: int) -> None:
         self._epoch = epoch
 
-    def __iter__(self) -> Iterator[ReplayPack]:
+    def decode_sample(self, sample_id: int, epoch: int) -> ReplayPack | None:
+        """Decode one stable global MDS sample ID for a specified shuffle epoch."""
+        compact = self._dataset[sample_id]
+        return self._decode_compact(compact, epoch, sample_id=sample_id)
+
+    def _decode_compact(
+        self,
+        compact: Mapping[str, object],
+        epoch: int,
+        *,
+        sample_id: int | None,
+    ) -> ReplayPack | None:
         # Defer shared helpers so dataloader can re-export this module safely.
         from hal.training.dataloader import _choose_chunk_starts
         from hal.training.dataloader import _make_window
 
+        replay_id = str(compact["replay_id"])
+        if self._replay_filter is not None and not self._replay_filter(replay_id):
+            return None
+        check_schema_version({"schema_version": int(compact["source_schema_version"])}, expected=self._schema_version)
+        frames = int(compact["num_frames"])
+        rng = _stable_replay_rng(self._seed, epoch, replay_id)
+        starts = [
+            int(chunk_start) - self._L_ctx
+            for chunk_start in _choose_chunk_starts(
+                frames,
+                self._L_ctx,
+                self._L_chunk,
+                self._K,
+                rng,
+                require_full_context=self._require_full_context,
+            )
+        ]
+        if self._require_pack and len(starts) != self._K:
+            raise ValueError(
+                f"replay {replay_id!r} with {frames} frames emits {len(starts)} of the required {self._K} windows"
+            )
+        if not starts:
+            return None
+        ego_prefixes = ["p1" if rng.random() < 0.5 else "p2" for _ in starts]
+        ranges = tuple((max(0, start), start + self._L_ctx + self._L_chunk) for start in starts)
+        windows = []
+        if self._replay_transform is None:
+            samples = self._decode_slices(compact, ranges)
+            labels = (
+                {}
+                if self._replay_labels is None
+                else {name: np.asarray(value) for name, value in self._replay_labels(compact).items()}
+            )
+            wrong_labels = {name: value.shape for name, value in labels.items() if value.shape not in ((), (frames,))}
+            if wrong_labels:
+                raise ValueError(f"replay labels have invalid shapes {wrong_labels}; expected scalar or {(frames,)}")
+            for start, ego_prefix, frame_range, sample in zip(
+                starts,
+                ego_prefixes,
+                ranges,
+                samples,
+                strict=True,
+            ):
+                range_start, range_stop = frame_range
+                sample.update(
+                    {
+                        name: (
+                            np.full(range_stop - range_start, value.item(), dtype=value.dtype)
+                            if value.shape == ()
+                            else value[range_start:range_stop]
+                        )
+                        for name, value in labels.items()
+                    }
+                )
+                pad = max(0, -start)
+                window = _make_window(
+                    sample,
+                    ego_prefix=ego_prefix,
+                    start=0,
+                    pad=pad,
+                    length=self._L_ctx + self._L_chunk,
+                    projection=self._projection,
+                )
+                window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
+                if self._window_transform is not None:
+                    self._window_transform(replay_id, ego_prefix, window)
+                windows.append(window)
+        else:
+            sample = self._replay_transform(self._decode(compact))
+            for start, ego_prefix in zip(starts, ego_prefixes, strict=True):
+                pad = max(0, -start)
+                window = _make_window(
+                    sample,
+                    ego_prefix=ego_prefix,
+                    start=start,
+                    pad=pad,
+                    length=self._L_ctx + self._L_chunk,
+                    projection=self._projection,
+                )
+                window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
+                if self._window_transform is not None:
+                    self._window_transform(replay_id, ego_prefix, window)
+                windows.append(window)
+        if not windows:
+            return None
+        return ReplayPack(
+            replay_id,
+            tuple(windows),
+            sample_id=sample_id,
+            epoch=epoch if sample_id is not None else None,
+        )
+
+    def __iter__(self) -> Iterator[ReplayPack]:
         epoch = self._epoch
         self._epoch += 1
         self._current_epoch = epoch
         self._source_samples = 0
         for compact in self._dataset:
             self._source_samples += 1
-            replay_id = str(compact["replay_id"])
-            if self._replay_filter is not None and not self._replay_filter(replay_id):
-                continue
-            check_schema_version(
-                {"schema_version": int(compact["source_schema_version"])}, expected=self._schema_version
-            )
-            frames = int(compact["num_frames"])
-            rng = _stable_replay_rng(self._seed, epoch, replay_id)
-            starts = [
-                int(chunk_start) - self._L_ctx
-                for chunk_start in _choose_chunk_starts(
-                    frames,
-                    self._L_ctx,
-                    self._L_chunk,
-                    self._K,
-                    rng,
-                    require_full_context=self._require_full_context,
-                )
-            ]
-            if self._require_pack and len(starts) != self._K:
-                raise ValueError(
-                    f"replay {replay_id!r} with {frames} frames emits {len(starts)} of the required {self._K} windows"
-                )
-            if not starts:
-                continue
-            ego_prefixes = ["p1" if rng.random() < 0.5 else "p2" for _ in starts]
-            ranges = tuple((max(0, start), start + self._L_ctx + self._L_chunk) for start in starts)
-            windows = []
-            if self._replay_transform is None:
-                samples = self._decode_slices(compact, ranges)
-                labels = (
-                    {}
-                    if self._replay_labels is None
-                    else {name: np.asarray(value) for name, value in self._replay_labels(compact).items()}
-                )
-                wrong_labels = {
-                    name: value.shape for name, value in labels.items() if value.shape not in ((), (frames,))
-                }
-                if wrong_labels:
-                    raise ValueError(
-                        f"replay labels have invalid shapes {wrong_labels}; expected scalar or {(frames,)}"
-                    )
-                for start, ego_prefix, frame_range, sample in zip(starts, ego_prefixes, ranges, samples, strict=True):
-                    range_start, range_stop = frame_range
-                    sample.update(
-                        {
-                            name: (
-                                np.full(range_stop - range_start, value.item(), dtype=value.dtype)
-                                if value.shape == ()
-                                else value[range_start:range_stop]
-                            )
-                            for name, value in labels.items()
-                        }
-                    )
-                    pad = max(0, -start)
-                    window = _make_window(
-                        sample,
-                        ego_prefix=ego_prefix,
-                        start=0,
-                        pad=pad,
-                        length=self._L_ctx + self._L_chunk,
-                        projection=self._projection,
-                    )
-                    window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
-                    if self._window_transform is not None:
-                        self._window_transform(replay_id, ego_prefix, window)
-                    windows.append(window)
-            else:
-                sample = self._replay_transform(self._decode(compact))
-                for start, ego_prefix in zip(starts, ego_prefixes, strict=True):
-                    pad = max(0, -start)
-                    window = _make_window(
-                        sample,
-                        ego_prefix=ego_prefix,
-                        start=start,
-                        pad=pad,
-                        length=self._L_ctx + self._L_chunk,
-                        projection=self._projection,
-                    )
-                    window["ctx_pad"] = np.int64(min(pad, self._L_ctx))
-                    if self._window_transform is not None:
-                        self._window_transform(replay_id, ego_prefix, window)
-                    windows.append(window)
-            if windows:
-                yield ReplayPack(replay_id, tuple(windows))
+            pack = self._decode_compact(compact, epoch, sample_id=None)
+            if pack is not None:
+                yield pack
 
 
 class ReservoirLoader:
@@ -517,6 +806,8 @@ class ReservoirLoader:
         source_names: tuple[str, ...],
         packs: PolicyReplayPackDataset,
         worker_independent_resume: bool,
+        cooldown_batches: int,
+        task_sampler: _ReplayTaskSampler | None,
     ) -> None:
         if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
             raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
@@ -535,11 +826,13 @@ class ReservoirLoader:
         self._source_names = source_names
         self._packs = packs
         self._worker_independent_resume = worker_independent_resume
+        self._cooldown_batches = cooldown_batches
+        self._task_sampler = task_sampler
         self._epoch = 0
         self._reservoir: ReplayReservoir | None = None
         self._pack_batches: ReplayPackBatchIterator | None = None
         self._resume_state: dict[str, Any] | None = None
-        self._visits: Counter[str] = Counter()
+        self._visits: Counter[str] | None = None if task_sampler is not None else Counter()
         self.last_epoch_stats: dict[str, int] | None = None
 
     @property
@@ -551,17 +844,23 @@ class ReservoirLoader:
         return {name: int(count) for name, count in zip(self._source_names, counts, strict=True)}
 
     def __iter__(self) -> Iterator[object]:
-        pack_batches = ReplayPackBatchIterator(iter(self._pack_loader), self._visits)
-        if self._resume_state is not None:
-            pack_batches.load_state_dict(self._resume_state.get("pack_batches", {}))
+        resume_state = self._resume_state
+        replay_packs = self._rehydrate(resume_state) if resume_state is not None else None
+        source: Iterator[object] = iter(self._pack_loader)
+        if self._task_sampler is not None:
+            source = _OrderedReplayTasks(source)
+        pack_batches = ReplayPackBatchIterator(source, self._visits)
+        if resume_state is not None:
+            pack_batches.load_state_dict(resume_state.get("pack_batches", {}), replay_packs)
         reservoir = ReplayReservoir(
             pack_batches,
             batch_size=self._batch_size,
             capacity=self._capacity,
             seed=self._seed + self._epoch,
+            cooldown_batches=self._cooldown_batches,
         )
-        if self._resume_state is not None:
-            reservoir.load_state_dict(self._resume_state["reservoir"])
+        if resume_state is not None:
+            reservoir.load_state_dict(resume_state["reservoir"], replay_packs)
             self._resume_state = None
         self._reservoir = reservoir
         self._pack_batches = pack_batches
@@ -579,6 +878,21 @@ class ReservoirLoader:
             raise RuntimeError("exact worker resume must be enabled when num_workers is nonzero")
         if self._reservoir is None or self._pack_batches is None:
             raise RuntimeError("the reservoir loader has not emitted a batch")
+        if self._task_sampler is not None:
+            pack_state = self._pack_batches.state_dict()
+            reservoir_state = self._reservoir.state_dict()
+            if self._pack_batches.source_cursor is None:
+                raise RuntimeError("deterministic replay source has no committed cursor")
+            if "pending_specs" not in pack_state or "active_specs" not in reservoir_state:
+                raise RuntimeError("deterministic replay state contains decoded arrays")
+            return {
+                "schema": 3,
+                "loader_epoch": self._epoch,
+                "source_cursor": self._pack_batches.source_cursor,
+                "sample_selection_sha256": getattr(self._dataset, "sample_selection_sha256", None),
+                "pack_batches": pack_state,
+                "reservoir": reservoir_state,
+            }
         if self._worker_independent_resume:
             source_samples = self._pack_batches.received_packs
         else:
@@ -590,12 +904,13 @@ class ReservoirLoader:
             "mds": self._dataset.state_dict(source_samples, from_beginning=False),
             "pack_batches": self._pack_batches.state_dict(),
             "reservoir": self._reservoir.state_dict(),
-            "visit_counters": dict(self._visits),
+            "visit_counters": dict(self._visits or ()),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Schedule an exact restore before the next iterator is created."""
-        if state.get("schema") not in (1, 2):
+        schema = state.get("schema")
+        if schema not in (1, 2, 3):
             raise ValueError(f"unsupported reservoir-loader state schema {state.get('schema')!r}")
         if self._prefetch_batches:
             raise RuntimeError("exact reservoir checkpoints require prefetch_batches=0")
@@ -603,14 +918,70 @@ class ReservoirLoader:
             raise RuntimeError("exact worker resume must be enabled when num_workers is nonzero")
         if self._reservoir is not None:
             raise RuntimeError("load reservoir state before creating its iterator")
-        self._dataset.load_state_dict(state["mds"])
-        self._packs.resume_epoch(int(state["pack_epoch"]))
+        if schema == 3:
+            if self._task_sampler is None:
+                raise ValueError("deterministic replay state requires the explicit sample-ID loader")
+            selection_hash = getattr(self._dataset, "sample_selection_sha256", None)
+            if state.get("sample_selection_sha256") != selection_hash:
+                raise ValueError("stream prefix selection changed across resume")
+            cursor = state.get("source_cursor")
+            if (
+                not isinstance(cursor, tuple)
+                or len(cursor) != 2
+                or any(not isinstance(value, int) or value < 0 for value in cursor)
+            ):
+                raise ValueError("deterministic replay source cursor is invalid")
+            self._task_sampler.resume((cursor[0], cursor[1]))
+        else:
+            if self._task_sampler is not None:
+                raise ValueError("legacy replay checkpoints require the ordered iterable loader")
+            self._dataset.load_state_dict(state["mds"])
+            self._packs.resume_epoch(int(state["pack_epoch"]))
         self._epoch = int(state["loader_epoch"]) - 1
-        self._visits = Counter({str(name): int(count) for name, count in state.get("visit_counters", {}).items()})
+        if self._visits is not None:
+            self._visits = Counter({str(name): int(count) for name, count in state.get("visit_counters", {}).items()})
         self._resume_state = {
             **state,
             "pack_batches": state.get("pack_batches", {"pending": ()}),
         }
+
+    def _rehydrate(self, state: Mapping[str, object]) -> dict[tuple[int, int], ReplayPack] | None:
+        """Rebuild compact checkpoint descriptors from their original MDS rows."""
+        if state.get("schema") != 3:
+            return None
+        keys: set[tuple[int, int]] = set()
+        pack_state = state.get("pack_batches")
+        reservoir_state = state.get("reservoir")
+        if not isinstance(pack_state, Mapping) or not isinstance(reservoir_state, Mapping):
+            raise ValueError("deterministic replay checkpoint state is incomplete")
+        pending_specs = pack_state.get("pending_specs", ())
+        active_specs = reservoir_state.get("active_specs", ())
+        if not isinstance(pending_specs, tuple) or not isinstance(active_specs, tuple):
+            raise ValueError("deterministic replay descriptors are invalid")
+        for value in pending_specs:
+            if not isinstance(value, tuple) or len(value) != 3:
+                raise ValueError("pending replay descriptor is invalid")
+            _, sample_id, epoch = value
+            if not isinstance(sample_id, int) or not isinstance(epoch, int):
+                raise ValueError("pending replay descriptor is invalid")
+            keys.add((sample_id, epoch))
+        for active in active_specs:
+            if not isinstance(active, tuple) or len(active) != 2 or not isinstance(active[1], tuple):
+                raise ValueError("active replay descriptor is invalid")
+            for value in active[1]:
+                if not isinstance(value, tuple) or len(value) != 3:
+                    raise ValueError("active replay window descriptor is invalid")
+                sample_id, epoch, _ = value
+                if not isinstance(sample_id, int) or not isinstance(epoch, int):
+                    raise ValueError("active replay window descriptor is invalid")
+                keys.add((sample_id, epoch))
+        replay_packs: dict[tuple[int, int], ReplayPack] = {}
+        for sample_id, epoch in sorted(keys, key=lambda value: (value[1], value[0])):
+            pack = self._packs.decode_sample(sample_id, epoch)
+            if pack is None:
+                raise ValueError(f"MDS sample {sample_id} no longer produces a replay pack")
+            replay_packs[(sample_id, epoch)] = pack
+        return replay_packs
 
     def _batches(self, reservoir: ReplayReservoir) -> Iterator[object]:
         from hal.training.dataloader import collate_train_batch
@@ -681,6 +1052,8 @@ def make_reservoir_loader(
     replay_filter: ReplayFilter | None = None,
     replay_pack_batch_size: int = 1,
     worker_independent_resume: bool = False,
+    deterministic_out_of_order: bool = False,
+    cooldown_batches: int = 1,
     limit_worker_threads: bool = False,
     require_full_context: bool = False,
 ) -> ReservoirLoader:
@@ -704,6 +1077,16 @@ def make_reservoir_loader(
         raise ValueError(
             "worker-independent resume requires row selection before worker dispatch; "
             "replay_filter runs inside workers"
+        )
+    if deterministic_out_of_order and not worker_independent_resume:
+        raise ValueError("deterministic out-of-order loading requires worker-independent resume")
+    if cooldown_batches < 0:
+        raise ValueError(f"cooldown_batches must be non-negative, got {cooldown_batches}")
+    minimum_capacity = batch_size * (cooldown_batches + 1)
+    if reservoir_capacity < minimum_capacity:
+        raise ValueError(
+            f"reservoir_capacity={reservoir_capacity} cannot enforce cooldown_batches={cooldown_batches}; "
+            f"need at least {minimum_capacity}"
         )
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
@@ -742,18 +1125,35 @@ def make_reservoir_loader(
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
     generator = torch.Generator().manual_seed(seed)
-    pack_loader = DataLoader(
-        packs,
-        batch_size=replay_pack_batch_size,
-        num_workers=num_workers,
-        collate_fn=_collate_replay_packs,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=prefetch_factor if num_workers > 0 else None,
-        pin_memory=False,
-        generator=generator,
-        worker_init_fn=_limit_worker_threads if limit_worker_threads else None,
-        in_order=True,
-    )
+    task_sampler: _ReplayTaskSampler | None = None
+    if deterministic_out_of_order:
+        task_sampler = _ReplayTaskSampler(dataset, replay_pack_batch_size)
+        pack_loader = DataLoader(
+            _ReplayDecodeDataset(packs),
+            batch_size=None,
+            sampler=task_sampler,
+            num_workers=num_workers,
+            collate_fn=_identity,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            pin_memory=False,
+            generator=generator,
+            worker_init_fn=_limit_worker_threads if limit_worker_threads else None,
+            in_order=(num_workers == 0),
+        )
+    else:
+        pack_loader = DataLoader(
+            packs,
+            batch_size=replay_pack_batch_size,
+            num_workers=num_workers,
+            collate_fn=_collate_replay_packs,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            pin_memory=False,
+            generator=generator,
+            worker_init_fn=_limit_worker_threads if limit_worker_threads else None,
+            in_order=True,
+        )
     return ReservoirLoader(
         pack_loader,
         stats=stats,
@@ -770,4 +1170,6 @@ def make_reservoir_loader(
         source_names=source_names,
         packs=packs,
         worker_independent_resume=worker_independent_resume,
+        cooldown_batches=cooldown_batches,
+        task_sampler=task_sampler,
     )

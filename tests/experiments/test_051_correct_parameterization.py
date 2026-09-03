@@ -108,6 +108,7 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     assert report["loader_only_windows_per_s"] > 0
     assert report["distinct_replays"] == cfg.batch_size
     assert report["within_batch_unique"] is True
+    assert report["cooldown_passed"] is False
 
 
 @pytest.mark.parametrize("level", ["base", "proxy", "mid", "large"])
@@ -328,6 +329,9 @@ def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
     defaults = exp.TrainConfig()
     assert defaults.adam_eps == 1e-12
     assert defaults.cache_limit_gb == 1700
+    assert defaults.replay_cooldown_batches == 16
+    assert defaults.reservoir_capacity == 17 * defaults.batch_size
+    assert replace(defaults, batch_size=1024).reservoir_capacity == 17_408
     assert exp.scaled_adam_lr(4.25e-4, batch_multiplier=1, duration_multiplier=1) == 4.25e-4
     assert exp.scaled_adam_lr(
         4.25e-4,

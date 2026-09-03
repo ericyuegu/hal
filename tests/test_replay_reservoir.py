@@ -77,6 +77,25 @@ def test_reservoir_rng_is_repeatable() -> None:
     assert run() == run()
 
 
+def test_reservoir_enforces_sixteen_complete_batch_cooldown() -> None:
+    cooldown = 16
+    batch_size = 4
+    reservoir = ReplayReservoir(
+        _packs((cooldown + 1) * batch_size, 2),
+        batch_size=batch_size,
+        capacity=(cooldown + 1) * batch_size,
+        seed=7,
+        cooldown_batches=cooldown,
+    )
+
+    last_seen: dict[str, int] = {}
+    for batch_index, batch in enumerate(reservoir):
+        for replay_id in batch.replay_ids:
+            if replay_id in last_seen:
+                assert batch_index - last_seen[replay_id] > cooldown
+            last_seen[replay_id] = batch_index
+
+
 class _CountedPacks:
     def __init__(self, packs: list[ReplayPack], start: int = 0) -> None:
         self.packs = packs
@@ -381,6 +400,28 @@ def test_worker_collation_round_trips_stacked_replay_packs() -> None:
     assert visits == {"0": 1, "1": 1, "2": 1}
 
 
+def test_completed_replay_tasks_are_released_in_predetermined_order() -> None:
+    def result(ordinal: int) -> replay_reservoir._CollatedReplayPackBatch:
+        task = replay_reservoir._ReplayDecodeTask(
+            ordinal=ordinal,
+            epoch=0,
+            sample_offset=ordinal,
+            sample_ids=(ordinal,),
+            cursor_after=(0, ordinal + 1),
+        )
+        pack = ReplayPack(
+            f"replay-{ordinal}",
+            ({"value": np.asarray([ordinal])},),
+            sample_id=ordinal,
+            epoch=0,
+        )
+        return replay_reservoir._collate_replay_packs([pack], task)
+
+    ordered = replay_reservoir._OrderedReplayTasks(iter((result(2), result(0), result(1))))
+
+    assert [next(ordered).task_ordinal for _ in range(3)] == [0, 1, 2]
+
+
 def _o51_style_loader(path: Path, *, workers: int, pack_batch: int):
     return make_reservoir_loader(
         str(path),
@@ -390,7 +431,7 @@ def _o51_style_loader(path: Path, *, workers: int, pack_batch: int):
         L_chunk=2,
         batch_size=2,
         seed=23,
-        reservoir_capacity=8,
+        reservoir_capacity=34,
         remote=None,
         shuffle=True,
         shuffle_seed=23,
@@ -405,6 +446,8 @@ def _o51_style_loader(path: Path, *, workers: int, pack_batch: int):
         schema_version=7,
         replay_pack_batch_size=pack_batch,
         worker_independent_resume=True,
+        deterministic_out_of_order=True,
+        cooldown_batches=16,
         limit_worker_threads=True,
         require_full_context=True,
     )
@@ -418,8 +461,10 @@ def test_pack_batch_is_passed_to_mosaic_and_dataloader_without_changing_draws(tm
     _write_policy_mds(tmp_path, replays=128, frames=80)
     small = _o51_style_loader(tmp_path, workers=0, pack_batch=2)
     large = _o51_style_loader(tmp_path, workers=0, pack_batch=4)
-    assert small._pack_loader.batch_size == small._dataset.batch_size == 2
-    assert large._pack_loader.batch_size == large._dataset.batch_size == 4
+    assert small._pack_loader.batch_size is None
+    assert large._pack_loader.batch_size is None
+    assert small._dataset.batch_size == 2
+    assert large._dataset.batch_size == 4
 
     small_batches = [_batch_signature(batch) for batch in islice(small, 8)]
     large_batches = [_batch_signature(batch) for batch in islice(large, 8)]
@@ -436,6 +481,11 @@ def test_resumption_is_tensor_exact_when_worker_count_changes(tmp_path: Path) ->
     for _ in range(5):
         next(iterator)
     state = uninterrupted.state_dict()
+    assert state["schema"] == 3
+    assert "active_specs" in state["reservoir"]
+    assert "active" not in state["reservoir"]
+    assert "pending_specs" in state["pack_batches"]
+    assert "pending" not in state["pack_batches"]
     expected = [_batch_signature(next(iterator)) for _ in range(8)]
 
     resumed = _o51_style_loader(tmp_path, workers=0, pack_batch=4)
@@ -447,7 +497,7 @@ def test_resumption_is_tensor_exact_when_worker_count_changes(tmp_path: Path) ->
         assert got[0] == want[0]
         assert torch.equal(got[1], want[1])
         assert torch.equal(got[2], want[2])
-    assert state["visit_counters"]
+    assert "visit_counters" not in state
 
     chained_state = resumed.state_dict()
     chained_expected = [_batch_signature(next(iterator)) for _ in range(5)]
