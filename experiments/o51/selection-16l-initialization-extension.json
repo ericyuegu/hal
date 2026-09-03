@@ -1,0 +1,65 @@
+{
+  "excluded": [],
+  "ranking": [
+    {
+      "arm_id": "o51-initialization-extension-h0p5-mup-normal",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/gqfonb65",
+      "state": "finished",
+      "val_far_nll": 2.2862439798863265,
+      "val_nll": 1.538116340691509,
+      "val_rollout_nll": 3.842087301298779
+    }
+  ],
+  "rule": [
+    "Every run must be terminal before screening.",
+    "A candidate must finish its exact D/U endpoint and final optimizer update.",
+    "Final validation NLL, far NLL, and rollout NLL must be finite.",
+    "Rank eligible candidates by validation NLL, then far NLL, then rollout NLL, then arm ID."
+  ],
+  "schema_version": 1,
+  "source_treatment": {
+    "adam_lr": 0.0002125,
+    "adam_weight_decay": 0.001,
+    "batch_size": 512,
+    "compile_mode": "reduce-overhead",
+    "depth_alpha": 0.5,
+    "hidden_std_multiplier": 0.5,
+    "loader_prefetch_factor": 2,
+    "muon_batch_scaling": "fixed",
+    "muon_duration_scaling": "fixed",
+    "muon_lr": 0.014,
+    "muon_weight_decay": 0.001,
+    "num_workers": 16,
+    "predownload": 1024,
+    "readout_init": "mup-normal",
+    "replay_pack_batch_size": 64,
+    "shuffle_algo": "py1s",
+    "shuffle_block_size": 8192,
+    "temporal_attention_chunk": 16384
+  },
+  "stage": "initialization-extension",
+  "winner_arm_id": "o51-initialization-extension-h0p5-mup-normal",
+  "winner_run": "ericyuegu/hal/gqfonb65",
+  "winner_treatment": {
+    "adam_lr": 0.0002125,
+    "adam_weight_decay": 0.001,
+    "batch_size": 512,
+    "compile_mode": "reduce-overhead",
+    "depth_alpha": 0.5,
+    "hidden_std_multiplier": 0.5,
+    "loader_prefetch_factor": 2,
+    "muon_batch_scaling": "fixed",
+    "muon_duration_scaling": "fixed",
+    "muon_lr": 0.014,
+    "muon_weight_decay": 0.001,
+    "num_workers": 16,
+    "predownload": 1024,
+    "readout_init": "mup-normal",
+    "replay_pack_batch_size": 64,
+    "shuffle_algo": "py1s",
+    "shuffle_block_size": 8192,
+    "temporal_attention_chunk": 16384
+  }
+}

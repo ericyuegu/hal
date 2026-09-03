@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "training_run": "ericyuegu/hal/gqfonb65",
+  "evaluation_run": "ericyuegu/hal/gqfonb65-eval96",
+  "final_update": 16384,
+  "validation": {
+    "nll": 1.538116340691509,
+    "far_nll": 2.2862439798863265,
+    "rollout_nll": 3.842087301298779
+  },
+  "closed_loop": {
+    "matchups": 96,
+    "completed_matchups": 96,
+    "crashed": 0,
+    "net_stock_per_min": -0.05836790944130421,
+    "net_stock_cluster_bootstrap_lcb": -0.16979755473833935,
+    "net_damage_per_min": 35.35893421769235,
+    "net_damage_cluster_bootstrap_lcb": 27.70711444473415
+  },
+  "performance_rule": {
+    "target_net_stock_per_min": 0.5,
+    "minimum_net_stock_per_min": 0.3
+  },
+  "decision": {
+    "performance_gate_passed": false,
+    "scale_transfer_eligible": false,
+    "next_stage": "Run the preregistered 16-layer learning-rate grid as a bounded diagnostic. Do not advance to larger models unless closed-loop performance recovers."
+  }
+}
