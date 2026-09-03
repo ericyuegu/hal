@@ -432,6 +432,46 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
     )
     assert decision.status == "reject"
 
+    warmup_growth = exp._ArmGuard(warmup_updates=10)
+    for update in range(1, 10):
+        assert (
+            warmup_growth.observe(
+                {
+                    "global_step": update,
+                    "stability/centered_logit_abs_p999": float(update),
+                }
+            ).status
+            == "pass"
+        )
+    assert (
+        warmup_growth.observe(
+            {
+                "global_step": 10,
+                "stability/centered_logit_abs_p999": 10.0,
+            }
+        ).status
+        == "pass"
+    )
+    for update in range(11, 14):
+        assert (
+            warmup_growth.observe(
+                {
+                    "global_step": update,
+                    "stability/centered_logit_abs_p999": 40.0,
+                }
+            ).status
+            == "pass"
+        )
+    assert (
+        warmup_growth.observe(
+            {
+                "global_step": 14,
+                "stability/centered_logit_abs_p999": 40.0,
+            }
+        ).status
+        == "reject"
+    )
+
     alternating = exp._ArmGuard(warmup_updates=0)
     assert (
         alternating.observe(

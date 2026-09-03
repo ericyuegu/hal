@@ -1218,11 +1218,6 @@ class _ArmGuard:
         if not isinstance(centered, int | float) and not isinstance(rms, int | float):
             return None
         numeric = {name: float(value) for name, value in metrics.items() if isinstance(value, int | float)}
-        if self._initial_centered is None and isinstance(centered, int | float):
-            self._initial_centered = max(float(centered), torch.finfo(torch.float32).tiny)
-        if self._initial_rms is None and isinstance(rms, int | float):
-            self._initial_rms = max(float(rms), torch.finfo(torch.float32).tiny)
-
         clip_fraction = metrics.get("optimizer/clip_fraction")
         window_updates = update - self._last_training_update
         if (
@@ -1235,12 +1230,17 @@ class _ArmGuard:
         self._last_training_update = update
         post_warmup_clip = self._clip_sum / max(self._clip_updates, 1)
 
-        if isinstance(centered, int | float) and self._initial_centered is not None:
-            grew = float(centered) >= 4 * self._initial_centered
-            self._centered_growth_windows = self._centered_growth_windows + 1 if grew else 0
-        if isinstance(rms, int | float) and self._initial_rms is not None:
-            grew = float(rms) >= 4 * self._initial_rms
-            self._rms_growth_windows = self._rms_growth_windows + 1 if grew else 0
+        if update >= self._warmup_updates:
+            if self._initial_centered is None and isinstance(centered, int | float):
+                self._initial_centered = max(float(centered), torch.finfo(torch.float32).tiny)
+            if self._initial_rms is None and isinstance(rms, int | float):
+                self._initial_rms = max(float(rms), torch.finfo(torch.float32).tiny)
+            if isinstance(centered, int | float) and self._initial_centered is not None:
+                grew = float(centered) >= 4 * self._initial_centered
+                self._centered_growth_windows = self._centered_growth_windows + 1 if grew else 0
+            if isinstance(rms, int | float) and self._initial_rms is not None:
+                grew = float(rms) >= 4 * self._initial_rms
+                self._rms_growth_windows = self._rms_growth_windows + 1 if grew else 0
         return arm_decision(
             numeric,
             post_warmup_clip_fraction=post_warmup_clip,
