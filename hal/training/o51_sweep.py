@@ -38,6 +38,8 @@ Stage = Literal[
     "duration",
 ]
 
+TERMINAL_RUN_STATES = frozenset({"finished", "failed", "crashed", "killed"})
+
 
 @dataclass(frozen=True, slots=True)
 class Treatment:
@@ -234,6 +236,93 @@ class SweepArm:
         for name, value in cfg.items():
             command.extend((f"--cfg.{name}", "None" if value is None else str(value)))
         return tuple(command)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationOutcome:
+    """Final validation evidence for one declared sweep arm."""
+
+    arm_id: str
+    run_path: str
+    state: str
+    processed_positions: float | None
+    final_update: float | None
+    val_nll: float | None
+    val_far_nll: float | None
+    val_rollout_nll: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationSelection:
+    """Deterministic validation ranking and its selected treatment."""
+
+    winner: SweepArm
+    ranking: tuple[ValidationOutcome, ...]
+    excluded: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def _finite(value: float | None) -> bool:
+    return value is not None and math.isfinite(value)
+
+
+def _outcome_failures(arm: SweepArm, outcome: ValidationOutcome) -> tuple[str, ...]:
+    failures: list[str] = []
+    if outcome.state != "finished":
+        failures.append(f"run state is {outcome.state}")
+    if outcome.processed_positions != arm.target_positions:
+        failures.append("run did not reach its exact D endpoint")
+    expected_update = arm.target_positions // (arm.treatment.batch_size * SUPERVISED_POSITIONS_PER_WINDOW)
+    if outcome.final_update != expected_update:
+        failures.append("run did not reach its final optimizer update")
+    for name in ("val_nll", "val_far_nll", "val_rollout_nll"):
+        if not _finite(getattr(outcome, name)):
+            failures.append(f"{name} is missing or non-finite")
+    return tuple(failures)
+
+
+def select_validation_winner(
+    arms: tuple[SweepArm, ...],
+    outcomes: dict[str, ValidationOutcome],
+) -> ValidationSelection:
+    """Select by final NLL, with fixed far-NLL and rollout-NLL tie breaks."""
+    if not arms:
+        raise ValueError("validation selection needs at least one sweep arm")
+    expected = {arm.arm_id for arm in arms}
+    actual = set(outcomes)
+    if expected != actual:
+        raise ValueError(
+            f"validation outcomes do not match the stage: missing={sorted(expected - actual)}, "
+            f"extra={sorted(actual - expected)}"
+        )
+    nonterminal = sorted(outcome.arm_id for outcome in outcomes.values() if outcome.state not in TERMINAL_RUN_STATES)
+    if nonterminal:
+        raise ValueError(f"validation runs are not terminal: {nonterminal}")
+
+    by_id = {arm.arm_id: arm for arm in arms}
+    eligible: list[ValidationOutcome] = []
+    excluded: list[tuple[str, tuple[str, ...]]] = []
+    for arm in arms:
+        outcome = outcomes[arm.arm_id]
+        failures = _outcome_failures(arm, outcome)
+        if failures:
+            excluded.append((arm.arm_id, failures))
+        else:
+            eligible.append(outcome)
+    if not eligible:
+        raise ValueError("no sweep arm completed with valid final validation evidence")
+    eligible.sort(
+        key=lambda outcome: (
+            outcome.val_nll,
+            outcome.val_far_nll,
+            outcome.val_rollout_nll,
+            outcome.arm_id,
+        )
+    )
+    return ValidationSelection(
+        winner=by_id[eligible[0].arm_id],
+        ranking=tuple(eligible),
+        excluded=tuple(excluded),
+    )
 
 
 def _safe_float(value: float) -> str:

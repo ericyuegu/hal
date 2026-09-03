@@ -9,12 +9,14 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from types import SimpleNamespace
 
 import pytest
 
 from hal.training.o51_data import D0
 from hal.training.o51_sweep import SweepArm
 from hal.training.o51_sweep import Treatment
+from hal.training.o51_sweep import ValidationOutcome
 from hal.training.o51_sweep import batch_arms
 from hal.training.o51_sweep import decay_arms
 from hal.training.o51_sweep import duration_arms
@@ -24,6 +26,7 @@ from hal.training.o51_sweep import lr_arms
 from hal.training.o51_sweep import mid_search_arms
 from hal.training.o51_sweep import proxy_transfer_arms
 from hal.training.o51_sweep import seed_repeat_arms
+from hal.training.o51_sweep import select_validation_winner
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -183,6 +186,108 @@ def test_treatment_loads_partial_overrides_and_rejects_unknown_fields(tmp_path: 
     path.write_text('{"unknown": 1}\n')
     with pytest.raises(ValueError, match="unknown fields"):
         Treatment.load(path)
+
+
+def _outcome(
+    arm: SweepArm,
+    *,
+    state: str = "finished",
+    val_nll: float | None = 1.0,
+) -> ValidationOutcome:
+    final_update = arm.target_positions // (arm.treatment.batch_size * 128)
+    return ValidationOutcome(
+        arm_id=arm.arm_id,
+        run_path=f"entity/project/{arm.arm_id}",
+        state=state,
+        processed_positions=float(arm.target_positions),
+        final_update=float(final_update),
+        val_nll=val_nll,
+        val_far_nll=2.0,
+        val_rollout_nll=3.0,
+    )
+
+
+def test_validation_selection_uses_one_fixed_ranking_and_excludes_failures() -> None:
+    arms = lr_arms(Treatment())[:3]
+    outcomes = {
+        arms[0].arm_id: _outcome(arms[0], val_nll=1.2),
+        arms[1].arm_id: _outcome(arms[1], state="crashed", val_nll=None),
+        arms[2].arm_id: _outcome(arms[2], val_nll=1.1),
+    }
+
+    selection = select_validation_winner(arms, outcomes)
+
+    assert selection.winner == arms[2]
+    assert [outcome.arm_id for outcome in selection.ranking] == [arms[2].arm_id, arms[0].arm_id]
+    assert selection.excluded[0][0] == arms[1].arm_id
+
+
+def test_validation_selection_waits_for_every_arm_to_be_terminal() -> None:
+    arms = lr_arms(Treatment())[:2]
+    outcomes = {
+        arms[0].arm_id: _outcome(arms[0]),
+        arms[1].arm_id: _outcome(arms[1], state="running"),
+    }
+
+    with pytest.raises(ValueError, match="not terminal"):
+        select_validation_winner(arms, outcomes)
+
+
+def test_runner_writes_treatment_and_complete_selection_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arms = lr_arms(Treatment())
+    run_map = {arm.arm_id: f"entity/project/run-{index}" for index, arm in enumerate(arms)}
+    runs = {}
+    for index, arm in enumerate(arms):
+        config = {
+            **RUNNER.asdict(arm.treatment),
+            "target_positions": arm.target_positions,
+            "tier_scale": arm.tier_scale,
+            "seed": arm.seed,
+            "data_protocol": RUNNER.DATA_PROTOCOL,
+            "adam_eps": 1e-12,
+            "reservoir_capacity": 17 * arm.treatment.batch_size,
+            "replay_cooldown_batches": 16,
+        }
+        update = arm.target_positions // (arm.treatment.batch_size * 128)
+        runs[run_map[arm.arm_id]] = SimpleNamespace(
+            config=config,
+            name=f"test_o51-{arm.level}-shape__{arm.arm_id}",
+            state="finished",
+            summary={
+                "data/processed_loss_positions": arm.target_positions,
+                "global_step": update,
+                "val/nll": 1.0 + index / 100,
+                "val/far_nll": 2.0,
+                "val/rollout_nll": 3.0,
+            },
+        )
+
+    class Api:
+        def run(self, run_path: str):
+            return runs[run_path]
+
+    monkeypatch.setattr(RUNNER.wandb, "Api", lambda **_kwargs: Api())
+    run_map_path = tmp_path / "runs.json"
+    treatment_path = tmp_path / "treatment.json"
+    evidence_path = tmp_path / "evidence.json"
+    run_map_path.write_text(json.dumps(run_map))
+
+    RUNNER.select(
+        RUNNER.SelectArgs(
+            stage="lr",
+            runs=run_map_path,
+            output=treatment_path,
+            evidence=evidence_path,
+        )
+    )
+
+    assert Treatment.load(treatment_path) == arms[0].treatment
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["winner_arm_id"] == arms[0].arm_id
+    assert len(evidence["ranking"]) == len(arms)
 
 
 def test_sweep_arm_rejects_a_mismatched_data_endpoint() -> None:

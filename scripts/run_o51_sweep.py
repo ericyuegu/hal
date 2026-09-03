@@ -18,15 +18,20 @@ from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import Literal
 from typing import cast
 
 import modal
 import tyro
 
+import wandb
+from hal.training.o51_data import DATA_PROTOCOL
 from hal.training.o51_sweep import Stage
 from hal.training.o51_sweep import SweepArm
 from hal.training.o51_sweep import Treatment
+from hal.training.o51_sweep import ValidationOutcome
+from hal.training.o51_sweep import select_validation_winner
 from hal.training.o51_sweep import stage_arms
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,8 +65,24 @@ class LaunchArgs:
     dry_run: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SelectArgs:
+    """Select a completed stage by its fixed validation rule."""
+
+    stage: Stage
+    runs: Path
+    """JSON object that maps every arm ID to its full W&B run path."""
+    output: Path
+    """New treatment JSON for the next stage."""
+    evidence: Path
+    """New durable JSON record of the complete ranking."""
+    treatment: Path | None = None
+
+
 type Command = (
-    Annotated[PlanArgs, tyro.conf.subcommand(name="plan")] | Annotated[LaunchArgs, tyro.conf.subcommand(name="launch")]
+    Annotated[PlanArgs, tyro.conf.subcommand(name="plan")]
+    | Annotated[LaunchArgs, tyro.conf.subcommand(name="launch")]
+    | Annotated[SelectArgs, tyro.conf.subcommand(name="select")]
 )
 
 
@@ -94,6 +115,76 @@ def _preflight_reports(path: Path | None) -> dict[str, Path]:
             raise ValueError(f"the preflight report path for {arm_id!r} must be a non-empty string")
         reports[arm_id] = Path(report)
     return reports
+
+
+def _run_paths(path: Path, arms: tuple[SweepArm, ...]) -> dict[str, str]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read the W&B run map {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("the W&B run map must be a JSON object")
+    expected = {arm.arm_id for arm in arms}
+    actual = set(payload)
+    if expected != actual:
+        raise ValueError(
+            f"W&B run map does not match the stage: missing={sorted(expected - actual)}, "
+            f"extra={sorted(actual - expected)}"
+        )
+    invalid = sorted(
+        arm_id for arm_id, run_path in payload.items() if not isinstance(run_path, str) or run_path.count("/") != 2
+    )
+    if invalid:
+        raise ValueError(f"W&B run paths must be entity/project/run_id: {invalid}")
+    return cast(dict[str, str], payload)
+
+
+def _run_config_mismatches(arm: SweepArm, run: Any) -> tuple[str, ...]:
+    expected = {
+        **asdict(arm.treatment),
+        "target_positions": arm.target_positions,
+        "tier_scale": arm.tier_scale,
+        "seed": arm.seed,
+        "data_protocol": DATA_PROTOCOL,
+        "adam_eps": 1e-12,
+        "reservoir_capacity": 17 * arm.treatment.batch_size,
+        "replay_cooldown_batches": 16,
+    }
+    config = dict(run.config)
+    mismatches = [
+        name
+        for name, value in expected.items()
+        if json.dumps(config.get(name), sort_keys=True) != json.dumps(value, sort_keys=True)
+    ]
+    name = str(run.name)
+    if not name.endswith(f"__{arm.arm_id}"):
+        mismatches.append("run_name")
+    if f"_o51-{arm.level}-" not in name:
+        mismatches.append("model_level")
+    return tuple(sorted(mismatches))
+
+
+def _optional_float(value: object) -> float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    return float(value)
+
+
+def _validation_outcome(arm: SweepArm, run_path: str, run: Any) -> ValidationOutcome:
+    mismatches = _run_config_mismatches(arm, run)
+    if mismatches:
+        raise ValueError(f"W&B run {run_path} does not match {arm.arm_id}: {list(mismatches)}")
+    summary = dict(run.summary)
+    return ValidationOutcome(
+        arm_id=arm.arm_id,
+        run_path=run_path,
+        state=str(run.state),
+        processed_positions=_optional_float(summary.get("data/processed_loss_positions")),
+        final_update=_optional_float(summary.get("global_step")),
+        val_nll=_optional_float(summary.get("val/nll")),
+        val_far_nll=_optional_float(summary.get("val/far_nll")),
+        val_rollout_nll=_optional_float(summary.get("val/rollout_nll")),
+    )
 
 
 def _validated_preflight_reports(reports: dict[str, Path]) -> dict[str, Path]:
@@ -420,9 +511,64 @@ def _plan(args: PlanArgs) -> None:
     print(json.dumps(payload, indent=2))
 
 
+def _json_text(payload: object) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def _check_output(path: Path, text: str) -> None:
+    if path.exists() and path.read_text() != text:
+        raise ValueError(f"refusing to replace different selection output: {path}")
+
+
+def _write_output(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(text)
+    temporary.replace(path)
+
+
+def select(args: SelectArgs) -> None:
+    """Collect final W&B values and write one reproducible stage decision."""
+    center = _treatment(args.treatment)
+    arms = stage_arms(args.stage, center)
+    run_paths = _run_paths(args.runs, arms)
+    api = wandb.Api(timeout=30)
+    outcomes = {
+        arm.arm_id: _validation_outcome(arm, run_paths[arm.arm_id], api.run(run_paths[arm.arm_id])) for arm in arms
+    }
+    selection = select_validation_winner(arms, outcomes)
+    treatment_payload = asdict(selection.winner.treatment)
+    evidence_payload = {
+        "schema_version": 1,
+        "stage": args.stage,
+        "rule": [
+            "A run must be terminal before selection.",
+            "A candidate must finish its exact D/U endpoint and final optimizer update.",
+            "Final validation NLL, far NLL, and rollout NLL must be finite.",
+            "Rank eligible candidates by validation NLL, then far NLL, then rollout NLL, then arm ID.",
+        ],
+        "source_treatment": asdict(center),
+        "winner_arm_id": selection.winner.arm_id,
+        "winner_run": outcomes[selection.winner.arm_id].run_path,
+        "winner_treatment": treatment_payload,
+        "ranking": [asdict(outcome) for outcome in selection.ranking],
+        "excluded": [{"arm_id": arm_id, "reasons": list(reasons)} for arm_id, reasons in selection.excluded],
+    }
+    treatment_text = _json_text(treatment_payload)
+    evidence_text = _json_text(evidence_payload)
+    _check_output(args.output, treatment_text)
+    _check_output(args.evidence, evidence_text)
+    _write_output(args.output, treatment_text)
+    _write_output(args.evidence, evidence_text)
+    print(f"selected {selection.winner.arm_id}; wrote {args.output} and {args.evidence}")
+
+
 def main(args: Command) -> None:
     if isinstance(args, PlanArgs):
         _plan(args)
+        return
+    if isinstance(args, SelectArgs):
+        select(args)
         return
     launch(args)
 
