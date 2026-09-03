@@ -110,6 +110,7 @@ _BASE_ADAM_BETAS: Final[tuple[float, float]] = (0.9, 0.95)
 _BASE_ADAM_EPS: Final[float] = 1e-12
 _SUPERVISED_POSITIONS_PER_WINDOW: Final[int] = 128
 _REPLAY_COOLDOWN_BATCHES: Final[int] = 16
+_LEGACY_RESERVOIR_CAPACITY: Final[int] = 4096
 _MIN_FREE_CACHE_GIB: Final[int] = 256
 _LONG_RUN_POSITIONS: Final[int] = D0
 # A 55M batch-1024 B200 benchmark reached 16.73% compiled MFU. Keep enough
@@ -2091,6 +2092,41 @@ def config_from_state(values: dict[str, object]) -> TrainConfig:
     return cfg
 
 
+def _config_from_eval_state(values: dict[str, object]) -> TrainConfig:
+    """Restore current or pre-cooldown O51 configuration for evaluation."""
+    if "replay_cooldown_batches" in values:
+        return config_from_state(values)
+
+    expected = {"experiment_id", "architecture", "awr_calibration", *_RUNTIME_CONFIG_FIELDS}
+    if set(values) != expected - {"replay_cooldown_batches"}:
+        return config_from_state(values)
+    if values["reservoir_capacity"] != _LEGACY_RESERVOIR_CAPACITY:
+        raise ValueError("legacy O51 evaluation checkpoint has an unknown replay reservoir")
+
+    migrated = {**values, "replay_cooldown_batches": _REPLAY_COOLDOWN_BATCHES}
+    return config_from_state(migrated)
+
+
+def load_checkpoint(
+    path: str,
+    *,
+    device: str = DEVICE,
+) -> tuple[GPT, TrainConfig, dict[str, object], dict[str, object]]:
+    """Load an O51 checkpoint without weakening strict resume compatibility."""
+    state = torch.load(path, map_location=device, weights_only=False)
+    cfg = _config_from_eval_state(state["cfg"])
+    validate_config(cfg)
+    encoded = state["model"].get("player_code_bytes")
+    if not isinstance(encoded, Tensor) or not encoded.numel():
+        raise ValueError("checkpoint has no embedded identity vocabulary")
+    vocabulary = _o50.PlayerVocabulary(_o50.decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
+    model = GPT(cfg, vocabulary).to(device)
+    model.load_state_dict(state["model"])
+    model.eval()
+    stats = load_stats(cfg)
+    return model, cfg, stats, state
+
+
 def validate_production_config(cfg: TrainConfig) -> None:
     """O51's declared grids are treatments, not forbidden production overrides."""
     validate_config(cfg)
@@ -2373,6 +2409,7 @@ def _install_o50_bindings() -> None:
     _o50._finalize_training = _finalize_training
     _o50._checkpoint_config = _checkpoint_config
     _o50.config_from_state = config_from_state
+    _o50.load_checkpoint = load_checkpoint
     _o50._ARCHITECTURE_FIELDS = _ARCHITECTURE_FIELDS
     _o50._AWR_FIELDS = _AWR_FIELDS
     _o50._RUNTIME_CONFIG_FIELDS = _RUNTIME_CONFIG_FIELDS

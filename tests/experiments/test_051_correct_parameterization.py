@@ -403,6 +403,30 @@ def test_checkpoint_identity_prevents_o50_or_changed_schedule_resume() -> None:
         exp.config_from_state(changed_schedule)
 
 
+def test_pre_cooldown_checkpoint_is_accepted_only_for_evaluation() -> None:
+    cfg = exp.config_for("base")
+    legacy = exp._checkpoint_config(cfg)
+    legacy.pop("replay_cooldown_batches")
+    legacy["reservoir_capacity"] = 4096
+
+    with pytest.raises(ValueError, match="replay_cooldown_batches"):
+        exp.config_from_state(legacy)
+
+    restored = exp._config_from_eval_state(legacy)
+    assert restored.replay_cooldown_batches == 16
+    assert restored.reservoir_capacity == 17 * restored.batch_size
+    assert exp._o50.load_checkpoint is exp.load_checkpoint
+
+
+def test_pre_cooldown_eval_rejects_unknown_reservoir() -> None:
+    legacy = exp._checkpoint_config(exp.config_for("base"))
+    legacy.pop("replay_cooldown_batches")
+    legacy["reservoir_capacity"] = 8192
+
+    with pytest.raises(ValueError, match="unknown replay reservoir"):
+        exp._config_from_eval_state(legacy)
+
+
 def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
     reject = exp.arm_decision(
         {"stability/centered_logit_abs_p999": 65.0},
