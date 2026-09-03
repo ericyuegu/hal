@@ -1805,6 +1805,34 @@ def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
     return tuple(float(selected[name]) for name in cfg.source_names)
 
 
+def _install_wandb_log_guard(cfg: TrainConfig) -> None:
+    """Install O51 metric semantics and arm gates after W&B initializes."""
+    arm_guard = _ArmGuard(cfg.warmup_steps)
+    original_log = _o50.wandb.log
+
+    def guarded_log(values: dict[str, object], *log_args: object, **log_kwargs: object) -> object:
+        payload = dict(values)
+        wall_mfu = payload.get("throughput/mfu")
+        update_s = payload.get("throughput/update_s")
+        if isinstance(wall_mfu, int | float) and isinstance(update_s, int | float):
+            payload["throughput/mfu_wall_clock"] = wall_mfu
+            phase_s = sum(
+                value
+                for name, value in payload.items()
+                if name.startswith("profile/") and name.endswith("_s") and isinstance(value, int | float)
+            )
+            if phase_s > 0:
+                payload["throughput/mfu_steady_state"] = wall_mfu * update_s / phase_s
+        result = original_log(payload, *log_args, **log_kwargs)
+        decision = arm_guard.observe(payload)
+        if decision is not None and decision.status != "pass":
+            reasons = "; ".join(decision.reasons)
+            raise RuntimeError(f"O51 arm {decision.status}: {reasons}")
+        return result
+
+    _o50.wandb.log = guarded_log
+
+
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict[str, object] | None) -> None:
     """Start an O51 run with its nested-data identity in the immutable config."""
     selection = data_selection(cfg)
@@ -1833,6 +1861,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict[str, object]
             x_stats_track_process_tree=True,
         ),
     )
+    # wandb.init() rebinds wandb.log. Install the guard only after that rebind.
+    _install_wandb_log_guard(cfg)
     if _o50.wandb.run is None:
         return
     _o50.wandb.define_metric("global_step")
@@ -2526,7 +2556,6 @@ def _run_train(args: TrainArgs) -> None:
     original_log = _o50.wandb.log
     original_host_metrics_sampler = _o50.HostMetricsSampler
     cache_roots = tuple(streams.BY_NAME[name].local_root for name in cfg.source_names)
-    arm_guard = _ArmGuard(cfg.warmup_steps)
 
     def o51_host_metrics_sampler(
         _ignored_roots: tuple[Path, ...],
@@ -2534,27 +2563,6 @@ def _run_train(args: TrainArgs) -> None:
     ) -> object:
         return original_host_metrics_sampler(cache_roots, **kwargs)
 
-    def log_with_mfu_semantics(values: dict[str, object], *log_args: object, **log_kwargs: object) -> object:
-        payload = dict(values)
-        wall_mfu = payload.get("throughput/mfu")
-        update_s = payload.get("throughput/update_s")
-        if isinstance(wall_mfu, int | float) and isinstance(update_s, int | float):
-            payload["throughput/mfu_wall_clock"] = wall_mfu
-            phase_s = sum(
-                value
-                for name, value in payload.items()
-                if name.startswith("profile/") and name.endswith("_s") and isinstance(value, int | float)
-            )
-            if phase_s > 0:
-                payload["throughput/mfu_steady_state"] = wall_mfu * update_s / phase_s
-        result = original_log(payload, *log_args, **log_kwargs)
-        decision = arm_guard.observe(payload)
-        if decision is not None and decision.status != "pass":
-            reasons = "; ".join(decision.reasons)
-            raise RuntimeError(f"O51 arm {decision.status}: {reasons}")
-        return result
-
-    _o50.wandb.log = log_with_mfu_semantics
     _o50.HostMetricsSampler = o51_host_metrics_sampler
     original_o50_file = _o50.__file__
     _o50.__file__ = __file__

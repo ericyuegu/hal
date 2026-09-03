@@ -8,6 +8,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -454,6 +455,32 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
             ).status
             == "pass"
         )
+
+
+def test_wandb_guard_is_installed_after_init_rebinds_log(monkeypatch) -> None:
+    logged: list[dict[str, object]] = []
+    run = SimpleNamespace(summary={}, log_code=lambda **_kwargs: None)
+
+    def rebound_log(values: dict[str, object], *_args: object, **_kwargs: object) -> None:
+        logged.append(values)
+
+    def init(**_kwargs: object) -> None:
+        monkeypatch.setattr(exp._o50.wandb, "log", rebound_log)
+        monkeypatch.setattr(exp._o50.wandb, "run", run)
+
+    monkeypatch.setattr(exp._o50.wandb, "init", init)
+    monkeypatch.setattr(exp._o50.wandb, "define_metric", lambda *_args, **_kwargs: None)
+    exp._init_wandb(exp.config_for("base"), "guard-test", None)
+
+    with pytest.raises(RuntimeError, match="raw button-logit"):
+        exp._o50.wandb.log(
+            {
+                "global_step": 25,
+                "stability/centered_logit_abs_p999": 1.0,
+                "stability/uncentered_button_logit_abs_p999": 129.0,
+            }
+        )
+    assert logged[-1]["global_step"] == 25
 
 
 def test_large_promotion_gate_requires_every_condition() -> None:
