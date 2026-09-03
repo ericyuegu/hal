@@ -24,6 +24,7 @@ from hal.data.o51 import DEFAULT_BAND_ROOT
 from hal.data.o51 import DEFAULT_O48_INDEX
 from hal.data.o51 import DEFAULT_O48_REMOTE
 from hal.data.o51 import TIER_SCALES
+from hal.data.o51 import InventoryEntry
 from hal.data.o51 import build_nested_corpus
 from hal.data.o51 import read_o48_inventory
 from hal.data.o51 import write_band_manifests
@@ -37,6 +38,7 @@ from hal.training.player_identity import load_player_identity_sidecar
 DEFAULT_PLAYER_SIDECAR = Path("data/processed/player-identity-v1/professional-code-v1.jsonl.gz")
 DEFAULT_PLAYER_SIDECAR_REMOTE = "s3://hal/processed/player-identity-v1/professional-code-v1.jsonl.gz"
 DEFAULT_SHARD_SIZE = 256 * 2**20
+_MATERIALIZATION_DOMAIN = b"o51-materialization-shard-v1\0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,22 @@ def _upload_artifacts(root: Path, remote: str, paths: list[Path]) -> None:
         client.upload_file(str(path), bucket, f"{prefix}/{relative}")
 
 
+def _materialization_order(
+    entries_by_band: dict[int, tuple[InventoryEntry, ...]],
+) -> list[tuple[InventoryEntry, int]]:
+    """Group selected rows by input shard while shuffling shard and row order."""
+
+    def key(item: tuple[InventoryEntry, int]) -> tuple[bytes, str, str, tuple[bytes, str, str]]:
+        entry, _scale = item
+        shard = f"{entry.source}\0{entry.shard}".encode()
+        shard_key = hashlib.blake2b(_MATERIALIZATION_DOMAIN + shard, digest_size=16).digest()
+        return shard_key, entry.source, entry.shard, entry.nesting_key
+
+    selected = [(entry, scale) for scale in TIER_SCALES for entry in entries_by_band.get(scale, ())]
+    selected.sort(key=key)
+    return selected
+
+
 def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
     """Build local bands in hash order and return their complete audit."""
     if args.predownload < 1 or args.shard_size < 1:
@@ -179,51 +197,56 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
             )
             for scale, path in train_paths.items()
         }
-        for scale in TIER_SCALES:
-            entries = corpus.bands[scale].entries
-            if args.max_rows_per_band is not None:
-                entries = entries[: args.max_rows_per_band]
-            for entry in tqdm(entries, desc=f"O51 band {scale}", unit="replay"):
-                source = streams.BY_NAME[entry.source]
-                dataset = source_datasets.get(entry.source)
-                if dataset is None:
-                    dataset = _dataset(source, args)
-                    source_datasets[entry.source] = dataset
-                compact = dataset[entry.row]
-                replay_id = str(compact["replay_id"])
-                frames = int(np.asarray(compact["num_frames"]).item())
-                if replay_id != entry.replay_id or frames != entry.frames:
-                    raise ValueError(
-                        f"{entry.source} row {entry.row}: inventory says {(entry.replay_id, entry.frames)}, "
-                        f"MDS says {(replay_id, frames)}"
-                    )
-                encoded = encode_o51_replay(
-                    compact,
-                    player_labels=player_lookup(compact),
-                    gamma=args.gamma,
-                    damage_shaping=args.damage_shaping,
-                    win_reward=args.win_reward,
-                    stock_value=args.stock_value,
+        entries_by_band = {
+            scale: (
+                corpus.bands[scale].entries
+                if args.max_rows_per_band is None
+                else corpus.bands[scale].entries[: args.max_rows_per_band]
+            )
+            for scale in TIER_SCALES
+        }
+        ordered = _materialization_order(entries_by_band)
+        for entry, scale in tqdm(ordered, desc="O51 shard-local materialization", unit="replay"):
+            source = streams.BY_NAME[entry.source]
+            dataset = source_datasets.get(entry.source)
+            if dataset is None:
+                dataset = _dataset(source, args)
+                source_datasets[entry.source] = dataset
+            compact = dataset[entry.row]
+            replay_id = str(compact["replay_id"])
+            frames = int(np.asarray(compact["num_frames"]).item())
+            if replay_id != entry.replay_id or frames != entry.frames:
+                raise ValueError(
+                    f"{entry.source} row {entry.row}: inventory says {(entry.replay_id, entry.frames)}, "
+                    f"MDS says {(replay_id, frames)}"
                 )
-                writers[scale].write(encoded)
+            encoded = encode_o51_replay(
+                compact,
+                player_labels=player_lookup(compact),
+                gamma=args.gamma,
+                damage_shaping=args.damage_shaping,
+                win_reward=args.win_reward,
+                stock_value=args.stock_value,
+            )
+            writers[scale].write(encoded)
 
-                p1_valid = np.asarray(encoded[f"p1_{O51_RETURN_SUFFIX}_valid"], dtype=np.uint8)
-                p2_valid = np.asarray(encoded[f"p2_{O51_RETURN_SUFFIX}_valid"], dtype=np.uint8)
-                terminal = bool(p1_valid.all() and p2_valid.all())
-                identities = sum(int(encoded[f"p{port}_player_id"]) != 0 for port in (1, 2))
-                counts = Counter(
-                    replays=1,
-                    frames=frames,
-                    potential_targets=2 * (frames - 1),
-                    terminal_replays=terminal,
-                    truncated_replays=not terminal,
-                    identity_sides=identities,
-                    awr_eligible_sides=2 * terminal,
-                    awr_eligible_frames=int(p1_valid.sum()) + int(p2_valid.sum()),
-                )
-                source_report[entry.source].update(counts)
-                source_band_report[entry.source][scale].update(counts)
-                band_report[scale].update(counts)
+            p1_valid = np.asarray(encoded[f"p1_{O51_RETURN_SUFFIX}_valid"], dtype=np.uint8)
+            p2_valid = np.asarray(encoded[f"p2_{O51_RETURN_SUFFIX}_valid"], dtype=np.uint8)
+            terminal = bool(p1_valid.all() and p2_valid.all())
+            identities = sum(int(encoded[f"p{port}_player_id"]) != 0 for port in (1, 2))
+            counts = Counter(
+                replays=1,
+                frames=frames,
+                potential_targets=2 * (frames - 1),
+                terminal_replays=terminal,
+                truncated_replays=not terminal,
+                identity_sides=identities,
+                awr_eligible_sides=2 * terminal,
+                awr_eligible_frames=int(p1_valid.sum()) + int(p2_valid.sum()),
+            )
+            source_report[entry.source].update(counts)
+            source_band_report[entry.source][scale].update(counts)
+            band_report[scale].update(counts)
 
     raw_sizes: dict[int, int] = {}
     largest_shard_samples: dict[int, int] = {}
@@ -266,6 +289,7 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
         "normalization_stats": str(normalization_path),
         "normalization_stats_sha256": normalization_sha256,
         "normalization_weighting": "content-unique-replays",
+        "materialization_order": "blake2b-shuffled-input-shards-v1",
         "player_sidecar_sha256": sidecar.sha256,
         "player_vocabulary_sha256": sidecar.vocabulary.sha256,
         "parameters": {

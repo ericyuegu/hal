@@ -97,7 +97,7 @@ class Args:
     memory_limit_gib: int | None = 384
     """Hard system-memory limit in GiB; None leaves the Modal default."""
     disk_gib: int = 2048
-    """Ephemeral SSD in GiB. O51 is raised to its required 3 TiB minimum automatically."""
+    """Ephemeral SSD in GiB. O51 keeps a 2 TiB minimum."""
     image: str = IMAGE
     """Dependency image imported from a registry. The clean local source is copied on top."""
     cloud: str | None = None
@@ -361,7 +361,7 @@ def gpu_request(gpu: str) -> str | list[str] | None:
 def requested_disk_gib(args: Args) -> int:
     """Keep legacy launch defaults while enforcing O51's full-tier disk floor."""
     script = experiment_script(args.cmd)
-    minimum = 3072 if script is not None and script.name == "051_correct_parameterization.py" else 0
+    minimum = 2048 if script is not None and script.name == "051_correct_parameterization.py" else 0
     return max(args.disk_gib, minimum)
 
 

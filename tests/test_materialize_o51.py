@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from hal.data.o51 import InventoryEntry
 from hal.scripts import materialize_o51
 
 
@@ -67,3 +68,31 @@ def test_streaming_endpoint_uses_standard_aws_endpoint(
     materialize_o51._bridge_streaming_endpoint()
 
     assert materialize_o51.os.environ["S3_ENDPOINT_URL"] == "https://r2.example"
+
+
+def test_materialization_order_groups_input_shards_without_changing_band_membership() -> None:
+    def entry(replay: str, shard: str) -> InventoryEntry:
+        return InventoryEntry(
+            source="source",
+            row=int(replay),
+            shard=shard,
+            replay_id=replay,
+            frames=100,
+            content_sha1=f"{int(replay):040x}",
+        )
+
+    entries = {
+        1: (entry("1", "a"), entry("2", "b")),
+        2: (entry("3", "a"),),
+        4: (entry("4", "c"),),
+        8: (entry("5", "b"),),
+    }
+
+    ordered = materialize_o51._materialization_order(entries)
+
+    assert ordered == materialize_o51._materialization_order(entries)
+    assert set(ordered) == {(candidate, scale) for scale, candidates in entries.items() for candidate in candidates}
+    positions: dict[str, list[int]] = {}
+    for index, (candidate, _scale) in enumerate(ordered):
+        positions.setdefault(candidate.shard, []).append(index)
+    assert all(indices == list(range(min(indices), max(indices) + 1)) for indices in positions.values())

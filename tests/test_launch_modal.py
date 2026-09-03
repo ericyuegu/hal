@@ -56,12 +56,12 @@ def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
     assert args.gpu_memory_snapshot
 
 
-def test_o51_automatically_requests_three_tib_ephemeral_ssd() -> None:
+def test_o51_uses_two_tib_ephemeral_ssd_floor() -> None:
     experiment = "experiments/051_correct_parameterization.py"
     args = Args(cmd=["uv", "run", experiment])
 
-    assert requested_disk_gib(args) == 3072
-    assert function_resources(args)["ephemeral_disk"] == 3072 * 1024
+    assert requested_disk_gib(args) == 2048
+    assert function_resources(args)["ephemeral_disk"] == 2048 * 1024
     assert requested_disk_gib(Args(cmd=["uv", "run", experiment], disk_gib=4096)) == 4096
 
 
