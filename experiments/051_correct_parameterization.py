@@ -1197,10 +1197,11 @@ def arm_decision(
 
 
 class _ArmGuard:
-    """Accumulate post-warmup clipping and require sustained growth to persist."""
+    """Apply live magnitude gates and the endpoint clipping gate."""
 
-    def __init__(self, warmup_updates: int) -> None:
+    def __init__(self, warmup_updates: int, final_update: int) -> None:
         self._warmup_updates = warmup_updates
+        self._final_update = final_update
         self._last_training_update = 0
         self._clip_sum = 0.0
         self._clip_updates = 0
@@ -1215,8 +1216,7 @@ class _ArmGuard:
             return None
         centered = metrics.get("stability/centered_logit_abs_p999")
         rms = metrics.get("stability/action_pre_norm_rms", metrics.get("stability/button_pre_norm_rms_min"))
-        if not isinstance(centered, int | float) and not isinstance(rms, int | float):
-            return None
+        has_stability = isinstance(centered, int | float) or isinstance(rms, int | float)
         numeric = {name: float(value) for name, value in metrics.items() if isinstance(value, int | float)}
         clip_fraction = metrics.get("optimizer/clip_fraction")
         window_updates = update - self._last_training_update
@@ -1230,7 +1230,7 @@ class _ArmGuard:
         self._last_training_update = update
         post_warmup_clip = self._clip_sum / max(self._clip_updates, 1)
 
-        if update >= self._warmup_updates:
+        if has_stability and update >= self._warmup_updates:
             if self._initial_centered is None and isinstance(centered, int | float):
                 self._initial_centered = max(float(centered), torch.finfo(torch.float32).tiny)
             if self._initial_rms is None and isinstance(rms, int | float):
@@ -1241,9 +1241,11 @@ class _ArmGuard:
             if isinstance(rms, int | float) and self._initial_rms is not None:
                 grew = float(rms) >= 4 * self._initial_rms
                 self._rms_growth_windows = self._rms_growth_windows + 1 if grew else 0
+        if not has_stability and update < self._final_update:
+            return None
         return arm_decision(
             numeric,
-            post_warmup_clip_fraction=post_warmup_clip,
+            post_warmup_clip_fraction=post_warmup_clip if update >= self._final_update else 0.0,
             initial_action_pre_norm_rms=self._initial_rms,
             initial_centered_logit_p999=self._initial_centered,
             sustained_growth=max(self._centered_growth_windows, self._rms_growth_windows) >= 4,
@@ -1807,7 +1809,7 @@ def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
 
 def _install_wandb_log_guard(cfg: TrainConfig) -> None:
     """Install O51 metric semantics and arm gates after W&B initializes."""
-    arm_guard = _ArmGuard(cfg.warmup_steps)
+    arm_guard = _ArmGuard(cfg.warmup_steps, cfg.max_steps)
     original_log = _o50.wandb.log
 
     def guarded_log(values: dict[str, object], *log_args: object, **log_kwargs: object) -> object:

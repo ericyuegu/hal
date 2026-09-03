@@ -421,7 +421,7 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
     assert reject.status == "reject"
     assert pause.status == "pause"
 
-    guard = exp._ArmGuard(warmup_updates=10)
+    guard = exp._ArmGuard(warmup_updates=10, final_update=20)
     assert guard.observe({"global_step": 10, "stability/centered_logit_abs_p999": 1.0}).status == "pass"
     decision = guard.observe(
         {
@@ -432,7 +432,7 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
     )
     assert decision.status == "reject"
 
-    warmup_growth = exp._ArmGuard(warmup_updates=10)
+    warmup_growth = exp._ArmGuard(warmup_updates=10, final_update=100)
     for update in range(1, 10):
         assert (
             warmup_growth.observe(
@@ -472,7 +472,29 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
         == "reject"
     )
 
-    alternating = exp._ArmGuard(warmup_updates=0)
+    endpoint_clipping = exp._ArmGuard(warmup_updates=10, final_update=30)
+    assert (
+        endpoint_clipping.observe(
+            {
+                "global_step": 10,
+                "stability/centered_logit_abs_p999": 1.0,
+            }
+        ).status
+        == "pass"
+    )
+    assert (
+        endpoint_clipping.observe(
+            {
+                "global_step": 20,
+                "optimizer/clip_fraction": 1.0,
+                "stability/centered_logit_abs_p999": 1.0,
+            }
+        ).status
+        == "pass"
+    )
+    assert endpoint_clipping.observe({"global_step": 30}).status == "reject"
+
+    alternating = exp._ArmGuard(warmup_updates=0, final_update=100)
     assert (
         alternating.observe(
             {
