@@ -102,6 +102,20 @@ def test_forward_matches_020_at_full_context(exp020) -> None:
     assert torch.equal(trunk(x, ctx_pad), want)
 
 
+def test_unpadded_forward_matches_dense_causal_values_and_gradients() -> None:
+    trunk = _trunk(_cfg(attn_window=0), prefer_flex=False, device="cpu", seed=17)
+    dense_input = torch.randn(3, _GEOM["L_ctx"], _GEOM["d_model"], requires_grad=True)
+    unpadded_input = dense_input.detach().clone().requires_grad_(True)
+
+    dense = trunk.forward_dense(dense_input, torch.zeros(3, dtype=torch.long))
+    unpadded = trunk.forward_unpadded(unpadded_input)
+    dense.square().mean().backward()
+    unpadded.square().mean().backward()
+
+    torch.testing.assert_close(unpadded, dense)
+    torch.testing.assert_close(unpadded_input.grad, dense_input.grad)
+
+
 @pytest.mark.parametrize("attn_window", [0, 8, 128])
 def test_dense_mask_matches_double_loop(attn_window: int) -> None:
     """The mask states three rules: causal, inside the window, and clear of the left padding. The

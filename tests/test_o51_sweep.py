@@ -12,7 +12,7 @@ from types import ModuleType
 
 import pytest
 
-from hal.data.o51 import D0
+from hal.training.o51_data import D0
 from hal.training.o51_sweep import SweepArm
 from hal.training.o51_sweep import Treatment
 from hal.training.o51_sweep import batch_arms
@@ -107,11 +107,8 @@ def test_declared_stage_grid_has_exact_arm_count(factory, count: int) -> None:
     assert len({arm.arm_id for arm in arms}) == count
 
 
-def test_batch_2048_is_added_only_after_memory_gate() -> None:
+def test_batch_grid_excludes_failed_2048_shape() -> None:
     assert {arm.treatment.batch_size for arm in batch_arms(Treatment())} == {128, 256, 512, 1024}
-    gated = batch_arms(Treatment(), include_2048=True)
-    assert len(gated) == 10
-    assert {arm.treatment.batch_size for arm in gated} == {128, 256, 512, 1024, 2048}
 
 
 def test_every_arm_uses_an_exact_matched_data_endpoint() -> None:

@@ -22,6 +22,7 @@ import hal.training.dataloader as dataloader
 from hal.data.schema import SCHEMA_VERSION
 from hal.streams import StreamSource
 from hal.training.dataloader import ResumableStreamingDataLoader
+from hal.training.dataloader import StreamSamplePrefix
 from hal.training.dataloader import WindowDataset
 from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
@@ -103,6 +104,41 @@ def test_multistream_dataset_applies_explicit_source_weights(tmp_path: Path) -> 
     assert dataset.samples_per_stream.tolist() == [3, 5]
 
 
+def test_multistream_dataset_selects_direct_prefixes_with_exclusions(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_scalar_mds(first, "train", range(0, 7))
+    _write_scalar_mds(second, "train", range(10, 17))
+    sources = (
+        StreamSource("first", None, first),  # type: ignore[arg-type]
+        StreamSource("second", None, second),  # type: ignore[arg-type]
+    )
+
+    dataset, names = _make_streaming_dataset(
+        None,
+        "train",
+        sources=sources,
+        source_prefixes=(StreamSamplePrefix(5, (2,)), StreamSamplePrefix(3)),
+        remote=None,
+        shuffle=False,
+        shuffle_seed=123,
+        cache_limit=None,
+        shuffle_block_size=16,
+        predownload=None,
+        batch_size=2,
+    )
+
+    assert names == ("first", "second")
+    assert dataset.samples_per_stream.tolist() == [7, 7]
+    assert dataset.selected_samples_per_stream.tolist() == [4, 3]
+    assert [stream.choose for stream in dataset.streams] == [4, 3]
+    assert [int(sample["value"]) for sample in dataset] == [0, 1, 3, 4, 10, 11, 12]
+    state = dataset.state_dict(7, from_beginning=True)
+    assert state["sample_selection_sha256"] == dataset.sample_selection_sha256
+    with pytest.raises(ValueError, match="selection changed"):
+        dataset.load_state_dict({**state, "sample_selection_sha256": "0" * 64})
+
+
 def test_source_weights_must_match_multistream_sources(tmp_path: Path) -> None:
     source = StreamSource("source", "s3://example/source", Path("cache/source"))
     kwargs = {
@@ -122,6 +158,21 @@ def test_source_weights_must_match_multistream_sources(tmp_path: Path) -> None:
         _make_streaming_dataset(None, sources=[source], source_weights=(0.0,), **kwargs)
     with pytest.raises(ValueError, match="requires sources"):
         _make_streaming_dataset(str(tmp_path), sources=None, source_weights=(1.0,), **kwargs)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _make_streaming_dataset(
+            None,
+            sources=[source],
+            source_weights=(1.0,),
+            source_prefixes=(StreamSamplePrefix(1),),
+            **kwargs,
+        )
+    with pytest.raises(ValueError, match="requires sources"):
+        _make_streaming_dataset(
+            str(tmp_path),
+            sources=None,
+            source_prefixes=(StreamSamplePrefix(1),),
+            **kwargs,
+        )
 
 
 def test_streaming_dataset_mode_selection_is_strict(tmp_path: Path) -> None:

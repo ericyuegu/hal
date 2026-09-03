@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -63,6 +64,116 @@ _STREAMING_REPLAY_ID = "_streaming_replay_id"
 
 def _loader_generator(seed: int) -> torch.Generator:
     return torch.Generator().manual_seed(seed)
+
+
+@dataclass(frozen=True, slots=True)
+class StreamSamplePrefix:
+    """A raw stream prefix with a small set of excluded row indices."""
+
+    stop: int
+    excluded: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stop, int) or isinstance(self.stop, bool) or self.stop < 1:
+            raise ValueError("stream prefix stop must be a positive integer")
+        if self.excluded != tuple(sorted(set(self.excluded))):
+            raise ValueError("stream prefix exclusions must be sorted and unique")
+        if any(not isinstance(row, int) or isinstance(row, bool) or not 0 <= row < self.stop for row in self.excluded):
+            raise ValueError("stream prefix exclusions must be integer rows inside the prefix")
+        if self.sample_count < 1:
+            raise ValueError("stream prefix must select at least one sample")
+
+    @property
+    def sample_count(self) -> int:
+        return self.stop - len(self.excluded)
+
+
+class _PrefixStreamingDataset(StreamingDataset):
+    """Mosaic dataset whose per-stream sample map is a direct raw prefix view."""
+
+    def __init__(
+        self,
+        *,
+        streams: Sequence[Stream],
+        sample_prefixes: Sequence[StreamSamplePrefix],
+        **kwargs: Any,
+    ) -> None:
+        self.sample_prefixes = tuple(sample_prefixes)
+        super().__init__(streams=streams, **kwargs)
+        if len(self.sample_prefixes) != self.num_streams:
+            raise ValueError(
+                f"sample prefix count {len(self.sample_prefixes)} does not match stream count {self.num_streams}"
+            )
+        too_long = {
+            index: (prefix.stop, int(samples))
+            for index, (prefix, samples) in enumerate(zip(self.sample_prefixes, self.samples_per_stream, strict=True))
+            if prefix.stop > samples
+        }
+        if too_long:
+            raise ValueError(f"stream prefixes exceed their source datasets: {too_long}")
+        chosen = np.asarray([prefix.sample_count for prefix in self.sample_prefixes], dtype=np.int64)
+        if not np.array_equal(chosen, np.asarray([stream.choose for stream in self.streams], dtype=np.int64)):
+            raise ValueError("stream weights do not match the requested prefix sample counts")
+        self.selected_samples_per_stream = chosen
+        self.sample_selection_sha256 = self._sample_selection_sha256()
+
+    def _sample_selection_sha256(self) -> str:
+        digest = hashlib.sha256()
+        for stream, prefix in zip(self.streams, self.sample_prefixes, strict=True):
+            digest.update(f"{stream.remote}\0{stream.split}\0{prefix.stop}\0".encode())
+            for row in prefix.excluded:
+                digest.update(f"{row},".encode())
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def resample_streams(
+        self,
+        epoch: int,
+        stream_id: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return exact prefix rows; Mosaic still shuffles this map by epoch."""
+        del epoch
+        stream_ids = range(self.num_streams) if stream_id is None else (stream_id,)
+        shuffle_units: list[int] = []
+        selected_ids: list[np.ndarray] = []
+        for selected_stream in stream_ids:
+            prefix = self.sample_prefixes[selected_stream]
+            shard_begin = int(self.shard_offset_per_stream[selected_stream])
+            shard_end = shard_begin + int(self.shards_per_stream[selected_stream])
+            for shard_id in range(shard_begin, shard_end):
+                local_start = int(
+                    self.sample_offset_per_shard[shard_id] - self.sample_offset_per_stream[selected_stream]
+                )
+                local_stop = min(local_start + int(self.samples_per_shard[shard_id]), prefix.stop)
+                if local_start >= prefix.stop:
+                    break
+                rows = np.arange(local_start, local_stop, dtype=np.int64)
+                excluded = [row - local_start for row in prefix.excluded if local_start <= row < local_stop]
+                if excluded:
+                    keep = np.ones(len(rows), dtype=np.bool_)
+                    keep[excluded] = False
+                    rows = rows[keep]
+                if len(rows):
+                    shuffle_units.append(len(rows))
+                    selected_ids.append(rows + int(self.sample_offset_per_stream[selected_stream]))
+        if not selected_ids:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+        units = np.asarray(shuffle_units, dtype=np.int64)
+        sample_ids = np.concatenate(selected_ids).astype(np.int64, copy=False)
+        expected = sum(self.sample_prefixes[index].sample_count for index in stream_ids)
+        if len(sample_ids) != expected or int(units.sum()) != expected:
+            raise RuntimeError(f"direct prefix map contains {len(sample_ids)} samples, expected {expected}")
+        return units, sample_ids
+
+    def state_dict(self, num_samples: int, from_beginning: bool) -> dict[str, Any]:
+        state = super().state_dict(num_samples, from_beginning)
+        state["sample_selection_sha256"] = self.sample_selection_sha256
+        return state
+
+    def load_state_dict(self, obj: dict[str, Any]) -> None:
+        if obj.get("sample_selection_sha256") != self.sample_selection_sha256:
+            raise ValueError("stream prefix selection changed across resume")
+        super().load_state_dict(obj)
 
 
 class PolicyReplayDataset(IterableDataset):
@@ -171,6 +282,7 @@ def _make_streaming_dataset(
     batch_size: int,
     shuffle_algo: str | None = None,
     source_weights: Sequence[float] | None = None,
+    source_prefixes: Sequence[StreamSamplePrefix] | None = None,
     download_retry: int = 2,
 ) -> tuple[StreamingDataset, tuple[str, ...]]:
     """Build one single- or multi-stream MDS dataset with strict mode selection."""
@@ -186,7 +298,22 @@ def _make_streaming_dataset(
         names = tuple(source.name for source in sources)
         if len(set(names)) != len(names):
             raise ValueError("source names must be unique")
-        if source_weights is not None:
+        if source_prefixes is not None:
+            if source_weights is not None:
+                raise ValueError("source_prefixes cannot be combined with source_weights")
+            if len(source_prefixes) != len(sources):
+                raise ValueError(f"source_prefixes length {len(source_prefixes)} != source count {len(sources)}")
+            selected_streams = [
+                Stream(
+                    remote=source.remote,
+                    local=str(source.local_root),
+                    split=split,
+                    choose=prefix.sample_count,
+                    download_retry=download_retry,
+                )
+                for source, prefix in zip(sources, source_prefixes, strict=True)
+            ]
+        elif source_weights is not None:
             if len(source_weights) != len(sources):
                 raise ValueError(f"source_weights length {len(source_weights)} != source count {len(sources)}")
             if any(not math.isfinite(weight) or weight <= 0 for weight in source_weights):
@@ -215,30 +342,26 @@ def _make_streaming_dataset(
                 )
                 for source in sources
             ]
-        if shuffle_seed is None:
-            dataset = StreamingDataset(
-                streams=selected_streams,
-                cache_limit=cache_limit,
-                predownload=predownload,
-                batch_size=batch_size,
-                shuffle=should_shuffle,
-                shuffle_block_size=shuffle_block_size,
-                **shuffle_options,
-            )
-        else:
-            dataset = StreamingDataset(
-                streams=selected_streams,
-                cache_limit=cache_limit,
-                predownload=predownload,
-                batch_size=batch_size,
-                shuffle=should_shuffle,
-                shuffle_seed=shuffle_seed,
-                shuffle_block_size=shuffle_block_size,
-                **shuffle_options,
-            )
+        dataset_type = _PrefixStreamingDataset if source_prefixes is not None else StreamingDataset
+        prefix_options = {} if source_prefixes is None else {"sample_prefixes": source_prefixes}
+        dataset_options: dict[str, Any] = {
+            "streams": selected_streams,
+            "cache_limit": cache_limit,
+            "predownload": predownload,
+            "batch_size": batch_size,
+            "shuffle": should_shuffle,
+            "shuffle_block_size": shuffle_block_size,
+            **prefix_options,
+            **shuffle_options,
+        }
+        if shuffle_seed is not None:
+            dataset_options["shuffle_seed"] = shuffle_seed
+        dataset = dataset_type(**dataset_options)
     else:
         if source_weights is not None:
             raise ValueError("source_weights requires sources")
+        if source_prefixes is not None:
+            raise ValueError("source_prefixes requires sources")
         if data_root is None:
             raise ValueError("data_root is required when sources are not provided")
         names = ()
@@ -531,6 +654,7 @@ def make_loader(
     remote: str | None = None,
     sources: Sequence[StreamSource] | None = None,
     source_weights: Sequence[float] | None = None,
+    source_prefixes: Sequence[StreamSamplePrefix] | None = None,
     cache_limit: str | int | None = None,
     shuffle_block_size: int | None = None,
     shuffle: bool | None = None,
@@ -615,6 +739,7 @@ def make_loader(
         split,
         sources=sources,
         source_weights=source_weights,
+        source_prefixes=source_prefixes,
         remote=remote,
         shuffle=shuffle,
         shuffle_seed=shuffle_seed,

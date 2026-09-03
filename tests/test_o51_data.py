@@ -1,84 +1,40 @@
-"""Contracts for O51 nested bands and training-only replay columns."""
-
-import gzip
-import hashlib
-import json
-from pathlib import Path
-
 import numpy as np
-from streaming import MDSWriter
-from streaming import StreamingDataset
 
 from hal import streams
-from hal.data.o51 import D0
-from hal.data.o51 import DEFAULT_BAND_REMOTE
-from hal.data.o51 import DEFAULT_BAND_ROOT
-from hal.data.o51 import O48_PROTOCOL
-from hal.data.o51 import OFFICIAL_CORPUS_TARGETS
-from hal.data.o51 import OFFICIAL_RAW_REPLAYS
-from hal.data.o51 import OFFICIAL_TIER_REPLAYS
-from hal.data.o51 import OFFICIAL_TIER_TARGETS
-from hal.data.o51 import OFFICIAL_UNIQUE_REPLAYS
-from hal.data.o51 import Inventory
-from hal.data.o51 import InventoryEntry
-from hal.data.o51 import build_nested_corpus
-from hal.data.o51 import iter_band_manifest
-from hal.data.o51 import read_o48_inventory
-from hal.data.o51 import write_band_manifests
-from hal.data.o51_schema import O51_MDS_COLUMNS
-from hal.data.o51_schema import O51_MDS_SCHEMA_VERSION
-from hal.data.o51_schema import O51_RETURN_SUFFIX
 from hal.data.policy_schema import PACKED_STATE_SUFFIXES
 from hal.data.policy_schema import pack_player_state
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
-from hal.training.o51_data import encode_o51_replay
-from hal.training.o51_data import o51_replay_labels
-
-_FIXTURE_CORPUS_HASH = "162a9f6e10f8d71d71a2fa539ccd8d1ed85c6236e5c73b7f96e39f6bcd78b4cf"
-_FIXTURE_BAND_HASHES = {
-    1: "3c6371e4825abe0a257c70ce712cd64254fcef7d8757cc07eb0a65a99562b67b",
-    2: "12becdf19075330d68c9565d2ff35bb3f6159ec8db27f86581d7698246720879",
-    4: "93b810f8c85db830320eb04843f28ccf258365583dcbceb25f44546c06fa22a3",
-    8: "08ecabe87760e8fecf25371680b320d2dd158fa52663789716cc255924b4458e",
-}
-_FIXTURE_TIER_HASHES = {
-    1: "3c6371e4825abe0a257c70ce712cd64254fcef7d8757cc07eb0a65a99562b67b",
-    2: "a2ac28df04f76ca4bf11f4ae660b15dbbb8a5870c1918ae25aed9abca6f6afe3",
-    4: "18da17669e432b7aa67e90a18373b7214cd035bcdcd7c356379cfee72d16589d",
-    8: "d661e5d3648681a7d7429b7f21947de23431db615e62ef1720ad156633074b22",
-}
-
-
-def _inventory() -> Inventory:
-    entries = []
-    digest = hashlib.sha256()
-    for source_index, source in enumerate(streams.POLICY_WORLD_V7_SOURCES):
-        for row in range(8):
-            entry = InventoryEntry(
-                source=source.name,
-                row=row,
-                shard=f"shard-{row // 2}",
-                replay_id=f"{source.name}-{row}",
-                frames=100 + 8 * source_index + row,
-                content_sha1=hashlib.sha1(f"{source.name}:{row}".encode()).hexdigest(),
-            )
-            entries.append(entry)
-            digest.update(
-                f"{entry.source}\t{entry.row}\t{entry.shard}\t{entry.replay_id}\t"
-                f"{entry.frames}\t{entry.content_sha1}\n".encode()
-            )
-    assert digest.hexdigest() == _FIXTURE_CORPUS_HASH
-    return Inventory({"corpus_hash": digest.hexdigest()}, tuple(entries))
+from hal.training import returns as returns_lib
+from hal.training.o51_data import CORPUS_SHA256
+from hal.training.o51_data import D0
+from hal.training.o51_data import EXCLUDED_SOURCE_ROWS
+from hal.training.o51_data import O51_RETURN_SUFFIX
+from hal.training.o51_data import OFFICIAL_CORPUS_TARGETS
+from hal.training.o51_data import OFFICIAL_RAW_REPLAYS
+from hal.training.o51_data import OFFICIAL_TIER_REPLAYS
+from hal.training.o51_data import OFFICIAL_TIER_TARGETS
+from hal.training.o51_data import OFFICIAL_UNIQUE_REPLAYS
+from hal.training.o51_data import SOURCE_MANIFEST_SHA256
+from hal.training.o51_data import TIER_SHA256
+from hal.training.o51_data import DirectO51ReplayLabels
+from hal.training.o51_data import corpus_selection
+from hal.training.player_identity import ReplayPlayerLookup
 
 
-def test_official_nested_data_accounting_is_pinned() -> None:
+def test_official_direct_data_accounting_is_pinned() -> None:
     assert D0 == 2**30
-    assert (OFFICIAL_RAW_REPLAYS, OFFICIAL_UNIQUE_REPLAYS) == (1_300_640, 1_300_638)
+    assert (OFFICIAL_RAW_REPLAYS, OFFICIAL_UNIQUE_REPLAYS) == (
+        1_300_640,
+        1_300_638,
+    )
     assert OFFICIAL_CORPUS_TARGETS == 26_582_742_076
-    assert Path("data/processed/policy-world-v7-content-unique-nested-awr-v1") == DEFAULT_BAND_ROOT
-    assert DEFAULT_BAND_REMOTE == "s3://hal/processed/policy-world-v7-content-unique-nested-awr-v1"
-    assert OFFICIAL_TIER_REPLAYS == {1: 162_598, 2: 325_176, 4: 650_331, 8: 1_300_638}
+    assert OFFICIAL_TIER_REPLAYS == {
+        1: 162_598,
+        2: 325_176,
+        4: 650_331,
+        8: 1_300_638,
+    }
     assert OFFICIAL_TIER_TARGETS == {
         1: 3_353_805_100,
         2: 6_686_081_812,
@@ -87,61 +43,36 @@ def test_official_nested_data_accounting_is_pinned() -> None:
     }
 
 
-def test_nested_selection_is_strict_source_prefix_and_hash_pinned() -> None:
-    inventory = _inventory()
-    corpus = build_nested_corpus(inventory, strict_official=False)
+def test_tiers_are_direct_source_prefixes_with_pinned_hashes() -> None:
+    selection = corpus_selection()
+    source_names = [source.name for source in streams.POLICY_WORLD_V7_SOURCES]
 
-    assert {scale: band.sha256 for scale, band in corpus.bands.items()} == _FIXTURE_BAND_HASHES
-    assert {scale: tier.sha256 for scale, tier in corpus.tiers.items()} == _FIXTURE_TIER_HASHES
-    assert {scale: tier.unique_replays for scale, tier in corpus.tiers.items()} == {
-        1: 44,
-        2: 88,
-        4: 176,
-        8: 352,
+    assert selection.corpus_hash == CORPUS_SHA256
+    assert selection.source_manifest_sha256 == {name: SOURCE_MANIFEST_SHA256[name] for name in source_names}
+    assert {scale: tier.sha256 for scale, tier in selection.tiers.items()} == TIER_SHA256
+    assert {scale: tier.unique_replays for scale, tier in selection.tiers.items()} == OFFICIAL_TIER_REPLAYS
+    assert {scale: tier.potential_targets for scale, tier in selection.tiers.items()} == OFFICIAL_TIER_TARGETS
+    for tier in selection.tiers.values():
+        assert [source.source for source in tier.sources] == source_names
+        assert tier.frames == tier.potential_targets // 2 + tier.unique_replays
+
+
+def test_only_full_tier_uses_the_two_row_exclusion_sidecar() -> None:
+    selection = corpus_selection()
+    source = "professional-monotheon-policy-world-v7"
+    selected = {
+        scale: next(view for view in tier.sources if view.source == source) for scale, tier in selection.tiers.items()
     }
-    previous: set[str] = set()
-    for scale in (1, 2, 4, 8):
-        tier = corpus.tiers[scale]
-        replay_ids = {entry.replay_id for entry in tier.entries}
-        assert previous < replay_ids
-        assert set(tier.source_replays) == {source.name for source in streams.POLICY_WORLD_V7_SOURCES}
-        assert set(tier.source_replays.values()) == {scale}
-        for source in streams.POLICY_WORLD_V7_SOURCES:
-            assert sorted(entry.row for entry in tier.entries if entry.source == source.name) == list(range(scale))
-        previous = replay_ids
-    assert previous == {entry.replay_id for entry in inventory.entries}
-    assert sum(band.unique_replays for band in corpus.bands.values()) == len(inventory.entries)
 
-
-def test_o48_inventory_authentication_and_band_manifests_are_exact(tmp_path: Path) -> None:
-    inventory = _inventory()
-    path = tmp_path / "inventory.tsv.gz"
-    header = {
-        "schema_version": 1,
-        "protocol": O48_PROTOCOL,
-        "source_names": [source.name for source in streams.POLICY_WORLD_V7_SOURCES],
-        "canonical_replays": len(inventory.entries),
-        "canonical_loss_positions": sum(entry.potential_targets for entry in inventory.entries),
-        "corpus_hash": inventory.corpus_hash,
+    assert {source: (14_160, 14_163)} == EXCLUDED_SOURCE_ROWS
+    assert {scale: view.stop for scale, view in selected.items()} == {
+        1: 2_042,
+        2: 4_083,
+        4: 8_166,
+        8: 16_333,
     }
-    with gzip.open(path, "wt", encoding="utf-8") as handle:
-        handle.write(f"#{json.dumps(header)}\n")
-        for entry in inventory.entries:
-            handle.write(
-                f"{entry.source}\t{entry.row}\t{entry.shard}\t{entry.replay_id}\t"
-                f"{entry.frames}\t{entry.content_sha1}\n"
-            )
-
-    loaded = read_o48_inventory(path)
-    assert loaded.entries == inventory.entries
-    assert loaded.corpus_hash == inventory.corpus_hash
-    corpus = build_nested_corpus(loaded, strict_official=False)
-    paths = write_band_manifests(corpus, tmp_path / "bands")
-    first_payloads = [manifest.read_bytes() for manifest in paths]
-    assert write_band_manifests(corpus, tmp_path / "bands") == paths
-    assert [manifest.read_bytes() for manifest in paths] == first_payloads
-    for scale, manifest in zip((1, 2, 4, 8), paths, strict=True):
-        assert tuple(iter_band_manifest(manifest)) == corpus.bands[scale].entries
+    assert all(not selected[scale].excluded_rows for scale in (1, 2, 4))
+    assert selected[8].excluded_rows == EXCLUDED_SOURCE_ROWS[source]
 
 
 def _compact_replay(frames: int, *, terminal: bool) -> dict[str, object]:
@@ -152,7 +83,8 @@ def _compact_replay(frames: int, *, terminal: bool) -> dict[str, object]:
         elif encoding == "int":
             compact[name] = 0
         else:
-            compact[name] = np.zeros(frames, dtype=np.dtype(encoding.removeprefix("ndarray:")))
+            dtype = np.dtype(encoding.removeprefix("ndarray:"))
+            compact[name] = np.zeros(frames, dtype=dtype)
     compact.update(
         policy_world_schema_version=POLICY_WORLD_SCHEMA_VERSION,
         source_schema_version=7,
@@ -170,43 +102,25 @@ def _compact_replay(frames: int, *, terminal: bool) -> dict[str, object]:
     return compact
 
 
-def _encode(frames: int, *, terminal: bool) -> dict[str, object]:
-    labels = {
-        "p1_player_id": np.full(frames, 7, dtype=np.int32),
-        "p2_player_id": np.full(frames, 11, dtype=np.int32),
-    }
-    return encode_o51_replay(
-        _compact_replay(frames, terminal=terminal),
-        player_labels=labels,
+def test_direct_labels_compute_returns_and_ids_from_existing_row() -> None:
+    compact = _compact_replay(12, terminal=True)
+    expected = returns_lib.compact_policy_returns(
+        compact,
         gamma=0.9,
         damage_shaping=1.0,
         win_reward=50.0,
         stock_value=120.0,
+        suffix=O51_RETURN_SUFFIX,
     )
+    labels = DirectO51ReplayLabels(
+        player_lookup=ReplayPlayerLookup({"replay-1": (7, 11)}),
+        gamma=0.9,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+    )(compact)
 
-
-def test_o51_schema_precomputes_returns_masks_and_scalar_player_ids(tmp_path: Path) -> None:
-    frames = 12
-    terminal = _encode(frames, terminal=True)
-    truncated = _encode(frames, terminal=False)
-
-    assert terminal["o51_schema_version"] == O51_MDS_SCHEMA_VERSION
-    assert (terminal["p1_player_id"], terminal["p2_player_id"]) == (7, 11)
-    for port in ("p1", "p2"):
-        returns_name = f"{port}_{O51_RETURN_SUFFIX}"
-        valid_name = f"{returns_name}_valid"
-        assert np.isfinite(terminal[returns_name]).all()
-        assert np.asarray(terminal[valid_name]).all()
-        assert np.isnan(truncated[returns_name]).all()
-        assert not np.asarray(truncated[valid_name]).any()
-
-    labels = o51_replay_labels(terminal)
-    assert labels["p1_player_id"].shape == labels["p2_player_id"].shape == ()
-    assert (labels["p1_player_id"].item(), labels["p2_player_id"].item()) == (7, 11)
-
-    with MDSWriter(out=str(tmp_path), columns=O51_MDS_COLUMNS, compression="zstd") as writer:
-        writer.write(terminal)
-    loaded = StreamingDataset(local=str(tmp_path), batch_size=1, shuffle=False)[0]
-    loaded_labels = o51_replay_labels(loaded)
-    for name, values in labels.items():
-        np.testing.assert_array_equal(loaded_labels[name], values)
+    for name, values in expected.items():
+        np.testing.assert_array_equal(labels[name], values)
+    np.testing.assert_array_equal(labels["p1_player_id"], np.full(12, 7))
+    np.testing.assert_array_equal(labels["p2_player_id"], np.full(12, 11))

@@ -2,7 +2,6 @@
 
 import gc
 import importlib.util
-import json
 import math
 import subprocess
 import sys
@@ -12,6 +11,10 @@ from types import ModuleType
 
 import pytest
 import torch
+
+from hal.training.o51_data import CorpusSelection
+from hal.training.o51_data import SourceSlice
+from hal.training.o51_data import TierSelection
 
 
 def _load() -> ModuleType:
@@ -51,7 +54,6 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
-    monkeypatch.setattr(exp, "band_sources", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(
         exp,
         "_require_launch_evidence",
@@ -74,7 +76,6 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
 def test_fresh_train_selects_requested_model_level(monkeypatch, level: str) -> None:
     observed: dict[str, object] = {}
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
-    monkeypatch.setattr(exp, "band_sources", lambda *_args, **_kwargs: ())
 
     def train(selected_cfg, _stats, **_kwargs) -> None:
         observed["level"] = exp.model_level(selected_cfg.arch)
@@ -262,6 +263,29 @@ def test_centering_preserves_policy_and_removes_each_group_common_mode() -> None
     assert torch.equal(centered.argmax(-1), logits.argmax(-1))
 
 
+def test_training_nll_skips_centering_without_changing_loss_or_gradient() -> None:
+    decoder = exp.GPT(_tiny_cfg(readout_init="mup-normal")).temporal
+    batch, positions = 2, 3
+    hidden = torch.randn(batch, positions, decoder.trunk_width, requires_grad=True)
+    observed = torch.zeros(batch, positions, exp.N_GROUPS, dtype=torch.long)
+    targets = torch.zeros(
+        batch,
+        positions,
+        len(decoder.head_offsets),
+        exp.N_GROUPS,
+        dtype=torch.long,
+    )
+
+    raw_nll = decoder.teacher_forced_nll(hidden, observed, targets)
+    raw_gradient = torch.autograd.grad(raw_nll.sum(), hidden, retain_graph=True)[0]
+    centered_logits = decoder.teacher_forced_logits_by_group(hidden, observed, targets)
+    centered_nll = decoder.nll_from_logits(centered_logits, targets)
+    centered_gradient = torch.autograd.grad(centered_nll.sum(), hidden)[0]
+
+    torch.testing.assert_close(raw_nll, centered_nll)
+    torch.testing.assert_close(raw_gradient, centered_gradient, atol=2e-5, rtol=2e-5)
+
+
 def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
     defaults = exp.TrainConfig()
     assert defaults.adam_eps == 1e-12
@@ -399,94 +423,43 @@ def test_large_promotion_gate_requires_every_condition() -> None:
         exp.validate_large_promotion(replace(evidence, stock_per_min_gain=math.nan))
 
 
-def _materialization_report(path: Path) -> None:
+def _selection() -> CorpusSelection:
     source_names = [source.name for source in exp.streams.POLICY_WORLD_V7_SOURCES]
-    metrics = (
-        "replays",
-        "frames",
-        "potential_targets",
-        "terminal_replays",
-        "truncated_replays",
-        "identity_sides",
-        "awr_eligible_sides",
-        "awr_eligible_frames",
-    )
-    source_bands = {name: {} for name in source_names}
-    bands = {}
-    previous_replays = 0
-    previous_targets = 0
+    tiers = {}
     for scale in exp.TIER_SCALES:
-        replays = exp.OFFICIAL_TIER_REPLAYS[scale] - previous_replays
-        targets = exp.OFFICIAL_TIER_TARGETS[scale] - previous_targets
-        previous_replays = exp.OFFICIAL_TIER_REPLAYS[scale]
-        previous_targets = exp.OFFICIAL_TIER_TARGETS[scale]
-        for index, name in enumerate(source_names):
-            source_replays = replays - len(source_names) + 1 if index == 0 else 1
-            source_targets = targets if index == 0 else 0
-            source_frames = source_replays + source_targets // 2
-            source_bands[name][scale] = {
-                "replays": source_replays,
-                "frames": source_frames,
-                "potential_targets": source_targets,
-                "terminal_replays": source_replays,
-                "truncated_replays": 0,
-                "identity_sides": 2 * source_replays,
-                "awr_eligible_sides": 2 * source_replays,
-                "awr_eligible_frames": 2 * source_frames,
-            }
-        bands[scale] = {metric: sum(source_bands[name][scale][metric] for name in source_names) for metric in metrics}
-    sources = {
-        name: {metric: sum(source_bands[name][scale][metric] for scale in exp.TIER_SCALES) for metric in metrics}
-        for name in source_names
-    }
-    report = {
-        "schema_version": 1,
-        "protocol": "o51-source-prefix-v1",
-        "corpus_hash": "a" * 64,
-        "normalization_stats_sha256": "b" * 64,
-        "normalization_weighting": "content-unique-replays",
-        "player_sidecar_sha256": exp.TrainConfig().player_sidecar_sha256,
-        "player_vocabulary_sha256": exp.TrainConfig().player_vocab_sha256,
-        "parameters": {
-            "gamma": exp.AWR_CALIBRATION.gamma,
-            "damage_shaping": exp.AWR_CALIBRATION.damage_shaping,
-            "win_reward": exp.AWR_CALIBRATION.win_reward,
-            "stock_value": exp.AWR_CALIBRATION.stock_value,
-        },
-        "band_hashes": {scale: f"{scale:x}" * 64 for scale in exp.TIER_SCALES},
-        "tier_hashes": {scale: f"{scale:x}" * 64 for scale in exp.TIER_SCALES},
-        "bands": bands,
-        "sources": sources,
-        "source_bands": source_bands,
-        "raw_band_bytes": {scale: 64 * 2**20 for scale in exp.TIER_SCALES},
-        "largest_shard_samples": {scale: 100 for scale in exp.TIER_SCALES},
-        "u0_awr_ineligible_fraction": 0.0,
-        "terminal_only_proxy_required": False,
-    }
-    path.write_text(json.dumps(report))
+        tiers[scale] = TierSelection(
+            scale=scale,
+            sources=tuple(SourceSlice(source=name, stop=scale) for name in source_names),
+            potential_targets=2 * scale * len(source_names),
+            sha256=f"{scale:x}" * 64,
+        )
+    return CorpusSelection(
+        corpus_hash="a" * 64,
+        source_manifest_sha256={name: "b" * 64 for name in source_names},
+        tiers=tiers,
+    )
 
 
-def _passing_preflight(cfg):
-    audit = exp.audit_materialization(cfg)
+def _passing_preflight(cfg, selection):
     return exp.PreflightReport(
-        fingerprint=exp.preflight_fingerprint(cfg, audit),
+        fingerprint=exp.preflight_fingerprint(cfg, selection),
         soak_tier_scale=8,
-        synthetic_mfu=0.35,
+        synthetic_mfu=0.15,
         compute_only_updates_per_s=10.0,
         end_to_end_updates_per_s=9.0,
         loader_only_windows_per_s=1250.0,
         gpu_windows_per_s=1000.0,
         loader_wait_mean_fraction=0.049,
         loader_wait_p95_fraction=0.099,
-        end_to_end_mfu=0.35,
+        end_to_end_mfu=0.135,
         soak_seconds=7200.0,
         judged_seconds=1800.0,
         raw_bytes_per_window=35.0,
         o50_raw_bytes_per_window=100.0,
-        peak_memory_fraction=0.849,
+        peak_memory_fraction=0.949,
         graph_gap_fraction=0.05,
         optimizer_time_fraction=0.10,
-        disk_capacity_bytes=3 * 2**40,
+        disk_capacity_bytes=2 * 2**40,
         exact_resume=True,
         memory_passed=True,
         shuffle_passed=True,
@@ -494,13 +467,14 @@ def _passing_preflight(cfg):
     )
 
 
-def test_preflight_enforces_every_launch_and_cache_gate(tmp_path: Path) -> None:
-    materialization = tmp_path / "materialization.json"
-    _materialization_report(materialization)
-    cfg = replace(exp.TrainConfig(), materialization_report=str(materialization))
-    report = _passing_preflight(cfg)
+def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
+    cfg = exp.TrainConfig()
+    selection = _selection()
+    monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
+    report = _passing_preflight(cfg, selection)
 
     assert exp.preflight_failures(cfg, report) == ()
+    assert "synthetic compiled MFU" in " ".join(exp.preflight_failures(cfg, replace(report, synthetic_mfu=0.149)))
     assert "mean loader wait" in " ".join(exp.preflight_failures(cfg, replace(report, loader_wait_mean_fraction=0.05)))
     assert "telemetry" in " ".join(exp.preflight_failures(cfg, replace(report, telemetry={})))
     assert "full U8" in " ".join(exp.preflight_failures(cfg, replace(report, soak_tier_scale=4)))
@@ -508,54 +482,32 @@ def test_preflight_enforces_every_launch_and_cache_gate(tmp_path: Path) -> None:
     assert "not boolean" in " ".join(
         exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
     )
-    assert "256 GiB free" in " ".join(exp.preflight_failures(cfg, replace(report, disk_capacity_bytes=1900 * 2**30)))
-    exp.validate_shuffle_config("py1e", 4096, largest_shard_samples=400)
-    with pytest.raises(ValueError, match="10x"):
-        exp.validate_shuffle_config("py1e", 4096, largest_shard_samples=410)
+    assert "256 GiB" in " ".join(
+        exp.preflight_failures(
+            cfg,
+            replace(report, disk_capacity_bytes=1900 * 2**30),
+        )
+    )
+    exp.validate_shuffle_config("py1e", 4096)
 
     full_cfg = replace(cfg, target_positions=8 * exp.D0, tier_scale=8)
-    assert exp.preflight_fingerprint(cfg, exp.audit_materialization(cfg)) == exp.preflight_fingerprint(
-        full_cfg, exp.audit_materialization(full_cfg)
-    )
+    assert exp.preflight_fingerprint(cfg, selection) == exp.preflight_fingerprint(full_cfg, selection)
     full_report = replace(
         report,
-        fingerprint=exp.preflight_fingerprint(full_cfg, exp.audit_materialization(full_cfg)),
-        end_to_end_mfu=0.349,
+        fingerprint=exp.preflight_fingerprint(full_cfg, selection),
+        end_to_end_mfu=0.134,
     )
     assert "end-to-end MFU" in " ".join(exp.preflight_failures(full_cfg, full_report))
 
 
-def test_materialization_audit_binds_precomputed_labels(tmp_path: Path) -> None:
-    materialization = tmp_path / "materialization.json"
-    _materialization_report(materialization)
-    cfg = replace(exp.TrainConfig(), materialization_report=str(materialization))
-    payload = json.loads(materialization.read_text())
+def test_preflight_fingerprint_binds_direct_prefixes() -> None:
+    cfg = exp.TrainConfig()
+    selection = _selection()
+    changed_source = replace(selection.tier(8).sources[0], stop=9)
+    changed_tier = replace(
+        selection.tier(8),
+        sources=(changed_source, *selection.tier(8).sources[1:]),
+    )
+    changed = replace(selection, tiers={**selection.tiers, 8: changed_tier})
 
-    payload["parameters"]["gamma"] = 0.5
-    materialization.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="frozen calibration"):
-        exp.audit_materialization(cfg)
-
-    payload["parameters"]["gamma"] = exp.AWR_CALIBRATION.gamma
-    payload["u0_awr_ineligible_fraction"] = math.nan
-    materialization.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="finite"):
-        exp.audit_materialization(cfg)
-
-
-def test_missing_root_artifact_is_fetched_atomically(tmp_path: Path, monkeypatch) -> None:
-    destination = tmp_path / "materialization.json"
-    downloads = []
-
-    class Client:
-        @staticmethod
-        def download_file(bucket: str, key: str, path: str) -> None:
-            downloads.append((bucket, key, Path(path).name))
-            Path(path).write_text("payload")
-
-    monkeypatch.setattr(exp._o50.r2, "client", lambda: Client())
-    cfg = replace(exp.TrainConfig(), band_remote="s3://test-bucket/o51/root")
-
-    assert exp._ensure_o51_artifact(cfg, destination) == destination
-    assert destination.read_text() == "payload"
-    assert downloads == [("test-bucket", "o51/root/materialization.json", "materialization.json.tmp")]
+    assert exp.preflight_fingerprint(cfg, selection) != exp.preflight_fingerprint(cfg, changed)

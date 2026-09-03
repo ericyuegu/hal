@@ -266,12 +266,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.rotary = Rotary(self.head_dim)
 
-    def forward(
-        self,
-        x: Float[Tensor, "B L d_model"],
-        mask: AttnMask | None,
-        ctx_pad: Int[Tensor, " B"],
-    ) -> Float[Tensor, "B L d_model"]:
+    def _qkv(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         B, L, _ = x.shape
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
         q = q.view(B, L, self.n_heads, self.head_dim)
@@ -281,6 +276,20 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
+        return q, k, v
+
+    def _project(self, y: Tensor, batch: int, length: int) -> Tensor:
+        y = y.transpose(1, 2).contiguous().view(batch, length, self.d_model)
+        return self.c_proj(y)
+
+    def forward(
+        self,
+        x: Float[Tensor, "B L d_model"],
+        mask: AttnMask | None,
+        ctx_pad: Int[Tensor, " B"],
+    ) -> Float[Tensor, "B L d_model"]:
+        B, L, _ = x.shape
+        q, k, v = self._qkv(x)
         if self.attention_backend == "varlen_flash" and x.device.type == "cuda":
             if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
                 raise RuntimeError(
@@ -310,8 +319,14 @@ class CausalSelfAttention(nn.Module):
             y = cast(Tensor, flex_attention(q, k, v, block_mask=mask))
         else:
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.c_proj(y)
+        return self._project(y, B, L)
+
+    def forward_unpadded(self, x: Tensor) -> Tensor:
+        """Use native causal attention when every context position is real."""
+        B, L, _ = x.shape
+        q, k, v = self._qkv(x)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return self._project(y, B, L)
 
 
 class MLP(nn.Module):
@@ -338,6 +353,10 @@ class Block(nn.Module):
         x = x + self.attn_scale * self.attn(rmsnorm(x), mask, ctx_pad)
         x = x + self.mlp_scale * self.mlp(rmsnorm(x))
         return x
+
+    def forward_unpadded(self, x: Tensor) -> Tensor:
+        x = x + self.attn_scale * self.attn.forward_unpadded(rmsnorm(x))
+        return x + self.mlp_scale * self.mlp(rmsnorm(x))
 
 
 class Trunk(nn.Module):
@@ -425,6 +444,16 @@ class Trunk(nn.Module):
         """Run the dense-SDPA correctness path without resolving FlexAttention."""
         self._check_shape(x, ctx_pad)
         return self._forward_with_mask(x, ctx_pad, dense_mask(ctx_pad, x.size(1), self.attn_window))
+
+    def forward_unpadded(self, x: Tensor) -> Tensor:
+        """Run the faster native causal path for batches without left padding."""
+        if x.ndim != 3:
+            raise ValueError(f"trunk takes x [B, L, d_model], got {tuple(x.shape)}")
+        if self.attn_window:
+            raise ValueError("the unpadded trunk path requires full causal attention")
+        for block in self.blocks:
+            x = block.forward_unpadded(x)
+        return rmsnorm(x)
 
     def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:
         self._check_shape(x, ctx_pad)

@@ -28,6 +28,7 @@ from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
 from hal.streams import StreamSource
 from hal.training.dataloader import ReplayFormat
+from hal.training.dataloader import StreamSamplePrefix
 from hal.training.dataloader import _make_streaming_dataset
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
@@ -503,9 +504,8 @@ class ReservoirLoader:
         """Per-stream sample counts in configured source order."""
         if not self._source_names:
             return {}
-        return {
-            name: int(count) for name, count in zip(self._source_names, self._dataset.samples_per_stream, strict=True)
-        }
+        counts = getattr(self._dataset, "selected_samples_per_stream", self._dataset.samples_per_stream)
+        return {name: int(count) for name, count in zip(self._source_names, counts, strict=True)}
 
     def __iter__(self) -> Iterator[object]:
         pack_batches = ReplayPackBatchIterator(iter(self._pack_loader), self._visits)
@@ -618,6 +618,7 @@ def make_reservoir_loader(
     remote: str | None = None,
     sources: Sequence[StreamSource] | None = None,
     source_weights: Sequence[float] | None = None,
+    source_prefixes: Sequence[StreamSamplePrefix] | None = None,
     cache_limit: str | int | None = None,
     shuffle_block_size: int | None = None,
     shuffle: bool | None = None,
@@ -661,7 +662,10 @@ def make_reservoir_loader(
     ):
         raise ValueError(f"replay_pack_batch_size must be a positive integer, got {replay_pack_batch_size!r}")
     if worker_independent_resume and replay_filter is not None:
-        raise ValueError("worker-independent resume requires a materialized pool, not a runtime replay filter")
+        raise ValueError(
+            "worker-independent resume requires row selection before worker dispatch; "
+            "replay_filter runs inside workers"
+        )
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
     dataset, source_names = _make_streaming_dataset(
@@ -669,6 +673,7 @@ def make_reservoir_loader(
         split,
         sources=sources,
         source_weights=source_weights,
+        source_prefixes=source_prefixes,
         remote=remote,
         shuffle=shuffle,
         shuffle_seed=shuffle_seed,

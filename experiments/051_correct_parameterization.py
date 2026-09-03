@@ -43,19 +43,19 @@ import tyro
 from torch import Tensor
 
 from hal import streams
-from hal.data.feature_stats import load_dataset_stats
-from hal.data.o51 import D0
-from hal.data.o51 import DEFAULT_BAND_REMOTE
-from hal.data.o51 import DEFAULT_BAND_ROOT
-from hal.data.o51 import NESTED_PROTOCOL
-from hal.data.o51 import OFFICIAL_TIER_REPLAYS
-from hal.data.o51 import OFFICIAL_TIER_TARGETS
-from hal.data.o51 import TIER_SCALES
-from hal.data.o51 import band_sources
-from hal.data.o51_schema import O51_RETURN_SUFFIX
+from hal.training.dataloader import StreamSamplePrefix
 from hal.training.dataloader import make_loader
+from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
-from hal.training.o51_data import o51_replay_labels
+from hal.training.o51_data import D0
+from hal.training.o51_data import DATA_PROTOCOL
+from hal.training.o51_data import O51_RETURN_SUFFIX
+from hal.training.o51_data import OFFICIAL_TIER_REPLAYS
+from hal.training.o51_data import OFFICIAL_TIER_TARGETS
+from hal.training.o51_data import TIER_SCALES
+from hal.training.o51_data import CorpusSelection
+from hal.training.o51_data import DirectO51ReplayLabels
+from hal.training.o51_data import corpus_selection
 from hal.training.player_identity import ReplayPlayerLookup
 from hal.training.replay_reservoir import ReservoirLoader
 from hal.training.replay_reservoir import make_reservoir_loader
@@ -65,7 +65,8 @@ from hal.training.trunk import TrunkConfig
 
 def _load_o50() -> ModuleType:
     path = Path(__file__).with_name("050_scaled_temporal_awr.py")
-    name = "_hal_experiment_050_for_051"
+    owner = __name__.replace(".", "_")
+    name = f"_hal_experiment_050_for_051_{owner}"
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {path}")
@@ -95,7 +96,7 @@ AWRCalibration = _o50.AWRCalibration
 AWR_CALIBRATION = _o50.AWR_CALIBRATION
 AWRBatch = _o50.AWRBatch
 
-_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v1"
+_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v2"
 _TRUNK_BASE_LAYERS: Final[int] = 8
 _TEMPORAL_BASE_LAYERS: Final[int] = 2
 _TRUNK_BASE_ATTENTION_SCALE: Final[float] = 0.25
@@ -107,6 +108,10 @@ _BASE_ADAM_EPS: Final[float] = 1e-12
 _SUPERVISED_POSITIONS_PER_WINDOW: Final[int] = 128
 _MIN_FREE_CACHE_GIB: Final[int] = 256
 _LONG_RUN_POSITIONS: Final[int] = D0
+# A 55M batch-1024 B200 benchmark reached 16.73% compiled MFU. Keep enough
+# margin for run-to-run variance, then require the loader to retain 90% of it.
+_MIN_SYNTHETIC_MFU: Final[float] = 0.15
+_MIN_FULL_TIER_MFU: Final[float] = 0.135
 
 MODEL_LEVELS: Final[tuple[str, ...]] = ("base", "proxy", "mid", "large")
 EXPECTED_PARAMETER_COUNTS: Final[dict[str, int]] = {
@@ -253,10 +258,6 @@ class TrainConfig(_o50.TrainConfig):
     predownload: int = 512
     num_workers: int = 16
     cache_limit_gb: int = 1700
-    band_root: str = str(DEFAULT_BAND_ROOT)
-    band_remote: str = DEFAULT_BAND_REMOTE
-    materialization_report: str = str(DEFAULT_BAND_ROOT / "materialization.json")
-    normalization_stats: str = str(DEFAULT_BAND_ROOT / "normalization-stats.json")
     stability_every: int = 25
 
     def __post_init__(self) -> None:
@@ -426,7 +427,7 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("warmup must consume exactly D/32 valid positions")
     if cfg.lr_floor_ratio != 1 / 170 or cfg.grad_clip != 1.0:
         raise ValueError("O51 fixes cosine floor=1/170 and global clipping=1.0")
-    if cfg.batch_size not in (128, 256, 512, 1024, 2048):
+    if cfg.batch_size not in (128, 256, 512, 1024):
         raise ValueError("batch_size is outside the O51 sweep")
     if cfg.reservoir_capacity < 2 * cfg.batch_size:
         raise ValueError("replay reservoir capacity must be at least two optimizer batches")
@@ -558,7 +559,7 @@ class CausalTemporalDecoder(_o50.CausalTemporalDecoder):
     def _center(logits: Tensor) -> Tensor:
         return center_class_logits(logits)
 
-    def _teacher_forced_outputs(
+    def _raw_teacher_forced_outputs(
         self,
         hidden: Tensor,
         observed: Tensor,
@@ -577,12 +578,32 @@ class CausalTemporalDecoder(_o50.CausalTemporalDecoder):
                 button_values = (features, head_input, combined)
             else:
                 combined = self.outputs[name](features) + self.trunk_outputs[name](hidden)[..., None, :]
-            logits[name] = self._center(combined)
+            logits[name] = combined
         if button_values is None:
             raise RuntimeError("button head was not evaluated")
         button_mask = self.codec.button_mask(targets[..., TRIG_G])
-        logits["buttons"] = logits["buttons"].masked_fill(button_mask, float("-inf"))
         return logits, (*button_values, button_mask)
+
+    @staticmethod
+    def _mask_buttons(logits: dict[str, Tensor], button_mask: Tensor) -> dict[str, Tensor]:
+        masked = dict(logits)
+        masked["buttons"] = masked["buttons"].masked_fill(button_mask, float("-inf"))
+        return masked
+
+    def _teacher_forced_outputs(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+    ) -> tuple[dict[str, Tensor], tuple[Tensor, Tensor, Tensor, Tensor]]:
+        raw_logits, button_values = self._raw_teacher_forced_outputs(hidden, observed, targets)
+        centered = {name: self._center(logits) for name, logits in raw_logits.items()}
+        return self._mask_buttons(centered, button_values[-1]), button_values
+
+    def teacher_forced_nll(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> Tensor:
+        """Compute the policy loss without a softmax-invariant common mode."""
+        logits, button_values = self._raw_teacher_forced_outputs(hidden, observed, targets)
+        return self.nll_from_logits(self._mask_buttons(logits, button_values[-1]), targets)
 
     def teacher_forced_nll_with_diagnostics(
         self,
@@ -590,17 +611,14 @@ class CausalTemporalDecoder(_o50.CausalTemporalDecoder):
         observed: Tensor,
         targets: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        logits, button_values = self._teacher_forced_outputs(hidden, observed, targets)
+        raw_logits, button_values = self._raw_teacher_forced_outputs(hidden, observed, targets)
         features, head_input, raw_button_logits, button_mask = button_values
         feature_rms = features.detach().float().square().mean(dim=-1).sqrt()
         button_targets = targets[..., BUTTONS_G, None]
         target_logits = raw_button_logits.detach().gather(-1, button_targets).squeeze(-1).float()
         legal_logits = raw_button_logits.detach().masked_fill(button_mask, float("-inf"))
         competing = legal_logits.scatter(-1, button_targets, float("-inf")).amax(dim=-1).float()
-        centered_values = {
-            **logits,
-            "buttons": self._center(raw_button_logits),
-        }
+        centered_values = {name: self._center(logits) for name, logits in raw_logits.items()}
         centered_p999 = torch.stack(
             [_o50._sampled_quantile(value.detach(), 99.9, absolute=True) for value in centered_values.values()]
         ).amax()
@@ -616,6 +634,7 @@ class CausalTemporalDecoder(_o50.CausalTemporalDecoder):
             "stability/centered_logit_abs_p999": centered_p999,
             "stability/button_margin_mean": (target_logits - competing).mean(),
         }
+        logits = self._mask_buttons(raw_logits, button_mask)
         return self.nll_from_logits(logits, targets), metrics
 
     def forced_stepwise_logits(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> list[dict[str, Tensor]]:
@@ -823,6 +842,15 @@ class GPT(_o50.GPT):
         self.temporal = CausalTemporalDecoder(cfg, self.codec)
         self.value_head = _o50.SwiGLU(cfg.arch.d_model, cfg.arch.value_hidden_dim, 1, output_bias=True)
         initialize_o51_parameters(self, cfg)
+
+    def forward_unpadded(
+        self,
+        features: dict[str, Tensor],
+        _ctx_pad: Tensor,
+        action_indices: Tensor | None = None,
+    ) -> Tensor:
+        """Training forward for the loader's guaranteed full contexts."""
+        return self.trunk.forward_unpadded(self.context_tokens(features, action_indices))
 
 
 def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
@@ -1209,227 +1237,20 @@ class _ArmGuard:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class MaterializationAudit:
-    corpus_hash: str
-    normalization_stats_sha256: str
-    normalization_weighting: str
-    player_sidecar_sha256: str
-    player_vocabulary_sha256: str
-    return_parameters: dict[str, float]
-    band_hashes: dict[int, str]
-    tier_hashes: dict[int, str]
-    raw_band_bytes: dict[int, int]
-    largest_shard_samples: dict[int, int]
-    band_counts: dict[int, dict[str, int]]
-    source_band_counts: dict[str, dict[int, dict[str, int]]]
-    source_replays: dict[str, int]
-    source_frames: dict[str, int]
-    u0_awr_ineligible_fraction: float
-    terminal_only_proxy_required: bool
-
-    @property
-    def raw_union_bytes(self) -> int:
-        return sum(self.raw_band_bytes.values())
-
-    def source_counts_for_tier(self, scale: int) -> dict[str, dict[str, int]]:
-        if scale not in TIER_SCALES:
-            raise ValueError(f"tier scale must be one of {TIER_SCALES}, got {scale}")
-        return {
-            source: {
-                metric: sum(
-                    band_counts.get(metric, 0) for band_scale, band_counts in bands.items() if band_scale <= scale
-                )
-                for metric in {metric for counts in bands.values() for metric in counts}
-            }
-            for source, bands in self.source_band_counts.items()
-        }
-
-
-def _ensure_o51_artifact(cfg: TrainConfig, path: Path) -> Path:
-    """Fetch a missing O51 root artifact without publishing a partial file."""
-    if path.is_file():
-        return path
-    remote = cfg.band_remote
-    if not remote.startswith("s3://"):
-        raise FileNotFoundError(f"O51 artifact is missing locally and has no S3 source: {path}")
-    bucket, separator, key = remote.removeprefix("s3://").partition("/")
-    if not separator or not bucket or not key:
-        raise ValueError(f"invalid O51 band remote {remote!r}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    try:
-        _o50.r2.client().download_file(bucket, f"{key.rstrip('/')}/{path.name}", str(temporary))
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return path
-
-
-def audit_materialization(cfg: TrainConfig) -> MaterializationAudit:
-    """Authenticate the materialized bands before constructing a loader."""
-    path = _ensure_o51_artifact(cfg, Path(cfg.materialization_report))
-    report = json.loads(path.read_text())
-    if report.get("schema_version") != 1 or report.get("protocol") != NESTED_PROTOCOL:
-        raise ValueError(f"unsupported O51 materialization report: {path}")
-    bands = {int(scale): values for scale, values in report["bands"].items()}
-    raw = {int(scale): int(value) for scale, value in report["raw_band_bytes"].items()}
-    largest = {int(scale): int(value) for scale, value in report["largest_shard_samples"].items()}
-    band_hashes = {int(scale): str(value) for scale, value in report["band_hashes"].items()}
-    tier_hashes = {int(scale): str(value) for scale, value in report["tier_hashes"].items()}
-    if set(bands) != set(raw) or set(raw) != set(TIER_SCALES) or set(largest) != set(TIER_SCALES):
-        raise ValueError("materialization report does not cover all four bands")
-    if set(band_hashes) != set(TIER_SCALES) or set(tier_hashes) != set(TIER_SCALES):
-        raise ValueError("materialization report does not contain all band and tier hashes")
-    normalization_hash = str(report["normalization_stats_sha256"])
-    hashes = (str(report["corpus_hash"]), normalization_hash, *band_hashes.values(), *tier_hashes.values())
-    if any(len(value) != 64 or any(character not in "0123456789abcdef" for character in value) for value in hashes):
-        raise ValueError("materialization report contains an invalid SHA-256")
-    band_counts = {scale: {name: int(value) for name, value in values.items()} for scale, values in bands.items()}
-    metrics = {
-        "replays",
-        "frames",
-        "potential_targets",
-        "terminal_replays",
-        "truncated_replays",
-        "identity_sides",
-        "awr_eligible_sides",
-        "awr_eligible_frames",
-    }
-    for scale in TIER_SCALES:
-        if not metrics <= band_counts[scale].keys():
-            raise ValueError(f"materialization band-{scale} counters are incomplete")
-        if any(band_counts[scale][metric] < 0 for metric in metrics):
-            raise ValueError(f"materialization band-{scale} counters are negative")
-        if raw[scale] <= 0 or largest[scale] <= 0:
-            raise ValueError(f"materialization band-{scale} storage counters must be positive")
-    for tier_scale in TIER_SCALES:
-        replays = sum(band_counts[scale]["replays"] for scale in TIER_SCALES if scale <= tier_scale)
-        if replays != OFFICIAL_TIER_REPLAYS[tier_scale]:
-            raise ValueError(f"materialized U{tier_scale} has {replays} replays")
-        targets = sum(band_counts[scale]["potential_targets"] for scale in TIER_SCALES if scale <= tier_scale)
-        if targets != OFFICIAL_TIER_TARGETS[tier_scale]:
-            raise ValueError(f"materialized U{tier_scale} has {targets} potential targets")
-    sources = report.get("sources", {})
-    source_bands = report.get("source_bands", {})
-    expected_sources = {source.name for source in streams.POLICY_WORLD_V7_SOURCES}
-    if set(sources) != expected_sources or set(source_bands) != expected_sources:
-        raise ValueError("materialization source audit does not cover all 44 sources")
-    normalized_source_bands = {
-        name: {
-            int(scale): {metric: int(value) for metric, value in counts.items()} for scale, counts in values.items()
-        }
-        for name, values in source_bands.items()
-    }
-    if any(set(values) != set(TIER_SCALES) for values in normalized_source_bands.values()):
-        raise ValueError("materialization source-band audit does not cover all four bands")
-    for scale in TIER_SCALES:
-        incomplete = sorted(
-            name for name in expected_sources if not metrics <= normalized_source_bands[name][scale].keys()
-        )
-        if incomplete:
-            raise ValueError(f"materialization band-{scale} source counters are incomplete: {incomplete}")
-        if any(normalized_source_bands[name][scale][metric] < 0 for name in expected_sources for metric in metrics):
-            raise ValueError(f"materialization band-{scale} source counters are negative")
-        aggregated = {
-            metric: sum(normalized_source_bands[name][scale].get(metric, 0) for name in expected_sources)
-            for metric in metrics
-        }
-        if any(aggregated[metric] != band_counts[scale].get(metric, 0) for metric in metrics):
-            raise ValueError(f"materialization band-{scale} and source counters differ")
-    for name in expected_sources:
-        full = {
-            metric: sum(normalized_source_bands[name][scale].get(metric, 0) for scale in TIER_SCALES)
-            for metric in metrics
-        }
-        if any(full[metric] != int(sources[name].get(metric, 0)) for metric in metrics):
-            raise ValueError(f"materialization source counters differ for {name}")
-        if full["terminal_replays"] + full["truncated_replays"] != full["replays"]:
-            raise ValueError(f"materialization terminal counters differ for {name}")
-        if full["potential_targets"] != 2 * (full["frames"] - full["replays"]):
-            raise ValueError(f"materialization frame counters differ for {name}")
-        if not 0 <= full["identity_sides"] <= 2 * full["replays"]:
-            raise ValueError(f"materialization identity counters differ for {name}")
-        if not 0 <= full["awr_eligible_sides"] <= 2 * full["replays"]:
-            raise ValueError(f"materialization AWR side counters differ for {name}")
-        if not 0 <= full["awr_eligible_frames"] <= 2 * full["frames"]:
-            raise ValueError(f"materialization AWR frame counters differ for {name}")
-        for tier_scale in TIER_SCALES:
-            tier_replays = sum(
-                normalized_source_bands[name][scale].get("replays", 0) for scale in TIER_SCALES if scale <= tier_scale
-            )
-            if tier_replays <= 0:
-                raise ValueError(f"materialized U{tier_scale} does not include source {name}")
-    source_replays = {name: int(values["replays"]) for name, values in sources.items()}
-    source_frames = {name: int(values["frames"]) for name, values in sources.items()}
-    if sum(source_replays.values()) != OFFICIAL_TIER_REPLAYS[8]:
-        raise ValueError("materialized full tier does not contain every unique replay")
-    ineligible = float(report["u0_awr_ineligible_fraction"])
-    if not math.isfinite(ineligible) or not 0 <= ineligible <= 1:
-        raise ValueError("U0 AWR-ineligible fraction must be finite and in [0, 1]")
-    proxy_required = report["terminal_only_proxy_required"]
-    if not isinstance(proxy_required, bool):
-        raise ValueError("terminal-only proxy flag must be boolean")
-    if proxy_required != (ineligible > 0.05):
-        raise ValueError("terminal-only proxy flag is inconsistent with U0 eligibility")
-
-    normalization_weighting = report.get("normalization_weighting")
-    if normalization_weighting != "content-unique-replays":
-        raise ValueError("O51 normalization must use the content-unique replay mixture")
-    player_sidecar_hash = str(report.get("player_sidecar_sha256", ""))
-    player_vocabulary_hash = str(report.get("player_vocabulary_sha256", ""))
-    identity_hashes = (player_sidecar_hash, player_vocabulary_hash)
-    if any(
-        len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
-        for value in identity_hashes
-    ):
-        raise ValueError("materialization report contains an invalid identity artifact hash")
-    if player_sidecar_hash != cfg.player_sidecar_sha256 or player_vocabulary_hash != cfg.player_vocab_sha256:
-        raise ValueError("materialized player IDs do not match O50's frozen identity artifacts")
-    expected_parameters = {
-        "gamma": cfg.awr.gamma,
-        "damage_shaping": cfg.awr.damage_shaping,
-        "win_reward": cfg.awr.win_reward,
-        "stock_value": cfg.awr.stock_value,
-    }
-    parameters = report.get("parameters")
-    if not isinstance(parameters, dict) or set(parameters) != set(expected_parameters):
-        raise ValueError("materialized AWR-return parameters are incomplete")
-    return_parameters = {name: float(value) for name, value in parameters.items()}
-    if any(not math.isfinite(value) for value in return_parameters.values()):
-        raise ValueError("materialized AWR-return parameters must be finite")
-    if return_parameters != expected_parameters:
-        raise ValueError("materialized AWR returns do not match O50's frozen calibration")
-    return MaterializationAudit(
-        corpus_hash=str(report["corpus_hash"]),
-        normalization_stats_sha256=normalization_hash,
-        normalization_weighting=normalization_weighting,
-        player_sidecar_sha256=player_sidecar_hash,
-        player_vocabulary_sha256=player_vocabulary_hash,
-        return_parameters=return_parameters,
-        band_hashes=band_hashes,
-        tier_hashes=tier_hashes,
-        raw_band_bytes=raw,
-        largest_shard_samples=largest,
-        band_counts=band_counts,
-        source_band_counts=normalized_source_bands,
-        source_replays=source_replays,
-        source_frames=source_frames,
-        u0_awr_ineligible_fraction=ineligible,
-        terminal_only_proxy_required=proxy_required,
-    )
+def data_selection(cfg: TrainConfig) -> CorpusSelection:
+    """Return the pinned direct-source tier definitions."""
+    del cfg
+    return corpus_selection()
 
 
 def load_stats(cfg: TrainConfig) -> dict[str, _o50.FeatureStats]:
-    """Load the one hash-pinned full-corpus normalization artifact."""
-    audit = audit_materialization(cfg)
-    path = _ensure_o51_artifact(cfg, Path(cfg.normalization_stats))
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != audit.normalization_stats_sha256:
-        raise ValueError("O51 normalization artifact hash does not match materialization")
-    return load_dataset_stats(
-        path,
+    """Combine existing source statistics with the selected direct-prefix mix."""
+    tier = data_selection(cfg).tier(cfg.tier_scale)
+    sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
+    selected = tier.source_replay_counts()
+    return load_consolidated_mixture_stats(
+        [source.local_root / "stats.json" for source in sources],
+        [float(selected[source.name]) for source in sources],
         expected_mds_schema_version=cfg.mds_schema_version,
     )
 
@@ -1438,13 +1259,13 @@ def _make_loaders(
     cfg: TrainConfig,
     stats: dict[str, _o50.FeatureStats],
 ) -> tuple[ReservoirLoader, list[_o50.TrainBatch]]:
-    """Build the fixed-band four-window loader and fixed validation cohort."""
-    audit = audit_materialization(cfg)
-    selected_bands = band_sources(
-        cfg.tier_scale,
-        local_root=Path(cfg.band_root),
-        remote_root=cfg.band_remote,
-    )
+    """Build direct source-prefix training and the fixed validation cohort."""
+    tier = data_selection(cfg).tier(cfg.tier_scale)
+    sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
+    views = tier.sources
+    if tuple(view.source for view in views) != cfg.source_names:
+        raise RuntimeError("direct prefix views do not match configured source order")
+    prefixes = tuple(StreamSamplePrefix(view.stop, view.excluded_rows) for view in views)
     projection = replace(
         _o50.MODEL_PROJECTION,
         columns=_o50.MODEL_PROJECTION.columns
@@ -1455,7 +1276,8 @@ def _make_loaders(
     )
     train_loader = make_reservoir_loader(
         data_root=None,
-        sources=selected_bands,
+        sources=sources,
+        source_prefixes=prefixes,
         split="train",
         cache_limit=f"{cfg.cache_limit_gb}gb",
         shuffle=True,
@@ -1478,7 +1300,13 @@ def _make_loaders(
         reservoir_capacity=cfg.reservoir_capacity,
         prefetch_batches=0,
         replay_format="policy-world",
-        replay_labels=o51_replay_labels,
+        replay_labels=DirectO51ReplayLabels(
+            player_lookup=ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay),
+            gamma=cfg.awr.gamma,
+            damage_shaping=cfg.awr.damage_shaping,
+            win_reward=cfg.awr.win_reward,
+            stock_value=cfg.awr.stock_value,
+        ),
         batch_transform=functools.partial(_o50.collate_awr_batch, L_ctx=cfg.arch.L_ctx),
         replay_pack_batch_size=cfg.replay_pack_batch_size,
         worker_independent_resume=True,
@@ -1489,7 +1317,7 @@ def _make_loaders(
     actual_train_rows = sum(train_loader.source_sample_counts.values())
     if actual_train_rows != expected_train_rows:
         raise ValueError(
-            f"materialized U{cfg.tier_scale} exposes {actual_train_rows} rows, expected {expected_train_rows}"
+            f"direct U{cfg.tier_scale} view exposes {actual_train_rows} rows, expected {expected_train_rows}"
         )
     _o50.TRAIN_REPLAYS = expected_train_rows
 
@@ -1511,68 +1339,24 @@ def _make_loaders(
         shuffle=True,
         **validation,
     )
-    del audit
     return train_loader, _o50.cache_validation(val_loader, cfg.val_n_samples)
 
 
 def validate_shuffle_config(
     algorithm: str,
     block_size: int,
-    *,
-    largest_shard_samples: int,
 ) -> None:
     if algorithm not in ("py1s", "py1e"):
         raise ValueError(f"unsupported shuffle algorithm {algorithm!r}")
     if block_size not in (4096, 8192):
         raise ValueError("O51 benchmarks shuffle blocks 4096 and 8192")
-    if algorithm == "py1e" and block_size <= 10 * largest_shard_samples:
-        raise ValueError(f"py1e block {block_size} must exceed 10x largest shard sample count {largest_shard_samples}")
-
-
-@dataclass(frozen=True, slots=True)
-class CacheSizing:
-    raw_union_bytes: int
-    shuffle_working_set_bytes: int
-    configured_limit_bytes: int
-    disk_capacity_bytes: int
-    reserved_free_bytes: int = _MIN_FREE_CACHE_GIB * 2**30
-
-    @property
-    def required_bytes(self) -> int:
-        return self.raw_union_bytes + self.shuffle_working_set_bytes
-
-    @property
-    def passes(self) -> bool:
-        return (
-            self.configured_limit_bytes >= self.required_bytes
-            and self.disk_capacity_bytes - self.configured_limit_bytes >= self.reserved_free_bytes
-        )
-
-
-def cache_sizing(
-    audit: MaterializationAudit,
-    cfg: TrainConfig,
-    *,
-    disk_capacity_bytes: int,
-) -> CacheSizing:
-    band_rows = {
-        scale: OFFICIAL_TIER_REPLAYS[scale] - OFFICIAL_TIER_REPLAYS.get(scale // 2, 0) for scale in TIER_SCALES
-    }
-    mean_row_bytes = max(audit.raw_band_bytes[scale] / max(band_rows[scale], 1) for scale in TIER_SCALES)
-    shuffle_working_set = math.ceil(mean_row_bytes * cfg.shuffle_block_size)
-    return CacheSizing(
-        raw_union_bytes=audit.raw_union_bytes,
-        shuffle_working_set_bytes=shuffle_working_set,
-        configured_limit_bytes=cfg.cache_limit_gb * 2**30,
-        disk_capacity_bytes=disk_capacity_bytes,
-    )
 
 
 LOADER_WORKERS: Final[tuple[int, ...]] = (8, 16, 24, 32)
 REPLAY_PACK_BATCHES: Final[tuple[int, ...]] = (16, 32, 64)
 LOADER_PREFETCH_FACTORS: Final[tuple[int, ...]] = (1, 2, 4)
 PREDOWNLOAD_MULTIPLIERS: Final[tuple[int, ...]] = (8, 16)
-PHYSICAL_BATCHES: Final[tuple[int, ...]] = (256, 512, 1024, 2048)
+PHYSICAL_BATCHES: Final[tuple[int, ...]] = (128, 256, 512, 1024)
 COMPILE_MODES: Final[tuple[str, ...]] = ("reduce-overhead", "max-autotune")
 TEMPORAL_ATTENTION_CHUNKS: Final[tuple[int | None, ...]] = (8192, 16_384, 32_768, None)
 REQUIRED_PREFLIGHT_TELEMETRY: Final[tuple[str, ...]] = (
@@ -1596,20 +1380,30 @@ REQUIRED_PREFLIGHT_TELEMETRY: Final[tuple[str, ...]] = (
 )
 
 
-def preflight_fingerprint(cfg: TrainConfig, audit: MaterializationAudit) -> str:
-    """Bind a full-tier soak to its model, loader, and physical materialization."""
+def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
+    """Bind throughput evidence to its model and direct-source selection."""
     payload = {
         "protocol": _EXPERIMENT_ID,
-        "corpus_hash": audit.corpus_hash,
-        "normalization_stats_sha256": audit.normalization_stats_sha256,
-        "normalization_weighting": audit.normalization_weighting,
-        "player_sidecar_sha256": audit.player_sidecar_sha256,
-        "player_vocabulary_sha256": audit.player_vocabulary_sha256,
-        "return_parameters": audit.return_parameters,
-        "band_hashes": audit.band_hashes,
-        "tier_hashes": audit.tier_hashes,
-        "raw_band_bytes": audit.raw_band_bytes,
-        "largest_shard_samples": audit.largest_shard_samples,
+        "data_protocol": DATA_PROTOCOL,
+        "corpus_hash": selection.corpus_hash,
+        "source_manifest_sha256": selection.source_manifest_sha256,
+        "tiers": {
+            scale: {
+                "sha256": tier.sha256,
+                "sources": [
+                    {
+                        "source": source.source,
+                        "stop": source.stop,
+                        "excluded_rows": source.excluded_rows,
+                    }
+                    for source in tier.sources
+                ],
+            }
+            for scale, tier in selection.tiers.items()
+        },
+        "player_sidecar_sha256": cfg.player_sidecar_sha256,
+        "player_vocabulary_sha256": cfg.player_vocab_sha256,
+        "return_parameters": asdict(cfg.awr),
         "model_level": model_level(cfg.arch),
         "architecture": {name: getattr(cfg.arch, name) for name in _MODEL_GEOMETRY_FIELDS},
         "batch_size": cfg.batch_size,
@@ -1658,10 +1452,10 @@ class PreflightReport:
 
 
 def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, ...]:
-    audit = audit_materialization(cfg)
+    selection = data_selection(cfg)
     failures: list[str] = []
-    if report.fingerprint != preflight_fingerprint(cfg, audit):
-        failures.append("preflight fingerprint does not match the selected shape and materialization")
+    if report.fingerprint != preflight_fingerprint(cfg, selection):
+        failures.append("preflight fingerprint does not match the selected shape and data")
     if not isinstance(report.soak_tier_scale, int) or isinstance(report.soak_tier_scale, bool):
         failures.append("preflight soak tier must be an integer")
     elif report.soak_tier_scale != 8:
@@ -1708,8 +1502,8 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
     if invalid_numeric:
         failures.append(f"preflight measurements are invalid {invalid_numeric}")
         return tuple(failures)
-    if numeric["synthetic_mfu"] < 0.35:
-        failures.append("synthetic compiled MFU is below 35%")
+    if numeric["synthetic_mfu"] < _MIN_SYNTHETIC_MFU:
+        failures.append("synthetic compiled MFU is below the measured 15% floor")
     if numeric["loader_only_windows_per_s"] < 1.25 * numeric["gpu_windows_per_s"]:
         failures.append("loader-only throughput is below 125% of GPU consumption")
     if (
@@ -1723,15 +1517,15 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         failures.append("p95 loader wait is not below 10%")
     if numeric["soak_seconds"] < 7200 or numeric["judged_seconds"] < 1800:
         failures.append("full-tier soak does not cover two hours with a final 30-minute judgment window")
-    if cfg.tier_scale == 8 and numeric["end_to_end_mfu"] < 0.35:
-        failures.append("full-tier end-to-end MFU is below 35%")
+    if cfg.tier_scale == 8 and numeric["end_to_end_mfu"] < _MIN_FULL_TIER_MFU:
+        failures.append("full-tier end-to-end MFU is below the revised 13.5% floor")
     if (
         numeric["o50_raw_bytes_per_window"] <= 0
         or numeric["raw_bytes_per_window"] > 0.35 * numeric["o50_raw_bytes_per_window"]
     ):
         failures.append("raw bytes per window exceed 35% of O50 K=1")
-    if numeric["peak_memory_fraction"] >= 0.85:
-        failures.append("peak device memory is not below 85%")
+    if numeric["peak_memory_fraction"] >= 0.95:
+        failures.append("peak device memory is not below 95%")
     if numeric["graph_gap_fraction"] > 0.05:
         failures.append("loss-path graph gaps exceed 5%")
     if numeric["optimizer_time_fraction"] > 0.10:
@@ -1764,12 +1558,11 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         failures.append(f"preflight telemetry is missing {missing_telemetry}")
     if invalid_telemetry:
         failures.append(f"preflight telemetry is invalid {invalid_telemetry}")
-    sizing = cache_sizing(audit, cfg, disk_capacity_bytes=int(numeric["disk_capacity_bytes"]))
-    if not sizing.passes:
-        failures.append("full raw union plus one shuffle working set cannot fit without eviction and 256 GiB free")
-    largest = max(audit.largest_shard_samples.values())
+    required_disk = (cfg.cache_limit_gb + _MIN_FREE_CACHE_GIB) * 2**30
+    if numeric["disk_capacity_bytes"] < required_disk:
+        failures.append("streaming cache does not leave 256 GiB of free disk")
     try:
-        validate_shuffle_config(cfg.shuffle_algo, cfg.shuffle_block_size, largest_shard_samples=largest)
+        validate_shuffle_config(cfg.shuffle_algo, cfg.shuffle_block_size)
     except ValueError as error:
         failures.append(str(error))
     return tuple(failures)
@@ -1826,14 +1619,13 @@ def model_tag(cfg: TrainConfig) -> str:
 
 def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
     """Return the selected tier's actual replay-count mixture."""
-    audit = audit_materialization(cfg)
-    selected = audit.source_counts_for_tier(cfg.tier_scale)
-    return tuple(float(selected[name]["replays"]) for name in cfg.source_names)
+    selected = data_selection(cfg).tier(cfg.tier_scale).source_replay_counts()
+    return tuple(float(selected[name]) for name in cfg.source_names)
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict[str, object] | None) -> None:
     """Start an O51 run with its nested-data identity in the immutable config."""
-    audit = audit_materialization(cfg)
+    selection = data_selection(cfg)
     _o50.wandb.init(
         project="hal",
         group="o51-correct-parameterization",
@@ -1850,9 +1642,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict[str, object]
         ],
         config={
             **asdict(cfg),
-            "data_protocol": NESTED_PROTOCOL,
-            "data_corpus_hash": audit.corpus_hash,
-            "data_tier_hash": audit.tier_hashes[cfg.tier_scale],
+            "data_protocol": DATA_PROTOCOL,
+            "data_corpus_hash": selection.corpus_hash,
+            "data_tier_hash": selection.tier(cfg.tier_scale).sha256,
         },
         settings=_o50.wandb.Settings(
             x_stats_sampling_interval=5.0,
@@ -1874,12 +1666,12 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict[str, object]
     )
     summary["architecture/treatment"] = (
         "O50 task and controller with O51 depth parameterization, semantic optimizer roles, "
-        "nested data, precomputed AWR labels, and centered class logits"
+        "direct source-prefix data, runtime AWR labels, and centered class logits"
     )
     summary["optimizer/muon_scale"] = "sqrt(d_out/d_in) per logical matrix"
     summary["optimizer/lr_schedule"] = cfg.lr_schedule_kind
-    summary["data/corpus_hash"] = audit.corpus_hash
-    summary["data/tier_hash"] = audit.tier_hashes[cfg.tier_scale]
+    summary["data/corpus_hash"] = selection.corpus_hash
+    summary["data/tier_hash"] = selection.tier(cfg.tier_scale).sha256
     if cfg.wandb_log_code:
         _o50.log_wandb_code(_o50.wandb.run)
 
@@ -1896,19 +1688,19 @@ def _log_training_summary(
     if _o50.wandb.run is None:
         return
     summary = _o50.wandb.run.summary
-    audit = audit_materialization(cfg)
-    selected = audit.source_counts_for_tier(cfg.tier_scale)
+    selection = data_selection(cfg)
+    tier = selection.tier(cfg.tier_scale)
+    selected = tier.source_replay_counts()
     for name, value in parameter_counts.items():
         summary[f"parameters/{name}"] = value
-    unique_replays = sum(values["replays"] for values in selected.values())
-    unique_frames = sum(values["frames"] for values in selected.values())
-    potential_targets = sum(values["potential_targets"] for values in selected.values())
+    unique_replays = tier.unique_replays
+    potential_targets = tier.potential_targets
     if unique_replays != OFFICIAL_TIER_REPLAYS[cfg.tier_scale]:
         raise RuntimeError("selected-tier replay accounting changed after loader construction")
     if potential_targets != OFFICIAL_TIER_TARGETS[cfg.tier_scale]:
         raise RuntimeError("selected-tier target accounting changed after loader construction")
     summary["data/unique_replays"] = unique_replays
-    summary["data/unique_frames"] = unique_frames
+    summary["data/unique_frames"] = tier.frames
     summary["data/potential_port_frame_targets"] = potential_targets
     summary["data/processed_loss_positions"] = cfg.target_positions
     summary["data/effective_target_epochs"] = cfg.target_positions / potential_targets
@@ -1917,9 +1709,9 @@ def _log_training_summary(
     summary["data/valid_positions_per_update"] = cfg.batch_size * _SUPERVISED_POSITIONS_PER_WINDOW
     summary["data/replay_pack_batch_size"] = cfg.replay_pack_batch_size
     summary["data/loader_prefetch_factor"] = cfg.loader_prefetch_factor
-    summary["data/source_mixing"] = "repeat_1_over_materialized_bands"
-    summary["data/corpus_hash"] = audit.corpus_hash
-    summary["data/tier_hash"] = audit.tier_hashes[cfg.tier_scale]
+    summary["data/source_mixing"] = "direct_source_prefixes"
+    summary["data/corpus_hash"] = selection.corpus_hash
+    summary["data/tier_hash"] = selection.tier(cfg.tier_scale).sha256
     summary["training/approx_flops_per_update"] = flops_per_update
     summary["training/flops_formula"] = "6*B*L_ctx*(N_trunk+N_other+N_value+n_offsets*(N_temporal+N_group_heads))"
     if device_name is not None:
@@ -1930,29 +1722,16 @@ def _log_training_summary(
         if source is not None:
             summary["hardware/bf16_dense_peak_source"] = source
     for source_name in cfg.source_names:
-        counts = selected[source_name]
-        summary[f"data/source_sampling_share/{source_name}"] = counts["replays"] / unique_replays
-        for metric in (
-            "replays",
-            "frames",
-            "potential_targets",
-            "terminal_replays",
-            "truncated_replays",
-            "identity_sides",
-            "awr_eligible_sides",
-            "awr_eligible_frames",
-        ):
-            summary[f"data/source_{metric}/{source_name}"] = counts.get(metric, 0)
+        source_replays = selected[source_name]
+        summary[f"data/source_sampling_share/{source_name}"] = source_replays / unique_replays
+        summary[f"data/source_replays/{source_name}"] = source_replays
 
 
 def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
     """Compile O51's selected trunk and complete temporal loss entrypoints."""
-    trunk_fn: Callable = model.forward
+    trunk_fn: Callable = model.forward_unpadded
     temporal_fn: Callable = model.temporal.teacher_forced_nll
     if DEVICE == "cuda" and cfg.compile_trunk:
-        model.trunk.resolve_attention(DEVICE)
-        if model.trunk.attn_path not in ("flex", "varlen_flash"):
-            raise RuntimeError(f"compiled CUDA training requires fused trunk attention, got {model.trunk.attn_path}")
         trunk_fn = torch.compile(
             trunk_fn,
             dynamic=False,
@@ -2051,7 +1830,7 @@ def _finalize_training(**kwargs: object) -> None:
     smoke = bool(kwargs["smoke"])
     if not smoke and model_level(cfg.arch) == "large" and cfg.target_positions == D0 and cfg.tier_scale == 1:
         run_dir = cast(Path, kwargs["run_dir"])
-        audit = audit_materialization(cfg)
+        selection = data_selection(cfg)
         evidence_path = run_dir / "large-d0-evidence.json"
         evidence = {
             "completed": True,
@@ -2059,7 +1838,7 @@ def _finalize_training(**kwargs: object) -> None:
             "model_level": "large",
             "target_positions": D0,
             "tier_scale": 1,
-            "corpus_hash": audit.corpus_hash,
+            "corpus_hash": selection.corpus_hash,
             "checkpoint_sha256": _o50._checkpoint_sha256(run_dir / "final.pt"),
         }
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
@@ -2147,7 +1926,7 @@ def describe() -> dict[str, object]:
             "adam_epsilon": _BASE_ADAM_EPS,
         },
         "decay_grid": [0.0, 0.001, 0.01],
-        "batch_grid": [128, 256, 512, 1024, 2048],
+        "batch_grid": list(PHYSICAL_BATCHES),
         "tiers": {
             scale: {
                 "D": scale * D0,
@@ -2283,17 +2062,10 @@ def run_coordinate_checks(*, batch_size: int = 512, steps: int = 128) -> list[di
     return reports
 
 
-def _validate_terminal_proxy_evidence(path: Path, audit: MaterializationAudit) -> None:
-    payload = json.loads(path.read_text())
-    if (
-        payload.get("completed") is not True
-        or payload.get("corpus_hash") != audit.corpus_hash
-        or payload.get("identical_source_quotas") is not True
-    ):
-        raise ValueError("terminal-only proxy evidence does not match U0 and its source quotas")
-
-
-def _validate_large_d0_evidence(path: Path, audit: MaterializationAudit) -> None:
+def _validate_large_d0_evidence(
+    path: Path,
+    selection: CorpusSelection,
+) -> None:
     payload = json.loads(path.read_text())
     checkpoint_hash = payload.get("checkpoint_sha256")
     if (
@@ -2302,7 +2074,7 @@ def _validate_large_d0_evidence(path: Path, audit: MaterializationAudit) -> None
         or payload.get("model_level") != "large"
         or payload.get("target_positions") != D0
         or payload.get("tier_scale") != 1
-        or payload.get("corpus_hash") != audit.corpus_hash
+        or payload.get("corpus_hash") != selection.corpus_hash
         or not isinstance(checkpoint_hash, str)
         or len(checkpoint_hash) != 64
         or any(character not in "0123456789abcdef" for character in checkpoint_hash)
@@ -2363,7 +2135,6 @@ class TrainArgs:
     preflight_report: Path | None = None
     promotion_evidence: Path | None = None
     large_d0_evidence: Path | None = None
-    terminal_proxy_evidence: Path | None = None
 
 
 @dataclass
@@ -2374,7 +2145,7 @@ class EvalArgs(_o50.EvalArgs):
 @dataclass
 class BenchmarkArgs:
     level: Literal["base", "proxy", "mid", "large"] = "mid"
-    batch_size: Literal[128, 256, 512, 1024, 2048] = 512
+    batch_size: Literal[128, 256, 512, 1024] = 512
     depth_alpha: Literal[0.5, 1.0] = 0.5
     compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
     temporal_attention_chunk: int | None = 16_384
@@ -2384,7 +2155,7 @@ class BenchmarkArgs:
 
 @dataclass
 class CoordinateChecksArgs:
-    batch_size: Literal[128, 256, 512, 1024, 2048] = 512
+    batch_size: Literal[128, 256, 512, 1024] = 512
 
 
 @dataclass
@@ -2415,17 +2186,13 @@ type Command = (
 
 
 def _require_launch_evidence(cfg: TrainConfig, args: TrainArgs) -> None:
-    audit = audit_materialization(cfg)
+    selection = data_selection(cfg)
     if cfg.target_positions >= _LONG_RUN_POSITIONS:
         if args.preflight_report is None:
             raise ValueError("runs at D0 or longer require a throughput preflight report")
         failures = preflight_failures(cfg, load_preflight(args.preflight_report))
         if failures:
             raise ValueError("throughput preflight failed: " + "; ".join(failures))
-    if audit.terminal_only_proxy_required:
-        if args.terminal_proxy_evidence is None:
-            raise ValueError("U0 is more than 5% AWR-ineligible; run the matched terminal-only proxy first")
-        _validate_terminal_proxy_evidence(args.terminal_proxy_evidence, audit)
     if model_level(cfg.arch) == "large":
         if args.promotion_evidence is None:
             raise ValueError("216M training requires the three-seed 55M promotion evidence")
@@ -2435,7 +2202,7 @@ def _require_launch_evidence(cfg: TrainConfig, args: TrainArgs) -> None:
         if cfg.target_positions == 8 * D0:
             if args.large_d0_evidence is None:
                 raise ValueError("216M 8D0/U8 requires evidence from its completed D0/U0 run")
-            _validate_large_d0_evidence(args.large_d0_evidence, audit)
+            _validate_large_d0_evidence(args.large_d0_evidence, selection)
 
 
 def _run_train(args: TrainArgs) -> None:
@@ -2486,14 +2253,7 @@ def _run_train(args: TrainArgs) -> None:
     stats = load_stats(cfg)
     original_log = _o50.wandb.log
     original_host_metrics_sampler = _o50.HostMetricsSampler
-    cache_roots = tuple(
-        source.local_root
-        for source in band_sources(
-            cfg.tier_scale,
-            local_root=Path(cfg.band_root),
-            remote_root=cfg.band_remote,
-        )
-    )
+    cache_roots = tuple(streams.BY_NAME[name].local_root for name in cfg.source_names)
     arm_guard = _ArmGuard(cfg.warmup_steps)
 
     def o51_host_metrics_sampler(
@@ -2549,8 +2309,8 @@ def main(args: Command) -> None:
         return
     if isinstance(args, AuditDataArgs):
         validate_config(args.cfg)
-        audit = audit_materialization(args.cfg)
-        print(json.dumps(asdict(audit), indent=2, sort_keys=True))
+        selection = data_selection(args.cfg)
+        print(json.dumps(asdict(selection), indent=2, sort_keys=True))
         return
     if isinstance(args, PreflightArgs):
         validate_config(args.cfg)

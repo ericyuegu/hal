@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
-from hal.data.o51 import D0
+from hal.training.o51_data import D0
 
 EXPERIMENT = "experiments/051_correct_parameterization.py"
 INIT_STD_GRID = (0.5, 1.0, 2.0)
@@ -89,7 +89,7 @@ class Treatment:
             raise ValueError(f"hidden_std_multiplier must be one of {INIT_STD_GRID}")
         if self.readout_init not in READOUT_GRID:
             raise ValueError(f"readout_init must be one of {READOUT_GRID}")
-        if self.batch_size not in (*BATCH_GRID, 2048):
+        if self.batch_size not in BATCH_GRID:
             raise ValueError("batch_size is outside the O51 sweep")
         if self.depth_alpha not in (0.5, 1.0):
             raise ValueError("depth_alpha must be 0.5 or 1.0")
@@ -305,8 +305,7 @@ def decay_arms(center: Treatment) -> tuple[SweepArm, ...]:
     )
 
 
-def batch_arms(center: Treatment, *, include_2048: bool = False) -> tuple[SweepArm, ...]:
-    batches = (*BATCH_GRID, 2048) if include_2048 else BATCH_GRID
+def batch_arms(center: Treatment) -> tuple[SweepArm, ...]:
     return tuple(
         _arm(
             "batch",
@@ -314,7 +313,7 @@ def batch_arms(center: Treatment, *, include_2048: bool = False) -> tuple[SweepA
             "base",
             replace(center, batch_size=batch, muon_batch_scaling=rule),
         )
-        for batch in batches
+        for batch in BATCH_GRID
         for rule in ("fixed", "sqrt")
     )
 
@@ -373,12 +372,12 @@ def duration_arms(center: Treatment) -> tuple[SweepArm, ...]:
     )
 
 
-def stage_arms(stage: Stage, center: Treatment, *, include_2048: bool = False) -> tuple[SweepArm, ...]:
+def stage_arms(stage: Stage, center: Treatment) -> tuple[SweepArm, ...]:
     generators: dict[Stage, Callable[[], tuple[SweepArm, ...]]] = {
         "initialization-screen": lambda: initialization_screen_arms(center),
         "lr": lambda: lr_arms(center),
         "decay": lambda: decay_arms(center),
-        "batch": lambda: batch_arms(center, include_2048=include_2048),
+        "batch": lambda: batch_arms(center),
         "proxy-transfer": lambda: proxy_transfer_arms(center),
         "mid-search": lambda: mid_search_arms(center),
         "seed-repeat": lambda: seed_repeat_arms(center),

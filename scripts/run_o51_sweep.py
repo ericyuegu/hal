@@ -43,7 +43,6 @@ LaunchEvent = Literal["launching", "failed", "uncertain", "launched"]
 class PlanArgs:
     stage: Stage
     treatment: Path | None = None
-    include_2048: bool = False
     preflight_reports: Path | None = None
     """JSON object that maps production arm IDs, or ``*``, to report paths."""
 
@@ -52,7 +51,6 @@ class PlanArgs:
 class LaunchArgs:
     stage: Stage
     treatment: Path | None = None
-    include_2048: bool = False
     preflight_reports: Path | None = None
     """JSON object that maps production arm IDs, or ``*``, to report paths."""
     state: Path = DEFAULT_STATE
@@ -382,7 +380,7 @@ def _launch_pending(
 def launch(args: LaunchArgs) -> None:
     _validate_launch_args(args)
     git_sha = _git_sha()
-    arms = stage_arms(args.stage, _treatment(args.treatment), include_2048=args.include_2048)
+    arms = stage_arms(args.stage, _treatment(args.treatment))
     prepared = _prepare_arms(
         arms,
         _validated_preflight_reports(_preflight_reports(args.preflight_reports)),
@@ -407,7 +405,7 @@ def launch(args: LaunchArgs) -> None:
 
 def _plan(args: PlanArgs) -> None:
     reports = _validated_preflight_reports(_preflight_reports(args.preflight_reports))
-    arms = stage_arms(args.stage, _treatment(args.treatment), include_2048=args.include_2048)
+    arms = stage_arms(args.stage, _treatment(args.treatment))
     payload = []
     for arm in arms:
         report = _report_for(arm, reports, required=False)
