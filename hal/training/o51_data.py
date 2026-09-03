@@ -239,5 +239,7 @@ class DirectO51ReplayLabels:
             stock_value=self.stock_value,
             suffix=O51_RETURN_SUFFIX,
         )
-        labels.update(self.player_lookup(compact))
+        p1_id, p2_id = self.player_lookup.ids(compact)
+        labels["p1_player_id"] = np.asarray(p1_id, dtype=np.int32)
+        labels["p2_player_id"] = np.asarray(p2_id, dtype=np.int32)
         return labels

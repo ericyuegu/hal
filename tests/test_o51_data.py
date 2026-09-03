@@ -122,5 +122,5 @@ def test_direct_labels_compute_returns_and_ids_from_existing_row() -> None:
 
     for name, values in expected.items():
         np.testing.assert_array_equal(labels[name], values)
-    np.testing.assert_array_equal(labels["p1_player_id"], np.full(12, 7))
-    np.testing.assert_array_equal(labels["p2_player_id"], np.full(12, 11))
+    np.testing.assert_array_equal(labels["p1_player_id"], np.asarray(7, dtype=np.int32))
+    np.testing.assert_array_equal(labels["p2_player_id"], np.asarray(11, dtype=np.int32))

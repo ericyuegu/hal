@@ -22,6 +22,7 @@ from hal.data.policy_schema import pack_trigger
 from hal.data.policy_schema import policy_replay_identity
 from hal.data.policy_schema import unpack_buttons
 from hal.data.policy_schema import unpack_player_state
+from hal.data.policy_schema import unpack_player_stock
 from hal.data.policy_schema import unpack_stick
 from hal.data.policy_schema import unpack_trigger
 from hal.training.features import ACTION_CHANNELS
@@ -86,7 +87,9 @@ def test_packed_player_state_round_trips_values_and_sentinels() -> None:
         "airborne": np.array([0, 1, 1, MASK_INT32], dtype=np.int32),
         "direction": np.array([-1.0, 1.0, 0.0, np.nan], dtype=np.float32),
     }
-    decoded = unpack_player_state(pack_player_state(values))
+    packed = pack_player_state(values)
+    decoded = unpack_player_state(packed)
+    np.testing.assert_array_equal(unpack_player_stock(packed), values["stock"])
     for name, source in values.items():
         if name == "direction":
             assert np.array_equal(_bits(decoded[name][:-1]), _bits(source[:-1]))
@@ -143,6 +146,8 @@ def test_state_pack_rejects_reserved_codes(name: str, bad: int) -> None:
 def test_state_unpack_rejects_reserved_high_bits() -> None:
     with pytest.raises(ValueError, match="reserved bits"):
         unpack_player_state(np.array([1 << 31], dtype=np.uint32))
+    with pytest.raises(ValueError, match="reserved bits"):
+        unpack_player_stock(np.array([1 << 31], dtype=np.uint32))
 
 
 def test_compact_columns_round_trip_through_mds(tmp_path) -> None:

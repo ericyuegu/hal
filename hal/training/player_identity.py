@@ -109,18 +109,24 @@ class ReplayPlayerLookup:
 
     professional: Mapping[str, tuple[int, int]]
 
-    def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
+    def ids(self, compact: Mapping[str, object]) -> tuple[int, int]:
+        """Return both IDs without allocating per-frame columns."""
         replay_id = str(compact["replay_id"])
-        frames = int(np.asarray(compact["num_frames"]).item())
         if replay_id in self.professional:
-            p1_id, p2_id = self.professional[replay_id]
-        else:
-            ranks = tuple(int(np.asarray(compact[f"p{port}_rank"]).item()) for port in (1, 2))
-            if set(ranks) - RANK_PLAYER_IDS:
-                raise KeyError(
-                    f"replay {replay_id} is absent from the professional sidecar and has unsupported ranks {ranks}"
-                )
-            p1_id, p2_id = ranks
+            return self.professional[replay_id]
+        ranks = (
+            int(np.asarray(compact["p1_rank"]).item()),
+            int(np.asarray(compact["p2_rank"]).item()),
+        )
+        if set(ranks) - RANK_PLAYER_IDS:
+            raise KeyError(
+                f"replay {replay_id} is absent from the professional sidecar and has unsupported ranks {ranks}"
+            )
+        return ranks
+
+    def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
+        frames = int(np.asarray(compact["num_frames"]).item())
+        p1_id, p2_id = self.ids(compact)
         return {
             "p1_player_id": np.full(frames, p1_id, dtype=np.int32),
             "p2_player_id": np.full(frames, p2_id, dtype=np.int32),

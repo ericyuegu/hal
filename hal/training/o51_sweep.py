@@ -56,9 +56,9 @@ class Treatment:
     compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
     temporal_attention_chunk: int | None = 16_384
     num_workers: int = 16
-    replay_pack_batch_size: int = 32
+    replay_pack_batch_size: int = 64
     loader_prefetch_factor: int = 2
-    predownload: int = 512
+    predownload: int = 1024
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
     shuffle_block_size: int = 8192
 

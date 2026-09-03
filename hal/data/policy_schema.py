@@ -102,21 +102,34 @@ def pack_player_state(values: Mapping[str, np.ndarray]) -> np.ndarray:
 
 
 def unpack_player_state(packed: np.ndarray) -> dict[str, np.ndarray]:
+    value = _validated_player_state(packed)
+
+    out = {name: _unpack_player_state_field(value, name) for name in _FIELDS}
+    direction_code = ((value >> _DIRECTION_SHIFT) & _DIRECTION_MASK).astype(np.intp)
+    out["direction"] = _CODE_TO_DIRECTION[direction_code]
+    return out
+
+
+def _validated_player_state(packed: np.ndarray) -> np.ndarray:
     value = np.asarray(packed)
     if value.dtype != np.uint32:
         raise TypeError(f"packed state must be uint32, got {value.dtype}")
     if (value & ~np.uint32(_USED_STATE_BITS)).any():
         raise ValueError("packed state uses reserved bits")
+    return value
 
-    out: dict[str, np.ndarray] = {}
-    for name, (shift, width, valid_max, sentinel) in _FIELDS.items():
-        code = ((value >> shift) & ((1 << width) - 1)).astype(np.int32)
-        if ((code > valid_max) & (code != sentinel)).any():
-            raise ValueError(f"packed {name} contains a reserved code")
-        out[name] = np.where(code == sentinel, MASK_INT32, code).astype(np.int32)
-    direction_code = ((value >> _DIRECTION_SHIFT) & _DIRECTION_MASK).astype(np.intp)
-    out["direction"] = _CODE_TO_DIRECTION[direction_code]
-    return out
+
+def _unpack_player_state_field(packed: np.ndarray, name: str) -> np.ndarray:
+    shift, width, valid_max, sentinel = _FIELDS[name]
+    code = ((packed >> shift) & ((1 << width) - 1)).astype(np.int32)
+    if ((code > valid_max) & (code != sentinel)).any():
+        raise ValueError(f"packed {name} contains a reserved code")
+    return np.where(code == sentinel, MASK_INT32, code).astype(np.int32)
+
+
+def unpack_player_stock(packed: np.ndarray) -> np.ndarray:
+    """Decode only stock counts from a packed player-state column."""
+    return _unpack_player_state_field(_validated_player_state(packed), "stock")
 
 
 def _pack_grid(values: np.ndarray, scale: int, sentinel: int, dtype: np.dtype) -> np.ndarray:

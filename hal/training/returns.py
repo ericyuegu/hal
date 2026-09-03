@@ -14,7 +14,7 @@ from collections.abc import Mapping
 import numpy as np
 from scipy.signal import lfilter
 
-from hal.data.policy_schema import unpack_player_state
+from hal.data.policy_schema import unpack_player_stock
 from hal.wire import MASK_INT32
 
 
@@ -103,9 +103,9 @@ def discounted_return(reward: np.ndarray, gamma: float) -> np.ndarray:
 def infer_terminal_replay(sample: dict) -> bool:
     """True when the replay ends at a known episode boundary.
 
-    An explicit scalar ``mc_terminated`` attached by a materializer wins. Without
-    it, only an observed final stock count of zero is trusted; an ambiguous
-    quit-out is not terminal.
+    An explicit scalar ``mc_terminated`` attached upstream wins. Without it, only
+    an observed final stock count of zero is trusted; an ambiguous quit-out is
+    not terminal.
     """
     if "mc_terminated" in sample:
         value = np.asarray(sample["mc_terminated"])
@@ -193,7 +193,7 @@ def compact_policy_returns(
     sample: dict[str, np.ndarray] = {}
     for port in ("p1", "p2"):
         percent = np.asarray(compact[f"{port}_percent"], dtype=np.float32)
-        stock = unpack_player_state(np.asarray(compact[f"{port}_state"]))["stock"]
+        stock = unpack_player_stock(np.asarray(compact[f"{port}_state"]))
         if percent.shape != (frames,) or stock.shape != (frames,):
             raise ValueError(
                 f"compact {port} return fields must have shape {(frames,)}, "

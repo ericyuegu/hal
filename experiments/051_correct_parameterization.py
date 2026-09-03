@@ -255,10 +255,10 @@ class TrainConfig(_o50.TrainConfig):
     temporal_attention_chunk: int | None = 16_384
     windows_per_replay: int = 4
     reservoir_capacity: int = 4096
-    replay_pack_batch_size: Literal[16, 32, 64] = 32
+    replay_pack_batch_size: Literal[16, 32, 64] = 64
     loader_prefetch_factor: Literal[1, 2, 4] = 2
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
-    predownload: int = 512
+    predownload: int = 1024
     num_workers: int = 16
     cache_limit_gb: int = 1700
     stability_every: int = 25
@@ -1373,12 +1373,8 @@ PHYSICAL_BATCHES: Final[tuple[int, ...]] = (128, 256, 512, 1024)
 COMPILE_MODES: Final[tuple[str, ...]] = ("reduce-overhead", "max-autotune")
 TEMPORAL_ATTENTION_CHUNKS: Final[tuple[int | None, ...]] = (8192, 16_384, 32_768, None)
 REQUIRED_PREFLIGHT_TELEMETRY: Final[tuple[str, ...]] = (
-    "system/cpu/utilization",
-    "system/disk/read_mib_s",
-    "system/disk/read_iops",
     "system/network/read_mib_s",
     "system/cache/allocated_gib",
-    "system/page_faults/s",
     "system/pinned_memory_gib",
     "system/cgroup/current_gib",
     "profile/target_prep_s",
@@ -2384,9 +2380,9 @@ class LoaderBenchmarkArgs:
     tier_scale: Literal[1, 2, 4, 8] = 8
     batch_size: Literal[128, 256, 512, 1024] = 512
     num_workers: Literal[8, 16, 24, 32] = 16
-    replay_pack_batch_size: Literal[16, 32, 64] = 32
+    replay_pack_batch_size: Literal[16, 32, 64] = 64
     loader_prefetch_factor: Literal[1, 2, 4] = 2
-    predownload: int = 512
+    predownload: int = 1024
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
     shuffle_block_size: Literal[4096, 8192] = 8192
     warmup_batches: int = 8
