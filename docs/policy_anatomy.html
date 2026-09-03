@@ -1,0 +1,2100 @@
+<title>Anatomy of a Melee Policy</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root{
+  color-scheme: light dark;
+  --bg:#F1F0F4; --panel:#FFFFFF; --inset:#F7F6FA; --sunk:#ECEAF1;
+  --ink:#17161F; --ink2:#605D72; --ink3:#8C8AA0;
+  --rule:#DAD8E2; --hair:#EAE9EF;
+  --accent:#B4700F; --accent-soft:#F3E6CF;
+  --indigo:#4B41C4; --ochre:#B4700F;
+  --gain:#00806A; --loss:#C0492E;
+  --s1:#7C74DC; --s2:#5B51D2; --s3:#4237B8; --s4:#2E2688; --s5:#6B6880;
+  --shadow:0 1px 2px rgba(23,22,31,.05), 0 8px 24px -14px rgba(23,22,31,.22);
+  --display:"Chivo","Helvetica Neue",Arial,sans-serif;
+  --body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121118; --panel:#1A1923; --inset:#22212D; --sunk:#15141C;
+    --ink:#EDEBF3; --ink2:#A29FB4; --ink3:#77748A;
+    --rule:#332F40; --hair:#26232F;
+    --accent:#D99B3E; --accent-soft:#3A2E17;
+    --indigo:#8A81E6; --ochre:#BE8836;
+    --gain:#1E9C80; --loss:#D2634B;
+    --s1:#A9A2F0; --s2:#8A81E6; --s3:#6C62DC; --s4:#5348C4; --s5:#8B8899;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121118; --panel:#1A1923; --inset:#22212D; --sunk:#15141C;
+  --ink:#EDEBF3; --ink2:#A29FB4; --ink3:#77748A;
+  --rule:#332F40; --hair:#26232F;
+  --accent:#D99B3E; --accent-soft:#3A2E17;
+  --indigo:#8A81E6; --ochre:#BE8836;
+  --gain:#1E9C80; --loss:#D2634B;
+  --s1:#A9A2F0; --s2:#8A81E6; --s3:#6C62DC; --s4:#5348C4; --s5:#8B8899;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -16px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html{scroll-behavior:smooth; scroll-padding-top:24px}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:var(--body); font-size:17px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} *{animation:none !important; transition:none !important} }
+
+/* ---------- shell: frame-ruler spine + content ---------- */
+.shell{display:grid; grid-template-columns:76px minmax(0,1fr); max-width:1240px; margin:0 auto; gap:0}
+.spine{position:sticky; top:0; align-self:start; height:100vh; padding:34px 0 34px 20px; border-right:1px solid var(--hair)}
+.spine ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px}
+.spine a{
+  display:flex; align-items:center; gap:8px; text-decoration:none;
+  font-family:var(--mono); font-size:10px; font-weight:500; letter-spacing:.04em;
+  color:var(--ink3); padding:5px 0; border-left:2px solid transparent; padding-left:10px; margin-left:-12px;
+}
+.spine a:hover{color:var(--ink)}
+.spine a[aria-current="true"]{color:var(--ink); border-left-color:var(--accent)}
+.spine .tick{display:block; width:14px; height:1px; background:currentColor; opacity:.5}
+.spine .grp{margin-top:14px; font-family:var(--mono); font-size:9px; letter-spacing:.16em; color:var(--ink3); padding-left:10px; margin-left:-12px; text-transform:uppercase}
+main{padding:34px 30px 100px; min-width:0}
+@media (max-width: 900px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .spine{display:none}
+  main{padding:24px 18px 72px}
+  body{font-size:16px}
+}
+
+/* ---------- type ---------- */
+h1,h2,h3,h4{font-family:var(--display); font-weight:600; line-height:1.14; letter-spacing:-.015em; text-wrap:balance; margin:0}
+h1{font-size:clamp(2.3rem,5.6vw,3.9rem); font-weight:700; letter-spacing:-.03em}
+h2{font-size:clamp(1.5rem,3vw,2rem); margin:0 0 6px}
+h3{font-size:1.12rem; margin:30px 0 8px}
+h4{font-size:.95rem; margin:20px 0 6px}
+p{margin:11px 0; max-width:68ch}
+a{color:var(--ink); text-decoration:underline; text-decoration-color:var(--rule); text-underline-offset:3px}
+a:hover{text-decoration-color:var(--accent)}
+code,.mono,.num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+code{font-size:.83em; background:var(--inset); border:1px solid var(--hair); border-radius:3px; padding:.05em .3em}
+.eyebrow{font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:.18em; text-transform:uppercase; color:var(--ink3); margin:0 0 12px}
+.lede{font-size:1.22rem; line-height:1.5; color:var(--ink2); max-width:60ch; margin:16px 0 0}
+.small{font-size:.86rem; color:var(--ink2)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:2px}
+
+/* ---------- header ---------- */
+header.hero{padding:26px 0 6px; border-bottom:1px solid var(--rule); margin-bottom:34px}
+.hero-top{display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:14px}
+.hero-top .eyebrow{margin:0}
+.theme-toggle{
+  display:inline-flex; align-items:center; gap:7px; flex:none;
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
+  padding:6px 12px; border:1px solid var(--rule); border-radius:999px;
+  background:var(--panel); color:var(--ink2); cursor:pointer; transition:border-color .14s ease, color .14s ease;
+}
+.theme-toggle:hover{border-color:var(--accent); color:var(--ink)}
+.theme-toggle .tt-icon{display:inline-flex}
+.theme-toggle svg{width:13px; height:13px; display:block}
+.hero-meta{display:flex; flex-wrap:wrap; gap:8px 26px; margin-top:24px; padding-bottom:26px; font-family:var(--mono); font-size:11.5px; color:var(--ink2)}
+.hero-meta b{color:var(--ink); font-weight:500}
+
+/* ---------- callouts ---------- */
+.callout{border-left:3px solid var(--rule); background:var(--panel); padding:14px 18px; margin:22px 0; border-radius:0 4px 4px 0; max-width:780px}
+.callout.key{border-left-color:var(--accent)}
+.callout.warn{border-left-color:var(--loss)}
+.callout p{margin:6px 0}
+.callout p:first-child{margin-top:0}
+.callout p:last-child{margin-bottom:0}
+
+/* ---------- section frame ---------- */
+section{padding:52px 0 8px; border-top:1px solid var(--hair); margin-top:34px}
+section:first-of-type{border-top:0}
+.sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:4px}
+.sec-num{font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:.08em; color:var(--stage,var(--ink3)); padding-top:4px}
+.sec-sub{color:var(--ink2); max-width:66ch; margin:8px 0 0}
+
+/* ---------- panels ---------- */
+.panel{background:var(--panel); border:1px solid var(--hair); border-radius:6px; box-shadow:var(--shadow)}
+
+/* ---------- hero diagram + spec panel ---------- */
+.stack{display:grid; grid-template-columns:minmax(0,1fr); gap:16px; margin:22px 0 8px}
+.diagram{padding:14px 12px 8px; overflow-x:auto}
+.diagram svg{display:block; width:100%; min-width:880px; height:auto}
+.stage{cursor:pointer}
+.stage .plate{transition:fill .16s ease, stroke .16s ease}
+.stage:hover .plate,.stage:focus-visible .plate{stroke-width:2}
+.diagram[data-selected] .stage{opacity:.34; transition:opacity .18s ease}
+.diagram[data-selected] .stage.is-sel{opacity:1}
+.diagram[data-selected] .stage.is-sel .plate{stroke-width:2}
+.diagram[data-selected] .flow{opacity:.4}
+.stage .lbl{font-family:"Chivo","Helvetica Neue",Arial,sans-serif; font-weight:600; letter-spacing:.02em}
+.diag-hint{font-family:var(--mono); font-size:10.5px; color:var(--ink3); text-align:center; padding:2px 0 6px}
+.narrow-only{display:none}
+@media (max-width: 760px){ .narrow-only{display:inline} }
+
+.spec{padding:18px 22px 20px}
+.spec-grid{display:grid; grid-template-columns:minmax(220px,.8fr) minmax(250px,1fr) minmax(240px,1fr); gap:0; align-items:start}
+.spec-grid > div{padding-right:28px}
+.spec-grid > div + div{border-left:1px solid var(--hair); padding-left:28px}
+@media (max-width: 860px){ .spec-grid{grid-template-columns:minmax(0,1fr)} .spec-grid > div + div{border-left:0; padding-left:0; border-top:1px solid var(--hair); padding-top:14px; margin-top:14px} }
+.spec-tests{margin-top:16px; padding-top:14px; border-top:1px solid var(--hair); display:flex; flex-wrap:wrap; gap:6px; align-items:center}
+.spec .parts{margin:10px 0 0; font-family:var(--mono); font-size:10.5px; line-height:1.65; color:var(--ink3)}
+.spec-tag{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink3)}
+.spec-tag .dot{width:9px; height:9px; border-radius:2px; background:var(--stage,var(--ink3))}
+.spec h3{margin:9px 0 2px; font-size:1.24rem}
+.spec .role{color:var(--ink2); font-size:.92rem; margin:6px 0 14px; max-width:46ch}
+.spec dl{display:grid; grid-template-columns:auto 1fr; gap:0; margin:0; border-top:1px solid var(--hair)}
+.spec dt{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink3); padding:7px 12px 7px 0; border-bottom:1px solid var(--hair); white-space:nowrap}
+.spec dd{margin:0; padding:7px 0; border-bottom:1px solid var(--hair); font-family:var(--mono); font-size:11px; line-height:1.6; text-align:right; color:var(--ink)}
+.shapes{display:flex; flex-wrap:wrap; gap:6px; align-items:center; justify-content:flex-end}
+.shapes .arw{color:var(--ink3)}
+.chip{display:inline-block; font-family:var(--mono); font-size:10.5px; padding:2px 7px; border:1px solid var(--rule); border-radius:3px; background:var(--inset); white-space:nowrap}
+.parambar{height:6px; border-radius:3px; background:var(--sunk); overflow:hidden; margin-top:7px}
+.parambar i{display:block; height:100%; background:var(--stage,var(--indigo))}
+.spec .jump{display:inline-block; margin-top:16px; font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--ink); text-decoration:none; border-bottom:1px solid var(--accent); padding-bottom:1px}
+
+/* ---------- ranked chart ---------- */
+.toolbar{display:flex; flex-wrap:wrap; gap:16px 24px; align-items:flex-end; margin:20px 0 12px}
+.fieldset{display:flex; flex-direction:column; gap:7px}
+.fieldset > span{font-family:var(--mono); font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3)}
+.pills{display:flex; flex-wrap:wrap; gap:5px}
+.pill{
+  font-family:var(--mono); font-size:11px; letter-spacing:.02em;
+  padding:4px 10px; border:1px solid var(--rule); border-radius:999px;
+  background:var(--panel); color:var(--ink2); cursor:pointer; transition:all .13s ease;
+}
+.pill:hover{border-color:var(--ink3); color:var(--ink)}
+.pill[aria-pressed="true"]{background:var(--ink); border-color:var(--ink); color:var(--bg)}
+.pill.k[aria-pressed="true"]{background:var(--accent); border-color:var(--accent); color:#fff}
+:root[data-theme="dark"] .pill.k[aria-pressed="true"],
+:root:not([data-theme="light"]) .pill.k[aria-pressed="true"]{color:#1A1923}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]) .pill.k[aria-pressed="true"]{color:#fff} }
+
+.rank-wrap{padding:16px 18px 10px; overflow-x:auto}
+.rank{width:100%; border-collapse:collapse; min-width:700px; table-layout:fixed}
+.rank tr{cursor:pointer}
+.rank tr:hover td{background:var(--inset)}
+.rank td{padding:6px 8px; border-bottom:1px solid var(--hair); vertical-align:middle}
+.rank td.f{font-size:.9rem; line-height:1.32}
+.rank td.f small{display:block; color:var(--ink3); font-family:var(--mono); font-size:10px; letter-spacing:.02em; margin-top:2px}
+.rank td.d{padding-right:16px}
+.rank td.v{font-family:var(--mono); font-size:12px; text-align:right; white-space:nowrap}
+.rank td.q{padding-left:14px}
+.bar{position:relative; height:20px}
+.bar .zero{position:absolute; top:-3px; bottom:-3px; width:1px; background:var(--rule)}
+.bar i{position:absolute; top:4px; height:12px; border-radius:2px}
+.bar u{position:absolute; top:1px; height:18px; width:2px; border-radius:1px; opacity:.75; text-decoration:none}
+.gain{background:var(--gain)} .loss{background:var(--loss)}
+.badge{display:inline-block; font-family:var(--mono); font-size:9px; letter-spacing:.09em; text-transform:uppercase; padding:2px 6px; border-radius:3px; border:1px solid var(--rule); color:var(--ink2); white-space:nowrap}
+.badge.strong{border-color:var(--gain); color:var(--gain)}
+.badge.near{border-color:var(--ink3); color:var(--ink2)}
+.badge.combined{border-color:var(--accent); color:var(--accent)}
+.badge.weak{border-color:var(--loss); color:var(--loss)}
+.lcbmini{display:none}
+@media (max-width: 760px){
+  .rank{min-width:0; table-layout:auto}
+  .rank col{width:auto !important}
+  .rank td.d, .rank-wrap .axis{display:none}
+  .rank td.v{padding-right:4px}
+  .rank td.q{padding-left:8px; width:1%}
+  .rank td.f{font-size:.86rem}
+  .lcbmini{display:block; color:var(--ink3); font-size:10px; font-weight:400}
+}
+.axis{display:grid; grid-template-columns:29% 46% 25%; font-family:var(--mono); font-size:10px; color:var(--ink3); padding:6px 8px 2px; border-top:1px solid var(--hair); min-width:700px}
+.axis .ax{display:flex; justify-content:space-between}
+
+/* ---------- evidence tables ---------- */
+.table-wrap{overflow-x:auto; margin:16px 0 8px; border:1px solid var(--hair); border-radius:6px; background:var(--panel)}
+table.ev{width:100%; border-collapse:collapse; min-width:620px; font-size:.88rem}
+table.ev caption{text-align:left; font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink3); padding:12px 14px 8px}
+table.ev th{text-align:left; font-family:var(--mono); font-weight:500; font-size:9.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink3); padding:8px 12px; border-bottom:1px solid var(--rule)}
+table.ev td{padding:9px 12px; border-bottom:1px solid var(--hair); vertical-align:top; line-height:1.45}
+table.ev tr:last-child td{border-bottom:0}
+table.ev td.n{font-family:var(--mono); text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums}
+table.ev tr.flash td{background:var(--accent-soft); transition:background 1.4s ease}
+.pos{color:var(--gain)} .neg{color:var(--loss)}
+
+/* ---------- charts ---------- */
+.chart-row{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; margin:18px 0}
+figure{margin:0; background:var(--panel); border:1px solid var(--hair); border-radius:6px; padding:14px 14px 10px}
+figure svg{display:block; width:100%; max-width:560px; height:auto; margin-inline:auto}
+figcaption{font-size:.83rem; color:var(--ink2); margin-top:10px; line-height:1.45}
+.legend{display:flex; flex-wrap:wrap; gap:6px 16px; font-family:var(--mono); font-size:10.5px; color:var(--ink2); margin:2px 0 8px}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.legend i{width:14px; height:3px; border-radius:2px; display:inline-block}
+.tip{
+  position:fixed; z-index:40; pointer-events:none; opacity:0; transform:translateY(4px);
+  background:var(--panel); border:1px solid var(--rule); border-radius:5px; box-shadow:var(--shadow);
+  padding:9px 11px; font-family:var(--mono); font-size:11px; line-height:1.55; max-width:290px; color:var(--ink);
+  transition:opacity .12s ease, transform .12s ease;
+}
+.tip.on{opacity:1; transform:translateY(0)}
+.tip b{font-weight:700}
+.tip .hd{font-family:var(--display); font-size:12.5px; font-weight:600; margin-bottom:4px; display:block}
+
+/* ---------- 039 capacity explorer ---------- */
+.explorer{padding:16px 18px 14px; margin:20px 0 6px}
+.exp-head{display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:14px; padding-bottom:12px; border-bottom:1px solid var(--hair)}
+.exp-head h3{font-size:1.16rem}
+.exp-controls{display:flex; flex-wrap:wrap; gap:14px 26px; align-items:flex-end; padding:12px 0 4px}
+.exp-controls .fieldset[hidden]{display:none}
+.exp-body{overflow-x:auto; padding:4px 0}
+.exp-body svg{display:block; width:100%; min-width:720px; height:auto}
+.exp-note{margin:8px 0 0; font-size:.86rem; color:var(--ink2); max-width:86ch; line-height:1.5}
+.cap-cell{cursor:default}
+.cap-ramp{display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; padding:4px 0 2px; font-family:var(--mono); font-size:10px; color:var(--ink3)}
+.cap-ramp i{width:15px; height:9px; border-radius:2px; display:inline-block}
+
+/* ---------- glossary ---------- */
+.toy{margin:4px 0 6px}
+.toy svg{max-width:840px}
+.toy [data-part]{transition:opacity .16s ease}
+.toy.hl [data-part]{opacity:.16}
+.toy.hl [data-part].lit{opacity:1}
+@media (max-width: 760px){ .toy{overflow-x:auto} .toy svg{min-width:660px} }
+.gterm[data-fig]{cursor:default}
+.gterm[data-fig] dt{border-bottom:1px dotted var(--rule); display:inline-block; padding-bottom:1px}
+.gterm[data-fig]:hover dt, .gterm[data-fig]:focus-within dt{color:var(--accent); border-bottom-color:var(--accent)}
+
+.gloss{display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:0 40px; margin:6px 0 22px}
+.gterm{border-top:1px solid var(--hair); padding:11px 0 12px}
+.gterm dt{font-family:var(--display); font-weight:600; font-size:.98rem; margin:0 0 3px}
+.gterm dt .alias{font-family:var(--mono); font-size:10px; color:var(--ink3); letter-spacing:.05em; font-weight:400; margin-left:8px}
+.gterm dd{margin:0; font-size:.88rem; color:var(--ink2); line-height:1.5}
+.gterm dd .vs{display:block; margin-top:6px; padding-left:10px; border-left:2px solid var(--accent); color:var(--ink3); font-size:.84rem}
+.gloss-head{font-family:var(--mono); font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3); margin:30px 0 2px}
+
+/* ---------- failed-branch cards ---------- */
+.cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(268px,1fr)); gap:14px; margin:20px 0}
+.card{background:var(--panel); border:1px solid var(--hair); border-radius:6px; padding:15px 16px 14px; display:flex; flex-direction:column; gap:6px}
+.card .hd{display:flex; align-items:baseline; justify-content:space-between; gap:10px}
+.card h4{margin:0; font-size:1rem}
+.card .exp{font-family:var(--mono); font-size:10px; color:var(--ink3); letter-spacing:.06em}
+.card .score{font-family:var(--mono); font-size:1.28rem; font-weight:500; letter-spacing:-.01em}
+.card p{margin:0; font-size:.87rem; line-height:1.48; color:var(--ink2); max-width:none}
+.card .runs{display:flex; flex-wrap:wrap; gap:5px; margin-top:2px}
+.card .runs a{font-family:var(--mono); font-size:10px; padding:2px 7px; border:1px solid var(--rule); border-radius:3px; text-decoration:none; color:var(--ink2)}
+.card .runs a:hover{border-color:var(--accent); color:var(--ink)}
+
+/* ---------- open questions ---------- */
+.oq{display:grid; grid-template-columns:34px minmax(0,1fr); gap:0 16px; padding:15px 0; border-bottom:1px solid var(--hair)}
+.oq:last-child{border-bottom:0}
+.oq .n{font-family:var(--mono); font-size:1.05rem; color:var(--ink3); font-weight:500}
+.oq h4{margin:0 0 4px}
+.oq p{margin:4px 0 0; font-size:.9rem; color:var(--ink2)}
+.oq .fix{font-family:var(--mono); font-size:.8rem; color:var(--ink2); margin-top:7px; padding-left:11px; border-left:2px solid var(--accent)}
+
+footer{margin-top:56px; padding-top:22px; border-top:1px solid var(--rule); font-family:var(--mono); font-size:10.5px; color:var(--ink3); display:flex; flex-wrap:wrap; gap:6px 22px}
+</style>
+
+<div class="shell">
+<nav class="spine" aria-label="Sections">
+  <ol>
+    <li class="grp">Start</li>
+    <li><a href="#map"><span class="tick"></span>map</a></li>
+    <li><a href="#terms"><span class="tick"></span>key</a></li>
+    <li><a href="#ranked"><span class="tick"></span>all</a></li>
+    <li class="grp">Model</li>
+    <li><a href="#observation"><span class="tick"></span>01</a></li>
+    <li><a href="#trunk"><span class="tick"></span>02</a></li>
+    <li><a href="#decoder"><span class="tick"></span>03</a></li>
+    <li><a href="#groups"><span class="tick"></span>04</a></li>
+    <li><a href="#codec"><span class="tick"></span>05</a></li>
+    <li><a href="#timing"><span class="tick"></span>06</a></li>
+    <li class="grp">Recipe</li>
+    <li><a href="#recipe"><span class="tick"></span>07</a></li>
+    <li class="grp">Rejected</li>
+    <li><a href="#failed"><span class="tick"></span>08</a></li>
+    <li><a href="#open"><span class="tick"></span>09</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="hero">
+  <div class="hero-top">
+    <p class="eyebrow">HAL · experiments/043_legacy_codec.py</p>
+    <button type="button" class="theme-toggle" id="theme-toggle">
+      <span class="tt-icon tt-sun" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.4M12 19.2v2.4M2.4 12h2.4M19.2 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7"/></svg></span>
+      <span class="tt-icon tt-moon" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.6A8.6 8.6 0 1 1 9.4 3.5a6.9 6.9 0 0 0 11.1 11.1z"/></svg></span>
+      <span class="tt-label">theme</span>
+    </button>
+  </div>
+  <h1>Anatomy of a Melee&nbsp;Policy</h1>
+  <p class="lede">A 15-million-parameter Transformer reads two seconds of Super Smash Bros. Melee and writes the next controller frames. Every part of it is the residue of an experiment that we ran and scored in a live game.</p>
+  <div class="hero-meta">
+    <span><b>15,053,039</b> parameters</span>
+    <span><b>128</b> frames of context</span>
+    <span><b>10</b> predicted offsets</span>
+    <span><b>60 Hz</b> closed loop</span>
+    <span><b>~40</b> scored experiments</span>
+  </div>
+</header>
+
+<div class="callout key">
+  <p><b>One number decides everything: net stocks per minute.</b> We play the model against the in-game CPU and count the stocks it takes minus the stocks it loses, per active minute. The <span class="mono">LCB</span> beside each score is the conservative one-sided 95&nbsp;% lower bound of that difference.</p>
+  <p>Validation loss does not decide anything. Experiment&nbsp;028 reached a <em>lower</em> final loss than the model it replaced, after twice the data, and played worse: NLL&nbsp;<span class="mono">1.1444</span> against <span class="mono">1.1596</span>, but <span class="mono neg">−0.23</span> stocks per minute against <span class="mono pos">+0.03</span>. Since then, only closed-loop play ranks a model.</p>
+</div>
+
+<section id="map" style="border-top:0; padding-top:26px">
+  <div class="sec-head"><span class="sec-num">MAP</span><h2>The five stages</h2></div>
+  <p class="sec-sub">Time runs left to right; the hierarchy runs down. The trunk reads 128 frames it has seen; the decoder sits to the right of <em>now</em>, one step per predicted offset; under each step sit the four controller groups that step must choose. Select a stage to inspect it.</p>
+
+  <div class="stack">
+    <div class="panel diagram" id="diagram">
+      <svg viewBox="0 0 992 606" role="img" aria-labelledby="mapT mapD">
+        <title id="mapT">How the Melee policy turns 128 observed frames into future controller frames</title>
+        <desc id="mapD">Time runs left to right. On the left, an observation encoder makes one token per observed frame and an eight-block causal trunk attends back over 128 of them, ending in one state for the current frame. That state passes to the right of the "now" line into a temporal decoder, whose ten steps sit at their true future offsets: a dense run at one to six frames ahead, then sparse steps at nine, twelve, sixteen and twenty. Below each step, a four-cell comb marks the four controller groups that step must choose. A detail panel expands one step into that chain: C-stick, main stick, triggers, buttons, and then a fourteen-channel controller frame. A final band shows which predicted frames the runtime actually sends to the emulator.</desc>
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0.5 L10 5 L0 9.5 Z" fill="currentColor"/></marker>
+          <marker id="fs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto"><path d="M0 0.5 L10 5 L0 9.5 Z" fill="currentColor"/></marker>
+        </defs>
+
+        <!-- shared time frame: guides, now line, axis -->
+        <g class="flow">
+          <g stroke="var(--s2)" stroke-width="1" stroke-dasharray="2 4" opacity=".55">
+            <line x1="60" y1="134" x2="60" y2="212"/><line x1="153" y1="134" x2="153" y2="212"/>
+            <line x1="246" y1="134" x2="246" y2="212"/><line x1="339" y1="134" x2="339" y2="212"/>
+            <line x1="432" y1="134" x2="432" y2="212"/>
+          </g>
+          <line x1="556" y1="134" x2="556" y2="312" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="2 4" opacity=".45"/>
+          <line x1="589" y1="44" x2="589" y2="340" stroke="var(--ink2)" stroke-width="1.2" stroke-dasharray="6 4"/>
+          <text x="589" y="38" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--ink2)">now</text>
+          <line x1="46" y1="320" x2="946" y2="320" stroke="var(--rule)" stroke-width="1"/>
+          <g font-family="var(--mono)" font-size="10.5" fill="var(--ink3)">
+            <text x="300" y="313" text-anchor="middle">← 128 frames the model has seen</text>
+            <text x="800" y="313" text-anchor="middle">20 frames the model predicts →</text>
+            <g stroke="var(--rule)" stroke-width="1">
+              <line x1="60" y1="320" x2="60" y2="325"/><line x1="308" y1="320" x2="308" y2="325"/><line x1="556" y1="320" x2="556" y2="325"/>
+              <line x1="619" y1="320" x2="619" y2="325"/><line x1="702" y1="320" x2="702" y2="325"/>
+              <line x1="801.6" y1="320" x2="801.6" y2="325"/><line x1="934.4" y1="320" x2="934.4" y2="325"/>
+            </g>
+            <g text-anchor="middle" font-size="10">
+              <text x="60" y="336">t−127</text><text x="308" y="336">t−64</text><text x="556" y="336">t</text>
+              <text x="619" y="336">t+1</text><text x="702" y="336">t+6</text><text x="801.6" y="336">t+12</text><text x="934.4" y="336">t+20</text>
+            </g>
+          </g>
+        </g>
+
+        <!-- 01 observation encoder -->
+        <g class="stage" data-stage="obs" tabindex="0" role="button" aria-label="Stage 1, observation encoder">
+          <rect class="plate" x="36" y="44" width="546" height="96" rx="7" fill="var(--inset)" stroke="var(--s1)" stroke-width="1.2"/>
+          <text x="52" y="66" class="lbl" font-size="12.5" fill="var(--s1)" letter-spacing="1.3">01 · OBSERVATION ENCODER</text>
+          <text x="566" y="66" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">185,388 params</text>
+          <text x="52" y="81" font-size="11" fill="var(--ink2)">every observed frame becomes one 384-dimension token</text>
+          <g font-size="10.5">
+            <rect x="52" y="88" width="122" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="62" y="103" fill="var(--ink)">player state ×4</text>
+            <rect x="180" y="88" width="122" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="190" y="103" fill="var(--ink)">previous action</text>
+            <rect x="308" y="88" width="122" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="318" y="103" fill="var(--ink)">item slots ×4</text>
+            <rect x="436" y="88" width="130" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="446" y="103" fill="var(--ink)">characters + stage</text>
+          </g>
+          <g fill="var(--s1)" opacity=".78">
+            <rect x="50" y="118" width="20" height="16" rx="2"/><rect x="81" y="118" width="20" height="16" rx="2"/>
+            <rect x="143" y="118" width="20" height="16" rx="2"/>
+            <rect x="174" y="118" width="20" height="16" rx="2"/><rect x="205" y="118" width="20" height="16" rx="2"/>
+            <rect x="236" y="118" width="20" height="16" rx="2"/><rect x="267" y="118" width="20" height="16" rx="2"/>
+            <rect x="298" y="118" width="20" height="16" rx="2"/><rect x="329" y="118" width="20" height="16" rx="2"/>
+            <rect x="360" y="118" width="20" height="16" rx="2"/><rect x="391" y="118" width="20" height="16" rx="2"/>
+            <rect x="422" y="118" width="20" height="16" rx="2"/><rect x="453" y="118" width="20" height="16" rx="2"/>
+            <rect x="484" y="118" width="20" height="16" rx="2"/><rect x="515" y="118" width="20" height="16" rx="2"/>
+          </g>
+          <rect x="546" y="116" width="20" height="20" rx="2" fill="var(--s1)"/>
+          <text x="122" y="131" text-anchor="middle" font-size="13" fill="var(--ink3)" font-family="var(--mono)">···</text>
+        </g>
+
+        <!-- 02 trunk -->
+        <g class="stage" data-stage="trunk" tabindex="0" role="button" aria-label="Stage 2, Transformer trunk">
+          <rect class="plate" x="36" y="152" width="546" height="148" rx="7" fill="var(--inset)" stroke="var(--s2)" stroke-width="1.2"/>
+          <text x="52" y="172" class="lbl" font-size="12.5" fill="var(--s2)" letter-spacing="1.3">02 · TRANSFORMER TRUNK</text>
+          <text x="566" y="172" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">14,155,776 params · 94 %</text>
+          <text x="52" y="188" font-size="11" fill="var(--ink2)">8 causal blocks · d384 · 6 heads × 64 · one state per observed frame</text>
+
+          <g fill="var(--s2)" opacity=".4">
+            <rect x="50" y="200" width="20" height="10" rx="2"/><rect x="81" y="200" width="20" height="10" rx="2"/>
+            <rect x="143" y="200" width="20" height="10" rx="2"/><rect x="174" y="200" width="20" height="10" rx="2"/>
+            <rect x="205" y="200" width="20" height="10" rx="2"/><rect x="236" y="200" width="20" height="10" rx="2"/>
+            <rect x="267" y="200" width="20" height="10" rx="2"/><rect x="298" y="200" width="20" height="10" rx="2"/>
+            <rect x="329" y="200" width="20" height="10" rx="2"/><rect x="360" y="200" width="20" height="10" rx="2"/>
+            <rect x="391" y="200" width="20" height="10" rx="2"/><rect x="422" y="200" width="20" height="10" rx="2"/>
+            <rect x="453" y="200" width="20" height="10" rx="2"/><rect x="484" y="200" width="20" height="10" rx="2"/>
+            <rect x="515" y="200" width="20" height="10" rx="2"/>
+          </g>
+          <text x="122" y="209" text-anchor="middle" font-size="12" fill="var(--ink3)" font-family="var(--mono)">···</text>
+          <rect x="546" y="196" width="20" height="18" rx="3" fill="var(--s2)"/>
+          <text x="556" y="192" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--s2)">h_t</text>
+
+          <g fill="none" stroke="var(--s2)" stroke-width="1.3" color="var(--s2)" opacity=".9">
+            <path d="M 60 212 Q 308 236 550 214" marker-end="url(#fs)"/>
+            <path d="M 153 212 Q 354.5 232 550 214" marker-end="url(#fs)"/>
+            <path d="M 246 212 Q 401 229 550 214" marker-end="url(#fs)"/>
+            <path d="M 339 212 Q 447.5 225 550 214" marker-end="url(#fs)"/>
+            <path d="M 432 212 Q 494 222 550 214" marker-end="url(#fs)"/>
+          </g>
+          <g fill="var(--s2)">
+            <circle cx="60" cy="212" r="2.6"/><circle cx="153" cy="212" r="2.6"/><circle cx="246" cy="212" r="2.6"/>
+            <circle cx="339" cy="212" r="2.6"/><circle cx="432" cy="212" r="2.6"/>
+          </g>
+
+          <g fill="var(--s2)" opacity=".26">
+            <rect x="52" y="248" width="18" height="18" rx="3"/><rect x="76" y="248" width="18" height="18" rx="3"/>
+            <rect x="100" y="248" width="18" height="18" rx="3"/><rect x="124" y="248" width="18" height="18" rx="3"/>
+            <rect x="148" y="248" width="18" height="18" rx="3"/><rect x="172" y="248" width="18" height="18" rx="3"/>
+            <rect x="196" y="248" width="18" height="18" rx="3"/><rect x="220" y="248" width="18" height="18" rx="3"/>
+          </g>
+          <g fill="none" stroke="var(--s2)" stroke-width="1" opacity=".65">
+            <rect x="52" y="248" width="18" height="18" rx="3"/><rect x="76" y="248" width="18" height="18" rx="3"/>
+            <rect x="100" y="248" width="18" height="18" rx="3"/><rect x="124" y="248" width="18" height="18" rx="3"/>
+            <rect x="148" y="248" width="18" height="18" rx="3"/><rect x="172" y="248" width="18" height="18" rx="3"/>
+            <rect x="196" y="248" width="18" height="18" rx="3"/><rect x="220" y="248" width="18" height="18" rx="3"/>
+          </g>
+          <text x="248" y="256" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">the attention above runs once per block</text>
+          <text x="248" y="268" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">×8 · pre-norm · rotary · no bias</text>
+          <text x="52" y="290" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">every frame gets a state; only the state at t, h_t, drives the plan</text>
+        </g>
+
+        <!-- trunk state hands off to the decoder -->
+        <g class="flow" color="var(--s3)">
+          <path d="M 566 205 C 584 205, 596 222, 606 228" fill="none" stroke="var(--s3)" stroke-width="1.8" marker-end="url(#fa)"/>
+        </g>
+
+        <!-- 03 temporal decoder -->
+        <g class="stage" data-stage="dec" tabindex="0" role="button" aria-label="Stage 3, temporal action decoder">
+          <rect class="plate" x="596" y="152" width="360" height="148" rx="7" fill="var(--inset)" stroke="var(--s3)" stroke-width="1.2"/>
+          <text x="612" y="174" class="lbl" font-size="12.5" fill="var(--s3)" letter-spacing="1.3">03 · TEMPORAL DECODER</text>
+          <text x="940" y="174" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">489,568</text>
+          <text x="612" y="190" font-size="11" fill="var(--ink2)">ten steps, placed at the offsets they predict</text>
+          <g fill="none" stroke="var(--s3)" stroke-width="1.2" color="var(--s3)">
+            <path d="M 619 214 Q 627.3 202 635.6 214" marker-end="url(#fs)"/>
+            <path d="M 635.6 214 Q 643.9 202 652.2 214" marker-end="url(#fs)"/>
+            <path d="M 652.2 214 Q 660.5 202 668.8 214" marker-end="url(#fs)"/>
+            <path d="M 668.8 214 Q 677.1 202 685.4 214" marker-end="url(#fs)"/>
+            <path d="M 685.4 214 Q 693.7 202 702 214" marker-end="url(#fs)"/>
+            <path d="M 702 214 Q 726.9 198 751.8 214" marker-end="url(#fs)"/>
+            <path d="M 751.8 214 Q 776.7 198 801.6 214" marker-end="url(#fs)"/>
+            <path d="M 801.6 214 Q 834.8 196 868 214" marker-end="url(#fs)"/>
+            <path d="M 868 214 Q 901.2 196 934.4 214" marker-end="url(#fs)"/>
+          </g>
+          <g fill="var(--s3)">
+            <rect x="612" y="214" width="14" height="32" rx="2"/><rect x="628.6" y="214" width="14" height="32" rx="2"/>
+            <rect x="645.2" y="214" width="14" height="32" rx="2"/><rect x="661.8" y="214" width="14" height="32" rx="2"/>
+            <rect x="678.4" y="214" width="14" height="32" rx="2"/><rect x="695" y="214" width="14" height="32" rx="2"/>
+            <rect x="744.8" y="214" width="14" height="32" rx="2"/><rect x="794.6" y="214" width="14" height="32" rx="2"/>
+            <rect x="861" y="214" width="14" height="32" rx="2"/><rect x="927.4" y="214" width="14" height="32" rx="2"/>
+          </g>
+          <g fill="var(--s4)" opacity=".62">
+            <rect x="612" y="252" width="14" height="5" rx="1"/><rect x="612" y="259" width="14" height="5" rx="1"/><rect x="612" y="266" width="14" height="5" rx="1"/><rect x="612" y="273" width="14" height="5" rx="1"/>
+            <rect x="628.6" y="252" width="14" height="5" rx="1"/><rect x="628.6" y="259" width="14" height="5" rx="1"/><rect x="628.6" y="266" width="14" height="5" rx="1"/><rect x="628.6" y="273" width="14" height="5" rx="1"/>
+            <rect x="645.2" y="252" width="14" height="5" rx="1"/><rect x="645.2" y="259" width="14" height="5" rx="1"/><rect x="645.2" y="266" width="14" height="5" rx="1"/><rect x="645.2" y="273" width="14" height="5" rx="1"/>
+            <rect x="661.8" y="252" width="14" height="5" rx="1"/><rect x="661.8" y="259" width="14" height="5" rx="1"/><rect x="661.8" y="266" width="14" height="5" rx="1"/><rect x="661.8" y="273" width="14" height="5" rx="1"/>
+            <rect x="678.4" y="252" width="14" height="5" rx="1"/><rect x="678.4" y="259" width="14" height="5" rx="1"/><rect x="678.4" y="266" width="14" height="5" rx="1"/><rect x="678.4" y="273" width="14" height="5" rx="1"/>
+            <rect x="695" y="252" width="14" height="5" rx="1"/><rect x="695" y="259" width="14" height="5" rx="1"/><rect x="695" y="266" width="14" height="5" rx="1"/><rect x="695" y="273" width="14" height="5" rx="1"/>
+            <rect x="744.8" y="252" width="14" height="5" rx="1"/><rect x="744.8" y="259" width="14" height="5" rx="1"/><rect x="744.8" y="266" width="14" height="5" rx="1"/><rect x="744.8" y="273" width="14" height="5" rx="1"/>
+            <rect x="794.6" y="252" width="14" height="5" rx="1"/><rect x="794.6" y="259" width="14" height="5" rx="1"/><rect x="794.6" y="266" width="14" height="5" rx="1"/><rect x="794.6" y="273" width="14" height="5" rx="1"/>
+            <rect x="861" y="252" width="14" height="5" rx="1"/><rect x="861" y="259" width="14" height="5" rx="1"/><rect x="861" y="266" width="14" height="5" rx="1"/><rect x="861" y="273" width="14" height="5" rx="1"/>
+            <rect x="927.4" y="252" width="14" height="5" rx="1"/><rect x="927.4" y="259" width="14" height="5" rx="1"/><rect x="927.4" y="266" width="14" height="5" rx="1"/><rect x="927.4" y="273" width="14" height="5" rx="1"/>
+          </g>
+          <text x="612" y="292" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">each step also picks four controller groups ↓</text>
+        </g>
+
+        <!-- 04 group chain -->
+        <g class="stage" data-stage="groups" tabindex="0" role="button" aria-label="Stage 4, within-frame group chain">
+          <rect class="plate" x="36" y="350" width="920" height="108" rx="7" fill="var(--inset)" stroke="var(--s4)" stroke-width="1.2"/>
+          <text x="52" y="372" class="lbl" font-size="12.5" fill="var(--s4)" letter-spacing="1.3">04 · WITHIN-FRAME GROUP CHAIN</text>
+          <text x="940" y="372" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">222,307 params · 1.5 %</text>
+          <text x="52" y="388" font-size="11" fill="var(--ink2)">any one step above, opened up · each pick shifts and scales the state for the next</text>
+          <g fill="var(--s4)" opacity=".62">
+            <rect x="52" y="396" width="14" height="5" rx="1"/><rect x="52" y="403" width="14" height="5" rx="1"/><rect x="52" y="410" width="14" height="5" rx="1"/><rect x="52" y="417" width="14" height="5" rx="1"/>
+          </g>
+          <path d="M 68 397 L 100 396 M 68 421 L 100 432" fill="none" stroke="var(--s4)" stroke-width="1" stroke-dasharray="3 3" opacity=".75"/>
+          <g>
+            <rect x="100" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="112" y="412" font-size="11.5" fill="var(--ink)">c_stick</text><text x="112" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">9 classes</text>
+            <rect x="272" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="284" y="412" font-size="11.5" fill="var(--ink)">main_stick</text><text x="284" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">37 classes</text>
+            <rect x="444" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="456" y="412" font-size="11.5" fill="var(--ink)">triggers</text><text x="456" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">5 classes</text>
+            <rect x="616" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="628" y="412" font-size="11.5" fill="var(--ink)">buttons</text><text x="628" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">6 classes</text>
+            <rect x="788" y="396" width="152" height="36" rx="4" fill="var(--s4)" opacity=".14"/>
+            <rect x="788" y="396" width="152" height="36" rx="4" fill="none" stroke="var(--s4)"/>
+            <text x="800" y="412" font-size="11.5" fill="var(--ink)">controller frame</text><text x="800" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">14 channels</text>
+            <g color="var(--s4)" font-family="var(--mono)" font-size="9.5" fill="var(--ink3)">
+              <line x1="248" y1="414" x2="268" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+              <text x="258" y="408" text-anchor="middle">FiLM</text>
+              <line x1="420" y1="414" x2="440" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+              <text x="430" y="408" text-anchor="middle">FiLM</text>
+              <line x1="592" y1="414" x2="612" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+              <text x="602" y="408" text-anchor="middle">FiLM</text>
+              <line x1="764" y1="414" x2="784" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+            </g>
+          </g>
+          <text x="52" y="449" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">a held shoulder click forces its analog value, so contradicting button classes are masked before sampling</text>
+        </g>
+
+        <!-- 05 closed loop -->
+        <g class="stage" data-stage="loop" tabindex="0" role="button" aria-label="Stage 5, closed-loop execution">
+          <rect class="plate" x="36" y="472" width="920" height="118" rx="7" fill="var(--sunk)" stroke="var(--s5)" stroke-width="1.2" stroke-dasharray="5 4"/>
+          <text x="52" y="494" class="lbl" font-size="12.5" fill="var(--s5)" letter-spacing="1.3">05 · CLOSED-LOOP EXECUTION</text>
+          <text x="940" y="494" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">no parameters</text>
+          <text x="52" y="510" font-size="11" fill="var(--ink2)">the runtime, not the model · it decides which predicted frames reach the game</text>
+          <g font-family="var(--mono)" font-size="10.5">
+            <text x="52" y="534" fill="var(--ink)">prediction delay d = 1 · plan length H = 1 · replan interval R = 1</text>
+            <text x="52" y="550" fill="var(--ink3)">observe, decide, act, repeat — once per frame</text>
+            <text x="52" y="572" fill="var(--ink3)">the other nine offsets never reach Dolphin; they shape the trunk in training</text>
+          </g>
+          <g>
+            <rect x="612" y="524" width="14" height="18" rx="2" fill="var(--gain)"/>
+            <g fill="var(--s5)" opacity=".55">
+              <rect x="628.6" y="524" width="14" height="18" rx="2"/><rect x="645.2" y="524" width="14" height="18" rx="2"/>
+              <rect x="661.8" y="524" width="14" height="18" rx="2"/><rect x="678.4" y="524" width="14" height="18" rx="2"/>
+              <rect x="695" y="524" width="14" height="18" rx="2"/>
+            </g>
+            <g fill="var(--s5)" opacity=".26">
+              <rect x="744.8" y="524" width="14" height="18" rx="2"/><rect x="794.6" y="524" width="14" height="18" rx="2"/>
+              <rect x="861" y="524" width="14" height="18" rx="2"/><rect x="927.4" y="524" width="14" height="18" rx="2"/>
+            </g>
+            <g font-family="var(--mono)" font-size="10" fill="var(--ink3)">
+              <text x="612" y="518">t+1</text>
+              <text x="619" y="558" text-anchor="middle" fill="var(--gain)">sent</text>
+              <text x="836" y="558" text-anchor="middle">computed in training, never sent</text>
+            </g>
+          </g>
+        </g>
+      </svg>
+      <p class="diag-hint"><span class="narrow-only">swipe the map sideways · </span>tap a stage to inspect it · press Escape to clear</p>
+    </div>
+
+    <div class="panel spec" id="spec" aria-live="polite"></div>
+  </div>
+
+</section>
+
+<section id="terms">
+  <div class="sec-head"><span class="sec-num">KEY</span><h2>A short glossary</h2></div>
+  <p class="sec-sub">The words this page uses, and the distinctions that get blurred most often. Hover a term to light up the part of the picture it names.</p>
+
+  <h3 class="gloss-head">Timing and control</h3>
+  <figure class="toy" id="fig-timing">
+    <svg viewBox="0 0 700 250" role="img" aria-label="Three successive plans on a frame timeline. Each plan starts from an observation, takes some wall-clock time to compute, then covers six future frames. A new plan starts every four frames and overwrites the tail of the plan before it.">
+      <defs><marker id="ta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 1 L10 5 L0 9 Z" fill="currentColor"/></marker>
+      <marker id="tb" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M10 1 L0 5 L10 9 Z" fill="currentColor"/></marker></defs>
+
+      <g data-part="d" color="var(--accent)">
+        <line x1="60" y1="40" x2="134" y2="40" stroke="currentColor" stroke-width="1.2"/>
+        <line x1="60" y1="35" x2="60" y2="45" stroke="currentColor" stroke-width="1.2"/>
+        <line x1="134" y1="35" x2="134" y2="45" stroke="currentColor" stroke-width="1.2"/>
+        <text x="97" y="30" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--accent)">d = 2</text>
+      </g>
+
+      <g font-family="var(--mono)" font-size="10" fill="var(--ink3)">
+        <text x="8" y="70">plan 1</text><text x="8" y="114">plan 2</text><text x="8" y="158">plan 3</text>
+      </g>
+
+      <g data-part="H">
+        <text x="245" y="52" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--indigo)">H = 6</text>
+      </g>
+      <g data-part="latency">
+        <text x="86" y="52" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">latency</text>
+      </g>
+
+      <g data-part="H"><rect x="134" y="56" width="222" height="20" rx="3" fill="var(--indigo)" opacity=".22"/></g>
+      <g data-part="openloop"><rect x="134" y="56" width="148" height="20" rx="3" fill="var(--indigo)"/></g>
+      <g data-part="receding"><rect x="282" y="56" width="74" height="20" rx="3" fill="none" stroke="var(--indigo)" stroke-width="1" stroke-dasharray="3 3"/></g>
+      <g data-part="latency"><rect x="60" y="62" width="52" height="8" rx="2" fill="none" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="3 2"/></g>
+
+      <g data-part="H"><rect x="282" y="100" width="222" height="20" rx="3" fill="var(--indigo)" opacity=".22"/></g>
+      <g data-part="openloop"><rect x="282" y="100" width="148" height="20" rx="3" fill="var(--indigo)"/></g>
+      <g data-part="receding"><rect x="430" y="100" width="74" height="20" rx="3" fill="none" stroke="var(--indigo)" stroke-width="1" stroke-dasharray="3 3"/></g>
+      <g data-part="latency"><rect x="208" y="106" width="52" height="8" rx="2" fill="none" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="3 2"/></g>
+
+      <g data-part="H"><rect x="430" y="144" width="222" height="20" rx="3" fill="var(--indigo)" opacity=".22"/></g>
+      <g data-part="openloop"><rect x="430" y="144" width="148" height="20" rx="3" fill="var(--indigo)"/></g>
+      <g data-part="latency"><rect x="356" y="150" width="52" height="8" rx="2" fill="none" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="3 2"/></g>
+
+      <g data-part="R">
+        <g fill="var(--ink)"><circle cx="60" cy="66" r="4"/><circle cx="208" cy="110" r="4"/><circle cx="356" cy="154" r="4"/></g>
+        <g stroke="var(--ink3)" stroke-width="1" stroke-dasharray="2 3" opacity=".6">
+          <line x1="60" y1="70" x2="60" y2="190"/><line x1="208" y1="114" x2="208" y2="190"/><line x1="356" y1="158" x2="356" y2="190"/>
+        </g>
+        <g color="var(--accent)">
+          <line x1="60" y1="222" x2="208" y2="222" stroke="currentColor" stroke-width="1.2" marker-start="url(#tb)" marker-end="url(#ta)"/>
+        </g>
+        <text x="134" y="216" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--accent)">R = 4</text>
+      </g>
+
+      <g data-part="frame">
+        <line x1="50" y1="190" x2="662" y2="190" stroke="var(--rule)" stroke-width="1"/>
+        <g stroke="var(--rule)" stroke-width="1">
+          <line x1="60" y1="190" x2="60" y2="195"/><line x1="134" y1="190" x2="134" y2="195"/><line x1="208" y1="190" x2="208" y2="195"/>
+          <line x1="282" y1="190" x2="282" y2="195"/><line x1="356" y1="190" x2="356" y2="195"/><line x1="430" y1="190" x2="430" y2="195"/>
+          <line x1="504" y1="190" x2="504" y2="195"/><line x1="578" y1="190" x2="578" y2="195"/><line x1="652" y1="190" x2="652" y2="195"/>
+        </g>
+        <g font-family="var(--mono)" font-size="9.5" fill="var(--ink3)" text-anchor="middle">
+          <text x="60" y="206">0</text><text x="134" y="206">2</text><text x="208" y="206">4</text><text x="282" y="206">6</text>
+          <text x="356" y="206">8</text><text x="430" y="206">10</text><text x="504" y="206">12</text><text x="578" y="206">14</text><text x="652" y="206">16</text>
+        </g>
+        <text x="662" y="206" text-anchor="end" font-size="9.5" font-family="var(--mono)" fill="var(--ink3)" dy="14">game frames</text>
+      </g>
+
+      <g data-part="receding">
+        <text x="662" y="240" text-anchor="end" font-size="10" font-family="var(--mono)" fill="var(--ink3)">dashed = computed, then replaced by the next plan</text>
+      </g>
+    </svg>
+    <figcaption>Drawn with <span class="mono">d = 2</span>, <span class="mono">H = 6</span>, <span class="mono">R = 4</span> so the three are visible at once. The current recipe sets all three to 1: observe, decide, act, once per frame.</figcaption>
+  </figure>
+
+  <dl class="gloss">
+    <div class="gterm" data-fig="fig-timing" data-hi="frame" tabindex="0">
+      <dt>Frame<span class="alias">16.7 ms</span></dt>
+      <dd>Melee runs at 60 Hz. Every count on this page is in frames, not seconds.</dd></div>
+    <div class="gterm" data-fig="fig-timing" data-hi="H" tabindex="0">
+      <dt>Action chunk<span class="alias">H · chunk length · planning horizon</span></dt>
+      <dd>The block of future actions that one forward pass produces. Those three names all mean the same number.</dd></div>
+    <div class="gterm" data-fig="fig-timing" data-hi="R" tabindex="0">
+      <dt>Replan interval<span class="alias">R · replanning frequency</span></dt>
+      <dd>Game frames between forward passes. <span class="mono">R = 1</span> runs the model every frame.
+      <span class="vs"><b>Not the same as H.</b> H is how much you compute. R is how often you compute it. H ≥ R, and the unused tail is thrown away.</span></dd></div>
+    <div class="gterm" data-fig="fig-timing" data-hi="d" tabindex="0">
+      <dt>Prediction delay<span class="alias">d · reaction delay</span></dt>
+      <dd>Frames between the newest observation and the first action that executes. It is a training choice as well: the model learns to predict for frame <span class="mono">t+d</span>.</dd></div>
+    <div class="gterm" data-fig="fig-timing" data-hi="latency" tabindex="0">
+      <dt>Inference latency</dt>
+      <dd>Wall-clock time for one forward pass, in milliseconds.
+      <span class="vs"><b>Not the same as delay.</b> Latency is milliseconds, and the hardware and model size set it. Delay is frames, and the schedule sets it. Latency forces delay up only when a pass cannot finish inside <span class="mono">d</span> frames.</span></dd></div>
+    <div class="gterm" data-fig="fig-timing" data-hi="receding" tabindex="0">
+      <dt>Receding horizon</dt>
+      <dd>Compute a chunk, execute part of it, discard the rest, compute again. The standard control loop, and the reason <span class="mono">R &lt; H</span> is useful.</dd></div>
+    <div class="gterm" data-fig="fig-timing" data-hi="openloop" tabindex="0">
+      <dt>Open loop<span class="alias">vs closed loop</span></dt>
+      <dd>Acting without new observations. A chunk executed with <span class="mono">R = H</span> is open loop for <span class="mono">H − 1</span> frames. Closed loop means the model sees the result of its last action before it picks the next.</dd></div>
+  </dl>
+
+  <h3 class="gloss-head">Autoregressive conditioning — three separate axes</h3>
+  <p class="small" style="max-width:66ch">"Autoregressive" only says that things are produced in an order, each conditioned on what came before. This model has three different orders in it, and each one is an independent choice.</p>
+  <figure class="toy" id="fig-ar">
+    <svg viewBox="0 0 700 196" role="img" aria-label="Three orderings. Across time, each observed frame attends to earlier frames. Across the chunk, each predicted step reads the step before it. Within one frame, four controller groups are chosen in order.">
+      <defs><marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 1 L10 5 L0 9 Z" fill="currentColor"/></marker></defs>
+
+      <g data-part="time">
+        <text x="60" y="32" font-size="11" fill="var(--ink2)">① across time — each frame reads earlier frames</text>
+        <g fill="var(--s1)" opacity=".82">
+          <rect x="60" y="44" width="58" height="26" rx="3"/><rect x="126" y="44" width="58" height="26" rx="3"/><rect x="192" y="44" width="58" height="26" rx="3"/>
+        </g>
+        <g fill="none" stroke="var(--s1)" stroke-width="1.3" color="var(--s1)">
+          <path d="M 89 72 Q 122 90 155 72" marker-end="url(#aa)"/>
+          <path d="M 155 72 Q 188 90 221 72" marker-end="url(#aa)"/>
+          <path d="M 89 72 Q 155 104 221 72" marker-end="url(#aa)"/>
+        </g>
+        <g font-family="var(--mono)" font-size="9.5" fill="var(--ink3)" text-anchor="middle">
+          <text x="89" y="120">t−2</text><text x="155" y="120">t−1</text><text x="221" y="120">t</text>
+        </g>
+      </g>
+
+      <g data-part="state">
+        <rect x="278" y="44" width="56" height="26" rx="3" fill="none" stroke="var(--s2)" stroke-width="1.2"/>
+        <text x="306" y="61" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--ink)">h_t</text>
+        <g color="var(--ink3)"><line x1="252" y1="57" x2="274" y2="57" stroke="currentColor" stroke-width="1.2" marker-end="url(#aa)"/></g>
+      </g>
+
+      <g data-part="chunk">
+        <text x="372" y="32" font-size="11" fill="var(--ink2)">② across the chunk — each step reads the step before</text>
+        <g fill="var(--s3)">
+          <rect x="372" y="44" width="74" height="26" rx="3"/><rect x="462" y="44" width="74" height="26" rx="3"/><rect x="552" y="44" width="74" height="26" rx="3"/>
+        </g>
+        <g fill="none" stroke="var(--s3)" stroke-width="1.3" color="var(--s3)">
+          <path d="M 409 72 Q 454 92 499 72" marker-end="url(#aa)"/>
+          <path d="M 499 72 Q 544 92 589 72" marker-end="url(#aa)"/>
+        </g>
+        <g color="var(--ink3)" opacity=".5">
+          <line x1="338" y1="57" x2="368" y2="57" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3"/>
+        </g>
+        <g font-family="var(--mono)" font-size="9.5" fill="var(--ink3)" text-anchor="middle">
+          <text x="409" y="120">t+1</text><text x="499" y="120">t+2</text><text x="589" y="120">t+3</text>
+        </g>
+      </g>
+
+      <g data-part="within">
+        <g stroke="var(--s4)" stroke-width="1" stroke-dasharray="3 3" opacity=".8">
+          <path d="M 409 126 L 409 136 M 300 136 L 518 136" fill="none"/>
+        </g>
+        <g>
+          <rect x="300" y="142" width="44" height="24" rx="3" fill="var(--s4)"/>
+          <rect x="358" y="142" width="44" height="24" rx="3" fill="var(--s4)"/>
+          <rect x="416" y="142" width="44" height="24" rx="3" fill="var(--s4)"/>
+          <rect x="474" y="142" width="44" height="24" rx="3" fill="var(--s4)"/>
+        </g>
+        <g font-family="var(--mono)" font-size="8.5" fill="var(--panel)" text-anchor="middle">
+          <text x="322" y="158">c_stick</text><text x="380" y="158">main</text><text x="438" y="158">trig</text><text x="496" y="158">button</text>
+        </g>
+        <g color="var(--s4)" stroke="var(--s4)" stroke-width="1.3">
+          <line x1="346" y1="154" x2="354" y2="154" marker-end="url(#aa)"/>
+          <line x1="404" y1="154" x2="412" y2="154" marker-end="url(#aa)"/>
+          <line x1="462" y1="154" x2="470" y2="154" marker-end="url(#aa)"/>
+        </g>
+        <text x="300" y="186" font-size="11" fill="var(--ink2)">③ within one frame — four groups, in a fixed order</text>
+      </g>
+
+      <g font-size="11" fill="var(--ink3)">
+        <text x="60" y="148">① is ordinary causal attention</text>
+        <text x="60" y="164">and is always on. ② and ③ can</text>
+        <text x="60" y="180">each be switched off on their own.</text>
+      </g>
+    </svg>
+    <figcaption>Three orderings, three independent switches. Experiment 037 turned ② and ③ on and off in every combination while holding everything else fixed.</figcaption>
+  </figure>
+
+  <dl class="gloss">
+    <div class="gterm" data-fig="fig-ar" data-hi="time" tabindex="0">
+      <dt>Causal attention<span class="alias">across time</span></dt>
+      <dd>Each frame's state reads only earlier frames. The ordinary language-model axis, and it is always on here.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="chunk" tabindex="0">
+      <dt>Autoregressive chunk<span class="alias">across the chunk · future conditioning</span></dt>
+      <dd>Each predicted future frame conditions on the frame the model predicted before it.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="chunk" tabindex="0">
+      <dt>Independent heads</dt>
+      <dd>The alternative: one output head per future offset, all reading the same trunk state and none reading each other. Cheaper, and unable to represent any correlation between future frames.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="within" tabindex="0">
+      <dt>Within-frame factorization<span class="alias">group conditioning</span></dt>
+      <dd>One controller frame is four values. Choosing them in a fixed order, each conditioned on the ones already chosen, models their joint distribution. The alternative treats the four as independent given the state.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="within" tabindex="0">
+      <dt>FiLM<span class="alias">feature-wise linear modulation</span></dt>
+      <dd>Scale and shift a hidden state using a conditioning input. It is how each chosen group reaches the next one.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="chunk" tabindex="0">
+      <dt>Teacher forcing</dt>
+      <dd>In training, condition each step on the <em>true</em> previous value, so every step runs in one parallel pass.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="chunk" tabindex="0">
+      <dt>Exposure bias</dt>
+      <dd>At play time the model conditions on its own samples, which it never saw in training. This is the price of teacher forcing, and it grows with chunk length.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="within" tabindex="0">
+      <dt>Ancestral sampling</dt>
+      <dd>Draw the first group, feed it back in, draw the second, and so on. What the model does at play time.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="chunk" tabindex="0">
+      <dt>KV cache</dt>
+      <dd>Keep the attention keys and values from earlier steps, so each new step costs one token of work instead of a full re-run.</dd></div>
+    <div class="gterm" data-fig="fig-ar" data-hi="chunk" tabindex="0">
+      <dt>Multi-token prediction</dt>
+      <dd>Train one model to predict several future steps, not only the next one. Offsets that never execute still shape the trunk.</dd></div>
+  </dl>
+
+  <h3 class="gloss-head">What goes in, what comes out</h3>
+  <figure class="toy" id="fig-codec">
+    <svg viewBox="0 0 700 210" role="img" aria-label="Two lanes sharing one class set. The upper lane is the input path: a past controller frame is quantized to class ids and embedded into an input token. The lower lane is the output path: a decoder state becomes logits over the same classes, which are masked and sampled into a controller frame.">
+      <defs><marker id="ca" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 1 L10 5 L0 9 Z" fill="currentColor"/></marker></defs>
+
+      <g data-part="input">
+        <text x="56" y="36" font-size="10" font-family="var(--mono)" fill="var(--s1)" letter-spacing=".08em">INPUT PATH · WHAT THE MODEL READS</text>
+        <rect x="56" y="48" width="130" height="30" rx="4" fill="var(--panel)" stroke="var(--s1)"/>
+        <text x="121" y="67" text-anchor="middle" font-size="10.5" fill="var(--ink)">past controller frame</text>
+        <rect x="246" y="48" width="100" height="30" rx="4" fill="var(--panel)" stroke="var(--s1)"/>
+        <text x="296" y="67" text-anchor="middle" font-size="10.5" fill="var(--ink)">class ids</text>
+        <rect x="406" y="48" width="180" height="30" rx="4" fill="var(--panel)" stroke="var(--s1)"/>
+        <text x="496" y="67" text-anchor="middle" font-size="10.5" fill="var(--ink)">embedding + value projection</text>
+        <g color="var(--s1)">
+          <line x1="346" y1="63" x2="402" y2="63" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+          <line x1="590" y1="63" x2="640" y2="63" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        </g>
+        <text x="644" y="67" font-size="10.5" fill="var(--ink2)">trunk</text>
+      </g>
+      <g data-part="input quantize" color="var(--s1)">
+        <line x1="190" y1="63" x2="242" y2="63" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        <text x="216" y="88" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">quantize</text>
+      </g>
+
+      <g data-part="codebook">
+        <rect x="246" y="98" width="220" height="30" rx="4" fill="var(--accent)" opacity=".12"/>
+        <rect x="246" y="98" width="220" height="30" rx="4" fill="none" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <text x="356" y="117" text-anchor="middle" font-size="10.5" fill="var(--ink)">one shared class set · 9 · 37 · 5 · 6</text>
+        <g stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 3">
+          <line x1="296" y1="78" x2="296" y2="98"/><line x1="356" y1="128" x2="356" y2="148"/>
+        </g>
+      </g>
+
+      <g data-part="output">
+        <rect x="56" y="148" width="130" height="30" rx="4" fill="var(--panel)" stroke="var(--s4)"/>
+        <text x="121" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink)">decoder state</text>
+        <rect x="246" y="148" width="220" height="30" rx="4" fill="var(--panel)" stroke="var(--s4)"/>
+        <text x="356" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink)">logits over the same classes</text>
+        <rect x="526" y="148" width="130" height="30" rx="4" fill="var(--panel)" stroke="var(--s4)"/>
+        <text x="591" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink)">controller frame</text>
+        <g color="var(--s4)">
+          <line x1="190" y1="163" x2="242" y2="163" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        </g>
+        <text x="216" y="143" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">head</text>
+        <text x="56" y="200" font-size="10" font-family="var(--mono)" fill="var(--s4)" letter-spacing=".08em">OUTPUT PATH · WHAT THE MODEL PREDICTS</text>
+      </g>
+      <g data-part="output mask" color="var(--s4)">
+        <line x1="470" y1="163" x2="522" y2="163" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        <text x="496" y="143" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">mask + sample</text>
+      </g>
+    </svg>
+    <figcaption>The two paths share one class set, and that is the only thing they share. Changing how the past is fed in and changing what the head predicts are separate experiments.</figcaption>
+  </figure>
+
+  <dl class="gloss">
+    <div class="gterm" data-fig="fig-codec" data-hi="input" tabindex="0">
+      <dt>Input encoding<span class="alias">featurization</span></dt>
+      <dd>How the past is presented to the model. Here the previous controller frame becomes a learned class embedding plus a linear map of its physical stick and trigger values.</dd></div>
+    <div class="gterm" data-fig="fig-codec" data-hi="output" tabindex="0">
+      <dt>Output parameterization<span class="alias">the head</span></dt>
+      <dd>What the model predicts. Here: four categorical distributions over controller classes.
+      <span class="vs"><b>Separate from input encoding</b>, even though the two share a class set. Experiment 028 changed only the input. The codec change in section 05 changed only the class set.</span></dd></div>
+    <div class="gterm" data-fig="fig-codec" data-hi="quantize" tabindex="0">
+      <dt>Quantization<span class="alias">discretization</span></dt>
+      <dd>Map a continuous value to the nearest point of a fixed set. The main stick is quantized to 37 positions.</dd></div>
+    <div class="gterm" data-fig="fig-codec" data-hi="codebook" tabindex="0">
+      <dt>Class set<span class="alias">codebook · vocabulary</span></dt>
+      <dd>The fixed set of points. Changing it changes what the model can express, and how many training examples each class receives.</dd></div>
+    <div class="gterm" data-fig="fig-codec" data-hi="codebook" tabindex="0">
+      <dt>Codec</dt>
+      <dd>The pair of maps: raw frame → class ids, and class ids → raw frame. One object, shared by the input encoder, the decoder and the sampler.</dd></div>
+    <div class="gterm" data-fig="fig-codec" data-hi="mask" tabindex="0">
+      <dt>Logit masking<span class="alias">constrained decoding</span></dt>
+      <dd>Set impossible classes to minus infinity before sampling, so an illegal combination has probability zero.</dd></div>
+    <div class="gterm">
+      <dt>Conditioning</dt>
+      <dd>Anything fed to the model that it does not predict: the two characters, the stage, which offset a step is for, and the controller groups already chosen.</dd></div>
+  </dl>
+
+  <h3 class="gloss-head">Training objectives</h3>
+  <dl class="gloss">
+    <div class="gterm">
+      <dt>Behaviour cloning<span class="alias">BC</span></dt>
+      <dd>Supervised learning from human play: raise the likelihood of the action the player actually took.</dd></div>
+    <div class="gterm">
+      <dt>Advantage-weighted regression<span class="alias">AWR</span></dt>
+      <dd>Behaviour cloning with each example weighted by how good its outcome was.</dd></div>
+    <div class="gterm">
+      <dt>Offline reinforcement learning<span class="alias">IQL</span></dt>
+      <dd>Learn a value or Q function from a fixed dataset and use it to improve the policy, without playing. IQL is one method for it.</dd></div>
+    <div class="gterm">
+      <dt>Auxiliary loss</dt>
+      <dd>A second training signal on a head that is discarded at play time. Its job is to shape the shared trunk.</dd></div>
+  </dl>
+
+  <h3 class="gloss-head">Measurement</h3>
+  <dl class="gloss">
+    <div class="gterm">
+      <dt>Validation NLL</dt>
+      <dd>Negative log-likelihood on held-out replays. It measures fit to human data, and on this page it ranks nothing.</dd></div>
+    <div class="gterm">
+      <dt>Net stocks per minute</dt>
+      <dd>Stocks taken minus stocks lost, per active minute, against the in-game CPU. The score on this page.</dd></div>
+    <div class="gterm">
+      <dt>Lower confidence bound<span class="alias">LCB</span></dt>
+      <dd>A conservative one-sided 95 % bound on that score, so a lucky sample cannot read as a win.</dd></div>
+    <div class="gterm">
+      <dt>Control</dt>
+      <dd>What a comparison holds fixed. A weak control tells you that something changed, not what.</dd></div>
+    <div class="gterm">
+      <dt>Paired evaluation</dt>
+      <dd>Both models play the same matchups, in the same order, with the same seed, so the difference is not schedule luck.</dd></div>
+    <div class="gterm">
+      <dt>Iso-FLOP</dt>
+      <dd>Compare models at equal training compute, rather than at equal parameters or equal data.</dd></div>
+    <div class="gterm">
+      <dt>Positions · examples · updates</dt>
+      <dd>Positions are the frames the optimizer processed, examples are sequences, updates are optimizer steps. Batch × updates = examples; examples × context length = positions.</dd></div>
+  </dl>
+</section>
+
+<section id="ranked">
+  <div class="sec-head"><span class="sec-num">ALL</span><h2>What actually moved the score</h2></div>
+  <p class="sec-sub">Twenty-four comparisons, sorted by the size of the change. The bar is the change in net stocks per minute. The thin tick is the same change measured on the lower confidence bound. A green bar means the second setting won.</p>
+
+  <div class="callout warn">
+    <p><b>Do not add these rows together.</b> Several comparisons share the same runs, and the badge on each row says how much of the change that comparison really isolates.</p>
+    <p class="small"><span class="badge strong">strong</span> one flag, or the same checkpoint on both sides. <span class="badge near">near</span> one axis moves and the mismatch is small. <span class="badge combined">combined</span> several changes travel together. <span class="badge weak">weak</span> data, compute and objective all move at once.</p>
+  </div>
+
+  <div class="toolbar">
+    <div class="fieldset"><span>Component</span><div class="pills" id="f-comp"></div></div>
+    <div class="fieldset"><span>Control</span><div class="pills" id="f-ctl"></div></div>
+    <div class="fieldset"><span>Sort by</span><div class="pills" id="f-sort"></div></div>
+  </div>
+
+  <div class="panel rank-wrap">
+    <table class="rank"><colgroup><col style="width:29%"><col style="width:46%"><col style="width:11%"><col style="width:14%"></colgroup><tbody id="rank-body"></tbody></table>
+    <div class="axis"><span></span><span class="ax"><span>−2.5</span><span>worse ← 0 → better</span><span>+2.5</span></span><span></span></div>
+  </div>
+  <p class="small" style="margin-top:10px">Click any row to jump to the section that owns it.</p>
+</section>
+
+<section id="observation" style="--stage:var(--s1)">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Observation encoder</h2></div>
+  <p class="sec-sub">Turn one frame of Melee into one token.</p>
+
+  <p>Each frame gives the model four player blocks, four item slots, the match conditioning, and the ego player's own previous controller frame. A linear projection joins them into a single 384-dimension token. The encoder holds 185,388 parameters, about 1.2&nbsp;% of the model.</p>
+  <p>Two rules shape this stage. First, every float carries a validity mask, so a missing value is explicit and never a magic number. Second, the model never reads the opponent's controller inputs. It must infer the opponent's intent from gamestate alone, because at play time no such input exists.</p>
+  <p>The previous action does not enter as a one-hot code. It enters through the same codec that the output head uses: a learned class embedding plus a linear map of the physical stick and trigger values. One table serves both directions.</p>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Observation evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="obs"></tbody>
+  </table></div>
+
+  <div class="callout">
+    <p><b>Verdict: the input encoding matters more than the input list.</b> Replacing the one-hot action history with the learned codec is worth <span class="mono pos">+0.26</span>. Adding items is worth <span class="mono pos">+0.09</span>. Cutting state features costs <span class="mono neg">−0.27</span>.</p>
+    <p><b>What this does not show.</b> No test removed one state column at a time. The lean-feature run also changed the state schema, so we cannot say which column carried the loss.</p>
+  </div>
+</section>
+
+<section id="trunk" style="--stage:var(--s2)">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Transformer trunk</h2></div>
+  <p class="sec-sub">Eight causal blocks over 128 frames. Ninety-four percent of the parameters.</p>
+
+  <p>The trunk is a plain pre-norm stack: rotary positions, causal attention, RMS normalization without affine weights, and no bias anywhere. It holds 14,155,776 of the model's 15,053,039 parameters, 1,769,472 per block. A 128-frame window is about 2.1&nbsp;seconds of play.</p>
+  <p>The attention mask obeys three rules together. A query must not read the future. A query must not read its own sample's cold-start padding. The diagonal always stays open, because a fully masked row makes the attention output undefined.</p>
+  <p>Capacity is the least settled part of the whole model. Experiment&nbsp;039 trained seven sizes, from 7.0M to 293M parameters, at five data budgets, and then played every checkpoint against the CPU at nine control settings. That is 291 evaluated cells, 96 boots each, on one RTX&nbsp;3060. The explorer below holds all of them.</p>
+<p>The scaling story falls apart under it. No column of the grid is monotonic in model size. No line separates cleanly with more data. And validation loss — which <em>does</em> improve smoothly with both size and data — is anti-correlated with play across the whole grid.</p>
+
+  <div class="panel explorer" id="cap">
+    <div class="exp-head">
+      <div>
+        <p class="eyebrow" style="margin:0 0 5px">Experiment 039 · capacity scaling</p>
+        <h3 id="cap-title" style="margin:0">Capability grid</h3>
+      </div>
+      <div class="pills" id="cap-views"></div>
+    </div>
+    <div class="exp-controls">
+      <div class="fieldset" data-ctl="metric"><span>Metric</span><div class="pills" id="cap-metric"></div></div>
+      <div class="fieldset" data-ctl="budget"><span>Training data</span><div class="pills" id="cap-budget"></div></div>
+      <div class="fieldset" data-ctl="delay"><span>Control delay</span><div class="pills" id="cap-delay"></div></div>
+    </div>
+    <div class="cap-ramp" id="cap-ramp" hidden></div>
+    <div class="exp-body"><svg id="cap-svg" role="img" aria-label="Interactive view of the experiment 039 capacity-scaling results"></svg></div>
+    <p class="exp-note" id="cap-note"></p>
+  </div>
+  <p class="small" style="margin-top:12px"><b>Read the delay axis carefully.</b> Experiment 039 moved three things together: at delay <span class="mono">d</span> it also set the replan interval to <span class="mono">d</span> and the decode horizon to <span class="mono">2d−1</span>. So a column is a whole control regime, not a delay on its own. One seed throughout. 291 evaluated cells, 96 boots each, on one RTX 3060.</p>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Trunk and capacity evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="trunk"></tbody>
+  </table></div>
+
+  <div class="callout">
+    <p><b>Verdict: at this stage capacity is not the binding constraint.</b> The best single reading is the one the audited table records — at one-frame control, the largest model beats the smallest by <span class="mono pos">+1.52</span> — but the ordering in between is not monotonic, the same span reverses to <span class="mono neg">−0.54</span> at four-frame control, and every cell in the grid is still net-negative against the in-game CPU.</p>
+    <p><b>Two things broke at the top end.</b> The 293M model diverged on its largest run: validation loss went from 1.176 bits at 537M positions to 7.34 bits at 940M, so it has no evaluated cells there. The 112M model's largest run also came back worse than the run below it. Whatever limits this line, it is not that we ran out of parameters.</p>
+    <p><b>What this does not show.</b> One seed everywhere. The delay axis moves three settings at once. And there is <em>no</em> context-length sweep at all: 51&nbsp;→&nbsp;256 frames gained about <span class="mono">+0.06</span> with five times the compute and a different protocol, 256&nbsp;→&nbsp;512 lost <span class="mono">−0.22</span> with attention and batch changes, and 256&nbsp;→&nbsp;1,024 lost <span class="mono">−0.02</span> with local attention and four times fewer examples. The current 128-frame context has no matched larger partner. Treat it as untested.</p>
+  </div>
+</section>
+
+<section id="decoder" style="--stage:var(--s3)">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Temporal action decoder</h2></div>
+  <p class="sec-sub">Ten future offsets, decoded in a chain.</p>
+
+  <p>Each trunk state feeds a small causal decoder of two blocks at d128. The decoder emits ten offsets: 1, 2, 3, 4, 5, 6, 9, 12, 16 and 20 frames ahead. Every step reads the action the previous step chose, plus an embedding of its own offset. In training all ten steps run in one teacher-forced pass. At play time the same blocks run one step at a time from a key-value cache.</p>
+  <p>Only the dense 1&nbsp;to&nbsp;6 prefix ever reaches the emulator. The sparse tail exists to shape the trunk. It is a training signal, not a plan.</p>
+  <p>Experiment&nbsp;037 is the cleanest test in the whole programme. It fixed one model, one dataset, one parameter count and one optimizer, then switched two information paths on and off. The panels below split that matrix so each one shows a single effect.</p>
+
+  <div class="chart-row">
+    <figure>
+      <h4 style="margin:0 0 8px">Future conditioning off</h4>
+      <div class="legend" id="lg-hz"></div>
+      <svg id="chart-hz-a" role="img" aria-label="Net stock lower bound against executed frames, for the two cells without future conditioning."></svg>
+      <figcaption>Without access to its own earlier predictions, the decoder falls apart as more planned frames execute.</figcaption>
+    </figure>
+    <figure>
+      <h4 style="margin:0 0 8px">Future conditioning on</h4>
+      <div class="legend" id="lg-hz2"></div>
+      <svg id="chart-hz-b" role="img" aria-label="Net stock lower bound against executed frames, for the two cells with future conditioning."></svg>
+      <figcaption>With that access, the same model holds its score from one executed frame to six.</figcaption>
+    </figure>
+  </div>
+  <p class="small">Experiment&nbsp;037, four cells of one 2×2, same checkpoint per cell, 96 boots per point. The ranking reverses with the horizon: at one executed frame the cell with group conditioning alone is best, at four and six the cell with both paths is best.</p>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Decoder evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="dec"></tbody>
+  </table></div>
+
+  <div class="callout">
+    <p><b>Verdict: feeding the decoder its own predictions pays for itself only when several of them execute.</b> At four executed frames it is worth <span class="mono pos">+0.36</span>. At one executed frame it costs <span class="mono neg">−0.18</span>. The current recipe executes one frame, and it keeps the chain anyway, because the chain also shapes the trunk.</p>
+    <p><b>What this does not show.</b> The horizon sweep moved plan length and replan interval together, so it is not a horizon-only test.</p>
+  </div>
+</section>
+
+<section id="groups" style="--stage:var(--s4)">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Within-frame group chain</h2></div>
+  <p class="sec-sub">Four controller groups, chosen in order, each one conditioning the next.</p>
+
+  <p>A controller frame is not one decision. It is four: the C-stick, the main stick, the shoulder value and the buttons. The model picks them in that fixed order. After each pick, a small projection of the groups already chosen scales and shifts the decoder state for the next group. A separate linear read of the trunk state adds to every group's logits, so the head never has to relearn what the trunk already knows.</p>
+  <p>One hard constraint stays outside the network. A digital shoulder click implies full analog pressure, so button classes that contradict the sampled shoulder value are masked to minus infinity before sampling.</p>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Group-chain evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="groups"></tbody>
+  </table></div>
+
+  <div class="callout">
+    <p><b>Verdict: order the four groups and let each one see the last.</b> The gain is <span class="mono pos">+0.24</span>, and experiment&nbsp;037 factorizes it exactly: the effect holds whether or not future conditioning is present.</p>
+    <p><b>What this does not show.</b> Only one group order was ever tested against a proper control. Head capacity gave <span class="mono pos">+0.11</span> for 12.6&nbsp;% more parameters, and a later head-to-head did not confirm it.</p>
+  </div>
+</section>
+
+<section id="codec" style="--stage:var(--s1)">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Controller codec</h2></div>
+  <p class="sec-sub">The one boundary between raw values and classes. The largest single recovery in the programme.</p>
+
+  <p>The codec quantizes a controller frame into four class indices and turns four indices back into a controller frame. The current recipe restores a historical class set: 6 button classes, 37 main-stick classes, 9 C-stick classes, and 5 fused shoulder levels. The model keeps its modern, larger output tensors; the codec simply masks the classes it does not use. No trainable tensor changed.</p>
+  <p>The historical codec also restores an early-release reducer. The reducer compares each raw button set with the set before it. It emits the lowest-index button that is newly pressed. If buttons were released and nothing new was pressed, it emits <span class="mono">None</span>. An unchanged set repeats the previous output.</p>
+
+  <div class="table-wrap" style="max-width:560px"><table class="ev" style="min-width:0; width:auto">
+    <caption>How the reducer encodes a held B with a tapped A</caption>
+    <tbody>
+      <tr><td style="font-family:var(--mono); font-size:10px; letter-spacing:.12em; color:var(--ink3); text-transform:uppercase">raw</td><td class="mono">B</td><td class="mono">B</td><td class="mono">B+A</td><td class="mono">B+A</td><td class="mono">B</td></tr>
+      <tr><td style="font-family:var(--mono); font-size:10px; letter-spacing:.12em; color:var(--ink3); text-transform:uppercase">encoded</td><td class="mono">B</td><td class="mono">B</td><td class="mono">A</td><td class="mono">A</td><td class="mono">None</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Codec evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="codec"></tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <p><b>Verdict: this recovered <span class="mono pos">+0.75</span> stocks per minute and turned the model's score positive. We do not know which part did it.</b> The change bundles four things at once: the legacy output classes, the early-release reducer, one-frame timing, and the move of half the action loss onto the next frame. The 2×2 that splits them is written but not yet run.</p>
+    <p>This is the largest honest gain on the page and the largest open question on it. Both statements are true.</p>
+  </div>
+</section>
+
+<section id="timing" style="--stage:var(--s5)">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Closed-loop timing</h2></div>
+  <p class="sec-sub">Three integers, no parameters, and the second-largest effect we measured.</p>
+
+  <p>A plan is not a policy. Three numbers decide how a plan meets a 60&nbsp;Hz game:</p>
+  <ul>
+    <li><b>Prediction delay <span class="mono">d</span></b> — frames from the newest observation to the first predicted action.</li>
+    <li><b>Plan length <span class="mono">H</span></b> — actions generated in one plan.</li>
+    <li><b>Replan interval <span class="mono">R</span></b> — game frames between inference requests.</li>
+  </ul>
+  <p>A plan covers frames <span class="mono">[t+d, t+d+H)</span>. The scheduler anchors each plan to the observation it came from and releases a frame only when that frame arrives. The newest eligible plan wins. The current recipe runs <span class="mono">d = H = R = 1</span>: observe, decide, act, repeat.</p>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Timing evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="loop"></tbody>
+  </table></div>
+
+  <div class="callout">
+    <p><b>Verdict: latency is expensive.</b> Moving the prediction delay from 1 frame to 12 costs <span class="mono neg">−1.11</span> stocks per minute — larger than any architecture change on this page except the codec. Twelve frames is 200&nbsp;milliseconds, and the model has no way to buy that back.</p>
+    <p><b>What this does not show.</b> Replan interval alone has never been measured. Every test so far moved it together with plan length or with delay. That is an evaluation-only experiment on one existing checkpoint, and it is the cheapest open question on this page.</p>
+  </div>
+</section>
+
+<section id="recipe" style="--stage:var(--s3)">
+  <div class="sec-head"><span class="sec-num">07</span><h2>Training recipe</h2></div>
+  <p class="sec-sub">Where the data comes from, and how the optimizer sees it.</p>
+
+  <p>The model trains on anonymized ranked Melee replays, materialized to a versioned columnar schema. A reservoir sampler draws four windows per replay. Each step processes 512 sequences of 128 frames, about 65,500 positions. Muon updates the trunk blocks; AdamW updates everything else. The learning rate warms up for 500 steps and then follows a cosine to a floor. Half the action loss sits on the next frame; the other nine offsets share the rest.</p>
+
+  <div class="chart-row">
+    <figure>
+      <svg id="chart-batch" role="img" aria-label="Net stocks per minute against batch size at a fixed example budget. Smaller batches score higher."></svg>
+      <figcaption>Batch size at a fixed 2.097&nbsp;million examples. Every arm saw the same data, so a smaller batch simply bought more optimizer updates. One seed.</figcaption>
+    </figure>
+    <figure>
+      <svg id="chart-lr" role="img" aria-label="Net stocks per minute against the paired Muon and AdamW learning rates. The best point is in the middle of the sweep."></svg>
+      <figcaption>The Muon and AdamW rates move together as one pair. The interior minimum near <span class="mono">.040 / .00170</span> is a real bracket, not an endpoint.</figcaption>
+    </figure>
+  </div>
+
+  <div class="table-wrap"><table class="ev">
+    <caption>Recipe evidence</caption>
+    <thead><tr><th>Change</th><th>From → to</th><th class="n">Δ score</th><th class="n">Δ LCB</th><th>Control</th></tr></thead>
+    <tbody data-ev="recipe"></tbody>
+  </table></div>
+
+  <div class="callout">
+    <p><b>Verdict: the sampler and the batch size are worth as much as most architecture work.</b> One window per replay beat four by <span class="mono pos">+0.73</span>. A batch of 128 beat 2,048 by <span class="mono pos">+0.47</span> at identical data. Both are free.</p>
+    <p><b>What this does not show.</b> The window result comes from an older sampler. The current reservoir sampler has never been tested at one window per replay, and that repeat is the second open question on this page.</p>
+    <p><b>And one negative result worth keeping.</b> Swapping AdamW for Muon plus AdamW moved the score by <span class="mono">+0.03</span>. Optimizer and learning rates changed together. There is no evidence here for a large Muon benefit.</p>
+  </div>
+</section>
+
+<section id="failed">
+  <div class="sec-head"><span class="sec-num">08</span><h2>The branches we cut</h2></div>
+  <p class="sec-sub">Nine directions that looked right on paper. Scores are net stocks per minute and net damage per minute, both at the lower bound, against the in-game CPU. The behaviour-cloning control of the same era scored <span class="mono pos">+0.03</span> / <span class="mono pos">+29.8</span>.</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="hd"><h4>IQL with attached heads</h4><span class="exp">027</span></div>
+      <div class="score neg">−2.02 <span style="color:var(--ink3); font-size:.72em">/ −66.3</span></div>
+      <p>Chunk-Q and value heads bolted onto the exact behaviour-cloning policy path. The worst score in the ledger, and the Q head barely tracked the return at all (correlation .043).</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/06fi5jms">06fi5jms</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>IQL with separate critics</h4><span class="exp">030</span></div>
+      <div class="score neg">−1.71 <span style="color:var(--ink3); font-size:.72em">/ −59.1</span></div>
+      <p>Full Q1, Q2, V and target critics. Q-return correlation rose to .43 and .45, ten times better than 027 — and control did not improve. Fitting the value is not the hard part.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/ud4p5klw">ud4p5klw</a><a href="https://wandb.ai/ericyuegu/hal/runs/kxzc3m9a">kxzc3m9a</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>Run-length action tokens</h4><span class="exp">018</span></div>
+      <div class="score neg">−3.58 <span style="color:var(--ink3); font-size:.72em">/ −169.8</span></div>
+      <p>Compress held inputs into variable-length spans, the way byte-pair encoding compresses text. Executing tokens natively was catastrophic and crashed 58&nbsp;% of matches. Replanning every frame from the same model was competitive — the representation was never the win.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/xgj1dwot">xgj1dwot</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>Parallel latent trajectory</h4><span class="exp">033</span></div>
+      <div class="score neg">−1.74 <span style="color:var(--ink3); font-size:.72em">/ −62.4</span></div>
+      <p>One non-causal pass emits the whole future chunk from latent modes. Fast to decode, 5.99&nbsp;ms, and far behind. Eight modes recovered about half the gap and still lost.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/mz8dk2gh">mz8dk2gh</a><a href="https://wandb.ai/ericyuegu/hal/runs/feic18gt">feic18gt</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>Continuous flow matching</h4><span class="exp">001</span></div>
+      <div class="score neg">−2.26 <span style="color:var(--ink3); font-size:.72em">/ −112.1</span></div>
+      <p>The original baseline: a continuous 16-frame chunk in eight flow steps. Nothing about it was controlled against the later models, so it rejects only itself.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/xummemli">xummemli</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>Categorical-endpoint flow</h4><span class="exp">038</span></div>
+      <div class="score neg">−0.42 <span style="color:var(--ink3); font-size:.72em">/ −16.5</span></div>
+      <p>The fair rerun: same trunk, same data, same updates, ten offsets in parallel instead of a chain. It closed almost all of the gap on stocks and none of it on damage, at 25&nbsp;% more parameters. Close enough to test again; not close enough to adopt.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/t4s3gohe">t4s3gohe</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>One-hot controller input</h4><span class="exp">028</span></div>
+      <div class="score neg">−0.23 <span style="color:var(--ink3); font-size:.72em">/ +6.1</span></div>
+      <p>Drop the learned codec and feed the action history as a flat one-hot code. It reached a lower validation loss than the model it replaced, after twice the data, and played worse. This is why the page ranks nothing by loss.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">1zzstd2d</a><a href="https://wandb.ai/ericyuegu/hal/runs/4wyxy1g2">4wyxy1g2</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>Future-state expert</h4><span class="exp">029</span></div>
+      <div class="score neg">−0.03 <span style="color:var(--ink3); font-size:.72em">/ +16.4</span></div>
+      <p>A training-only head that predicts the next gamestate, to force the trunk to model the world. No gain. The run also doubled the data and changed the attention backend, so it condemns this world-model loss and not the idea.</p>
+      <div class="runs"><a href="https://wandb.ai/ericyuegu/hal/runs/qxcjjwl8">qxcjjwl8</a></div>
+    </div>
+    <div class="card">
+      <div class="hd"><h4>Iso-FLOP scaling suite</h4><span class="exp">048</span></div>
+      <div class="score" style="color:var(--ink3)">canceled</div>
+      <p>Twenty-six runs, seven widths, five FLOP lines, about 1.0×10<sup>19</sup> FLOPs. Designed in full and stopped before launch: the smaller capacity matrix on the current recipe answers the same question for a fraction of the cost.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p><b>One diagnostic, not a run.</b> Hiding the ego player's own action history was meant to break the model's habit of copying its recent inputs. Instead the policies went incoherent. Copycat behaviour has to be fixed by modelling the action chunk jointly, not by removing the input.</p>
+  </div>
+</section>
+
+<section id="open">
+  <div class="sec-head"><span class="sec-num">09</span><h2>What we still cannot claim</h2></div>
+  <p class="sec-sub">Eight questions the current evidence does not answer, in the order we would run them.</p>
+
+  <div class="panel" style="padding:6px 20px 12px; margin-top:16px">
+    <div class="oq"><span class="n">1</span><div>
+      <h4>Professional data against ranked-anonymous data</h4>
+      <p>The old champion trained on one professional player's replays. Existing comparisons hint at a 0.4 to 0.5 effect, but none holds the current recipe fixed.</p>
+      <p class="fix">Train both corpora with identical samples, updates, seed, sampler, codec and losses. Evaluate on the same paired schedules.</p>
+    </div></div>
+    <div class="oq"><span class="n">2</span><div>
+      <h4>Windows per replay, on the current sampler</h4>
+      <p>One window per replay beat four by <span class="mono pos">+0.73</span> — on a sampler we no longer use.</p>
+      <p class="fix">Run the current recipe at one and four windows, reservoir 4,096 in both arms, sampled frames and updates held fixed.</p>
+    </div></div>
+    <div class="oq"><span class="n">3</span><div>
+      <h4>Replan interval, on its own</h4>
+      <p>Every horizon test so far tied the replan interval to plan length or to delay. A flow checkpoint moved <span class="mono">+0.02</span> between two settings that changed both.</p>
+      <p class="fix">One checkpoint, delay fixed at 1, decode 6 frames every time, evaluate <span class="mono">R = 1, 2, 3, 6</span> with paired randomness. No training needed.</p>
+    </div></div>
+    <div class="oq"><span class="n">4</span><div>
+      <h4>Which target horizon the loss should cover</h4>
+      <p>Adding a third target offset cost <span class="mono neg">−0.20</span>, but the target count and the next-frame weight moved together.</p>
+      <p class="fix">Three arms: next frame only; the legacy pair at half and half; the current ten offsets with the next frame fixed at half. Hold total loss weight, data and parameters fixed.</p>
+    </div></div>
+    <div class="oq"><span class="n">5</span><div>
+      <h4>Context length</h4>
+      <p>There has never been a sweep. The three observations we have each change compute, attention and protocol at the same time.</p>
+      <p class="fix">Evaluate 128, 256, 512 and 1,024 frames with local attention width 128, <span class="mono">batch × context</span> fixed, updates fixed, and the same replay end frames.</p>
+    </div></div>
+    <div class="oq"><span class="n">6</span><div>
+      <h4>Which quarter of the codec change helped</h4>
+      <p>The <span class="mono pos">+0.75</span> recovery bundles four changes.</p>
+      <p class="fix">A 2×2 first: modern against legacy output classes, crossed with the reducer off and on, at <span class="mono">d = H = R = 1</span> and half the loss on the next frame. Then test timing and loss allocation separately.</p>
+    </div></div>
+    <div class="oq"><span class="n">7</span><div>
+      <h4>Model size, on the recovered recipe</h4>
+      <p>The capacity result comes from the previous recipe and reverses with control timing. It does not establish a general size effect.</p>
+      <p class="fix">Rerun the existing four-point capacity matrix — 2.506M, 4.722M, 9.445M and 15.053M at matched compute.</p>
+    </div></div>
+    <div class="oq"><span class="n">8</span><div>
+      <h4>The architecture package, on its own</h4>
+      <p>The architecture change cost <span class="mono neg">−0.66</span>, but the loader and the sampler changed with it.</p>
+      <p class="fix">Hold the current data, codec, loss and timing, and change only the architecture package. If it matters, split it into trunk, temporal decoder, skip connection and output head.</p>
+    </div></div>
+  </div>
+
+  <p style="margin-top:26px; font-size:1.05rem">The model is what survived. Seven of these eight questions are cheap, and one of them needs no training at all.</p>
+</section>
+
+<footer>
+  <span>HAL · experiments/043_legacy_codec.py</span>
+  <span>Scores: net stocks per minute vs the in-game CPU, conservative one-sided 95&nbsp;% lower bound</span>
+  <span>Run ledger: docs/blog_experiment_evidence.md</span>
+</footer>
+</main>
+</div>
+<div class="tip" id="tip" role="status"></div>
+
+<script>
+"use strict";
+const WB = id => `https://wandb.ai/ericyuegu/hal/runs/${id}`;
+const TOTAL_PARAMS = 15053039;
+
+/* ---------- stage specification (from experiments/043_legacy_codec.py) ---------- */
+const STAGES = {
+  obs: {
+    n:"01", name:"Observation encoder", sec:"observation", color:"var(--s1)", params:185388,
+    role:"Turns one frame of gamestate, the previous controller frame, the item slots and the match conditioning into a single token.",
+    shapes:["MDS columns", "[B, 128, 384]"],
+    cfg:[["d_model","384"],["L_ctx","128"],["action_state_embed_dim","48"],["char_dim / stage_dim","8 / 4"],["observation_bundle","base"],["item slots","4, spawn-ordered"]],
+    parts:"ctx_proj 135,552 · categorical tables 49,190 · character 256 · stage 128",
+    tests:["Observation feature set","Past-action input encoding","Item and projectile features","One-hot button class count"]
+  },
+  trunk: {
+    n:"02", name:"Transformer trunk", sec:"trunk", color:"var(--s2)", params:14155776,
+    role:"Eight causal pre-norm blocks read the 128-frame window and produce one state per frame.",
+    shapes:["[B, 128, 384]", "[B, 128, 384]"],
+    cfg:[["n_layers","8"],["n_heads","6 × 64"],["d_model","384"],["attn_window","0 (full)"],["mlp","384 → 1536 → 384"],["norm","RMS, no affine"]],
+    parts:"1,769,472 per block · no bias anywhere · rotary positions",
+    tests:["Model size","Architecture package"]
+  },
+  dec: {
+    n:"03", name:"Temporal action decoder", sec:"decoder", color:"var(--s3)", params:489568,
+    role:"Expands each trunk state into ten selected future offsets. Every step reads the action the step before it chose.",
+    shapes:["[B, 128, 384]", "[B, 128, 10, 128]"],
+    cfg:[["head_offsets","1 2 3 4 5 6 9 12 16 20"],["temporal_d_model","128"],["temporal_layers","2"],["temporal_heads","4 × 32"],["temporal_ff_dim","256"],["offset_embed_dim","16"]],
+    parts:"token projection 59,520 · 2 blocks 262,144 · group conditioning 25,344 · trunk-logit skip 136,320 · shared codec 5,904",
+    tests:["Predicted-action feedback","Plan length and replan interval","Future targets and next-frame share","Decoder type","Future target offsets"]
+  },
+  groups: {
+    n:"04", name:"Within-frame group chain", sec:"groups", color:"var(--s4)", params:222307,
+    role:"Picks four controller groups in a fixed order. Each pick scales and shifts the state for the next.",
+    shapes:["[B, 128, 10, 128]", "14-channel controller frame"],
+    cfg:[["group_order","c_stick → main_stick → triggers → buttons"],["group_head_dim","256"],["head","RMSNorm → SiLU → linear"],["conditioning","state × (1 + tanh γ) + β"],["legality","shoulder click masks buttons"]],
+    parts:"four nonlinear heads over the retained legacy classes: 9, 37, 5 and 6",
+    tests:["Controller-part conditioning","Action-head capacity","Architecture package"]
+  },
+  loop: {
+    n:"05", name:"Closed-loop execution", sec:"timing", color:"var(--s5)", params:0,
+    role:"The runtime, not the model. It decides when a predicted frame reaches the emulator.",
+    shapes:["controller frame", "Dolphin, at 60 Hz"],
+    cfg:[["prediction delay d","1"],["plan length H","1"],["replan interval R","1"],["decode","ancestral, one group at a time"],["temperature","1.0, frozen"],["inference","compiled, bucketed"]],
+    parts:"a plan covers frames [t+d, t+d+H) · the newest eligible plan wins",
+    tests:["Prediction delay","Plan length and replan interval"]
+  }
+};
+
+/* ---------- the audited comparison table ---------- */
+const EV = [
+ {r:1, c:"recipe", t:"Training objective: BC → offline Q learning", a:"behaviour cloning +0.16", b:"IQL −1.85", d:-2.01, l:-2.05, q:"weak", runs:["cqbbbg77","06fi5jms"],
+  note:"Data, compute, value heads and losses also changed. The tested IQL system was clearly bad. This does not isolate IQL itself."},
+ {r:2, c:"trunk", t:"Model size", a:"7M −3.62", b:"205M −2.09", d:1.52, l:1.61, q:"near", runs:[],
+  note:"One family, one seed, at delay and replan of one frame. Not monotonic: 18M scored below 7M and 112M below 51M. At delay and replan of four frames the same span is −0.54."},
+ {r:3, c:"loop", t:"Prediction delay", a:"d=1 +0.24", b:"d=12 −0.86", d:-1.11, l:-1.21, q:"near", runs:["1imfy8v3","2qs05au4"],
+  note:"Near control. The Fox-only score changed by −0.98. The delay-12 run kept H=6 and R=1 but used a longer future-data buffer."},
+ {r:4, c:"codec", t:"Legacy action setup", a:"modern codec −0.50", b:"legacy codec +0.24", d:0.75, l:0.69, q:"combined", runs:["k8nb00xv","1imfy8v3"],
+  note:"Four changes at once: legacy output classes, the early-release reducer, one-frame timing, and half the action loss on the next frame. The 8k checkpoint gave +0.62."},
+ {r:5, c:"recipe", t:"Training windows per replay", a:"K=4 −0.60", b:"K=1 +0.13", d:0.73, l:0.73, q:"strong", runs:["uw05bvm2","shjnxxsu"],
+  note:"Only the recorded window setting changed. It must still be repeated on the current reservoir sampler."},
+ {r:6, c:"groups", t:"Architecture package", a:"previous +0.16", b:"current −0.50", d:-0.66, l:-0.64, q:"combined", runs:["cqbbbg77","k8nb00xv"],
+  note:"Architecture details and sampling code changed together. The later recovery on the same architecture shows that architecture is not the sole cause."},
+ {r:7, c:"recipe", t:"Batch size at fixed data", a:"2,048 −0.79", b:"128 −0.32", d:0.47, l:0.47, q:"strong", runs:[],
+  note:"All five arms saw 2.097M examples, so a smaller batch simply bought more optimizer updates. One seed."},
+ {r:8, c:"dec", t:"Plan length and replan interval", a:"H=1", b:"H=6", d:-0.43, l:-0.44, q:"combined", runs:[],
+  note:"Mean over four decoder cells, same checkpoint on each side. The old runs tied plan length to replan interval, so this is not a horizon-only test. Per-cell change ran from −1.00 to −0.05."},
+ {r:9, c:"recipe", t:"Training data mix", a:"ranked only −0.50", b:"full mix −0.12", d:0.39, l:0.38, q:"strong", runs:["k8nb00xv","bevhq159"],
+  note:"Strong control inside one experiment. Separately, an old professional-data run beat an old mixed run by +0.51, but that comparison has other changes."},
+ {r:10, c:"dec", t:"Predicted-action feedback", a:"off", b:"on", d:0.36, l:0.35, q:"strong", runs:["98r9smrj","50q39o9j"],
+  note:"Exact factorization at four executed frames: −0.70 → −0.20 without group conditioning, −0.31 → −0.10 with it. At one executed frame it is harmful, mean −0.18."},
+ {r:11, c:"obs", t:"Observation feature set", a:"full −0.62", b:"lean −0.89", d:-0.27, l:-0.30, q:"near", runs:["pu8jpmbf"],
+  note:"Good historical near-control. Removing or changing state features harmed play. The state schema changed too, so no single column is implicated."},
+ {r:12, c:"obs", t:"Past-action input encoding", a:"one-hot −0.10", b:"learned codec +0.16", d:0.26, l:0.26, q:"near", runs:["1zzstd2d","cqbbbg77"],
+  note:"The one-hot run saw twice the examples and still lost. At matched exposure its validation loss and its button-change F1 were also worse."},
+ {r:13, c:"groups", t:"Controller-part conditioning", a:"independent groups", b:"chained groups", d:0.24, l:0.24, q:"strong", runs:["98r9smrj","a117chkw"],
+  note:"Exact control at four executed frames: −0.70 → −0.31 without future conditioning, −0.20 → −0.10 with it. Letting later controller parts depend on earlier parts helped in both backgrounds."},
+ {r:14, c:"recipe", t:"Learning-rate pair", a:"worst −0.59", b:"best −0.37", d:0.22, l:0.22, q:"strong", runs:[],
+  note:"Fixed model, fixed data, six paired points. The best point is near .040 / .00170 and it is interior to the sweep."},
+ {r:15, c:"dec", t:"Future targets and next-frame share", a:"{1,12} +1.10", b:"{1,12,18} +0.90", d:-0.20, l:null, q:"near", runs:["c6r7edxf","8fo0kube"],
+  note:"Adding a target offset also reduced the relative weight of frame 1. This supports keeping half the loss on the next frame."},
+ {r:16, c:"recipe", t:"Training examples seen", a:"8.39M +1.04", b:"16.78M +1.23", d:0.19, l:null, q:"near", runs:[],
+  note:"Same run, two checkpoints. Training longer helps, but it does not explain the original gap."},
+ {r:17, c:"dec", t:"Decoder type: categorical → flow", a:"categorical −0.10", b:"flow −0.28", d:-0.19, l:-0.16, q:"strong", runs:["5wfk2esf","t4s3gohe"],
+  note:"Matched trunk and data. Decoder, objective, parameters and inference work changed together."},
+ {r:18, c:"recipe", t:"Advantage-weighted regression", a:"behaviour cloning −0.62", b:"AWR −0.50", d:0.12, l:0.11, q:"near", runs:["5wfk2esf","hwzv0k9a"],
+  note:"The modern matched pair gives +0.08 and the old reference about +0.13. The evidence is consistent but modest."},
+ {r:19, c:"groups", t:"Action-head capacity", a:"linear head −0.69", b:"state-MLP head −0.58", d:0.11, l:0.08, q:"near", runs:["obx3o3az","q3aojgfm"],
+  note:"Parameters and compute rose 12.6 %. A later head-to-head test did not confirm a large benefit."},
+ {r:20, c:"obs", t:"Item and projectile features", a:"off −1.43", b:"on −1.34", d:0.09, l:0.11, q:"strong", runs:["v9xku05q","9wh7qhr1"],
+  note:"Direct feature control. A small positive effect."},
+ {r:21, c:"recipe", t:"Future-state auxiliary loss", a:"off +0.16", b:"on +0.11", d:-0.05, l:-0.06, q:"weak", runs:["cqbbbg77","qxcjjwl8"],
+  note:"Also used twice the data, more parameters, more compute and another attention backend."},
+ {r:22, c:"obs", t:"One-hot button class count", a:"256 classes −0.10", b:"52 classes −0.06", d:0.04, l:0.03, q:"strong", runs:["1zzstd2d","4wyxy1g2"],
+  note:"Strong control inside one experiment. This concerns the one-hot history input, not the legacy six-class output codec."},
+ {r:23, c:"recipe", t:"Optimizer and rate recipe", a:"AdamW −0.41", b:"Muon + AdamW −0.38", d:0.03, l:0.03, q:"strong", runs:["o3nihah5","vlim96s9"],
+  note:"Exact recipe comparison, but the optimizer and the rates changed together. There is no evidence here for a large Muon benefit."},
+ {r:24, c:"dec", t:"Future target offsets", a:"{1,2,3,4} −0.59", b:"{1,5,9,13} −0.56", d:0.03, l:0.05, q:"weak", runs:[],
+  note:"Weak control, because the auxiliary-loss weight also changed."}
+];
+
+const COMPS = [
+  ["obs","Observation","observation"], ["trunk","Trunk","trunk"], ["dec","Decoder","decoder"],
+  ["groups","Group chain","groups"], ["codec","Codec","codec"], ["loop","Timing","timing"], ["recipe","Recipe","recipe"]
+];
+const QUALS = [["strong","strong"],["near","near"],["combined","combined"],["weak","weak"]];
+const SEC_OF = Object.fromEntries(COMPS.map(([k,,s]) => [k,s]));
+
+/* ---------- tiny helpers ---------- */
+function fmt(v, sign){ if (v === null || v === undefined) return "—"; const s = v.toFixed(2); return sign && v > 0 ? "+" + s : s; }
+function cls(v){ return v > 0 ? "pos" : v < 0 ? "neg" : ""; }
+
+/* ---------- spec panel ---------- */
+const diagram = document.getElementById("diagram");
+const spec = document.getElementById("spec");
+
+function renderSpec(key){
+  const s = STAGES[key];
+  const pct = s.params ? (100 * s.params / TOTAL_PARAMS) : 0;
+  const shapeHTML = s.shapes.map(x => `<span class="chip">${x}</span>`).join('<span class="arw">→</span>');
+  const cfgHTML = s.cfg.map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  const testHTML = s.tests.map(t => `<span class="chip">${t}</span>`).join(" ");
+  spec.style.setProperty("--stage", s.color);
+  spec.innerHTML = `
+    <div class="spec-grid">
+      <div>
+        <span class="spec-tag"><i class="dot"></i>STAGE ${s.n}</span>
+        <h3>${s.name}</h3>
+        <p class="role">${s.role}</p>
+        <a class="jump" href="#${s.sec}">Read section ${s.n} →</a>
+      </div>
+      <div>
+        <dl>
+          <dt>Shapes</dt><dd><span class="shapes">${shapeHTML}</span></dd>
+          <dt>Parameters</dt><dd>${s.params ? s.params.toLocaleString("en-US") + " · " + pct.toFixed(2) + " %" : "none — this stage is runtime"}
+            <span class="parambar"><i style="width:${Math.max(pct, 0.6)}%"></i></span></dd>
+        </dl>
+        <p class="parts">${s.parts}</p>
+      </div>
+      <div><dl>${cfgHTML}</dl></div>
+    </div>
+    <div class="spec-tests"><span class="spec-tag">Tested by</span>${testHTML}</div>`;
+}
+
+let selected = null;
+function select(key, scroll){
+  selected = key;
+  diagram.setAttribute("data-selected", key);
+  diagram.querySelectorAll(".stage").forEach(g => g.classList.toggle("is-sel", g.dataset.stage === key));
+  renderSpec(key);
+  if (scroll) document.getElementById(STAGES[key].sec).scrollIntoView({behavior:"smooth", block:"start"});
+}
+function clearSelect(){
+  selected = null;
+  diagram.removeAttribute("data-selected");
+  diagram.querySelectorAll(".stage").forEach(g => g.classList.remove("is-sel"));
+  renderSpec("trunk");
+}
+diagram.querySelectorAll(".stage").forEach(g => {
+  const key = g.dataset.stage;
+  g.addEventListener("click", () => select(key, false));
+  g.addEventListener("mouseenter", () => { if (!selected) renderSpec(key); });
+  g.addEventListener("focus", () => renderSpec(key));
+  g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); select(key, false); } });
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && selected) clearSelect(); });
+renderSpec("trunk");
+
+/* ---------- tooltip ---------- */
+const tip = document.getElementById("tip");
+function showTip(html, x, y){
+  tip.innerHTML = html; tip.classList.add("on");
+  const r = tip.getBoundingClientRect();
+  const left = Math.min(Math.max(10, x + 14), window.innerWidth - r.width - 10);
+  const top = Math.min(Math.max(10, y + 14), window.innerHeight - r.height - 10);
+  tip.style.left = left + "px"; tip.style.top = top + "px";
+}
+function hideTip(){ tip.classList.remove("on"); }
+
+/* ---------- ranked chart ---------- */
+const SCALE = 2.5;
+const state = { comp:new Set(), qual:new Set(), sort:"d" };
+
+function pillRow(host, items, key, onDone){
+  const all = document.createElement("button");
+  all.className = "pill"; all.type = "button"; all.textContent = "all";
+  all.setAttribute("aria-pressed", "true");
+  all.addEventListener("click", () => { state[key].clear(); sync(); });
+  host.appendChild(all);
+  items.forEach(([k, label]) => {
+    const b = document.createElement("button");
+    b.className = key === "comp" ? "pill k" : "pill"; b.type = "button"; b.textContent = label;
+    b.dataset.k = k; b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => {
+      state[key].has(k) ? state[key].delete(k) : state[key].add(k);
+      sync();
+    });
+    host.appendChild(b);
+  });
+  function sync(){
+    const s = state[key];
+    all.setAttribute("aria-pressed", String(s.size === 0));
+    host.querySelectorAll("[data-k]").forEach(b => b.setAttribute("aria-pressed", String(s.has(b.dataset.k))));
+    onDone();
+  }
+}
+
+const fComp = document.getElementById("f-comp");
+const fCtl = document.getElementById("f-ctl");
+const fSort = document.getElementById("f-sort");
+pillRow(fComp, COMPS.map(([k,l]) => [k,l]), "comp", drawRank);
+pillRow(fCtl, QUALS, "qual", drawRank);
+[["d","change in score"],["l","change in LCB"]].forEach(([k,label], i) => {
+  const b = document.createElement("button");
+  b.className = "pill"; b.type = "button"; b.textContent = label; b.dataset.s = k;
+  b.setAttribute("aria-pressed", String(i === 0));
+  b.addEventListener("click", () => {
+    state.sort = k;
+    fSort.querySelectorAll("[data-s]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.s === k)));
+    drawRank();
+  });
+  fSort.appendChild(b);
+});
+
+const rankBody = document.getElementById("rank-body");
+function drawRank(){
+  const rows = EV
+    .filter(e => (state.comp.size === 0 || state.comp.has(e.c)) && (state.qual.size === 0 || state.qual.has(e.q)))
+    .slice()
+    .sort((x, y) => {
+      const kx = state.sort === "l" && x.l !== null ? x.l : x.d;
+      const ky = state.sort === "l" && y.l !== null ? y.l : y.d;
+      return Math.abs(ky) - Math.abs(kx);
+    });
+  rankBody.replaceChildren();
+  if (!rows.length){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="4" style="padding:22px 8px; color:var(--ink3)">No comparison matches these filters.</td>`;
+    rankBody.appendChild(tr);
+    return;
+  }
+  const compLabel = Object.fromEntries(COMPS.map(([k,l]) => [k,l]));
+  for (const e of rows){
+    const tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    const w = Math.min(Math.abs(e.d) / SCALE, 1) * 50;
+    const left = e.d >= 0 ? 50 : 50 - w;
+    const lt = e.l === null ? "" :
+      `<u style="left:${(50 + Math.max(Math.min(e.l / SCALE, 1), -1) * 50).toFixed(2)}%; background:var(--ink2)"></u>`;
+    tr.innerHTML =
+      `<td class="f">${e.t}<small>${compLabel[e.c]}</small></td>` +
+      `<td class="d"><div class="bar"><span class="zero" style="left:50%"></span>` +
+        `<i class="${e.d >= 0 ? "gain" : "loss"}" style="left:${left.toFixed(2)}%; width:${w.toFixed(2)}%"></i>${lt}</div></td>` +
+      `<td class="v ${cls(e.d)}">${fmt(e.d, true)}<small class="lcbmini">LCB ${fmt(e.l, true)}</small></td>` +
+      `<td class="q"><span class="badge ${e.q}">${e.q}</span></td>`;
+    const go = () => { location.hash = "#" + SEC_OF[e.c]; flash(e); };
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", ev => { if (ev.key === "Enter"){ ev.preventDefault(); go(); } });
+    tr.addEventListener("mousemove", ev => showTip(
+      `<span class="hd">${e.t}</span>${e.a} &nbsp;→&nbsp; ${e.b}<br>` +
+      `score <b>${fmt(e.d, true)}</b> · LCB <b>${fmt(e.l, true)}</b><br>` +
+      `<span style="color:var(--ink3)">${e.note}</span>`, ev.clientX, ev.clientY));
+    tr.addEventListener("mouseleave", hideTip);
+    rankBody.appendChild(tr);
+  }
+}
+drawRank();
+
+/* ---------- theme toggle: light ⇄ dark, remembered on this device ---------- */
+(function(){
+  const root = document.documentElement;
+  const btn = document.getElementById("theme-toggle");
+  const label = btn.querySelector(".tt-label");
+  const sun = btn.querySelector(".tt-sun");
+  const moon = btn.querySelector(".tt-moon");
+  const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+  function effective(){
+    const stamped = root.getAttribute("data-theme");
+    if (stamped === "light" || stamped === "dark") return stamped;
+    return systemDark.matches ? "dark" : "light";
+  }
+  function paint(){
+    const theme = effective();
+    label.textContent = theme;
+    sun.hidden = theme === "dark";
+    moon.hidden = theme !== "dark";
+    btn.setAttribute("aria-label", `Theme is ${theme}. Switch to ${theme === "dark" ? "light" : "dark"}.`);
+  }
+  try {
+    const saved = localStorage.getItem("policy-anatomy-theme");
+    if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+  } catch (err) {
+    // site data is blocked in this context; the viewer's own theme still applies
+  }
+  paint();
+  btn.addEventListener("click", () => {
+    const next = effective() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("policy-anatomy-theme", next); } catch (err) { /* nothing to remember */ }
+    paint();
+  });
+  systemDark.addEventListener("change", paint);
+})();
+
+/* ---------- glossary: term lights up its part of the toy figure ---------- */
+function highlight(figId, key){
+  const fig = document.getElementById(figId);
+  if (!fig) return;
+  fig.classList.toggle("hl", Boolean(key));
+  fig.querySelectorAll("[data-part]").forEach(node =>
+    node.classList.toggle("lit", Boolean(key) && node.dataset.part.split(" ").includes(key)));
+}
+document.querySelectorAll(".gterm[data-fig]").forEach(term => {
+  const on = () => highlight(term.dataset.fig, term.dataset.hi);
+  const offAll = () => highlight(term.dataset.fig, null);
+  term.addEventListener("mouseenter", on);
+  term.addEventListener("mouseleave", offAll);
+  term.addEventListener("focus", on);
+  term.addEventListener("blur", offAll);
+});
+
+/* ---------- per-section evidence tables ---------- */
+function flash(e){
+  const row = document.querySelector(`tr[data-r="${e.r}"]`);
+  if (!row) return;
+  row.classList.add("flash");
+  setTimeout(() => row.classList.remove("flash"), 1500);
+}
+document.querySelectorAll("tbody[data-ev]").forEach(tb => {
+  const comp = tb.dataset.ev;
+  EV.filter(e => e.c === comp).forEach(e => {
+    const tr = document.createElement("tr");
+    tr.dataset.r = e.r;
+    const runs = e.runs.length
+      ? `<div style="margin-top:4px">${e.runs.map(id => `<a class="chip" style="text-decoration:none" href="${WB(id)}">${id}</a>`).join(" ")}</div>` : "";
+    tr.innerHTML =
+      `<td><b style="font-weight:600">${e.t}</b><div class="small" style="margin-top:3px">${e.note}</div></td>` +
+      `<td class="mono" style="font-size:.8rem; white-space:nowrap">${e.a}<br><span style="color:var(--ink3)">↓</span><br>${e.b}${runs}</td>` +
+      `<td class="n ${cls(e.d)}">${fmt(e.d, true)}</td>` +
+      `<td class="n ${e.l === null ? "" : cls(e.l)}">${fmt(e.l, true)}</td>` +
+      `<td><span class="badge ${e.q}">${e.q}</span></td>`;
+    tb.appendChild(tr);
+  });
+});
+</script>
+
+<script>
+"use strict";
+(function(){
+const NS = "http://www.w3.org/2000/svg";
+const A = "var(--indigo)", B = "var(--ochre)";
+const tip = document.getElementById("tip");
+function put(html, x, y){
+  tip.innerHTML = html; tip.classList.add("on");
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(Math.max(10, x + 14), window.innerWidth - r.width - 10) + "px";
+  tip.style.top = Math.min(Math.max(10, y + 14), window.innerHeight - r.height - 10) + "px";
+}
+const off = () => tip.classList.remove("on");
+function E(p, tag, a, txt){
+  const n = document.createElementNS(NS, tag);
+  for (const k in a) n.setAttribute(k, a[k]);
+  if (txt !== undefined) n.textContent = txt;
+  p.appendChild(n); return n;
+}
+function frame(id, W, H, pad){
+  const s = document.getElementById(id);
+  s.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  s.replaceChildren();
+  return s;
+}
+function grid(s, pad, W, H, yTicks, y){
+  yTicks.forEach(v => {
+    const py = y(v);
+    E(s, "line", {x1:pad.l, y1:py, x2:W - pad.r, y2:py,
+      stroke: v === 0 ? "var(--ink3)" : "var(--hair)", "stroke-width": v === 0 ? 1 : 1});
+    E(s, "text", {x:pad.l - 7, y:py + 3.6, "text-anchor":"end", "font-size":9.5,
+      fill:"var(--ink3)", "font-family":"var(--mono)"}, v.toFixed(v % 1 === 0 ? 0 : 1));
+  });
+}
+function legend(id, items){
+  const host = document.getElementById(id);
+  if (!host) return;
+  host.replaceChildren();
+  items.forEach(([c, label]) => {
+    const sp = document.createElement("span");
+    sp.innerHTML = `<i style="background:${c}"></i>${label}`;
+    host.appendChild(sp);
+  });
+}
+
+/* ---- 2. horizon panels ---- */
+(function(){
+  const xs = [1, 2, 4, 6];
+  const panels = [
+    ["chart-hz-a", "lg-hz",  {off:[-0.0453,-0.2924,-0.8457,-1.0581], on:[-0.0013,-0.0813,-0.4381,-0.6078]}],
+    ["chart-hz-b", "lg-hz2", {off:[-0.3176,-0.2066,-0.3306,-0.3837], on:[-0.0740,-0.1428,-0.2504,-0.1644]}]
+  ];
+  panels.forEach(([id, lg, d]) => {
+    legend(lg, [[B, "group chain off"], [A, "group chain on"]]);
+    const W = 420, H = 240, pad = {l:38, r:52, t:14, b:36};
+    const s = frame(id, W, H, pad);
+    const x = i => pad.l + i / (xs.length - 1) * (W - pad.l - pad.r);
+    const y = v => pad.t + (0.10 - v) / (0.10 + 1.20) * (H - pad.t - pad.b);
+    grid(s, pad, W, H, [0, -0.4, -0.8, -1.2], y);
+    xs.forEach((v, i) => E(s, "text", {x:x(i), y:H - pad.b + 16, "text-anchor":"middle",
+      "font-size":10, fill:"var(--ink3)", "font-family":"var(--mono)"}, String(v)));
+    E(s, "text", {x:(pad.l + W - pad.r)/2, y:H - 6, "text-anchor":"middle", "font-size":10,
+      fill:"var(--ink3)", "font-family":"var(--mono)"}, "frames executed per plan");
+    [["off", B, "off"], ["on", A, "on"]].forEach(([k, col, label]) => {
+      const pts = d[k];
+      E(s, "polyline", {points: pts.map((v, i) => `${x(i)},${y(v)}`).join(" "),
+        fill:"none", stroke:col, "stroke-width":2, "stroke-linejoin":"round"});
+      pts.forEach((v, i) => {
+        E(s, "circle", {cx:x(i), cy:y(v), r:4.5, fill:col, stroke:"var(--panel)", "stroke-width":2});
+        const hit = E(s, "circle", {cx:x(i), cy:y(v), r:12, fill:"transparent"});
+        hit.addEventListener("mousemove", ev => put(
+          `<span class="hd">group chain ${label}</span>${xs[i]} executed frame${xs[i] > 1 ? "s" : ""}<br>` +
+          `stock LCB <b>${v.toFixed(4)}</b>`, ev.clientX, ev.clientY));
+        hit.addEventListener("mouseleave", off);
+      });
+      E(s, "text", {x:x(xs.length - 1) + 9, y:y(pts[pts.length - 1]) + 3.6, "font-size":10.5,
+        fill:col, "font-family":"var(--mono)"}, label);
+    });
+    E(s, "text", {x:pad.l, y:10, "font-size":9.5, fill:"var(--ink3)", "font-family":"var(--mono)"}, "stock LCB");
+  });
+})();
+
+/* ---- 3. batch size ---- */
+(function(){
+  const data = [[128,-0.32],[256,-0.49],[512,-0.72],[1024,-0.56],[2048,-0.79]];
+  const W = 420, H = 240, pad = {l:38, r:14, t:30, b:40};
+  const s = frame("chart-batch", W, H, pad);
+  const y = v => pad.t + (0 - v) / 0.9 * (H - pad.t - pad.b);
+  const bw = (W - pad.l - pad.r) / data.length;
+  E(s, "text", {x:pad.l, y:14, "font-size":11, fill:"var(--ink)", "font-family":"var(--mono)"}, "batch size at 2.097M examples");
+  grid(s, pad, W, H, [0, -0.3, -0.6, -0.9], y);
+  data.forEach(([n, v], i) => {
+    const cx = pad.l + i * bw + bw / 2;
+    const h = y(v) - y(0);
+    E(s, "rect", {x:cx - bw * 0.3, y:y(0), width:bw * 0.6, height:h, rx:3, fill:B});
+    E(s, "text", {x:cx, y:y(v) + 15, "text-anchor":"middle", "font-size":10.5,
+      fill:"var(--ink2)", "font-family":"var(--mono)"}, v.toFixed(2));
+    E(s, "text", {x:cx, y:H - pad.b + 16, "text-anchor":"middle", "font-size":10,
+      fill:"var(--ink3)", "font-family":"var(--mono)"}, String(n));
+    const hit = E(s, "rect", {x:cx - bw/2, y:pad.t, width:bw, height:H - pad.t - pad.b, fill:"transparent"});
+    hit.addEventListener("mousemove", ev => put(
+      `<span class="hd">batch ${n}</span>${v.toFixed(2)} net stocks / min<br>` +
+      `<span style="color:var(--ink3)">${(2097152 / n).toLocaleString("en-US")} optimizer updates</span>`, ev.clientX, ev.clientY));
+    hit.addEventListener("mouseleave", off);
+  });
+})();
+
+/* ---- 4. learning-rate pair ---- */
+(function(){
+  const data = [[".014",-0.59],[".028",-0.43],[".040",-0.37],[".056",-0.46],[".080",-0.54],[".112",-0.51]];
+  const adam = [".000595",".00119",".00170",".00238",".00340",".00476"];
+  const W = 420, H = 240, pad = {l:38, r:16, t:30, b:44};
+  const s = frame("chart-lr", W, H, pad);
+  const x = i => pad.l + i / (data.length - 1) * (W - pad.l - pad.r);
+  const y = v => pad.t + (-0.30 - v) / (-0.30 + 0.65) * (H - pad.t - pad.b);
+  E(s, "text", {x:pad.l, y:14, "font-size":11, fill:"var(--ink)", "font-family":"var(--mono)"}, "paired Muon / AdamW rates");
+  grid(s, pad, W, H, [-0.3, -0.4, -0.5, -0.6], y);
+  E(s, "polyline", {points: data.map(([, v], i) => `${x(i)},${y(v)}`).join(" "),
+    fill:"none", stroke:A, "stroke-width":2, "stroke-linejoin":"round"});
+  data.forEach(([lbl, v], i) => {
+    const best = v === -0.37;
+    E(s, "circle", {cx:x(i), cy:y(v), r: best ? 6.5 : 4.5, fill: best ? "var(--accent)" : A,
+      stroke:"var(--panel)", "stroke-width":2});
+    E(s, "text", {x:x(i), y:H - pad.b + 15, "text-anchor":"middle", "font-size":10,
+      fill:"var(--ink3)", "font-family":"var(--mono)"}, lbl);
+    const hit = E(s, "circle", {cx:x(i), cy:y(v), r:13, fill:"transparent"});
+    hit.addEventListener("mousemove", ev => put(
+      `<span class="hd">Muon ${lbl} · AdamW ${adam[i]}</span>${v.toFixed(2)} net stocks / min` +
+      (best ? "<br><span style='color:var(--accent)'>best point in the sweep</span>" : ""), ev.clientX, ev.clientY));
+    hit.addEventListener("mouseleave", off);
+  });
+  E(s, "text", {x:(W)/2, y:H - 8, "text-anchor":"middle", "font-size":10,
+    fill:"var(--ink3)", "font-family":"var(--mono)"}, "Muon rate · AdamW rate scales with it");
+})();
+
+/* ---- spine scroll spy ---- */
+(function(){
+  const links = [...document.querySelectorAll(".spine a")];
+  const map = new Map(links.map(a => [a.getAttribute("href").slice(1), a]));
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      const a = map.get(e.target.id);
+      if (a && e.isIntersecting) {
+        links.forEach(l => l.removeAttribute("aria-current"));
+        a.setAttribute("aria-current", "true");
+      }
+    });
+  }, {rootMargin:"-15% 0px -70% 0px"});
+  map.forEach((a, id) => { const el = document.getElementById(id); if (el) obs.observe(el); });
+})();
+})();
+</script>
+
+<script>
+"use strict";
+(function(){
+const CAP = {"models":[{"k":"L5","L":5,"d":320,"h":5,"p":6988015},{"k":"026base","L":8,"d":256,"h":4,"p":7081967},{"k":"L7","L":7,"d":448,"h":7,"p":17810159},{"k":"L10","L":10,"d":640,"h":10,"p":51154223},{"k":"L13","L":13,"d":832,"h":13,"p":111720303},{"k":"L16","L":16,"d":1024,"h":16,"p":205245039},{"k":"L18","L":18,"d":1152,"h":18,"p":293127087}],"budgets":[26,27,28,29,30],"positions":[67108864,134217728,268435456,536870912,1073741824],"delays":[1,2,4,6,8,10,12,14,16],"train":[[[1.3387,2.043,12.41,67108864],[1.29,1.9696,24.83,134217728],[1.2569,1.9181,49.66,268435456],[1.2329,1.8786,99.31,536870912],[1.2149,1.8489,198.63,1073741824]],[[1.3343,2.0359,12.02,67108864],[1.287,1.965,24.03,134217728],[1.2536,1.9136,48.07,268435456],[1.2301,1.875,96.13,536870912],[1.2129,1.8461,192.26,1073741824]],[[1.3327,2.0365,17.64,67108864],[1.2835,1.9621,35.29,134217728],[1.2486,1.9072,70.57,268435456],[1.2248,1.8685,141.14,536870912],[1.2077,1.8403,282.29,1073741824]],[[1.3016,1.9844,44.93,67108864],[1.2544,1.9122,89.86,134217728],[1.2206,1.8588,179.71,268435456],[1.1983,1.8218,359.43,536870912],[1.183,1.7956,718.85,1073741824]],[[1.288,1.9602,92.76,67108864],[1.24,1.8862,185.51,134217728],[1.2069,1.8336,371.03,268435456],[1.1851,1.7975,742.06,536870912],[1.2234,1.8479,1298.6,939524096]],[[1.2858,1.9581,132.07,67108864],[1.2382,1.8844,264.14,134217728],[1.205,1.8318,528.27,268435456],[1.1839,1.7966,1056.55,536870912],[1.1691,1.7711,2113.09,1073741824]],[[1.2799,1.947,202.81,67108864],[1.2287,1.8678,405.63,134217728],[1.1968,1.8159,811.25,268435456],[1.1761,1.781,1622.5,536870912],[7.3444,11.0217,2839.38,939524096]]],"cells":[[[[-3.484,-3.824,-74.7,-85.9,225,0.0,14.3],[-2.214,-2.421,-45.5,-53.9,174,0.0,20.0],[-2.108,-2.279,-44.7,-52.3,174,0.0,131.9],[-2.068,-2.235,-65.2,-72.8,170,0.0,38.7],[-1.831,-2.001,-72.8,-79.2,153,0.0,48.0],[-1.959,-2.131,-78.6,-85.7,166,0.0,56.5],[-2.322,-2.497,-88.7,-95.3,172,0.0,62.8],[-2.236,-2.39,-99.1,-105.4,174,0.0,73.4],[-2.302,-2.473,-108.8,-115.8,178,0.0,81.6]],[[-2.957,-3.276,-77.2,-86.4,202,0.0,14.0],[-2.22,-2.426,-52.6,-60.7,174,0.0,19.7],[-1.68,-1.852,-44.5,-52.2,148,0.0,118.4],[-1.572,-1.724,-61.8,-68.8,143,0.0,38.0],[-1.437,-1.581,-70.8,-78.1,140,0.0,45.2],[-1.512,-1.667,-81.1,-88.3,141,0.0,56.3],[-1.684,-1.83,-90.2,-96.9,143,0.0,61.1],[-1.728,-1.899,-97.9,-104.8,147,0.0,66.0],[-1.87,-2.02,-102.4,-109.1,156,0.0,72.4]],[[-3.435,-3.759,-85.5,-96.3,225,0.0,12.5],[-2.179,-2.411,-51.0,-60.4,179,0.0,18.4],[-1.32,-1.475,-34.6,-42.8,140,0.0,129.6],[-1.195,-1.355,-42.2,-49.8,130,0.0,38.4],[-1.181,-1.31,-60.3,-68.0,119,0.0,42.8],[-1.156,-1.296,-62.7,-70.0,122,0.0,49.2],[-1.581,-1.724,-79.6,-87.1,139,0.0,56.2],[-1.636,-1.787,-90.0,-97.5,144,0.0,63.7],[-1.77,-1.922,-94.7,-102.4,143,0.0,70.0]],[[-2.117,-2.411,-63.0,-75.9,171,0.0,13.3],[-1.992,-2.194,-62.2,-72.0,168,0.0,17.7],[-1.382,-1.53,-51.1,-59.1,134,0.0,125.0],[-1.119,-1.256,-50.8,-58.1,127,0.0,35.6],[-1.128,-1.285,-53.5,-61.0,121,0.008,43.0],[-1.247,-1.399,-64.4,-71.4,129,0.0,50.5],[-1.56,-1.705,-82.6,-89.0,139,0.0,60.6],[-1.598,-1.771,-93.6,-100.8,142,0.0,73.1],[-1.648,-1.801,-85.0,-92.1,150,0.0,79.8]],[[-3.617,-3.973,-92.6,-105.3,236,0.004,12.8],[-1.899,-2.075,-77.8,-88.0,162,0.0,18.0],[-1.071,-1.229,-44.5,-52.7,128,0.0,118.9],[-1.036,-1.184,-59.5,-67.8,91,0.0,47.6],[-0.968,-1.103,-40.1,-47.7,115,0.0,43.3],[-1.042,-1.183,-51.2,-58.5,114,0.0,53.7],[-1.192,-1.35,-65.1,-72.9,120,0.0,58.3],[-1.389,-1.548,-70.9,-78.3,138,0.0,63.6],[-1.523,-1.671,-80.6,-88.4,142,0.0,68.7]]],[[[-2.825,-3.109,-85.0,-96.4,200,0.005,17.8],[-2.37,-2.563,-64.8,-74.2,184,0.0,24.3],[-1.959,-2.147,-43.8,-51.5,163,0.006,170.2],[-1.762,-1.918,-63.1,-70.8,156,0.0,41.6],[-1.717,-1.889,-73.0,-80.8,146,0.0,54.6],[-1.816,-1.984,-82.7,-90.5,154,0.0,59.2],[-1.869,-2.015,-86.8,-94.2,151,0.0,66.6],[-1.838,-1.989,-98.3,-105.1,158,0.0,76.8],[-2.201,-2.371,-99.9,-107.1,168,0.0,78.6]],[[-3.561,-3.854,-101.3,-111.4,226,0.0,14.2],[-2.254,-2.46,-49.7,-58.4,178,0.0,20.7],[-1.638,-1.8,-46.5,-55.2,150,0.0,116.1],[-1.323,-1.463,-54.4,-62.1,129,0.0,36.3],[-1.457,-1.598,-70.6,-79.0,135,0.0,43.1],[-1.392,-1.533,-76.7,-83.9,133,0.0,51.5],[-1.532,-1.683,-78.6,-85.5,135,0.0,64.2],[-1.826,-1.97,-101.0,-108.1,152,0.0,64.8],[-1.906,-2.059,-101.9,-108.5,152,0.0,74.7]],[[-2.738,-2.998,-77.8,-88.6,198,0.0,13.9],[-1.39,-1.575,-33.7,-43.1,142,0.0,17.0],[-1.698,-1.864,-56.0,-64.0,155,0.0,119.3],[-1.242,-1.387,-44.1,-51.4,127,0.0,39.0],[-1.225,-1.367,-53.3,-60.6,124,0.0,42.5],[-1.344,-1.485,-73.1,-80.7,133,0.0,51.0],[-1.456,-1.602,-75.2,-82.6,130,0.0,56.0],[-1.845,-1.995,-85.3,-92.1,160,0.0,64.9],[-1.835,-1.988,-96.3,-103.2,147,0.0,77.8]],[[-2.592,-2.898,-87.3,-98.9,187,0.005,14.5],[-1.204,-1.36,-34.1,-43.1,125,0.0,19.5],[-1.387,-1.541,-63.7,-71.3,135,0.0,120.7],[-1.143,-1.277,-61.0,-68.9,116,0.0,37.7],[-1.01,-1.142,-60.2,-67.3,111,0.0,42.9],[-1.164,-1.308,-75.3,-82.5,115,0.0,52.2],[-1.401,-1.536,-77.3,-84.7,120,0.0,61.0],[-1.537,-1.685,-86.4,-93.4,133,0.0,70.0],[-1.678,-1.82,-98.7,-105.3,143,0.0,79.6]],[[-3.198,-3.533,-80.7,-92.5,218,0.0,13.4],[-1.719,-1.906,-44.3,-54.5,153,0.0,20.5],[-1.818,-1.998,-71.4,-80.2,145,0.0,136.2],null,null,null,null,null,null]],[[[-2.82,-3.108,-77.3,-88.0,200,0.0,13.8],[-2.238,-2.442,-50.9,-59.0,177,0.0,19.7],[-2.155,-2.366,-52.9,-60.6,173,0.006,116.4],[-1.6,-1.751,-67.1,-73.6,148,0.0,38.2],[-1.679,-1.841,-74.3,-81.2,145,0.0,45.8],[-1.811,-1.962,-81.1,-88.0,157,0.0,55.0],[-2.09,-2.246,-96.2,-103.1,170,0.0,62.6],[-2.214,-2.37,-104.3,-111.4,171,0.0,70.0],[-2.381,-2.531,-110.6,-117.2,172,0.0,80.9]],[[-2.541,-2.856,-62.1,-73.7,193,0.005,14.1],[-2.218,-2.447,-43.7,-52.1,182,0.0,20.4],[-1.91,-2.109,-42.8,-50.9,162,0.0,120.6],[-1.8,-1.961,-63.3,-70.5,155,0.0,38.6],[-1.414,-1.575,-56.8,-64.3,134,0.0,44.0],[-1.354,-1.501,-73.4,-80.7,125,0.0,51.6],[-1.684,-1.832,-87.5,-94.3,143,0.0,58.3],[-1.798,-1.945,-84.2,-91.0,148,0.0,64.1],[-1.745,-1.902,-101.6,-108.2,150,0.0,75.3]],[[-2.188,-2.484,-54.6,-67.1,173,0.0,19.5],[-1.336,-1.493,-20.1,-28.7,142,0.0,21.0],[-1.35,-1.505,-33.3,-41.1,135,0.0,139.3],[-1.405,-1.537,-54.6,-62.0,138,0.0,34.8],[-1.248,-1.386,-56.9,-64.9,131,0.0,44.0],[-1.494,-1.639,-76.4,-84.0,134,0.0,57.1],[-1.598,-1.751,-80.8,-87.9,141,0.0,61.4],[-1.69,-1.833,-83.3,-90.8,145,0.0,68.9],[-1.778,-1.929,-94.4,-101.7,155,0.0,78.7]],[[-0.542,-0.679,-5.2,-13.5,110,0.0,17.1],[-0.59,-0.741,8.3,0.0,111,0.009,22.2],[-0.755,-0.902,-7.5,-15.4,116,0.0,130.8],[-0.84,-0.99,-29.0,-36.7,112,0.0,34.6],[-0.909,-1.053,-48.0,-54.5,111,0.0,41.7],[-1.242,-1.391,-61.3,-69.1,129,0.0,49.8],[-1.113,-1.261,-63.4,-70.8,122,0.0,57.6],[-1.36,-1.525,-76.3,-83.2,130,0.008,64.7],[-1.574,-1.713,-82.0,-89.5,134,0.0,163.4]],[[-3.648,-4.039,-75.5,-87.9,232,0.0,13.5],[-1.569,-1.779,-32.1,-41.7,153,0.0,19.2],[-0.936,-1.08,-37.3,-44.6,113,0.0,123.0],[-1.418,-1.566,-94.3,-103.1,130,0.0,47.8],[-1.187,-1.327,-65.0,-72.8,120,0.0,45.4],[-1.374,-1.514,-86.6,-94.0,125,0.0,54.1],[-1.318,-1.467,-76.8,-84.2,133,0.0,60.5],[-1.501,-1.642,-80.9,-87.8,140,0.0,73.3],[-1.695,-1.842,-97.6,-104.9,145,0.0,180.7]]],[[[-3.434,-3.778,-87.2,-98.2,232,0.0,19.3],[-1.804,-1.993,-32.2,-39.7,166,0.0,26.6],[-1.617,-1.779,-47.1,-54.7,151,0.0,35.5],[-1.686,-1.847,-60.4,-68.1,149,0.0,45.0],[-1.751,-1.92,-70.8,-78.3,153,0.0,56.8],[-1.827,-1.989,-77.4,-85.1,155,0.0,68.9],[-1.87,-2.037,-89.4,-96.3,155,0.0,79.2],[-1.935,-2.097,-90.8,-98.0,159,0.0,90.3],[-2.206,-2.36,-105.0,-112.5,166,0.0,97.3]],[[-3.675,-4.1,-75.5,-87.8,242,0.0,14.4],[-2.283,-2.543,-40.2,-49.3,182,0.0,21.3],[-1.833,-2.031,-42.9,-51.3,157,0.0,31.1],[-1.536,-1.694,-57.8,-64.8,151,0.0,40.1],[-1.421,-1.568,-59.5,-67.1,139,0.0,55.8],[-1.501,-1.654,-68.9,-76.1,139,0.0,63.1],[-1.837,-1.99,-88.2,-95.5,153,0.0,68.8],[-1.722,-1.88,-84.8,-91.7,146,0.0,77.5],[-1.766,-1.913,-104.2,-111.0,148,0.0,87.2]],[[-3.34,-3.601,-72.5,-82.5,217,0.0,14.3],[-1.255,-1.436,-12.3,-20.8,138,0.0,21.3],[-1.465,-1.633,-30.0,-38.1,146,0.0,31.1],[-1.313,-1.466,-43.6,-50.9,136,0.0,41.8],[-1.757,-1.933,-60.0,-67.6,156,0.0,49.9],[-1.517,-1.672,-71.2,-78.8,141,0.0,58.6],[-1.784,-1.941,-85.9,-93.8,155,0.0,68.2],[-1.876,-2.021,-95.8,-103.6,160,0.0,79.6],[-1.986,-2.13,-103.3,-110.8,165,0.0,86.4]],[[-2.997,-3.312,-83.9,-94.8,208,0.0,13.6],[-1.624,-1.838,-38.8,-47.9,156,0.006,20.7],[-1.351,-1.519,-49.5,-58.3,137,0.0,30.6],[-1.129,-1.282,-40.7,-48.7,122,0.0,41.7],[-1.209,-1.345,-56.1,-62.6,123,0.0,50.7],[-1.214,-1.359,-62.2,-69.8,121,0.0,62.4],[-1.43,-1.569,-76.7,-83.6,133,0.0,73.1],[-1.641,-1.789,-105.0,-112.5,144,0.0,77.8],[-1.64,-1.781,-91.3,-98.4,139,0.0,88.2]],[[-2.704,-2.981,-93.5,-105.2,196,0.0,15.6],[-1.334,-1.528,-24.2,-34.3,136,0.0,26.5],[-1.044,-1.193,-26.8,-35.2,122,0.0,35.7],[-0.903,-1.033,-39.6,-47.2,106,0.0,41.5],[-1.009,-1.124,-51.6,-58.3,109,0.0,54.8],[-1.0,-1.14,-55.8,-63.9,116,0.008,61.3],[-1.658,-1.806,-96.2,-104.0,148,0.0,77.2],[-1.483,-1.624,-82.7,-90.6,104,0.0,87.7],[-1.332,-1.473,-80.0,-86.8,125,0.0,79.7]]],[[[-1.231,-1.393,-27.3,-35.7,126,0.0,16.0],[-1.622,-1.817,-45.7,-54.8,149,0.0,22.2],[-1.8,-1.962,-53.9,-62.5,156,0.0,32.8],[-1.624,-1.77,-68.7,-76.3,141,0.0,44.0],[-1.559,-1.716,-69.8,-77.0,137,0.0,54.9],[-1.85,-2.003,-78.4,-85.6,162,0.0,70.2],[-1.866,-2.014,-82.8,-90.2,159,0.0,74.5],[-1.837,-1.992,-93.3,-101.1,153,0.0,84.8],[-2.077,-2.22,-97.1,-104.5,163,0.0,92.8]],[[-0.809,-0.98,-11.9,-21.7,118,0.008,10.0],[-3.343,-3.585,-51.4,-60.5,217,0.0,14.4],[-1.572,-1.74,-43.7,-51.1,145,0.0,21.0],[-1.247,-1.409,-45.0,-51.4,128,0.0,27.5],[-1.08,-1.229,-49.0,-56.9,119,0.0,33.0],[-1.431,-1.579,-64.3,-71.6,138,0.0,39.2],[-1.473,-1.623,-84.5,-91.5,133,0.0,45.1],[-1.744,-1.895,-90.0,-96.3,149,0.0,51.4],[-1.804,-1.958,-95.2,-102.8,151,0.0,57.3]],[[-2.631,-2.94,-54.0,-65.2,191,0.0,16.4],[-1.915,-2.14,-42.1,-51.0,164,0.0,22.2],[-1.471,-1.641,-37.0,-45.2,146,0.007,34.0],[-1.319,-1.486,-52.8,-60.6,135,0.0,43.6],[-1.328,-1.471,-62.9,-70.7,132,0.0,58.1],[-1.766,-1.913,-77.8,-85.2,150,0.0,63.5],[-1.985,-2.154,-92.4,-100.5,164,0.0,81.1],[-1.625,-1.759,-79.7,-87.3,143,0.0,91.7],[-1.985,-2.133,-109.4,-116.4,162,0.0,102.9]],[[-1.681,-1.885,-82.4,-92.7,151,0.007,18.1],[-1.18,-1.368,-23.6,-32.6,140,0.0,22.5],[-1.515,-1.681,-44.0,-52.3,151,0.0,36.2],[-1.501,-1.668,-60.7,-69.0,140,0.0,47.0],[-0.845,-0.959,-37.2,-43.8,109,0.0,51.9],[-1.021,-1.157,-47.6,-55.7,116,0.0,58.2],[-1.332,-1.491,-58.8,-66.1,126,0.0,69.9],[-1.3,-1.435,-75.2,-82.8,124,0.0,77.3],[-1.548,-1.689,-83.9,-90.7,136,0.0,85.9]],[null,null,null,null,null,null,null,null,null]],[[[-1.849,-2.095,-53.8,-64.9,159,0.0,63.1],[-2.166,-2.357,-52.8,-61.5,172,0.0,63.9],[-2.334,-2.508,-67.2,-74.6,176,0.0,86.3],[-1.463,-1.626,-57.8,-65.3,138,0.0,91.2],[-1.545,-1.715,-70.7,-78.5,145,0.0,103.0],[-1.574,-1.737,-77.0,-84.1,134,0.0,111.7],[-1.865,-2.021,-93.8,-101.2,158,0.0,107.5],[-1.766,-1.908,-94.1,-100.5,149,0.0,111.5],[-2.048,-2.197,-97.5,-104.0,159,0.0,135.3]],[[-1.089,-1.381,-0.1,-10.8,135,0.0,45.1],[-1.78,-1.961,-35.7,-44.4,160,0.0,62.8],[-1.675,-1.848,-48.5,-56.8,149,0.0,72.9],[-1.383,-1.54,-55.8,-63.7,137,0.0,76.1],[-1.344,-1.498,-67.8,-75.2,132,0.0,86.8],[-1.587,-1.742,-74.6,-81.5,139,0.0,97.0],[-1.468,-1.63,-73.6,-80.5,134,0.0,107.1],[-1.625,-1.78,-90.0,-97.2,143,0.0,87.8],[-1.737,-1.894,-86.6,-93.4,141,0.0,97.6]],[[-0.82,-1.06,7.3,-3.0,122,0.0,49.1],[-1.558,-1.754,-17.9,-26.0,153,0.0,60.6],[-1.597,-1.836,-42.1,-53.4,79,0.0,80.2],[-0.899,-1.04,-23.3,-30.7,117,0.0,42.8],[-0.989,-1.135,-40.5,-48.1,114,0.0,50.1],[-1.251,-1.396,-57.6,-64.8,121,0.0,71.8],[-1.317,-1.459,-66.5,-73.7,129,0.0,70.7],[-1.457,-1.603,-77.6,-84.5,133,0.0,79.5],[-1.542,-1.688,-84.4,-91.8,131,0.0,88.4]],[[-0.218,-0.369,22.2,14.1,108,0.009,45.7],[-1.277,-1.453,-35.7,-44.9,141,0.0,61.1],[-0.664,-0.81,-12.8,-21.8,111,0.0,41.5],[-0.738,-0.866,-22.3,-29.7,108,0.0,41.9],[-0.877,-1.023,-34.2,-41.3,110,0.0,51.9],[-0.989,-1.136,-54.4,-61.3,116,0.0,63.2],[-1.091,-1.237,-62.1,-69.3,118,0.0,71.9],[-1.234,-1.352,-71.2,-79.1,117,0.0,82.3],[-1.458,-1.614,-78.4,-86.1,137,0.0,92.0]],[[-2.095,-2.367,-91.0,-104.2,170,0.006,54.3],[-1.357,-1.562,-24.4,-35.7,142,0.0,66.2],[-1.611,-1.77,-78.0,-86.8,149,0.0,81.7],[-1.425,-1.589,-66.2,-75.3,130,0.0,102.5],[-1.113,-1.257,-60.9,-68.9,122,0.0,101.5],[-1.484,-1.62,-90.9,-99.0,136,0.0,117.0],[-1.063,-1.191,-58.0,-65.4,110,0.0,134.5],[-1.776,-1.926,-111.7,-119.5,149,0.0,146.9],[-1.618,-1.76,-88.3,-95.0,139,0.0,291.6]]],[[[-2.927,-3.159,-86.7,-96.0,198,0.0,43.8],[-2.357,-2.573,-59.7,-68.7,181,0.0,52.4],[-2.135,-2.305,-63.8,-72.2,176,0.0,64.6],[-1.517,-1.689,-50.6,-57.7,136,0.0,76.7],[-1.668,-1.842,-70.8,-77.7,145,0.0,88.2],[-1.659,-1.821,-83.2,-90.2,149,0.007,103.7],[-1.958,-2.103,-86.4,-94.0,162,0.0,149.7],[-1.93,-2.083,-90.4,-97.0,160,0.0,135.1],[-1.991,-2.131,-102.2,-108.9,164,0.0,139.3]],[[-3.805,-4.141,-83.6,-95.0,240,0.0,41.3],[-2.529,-2.754,-42.4,-51.6,190,0.0,50.4],[-1.555,-1.738,-46.5,-54.5,143,0.0,70.5],[-1.166,-1.316,-34.6,-41.8,119,0.0,79.2],[-1.118,-1.258,-55.3,-63.2,120,0.0,93.6],[-1.499,-1.631,-82.9,-89.5,131,0.0,111.7],[-1.596,-1.751,-87.9,-96.0,135,0.0,120.2],[-1.591,-1.728,-95.6,-102.5,137,0.0,134.4],[-1.722,-1.876,-95.0,-101.4,147,0.0,143.7]],[[-0.713,-0.892,9.0,-1.2,120,0.0,49.9],[-1.607,-1.83,-16.9,-27.0,154,0.006,67.5],[-1.487,-1.648,-41.4,-49.2,146,0.0,88.2],[-1.582,-1.753,-57.9,-66.3,143,0.0,102.7],[-1.392,-1.536,-56.9,-64.3,131,0.0,116.0],[-1.334,-1.479,-68.8,-75.4,132,0.0,128.4],[-1.56,-1.699,-84.4,-91.7,140,0.0,148.3],[-1.782,-1.938,-81.3,-87.5,147,0.0,159.2],[-1.652,-1.784,-91.1,-98.1,145,0.0,321.9]],[[-0.42,-0.587,5.6,-4.3,108,0.0,60.4],[-1.427,-1.613,-34.0,-43.9,143,0.0,61.9],[-1.226,-1.382,-37.8,-46.0,127,0.0,90.6],[-1.172,-1.325,-57.2,-64.3,123,0.0,89.3],[-1.128,-1.268,-52.6,-60.7,119,0.0,119.6],[-0.988,-1.126,-56.0,-63.7,112,0.0,110.6],[-1.321,-1.448,-70.3,-78.1,124,0.0,122.7],[-1.396,-1.557,-70.4,-78.5,127,0.0,140.5],[-1.695,-1.835,-105.5,-112.8,146,0.0,145.8]],[null,null,null,null,null,null,null,null,null]]],"lat":[[[4.99,6.25,0.0,1],[6.36,8.05,0.0,1],[7.93,12.83,0.0,1],[9.26,11.62,0.0,1],[10.74,12.66,0.0,1],[12.1,14.22,0.0,1],[13.55,15.11,0.0,1],[14.93,16.42,0.0,1],[16.42,17.77,0.0,1]],[[5.18,5.99,0.0,1],[6.75,8.8,0.0,1],[8.14,11.06,0.0,1],[9.56,12.06,0.0,1],[11.06,12.86,0.0,1],[12.42,15.0,0.0,1],[13.87,15.34,0.0,1],[15.35,16.68,0.0,1],[16.89,18.21,0.0,1]],[[6.41,7.54,0.0,1],[8.21,10.31,0.0,1],[9.58,12.32,0.0,1],[10.87,14.95,0.0,1],[12.32,13.62,0.0,1],[13.75,15.25,0.0,1],[15.27,16.78,0.0,1],[16.77,18.43,0.0,1],[18.18,20.02,0.0,1]],[[10.76,11.66,0.0,1],[12.53,14.62,0.0,1],[14.22,17.3,0.0,1],[16.01,17.3,0.0,1],[17.62,19.39,0.0,1],[19.23,20.56,0.0,1],[21.12,22.26,0.0,1],[22.9,24.88,0.0,1],[24.67,26.57,0.0,1]],[[17.56,19.07,1.0,0],[19.6,21.67,0.0,1],[21.41,23.68,0.0,1],[23.39,25.18,0.01,0],[25.54,27.02,0.0,1],[27.41,29.01,0.0,1],[29.53,31.22,0.0,1],[31.64,33.41,0.0,1],[33.91,35.44,0.0,1]],[[28.92,29.66,1.0,0],[30.93,32.83,0.04,0],[32.96,35.92,0.0,1],[35.34,37.43,0.0,1],[37.25,39.25,0.01,0],[39.36,40.92,0.0,1],[41.07,43.02,0.0,1],[43.41,44.6,0.0,1],[45.44,46.85,0.0,1]],[[39.21,40.17,1.0,0],[41.19,43.07,1.0,0],[43.59,45.78,0.0,1],[45.91,47.93,0.0,1],[48.21,51.85,0.0,1],[50.69,52.65,0.0,1],[52.99,54.53,0.0,1],[55.61,57.32,0.0,1],[58.03,59.41,0.0,1]]]};
+const NS = "http://www.w3.org/2000/svg";
+const tip = document.getElementById("tip");
+function put(html, x, y){
+  tip.innerHTML = html; tip.classList.add("on");
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(Math.max(10, x + 14), window.innerWidth - r.width - 10) + "px";
+  tip.style.top = Math.min(Math.max(10, y + 14), window.innerHeight - r.height - 10) + "px";
+}
+const off = () => tip.classList.remove("on");
+function E(parent, tag, attrs, text){
+  const node = document.createElementNS(NS, tag);
+  for (const key in attrs) node.setAttribute(key, attrs[key]);
+  if (text !== undefined) node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}
+
+const RAMP_LIGHT = ["#A9A2E9","#9188E0","#7A6FD4","#6255C5","#4B3EAE","#372B8F","#251C68"];
+const RAMP_DARK  = ["#4A409B","#5A4FB8","#6C60D2","#8074E2","#9890EC","#B2ABF4","#CDC8FA"];
+const isDark = () => {
+  const stamped = document.documentElement.getAttribute("data-theme");
+  if (stamped === "light" || stamped === "dark") return stamped === "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+};
+const ramp = i => (isDark() ? RAMP_DARK : RAMP_LIGHT)[i];
+
+const METRICS = {
+  stock:    {i:0, label:"net stocks / min",  short:"stocks",  diverging:true,  dp:2, max:4.2},
+  stockLcb: {i:1, label:"stock LCB",         short:"LCB",     diverging:true,  dp:2, max:4.4},
+  damage:   {i:2, label:"net damage / min",  short:"damage",  diverging:true,  dp:0, max:130},
+  win:      {i:5, label:"win rate",          short:"win rate",diverging:false, dp:3, max:0.35}
+};
+const VIEWS = [
+  ["grid",    "capability grid"],
+  ["data",    "more data"],
+  ["loss",    "loss vs play"],
+  ["latency", "latency budget"]
+];
+const CONTROLS = {grid:["metric","budget"], data:["metric","delay"], loss:["delay"], latency:["delay"]};
+const NOTES = {
+  grid: "Every evaluated cell at one training budget. Colour and number are the selected metric; an empty cell was never run. Nothing here is positive: at this stage the model still loses stocks to the in-game CPU in every regime.",
+  data: "The same metric against the number of positions the optimizer processed, one line per model size. If capacity were the binding constraint, the large models would separate cleanly from the small ones. They do not.",
+  loss: "Validation loss on the x axis, closed-loop play on the y axis, one point per model and training budget. A tight upward line would mean loss predicts play. It is the strongest evidence on the page that it does not: the fit improves smoothly with size and data, and the ranking of the play does not follow. The 293M run at the largest budget is absent because it diverged.",
+  latency: "Measured p95 replan latency on one RTX 3060 against the frame budget the chosen delay allows. Points under the dashed line fit inside the budget; points above it miss deadlines and cannot be deployed at that delay."
+};
+
+const state = {view:"grid", metric:"stock", budget:4, delay:0};
+const fmtParams = p => p >= 1e6 ? (p/1e6).toFixed(p >= 1e8 ? 0 : 1) + "M" : (p/1e3).toFixed(0) + "k";
+const fmtPos = v => (v/1e6 >= 1000) ? (v/1e9).toFixed(2) + "B" : (v/1e6).toFixed(0) + "M";
+const fmtTick = v => v >= 1e8 ? (v/1e6).toFixed(0) + "M" : (v/1e6).toFixed(0) + "M";
+function ylabel(svg, text){
+  E(svg, "text", {x:14, y:H/2, "font-size":10, fill:"var(--ink3)", "font-family":"var(--mono)",
+    "text-anchor":"middle", transform:`rotate(-90 14 ${H/2})`}, text);
+}
+const cell = (m, b, d) => CAP.cells[m][b][d];
+
+function pillRow(host, items, key, onPick){
+  host.replaceChildren();
+  items.forEach(([value, label]) => {
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "pill"; btn.textContent = label; btn.dataset.v = String(value);
+    btn.addEventListener("click", () => { onPick(value); syncPills(); render(); });
+    host.appendChild(btn);
+  });
+}
+function syncPills(){
+  const marks = [
+    ["cap-views", state.view], ["cap-metric", state.metric],
+    ["cap-budget", String(state.budget)], ["cap-delay", String(state.delay)]
+  ];
+  marks.forEach(([id, value]) => document.getElementById(id).querySelectorAll("[data-v]")
+    .forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === String(value)))));
+  document.querySelectorAll(".exp-controls .fieldset").forEach(f => {
+    f.hidden = !CONTROLS[state.view].includes(f.dataset.ctl);
+  });
+  document.getElementById("cap-title").textContent =
+    VIEWS.find(v => v[0] === state.view)[1].replace(/^./, c => c.toUpperCase());
+  document.getElementById("cap-note").textContent = NOTES[state.view];
+  const legend = document.getElementById("cap-ramp");
+  legend.hidden = state.view === "grid";
+  if (!legend.hidden){
+    legend.replaceChildren();
+    const head = document.createElement("span");
+    head.textContent = "model size";
+    head.style.letterSpacing = ".14em";
+    head.style.textTransform = "uppercase";
+    legend.appendChild(head);
+    CAP.models.forEach((m, i) => {
+      const chip = document.createElement("span");
+      chip.style.display = "inline-flex";
+      chip.style.alignItems = "center";
+      chip.style.gap = "5px";
+      const swatch = document.createElement("i");
+      swatch.style.background = ramp(i);
+      chip.append(swatch, document.createTextNode(fmtParams(m.p)));
+      legend.appendChild(chip);
+    });
+  }
+}
+
+const W = 900, H = 400;
+function frame(){
+  const svg = document.getElementById("cap-svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.replaceChildren();
+  return svg;
+}
+function axisY(svg, ticks, y, x0, x1, dp){
+  ticks.forEach(v => {
+    const py = y(v);
+    E(svg, "line", {x1:x0, y1:py, x2:x1, y2:py, stroke: v === 0 ? "var(--ink3)" : "var(--hair)", "stroke-width":1});
+    E(svg, "text", {x:x0 - 8, y:py + 3.6, "text-anchor":"end", "font-size":9.5, fill:"var(--ink3)",
+      "font-family":"var(--mono)"}, v.toFixed(dp));
+  });
+}
+
+/* ---- view: capability grid ---- */
+function drawGrid(svg){
+  const met = METRICS[state.metric];
+  const cw = 78, ch = 34, x0 = 138, y0 = 78;
+  E(svg, "text", {x:0, y:22, "font-size":11, fill:"var(--ink2)", "font-family":"var(--mono)"},
+    `${met.label} · ${fmtPos(CAP.positions[state.budget])} positions processed`);
+  E(svg, "text", {x:x0, y:46, "font-size":10, fill:"var(--ink3)", "font-family":"var(--mono)"},
+    "control delay d, in frames — replan interval is also d, decode horizon is 2d−1");
+  CAP.delays.forEach((d, i) => E(svg, "text", {x:x0 + i*(cw + 6) + cw/2, y:68, "text-anchor":"middle",
+    "font-size":11, fill:"var(--ink2)", "font-family":"var(--mono)"}, "d=" + d));
+  CAP.models.forEach((model, mi) => {
+    const y = y0 + mi*(ch + 6);
+    E(svg, "text", {x:126, y:y + 15, "text-anchor":"end", "font-size":11.5, fill:"var(--ink)",
+      "font-family":"var(--mono)"}, fmtParams(model.p));
+    E(svg, "text", {x:126, y:y + 27, "text-anchor":"end", "font-size":9.5, fill:"var(--ink3)",
+      "font-family":"var(--mono)"}, `L${model.L}·d${model.d}`);
+    CAP.delays.forEach((d, di) => {
+      const x = x0 + di*(cw + 6);
+      const c = cell(mi, state.budget, di);
+      if (!c){
+        E(svg, "rect", {x, y, width:cw, height:ch, rx:3, fill:"none", stroke:"var(--hair)",
+          "stroke-dasharray":"3 3"});
+        E(svg, "text", {x:x + cw/2, y:y + 21, "text-anchor":"middle", "font-size":11,
+          fill:"var(--ink3)", "font-family":"var(--mono)"}, "—");
+        return;
+      }
+      const v = c[met.i];
+      let fill, alpha;
+      if (met.diverging){
+        alpha = Math.min(Math.abs(v) / met.max, 1) * 0.62;
+        fill = v >= 0 ? "var(--gain)" : "var(--loss)";
+      } else {
+        alpha = Math.min(v / met.max, 1) * 0.7 + 0.06;
+        fill = ramp(Math.min(6, Math.round(Math.min(v / met.max, 1) * 6)));
+      }
+      E(svg, "rect", {x, y, width:cw, height:ch, rx:3, fill, "fill-opacity":alpha.toFixed(3)});
+      E(svg, "text", {x:x + cw/2, y:y + 21, "text-anchor":"middle", "font-size":11.5, fill:"var(--ink)",
+        "font-family":"var(--mono)"}, v.toFixed(met.dp));
+      const hit = E(svg, "rect", {x, y, width:cw, height:ch, rx:3, fill:"transparent", class:"cap-cell"});
+      hit.addEventListener("mousemove", ev => put(
+        `<span class="hd">${fmtParams(model.p)} · d=${d}</span>` +
+        `net stocks <b>${c[0].toFixed(2)}</b> · LCB ${c[1].toFixed(2)}<br>` +
+        `net damage <b>${c[2].toFixed(1)}</b> · LCB ${c[3].toFixed(1)}<br>` +
+        `win rate ${(c[5]*100).toFixed(1)} % over ${c[4]} matches<br>` +
+        `<span style="color:var(--ink3)">replan ${d} · horizon ${2*d - 1} · p95 ${c[6]} ms</span>`,
+        ev.clientX, ev.clientY));
+      hit.addEventListener("mouseleave", off);
+    });
+  });
+  E(svg, "text", {x:0, y:372, "font-size":10, fill:"var(--ink3)", "font-family":"var(--mono)"},
+    met.diverging ? "deeper red = worse · deeper green = better · 0 would mean even with the CPU"
+                  : "deeper = higher");
+}
+
+/* ---- view: scaling curves ---- */
+function drawData(svg){
+  const met = METRICS[state.metric];
+  const pad = {l:56, r:104, t:34, b:46};
+  const xs = CAP.positions;
+  const x = i => pad.l + i/(xs.length - 1) * (W - pad.l - pad.r);
+  let lo = Infinity, hi = -Infinity;
+  CAP.models.forEach((m, mi) => CAP.budgets.forEach((b, bi) => {
+    const c = cell(mi, bi, state.delay);
+    if (c){ lo = Math.min(lo, c[met.i]); hi = Math.max(hi, c[met.i]); }
+  }));
+  const span = (hi - lo) || 1;
+  lo -= span*0.12; hi += span*0.12;
+  const y = v => pad.t + (hi - v)/(hi - lo) * (H - pad.t - pad.b);
+  const ticks = [0,1,2,3,4].map(k => lo + k*(hi - lo)/4);
+  E(svg, "text", {x:0, y:20, "font-size":11, fill:"var(--ink2)", "font-family":"var(--mono)"},
+    `${met.label} · control delay d = ${CAP.delays[state.delay]} frames`);
+  ylabel(svg, met.label);
+  axisY(svg, ticks, y, pad.l, W - pad.r, met.dp);
+  xs.forEach((v, i) => E(svg, "text", {x:x(i), y:H - pad.b + 18, "text-anchor":"middle", "font-size":10,
+    fill:"var(--ink3)", "font-family":"var(--mono)"}, fmtPos(v)));
+  E(svg, "text", {x:(pad.l + W - pad.r)/2, y:H - 8, "text-anchor":"middle", "font-size":10,
+    fill:"var(--ink3)", "font-family":"var(--mono)"}, "positions the optimizer processed");
+  const ends = [];
+  CAP.models.forEach((model, mi) => {
+    const pts = [];
+    CAP.budgets.forEach((b, bi) => {
+      const c = cell(mi, bi, state.delay);
+      if (c) pts.push([x(bi), y(c[met.i]), c, bi]);
+    });
+    if (!pts.length) return;
+    const col = ramp(mi);
+    E(svg, "polyline", {points: pts.map(p => `${p[0]},${p[1]}`).join(" "), fill:"none", stroke:col,
+      "stroke-width":2, "stroke-linejoin":"round"});
+    pts.forEach(p => {
+      E(svg, "circle", {cx:p[0], cy:p[1], r:4, fill:col, stroke:"var(--panel)", "stroke-width":1.6});
+      const hit = E(svg, "circle", {cx:p[0], cy:p[1], r:12, fill:"transparent"});
+      hit.addEventListener("mousemove", ev => put(
+        `<span class="hd">${fmtParams(model.p)} · ${fmtPos(xs[p[3]])} positions</span>` +
+        `${met.label} <b>${p[2][met.i].toFixed(met.dp)}</b><br>` +
+        `<span style="color:var(--ink3)">${p[2][4]} matches · d=${CAP.delays[state.delay]}</span>`,
+        ev.clientX, ev.clientY));
+      hit.addEventListener("mouseleave", off);
+    });
+    const last = pts[pts.length - 1];
+    ends.push({x:last[0] + 9, y:last[1] + 3.6, col, text:fmtParams(model.p)});
+  });
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++){
+    if (ends[i].x === ends[i - 1].x && ends[i].y - ends[i - 1].y < 12) ends[i].y = ends[i - 1].y + 12;
+  }
+  ends.forEach(e => E(svg, "text", {x:e.x, y:e.y, "font-size":10, fill:e.col,
+    "font-family":"var(--mono)"}, e.text));
+}
+
+/* ---- view: validation loss against closed-loop play ---- */
+function drawLoss(svg){
+  const pad = {l:56, r:96, t:34, b:52};
+  const pts = [];
+  CAP.models.forEach((model, mi) => CAP.budgets.forEach((b, bi) => {
+    const t = CAP.train[mi][bi], c = cell(mi, bi, state.delay);
+    if (t && c && t[0] < 2) pts.push({mi, bi, nll:t[0], score:c[0], c, model, pos:t[3]});
+  }));
+  const nx = pts.map(p => p.nll), ny = pts.map(p => p.score);
+  const xlo = Math.min(...nx) - 0.006, xhi = Math.max(...nx) + 0.006;
+  const ylo = Math.min(...ny) - 0.3, yhi = Math.max(...ny) + 0.3;
+  const x = v => pad.l + (v - xlo)/(xhi - xlo) * (W - pad.l - pad.r);
+  const y = v => pad.t + (yhi - v)/(yhi - ylo) * (H - pad.t - pad.b);
+  E(svg, "text", {x:0, y:20, "font-size":11, fill:"var(--ink2)", "font-family":"var(--mono)"},
+    `validation loss against play · control delay d = ${CAP.delays[state.delay]} frames`);
+  axisY(svg, [0,1,2,3,4].map(k => ylo + k*(yhi - ylo)/4), y, pad.l, W - pad.r, 2);
+  [0,1,2,3,4].forEach(k => {
+    const v = xlo + k*(xhi - xlo)/4;
+    E(svg, "text", {x:x(v), y:H - pad.b + 18, "text-anchor":"middle", "font-size":10,
+      fill:"var(--ink3)", "font-family":"var(--mono)"}, v.toFixed(3));
+  });
+  E(svg, "text", {x:(pad.l + W - pad.r)/2, y:H - 22, "text-anchor":"middle", "font-size":10,
+    fill:"var(--ink3)", "font-family":"var(--mono)"}, "validation next-frame loss, in bits");
+  E(svg, "text", {x:pad.l, y:H - 6, "font-size":10, fill:"var(--ink3)", "font-family":"var(--mono)"},
+    "← better fit");
+  ylabel(svg, "net stocks / min  →  better play");
+  CAP.models.forEach((model, mi) => {
+    const own = pts.filter(p => p.mi === mi).sort((a, b) => a.bi - b.bi);
+    if (own.length > 1) E(svg, "polyline", {points: own.map(p => `${x(p.nll)},${y(p.score)}`).join(" "),
+      fill:"none", stroke:ramp(mi), "stroke-width":1, opacity:".28"});
+  });
+  pts.forEach(p => {
+    const col = ramp(p.mi);
+    E(svg, "circle", {cx:x(p.nll), cy:y(p.score), r:5.5, fill:col, stroke:"var(--panel)", "stroke-width":1.6});
+    const hit = E(svg, "circle", {cx:x(p.nll), cy:y(p.score), r:13, fill:"transparent"});
+    hit.addEventListener("mousemove", ev => put(
+      `<span class="hd">${fmtParams(p.model.p)} · ${fmtPos(p.pos)} positions</span>` +
+      `validation loss <b>${p.nll.toFixed(4)}</b> bits<br>net stocks <b>${p.score.toFixed(2)}</b> / min<br>` +
+      `<span style="color:var(--ink3)">${p.c[4]} matches · d=${CAP.delays[state.delay]}</span>`,
+      ev.clientX, ev.clientY));
+    hit.addEventListener("mouseleave", off);
+  });
+  const n = pts.length;
+  const rank = arr => { const idx = arr.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0]);
+    const out = Array(n); idx.forEach(([, i], k) => out[i] = k); return out; };
+  const rx = rank(pts.map(p => p.nll)), ry = rank(pts.map(p => p.score));
+  let d2 = 0; for (let i = 0; i < n; i++) d2 += (rx[i] - ry[i])**2;
+  const rho = 1 - 6*d2/(n*(n*n - 1));
+  E(svg, "text", {x:W - pad.r + 10, y:pad.t + 8, "font-size":11, fill:"var(--ink)",
+    "font-family":"var(--mono)"}, "ρ = " + rho.toFixed(2));
+  E(svg, "text", {x:W - pad.r + 10, y:pad.t + 22, "font-size":9.5, fill:"var(--ink3)",
+    "font-family":"var(--mono)"}, "Spearman");
+  E(svg, "text", {x:W - pad.r + 10, y:pad.t + 34, "font-size":9.5, fill:"var(--ink3)",
+    "font-family":"var(--mono)"}, `n = ${n}`);
+}
+
+/* ---- view: latency against the frame budget ---- */
+function drawLatency(svg){
+  const pad = {l:56, r:30, t:34, b:52};
+  const d = CAP.delays[state.delay];
+  const budget = d * 1000/60;
+  const rows = CAP.models.map((m, mi) => ({m, mi, l:CAP.lat[mi][state.delay]})).filter(r => r.l);
+  const hi = Math.max(budget, ...rows.map(r => r.l[1])) * 1.16;
+  const lx = v => Math.log10(v);
+  const x = v => pad.l + (lx(v) - lx(5e6))/(lx(4e8) - lx(5e6)) * (W - pad.l - pad.r);
+  const y = v => pad.t + (hi - v)/hi * (H - pad.t - pad.b);
+  E(svg, "text", {x:0, y:20, "font-size":11, fill:"var(--ink2)", "font-family":"var(--mono)"},
+    `measured p95 replan latency · delay d = ${d} allows ${budget.toFixed(1)} ms`);
+  axisY(svg, [0, hi*0.25, hi*0.5, hi*0.75].map(v => Math.round(v)), y, pad.l, W - pad.r, 0);
+  ylabel(svg, "p95 replan latency, ms");
+  E(svg, "line", {x1:pad.l, y1:y(budget), x2:W - pad.r, y2:y(budget), stroke:"var(--accent)",
+    "stroke-width":1.6, "stroke-dasharray":"6 4"});
+  E(svg, "text", {x:W - pad.r - 4, y:y(budget) - 8, "text-anchor":"end", "font-size":10.5,
+    fill:"var(--accent)", "font-family":"var(--mono)"}, `frame budget ${budget.toFixed(1)} ms`);
+  [1e7, 3e7, 1e8, 3e8].forEach(v => E(svg, "text", {x:x(v), y:H - pad.b + 18, "text-anchor":"middle",
+    "font-size":10, fill:"var(--ink3)", "font-family":"var(--mono)"}, fmtTick(v)));
+  E(svg, "text", {x:(pad.l + W - pad.r)/2, y:H - 12, "text-anchor":"middle", "font-size":10,
+    fill:"var(--ink3)", "font-family":"var(--mono)"}, "parameters, log scale");
+  let lastX = -99, flip = false;
+  rows.forEach(r => {
+    const fits = r.l[1] <= budget;
+    const col = fits ? ramp(r.mi) : "var(--loss)";
+    const cx = x(r.m.p), cy = y(r.l[1]);
+    E(svg, "line", {x1:cx, y1:y(r.l[0]), x2:cx, y2:cy, stroke:col, "stroke-width":1.4, opacity:".6"});
+    E(svg, "circle", {cx, cy, r:6, fill: fits ? col : "var(--panel)", stroke:col, "stroke-width":2});
+    flip = (cx - lastX) < 26 ? !flip : false;
+    lastX = cx;
+    E(svg, "text", {x:cx, y:cy + (flip ? 22 : -13), "text-anchor":"middle", "font-size":10, fill:col,
+      "font-family":"var(--mono)"}, fmtParams(r.m.p));
+    const hit = E(svg, "circle", {cx, cy, r:14, fill:"transparent"});
+    hit.addEventListener("mousemove", ev => put(
+      `<span class="hd">${r.m.k} · ${fmtParams(r.m.p)}</span>` +
+      `p50 <b>${r.l[0]}</b> ms · p95 <b>${r.l[1]}</b> ms<br>` +
+      `budget at d=${d} is ${budget.toFixed(1)} ms<br>` +
+      `<span style="color:${fits ? "var(--gain)" : "var(--loss)"}">${fits ? "fits inside the budget" : "misses the deadline"}</span>` +
+      `<br><span style="color:var(--ink3)">deadline misses ${(r.l[2]*100).toFixed(0)} %</span>`,
+      ev.clientX, ev.clientY));
+    hit.addEventListener("mouseleave", off);
+  });
+}
+
+function render(){
+  const svg = frame();
+  if (state.view === "grid") drawGrid(svg);
+  else if (state.view === "data") drawData(svg);
+  else if (state.view === "loss") drawLoss(svg);
+  else drawLatency(svg);
+}
+
+pillRow(document.getElementById("cap-views"), VIEWS, "view", v => { state.view = v; });
+pillRow(document.getElementById("cap-metric"),
+  Object.entries(METRICS).map(([k, m]) => [k, m.short]), "metric", v => { state.metric = v; });
+pillRow(document.getElementById("cap-budget"),
+  CAP.positions.map((p, i) => [i, fmtPos(p)]), "budget", v => { state.budget = Number(v); });
+pillRow(document.getElementById("cap-delay"),
+  CAP.delays.map((d, i) => [i, "d=" + d]), "delay", v => { state.delay = Number(v); });
+syncPills();
+render();
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+document.getElementById("theme-toggle").addEventListener("click", () => setTimeout(render, 0));
+})();
+</script>
