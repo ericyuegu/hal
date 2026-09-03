@@ -1,0 +1,134 @@
+{
+  "excluded": [],
+  "final_eval_matchups": 96,
+  "finalists": [
+    {
+      "arm_id": "o51-lr-m0p014-a0p0002125",
+      "training_run": "ericyuegu/hal/0m55am9g"
+    },
+    {
+      "arm_id": "o51-lr-m0p014-a0p000425",
+      "training_run": "ericyuegu/hal/cg4rwqnr"
+    }
+  ],
+  "ranking": [
+    {
+      "arm_id": "o51-lr-m0p014-a0p0002125",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/0m55am9g",
+      "state": "finished",
+      "val_far_nll": 2.2868923481883248,
+      "val_nll": 1.535788719644043,
+      "val_rollout_nll": 3.818934525800315
+    },
+    {
+      "arm_id": "o51-lr-m0p014-a0p000425",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/cg4rwqnr",
+      "state": "finished",
+      "val_far_nll": 2.289823342286891,
+      "val_nll": 1.5362753347536662,
+      "val_rollout_nll": 3.827981157924485
+    },
+    {
+      "arm_id": "o51-lr-m0p007-a0p000425",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/nmrdlokn",
+      "state": "finished",
+      "val_far_nll": 2.2897615912401097,
+      "val_nll": 1.5377786069269588,
+      "val_rollout_nll": 3.832112168669338
+    },
+    {
+      "arm_id": "o51-lr-m0p007-a0p00010625",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/y49v95yb",
+      "state": "finished",
+      "val_far_nll": 2.301665706812741,
+      "val_nll": 1.542125355004032,
+      "val_rollout_nll": 3.8621695638548728
+    },
+    {
+      "arm_id": "o51-lr-m0p007-a0p0002125",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/nhpdph2i",
+      "state": "finished",
+      "val_far_nll": 2.3002110894148404,
+      "val_nll": 1.5427596210067411,
+      "val_rollout_nll": 3.836148710419376
+    },
+    {
+      "arm_id": "o51-lr-m0p014-a0p00010625",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/4jck9d40",
+      "state": "finished",
+      "val_far_nll": 2.300923926415255,
+      "val_nll": 1.5442047821234963,
+      "val_rollout_nll": 3.788979603457851
+    },
+    {
+      "arm_id": "o51-lr-m0p028-a0p000425",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/t5tbrniz",
+      "state": "finished",
+      "val_far_nll": 2.3091853601401553,
+      "val_nll": 1.55441896434002,
+      "val_rollout_nll": 3.951031156394015
+    },
+    {
+      "arm_id": "o51-lr-m0p028-a0p0002125",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/777ann3w",
+      "state": "finished",
+      "val_far_nll": 2.315782004342745,
+      "val_nll": 1.559911890813887,
+      "val_rollout_nll": 3.8986639442916258
+    },
+    {
+      "arm_id": "o51-lr-m0p028-a0p00010625",
+      "final_update": 16384.0,
+      "processed_positions": 1073741824.0,
+      "run_path": "ericyuegu/hal/81fuij5j",
+      "state": "finished",
+      "val_far_nll": 2.343454721383667,
+      "val_nll": 1.575615605401162,
+      "val_rollout_nll": 3.947317314514153
+    }
+  ],
+  "rule": [
+    "Every run must be terminal before screening.",
+    "A candidate must finish its exact D/U endpoint and final optimizer update.",
+    "Final validation NLL, far NLL, and rollout NLL must be finite.",
+    "Rank eligible candidates by validation NLL, then far NLL, then rollout NLL, then arm ID."
+  ],
+  "schema_version": 1,
+  "source_treatment": {
+    "adam_lr": 0.0002125,
+    "adam_weight_decay": 0.001,
+    "batch_size": 512,
+    "compile_mode": "reduce-overhead",
+    "depth_alpha": 0.5,
+    "hidden_std_multiplier": 0.5,
+    "loader_prefetch_factor": 2,
+    "muon_batch_scaling": "fixed",
+    "muon_duration_scaling": "fixed",
+    "muon_lr": 0.014,
+    "muon_weight_decay": 0.001,
+    "num_workers": 16,
+    "predownload": 1024,
+    "readout_init": "mup-normal",
+    "replay_pack_batch_size": 64,
+    "shuffle_algo": "py1s",
+    "shuffle_block_size": 8192,
+    "temporal_attention_chunk": 16384
+  },
+  "stage": "lr"
+}
