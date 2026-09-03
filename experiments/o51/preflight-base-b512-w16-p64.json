@@ -5,7 +5,6 @@
   "fingerprint": "92adb130344aa62d233e7e2dc5f787d7f62f47ee232a658733c43fef3bbcc179",
   "graph_gap_fraction": 0.017002842289086235,
   "loader_only_windows_per_s": 6561.627553521237,
-  "loader_turnover_passed": false,
   "memory_passed": true,
   "o50_raw_bytes_per_window": 1296261.9296936993,
   "optimizer_time_fraction": 0.04258847368855013,

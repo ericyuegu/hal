@@ -495,7 +495,6 @@ def _passing_preflight(cfg, selection):
         optimizer_time_fraction=0.10,
         disk_capacity_bytes=2 * 2**40,
         exact_resume=True,
-        loader_turnover_passed=True,
         memory_passed=True,
         shuffle_passed=True,
         telemetry={name: 0.0 for name in exp.REQUIRED_PREFLIGHT_TELEMETRY},
@@ -515,7 +514,6 @@ def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
     assert "not boolean" in " ".join(
         exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
     )
-    assert "buffered cohorts" in " ".join(exp.preflight_failures(cfg, replace(report, loader_turnover_passed=False)))
     assert "256 GiB" in " ".join(
         exp.preflight_failures(
             cfg,

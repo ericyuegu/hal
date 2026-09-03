@@ -11,9 +11,6 @@ from collections.abc import Sequence
 from concurrent.futures import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import Condition
-from threading import Lock
-from threading import Thread
 from typing import Any
 
 import numpy as np
@@ -146,30 +143,18 @@ class _ReplayDecodeTask:
 
 
 @dataclass(frozen=True, slots=True)
-class _TensorColumnGroup:
-    """Columns with one dtype and shape, coalesced into one shared tensor."""
-
-    names: tuple[str, ...]
-    values: torch.Tensor
-
-
-@dataclass(frozen=True, slots=True)
 class _CollatedReplayPackBatch:
-    """Worker-stacked replay windows transferred in coalesced shared tensors."""
+    """Worker-stacked replay windows transferred as a few contiguous arrays."""
 
     replay_ids: tuple[str, ...]
     pack_sizes: tuple[int, ...]
-    column_groups: tuple[_TensorColumnGroup, ...]
+    columns: dict[str, np.ndarray]
     sample_ids: tuple[int | None, ...]
     epochs: tuple[int | None, ...]
     task_ordinal: int | None = None
     cursor_after: tuple[int, int] | None = None
 
     def unpack(self) -> tuple[ReplayPack, ...]:
-        columns: dict[str, np.ndarray] = {}
-        for group in self.column_groups:
-            values = group.values.numpy().copy()
-            columns.update({name: values[index] for index, name in enumerate(group.names)})
         packs: list[ReplayPack] = []
         offset = 0
         for replay_id, size, sample_id, epoch in zip(
@@ -180,11 +165,12 @@ class _CollatedReplayPackBatch:
             strict=True,
         ):
             windows = tuple(
-                {name: values[index] for name, values in columns.items()} for index in range(offset, offset + size)
+                {name: values[index] for name, values in self.columns.items()}
+                for index in range(offset, offset + size)
             )
             packs.append(ReplayPack(replay_id, windows, sample_id=sample_id, epoch=epoch))
             offset += size
-        if offset != next(iter(columns.values())).shape[0]:
+        if offset != next(iter(self.columns.values())).shape[0]:
             raise RuntimeError("collated replay-pack row count changed during transfer")
         return tuple(packs)
 
@@ -202,19 +188,11 @@ def _collate_replay_packs(
         raise ValueError("cannot collate replay windows without columns")
     if any(set(window) != set(keys) for window in windows[1:]):
         raise ValueError("replay windows have inconsistent columns")
-    grouped_names: dict[tuple[str, tuple[int, ...]], list[str]] = {}
-    for name in keys:
-        values = np.asarray(windows[0][name])
-        grouped_names.setdefault((values.dtype.str, values.shape), []).append(name)
-    column_groups = []
-    for (_dtype, shape), names in grouped_names.items():
-        values = np.stack([np.asarray(window[name]) for name in names for window in windows])
-        values = values.reshape(len(names), len(windows), *shape)
-        column_groups.append(_TensorColumnGroup(tuple(names), torch.from_numpy(values)))
+    columns = {name: np.stack([np.asarray(window[name]) for window in windows]) for name in keys}
     return _CollatedReplayPackBatch(
         replay_ids=tuple(pack.replay_id for pack in packs),
         pack_sizes=tuple(len(pack.windows) for pack in packs),
-        column_groups=tuple(column_groups),
+        columns=columns,
         sample_ids=tuple(pack.sample_id for pack in packs),
         epochs=tuple(pack.epoch for pack in packs),
         task_ordinal=None if task is None else task.ordinal,
@@ -416,130 +394,6 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
         self._pending = deque(pending)
         self.received_packs = int(state.get("received_packs", 0))
         self.source_cursor = cursor
-
-
-class ReplayPackPrefetch(Iterator[ReplayPack]):
-    """Keep one deterministic replay cohort decoded in normal process memory."""
-
-    def __init__(self, source: ReplayPackBatchIterator, *, capacity: int) -> None:
-        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 1:
-            raise ValueError(f"replay prefetch capacity must be positive, got {capacity!r}")
-        self._source = source
-        self._capacity = capacity
-        self._buffer: deque[ReplayPack] = deque()
-        self._condition = Condition()
-        self._source_lock = Lock()
-        self._thread: Thread | None = None
-        self._source_done = False
-        self._closed = False
-        self._error: BaseException | None = None
-
-    @property
-    def buffered_packs(self) -> int:
-        with self._condition:
-            return len(self._buffer)
-
-    def start(self) -> None:
-        """Start the sole producer after any checkpoint state is restored."""
-        with self._condition:
-            if self._thread is not None:
-                raise RuntimeError("replay prefetch has already started")
-            self._thread = Thread(target=self._produce, name="replay-cohort", daemon=True)
-            self._thread.start()
-
-    def __iter__(self) -> ReplayPackPrefetch:
-        return self
-
-    def __next__(self) -> ReplayPack:
-        with self._condition:
-            while not self._buffer and not self._source_done and not self._closed and self._error is None:
-                self._condition.wait()
-            if self._closed:
-                raise StopIteration
-            if self._buffer:
-                pack = self._buffer.popleft()
-                self._condition.notify_all()
-                return pack
-            if self._error is not None:
-                raise self._error
-            raise StopIteration
-
-    def state_dict(self) -> dict[str, object]:
-        """Return a coherent source cursor and descriptor-only cohort snapshot."""
-        with self._source_lock, self._condition:
-            if self._error is not None:
-                raise RuntimeError("replay prefetch producer failed") from self._error
-            if any(pack.sample_id is None or pack.epoch is None for pack in self._buffer):
-                raise RuntimeError("replay prefetch contains an anonymous pack")
-            return {
-                "capacity": self._capacity,
-                "source_done": self._source_done,
-                "buffer_specs": tuple((pack.replay_id, pack.sample_id, pack.epoch) for pack in self._buffer),
-                "source": self._source.state_dict(),
-            }
-
-    def load_state_dict(
-        self,
-        state: Mapping[str, object],
-        replay_packs: Mapping[tuple[int, int], ReplayPack],
-    ) -> None:
-        """Restore a descriptor-only cohort before starting the producer."""
-        if self._thread is not None:
-            raise RuntimeError("restore replay prefetch state before starting it")
-        if state.get("capacity") != self._capacity:
-            raise ValueError("replay prefetch capacity changed across resume")
-        stored = state.get("buffer_specs")
-        if not isinstance(stored, tuple):
-            raise ValueError("replay prefetch descriptors are invalid")
-        restored: deque[ReplayPack] = deque()
-        for value in stored:
-            if (
-                not isinstance(value, tuple)
-                or len(value) != 3
-                or not isinstance(value[0], str)
-                or not isinstance(value[1], int)
-                or not isinstance(value[2], int)
-            ):
-                raise ValueError("replay prefetch descriptor is invalid")
-            replay_id, sample_id, epoch = value
-            pack = replay_packs.get((sample_id, epoch))
-            if pack is None or pack.replay_id != replay_id:
-                raise ValueError(f"could not reconstruct prefetched replay {replay_id!r}")
-            restored.append(pack)
-        if len(restored) > self._capacity:
-            raise ValueError("restored replay prefetch exceeds its capacity")
-        self._buffer = restored
-        self._source_done = bool(state.get("source_done", False))
-
-    def close(self) -> None:
-        """Stop accepting or yielding packs without waiting on a blocked read."""
-        with self._condition:
-            self._closed = True
-            self._condition.notify_all()
-
-    def _produce(self) -> None:
-        try:
-            while True:
-                with self._condition:
-                    while len(self._buffer) >= self._capacity and not self._closed:
-                        self._condition.wait()
-                    if self._closed:
-                        return
-                with self._source_lock:
-                    pack = next(self._source)
-                    with self._condition:
-                        if self._closed:
-                            return
-                        self._buffer.append(pack)
-                        self._condition.notify_all()
-        except StopIteration:
-            with self._condition:
-                self._source_done = True
-                self._condition.notify_all()
-        except BaseException as error:
-            with self._condition:
-                self._error = error
-                self._condition.notify_all()
 
 
 class ReplayReservoir:
@@ -954,7 +808,6 @@ class ReservoirLoader:
         worker_independent_resume: bool,
         cooldown_batches: int,
         task_sampler: _ReplayTaskSampler | None,
-        replay_prefetch_capacity: int,
     ) -> None:
         if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
             raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
@@ -975,11 +828,9 @@ class ReservoirLoader:
         self._worker_independent_resume = worker_independent_resume
         self._cooldown_batches = cooldown_batches
         self._task_sampler = task_sampler
-        self._replay_prefetch_capacity = replay_prefetch_capacity
         self._epoch = 0
         self._reservoir: ReplayReservoir | None = None
         self._pack_batches: ReplayPackBatchIterator | None = None
-        self._replay_prefetch: ReplayPackPrefetch | None = None
         self._resume_state: dict[str, Any] | None = None
         self._visits: Counter[str] | None = None if task_sampler is not None else Counter()
         self.last_epoch_stats: dict[str, int] | None = None
@@ -1001,19 +852,8 @@ class ReservoirLoader:
         pack_batches = ReplayPackBatchIterator(source, self._visits)
         if resume_state is not None:
             pack_batches.load_state_dict(resume_state.get("pack_batches", {}), replay_packs)
-        reservoir_source: Iterator[ReplayPack] = pack_batches
-        replay_prefetch: ReplayPackPrefetch | None = None
-        if self._replay_prefetch_capacity:
-            replay_prefetch = ReplayPackPrefetch(pack_batches, capacity=self._replay_prefetch_capacity)
-            if resume_state is not None and resume_state.get("schema") == 4:
-                prefetch_state = resume_state.get("replay_prefetch")
-                if not isinstance(prefetch_state, Mapping) or replay_packs is None:
-                    raise ValueError("replay prefetch checkpoint state is incomplete")
-                replay_prefetch.load_state_dict(prefetch_state, replay_packs)
-            replay_prefetch.start()
-            reservoir_source = replay_prefetch
         reservoir = ReplayReservoir(
-            reservoir_source,
+            pack_batches,
             batch_size=self._batch_size,
             capacity=self._capacity,
             seed=self._seed + self._epoch,
@@ -1024,7 +864,6 @@ class ReservoirLoader:
             self._resume_state = None
         self._reservoir = reservoir
         self._pack_batches = pack_batches
-        self._replay_prefetch = replay_prefetch
         self._epoch += 1
         batches = self._batches(reservoir)
         if self._prefetch_batches:
@@ -1040,32 +879,20 @@ class ReservoirLoader:
         if self._reservoir is None or self._pack_batches is None:
             raise RuntimeError("the reservoir loader has not emitted a batch")
         if self._task_sampler is not None:
-            prefetch_state = None
-            if self._replay_prefetch is not None:
-                prefetch_snapshot = self._replay_prefetch.state_dict()
-                pack_state = prefetch_snapshot["source"]
-                if not isinstance(pack_state, dict):
-                    raise RuntimeError("replay prefetch source state is invalid")
-                prefetch_state = {name: value for name, value in prefetch_snapshot.items() if name != "source"}
-            else:
-                pack_state = self._pack_batches.state_dict()
+            pack_state = self._pack_batches.state_dict()
             reservoir_state = self._reservoir.state_dict()
-            source_cursor = pack_state.get("source_cursor")
-            if source_cursor is None:
+            if self._pack_batches.source_cursor is None:
                 raise RuntimeError("deterministic replay source has no committed cursor")
             if "pending_specs" not in pack_state or "active_specs" not in reservoir_state:
                 raise RuntimeError("deterministic replay state contains decoded arrays")
-            state = {
-                "schema": 4 if prefetch_state is not None else 3,
+            return {
+                "schema": 3,
                 "loader_epoch": self._epoch,
-                "source_cursor": source_cursor,
+                "source_cursor": self._pack_batches.source_cursor,
                 "sample_selection_sha256": getattr(self._dataset, "sample_selection_sha256", None),
                 "pack_batches": pack_state,
                 "reservoir": reservoir_state,
             }
-            if prefetch_state is not None:
-                state["replay_prefetch"] = prefetch_state
-            return state
         if self._worker_independent_resume:
             source_samples = self._pack_batches.received_packs
         else:
@@ -1083,7 +910,7 @@ class ReservoirLoader:
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Schedule an exact restore before the next iterator is created."""
         schema = state.get("schema")
-        if schema not in (1, 2, 3, 4):
+        if schema not in (1, 2, 3):
             raise ValueError(f"unsupported reservoir-loader state schema {state.get('schema')!r}")
         if self._prefetch_batches:
             raise RuntimeError("exact reservoir checkpoints require prefetch_batches=0")
@@ -1091,11 +918,9 @@ class ReservoirLoader:
             raise RuntimeError("exact worker resume must be enabled when num_workers is nonzero")
         if self._reservoir is not None:
             raise RuntimeError("load reservoir state before creating its iterator")
-        if schema in (3, 4):
+        if schema == 3:
             if self._task_sampler is None:
                 raise ValueError("deterministic replay state requires the explicit sample-ID loader")
-            if schema == 4 and not self._replay_prefetch_capacity:
-                raise ValueError("replay prefetch checkpoint requires replay prefetch to be enabled")
             selection_hash = getattr(self._dataset, "sample_selection_sha256", None)
             if state.get("sample_selection_sha256") != selection_hash:
                 raise ValueError("stream prefix selection changed across resume")
@@ -1122,7 +947,7 @@ class ReservoirLoader:
 
     def _rehydrate(self, state: Mapping[str, object]) -> dict[tuple[int, int], ReplayPack] | None:
         """Rebuild compact checkpoint descriptors from their original MDS rows."""
-        if state.get("schema") not in (3, 4):
+        if state.get("schema") != 3:
             return None
         keys: set[tuple[int, int]] = set()
         pack_state = state.get("pack_batches")
@@ -1149,20 +974,6 @@ class ReservoirLoader:
                 sample_id, epoch, _ = value
                 if not isinstance(sample_id, int) or not isinstance(epoch, int):
                     raise ValueError("active replay window descriptor is invalid")
-                keys.add((sample_id, epoch))
-        if state.get("schema") == 4:
-            prefetch_state = state.get("replay_prefetch")
-            if not isinstance(prefetch_state, Mapping):
-                raise ValueError("replay prefetch checkpoint state is incomplete")
-            buffer_specs = prefetch_state.get("buffer_specs")
-            if not isinstance(buffer_specs, tuple):
-                raise ValueError("replay prefetch descriptors are invalid")
-            for value in buffer_specs:
-                if not isinstance(value, tuple) or len(value) != 3:
-                    raise ValueError("replay prefetch descriptor is invalid")
-                _, sample_id, epoch = value
-                if not isinstance(sample_id, int) or not isinstance(epoch, int):
-                    raise ValueError("replay prefetch descriptor is invalid")
                 keys.add((sample_id, epoch))
         replay_packs: dict[tuple[int, int], ReplayPack] = {}
         for sample_id, epoch in sorted(keys, key=lambda value: (value[1], value[0])):
@@ -1195,8 +1006,6 @@ class ReservoirLoader:
                 "dropped_windows": reservoir.dropped_windows,
                 "dropped_replays": reservoir.dropped_replays,
             }
-            if self._replay_prefetch is not None:
-                self._replay_prefetch.close()
 
 
 def _limit_worker_threads(_worker_id: int) -> None:
@@ -1245,7 +1054,6 @@ def make_reservoir_loader(
     worker_independent_resume: bool = False,
     deterministic_out_of_order: bool = False,
     cooldown_batches: int = 1,
-    replay_prefetch_capacity: int = 0,
     limit_worker_threads: bool = False,
     require_full_context: bool = False,
 ) -> ReservoirLoader:
@@ -1274,14 +1082,6 @@ def make_reservoir_loader(
         raise ValueError("deterministic out-of-order loading requires worker-independent resume")
     if cooldown_batches < 0:
         raise ValueError(f"cooldown_batches must be non-negative, got {cooldown_batches}")
-    if (
-        not isinstance(replay_prefetch_capacity, int)
-        or isinstance(replay_prefetch_capacity, bool)
-        or replay_prefetch_capacity < 0
-    ):
-        raise ValueError(f"replay_prefetch_capacity must be a non-negative integer, got {replay_prefetch_capacity!r}")
-    if replay_prefetch_capacity and not deterministic_out_of_order:
-        raise ValueError("replay prefetch requires deterministic out-of-order loading")
     minimum_capacity = batch_size * (cooldown_batches + 1)
     if reservoir_capacity < minimum_capacity:
         raise ValueError(
@@ -1372,5 +1172,4 @@ def make_reservoir_loader(
         worker_independent_resume=worker_independent_resume,
         cooldown_batches=cooldown_batches,
         task_sampler=task_sampler,
-        replay_prefetch_capacity=replay_prefetch_capacity,
     )

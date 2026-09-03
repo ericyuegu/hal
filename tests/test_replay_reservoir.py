@@ -17,7 +17,6 @@ from hal.training.replay_reservoir import OneBatchPrefetch
 from hal.training.replay_reservoir import PolicyReplayPackDataset
 from hal.training.replay_reservoir import ReplayPack
 from hal.training.replay_reservoir import ReplayPackBatchIterator
-from hal.training.replay_reservoir import ReplayPackPrefetch
 from hal.training.replay_reservoir import ReplayReservoir
 from hal.training.replay_reservoir import _stable_replay_rng
 from hal.training.replay_reservoir import make_reservoir_loader
@@ -388,17 +387,8 @@ def test_replay_pack_batch_iterator_persists_worker_lookahead_and_visits() -> No
 
 
 def test_worker_collation_round_trips_stacked_replay_packs() -> None:
-    original = tuple(
-        ReplayPack(
-            pack.replay_id,
-            tuple({**window, "other": window["value"] + 10} for window in pack.windows),
-        )
-        for pack in _packs(3, 2)
-    )
+    original = tuple(_packs(3, 2))
     collated = replay_reservoir._collate_replay_packs(list(original))
-    assert len(collated.column_groups) == 1
-    assert collated.column_groups[0].names == ("value", "other")
-    assert isinstance(collated.column_groups[0].values, torch.Tensor)
     visits: Counter[str] = Counter()
     restored = ReplayPackBatchIterator(iter((collated,)), visits)
 
@@ -406,34 +396,8 @@ def test_worker_collation_round_trips_stacked_replay_packs() -> None:
         actual = next(restored)
         assert actual.replay_id == expected.replay_id
         for actual_window, expected_window in zip(actual.windows, expected.windows, strict=True):
-            for name in ("value", "other"):
-                np.testing.assert_array_equal(actual_window[name], expected_window[name])
+            np.testing.assert_array_equal(actual_window["value"], expected_window["value"])
     assert visits == {"0": 1, "1": 1, "2": 1}
-
-
-def test_replay_pack_prefetch_fills_a_bounded_fifo_cohort() -> None:
-    third_pack_started = Event()
-
-    def source() -> Iterator[ReplayPack]:
-        for index in range(6):
-            if index == 2:
-                third_pack_started.set()
-            yield ReplayPack(
-                str(index),
-                ({"value": np.asarray([index])},),
-                sample_id=index,
-                epoch=0,
-            )
-
-    packs = ReplayPackBatchIterator(iter(source()), None)
-    prefetched = ReplayPackPrefetch(packs, capacity=3)
-    prefetched.start()
-    assert third_pack_started.wait(timeout=1)
-    state = prefetched.state_dict()
-
-    assert prefetched.buffered_packs == 3
-    assert state["buffer_specs"] == (("0", 0, 0), ("1", 1, 0), ("2", 2, 0))
-    assert [pack.replay_id for pack in prefetched] == [str(index) for index in range(6)]
 
 
 def test_completed_replay_tasks_are_released_in_predetermined_order() -> None:
@@ -458,7 +422,7 @@ def test_completed_replay_tasks_are_released_in_predetermined_order() -> None:
     assert [next(ordered).task_ordinal for _ in range(3)] == [0, 1, 2]
 
 
-def _o51_style_loader(path: Path, *, workers: int, pack_batch: int, replay_prefetch: int = 34):
+def _o51_style_loader(path: Path, *, workers: int, pack_batch: int):
     return make_reservoir_loader(
         str(path),
         "train",
@@ -484,7 +448,6 @@ def _o51_style_loader(path: Path, *, workers: int, pack_batch: int, replay_prefe
         worker_independent_resume=True,
         deterministic_out_of_order=True,
         cooldown_batches=16,
-        replay_prefetch_capacity=replay_prefetch,
         limit_worker_threads=True,
         require_full_context=True,
     )
@@ -518,13 +481,11 @@ def test_resumption_is_tensor_exact_when_worker_count_changes(tmp_path: Path) ->
     for _ in range(5):
         next(iterator)
     state = uninterrupted.state_dict()
-    assert state["schema"] == 4
+    assert state["schema"] == 3
     assert "active_specs" in state["reservoir"]
     assert "active" not in state["reservoir"]
     assert "pending_specs" in state["pack_batches"]
     assert "pending" not in state["pack_batches"]
-    assert "buffer_specs" in state["replay_prefetch"]
-    assert "buffer" not in state["replay_prefetch"]
     expected = [_batch_signature(next(iterator)) for _ in range(8)]
 
     resumed = _o51_style_loader(tmp_path, workers=0, pack_batch=4)
@@ -545,27 +506,6 @@ def test_resumption_is_tensor_exact_when_worker_count_changes(tmp_path: Path) ->
     chained_iterator = iter(chained)
     chained_actual = [_batch_signature(next(chained_iterator)) for _ in range(5)]
     for got, want in zip(chained_actual, chained_expected, strict=True):
-        assert got[0] == want[0]
-        assert torch.equal(got[1], want[1])
-        assert torch.equal(got[2], want[2])
-
-
-def test_descriptor_checkpoint_before_replay_prefetch_resumes_exactly(tmp_path: Path) -> None:
-    _write_policy_mds(tmp_path, replays=64, frames=80)
-    old_loader = _o51_style_loader(tmp_path, workers=0, pack_batch=4, replay_prefetch=0)
-    old_iterator = iter(old_loader)
-    for _ in range(5):
-        next(old_iterator)
-    state = old_loader.state_dict()
-    assert state["schema"] == 3
-    expected = [_batch_signature(next(old_iterator)) for _ in range(8)]
-
-    resumed = _o51_style_loader(tmp_path, workers=0, pack_batch=4)
-    resumed.load_state_dict(state)
-    resumed_iterator = iter(resumed)
-    actual = [_batch_signature(next(resumed_iterator)) for _ in range(8)]
-
-    for got, want in zip(actual, expected, strict=True):
         assert got[0] == want[0]
         assert torch.equal(got[1], want[1])
         assert torch.equal(got[2], want[2])

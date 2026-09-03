@@ -211,12 +211,11 @@ def decode_policy_world_replay_slices(
     if not outs:
         return ()
     lengths = [stop - start for start, stop in ranges]
+    boundaries = np.cumsum(lengths)[:-1]
 
     def assign(name: str, values: np.ndarray) -> None:
-        offset = 0
-        for out, length in zip(outs, lengths, strict=True):
-            out[name] = values[offset : offset + length]
-            offset += length
+        for out, part in zip(outs, np.split(values, boundaries), strict=True):
+            out[name] = part
 
     for prefix in ("p1", "p2"):
         rank = _scalar_int(source, f"{prefix}_rank")

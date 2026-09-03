@@ -366,6 +366,7 @@ def decode_policy_replay_slices(
     if not ranges:
         return ()
     lengths = [stop - start for start, stop in ranges]
+    boundaries = np.cumsum(lengths)[:-1]
     outs: list[dict[str, np.ndarray | int]] = []
     for (start, stop), length in zip(ranges, lengths, strict=True):
         out: dict[str, np.ndarray | int] = {
@@ -377,10 +378,8 @@ def decode_policy_replay_slices(
         outs.append(out)
 
     def assign(name: str, values: np.ndarray) -> None:
-        offset = 0
-        for out, length in zip(outs, lengths, strict=True):
-            out[name] = values[offset : offset + length]
-            offset += length
+        for out, part in zip(outs, np.split(values, boundaries), strict=True):
+            out[name] = part
 
     for prefix in PLAYER_PREFIXES:
         present = True
