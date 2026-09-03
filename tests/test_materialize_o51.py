@@ -8,6 +8,10 @@ from hal.data.o51 import InventoryEntry
 from hal.scripts import materialize_o51
 
 
+def test_default_cache_limit_preserves_free_space_on_two_tib_disk() -> None:
+    assert materialize_o51.MaterializeArgs().cache_limit == "1700gb"
+
+
 def test_remote_writer_uses_one_training_prefix_per_band(tmp_path: Path) -> None:
     remote = "s3://hal/processed/_staging/corpus"
 
@@ -70,29 +74,34 @@ def test_streaming_endpoint_uses_standard_aws_endpoint(
     assert materialize_o51.os.environ["S3_ENDPOINT_URL"] == "https://r2.example"
 
 
-def test_materialization_order_groups_input_shards_without_changing_band_membership() -> None:
-    def entry(replay: str, shard: str) -> InventoryEntry:
+def test_materialization_order_preserves_source_mds_prefixes_and_band_membership() -> None:
+    source_a, source_b = (source.name for source in materialize_o51.streams.POLICY_WORLD_V7_SOURCES[:2])
+
+    def entry(replay: str, source: str) -> InventoryEntry:
         return InventoryEntry(
-            source="source",
+            source=source,
             row=int(replay),
-            shard=shard,
-            replay_id=replay,
+            shard=f"shard-{replay}",
+            replay_id=f"{source}-{replay}",
             frames=100,
-            content_sha1=f"{int(replay):040x}",
+            content_sha1=f"{source}-{replay}".encode().hex().ljust(40, "0")[:40],
         )
 
     entries = {
-        1: (entry("1", "a"), entry("2", "b")),
-        2: (entry("3", "a"),),
-        4: (entry("4", "c"),),
-        8: (entry("5", "b"),),
+        1: (entry("4", source_a), entry("2", source_b)),
+        2: (entry("1", source_a),),
+        4: (entry("3", source_b),),
+        8: (entry("5", source_a),),
     }
 
     ordered = materialize_o51._materialization_order(entries)
 
     assert ordered == materialize_o51._materialization_order(entries)
     assert set(ordered) == {(candidate, scale) for scale, candidates in entries.items() for candidate in candidates}
-    positions: dict[str, list[int]] = {}
-    for index, (candidate, _scale) in enumerate(ordered):
-        positions.setdefault(candidate.shard, []).append(index)
-    assert all(indices == list(range(min(indices), max(indices) + 1)) for indices in positions.values())
+    assert [(candidate.source, candidate.row) for candidate, _scale in ordered] == [
+        (source_a, 1),
+        (source_a, 4),
+        (source_a, 5),
+        (source_b, 2),
+        (source_b, 3),
+    ]

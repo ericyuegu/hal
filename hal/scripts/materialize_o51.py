@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from hal.data.feature_stats import dump_finalized_stats
 from hal.data.o51 import DEFAULT_BAND_ROOT
 from hal.data.o51 import DEFAULT_O48_INDEX
 from hal.data.o51 import DEFAULT_O48_REMOTE
+from hal.data.o51 import NESTED_PROTOCOL
 from hal.data.o51 import TIER_SCALES
 from hal.data.o51 import InventoryEntry
 from hal.data.o51 import build_nested_corpus
@@ -38,7 +40,6 @@ from hal.training.player_identity import load_player_identity_sidecar
 DEFAULT_PLAYER_SIDECAR = Path("data/processed/player-identity-v1/professional-code-v1.jsonl.gz")
 DEFAULT_PLAYER_SIDECAR_REMOTE = "s3://hal/processed/player-identity-v1/professional-code-v1.jsonl.gz"
 DEFAULT_SHARD_SIZE = 256 * 2**20
-_MATERIALIZATION_DOMAIN = b"o51-materialization-shard-v1\0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +50,7 @@ class MaterializeArgs:
     output_remote: str | None = None
     player_sidecar: Path = DEFAULT_PLAYER_SIDECAR
     player_sidecar_remote: str = DEFAULT_PLAYER_SIDECAR_REMOTE
-    cache_limit: str = "2500gb"
+    cache_limit: str = "1700gb"
     predownload: int = 2048
     shard_size: int = DEFAULT_SHARD_SIZE
     gamma: float = 0.99618
@@ -139,15 +140,15 @@ def _upload_artifacts(root: Path, remote: str, paths: list[Path]) -> None:
 
 
 def _materialization_order(
-    entries_by_band: dict[int, tuple[InventoryEntry, ...]],
+    entries_by_band: Mapping[int, tuple[InventoryEntry, ...]],
 ) -> list[tuple[InventoryEntry, int]]:
-    """Group selected rows by input shard while shuffling shard and row order."""
+    """Preserve each source's existing shuffled MDS order."""
 
-    def key(item: tuple[InventoryEntry, int]) -> tuple[bytes, str, str, tuple[bytes, str, str]]:
+    source_order = {source.name: index for index, source in enumerate(streams.POLICY_WORLD_V7_SOURCES)}
+
+    def key(item: tuple[InventoryEntry, int]) -> tuple[int, int]:
         entry, _scale = item
-        shard = f"{entry.source}\0{entry.shard}".encode()
-        shard_key = hashlib.blake2b(_MATERIALIZATION_DOMAIN + shard, digest_size=16).digest()
-        return shard_key, entry.source, entry.shard, entry.nesting_key
+        return source_order[entry.source], entry.row
 
     selected = [(entry, scale) for scale in TIER_SCALES for entry in entries_by_band.get(scale, ())]
     selected.sort(key=key)
@@ -155,7 +156,7 @@ def _materialization_order(
 
 
 def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
-    """Build local bands in hash order and return their complete audit."""
+    """Build source-prefix bands and return their complete audit."""
     if args.predownload < 1 or args.shard_size < 1:
         raise ValueError("predownload and shard_size must be positive")
     if args.max_rows_per_band is not None and args.max_rows_per_band < 1:
@@ -206,7 +207,7 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
             for scale in TIER_SCALES
         }
         ordered = _materialization_order(entries_by_band)
-        for entry, scale in tqdm(ordered, desc="O51 shard-local materialization", unit="replay"):
+        for entry, scale in tqdm(ordered, desc="O51 source-prefix materialization", unit="replay"):
             source = streams.BY_NAME[entry.source]
             dataset = source_datasets.get(entry.source)
             if dataset is None:
@@ -270,7 +271,7 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
     normalization_sha256 = hashlib.sha256(normalization_path.read_bytes()).hexdigest()
     report: dict[str, Any] = {
         "schema_version": 1,
-        "protocol": "o51-nested-v1",
+        "protocol": NESTED_PROTOCOL,
         "corpus_hash": corpus.corpus_hash,
         "band_manifests": [path.relative_to(args.output).as_posix() for path in manifests],
         "band_hashes": {scale: corpus.bands[scale].sha256 for scale in TIER_SCALES},
@@ -289,7 +290,7 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
         "normalization_stats": str(normalization_path),
         "normalization_stats_sha256": normalization_sha256,
         "normalization_weighting": "content-unique-replays",
-        "materialization_order": "blake2b-shuffled-input-shards-v1",
+        "materialization_order": "source-prefix-mds-order-v1",
         "player_sidecar_sha256": sidecar.sha256,
         "player_vocabulary_sha256": sidecar.vocabulary.sha256,
         "parameters": {

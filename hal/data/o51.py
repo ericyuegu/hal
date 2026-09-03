@@ -1,8 +1,10 @@
 """O51 nested, content-unique replay bands.
 
 The O48 gzip index is the immutable inventory.  This module only assigns its
-already-deduplicated rows to source-stratified O51 bands; it never revisits the
-raw manifests or treats older schema projections as new data.
+already-deduplicated rows to source-prefix O51 bands; it never revisits the raw
+manifests or treats older schema projections as new data.  Each source MDS was
+shuffled when it was created, so O51 preserves that order instead of hashing it
+again.
 """
 
 from __future__ import annotations
@@ -22,11 +24,10 @@ from typing import Final
 from hal import streams
 from hal.streams import StreamSource
 
-NESTED_PROTOCOL: Final[str] = "o51-nested-v1"
+NESTED_PROTOCOL: Final[str] = "o51-source-prefix-v1"
 O48_PROTOCOL: Final[str] = "048-sha1-dedup-shard-order-v1"
 O48_SCHEMA_VERSION: Final[int] = 1
 NESTED_SCHEMA_VERSION: Final[int] = 1
-NESTING_DOMAIN: Final[bytes] = b"o51-nested-v1\0"
 
 D0: Final[int] = 2**30
 TIER_SCALES: Final[tuple[int, ...]] = (1, 2, 4, 8)
@@ -40,9 +41,9 @@ OFFICIAL_TIER_REPLAYS: Final[dict[int, int]] = {
     8: 1_300_638,
 }
 OFFICIAL_TIER_TARGETS: Final[dict[int, int]] = {
-    1: 3_321_597_594,
-    2: 6_647_731_852,
-    4: 13_297_093_392,
+    1: 3_353_805_100,
+    2: 6_686_081_812,
+    4: 13_291_247_716,
     8: 26_582_742_076,
 }
 
@@ -74,11 +75,6 @@ class InventoryEntry:
     def potential_targets(self) -> int:
         """Both ports at every position that has a subsequent frame."""
         return 2 * (self.frames - 1)
-
-    @property
-    def nesting_key(self) -> tuple[bytes, str, str]:
-        digest = hashlib.blake2b(NESTING_DOMAIN + self.content_sha1.encode("ascii"), digest_size=16).digest()
-        return digest, self.content_sha1, self.replay_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,8 +225,11 @@ def build_nested_corpus(inventory: Inventory, *, strict_official: bool = True) -
         missing = set(expected_sources) - by_source.keys()
         extra = by_source.keys() - set(expected_sources)
         raise ValueError(f"inventory source coverage differs: missing={sorted(missing)}, extra={sorted(extra)}")
-    for entries in by_source.values():
-        entries.sort(key=lambda entry: entry.nesting_key)
+    for source, entries in by_source.items():
+        entries.sort(key=lambda entry: entry.row)
+        rows = [entry.row for entry in entries]
+        if len(set(rows)) != len(rows):
+            raise ValueError(f"source {source!r} repeats an MDS row")
 
     band_entries: dict[int, list[InventoryEntry]] = {scale: [] for scale in TIER_SCALES}
     previous: dict[str, int] = {source: 0 for source in expected_sources}
@@ -247,9 +246,9 @@ def build_nested_corpus(inventory: Inventory, *, strict_official: bool = True) -
     seen_content: set[str] = set()
     seen_replays: set[str] = set()
     for scale in TIER_SCALES:
-        # The key is random-like and stable, so writing in this order also
-        # pre-shuffles rows before Mosaic sees them.
-        entries = tuple(sorted(band_entries[scale], key=lambda entry: (entry.nesting_key, entry.source)))
+        # Source MDS rows already have a fixed shuffled order.  Keep each
+        # contiguous source slice in that order.
+        entries = tuple(band_entries[scale])
         band_hash, source_replays, source_frames = _summary(entries)
         bands[scale] = NestedBand(scale, entries, band_hash, source_replays, source_frames)
         cumulative.extend(entries)

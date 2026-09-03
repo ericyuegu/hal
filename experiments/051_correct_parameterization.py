@@ -47,6 +47,7 @@ from hal.data.feature_stats import load_dataset_stats
 from hal.data.o51 import D0
 from hal.data.o51 import DEFAULT_BAND_REMOTE
 from hal.data.o51 import DEFAULT_BAND_ROOT
+from hal.data.o51 import NESTED_PROTOCOL
 from hal.data.o51 import OFFICIAL_TIER_REPLAYS
 from hal.data.o51 import OFFICIAL_TIER_TARGETS
 from hal.data.o51 import TIER_SCALES
@@ -251,7 +252,7 @@ class TrainConfig(_o50.TrainConfig):
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
     predownload: int = 512
     num_workers: int = 16
-    cache_limit_gb: int = 2560
+    cache_limit_gb: int = 1700
     band_root: str = str(DEFAULT_BAND_ROOT)
     band_remote: str = DEFAULT_BAND_REMOTE
     materialization_report: str = str(DEFAULT_BAND_ROOT / "materialization.json")
@@ -1270,7 +1271,7 @@ def audit_materialization(cfg: TrainConfig) -> MaterializationAudit:
     """Authenticate the materialized bands before constructing a loader."""
     path = _ensure_o51_artifact(cfg, Path(cfg.materialization_report))
     report = json.loads(path.read_text())
-    if report.get("schema_version") != 1 or report.get("protocol") != "o51-nested-v1":
+    if report.get("schema_version") != 1 or report.get("protocol") != NESTED_PROTOCOL:
         raise ValueError(f"unsupported O51 materialization report: {path}")
     bands = {int(scale): values for scale, values in report["bands"].items()}
     raw = {int(scale): int(value) for scale, value in report["raw_band_bytes"].items()}
@@ -1849,7 +1850,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict[str, object]
         ],
         config={
             **asdict(cfg),
-            "data_protocol": "o51-nested-v1",
+            "data_protocol": NESTED_PROTOCOL,
             "data_corpus_hash": audit.corpus_hash,
             "data_tier_hash": audit.tier_hashes[cfg.tier_scale],
         },

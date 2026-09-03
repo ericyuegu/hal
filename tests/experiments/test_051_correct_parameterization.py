@@ -263,7 +263,9 @@ def test_centering_preserves_policy_and_removes_each_group_common_mode() -> None
 
 
 def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
-    assert exp.TrainConfig().adam_eps == 1e-12
+    defaults = exp.TrainConfig()
+    assert defaults.adam_eps == 1e-12
+    assert defaults.cache_limit_gb == 1700
     assert exp.scaled_adam_lr(4.25e-4, batch_multiplier=1, duration_multiplier=1) == 4.25e-4
     assert exp.scaled_adam_lr(
         4.25e-4,
@@ -439,7 +441,7 @@ def _materialization_report(path: Path) -> None:
     }
     report = {
         "schema_version": 1,
-        "protocol": "o51-nested-v1",
+        "protocol": "o51-source-prefix-v1",
         "corpus_hash": "a" * 64,
         "normalization_stats_sha256": "b" * 64,
         "normalization_weighting": "content-unique-replays",
@@ -506,7 +508,7 @@ def test_preflight_enforces_every_launch_and_cache_gate(tmp_path: Path) -> None:
     assert "not boolean" in " ".join(
         exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
     )
-    assert "256 GiB free" in " ".join(exp.preflight_failures(cfg, replace(report, disk_capacity_bytes=2700 * 2**30)))
+    assert "256 GiB free" in " ".join(exp.preflight_failures(cfg, replace(report, disk_capacity_bytes=1900 * 2**30)))
     exp.validate_shuffle_config("py1e", 4096, largest_shard_samples=400)
     with pytest.raises(ValueError, match="10x"):
         exp.validate_shuffle_config("py1e", 4096, largest_shard_samples=410)

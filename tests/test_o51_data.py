@@ -37,16 +37,16 @@ from hal.training.o51_data import o51_replay_labels
 
 _FIXTURE_CORPUS_HASH = "162a9f6e10f8d71d71a2fa539ccd8d1ed85c6236e5c73b7f96e39f6bcd78b4cf"
 _FIXTURE_BAND_HASHES = {
-    1: "68a2c2e554de829d36b812edaddd385ade9483240e6e0804ac57f41aee19d3bf",
-    2: "ca9a15e6a37871c3863f3039780298e3dffa7faf2765920c3959cc2ff71d653e",
-    4: "90e2a6236800fa6deb6206772d9da269c61b4a5fc6c789418d3fd545228a90a3",
-    8: "f94b14bd8de9e48ea1c4c7c37540533ee383b04f67aae2c981214cbadccbdbea",
+    1: "3c6371e4825abe0a257c70ce712cd64254fcef7d8757cc07eb0a65a99562b67b",
+    2: "12becdf19075330d68c9565d2ff35bb3f6159ec8db27f86581d7698246720879",
+    4: "93b810f8c85db830320eb04843f28ccf258365583dcbceb25f44546c06fa22a3",
+    8: "08ecabe87760e8fecf25371680b320d2dd158fa52663789716cc255924b4458e",
 }
 _FIXTURE_TIER_HASHES = {
-    1: "68a2c2e554de829d36b812edaddd385ade9483240e6e0804ac57f41aee19d3bf",
-    2: "3af5f1f850f734110b0e22f1b3d87bb50d32eaf3489944915be3a92a5f0a07e0",
-    4: "dad47b75a2a208e62a350b8e12fac7c80a15c60503e9cc427f759738e8cd2ecf",
-    8: "9eee83144b150a66de1f2905f92006efdea3012534604ca81c12872882542815",
+    1: "3c6371e4825abe0a257c70ce712cd64254fcef7d8757cc07eb0a65a99562b67b",
+    2: "a2ac28df04f76ca4bf11f4ae660b15dbbb8a5870c1918ae25aed9abca6f6afe3",
+    4: "18da17669e432b7aa67e90a18373b7214cd035bcdcd7c356379cfee72d16589d",
+    8: "d661e5d3648681a7d7429b7f21947de23431db615e62ef1720ad156633074b22",
 }
 
 
@@ -80,14 +80,14 @@ def test_official_nested_data_accounting_is_pinned() -> None:
     assert DEFAULT_BAND_REMOTE == "s3://hal/processed/policy-world-v7-content-unique-nested-awr-v1"
     assert OFFICIAL_TIER_REPLAYS == {1: 162_598, 2: 325_176, 4: 650_331, 8: 1_300_638}
     assert OFFICIAL_TIER_TARGETS == {
-        1: 3_321_597_594,
-        2: 6_647_731_852,
-        4: 13_297_093_392,
+        1: 3_353_805_100,
+        2: 6_686_081_812,
+        4: 13_291_247_716,
         8: 26_582_742_076,
     }
 
 
-def test_nested_selection_is_strict_source_stratified_and_hash_pinned() -> None:
+def test_nested_selection_is_strict_source_prefix_and_hash_pinned() -> None:
     inventory = _inventory()
     corpus = build_nested_corpus(inventory, strict_official=False)
 
@@ -106,6 +106,8 @@ def test_nested_selection_is_strict_source_stratified_and_hash_pinned() -> None:
         assert previous < replay_ids
         assert set(tier.source_replays) == {source.name for source in streams.POLICY_WORLD_V7_SOURCES}
         assert set(tier.source_replays.values()) == {scale}
+        for source in streams.POLICY_WORLD_V7_SOURCES:
+            assert sorted(entry.row for entry in tier.entries if entry.source == source.name) == list(range(scale))
         previous = replay_ids
     assert previous == {entry.replay_id for entry in inventory.entries}
     assert sum(band.unique_replays for band in corpus.bands.values()) == len(inventory.entries)
