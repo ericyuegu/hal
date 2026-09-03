@@ -87,7 +87,7 @@ class Args:
     cmd: tyro.conf.Positional[list[str]] = field(default_factory=list)
     """Command after ``--``. Automatic recovery requires an ``experiments/*.py`` command."""
     gpu: str = "B200"
-    """Modal GPU type. A comma-separated fallback list is also accepted."""
+    """Modal GPU type. Use 'none' for CPU-only work; comma-separated fallbacks are accepted."""
     cpu: float = 32.0
     """Requested physical CPU cores."""
     cpu_limit: float = 48.0
@@ -131,7 +131,7 @@ class Args:
 
 
 class FunctionResources(TypedDict):
-    gpu: str | list[str]
+    gpu: str | list[str] | None
     cpu: tuple[float, float]
     memory: int | tuple[int, int]
     ephemeral_disk: int
@@ -150,6 +150,7 @@ class LaunchSpec:
     auto_resume: bool
     stall_s: int
     skip_sm120_probe: bool
+    require_cuda: bool = True
     modal_app_url: str | None = None
 
 
@@ -346,10 +347,14 @@ def redact_argv(argv: list[str] | tuple[str, ...]) -> str:
     return shlex.join(redacted)
 
 
-def gpu_request(gpu: str) -> str | list[str]:
+def gpu_request(gpu: str) -> str | list[str] | None:
     choices = [item.strip() for item in gpu.split(",") if item.strip()]
     if not choices:
         raise SystemExit("--gpu must contain at least one GPU type.")
+    if len(choices) == 1 and choices[0].lower() == "none":
+        return None
+    if any(item.lower() == "none" for item in choices):
+        raise SystemExit("--gpu none cannot be combined with GPU fallbacks.")
     return choices[0] if len(choices) == 1 else choices
 
 
@@ -482,36 +487,40 @@ def _configure_tracking_context(env: dict[str, str], modal_app_url: str | None) 
         env["WANDB_NOTES"] = f"{existing_notes}\n\n{modal_note}" if existing_notes else modal_note
 
 
-def _prepare_remote(*, skip_sm120_probe: bool) -> dict[str, str]:
-    """Fail before data download if the GPU, shared memory, or SSD is unsuitable."""
-    subprocess.run(["mount", "-o", "remount,size=16g", "/dev/shm"], check=False, capture_output=True)
-    shm_gib = shutil.disk_usage("/dev/shm").total / 2**30
-    loguru.logger.info(f"/dev/shm = {shm_gib:.1f} GiB")
-    if shm_gib < 1:
-        raise RuntimeError(f"/dev/shm is {shm_gib:.2f} GiB; training requires at least 1 GiB")
+def _prepare_remote(*, skip_sm120_probe: bool, require_cuda: bool = True) -> dict[str, str]:
+    """Prepare one remote job and check CUDA resources when it requested a GPU."""
+    compute_capability: str | None = None
+    if require_cuda:
+        subprocess.run(["mount", "-o", "remount,size=16g", "/dev/shm"], check=False, capture_output=True)
+        shm_gib = shutil.disk_usage("/dev/shm").total / 2**30
+        loguru.logger.info(f"/dev/shm = {shm_gib:.1f} GiB")
+        if shm_gib < 1:
+            raise RuntimeError(f"/dev/shm is {shm_gib:.2f} GiB; training requires at least 1 GiB")
 
-    if not os.environ.get("DISPLAY"):
-        os.environ["DISPLAY"] = ":99"
-    if subprocess.run(["pgrep", "-x", "Xvfb"], check=False, capture_output=True).returncode != 0:
-        with Path("/tmp/xvfb.log").open("ab") as xvfb_log:
-            subprocess.Popen(
-                ["Xvfb", ":99", "-screen", "0", "1280x720x24"],
-                stdout=xvfb_log,
-                stderr=subprocess.STDOUT,
-            )
+        if not os.environ.get("DISPLAY"):
+            os.environ["DISPLAY"] = ":99"
+        if subprocess.run(["pgrep", "-x", "Xvfb"], check=False, capture_output=True).returncode != 0:
+            with Path("/tmp/xvfb.log").open("ab") as xvfb_log:
+                subprocess.Popen(
+                    ["Xvfb", ":99", "-screen", "0", "1280x720x24"],
+                    stdout=xvfb_log,
+                    stderr=subprocess.STDOUT,
+                )
 
-    compute_capability = _run_checked(
-        [
-            "uv",
-            "run",
-            "python",
-            "-c",
-            "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; "
-            "print(''.join(map(str, torch.cuda.get_device_capability())))",
-        ],
-        capture=True,
-    )
-    loguru.logger.info(f"CUDA compute capability = sm_{compute_capability}")
+        compute_capability = _run_checked(
+            [
+                "uv",
+                "run",
+                "python",
+                "-c",
+                "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; "
+                "print(''.join(map(str, torch.cuda.get_device_capability())))",
+            ],
+            capture=True,
+        )
+        loguru.logger.info(f"CUDA compute capability = sm_{compute_capability}")
+    else:
+        loguru.logger.info("CPU-only job; skipping CUDA and Xvfb checks")
 
     env = os.environ.copy()
     # Modal injects its internal PyPI mirror through UV_INDEX_URL. Keep uv's
@@ -716,7 +725,7 @@ def _run_remote(spec: LaunchSpec) -> int:
             f"launch {spec.launch_id} already failed with exit code {attempt.state.exit_code}; refusing to rerun"
         )
     _commit_state(state_path, attempt.state, spec.state_volume)
-    env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe)
+    env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
     _configure_tracking_context(env, spec.modal_app_url)
     return _run_training(
         attempt.argv,
@@ -858,7 +867,9 @@ def main(args: Args) -> None:
         serialized=True,
         include_source=False,
         enable_memory_snapshot=args.gpu_memory_snapshot,
-        experimental_options={"enable_gpu_snapshot": True} if args.gpu_memory_snapshot else None,
+        experimental_options=(
+            {"enable_gpu_snapshot": True} if args.gpu_memory_snapshot and resources["gpu"] is not None else None
+        ),
         name="train",
         **resources,
     )(_run_remote)
@@ -871,6 +882,7 @@ def main(args: Args) -> None:
             auto_resume=args.auto_resume,
             stall_s=args.stall_minutes * 60,
             skip_sm120_probe=args.skip_sm120_probe,
+            require_cuda=resources["gpu"] is not None,
             modal_app_url=f"https://modal.com/apps/{app.app_id}",
         )
         call = function.spawn(spec)

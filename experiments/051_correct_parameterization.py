@@ -2348,6 +2348,7 @@ _install_o50_bindings()
 @dataclass
 class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
+    level: Literal["base", "proxy", "mid", "large"] | None = None
     comment: str = ""
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
@@ -2440,6 +2441,8 @@ def _run_train(args: TrainArgs) -> None:
     resume_run = None
     resume_state = None
     cfg = args.cfg
+    if args.resume is None:
+        cfg = replace(cfg, arch=MODEL_FAMILY[args.level or model_level(cfg.arch)])
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
     if args.resume is None and (args.resume_num_workers is not None or args.resume_predownload is not None):
@@ -2458,6 +2461,8 @@ def _run_train(args: TrainArgs) -> None:
             raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
         resume_run = args.resume_as or args.resume
         cfg = config_from_state(resume_state["cfg"])
+        if args.level is not None and model_level(cfg.arch) != args.level:
+            raise SystemExit(f"--level {args.level} does not match resumed {model_level(cfg.arch)} architecture")
         cfg = replace(
             cfg,
             num_workers=cfg.num_workers if args.resume_num_workers is None else args.resume_num_workers,

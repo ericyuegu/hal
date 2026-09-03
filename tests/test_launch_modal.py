@@ -113,8 +113,11 @@ def test_tracking_context_ignores_non_modal_launches() -> None:
 
 def test_gpu_request_accepts_fallbacks_and_rejects_empty() -> None:
     assert gpu_request("L40S,A100-80GB") == ["L40S", "A100-80GB"]
+    assert gpu_request("none") is None
     with pytest.raises(SystemExit, match="at least one"):
         gpu_request(" , ")
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        gpu_request("none,B200")
 
 
 def test_validate_args_requires_experiment_for_auto_resume() -> None:

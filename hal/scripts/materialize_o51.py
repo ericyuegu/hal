@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ class MaterializeArgs:
     inventory: Path = DEFAULT_O48_INDEX
     inventory_remote: str = DEFAULT_O48_REMOTE
     output: Path = DEFAULT_BAND_ROOT
+    output_remote: str | None = None
     player_sidecar: Path = DEFAULT_PLAYER_SIDECAR
     player_sidecar_remote: str = DEFAULT_PLAYER_SIDECAR_REMOTE
     cache_limit: str = "2500gb"
@@ -88,14 +90,50 @@ def _dataset(source: streams.StreamSource, args: MaterializeArgs) -> StreamingDa
     )
 
 
-def _raw_band_bytes(path: Path) -> tuple[int, int, int]:
-    index = json.loads((path / "train" / "index.json").read_text())
-    shards = index["shards"]
+def _remote_parts(remote: str) -> tuple[str, str]:
+    if not remote.startswith("s3://"):
+        raise ValueError(f"expected an s3:// output URI, got {remote!r}")
+    bucket, separator, prefix = remote.removeprefix("s3://").partition("/")
+    if not separator or not bucket or not prefix:
+        raise ValueError(f"invalid S3 output URI {remote!r}")
+    return bucket, prefix.rstrip("/")
+
+
+def _ensure_empty_remote(remote: str) -> None:
+    bucket, prefix = _remote_parts(remote)
+    response = r2.client().list_objects_v2(Bucket=bucket, Prefix=f"{prefix}/", MaxKeys=1)
+    if response.get("KeyCount", len(response.get("Contents", ()))):
+        raise FileExistsError(f"O51 remote output already exists: {remote}")
+
+
+def _bridge_streaming_endpoint() -> None:
+    """Give Mosaic's uploader the standard R2 endpoint used by HAL."""
+    endpoint = os.environ.get("AWS_ENDPOINT_URL")
+    if not endpoint:
+        raise RuntimeError("remote O51 output requires AWS_ENDPOINT_URL")
+    os.environ.setdefault("S3_ENDPOINT_URL", endpoint)
+
+
+def _writer_output(path: Path, remote: str | None, scale: int) -> str | tuple[str, str]:
+    if remote is None:
+        return str(path)
+    return str(path), f"{remote.rstrip('/')}/band-{scale}/train"
+
+
+def _shard_summary(shards: list[dict[str, Any]]) -> tuple[int, int, int]:
     return (
         sum(int(shard["raw_data"]["bytes"]) for shard in shards),
         max((int(shard["samples"]) for shard in shards), default=0),
         len(shards),
     )
+
+
+def _upload_artifacts(root: Path, remote: str, paths: list[Path]) -> None:
+    bucket, prefix = _remote_parts(remote)
+    client = r2.client()
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        client.upload_file(str(path), bucket, f"{prefix}/{relative}")
 
 
 def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
@@ -108,6 +146,9 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
     existing = [path for path in train_paths.values() if path.exists()]
     if existing:
         raise FileExistsError(f"O51 output already exists: {existing[0]}")
+    if args.output_remote is not None:
+        _ensure_empty_remote(args.output_remote)
+        _bridge_streaming_endpoint()
 
     inventory_path = _ensure_s3_artifact(args.inventory, args.inventory_remote)
     sidecar_path = _ensure_s3_artifact(args.player_sidecar, args.player_sidecar_remote)
@@ -127,7 +168,8 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
         writers = {
             scale: stack.enter_context(
                 MDSWriter(
-                    out=str(path),
+                    out=_writer_output(path, args.output_remote, scale),
+                    keep_local=args.output_remote is None,
                     columns=O51_MDS_COLUMNS,
                     compression="zstd",
                     hashes=["md5", "sha256"],
@@ -186,8 +228,8 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
     raw_sizes: dict[int, int] = {}
     largest_shard_samples: dict[int, int] = {}
     shard_counts: dict[int, int] = {}
-    for scale, path in train_paths.items():
-        raw_sizes[scale], largest_shard_samples[scale], shard_counts[scale] = _raw_band_bytes(path.parent)
+    for scale, writer in writers.items():
+        raw_sizes[scale], largest_shard_samples[scale], shard_counts[scale] = _shard_summary(writer.shards)
     u0 = band_report[1]
     u0_ineligible_fraction = 1 - u0["terminal_replays"] / max(u0["replays"], 1)
     normalization_path = args.output / "normalization-stats.json"
@@ -207,7 +249,7 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
         "schema_version": 1,
         "protocol": "o51-nested-v1",
         "corpus_hash": corpus.corpus_hash,
-        "band_manifests": [str(path) for path in manifests],
+        "band_manifests": [path.relative_to(args.output).as_posix() for path in manifests],
         "band_hashes": {scale: corpus.bands[scale].sha256 for scale in TIER_SCALES},
         "tier_hashes": {scale: corpus.tiers[scale].sha256 for scale in TIER_SCALES},
         "bands": {scale: dict(band_report[scale]) for scale in TIER_SCALES},
@@ -235,6 +277,12 @@ def materialize_o51(args: MaterializeArgs) -> dict[str, Any]:
     }
     metadata = args.output / "materialization.json"
     metadata.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    if args.output_remote is not None:
+        _upload_artifacts(
+            args.output,
+            args.output_remote,
+            [*manifests, normalization_path, metadata],
+        )
     return report
 
 

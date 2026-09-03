@@ -48,8 +48,9 @@ OFFICIAL_TIER_TARGETS: Final[dict[int, int]] = {
 
 DEFAULT_O48_INDEX: Final[Path] = Path("data/processed/048_policy_world_unique_v1.tsv.gz")
 DEFAULT_O48_REMOTE: Final[str] = "s3://hal/processed/048-policy-world-unique-v1.tsv.gz"
-DEFAULT_BAND_ROOT: Final[Path] = Path("data/processed/o51-nested-v1")
-DEFAULT_BAND_REMOTE: Final[str] = "s3://hal/processed/o51-nested-v1"
+CORPUS_ARTIFACT_NAME: Final[str] = "policy-world-v7-content-unique-nested-awr-v1"
+DEFAULT_BAND_ROOT: Final[Path] = Path("data/processed") / CORPUS_ARTIFACT_NAME
+DEFAULT_BAND_REMOTE: Final[str] = f"s3://hal/processed/{CORPUS_ARTIFACT_NAME}"
 
 
 @dataclass(frozen=True, slots=True)

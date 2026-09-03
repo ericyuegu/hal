@@ -70,6 +70,41 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
     assert exp._o50.__file__ == original_o50_file
 
 
+@pytest.mark.parametrize("level", ["base", "proxy", "mid", "large"])
+def test_fresh_train_selects_requested_model_level(monkeypatch, level: str) -> None:
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+    monkeypatch.setattr(exp, "band_sources", lambda *_args, **_kwargs: ())
+
+    def train(selected_cfg, _stats, **_kwargs) -> None:
+        observed["level"] = exp.model_level(selected_cfg.arch)
+
+    monkeypatch.setattr(exp._o50, "train", train)
+
+    exp._run_train(
+        exp.TrainArgs(
+            cfg=exp.config_for("mid", push_to_r2=False),
+            level=level,
+            smoke=True,
+            stop_after_update=1,
+        )
+    )
+
+    assert observed == {"level": level}
+
+
+def test_resume_rejects_conflicting_model_level(monkeypatch) -> None:
+    cfg = exp.config_for("base", push_to_r2=False)
+    monkeypatch.setattr(
+        exp._o50,
+        "load_for_resume",
+        lambda *_args, **_kwargs: {"cfg": exp._checkpoint_config(cfg)},
+    )
+
+    with pytest.raises(SystemExit, match="does not match resumed base"):
+        exp._run_train(exp.TrainArgs(resume="run", level="large"))
+
+
 def _tiny_cfg(**changes: object):
     architecture = replace(
         exp.ARCHITECTURE,

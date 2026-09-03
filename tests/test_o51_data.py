@@ -11,6 +11,8 @@ from streaming import StreamingDataset
 
 from hal import streams
 from hal.data.o51 import D0
+from hal.data.o51 import DEFAULT_BAND_REMOTE
+from hal.data.o51 import DEFAULT_BAND_ROOT
 from hal.data.o51 import O48_PROTOCOL
 from hal.data.o51 import OFFICIAL_CORPUS_TARGETS
 from hal.data.o51 import OFFICIAL_RAW_REPLAYS
@@ -74,6 +76,8 @@ def test_official_nested_data_accounting_is_pinned() -> None:
     assert D0 == 2**30
     assert (OFFICIAL_RAW_REPLAYS, OFFICIAL_UNIQUE_REPLAYS) == (1_300_640, 1_300_638)
     assert OFFICIAL_CORPUS_TARGETS == 26_582_742_076
+    assert Path("data/processed/policy-world-v7-content-unique-nested-awr-v1") == DEFAULT_BAND_ROOT
+    assert DEFAULT_BAND_REMOTE == "s3://hal/processed/policy-world-v7-content-unique-nested-awr-v1"
     assert OFFICIAL_TIER_REPLAYS == {1: 162_598, 2: 325_176, 4: 650_331, 8: 1_300_638}
     assert OFFICIAL_TIER_TARGETS == {
         1: 3_321_597_594,
