@@ -367,7 +367,7 @@ def test_replay_pack_batch_iterator_persists_worker_lookahead_and_visits() -> No
     assert next(resumed).replay_id == "b"
 
 
-def test_worker_collation_round_trips_replay_packs_through_shared_tensors() -> None:
+def test_worker_collation_round_trips_stacked_replay_packs() -> None:
     original = tuple(_packs(3, 2))
     collated = replay_reservoir._collate_replay_packs(list(original))
     visits: Counter[str] = Counter()

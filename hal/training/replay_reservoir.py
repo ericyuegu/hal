@@ -112,18 +112,18 @@ class ReplayPack:
 
 @dataclass(frozen=True, slots=True)
 class _CollatedReplayPackBatch:
-    """Worker-stacked replay windows transferred through shared tensors."""
+    """Worker-stacked replay windows transferred as a few contiguous arrays."""
 
     replay_ids: tuple[str, ...]
     pack_sizes: tuple[int, ...]
-    columns: dict[str, torch.Tensor]
+    columns: dict[str, np.ndarray]
 
     def unpack(self) -> tuple[ReplayPack, ...]:
         packs: list[ReplayPack] = []
         offset = 0
         for replay_id, size in zip(self.replay_ids, self.pack_sizes, strict=True):
             windows = tuple(
-                {name: values[index].numpy() for name, values in self.columns.items()}
+                {name: values[index] for name, values in self.columns.items()}
                 for index in range(offset, offset + size)
             )
             packs.append(ReplayPack(replay_id, windows))
@@ -134,7 +134,7 @@ class _CollatedReplayPackBatch:
 
 
 def _collate_replay_packs(packs: list[ReplayPack]) -> _CollatedReplayPackBatch:
-    """Stack worker results so Torch shares storage instead of pickling each array."""
+    """Stack worker results to avoid pickling each small window array."""
     if not packs:
         raise ValueError("cannot collate an empty replay-pack batch")
     windows = [window for pack in packs for window in pack.windows]
@@ -143,7 +143,7 @@ def _collate_replay_packs(packs: list[ReplayPack]) -> _CollatedReplayPackBatch:
         raise ValueError("cannot collate replay windows without columns")
     if any(set(window) != set(keys) for window in windows[1:]):
         raise ValueError("replay windows have inconsistent columns")
-    columns = {name: torch.from_numpy(np.stack([np.asarray(window[name]) for window in windows])) for name in keys}
+    columns = {name: np.stack([np.asarray(window[name]) for window in windows]) for name in keys}
     return _CollatedReplayPackBatch(
         replay_ids=tuple(pack.replay_id for pack in packs),
         pack_sizes=tuple(len(pack.windows) for pack in packs),
