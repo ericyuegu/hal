@@ -1326,6 +1326,7 @@ def _make_train_loader(
         worker_independent_resume=True,
         deterministic_out_of_order=True,
         cooldown_batches=cfg.replay_cooldown_batches,
+        replay_prefetch_capacity=cfg.reservoir_capacity,
         limit_worker_threads=True,
         require_full_context=True,
     )
@@ -1436,7 +1437,8 @@ def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
         "cache_limit_gb": cfg.cache_limit_gb,
         "reservoir_capacity": cfg.reservoir_capacity,
         "replay_cooldown_batches": cfg.replay_cooldown_batches,
-        "worker_completion_order": "deterministic-sample-id-tasks-v1",
+        "worker_completion_order": "deterministic-sample-id-tasks-v2",
+        "replay_prefetch_capacity": cfg.reservoir_capacity,
         "windows_per_replay": cfg.windows_per_replay,
         "replay_pack_batch_size": cfg.replay_pack_batch_size,
         "loader_prefetch_factor": cfg.loader_prefetch_factor,
@@ -1460,6 +1462,7 @@ class PreflightReport:
     optimizer_time_fraction: float
     disk_capacity_bytes: int
     exact_resume: bool
+    loader_turnover_passed: bool
     memory_passed: bool
     shuffle_passed: bool
     telemetry: dict[str, float]
@@ -1553,6 +1556,7 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         failures.append("optimizer time exceeds 10%")
     flags = {
         "exact_resume": report.exact_resume,
+        "loader_turnover_passed": report.loader_turnover_passed,
         "memory_passed": report.memory_passed,
         "shuffle_passed": report.shuffle_passed,
     }
@@ -1561,6 +1565,8 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         failures.append(f"preflight pass flags are not boolean {invalid_flags}")
     if report.exact_resume is not True:
         failures.append("tensor-exact resume did not pass")
+    if report.loader_turnover_passed is not True:
+        failures.append("loader benchmark did not begin after one complete reservoir turnover")
     if report.memory_passed is not True:
         failures.append("host/pinned-memory gate did not pass")
     if report.shuffle_passed is not True:
@@ -2229,8 +2235,8 @@ def benchmark_train_step(
 def benchmark_loader(
     cfg: TrainConfig,
     *,
-    warmup_batches: int = 8,
-    measured_batches: int = 50,
+    warmup_batches: int = 72,
+    measured_batches: int = 192,
 ) -> dict[str, object]:
     """Measure the direct-source loader without running the model."""
     if warmup_batches < 1 or measured_batches < 1:
@@ -2281,6 +2287,9 @@ def benchmark_loader(
         "distinct_replays": len(replay_ids),
         "within_batch_unique": True,
         "cooldown_batches": cfg.replay_cooldown_batches,
+        "replay_prefetch_capacity": cfg.reservoir_capacity,
+        "initial_reservoir_turnover_batches": cfg.windows_per_replay * (cfg.replay_cooldown_batches + 1),
+        "loader_turnover_passed": warmup_batches >= cfg.windows_per_replay * (cfg.replay_cooldown_batches + 1),
         "cooldown_passed": cooldown_passed,
         "source_sample_counts": loader.source_sample_counts,
     }
@@ -2408,8 +2417,8 @@ class LoaderBenchmarkArgs:
     predownload: int = 1024
     shuffle_algo: Literal["py1s", "py1e"] = "py1s"
     shuffle_block_size: Literal[4096, 8192] = 8192
-    warmup_batches: int = 8
-    measured_batches: int = 50
+    warmup_batches: int = 72
+    measured_batches: int = 192
 
 
 @dataclass

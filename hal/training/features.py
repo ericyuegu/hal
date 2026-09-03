@@ -591,19 +591,21 @@ def preprocess(
                 "derive_spatial; materializing it into the MDS needs a schema bump and this derivation removed"
             )
         mask = _is_masked(arr)
+        has_mask = bool(mask.any())
         if kind == "button" or kind == "stick_trigger":
-            x = np.where(mask, 0.0, arr).astype(np.float32)
+            x = arr.astype(np.float32)
         elif kind == "cat":
-            x = np.where(mask, 0, arr).astype(np.int64)
+            x = (np.where(mask, 0, arr) if has_mask else arr).astype(np.int64)
         elif kind == "float":
             s = feature_stats[consolidate_key(name)]
             transform = _float_transform(name, routing)
             x = _standardize(arr, s) if transform == "standardize" else _normalize(arr, s)
-            x = np.where(mask, 0.0, x)
         else:
             raise AssertionError(f"unhandled kind {kind} for {name}")
+        if has_mask:
+            x[mask] = 0
         out[name] = torch.from_numpy(np.ascontiguousarray(x))
-        if kind == "float" and mask.any():
+        if kind == "float" and has_mask:
             out[f"{name}_mask"] = torch.from_numpy(np.ascontiguousarray(mask.astype(np.float32)))
     if _SPATIAL_GATE in batch and (projection is None or projection.derive_spatial):
         for name, value in derive_spatial(batch).items():

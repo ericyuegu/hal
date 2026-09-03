@@ -591,7 +591,7 @@ def _stable_window_rng(seed: int, epoch: int, replay_id: str) -> np.random.Gener
 def collate_windows(batch: list[dict]) -> dict[str, np.ndarray]:
     """Stack a list of ``[seq]`` per-sample windows into ``[B, seq]`` columns."""
     keys = batch[0].keys()
-    return {k: np.stack([s[k] for s in batch]) for k in keys}
+    return {key: np.asarray([sample[key] for sample in batch]) for key in keys}
 
 
 def collate_train_batch(
