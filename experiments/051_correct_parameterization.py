@@ -9,6 +9,7 @@ Examples:
     uv run experiments/051_correct_parameterization.py describe
     uv run experiments/051_correct_parameterization.py coordinate-checks
     uv run experiments/051_correct_parameterization.py benchmark
+    uv run experiments/051_correct_parameterization.py loader-benchmark
     uv run experiments/051_correct_parameterization.py preflight --report preflight.json
     uv run experiments/051_correct_parameterization.py train --preflight-report preflight.json
 """
@@ -1255,11 +1256,12 @@ def load_stats(cfg: TrainConfig) -> dict[str, _o50.FeatureStats]:
     )
 
 
-def _make_loaders(
+def _make_train_loader(
     cfg: TrainConfig,
     stats: dict[str, _o50.FeatureStats],
-) -> tuple[ReservoirLoader, list[_o50.TrainBatch]]:
-    """Build direct source-prefix training and the fixed validation cohort."""
+    player_lookup: ReplayPlayerLookup,
+) -> ReservoirLoader:
+    """Build the direct source-prefix training loader."""
     tier = data_selection(cfg).tier(cfg.tier_scale)
     sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
     views = tier.sources
@@ -1301,7 +1303,7 @@ def _make_loaders(
         prefetch_batches=0,
         replay_format="policy-world",
         replay_labels=DirectO51ReplayLabels(
-            player_lookup=ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay),
+            player_lookup=player_lookup,
             gamma=cfg.awr.gamma,
             damage_shaping=cfg.awr.damage_shaping,
             win_reward=cfg.awr.win_reward,
@@ -1320,9 +1322,18 @@ def _make_loaders(
             f"direct U{cfg.tier_scale} view exposes {actual_train_rows} rows, expected {expected_train_rows}"
         )
     _o50.TRAIN_REPLAYS = expected_train_rows
+    return train_loader
+
+
+def _make_loaders(
+    cfg: TrainConfig,
+    stats: dict[str, _o50.FeatureStats],
+) -> tuple[ReservoirLoader, list[_o50.TrainBatch]]:
+    """Build direct source-prefix training and the fixed validation cohort."""
+    player_lookup = ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay)
+    train_loader = _make_train_loader(cfg, stats, player_lookup)
 
     common = _o50.loader_kwargs(cfg, stats)
-    replay_labels = ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay)
     validation = {
         **common,
         "batch_size": _O50_DEFAULT_CONFIG.val_batch_size,
@@ -1334,7 +1345,7 @@ def _make_loaders(
         split=cfg.val_split,
         num_workers=0,
         replay_format="policy-world",
-        replay_labels=replay_labels,
+        replay_labels=player_lookup,
         require_full_context=True,
         shuffle=True,
         **validation,
@@ -2044,6 +2055,59 @@ def benchmark_train_step(
     return metrics
 
 
+def benchmark_loader(
+    cfg: TrainConfig,
+    *,
+    warmup_batches: int = 8,
+    measured_batches: int = 50,
+) -> dict[str, object]:
+    """Measure the direct-source loader without running the model."""
+    if warmup_batches < 1 or measured_batches < 1:
+        raise ValueError("loader benchmark batch counts must be positive")
+    validate_config(cfg)
+    stats = load_stats(cfg)
+    player_lookup = ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay)
+    loader = _make_train_loader(cfg, stats, player_lookup)
+    iterator = iter(loader)
+    for _ in range(warmup_batches):
+        next(iterator)
+
+    batch_seconds: list[float] = []
+    replay_ids: set[str] = set()
+    started = _o50.time.monotonic()
+    for _ in range(measured_batches):
+        batch_started = _o50.time.monotonic()
+        batch = next(iterator)
+        batch_seconds.append(_o50.time.monotonic() - batch_started)
+        if not isinstance(batch, AWRBatch) or batch.batch.replay_ids is None:
+            raise TypeError("O51 loader benchmark requires replay-aware AWR batches")
+        if len(batch.batch.replay_ids) != cfg.batch_size or len(set(batch.batch.replay_ids)) != cfg.batch_size:
+            raise RuntimeError("O51 loader emitted a batch with repeated or missing replay IDs")
+        replay_ids.update(batch.batch.replay_ids)
+    elapsed = _o50.time.monotonic() - started
+    windows = measured_batches * cfg.batch_size
+    metrics: dict[str, object] = {
+        "fingerprint": preflight_fingerprint(cfg, data_selection(cfg)),
+        "tier_scale": cfg.tier_scale,
+        "batch_size": cfg.batch_size,
+        "num_workers": cfg.num_workers,
+        "replay_pack_batch_size": cfg.replay_pack_batch_size,
+        "loader_prefetch_factor": cfg.loader_prefetch_factor,
+        "predownload": cfg.predownload,
+        "warmup_batches": warmup_batches,
+        "measured_batches": measured_batches,
+        "measured_seconds": elapsed,
+        "loader_only_windows_per_s": windows / elapsed,
+        "batch_seconds_mean": float(np.mean(batch_seconds)),
+        "batch_seconds_p95": float(np.percentile(batch_seconds, 95)),
+        "distinct_replays": len(replay_ids),
+        "within_batch_unique": True,
+        "source_sample_counts": loader.source_sample_counts,
+    }
+    print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
+    return metrics
+
+
 def run_coordinate_checks(*, batch_size: int = 512, steps: int = 128) -> list[dict[str, object]]:
     """Run every model/depth coordinate for exactly 128 synthetic updates."""
     if steps != 128:
@@ -2154,6 +2218,21 @@ class BenchmarkArgs:
 
 
 @dataclass
+class LoaderBenchmarkArgs:
+    level: Literal["base", "proxy", "mid"] = "mid"
+    tier_scale: Literal[1, 2, 4, 8] = 8
+    batch_size: Literal[128, 256, 512, 1024] = 512
+    num_workers: Literal[8, 16, 24, 32] = 16
+    replay_pack_batch_size: Literal[16, 32, 64] = 32
+    loader_prefetch_factor: Literal[1, 2, 4] = 2
+    predownload: int = 512
+    shuffle_algo: Literal["py1s", "py1e"] = "py1s"
+    shuffle_block_size: Literal[4096, 8192] = 8192
+    warmup_batches: int = 8
+    measured_batches: int = 50
+
+
+@dataclass
 class CoordinateChecksArgs:
     batch_size: Literal[128, 256, 512, 1024] = 512
 
@@ -2178,6 +2257,7 @@ type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[BenchmarkArgs, tyro.conf.subcommand(name="benchmark")]
+    | Annotated[LoaderBenchmarkArgs, tyro.conf.subcommand(name="loader-benchmark")]
     | Annotated[CoordinateChecksArgs, tyro.conf.subcommand(name="coordinate-checks")]
     | Annotated[DescribeArgs, tyro.conf.subcommand(name="describe")]
     | Annotated[AuditDataArgs, tyro.conf.subcommand(name="audit-data")]
@@ -2330,6 +2410,27 @@ def main(args: Command) -> None:
             wandb_log_code=False,
         )
         benchmark_train_step(cfg, warmup_steps=args.warmup_steps, measured_steps=args.measured_steps)
+        return
+    if isinstance(args, LoaderBenchmarkArgs):
+        cfg = config_for(
+            args.level,
+            target_positions=args.tier_scale * D0,
+            tier_scale=args.tier_scale,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            replay_pack_batch_size=args.replay_pack_batch_size,
+            loader_prefetch_factor=args.loader_prefetch_factor,
+            predownload=args.predownload,
+            shuffle_algo=args.shuffle_algo,
+            shuffle_block_size=args.shuffle_block_size,
+            push_to_r2=False,
+            wandb_log_code=False,
+        )
+        benchmark_loader(
+            cfg,
+            warmup_batches=args.warmup_batches,
+            measured_batches=args.measured_batches,
+        )
         return
     if isinstance(args, CoordinateChecksArgs):
         reports = run_coordinate_checks(batch_size=args.batch_size)

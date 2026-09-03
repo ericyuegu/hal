@@ -30,7 +30,7 @@ def _load() -> ModuleType:
 exp = _load()
 
 
-@pytest.mark.parametrize("command", ["train", "audit-data", "preflight"])
+@pytest.mark.parametrize("command", ["train", "audit-data", "preflight", "loader-benchmark"])
 def test_nested_config_command_help_is_parseable(command: str) -> None:
     script = Path(exp.__file__).resolve()
     result = subprocess.run(
@@ -70,6 +70,41 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
 
     assert observed == {"tier_scale": 8, "module_file": exp.__file__}
     assert exp._o50.__file__ == original_o50_file
+
+
+def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
+    cfg = exp.TrainConfig()
+    replay_ids = tuple(f"replay-{index}" for index in range(cfg.batch_size))
+    train_batch = exp._o50.TrainBatch(
+        exp._o50.Context({}, torch.zeros(cfg.batch_size, dtype=torch.int64)),
+        torch.empty(cfg.batch_size, 0, 0),
+        replay_ids,
+    )
+    batch = exp.AWRBatch(
+        train_batch,
+        torch.empty(cfg.batch_size, 0),
+        torch.empty(cfg.batch_size, 0, dtype=torch.bool),
+    )
+
+    class Loader:
+        source_sample_counts = {"source": cfg.batch_size}
+
+        def __iter__(self):
+            while True:
+                yield batch
+
+    sidecar = type("Sidecar", (), {"by_replay": {}})()
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+    monkeypatch.setattr(exp._o50, "load_identity_sidecar", lambda _cfg: sidecar)
+    monkeypatch.setattr(exp, "_make_train_loader", lambda *_args: Loader())
+    monkeypatch.setattr(exp, "data_selection", lambda _cfg: object())
+    monkeypatch.setattr(exp, "preflight_fingerprint", lambda *_args: "f" * 64)
+
+    report = exp.benchmark_loader(cfg, warmup_batches=1, measured_batches=2)
+
+    assert report["loader_only_windows_per_s"] > 0
+    assert report["distinct_replays"] == cfg.batch_size
+    assert report["within_batch_unique"] is True
 
 
 @pytest.mark.parametrize("level", ["base", "proxy", "mid", "large"])

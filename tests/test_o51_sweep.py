@@ -18,6 +18,7 @@ from hal.training.o51_sweep import Treatment
 from hal.training.o51_sweep import batch_arms
 from hal.training.o51_sweep import decay_arms
 from hal.training.o51_sweep import duration_arms
+from hal.training.o51_sweep import initialization_extension_arms
 from hal.training.o51_sweep import initialization_screen_arms
 from hal.training.o51_sweep import lr_arms
 from hal.training.o51_sweep import mid_search_arms
@@ -49,6 +50,7 @@ def _all_arms() -> tuple[SweepArm, ...]:
     center = Treatment()
     return (
         *initialization_screen_arms(center),
+        *initialization_extension_arms(center),
         *lr_arms(center),
         *decay_arms(center),
         *batch_arms(center),
@@ -92,6 +94,7 @@ def test_initialization_screen_has_six_d0_arms_stopped_at_d0_over_8() -> None:
     ("factory", "count"),
     [
         (lr_arms, 9),
+        (initialization_extension_arms, 1),
         (decay_arms, 9),
         (batch_arms, 8),
         (proxy_transfer_arms, 2),

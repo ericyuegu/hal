@@ -28,6 +28,7 @@ _ARM_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 
 Stage = Literal[
     "initialization-screen",
+    "initialization-extension",
     "lr",
     "decay",
     "batch",
@@ -279,6 +280,12 @@ def initialization_screen_arms(center: Treatment | None = None) -> tuple[SweepAr
     )
 
 
+def initialization_extension_arms(center: Treatment) -> tuple[SweepArm, ...]:
+    """Run one selected initialization treatment to its fresh D0 endpoint."""
+    suffix = f"h{_safe_float(center.hidden_std_multiplier)}-{center.readout_init}"
+    return (_arm("initialization-extension", suffix, "base", center),)
+
+
 def lr_arms(center: Treatment) -> tuple[SweepArm, ...]:
     return tuple(
         _arm(
@@ -375,6 +382,7 @@ def duration_arms(center: Treatment) -> tuple[SweepArm, ...]:
 def stage_arms(stage: Stage, center: Treatment) -> tuple[SweepArm, ...]:
     generators: dict[Stage, Callable[[], tuple[SweepArm, ...]]] = {
         "initialization-screen": lambda: initialization_screen_arms(center),
+        "initialization-extension": lambda: initialization_extension_arms(center),
         "lr": lambda: lr_arms(center),
         "decay": lambda: decay_arms(center),
         "batch": lambda: batch_arms(center),
