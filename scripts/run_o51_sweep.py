@@ -103,7 +103,7 @@ class AdjudicateArgs:
     runs: Path
     """JSON object that maps every arm ID to its full W&B training-run path."""
     evaluations: Path
-    """JSON object that maps the two finalist arm IDs to companion W&B runs."""
+    """JSON object that maps finalists to W&B runs containing closed-loop metrics."""
     output: Path
     """New treatment JSON for the next stage."""
     evidence: Path
@@ -249,16 +249,20 @@ def _closed_loop_outcome(
     evaluation_run_path: str,
     run: Any,
 ) -> ClosedLoopOutcome:
-    expected_training_id = training_run_path.rsplit("/", maxsplit=1)[1]
     config = dict(run.config)
+    summary = dict(run.summary)
     mismatches: list[str] = []
-    if config.get("training_wandb_id") != expected_training_id:
-        mismatches.append("training_wandb_id")
-    if config.get("eval_matchups") != GRID_EVAL_MATCHUPS:
-        mismatches.append("eval_matchups")
+    if evaluation_run_path == training_run_path:
+        if summary.get("eval/backfilled") != 1:
+            mismatches.append("eval/backfilled")
+    else:
+        expected_training_id = training_run_path.rsplit("/", maxsplit=1)[1]
+        if config.get("training_wandb_id") != expected_training_id:
+            mismatches.append("training_wandb_id")
+        if config.get("eval_matchups") != GRID_EVAL_MATCHUPS:
+            mismatches.append("eval_matchups")
     if mismatches:
         raise ValueError(f"W&B evaluation {evaluation_run_path} does not match {arm.arm_id}: {sorted(mismatches)}")
-    summary = dict(run.summary)
     return ClosedLoopOutcome(
         arm_id=arm.arm_id,
         run_path=evaluation_run_path,

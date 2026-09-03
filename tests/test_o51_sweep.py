@@ -436,6 +436,77 @@ def test_grid_runner_ranks_then_adjudicates_two_companion_evals(
     assert len(evidence["closed_loop_ranking"]) == 2
 
 
+def test_grid_runner_adjudicates_evals_backfilled_into_training_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arms = lr_arms(Treatment())
+    run_map = {arm.arm_id: f"entity/project/train-{index}" for index, arm in enumerate(arms)}
+    runs: dict[str, SimpleNamespace] = {}
+    for index, arm in enumerate(arms):
+        final_update = arm.target_positions // (arm.treatment.batch_size * 128)
+        summary = {
+            "data/processed_loss_positions": arm.target_positions,
+            "global_step": final_update,
+            "val/nll": 1.0 + index / 100,
+            "val/far_nll": 2.0,
+            "val/rollout_nll": 3.0,
+        }
+        if index < 2:
+            summary.update(
+                {
+                    "eval/backfilled": 1,
+                    "eval/boots": 96,
+                    "eval/crashed": 0,
+                    "eval/net_stock_lcb": -0.2 + index * 0.3,
+                    "eval/net_stock_per_min": index * 0.2,
+                    "eval/net_dmg_per_min": 10.0,
+                }
+            )
+        runs[run_map[arm.arm_id]] = SimpleNamespace(
+            config={
+                **RUNNER.asdict(arm.treatment),
+                "target_positions": arm.target_positions,
+                "tier_scale": arm.tier_scale,
+                "seed": arm.seed,
+                "data_protocol": RUNNER.DATA_PROTOCOL,
+                "adam_eps": 1e-12,
+                "reservoir_capacity": 17 * arm.treatment.batch_size,
+                "replay_cooldown_batches": 16,
+            },
+            name=f"test_o51-{arm.level}-shape__{arm.arm_id}",
+            state="finished",
+            summary=summary,
+        )
+
+    class Api:
+        def run(self, run_path: str):
+            return runs[run_path]
+
+    monkeypatch.setattr(RUNNER.wandb, "Api", lambda **_kwargs: Api())
+    run_map_path = tmp_path / "runs.json"
+    evaluation_map_path = tmp_path / "evaluations.json"
+    treatment_path = tmp_path / "treatment.json"
+    evidence_path = tmp_path / "evidence.json"
+    run_map_path.write_text(json.dumps(run_map))
+    evaluation_map_path.write_text(json.dumps({arm.arm_id: run_map[arm.arm_id] for arm in arms[:2]}))
+
+    RUNNER.adjudicate(
+        RUNNER.AdjudicateArgs(
+            stage="lr",
+            runs=run_map_path,
+            evaluations=evaluation_map_path,
+            output=treatment_path,
+            evidence=evidence_path,
+        )
+    )
+
+    assert Treatment.load(treatment_path) == arms[1].treatment
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["winner_training_run"] == run_map[arms[1].arm_id]
+    assert evidence["winner_evaluation_run"] == run_map[arms[1].arm_id]
+
+
 def test_grid_cannot_be_selected_from_validation_alone(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="use rank"):
         RUNNER.select(
