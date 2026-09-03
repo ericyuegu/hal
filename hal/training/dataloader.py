@@ -169,10 +169,14 @@ def _make_streaming_dataset(
     shuffle_block_size: int | None,
     predownload: int | None,
     batch_size: int,
+    shuffle_algo: str | None = None,
     source_weights: Sequence[float] | None = None,
     download_retry: int = 2,
 ) -> tuple[StreamingDataset, tuple[str, ...]]:
     """Build one single- or multi-stream MDS dataset with strict mode selection."""
+    if shuffle_algo is not None and shuffle_algo not in ("py1s", "py1e"):
+        raise ValueError(f"shuffle_algo must be py1s or py1e, got {shuffle_algo!r}")
+    shuffle_options = {} if shuffle_algo is None else {"shuffle_algo": shuffle_algo}
     should_shuffle = (split == "train") if shuffle is None else shuffle
     if sources is not None:
         if data_root is not None or remote is not None:
@@ -219,6 +223,7 @@ def _make_streaming_dataset(
                 batch_size=batch_size,
                 shuffle=should_shuffle,
                 shuffle_block_size=shuffle_block_size,
+                **shuffle_options,
             )
         else:
             dataset = StreamingDataset(
@@ -229,6 +234,7 @@ def _make_streaming_dataset(
                 shuffle=should_shuffle,
                 shuffle_seed=shuffle_seed,
                 shuffle_block_size=shuffle_block_size,
+                **shuffle_options,
             )
     else:
         if source_weights is not None:
@@ -250,6 +256,7 @@ def _make_streaming_dataset(
                 batch_size=batch_size,
                 shuffle=should_shuffle,
                 shuffle_block_size=shuffle_block_size,
+                **shuffle_options,
             )
         else:
             dataset = StreamingDataset(
@@ -262,6 +269,7 @@ def _make_streaming_dataset(
                 shuffle=should_shuffle,
                 shuffle_seed=shuffle_seed,
                 shuffle_block_size=shuffle_block_size,
+                **shuffle_options,
             )
     return dataset, names
 
@@ -527,6 +535,7 @@ def make_loader(
     shuffle_block_size: int | None = None,
     shuffle: bool | None = None,
     shuffle_seed: int | None = None,
+    shuffle_algo: str | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 4,
     drop_last: bool = False,
@@ -613,6 +622,7 @@ def make_loader(
         shuffle_block_size=shuffle_block_size,
         predownload=predownload,
         batch_size=batch_size,
+        shuffle_algo=shuffle_algo,
         download_retry=download_retry,
     )
     rows = PolicyReplayDataset(mds, resolved_format, replay_labels=replay_labels) if resolved_format != "full" else mds

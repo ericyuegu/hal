@@ -1,5 +1,6 @@
 import math
 from collections.abc import Mapping
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -40,14 +41,69 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
-def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
+type MuonScaleMode = Literal["legacy", "o51"]
+
+
+def muon_matrix_scale(d_out: int, d_in: int, *, mode: MuonScaleMode = "legacy") -> float:
+    """Return the post-orthogonalization scale for one logical matrix.
+
+    Historical experiments use the clamped Muon rule.  O51 deliberately uses
+    ``sqrt(d_out / d_in)`` even when the matrix is wide.  Keeping the mode
+    explicit prevents a new experiment from changing old checkpoint updates.
+    """
+    if d_out < 1 or d_in < 1:
+        raise ValueError(f"matrix dimensions must be positive, got {(d_out, d_in)}")
+    if mode == "legacy":
+        return max(1, d_out / d_in) ** 0.5
+    if mode == "o51":
+        return (d_out / d_in) ** 0.5
+    raise ValueError(f"unknown Muon scale mode {mode!r}")
+
+
+def _orthogonalize_logical_matrices(
+    matrices: Tensor,
+    *,
+    logical_splits: int,
+    scale_mode: MuonScaleMode,
+    ns_steps: int,
+) -> Tensor:
+    """Orthogonalize equal row-wise logical matrices, then restore fusion."""
+    if not isinstance(logical_splits, int) or isinstance(logical_splits, bool) or logical_splits < 1:
+        raise ValueError(f"logical_splits must be a positive integer, got {logical_splits!r}")
+    d_out, d_in = matrices.shape[-2:]
+    if d_out % logical_splits:
+        raise ValueError(f"cannot split {d_out} output rows into {logical_splits} logical matrices")
+    if logical_splits == 1:
+        orthogonal = zeropower_via_newtonschulz5(matrices, steps=ns_steps)
+        orthogonal *= muon_matrix_scale(d_out, d_in, mode=scale_mode)
+        return orthogonal
+    logical_d_out = d_out // logical_splits
+    logical = matrices.reshape(*matrices.shape[:-2], logical_splits, logical_d_out, d_in)
+    logical = zeropower_via_newtonschulz5(logical, steps=ns_steps)
+    logical *= muon_matrix_scale(logical_d_out, d_in, mode=scale_mode)
+    return logical.reshape_as(matrices)
+
+
+def muon_update(
+    grad,
+    momentum,
+    beta=0.95,
+    ns_steps=5,
+    nesterov=True,
+    *,
+    scale_mode: MuonScaleMode = "legacy",
+    logical_splits: int = 1,
+):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4:  # for the case of conv filters
         update = update.view(len(update), -1)
-    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-    update *= max(1, update.size(-2) / update.size(-1)) ** 0.5
-    return update
+    return _orthogonalize_logical_matrices(
+        update,
+        logical_splits=logical_splits,
+        scale_mode=scale_mode,
+        ns_steps=ns_steps,
+    )
 
 
 class Muon(torch.optim.Optimizer):
@@ -162,6 +218,8 @@ def _batched_muon_step(
     lr: float,
     momentum: float,
     weight_decay: float,
+    scale_mode: MuonScaleMode = "legacy",
+    logical_splits: int = 1,
 ) -> None:
     """Apply one Muon update to a bucket of identically shaped matrices."""
     parameter_tensors: list[Tensor] = list(parameters)
@@ -173,8 +231,12 @@ def _batched_muon_step(
     torch._foreach_lerp_(momentum_buffers, gradients, 1 - momentum)
     nesterov_updates = torch._foreach_lerp(gradients, momentum_buffers, momentum)
     matrices = torch.stack([_matrix_view(update) for update in nesterov_updates])
-    matrices = zeropower_via_newtonschulz5(matrices, steps=5)
-    matrices *= max(1, matrices.size(-2) / matrices.size(-1)) ** 0.5
+    matrices = _orthogonalize_logical_matrices(
+        matrices,
+        logical_splits=logical_splits,
+        scale_mode=scale_mode,
+        ns_steps=5,
+    )
     updates = [update.reshape(parameter.shape) for update, parameter in zip(matrices, parameters, strict=True)]
 
     if weight_decay:
@@ -436,7 +498,13 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["lr"] = group.get("lr", 0.02)
                 group["momentum"] = group.get("momentum", 0.95)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
+                scale_mode = group.get("muon_scale_mode", "legacy")
+                logical_splits = group.get("logical_splits", 1)
+                muon_matrix_scale(1, 1, mode=scale_mode)
+                if not isinstance(logical_splits, int) or isinstance(logical_splits, bool) or logical_splits < 1:
+                    raise ValueError(f"logical_splits must be a positive integer, got {logical_splits!r}")
+                required = {"params", "lr", "momentum", "weight_decay", "use_muon"}
+                assert required <= group.keys() <= required | {"muon_scale_mode", "logical_splits"}
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
@@ -466,10 +534,27 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
         """Load state while retaining newly configured update clipping."""
         clipping = [group.get("update_clip_threshold") for group in self.param_groups]
         clipping_missing = ["update_clip_threshold" not in group for group in state_dict["param_groups"]]
+        muon_modes = [group.get("muon_scale_mode") for group in self.param_groups]
+        muon_splits = [group.get("logical_splits") for group in self.param_groups]
+        mode_missing = ["muon_scale_mode" not in group for group in state_dict["param_groups"]]
+        splits_missing = ["logical_splits" not in group for group in state_dict["param_groups"]]
         super().load_state_dict(state_dict)
-        for group, threshold, missing in zip(self.param_groups, clipping, clipping_missing, strict=True):
+        for group, threshold, missing, mode, split, missing_mode, missing_split in zip(
+            self.param_groups,
+            clipping,
+            clipping_missing,
+            muon_modes,
+            muon_splits,
+            mode_missing,
+            splits_missing,
+            strict=True,
+        ):
             if missing and threshold is not None:
                 group["update_clip_threshold"] = threshold
+            if group["use_muon"] and missing_mode and mode is not None:
+                group["muon_scale_mode"] = mode
+            if group["use_muon"] and missing_split and split is not None:
+                group["logical_splits"] = split
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -498,6 +583,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                         lr=group["lr"],
                         momentum=group["momentum"],
                         weight_decay=group["weight_decay"],
+                        scale_mode=group.get("muon_scale_mode", "legacy"),
+                        logical_splits=group.get("logical_splits", 1),
                     )
             else:
                 parameters_by_step: dict[int, list[nn.Parameter]] = {}

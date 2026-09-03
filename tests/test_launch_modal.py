@@ -26,6 +26,7 @@ configure_compiler_cache = _MODULE._configure_compiler_cache
 configure_tracking_context = _MODULE._configure_tracking_context
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
+requested_disk_gib = _MODULE.requested_disk_gib
 plan_attempt = _MODULE.plan_attempt
 preflight_git = _MODULE.preflight_git
 preflight_modal = _MODULE.preflight_modal
@@ -53,6 +54,15 @@ def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
         "region": None,
     }
     assert args.gpu_memory_snapshot
+
+
+def test_o51_automatically_requests_three_tib_ephemeral_ssd() -> None:
+    experiment = "experiments/051_correct_parameterization.py"
+    args = Args(cmd=["uv", "run", experiment])
+
+    assert requested_disk_gib(args) == 3072
+    assert function_resources(args)["ephemeral_disk"] == 3072 * 1024
+    assert requested_disk_gib(Args(cmd=["uv", "run", experiment], disk_gib=4096)) == 4096
 
 
 def test_memory_limit_must_cover_the_request() -> None:

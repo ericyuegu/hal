@@ -27,6 +27,7 @@ The public forward method has one direct shape guard for the error that could ot
 """
 
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
@@ -63,6 +64,11 @@ class TrunkConfig:
     # separate causal sequences.  It therefore preserves the valid-token mask while
     # calling PyTorch's native FlashAttention kernel without a dense [B, L, L] mask.
     attention_backend: str = "auto_flex"
+    # Experiments that study depth parameterization can supply explicit
+    # residual-branch multipliers.  ``None`` retains the historical attention
+    # rule exactly; the MLP branch historically used 1.0.
+    attention_scale: float | None = None
+    mlp_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.n_heads <= 0 or self.d_model % self.n_heads != 0:
@@ -79,6 +85,10 @@ class TrunkConfig:
             raise ValueError(f"unknown attention_backend={self.attention_backend!r}")
         if self.require_flex and self.attention_backend != "auto_flex":
             raise ValueError("require_flex is compatible only with attention_backend='auto_flex'")
+        if self.attention_scale is not None and (not math.isfinite(self.attention_scale) or self.attention_scale <= 0):
+            raise ValueError(f"attention_scale must be finite and positive, got {self.attention_scale!r}")
+        if not math.isfinite(self.mlp_scale) or self.mlp_scale <= 0:
+            raise ValueError(f"mlp_scale must be finite and positive, got {self.mlp_scale!r}")
 
 
 class Rotary(nn.Module):
@@ -319,13 +329,14 @@ class Block(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(cfg)
         self.mlp = MLP(cfg)
-        self.attn_scale = 1 / (2 * cfg.n_layers) ** 0.5
+        self.attn_scale = 1 / (2 * cfg.n_layers) ** 0.5 if cfg.attention_scale is None else cfg.attention_scale
+        self.mlp_scale = cfg.mlp_scale
 
     def forward(
         self, x: Float[Tensor, "B L d_model"], mask: AttnMask | None, ctx_pad: Int[Tensor, " B"]
     ) -> Float[Tensor, "B L d_model"]:
         x = x + self.attn_scale * self.attn(rmsnorm(x), mask, ctx_pad)
-        x = x + self.mlp(rmsnorm(x))
+        x = x + self.mlp_scale * self.mlp(rmsnorm(x))
         return x
 
 

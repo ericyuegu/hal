@@ -255,6 +255,110 @@ def read_cache_usage(cache_roots: Sequence[Path]) -> dict[str, float]:
     }
 
 
+def read_system_counters(
+    *,
+    proc_stat: Path = Path("/proc/stat"),
+    proc_diskstats: Path = Path("/proc/diskstats"),
+    proc_net_dev: Path = Path("/proc/net/dev"),
+    proc_vmstat: Path = Path("/proc/vmstat"),
+    proc_meminfo: Path = Path("/proc/meminfo"),
+    sys_block: Path = Path("/sys/block"),
+) -> tuple[dict[str, int], dict[str, float]]:
+    """Read monotonic host counters plus instantaneous pinned-memory use."""
+    counters: dict[str, int] = {}
+    gauges: dict[str, float] = {}
+    try:
+        cpu = proc_stat.read_text().splitlines()[0].split()
+        if cpu and cpu[0] == "cpu":
+            values = [int(value) for value in cpu[1:]]
+            idle = sum(values[index] for index in (3, 4) if index < len(values))
+            counters["cpu_total"] = sum(values)
+            counters["cpu_busy"] = sum(values) - idle
+    except OSError, ValueError, IndexError:
+        pass
+
+    try:
+        devices = {path.name for path in sys_block.iterdir()}
+    except OSError:
+        devices = set()
+    try:
+        disk_values = [0, 0, 0, 0]
+        for line in proc_diskstats.read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 14 or (devices and fields[2] not in devices):
+                continue
+            disk_values[0] += int(fields[3])
+            disk_values[1] += int(fields[5]) * 512
+            disk_values[2] += int(fields[7])
+            disk_values[3] += int(fields[9]) * 512
+        for name, value in zip(
+            ("disk_reads", "disk_read_bytes", "disk_writes", "disk_write_bytes"),
+            disk_values,
+            strict=True,
+        ):
+            counters[name] = value
+    except OSError, ValueError:
+        pass
+
+    try:
+        received = transmitted = 0
+        for line in proc_net_dev.read_text().splitlines()[2:]:
+            interface, separator, payload = line.partition(":")
+            if not separator or interface.strip() == "lo":
+                continue
+            values = payload.split()
+            received += int(values[0])
+            transmitted += int(values[8])
+        counters["network_receive_bytes"] = received
+        counters["network_transmit_bytes"] = transmitted
+    except OSError, ValueError, IndexError:
+        pass
+
+    vm = _read_keyed_ints(proc_vmstat)
+    if "pgfault" in vm:
+        counters["page_faults"] = vm["pgfault"]
+    if "pgmajfault" in vm:
+        counters["major_page_faults"] = vm["pgmajfault"]
+    memory = _read_keyed_ints(proc_meminfo)
+    if "Mlocked" in memory:
+        gauges["system/pinned_memory_gib"] = memory["Mlocked"] * _KIB / _GIB
+    elif "Unevictable" in memory:
+        gauges["system/pinned_memory_gib"] = memory["Unevictable"] * _KIB / _GIB
+    return counters, gauges
+
+
+def system_counter_rates(current: dict[str, int], previous: dict[str, int], elapsed_s: float) -> dict[str, float]:
+    """Convert two host counter snapshots into O51 resource rates."""
+    if elapsed_s <= 0:
+        raise ValueError("counter interval must be positive")
+
+    def rate(name: str) -> float | None:
+        if name not in current or name not in previous:
+            return None
+        return max(0, current[name] - previous[name]) / elapsed_s
+
+    metrics: dict[str, float] = {}
+    total_delta = rate("cpu_total")
+    busy_delta = rate("cpu_busy")
+    if total_delta is not None and busy_delta is not None and total_delta > 0:
+        metrics["system/cpu/utilization"] = min(busy_delta / total_delta, 1.0)
+    mappings = {
+        "disk_read_bytes": ("system/disk/read_mib_s", 2**20),
+        "disk_write_bytes": ("system/disk/write_mib_s", 2**20),
+        "disk_reads": ("system/disk/read_iops", 1),
+        "disk_writes": ("system/disk/write_iops", 1),
+        "network_receive_bytes": ("system/network/read_mib_s", 2**20),
+        "network_transmit_bytes": ("system/network/write_mib_s", 2**20),
+        "page_faults": ("system/page_faults/s", 1),
+        "major_page_faults": ("system/major_page_faults/s", 1),
+    }
+    for counter, (metric, divisor) in mappings.items():
+        value = rate(counter)
+        if value is not None:
+            metrics[metric] = value / divisor
+    return metrics
+
+
 class HostMetricsSampler:
     """Collect host metrics off the training thread and expose the latest sample."""
 
@@ -278,6 +382,8 @@ class HostMetricsSampler:
         self._latest: dict[str, float] = {}
         self._sampled_at = 0.0
         self._errors = 0
+        self._last_counters: dict[str, int] = {}
+        self._last_counter_at = 0.0
 
     def start(self) -> None:
         """Start one daemon sampling thread."""
@@ -293,6 +399,12 @@ class HostMetricsSampler:
             started = time.monotonic()
             try:
                 sample = read_cgroup_memory()
+                counters, gauges = read_system_counters()
+                sample.update(gauges)
+                if self._last_counter_at:
+                    sample.update(system_counter_rates(counters, self._last_counters, started - self._last_counter_at))
+                self._last_counters = counters
+                self._last_counter_at = started
                 if started >= next_process_sample:
                     sample.update(read_process_tree_memory())
                     next_process_sample = started + self._process_interval_s

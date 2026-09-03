@@ -223,6 +223,71 @@ def test_loading_old_optimizer_state_retains_configured_update_clipping() -> Non
     assert adam_group["update_clip_threshold"] == 1.0
 
 
+def test_o51_muon_scale_is_unclamped_for_wide_logical_matrices() -> None:
+    assert muon.muon_matrix_scale(2, 8, mode="legacy") == 1.0
+    assert muon.muon_matrix_scale(2, 8, mode="o51") == 0.5
+    assert muon.muon_matrix_scale(8, 2, mode="legacy") == 2.0
+    assert muon.muon_matrix_scale(8, 2, mode="o51") == 2.0
+    with pytest.raises(ValueError, match="unknown"):
+        muon.muon_matrix_scale(2, 8, mode="other")  # type: ignore[arg-type]
+
+
+def test_fused_qkv_is_orthogonalized_as_three_logical_matrices() -> None:
+    generator = torch.Generator().manual_seed(31)
+    gradient = torch.randn(12, 4, generator=generator)
+    fused_momentum = torch.zeros_like(gradient)
+    separate_momentum = torch.zeros_like(gradient)
+
+    fused = muon.muon_update(
+        gradient.clone(),
+        fused_momentum,
+        scale_mode="o51",
+        logical_splits=3,
+    )
+    separate = torch.cat(
+        [
+            muon.muon_update(
+                chunk.clone(),
+                momentum,
+                scale_mode="o51",
+            )
+            for chunk, momentum in zip(gradient.chunk(3), separate_momentum.chunk(3), strict=True)
+        ]
+    )
+
+    torch.testing.assert_close(fused, separate)
+    torch.testing.assert_close(fused_momentum, separate_momentum)
+
+
+def test_loading_legacy_state_retains_configured_o51_muon_rule() -> None:
+    parameters = [torch.nn.Parameter(torch.ones(6, 2))]
+    source = muon.SingleDeviceMuonWithAuxAdam(
+        [{"params": parameters, "lr": 0.02, "momentum": 0.95, "weight_decay": 0.0, "use_muon": True}]
+    )
+    state = copy.deepcopy(source.state_dict())
+    assert "muon_scale_mode" not in state["param_groups"][0]
+    assert "logical_splits" not in state["param_groups"][0]
+
+    target_parameters = [torch.nn.Parameter(torch.ones(6, 2))]
+    target = muon.SingleDeviceMuonWithAuxAdam(
+        [
+            {
+                "params": target_parameters,
+                "lr": 0.02,
+                "momentum": 0.95,
+                "weight_decay": 0.0,
+                "use_muon": True,
+                "muon_scale_mode": "o51",
+                "logical_splits": 3,
+            }
+        ]
+    )
+    target.load_state_dict(state)
+
+    assert target.param_groups[0]["muon_scale_mode"] == "o51"
+    assert target.param_groups[0]["logical_splits"] == 3
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for batched Muon parity")
 def test_batched_muon_matches_scalar_cuda_update() -> None:
     reference_muon, reference_adam = _parameters()

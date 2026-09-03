@@ -1,4 +1,6 @@
+from collections import Counter
 from collections.abc import Iterator
+from itertools import islice
 from pathlib import Path
 from threading import Event
 
@@ -14,6 +16,7 @@ from hal.training.ego_stats import load_consolidated_stats
 from hal.training.replay_reservoir import OneBatchPrefetch
 from hal.training.replay_reservoir import PolicyReplayPackDataset
 from hal.training.replay_reservoir import ReplayPack
+from hal.training.replay_reservoir import ReplayPackBatchIterator
 from hal.training.replay_reservoir import ReplayReservoir
 from hal.training.replay_reservoir import _stable_replay_rng
 from hal.training.replay_reservoir import make_reservoir_loader
@@ -25,6 +28,28 @@ def _packs(n_replays: int, windows: int) -> Iterator[ReplayPack]:
     for replay in range(n_replays):
         values = tuple({"value": np.array([replay, window])} for window in range(windows))
         yield ReplayPack(str(replay), values)
+
+
+def _write_policy_mds(path: Path, *, replays: int, frames: int) -> None:
+    with MDSWriter(out=str(path / "train"), columns=POLICY_MDS_COLUMNS, compression="zstd") as writer:
+        for replay in range(replays):
+            sample: dict[str, object] = {
+                "policy_schema_version": POLICY_SCHEMA_VERSION,
+                "source_schema_version": 7,
+                "replay_id": f"replay-{replay:03d}",
+                "num_frames": frames,
+                "stage": 25,
+                "p1_character": 1,
+                "p2_character": 22,
+                "p1_nana_present": 0,
+                "p2_nana_present": 0,
+            }
+            for name, encoding in POLICY_MDS_COLUMNS.items():
+                if name in sample:
+                    continue
+                dtype = np.dtype(encoding.removeprefix("ndarray:"))
+                sample[name] = np.zeros(1 if "nana" in name else frames, dtype=dtype)
+            writer.write(sample)
 
 
 def test_reservoir_preserves_uniqueness_cooldown_and_metrics() -> None:
@@ -90,25 +115,7 @@ def test_reservoir_state_resumes_exact_next_batches() -> None:
 
 def test_real_streaming_reservoir_resume_is_tensor_exact(tmp_path: Path) -> None:
     frames = 12
-    with MDSWriter(out=str(tmp_path / "train"), columns=POLICY_MDS_COLUMNS, compression="zstd") as writer:
-        for replay in range(20):
-            sample: dict[str, object] = {
-                "policy_schema_version": POLICY_SCHEMA_VERSION,
-                "source_schema_version": 7,
-                "replay_id": f"replay-{replay:02d}",
-                "num_frames": frames,
-                "stage": 25,
-                "p1_character": 1,
-                "p2_character": 22,
-                "p1_nana_present": 0,
-                "p2_nana_present": 0,
-            }
-            for name, encoding in POLICY_MDS_COLUMNS.items():
-                if name in sample:
-                    continue
-                dtype = np.dtype(encoding.removeprefix("ndarray:"))
-                sample[name] = np.zeros(1 if "nana" in name else frames, dtype=dtype)
-            writer.write(sample)
+    _write_policy_mds(tmp_path, replays=20, frames=frames)
     stats = load_consolidated_stats(_DEV_STATS)
 
     def loader():
@@ -241,6 +248,203 @@ def test_compact_replay_labels_are_computed_once_then_sliced(monkeypatch) -> Non
     for window in packs[0].windows:
         pad = int(window["ctx_pad"])
         np.testing.assert_array_equal(window["ego_label"][pad:], window["frame"][pad:] + 100)
+
+
+def test_scalar_replay_labels_expand_only_inside_selected_slices(monkeypatch) -> None:
+    frames = 40
+    compact = {"replay_id": "r", "source_schema_version": 7, "num_frames": frames}
+
+    def decode_slices(row, ranges):
+        del row
+        return tuple(
+            {
+                "schema_version": 7,
+                "frame": np.arange(start, stop, dtype=np.int32),
+                "p1_player_id": np.zeros(stop - start, dtype=np.int32),
+                "p2_player_id": np.zeros(stop - start, dtype=np.int32),
+            }
+            for start, stop in ranges
+        )
+
+    monkeypatch.setattr(replay_reservoir, "decode_policy_replay_slices", decode_slices)
+    packs = list(
+        PolicyReplayPackDataset(
+            [compact],
+            L_ctx=4,
+            L_chunk=2,
+            seed=4,
+            windows_per_replay=2,
+            schema_version=7,
+            projection=None,
+            replay_labels=lambda replay: {
+                "p1_identity": np.asarray(7, dtype=np.int32),
+                "p2_identity": np.asarray(11, dtype=np.int32),
+            },
+            require_full_context=True,
+        )
+    )
+
+    assert len(packs) == 1
+    for window in packs[0].windows:
+        identity = window["ego_identity"]
+        assert identity.shape == (6,)
+        assert np.unique(identity).item() in (7, 11)
+
+
+def test_four_windows_are_deterministic_and_non_overlapping(monkeypatch) -> None:
+    frames = 80
+    compact = {"replay_id": "r", "source_schema_version": 7, "num_frames": frames}
+
+    def decode_slices(row, ranges):
+        del row
+        return tuple(
+            {
+                "schema_version": 7,
+                "frame": np.arange(start, stop, dtype=np.int32),
+                "p1_value": np.arange(start, stop, dtype=np.float32),
+                "p2_value": -np.arange(start, stop, dtype=np.float32),
+            }
+            for start, stop in ranges
+        )
+
+    monkeypatch.setattr(replay_reservoir, "decode_policy_replay_slices", decode_slices)
+
+    def run() -> ReplayPack:
+        return next(
+            iter(
+                PolicyReplayPackDataset(
+                    [compact],
+                    L_ctx=4,
+                    L_chunk=2,
+                    seed=17,
+                    windows_per_replay=4,
+                    schema_version=7,
+                    projection=None,
+                    require_full_context=True,
+                )
+            )
+        )
+
+    first = run()
+    second = run()
+    assert len(first.windows) == 4
+    first_ranges = [(int(window["frame"][0]), int(window["frame"][-1]) + 1) for window in first.windows]
+    second_ranges = [(int(window["frame"][0]), int(window["frame"][-1]) + 1) for window in second.windows]
+    assert first_ranges == second_ranges
+    ordered = sorted(first_ranges)
+    for (_, stop), (start, _) in zip(ordered[:-1], ordered[1:], strict=True):
+        assert stop <= start
+
+
+def test_required_pack_rejects_a_replay_that_cannot_supply_four_windows() -> None:
+    compact = {"replay_id": "short", "source_schema_version": 7, "num_frames": 12}
+    packs = PolicyReplayPackDataset(
+        [compact],
+        L_ctx=4,
+        L_chunk=2,
+        seed=17,
+        windows_per_replay=4,
+        schema_version=7,
+        projection=None,
+        require_pack=True,
+        require_full_context=True,
+    )
+
+    with pytest.raises(ValueError, match="emits 1 of the required 4 windows"):
+        next(iter(packs))
+
+
+def test_replay_pack_batch_iterator_persists_worker_lookahead_and_visits() -> None:
+    visits: Counter[str] = Counter()
+    source = iter([(ReplayPack("a", ({"x": np.zeros(1)},)), ReplayPack("b", ({"x": np.ones(1)},)))])
+    packs = ReplayPackBatchIterator(source, visits)
+
+    assert next(packs).replay_id == "a"
+    state = packs.state_dict()
+    assert visits == {"a": 1, "b": 1}
+    resumed = ReplayPackBatchIterator(iter(()), visits)
+    resumed.load_state_dict(state)
+    assert next(resumed).replay_id == "b"
+
+
+def _o51_style_loader(path: Path, *, workers: int, pack_batch: int):
+    return make_reservoir_loader(
+        str(path),
+        "train",
+        stats=load_consolidated_stats(_DEV_STATS),
+        L_ctx=4,
+        L_chunk=2,
+        batch_size=2,
+        seed=23,
+        reservoir_capacity=8,
+        remote=None,
+        shuffle=True,
+        shuffle_seed=23,
+        shuffle_algo="py1s",
+        shuffle_block_size=32,
+        predownload=8 * pack_batch,
+        windows_per_replay=4,
+        prefetch_batches=0,
+        num_workers=workers,
+        prefetch_factor=1,
+        pin_memory=False,
+        schema_version=7,
+        replay_pack_batch_size=pack_batch,
+        worker_independent_resume=True,
+        limit_worker_threads=True,
+        require_full_context=True,
+    )
+
+
+def _batch_signature(batch) -> tuple[tuple[str, ...], torch.Tensor, torch.Tensor]:
+    return batch.replay_ids, batch.context.ctx_pad.clone(), batch.target.clone()
+
+
+def test_pack_batch_is_passed_to_mosaic_and_dataloader_without_changing_draws(tmp_path: Path) -> None:
+    _write_policy_mds(tmp_path, replays=128, frames=80)
+    small = _o51_style_loader(tmp_path, workers=0, pack_batch=2)
+    large = _o51_style_loader(tmp_path, workers=0, pack_batch=4)
+    assert small._pack_loader.batch_size == small._dataset.batch_size == 2
+    assert large._pack_loader.batch_size == large._dataset.batch_size == 4
+
+    small_batches = [_batch_signature(batch) for batch in islice(small, 8)]
+    large_batches = [_batch_signature(batch) for batch in islice(large, 8)]
+    for got, want in zip(small_batches, large_batches, strict=True):
+        assert got[0] == want[0]
+        assert torch.equal(got[1], want[1])
+        assert torch.equal(got[2], want[2])
+
+
+def test_resumption_is_tensor_exact_when_worker_count_changes(tmp_path: Path) -> None:
+    _write_policy_mds(tmp_path, replays=64, frames=80)
+    uninterrupted = _o51_style_loader(tmp_path, workers=2, pack_batch=4)
+    iterator = iter(uninterrupted)
+    for _ in range(5):
+        next(iterator)
+    state = uninterrupted.state_dict()
+    expected = [_batch_signature(next(iterator)) for _ in range(8)]
+
+    resumed = _o51_style_loader(tmp_path, workers=0, pack_batch=4)
+    resumed.load_state_dict(state)
+    resumed_iterator = iter(resumed)
+    actual = [_batch_signature(next(resumed_iterator)) for _ in range(8)]
+
+    for got, want in zip(actual, expected, strict=True):
+        assert got[0] == want[0]
+        assert torch.equal(got[1], want[1])
+        assert torch.equal(got[2], want[2])
+    assert state["visit_counters"]
+
+    chained_state = resumed.state_dict()
+    chained_expected = [_batch_signature(next(iterator)) for _ in range(5)]
+    chained = _o51_style_loader(tmp_path, workers=1, pack_batch=4)
+    chained.load_state_dict(chained_state)
+    chained_iterator = iter(chained)
+    chained_actual = [_batch_signature(next(chained_iterator)) for _ in range(5)]
+    for got, want in zip(chained_actual, chained_expected, strict=True):
+        assert got[0] == want[0]
+        assert torch.equal(got[1], want[1])
+        assert torch.equal(got[2], want[2])
 
 
 def test_replay_labels_reject_transform_and_wrong_length(monkeypatch) -> None:

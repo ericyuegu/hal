@@ -97,7 +97,7 @@ class Args:
     memory_limit_gib: int | None = 384
     """Hard system-memory limit in GiB; None leaves the Modal default."""
     disk_gib: int = 2048
-    """Ephemeral SSD in GiB for datasets, the emulator, and compiler scratch."""
+    """Ephemeral SSD in GiB. O51 is raised to its required 3 TiB minimum automatically."""
     image: str = IMAGE
     """Dependency image imported from a registry. The clean local source is copied on top."""
     cloud: str | None = None
@@ -353,6 +353,13 @@ def gpu_request(gpu: str) -> str | list[str]:
     return choices[0] if len(choices) == 1 else choices
 
 
+def requested_disk_gib(args: Args) -> int:
+    """Keep legacy launch defaults while enforcing O51's full-tier disk floor."""
+    script = experiment_script(args.cmd)
+    minimum = 3072 if script is not None and script.name == "051_correct_parameterization.py" else 0
+    return max(args.disk_gib, minimum)
+
+
 def function_resources(args: Args) -> FunctionResources:
     """Modal resource values in the units expected by ``App.function``."""
     memory_request = args.memory_gib * 1024
@@ -361,7 +368,7 @@ def function_resources(args: Args) -> FunctionResources:
         "gpu": gpu_request(args.gpu),
         "cpu": (args.cpu, args.cpu_limit),
         "memory": memory,
-        "ephemeral_disk": args.disk_gib * 1024,
+        "ephemeral_disk": requested_disk_gib(args) * 1024,
         "timeout": args.timeout_hours * 60 * 60,
         "startup_timeout": args.startup_timeout_minutes * 60,
         "cloud": args.cloud,
@@ -814,7 +821,8 @@ def _print_request(
     loguru.logger.info(
         f"gpu={resources['gpu']} cpu={resources['cpu']} "
         f"memory=({args.memory_gib},{args.memory_limit_gib})GiB "
-        f"ephemeral_ssd={args.disk_gib}GiB cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
+        f"ephemeral_ssd={resources['ephemeral_disk'] / 1024:g}GiB "
+        f"cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
     )
     loguru.logger.info(
         f"attempt_timeout={args.timeout_hours}h retries={args.max_retries} secret={args.secret!r} "

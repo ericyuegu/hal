@@ -1,6 +1,8 @@
 """Replay-aware batching for compact policy datasets."""
 
 import hashlib
+import os
+from collections import Counter
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -111,6 +113,46 @@ class ReplayPack:
 class ReservoirBatch:
     replay_ids: tuple[str, ...]
     windows: tuple[dict[str, np.ndarray], ...]
+
+
+class ReplayPackBatchIterator(Iterator[ReplayPack]):
+    """Flatten worker-side pack batches while retaining checkpointable lookahead."""
+
+    def __init__(self, source: Iterator[object], visits: Counter[str]) -> None:
+        self._source = source
+        self._visits = visits
+        self._pending: deque[ReplayPack] = deque()
+        self.received_packs = 0
+
+    def __iter__(self) -> ReplayPackBatchIterator:
+        return self
+
+    def __next__(self) -> ReplayPack:
+        while not self._pending:
+            value = next(self._source)
+            if isinstance(value, ReplayPack):
+                batch = (value,)
+            elif isinstance(value, list | tuple) and all(isinstance(pack, ReplayPack) for pack in value):
+                batch = tuple(value)
+            else:
+                raise TypeError(f"pack loader yielded {type(value).__name__}, expected ReplayPack batch")
+            if not batch:
+                continue
+            self.received_packs += len(batch)
+            for pack in batch:
+                self._visits[pack.replay_id] += 1
+            self._pending.extend(batch)
+        return self._pending.popleft()
+
+    def state_dict(self) -> dict[str, object]:
+        """Return packs fetched by a worker batch but not yet read by the reservoir."""
+        return {"pending": tuple(self._pending)}
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        pending = state.get("pending", ())
+        if not isinstance(pending, tuple) or any(not isinstance(pack, ReplayPack) for pack in pending):
+            raise ValueError("pending replay-pack state is invalid")
+        self._pending = deque(pending)
 
 
 class ReplayReservoir:
@@ -273,11 +315,15 @@ class PolicyReplayPackDataset(IterableDataset):
         replay_labels: ReplayLabels | None = None,
         window_transform: WindowTransform | None = None,
         replay_filter: ReplayFilter | None = None,
+        require_pack: bool = False,
+        require_full_context: bool = False,
     ) -> None:
         if replay_format not in ("policy", "policy-world"):
             raise ValueError(f"replay reservoir requires a compact format, got {replay_format!r}")
         if replay_transform is not None and replay_labels is not None:
             raise ValueError("replay_transform and replay_labels are mutually exclusive")
+        if not isinstance(windows_per_replay, int) or isinstance(windows_per_replay, bool) or windows_per_replay < 1:
+            raise ValueError("windows_per_replay must be a positive integer")
         self._dataset = dataset
         self._L_ctx = L_ctx
         self._L_chunk = L_chunk
@@ -293,6 +339,8 @@ class PolicyReplayPackDataset(IterableDataset):
         self._replay_labels = replay_labels
         self._window_transform = window_transform
         self._replay_filter = replay_filter
+        self._require_pack = require_pack
+        self._require_full_context = require_full_context
         self._epoch = 0
         self._current_epoch: int | None = None
         self._source_samples = 0
@@ -329,8 +377,19 @@ class PolicyReplayPackDataset(IterableDataset):
             rng = _stable_replay_rng(self._seed, epoch, replay_id)
             starts = [
                 int(chunk_start) - self._L_ctx
-                for chunk_start in _choose_chunk_starts(frames, self._L_ctx, self._L_chunk, self._K, rng)
+                for chunk_start in _choose_chunk_starts(
+                    frames,
+                    self._L_ctx,
+                    self._L_chunk,
+                    self._K,
+                    rng,
+                    require_full_context=self._require_full_context,
+                )
             ]
+            if self._require_pack and len(starts) != self._K:
+                raise ValueError(
+                    f"replay {replay_id!r} with {frames} frames emits {len(starts)} of the required {self._K} windows"
+                )
             if not starts:
                 continue
             ego_prefixes = ["p1" if rng.random() < 0.5 else "p2" for _ in starts]
@@ -343,12 +402,25 @@ class PolicyReplayPackDataset(IterableDataset):
                     if self._replay_labels is None
                     else {name: np.asarray(value) for name, value in self._replay_labels(compact).items()}
                 )
-                wrong_labels = {name: value.shape for name, value in labels.items() if value.shape != (frames,)}
+                wrong_labels = {
+                    name: value.shape for name, value in labels.items() if value.shape not in ((), (frames,))
+                }
                 if wrong_labels:
-                    raise ValueError(f"replay labels have invalid shapes {wrong_labels}; expected {(frames,)}")
+                    raise ValueError(
+                        f"replay labels have invalid shapes {wrong_labels}; expected scalar or {(frames,)}"
+                    )
                 for start, ego_prefix, frame_range, sample in zip(starts, ego_prefixes, ranges, samples, strict=True):
                     range_start, range_stop = frame_range
-                    sample.update({name: value[range_start:range_stop] for name, value in labels.items()})
+                    sample.update(
+                        {
+                            name: (
+                                np.full(range_stop - range_start, value.item(), dtype=value.dtype)
+                                if value.shape == ()
+                                else value[range_start:range_stop]
+                            )
+                            for name, value in labels.items()
+                        }
+                    )
                     pad = max(0, -start)
                     window = _make_window(
                         sample,
@@ -400,6 +472,7 @@ class ReservoirLoader:
         dataset: StreamingDataset,
         source_names: tuple[str, ...],
         packs: PolicyReplayPackDataset,
+        worker_independent_resume: bool,
     ) -> None:
         if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
             raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
@@ -417,9 +490,12 @@ class ReservoirLoader:
         self._dataset = dataset
         self._source_names = source_names
         self._packs = packs
+        self._worker_independent_resume = worker_independent_resume
         self._epoch = 0
         self._reservoir: ReplayReservoir | None = None
+        self._pack_batches: ReplayPackBatchIterator | None = None
         self._resume_state: dict[str, Any] | None = None
+        self._visits: Counter[str] = Counter()
         self.last_epoch_stats: dict[str, int] | None = None
 
     @property
@@ -432,8 +508,11 @@ class ReservoirLoader:
         }
 
     def __iter__(self) -> Iterator[object]:
+        pack_batches = ReplayPackBatchIterator(iter(self._pack_loader), self._visits)
+        if self._resume_state is not None:
+            pack_batches.load_state_dict(self._resume_state.get("pack_batches", {}))
         reservoir = ReplayReservoir(
-            iter(self._pack_loader),
+            pack_batches,
             batch_size=self._batch_size,
             capacity=self._capacity,
             seed=self._seed + self._epoch,
@@ -442,6 +521,7 @@ class ReservoirLoader:
             reservoir.load_state_dict(self._resume_state["reservoir"])
             self._resume_state = None
         self._reservoir = reservoir
+        self._pack_batches = pack_batches
         self._epoch += 1
         batches = self._batches(reservoir)
         if self._prefetch_batches:
@@ -449,31 +529,45 @@ class ReservoirLoader:
         return batches
 
     def state_dict(self) -> dict[str, Any]:
-        """Return an exact cursor when workers and background prefetch are off."""
-        if self._pack_loader.num_workers != 0 or self._prefetch_batches:
-            raise RuntimeError("exact reservoir checkpoints require num_workers=0 and prefetch_batches=0")
-        if self._reservoir is None or self._packs.current_epoch is None:
+        """Return the Mosaic cursor, pack lookahead, reservoir, visits, and RNG state."""
+        if self._prefetch_batches:
+            raise RuntimeError("exact reservoir checkpoints require prefetch_batches=0")
+        if self._pack_loader.num_workers != 0 and not self._worker_independent_resume:
+            raise RuntimeError("exact worker resume must be enabled when num_workers is nonzero")
+        if self._reservoir is None or self._pack_batches is None:
             raise RuntimeError("the reservoir loader has not emitted a batch")
+        if self._worker_independent_resume:
+            source_samples = self._pack_batches.received_packs
+        else:
+            source_samples = self._packs.source_samples
         return {
-            "schema": 1,
+            "schema": 2,
             "loader_epoch": self._epoch,
-            "pack_epoch": self._packs.current_epoch,
-            "mds": self._dataset.state_dict(self._packs.source_samples, from_beginning=False),
+            "pack_epoch": self._epoch - 1,
+            "mds": self._dataset.state_dict(source_samples, from_beginning=False),
+            "pack_batches": self._pack_batches.state_dict(),
             "reservoir": self._reservoir.state_dict(),
+            "visit_counters": dict(self._visits),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Schedule an exact restore before the next iterator is created."""
-        if state.get("schema") != 1:
+        if state.get("schema") not in (1, 2):
             raise ValueError(f"unsupported reservoir-loader state schema {state.get('schema')!r}")
-        if self._pack_loader.num_workers != 0 or self._prefetch_batches:
-            raise RuntimeError("exact reservoir checkpoints require num_workers=0 and prefetch_batches=0")
+        if self._prefetch_batches:
+            raise RuntimeError("exact reservoir checkpoints require prefetch_batches=0")
+        if self._pack_loader.num_workers != 0 and not self._worker_independent_resume:
+            raise RuntimeError("exact worker resume must be enabled when num_workers is nonzero")
         if self._reservoir is not None:
             raise RuntimeError("load reservoir state before creating its iterator")
         self._dataset.load_state_dict(state["mds"])
         self._packs.resume_epoch(int(state["pack_epoch"]))
         self._epoch = int(state["loader_epoch"]) - 1
-        self._resume_state = state
+        self._visits = Counter({str(name): int(count) for name, count in state.get("visit_counters", {}).items()})
+        self._resume_state = {
+            **state,
+            "pack_batches": state.get("pack_batches", {"pending": ()}),
+        }
 
     def _batches(self, reservoir: ReplayReservoir) -> Iterator[object]:
         from hal.training.dataloader import collate_train_batch
@@ -504,6 +598,13 @@ def _identity(value: Any) -> Any:
     return value
 
 
+def _limit_worker_threads(_worker_id: int) -> None:
+    """Keep one loader worker from creating a nested Torch/BLAS thread pool."""
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[name] = "1"
+    torch.set_num_threads(1)
+
+
 def make_reservoir_loader(
     data_root: str | None,
     split: str,
@@ -521,9 +622,11 @@ def make_reservoir_loader(
     shuffle_block_size: int | None = None,
     shuffle: bool | None = None,
     shuffle_seed: int | None = None,
+    shuffle_algo: str | None = None,
     num_workers: int = 4,
     prefetch_factor: int = 2,
     predownload: int = 512,
+    download_retry: int = 2,
     windows_per_replay: int = 4,
     prefetch_batches: int = 0,
     pin_memory: bool | None = None,
@@ -536,6 +639,10 @@ def make_reservoir_loader(
     batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
     replay_format: ReplayFormat = "policy",
     replay_filter: ReplayFilter | None = None,
+    replay_pack_batch_size: int = 1,
+    worker_independent_resume: bool = False,
+    limit_worker_threads: bool = False,
+    require_full_context: bool = False,
 ) -> ReservoirLoader:
     """Build a compact replay loader with replay-aware batches.
 
@@ -547,6 +654,14 @@ def make_reservoir_loader(
         raise ValueError(f"predownload must be positive, got {predownload}")
     if not isinstance(prefetch_batches, int) or isinstance(prefetch_batches, bool) or prefetch_batches < 0:
         raise ValueError(f"prefetch_batches must be a non-negative integer, got {prefetch_batches!r}")
+    if (
+        not isinstance(replay_pack_batch_size, int)
+        or isinstance(replay_pack_batch_size, bool)
+        or replay_pack_batch_size < 1
+    ):
+        raise ValueError(f"replay_pack_batch_size must be a positive integer, got {replay_pack_batch_size!r}")
+    if worker_independent_resume and replay_filter is not None:
+        raise ValueError("worker-independent resume requires a materialized pool, not a runtime replay filter")
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
     dataset, source_names = _make_streaming_dataset(
@@ -560,7 +675,9 @@ def make_reservoir_loader(
         cache_limit=cache_limit,
         shuffle_block_size=shuffle_block_size,
         predownload=predownload if remote or sources is not None else None,
-        batch_size=1,
+        batch_size=replay_pack_batch_size,
+        shuffle_algo=shuffle_algo,
+        download_retry=download_retry,
     )
     packs = PolicyReplayPackDataset(
         dataset,
@@ -575,19 +692,23 @@ def make_reservoir_loader(
         replay_labels=replay_labels,
         window_transform=window_transform,
         replay_filter=replay_filter,
+        require_pack=worker_independent_resume,
+        require_full_context=require_full_context,
     )
     if num_workers > 0:
         torch.multiprocessing.set_sharing_strategy("file_system")
     generator = torch.Generator().manual_seed(seed)
     pack_loader = DataLoader(
         packs,
-        batch_size=None,
+        batch_size=replay_pack_batch_size,
         num_workers=num_workers,
         collate_fn=_identity,
         persistent_workers=(num_workers > 0),
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=False,
         generator=generator,
+        worker_init_fn=_limit_worker_threads if limit_worker_threads else None,
+        in_order=True,
     )
     return ReservoirLoader(
         pack_loader,
@@ -604,4 +725,5 @@ def make_reservoir_loader(
         dataset=dataset,
         source_names=source_names,
         packs=packs,
+        worker_independent_resume=worker_independent_resume,
     )

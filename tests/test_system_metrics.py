@@ -112,3 +112,89 @@ def test_read_cache_usage_sums_multiple_roots(tmp_path: Path) -> None:
     assert metrics["system/cache/apparent_gib"] == pytest.approx(3072 / 2**30)
     assert metrics["system/cache/allocated_gib"] >= metrics["system/cache/apparent_gib"]
     assert metrics["system/cache/file_count"] == 2.0
+
+
+def test_read_system_counters_covers_cpu_disk_network_faults_and_pinned_memory(tmp_path: Path) -> None:
+    proc_stat = tmp_path / "stat"
+    proc_stat.write_text("cpu  100 10 20 400 30 5 3 2\n")
+    proc_diskstats = tmp_path / "diskstats"
+    proc_diskstats.write_text(
+        "259 0 nvme0n1 11 0 101 0 13 0 103 0 0 0 0 0\n259 1 nvme0n1p1 7 0 70 0 9 0 90 0 0 0 0 0\n"
+    )
+    proc_net_dev = tmp_path / "net_dev"
+    proc_net_dev.write_text(
+        "Inter-| Receive | Transmit\n"
+        " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n"
+        " lo: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n"
+        " eth0: 300 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0\n"
+    )
+    proc_vmstat = tmp_path / "vmstat"
+    proc_vmstat.write_text("pgfault 1200\npgmajfault 12\n")
+    proc_meminfo = tmp_path / "meminfo"
+    proc_meminfo.write_text("Mlocked: 1048576 kB\nUnevictable: 2097152 kB\n")
+    sys_block = tmp_path / "block"
+    (sys_block / "nvme0n1").mkdir(parents=True)
+
+    counters, gauges = system_metrics.read_system_counters(
+        proc_stat=proc_stat,
+        proc_diskstats=proc_diskstats,
+        proc_net_dev=proc_net_dev,
+        proc_vmstat=proc_vmstat,
+        proc_meminfo=proc_meminfo,
+        sys_block=sys_block,
+    )
+
+    assert counters == {
+        "cpu_total": 570,
+        "cpu_busy": 140,
+        "disk_reads": 11,
+        "disk_read_bytes": 101 * 512,
+        "disk_writes": 13,
+        "disk_write_bytes": 103 * 512,
+        "network_receive_bytes": 300,
+        "network_transmit_bytes": 500,
+        "page_faults": 1200,
+        "major_page_faults": 12,
+    }
+    assert gauges["system/pinned_memory_gib"] == 1.0
+
+
+def test_system_counter_rates_are_clamped_and_unit_scaled() -> None:
+    previous = {
+        "cpu_total": 100,
+        "cpu_busy": 30,
+        "disk_read_bytes": 2**20,
+        "disk_write_bytes": 4 * 2**20,
+        "disk_reads": 10,
+        "disk_writes": 20,
+        "network_receive_bytes": 3 * 2**20,
+        "network_transmit_bytes": 5 * 2**20,
+        "page_faults": 100,
+        "major_page_faults": 10,
+    }
+    current = {
+        "cpu_total": 200,
+        "cpu_busy": 70,
+        "disk_read_bytes": 5 * 2**20,
+        "disk_write_bytes": 2 * 2**20,
+        "disk_reads": 18,
+        "disk_writes": 30,
+        "network_receive_bytes": 7 * 2**20,
+        "network_transmit_bytes": 11 * 2**20,
+        "page_faults": 140,
+        "major_page_faults": 14,
+    }
+
+    metrics = system_metrics.system_counter_rates(current, previous, 2.0)
+
+    assert metrics["system/cpu/utilization"] == 0.4
+    assert metrics["system/disk/read_mib_s"] == 2.0
+    assert metrics["system/disk/write_mib_s"] == 0.0
+    assert metrics["system/disk/read_iops"] == 4.0
+    assert metrics["system/disk/write_iops"] == 5.0
+    assert metrics["system/network/read_mib_s"] == 2.0
+    assert metrics["system/network/write_mib_s"] == 3.0
+    assert metrics["system/page_faults/s"] == 20.0
+    assert metrics["system/major_page_faults/s"] == 2.0
+    with pytest.raises(ValueError, match="positive"):
+        system_metrics.system_counter_rates(current, previous, 0.0)
