@@ -18,12 +18,13 @@ from hal.training.o51_data import D0
 EXPERIMENT = "experiments/051_correct_parameterization.py"
 INIT_STD_GRID = (0.5, 1.0, 2.0)
 READOUT_GRID = ("zero", "mup-normal")
-MUON_LR_GRID = (0.014, 0.028, 0.056)
-ADAM_LR_GRID = (2.125e-4, 4.25e-4, 8.5e-4)
+MUON_LR_GRID = (0.007, 0.014, 0.028)
+ADAM_LR_GRID = (1.0625e-4, 2.125e-4, 4.25e-4)
 DECAY_GRID = (0.0, 0.001, 0.01)
 BATCH_GRID = (128, 256, 512, 1024)
 TIER_SCALES = (1, 2, 4, 8)
 SUPERVISED_POSITIONS_PER_WINDOW = 128
+GRID_EVAL_MATCHUPS = 96
 _ARM_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 
 Stage = Literal[
@@ -37,6 +38,7 @@ Stage = Literal[
     "seed-repeat",
     "duration",
 ]
+GridStage = Literal["lr", "decay"]
 
 TERMINAL_RUN_STATES = frozenset({"finished", "failed", "crashed", "killed"})
 
@@ -261,6 +263,29 @@ class ValidationSelection:
     excluded: tuple[tuple[str, tuple[str, ...]], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ClosedLoopOutcome:
+    """Final 96-matchup evidence for one validation-screened arm."""
+
+    arm_id: str
+    run_path: str
+    state: str
+    final_update: float | None
+    boots: float | None
+    crashed: float | None
+    net_stock_per_min: float | None
+    net_stock_lcb: float | None
+    net_dmg_per_min: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedLoopSelection:
+    """Deterministic closed-loop ranking of a grid's two finalists."""
+
+    winner: SweepArm
+    ranking: tuple[ClosedLoopOutcome, ...]
+
+
 def _finite(value: float | None) -> bool:
     return value is not None and math.isfinite(value)
 
@@ -325,6 +350,57 @@ def select_validation_winner(
     )
 
 
+def select_closed_loop_winner(
+    arms: tuple[SweepArm, ...],
+    validation: ValidationSelection,
+    outcomes: dict[str, ClosedLoopOutcome],
+) -> ClosedLoopSelection:
+    """Adjudicate the two best validation arms by complete closed-loop evidence."""
+    finalists = validation.ranking[:2]
+    if len(finalists) != 2:
+        raise ValueError("closed-loop adjudication needs two eligible validation finalists")
+    expected = {outcome.arm_id for outcome in finalists}
+    actual = set(outcomes)
+    if actual != expected:
+        raise ValueError(
+            f"closed-loop outcomes do not match the top two validation arms: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+
+    by_id = {arm.arm_id: arm for arm in arms}
+    validation_by_id = {outcome.arm_id: outcome for outcome in finalists}
+    failures: list[str] = []
+    for arm_id in sorted(expected):
+        arm = by_id[arm_id]
+        outcome = outcomes[arm_id]
+        final_update = arm.target_positions // (arm.treatment.batch_size * SUPERVISED_POSITIONS_PER_WINDOW)
+        if outcome.state != "finished":
+            failures.append(f"{arm_id}: evaluation state is {outcome.state}")
+        if outcome.final_update != final_update:
+            failures.append(f"{arm_id}: evaluation does not target the final checkpoint")
+        if outcome.boots != GRID_EVAL_MATCHUPS:
+            failures.append(f"{arm_id}: evaluation did not complete {GRID_EVAL_MATCHUPS} boots")
+        if outcome.crashed != 0:
+            failures.append(f"{arm_id}: evaluation had crashes")
+        for name in ("net_stock_per_min", "net_stock_lcb", "net_dmg_per_min"):
+            if not _finite(getattr(outcome, name)):
+                failures.append(f"{arm_id}: {name} is missing or non-finite")
+    if failures:
+        raise ValueError("invalid closed-loop evidence: " + "; ".join(failures))
+
+    ranking = sorted(
+        outcomes.values(),
+        key=lambda outcome: (
+            -float(outcome.net_stock_lcb),
+            -float(outcome.net_stock_per_min),
+            -float(outcome.net_dmg_per_min),
+            validation_by_id[outcome.arm_id].val_nll,
+            outcome.arm_id,
+        ),
+    )
+    return ClosedLoopSelection(winner=by_id[ranking[0].arm_id], ranking=tuple(ranking))
+
+
 def _safe_float(value: float) -> str:
     return f"{value:g}".replace("-", "n").replace(".", "p")
 
@@ -370,9 +446,9 @@ def initialization_screen_arms(center: Treatment | None = None) -> tuple[SweepAr
 
 
 def initialization_extension_arms(center: Treatment) -> tuple[SweepArm, ...]:
-    """Run one selected initialization treatment to its fresh D0 endpoint."""
+    """Run one selected initialization treatment on the 16-layer proxy."""
     suffix = f"h{_safe_float(center.hidden_std_multiplier)}-{center.readout_init}"
-    return (_arm("initialization-extension", suffix, "base", center),)
+    return (_arm("initialization-extension", suffix, "proxy", center),)
 
 
 def lr_arms(center: Treatment) -> tuple[SweepArm, ...]:
@@ -380,7 +456,7 @@ def lr_arms(center: Treatment) -> tuple[SweepArm, ...]:
         _arm(
             "lr",
             f"m{_safe_float(muon)}-a{_safe_float(adam)}",
-            "base",
+            "proxy",
             replace(center, muon_lr=muon, adam_lr=adam),
         )
         for muon in MUON_LR_GRID
@@ -393,7 +469,7 @@ def decay_arms(center: Treatment) -> tuple[SweepArm, ...]:
         _arm(
             "decay",
             f"m{_safe_float(muon)}-a{_safe_float(adam)}",
-            "base",
+            "proxy",
             replace(center, muon_weight_decay=muon, adam_weight_decay=adam),
         )
         for muon in DECAY_GRID
@@ -406,7 +482,7 @@ def batch_arms(center: Treatment) -> tuple[SweepArm, ...]:
         _arm(
             "batch",
             f"b{batch}-muon-{rule}",
-            "base",
+            "proxy",
             replace(center, batch_size=batch, muon_batch_scaling=rule),
         )
         for batch in BATCH_GRID

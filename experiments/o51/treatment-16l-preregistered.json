@@ -1,0 +1,20 @@
+{
+  "adam_lr": 0.0002125,
+  "adam_weight_decay": 0.001,
+  "batch_size": 512,
+  "compile_mode": "reduce-overhead",
+  "depth_alpha": 0.5,
+  "hidden_std_multiplier": 0.5,
+  "loader_prefetch_factor": 2,
+  "muon_batch_scaling": "fixed",
+  "muon_duration_scaling": "fixed",
+  "muon_lr": 0.014,
+  "muon_weight_decay": 0.001,
+  "num_workers": 16,
+  "predownload": 1024,
+  "readout_init": "mup-normal",
+  "replay_pack_batch_size": 64,
+  "shuffle_algo": "py1s",
+  "shuffle_block_size": 8192,
+  "temporal_attention_chunk": 16384
+}

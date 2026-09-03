@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hal.training.o51_data import D0
+from hal.training.o51_sweep import ClosedLoopOutcome
 from hal.training.o51_sweep import SweepArm
 from hal.training.o51_sweep import Treatment
 from hal.training.o51_sweep import ValidationOutcome
@@ -26,6 +27,7 @@ from hal.training.o51_sweep import lr_arms
 from hal.training.o51_sweep import mid_search_arms
 from hal.training.o51_sweep import proxy_transfer_arms
 from hal.training.o51_sweep import seed_repeat_arms
+from hal.training.o51_sweep import select_closed_loop_winner
 from hal.training.o51_sweep import select_validation_winner
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +117,24 @@ def test_declared_stage_grid_has_exact_arm_count(factory, count: int) -> None:
 
 def test_batch_grid_excludes_failed_2048_shape() -> None:
     assert {arm.treatment.batch_size for arm in batch_arms(Treatment())} == {128, 256, 512, 1024}
+
+
+def test_authoritative_tuning_holds_depth_at_the_16_layer_proxy() -> None:
+    arms = (
+        *initialization_extension_arms(Treatment()),
+        *lr_arms(Treatment()),
+        *decay_arms(Treatment()),
+        *batch_arms(Treatment()),
+    )
+
+    assert {arm.level for arm in arms} == {"proxy"}
+
+
+def test_lr_grid_is_centered_on_the_best_preliminary_8_layer_rates() -> None:
+    treatments = {arm.treatment for arm in lr_arms(Treatment())}
+
+    assert {treatment.muon_lr for treatment in treatments} == {0.007, 0.014, 0.028}
+    assert {treatment.adam_lr for treatment in treatments} == {1.0625e-4, 2.125e-4, 4.25e-4}
 
 
 def test_every_arm_uses_an_exact_matched_data_endpoint() -> None:
@@ -233,11 +253,57 @@ def test_validation_selection_waits_for_every_arm_to_be_terminal() -> None:
         select_validation_winner(arms, outcomes)
 
 
+def _closed_loop_outcome(
+    arm: SweepArm,
+    *,
+    net_stock_lcb: float,
+    net_stock_per_min: float,
+) -> ClosedLoopOutcome:
+    final_update = arm.target_positions // (arm.treatment.batch_size * 128)
+    return ClosedLoopOutcome(
+        arm_id=arm.arm_id,
+        run_path=f"entity/project/{arm.arm_id}-eval96",
+        state="finished",
+        final_update=float(final_update),
+        boots=96.0,
+        crashed=0.0,
+        net_stock_per_min=net_stock_per_min,
+        net_stock_lcb=net_stock_lcb,
+        net_dmg_per_min=10.0,
+    )
+
+
+def test_closed_loop_adjudication_uses_only_the_two_validation_finalists() -> None:
+    arms = lr_arms(Treatment())[:3]
+    validation = select_validation_winner(
+        arms,
+        {
+            arms[0].arm_id: _outcome(arms[0], val_nll=1.0),
+            arms[1].arm_id: _outcome(arms[1], val_nll=1.1),
+            arms[2].arm_id: _outcome(arms[2], val_nll=1.2),
+        },
+    )
+    evaluations = {
+        arms[0].arm_id: _closed_loop_outcome(arms[0], net_stock_lcb=-0.2, net_stock_per_min=0.0),
+        arms[1].arm_id: _closed_loop_outcome(arms[1], net_stock_lcb=0.1, net_stock_per_min=0.2),
+    }
+
+    selection = select_closed_loop_winner(arms, validation, evaluations)
+
+    assert selection.winner == arms[1]
+    with pytest.raises(ValueError, match="top two validation arms"):
+        select_closed_loop_winner(
+            arms,
+            validation,
+            {**evaluations, arms[2].arm_id: _closed_loop_outcome(arms[2], net_stock_lcb=1.0, net_stock_per_min=1.0)},
+        )
+
+
 def test_runner_writes_treatment_and_complete_selection_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    arms = lr_arms(Treatment())
+    arms = batch_arms(Treatment())
     run_map = {arm.arm_id: f"entity/project/run-{index}" for index, arm in enumerate(arms)}
     runs = {}
     for index, arm in enumerate(arms):
@@ -277,7 +343,7 @@ def test_runner_writes_treatment_and_complete_selection_evidence(
 
     RUNNER.select(
         RUNNER.SelectArgs(
-            stage="lr",
+            stage="batch",
             runs=run_map_path,
             output=treatment_path,
             evidence=evidence_path,
@@ -288,6 +354,98 @@ def test_runner_writes_treatment_and_complete_selection_evidence(
     evidence = json.loads(evidence_path.read_text())
     assert evidence["winner_arm_id"] == arms[0].arm_id
     assert len(evidence["ranking"]) == len(arms)
+
+
+def test_grid_runner_ranks_then_adjudicates_two_companion_evals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arms = lr_arms(Treatment())
+    run_map = {arm.arm_id: f"entity/project/train-{index}" for index, arm in enumerate(arms)}
+    runs: dict[str, SimpleNamespace] = {}
+    for index, arm in enumerate(arms):
+        final_update = arm.target_positions // (arm.treatment.batch_size * 128)
+        runs[run_map[arm.arm_id]] = SimpleNamespace(
+            config={
+                **RUNNER.asdict(arm.treatment),
+                "target_positions": arm.target_positions,
+                "tier_scale": arm.tier_scale,
+                "seed": arm.seed,
+                "data_protocol": RUNNER.DATA_PROTOCOL,
+                "adam_eps": 1e-12,
+                "reservoir_capacity": 17 * arm.treatment.batch_size,
+                "replay_cooldown_batches": 16,
+            },
+            name=f"test_o51-{arm.level}-shape__{arm.arm_id}",
+            state="finished",
+            summary={
+                "data/processed_loss_positions": arm.target_positions,
+                "global_step": final_update,
+                "val/nll": 1.0 + index / 100,
+                "val/far_nll": 2.0,
+                "val/rollout_nll": 3.0,
+            },
+        )
+    finalists = arms[:2]
+    evaluation_map = {arm.arm_id: f"entity/project/eval-{index}" for index, arm in enumerate(finalists)}
+    for index, arm in enumerate(finalists):
+        final_update = arm.target_positions // (arm.treatment.batch_size * 128)
+        runs[evaluation_map[arm.arm_id]] = SimpleNamespace(
+            config={"training_wandb_id": f"train-{index}", "eval_matchups": 96},
+            state="finished",
+            summary={
+                "global_step": final_update,
+                "eval/boots": 96,
+                "eval/crashed": 0,
+                "eval/net_stock_lcb": -0.2 + index * 0.3,
+                "eval/net_stock_per_min": index * 0.2,
+                "eval/net_dmg_per_min": 10.0,
+            },
+        )
+
+    class Api:
+        def run(self, run_path: str):
+            return runs[run_path]
+
+    monkeypatch.setattr(RUNNER.wandb, "Api", lambda **_kwargs: Api())
+    run_map_path = tmp_path / "runs.json"
+    evaluation_map_path = tmp_path / "evaluations.json"
+    rank_path = tmp_path / "rank.json"
+    treatment_path = tmp_path / "treatment.json"
+    evidence_path = tmp_path / "evidence.json"
+    run_map_path.write_text(json.dumps(run_map))
+    evaluation_map_path.write_text(json.dumps(evaluation_map))
+
+    RUNNER.rank(RUNNER.RankArgs(stage="lr", runs=run_map_path, evidence=rank_path))
+    RUNNER.adjudicate(
+        RUNNER.AdjudicateArgs(
+            stage="lr",
+            runs=run_map_path,
+            evaluations=evaluation_map_path,
+            output=treatment_path,
+            evidence=evidence_path,
+        )
+    )
+
+    assert [item["arm_id"] for item in json.loads(rank_path.read_text())["finalists"]] == [
+        arm.arm_id for arm in finalists
+    ]
+    assert Treatment.load(treatment_path) == finalists[1].treatment
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["winner_arm_id"] == finalists[1].arm_id
+    assert len(evidence["closed_loop_ranking"]) == 2
+
+
+def test_grid_cannot_be_selected_from_validation_alone(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="use rank"):
+        RUNNER.select(
+            RUNNER.SelectArgs(
+                stage="lr",
+                runs=tmp_path / "unused-runs.json",
+                output=tmp_path / "unused-treatment.json",
+                evidence=tmp_path / "unused-evidence.json",
+            )
+        )
 
 
 def test_sweep_arm_rejects_a_mismatched_data_endpoint() -> None:

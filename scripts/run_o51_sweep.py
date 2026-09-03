@@ -27,16 +27,20 @@ import tyro
 
 import wandb
 from hal.training.o51_data import DATA_PROTOCOL
+from hal.training.o51_sweep import GRID_EVAL_MATCHUPS
+from hal.training.o51_sweep import ClosedLoopOutcome
+from hal.training.o51_sweep import GridStage
 from hal.training.o51_sweep import Stage
 from hal.training.o51_sweep import SweepArm
 from hal.training.o51_sweep import Treatment
 from hal.training.o51_sweep import ValidationOutcome
+from hal.training.o51_sweep import select_closed_loop_winner
 from hal.training.o51_sweep import select_validation_winner
 from hal.training.o51_sweep import stage_arms
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "launch_modal.py"
-DEFAULT_STATE = ROOT / "runs" / "o51-sweep-v1" / "launches.jsonl"
+DEFAULT_STATE = ROOT / "runs" / "o51-sweep-v3-16l" / "launches.jsonl"
 APP_PATTERN = re.compile(r"submitted Modal App (ap-[A-Za-z0-9]+), Function call (fc-[A-Za-z0-9]+)")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 STATE_SCHEMA = 2
@@ -79,9 +83,39 @@ class SelectArgs:
     treatment: Path | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RankArgs:
+    """Screen a 3x3 grid to its two closed-loop finalists."""
+
+    stage: GridStage
+    runs: Path
+    """JSON object that maps every arm ID to its full W&B training-run path."""
+    evidence: Path
+    """New durable JSON record of the validation ranking and finalists."""
+    treatment: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdjudicateArgs:
+    """Select a 3x3 grid winner from two complete closed-loop evaluations."""
+
+    stage: GridStage
+    runs: Path
+    """JSON object that maps every arm ID to its full W&B training-run path."""
+    evaluations: Path
+    """JSON object that maps the two finalist arm IDs to companion W&B runs."""
+    output: Path
+    """New treatment JSON for the next stage."""
+    evidence: Path
+    """New durable JSON record of validation screening and closed-loop ranking."""
+    treatment: Path | None = None
+
+
 type Command = (
     Annotated[PlanArgs, tyro.conf.subcommand(name="plan")]
     | Annotated[LaunchArgs, tyro.conf.subcommand(name="launch")]
+    | Annotated[RankArgs, tyro.conf.subcommand(name="rank")]
+    | Annotated[AdjudicateArgs, tyro.conf.subcommand(name="adjudicate")]
     | Annotated[SelectArgs, tyro.conf.subcommand(name="select")]
 )
 
@@ -139,6 +173,28 @@ def _run_paths(path: Path, arms: tuple[SweepArm, ...]) -> dict[str, str]:
     return cast(dict[str, str], payload)
 
 
+def _evaluation_paths(path: Path, finalists: tuple[str, str]) -> dict[str, str]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read the W&B evaluation map {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("the W&B evaluation map must be a JSON object")
+    expected = set(finalists)
+    actual = set(payload)
+    if expected != actual:
+        raise ValueError(
+            f"W&B evaluation map does not match the finalists: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    invalid = sorted(
+        arm_id for arm_id, run_path in payload.items() if not isinstance(run_path, str) or run_path.count("/") != 2
+    )
+    if invalid:
+        raise ValueError(f"W&B evaluation paths must be entity/project/run_id: {invalid}")
+    return cast(dict[str, str], payload)
+
+
 def _run_config_mismatches(arm: SweepArm, run: Any) -> tuple[str, ...]:
     expected = {
         **asdict(arm.treatment),
@@ -184,6 +240,35 @@ def _validation_outcome(arm: SweepArm, run_path: str, run: Any) -> ValidationOut
         val_nll=_optional_float(summary.get("val/nll")),
         val_far_nll=_optional_float(summary.get("val/far_nll")),
         val_rollout_nll=_optional_float(summary.get("val/rollout_nll")),
+    )
+
+
+def _closed_loop_outcome(
+    arm: SweepArm,
+    training_run_path: str,
+    evaluation_run_path: str,
+    run: Any,
+) -> ClosedLoopOutcome:
+    expected_training_id = training_run_path.rsplit("/", maxsplit=1)[1]
+    config = dict(run.config)
+    mismatches: list[str] = []
+    if config.get("training_wandb_id") != expected_training_id:
+        mismatches.append("training_wandb_id")
+    if config.get("eval_matchups") != GRID_EVAL_MATCHUPS:
+        mismatches.append("eval_matchups")
+    if mismatches:
+        raise ValueError(f"W&B evaluation {evaluation_run_path} does not match {arm.arm_id}: {sorted(mismatches)}")
+    summary = dict(run.summary)
+    return ClosedLoopOutcome(
+        arm_id=arm.arm_id,
+        run_path=evaluation_run_path,
+        state=str(run.state),
+        final_update=_optional_float(summary.get("global_step")),
+        boots=_optional_float(summary.get("eval/boots")),
+        crashed=_optional_float(summary.get("eval/crashed")),
+        net_stock_per_min=_optional_float(summary.get("eval/net_stock_per_min")),
+        net_stock_lcb=_optional_float(summary.get("eval/net_stock_lcb")),
+        net_dmg_per_min=_optional_float(summary.get("eval/net_dmg_per_min")),
     )
 
 
@@ -527,26 +612,117 @@ def _write_output(path: Path, text: str) -> None:
     temporary.replace(path)
 
 
-def select(args: SelectArgs) -> None:
-    """Collect final W&B values and write one reproducible stage decision."""
-    center = _treatment(args.treatment)
-    arms = stage_arms(args.stage, center)
-    run_paths = _run_paths(args.runs, arms)
-    api = wandb.Api(timeout=30)
+def _collect_validation(
+    stage: Stage,
+    center: Treatment,
+    runs_path: Path,
+    api: Any,
+) -> tuple[tuple[SweepArm, ...], dict[str, ValidationOutcome], Any]:
+    arms = stage_arms(stage, center)
+    run_paths = _run_paths(runs_path, arms)
     outcomes = {
         arm.arm_id: _validation_outcome(arm, run_paths[arm.arm_id], api.run(run_paths[arm.arm_id])) for arm in arms
     }
-    selection = select_validation_winner(arms, outcomes)
+    return arms, outcomes, select_validation_winner(arms, outcomes)
+
+
+def _validation_rule() -> list[str]:
+    return [
+        "Every run must be terminal before screening.",
+        "A candidate must finish its exact D/U endpoint and final optimizer update.",
+        "Final validation NLL, far NLL, and rollout NLL must be finite.",
+        "Rank eligible candidates by validation NLL, then far NLL, then rollout NLL, then arm ID.",
+    ]
+
+
+def rank(args: RankArgs) -> None:
+    """Record the two validation finalists that require closed-loop evaluation."""
+    center = _treatment(args.treatment)
+    arms, outcomes, selection = _collect_validation(args.stage, center, args.runs, wandb.Api(timeout=30))
+    del arms
+    finalists = selection.ranking[:2]
+    if len(finalists) != 2:
+        raise ValueError("a 3x3 grid needs two eligible finalists")
+    evidence = {
+        "schema_version": 1,
+        "stage": args.stage,
+        "rule": _validation_rule(),
+        "source_treatment": asdict(center),
+        "final_eval_matchups": GRID_EVAL_MATCHUPS,
+        "finalists": [{"arm_id": outcome.arm_id, "training_run": outcome.run_path} for outcome in finalists],
+        "ranking": [asdict(outcome) for outcome in selection.ranking],
+        "excluded": [{"arm_id": arm_id, "reasons": list(reasons)} for arm_id, reasons in selection.excluded],
+    }
+    text = _json_text(evidence)
+    _check_output(args.evidence, text)
+    _write_output(args.evidence, text)
+    print(f"screened {args.stage}; evaluate {', '.join(outcome.arm_id for outcome in finalists)}")
+
+
+def adjudicate(args: AdjudicateArgs) -> None:
+    """Select a 3x3 grid only after evaluating its two validation finalists."""
+    center = _treatment(args.treatment)
+    api = wandb.Api(timeout=30)
+    arms, validation_outcomes, validation = _collect_validation(args.stage, center, args.runs, api)
+    finalists = validation.ranking[:2]
+    if len(finalists) != 2:
+        raise ValueError("a 3x3 grid needs two eligible finalists")
+    finalist_ids = (finalists[0].arm_id, finalists[1].arm_id)
+    training_paths = {outcome.arm_id: outcome.run_path for outcome in finalists}
+    evaluation_paths = _evaluation_paths(args.evaluations, finalist_ids)
+    arms_by_id = {arm.arm_id: arm for arm in arms}
+    closed_loop_outcomes = {
+        arm_id: _closed_loop_outcome(
+            arms_by_id[arm_id],
+            training_paths[arm_id],
+            evaluation_paths[arm_id],
+            api.run(evaluation_paths[arm_id]),
+        )
+        for arm_id in finalist_ids
+    }
+    selection = select_closed_loop_winner(arms, validation, closed_loop_outcomes)
     treatment_payload = asdict(selection.winner.treatment)
     evidence_payload = {
         "schema_version": 1,
         "stage": args.stage,
-        "rule": [
-            "A run must be terminal before selection.",
-            "A candidate must finish its exact D/U endpoint and final optimizer update.",
-            "Final validation NLL, far NLL, and rollout NLL must be finite.",
-            "Rank eligible candidates by validation NLL, then far NLL, then rollout NLL, then arm ID.",
+        "validation_rule": _validation_rule(),
+        "closed_loop_rule": [
+            f"Evaluate exactly the two best validation arms over {GRID_EVAL_MATCHUPS} fixed matchups.",
+            "Both evaluations must finish the final checkpoint with all boots and no crashes.",
+            "Rank by net-stock cluster-bootstrap lower bound, then mean net stock per minute.",
+            "Break any remaining tie by net damage per minute, validation NLL, then arm ID.",
         ],
+        "source_treatment": asdict(center),
+        "winner_arm_id": selection.winner.arm_id,
+        "winner_training_run": training_paths[selection.winner.arm_id],
+        "winner_evaluation_run": closed_loop_outcomes[selection.winner.arm_id].run_path,
+        "winner_treatment": treatment_payload,
+        "validation_ranking": [asdict(outcome) for outcome in validation.ranking],
+        "validation_excluded": [
+            {"arm_id": arm_id, "reasons": list(reasons)} for arm_id, reasons in validation.excluded
+        ],
+        "closed_loop_ranking": [asdict(outcome) for outcome in selection.ranking],
+    }
+    treatment_text = _json_text(treatment_payload)
+    evidence_text = _json_text(evidence_payload)
+    _check_output(args.output, treatment_text)
+    _check_output(args.evidence, evidence_text)
+    _write_output(args.output, treatment_text)
+    _write_output(args.evidence, evidence_text)
+    print(f"selected {selection.winner.arm_id}; wrote {args.output} and {args.evidence}")
+
+
+def select(args: SelectArgs) -> None:
+    """Collect final W&B values and write one reproducible stage decision."""
+    if args.stage in ("lr", "decay"):
+        raise ValueError(f"{args.stage} is a 3x3 grid; use rank, evaluate both finalists, then adjudicate")
+    center = _treatment(args.treatment)
+    _arms, outcomes, selection = _collect_validation(args.stage, center, args.runs, wandb.Api(timeout=30))
+    treatment_payload = asdict(selection.winner.treatment)
+    evidence_payload = {
+        "schema_version": 1,
+        "stage": args.stage,
+        "rule": _validation_rule(),
         "source_treatment": asdict(center),
         "winner_arm_id": selection.winner.arm_id,
         "winner_run": outcomes[selection.winner.arm_id].run_path,
@@ -566,6 +742,12 @@ def select(args: SelectArgs) -> None:
 def main(args: Command) -> None:
     if isinstance(args, PlanArgs):
         _plan(args)
+        return
+    if isinstance(args, RankArgs):
+        rank(args)
+        return
+    if isinstance(args, AdjudicateArgs):
+        adjudicate(args)
         return
     if isinstance(args, SelectArgs):
         select(args)

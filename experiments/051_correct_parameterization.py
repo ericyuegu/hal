@@ -99,7 +99,7 @@ AWRCalibration = _o50.AWRCalibration
 AWR_CALIBRATION = _o50.AWR_CALIBRATION
 AWRBatch = _o50.AWRBatch
 
-_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v2"
+_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v3"
 _TRUNK_BASE_LAYERS: Final[int] = 8
 _TEMPORAL_BASE_LAYERS: Final[int] = 2
 _TRUNK_BASE_ATTENTION_SCALE: Final[float] = 0.25
@@ -311,11 +311,10 @@ def config_for(
 class DepthRule:
     attention: float
     mlp: float
-    learning_rate: float
 
 
 def depth_rule(stack: Literal["trunk", "temporal"], layers: int, alpha: float) -> DepthRule:
-    """Return O51's branch and optimizer multipliers for one stack."""
+    """Return O51's residual-branch multipliers for one stack."""
     if alpha not in (0.5, 1.0):
         raise ValueError(f"depth alpha must be 0.5 or 1.0, got {alpha}")
     if stack == "trunk":
@@ -333,7 +332,6 @@ def depth_rule(stack: Literal["trunk", "temporal"], layers: int, alpha: float) -
     return DepthRule(
         attention=base_attention * branch,
         mlp=_BASE_MLP_SCALE * branch,
-        learning_rate=multiplier ** (alpha - 1),
     )
 
 
@@ -370,11 +368,10 @@ def scaled_adam_lr(
     duration_multiplier: float,
     fan_in_multiplier: float = 1.0,
     output: bool = False,
-    depth_multiplier: float = 1.0,
 ) -> float:
-    if fan_in_multiplier <= 0 or depth_multiplier <= 0:
-        raise ValueError("fan-in and depth multipliers must be positive")
-    value = master_lr * math.sqrt(batch_multiplier / duration_multiplier) * depth_multiplier
+    if fan_in_multiplier <= 0:
+        raise ValueError("fan-in multiplier must be positive")
+    value = master_lr * math.sqrt(batch_multiplier / duration_multiplier)
     return value / fan_in_multiplier if output else value
 
 
@@ -900,7 +897,6 @@ class OptimizerRole:
     optimizer: Literal["muon", "adamw"]
     lr_kind: Literal["hidden", "input", "output", "vector"]
     decay: bool
-    stack: Literal["trunk", "temporal"] | None = None
     logical_splits: int = 1
     fan_in_multiplier: float = 1.0
 
@@ -953,10 +949,10 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
             )
         elif name.startswith("trunk.blocks."):
             splits = 3 if name.endswith("attn.c_attn.weight") else 1
-            roles[name] = OptimizerRole("muon", "hidden", True, stack="trunk", logical_splits=splits)
+            roles[name] = OptimizerRole("muon", "hidden", True, logical_splits=splits)
         elif name.startswith("temporal.blocks."):
             splits = 3 if name.endswith("qkv.weight") else 1
-            roles[name] = OptimizerRole("muon", "hidden", True, stack="temporal", logical_splits=splits)
+            roles[name] = OptimizerRole("muon", "hidden", True, logical_splits=splits)
         elif name == "temporal.token_projection.weight" or (
             name.startswith("temporal.outputs.") and name.endswith("up.weight")
         ):
@@ -979,22 +975,13 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
 def _role_lr(role: OptimizerRole, cfg: TrainConfig) -> float:
     batch_multiplier, duration_multiplier = scaling_multipliers(cfg)
     if role.optimizer == "muon":
-        value = cfg.muon_lr * muon_lr_multiplier(cfg)
-        if role.stack is not None:
-            layers = cfg.arch.n_layers if role.stack == "trunk" else cfg.arch.temporal_layers
-            value *= depth_rule(role.stack, layers, cfg.depth_alpha).learning_rate
-        return value
-    depth = 1.0
-    if role.stack is not None:
-        layers = cfg.arch.n_layers if role.stack == "trunk" else cfg.arch.temporal_layers
-        depth = depth_rule(role.stack, layers, cfg.depth_alpha).learning_rate
+        return cfg.muon_lr * muon_lr_multiplier(cfg)
     return scaled_adam_lr(
         cfg.adam_lr,
         batch_multiplier=batch_multiplier,
         duration_multiplier=duration_multiplier,
         fan_in_multiplier=role.fan_in_multiplier,
         output=role.lr_kind == "output",
-        depth_multiplier=depth,
     )
 
 

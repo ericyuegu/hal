@@ -191,12 +191,8 @@ def test_optimizer_roles_cover_every_tensor_by_semantics() -> None:
     roles = exp.optimizer_roles(model, cfg)
 
     assert set(roles) == dict(model.named_parameters()).keys()
-    assert roles["trunk.blocks.0.attn.c_attn.weight"] == exp.OptimizerRole(
-        "muon", "hidden", True, stack="trunk", logical_splits=3
-    )
-    assert roles["temporal.blocks.0.qkv.weight"] == exp.OptimizerRole(
-        "muon", "hidden", True, stack="temporal", logical_splits=3
-    )
+    assert roles["trunk.blocks.0.attn.c_attn.weight"] == exp.OptimizerRole("muon", "hidden", True, logical_splits=3)
+    assert roles["temporal.blocks.0.qkv.weight"] == exp.OptimizerRole("muon", "hidden", True, logical_splits=3)
     assert roles["temporal.token_projection.weight"].optimizer == "muon"
     assert roles["temporal.token_projection.bias"].optimizer == "adamw"
     assert roles["temporal.outputs.buttons.up.weight"].optimizer == "muon"
@@ -240,13 +236,12 @@ def test_stability_signals_run_only_on_the_logging_cadence() -> None:
 def test_depth_rule_applies_to_training_and_cached_inference(alpha: float) -> None:
     base_trunk = exp.depth_rule("trunk", 8, alpha)
     base_temporal = exp.depth_rule("temporal", 2, alpha)
-    assert base_trunk == exp.DepthRule(attention=0.25, mlp=1.0, learning_rate=1.0)
-    assert base_temporal == exp.DepthRule(attention=0.5, mlp=1.0, learning_rate=1.0)
+    assert base_trunk == exp.DepthRule(attention=0.25, mlp=1.0)
+    assert base_temporal == exp.DepthRule(attention=0.5, mlp=1.0)
 
     deep = exp.depth_rule("trunk", 16, alpha)
     assert deep.attention == pytest.approx(0.25 * 2**-alpha)
     assert deep.mlp == pytest.approx(2**-alpha)
-    assert deep.learning_rate == pytest.approx(2 ** (alpha - 1))
 
     cfg = _tiny_cfg(depth_alpha=alpha)
     block = exp.TemporalBlock(cfg).eval()
@@ -340,8 +335,7 @@ def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
         duration_multiplier=8,
         fan_in_multiplier=4,
         output=True,
-        depth_multiplier=0.5,
-    ) == pytest.approx(4.25e-4 * math.sqrt(2 / 8) * 0.5 / 4)
+    ) == pytest.approx(4.25e-4 * math.sqrt(2 / 8) / 4)
     assert exp.scaled_adam_betas((0.9, 0.95), batch_multiplier=2, duration_multiplier=4) == pytest.approx(
         (0.95, 0.975)
     )
@@ -353,6 +347,9 @@ def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
     assert exp.muon_lr_multiplier(inverse) == pytest.approx(0.5)
     batch_scaled = replace(inverse, batch_size=1024, muon_batch_scaling="sqrt")
     assert exp.muon_lr_multiplier(batch_scaled) == pytest.approx(math.sqrt(2) / 2)
+    muon_role = exp.OptimizerRole("muon", "hidden", True)
+    assert exp._role_lr(muon_role, exp.config_for("base", muon_lr=0.014)) == pytest.approx(0.014)
+    assert exp._role_lr(muon_role, exp.config_for("proxy", muon_lr=0.014)) == pytest.approx(0.014)
     adam_decay, muon_decay = exp.scaled_weight_decays(batch_scaled)
     assert adam_decay == pytest.approx(batch_scaled.adam_weight_decay * math.sqrt(2 / 4))
     assert muon_decay == pytest.approx(batch_scaled.muon_weight_decay * 2 / (4 * math.sqrt(2 / 4)))
