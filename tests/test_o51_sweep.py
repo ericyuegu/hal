@@ -65,15 +65,12 @@ def _all_arms() -> tuple[SweepArm, ...]:
     )
 
 
-def _prepared(arm: SweepArm, *, report: Path | None = None, git_sha: str = "a" * 40):
-    reports = {} if report is None else {arm.arm_id: report}
+def _prepared(arm: SweepArm, *, git_sha: str = "a" * 40):
     return RUNNER._prepare_arms(
         (arm,),
-        reports,
         git_sha=git_sha,
         gpu="B200",
         disk_gib=2048,
-        require_preflight=True,
     )[0]
 
 
@@ -158,21 +155,18 @@ def test_initialization_screen_is_the_only_smoke_stage() -> None:
     screen = initialization_screen_arms()[0]
     screen_argv = screen.argv()
     production = proxy_transfer_arms(Treatment())[0]
-    production_argv = production.argv(preflight_report=Path("evidence/proxy-b512.json"))
+    production_argv = production.argv()
 
     assert "--smoke" in screen_argv
     assert _flag(screen_argv, "--smoke-eval-matchups") == "0"
     assert _flag(screen_argv, "--stop-after-update") == "2048"
-    assert "--preflight-report" not in screen_argv
     assert "--smoke" not in production_argv
     assert "--smoke-eval-matchups" not in production_argv
-    assert _flag(production_argv, "--preflight-report") == "evidence/proxy-b512.json"
 
 
 def test_train_commands_parse_and_validate_under_o51() -> None:
     for arm in _all_arms():
-        report = Path("evidence.json") if arm.requires_preflight else None
-        parsed = EXPERIMENT.tyro.cli(EXPERIMENT.Command, args=list(arm.argv(preflight_report=report)[3:]))
+        parsed = EXPERIMENT.tyro.cli(EXPERIMENT.Command, args=list(arm.argv()[3:]))
         assert isinstance(parsed, EXPERIMENT.TrainArgs)
         cfg = replace(parsed.cfg, arch=EXPERIMENT.MODEL_FAMILY[parsed.level])
         EXPERIMENT.validate_config(cfg)
@@ -515,39 +509,11 @@ def test_sweep_arm_rejects_a_mismatched_data_endpoint() -> None:
         replace(lr_arms(Treatment())[0], tier_scale=2)
 
 
-def test_production_preflight_map_supports_override_and_fallback(tmp_path: Path) -> None:
-    path = tmp_path / "reports.json"
-    arm = lr_arms(Treatment())[0]
-    path.write_text(json.dumps({"*": "default.json", arm.arm_id: "selected.json"}))
-
-    reports = RUNNER._preflight_reports(path)
-
-    assert RUNNER._report_for(arm, reports, required=True) == Path("selected.json")
-    assert RUNNER._report_for(lr_arms(Treatment())[1], reports, required=True) == Path("default.json")
-
-
-def test_production_launch_requires_preflight_before_any_subprocess(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(RUNNER, "_git_sha", lambda: "a" * 40)
-    monkeypatch.setattr(
-        RUNNER.subprocess,
-        "run",
-        lambda *_args, **_kwargs: pytest.fail("missing preflight evidence started a subprocess"),
-    )
-
-    with pytest.raises(ValueError, match="needs a preflight report"):
-        RUNNER.launch(RUNNER.LaunchArgs(stage="lr", state=tmp_path / "state.jsonl", dry_run=True))
-
-
-def test_production_dry_run_injects_preflight_without_writing_state(
+def test_production_dry_run_needs_no_preflight_report_and_does_not_write_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    reports = tmp_path / "reports.json"
-    reports.write_text('{"*": "pyproject.toml"}\n')
     state = tmp_path / "state.jsonl"
     monkeypatch.setattr(RUNNER, "_git_sha", lambda: "a" * 40)
 
@@ -555,26 +521,16 @@ def test_production_dry_run_injects_preflight_without_writing_state(
         RUNNER.LaunchArgs(
             stage="lr",
             state=state,
-            preflight_reports=reports,
             max_arms=1,
             dry_run=True,
         )
     )
 
     command = json.loads(capsys.readouterr().out)["command"]
-    assert "--preflight-report" in command
-    assert "pyproject.toml" in command
+    assert "--preflight-report" not in command
     assert "--smoke" not in command
     assert not state.exists()
     assert not state.with_suffix(".jsonl.lock").exists()
-
-
-def test_preflight_report_must_be_a_tracked_image_file(tmp_path: Path) -> None:
-    report = tmp_path / "report.json"
-    report.write_text("{}\n")
-
-    with pytest.raises(ValueError, match="relative to the repository"):
-        RUNNER._validated_preflight_reports({"*": report})
 
 
 def test_successful_launch_journals_before_and_after_submission(

@@ -46,7 +46,6 @@ from typing import TypedDict
 from typing import cast
 
 import melee
-import modal
 import numpy as np
 import torch
 import torch.nn as nn
@@ -183,9 +182,6 @@ _BASE_BATCH: Final[int] = 512
 _BASE_ADAM_BETAS: Final[tuple[float, float]] = (0.9, 0.95)
 _BASE_ADAM_EPS: Final[float] = 1e-12
 _SUPERVISED_POSITIONS_PER_WINDOW: Final[int] = 128
-_LONG_RUN_POSITIONS: Final[int] = D0
-_MIN_SYNTHETIC_MFU: Final[float] = 0.15
-_MIN_FULL_TIER_MFU: Final[float] = 0.135
 MODEL_LEVELS: Final[tuple[str, ...]] = ("base", "proxy", "mid", "large")
 EXPECTED_PARAMETER_COUNTS: Final[dict[str, int]] = {
     "base": 7_861_786,
@@ -3004,8 +3000,8 @@ def train(
                 cfg.eval_every > 0 and update % cfg.eval_every == 0 and update < run_stop
             )
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
-            preflight_boundary = update in (8, 9)
-            boundary_due = val_due or eval_request_due or ckpt_due or preflight_boundary
+            startup_boundary = update in (8, 9)
+            boundary_due = val_due or eval_request_due or ckpt_due or startup_boundary
             overlap_preload = update < run_stop and not boundary_due
 
             phase_due = (
@@ -3112,7 +3108,7 @@ def train(
                 window_peak_allocated_gb = 0.0
                 metrics_window_started = wandb_started
             checkpoint_path: Path | None = None
-            if val_due or eval_request_due or ckpt_due or preflight_boundary:
+            if val_due or eval_request_due or ckpt_due or startup_boundary:
                 checkpoint_path = save_boundary_checkpoint(
                     run_dir,
                     update=update,
@@ -3121,7 +3117,7 @@ def train(
                     scheduler=scheduler,
                     cfg=cfg,
                     uploader=uploader,
-                    milestone=preflight_boundary or (update % 8192 == 0),
+                    milestone=startup_boundary or (update % 8192 == 0),
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
                     loader_state=_training_loader_state(train_loader, identity_masker),
@@ -3635,11 +3631,11 @@ class Treatment:
         if self.muon_duration_scaling not in ("fixed", "inverse-sqrt"):
             raise ValueError("muon_duration_scaling must be fixed or inverse-sqrt")
         if self.compile_mode not in ("reduce-overhead", "max-autotune"):
-            raise ValueError("compile_mode is outside the O51 preflight grid")
+            raise ValueError("compile_mode is outside the O51 sweep")
         if self.temporal_attention_chunk not in (8192, 16_384, 32_768, None):
-            raise ValueError("temporal_attention_chunk is outside the O51 preflight grid")
+            raise ValueError("temporal_attention_chunk is outside the O51 sweep")
         if self.num_workers not in (8, 16, 24, 32):
-            raise ValueError("num_workers is outside the O51 preflight grid")
+            raise ValueError("num_workers is outside the O51 sweep")
 
     @classmethod
     def load(cls, path: Path) -> Treatment:
@@ -3701,14 +3697,7 @@ class SweepArm:
         if self.stage != "initialization-screen" and self.stop_after_update is not None:
             raise ValueError("only initialization-screen arms can stop early")
 
-    @property
-    def requires_preflight(self) -> bool:
-        """Return whether the O51 train command requires launch evidence."""
-        return self.stop_after_update is None
-
-    def argv(self, *, preflight_report: Path | None = None) -> tuple[str, ...]:
-        if self.stop_after_update is not None and preflight_report is not None:
-            raise ValueError("initialization-screen arms do not use a preflight report")
+    def argv(self) -> tuple[str, ...]:
         cfg = {
             "target-positions": self.target_positions,
             "tier-scale": self.tier_scale,
@@ -3747,8 +3736,6 @@ class SweepArm:
                     str(self.stop_after_update),
                 )
             )
-        if preflight_report is not None:
-            command.extend(("--preflight-report", str(preflight_report)))
         for name, value in cfg.items():
             command.extend((f"--cfg.{name}", "None" if value is None else str(value)))
         return tuple(command)
@@ -4088,16 +4075,12 @@ LaunchEvent = Literal["launching", "failed", "uncertain", "launched"]
 class PlanArgs:
     stage: Stage
     treatment: Path | None = None
-    preflight_reports: Path | None = None
-    """JSON object that maps production arm IDs, or ``*``, to report paths."""
 
 
 @dataclass(frozen=True, slots=True)
 class LaunchArgs:
     stage: Stage
     treatment: Path | None = None
-    preflight_reports: Path | None = None
-    """JSON object that maps production arm IDs, or ``*``, to report paths."""
     state: Path = DEFAULT_STATE
     max_arms: int | None = None
     gpu: str = "B200"
@@ -4150,32 +4133,12 @@ class AdjudicateArgs:
 @dataclass(frozen=True, slots=True)
 class PreparedArm:
     arm: SweepArm
-    preflight_report: Path | None
     train_argv: tuple[str, ...]
     spec_sha256: str
 
 
 def _treatment(path: Path | None) -> Treatment:
     return Treatment() if path is None else Treatment.load(path)
-
-
-def _preflight_reports(path: Path | None) -> dict[str, Path]:
-    if path is None:
-        return {}
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read the preflight report map {path}: {error}") from error
-    if not isinstance(payload, dict):
-        raise ValueError("the preflight report map must be a JSON object")
-    reports: dict[str, Path] = {}
-    for arm_id, report in payload.items():
-        if not isinstance(arm_id, str) or not arm_id:
-            raise ValueError("each preflight report key must be a non-empty arm ID")
-        if not isinstance(report, str) or not report:
-            raise ValueError(f"the preflight report path for {arm_id!r} must be a non-empty string")
-        reports[arm_id] = Path(report)
-    return reports
 
 
 def _run_paths(path: Path, arms: tuple[SweepArm, ...]) -> dict[str, str]:
@@ -4301,43 +4264,6 @@ def _closed_loop_outcome(
     )
 
 
-def _validated_preflight_reports(reports: dict[str, Path]) -> dict[str, Path]:
-    """Return report paths that the Modal source image will contain."""
-    if not reports:
-        return {}
-    ignored = modal.FilePatternMatcher.from_file(ROOT / ".dockerignore")
-    tracked = {Path(value) for value in _git("ls-files", "-z").split("\0") if value}
-    validated: dict[str, Path] = {}
-    root = ROOT.resolve()
-    for arm_id, report in reports.items():
-        if report.is_absolute():
-            raise ValueError(f"preflight report for {arm_id!r} must be relative to the repository")
-        try:
-            candidate = (ROOT / report).resolve(strict=True)
-            relative = candidate.relative_to(root)
-        except (FileNotFoundError, ValueError) as error:
-            raise ValueError(f"preflight report for {arm_id!r} is not a repository file: {report}") from error
-        if not candidate.is_file():
-            raise ValueError(f"preflight report for {arm_id!r} is not a regular file: {report}")
-        if relative not in tracked:
-            raise ValueError(f"preflight report for {arm_id!r} is not tracked by Git: {relative}")
-        if ignored(relative):
-            raise ValueError(f"preflight report for {arm_id!r} is excluded from the Modal image: {relative}")
-        validated[arm_id] = relative
-    return validated
-
-
-def _report_for(arm: SweepArm, reports: dict[str, Path], *, required: bool) -> Path | None:
-    if not arm.requires_preflight:
-        return None
-    report = reports.get(arm.arm_id, reports.get("*"))
-    if report is None and required:
-        raise ValueError(
-            f"production arm {arm.arm_id} needs a preflight report; add its arm ID or '*' to --preflight-reports"
-        )
-    return report
-
-
 def _spec_sha256(
     arm: SweepArm,
     train_argv: tuple[str, ...],
@@ -4360,21 +4286,17 @@ def _spec_sha256(
 
 def _prepare_arms(
     arms: tuple[SweepArm, ...],
-    reports: dict[str, Path],
     *,
     git_sha: str,
     gpu: str,
     disk_gib: int,
-    require_preflight: bool,
 ) -> tuple[PreparedArm, ...]:
     prepared: list[PreparedArm] = []
     for arm in arms:
-        report = _report_for(arm, reports, required=require_preflight)
-        train_argv = arm.argv(preflight_report=report)
+        train_argv = arm.argv()
         prepared.append(
             PreparedArm(
                 arm=arm,
-                preflight_report=report,
                 train_argv=train_argv,
                 spec_sha256=_spec_sha256(
                     arm,
@@ -4597,11 +4519,9 @@ def launch(args: LaunchArgs) -> None:
     arms = stage_arms(args.stage, _treatment(args.treatment))
     prepared = _prepare_arms(
         arms,
-        _validated_preflight_reports(_preflight_reports(args.preflight_reports)),
         git_sha=git_sha,
         gpu=args.gpu,
         disk_gib=args.disk_gib,
-        require_preflight=True,
     )
     if args.dry_run:
         pending = _pending_arms(prepared, _records(args.state))
@@ -4618,19 +4538,8 @@ def launch(args: LaunchArgs) -> None:
 
 
 def _plan(args: PlanArgs) -> None:
-    reports = _validated_preflight_reports(_preflight_reports(args.preflight_reports))
     arms = stage_arms(args.stage, _treatment(args.treatment))
-    payload = []
-    for arm in arms:
-        report = _report_for(arm, reports, required=False)
-        payload.append(
-            {
-                "arm_id": arm.arm_id,
-                "requires_preflight": arm.requires_preflight,
-                "preflight_report": None if report is None else str(report),
-                "argv": arm.argv(preflight_report=report),
-            }
-        )
+    payload = [{"arm_id": arm.arm_id, "argv": arm.argv()} for arm in arms]
     print(json.dumps(payload, indent=2))
 
 
@@ -5020,7 +4929,7 @@ def validate_config(cfg: TrainConfig) -> None:
     if cfg.batch_size not in (128, 256, 512, 1024):
         raise ValueError("batch_size is outside the O51 sweep")
     if cfg.temporal_attention_chunk not in (8192, 16_384, 32_768, None):
-        raise ValueError("temporal attention chunk is outside the O51 preflight grid")
+        raise ValueError("temporal attention chunk is outside the O51 supported grid")
     if cfg.compile_mode not in ("reduce-overhead", "max-autotune"):
         raise ValueError("unsupported compile mode")
     if cfg.stability_every != 25:
@@ -5658,392 +5567,6 @@ LOADER_WORKERS: Final[tuple[int, ...]] = (8, 16, 24, 32)
 PHYSICAL_BATCHES: Final[tuple[int, ...]] = (128, 256, 512, 1024)
 COMPILE_MODES: Final[tuple[str, ...]] = ("reduce-overhead", "max-autotune")
 TEMPORAL_ATTENTION_CHUNKS: Final[tuple[int | None, ...]] = (8192, 16_384, 32_768, None)
-REQUIRED_PREFLIGHT_TELEMETRY: Final[tuple[str, ...]] = (
-    "system/network/read_mib_s",
-    "system/cache/allocated_gib",
-    "system/pinned_memory_gib",
-    "system/cgroup/current_gib",
-    "system/cgroup/projected_peak_gib",
-    "system/disk/required_bytes",
-    "profile/target_prep_s",
-    "profile/trunk_s",
-    "profile/temporal_s",
-    "profile/backward_s",
-    "profile/grad_norm_s",
-    "profile/diagnostics_s",
-    "profile/optimizer_s",
-    "throughput/mfu_wall_clock",
-    "throughput/mfu_steady_state",
-)
-
-
-def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
-    """Bind throughput evidence to its model and direct-source selection."""
-    payload = {
-        "protocol": _EXPERIMENT_ID,
-        "data_protocol": DATA_PROTOCOL,
-        "corpus_hash": selection.corpus_hash,
-        "source_manifest_sha256": selection.source_manifest_sha256,
-        "tiers": {
-            scale: {
-                "sha256": tier.sha256,
-                "sources": [
-                    {
-                        "source": source.source,
-                        "stop": source.stop,
-                        "excluded_rows": source.excluded_rows,
-                    }
-                    for source in tier.sources
-                ],
-            }
-            for scale, tier in selection.tiers.items()
-        },
-        "player_sidecar_sha256": cfg.player_sidecar_sha256,
-        "player_vocabulary_sha256": cfg.player_vocab_sha256,
-        "return_parameters": asdict(cfg.awr),
-        "model_level": model_level(cfg.arch),
-        "architecture": {name: getattr(cfg.arch, name) for name in _MODEL_GEOMETRY_FIELDS},
-        "batch_size": cfg.batch_size,
-        "compile_mode": cfg.compile_mode,
-        "temporal_attention_chunk": cfg.temporal_attention_chunk,
-        "num_workers": cfg.num_workers,
-        "worker_completion_order": "in-order-keyed-shards-v1",
-        "replay_slots": DEFAULT_REPLAY_SLOTS,
-        "windows_per_generation": WINDOWS_PER_GENERATION,
-        "loader_prefetch_factor": PREFETCH_FACTOR,
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class PreflightReport:
-    fingerprint: str
-    synthetic_mfu: float
-    compute_only_updates_per_s: float
-    loader_only_windows_per_s: float
-    raw_bytes_per_window: float
-    o50_raw_bytes_per_window: float
-    peak_memory_fraction: float
-    graph_gap_fraction: float
-    optimizer_time_fraction: float
-    disk_free_bytes: int
-    exact_resume: bool
-    memory_passed: bool
-    shuffle_passed: bool
-    loader_stability_passed: bool
-    telemetry: dict[str, float]
-
-
-@dataclass(frozen=True, slots=True)
-class SoakReport(PreflightReport):
-    """Preflight measurements plus the final U8 endurance evidence."""
-
-    tier_scale: int
-    end_to_end_updates_per_s: float
-    gpu_windows_per_s: float
-    loader_wait_mean_fraction: float
-    loader_wait_p95_fraction: float
-    end_to_end_mfu: float
-    soak_seconds: float
-    judged_seconds: float
-
-
-def _numeric_report_values(
-    report: object,
-    names: tuple[str, ...],
-    unit_fractions: tuple[str, ...],
-    *,
-    label: str,
-) -> tuple[dict[str, float], tuple[str, ...]]:
-    numeric: dict[str, float] = {}
-    invalid: list[str] = []
-    for name in names:
-        value = getattr(report, name)
-        if not isinstance(value, int | float) or isinstance(value, bool):
-            invalid.append(name)
-            continue
-        numeric[name] = float(value)
-        if not math.isfinite(numeric[name]) or numeric[name] < 0:
-            invalid.append(name)
-    invalid.extend(name for name in unit_fractions if numeric.get(name, 0) > 1)
-    if invalid:
-        return numeric, (f"{label} measurements are invalid {sorted(set(invalid))}",)
-    return numeric, ()
-
-
-def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, ...]:
-    """Check the short compute and loader evidence required before long runs."""
-    selection = data_selection(cfg)
-    failures: list[str] = []
-    if report.fingerprint != preflight_fingerprint(cfg, selection):
-        failures.append("preflight fingerprint does not match the selected shape and data")
-    numeric_names = (
-        "synthetic_mfu",
-        "compute_only_updates_per_s",
-        "loader_only_windows_per_s",
-        "raw_bytes_per_window",
-        "o50_raw_bytes_per_window",
-        "peak_memory_fraction",
-        "graph_gap_fraction",
-        "optimizer_time_fraction",
-        "disk_free_bytes",
-    )
-    unit_fractions = (
-        "synthetic_mfu",
-        "peak_memory_fraction",
-        "graph_gap_fraction",
-        "optimizer_time_fraction",
-    )
-    numeric, numeric_failures = _numeric_report_values(
-        report,
-        numeric_names,
-        unit_fractions,
-        label="preflight",
-    )
-    failures.extend(numeric_failures)
-    if numeric_failures:
-        return tuple(failures)
-    if model_level(cfg.arch) == "mid" and numeric["synthetic_mfu"] < _MIN_SYNTHETIC_MFU:
-        failures.append("55M synthetic compiled MFU is below the measured 15% floor")
-    if numeric["compute_only_updates_per_s"] <= 0:
-        failures.append("compute-only throughput is zero")
-    if numeric["loader_only_windows_per_s"] <= 0:
-        failures.append("loader-only throughput is zero")
-    if (
-        numeric["o50_raw_bytes_per_window"] <= 0
-        or numeric["raw_bytes_per_window"] > 0.35 * numeric["o50_raw_bytes_per_window"]
-    ):
-        failures.append("raw bytes per window exceed 35% of O50 K=1")
-    if numeric["peak_memory_fraction"] >= 0.95:
-        failures.append("peak device memory is not below 95%")
-    if numeric["graph_gap_fraction"] > 0.05:
-        failures.append("loss-path graph gaps exceed 5%")
-    if numeric["optimizer_time_fraction"] > 0.10:
-        failures.append("optimizer time exceeds 10%")
-    flags = {
-        "exact_resume": report.exact_resume,
-        "memory_passed": report.memory_passed,
-        "shuffle_passed": report.shuffle_passed,
-        "loader_stability_passed": report.loader_stability_passed,
-    }
-    invalid_flags = sorted(name for name, value in flags.items() if not isinstance(value, bool))
-    if invalid_flags:
-        failures.append(f"preflight pass flags are not boolean {invalid_flags}")
-    if report.exact_resume is not True:
-        failures.append("tensor-exact resume did not pass")
-    if report.memory_passed is not True:
-        failures.append("host/pinned-memory gate did not pass")
-    if report.shuffle_passed is not True:
-        failures.append("shuffle audit did not pass")
-    if report.loader_stability_passed is not True:
-        failures.append("loader-only stability audit did not pass")
-    if not isinstance(report.telemetry, dict):
-        failures.append("preflight telemetry must be an object")
-        return tuple(failures)
-    missing_telemetry = sorted(set(REQUIRED_PREFLIGHT_TELEMETRY) - report.telemetry.keys())
-    invalid_telemetry = sorted(
-        name
-        for name, value in report.telemetry.items()
-        if name in REQUIRED_PREFLIGHT_TELEMETRY
-        and (not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value) or value < 0)
-    )
-    if missing_telemetry:
-        failures.append(f"preflight telemetry is missing {missing_telemetry}")
-    if invalid_telemetry:
-        failures.append(f"preflight telemetry is invalid {invalid_telemetry}")
-    required_disk = report.telemetry.get("system/disk/required_bytes")
-    if isinstance(required_disk, int | float) and numeric["disk_free_bytes"] < float(required_disk):
-        failures.append("current free disk does not cover the manifest, download workspace, and 256 GiB reserve")
-    cgroup_peak = max(
-        report.telemetry.get("system/cgroup/current_gib", 0.0),
-        report.telemetry.get("system/cgroup/projected_peak_gib", 0.0),
-    )
-    if cgroup_peak > 300:
-        failures.append("projected or observed cgroup memory exceeds 300 GiB")
-    compute_demand = 1.25 * numeric["compute_only_updates_per_s"] * cfg.batch_size
-    if numeric["loader_only_windows_per_s"] < compute_demand:
-        failures.append("loader-only throughput is below 1.25x measured compute demand")
-    return tuple(failures)
-
-
-def soak_failures(cfg: TrainConfig, report: SoakReport) -> tuple[str, ...]:
-    """Check the final two-hour 55M run over the full direct U8 view."""
-    failures = list(preflight_failures(cfg, report))
-    if model_level(cfg.arch) != "mid":
-        failures.append("the authoritative soak must use the 55M model")
-    if not isinstance(report.tier_scale, int) or isinstance(report.tier_scale, bool):
-        failures.append("soak tier must be an integer")
-    elif report.tier_scale != 8 or cfg.tier_scale != 8:
-        failures.append("the authoritative soak must use the full U8 tier")
-    numeric, numeric_failures = _numeric_report_values(
-        report,
-        (
-            "compute_only_updates_per_s",
-            "loader_only_windows_per_s",
-            "end_to_end_updates_per_s",
-            "gpu_windows_per_s",
-            "loader_wait_mean_fraction",
-            "loader_wait_p95_fraction",
-            "end_to_end_mfu",
-            "soak_seconds",
-            "judged_seconds",
-        ),
-        (
-            "loader_wait_mean_fraction",
-            "loader_wait_p95_fraction",
-            "end_to_end_mfu",
-        ),
-        label="soak",
-    )
-    failures.extend(numeric_failures)
-    if numeric_failures:
-        return tuple(failures)
-    if numeric["soak_seconds"] < 7200 or numeric["judged_seconds"] < 1800:
-        failures.append("soak does not cover two hours with a final 30-minute judgment window")
-    if numeric["end_to_end_mfu"] < _MIN_FULL_TIER_MFU:
-        failures.append("full-tier end-to-end MFU is below the revised 13.5% floor")
-    if numeric["loader_only_windows_per_s"] < 1.25 * numeric["gpu_windows_per_s"]:
-        failures.append("loader-only throughput is below 125% of GPU consumption")
-    if numeric["end_to_end_updates_per_s"] < 0.9 * numeric["compute_only_updates_per_s"]:
-        failures.append("end-to-end throughput retains less than 90% of compute-only throughput")
-    if numeric["loader_wait_mean_fraction"] >= 0.05:
-        failures.append("mean loader wait is not below 5%")
-    if numeric["loader_wait_p95_fraction"] >= 0.10:
-        failures.append("p95 loader wait is not below 10%")
-    return tuple(failures)
-
-
-def load_preflight(path: Path) -> PreflightReport:
-    return PreflightReport(**json.loads(path.read_text()))
-
-
-def load_soak(path: Path) -> SoakReport:
-    return SoakReport(**json.loads(path.read_text()))
-
-
-def _weighted_percentile(values: list[tuple[float, float]], percentile: float) -> float:
-    if not values or not 0 <= percentile <= 1:
-        raise ValueError("weighted percentile needs samples and a percentile in [0, 1]")
-    threshold = percentile * sum(weight for _, weight in values)
-    cumulative = 0.0
-    for value, weight in sorted(values):
-        cumulative += weight
-        if cumulative >= threshold:
-            return value
-    return max(value for value, _ in values)
-
-
-def collect_soak_report(
-    cfg: TrainConfig,
-    preflight: PreflightReport,
-    history: Iterable[Mapping[str, object]],
-    *,
-    judged_seconds: float = 1800.0,
-) -> SoakReport:
-    """Aggregate the final judgment window from a fresh W&B training history."""
-    if not math.isfinite(judged_seconds) or judged_seconds <= 0:
-        raise ValueError("judged_seconds must be finite and positive")
-    rows: list[dict[str, float]] = []
-    for raw in history:
-        names = (
-            "global_step",
-            "progress/elapsed_s",
-            "throughput/update_s",
-            "loader/wait_s",
-        )
-        if any(name not in raw for name in names):
-            continue
-        mfu = raw.get("throughput/mfu_wall_clock", raw.get("throughput/mfu"))
-        values = {name: raw[name] for name in names} | {"throughput/mfu_wall_clock": mfu}
-        if any(
-            not isinstance(value, int | float)
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or float(value) < 0
-            for value in values.values()
-        ):
-            continue
-        row = {name: float(cast(int | float, value)) for name, value in values.items()}
-        if row["throughput/update_s"] <= 0:
-            continue
-        for name in REQUIRED_PREFLIGHT_TELEMETRY:
-            value = raw.get(name)
-            if (
-                isinstance(value, int | float)
-                and not isinstance(value, bool)
-                and math.isfinite(float(value))
-                and float(value) >= 0
-            ):
-                row[name] = float(value)
-        rows.append(row)
-    rows.sort(key=lambda row: (row["progress/elapsed_s"], row["global_step"]))
-    if len(rows) < 2:
-        raise ValueError("soak history has fewer than two complete throughput windows")
-    last_elapsed = rows[-1]["progress/elapsed_s"]
-    cutoff = last_elapsed - judged_seconds
-    if cutoff < 0 or rows[0]["progress/elapsed_s"] > cutoff:
-        raise ValueError("soak history does not cover the requested judgment window")
-
-    samples: list[tuple[dict[str, float], float]] = []
-    for previous, row in zip(rows, rows[1:], strict=False):
-        start = previous["progress/elapsed_s"]
-        stop = row["progress/elapsed_s"]
-        updates = row["global_step"] - previous["global_step"]
-        if stop <= cutoff or stop <= start or updates <= 0:
-            continue
-        overlap = (stop - max(start, cutoff)) / (stop - start)
-        samples.append((row, updates * overlap))
-    if not samples:
-        raise ValueError("soak history has no training windows in the judgment period")
-
-    total_updates = sum(weight for _, weight in samples)
-
-    def update_mean(name: str) -> float:
-        return sum(row[name] * weight for row, weight in samples) / total_updates
-
-    update_s = update_mean("throughput/update_s")
-    wait_fractions = [
-        (row["loader/wait_s"] / max(row["throughput/update_s"], 1e-12), weight) for row, weight in samples
-    ]
-    elapsed_weights = [
-        (row["throughput/mfu_wall_clock"], weight * row["throughput/update_s"]) for row, weight in samples
-    ]
-    total_elapsed_weight = sum(weight for _, weight in elapsed_weights)
-    telemetry = {
-        name: float(np.mean([row[name] for row, _ in samples if name in row]))
-        for name in REQUIRED_PREFLIGHT_TELEMETRY
-        if any(name in row for row, _ in samples)
-    }
-    telemetry["throughput/mfu_wall_clock"] = (
-        sum(value * weight for value, weight in elapsed_weights) / total_elapsed_weight
-    )
-    report = SoakReport(
-        fingerprint=preflight.fingerprint,
-        synthetic_mfu=preflight.synthetic_mfu,
-        compute_only_updates_per_s=preflight.compute_only_updates_per_s,
-        loader_only_windows_per_s=preflight.loader_only_windows_per_s,
-        raw_bytes_per_window=preflight.raw_bytes_per_window,
-        o50_raw_bytes_per_window=preflight.o50_raw_bytes_per_window,
-        peak_memory_fraction=preflight.peak_memory_fraction,
-        graph_gap_fraction=preflight.graph_gap_fraction,
-        optimizer_time_fraction=preflight.optimizer_time_fraction,
-        disk_free_bytes=preflight.disk_free_bytes,
-        exact_resume=preflight.exact_resume,
-        memory_passed=preflight.memory_passed,
-        shuffle_passed=preflight.shuffle_passed,
-        loader_stability_passed=preflight.loader_stability_passed,
-        telemetry=telemetry,
-        tier_scale=cfg.tier_scale,
-        end_to_end_updates_per_s=1.0 / update_s,
-        gpu_windows_per_s=cfg.batch_size / update_s,
-        loader_wait_mean_fraction=sum(value * weight for value, weight in wait_fractions) / total_updates,
-        loader_wait_p95_fraction=_weighted_percentile(wait_fractions, 0.95),
-        end_to_end_mfu=telemetry["throughput/mfu_wall_clock"],
-        soak_seconds=last_elapsed,
-        judged_seconds=judged_seconds,
-    )
-    return report
 
 
 @dataclass(frozen=True, slots=True)
@@ -6777,7 +6300,6 @@ def benchmark_loader(
     disk_free_bytes = int(getattr(loader, "disk_free_bytes", 0))
     memory_passed = host_memory.peak_bytes <= 300 * 2**30
     metrics: dict[str, object] = {
-        "fingerprint": preflight_fingerprint(cfg, data_selection(cfg)),
         "tier_scale": cfg.tier_scale,
         "batch_size": cfg.batch_size,
         "num_workers": cfg.num_workers,
@@ -6891,7 +6413,6 @@ class TrainArgs:
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
     eval_max_parallel: int | None = None
-    preflight_report: Path | None = None
     promotion_evidence: Path | None = None
     large_d0_evidence: Path | None = None
 
@@ -6932,23 +6453,6 @@ class AuditDataArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
 
 
-@dataclass
-class PreflightArgs:
-    report: Path
-    cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
-
-
-@dataclass
-class CollectSoakArgs:
-    run: str
-    """Full W&B run path: entity/project/run_id."""
-
-    preflight_report: Path
-    output: Path
-    cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
-    judged_seconds: float = 1800.0
-
-
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
@@ -6957,8 +6461,6 @@ type Command = (
     | Annotated[CoordinateChecksArgs, tyro.conf.subcommand(name="coordinate-checks")]
     | Annotated[DescribeArgs, tyro.conf.subcommand(name="describe")]
     | Annotated[AuditDataArgs, tyro.conf.subcommand(name="audit-data")]
-    | Annotated[PreflightArgs, tyro.conf.subcommand(name="preflight")]
-    | Annotated[CollectSoakArgs, tyro.conf.subcommand(name="collect-soak")]
     | Annotated[PlanArgs, tyro.conf.subcommand(name="sweep-plan")]
     | Annotated[LaunchArgs, tyro.conf.subcommand(name="sweep-launch")]
     | Annotated[RankArgs, tyro.conf.subcommand(name="sweep-rank")]
@@ -6967,15 +6469,9 @@ type Command = (
 )
 
 
-def _require_launch_evidence(cfg: TrainConfig, args: TrainArgs) -> None:
-    selection = data_selection(cfg)
-    if cfg.target_positions >= _LONG_RUN_POSITIONS:
-        if args.preflight_report is None:
-            raise ValueError("runs at D0 or longer require a throughput preflight report")
-        failures = preflight_failures(cfg, load_preflight(args.preflight_report))
-        if failures:
-            raise ValueError("throughput preflight failed: " + "; ".join(failures))
+def _require_model_evidence(cfg: TrainConfig, args: TrainArgs) -> None:
     if model_level(cfg.arch) == "large":
+        selection = data_selection(cfg)
         if args.promotion_evidence is None:
             raise ValueError("216M training requires the three-seed 55M promotion evidence")
         validate_large_promotion(PromotionEvidence(**json.loads(args.promotion_evidence.read_text())))
@@ -7030,7 +6526,7 @@ def _run_train(args: TrainArgs) -> None:
         cfg = replace(cfg, eval_max_parallel=args.eval_max_parallel)
     validate_config(cfg)
     if not args.smoke:
-        _require_launch_evidence(cfg, args)
+        _require_model_evidence(cfg, args)
     stats = load_stats(cfg)
     train(
         cfg,
@@ -7068,53 +6564,6 @@ def main(args: Command) -> None:
         validate_config(args.cfg)
         selection = data_selection(args.cfg)
         print(json.dumps(asdict(selection), indent=2, sort_keys=True))
-        return
-    if isinstance(args, PreflightArgs):
-        validate_config(args.cfg)
-        failures = preflight_failures(args.cfg, load_preflight(args.report))
-        if failures:
-            raise SystemExit("preflight failed: " + "; ".join(failures))
-        print("preflight passed")
-        return
-    if isinstance(args, CollectSoakArgs):
-        validate_config(args.cfg)
-        if args.run.count("/") != 2:
-            raise SystemExit("--run must be entity/project/run_id")
-        run = wandb.Api().run(args.run)
-        expected = asdict(args.cfg)
-        bound_fields = (
-            "arch",
-            "awr",
-            "target_positions",
-            "tier_scale",
-            "batch_size",
-            "player_sidecar_sha256",
-            "player_vocab_sha256",
-            "compile_mode",
-            "temporal_attention_chunk",
-            "num_workers",
-        )
-        mismatched = [
-            name
-            for name in bound_fields
-            if json.dumps(run.config.get(name), sort_keys=True) != json.dumps(expected[name], sort_keys=True)
-        ]
-        if mismatched:
-            raise SystemExit(f"W&B run does not match the selected soak config: {mismatched}")
-        report = collect_soak_report(
-            args.cfg,
-            load_preflight(args.preflight_report),
-            run.scan_history(page_size=1000),
-            judged_seconds=args.judged_seconds,
-        )
-        temporary = args.output.with_name(f".{args.output.name}.tmp")
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(asdict(report), indent=2, sort_keys=True) + "\n")
-        temporary.replace(args.output)
-        failures = soak_failures(args.cfg, report)
-        if failures:
-            raise SystemExit("soak failed: " + "; ".join(failures))
-        print(f"soak passed; report written to {args.output}")
         return
     if isinstance(args, BenchmarkArgs):
         cfg = config_for(

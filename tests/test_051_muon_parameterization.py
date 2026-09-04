@@ -26,14 +26,11 @@ def _load() -> ModuleType:
 
 
 exp = _load()
-CorpusSelection = exp.CorpusSelection
-SourceSlice = exp.SourceSlice
-TierSelection = exp.TierSelection
 
 
 @pytest.mark.parametrize(
     "command",
-    ["train", "audit-data", "preflight", "loader-benchmark", "collect-soak"],
+    ["train", "audit-data", "loader-benchmark"],
 )
 def test_nested_config_command_help_is_parseable(command: str) -> None:
     script = Path(exp.__file__).resolve()
@@ -47,7 +44,7 @@ def test_nested_config_command_help_is_parseable(command: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monkeypatch) -> None:
+def test_full_run_does_not_require_throughput_preflight_evidence(monkeypatch) -> None:
     cfg = exp.config_for(
         "mid",
         target_positions=8 * exp.D0,
@@ -57,11 +54,6 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
-    monkeypatch.setattr(
-        exp,
-        "_require_launch_evidence",
-        lambda *_args: pytest.fail("smoke collection requested prior preflight evidence"),
-    )
 
     def train(selected_cfg, _stats, **_kwargs) -> None:
         observed["tier_scale"] = selected_cfg.tier_scale
@@ -69,7 +61,7 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
 
     monkeypatch.setattr(exp, "train", train)
 
-    exp._run_train(exp.TrainArgs(cfg=cfg, smoke=True, stop_after_update=1))
+    exp._run_train(exp.TrainArgs(cfg=cfg))
 
     assert observed == {"tier_scale": 8, "module_file": exp.__file__}
 
@@ -128,8 +120,6 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     monkeypatch.setattr(exp, "load_identity_sidecar", lambda _cfg: sidecar)
     monkeypatch.setattr(exp, "_make_train_loader", lambda *_args: Loader())
     monkeypatch.setattr(exp, "data_selection", lambda _cfg: object())
-    monkeypatch.setattr(exp, "preflight_fingerprint", lambda *_args: "f" * 64)
-
     report = exp.benchmark_loader(cfg, warmup_batches=1, measured_batches=2)
 
     assert report["loader_only_windows_per_s"] > 0
@@ -423,7 +413,7 @@ def test_o50_task_awr_and_validation_cohort_remain_frozen() -> None:
         exp.validate_config(replace(cfg, adam_eps=1e-8))
 
 
-def test_production_loader_and_compilation_choices_come_from_preflight_grid() -> None:
+def test_production_loader_and_compilation_choices_use_supported_values() -> None:
     cfg = exp.config_for("base")
     exp.validate_production_config(cfg)
     with pytest.raises(ValueError, match="num_workers"):
@@ -604,135 +594,3 @@ def test_large_promotion_gate_requires_every_condition() -> None:
         exp.validate_large_promotion(replace(evidence, paired_90_lower_bound=0.0))
     with pytest.raises(ValueError, match="non-finite"):
         exp.validate_large_promotion(replace(evidence, stock_per_min_gain=math.nan))
-
-
-def _selection() -> CorpusSelection:
-    source_names = [source.name for source in exp.streams.POLICY_WORLD_V7_SOURCES]
-    tiers = {}
-    for scale in exp.TIER_SCALES:
-        tiers[scale] = TierSelection(
-            scale=scale,
-            sources=tuple(SourceSlice(source=name, stop=scale) for name in source_names),
-            potential_targets=2 * scale * len(source_names),
-            sha256=f"{scale:x}" * 64,
-        )
-    return CorpusSelection(
-        corpus_hash="a" * 64,
-        source_manifest_sha256={name: "b" * 64 for name in source_names},
-        tiers=tiers,
-    )
-
-
-def _passing_preflight(cfg, selection):
-    return exp.PreflightReport(
-        fingerprint=exp.preflight_fingerprint(cfg, selection),
-        synthetic_mfu=0.15,
-        compute_only_updates_per_s=10.0,
-        loader_only_windows_per_s=7000.0,
-        raw_bytes_per_window=35.0,
-        o50_raw_bytes_per_window=100.0,
-        peak_memory_fraction=0.949,
-        graph_gap_fraction=0.05,
-        optimizer_time_fraction=0.10,
-        disk_free_bytes=2 * 2**40,
-        exact_resume=True,
-        memory_passed=True,
-        shuffle_passed=True,
-        loader_stability_passed=True,
-        telemetry={
-            **{name: 0.0 for name in exp.REQUIRED_PREFLIGHT_TELEMETRY},
-            "system/disk/required_bytes": 2048 * 2**30,
-        },
-    )
-
-
-def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
-    cfg = exp.config_for("base")
-    selection = _selection()
-    monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
-    report = _passing_preflight(cfg, selection)
-
-    assert exp.preflight_failures(cfg, report) == ()
-    assert exp.preflight_failures(cfg, replace(report, synthetic_mfu=0.0)) == ()
-    assert "telemetry" in " ".join(exp.preflight_failures(cfg, replace(report, telemetry={})))
-    assert "invalid" in " ".join(exp.preflight_failures(cfg, replace(report, synthetic_mfu=math.nan)))
-    assert "not boolean" in " ".join(
-        exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
-    )
-    assert "current free disk" in " ".join(
-        exp.preflight_failures(
-            cfg,
-            replace(report, disk_free_bytes=1900 * 2**30),
-        )
-    )
-    assert "1.25x" in " ".join(exp.preflight_failures(cfg, replace(report, loader_only_windows_per_s=6399.0)))
-
-    mid_cfg = exp.config_for("mid")
-    mid_report = replace(report, fingerprint=exp.preflight_fingerprint(mid_cfg, selection))
-    assert "55M synthetic compiled MFU" in " ".join(
-        exp.preflight_failures(mid_cfg, replace(mid_report, synthetic_mfu=0.149))
-    )
-
-
-def test_soak_is_a_separate_full_u8_gate(monkeypatch) -> None:
-    cfg = exp.config_for("mid", target_positions=8 * exp.D0, tier_scale=8)
-    selection = _selection()
-    monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
-    report = exp.SoakReport(
-        **exp.asdict(_passing_preflight(cfg, selection)),
-        tier_scale=8,
-        end_to_end_updates_per_s=9.0,
-        gpu_windows_per_s=1000.0,
-        loader_wait_mean_fraction=0.049,
-        loader_wait_p95_fraction=0.099,
-        end_to_end_mfu=0.135,
-        soak_seconds=7200.0,
-        judged_seconds=1800.0,
-    )
-
-    assert exp.soak_failures(cfg, report) == ()
-    assert "two hours" in " ".join(exp.soak_failures(cfg, replace(report, soak_seconds=7199.0)))
-    assert "end-to-end MFU" in " ".join(exp.soak_failures(cfg, replace(report, end_to_end_mfu=0.134)))
-    assert "full U8" in " ".join(exp.soak_failures(cfg, replace(report, tier_scale=4)))
-    assert "mean loader wait" in " ".join(exp.soak_failures(cfg, replace(report, loader_wait_mean_fraction=0.05)))
-
-
-def test_soak_collector_uses_only_the_final_judgment_window(monkeypatch) -> None:
-    cfg = exp.config_for("mid", target_positions=8 * exp.D0, tier_scale=8)
-    selection = _selection()
-    monkeypatch.setattr(exp, "data_selection", lambda _cfg: selection)
-    preflight = _passing_preflight(cfg, selection)
-    history = []
-    for index, elapsed in enumerate(range(0, 7201, 900)):
-        history.append(
-            {
-                **{name: 1.0 for name in exp.REQUIRED_PREFLIGHT_TELEMETRY},
-                "global_step": index * 100,
-                "progress/elapsed_s": elapsed,
-                "throughput/update_s": 0.1,
-                "throughput/mfu_wall_clock": 0.01 if elapsed < 5400 else 0.14,
-                "loader/wait_s": 0.004,
-            }
-        )
-
-    report = exp.collect_soak_report(cfg, preflight, history)
-
-    assert report.end_to_end_mfu == pytest.approx(0.14)
-    assert report.end_to_end_updates_per_s == pytest.approx(10.0)
-    assert report.gpu_windows_per_s == pytest.approx(10 * cfg.batch_size)
-    assert report.loader_wait_mean_fraction == pytest.approx(0.04)
-    assert report.soak_seconds == 7200
-    assert report.judged_seconds == 1800
-
-
-def test_preflight_fingerprint_binds_direct_prefixes() -> None:
-    cfg = exp.TrainConfig()
-    selection = _selection()
-    changed_source = replace(selection.tier(8).sources[0], stop=9)
-    changed_tier = replace(
-        selection.tier(8),
-        sources=(changed_source, *selection.tier(8).sources[1:]),
-    )
-    changed = replace(selection, tiers={**selection.tiers, 8: changed_tier})
-
-    assert exp.preflight_fingerprint(cfg, selection) != exp.preflight_fingerprint(cfg, changed)
