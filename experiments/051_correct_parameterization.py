@@ -2255,6 +2255,11 @@ def benchmark_loader(
     fill_started = _o50.time.monotonic()
     next(iterator)
     initial_fill_seconds = _o50.time.monotonic() - fill_started
+    initial_fill_shard_profile = dict(getattr(loader, "shard_profile", {}))
+    initial_fill_slowest_shards = dict(getattr(loader, "slowest_shards", {}))
+    reset_shard_profile = getattr(loader, "reset_shard_profile", None)
+    if callable(reset_shard_profile):
+        reset_shard_profile()
     steady_warmup_started = _o50.time.monotonic()
     for warmup_batch in range(1, warmup_batches):
         next(iterator)
@@ -2272,6 +2277,10 @@ def benchmark_loader(
                 flush=True,
             )
     steady_warmup_seconds = _o50.time.monotonic() - steady_warmup_started
+    steady_warmup_shard_profile = dict(getattr(loader, "shard_profile", {}))
+    steady_warmup_slowest_shards = dict(getattr(loader, "slowest_shards", {}))
+    if callable(reset_shard_profile):
+        reset_shard_profile()
 
     batch_seconds: list[float] = []
     replay_frequencies: defaultdict[str, int] = defaultdict(int)
@@ -2386,6 +2395,8 @@ def benchmark_loader(
         batch_p95 <= 2 * batch_mean and batch_p99 <= 3 * batch_mean and batch_cv <= 0.5 and turnover_passed
     )
     raw_bytes = int(getattr(loader, "raw_bytes_read", 0)) - raw_bytes_at_start
+    measured_shard_profile = dict(getattr(loader, "shard_profile", {}))
+    measured_slowest_shards = dict(getattr(loader, "slowest_shards", {}))
     pinned_batch_bytes = int(batch.target.numel() * batch.target.element_size())
     pinned_batch_bytes += int(batch.returns.numel() * batch.returns.element_size())
     pinned_batch_bytes += int(batch.eligible.numel() * batch.eligible.element_size())
@@ -2415,7 +2426,11 @@ def benchmark_loader(
         "warmup_batches": warmup_batches,
         "worker_start_seconds": worker_start_seconds,
         "initial_fill_seconds": initial_fill_seconds,
+        "initial_fill_shard_profile": initial_fill_shard_profile,
+        "initial_fill_slowest_shards": initial_fill_slowest_shards,
         "steady_warmup_seconds": steady_warmup_seconds,
+        "steady_warmup_shard_profile": steady_warmup_shard_profile,
+        "steady_warmup_slowest_shards": steady_warmup_slowest_shards,
         "measured_batches": measured_batches,
         "measured_seconds": elapsed,
         "loader_only_windows_per_s": windows / elapsed,
@@ -2423,6 +2438,7 @@ def benchmark_loader(
         "batch_seconds_p50": float(np.percentile(batch_seconds, 50)),
         "batch_seconds_p95": batch_p95,
         "batch_seconds_p99": batch_p99,
+        "batch_seconds_max": float(np.max(batch_seconds)),
         "batch_seconds_cv": batch_cv,
         "loader_stability_passed": stability_passed,
         "distinct_replays": len(replay_frequencies),
@@ -2460,6 +2476,8 @@ def benchmark_loader(
         "system/disk/free_bytes": disk_free_bytes,
         "system/cgroup/projected_peak_gib": host_memory.peak_bytes / 2**30,
         "source_sample_counts": loader.source_sample_counts,
+        **measured_shard_profile,
+        "slowest_shards": measured_slowest_shards,
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
     close_loader = getattr(loader, "close", None)

@@ -16,10 +16,12 @@ from hal.training.o51_data import SourceSlice
 from hal.training.o51_data import TierSelection
 from hal.training.o51_data import corpus_selection
 from hal.training.o51_replay_loader import DecodedShard
+from hal.training.o51_replay_loader import MDSStorageAdapter
 from hal.training.o51_replay_loader import O51ReplayLoader
 from hal.training.o51_replay_loader import PhysicalRow
 from hal.training.o51_replay_loader import ReplayBuffer
 from hal.training.o51_replay_loader import ShardTask
+from hal.training.o51_replay_loader import ShardTimings
 from hal.training.o51_replay_loader import SourceManifest
 from hal.training.o51_replay_loader import _decode_generation
 from hal.training.o51_replay_loader import _stack_window_rows
@@ -170,6 +172,41 @@ def test_decoded_shard_requires_fixed_four_window_columns() -> None:
             (PhysicalRow("source", 0, 0), PhysicalRow("source", 0, 1)),
             {"value": np.zeros((2, 3, 5), dtype=np.float32)},
         )
+
+
+def test_shard_timings_must_be_non_negative() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        ShardTimings(download_seconds=-1)
+
+
+def test_mds_prepare_profiles_download_and_decompression() -> None:
+    class Stream:
+        def _download_file(self, *_args: object, **_kwargs: object) -> None:
+            time.sleep(0.001)
+
+        def _decompress_shard_part(self, *_args: object, **_kwargs: object) -> None:
+            time.sleep(0.001)
+
+    class Dataset:
+        stream_per_shard = (0,)
+
+        def __init__(self) -> None:
+            self.streams = [Stream()]
+
+        def prepare_shard(self, _shard: int) -> None:
+            self.streams[0]._download_file("shard")
+            self.streams[0]._decompress_shard_part("shard")
+
+    adapter = object.__new__(MDSStorageAdapter)
+    adapter.dataset = Dataset()
+
+    prepare, download, decompress = adapter._prepare_shard_profiled(ShardTask("source", 0, 0, 1, global_shard=0))
+
+    assert prepare >= download + decompress
+    assert download > 0
+    assert decompress > 0
+    assert "_download_file" not in vars(adapter.dataset.streams[0])
+    assert "_decompress_shard_part" not in vars(adapter.dataset.streams[0])
 
 
 def test_window_column_order_does_not_change_schema() -> None:
@@ -360,6 +397,18 @@ def test_every_batch_contains_distinct_replay_ids() -> None:
         batch = next(iterator)
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 2
+
+
+def test_shard_profile_records_and_resets_parent_wait() -> None:
+    loader = _loader(seed=32)
+
+    next(iter(loader))
+
+    assert loader.shard_profile["shard_profile_count"] == 1
+    assert loader.shard_profile["shard_parent_wait_seconds_max"] > 0
+    assert loader.slowest_shards["parent_wait_seconds"][0]["source"] == "source"
+    loader.reset_shard_profile()
+    assert loader.shard_profile["shard_profile_count"] == 0
 
 
 def test_delayed_workers_and_worker_count_change_preserve_exact_resume() -> None:
