@@ -22,6 +22,7 @@ from hal.training.o51_replay_loader import ReplayBuffer
 from hal.training.o51_replay_loader import ShardTask
 from hal.training.o51_replay_loader import SourceManifest
 from hal.training.o51_replay_loader import _decode_generation
+from hal.training.o51_replay_loader import _stack_window_rows
 from hal.training.o51_replay_loader import build_shard_plan
 from hal.training.o51_replay_loader import choose_o51_window_starts
 from hal.training.o51_replay_loader import disk_requirement_bytes
@@ -169,6 +170,22 @@ def test_decoded_shard_requires_fixed_four_window_columns() -> None:
             (PhysicalRow("source", 0, 0), PhysicalRow("source", 0, 1)),
             {"value": np.zeros((2, 3, 5), dtype=np.float32)},
         )
+
+
+def test_window_column_order_does_not_change_schema() -> None:
+    windows = (
+        (
+            {"ego_x": np.ones(2), "opp_x": np.zeros(2)},
+            {"opp_x": np.zeros(2), "ego_x": np.ones(2)},
+            {"ego_x": np.ones(2), "opp_x": np.zeros(2)},
+            {"opp_x": np.zeros(2), "ego_x": np.ones(2)},
+        ),
+    )
+
+    columns = _stack_window_rows(windows)
+
+    assert tuple(columns) == ("ego_x", "opp_x")
+    assert columns["ego_x"].shape == (1, 4, 2)
 
 
 def test_duplicate_generations_do_not_change_identity_sampling_weight() -> None:

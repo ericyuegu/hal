@@ -374,10 +374,11 @@ def _generation_rng(seed: int, epoch: int, replay_id: str) -> np.random.Generato
 def _stack_window_rows(rows: Sequence[tuple[dict[str, np.ndarray], ...]]) -> dict[str, np.ndarray]:
     if not rows:
         raise ValueError("cannot stack an empty shard")
-    names = tuple(rows[0][0])
+    names = tuple(sorted(rows[0][0]))
+    expected_names = set(names)
     arrays: dict[str, np.ndarray] = {}
     for row in rows:
-        if len(row) != WINDOWS_PER_GENERATION or any(tuple(window) != names for window in row):
+        if len(row) != WINDOWS_PER_GENERATION or any(set(window) != expected_names for window in row):
             raise ValueError("decoded windows do not have fixed keys")
     for name in names:
         reference = rows[0][0][name]
@@ -624,9 +625,10 @@ class MDSStorageAdapter:
                 if not columns:
                     columns = {
                         name: np.empty((len(rows), WINDOWS_PER_GENERATION, *value.shape), dtype=value.dtype)
-                        for name, value in windows[0].items()
+                        for name, value in sorted(windows[0].items())
                     }
-                if any(tuple(window) != tuple(columns) for window in windows):
+                expected_names = set(columns)
+                if any(set(window) != expected_names for window in windows):
                     raise ValueError("decoded windows do not have fixed keys")
                 for window_index, window in enumerate(windows):
                     for name, destination in columns.items():
@@ -835,7 +837,7 @@ class ReplayBuffer:
     def admit(self, shard: DecodedShard, row: int, *, slot: int | None = None) -> int:
         """Copy one decoded generation into a free slot."""
         self._initialize_columns(shard)
-        if tuple(self.columns) != tuple(shard.columns):
+        if set(self.columns) != set(shard.columns):
             raise ValueError("decoded shard columns changed after buffer allocation")
         if slot is None:
             if not self.free_slots:
