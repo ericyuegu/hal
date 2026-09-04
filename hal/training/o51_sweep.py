@@ -60,11 +60,6 @@ class Treatment:
     compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
     temporal_attention_chunk: int | None = 16_384
     num_workers: int = 16
-    replay_pack_batch_size: int = 64
-    loader_prefetch_factor: int = 2
-    predownload: int = 1024
-    shuffle_algo: Literal["py1s", "py1e"] = "py1s"
-    shuffle_block_size: int = 8192
 
     def __post_init__(self) -> None:
         positive_floats = {
@@ -108,19 +103,6 @@ class Treatment:
             raise ValueError("temporal_attention_chunk is outside the O51 preflight grid")
         if self.num_workers not in (8, 16, 24, 32):
             raise ValueError("num_workers is outside the O51 preflight grid")
-        if self.replay_pack_batch_size not in (16, 32, 64):
-            raise ValueError("replay_pack_batch_size is outside the O51 preflight grid")
-        if self.loader_prefetch_factor not in (1, 2, 4):
-            raise ValueError("loader_prefetch_factor is outside the O51 preflight grid")
-        if self.predownload not in (
-            8 * self.replay_pack_batch_size,
-            16 * self.replay_pack_batch_size,
-        ):
-            raise ValueError("predownload must be 8x or 16x the replay-pack batch")
-        if self.shuffle_algo not in ("py1s", "py1e"):
-            raise ValueError("shuffle_algo must be py1s or py1e")
-        if self.shuffle_block_size not in (4096, 8192):
-            raise ValueError("shuffle_block_size is outside the O51 preflight grid")
 
     @classmethod
     def load(cls, path: Path) -> Treatment:
@@ -207,11 +189,6 @@ class SweepArm:
             "compile-mode": self.treatment.compile_mode,
             "temporal-attention-chunk": self.treatment.temporal_attention_chunk,
             "num-workers": self.treatment.num_workers,
-            "replay-pack-batch-size": self.treatment.replay_pack_batch_size,
-            "loader-prefetch-factor": self.treatment.loader_prefetch_factor,
-            "predownload": self.treatment.predownload,
-            "shuffle-algo": self.treatment.shuffle_algo,
-            "shuffle-block-size": self.treatment.shuffle_block_size,
         }
         command = [
             "uv",

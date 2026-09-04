@@ -5,6 +5,7 @@ import importlib.util
 import math
 import subprocess
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -76,6 +77,34 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
     assert exp._o50.__file__ == original_o50_file
 
 
+def test_prepared_o51_data_starts_iterator_before_background_next(monkeypatch) -> None:
+    events: list[tuple[str, int]] = []
+    batch = object()
+
+    class Loader:
+        def __iter__(self):
+            events.append(("iter", threading.get_ident()))
+            return self
+
+        def __next__(self):
+            events.append(("next", threading.get_ident()))
+            return batch
+
+    loader = Loader()
+    monkeypatch.setattr(exp, "_make_loaders", lambda *_args: (loader, []))
+    sidecar = SimpleNamespace(by_replay={})
+
+    prepared = exp._prepare_training_data(exp.TrainConfig(), {}, sidecar, None)
+    try:
+        assert prepared.first_batch_future.result() is batch
+    finally:
+        prepared.executor.shutdown(wait=True)
+
+    assert events[0] == ("iter", threading.main_thread().ident)
+    assert events[1][0] == "next"
+    assert events[1][1] != threading.main_thread().ident
+
+
 def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     cfg = exp.TrainConfig()
     replay_ids = tuple(f"replay-{index}" for index in range(cfg.batch_size))
@@ -109,7 +138,9 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     assert report["loader_only_windows_per_s"] > 0
     assert report["distinct_replays"] == cfg.batch_size
     assert report["within_batch_unique"] is True
-    assert report["cooldown_passed"] is False
+    assert report["cooldown_batches"] == 0
+    assert report["identity_coverage_fraction"] == 1.0
+    assert report["shuffle_passed"] is True
 
 
 @pytest.mark.parametrize("level", ["base", "proxy", "mid", "large"])
@@ -324,10 +355,22 @@ def test_training_nll_skips_centering_without_changing_loss_or_gradient() -> Non
 def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
     defaults = exp.TrainConfig()
     assert defaults.adam_eps == 1e-12
-    assert defaults.cache_limit_gb == 1700
-    assert defaults.replay_cooldown_batches == 16
-    assert defaults.reservoir_capacity == 17 * defaults.batch_size
-    assert replace(defaults, batch_size=1024).reservoir_capacity == 17_408
+    runtime_fields = {field.name for field in exp.fields(exp.TrainConfig)}
+    assert not runtime_fields.intersection(
+        {
+            "cache_limit_gb",
+            "shuffle_block_size",
+            "predownload",
+            "download_retry",
+            "windows_per_replay",
+            "reservoir_capacity",
+            "replay_cooldown_batches",
+            "replay_pack_batch_size",
+            "loader_prefetch_factor",
+            "shuffle_algo",
+        }
+    )
+    assert exp.DEFAULT_REPLAY_SLOTS == 65_536
     assert exp.scaled_adam_lr(4.25e-4, batch_multiplier=1, duration_multiplier=1) == 4.25e-4
     assert exp.scaled_adam_lr(
         4.25e-4,
@@ -403,27 +446,15 @@ def test_checkpoint_identity_prevents_o50_or_changed_schedule_resume() -> None:
         exp.config_from_state(changed_schedule)
 
 
-def test_pre_cooldown_checkpoint_is_accepted_only_for_evaluation() -> None:
+def test_older_o51_checkpoint_is_rejected_for_resume_and_evaluation() -> None:
     cfg = exp.config_for("base")
     legacy = exp._checkpoint_config(cfg)
-    legacy.pop("replay_cooldown_batches")
+    legacy["experiment_id"] = "051_correct_parameterization_v3"
     legacy["reservoir_capacity"] = 4096
 
-    with pytest.raises(ValueError, match="replay_cooldown_batches"):
+    with pytest.raises(ValueError, match="unexpected"):
         exp.config_from_state(legacy)
-
-    restored = exp._config_from_eval_state(legacy)
-    assert restored.replay_cooldown_batches == 16
-    assert restored.reservoir_capacity == 17 * restored.batch_size
-    assert exp._o50.load_checkpoint is exp.load_checkpoint
-
-
-def test_pre_cooldown_eval_rejects_unknown_reservoir() -> None:
-    legacy = exp._checkpoint_config(exp.config_for("base"))
-    legacy.pop("replay_cooldown_batches")
-    legacy["reservoir_capacity"] = 8192
-
-    with pytest.raises(ValueError, match="unknown replay reservoir"):
+    with pytest.raises(ValueError, match="unexpected"):
         exp._config_from_eval_state(legacy)
 
 
@@ -597,17 +628,21 @@ def _passing_preflight(cfg, selection):
         fingerprint=exp.preflight_fingerprint(cfg, selection),
         synthetic_mfu=0.15,
         compute_only_updates_per_s=10.0,
-        loader_only_windows_per_s=1250.0,
+        loader_only_windows_per_s=7000.0,
         raw_bytes_per_window=35.0,
         o50_raw_bytes_per_window=100.0,
         peak_memory_fraction=0.949,
         graph_gap_fraction=0.05,
         optimizer_time_fraction=0.10,
-        disk_capacity_bytes=2 * 2**40,
+        disk_free_bytes=2 * 2**40,
         exact_resume=True,
         memory_passed=True,
         shuffle_passed=True,
-        telemetry={name: 0.0 for name in exp.REQUIRED_PREFLIGHT_TELEMETRY},
+        loader_stability_passed=True,
+        telemetry={
+            **{name: 0.0 for name in exp.REQUIRED_PREFLIGHT_TELEMETRY},
+            "system/disk/required_bytes": 2048 * 2**30,
+        },
     )
 
 
@@ -624,13 +659,13 @@ def test_preflight_enforces_every_launch_and_cache_gate(monkeypatch) -> None:
     assert "not boolean" in " ".join(
         exp.preflight_failures(cfg, replace(report, exact_resume="false"))  # type: ignore[arg-type]
     )
-    assert "256 GiB" in " ".join(
+    assert "current free disk" in " ".join(
         exp.preflight_failures(
             cfg,
-            replace(report, disk_capacity_bytes=1900 * 2**30),
+            replace(report, disk_free_bytes=1900 * 2**30),
         )
     )
-    exp.validate_shuffle_config("py1e", 4096)
+    assert "1.25x" in " ".join(exp.preflight_failures(cfg, replace(report, loader_only_windows_per_s=6399.0)))
 
     mid_cfg = exp.config_for("mid")
     mid_report = replace(report, fingerprint=exp.preflight_fingerprint(mid_cfg, selection))

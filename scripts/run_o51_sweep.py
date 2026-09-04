@@ -203,8 +203,6 @@ def _run_config_mismatches(arm: SweepArm, run: Any) -> tuple[str, ...]:
         "seed": arm.seed,
         "data_protocol": DATA_PROTOCOL,
         "adam_eps": 1e-12,
-        "reservoir_capacity": 17 * arm.treatment.batch_size,
-        "replay_cooldown_batches": 16,
     }
     config = dict(run.config)
     mismatches = [

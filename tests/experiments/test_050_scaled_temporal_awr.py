@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+from concurrent.futures import Future
 from dataclasses import asdict
 from pathlib import Path
 
@@ -114,6 +115,35 @@ def test_identity_masker_is_window_wide_and_resumable() -> None:
     actual = resumed(batch).context.features["ego_player_id"]
     assert torch.equal(actual, expected)
     assert all(torch.unique(row).numel() == 1 for row in actual)
+
+
+def test_external_first_batch_gets_parent_side_transforms() -> None:
+    cfg = _tiny_cfg()
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    transformed = []
+
+    def masker(value):
+        transformed.append(value)
+        return value
+
+    first_batch: Future = Future()
+    first_batch.set_result(batch)
+    prefetcher = exp.DeviceBatchPrefetcher(
+        (),
+        cfg,
+        "cpu",
+        masker,
+        iterator=iter(()),
+        first_batch_future=first_batch,
+    )
+    try:
+        staged, valid_prefixes = prefetcher.next()
+    finally:
+        prefetcher.close()
+
+    assert transformed == [batch]
+    torch.testing.assert_close(staged.target, batch.target)
+    assert valid_prefixes > 0
 
 
 def test_parameter_contract_records_action_embedding_width_32() -> None:

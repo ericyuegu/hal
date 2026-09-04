@@ -93,7 +93,7 @@ class Args:
     cpu_limit: float = 48.0
     """CPU hard limit. Modal can burst above the request when capacity is available."""
     memory_gib: int = 128
-    """Requested system memory in GiB."""
+    """Requested system memory in GiB. O51 applies a 288 GiB floor."""
     memory_limit_gib: int | None = 384
     """Hard system-memory limit in GiB; None leaves the Modal default."""
     disk_gib: int = 2048
@@ -365,10 +365,21 @@ def requested_disk_gib(args: Args) -> int:
     return max(args.disk_gib, minimum)
 
 
+def requested_memory_gib(args: Args) -> tuple[int, int | None]:
+    """Keep legacy overrides while enforcing O51's memory request and limit."""
+    script = experiment_script(args.cmd)
+    if script is None or script.name != "051_correct_parameterization.py":
+        return args.memory_gib, args.memory_limit_gib
+    request = max(args.memory_gib, 288)
+    limit = 384 if args.memory_limit_gib is None else max(args.memory_limit_gib, 384, request)
+    return request, limit
+
+
 def function_resources(args: Args) -> FunctionResources:
     """Modal resource values in the units expected by ``App.function``."""
-    memory_request = args.memory_gib * 1024
-    memory = memory_request if args.memory_limit_gib is None else (memory_request, args.memory_limit_gib * 1024)
+    memory_gib, memory_limit_gib = requested_memory_gib(args)
+    memory_request = memory_gib * 1024
+    memory = memory_request if memory_limit_gib is None else (memory_request, memory_limit_gib * 1024)
     return {
         "gpu": gpu_request(args.gpu),
         "cpu": (args.cpu, args.cpu_limit),
@@ -826,10 +837,11 @@ def _print_request(
     name: str,
     launch_id: str,
 ) -> None:
+    memory_request, memory_limit = requested_memory_gib(args)
     loguru.logger.info(f"app={name} launch={launch_id} git={sha[:10]} image={args.image}")
     loguru.logger.info(
         f"gpu={resources['gpu']} cpu={resources['cpu']} "
-        f"memory=({args.memory_gib},{args.memory_limit_gib})GiB "
+        f"memory=({memory_request},{memory_limit})GiB "
         f"ephemeral_ssd={resources['ephemeral_disk'] / 1024:g}GiB "
         f"cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
     )

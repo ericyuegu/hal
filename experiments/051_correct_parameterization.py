@@ -16,7 +16,6 @@ Examples:
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import importlib.util
 import json
@@ -26,6 +25,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -34,6 +34,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Annotated
+from typing import ClassVar
 from typing import Final
 from typing import Literal
 from typing import cast
@@ -46,7 +47,6 @@ import tyro
 from torch import Tensor
 
 from hal import streams
-from hal.training.dataloader import StreamSamplePrefix
 from hal.training.dataloader import make_loader
 from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
@@ -59,9 +59,14 @@ from hal.training.o51_data import TIER_SCALES
 from hal.training.o51_data import CorpusSelection
 from hal.training.o51_data import DirectO51ReplayLabels
 from hal.training.o51_data import corpus_selection
+from hal.training.o51_replay_loader import DEFAULT_REPLAY_SLOTS
+from hal.training.o51_replay_loader import PREFETCH_FACTOR
+from hal.training.o51_replay_loader import WINDOWS_PER_GENERATION
+from hal.training.o51_replay_loader import O51AWRBatch
+from hal.training.o51_replay_loader import O51ReplayLoader
+from hal.training.o51_replay_loader import estimate_host_memory
+from hal.training.o51_replay_loader import make_o51_replay_loader
 from hal.training.player_identity import ReplayPlayerLookup
-from hal.training.replay_reservoir import ReservoirLoader
-from hal.training.replay_reservoir import make_reservoir_loader
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 
@@ -97,9 +102,9 @@ EVAL_HORIZONS = _o50.EVAL_HORIZONS
 DIRECT_LOSS_START = _o50.DIRECT_LOSS_START
 AWRCalibration = _o50.AWRCalibration
 AWR_CALIBRATION = _o50.AWR_CALIBRATION
-AWRBatch = _o50.AWRBatch
+AWRBatch = O51AWRBatch
 
-_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v3"
+_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v4"
 _TRUNK_BASE_LAYERS: Final[int] = 8
 _TEMPORAL_BASE_LAYERS: Final[int] = 2
 _TRUNK_BASE_ATTENTION_SCALE: Final[float] = 0.25
@@ -109,9 +114,6 @@ _BASE_BATCH: Final[int] = 512
 _BASE_ADAM_BETAS: Final[tuple[float, float]] = (0.9, 0.95)
 _BASE_ADAM_EPS: Final[float] = 1e-12
 _SUPERVISED_POSITIONS_PER_WINDOW: Final[int] = 128
-_REPLAY_COOLDOWN_BATCHES: Final[int] = 16
-_LEGACY_RESERVOIR_CAPACITY: Final[int] = 4096
-_MIN_FREE_CACHE_GIB: Final[int] = 256
 _LONG_RUN_POSITIONS: Final[int] = D0
 # A 55M batch-1024 B200 benchmark reached 16.73% compiled MFU. Keep enough
 # margin for run-to-run variance, then require the loader to retain 90% of it.
@@ -255,16 +257,15 @@ class TrainConfig(_o50.TrainConfig):
 
     compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
     temporal_attention_chunk: int | None = 16_384
-    windows_per_replay: int = 4
-    reservoir_capacity: Annotated[int, tyro.conf.Suppress] = _BASE_BATCH * (_REPLAY_COOLDOWN_BATCHES + 1)
-    replay_cooldown_batches: Annotated[int, tyro.conf.Suppress] = _REPLAY_COOLDOWN_BATCHES
-    replay_pack_batch_size: Literal[16, 32, 64] = 64
-    loader_prefetch_factor: Literal[1, 2, 4] = 2
-    shuffle_algo: Literal["py1s", "py1e"] = "py1s"
-    predownload: int = 1024
     num_workers: int = 16
-    cache_limit_gb: int = 1700
     stability_every: int = 25
+
+    # These inherited O50 knobs do not exist in the O51 protocol. ClassVar
+    # overrides keep them out of the dataclass, CLI, and checkpoint schema.
+    cache_limit_gb: ClassVar[int] = 0
+    shuffle_block_size: ClassVar[int] = 0
+    predownload: ClassVar[int] = 0
+    download_retry: ClassVar[int] = 8
 
     def __post_init__(self) -> None:
         supervised = self.arch.L_ctx - self.arch.L_ctx // 2
@@ -283,11 +284,6 @@ class TrainConfig(_o50.TrainConfig):
             raise ValueError("D/32 warmup does not land on an optimizer boundary")
         object.__setattr__(self, "max_steps", updates)
         object.__setattr__(self, "warmup_steps", warmup_updates)
-        object.__setattr__(
-            self,
-            "reservoir_capacity",
-            self.batch_size * (self.replay_cooldown_batches + 1),
-        )
 
 
 def config_for(
@@ -437,19 +433,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O51 fixes cosine floor=1/170 and global clipping=1.0")
     if cfg.batch_size not in (128, 256, 512, 1024):
         raise ValueError("batch_size is outside the O51 sweep")
-    if cfg.replay_cooldown_batches != _REPLAY_COOLDOWN_BATCHES:
-        raise ValueError(f"O51 fixes replay cooldown to {_REPLAY_COOLDOWN_BATCHES} batches")
-    expected_capacity = cfg.batch_size * (cfg.replay_cooldown_batches + 1)
-    if cfg.reservoir_capacity != expected_capacity:
-        raise ValueError(f"O51 replay reservoir must contain exactly {expected_capacity} replay IDs")
-    if cfg.windows_per_replay != 4:
-        raise ValueError("O51 emits four deterministic windows per physical replay read")
-    if cfg.replay_pack_batch_size not in (16, 32, 64):
-        raise ValueError("replay-pack batch is outside the O51 preflight grid")
-    if cfg.loader_prefetch_factor not in (1, 2, 4):
-        raise ValueError("loader prefetch factor is outside the O51 preflight grid")
-    if cfg.predownload not in (8 * cfg.replay_pack_batch_size, 16 * cfg.replay_pack_batch_size):
-        raise ValueError("predownload must be 8x or 16x the replay-pack batch")
     if cfg.temporal_attention_chunk not in (8192, 16_384, 32_768, None):
         raise ValueError("temporal attention chunk is outside the O51 preflight grid")
     if cfg.compile_mode not in ("reduce-overhead", "max-autotune"):
@@ -483,8 +466,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O51 scales the fixed base Adam betas and epsilon")
     if not isinstance(cfg.num_workers, int) or isinstance(cfg.num_workers, bool) or not 0 <= cfg.num_workers <= 48:
         raise ValueError("num_workers must be an integer in [0, 48]")
-    if not isinstance(cfg.cache_limit_gb, int) or isinstance(cfg.cache_limit_gb, bool) or cfg.cache_limit_gb <= 0:
-        raise ValueError("cache_limit_gb must be a positive integer")
     scaled_adam_betas(
         (cfg.adam_beta1, cfg.adam_beta2),
         batch_multiplier=scaling_multipliers(cfg)[0],
@@ -1262,14 +1243,11 @@ def _make_train_loader(
     cfg: TrainConfig,
     stats: dict[str, _o50.FeatureStats],
     player_lookup: ReplayPlayerLookup,
-) -> ReservoirLoader:
+) -> O51ReplayLoader:
     """Build the direct source-prefix training loader."""
     tier = data_selection(cfg).tier(cfg.tier_scale)
-    sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
-    views = tier.sources
-    if tuple(view.source for view in views) != cfg.source_names:
+    if tuple(view.source for view in tier.sources) != cfg.source_names:
         raise RuntimeError("direct prefix views do not match configured source order")
-    prefixes = tuple(StreamSamplePrefix(view.stop, view.excluded_rows) for view in views)
     projection = replace(
         _o50.MODEL_PROJECTION,
         columns=_o50.MODEL_PROJECTION.columns
@@ -1278,46 +1256,21 @@ def _make_train_loader(
             f"ego_{O51_RETURN_SUFFIX}_valid",
         },
     )
-    train_loader = make_reservoir_loader(
-        data_root=None,
-        sources=sources,
-        source_prefixes=prefixes,
-        split="train",
-        cache_limit=f"{cfg.cache_limit_gb}gb",
-        shuffle=True,
-        shuffle_seed=cfg.seed,
-        shuffle_algo=cfg.shuffle_algo,
-        shuffle_block_size=cfg.shuffle_block_size,
+    train_loader = make_o51_replay_loader(
+        tier=tier,
         stats=stats,
-        L_ctx=cfg.arch.L_ctx,
-        L_chunk=cfg.arch.sample_chunk_length,
         batch_size=cfg.batch_size,
+        replay_slots=DEFAULT_REPLAY_SLOTS,
         seed=cfg.seed,
-        schema_version=cfg.mds_schema_version,
-        extra=_o50.MODEL_COLUMNS,
-        projection=projection,
         num_workers=cfg.num_workers,
-        prefetch_factor=cfg.loader_prefetch_factor,
-        predownload=cfg.predownload,
-        download_retry=cfg.download_retry,
-        windows_per_replay=cfg.windows_per_replay,
-        reservoir_capacity=cfg.reservoir_capacity,
-        prefetch_batches=0,
-        replay_format="policy-world",
-        replay_labels=DirectO51ReplayLabels(
+        labels=DirectO51ReplayLabels(
             player_lookup=player_lookup,
             gamma=cfg.awr.gamma,
             damage_shaping=cfg.awr.damage_shaping,
             win_reward=cfg.awr.win_reward,
             stock_value=cfg.awr.stock_value,
         ),
-        batch_transform=functools.partial(_o50.collate_awr_batch, L_ctx=cfg.arch.L_ctx),
-        replay_pack_batch_size=cfg.replay_pack_batch_size,
-        worker_independent_resume=True,
-        deterministic_out_of_order=True,
-        cooldown_batches=cfg.replay_cooldown_batches,
-        limit_worker_threads=True,
-        require_full_context=True,
+        projection=projection,
     )
     expected_train_rows = OFFICIAL_TIER_REPLAYS[cfg.tier_scale]
     actual_train_rows = sum(train_loader.source_sample_counts.values())
@@ -1332,15 +1285,18 @@ def _make_train_loader(
 def _make_loaders(
     cfg: TrainConfig,
     stats: dict[str, _o50.FeatureStats],
-) -> tuple[ReservoirLoader, list[_o50.TrainBatch]]:
+    player_lookup: ReplayPlayerLookup | None = None,
+) -> tuple[O51ReplayLoader, list[_o50.TrainBatch]]:
     """Build direct source-prefix training and the fixed validation cohort."""
-    player_lookup = ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay)
+    if player_lookup is None:
+        player_lookup = ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay)
     train_loader = _make_train_loader(cfg, stats, player_lookup)
 
     common = _o50.loader_kwargs(cfg, stats)
     validation = {
         **common,
         "batch_size": _O50_DEFAULT_CONFIG.val_batch_size,
+        "cache_limit": f"{_O50_DEFAULT_CONFIG.cache_limit_gb}gb",
         "shuffle_block_size": _O50_DEFAULT_CONFIG.shuffle_block_size,
         "seed": 0,
         "shuffle_seed": 0,
@@ -1357,20 +1313,29 @@ def _make_loaders(
     return train_loader, _o50.cache_validation(val_loader, cfg.val_n_samples)
 
 
-def validate_shuffle_config(
-    algorithm: str,
-    block_size: int,
-) -> None:
-    if algorithm not in ("py1s", "py1e"):
-        raise ValueError(f"unsupported shuffle algorithm {algorithm!r}")
-    if block_size not in (4096, 8192):
-        raise ValueError("O51 benchmarks shuffle blocks 4096 and 8192")
+def _prepare_training_data(
+    cfg: TrainConfig,
+    stats: dict[str, _o50.FeatureStats],
+    sidecar: object,
+    resume_state: dict | None,
+) -> object:
+    """Start O51 shard workers and its first batch before CUDA allocation."""
+    by_replay = getattr(sidecar, "by_replay", None)
+    if not isinstance(by_replay, Mapping):
+        raise TypeError("O51 identity sidecar has no replay mapping")
+    train_loader, validation = _make_loaders(cfg, stats, ReplayPlayerLookup(by_replay))
+    if resume_state is not None:
+        loader_state = resume_state.get("loader")
+        if not isinstance(loader_state, dict):
+            raise ValueError("resume checkpoint does not contain O51 replay-loader state")
+        train_loader.load_state_dict(loader_state)
+    train_iterator = iter(train_loader)
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="o51-first-batch")
+    first_batch = executor.submit(next, train_iterator)
+    return _o50.PreparedTrainingData(train_loader, validation, train_iterator, first_batch, executor)
 
 
 LOADER_WORKERS: Final[tuple[int, ...]] = (8, 16, 24, 32)
-REPLAY_PACK_BATCHES: Final[tuple[int, ...]] = (16, 32, 64)
-LOADER_PREFETCH_FACTORS: Final[tuple[int, ...]] = (1, 2, 4)
-PREDOWNLOAD_MULTIPLIERS: Final[tuple[int, ...]] = (8, 16)
 PHYSICAL_BATCHES: Final[tuple[int, ...]] = (128, 256, 512, 1024)
 COMPILE_MODES: Final[tuple[str, ...]] = ("reduce-overhead", "max-autotune")
 TEMPORAL_ATTENTION_CHUNKS: Final[tuple[int | None, ...]] = (8192, 16_384, 32_768, None)
@@ -1379,6 +1344,8 @@ REQUIRED_PREFLIGHT_TELEMETRY: Final[tuple[str, ...]] = (
     "system/cache/allocated_gib",
     "system/pinned_memory_gib",
     "system/cgroup/current_gib",
+    "system/cgroup/projected_peak_gib",
+    "system/disk/required_bytes",
     "profile/target_prep_s",
     "profile/trunk_s",
     "profile/temporal_s",
@@ -1420,18 +1387,11 @@ def preflight_fingerprint(cfg: TrainConfig, selection: CorpusSelection) -> str:
         "batch_size": cfg.batch_size,
         "compile_mode": cfg.compile_mode,
         "temporal_attention_chunk": cfg.temporal_attention_chunk,
-        "shuffle_algo": cfg.shuffle_algo,
-        "shuffle_block_size": cfg.shuffle_block_size,
         "num_workers": cfg.num_workers,
-        "cache_limit_gb": cfg.cache_limit_gb,
-        "reservoir_capacity": cfg.reservoir_capacity,
-        "replay_cooldown_batches": cfg.replay_cooldown_batches,
-        "worker_completion_order": "deterministic-sample-id-tasks-v1",
-        "windows_per_replay": cfg.windows_per_replay,
-        "replay_pack_batch_size": cfg.replay_pack_batch_size,
-        "loader_prefetch_factor": cfg.loader_prefetch_factor,
-        "predownload": cfg.predownload,
-        "download_retry": cfg.download_retry,
+        "worker_completion_order": "in-order-keyed-shards-v1",
+        "replay_slots": DEFAULT_REPLAY_SLOTS,
+        "windows_per_generation": WINDOWS_PER_GENERATION,
+        "loader_prefetch_factor": PREFETCH_FACTOR,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -1448,10 +1408,11 @@ class PreflightReport:
     peak_memory_fraction: float
     graph_gap_fraction: float
     optimizer_time_fraction: float
-    disk_capacity_bytes: int
+    disk_free_bytes: int
     exact_resume: bool
     memory_passed: bool
     shuffle_passed: bool
+    loader_stability_passed: bool
     telemetry: dict[str, float]
 
 
@@ -1507,7 +1468,7 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         "peak_memory_fraction",
         "graph_gap_fraction",
         "optimizer_time_fraction",
-        "disk_capacity_bytes",
+        "disk_free_bytes",
     )
     unit_fractions = (
         "synthetic_mfu",
@@ -1545,6 +1506,7 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         "exact_resume": report.exact_resume,
         "memory_passed": report.memory_passed,
         "shuffle_passed": report.shuffle_passed,
+        "loader_stability_passed": report.loader_stability_passed,
     }
     invalid_flags = sorted(name for name, value in flags.items() if not isinstance(value, bool))
     if invalid_flags:
@@ -1555,6 +1517,8 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         failures.append("host/pinned-memory gate did not pass")
     if report.shuffle_passed is not True:
         failures.append("shuffle audit did not pass")
+    if report.loader_stability_passed is not True:
+        failures.append("loader-only stability audit did not pass")
     if not isinstance(report.telemetry, dict):
         failures.append("preflight telemetry must be an object")
         return tuple(failures)
@@ -1569,13 +1533,18 @@ def preflight_failures(cfg: TrainConfig, report: PreflightReport) -> tuple[str, 
         failures.append(f"preflight telemetry is missing {missing_telemetry}")
     if invalid_telemetry:
         failures.append(f"preflight telemetry is invalid {invalid_telemetry}")
-    required_disk = (cfg.cache_limit_gb + _MIN_FREE_CACHE_GIB) * 2**30
-    if numeric["disk_capacity_bytes"] < required_disk:
-        failures.append("streaming cache does not leave 256 GiB of free disk")
-    try:
-        validate_shuffle_config(cfg.shuffle_algo, cfg.shuffle_block_size)
-    except ValueError as error:
-        failures.append(str(error))
+    required_disk = report.telemetry.get("system/disk/required_bytes")
+    if isinstance(required_disk, int | float) and numeric["disk_free_bytes"] < float(required_disk):
+        failures.append("current free disk does not cover the manifest, download workspace, and 256 GiB reserve")
+    cgroup_peak = max(
+        report.telemetry.get("system/cgroup/current_gib", 0.0),
+        report.telemetry.get("system/cgroup/projected_peak_gib", 0.0),
+    )
+    if cgroup_peak > 300:
+        failures.append("projected or observed cgroup memory exceeds 300 GiB")
+    compute_demand = 1.25 * numeric["compute_only_updates_per_s"] * cfg.batch_size
+    if numeric["loader_only_windows_per_s"] < compute_demand:
+        failures.append("loader-only throughput is below 1.25x measured compute demand")
     return tuple(failures)
 
 
@@ -1909,9 +1878,10 @@ def _log_training_summary(
     summary["data/windows_per_replay"] = cfg.target_positions / (128 * unique_replays)
     summary["data/D_over_N"] = cfg.target_positions / parameter_counts["total"]
     summary["data/valid_positions_per_update"] = cfg.batch_size * _SUPERVISED_POSITIONS_PER_WINDOW
-    summary["data/replay_pack_batch_size"] = cfg.replay_pack_batch_size
-    summary["data/loader_prefetch_factor"] = cfg.loader_prefetch_factor
-    summary["data/source_mixing"] = "direct_source_prefixes"
+    summary["data/replay_slots"] = min(DEFAULT_REPLAY_SLOTS, unique_replays)
+    summary["data/generation_windows"] = WINDOWS_PER_GENERATION
+    summary["data/loader_prefetch_factor"] = PREFETCH_FACTOR
+    summary["data/source_mixing"] = "identity_uniform_dense_shards"
     summary["data/corpus_hash"] = selection.corpus_hash
     summary["data/tier_hash"] = selection.tier(cfg.tier_scale).sha256
     summary["training/approx_flops_per_update"] = flops_per_update
@@ -2093,18 +2063,8 @@ def config_from_state(values: dict[str, object]) -> TrainConfig:
 
 
 def _config_from_eval_state(values: dict[str, object]) -> TrainConfig:
-    """Restore current or pre-cooldown O51 configuration for evaluation."""
-    if "replay_cooldown_batches" in values:
-        return config_from_state(values)
-
-    expected = {"experiment_id", "architecture", "awr_calibration", *_RUNTIME_CONFIG_FIELDS}
-    if set(values) != expected - {"replay_cooldown_batches"}:
-        return config_from_state(values)
-    if values["reservoir_capacity"] != _LEGACY_RESERVOIR_CAPACITY:
-        raise ValueError("legacy O51 evaluation checkpoint has an unknown replay reservoir")
-
-    migrated = {**values, "replay_cooldown_batches": _REPLAY_COOLDOWN_BATCHES}
-    return config_from_state(migrated)
+    """Reject checkpoints from every earlier O51 data protocol."""
+    return config_from_state(values)
 
 
 def load_checkpoint(
@@ -2132,10 +2092,6 @@ def validate_production_config(cfg: TrainConfig) -> None:
     validate_config(cfg)
     if cfg.num_workers not in LOADER_WORKERS:
         raise ValueError(f"production num_workers must be one of {LOADER_WORKERS}")
-    if cfg.shuffle_block_size not in (4096, 8192):
-        raise ValueError("production shuffle block must be 4096 or 8192")
-    if cfg.shuffle_algo not in ("py1s", "py1e"):
-        raise ValueError("production shuffle algorithm must be py1s or py1e")
     if not cfg.compile_trunk or not cfg.compile_temporal:
         raise ValueError("production O51 requires compiled trunk and temporal loss paths")
     if cfg.amp_dtype != "bfloat16":
@@ -2175,11 +2131,10 @@ def describe() -> dict[str, object]:
         },
         "loader_grid": {
             "workers": LOADER_WORKERS,
-            "pack_batches": REPLAY_PACK_BATCHES,
-            "prefetch_factors": LOADER_PREFETCH_FACTORS,
-            "predownload_multipliers": PREDOWNLOAD_MULTIPLIERS,
-            "shuffle_algorithms": ["py1s", "py1e"],
-            "shuffle_blocks": [4096, 8192],
+            "prefetch_factor": PREFETCH_FACTOR,
+            "replay_slots": DEFAULT_REPLAY_SLOTS,
+            "windows_per_generation": WINDOWS_PER_GENERATION,
+            "order": "keyed_physical_shards",
         },
         "compute_grid": {
             "physical_batches": PHYSICAL_BATCHES,
@@ -2294,16 +2249,31 @@ def benchmark_loader(
     stats = load_stats(cfg)
     player_lookup = ReplayPlayerLookup(_o50.load_identity_sidecar(cfg).by_replay)
     loader = _make_train_loader(cfg, stats, player_lookup)
+    loader_started = _o50.time.monotonic()
     iterator = iter(loader)
-    for _ in range(warmup_batches):
+    worker_start_seconds = _o50.time.monotonic() - loader_started
+    fill_started = _o50.time.monotonic()
+    next(iterator)
+    initial_fill_seconds = _o50.time.monotonic() - fill_started
+    for _ in range(warmup_batches - 1):
         next(iterator)
 
     batch_seconds: list[float] = []
-    replay_ids: set[str] = set()
-    last_seen_batch: dict[str, int] = {}
-    cooldown_passed = True
+    replay_frequencies: defaultdict[str, int] = defaultdict(int)
+    expected_frequencies: defaultdict[str, float] = defaultdict(float)
+    frequency_variances: defaultdict[str, float] = defaultdict(float)
+    never_selected_probability: defaultdict[str, float] = defaultdict(lambda: 1.0)
+    adjacent_repeats: list[int] = []
+    adjacent_expected: list[float] = []
+    adjacent_variances: list[float] = []
+    prior_16: list[set[str]] = []
+    repeats_within_16: list[int] = []
+    prior_16_expected: list[float] = []
+    selection_outside_active = False
+    raw_bytes_at_start = int(getattr(loader, "raw_bytes_read", 0))
     started = _o50.time.monotonic()
-    for batch_index in range(measured_batches):
+    for _batch_index in range(measured_batches):
+        eligible = set(getattr(loader, "active_replay_ids", ()))
         batch_started = _o50.time.monotonic()
         batch = next(iterator)
         batch_seconds.append(_o50.time.monotonic() - batch_started)
@@ -2311,35 +2281,152 @@ def benchmark_loader(
             raise TypeError("O51 loader benchmark requires replay-aware AWR batches")
         if len(batch.batch.replay_ids) != cfg.batch_size or len(set(batch.batch.replay_ids)) != cfg.batch_size:
             raise RuntimeError("O51 loader emitted a batch with repeated or missing replay IDs")
-        for replay_id in batch.batch.replay_ids:
-            previous = last_seen_batch.get(replay_id)
-            if previous is not None and batch_index - previous <= cfg.replay_cooldown_batches:
-                cooldown_passed = False
-            last_seen_batch[replay_id] = batch_index
-        replay_ids.update(batch.batch.replay_ids)
-    elapsed = _o50.time.monotonic() - started
+        current = set(batch.batch.replay_ids)
+        if not eligible:
+            eligible = current
+        selection_outside_active |= not current <= eligible
+        active_count = len(eligible)
+        inclusion_probability = cfg.batch_size / active_count
+        for replay_id in eligible:
+            expected_frequencies[replay_id] += inclusion_probability
+            frequency_variances[replay_id] += inclusion_probability * (1 - inclusion_probability)
+            never_selected_probability[replay_id] *= 1 - inclusion_probability
+        previous = prior_16[-1] if prior_16 else set()
+        recent = set().union(*prior_16) if prior_16 else set()
+        adjacent_candidates = len(previous & eligible)
+        recent_candidates = len(recent & eligible)
+        adjacent_repeats.append(len(current & previous))
+        repeats_within_16.append(len(current & recent))
+        adjacent_expected.append(adjacent_candidates * inclusion_probability)
+        prior_16_expected.append(recent_candidates * inclusion_probability)
+        if active_count > 1:
+            marked_fraction = adjacent_candidates / active_count
+            adjacent_variances.append(
+                cfg.batch_size
+                * marked_fraction
+                * (1 - marked_fraction)
+                * (active_count - cfg.batch_size)
+                / (active_count - 1)
+            )
+        else:
+            adjacent_variances.append(0.0)
+        for replay_id in current:
+            replay_frequencies[replay_id] += 1
+        prior_16.append(current)
+        if len(prior_16) > 16:
+            prior_16.pop(0)
+    audit_wall_seconds = _o50.time.monotonic() - started
+    elapsed = sum(batch_seconds)
     windows = measured_batches * cfg.batch_size
+    identity_universe = tuple(expected_frequencies)
+    active_identities = len(getattr(loader, "active_replay_ids", identity_universe))
+    chi_square = sum(
+        (replay_frequencies.get(replay_id, 0) - expected_frequencies[replay_id]) ** 2 / frequency_variances[replay_id]
+        for replay_id in identity_universe
+        if frequency_variances[replay_id] > 0
+    )
+    chi_square_dof = max(sum(frequency_variances[replay_id] > 0 for replay_id in identity_universe) - 1, 1)
+    chi_square_per_dof = chi_square / chi_square_dof
+    chi_square_z = (chi_square - chi_square_dof) / math.sqrt(2 * chi_square_dof)
+    expected_coverage = sum(1 - never_selected_probability[replay_id] for replay_id in identity_universe) / len(
+        identity_universe
+    )
+    observed_coverage = len(replay_frequencies) / len(identity_universe)
+    coverage_tolerance = max(
+        0.02,
+        6 * math.sqrt(expected_coverage * (1 - expected_coverage) / len(identity_universe)),
+    )
+    adjacent_variance = sum(adjacent_variances)
+    adjacent_z = (
+        (sum(adjacent_repeats) - sum(adjacent_expected)) / math.sqrt(adjacent_variance)
+        if adjacent_variance > 0
+        else 0.0
+    )
+    uniformity_passed = (
+        not selection_outside_active
+        and abs(chi_square_z) <= 6
+        and abs(adjacent_z) <= 6
+        and abs(observed_coverage - expected_coverage) <= coverage_tolerance
+    )
+    batch_mean = float(np.mean(batch_seconds))
+    batch_p95 = float(np.percentile(batch_seconds, 95))
+    batch_p99 = float(np.percentile(batch_seconds, 99))
+    batch_cv = float(np.std(batch_seconds) / max(batch_mean, 1e-12))
+    stability_passed = batch_p95 <= 2 * batch_mean and batch_p99 <= 3 * batch_mean and batch_cv <= 0.5
+    raw_bytes = int(getattr(loader, "raw_bytes_read", 0)) - raw_bytes_at_start
+    pinned_batch_bytes = int(batch.target.numel() * batch.target.element_size())
+    pinned_batch_bytes += int(batch.returns.numel() * batch.returns.element_size())
+    pinned_batch_bytes += int(batch.eligible.numel() * batch.eligible.element_size())
+    pinned_batch_bytes += sum(int(value.numel() * value.element_size()) for value in batch.context.features.values())
+    pinned_batch_bytes += int(batch.context.ctx_pad.numel() * batch.context.ctx_pad.element_size())
+    decoded_shard_bytes = int(getattr(loader, "max_decoded_shard_bytes", 0))
+    host_memory = estimate_host_memory(
+        central_buffer_bytes=int(getattr(loader, "buffer_bytes", 0)),
+        decoded_shard_bytes=decoded_shard_bytes,
+        replay_workspace_bytes=decoded_shard_bytes,
+        pinned_batch_bytes=pinned_batch_bytes,
+        validation_cache_bytes=4 * 2**30,
+        compiler_and_process_bytes=64 * 2**30,
+        workers=cfg.num_workers,
+    )
+    required_disk_bytes = int(getattr(loader, "required_disk_bytes", 0))
+    disk_free_bytes = int(getattr(loader, "disk_free_bytes", 0))
+    memory_passed = host_memory.peak_bytes <= 300 * 2**30
     metrics: dict[str, object] = {
         "fingerprint": preflight_fingerprint(cfg, data_selection(cfg)),
         "tier_scale": cfg.tier_scale,
         "batch_size": cfg.batch_size,
         "num_workers": cfg.num_workers,
-        "replay_pack_batch_size": cfg.replay_pack_batch_size,
-        "loader_prefetch_factor": cfg.loader_prefetch_factor,
-        "predownload": cfg.predownload,
+        "replay_slots": int(getattr(loader, "replay_slots", active_identities)),
+        "windows_per_generation": WINDOWS_PER_GENERATION,
+        "loader_prefetch_factor": PREFETCH_FACTOR,
         "warmup_batches": warmup_batches,
+        "worker_start_seconds": worker_start_seconds,
+        "initial_fill_seconds": initial_fill_seconds,
         "measured_batches": measured_batches,
         "measured_seconds": elapsed,
+        "audit_wall_seconds": audit_wall_seconds,
         "loader_only_windows_per_s": windows / elapsed,
-        "batch_seconds_mean": float(np.mean(batch_seconds)),
-        "batch_seconds_p95": float(np.percentile(batch_seconds, 95)),
-        "distinct_replays": len(replay_ids),
+        "batch_seconds_mean": batch_mean,
+        "batch_seconds_p50": float(np.percentile(batch_seconds, 50)),
+        "batch_seconds_p95": batch_p95,
+        "batch_seconds_p99": batch_p99,
+        "batch_seconds_cv": batch_cv,
+        "loader_stability_passed": stability_passed,
+        "distinct_replays": len(replay_frequencies),
+        "active_replay_identities": active_identities,
+        "eligible_identity_universe": len(identity_universe),
+        "identity_coverage_fraction": observed_coverage,
+        "expected_identity_coverage_fraction": expected_coverage,
+        "identity_chi_square_per_dof": chi_square_per_dof,
+        "identity_chi_square_z": chi_square_z,
+        "adjacent_batch_repeats_mean": float(np.mean(adjacent_repeats)),
+        "adjacent_batch_repeats_expected": float(np.mean(adjacent_expected)),
+        "adjacent_batch_repeats_z": adjacent_z,
+        "prior_16_batch_repeats_mean": float(np.mean(repeats_within_16)),
+        "prior_16_batch_repeats_expected": float(np.mean(prior_16_expected)),
+        "identity_uniformity_passed": uniformity_passed,
+        "shuffle_passed": uniformity_passed,
         "within_batch_unique": True,
-        "cooldown_batches": cfg.replay_cooldown_batches,
-        "cooldown_passed": cooldown_passed,
+        "cooldown_batches": 0,
+        "raw_bytes_read": raw_bytes,
+        "raw_bytes_per_window": raw_bytes / windows,
+        "central_buffer_bytes": int(getattr(loader, "buffer_bytes", 0)),
+        "max_decoded_shard_bytes": decoded_shard_bytes,
+        "projected_host_peak_bytes": host_memory.peak_bytes,
+        "memory_passed": memory_passed,
+        "required_disk_bytes": required_disk_bytes,
+        "disk_free_bytes": disk_free_bytes,
+        "disk_requirement_passed": disk_free_bytes >= required_disk_bytes,
+        "system/disk/required_bytes": required_disk_bytes,
+        "system/disk/free_bytes": disk_free_bytes,
+        "system/cgroup/projected_peak_gib": host_memory.peak_bytes / 2**30,
         "source_sample_counts": loader.source_sample_counts,
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
+    close_loader = getattr(loader, "close", None)
+    if callable(close_loader):
+        close_loader()
     return metrics
 
 
@@ -2390,6 +2477,7 @@ def _install_o50_bindings() -> None:
     _o50.TemporalBlock = TemporalBlock
     _o50.CausalTemporalDecoder = CausalTemporalDecoder
     _o50.GPT = GPT
+    _o50.AWRBatch = AWRBatch
     _o50.validate_config = validate_config
     _o50.validate_production_config = validate_production_config
     _o50.make_optimizer = make_optimizer
@@ -2427,7 +2515,6 @@ class TrainArgs:
     resume_checkpoint: str = "latest.pt"
     resume_as: str | None = None
     resume_num_workers: int | None = None
-    resume_predownload: int | None = None
     smoke: bool = False
     stop_after_update: int | None = None
     smoke_eval_matchups: int = 4
@@ -2459,11 +2546,6 @@ class LoaderBenchmarkArgs:
     tier_scale: Literal[1, 2, 4, 8] = 8
     batch_size: Literal[128, 256, 512, 1024] = 512
     num_workers: Literal[8, 16, 24, 32] = 16
-    replay_pack_batch_size: Literal[16, 32, 64] = 64
-    loader_prefetch_factor: Literal[1, 2, 4] = 2
-    predownload: int = 1024
-    shuffle_algo: Literal["py1s", "py1e"] = "py1s"
-    shuffle_block_size: Literal[4096, 8192] = 8192
     warmup_batches: int = 8
     measured_batches: int = 50
 
@@ -2541,8 +2623,8 @@ def _run_train(args: TrainArgs) -> None:
         cfg = replace(cfg, arch=MODEL_FAMILY[args.level or model_level(cfg.arch)])
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
-    if args.resume is None and (args.resume_num_workers is not None or args.resume_predownload is not None):
-        raise SystemExit("--resume-num-workers and --resume-predownload require --resume")
+    if args.resume is None and args.resume_num_workers is not None:
+        raise SystemExit("--resume-num-workers requires --resume")
     if args.resume is not None:
         checkpoint = Path(args.resume_checkpoint)
         if checkpoint.is_absolute() or ".." in checkpoint.parts or checkpoint.suffix != ".pt":
@@ -2562,7 +2644,6 @@ def _run_train(args: TrainArgs) -> None:
         cfg = replace(
             cfg,
             num_workers=cfg.num_workers if args.resume_num_workers is None else args.resume_num_workers,
-            predownload=cfg.predownload if args.resume_predownload is None else args.resume_predownload,
         )
         if args.resume_as is not None:
             if Path(args.resume_as).name != args.resume_as or args.resume_as in ("", ".", "..", args.resume):
@@ -2602,6 +2683,7 @@ def _run_train(args: TrainArgs) -> None:
             smoke=args.smoke,
             stop_after_update=args.stop_after_update,
             smoke_eval_matchups=args.smoke_eval_matchups,
+            prepared_data_factory=_prepare_training_data,
         )
     finally:
         _o50.__file__ = original_o50_file
@@ -2641,17 +2723,7 @@ def main(args: Command) -> None:
             "player_vocab_sha256",
             "compile_mode",
             "temporal_attention_chunk",
-            "shuffle_algo",
-            "shuffle_block_size",
             "num_workers",
-            "cache_limit_gb",
-            "reservoir_capacity",
-            "replay_cooldown_batches",
-            "windows_per_replay",
-            "replay_pack_batch_size",
-            "loader_prefetch_factor",
-            "predownload",
-            "download_retry",
         )
         mismatched = [
             name
@@ -2694,11 +2766,6 @@ def main(args: Command) -> None:
             tier_scale=args.tier_scale,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
-            replay_pack_batch_size=args.replay_pack_batch_size,
-            loader_prefetch_factor=args.loader_prefetch_factor,
-            predownload=args.predownload,
-            shuffle_algo=args.shuffle_algo,
-            shuffle_block_size=args.shuffle_block_size,
             push_to_r2=False,
             wandb_log_code=False,
         )

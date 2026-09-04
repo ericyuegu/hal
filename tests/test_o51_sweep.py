@@ -189,8 +189,6 @@ def test_train_commands_parse_and_validate_under_o51() -> None:
         {"adam_lr": float("nan")},
         {"adam_weight_decay": -0.1},
         {"num_workers": 12},
-        {"predownload": 31},
-        {"shuffle_block_size": 1024},
     ],
 )
 def test_treatment_rejects_values_outside_the_o51_search(changes: dict[str, object]) -> None:
@@ -314,8 +312,6 @@ def test_runner_writes_treatment_and_complete_selection_evidence(
             "seed": arm.seed,
             "data_protocol": RUNNER.DATA_PROTOCOL,
             "adam_eps": 1e-12,
-            "reservoir_capacity": 17 * arm.treatment.batch_size,
-            "replay_cooldown_batches": 16,
         }
         update = arm.target_positions // (arm.treatment.batch_size * 128)
         runs[run_map[arm.arm_id]] = SimpleNamespace(
@@ -373,8 +369,6 @@ def test_grid_runner_ranks_then_adjudicates_two_companion_evals(
                 "seed": arm.seed,
                 "data_protocol": RUNNER.DATA_PROTOCOL,
                 "adam_eps": 1e-12,
-                "reservoir_capacity": 17 * arm.treatment.batch_size,
-                "replay_cooldown_batches": 16,
             },
             name=f"test_o51-{arm.level}-shape__{arm.arm_id}",
             state="finished",
@@ -471,8 +465,6 @@ def test_grid_runner_adjudicates_evals_backfilled_into_training_runs(
                 "seed": arm.seed,
                 "data_protocol": RUNNER.DATA_PROTOCOL,
                 "adam_eps": 1e-12,
-                "reservoir_capacity": 17 * arm.treatment.batch_size,
-                "replay_cooldown_batches": 16,
             },
             name=f"test_o51-{arm.level}-shape__{arm.arm_id}",
             state="finished",

@@ -1125,7 +1125,7 @@ requires-dist = [
     { name = "melee", git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d" },
     { name = "modal", specifier = ">=1.5.3" },
     { name = "more-itertools" },
-    { name = "mosaicml-streaming", specifier = ">=0.11.0" },
+    { name = "mosaicml-streaming", specifier = "==0.13.0" },
     { name = "mypy-extensions" },
     { name = "numpy" },
     { name = "nvidia-ml-py", specifier = ">=13.590.48" },

@@ -7,7 +7,8 @@ Owns the single source of truth for two wires:
 * a 14-channel action vector ↔ :class:`ControllerInputsValue` (the inference
   output bridge).
 
-Plus the typed model I/O value objects :class:`Context` and :class:`TrainBatch`.
+Plus the typed model I/O value objects :class:`Context`, :class:`TrainBatch`,
+and :class:`AWRBatch`.
 
 Kept **side-effect-free** (no module-level CUDA / device probing) so that
 forkserver-spawned DataLoader workers can re-import it to run :func:`preprocess`
@@ -489,6 +490,44 @@ class TrainBatch:
             tensors.append(self.context.reset)
         for tensor in tensors:
             tensor.record_stream(stream)
+
+
+@dataclass(frozen=True, slots=True)
+class AWRBatch:
+    """A policy batch with return targets aligned to the next frame."""
+
+    batch: TrainBatch
+    returns: Tensor
+    eligible: Tensor
+
+    @property
+    def context(self) -> Context:
+        return self.batch.context
+
+    @property
+    def target(self) -> Tensor:
+        return self.batch.target
+
+    def to(self, device: str | torch.device) -> AWRBatch:
+        target_device = torch.device(device)
+        return AWRBatch(
+            batch=self.batch.to(target_device),
+            returns=self.returns.to(target_device, non_blocking=True),
+            eligible=self.eligible.to(target_device, non_blocking=True),
+        )
+
+    def pin_memory(self) -> AWRBatch:
+        return AWRBatch(
+            batch=self.batch.pin_memory(),
+            returns=self.returns.pin_memory(),
+            eligible=self.eligible.pin_memory(),
+        )
+
+    def record_stream(self, stream: torch.cuda.Stream) -> None:
+        """Keep staged device storage alive until the compute stream is done."""
+        self.batch.record_stream(stream)
+        self.returns.record_stream(stream)
+        self.eligible.record_stream(stream)
 
 
 # %%

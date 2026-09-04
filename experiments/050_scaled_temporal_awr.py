@@ -34,6 +34,7 @@ import os
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Iterator
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -102,6 +103,7 @@ from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import ITEM_COLUMNS
 from hal.training.features import NEUTRAL_ACTION
+from hal.training.features import AWRBatch
 from hal.training.features import Context
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
@@ -1261,49 +1263,6 @@ class GPT(nn.Module):
         return self.trunk.forward_dense(self.context_tokens(features, action_indices), ctx_pad)
 
 
-@dataclass(frozen=True, slots=True)
-class AWRBatch:
-    """A policy batch with return targets aligned to the next frame.
-
-    Ineligible positions are padding or truncated returns. They keep policy
-    weight one and take no value loss. Their return may be NaN, so select them
-    with ``eligible`` rather than masking by multiplication.
-    """
-
-    batch: TrainBatch
-    returns: Float[Tensor, "B L_ctx"]
-    eligible: Bool[Tensor, "B L_ctx"]
-
-    @property
-    def context(self) -> Context:
-        return self.batch.context
-
-    @property
-    def target(self) -> Tensor:
-        return self.batch.target
-
-    def to(self, device: str | torch.device) -> AWRBatch:
-        target_device = torch.device(device)
-        return AWRBatch(
-            batch=self.batch.to(target_device),
-            returns=self.returns.to(target_device, non_blocking=True),
-            eligible=self.eligible.to(target_device, non_blocking=True),
-        )
-
-    def pin_memory(self) -> AWRBatch:
-        return AWRBatch(
-            batch=self.batch.pin_memory(),
-            returns=self.returns.pin_memory(),
-            eligible=self.eligible.pin_memory(),
-        )
-
-    def record_stream(self, stream: torch.cuda.Stream) -> None:
-        """Keep staged device storage alive until the compute stream is done."""
-        self.batch.record_stream(stream)
-        self.returns.record_stream(stream)
-        self.eligible.record_stream(stream)
-
-
 class IdentityMasker:
     """Checkpointable, per-window identity dropout independent of all other RNGs."""
 
@@ -1355,6 +1314,17 @@ class IdentityMasker:
         }
 
 
+@dataclass(slots=True)
+class PreparedTrainingData:
+    """An optional loader path started before the training process touches CUDA."""
+
+    loader: object
+    validation: list[TrainBatch]
+    iterator: Iterator[AWRBatch]
+    first_batch_future: Future[AWRBatch]
+    executor: ThreadPoolExecutor
+
+
 @jaxtyped(typechecker=beartype)
 def prepared_targets(
     model: GPT, batch: TrainBatch | AWRBatch
@@ -1382,17 +1352,23 @@ class DeviceBatchPrefetcher:
         cfg: TrainConfig,
         device: str | torch.device,
         identity_masker: IdentityMasker | None = None,
+        *,
+        iterator: Iterator[AWRBatch] | None = None,
+        first_batch_future: Future[AWRBatch] | None = None,
     ) -> None:
         self._loader = loader
-        self._iterator = iter(loader)
+        self._iterator = iter(loader) if iterator is None else iterator
         self._cfg = cfg
         self._device = torch.device(device)
         self._identity_masker = identity_masker
         self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
         self._staged: tuple[AWRBatch, AWRBatch, int] | None = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
-        self._future: Future[AWRBatch] | None = None
-        self.preload()
+        self._future = first_batch_future
+        if first_batch_future is None:
+            self.preload()
+        else:
+            self.finish_preload()
 
     def _load_cpu_batch(self) -> AWRBatch:
         try:
@@ -1400,6 +1376,10 @@ class DeviceBatchPrefetcher:
         except StopIteration:
             self._iterator = iter(self._loader)
             cpu_batch = next(self._iterator)
+        return self._prepare_cpu_batch(cpu_batch)
+
+    def _prepare_cpu_batch(self, cpu_batch: AWRBatch) -> AWRBatch:
+        """Apply the parent-side transforms to an already-fetched batch."""
         if not isinstance(cpu_batch, AWRBatch):
             raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
         if self._identity_masker is not None:
@@ -1443,7 +1423,7 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("no background preload is running")
         started = time.monotonic()
         future, self._future = self._future, None
-        cpu_batch = future.result()
+        cpu_batch = self._prepare_cpu_batch(future.result())
         loader_wait = time.monotonic() - started
         self._stage(cpu_batch)
         return loader_wait
@@ -2988,6 +2968,7 @@ def save_boundary_checkpoint(
     wandb_id: str | None,
     actual_loss_positions: int,
     loader_state: dict[str, object],
+    identity_masker_state: dict[str, object] | None = None,
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
@@ -3007,7 +2988,9 @@ def save_boundary_checkpoint(
         extra_state={
             "actual_loss_positions": actual_loss_positions,
             "loader": loader_state,
-            "identity_masker": loader_state.get("identity_masker"),
+            "identity_masker": (
+                loader_state.get("identity_masker") if identity_masker_state is None else identity_masker_state
+            ),
         },
     )
     os.replace(temporary, snapshot)
@@ -3557,6 +3540,7 @@ def _finalize_training(
     uploader: BackgroundUploader | None,
     loader_wait_fractions: list[float],
     loader_state: dict[str, object],
+    identity_masker_state: dict[str, object],
     update: int,
     actual_loss_positions: int,
     smoke: bool,
@@ -3575,6 +3559,7 @@ def _finalize_training(
         wandb_id=None if wandb.run is None else wandb.run.id,
         actual_loss_positions=actual_loss_positions,
         loader_state=loader_state,
+        identity_masker_state=identity_masker_state,
     )
     final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
     _replace_link(snapshot, final_path)
@@ -3595,6 +3580,52 @@ def _finalize_training(
         raise RuntimeError("smoke loader gate failed: require mean wait <=5% and p95 <=10%")
 
 
+def _compile_synthetic_forward_backward(
+    model: GPT,
+    cfg: TrainConfig,
+    *,
+    step: int,
+    trunk_fn: Callable,
+    temporal_fn: Callable,
+) -> None:
+    """Compile production-shaped loss graphs without changing training state."""
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_states = torch.cuda.get_rng_state_all() if DEVICE == "cuda" else None
+    try:
+        model.train()
+        model.zero_grad(set_to_none=True)
+        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
+            torch.compiler.cudagraph_mark_step_begin()
+        batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
+        valid_prefixes = cfg.batch_size * (cfg.arch.L_ctx - DIRECT_LOSS_START)
+        loss, _nll, _metrics = microbatch_loss(
+            model,
+            batch,
+            cfg,
+            step=step,
+            valid_prefixes=valid_prefixes,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+        )
+        loss.backward()
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
+    finally:
+        model.zero_grad(set_to_none=True)
+        torch.set_rng_state(cpu_rng_state)
+        if cuda_rng_states is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_states)
+
+
+def _training_loader_state(train_loader: object, identity_masker: IdentityMasker) -> dict[str, object]:
+    state = train_loader.state_dict()
+    if not isinstance(state, dict):
+        raise TypeError("training loader state must be a dict")
+    if getattr(train_loader, "separate_identity_checkpoint", False):
+        return state
+    return {**state, "identity_masker": identity_masker.state_dict()}
+
+
 def train(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
@@ -3605,6 +3636,8 @@ def train(
     smoke: bool = False,
     stop_after_update: int | None = None,
     smoke_eval_matchups: int = 4,
+    prepared_data_factory: Callable[[TrainConfig, dict[str, FeatureStats], object, dict | None], PreparedTrainingData]
+    | None = None,
 ) -> None:
     validate_config(cfg)
     if not smoke:
@@ -3623,6 +3656,7 @@ def train(
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     sidecar = load_identity_sidecar(cfg)
+    prepared_data = None if prepared_data_factory is None else prepared_data_factory(cfg, stats, sidecar, resume_state)
     model = GPT(cfg, sidecar.vocabulary).to(DEVICE)
     _watch_gradients(model, cfg)
     counts = subsystem_parameter_counts(model)
@@ -3659,14 +3693,37 @@ def train(
 
     trunk_fn, temporal_fn = _training_functions(model, cfg)
 
-    train_loader, val_cache = _make_loaders(cfg, stats)
-    if resume_state is not None:
+    if prepared_data is None:
+        train_loader, val_cache = _make_loaders(cfg, stats)
+    else:
+        train_loader, val_cache = prepared_data.loader, prepared_data.validation
+        _compile_synthetic_forward_backward(
+            model,
+            cfg,
+            step=start_step,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+        )
+    if resume_state is not None and prepared_data is None:
         loader_state = resume_state.get("loader")
         if not isinstance(loader_state, dict):
             raise ValueError("resume checkpoint does not contain Mosaic streaming loader state")
         train_loader.load_state_dict(loader_state)
     run_started = time.monotonic()
-    batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE, identity_masker)
+    if prepared_data is None:
+        batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE, identity_masker)
+    else:
+        try:
+            batch_prefetcher = DeviceBatchPrefetcher(
+                train_loader,
+                cfg,
+                DEVICE,
+                identity_masker,
+                iterator=prepared_data.iterator,
+                first_batch_future=prepared_data.first_batch_future,
+            )
+        finally:
+            prepared_data.executor.shutdown(wait=True, cancel_futures=True)
     loader_wait_fractions: list[float] = []
     cache_roots = tuple(streams.BY_NAME[name].local_root for name in cfg.source_names)
     host_metrics = HostMetricsSampler(
@@ -3768,6 +3825,9 @@ def train(
                     **identity_masker.metrics(),
                     **_mean_phase_metrics(window_phase_timers),
                 }
+                loader_metrics = getattr(train_loader, "metrics", None)
+                if isinstance(loader_metrics, dict):
+                    log.update(loader_metrics)
                 if _cadence_in_window(first_window_update, update, cfg.system_metrics_every):
                     log.update(_minimal_system_metrics(host_metrics.snapshot()))
                 if DEVICE == "cuda":
@@ -3813,7 +3873,8 @@ def train(
                     milestone=preflight_boundary or (update % 8192 == 0),
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
-                    loader_state={**train_loader.state_dict(), "identity_masker": identity_masker.state_dict()},
+                    loader_state=_training_loader_state(train_loader, identity_masker),
+                    identity_masker_state=identity_masker.state_dict(),
                 )
             boundary_metrics: dict[str, float] = {}
             if val_due:
@@ -3845,7 +3906,8 @@ def train(
             replay_dir=replay_dir,
             uploader=uploader,
             loader_wait_fractions=loader_wait_fractions,
-            loader_state={**train_loader.state_dict(), "identity_masker": identity_masker.state_dict()},
+            loader_state=_training_loader_state(train_loader, identity_masker),
+            identity_masker_state=identity_masker.state_dict(),
             update=run_stop,
             actual_loss_positions=actual_positions,
             smoke=smoke,
@@ -3853,6 +3915,9 @@ def train(
         )
     finally:
         batch_prefetcher.close()
+        close_loader = getattr(train_loader, "close", None)
+        if callable(close_loader):
+            close_loader()
         host_metrics.close()
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
