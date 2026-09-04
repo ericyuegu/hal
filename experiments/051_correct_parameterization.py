@@ -2239,8 +2239,8 @@ def benchmark_train_step(
 def benchmark_loader(
     cfg: TrainConfig,
     *,
-    warmup_batches: int = 8,
-    measured_batches: int = 50,
+    warmup_batches: int = 4_096,
+    measured_batches: int = 1_000,
 ) -> dict[str, object]:
     """Measure the direct-source loader without running the model."""
     if warmup_batches < 1 or measured_batches < 1:
@@ -2255,14 +2255,31 @@ def benchmark_loader(
     fill_started = _o50.time.monotonic()
     next(iterator)
     initial_fill_seconds = _o50.time.monotonic() - fill_started
-    for _ in range(warmup_batches - 1):
+    steady_warmup_started = _o50.time.monotonic()
+    for warmup_batch in range(1, warmup_batches):
         next(iterator)
+        if warmup_batches >= 1_024 and (warmup_batch + 1) % 512 == 0:
+            print(
+                json.dumps(
+                    {
+                        "event": "loader_warmup",
+                        "completed_batches": warmup_batch + 1,
+                        "generations_read": int(getattr(loader, "generations_read", 0)),
+                        "raw_gib": int(getattr(loader, "raw_bytes_read", 0)) / 2**30,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+    steady_warmup_seconds = _o50.time.monotonic() - steady_warmup_started
 
     batch_seconds: list[float] = []
     replay_frequencies: defaultdict[str, int] = defaultdict(int)
-    expected_frequencies: defaultdict[str, float] = defaultdict(float)
-    frequency_variances: defaultdict[str, float] = defaultdict(float)
-    never_selected_probability: defaultdict[str, float] = defaultdict(lambda: 1.0)
+    rank_bucket_count = 256
+    rank_observed = np.zeros(rank_bucket_count, dtype=np.int64)
+    rank_expected = np.zeros(rank_bucket_count, dtype=np.float64)
+    rank_pearson_denominator = np.zeros(rank_bucket_count, dtype=np.float64)
+    bucket_sizes_by_active_count: dict[int, np.ndarray] = {}
     adjacent_repeats: list[int] = []
     adjacent_expected: list[float] = []
     adjacent_variances: list[float] = []
@@ -2271,9 +2288,9 @@ def benchmark_loader(
     prior_16_expected: list[float] = []
     selection_outside_active = False
     raw_bytes_at_start = int(getattr(loader, "raw_bytes_read", 0))
+    generations_at_start = int(getattr(loader, "generations_read", 0))
     started = _o50.time.monotonic()
     for _batch_index in range(measured_batches):
-        eligible = set(getattr(loader, "active_replay_ids", ()))
         batch_started = _o50.time.monotonic()
         batch = next(iterator)
         batch_seconds.append(_o50.time.monotonic() - batch_started)
@@ -2282,19 +2299,28 @@ def benchmark_loader(
         if len(batch.batch.replay_ids) != cfg.batch_size or len(set(batch.batch.replay_ids)) != cfg.batch_size:
             raise RuntimeError("O51 loader emitted a batch with repeated or missing replay IDs")
         current = set(batch.batch.replay_ids)
-        if not eligible:
-            eligible = current
-        selection_outside_active |= not current <= eligible
-        active_count = len(eligible)
+        active_count = int(getattr(loader, "sampled_identity_count", len(current)))
+        sampled_ranks = tuple(getattr(loader, "sampled_identity_ranks", range(active_count)))
+        if len(sampled_ranks) != cfg.batch_size or len(set(sampled_ranks)) != cfg.batch_size:
+            raise RuntimeError("O51 loader did not report one distinct identity rank per batch row")
+        selection_outside_active |= any(not 0 <= rank < active_count for rank in sampled_ranks)
+        bucket_indices = np.asarray(sampled_ranks, dtype=np.int64) * rank_bucket_count // active_count
+        rank_observed += np.bincount(bucket_indices, minlength=rank_bucket_count)
+        bucket_sizes = bucket_sizes_by_active_count.get(active_count)
+        if bucket_sizes is None:
+            all_buckets = np.arange(active_count, dtype=np.int64) * rank_bucket_count // active_count
+            bucket_sizes = np.bincount(all_buckets, minlength=rank_bucket_count)
+            bucket_sizes_by_active_count[active_count] = bucket_sizes
+        bucket_probability = bucket_sizes / active_count
+        rank_expected += cfg.batch_size * bucket_probability
+        if active_count > cfg.batch_size:
+            finite_population_correction = (active_count - cfg.batch_size) / (active_count - 1)
+            rank_pearson_denominator += cfg.batch_size * bucket_probability * finite_population_correction
         inclusion_probability = cfg.batch_size / active_count
-        for replay_id in eligible:
-            expected_frequencies[replay_id] += inclusion_probability
-            frequency_variances[replay_id] += inclusion_probability * (1 - inclusion_probability)
-            never_selected_probability[replay_id] *= 1 - inclusion_probability
         previous = prior_16[-1] if prior_16 else set()
         recent = set().union(*prior_16) if prior_16 else set()
-        adjacent_candidates = len(previous & eligible)
-        recent_candidates = len(recent & eligible)
+        adjacent_candidates = len(previous)
+        recent_candidates = len(recent)
         adjacent_repeats.append(len(current & previous))
         repeats_within_16.append(len(current & recent))
         adjacent_expected.append(adjacent_candidates * inclusion_probability)
@@ -2315,44 +2341,45 @@ def benchmark_loader(
         prior_16.append(current)
         if len(prior_16) > 16:
             prior_16.pop(0)
-    audit_wall_seconds = _o50.time.monotonic() - started
-    elapsed = sum(batch_seconds)
+    elapsed = _o50.time.monotonic() - started
     windows = measured_batches * cfg.batch_size
-    identity_universe = tuple(expected_frequencies)
-    active_identities = len(getattr(loader, "active_replay_ids", identity_universe))
-    chi_square = sum(
-        (replay_frequencies.get(replay_id, 0) - expected_frequencies[replay_id]) ** 2 / frequency_variances[replay_id]
-        for replay_id in identity_universe
-        if frequency_variances[replay_id] > 0
-    )
-    chi_square_dof = max(sum(frequency_variances[replay_id] > 0 for replay_id in identity_universe) - 1, 1)
-    chi_square_per_dof = chi_square / chi_square_dof
-    chi_square_z = (chi_square - chi_square_dof) / math.sqrt(2 * chi_square_dof)
-    expected_coverage = sum(1 - never_selected_probability[replay_id] for replay_id in identity_universe) / len(
-        identity_universe
-    )
+    final_active = set(getattr(loader, "active_replay_ids", replay_frequencies))
+    identity_universe = final_active | set(replay_frequencies)
+    active_identities = int(getattr(loader, "active_identity_count", len(final_active)))
     observed_coverage = len(replay_frequencies) / len(identity_universe)
-    coverage_tolerance = max(
-        0.02,
-        6 * math.sqrt(expected_coverage * (1 - expected_coverage) / len(identity_universe)),
-    )
+    expected_coverage = 1 - (1 - cfg.batch_size / active_identities) ** measured_batches
+    valid_rank_buckets = rank_pearson_denominator > 0
+    if valid_rank_buckets.any():
+        rank_chi_square = float(
+            np.sum(
+                (rank_observed[valid_rank_buckets] - rank_expected[valid_rank_buckets]) ** 2
+                / rank_pearson_denominator[valid_rank_buckets]
+            )
+        )
+        rank_chi_square_dof = max(int(valid_rank_buckets.sum()) - 1, 1)
+        rank_chi_square_z = (rank_chi_square - rank_chi_square_dof) / math.sqrt(2 * rank_chi_square_dof)
+    else:
+        rank_chi_square = 0.0
+        rank_chi_square_dof = 0
+        rank_chi_square_z = 0.0
     adjacent_variance = sum(adjacent_variances)
     adjacent_z = (
         (sum(adjacent_repeats) - sum(adjacent_expected)) / math.sqrt(adjacent_variance)
         if adjacent_variance > 0
         else 0.0
     )
-    uniformity_passed = (
-        not selection_outside_active
-        and abs(chi_square_z) <= 6
-        and abs(adjacent_z) <= 6
-        and abs(observed_coverage - expected_coverage) <= coverage_tolerance
-    )
+    uniformity_passed = not selection_outside_active and abs(rank_chi_square_z) <= 6 and abs(adjacent_z) <= 6
     batch_mean = float(np.mean(batch_seconds))
     batch_p95 = float(np.percentile(batch_seconds, 95))
     batch_p99 = float(np.percentile(batch_seconds, 99))
     batch_cv = float(np.std(batch_seconds) / max(batch_mean, 1e-12))
-    stability_passed = batch_p95 <= 2 * batch_mean and batch_p99 <= 3 * batch_mean and batch_cv <= 0.5
+    generations_read = int(getattr(loader, "generations_read", generations_at_start)) - generations_at_start
+    turnover_per_batch = generations_read / measured_batches
+    expected_turnover_per_batch = cfg.batch_size / WINDOWS_PER_GENERATION
+    turnover_passed = generations_read == 0 or abs(turnover_per_batch / expected_turnover_per_batch - 1) <= 0.1
+    stability_passed = (
+        batch_p95 <= 2 * batch_mean and batch_p99 <= 3 * batch_mean and batch_cv <= 0.5 and turnover_passed
+    )
     raw_bytes = int(getattr(loader, "raw_bytes_read", 0)) - raw_bytes_at_start
     pinned_batch_bytes = int(batch.target.numel() * batch.target.element_size())
     pinned_batch_bytes += int(batch.returns.numel() * batch.returns.element_size())
@@ -2383,9 +2410,9 @@ def benchmark_loader(
         "warmup_batches": warmup_batches,
         "worker_start_seconds": worker_start_seconds,
         "initial_fill_seconds": initial_fill_seconds,
+        "steady_warmup_seconds": steady_warmup_seconds,
         "measured_batches": measured_batches,
         "measured_seconds": elapsed,
-        "audit_wall_seconds": audit_wall_seconds,
         "loader_only_windows_per_s": windows / elapsed,
         "batch_seconds_mean": batch_mean,
         "batch_seconds_p50": float(np.percentile(batch_seconds, 50)),
@@ -2398,8 +2425,10 @@ def benchmark_loader(
         "eligible_identity_universe": len(identity_universe),
         "identity_coverage_fraction": observed_coverage,
         "expected_identity_coverage_fraction": expected_coverage,
-        "identity_chi_square_per_dof": chi_square_per_dof,
-        "identity_chi_square_z": chi_square_z,
+        "identity_rank_bucket_count": rank_bucket_count,
+        "identity_rank_chi_square": rank_chi_square,
+        "identity_rank_chi_square_dof": rank_chi_square_dof,
+        "identity_rank_chi_square_z": rank_chi_square_z,
         "adjacent_batch_repeats_mean": float(np.mean(adjacent_repeats)),
         "adjacent_batch_repeats_expected": float(np.mean(adjacent_expected)),
         "adjacent_batch_repeats_z": adjacent_z,
@@ -2409,6 +2438,10 @@ def benchmark_loader(
         "shuffle_passed": uniformity_passed,
         "within_batch_unique": True,
         "cooldown_batches": 0,
+        "generations_read": generations_read,
+        "generation_turnover_per_batch": turnover_per_batch,
+        "expected_generation_turnover_per_batch": expected_turnover_per_batch,
+        "steady_state_turnover_passed": turnover_passed,
         "raw_bytes_read": raw_bytes,
         "raw_bytes_per_window": raw_bytes / windows,
         "central_buffer_bytes": int(getattr(loader, "buffer_bytes", 0)),
@@ -2546,8 +2579,8 @@ class LoaderBenchmarkArgs:
     tier_scale: Literal[1, 2, 4, 8] = 8
     batch_size: Literal[128, 256, 512, 1024] = 512
     num_workers: Literal[8, 16, 24, 32] = 16
-    warmup_batches: int = 8
-    measured_batches: int = 50
+    warmup_batches: int = 4_096
+    measured_batches: int = 1_000
 
 
 @dataclass

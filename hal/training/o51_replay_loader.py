@@ -812,6 +812,8 @@ class ReplayBuffer:
         self.batch_index = 0
         self.last_seen: dict[str, int] = {}
         self.last_metrics: dict[str, float] = {}
+        self.last_sampled_identity_ranks: tuple[int, ...] = ()
+        self.last_sampled_identity_count = 0
 
     @property
     def size(self) -> int:
@@ -888,7 +890,9 @@ class ReplayBuffer:
             raise RuntimeError(
                 f"replay buffer has {self.active_identities} identities, but a batch needs {self.batch_size}"
             )
-        ranks = self.rng.choice(self.active_identities, size=self.batch_size, replace=False)
+        self.last_sampled_identity_count = self.active_identities
+        ranks = self.rng.choice(self.last_sampled_identity_count, size=self.batch_size, replace=False)
+        self.last_sampled_identity_ranks = tuple(int(rank) for rank in ranks)
         slots: list[int] = []
         replay_ids: list[str] = []
         windows: list[dict[str, np.ndarray]] = []
@@ -984,6 +988,7 @@ class _O51Iterator(Iterator[object]):
                 raise RuntimeError("committed row cursor exceeds its shard")
         row = self.loader._cursor[2]
         self.loader._cursor = (self.loader._cursor[0], self.loader._cursor[1], row + 1)
+        self.loader._generations_read += 1
         return self.current, row
 
 
@@ -1045,6 +1050,7 @@ class O51ReplayLoader:
         self._data_iterator: Iterator[DecodedShard] | None = None
         self._parent_next_active = False
         self._raw_bytes_read = 0
+        self._generations_read = 0
         self._max_decoded_shard_bytes = 0
 
     @property
@@ -1062,6 +1068,22 @@ class O51ReplayLoader:
     @property
     def active_replay_ids(self) -> tuple[str, ...]:
         return tuple(self._buffer.identity_slots)
+
+    @property
+    def active_identity_count(self) -> int:
+        return self._buffer.active_identities
+
+    @property
+    def sampled_identity_ranks(self) -> tuple[int, ...]:
+        return self._buffer.last_sampled_identity_ranks
+
+    @property
+    def sampled_identity_count(self) -> int:
+        return self._buffer.last_sampled_identity_count
+
+    @property
+    def generations_read(self) -> int:
+        return self._generations_read
 
     @property
     def max_decoded_shard_bytes(self) -> int:

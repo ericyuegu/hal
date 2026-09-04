@@ -214,6 +214,9 @@ def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
     sampled, _windows, _exhausted = buffer.sample()
 
     assert len(sampled) == len(set(sampled)) == 512
+    assert len(buffer.last_sampled_identity_ranks) == len(set(buffer.last_sampled_identity_ranks)) == 512
+    assert min(buffer.last_sampled_identity_ranks) >= 0
+    assert max(buffer.last_sampled_identity_ranks) < buffer.last_sampled_identity_count == buffer.active_identities
 
 
 class _FakeAdapter:
