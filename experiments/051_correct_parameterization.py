@@ -2291,6 +2291,15 @@ def benchmark_loader(
     generations_at_start = int(getattr(loader, "generations_read", 0))
     started = _o50.time.monotonic()
     for _batch_index in range(measured_batches):
+        previous = prior_16[-1] if prior_16 else set()
+        recent = set().union(*prior_16) if prior_16 else set()
+        count_active = getattr(loader, "count_active_replay_ids", None)
+        if callable(count_active):
+            adjacent_candidates = int(count_active(previous))
+            recent_candidates = int(count_active(recent))
+        else:
+            adjacent_candidates = len(previous)
+            recent_candidates = len(recent)
         batch_started = _o50.time.monotonic()
         batch = next(iterator)
         batch_seconds.append(_o50.time.monotonic() - batch_started)
@@ -2317,10 +2326,6 @@ def benchmark_loader(
             finite_population_correction = (active_count - cfg.batch_size) / (active_count - 1)
             rank_pearson_denominator += cfg.batch_size * bucket_probability * finite_population_correction
         inclusion_probability = cfg.batch_size / active_count
-        previous = prior_16[-1] if prior_16 else set()
-        recent = set().union(*prior_16) if prior_16 else set()
-        adjacent_candidates = len(previous)
-        recent_candidates = len(recent)
         adjacent_repeats.append(len(current & previous))
         repeats_within_16.append(len(current & recent))
         adjacent_expected.append(adjacent_candidates * inclusion_probability)

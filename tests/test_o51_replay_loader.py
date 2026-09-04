@@ -219,6 +219,14 @@ def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
     assert max(buffer.last_sampled_identity_ranks) < buffer.last_sampled_identity_count == buffer.active_identities
 
 
+def test_count_active_replay_ids_ignores_replaced_generations() -> None:
+    loader = object.__new__(O51ReplayLoader)
+    loader._buffer = ReplayBuffer(capacity=512, batch_size=1, seed=51)
+    loader._buffer.identity_slots = {"active": {0}, "duplicate": {1, 2}}
+
+    assert loader.count_active_replay_ids(("active", "retired", "duplicate")) == 2
+
+
 class _FakeAdapter:
     def __init__(self, rows: int, length: int) -> None:
         self.rows = rows

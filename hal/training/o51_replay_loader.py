@@ -13,6 +13,7 @@ import os
 import shutil
 import threading
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -1072,6 +1073,10 @@ class O51ReplayLoader:
     @property
     def active_identity_count(self) -> int:
         return self._buffer.active_identities
+
+    def count_active_replay_ids(self, replay_ids: Iterable[str]) -> int:
+        """Count candidate identities that are live before the next sample."""
+        return sum(replay_id in self._buffer.identity_slots for replay_id in replay_ids)
 
     @property
     def sampled_identity_ranks(self) -> tuple[int, ...]:
