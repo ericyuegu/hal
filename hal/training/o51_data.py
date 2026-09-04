@@ -12,7 +12,7 @@ from hal import streams
 from hal.training import returns as returns_lib
 from hal.training.player_identity import ReplayPlayerLookup
 
-DATA_PROTOCOL: Final[str] = "o51-dense-shard-replay-v1"
+DATA_PROTOCOL: Final[str] = "o51-dense-shard-replay-v2"
 D0: Final[int] = 2**30
 TIER_SCALES: Final[tuple[int, ...]] = (1, 2, 4, 8)
 OFFICIAL_RAW_REPLAYS: Final[int] = 1_300_640

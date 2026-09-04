@@ -370,7 +370,7 @@ def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
             "shuffle_algo",
         }
     )
-    assert exp.DEFAULT_REPLAY_SLOTS == 65_536
+    assert exp.DEFAULT_REPLAY_SLOTS == 131_072
     assert exp.scaled_adam_lr(4.25e-4, batch_multiplier=1, duration_multiplier=1) == 4.25e-4
     assert exp.scaled_adam_lr(
         4.25e-4,
@@ -449,7 +449,7 @@ def test_checkpoint_identity_prevents_o50_or_changed_schedule_resume() -> None:
 def test_older_o51_checkpoint_is_rejected_for_resume_and_evaluation() -> None:
     cfg = exp.config_for("base")
     legacy = exp._checkpoint_config(cfg)
-    legacy["experiment_id"] = "051_correct_parameterization_v3"
+    legacy["experiment_id"] = "051_correct_parameterization_v4"
     legacy["reservoir_capacity"] = 4096
 
     with pytest.raises(ValueError, match="unexpected"):

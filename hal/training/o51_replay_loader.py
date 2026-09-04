@@ -48,7 +48,7 @@ from hal.training.o51_data import SOURCE_MANIFEST_SHA256
 from hal.training.o51_data import TierSelection
 
 WINDOWS_PER_GENERATION: Final[int] = 4
-DEFAULT_REPLAY_SLOTS: Final[int] = 65_536
+DEFAULT_REPLAY_SLOTS: Final[int] = 131_072
 PREFETCH_FACTOR: Final[int] = 1
 CHECKPOINT_SCHEMA: Final[int] = 1
 RESERVED_DISK_BYTES: Final[int] = 256 * 2**30

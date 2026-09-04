@@ -93,7 +93,7 @@ class Args:
     cpu_limit: float = 48.0
     """CPU hard limit. Modal can burst above the request when capacity is available."""
     memory_gib: int = 128
-    """Requested system memory in GiB. O51 applies a 288 GiB floor."""
+    """Requested system memory in GiB. O51 applies a 192 GiB floor."""
     memory_limit_gib: int | None = 384
     """Hard system-memory limit in GiB; None leaves the Modal default."""
     disk_gib: int = 2048
@@ -370,7 +370,7 @@ def requested_memory_gib(args: Args) -> tuple[int, int | None]:
     script = experiment_script(args.cmd)
     if script is None or script.name != "051_correct_parameterization.py":
         return args.memory_gib, args.memory_limit_gib
-    request = max(args.memory_gib, 288)
+    request = max(args.memory_gib, 192)
     limit = 384 if args.memory_limit_gib is None else max(args.memory_limit_gib, 384, request)
     return request, limit
 

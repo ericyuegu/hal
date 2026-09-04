@@ -62,7 +62,7 @@ def test_o51_uses_two_tib_ephemeral_ssd_floor() -> None:
 
     assert requested_disk_gib(args) == 2048
     assert function_resources(args)["ephemeral_disk"] == 2048 * 1024
-    assert function_resources(args)["memory"] == (288 * 1024, 384 * 1024)
+    assert function_resources(args)["memory"] == (192 * 1024, 384 * 1024)
     assert requested_disk_gib(Args(cmd=["uv", "run", experiment], disk_gib=4096)) == 4096
 
 

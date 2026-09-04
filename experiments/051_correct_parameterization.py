@@ -104,7 +104,7 @@ AWRCalibration = _o50.AWRCalibration
 AWR_CALIBRATION = _o50.AWR_CALIBRATION
 AWRBatch = O51AWRBatch
 
-_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v4"
+_EXPERIMENT_ID: Final[str] = "051_correct_parameterization_v5"
 _TRUNK_BASE_LAYERS: Final[int] = 8
 _TEMPORAL_BASE_LAYERS: Final[int] = 2
 _TRUNK_BASE_ATTENTION_SCALE: Final[float] = 0.25
