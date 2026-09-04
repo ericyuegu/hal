@@ -5,8 +5,7 @@ and ``hal.sim`` (inputs, trajectory, session). Anything declared
 here is the canonical encoding shared across offline-dataset and online-
 emulator code — no other module should re-state what's defined here.
 
-See CLAUDE.md (Controller data model) for the logical-only
-controller representation and the peppi → MDS → libmelee → Dolphin data flow.
+See AGENTS.md for the offline/live representation boundary.
 """
 
 from collections.abc import Sequence
@@ -41,8 +40,6 @@ ACTION_CHANNELS: Final[tuple[str, ...]] = (
     "button_d_up",
 )
 ACTION_DIM: Final[int] = len(ACTION_CHANNELS)
-# Compatibility name used by existing model code.
-A_DIM: Final[int] = ACTION_DIM
 
 # ---------------------------------------------------------------------------
 # Player / port conventions
@@ -74,7 +71,7 @@ def libmelee_port_to_peppi(port: int) -> int:
 GAME_START_FRAME: Final[int] = -123
 
 
-def dedupe_keep_idx(frame_ids: Sequence[int]) -> np.ndarray:
+def dedupe_keep_idx(frame_ids: Sequence[int] | np.ndarray) -> np.ndarray:
     """Indices keeping the LAST row per ``frame_id`` — rollback consolidation.
 
     peppi-py emits one row per recorded slp state including rollback

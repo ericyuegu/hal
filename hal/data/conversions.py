@@ -523,7 +523,7 @@ def count_inputs(p: PlayerBehaviorFrames, frame_id: np.ndarray) -> InputCounts:
     region, and each trigger crossing ``TRIGGER_PRESS_THRESHOLD`` upward.
 
     NOT bit-parity with slippi-js, by construction: HAL stores the LOGICAL
-    controller (CLAUDE.md, Controller data model), so the trigger columns are
+    controller (see ``hal.wire``), so the trigger columns are
     already zeroed below ``wire.TRIGGER_DEADZONE`` (43/140 = 0.307). A trigger
     press that peaks in the 0.300-0.307 band therefore counts in slippi-js and
     not here. The stick columns are the same slp-logical values slippi-js reads,

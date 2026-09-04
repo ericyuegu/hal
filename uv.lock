@@ -1131,9 +1131,9 @@ requires-dist = [
     { name = "nvidia-ml-py", specifier = ">=13.590.48" },
     { name = "nvitop" },
     { name = "pandas" },
-    { name = "peppi-py", git = "https://github.com/ericyuegu/peppi-py?branch=libmelee-parity" },
+    { name = "peppi-py", git = "https://github.com/ericyuegu/peppi-py?rev=6fca8045d891961c8c9a40ff21ea40bcf5367e0e" },
     { name = "polars" },
-    { name = "py7zr", specifier = ">=1.1.0" },
+    { name = "py7zr", specifier = "==1.1.0" },
     { name = "pyarrow", specifier = ">=22" },
     { name = "s3fs", specifier = ">=2025" },
     { name = "scikit-learn" },
@@ -2123,7 +2123,7 @@ wheels = [
 [[package]]
 name = "peppi-py"
 version = "0.9.0"
-source = { git = "https://github.com/ericyuegu/peppi-py?branch=libmelee-parity#6fca8045d891961c8c9a40ff21ea40bcf5367e0e" }
+source = { git = "https://github.com/ericyuegu/peppi-py?rev=6fca8045d891961c8c9a40ff21ea40bcf5367e0e#6fca8045d891961c8c9a40ff21ea40bcf5367e0e" }
 dependencies = [
     { name = "inflection" },
     { name = "pyarrow" },

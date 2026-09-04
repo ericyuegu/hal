@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "provenance": {
+    "git_commit": "1c3511ca39c21521db436f52da8d2ad9f74668a2",
+    "python": "3.14.4",
+    "torch": "2.11.0+cu130",
+    "sources": {
+      "experiments/050_scaled_temporal_awr.py": "a03ebcf85a79fbfeb9d1b4f8e526a3a21099e9027fc00076fa6cc9428047d572",
+      "experiments/051_correct_parameterization.py": "9984f0ef45bace418601cc448205746e03cadecdf7b378378705e66793e47b20",
+      "hal/training/o51_data.py": "2d71b796855c00bf1743ce185540768e8c01d23f7bed8f41d8b286c5e306208d",
+      "hal/training/o51_replay_loader.py": "107ce5cc226f6325fd395245d54e183fdc2d524e9979cc6dca7cc79268cb2e4a",
+      "hal/training/o51_sweep.py": "c9bc8d0e54163d35b5a0219a7c7c5f2c7cacf7ffdbcd921d8d88c779082a3579"
+    }
+  },
+  "contract": {
+    "checkpoint": {
+      "architecture_keys": [
+        "L_ctx", "action_embed_dim", "action_state_embed_dim", "action_vocab", "attn_window",
+        "char_dim", "char_vocab", "d_model", "group_head_dim", "head_offsets", "item_dim",
+        "item_hidden_dim", "item_state_dim", "item_type_dim", "n_heads", "n_layers",
+        "offset_embed_dim", "sample_chunk_length", "stage_dim", "stage_vocab", "temporal_d_model",
+        "temporal_ff_dim", "temporal_heads", "temporal_layers", "value_hidden_dim"
+      ],
+      "awr_calibration_keys": [
+        "auxiliary_loss_weight", "beta", "damage_shaping", "gamma", "stock_value",
+        "value_loss_weight", "weight_max", "win_reward"
+      ],
+      "boundary_step": 6,
+      "config_keys": [
+        "adam_beta1", "adam_beta2", "adam_eps", "adam_lr", "adam_weight_decay", "allow_tf32",
+        "amp_dtype", "architecture", "architecture_metrics_every", "awr_calibration", "batch_size",
+        "cache_metrics_interval_s", "ckpt_every", "compile_mode", "compile_temporal", "compile_trunk",
+        "compiled_inference_bucket", "delay_frames", "depth_alpha", "eval_every", "eval_max_frames",
+        "eval_max_parallel", "eval_n_matchups", "eval_seed", "experiment_id", "final_eval_n_matchups",
+        "grad_clip", "gradient_hist_every", "hidden_std_multiplier", "identity_dropout",
+        "inference_mode", "layer_rms_batch_size", "layer_rms_every", "loader_timeout_s",
+        "lr_floor_ratio", "lr_schedule_kind", "max_steps", "mds_schema_version", "muon_batch_scaling",
+        "muon_duration_scaling", "muon_lr", "muon_weight_decay", "num_workers", "phase_timing_every",
+        "player_sidecar_local", "player_sidecar_sha256", "player_vocab_sha256", "player_vocab_size",
+        "policy_world_schema_version", "prediction_frames", "process_metrics_interval_s", "push_to_r2",
+        "readout_init", "replan_interval_frames", "seed", "source_names", "stability_every",
+        "system_metrics_every", "system_metrics_interval_s", "target_positions",
+        "temporal_attention_chunk", "tier_scale", "val_batch_size", "val_every", "val_n_samples",
+        "val_split", "wandb_log_code", "warmup_steps", "weight_hist_every"
+      ],
+      "config_round_trip": true,
+      "config_sha256": "e0bc4ccabd208a9c05592e354edcbe265a53b3d84ad6f5cd57cf04158bca6f73",
+      "loader_descriptor": {
+        "epoch": 3,
+        "locator": {"row": 11, "shard": 7, "source": "source"},
+        "next_window": 2,
+        "replay_checksum": 13,
+        "slot": 0
+      },
+      "loader_keys": [
+        "batch_sampler_rng_state", "buffer_geometry", "cursor", "data_protocol", "schema", "slots",
+        "source_manifest_sha256", "source_selection_sha256"
+      ],
+      "top_level_keys": [
+        "actual_loss_positions", "cfg", "identity_masker", "loader", "model", "opt", "sched", "step",
+        "wandb_id"
+      ]
+    },
+    "describe": {
+      "batch_grid": [128, 256, 512, 1024],
+      "compute_grid": {
+        "compile_modes": ["reduce-overhead", "max-autotune"],
+        "physical_batches": [128, 256, 512, 1024],
+        "temporal_attention_chunks": [8192, 16384, 32768, null]
+      },
+      "decay_grid": [0.0, 0.001, 0.01],
+      "depth_alpha": [0.5, 1.0],
+      "experiment": "051_correct_parameterization_v5",
+      "initialization": {
+        "hidden_std_multiplier": [0.5, 1.0, 2.0],
+        "readout": ["zero", "mup-normal"]
+      },
+      "loader_grid": {
+        "order": "keyed_physical_shards",
+        "prefetch_factor": 1,
+        "replay_slots": 131072,
+        "windows_per_generation": 4,
+        "workers": [8, 16, 24, 32]
+      },
+      "lr_grid": {
+        "adam": [0.0002125, 0.000425, 0.00085],
+        "adam_epsilon": 1e-12,
+        "muon": [0.014, 0.028, 0.056]
+      },
+      "models": {
+        "base": {"d_model": 256, "group_head_dim": 128, "n_heads": 4, "n_layers": 8, "parameters": 7861786, "temporal_d_model": 128, "temporal_ff_dim": 384, "temporal_heads": 2, "temporal_layers": 2, "value_hidden_dim": 128},
+        "proxy": {"d_model": 256, "group_head_dim": 128, "n_heads": 4, "n_layers": 16, "parameters": 14480922, "temporal_d_model": 128, "temporal_ff_dim": 384, "temporal_heads": 2, "temporal_layers": 4, "value_hidden_dim": 128},
+        "mid": {"d_model": 512, "group_head_dim": 256, "n_heads": 8, "n_layers": 16, "parameters": 55015322, "temporal_d_model": 256, "temporal_ff_dim": 768, "temporal_heads": 4, "temporal_layers": 4, "value_hidden_dim": 256},
+        "large": {"d_model": 1024, "group_head_dim": 512, "n_heads": 16, "n_layers": 16, "parameters": 216496794, "temporal_d_model": 512, "temporal_ff_dim": 1536, "temporal_heads": 8, "temporal_layers": 4, "value_hidden_dim": 512}
+      },
+      "tiers": {
+        "1": {"D": 1073741824, "potential_targets": 3353805100, "unique_replays": 162598, "updates_at_B512": 16384},
+        "2": {"D": 2147483648, "potential_targets": 6686081812, "unique_replays": 325176, "updates_at_B512": 32768},
+        "4": {"D": 4294967296, "potential_targets": 13291247716, "unique_replays": 650331, "updates_at_B512": 65536},
+        "8": {"D": 8589934592, "potential_targets": 26582742076, "unique_replays": 1300638, "updates_at_B512": 131072}
+      }
+    },
+    "models": {
+      "base": {"state_entries": 118, "state_schema_sha256": "4a507db9b47771a64dd6764e0081fd51324418bc962e8c5c096ce1e40549bb86", "subsystem_parameters": {"group_heads": 202211, "other": 861382, "temporal_decoder": 441072, "total": 7861786, "trunk": 6291456, "value_head": 65665}},
+      "proxy": {"state_entries": 168, "state_schema_sha256": "bde2f064ba6d76014c88140acfcf476cf6b81d039f522f4aa5a0bfe02733862d", "subsystem_parameters": {"group_heads": 202211, "other": 861382, "temporal_decoder": 768752, "total": 14480922, "trunk": 12582912, "value_head": 65665}},
+      "mid": {"state_entries": 168, "state_schema_sha256": "32703c3956a01f1d56aa921f4df45dfe07aabd03c27e31abad5060ca5e8eb9a4", "subsystem_parameters": {"group_heads": 535139, "other": 984518, "temporal_decoder": 2901616, "total": 55015322, "trunk": 50331648, "value_head": 262401}},
+      "large": {"state_entries": 168, "state_schema_sha256": "0bb8cb4edc18eaaaa09183829707595f8e2d173466922c3cafd4e9e1f23251a8", "subsystem_parameters": {"group_heads": 1594211, "other": 1230790, "temporal_decoder": 11296112, "total": 216496794, "trunk": 201326592, "value_head": 1049089}}
+    },
+    "numeric": {
+      "hidden_l2": 22.62741470336914,
+      "hidden_mean": -0.04246696084737778,
+      "hidden_shape": [2, 8, 32],
+      "loss": 13.749371528625488,
+      "metric_keys": [
+        "awr/active", "awr/button_loss_correlation", "awr/cap_fraction", "awr/eligible_fraction",
+        "awr/ess_fraction", "awr/weight_max", "awr/weight_mean", "train/far_nll", "train/loss",
+        "train/near_loss", "train/objective", "value/loss", "value/rmse"
+      ],
+      "nll_mean": 27.498743057250977,
+      "policy_loss_bits": 19.836149215698242,
+      "value_loss": 0.0
+    },
+    "optimizer": {
+      "groups": [
+        {"betas": [0.9, 0.95], "eps": 1e-12, "first_parameter": "codec.class_embeddings.buttons.weight", "last_parameter": "value_head.down.bias", "lr": 0.000425, "parameter_count": 25, "parameter_names_sha256": "99da77177e183eb860b4ed86d5bae682c85be77d2fc240614f48eceffb51d3de", "update_clip_threshold": null, "use_muon": false, "weight_decay": 0.0},
+        {"betas": [0.9, 0.95], "eps": 1e-12, "first_parameter": "codec.semantic_projections.buttons.weight", "last_parameter": "value_head.down.weight", "lr": 0.000425, "parameter_count": 20, "parameter_names_sha256": "0c00684463d938db3408d82e03bc594b12546eb69fa714d88960f38a5e034aa9", "update_clip_threshold": null, "use_muon": false, "weight_decay": 0.001},
+        {"first_parameter": "trunk.blocks.0.attn.c_attn.weight", "last_parameter": "temporal.blocks.1.qkv.weight", "logical_splits": 3, "lr": 0.028, "momentum": 0.95, "muon_scale_clamp_min_one": false, "parameter_count": 10, "parameter_names_sha256": "27a6dbf54e8acd9226ecf0cf5fcf5b5a1490bebf804ff6aa5cb2cb9cb78f34ea", "use_muon": true, "weight_decay": 0.001},
+        {"first_parameter": "trunk.blocks.0.attn.c_proj.weight", "last_parameter": "temporal.outputs.triggers.up.weight", "logical_splits": 1, "lr": 0.028, "momentum": 0.95, "muon_scale_clamp_min_one": false, "parameter_count": 35, "parameter_names_sha256": "6e1c8ec717ec769479ebf714ee0b4a7549f83e785ecfe006ae671e6083d1d48a", "use_muon": true, "weight_decay": 0.001},
+        {"first_parameter": "value_head.up.weight", "last_parameter": "value_head.up.weight", "logical_splits": 2, "lr": 0.028, "momentum": 0.95, "muon_scale_clamp_min_one": false, "parameter_count": 1, "parameter_names_sha256": "3913a3484921ab8c18ac1fc8c80d011593cfcc812efe252d3905fcff2dbcd79c", "use_muon": true, "weight_decay": 0.001}
+      ],
+      "matrix_scale": {"tall_8_by_2": 2.0, "wide_2_by_8": 0.5}
+    },
+    "sweep": {
+      "arm_counts": {"batch": 8, "decay": 9, "duration": 6, "initialization-extension": 1, "initialization-screen": 6, "lr": 9, "mid-search": 9, "proxy-transfer": 2, "seed-repeat": 2},
+      "arms_sha256": "3448f4af0e55c531e734867ade37fc7c1295498bad508a96e62222f5b4c8b564",
+      "closed_loop_ranking": ["o51-lr-m0p007-a0p00010625", "o51-lr-m0p007-a0p0002125"],
+      "closed_loop_winner": "o51-lr-m0p007-a0p00010625",
+      "validation_ranking": ["o51-lr-m0p007-a0p0002125", "o51-lr-m0p007-a0p00010625", "o51-lr-m0p007-a0p000425"],
+      "validation_winner": "o51-lr-m0p007-a0p0002125"
+    }
+  }
+}

@@ -13,23 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hal.training.o51_data import D0
-from hal.training.o51_sweep import ClosedLoopOutcome
-from hal.training.o51_sweep import SweepArm
-from hal.training.o51_sweep import Treatment
-from hal.training.o51_sweep import ValidationOutcome
-from hal.training.o51_sweep import batch_arms
-from hal.training.o51_sweep import decay_arms
-from hal.training.o51_sweep import duration_arms
-from hal.training.o51_sweep import initialization_extension_arms
-from hal.training.o51_sweep import initialization_screen_arms
-from hal.training.o51_sweep import lr_arms
-from hal.training.o51_sweep import mid_search_arms
-from hal.training.o51_sweep import proxy_transfer_arms
-from hal.training.o51_sweep import seed_repeat_arms
-from hal.training.o51_sweep import select_closed_loop_winner
-from hal.training.o51_sweep import select_validation_winner
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -42,8 +25,24 @@ def _load(name: str, path: Path) -> ModuleType:
     return module
 
 
-RUNNER = _load("test_run_o51_sweep", ROOT / "scripts" / "run_o51_sweep.py")
-EXPERIMENT = _load("test_o51_sweep_experiment", ROOT / "experiments" / "051_correct_parameterization.py")
+EXPERIMENT = _load("test_o51_sweep_experiment", ROOT / "experiments" / "051_muon_parameterization.py")
+RUNNER = EXPERIMENT
+D0 = EXPERIMENT.D0
+ClosedLoopOutcome = EXPERIMENT.ClosedLoopOutcome
+SweepArm = EXPERIMENT.SweepArm
+Treatment = EXPERIMENT.Treatment
+ValidationOutcome = EXPERIMENT.ValidationOutcome
+batch_arms = EXPERIMENT.batch_arms
+decay_arms = EXPERIMENT.decay_arms
+duration_arms = EXPERIMENT.duration_arms
+initialization_extension_arms = EXPERIMENT.initialization_extension_arms
+initialization_screen_arms = EXPERIMENT.initialization_screen_arms
+lr_arms = EXPERIMENT.lr_arms
+mid_search_arms = EXPERIMENT.mid_search_arms
+proxy_transfer_arms = EXPERIMENT.proxy_transfer_arms
+seed_repeat_arms = EXPERIMENT.seed_repeat_arms
+select_closed_loop_winner = EXPERIMENT.select_closed_loop_winner
+select_validation_winner = EXPERIMENT.select_validation_winner
 
 
 def _flag(argv: tuple[str, ...], name: str) -> str:

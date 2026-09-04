@@ -37,3 +37,24 @@ from hal.sim.vec import BatchPolicy
 from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
 from hal.sim.vec import drive_vec
+
+__all__ = [
+    "BatchPolicy",
+    "ControllerInputs",
+    "ControllerInputsValue",
+    "ControllerSource",
+    "DiffReport",
+    "InternalControllerSource",
+    "MDSControllerSource",
+    "Matchup",
+    "PlayerSetup",
+    "ScriptedControllerSource",
+    "Session",
+    "Slot",
+    "Trajectory",
+    "VecMatch",
+    "apply_inputs",
+    "diff",
+    "drive",
+    "drive_vec",
+]

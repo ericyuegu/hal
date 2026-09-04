@@ -17,6 +17,7 @@ documented in memory ``project_roundtrip_limits``.
 """
 
 import multiprocessing as mp
+import os
 
 # libmelee's slippstream client spawns a child via mp.Process; on Python 3.14
 # the default start method is "forkserver" which re-imports the worker script
@@ -78,15 +79,33 @@ _EXCLUDED_FIXTURE_CHARACTERS = {
 }
 
 
+def _missing_prerequisite(message: str) -> None:
+    if os.environ.get("HAL_REQUIRE_INTEGRATION") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def _check_prereqs() -> None:
     if not ISO_PATH.is_file():
-        pytest.skip(f"ISO missing at {ISO_PATH}; run `python -m hal.scripts.fetch --name ssbm.ciso`")
+        _missing_prerequisite(f"ISO missing at {ISO_PATH}; run `python -m hal.scripts.fetch --name ssbm.ciso`")
     if not DOLPHIN_PATH.is_file():
-        pytest.skip(
+        _missing_prerequisite(
             f"Dolphin AppRun missing at {DOLPHIN_PATH}; run `python -m hal.scripts.fetch --name dolphin-exiai`"
         )
     if not (DEV_MDS_DIR / "manifest.jsonl").is_file():
-        pytest.skip(f"dev MDS missing at {DEV_MDS_DIR}; run `python -m hal.scripts.fetch --name dev-mds`")
+        _missing_prerequisite(f"dev MDS missing at {DEV_MDS_DIR}; run `python -m hal.scripts.fetch --name dev-mds`")
+
+
+def test_missing_integration_fixture_skips_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HAL_REQUIRE_INTEGRATION", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="fixture is missing"):
+        _missing_prerequisite("fixture is missing")
+
+
+def test_missing_integration_fixture_fails_when_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL_REQUIRE_INTEGRATION", "1")
+    with pytest.raises(pytest.fail.Exception, match="fixture is missing"):
+        _missing_prerequisite("fixture is missing")
 
 
 def _pick_safe_entry():
@@ -98,7 +117,7 @@ def _pick_safe_entry():
             and entry.annotation is not None
         ):
             return entry
-    pytest.skip("no RNG-stable replay in dev MDS")
+    _missing_prerequisite("no RNG-stable replay in dev MDS")
 
 
 @pytest.mark.integration

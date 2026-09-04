@@ -93,11 +93,11 @@ class Args:
     cpu_limit: float = 48.0
     """CPU hard limit. Modal can burst above the request when capacity is available."""
     memory_gib: int = 128
-    """Requested system memory in GiB. O51 applies a 192 GiB floor."""
+    """Requested system memory in GiB."""
     memory_limit_gib: int | None = 384
     """Hard system-memory limit in GiB; None leaves the Modal default."""
     disk_gib: int = 2048
-    """Ephemeral SSD in GiB. O51 keeps a 2 TiB minimum."""
+    """Ephemeral SSD in GiB."""
     image: str = IMAGE
     """Dependency image imported from a registry. The clean local source is copied on top."""
     cloud: str | None = None
@@ -359,20 +359,11 @@ def gpu_request(gpu: str) -> str | list[str] | None:
 
 
 def requested_disk_gib(args: Args) -> int:
-    """Keep legacy launch defaults while enforcing O51's full-tier disk floor."""
-    script = experiment_script(args.cmd)
-    minimum = 2048 if script is not None and script.name == "051_correct_parameterization.py" else 0
-    return max(args.disk_gib, minimum)
+    return args.disk_gib
 
 
 def requested_memory_gib(args: Args) -> tuple[int, int | None]:
-    """Keep legacy overrides while enforcing O51's memory request and limit."""
-    script = experiment_script(args.cmd)
-    if script is None or script.name != "051_correct_parameterization.py":
-        return args.memory_gib, args.memory_limit_gib
-    request = max(args.memory_gib, 192)
-    limit = 384 if args.memory_limit_gib is None else max(args.memory_limit_gib, 384, request)
-    return request, limit
+    return args.memory_gib, args.memory_limit_gib
 
 
 def function_resources(args: Args) -> FunctionResources:

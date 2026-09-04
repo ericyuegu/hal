@@ -16,7 +16,7 @@ from hal.scripts.prepare_professional import load_sources
 from hal.scripts.prepare_professional import prepare_professional
 from hal.scripts.publish_mds import audit
 from hal.scripts.publish_mds import publish_mds
-from hal.scripts.scaleup_ranked import _rclone_objects
+from hal.scripts.scaleup_ranked import rclone_objects
 
 _PLAYER_MIN_OWNER_COVERAGE = {
     # Franz has many anonymous offline sets. A unique Dr. Mario extends the
@@ -29,7 +29,7 @@ def _empty_attempt(staging_root: str, slug: str) -> str:
     base = f"{staging_root.rstrip('/')}/professional/{slug}"
     for attempt in range(1, 1_000):
         candidate = f"{base}/attempt-{attempt:03d}/mds-policy-world-v7"
-        objects = _rclone_objects(candidate)
+        objects = rclone_objects(candidate)
         if not objects:
             return candidate
         if "projection.json" in objects:
@@ -67,7 +67,7 @@ def scaleup_professional(cfg: ProfessionalScaleupConfig) -> None:
 
     for slug in slugs:
         final = f"{cfg.final_root.rstrip('/')}/professional/{slug}/mds-policy-world-v7"
-        final_objects = _rclone_objects(final)
+        final_objects = rclone_objects(final)
         if final_objects:
             if "_SUCCESS" not in final_objects:
                 raise FileExistsError(f"{slug}: nonempty final prefix lacks _SUCCESS: {final}")
@@ -100,7 +100,7 @@ def scaleup_professional(cfg: ProfessionalScaleupConfig) -> None:
             )
 
         staging = _empty_attempt(cfg.staging_root, slug)
-        staged_objects = _rclone_objects(staging)
+        staged_objects = rclone_objects(staging)
         if "projection.json" not in staged_objects:
             process_replays(
                 paths_file=root / "paths.txt",

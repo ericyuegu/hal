@@ -14,13 +14,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from hal.training.o51_data import CorpusSelection
-from hal.training.o51_data import SourceSlice
-from hal.training.o51_data import TierSelection
-
 
 def _load() -> ModuleType:
-    path = Path(__file__).resolve().parents[2] / "experiments" / "051_correct_parameterization.py"
+    path = Path(__file__).resolve().parents[1] / "experiments" / "051_muon_parameterization.py"
     spec = importlib.util.spec_from_file_location("test_exp051", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -30,6 +26,9 @@ def _load() -> ModuleType:
 
 
 exp = _load()
+CorpusSelection = exp.CorpusSelection
+SourceSlice = exp.SourceSlice
+TierSelection = exp.TierSelection
 
 
 @pytest.mark.parametrize(
@@ -55,7 +54,6 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
         tier_scale=8,
         push_to_r2=False,
     )
-    original_o50_file = exp._o50.__file__
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
@@ -67,14 +65,13 @@ def test_full_tier_smoke_can_collect_preflight_data_without_prior_evidence(monke
 
     def train(selected_cfg, _stats, **_kwargs) -> None:
         observed["tier_scale"] = selected_cfg.tier_scale
-        observed["module_file"] = exp._o50.__file__
+        observed["module_file"] = exp.__file__
 
-    monkeypatch.setattr(exp._o50, "train", train)
+    monkeypatch.setattr(exp, "train", train)
 
     exp._run_train(exp.TrainArgs(cfg=cfg, smoke=True, stop_after_update=1))
 
     assert observed == {"tier_scale": 8, "module_file": exp.__file__}
-    assert exp._o50.__file__ == original_o50_file
 
 
 def test_prepared_o51_data_starts_iterator_before_background_next(monkeypatch) -> None:
@@ -108,8 +105,8 @@ def test_prepared_o51_data_starts_iterator_before_background_next(monkeypatch) -
 def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     cfg = exp.TrainConfig()
     replay_ids = tuple(f"replay-{index}" for index in range(cfg.batch_size))
-    train_batch = exp._o50.TrainBatch(
-        exp._o50.Context({}, torch.zeros(cfg.batch_size, dtype=torch.int64)),
+    train_batch = exp.TrainBatch(
+        exp.Context({}, torch.zeros(cfg.batch_size, dtype=torch.int64)),
         torch.empty(cfg.batch_size, 0, 0),
         replay_ids,
     )
@@ -128,7 +125,7 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
 
     sidecar = type("Sidecar", (), {"by_replay": {}})()
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
-    monkeypatch.setattr(exp._o50, "load_identity_sidecar", lambda _cfg: sidecar)
+    monkeypatch.setattr(exp, "load_identity_sidecar", lambda _cfg: sidecar)
     monkeypatch.setattr(exp, "_make_train_loader", lambda *_args: Loader())
     monkeypatch.setattr(exp, "data_selection", lambda _cfg: object())
     monkeypatch.setattr(exp, "preflight_fingerprint", lambda *_args: "f" * 64)
@@ -153,7 +150,7 @@ def test_fresh_train_selects_requested_model_level(monkeypatch, level: str) -> N
     def train(selected_cfg, _stats, **_kwargs) -> None:
         observed["level"] = exp.model_level(selected_cfg.arch)
 
-    monkeypatch.setattr(exp._o50, "train", train)
+    monkeypatch.setattr(exp, "train", train)
 
     exp._run_train(
         exp.TrainArgs(
@@ -170,7 +167,7 @@ def test_fresh_train_selects_requested_model_level(monkeypatch, level: str) -> N
 def test_resume_rejects_conflicting_model_level(monkeypatch) -> None:
     cfg = exp.config_for("base", push_to_r2=False)
     monkeypatch.setattr(
-        exp._o50,
+        exp,
         "load_for_resume",
         lambda *_args, **_kwargs: {"cfg": exp._checkpoint_config(cfg)},
     )
@@ -211,7 +208,7 @@ def _tiny_cfg(**changes: object):
 def test_all_four_model_sizes_are_exact_without_allocating_weights() -> None:
     for level, expected in exp.EXPECTED_PARAMETER_COUNTS.items():
         with torch.device("meta"):
-            model = exp.GPT(exp.config_for(level))
+            model = exp.Policy(exp.config_for(level))
         assert exp.subsystem_parameter_counts(model)["total"] == expected
         del model
         gc.collect()
@@ -220,7 +217,7 @@ def test_all_four_model_sizes_are_exact_without_allocating_weights() -> None:
 def test_optimizer_roles_cover_every_tensor_by_semantics() -> None:
     cfg = exp.config_for("base")
     with torch.device("meta"):
-        model = exp.GPT(cfg)
+        model = exp.Policy(cfg)
     roles = exp.optimizer_roles(model, cfg)
 
     assert set(roles) == dict(model.named_parameters()).keys()
@@ -243,15 +240,15 @@ def test_optimizer_roles_cover_every_tensor_by_semantics() -> None:
     grouped = [parameter for group in optimizer.param_groups for parameter in group["params"]]
     assert len(grouped) == len({id(parameter) for parameter in grouped}) == len(roles)
     muon_groups = [group for group in optimizer.param_groups if group["use_muon"]]
-    assert {group["muon_scale_mode"] for group in muon_groups} == {"o51"}
+    assert {group["muon_scale_clamp_min_one"] for group in muon_groups} == {False}
     assert {group["logical_splits"] for group in muon_groups} >= {1, 2, 3}
     assert optimizer._adam_diagnostic_names == {}
 
 
 def test_stability_signals_run_only_on_the_logging_cadence() -> None:
     cfg = _tiny_cfg()
-    model = exp.GPT(cfg)
-    batch = exp._o50.synthetic_awr_batch(cfg, torch.device("cpu"))
+    model = exp.Policy(cfg)
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
     _trunk_fn, temporal_fn = exp._training_functions(model, cfg)
 
     assert temporal_fn.__name__ == "teacher_forced_nll"
@@ -298,7 +295,7 @@ def test_six_initialization_arms_only_zero_designated_readouts(
 ) -> None:
     torch.manual_seed(7)
     cfg = _tiny_cfg(hidden_std_multiplier=hidden_multiplier, readout_init=readout)
-    model = exp.GPT(cfg)
+    model = exp.Policy(cfg)
     final_weights = [module.weight for module, _ in exp._final_readouts(model)]
 
     if readout == "zero":
@@ -312,9 +309,9 @@ def test_six_initialization_arms_only_zero_designated_readouts(
 
 def test_hidden_initialization_has_no_depth_factor_and_mup_readout_scales_by_inverse_width() -> None:
     torch.manual_seed(13)
-    half = exp.GPT(_tiny_cfg(hidden_std_multiplier=0.5))
+    half = exp.Policy(_tiny_cfg(hidden_std_multiplier=0.5))
     torch.manual_seed(13)
-    full = exp.GPT(_tiny_cfg(hidden_std_multiplier=1.0))
+    full = exp.Policy(_tiny_cfg(hidden_std_multiplier=1.0))
     torch.testing.assert_close(
         2 * half.temporal.blocks[0].qkv.weight,
         full.temporal.blocks[0].qkv.weight,
@@ -332,7 +329,7 @@ def test_centering_preserves_policy_and_removes_each_group_common_mode() -> None
 
 
 def test_training_nll_skips_centering_without_changing_loss_or_gradient() -> None:
-    decoder = exp.GPT(_tiny_cfg(readout_init="mup-normal")).temporal
+    decoder = exp.Policy(_tiny_cfg(readout_init="mup-normal")).temporal
     batch, positions = 2, 3
     hidden = torch.randn(batch, positions, decoder.trunk_width, requires_grad=True)
     observed = torch.zeros(batch, positions, exp.N_GROUPS, dtype=torch.long)
@@ -573,7 +570,7 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
         )
 
 
-def test_wandb_guard_is_installed_after_init_rebinds_log(monkeypatch) -> None:
+def test_wandb_log_applies_the_arm_guard_without_patching_wandb(monkeypatch) -> None:
     logged: list[dict[str, object]] = []
     run = SimpleNamespace(summary={}, log_code=lambda **_kwargs: None)
 
@@ -581,20 +578,21 @@ def test_wandb_guard_is_installed_after_init_rebinds_log(monkeypatch) -> None:
         logged.append(values)
 
     def init(**_kwargs: object) -> None:
-        monkeypatch.setattr(exp._o50.wandb, "log", rebound_log)
-        monkeypatch.setattr(exp._o50.wandb, "run", run)
+        monkeypatch.setattr(exp.wandb, "log", rebound_log)
+        monkeypatch.setattr(exp.wandb, "run", run)
 
-    monkeypatch.setattr(exp._o50.wandb, "init", init)
-    monkeypatch.setattr(exp._o50.wandb, "define_metric", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(exp.wandb, "init", init)
+    monkeypatch.setattr(exp.wandb, "define_metric", lambda *_args, **_kwargs: None)
     exp._init_wandb(exp.config_for("base"), "guard-test", None)
 
     with pytest.raises(RuntimeError, match="raw button-logit"):
-        exp._o50.wandb.log(
+        exp._log_wandb(
             {
                 "global_step": 25,
                 "stability/centered_logit_abs_p999": 1.0,
                 "stability/uncentered_button_logit_abs_p999": 129.0,
-            }
+            },
+            exp._ArmGuard(warmup_updates=0, final_update=100),
         )
     assert logged[-1]["global_step"] == 25
 

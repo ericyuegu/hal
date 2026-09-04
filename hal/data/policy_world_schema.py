@@ -150,7 +150,10 @@ def _unpack_item_meta(meta: np.ndarray, present: np.ndarray) -> dict[str, np.nda
 
 def encode_policy_world_replay(source: Mapping[str, object], replay_id: str) -> dict[str, object]:
     out = encode_policy_replay(source, replay_id)
-    frames = int(out["num_frames"])
+    frame_count = out["num_frames"]
+    if not isinstance(frame_count, int | np.integer):
+        raise TypeError(f"num_frames must be an integer, got {type(frame_count).__name__}")
+    frames = int(frame_count)
     out["policy_world_schema_version"] = POLICY_WORLD_SCHEMA_VERSION
     for prefix in ("p1", "p2"):
         rank = _constant_int(source, f"{prefix}_rank", frames)

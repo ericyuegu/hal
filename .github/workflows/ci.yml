@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - run: uv sync --frozen --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - name: Type check maintained code
+        run: |
+          uv run ty check --python-version 3.14 --error-on-warning \
+            hal \
+            experiments/051_muon_parameterization.py \
+            scripts/cache_modal_fixtures.py \
+            scripts/launch_gce.py \
+            scripts/launch_modal.py \
+            scripts/launch_vast.py \
+            scripts/replay_policy_fault.py
+      - run: uv run pytest -q --ignore=tests/experiments -m "not integration"

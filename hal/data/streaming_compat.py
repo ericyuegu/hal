@@ -1,7 +1,18 @@
-"""Compatibility fixes for MosaicML Streaming."""
+"""Compatibility fixes for MosaicML Streaming 0.13.0.
+
+Mosaic 0.13.0 mishandles Python 3.14 shared-memory registration, retains file
+descriptors for non-owning prefix probes, and leaves failed shard downloads in
+``PREPARING``. The focused tests in ``tests/test_dataloader.py`` reproduce all
+three failures. Remove a patch only after those tests pass against an upgraded
+Mosaic release.
+
+This module replaces private APIs. ``patch_streaming`` therefore rejects every
+version except the one validated here and applies the replacements once.
+"""
 
 import os
 import tempfile
+from importlib.metadata import version
 from multiprocessing import resource_tracker
 from typing import Any
 
@@ -10,7 +21,25 @@ import streaming.base.dataset as streaming_dataset
 import streaming.base.shared.memory as streaming_memory
 import streaming.base.shared.prefix as streaming_prefix
 
-_ORIGINAL_PREPARE_SHARD = streaming_dataset.StreamingDataset.prepare_shard
+_ORIGINAL_PREPARE_SHARD_ATTR = "_hal_original_prepare_shard"
+if not hasattr(streaming_dataset.StreamingDataset, _ORIGINAL_PREPARE_SHARD_ATTR):
+    setattr(
+        streaming_dataset.StreamingDataset,
+        _ORIGINAL_PREPARE_SHARD_ATTR,
+        streaming_dataset.StreamingDataset.prepare_shard,
+    )
+_SUPPORTED_STREAMING_VERSION = "0.13.0"
+_PATCHED = False
+
+
+def require_supported_streaming() -> None:
+    """Reject a Mosaic version that has not passed HAL's private-API tests."""
+    installed = version("mosaicml-streaming")
+    if installed != _SUPPORTED_STREAMING_VERSION:
+        raise RuntimeError(
+            "HAL's Mosaic compatibility patches require "
+            f"mosaicml-streaming=={_SUPPORTED_STREAMING_VERSION}; found {installed}"
+        )
 
 
 def _register(self: streaming_memory.SharedMemory, name: str, resource_type: str) -> Any:
@@ -87,8 +116,9 @@ def _prepare_shard_without_poisoned_state(
     blocking: bool = True,
 ) -> None:
     """Return a failed download to REMOTE instead of stranding waiters."""
+    original_prepare_shard = getattr(streaming_dataset.StreamingDataset, _ORIGINAL_PREPARE_SHARD_ATTR)
     try:
-        _ORIGINAL_PREPARE_SHARD(self, shard_id, blocking)
+        original_prepare_shard(self, shard_id, blocking)
     except BaseException:
         if self._shard_states[shard_id] == streaming_dataset._ShardState.PREPARING:
             self._shard_states[shard_id] = streaming_dataset._ShardState.REMOTE
@@ -96,10 +126,15 @@ def _prepare_shard_without_poisoned_state(
 
 
 def patch_streaming() -> None:
-    """Apply HAL's Python 3.14 and shared-memory compatibility fixes."""
+    """Apply HAL's Python 3.14 and shared-memory compatibility fixes once."""
+    global _PATCHED
+    require_supported_streaming()
+    if _PATCHED:
+        return
     streaming_memory.SharedMemory.fix_register = _register  # ty: ignore[invalid-assignment]
     streaming_memory.SharedMemory.fix_unregister = _unregister  # ty: ignore[invalid-assignment]
     streaming_prefix._check_and_find = _check_and_find_without_fd_leak  # ty: ignore[invalid-assignment]
     streaming_dataset.StreamingDataset.prepare_shard = (  # ty: ignore[invalid-assignment]
         _prepare_shard_without_poisoned_state
     )
+    _PATCHED = True

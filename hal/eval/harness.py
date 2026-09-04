@@ -33,6 +33,7 @@ from hal.sim.process_vec import drive_process_vec
 from hal.sim.rollout import nearest_power_of_two
 from hal.sim.session import Matchup
 from hal.sim.session import Session
+from hal.sim.session import SessionOptions
 from hal.sim.sources import ControllerSource
 from hal.sim.trajectory import Trajectory
 from hal.sim.vec import BatchPolicy
@@ -130,9 +131,7 @@ def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: 
     return Session(**_session_kwargs(session_cfg, slippi_port=slippi_port, replay_dir=replay_dir))
 
 
-def _session_kwargs(
-    session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None
-) -> dict[str, object]:
+def _session_kwargs(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None) -> SessionOptions:
     """Spawn-safe Session constructor values for one worker."""
     return dict(
         iso_path=session_cfg.iso_path,

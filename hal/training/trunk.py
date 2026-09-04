@@ -304,15 +304,18 @@ class CausalSelfAttention(nn.Module):
             cumulative = lengths.cumsum(0, dtype=torch.int32)
             cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
             window = (-1, 0) if self.attn_window == 0 else (self.attn_window - 1, 0)
-            y = varlen_attn(
-                q.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
-                k.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
-                v.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
-                cu_seqlens,
-                cu_seqlens,
-                L,
-                L,
-                window_size=window,
+            y = cast(
+                Tensor,
+                varlen_attn(
+                    q.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
+                    k.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
+                    v.transpose(1, 2).reshape(B * L, self.n_heads, self.head_dim),
+                    cu_seqlens,
+                    cu_seqlens,
+                    L,
+                    L,
+                    window_size=window,
+                ),
             ).reshape(B, L, self.n_heads, self.head_dim)
             return self.c_proj(y.reshape(B, L, self.d_model))
         if isinstance(mask, BlockMask):
@@ -452,7 +455,7 @@ class Trunk(nn.Module):
         if self.attn_window:
             raise ValueError("the unpadded trunk path requires full causal attention")
         for block in self.blocks:
-            x = block.forward_unpadded(x)
+            x = cast(Block, block).forward_unpadded(x)
         return rmsnorm(x)
 
     def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:

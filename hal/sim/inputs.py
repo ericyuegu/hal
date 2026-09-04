@@ -7,7 +7,7 @@ All values are logical (game-causal): sticks in [-1, 1], triggers in [0, 1],
 buttons a wire-bitmask. ``fix_analog_stick_signed`` / ``fix_analog_trigger``
 in libmelee own the wire conversion; the Controller is constructed with
 ``fix_analog_inputs=False`` so the converted value reaches Dolphin unmodified.
-See CLAUDE.md (Controller data model).
+See ``hal.wire`` for the controller data model.
 """
 
 import math

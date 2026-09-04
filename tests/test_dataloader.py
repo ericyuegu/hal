@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import json
 import subprocess
 import sys
@@ -24,9 +25,9 @@ from hal.streams import StreamSource
 from hal.training.dataloader import ResumableStreamingDataLoader
 from hal.training.dataloader import StreamSamplePrefix
 from hal.training.dataloader import WindowDataset
-from hal.training.dataloader import _choose_chunk_starts
 from hal.training.dataloader import _loader_generator
-from hal.training.dataloader import _make_streaming_dataset
+from hal.training.dataloader import choose_chunk_starts
+from hal.training.dataloader import make_streaming_dataset
 from hal.training.features import Context
 from hal.training.features import TrainBatch
 from hal.training.replay_reservoir import OneBatchPrefetch
@@ -55,7 +56,7 @@ def test_multistream_dataset_uses_every_source_and_exposes_counts(tmp_path: Path
         StreamSource("second", None, second),  # type: ignore[arg-type]
     )
 
-    dataset, names = _make_streaming_dataset(
+    dataset, names = make_streaming_dataset(
         None,
         "val",
         sources=sources,
@@ -86,7 +87,7 @@ def test_multistream_dataset_applies_explicit_source_weights(tmp_path: Path) -> 
         StreamSource("second", None, second),  # type: ignore[arg-type]
     )
 
-    dataset, _ = _make_streaming_dataset(
+    dataset, _ = make_streaming_dataset(
         None,
         "train",
         sources=sources,
@@ -114,7 +115,7 @@ def test_multistream_dataset_selects_direct_prefixes_with_exclusions(tmp_path: P
         StreamSource("second", None, second),  # type: ignore[arg-type]
     )
 
-    dataset, names = _make_streaming_dataset(
+    dataset, names = make_streaming_dataset(
         None,
         "train",
         sources=sources,
@@ -153,13 +154,13 @@ def test_source_weights_must_match_multistream_sources(tmp_path: Path) -> None:
     }
 
     with pytest.raises(ValueError, match="length"):
-        _make_streaming_dataset(None, sources=[source], source_weights=(1.0, 2.0), **kwargs)
+        make_streaming_dataset(None, sources=[source], source_weights=(1.0, 2.0), **kwargs)
     with pytest.raises(ValueError, match="finite and positive"):
-        _make_streaming_dataset(None, sources=[source], source_weights=(0.0,), **kwargs)
+        make_streaming_dataset(None, sources=[source], source_weights=(0.0,), **kwargs)
     with pytest.raises(ValueError, match="requires sources"):
-        _make_streaming_dataset(str(tmp_path), sources=None, source_weights=(1.0,), **kwargs)
+        make_streaming_dataset(str(tmp_path), sources=None, source_weights=(1.0,), **kwargs)
     with pytest.raises(ValueError, match="cannot be combined"):
-        _make_streaming_dataset(
+        make_streaming_dataset(
             None,
             sources=[source],
             source_weights=(1.0,),
@@ -167,7 +168,7 @@ def test_source_weights_must_match_multistream_sources(tmp_path: Path) -> None:
             **kwargs,
         )
     with pytest.raises(ValueError, match="requires sources"):
-        _make_streaming_dataset(
+        make_streaming_dataset(
             str(tmp_path),
             sources=None,
             source_prefixes=(StreamSamplePrefix(1),),
@@ -188,11 +189,11 @@ def test_streaming_dataset_mode_selection_is_strict(tmp_path: Path) -> None:
         "batch_size": 1,
     }
     with pytest.raises(ValueError, match="cannot be combined"):
-        _make_streaming_dataset(str(tmp_path), sources=[source], **kwargs)
+        make_streaming_dataset(str(tmp_path), sources=[source], **kwargs)
     with pytest.raises(ValueError, match="must not be empty"):
-        _make_streaming_dataset(None, sources=[], **kwargs)
+        make_streaming_dataset(None, sources=[], **kwargs)
     with pytest.raises(ValueError, match="data_root is required"):
-        _make_streaming_dataset(None, sources=None, **kwargs)
+        make_streaming_dataset(None, sources=None, **kwargs)
 
 
 def test_single_stream_reservoir_count_metadata_is_empty() -> None:
@@ -211,6 +212,29 @@ def test_streaming_resource_tracker_forwards_without_extra_self() -> None:
     with patch.object(resource_tracker._resource_tracker, "unregister") as unregister:
         memory.fix_unregister("/semaphore", "semaphore")
     unregister.assert_called_once_with("/semaphore", "semaphore")
+
+
+def test_streaming_patches_are_idempotent_and_version_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    streaming_compat.patch_streaming()
+    patched = streaming_compat.streaming_prefix._check_and_find
+    streaming_compat.patch_streaming()
+    assert streaming_compat.streaming_prefix._check_and_find is patched
+
+    monkeypatch.setattr(streaming_compat, "version", lambda _distribution: "0.14.0")
+    with pytest.raises(RuntimeError, match="mosaicml-streaming==0.13.0"):
+        streaming_compat.patch_streaming()
+
+
+def test_streaming_patches_survive_module_reload() -> None:
+    dataset_type = streaming_compat.streaming_dataset.StreamingDataset
+    original = getattr(dataset_type, streaming_compat._ORIGINAL_PREPARE_SHARD_ATTR)
+
+    reloaded = importlib.reload(streaming_compat)
+    reloaded.patch_streaming()
+
+    assert getattr(dataset_type, reloaded._ORIGINAL_PREPARE_SHARD_ATTR) is original
+    assert dataset_type.prepare_shard is reloaded._prepare_shard_without_poisoned_state
+    assert original is not dataset_type.prepare_shard
 
 
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="requires Linux procfs")
@@ -450,7 +474,7 @@ def test_windows_vary_across_epochs() -> None:
 
 def test_full_context_windows_never_pad_and_reject_short_replays() -> None:
     rng = np.random.default_rng(7)
-    starts = _choose_chunk_starts(60, L_CTX, L_CHUNK, 4, rng, require_full_context=True)
+    starts = choose_chunk_starts(60, L_CTX, L_CHUNK, 4, rng, require_full_context=True)
     assert starts.min() >= L_CTX
     assert starts.max() <= 60 - L_CHUNK
 
@@ -573,27 +597,10 @@ def test_resumable_streaming_loader_routes_mosaic_cursor_through_wrapper() -> No
     assert restored_rows.resumed_epoch == 3
 
 
-def test_resumable_streaming_loader_accepts_legacy_unwrapped_state() -> None:
-    rows = _StatefulRows()
-    mds = _MosaicStateStub()
-    loader = ResumableStreamingDataLoader(
-        rows,
-        streaming_dataset=mds,  # type: ignore[arg-type]
-        window_dataset=rows,  # type: ignore[arg-type]
-        batch_size=2,
-        num_workers=0,
-    )
-    legacy_state = {"epoch": 3, "sample_in_epoch": 11}
-
-    loader.load_state_dict(legacy_state)
-
-    assert mds.loaded == legacy_state
-    assert rows.resumed_epoch == 3
-
-
 @pytest.mark.parametrize(
     ("state", "error", "message"),
     [
+        ({"epoch": 3, "sample_in_epoch": 11}, ValueError, "unsupported"),
         ({"schema": 2, "mds": {}}, ValueError, "unsupported"),
         ({"schema": 1, "mds": None}, TypeError, "mds"),
         ({"schema": 1, "mds": {}}, TypeError, "epoch"),
@@ -707,7 +714,11 @@ def test_failed_streaming_download_does_not_poison_shared_shard_state(monkeypatc
         dataset._shard_states[shard_id] = preparing
         raise RuntimeError("transient object-store failure")
 
-    monkeypatch.setattr(streaming_compat, "_ORIGINAL_PREPARE_SHARD", fail)
+    monkeypatch.setattr(
+        streaming_compat.streaming_dataset.StreamingDataset,
+        streaming_compat._ORIGINAL_PREPARE_SHARD_ATTR,
+        fail,
+    )
     with pytest.raises(RuntimeError, match="object-store"):
         streaming_compat._prepare_shard_without_poisoned_state(Dataset(), 0)  # type: ignore[arg-type]
     assert Dataset._shard_states[0] == remote
@@ -776,7 +787,7 @@ def test_make_loader_forwards_out_of_order_delivery(
         streaming.update(kwargs)
         return _fake_mds(), ()
 
-    monkeypatch.setattr(dataloader, "_make_streaming_dataset", capture_streaming)
+    monkeypatch.setattr(dataloader, "make_streaming_dataset", capture_streaming)
 
     dataloader.make_loader(
         "unused",
@@ -818,7 +829,7 @@ def test_choose_chunk_starts_nonoverlapping_and_bounded() -> None:
     rng = np.random.default_rng(0)
     for T in [11, 30, 44, 60, 100, 300]:
         for K in [1, 2, 4, 16]:
-            cs = _choose_chunk_starts(T, L_CTX, L_CHUNK, K, rng)
+            cs = choose_chunk_starts(T, L_CTX, L_CHUNK, K, rng)
             fit = max(1, (T - L_CHUNK) // _L)
             assert len(cs) == min(K, fit)
             assert (cs >= 1).all() and (cs <= T - L_CHUNK).all()
@@ -939,7 +950,7 @@ def _per_replay_draws(replay_ids: list[str], worker_count: int, epoch: int) -> d
     for worker in range(worker_count):
         for replay_id in replay_ids[worker::worker_count]:
             rng = _stable_replay_rng(17, epoch, replay_id)
-            starts = tuple(_choose_chunk_starts(100, L_CTX, L_CHUNK, 4, rng).tolist())
+            starts = tuple(choose_chunk_starts(100, L_CTX, L_CHUNK, 4, rng).tolist())
             ego = tuple(bool(rng.integers(0, 2)) for _ in starts)
             draws[replay_id] = (starts, ego)
     return draws
@@ -979,3 +990,38 @@ def test_train_batch_record_stream_covers_optional_context_fields(monkeypatch) -
     bare = TrainBatch(context=Context(features=features, ctx_pad=torch.zeros(2, dtype=torch.int64)), target=target)
     bare.record_stream(object())
     assert len(recorded) == len(features) + 2
+
+
+def test_cache_validation_batches_trims_only_the_last_batch() -> None:
+    def batch(start: int, count: int) -> TrainBatch:
+        values = torch.arange(start, start + count)
+        return TrainBatch(
+            context=Context(
+                features={"value": values[:, None]},
+                ctx_pad=values,
+                slot_ids=values + 10,
+                reset=values % 2 == 0,
+            ),
+            target=values[:, None, None],
+            replay_ids=tuple(f"replay-{value}" for value in values.tolist()),
+        )
+
+    cached = dataloader.cache_validation_batches([batch(0, 3), batch(3, 3)], 5)
+
+    assert [item.target.shape[0] for item in cached] == [3, 2]
+    assert cached[-1].target[:, 0, 0].tolist() == [3, 4]
+    assert cached[-1].context.slot_ids is not None
+    assert cached[-1].context.slot_ids.tolist() == [13, 14]
+    assert cached[-1].context.reset is not None
+    assert cached[-1].context.reset.tolist() == [False, True]
+    assert cached[-1].replay_ids == ("replay-3", "replay-4")
+
+
+def test_cache_validation_batches_rejects_a_short_loader() -> None:
+    batch = TrainBatch(
+        context=Context(features={"value": torch.zeros(2, 1)}, ctx_pad=torch.zeros(2, dtype=torch.int64)),
+        target=torch.zeros(2, 1, 1),
+    )
+
+    with pytest.raises(RuntimeError, match="yielded 2 samples, expected 3"):
+        dataloader.cache_validation_batches([batch], 3)

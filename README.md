@@ -44,8 +44,9 @@ uv run modal secret create hal \
   AWS_BUCKET="$AWS_BUCKET" \
   WANDB_API_KEY="$WANDB_API_KEY"
 ```
-The launcher defaults to one L40S, 8 requested/16 maximum CPU cores, 64 GiB RAM,
-and a 512 GiB ephemeral SSD. It submits a detached Function by default:
+The launcher defaults to one B200, 32 requested/48 maximum CPU cores, 128 GiB
+RAM, a 384 GiB memory limit, and a 2 TiB ephemeral SSD. It submits a detached
+Function by default:
 ```bash
 uv run scripts/launch_modal.py --dry-run -- uv run experiments/028_onehot_controller.py
 uv run scripts/launch_modal.py -- uv run experiments/028_onehot_controller.py

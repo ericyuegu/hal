@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -131,3 +132,24 @@ def test_upload_tree_only_queues_new_versions(tmp_path: Path, monkeypatch: pytes
     uploader.close()
 
     assert len(client.uploaded) == 2
+
+
+def test_checkpoint_sha256_reads_the_complete_file(tmp_path: Path) -> None:
+    content = b"a" * (1024 * 1024) + b"tail"
+    path = tmp_path / "checkpoint.pt"
+    path.write_bytes(content)
+
+    assert checkpoints.checkpoint_sha256(path) == hashlib.sha256(content).hexdigest()
+
+
+def test_advance_checkpoint_link_atomically_replaces_the_destination(tmp_path: Path) -> None:
+    source = tmp_path / "boundary-step-0000002.pt"
+    source.write_bytes(b"new checkpoint")
+    destination = tmp_path / "latest.pt"
+    destination.write_bytes(b"old checkpoint")
+
+    checkpoints.advance_checkpoint_link(source, destination)
+
+    assert destination.read_bytes() == b"new checkpoint"
+    assert destination.stat().st_ino == source.stat().st_ino
+    assert not (tmp_path / "latest.pt.tmp").exists()

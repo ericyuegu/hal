@@ -1,3 +1,8 @@
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
+
 import numpy as np
 
 from hal import streams
@@ -6,20 +11,33 @@ from hal.data.policy_schema import pack_player_state
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.training import returns as returns_lib
-from hal.training.o51_data import CORPUS_SHA256
-from hal.training.o51_data import D0
-from hal.training.o51_data import EXCLUDED_SOURCE_ROWS
-from hal.training.o51_data import O51_RETURN_SUFFIX
-from hal.training.o51_data import OFFICIAL_CORPUS_TARGETS
-from hal.training.o51_data import OFFICIAL_RAW_REPLAYS
-from hal.training.o51_data import OFFICIAL_TIER_REPLAYS
-from hal.training.o51_data import OFFICIAL_TIER_TARGETS
-from hal.training.o51_data import OFFICIAL_UNIQUE_REPLAYS
-from hal.training.o51_data import SOURCE_MANIFEST_SHA256
-from hal.training.o51_data import TIER_SHA256
-from hal.training.o51_data import DirectO51ReplayLabels
-from hal.training.o51_data import corpus_selection
 from hal.training.player_identity import ReplayPlayerLookup
+
+
+def _load_experiment() -> ModuleType:
+    path = Path(__file__).resolve().parents[1] / "experiments" / "051_muon_parameterization.py"
+    spec = importlib.util.spec_from_file_location("test_o51_data_experiment", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+exp = _load_experiment()
+CORPUS_SHA256 = exp.CORPUS_SHA256
+D0 = exp.D0
+EXCLUDED_SOURCE_ROWS = exp.EXCLUDED_SOURCE_ROWS
+O51_RETURN_SUFFIX = exp.O51_RETURN_SUFFIX
+OFFICIAL_CORPUS_TARGETS = exp.OFFICIAL_CORPUS_TARGETS
+OFFICIAL_RAW_REPLAYS = exp.OFFICIAL_RAW_REPLAYS
+OFFICIAL_TIER_REPLAYS = exp.OFFICIAL_TIER_REPLAYS
+OFFICIAL_TIER_TARGETS = exp.OFFICIAL_TIER_TARGETS
+OFFICIAL_UNIQUE_REPLAYS = exp.OFFICIAL_UNIQUE_REPLAYS
+SOURCE_MANIFEST_SHA256 = exp.SOURCE_MANIFEST_SHA256
+TIER_SHA256 = exp.TIER_SHA256
+ParameterizationReplayLabels = exp.ParameterizationReplayLabels
+corpus_selection = exp.corpus_selection
 
 
 def test_official_direct_data_accounting_is_pinned() -> None:
@@ -112,7 +130,7 @@ def test_direct_labels_compute_returns_and_ids_from_existing_row() -> None:
         stock_value=120.0,
         suffix=O51_RETURN_SUFFIX,
     )
-    labels = DirectO51ReplayLabels(
+    labels = ParameterizationReplayLabels(
         player_lookup=ReplayPlayerLookup({"replay-1": (7, 11)}),
         gamma=0.9,
         damage_shaping=1.0,

@@ -31,7 +31,7 @@ from hal.eval.harness import default_session_cfg
 from hal.eval.harness import run_matches_vec
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.self_play import DecodeTelemetry
-from hal.eval.self_play import _self_play_matches
+from hal.eval.self_play import self_play_matches
 from hal.sim.process_vec import ProcessVecTelemetry
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import download_latest
@@ -108,7 +108,7 @@ def _self_play_eval(
     args: Args,
     checkpoint_sha256: str,
 ) -> dict[str, float]:
-    matches = _self_play_matches(args.boots)
+    matches = self_play_matches(args.boots)
     telemetry = DecodeTelemetry()
     process_telemetry = ProcessVecTelemetry()
     policy_index = itertools.count()

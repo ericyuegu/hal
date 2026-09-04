@@ -56,9 +56,9 @@ def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
     assert args.gpu_memory_snapshot
 
 
-def test_o51_uses_two_tib_ephemeral_ssd_floor() -> None:
-    experiment = "experiments/051_correct_parameterization.py"
-    args = Args(cmd=["uv", "run", experiment])
+def test_resources_are_controlled_by_explicit_arguments() -> None:
+    experiment = "experiments/051_muon_parameterization.py"
+    args = Args(cmd=["uv", "run", experiment], memory_gib=192, memory_limit_gib=384)
 
     assert requested_disk_gib(args) == 2048
     assert function_resources(args)["ephemeral_disk"] == 2048 * 1024
@@ -512,7 +512,7 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
 
     class FakeIgnore:
         def __call__(self, path: Path) -> bool:
-            return path.parts[:1] == ("notebooks",)
+            return path.parts[:1] == ("tests",)
 
     class FakeImage:
         def add_local_file(self, local: Path, remote: str, *, copy: bool) -> FakeImage:
@@ -542,9 +542,16 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
     ignore = FakeIgnore()
     monkeypatch.setattr(_MODULE.modal.FilePatternMatcher, "from_file", lambda _path: ignore)
 
-    notebook = _MODULE.ROOT / "notebooks" / "040_awr_constants.py"
+    ignored_command = _MODULE.ROOT / "tests" / "fixtures" / "modal_command.py"
     secret = object()
-    assert _MODULE._image("example/image:tag", ("uv", "run", str(notebook.relative_to(_MODULE.ROOT))), secret) is fake
+    assert (
+        _MODULE._image(
+            "example/image:tag",
+            ("uv", "run", str(ignored_command.relative_to(_MODULE.ROOT))),
+            secret,
+        )
+        is fake
+    )
     dependency_run = events.index(
         ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --no-install-project", None, None)
     )
@@ -556,8 +563,13 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
         if event[:2] == ("run", "/opt/venv/bin/python /opt/cache_modal_fixtures.py")
     )
     source_copy = next(index for index, event in enumerate(events) if event[0] == "dir")
-    notebook_copy = events.index(
-        ("file", notebook, str(_MODULE.REMOTE_ROOT / notebook.relative_to(_MODULE.ROOT)), True)
+    ignored_command_copy = events.index(
+        (
+            "file",
+            ignored_command,
+            str(_MODULE.REMOTE_ROOT / ignored_command.relative_to(_MODULE.ROOT)),
+            True,
+        )
     )
     project_run = events.index(
         ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation", None, None)
@@ -569,7 +581,7 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
         ("file", _MODULE.ROOT / "uv.lock", str(_MODULE.REMOTE_ROOT / "uv.lock"), True),
         ("workdir", str(_MODULE.REMOTE_ROOT)),
     ]
-    assert dependency_run < helper_copy < fixture_run < source_copy < notebook_copy < project_run
+    assert dependency_run < helper_copy < fixture_run < source_copy < ignored_command_copy < project_run
     fixture_event = events[fixture_run]
     assert fixture_event[2]["HAL_FIXTURE_ROOT"] == str(_MODULE.REMOTE_ROOT)
     assert json.loads(fixture_event[2]["HAL_FIXTURE_MANIFEST"])

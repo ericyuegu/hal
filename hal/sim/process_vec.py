@@ -14,8 +14,10 @@ from dataclasses import dataclass
 from dataclasses import field
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Protocol
+from typing import cast
 
 import numpy as np
 from loguru import logger
@@ -32,10 +34,11 @@ from hal.sim.ipc import result_shm_name
 from hal.sim.ipc import send_control
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.session import SessionOptions
 from hal.sim.trajectory import Trajectory
 from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
-from hal.sim.worker import _session_worker
+from hal.sim.worker import session_worker
 from hal.wire import POST_FIELD_SUFFIXES
 
 
@@ -213,7 +216,7 @@ def _cohort_latency_start_ns(acknowledged: Sequence[tuple[int, int, int, int]]) 
 
 
 def drive_process_vec(
-    session_kwargs: Sequence[dict[str, object]],
+    session_kwargs: Sequence[SessionOptions],
     matches: Sequence[VecMatch],
     policy: SharedChunkPolicy,
     *,
@@ -275,7 +278,7 @@ def drive_process_vec(
     timed_out_workers = 0
     with RolloutArena.create(spec) as arena:
         parents: dict[int, Connection] = {}
-        processes: dict[int, mp.Process] = {}
+        processes: dict[int, BaseProcess] = {}
         receive_buffers: dict[int, bytearray] = {}
         send_buffers: dict[int, bytearray] = {}
         active_workers: set[int] = set()
@@ -302,7 +305,7 @@ def drive_process_vec(
             match = matches[worker]
             parent, child = context.Pipe(duplex=True)
             process = context.Process(
-                target=_session_worker,
+                target=session_worker,
                 args=(
                     worker,
                     child,
@@ -411,7 +414,8 @@ def drive_process_vec(
                 ready = wait([parents[worker] for worker in booting], timeout=wait_seconds)
                 if telemetry is not None:
                     telemetry.control_wait_seconds += time.monotonic() - wait_started
-                for connection in ready:
+                for ready_connection in ready:
+                    connection = cast(Connection, ready_connection)
                     worker = connection_to_worker[connection]
                     if worker not in active_workers:
                         continue
@@ -475,7 +479,8 @@ def drive_process_vec(
                         telemetry.control_wait_seconds += time.monotonic() - wait_started
                 else:
                     ready = []
-                for connection in ready:
+                for ready_connection in ready:
+                    connection = cast(Connection, ready_connection)
                     worker = connection_to_worker[connection]
                     if worker not in active_workers:
                         continue

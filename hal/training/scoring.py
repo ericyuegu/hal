@@ -2,8 +2,8 @@
 experiments.
 
 One source of truth so a classification experiment's targets/decode and every run's
-comparison metrics agree byte-for-byte (CLAUDE.md: shared infra never lives in
-``experiments/``). Three groups:
+comparison metrics agree byte-for-byte. Stable shared code lives outside
+``experiments/``. Three groups:
 
 * **discretizers** — uniform per-channel ``BinSpec`` bins, hand-tuned joint-2D stick
   ``cluster`` centers, a 1D hand-tuned ``TRIGGER_CENTERS`` set, plus the single-label

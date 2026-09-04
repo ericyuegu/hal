@@ -4,9 +4,20 @@ import queue
 import threading
 from pathlib import Path
 
+import py7zr
+import pytest
 from py7zr.io import NullIO
 
+from hal.data.archive import _require_supported_py7zr
 from hal.data.archive import _StreamFactory
+from hal.data.archive import archive_member_path
+from hal.data.archive import iter_archive_members
+
+
+def test_py7zr_private_api_version_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.data.archive.version", lambda _distribution: "1.2.0")
+    with pytest.raises(RuntimeError, match="py7zr==1.1.0"):
+        _require_supported_py7zr()
 
 
 def test_finalize_thread_releases_last_writer_at_folder_boundary(tmp_path: Path) -> None:
@@ -62,3 +73,26 @@ def test_abort_all_unblocks_writer_waiting_for_queue_slot(tmp_path: Path) -> Non
     assert isinstance(result[0], NullIO)
     assert not list(tmp_path.iterdir())
     assert slots.acquire(blocking=False)
+
+
+def test_synthetic_7z_streams_all_members_and_rejects_a_missing_filter(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    payloads = {"first.slp": b"first", "nested/second.slp": b"second"}
+    archive = tmp_path / "replays.7z"
+    with py7zr.SevenZipFile(archive, "w") as writer:
+        for name, payload in payloads.items():
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            writer.write(path, arcname=name)
+
+    extracted_root = tmp_path / "extracted"
+    seen: dict[str, bytes] = {}
+    for synthetic, extracted in iter_archive_members(archive, tmpfs_root=extracted_root, queue_size=1):
+        seen[synthetic] = extracted.read_bytes()
+        extracted.unlink()
+    assert seen == {archive_member_path(archive, name): payload for name, payload in payloads.items()}
+
+    with pytest.raises(FileNotFoundError, match="missing.slp"):
+        list(iter_archive_members(archive, tmpfs_root=extracted_root, filter_paths={"missing.slp"}))

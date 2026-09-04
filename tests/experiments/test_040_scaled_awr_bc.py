@@ -7,7 +7,6 @@ must be ones that carry the projectile block at all.
 
 import functools
 import importlib.util
-import json
 import math
 import sys
 from collections.abc import Mapping
@@ -81,17 +80,6 @@ STAGE = int(melee.Stage.FINAL_DESTINATION.value)
 _V7_TRAIN = (
     Path(__file__).resolve().parents[2] / "data" / "processed" / "ranked-anonymized-1" / "mds-v7-sub4" / "train"
 )
-
-
-def test_production_return_scale_matches_calibration_artifact() -> None:
-    artifact_path = Path(__file__).resolve().parents[2] / "notebooks" / "040_awr_constants.json"
-    artifact = json.loads(artifact_path.read_text())
-    cfg = exp.TrainConfig()
-
-    assert cfg.awr.beta == artifact["awr_beta"]
-    assert cfg.awr.weight_max == artifact["awr_weight_max"]
-    assert cfg.awr.gamma == artifact["reward"]["gamma"]
-    assert cfg.awr.stock_value == artifact["reward"]["stock_value"]
 
 
 def _cfg(**overrides) -> exp.TrainConfig:

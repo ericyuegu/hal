@@ -1,48 +1,49 @@
-"""Focused tests for O51's shard-owned replay loader."""
+"""Focused tests for deterministic physical-shard replay loading."""
 
 from __future__ import annotations
 
+import pickle
 import threading
 import time
 from collections.abc import Mapping
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
-from hal.training.o51_data import SourceSlice
-from hal.training.o51_data import TierSelection
-from hal.training.o51_data import corpus_selection
-from hal.training.o51_replay_loader import DecodedShard
-from hal.training.o51_replay_loader import O51ReplayLoader
-from hal.training.o51_replay_loader import PhysicalRow
-from hal.training.o51_replay_loader import ReplayBuffer
-from hal.training.o51_replay_loader import ShardTask
-from hal.training.o51_replay_loader import SourceManifest
-from hal.training.o51_replay_loader import _decode_generation
-from hal.training.o51_replay_loader import _stack_window_rows
-from hal.training.o51_replay_loader import build_shard_plan
-from hal.training.o51_replay_loader import choose_o51_window_starts
-from hal.training.o51_replay_loader import disk_requirement_bytes
-from hal.training.o51_replay_loader import estimate_host_memory
-from hal.training.o51_replay_loader import permute_shard_tasks
+from hal.training.physical_shard_loader import DecodedShard
+from hal.training.physical_shard_loader import PhysicalRow
+from hal.training.physical_shard_loader import PhysicalShardReplayLoader
+from hal.training.physical_shard_loader import PhysicalShardSelection
+from hal.training.physical_shard_loader import ReplayBuffer
+from hal.training.physical_shard_loader import ShardTask
+from hal.training.physical_shard_loader import SourceManifest
+from hal.training.physical_shard_loader import SourceRowSelection
+from hal.training.physical_shard_loader import _decode_generation
+from hal.training.physical_shard_loader import _shutdown_data_loader_workers
+from hal.training.physical_shard_loader import _stack_window_rows
+from hal.training.physical_shard_loader import build_shard_plan
+from hal.training.physical_shard_loader import choose_generation_window_starts
+from hal.training.physical_shard_loader import disk_requirement_bytes
+from hal.training.physical_shard_loader import estimate_host_memory
+from hal.training.physical_shard_loader import permute_shard_tasks
 from hal.wire import ACTION_CHANNELS
 
 
-def _tier(rows: int = 19) -> TierSelection:
-    return TierSelection(
-        scale=1,
-        sources=(SourceSlice("source", rows, (3, 11) if rows > 11 else ()),),
-        potential_targets=2,
+def _selection(rows: int = 19) -> PhysicalShardSelection:
+    return PhysicalShardSelection(
+        sources=(SourceRowSelection("source", rows, (3, 11) if rows > 11 else ()),),
         sha256="a" * 64,
     )
 
 
 def test_shard_plan_covers_prefix_once_and_excludes_only_sidecar_rows() -> None:
-    tier = _tier()
-    tasks = build_shard_plan(tier, {"source": SourceManifest("source", (5, 7, 11, 13))})
+    selection = _selection()
+    tasks = build_shard_plan(selection, {"source": SourceManifest("source", (5, 7, 11, 13))})
 
     exposed = []
     source_offset = 0
@@ -52,17 +53,7 @@ def test_shard_plan_covers_prefix_once_and_excludes_only_sidecar_rows() -> None:
 
     assert exposed == [row for row in range(19) if row not in (3, 11)]
     assert tasks[-1].row_stop == 7
-    assert sum(task.row_count for task in tasks) == tier.unique_replays
-
-
-def test_full_corpus_plan_contains_exactly_the_two_pinned_exclusions() -> None:
-    tier = corpus_selection().tier(8)
-    manifests = {view.source: SourceManifest(view.source, (view.stop,)) for view in tier.sources}
-
-    tasks = build_shard_plan(tier, manifests)
-
-    assert sum(len(task.excluded_rows) for task in tasks) == 2
-    assert sum(task.row_count for task in tasks) == tier.unique_replays
+    assert sum(task.row_count for task in tasks) == selection.row_count
 
 
 def test_shard_permutation_is_deterministic_and_changes_by_epoch() -> None:
@@ -113,7 +104,7 @@ def test_host_memory_model_includes_every_concurrent_copy() -> None:
 
 def test_circular_windows_are_full_and_pairwise_non_overlapping() -> None:
     length = 266
-    starts = choose_o51_window_starts(1329, 256, 10, np.random.default_rng(4))
+    starts = choose_generation_window_starts(1329, 256, 10, 4, np.random.default_rng(4))
 
     assert len(starts) == 4
     assert len(set(map(int, starts))) == 4
@@ -121,8 +112,8 @@ def test_circular_windows_are_full_and_pairwise_non_overlapping() -> None:
     intervals = sorted((int(start), int(start) + length) for start in starts)
     assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:], strict=False))
 
-    with pytest.raises(ValueError, match="four windows require"):
-        choose_o51_window_starts(1328, 256, 10, np.random.default_rng(4))
+    with pytest.raises(ValueError, match="4 windows require"):
+        choose_generation_window_starts(1328, 256, 10, 4, np.random.default_rng(4))
 
 
 def test_short_replay_error_identifies_the_physical_row() -> None:
@@ -138,8 +129,9 @@ def test_short_replay_error_identifies_the_physical_row() -> None:
             row=0,
             epoch=0,
             seed=1,
-            L_ctx=256,
-            L_chunk=10,
+            context_length=256,
+            chunk_length=10,
+            windows_per_generation=4,
             schema_version=7,
             labels=_no_labels,
             projection=None,
@@ -156,6 +148,7 @@ def _decoded(ids: tuple[str, ...], *, epoch: int = 0) -> DecodedShard:
         replay_ids=ids,
         locators=tuple(PhysicalRow("source", 0, row) for row in range(len(ids))),
         columns={"value": values},
+        windows_per_generation=4,
     )
 
 
@@ -169,6 +162,7 @@ def test_decoded_shard_requires_fixed_four_window_columns() -> None:
             ("a", "b"),
             (PhysicalRow("source", 0, 0), PhysicalRow("source", 0, 1)),
             {"value": np.zeros((2, 3, 5), dtype=np.float32)},
+            4,
         )
 
 
@@ -182,14 +176,14 @@ def test_window_column_order_does_not_change_schema() -> None:
         ),
     )
 
-    columns = _stack_window_rows(windows)
+    columns = _stack_window_rows(windows, windows_per_generation=4)
 
     assert tuple(columns) == ("ego_x", "opp_x")
     assert columns["ego_x"].shape == (1, 4, 2)
 
 
 def test_duplicate_generations_do_not_change_identity_sampling_weight() -> None:
-    buffer = ReplayBuffer(capacity=4, batch_size=1, seed=9)
+    buffer = ReplayBuffer(capacity=4, batch_size=1, windows_per_generation=4, seed=9)
     shard = _decoded(("a", "a", "b", "c"))
     for row in range(4):
         buffer.admit(shard, row)
@@ -206,7 +200,7 @@ def test_duplicate_generations_do_not_change_identity_sampling_weight() -> None:
 
 def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
     replay_ids = tuple(f"replay-{index}" for index in range(1024))
-    buffer = ReplayBuffer(capacity=len(replay_ids), batch_size=512, seed=10)
+    buffer = ReplayBuffer(capacity=len(replay_ids), batch_size=512, windows_per_generation=4, seed=10)
     shard = _decoded(replay_ids)
     for row in range(len(replay_ids)):
         buffer.admit(shard, row)
@@ -220,8 +214,8 @@ def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
 
 
 def test_count_active_replay_ids_ignores_replaced_generations() -> None:
-    loader = object.__new__(O51ReplayLoader)
-    loader._buffer = ReplayBuffer(capacity=512, batch_size=1, seed=51)
+    loader = object.__new__(PhysicalShardReplayLoader)
+    loader._buffer = ReplayBuffer(capacity=512, batch_size=1, windows_per_generation=4, seed=51)
     loader._buffer.identity_slots = {"active": {0}, "duplicate": {1, 2}}
 
     assert loader.count_active_replay_ids(("active", "retired", "duplicate")) == 2
@@ -231,6 +225,7 @@ class _FakeAdapter:
     def __init__(self, rows: int, length: int) -> None:
         self.rows = rows
         self.length = length
+        self.manifests: Mapping[str, SourceManifest] = {"source": SourceManifest("source", (rows,))}
 
     def _generation(self, row: int, epoch: int) -> tuple[str, tuple[dict[str, np.ndarray], ...]]:
         replay_id = f"replay-{row}"
@@ -256,10 +251,11 @@ class _FakeAdapter:
             tuple(generation[0] for generation in generations),
             tuple(PhysicalRow(task.source, task.shard, row) for row in task.selected_rows),
             columns,
+            4,
         )
 
     def decode_generations(
-        self, task: ShardTask, requests: list[tuple[int, int]], **_kwargs: object
+        self, task: ShardTask, requests: Sequence[tuple[int, int]], **_kwargs: object
     ) -> Mapping[tuple[int, int], tuple[str, tuple[dict[str, np.ndarray], ...]]]:
         del task
         return {request: self._generation(*request) for request in requests}
@@ -288,12 +284,24 @@ def _no_labels(_row: Mapping[str, object]) -> dict[str, np.ndarray]:
     return {}
 
 
-def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> O51ReplayLoader:
+@dataclass(frozen=True, slots=True)
+class _Batch:
+    replay_ids: tuple[str, ...]
+    values: torch.Tensor
+
+    def pin_memory(self) -> _Batch:
+        return _Batch(self.replay_ids, self.values.pin_memory())
+
+
+def _collate_batch(replay_ids: tuple[str, ...], windows: list[dict[str, np.ndarray]]) -> _Batch:
+    values = np.stack([window["ego_main_stick_x"] for window in windows])
+    return _Batch(replay_ids, torch.from_numpy(values.copy()))
+
+
+def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> PhysicalShardReplayLoader[_Batch]:
     rows = 8
-    tier = TierSelection(
-        scale=1,
-        sources=(SourceSlice("source", rows),),
-        potential_targets=2,
+    selection = PhysicalShardSelection(
+        sources=(SourceRowSelection("source", rows),),
         sha256="b" * 64,
     )
     tasks = (
@@ -302,22 +310,25 @@ def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> O51ReplayL
         else (ShardTask("source", 0, 0, rows, global_shard=0),)
     )
     adapter_type = _DelayedFakeAdapter if delayed else _FakeAdapter
-    return O51ReplayLoader(
-        tier=tier,
-        adapter=adapter_type(rows, 5),  # type: ignore[arg-type]
+    adapter = adapter_type(rows, 5)
+    return PhysicalShardReplayLoader[_Batch](
+        selection=selection,
+        adapter=adapter,
         tasks=tasks,
-        stats={},
+        data_protocol="test-physical-shard-v1",
+        source_manifest_sha256={"source": "c" * 64},
         labels=_no_labels,
         projection=None,
+        batch_transform=_collate_batch,
         batch_size=2,
         replay_slots=rows,
         seed=seed,
         num_workers=workers,
-        L_ctx=3,
-        L_chunk=2,
+        context_length=3,
+        chunk_length=2,
+        windows_per_generation=4,
         schema_version=7,
-        extra=None,
-        batch_transform=None,
+        reserved_disk_bytes=0,
         pin_memory=False,
     )
 
@@ -348,8 +359,7 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
 
     for left, right in zip(expected, actual, strict=True):
         assert left.replay_ids == right.replay_ids
-        torch.testing.assert_close(left.target, right.target)
-        assert left.context.ctx_pad.equal(right.context.ctx_pad)
+        torch.testing.assert_close(left.values, right.values)
 
 
 def test_every_batch_contains_distinct_replay_ids() -> None:
@@ -378,7 +388,7 @@ def test_delayed_workers_and_worker_count_change_preserve_exact_resume() -> None
 
     for left, right in zip(expected, actual, strict=True):
         assert left.replay_ids == right.replay_ids
-        torch.testing.assert_close(left.target, right.target)
+        torch.testing.assert_close(left.values, right.values)
 
 
 def test_iterator_must_start_on_main_thread() -> None:
@@ -399,20 +409,32 @@ def test_iterator_must_start_on_main_thread() -> None:
     assert "main thread" in str(errors[0])
 
 
-def test_iterator_rejects_cuda_initialized_before_worker_start(monkeypatch) -> None:
+def test_zero_worker_iterator_does_not_query_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     loader = _loader(seed=2)
+
+    def fail() -> bool:
+        raise AssertionError("loader queried CUDA state")
+
+    monkeypatch.setattr(torch.cuda, "is_available", fail)
+    monkeypatch.setattr(torch.cuda, "is_initialized", fail)
+
+    next(iter(loader))
+
+
+def test_spawn_workers_can_start_after_cuda_initialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    loader = _loader(seed=2, workers=2, delayed=True)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
 
-    with pytest.raises(RuntimeError, match="before CUDA initialization"):
-        iter(loader)
+    next(iter(loader))
+    loader.close()
 
 
 def test_checkpoint_rejects_an_active_parent_next() -> None:
     started = threading.Event()
     release = threading.Event()
     loader = _loader(seed=3)
-    loader.adapter = _BlockingFakeAdapter(8, 5, started, release)  # type: ignore[assignment]
+    loader.adapter = _BlockingFakeAdapter(8, 5, started, release)
     iterator = iter(loader)
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(next, iterator)
@@ -426,5 +448,47 @@ def test_checkpoint_rejects_an_active_parent_next() -> None:
 def test_old_loader_schema_is_rejected() -> None:
     loader = _loader(seed=4)
 
-    with pytest.raises(ValueError, match="unsupported O51 loader schema"):
+    with pytest.raises(ValueError, match="unsupported physical-shard loader schema"):
         loader.load_state_dict({"schema": 0})
+
+
+def test_context_manager_closes_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object | None] = []
+
+    def record_shutdown(iterator: object | None) -> None:
+        calls.append(iterator)
+
+    monkeypatch.setattr(
+        "hal.training.physical_shard_loader._shutdown_data_loader_workers",
+        record_shutdown,
+    )
+    loader = _loader(seed=5)
+    with loader:
+        next(iter(loader))
+
+    loader.close()
+    assert len(calls) == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        iter(loader)
+
+
+def test_private_worker_shutdown_isolated_in_one_function() -> None:
+    calls = 0
+
+    class IteratorWithWorkers:
+        def _shutdown_workers(self) -> None:
+            nonlocal calls
+            calls += 1
+
+    _shutdown_data_loader_workers(IteratorWithWorkers())
+    _shutdown_data_loader_workers(None)
+
+    assert calls == 1
+
+
+def test_legacy_pickle_resolves_physical_row_through_shim() -> None:
+    payload = b"chal.training.o51_replay_loader\nPhysicalRow\n(Vsource\nI2\nI3\ntR."
+
+    row = pickle.loads(payload)
+
+    assert row == PhysicalRow("source", 2, 3)

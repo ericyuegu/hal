@@ -553,10 +553,9 @@ class Args:
     A shorter run makes the transfer tax weigh more. Does not gate anything."""
 
 
-def main(args: Args) -> None:
-    vast = VastAI()
-
-    search_kw = dict(
+def _find_offers(vast: VastAI, args: Args) -> list[dict]:
+    return search(
+        vast,
         max_price=args.max_price,
         limit=args.limit,
         disk=args.disk,
@@ -571,11 +570,24 @@ def main(args: Args) -> None:
         upload_gb=args.upload_gb,
         run_hours=args.run_hours,
     )
-    print_kw = dict(disk=args.disk, data_gb=args.data_gb, upload_gb=args.upload_gb, run_hours=args.run_hours)
+
+
+def _show_offers(offers: list[dict], args: Args) -> None:
+    print_offers(
+        offers,
+        disk=args.disk,
+        data_gb=args.data_gb,
+        upload_gb=args.upload_gb,
+        run_hours=args.run_hours,
+    )
+
+
+def main(args: Args) -> None:
+    vast = VastAI()
 
     if not args.cmd:
-        offers = search(vast, **search_kw)
-        print_offers(offers, **print_kw)
+        offers = _find_offers(vast, args)
+        _show_offers(offers, args)
         logger.info("search-only (pass a training command after `--` to launch). Nothing rented.")
         return
 
@@ -586,8 +598,8 @@ def main(args: Args) -> None:
         env["HAL_KEEP_ALIVE"] = "1"
 
     if args.dry_run:
-        offers = search(vast, **search_kw)
-        print_offers(offers, **print_kw)
+        offers = _find_offers(vast, args)
+        _show_offers(offers, args)
         login = f"'-u {GHCR_USER} -p *** ghcr.io'" if token else "none (public image)"
         logger.info(f"[dry-run] image={args.image} disk={args.disk}GB runtype=ssh_proxy login={login}")
         logger.info(f"[dry-run] env (non-secret; secrets come from vast account env-vars)={env}")
@@ -596,8 +608,24 @@ def main(args: Args) -> None:
         logger.info(f"[dry-run] train cmd: {train_cmd}")
         return
 
-    offers = queue(vast, **search_kw, poll_interval_s=args.poll_interval_s)
-    print_offers(offers, **print_kw)
+    offers = queue(
+        vast,
+        max_price=args.max_price,
+        limit=args.limit,
+        disk=args.disk,
+        min_vram=args.min_vram,
+        min_ram=args.min_ram,
+        min_dlperf=args.min_dlperf,
+        min_compute_cap=args.min_compute_cap,
+        max_compute_cap=args.max_compute_cap,
+        gpu_name=args.gpu_name,
+        min_cpu_cores=args.min_cpu_cores,
+        data_gb=args.data_gb,
+        upload_gb=args.upload_gb,
+        run_hours=args.run_hours,
+        poll_interval_s=args.poll_interval_s,
+    )
+    _show_offers(offers, args)
     # Try offers best-first; a stuck/dead box (e.g. a host that can't provision the
     # disk or pull the image in time) fails over to the next rather than killing the run.
     for offer in offers:

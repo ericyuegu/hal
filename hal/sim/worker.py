@@ -29,6 +29,7 @@ from hal.sim.ipc import send_control
 from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.session import Matchup
 from hal.sim.session import Session
+from hal.sim.session import SessionOptions
 from hal.sim.trajectory import Trajectory
 from hal.training.canonical import flatten_canonical_frame
 from hal.wire import POST_FIELD_SUFFIXES
@@ -50,11 +51,11 @@ def _match_metadata(matchup: Matchup) -> dict[str, object]:
     }
 
 
-def _session_worker(
+def session_worker(
     worker_id: int,
     connection: Connection,
     arena_descriptor: Any,
-    session_kwargs: dict[str, object],
+    session_kwargs: SessionOptions,
     matchup: Matchup,
     model_ports: tuple[int, ...],
     arena_slots: tuple[int, ...],
@@ -187,7 +188,7 @@ def _session_worker(
                     executed = 0
                     while executed < runtime.execution_stride and captured < max_frames:
                         actions = {port: plans[port][executed] for port in model_ports}
-                        controller_inputs = (
+                        controller_inputs: dict[int, ControllerInputs] = (
                             first_inputs
                             if executed == 0
                             else {port: action_vec_to_controller(action) for port, action in actions.items()}

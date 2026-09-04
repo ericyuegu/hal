@@ -124,7 +124,7 @@ def _ready_worker(
 def _use_forked_fake_worker(monkeypatch: pytest.MonkeyPatch, target) -> None:
     context = mp.get_context("fork")
     monkeypatch.setattr(process_vec.mp, "get_context", lambda _method: context)
-    monkeypatch.setattr(process_vec, "_session_worker", target)
+    monkeypatch.setattr(process_vec, "session_worker", target)
 
 
 def test_silent_worker_is_named_killed_and_reaped(monkeypatch: pytest.MonkeyPatch) -> None:

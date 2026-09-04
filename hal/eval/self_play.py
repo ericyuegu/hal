@@ -161,7 +161,7 @@ def _checkpoint_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _self_play_matches(n_matches: int) -> list[VecMatch]:
+def self_play_matches(n_matches: int) -> list[VecMatch]:
     return [
         VecMatch(
             matchup=Matchup(
@@ -243,7 +243,7 @@ def benchmark_checkpoint(
     inference = make_inference(model, cfg, bucket=inference_bucket, compile_mode="default")
     telemetry = DecodeTelemetry()
     compile_seconds = _prewarm(inference, cfg, inference_bucket)
-    matches = _self_play_matches(n_matches)
+    matches = self_play_matches(n_matches)
 
     checkpoint = Path(path).resolve()
     out_dir = _output_directory(

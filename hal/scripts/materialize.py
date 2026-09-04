@@ -40,6 +40,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from typing import cast
 
 import fsspec
 import numpy as np
@@ -92,7 +93,7 @@ class ExtractResult:
     """Typed return for `_process_one`; sample is None on parse failure."""
 
     manifest_key: str
-    sample: dict[str, np.ndarray] | None
+    sample: dict[str, object] | None
     error: str | None = None
     frame_count: int | None = None
     stats: dict[str, FeatureStatsSufficient] | None = None
@@ -156,13 +157,18 @@ def _process_one(item: ReplayWork) -> ExtractResult:
         )
     try:
         extractor = extract_policy_world_replay if _WORKER_REPLAY_FORMAT == "policy-world" else extract_replay
-        sample = extractor(str(item.open_path))
+        sample = cast(dict[str, object] | None, extractor(str(item.open_path)))
         error = "extract_replay returned None" if sample is None else None
-        frame_count = None if sample is None else int(sample["frame"].shape[0])
+        frame_count = None
         sufficient = None
         if sample is not None:
+            frame = sample["frame"]
+            if not isinstance(frame, np.ndarray):
+                raise TypeError(f"frame must be an ndarray, got {type(frame).__name__}")
+            frame_count = int(frame.shape[0])
             sample["schema_version"] = SCHEMA_VERSION
         if sample is not None and _WORKER_REPLAY_FORMAT == "policy-world":
+            assert frame_count is not None
             ranks = _WORKER_RANK_OVERRIDES.get(item.manifest_key)
             if ranks is None and _WORKER_RANK_OVERRIDE is not None:
                 ranks = (int(_WORKER_RANK_OVERRIDE), int(_WORKER_RANK_OVERRIDE))
@@ -173,7 +179,7 @@ def _process_one(item: ReplayWork) -> ExtractResult:
             assert_policy_world_replay_equal(sample, encoded, item.manifest_key)
             replay_stats = StatsAccumulator(POLICY_WORLD_FLOAT_COLUMNS)
             for name in POLICY_WORLD_FLOAT_COLUMNS:
-                replay_stats.update(name, sample[name])
+                replay_stats.update(name, np.asarray(sample[name]))
             sufficient = replay_stats.to_sufficient()
             sample = encoded
     except KeyboardInterrupt, SystemExit:

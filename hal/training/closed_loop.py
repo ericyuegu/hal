@@ -64,19 +64,19 @@ from hal.training.ego_stats import consolidate_key
 # Column routing has one home. The ring builder resolves it per slot rather than per
 # window, so it reads the same routing helpers ``preprocess`` uses instead of
 # restating the rules here.
-from hal.training.features import _NO_EXTRA
-from hal.training.features import _SPATIAL_GATE
-from hal.training.features import _SPATIAL_INPUTS
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import NEUTRAL_ACTION
+from hal.training.features import NO_EXTRA_COLUMNS
 from hal.training.features import SPATIAL_COLUMNS
+from hal.training.features import SPATIAL_GATE_COLUMN
+from hal.training.features import SPATIAL_INPUT_COLUMNS
 from hal.training.features import Context
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
-from hal.training.features import _classify
-from hal.training.features import _float_transform
-from hal.training.features import _is_masked
 from hal.training.features import derive_spatial
+from hal.training.features import feature_kind
+from hal.training.features import float_feature_transform
+from hal.training.features import mask_sentinel_positions
 
 # A bound model + integration scheme: (Context, committed-action prefix or None)
 # → predicted action chunks ``[n_live, L_chunk, d_action]`` (numpy, for the
@@ -145,7 +145,7 @@ class _Layout:
     cat_names: tuple[str, ...]
     mask_names: tuple[str, ...]
     spatial_at: slice | None
-    spatial_sources: tuple[tuple[int, int], ...]  # (raw row, index in it) per _SPATIAL_INPUTS entry
+    spatial_sources: tuple[tuple[int, int], ...]  # (raw row, index in it) per SPATIAL_INPUT_COLUMNS entry
     dpos_rows: np.ndarray  # value rows the window read zeroes at position 0
     dpos_mask_row: int  # value row the window read flags at position 0; -1 = no spatial block
     zero_value: np.ndarray
@@ -165,7 +165,7 @@ def _column_transform(name: str, kind: str, stats: dict[str, FeatureStats], extr
     if kind in ("button", "stick_trigger"):
         return "raw"
     s = stats[consolidate_key(name)]
-    if _float_transform(name, extra) == "standardize":
+    if float_feature_transform(name, extra) == "standardize":
         return "zero" if s.std == 0 else "standardize"
     return "zero" if s.max == s.min else "minmax"
 
@@ -268,7 +268,7 @@ def _build_layout(
     Column dtypes and the surviving key set come from that frame, the same rule the
     window builder applied to the first row of its buffer.
     """
-    routing = _NO_EXTRA if extra is None else extra
+    routing = NO_EXTRA_COLUMNS if extra is None else extra
     raw_key: dict[str, str] = {}
     gamestate: list[tuple[str, int, str]] = []
     for key, value in flat.items():
@@ -277,7 +277,7 @@ def _build_layout(
         name = _model_name(key, ego_prefix)
         if projection is not None and name not in projection.columns:
             continue
-        kind = _classify(name, routing)
+        kind = feature_kind(name, routing)
         if kind == "derived":
             raise ValueError(
                 f"{name!r} arrived as an input column, but the spatial block is derived on the fly by "
@@ -292,7 +292,7 @@ def _build_layout(
     channel_of: dict[str, int] = {}
     for i, channel in enumerate(ACTION_CHANNELS):
         name = f"ego_{channel}"
-        kind = _classify(name, routing)
+        kind = feature_kind(name, routing)
         if kind not in ("button", "stick_trigger"):
             raise ValueError(f"action channel {name!r} routes as {kind!r}; expected a raw controller channel")
         action.append((name, 1 if kind == "button" else 0, "raw"))
@@ -329,13 +329,13 @@ def _build_layout(
     spatial_sources: tuple[tuple[int, int], ...] = ()
     dpos_rows = np.empty(0, dtype=np.intp)
     dpos_mask_row = -1
-    if _SPATIAL_GATE in flat and (projection is None or projection.derive_spatial):
+    if SPATIAL_GATE_COLUMN in flat and (projection is None or projection.derive_spatial):
         row_index = _row_indices(ordered)
         located = {name: (src, row_index[at]) for at, (name, src, _) in enumerate(ordered)}
-        missing = [name for name in _SPATIAL_INPUTS if name not in located]
+        missing = [name for name in SPATIAL_INPUT_COLUMNS if name not in located]
         if missing:
             raise ValueError(f"derive_spatial needs raw columns {missing}, which the observation does not carry")
-        spatial_sources = tuple(located[name] for name in _SPATIAL_INPUTS)
+        spatial_sources = tuple(located[name] for name in SPATIAL_INPUT_COLUMNS)
         spatial_at = slice(len(value_names), len(value_names) + len(SPATIAL_COLUMNS))
         value_names = value_names + SPATIAL_COLUMNS
         dpos_rows = np.array([value_names.index(name) for name in _DPOS_COLUMNS], dtype=np.intp)
@@ -372,7 +372,7 @@ def _zero_rows(layout: _Layout) -> dict[str, np.ndarray]:
     exactly what the left-padded window produced once it went through ``preprocess``.
     """
     raw = _empty_raw(layout)
-    masks = tuple(_is_masked(row) for row in raw)
+    masks = tuple(mask_sentinel_positions(row) for row in raw)
     value = np.zeros(len(layout.value_names), dtype=np.float32)
     cat = np.zeros(len(layout.cat_names), dtype=np.int64)
     mask = np.zeros(len(layout.mask_names), dtype=np.float32)
@@ -432,7 +432,7 @@ def _spatial_block(layout: _Layout, pairs: list[tuple[tuple[np.ndarray, ...], ..
     Batched over slots because ``derive_spatial``'s cost is per call, not per element.
     """
     batch: dict[str, np.ndarray] = {}
-    for name, (src, index) in zip(_SPATIAL_INPUTS, layout.spatial_sources, strict=True):
+    for name, (src, index) in zip(SPATIAL_INPUT_COLUMNS, layout.spatial_sources, strict=True):
         column = np.empty((len(pairs), 2), dtype=_RAW_DTYPES[src])
         for j, (prev, cur) in enumerate(pairs):
             column[j, 0] = prev[src][index]
@@ -489,7 +489,7 @@ class _Rings:
     def push(self, spatial: np.ndarray | None) -> None:
         """Preprocess the gathered raw row and write it into every ring, twice."""
         layout = self.layout
-        masks = tuple(_is_masked(row) for row in self.raw)
+        masks = tuple(mask_sentinel_positions(row) for row in self.raw)
         _write_value_row(layout, self.raw, masks, self._value)
         _write_cat_row(layout, self.raw, masks, self._cat)
         _write_mask_row(layout, masks, self._mask)

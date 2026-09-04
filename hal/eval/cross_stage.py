@@ -324,8 +324,8 @@ def vs_cpu_metrics(
 class MatchRow:
     """One completed match, flat and self-describing for paired analysis.
 
-    Characters/stage are libmelee-internal id **values** (the space the model trains
-    on; see CLAUDE.md). ``stage`` is the boot's nominal/seed stage — under
+    Characters/stage are libmelee-internal ID values (see ``hal.wire``).
+    ``stage`` is the boot's nominal/seed stage — under
     instant-restart the live per-match stage is randomized by the Gecko code and is
     NOT retained in the ``Trajectory``, so it cannot be recovered here. Damage/stocks
     are ego-relative (``dealt``/``taken`` = ego dealt-to / received-from the opponent;

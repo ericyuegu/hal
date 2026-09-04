@@ -21,7 +21,7 @@ from hal.scripts.publish_mds import audit
 from hal.scripts.publish_mds import publish_mds
 
 
-def _rclone_objects(prefix: str) -> list[str]:
+def rclone_objects(prefix: str) -> list[str]:
     result = subprocess.run(
         ["rclone", "lsf", prefix, "--recursive", "--files-only"],
         capture_output=True,
@@ -59,7 +59,7 @@ def _empty_attempt(staging_root: str, rank: int) -> str:
     base = f"{staging_root.rstrip('/')}/ranked-anonymized-{rank}"
     for attempt in range(1, 1_000):
         candidate = f"{base}/attempt-{attempt:03d}/mds-policy-world-v7"
-        objects = _rclone_objects(candidate)
+        objects = rclone_objects(candidate)
         if not objects:
             return candidate
         if "projection.json" in objects:
@@ -124,7 +124,7 @@ def scaleup_ranked(cfg: RankedScaleupConfig) -> None:
         logger.info(f"rank {rank}: quality filter kept {kept}")
 
         final = f"{cfg.final_root.rstrip('/')}/ranked-anonymized-{rank}/mds-policy-world-v7"
-        final_objects = _rclone_objects(final)
+        final_objects = rclone_objects(final)
         if final_objects:
             if "_SUCCESS" not in final_objects:
                 raise FileExistsError(f"rank {rank}: nonempty final prefix lacks _SUCCESS: {final}")
@@ -132,7 +132,7 @@ def scaleup_ranked(cfg: RankedScaleupConfig) -> None:
             continue
 
         staging = _empty_attempt(cfg.staging_root, rank)
-        staged_objects = _rclone_objects(staging)
+        staged_objects = rclone_objects(staging)
         if "projection.json" not in staged_objects:
             process_replays(
                 paths_file=paths,

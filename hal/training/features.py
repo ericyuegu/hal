@@ -19,7 +19,7 @@ Tensor-dim names (docstrings):
     L           = sequence length carried by the batch (window at train, L_ctx at inference)
     L_ctx       = context length
     L_chunk     = predicted chunk length
-    d_action    = action vector dim (A_DIM)
+    d_action    = action vector dim (ACTION_DIM)
 """
 
 from collections.abc import Mapping
@@ -37,7 +37,6 @@ from hal.data.feature_stats import FeatureStats
 from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import action_vec_to_controller as action_vec_to_controller
 from hal.training.ego_stats import consolidate_key
-from hal.wire import A_DIM
 from hal.wire import ACTION_CHANNELS
 from hal.wire import ACTION_DIM as _ACTION_DIM
 from hal.wire import ITEM_SLOTS
@@ -163,11 +162,14 @@ ITEM_INPUT_COLUMNS: Final[frozenset[str]] = frozenset(
     item_column(slot, suffix) for slot in range(ITEM_SLOTS) for suffix in (*ITEM_COLUMNS.floats, *ITEM_COLUMNS.cats)
 )
 
-_NO_EXTRA: Final[ExtraColumns] = ExtraColumns(floats={}, cats={})
+NO_EXTRA_COLUMNS: Final[ExtraColumns] = ExtraColumns(floats={}, cats={})
 
 # Re-export the policy action wire. Training callers that imported these names
 # from this module continue to work while data code imports hal.wire directly.
 ACTION_DIM = _ACTION_DIM
+# Frozen experiments loaded by ``hal.scripts.h2h`` import this historical name.
+# Remove it only when H2H no longer supports those recorded experiment sources.
+A_DIM = ACTION_DIM
 
 BASE_PLAYER_PREFIXES: Final[tuple[str, ...]] = ("ego", "ego_nana", "opp_nana", "opp")
 BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
@@ -187,7 +189,7 @@ BASE_ITEMS_PROJECTION: Final[FeatureProjection] = FeatureProjection(
 
 _BUTTON_ORDER = tuple(channel.removeprefix("button_") for channel in ACTION_CHANNELS[6:])
 
-NEUTRAL_ACTION = np.zeros(A_DIM, dtype=np.float32)
+NEUTRAL_ACTION = np.zeros(ACTION_DIM, dtype=np.float32)
 
 _STICK_TRIGGER_SUFFIXES = (
     "main_stick_x",
@@ -290,9 +292,9 @@ _SPATIAL_SCALES: Final[dict[str, float]] = {
 
 # Raw columns the block is a pure function of. ``stage`` doubles as the gate: a
 # batch without it predates matchup conditioning and gets no spatial block.
-_SPATIAL_GATE: Final[str] = "stage"
-_SPATIAL_INPUTS: Final[tuple[str, ...]] = (
-    _SPATIAL_GATE,
+SPATIAL_GATE_COLUMN: Final[str] = "stage"
+SPATIAL_INPUT_COLUMNS: Final[tuple[str, ...]] = (
+    SPATIAL_GATE_COLUMN,
     *(f"{player}_{column}" for player in _SPATIAL_PLAYERS for column in ("position_x", "position_y", "direction")),
 )
 
@@ -354,14 +356,14 @@ def derive_spatial(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     true per-frame velocity, which schema v5 does not carry; they differ from it
     wherever the engine clamps or teleports (respawns, ledge snaps).
     """
-    missing = [name for name in _SPATIAL_INPUTS if name not in batch]
+    missing = [name for name in SPATIAL_INPUT_COLUMNS if name not in batch]
     if missing:
         raise ValueError(f"derive_spatial needs raw columns {missing}, which the batch does not carry")
 
-    ids, known = _stage_known(batch[_SPATIAL_GATE])
+    ids, known = _stage_known(batch[SPATIAL_GATE_COLUMN])
     observed = known
-    for name in _SPATIAL_INPUTS[1:]:
-        observed = observed & ~_is_masked(np.asarray(batch[name]))
+    for name in SPATIAL_INPUT_COLUMNS[1:]:
+        observed = observed & ~mask_sentinel_positions(np.asarray(batch[name]))
     dpos_valid = np.zeros(observed.shape, dtype=bool)
     dpos_valid[..., 1:] = observed[..., 1:] & observed[..., :-1]
 
@@ -535,7 +537,7 @@ def _has_suffix(name: str, suffixes: Mapping[str, object] | tuple[str, ...]) -> 
     return any(name.endswith(f"_{suffix}") for suffix in suffixes)
 
 
-def _classify(name: str, extra: ExtraColumns = _NO_EXTRA) -> str:
+def feature_kind(name: str, extra: ExtraColumns = NO_EXTRA_COLUMNS) -> str:
     if name == "frame":
         return "drop"
     # The spatial block is computed on the fly with its own fixed scalings; routing
@@ -563,7 +565,7 @@ def _classify(name: str, extra: ExtraColumns = _NO_EXTRA) -> str:
     return "drop"
 
 
-def _is_masked(arr: np.ndarray) -> np.ndarray:
+def mask_sentinel_positions(arr: np.ndarray) -> np.ndarray:
     if arr.dtype.kind == "f":
         return np.isnan(arr)
     return arr == mask_value(arr.dtype)
@@ -581,7 +583,7 @@ def _standardize(arr: np.ndarray, s: FeatureStats) -> np.ndarray:
     return ((arr - s.mean) / s.std).astype(np.float32)
 
 
-def _float_transform(name: str, extra: ExtraColumns) -> str:
+def float_feature_transform(name: str, extra: ExtraColumns) -> str:
     """Normalization for one float column. ``extra`` declares it per suffix; otherwise
     percent + position standardize — their dataset max (percent ~507, off the 0-160
     decision range) squashes min-max into a sliver — and every other float min-maxes."""
@@ -616,12 +618,12 @@ def preprocess(
     the schema-v6 post block. Without it those columns are dropped, so every model
     built before v6 keeps its exact input width.
     """
-    routing = _NO_EXTRA if extra is None else extra
+    routing = NO_EXTRA_COLUMNS if extra is None else extra
     out: dict[str, Tensor] = {}
     for name, arr in batch.items():
         if projection is not None and name not in projection.columns:
             continue
-        kind = _classify(name, routing)
+        kind = feature_kind(name, routing)
         if kind == "drop":
             continue
         if kind == "derived":
@@ -629,14 +631,14 @@ def preprocess(
                 f"{name!r} arrived as an input column, but the spatial block is derived on the fly by "
                 "derive_spatial; materializing it into the MDS needs a schema bump and this derivation removed"
             )
-        mask = _is_masked(arr)
+        mask = mask_sentinel_positions(arr)
         if kind == "button" or kind == "stick_trigger":
             x = np.where(mask, 0.0, arr).astype(np.float32)
         elif kind == "cat":
             x = np.where(mask, 0, arr).astype(np.int64)
         elif kind == "float":
             s = feature_stats[consolidate_key(name)]
-            transform = _float_transform(name, routing)
+            transform = float_feature_transform(name, routing)
             x = _standardize(arr, s) if transform == "standardize" else _normalize(arr, s)
             x = np.where(mask, 0.0, x)
         else:
@@ -644,14 +646,14 @@ def preprocess(
         out[name] = torch.from_numpy(np.ascontiguousarray(x))
         if kind == "float" and mask.any():
             out[f"{name}_mask"] = torch.from_numpy(np.ascontiguousarray(mask.astype(np.float32)))
-    if _SPATIAL_GATE in batch and (projection is None or projection.derive_spatial):
+    if SPATIAL_GATE_COLUMN in batch and (projection is None or projection.derive_spatial):
         for name, value in derive_spatial(batch).items():
             out[name] = torch.from_numpy(np.ascontiguousarray(value))
     return out
 
 
 def stack_actions(batch: dict[str, Tensor]) -> Tensor:
-    """Stack ego action channels in canonical order → ``[B, L, A_DIM]`` over
+    """Stack ego action channels in canonical order → ``[B, L, ACTION_DIM]`` over
     whatever sequence length the batch carries (full window at train; L_ctx at
     inference)."""
     return torch.stack([batch[f"ego_{ch}"] for ch in ACTION_CHANNELS], dim=-1)

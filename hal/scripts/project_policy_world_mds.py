@@ -25,7 +25,7 @@ from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.data.policy_world_schema import assert_policy_world_replay_equal
 from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.data.schema import SCHEMA_VERSION
-from hal.scripts.project_policy_mds import _replay_ids
+from hal.scripts.project_policy_mds import load_replay_ids_by_split
 
 DEFAULT_SCRATCH = Path("/dev/shm/hal_policy_world_projection")
 DEFAULT_SHARD_SIZE = 256 * 2**20
@@ -156,7 +156,7 @@ def project_policy_world_mds(
     elif Path(out).exists():
         raise FileExistsError(f"{out} already exists")
 
-    ids = _replay_ids(src)
+    ids = load_replay_ids_by_split(src)
     scratch.mkdir(parents=True, exist_ok=True)
     upload_root = Path(tempfile.mkdtemp(dir=scratch, prefix="mds-upload-")) if remote else None
     stats = StatsAccumulator(POLICY_WORLD_FLOAT_COLUMNS)

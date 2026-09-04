@@ -8,7 +8,7 @@ Characters are stored as the libmelee ``Character`` value (Fox=1): the slp EXTER
 character-select id is normalized via ``wire.slp_character_to_libmelee`` at read time.
 Stage stays the slp stage id (the one un-normalized game id here; consumers convert
 via ``wire.slp_stage_to_libmelee``).
-See CLAUDE.md (Controller data model → Character-id footgun).
+See ``hal.wire`` for the character-ID conversion contract.
 LRAS = "L + R + A + Start" controller-combo forfeit; valid only when the slp
 ended via ``NO_CONTEST`` — ``GameOutcome`` enforces this at construction.
 
@@ -354,6 +354,8 @@ def extract_index_entry(
                 g = peppi_py.read_slippi(str(replay_path), skip_frames=False)
             except Exception:
                 return None
+        if g.frames is None:
+            return None
         ids = g.frames.id
         last_frame = int(ids[-1]) if len(ids) else None
     frame_count = int(last_frame) if last_frame is not None else 0

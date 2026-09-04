@@ -1,5 +1,7 @@
 """Upload checkpoints and evaluation files to R2."""
 
+import hashlib
+import os
 import queue
 import threading
 from pathlib import Path
@@ -24,6 +26,23 @@ class _Stop:
 
 
 _SENTINEL: Final[_Stop] = _Stop()
+
+
+def checkpoint_sha256(path: Path) -> str:
+    """Return the SHA-256 digest of a checkpoint file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def advance_checkpoint_link(source: Path, destination: Path) -> None:
+    """Atomically point ``destination`` at an immutable checkpoint inode."""
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    os.link(source, temporary)
+    os.replace(temporary, destination)
 
 
 class BackgroundUploader:

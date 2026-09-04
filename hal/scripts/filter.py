@@ -43,6 +43,7 @@ from loguru import logger
 
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
+from hal.data.replay_stats import PlayerStats
 from hal.data.replay_stats import PlayerStatsMins
 from hal.policy import INCLUDED_STAGES
 from hal.wire import CHARACTERS_BY_NAME
@@ -52,6 +53,12 @@ Predicate = Callable[[ReplayIndexEntry], bool]
 
 # Project policy: tournament-legal stages, keyed by libmelee enum name.
 INCLUDED_STAGES_BY_NAME: dict[str, melee.Stage] = {stage.name: stage for stage in INCLUDED_STAGES}
+
+
+def _stats_players(entry: ReplayIndexEntry) -> tuple[PlayerStats, ...]:
+    if entry.stats is None:
+        raise ValueError("a statistics predicate requires replay statistics")
+    return entry.stats.players
 
 
 def _resolve_ids(values: list[str], table: dict[str, int], kind: str) -> set[int]:
@@ -122,7 +129,7 @@ def build_predicates(
         preds.append(
             (
                 "stock_zero_only",
-                lambda e: any(player.stocks_remaining == 0 for player in e.stats.players),
+                lambda e: any(player.stocks_remaining == 0 for player in _stats_players(e)),
             )
         )
     if stages:
@@ -149,7 +156,7 @@ def build_predicates(
             preds.append(
                 (
                     f"min_{f.name}={t}",
-                    lambda e, t=t, n=f.name: any(getattr(p, n) >= t for p in e.stats.players),
+                    lambda e, t=t, n=f.name: any(getattr(p, n) >= t for p in _stats_players(e)),
                 )
             )
 
@@ -157,7 +164,7 @@ def build_predicates(
         preds.append(
             (
                 f"min_death_count={min_death_count}",
-                lambda e, t=min_death_count: any(len(p.death_percents) >= t for p in e.stats.players),
+                lambda e, t=min_death_count: any(len(p.death_percents) >= t for p in _stats_players(e)),
             )
         )
 
@@ -166,7 +173,7 @@ def build_predicates(
             (
                 f"max_cheap_deaths<{max_cheap_deaths}@{cheap_death_pct}%",
                 lambda e, m=max_cheap_deaths, c=cheap_death_pct: all(
-                    sum(1 for dp in p.death_percents if dp <= c) < m for p in e.stats.players
+                    sum(1 for dp in p.death_percents if dp <= c) < m for p in _stats_players(e)
                 ),
             )
         )

@@ -12,6 +12,9 @@ from concurrent.futures import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
+from typing import Protocol
+from typing import Self
+from typing import cast
 
 import numpy as np
 import torch
@@ -33,14 +36,24 @@ from hal.data.schema import check_schema_version
 from hal.streams import StreamSource
 from hal.training.dataloader import ReplayFormat
 from hal.training.dataloader import StreamSamplePrefix
-from hal.training.dataloader import _make_streaming_dataset
+from hal.training.dataloader import Window
+from hal.training.dataloader import choose_chunk_starts
+from hal.training.dataloader import make_streaming_dataset
+from hal.training.dataloader import make_window
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
 
-type WindowTransform = Callable[[str, str, dict[str, np.ndarray]], None]
+type WindowTransform = Callable[[str, str, Window], None]
 type ReplayFilter = Callable[[str], bool]
 type ReplayLabels = Callable[[Mapping[str, object]], dict[str, np.ndarray]]
+
+
+class PinnableBatch(Protocol):
+    def pin_memory(self) -> Self: ...
+
+
+type BatchTransform = Callable[[list[Window], TrainBatch], PinnableBatch]
 
 
 def _next_item[T](source: Iterator[T]) -> T:
@@ -111,7 +124,7 @@ class OneBatchPrefetch[T](Iterator[T]):
 @dataclass(frozen=True, slots=True)
 class ReplayPack:
     replay_id: str
-    windows: tuple[dict[str, np.ndarray], ...]
+    windows: tuple[Window, ...]
     sample_id: int | None = None
     epoch: int | None = None
 
@@ -263,7 +276,8 @@ class _ReplayDecodeDataset(Dataset[_CollatedReplayPackBatch]):
     def __init__(self, packs: PolicyReplayPackDataset) -> None:
         self._packs = packs
 
-    def __getitem__(self, task: _ReplayDecodeTask) -> _CollatedReplayPackBatch:
+    def __getitem__(self, index: _ReplayDecodeTask) -> _CollatedReplayPackBatch:
+        task = index
         packs = [self._packs.decode_sample(sample_id, task.epoch) for sample_id in task.sample_ids]
         if any(pack is None for pack in packs):
             raise RuntimeError("a deterministic replay task did not produce one pack per sample ID")
@@ -305,7 +319,7 @@ class _OrderedReplayTasks(Iterator[_CollatedReplayPackBatch]):
 @dataclass(frozen=True, slots=True)
 class ReservoirBatch:
     replay_ids: tuple[str, ...]
-    windows: tuple[dict[str, np.ndarray], ...]
+    windows: tuple[Window, ...]
 
 
 class ReplayPackBatchIterator(Iterator[ReplayPack]):
@@ -324,6 +338,7 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
     def __next__(self) -> ReplayPack:
         while not self._pending:
             value = next(self._source)
+            batch: tuple[ReplayPack, ...]
             if isinstance(value, ReplayPack):
                 batch = (value,)
             elif isinstance(value, _CollatedReplayPackBatch):
@@ -331,7 +346,7 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
                 if value.cursor_after is not None:
                     self.source_cursor = value.cursor_after
             elif isinstance(value, list | tuple) and all(isinstance(pack, ReplayPack) for pack in value):
-                batch = tuple(value)
+                batch = tuple(pack for pack in value if isinstance(pack, ReplayPack))
             else:
                 raise TypeError(f"pack loader yielded {type(value).__name__}, expected ReplayPack batch")
             if not batch:
@@ -374,7 +389,9 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
                     or not isinstance(value[2], int)
                 ):
                     raise ValueError("pending replay-pack descriptor is invalid")
-                replay_id, sample_id, epoch = value
+                replay_id = value[0]
+                sample_id = _require_nonnegative_int(value[1], "pending sample_id")
+                epoch = _require_nonnegative_int(value[2], "pending epoch")
                 pack = replay_packs.get((sample_id, epoch))
                 if pack is None or pack.replay_id != replay_id:
                     raise ValueError(f"could not reconstruct pending replay {replay_id!r}")
@@ -383,7 +400,7 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
             stored = state.get("pending", ())
             if not isinstance(stored, tuple) or any(not isinstance(pack, ReplayPack) for pack in stored):
                 raise ValueError("pending replay-pack state is invalid")
-            pending = list(stored)
+            pending = [pack for pack in stored if isinstance(pack, ReplayPack)]
         cursor = state.get("source_cursor")
         if cursor is not None and (
             not isinstance(cursor, tuple)
@@ -392,8 +409,15 @@ class ReplayPackBatchIterator(Iterator[ReplayPack]):
         ):
             raise ValueError("replay source cursor is invalid")
         self._pending = deque(pending)
-        self.received_packs = int(state.get("received_packs", 0))
-        self.source_cursor = cursor
+        self.received_packs = _require_nonnegative_int(state.get("received_packs", 0), "received_packs")
+        self.source_cursor = (
+            None
+            if cursor is None
+            else (
+                _require_nonnegative_int(cursor[0], "source epoch"),
+                _require_nonnegative_int(cursor[1], "source sample offset"),
+            )
+        )
 
 
 class ReplayReservoir:
@@ -424,7 +448,7 @@ class ReplayReservoir:
         self._batch_size = batch_size
         self._capacity = capacity
         self._rng = np.random.default_rng(seed)
-        self._active: dict[str, deque[dict[str, np.ndarray]]] = {}
+        self._active: dict[str, deque[Window]] = {}
         self._active_specs: dict[str, deque[_ReplayWindowSpec]] = {}
         self._descriptor_backed: bool | None = None
         self._cooldown: deque[set[str]] = deque(maxlen=cooldown_batches)
@@ -455,7 +479,7 @@ class ReplayReservoir:
 
     def state_dict(self) -> dict[str, Any]:
         """Return the exact between-batch reservoir state."""
-        state = {
+        state: dict[str, Any] = {
             "batch_size": self._batch_size,
             "capacity": self._capacity,
             "rng": self._rng.bit_generator.state,
@@ -503,7 +527,7 @@ class ReplayReservoir:
                 replay_id, stored_specs = value
                 if not isinstance(stored_specs, tuple):
                     raise ValueError("active replay window descriptors are invalid")
-                windows: deque[dict[str, np.ndarray]] = deque()
+                windows: deque[Window] = deque()
                 specs: deque[_ReplayWindowSpec] = deque()
                 for stored_spec in stored_specs:
                     if (
@@ -610,6 +634,12 @@ def _stable_replay_rng(seed: int, epoch: int, replay_id: str) -> np.random.Gener
     return np.random.default_rng((seed, epoch, identity & 0xFFFFFFFF, identity >> 32))
 
 
+def _require_nonnegative_int(value: object, name: str) -> int:
+    if not isinstance(value, int | np.integer) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    return int(value)
+
+
 class PolicyReplayPackDataset(IterableDataset):
     def __init__(
         self,
@@ -679,19 +709,16 @@ class PolicyReplayPackDataset(IterableDataset):
         *,
         sample_id: int | None,
     ) -> ReplayPack | None:
-        # Defer shared helpers so dataloader can re-export this module safely.
-        from hal.training.dataloader import _choose_chunk_starts
-        from hal.training.dataloader import _make_window
-
         replay_id = str(compact["replay_id"])
         if self._replay_filter is not None and not self._replay_filter(replay_id):
             return None
-        check_schema_version({"schema_version": int(compact["source_schema_version"])}, expected=self._schema_version)
-        frames = int(compact["num_frames"])
+        source_schema_version = _require_nonnegative_int(compact["source_schema_version"], "source_schema_version")
+        check_schema_version({"schema_version": source_schema_version}, expected=self._schema_version)
+        frames = _require_nonnegative_int(compact["num_frames"], "num_frames")
         rng = _stable_replay_rng(self._seed, epoch, replay_id)
         starts = [
             int(chunk_start) - self._L_ctx
-            for chunk_start in _choose_chunk_starts(
+            for chunk_start in choose_chunk_starts(
                 frames,
                 self._L_ctx,
                 self._L_chunk,
@@ -738,7 +765,7 @@ class PolicyReplayPackDataset(IterableDataset):
                     }
                 )
                 pad = max(0, -start)
-                window = _make_window(
+                window = make_window(
                     sample,
                     ego_prefix=ego_prefix,
                     start=0,
@@ -754,7 +781,7 @@ class PolicyReplayPackDataset(IterableDataset):
             sample = self._replay_transform(self._decode(compact))
             for start, ego_prefix in zip(starts, ego_prefixes, strict=True):
                 pad = max(0, -start)
-                window = _make_window(
+                window = make_window(
                     sample,
                     ego_prefix=ego_prefix,
                     start=start,
@@ -799,7 +826,7 @@ class ReservoirLoader:
         seed: int,
         extra: ExtraColumns | None,
         projection: FeatureProjection | None,
-        batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None,
+        batch_transform: BatchTransform | None,
         prefetch_batches: int,
         pin_memory: bool,
         dataset: StreamingDataset,
@@ -954,8 +981,14 @@ class ReservoirLoader:
         reservoir_state = state.get("reservoir")
         if not isinstance(pack_state, Mapping) or not isinstance(reservoir_state, Mapping):
             raise ValueError("deterministic replay checkpoint state is incomplete")
-        pending_specs = pack_state.get("pending_specs", ())
-        active_specs = reservoir_state.get("active_specs", ())
+        pack_state = cast(Mapping[str, object], pack_state)
+        reservoir_state = cast(Mapping[str, object], reservoir_state)
+        pending_specs = pack_state.get("pending_specs")
+        active_specs = reservoir_state.get("active_specs")
+        if pending_specs is None:
+            pending_specs = ()
+        if active_specs is None:
+            active_specs = ()
         if not isinstance(pending_specs, tuple) or not isinstance(active_specs, tuple):
             raise ValueError("deterministic replay descriptors are invalid")
         for value in pending_specs:
@@ -983,7 +1016,7 @@ class ReservoirLoader:
             replay_packs[(sample_id, epoch)] = pack
         return replay_packs
 
-    def _batches(self, reservoir: ReplayReservoir) -> Iterator[object]:
+    def _batches(self, reservoir: ReplayReservoir) -> Iterator[PinnableBatch]:
         from hal.training.dataloader import collate_train_batch
 
         try:
@@ -996,7 +1029,7 @@ class ReservoirLoader:
                     projection=self._projection,
                 )
                 batch = TrainBatch(context=batch.context, target=batch.target, replay_ids=item.replay_ids)
-                transformed = (
+                transformed: PinnableBatch = (
                     self._batch_transform(list(item.windows), batch) if self._batch_transform is not None else batch
                 )
                 yield transformed.pin_memory() if self._pin_memory else transformed
@@ -1047,7 +1080,7 @@ def make_reservoir_loader(
     replay_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     replay_labels: ReplayLabels | None = None,
     window_transform: WindowTransform | None = None,
-    batch_transform: Callable[[list[dict[str, np.ndarray]], TrainBatch], object] | None = None,
+    batch_transform: BatchTransform | None = None,
     replay_format: ReplayFormat = "policy",
     replay_filter: ReplayFilter | None = None,
     replay_pack_batch_size: int = 1,
@@ -1090,7 +1123,7 @@ def make_reservoir_loader(
         )
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
-    dataset, source_names = _make_streaming_dataset(
+    dataset, source_names = make_streaming_dataset(
         data_root,
         split,
         sources=sources,

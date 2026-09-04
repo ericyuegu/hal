@@ -47,10 +47,9 @@ initialization coefficient also stays fixed because applying another depth
 factor there would scale the branch twice.
 
 The relevant implementation is in
-[`051_correct_parameterization.py`](../051_correct_parameterization.py):
+[`051_muon_parameterization.py`](../051_muon_parameterization.py):
 `MODEL_FAMILY`, `depth_rule`, `initialize_o51_parameters`, `optimizer_roles`,
-and `_role_lr`. The fixed grids and 16-layer stage routing are in
-[`o51_sweep.py`](../../hal/training/o51_sweep.py).
+`_role_lr`, and the `sweep-*` commands.
 
 This interpretation follows the previously reviewed Depth-μP, CompleteP,
 Complete(d)P, μTransfer, and Muon parameterization results. No new literature

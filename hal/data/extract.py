@@ -13,7 +13,7 @@ with sub-deadzone jitter zeroed (``wire.TRIGGER_DEADZONE``), buttons unpacked
 from the physical bitmask. Slp-version-unavailable fields get dtype-specific
 mask sentinels. Items (projectiles) are global, not per-player: the K lowest
 spawn ids alive on a frame fill the ``item{k}_*`` slots, the rest are masked.
-See CLAUDE.md (Controller data model, Per-frame schema).
+See ``hal.wire`` for the controller and replay wire contracts.
 """
 
 from collections.abc import Mapping

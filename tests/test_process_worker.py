@@ -109,7 +109,7 @@ def test_worker_keeps_terminal_frame_without_publishing_it(monkeypatch: pytest.M
     receive_buffer = bytearray(64)
     with RolloutArena.create(arena_spec) as arena:
         thread = threading.Thread(
-            target=worker_module._session_worker,
+            target=worker_module.session_worker,
             args=(0, child, arena.descriptor, {}, matchup, (1, 2), (0, 1), runtime, 10, False),
         )
         thread.start()

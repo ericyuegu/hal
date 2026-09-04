@@ -11,8 +11,7 @@ match. Use as a context manager.
 """
 
 import atexit
-import ctypes
-import signal as _signal
+import os
 import subprocess
 import sys
 import threading
@@ -24,8 +23,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
+from typing import Any
 from typing import Literal
 from typing import Self
+from typing import TypedDict
 
 import melee
 from loguru import logger
@@ -36,21 +37,34 @@ from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
 from hal.wire import slp_stage_to_libmelee
 
-# Linux-only PR_SET_PDEATHSIG: have the kernel SIGKILL the Dolphin child if
+# Linux-only PR_SET_PDEATHSIG makes the kernel kill Dolphin if
 # this Python process dies before _teardown can run (e.g. parent SIGKILL'd,
 # OOM, segfault). Belt-and-suspenders on top of __exit__/atexit cleanup —
 # without it, an orphaned Dolphin keeps UDP 51441 bound and breaks the next
 # Session boot until reboot or manual kill (see PID-575155 incident).
-_PR_SET_PDEATHSIG = 1
 # Dolphin often ignores SIGTERM while the EXI fast-forward loop is blocked on
 # input. A long grace period stalls every wave boundary and adds no replay
 # safety: ``finalize_replay_dir`` repairs an interrupted .slp below.
 _DOLPHIN_TERM_GRACE_SECONDS = 0.25
 
 
-def _set_pdeathsig_sigkill() -> None:
-    libc = ctypes.CDLL("libc.so.6", use_errno=True)
-    libc.prctl(_PR_SET_PDEATHSIG, _signal.SIGKILL, 0, 0, 0)
+class SessionOptions(TypedDict):
+    """Spawn-safe constructor arguments used by evaluation workers."""
+
+    iso_path: str | Path
+    dolphin_path: str | Path
+    slippi_port: int
+    step_timeout_seconds: float
+    start_timeout_seconds: float
+    tmp_home_directory: bool
+    replay_dir: str | Path | None
+    blocking_input: bool
+    emulation_speed: float
+    use_exi_inputs: bool
+    enable_ffw: bool
+    disable_audio: bool
+    polling_mode: bool
+    instant_match_restart: bool
 
 
 # The patch swaps a process-global (``subprocess.Popen``), so concurrent boots
@@ -59,34 +73,43 @@ def _set_pdeathsig_sigkill() -> None:
 # wrapper or dropping the pdeathsig. The window guarded is just ``Console.run``'s
 # launch, which only spawns (it doesn't wait), so serializing it is cheap.
 _POPEN_PATCH_LOCK = threading.Lock()
+_PARENT_BOUND_POPEN_ORIGINAL: Any = None
+
+
+def _spawn_parent_bound(command: object, *args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+    """Start a command through the parent-death-signal exec wrapper."""
+    if not isinstance(command, list | tuple):
+        raise TypeError("the parent-bound process command must be a sequence of paths and strings")
+    if _PARENT_BOUND_POPEN_ORIGINAL is None:
+        raise RuntimeError("parent-bound Popen used outside its patch scope")
+    wrapped = [sys.executable, "-m", "hal.sim.pdeathsig_exec"]
+    for part in command:
+        if not isinstance(part, str | os.PathLike):
+            raise TypeError("the parent-bound process command must contain only paths and strings")
+        path = os.fspath(part)
+        if not isinstance(path, str):
+            raise TypeError("the parent-bound process command must not contain bytes")
+        wrapped.append(path)
+    return _PARENT_BOUND_POPEN_ORIGINAL(wrapped, *args, **kwargs)
 
 
 @contextmanager
 def _popen_with_pdeathsig() -> Iterator[None]:
-    """Monkeypatch ``subprocess.Popen`` to inject ``PR_SET_PDEATHSIG`` into any
-    child spawned inside the block. Restores on exit. Used to wrap libmelee's
-    ``Console.run`` (the actual ``Popen(...)`` call lives inside the library
-    and is otherwise out of our reach). Serialized across threads via
-    ``_POPEN_PATCH_LOCK`` since it mutates a process-global."""
+    """Route libmelee's Dolphin launch through a parent-bound exec wrapper.
+
+    The extra executable avoids ``preexec_fn``, which can deadlock when another
+    thread holds a Python runtime lock at fork.
+    """
+    global _PARENT_BOUND_POPEN_ORIGINAL
     with _POPEN_PATCH_LOCK:
         original = subprocess.Popen
-
-        def _wrapped(*args, **kwargs):
-            user_pre = kwargs.pop("preexec_fn", None)
-
-            def _pre():
-                _set_pdeathsig_sigkill()
-                if user_pre is not None:
-                    user_pre()
-
-            kwargs["preexec_fn"] = _pre
-            return original(*args, **kwargs)
-
-        subprocess.Popen = _wrapped  # type: ignore[misc]
+        _PARENT_BOUND_POPEN_ORIGINAL = original
+        subprocess.__dict__["Popen"] = _spawn_parent_bound
         try:
             yield
         finally:
-            subprocess.Popen = original  # type: ignore[misc]
+            subprocess.__dict__["Popen"] = original
+            _PARENT_BOUND_POPEN_ORIGINAL = None
 
 
 # Menu states that signal "match is live, drive() can take over."
@@ -346,49 +369,59 @@ class Session:
         # again at interpreter shutdown (harmless but noisy).
         with suppress(Exception):
             atexit.unregister(self._atexit_kill)
-        if self._console is None:
+        try:
+            if self._console is None:
+                return
+            proc = getattr(self._console, "_process", None)
+            # 1. Graceful SIGTERM so Slippi can finish flushing its current frame and
+            #    cleanly close a match that reached GAME_END (which finalizes the
+            #    .slp with full metadata). A match abandoned mid-game — stopped at
+            #    max_frames while still IN_GAME — never gets GAME_END, so SIGTERM
+            #    can't finalize it; step 4 repairs those.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=_DOLPHIN_TERM_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    # Expected for EXI FFW while it blocks on the input device. The
+                    # hard kill and replay repair below are the normal fallback.
+                    pass
+                except (OSError, RuntimeError) as e:
+                    logger.warning(f"Console SIGTERM wait failed: {e}")
+            # 2. Hard SIGKILL ourselves before delegating to libmelee — its
+            #    Console.stop() can raise inside slippstream.shutdown() when the
+            #    worker never started, leaving its own proc.kill() unreached and
+            #    Dolphin orphaned (PID 575155 incident, 2026-05-21).
+            self._kill_dolphin_only()
+            # 3. Now let libmelee tear down its state (slippstream worker handle,
+            #    temp Dolphin home). Errors here are non-fatal since the
+            #    Dolphin process is already dead.
+            try:
+                self._console.stop()
+            except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as e:
+                logger.warning(f"Console.stop() raised on teardown: {e}")
+            # 4. Finalize any .slp Slippi left unclosed (rawLength == 0): a match
+            #    that hit max_frames mid-game is otherwise unparseable by peppi /
+            #    slippilab even though the frame data is intact. No-op for matches
+            #    that ended cleanly (already finalized by Dolphin at GAME_END).
+            if self.replay_dir is not None:
+                try:
+                    repaired = finalize_replay_dir(self.replay_dir)
+                except Exception as e:
+                    # Replay repair is best-effort teardown. It must not replace
+                    # an exception from the Session body or retain live state.
+                    logger.warning(f"Failed to finalize replays in {self.replay_dir}: {e}")
+                else:
+                    if repaired:
+                        logger.info(f"finalized {len(repaired)} unclosed .slp in {self.replay_dir}")
+        finally:
+            self._console = None
             self._controllers.clear()
             self._menu_helpers.clear()
-            return
-        proc = getattr(self._console, "_process", None)
-        # 1. Graceful SIGTERM so Slippi can finish flushing its current frame and
-        #    cleanly close a match that reached GAME_END (which finalizes the
-        #    .slp with full metadata). A match abandoned mid-game — stopped at
-        #    max_frames while still IN_GAME — never gets GAME_END, so SIGTERM
-        #    can't finalize it; step 4 repairs those.
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=_DOLPHIN_TERM_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                # Expected for EXI FFW while it blocks on the input device. The
-                # hard kill and replay repair below are the normal fallback.
-                pass
-            except (OSError, RuntimeError) as e:
-                logger.warning(f"Console SIGTERM wait failed: {e}")
-        # 2. Hard SIGKILL ourselves before delegating to libmelee — its
-        #    Console.stop() can raise inside slippstream.shutdown() when the
-        #    worker never started, leaving its own proc.kill() unreached and
-        #    Dolphin orphaned (PID 575155 incident, 2026-05-21).
-        self._kill_dolphin_only()
-        # 3. Now let libmelee tear down its state (slippstream worker handle,
-        #    temp Dolphin home). Errors here are non-fatal since the
-        #    Dolphin process is already dead.
-        try:
-            self._console.stop()
-        except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as e:
-            logger.warning(f"Console.stop() raised on teardown: {e}")
-        # 4. Finalize any .slp Slippi left unclosed (rawLength == 0): a match
-        #    that hit max_frames mid-game is otherwise unparseable by peppi /
-        #    slippilab even though the frame data is intact. No-op for matches
-        #    that ended cleanly (already finalized by Dolphin at GAME_END).
-        if self.replay_dir is not None:
-            repaired = finalize_replay_dir(self.replay_dir)
-            if repaired:
-                logger.info(f"finalized {len(repaired)} unclosed .slp in {self.replay_dir}")
-        self._console = None
-        self._controllers.clear()
-        self._menu_helpers.clear()
+            self._pending_flush_ports.clear()
+            self._inputs_flushed_callback = None
+            self._stage_select_steps = 0
+            self._matchup = None
 
     def start_match(self, matchup: Matchup) -> dict:
         """Start Dolphin, configure controllers, and drive menus to IN_GAME.
@@ -436,7 +469,7 @@ class Session:
                 self._inputs_flushed_callback = None
                 callback()
 
-        controller.flush = instrumented_flush
+        controller.__dict__["flush"] = instrumented_flush
 
     def _navigate_to_live(self) -> dict:
         """Drive the menus until the match goes live, returning the first

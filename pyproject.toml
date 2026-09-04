@@ -28,7 +28,7 @@ dependencies = [
     "pandas",
     "peppi-py",
     "polars",
-    "py7zr>=1.1.0",
+    "py7zr==1.1.0",
     "pyarrow>=22",
     "s3fs>=2025",
     "scikit-learn",
@@ -66,7 +66,7 @@ python-preference = "only-managed"
 
 [tool.uv.sources]
 melee = { git = "https://github.com/ericyuegu/libmelee", rev = "222a399cd1368d33458b4c36f4823f7220ca889d" }
-peppi-py = { git = "https://github.com/ericyuegu/peppi-py", branch = "libmelee-parity" }
+peppi-py = { git = "https://github.com/ericyuegu/peppi-py", rev = "6fca8045d891961c8c9a40ff21ea40bcf5367e0e" }
 
 [tool.setuptools.packages.find]
 include = ["hal*"]
@@ -86,11 +86,13 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
-# F722 ignored under experiments/ for jaxtyping annotations (e.g. `Float[Tensor, "B L_ctx d_model"]`);
-# ruff parses the string literal as a forward-ref type expression, but it's a jaxtyping dim spec.
-"experiments/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+# Completed experiments retain their historical lint exemptions.
+"experiments/0[0-4][0-9]_*.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+"experiments/050_*.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+"experiments/benchmark_closed_loop.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+# Ruff parses jaxtyping dimension strings as forward-reference type expressions.
+"experiments/051_muon_parameterization.py" = ["F722"]
 "hal/training/trunk.py" = ["F722"]  # same jaxtyping dim specs as the experiment copies
-"**/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 # Without this a bare `pytest` walks runs/, wandb/ and data/ and dies on the
@@ -112,16 +114,3 @@ root = ["."]
 exclude = [
     "notebooks/**",
 ]
-
-[tool.ty.rules]
-call-non-callable = "warn"
-invalid-argument-type = "warn"
-invalid-assignment = "warn"
-invalid-method-override = "warn"
-invalid-return-type = "warn"
-missing-argument = "warn"
-no-matching-overload = "warn"
-not-iterable = "warn"
-not-subscriptable = "warn"
-unresolved-attribute = "warn"
-unsupported-operator = "warn"

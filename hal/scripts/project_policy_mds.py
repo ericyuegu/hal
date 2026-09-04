@@ -23,7 +23,7 @@ DEFAULT_SCRATCH = Path("/dev/shm/hal_policy_projection")
 DEFAULT_SHARD_SIZE = 256 * 2**20
 
 
-def _replay_ids(src: Path) -> dict[str, list[str]]:
+def load_replay_ids_by_split(src: Path) -> dict[str, list[str]]:
     rows: dict[str, dict[int, str]] = {}
     identity_paths: dict[str, str] = {}
     for entry in read_jsonl(src / "manifest.jsonl", verify_schema_version=False):
@@ -121,7 +121,7 @@ def project_policy_mds(
     if missing:
         raise FileNotFoundError(f"source is missing splits {missing}")
 
-    ids = _replay_ids(src) if (src / "manifest.jsonl").is_file() else {}
+    ids = load_replay_ids_by_split(src) if (src / "manifest.jsonl").is_file() else {}
     scratch.mkdir(parents=True, exist_ok=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=out.parent, prefix=f".{out.name}.") as staging_name:

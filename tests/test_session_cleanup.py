@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -34,11 +35,17 @@ ISO_PATH = Path(_ISO_PATH)
 DOLPHIN_PATH = Path(EMULATOR_PATH)
 
 
+def _missing_prerequisite(message: str) -> Never:
+    if os.environ.get("HAL_REQUIRE_INTEGRATION") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def _check_prereqs() -> None:
     if not ISO_PATH.is_file():
-        pytest.skip(f"ISO missing at {ISO_PATH}; run `python -m hal.scripts.fetch --name ssbm.ciso`")
+        _missing_prerequisite(f"ISO missing at {ISO_PATH}; run `python -m hal.scripts.fetch --name ssbm.ciso`")
     if not DOLPHIN_PATH.is_file():
-        pytest.skip(
+        _missing_prerequisite(
             f"Dolphin AppRun missing at {DOLPHIN_PATH}; run `python -m hal.scripts.fetch --name dolphin-exiai`"
         )
 
@@ -53,7 +60,7 @@ def _slippi_port_holders() -> list[int]:
             timeout=5,
         )
     except FileNotFoundError, subprocess.TimeoutExpired:
-        pytest.skip("lsof not available")
+        _missing_prerequisite("lsof not available")
     return [int(line[1:]) for line in result.stdout.splitlines() if line.startswith("p")]
 
 

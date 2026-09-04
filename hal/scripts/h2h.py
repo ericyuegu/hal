@@ -182,7 +182,7 @@ def _import_git_experiment(spec: str) -> ModuleType:
     module = ModuleType(module_name)
     module.__file__ = f"git:{commit_sha}:{source_path}"
     module.__package__ = ""
-    module.__hal_source__ = {"commit": commit_sha, "blob": blob, "path": source_path}
+    module.__dict__["__hal_source__"] = {"commit": commit_sha, "blob": blob, "path": source_path}
     sys.modules[module_name] = module
     try:
         with _historical_import_aliases():

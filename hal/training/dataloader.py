@@ -42,7 +42,7 @@ patch_streaming()
 
 # Frozen val-window geometry shared by every experiment: the val loader is always built with this
 # ``L_chunk`` so val windows — hence val NLLs — are comparable across experiments regardless of each
-# run's train-time ``L_chunk``. ``_choose_chunk_starts`` draws windows in a way that depends on
+# run's train-time ``L_chunk``. ``choose_chunk_starts`` draws windows in a way that depends on
 # ``L_chunk`` (its valid chunk-start support ``[1, T - L_chunk]`` and the RNG stream it consumes), so
 # a val loader built with each run's own ``L_chunk`` samples different windows and makes val losses
 # incomparable. Wide enough to cover multi-frame target horizons (e.g. 012's farthest auxiliary head);
@@ -239,16 +239,12 @@ class ResumableStreamingDataLoader(StreamingDataLoader):
         }
 
     def load_state_dict(self, obj: dict[str, Any]) -> None:
-        """Restore a canonical or legacy Mosaic cursor before workers start."""
+        """Restore a versioned Mosaic cursor before workers start."""
         schema = obj.get("schema")
         if schema == 1:
             mds_state = obj.get("mds")
             if not isinstance(mds_state, dict):
                 raise TypeError("streaming-loader state 'mds' must be a dict")
-        elif schema is None and "epoch" in obj:
-            # Experiment 040 briefly wrote Mosaic's unwrapped state under
-            # ``data_loader``. Accept it so those in-flight runs can move to main.
-            mds_state = obj
         else:
             raise ValueError(f"unsupported streaming-loader state schema {schema!r}")
         epoch = mds_state.get("epoch")
@@ -258,17 +254,15 @@ class ResumableStreamingDataLoader(StreamingDataLoader):
         self.window_dataset.resume_epoch(epoch)
 
 
-def _resolve_replay_format(replay_format: ReplayFormat | None, compact: bool) -> ReplayFormat:
+def _resolve_replay_format(replay_format: ReplayFormat | None) -> ReplayFormat:
     if replay_format is None:
-        return "policy" if compact else "full"
+        return "full"
     if replay_format not in ("full", "policy", "policy-world"):
         raise ValueError(f"unknown replay_format {replay_format!r}")
-    if compact and replay_format != "policy":
-        raise ValueError("compact=True is the compatibility spelling of replay_format='policy'; do not pass both")
     return replay_format
 
 
-def _make_streaming_dataset(
+def make_streaming_dataset(
     data_root: str | None,
     split: str,
     *,
@@ -288,7 +282,7 @@ def _make_streaming_dataset(
     """Build one single- or multi-stream MDS dataset with strict mode selection."""
     if shuffle_algo is not None and shuffle_algo not in ("py1s", "py1e"):
         raise ValueError(f"shuffle_algo must be py1s or py1e, got {shuffle_algo!r}")
-    shuffle_options = {} if shuffle_algo is None else {"shuffle_algo": shuffle_algo}
+    resolved_shuffle_algo = "py1e" if shuffle_algo is None else shuffle_algo
     should_shuffle = (split == "train") if shuffle is None else shuffle
     if sources is not None:
         if data_root is not None or remote is not None:
@@ -350,9 +344,9 @@ def _make_streaming_dataset(
             "predownload": predownload,
             "batch_size": batch_size,
             "shuffle": should_shuffle,
+            "shuffle_algo": resolved_shuffle_algo,
             "shuffle_block_size": shuffle_block_size,
             **prefix_options,
-            **shuffle_options,
         }
         if shuffle_seed is not None:
             dataset_options["shuffle_seed"] = shuffle_seed
@@ -378,8 +372,8 @@ def _make_streaming_dataset(
                 download_retry=download_retry,
                 batch_size=batch_size,
                 shuffle=should_shuffle,
+                shuffle_algo=resolved_shuffle_algo,
                 shuffle_block_size=shuffle_block_size,
-                **shuffle_options,
             )
         else:
             dataset = StreamingDataset(
@@ -390,9 +384,9 @@ def _make_streaming_dataset(
                 download_retry=download_retry,
                 batch_size=batch_size,
                 shuffle=should_shuffle,
+                shuffle_algo=resolved_shuffle_algo,
                 shuffle_seed=shuffle_seed,
                 shuffle_block_size=shuffle_block_size,
-                **shuffle_options,
             )
     return dataset, names
 
@@ -411,7 +405,7 @@ def relabel_ego(window: dict[str, np.ndarray], ego_prefix: str) -> dict[str, np.
     return rel
 
 
-def _make_window(
+def make_window(
     sample: dict,
     *,
     ego_prefix: str,
@@ -436,7 +430,7 @@ def _make_window(
     return out
 
 
-def _choose_chunk_starts(
+def choose_chunk_starts(
     T: int,
     L_ctx: int,
     L_chunk: int,
@@ -547,7 +541,7 @@ class WindowDataset(IterableDataset):
             # cold-start floor: inference always has the just-observed frame), the
             # L_chunk-long chunk inside the episode, and their windows disjoint.
             rng = _stable_window_rng(self._seed, epoch, replay_id) if replay_id is not None else worker_rng
-            chunk_starts = _choose_chunk_starts(
+            chunk_starts = choose_chunk_starts(
                 T,
                 self.L_ctx,
                 self.L_chunk,
@@ -569,7 +563,7 @@ class WindowDataset(IterableDataset):
                 start = cs - self.L_ctx  # virtual window start; < 0 ⇒ left-pad
                 pad = max(0, -start)
                 ego_prefix = "p1" if rng.random() < 0.5 else "p2"
-                window = _make_window(
+                window = make_window(
                     sample,
                     ego_prefix=ego_prefix,
                     start=start,
@@ -623,6 +617,33 @@ def collate_train_batch(
     return TrainBatch(Context(features=context_features, ctx_pad=ctx_pad), target=target)
 
 
+def cache_validation_batches(loader: Iterable[TrainBatch], sample_count: int) -> list[TrainBatch]:
+    """Read exactly ``sample_count`` validation rows into reusable batches."""
+    batches: list[TrainBatch] = []
+    cached_count = 0
+    for batch in loader:
+        remaining = sample_count - cached_count
+        if remaining <= 0:
+            break
+        if batch.target.shape[0] > remaining:
+            context = batch.context
+            batch = TrainBatch(
+                context=Context(
+                    features={name: value[:remaining] for name, value in context.features.items()},
+                    ctx_pad=context.ctx_pad[:remaining],
+                    slot_ids=None if context.slot_ids is None else context.slot_ids[:remaining],
+                    reset=None if context.reset is None else context.reset[:remaining],
+                ),
+                target=batch.target[:remaining],
+                replay_ids=None if batch.replay_ids is None else batch.replay_ids[:remaining],
+            )
+        batches.append(batch)
+        cached_count += batch.target.shape[0]
+    if cached_count != sample_count:
+        raise RuntimeError(f"validation yielded {cached_count} samples, expected {sample_count}")
+    return batches
+
+
 def _collate_with_batch_transform(
     batch: list[dict],
     *,
@@ -673,7 +694,6 @@ def make_loader(
     schema_version: int = SCHEMA_VERSION,
     extra: ExtraColumns | None = None,
     projection: FeatureProjection | None = None,
-    compact: bool = False,
     replay_format: ReplayFormat | None = None,
     replay_transform: ReplayTransform | None = None,
     batch_transform: BatchTransform | None = None,
@@ -727,14 +747,14 @@ def make_loader(
     # conservative default there.
     if predownload is None:
         predownload = 8 * batch_size if remote or sources is not None else None
-    resolved_format = _resolve_replay_format(replay_format, compact)
+    resolved_format = _resolve_replay_format(replay_format)
     if replay_labels is not None and resolved_format == "full":
         raise ValueError("replay_labels requires a compact replay format")
     if resumable and resolved_format == "full":
         raise ValueError("resumable window loading requires a compact replay format with replay identities")
     if resumable and windows_per_replay != 1:
         raise ValueError("resumable window loading requires windows_per_replay=1")
-    mds, _ = _make_streaming_dataset(
+    mds, _ = make_streaming_dataset(
         data_root,
         split,
         sources=sources,

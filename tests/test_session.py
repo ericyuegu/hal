@@ -14,6 +14,7 @@ import pytest
 
 import hal.sim.session as session_module
 from hal.sim.inputs import ControllerInputsValue
+from hal.sim.session import Matchup
 from hal.sim.session import Session
 
 
@@ -93,3 +94,107 @@ def test_step_reports_latency_only_after_controller_pipe_flush(monkeypatch: pyte
     session.step({1: inputs}, on_inputs_flushed=lambda: events.append("ack"))
 
     assert events == ["apply", "advance", "flush", "ack", "receive"]
+
+
+def test_parent_bound_spawn_uses_exec_wrapper_without_preexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], tuple[object, ...], dict[str, object]]] = []
+    sentinel = object()
+
+    def popen(command: list[str], *args: object, **kwargs: object) -> object:
+        calls.append((command, args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(session_module, "_PARENT_BOUND_POPEN_ORIGINAL", popen)
+
+    result = session_module._spawn_parent_bound(["dolphin", "-e", "game.iso"], env={"A": "B"})
+
+    assert result is sentinel
+    assert calls == [
+        (
+            [session_module.sys.executable, "-m", "hal.sim.pdeathsig_exec", "dolphin", "-e", "game.iso"],
+            (),
+            {"env": {"A": "B"}},
+        )
+    ]
+    assert "preexec_fn" not in calls[0][2]
+
+
+def test_replay_repair_failure_does_not_mask_body_error_or_retain_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    class Console:
+        _process = None
+
+        def stop(self) -> None:
+            pass
+
+    repair_calls = 0
+
+    def fail_repair(_replay_dir) -> None:
+        nonlocal repair_calls
+        repair_calls += 1
+        raise OSError("repair failed")
+
+    session = Session(iso_path="unused.iso", dolphin_path="unused", replay_dir=tmp_path)
+
+    def boot() -> None:
+        session._console = Console()  # type: ignore[assignment]
+        session._controllers = {1: object()}  # type: ignore[dict-item]
+        session._menu_helpers = {1: object()}  # type: ignore[dict-item]
+        session._pending_flush_ports = {1}
+        session._inputs_flushed_callback = lambda: None
+        session._stage_select_steps = 17
+        session._matchup = Matchup(stage=melee.Stage.FINAL_DESTINATION, players=())
+
+    monkeypatch.setattr(session, "_boot", boot)
+    monkeypatch.setattr(session_module, "finalize_replay_dir", fail_repair)
+
+    with pytest.raises(RuntimeError, match="body failed"), session:
+        raise RuntimeError("body failed")
+
+    assert repair_calls == 1
+    assert session._console is None
+    assert session._controllers == {}
+    assert session._menu_helpers == {}
+    assert session._pending_flush_ports == set()
+    assert session._inputs_flushed_callback is None
+    assert session._stage_select_steps == 0
+    assert session._matchup is None
+
+    session._teardown()
+    assert repair_calls == 1
+
+
+def test_teardown_kills_dolphin_when_console_stop_raises() -> None:
+    class Process:
+        terminated = False
+        killed = False
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: float) -> None:
+            assert timeout > 0
+
+    class Console:
+        def __init__(self, process: Process) -> None:
+            self._process = process
+
+        def stop(self) -> None:
+            raise AssertionError("worker never started")
+
+    process = Process()
+    session = Session(iso_path="unused.iso", dolphin_path="unused")
+    session._console = Console(process)  # type: ignore[assignment]
+
+    session._teardown()
+
+    assert process.terminated
+    assert process.killed
+    assert session._console is None

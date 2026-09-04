@@ -32,6 +32,11 @@ The dump ships in two mutually-incompatible on-disk layouts and both must work:
 dispatches. Both paths yield ``(synthetic_path, tmpfs_path)`` with the same
 ownership contract; the materialized tmpfs file is always raw ``.slp``
 regardless of source — the ``.gz`` layer is stripped on the zip path.
+
+The 7z path is validated against py7zr 1.1.0 and replaces its private worker
+API. Synthetic archive and backpressure tests reproduce the resource failures.
+Remove these workarounds only when those tests pass against a newer py7zr.
+The ``.slpz`` path accepts only the 1.3.0 CLI used to validate decoding.
 """
 
 import atexit
@@ -39,6 +44,7 @@ import concurrent.futures
 import contextlib
 import functools
 import gzip
+import json
 import os
 import queue
 import shutil
@@ -56,6 +62,7 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +80,15 @@ _ZIP_MAGIC: bytes = b"PK\x03\x04"
 _7Z_MAGIC: bytes = b"7z\xbc\xaf\x27\x1c"
 _SLPZ_BIN_ENV: str = "HAL_SLPZ_BIN"
 _PINNED_SLPZ_BIN: Path = Path(REPO_DIR) / "data" / "tools" / "slpz-1.3.0" / "bin" / "slpz"
+_SUPPORTED_SLPZ_VERSION = "1.3.0"
+_SUPPORTED_PY7ZR_VERSION = "1.1.0"
+
+
+def _require_supported_py7zr() -> None:
+    """Reject a py7zr version that has not passed HAL's private-API tests."""
+    installed = version("py7zr")
+    if installed != _SUPPORTED_PY7ZR_VERSION:
+        raise RuntimeError(f"HAL's archive workarounds require py7zr=={_SUPPORTED_PY7ZR_VERSION}; found {installed}")
 
 
 def _sniff_archive_format(archive: Path) -> str:
@@ -99,27 +115,61 @@ def list_archive_slps(archive: Path) -> list[str]:
     """
     fmt = _sniff_archive_format(archive)
     if fmt == "7z":
+        _require_supported_py7zr()
         with py7zr.SevenZipFile(str(archive), "r") as z:
             return [n for n in z.getnames() if n.endswith(".slp")]
     with zipfile.ZipFile(archive) as z:
         return [n for n in z.namelist() if n.endswith(".slp") or n.endswith(".slp.gz") or n.endswith(".slpz")]
 
 
+@functools.cache
 def _slpz_binary() -> Path:
     configured = os.environ.get(_SLPZ_BIN_ENV)
-    candidates = [Path(configured)] if configured else []
+    if configured:
+        return _validated_slpz_binary(Path(configured))
+    if _PINNED_SLPZ_BIN.is_file():
+        return _validated_slpz_binary(_PINNED_SLPZ_BIN)
     on_path = shutil.which("slpz")
     if on_path:
-        candidates.append(Path(on_path))
-    candidates.append(_PINNED_SLPZ_BIN)
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
+        return _validated_slpz_binary(Path(on_path))
     raise FileNotFoundError(
         "a .slpz member requires slpz 1.3.0; install it with "
         f"`cargo install slpz --version 1.3.0 --locked --root {_PINNED_SLPZ_BIN.parents[1]}` "
         f"or set {_SLPZ_BIN_ENV}"
     )
+
+
+def _validated_slpz_binary(binary: Path) -> Path:
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise FileNotFoundError(f"{_SLPZ_BIN_ENV} does not name an executable file: {binary}")
+    installed = _cargo_binary_version(binary, "slpz")
+    if installed != _SUPPORTED_SLPZ_VERSION:
+        raise RuntimeError(
+            f"slpz must be version {_SUPPORTED_SLPZ_VERSION}; {binary} has Cargo metadata version {installed!r}"
+        )
+    return binary
+
+
+def _cargo_binary_version(binary: Path, package: str) -> str | None:
+    """Read the version recorded by ``cargo install --root``.
+
+    slpz 1.3.0 reports its CLI version as ``0``, so its own ``--version``
+    output cannot validate the package version.
+    """
+    metadata_path = binary.parent.parent / ".crates2.json"
+    try:
+        installs = json.loads(metadata_path.read_text())["installs"]
+    except FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError:
+        return None
+    if not isinstance(installs, dict):
+        return None
+    prefix = f"{package} "
+    for identity, details in installs.items():
+        if not isinstance(identity, str) or not identity.startswith(prefix) or not isinstance(details, dict):
+            continue
+        if binary.name in details.get("bins", ()):
+            return identity.removeprefix(prefix).split(" ", 1)[0]
+    return None
 
 
 def _decode_slpz_member(raw: Any, out_path: Path) -> None:
@@ -703,6 +753,7 @@ def _iter_7z_members(
     ``filter_paths``) are still decompressed (unavoidable in a solid block)
     but discarded into a ``NullIO`` instead of materializing.
     """
+    _require_supported_py7zr()
     run_dir = _archive_tmpfs_dir(tmpfs_root)
 
     out_q: queue.Queue = queue.Queue()
@@ -788,8 +839,8 @@ def _iter_7z_members(
         missing = filter_paths - seen_members
         if missing:
             preview = sorted(missing)[:5]
-            logger.warning(
-                f"{archive.name}: {len(missing)}/{len(filter_paths)} requested members not in archive "
+            raise FileNotFoundError(
+                f"{archive.name}: {len(missing)}/{len(filter_paths)} requested members are not in the archive "
                 f"(first few: {preview})"
             )
 
@@ -835,7 +886,7 @@ def _iter_zip_members(
         missing = set(filter_paths) - seen
         if missing:
             preview = sorted(missing)[:5]
-            logger.warning(
-                f"{archive.name}: {len(missing)}/{len(filter_paths)} requested members not in archive "
+            raise FileNotFoundError(
+                f"{archive.name}: {len(missing)}/{len(filter_paths)} requested members are not in the archive "
                 f"(first few: {preview})"
             )

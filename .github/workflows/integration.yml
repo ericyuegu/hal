@@ -1,0 +1,20 @@
+name: Dolphin integration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  roundtrip:
+    environment: integration
+    runs-on: [self-hosted, hal-integration]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - run: uv sync --frozen --all-groups
+      - name: Verify offline/live parity and process cleanup
+        env:
+          HAL_REQUIRE_INTEGRATION: "1"
+        run: uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration

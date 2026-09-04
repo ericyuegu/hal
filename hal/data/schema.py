@@ -6,8 +6,7 @@ replay frame count, plus the scalar ``schema_version``). Per-replay scalars
 Slp-native vocabulary (button bits, mask sentinels, player prefixes) lives in
 ``hal.wire``.
 
-See CLAUDE.md (Controller data model) for the logical-only
-controller representation, mask sentinels, and naming.
+See ``hal.wire`` for controller representation, mask sentinels, and naming.
 """
 
 from enum import IntEnum

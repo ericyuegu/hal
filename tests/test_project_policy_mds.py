@@ -13,12 +13,12 @@ from hal.data.index import write_jsonl
 from hal.data.policy_schema import POLICY_SCHEMA_VERSION
 from hal.data.policy_schema import decode_policy_replay
 from hal.scripts import project_policy_mds as project_module
-from hal.scripts.project_policy_mds import _replay_ids
+from hal.scripts.project_policy_mds import load_replay_ids_by_split
 from hal.scripts.project_policy_mds import project_policy_mds
 from hal.training.dataloader import WindowDataset
-from hal.training.dataloader import _choose_chunk_starts
-from hal.training.dataloader import _make_window
+from hal.training.dataloader import choose_chunk_starts
 from hal.training.dataloader import collate_train_batch
+from hal.training.dataloader import make_window
 from hal.training.ego_stats import load_consolidated_stats
 from hal.training.features import FeatureProjection
 from hal.training.replay_reservoir import PolicyReplayPackDataset
@@ -42,11 +42,11 @@ def _full_decode_windows(
     replay_id = str(compact["replay_id"])
     rng = _stable_replay_rng(seed, 0, replay_id)
     windows = []
-    for cs in _choose_chunk_starts(len(sample["frame"]), L_ctx, L_chunk, 2, rng):
+    for cs in choose_chunk_starts(len(sample["frame"]), L_ctx, L_chunk, 2, rng):
         start = int(cs) - L_ctx
         pad = max(0, -start)
         ego_prefix = "p1" if rng.random() < 0.5 else "p2"
-        window = _make_window(
+        window = make_window(
             sample,
             ego_prefix=ego_prefix,
             start=start,
@@ -101,7 +101,7 @@ def test_replay_identity_does_not_use_colliding_32_bit_uuid(tmp_path: Path) -> N
         ],
     )
 
-    replay_ids = _replay_ids(src)["train"]
+    replay_ids = load_replay_ids_by_split(src)["train"]
     assert len(replay_ids) == len(set(replay_ids)) == 2
     assert all(len(replay_id) == 32 for replay_id in replay_ids)
 
@@ -116,7 +116,7 @@ def test_duplicate_manifest_path_is_rejected_across_splits(tmp_path: Path) -> No
     )
 
     with pytest.raises(ValueError, match="duplicate replay identity"):
-        _replay_ids(src)
+        load_replay_ids_by_split(src)
 
 
 @pytest.mark.skipif(not _RANKED_MANIFEST.is_file(), reason="ranked v7 manifest is not available")
@@ -125,7 +125,7 @@ def test_real_manifest_32_bit_collisions_have_unique_projected_ids() -> None:
     uuid_counts = Counter(entry.annotation.replay_uuid for entry in entries if entry.annotation)
     assert any(count > 1 for count in uuid_counts.values())
 
-    replay_ids = _replay_ids(_RANKED_MANIFEST.parent)
+    replay_ids = load_replay_ids_by_split(_RANKED_MANIFEST.parent)
     flattened = [replay_id for split_ids in replay_ids.values() for replay_id in split_ids]
     assert len(flattened) == len(set(flattened)) == len(entries)
 

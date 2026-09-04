@@ -3,6 +3,9 @@
 import struct
 from pathlib import Path
 
+import pytest
+
+import hal.data.slp_finalize as slp_finalize
 from hal.data.slp_finalize import finalize_bytes
 from hal.data.slp_finalize import finalize_slp
 from hal.data.slp_finalize import is_finalized
@@ -29,13 +32,15 @@ def _unfinalized(*, trailing_partial: bool) -> bytes:
 def _events(frames: int, *, torn: bool) -> bytes:
     """``frames`` complete frames plus an optional torn one.
 
-    A frame is a 4-byte 0x38 event followed by a Frame Bookend (0x3C); the torn
-    frame is a 0x38 with no bookend after it, which is what a match killed at its
-    frame budget leaves behind.
+    A frame has one post-frame event for each of two ports, followed by a Frame
+    Bookend (0x3C). The torn frame has only port 1's post-frame event, matching a
+    Dolphin kill between the two players' writes.
     """
     event_payloads = bytes([0x35, 0x07, 0x38, 0x00, 0x04, _BOOKEND, 0x00, 0x04])
-    body = b"".join(bytes([0x38, i, 0, 0, 0]) + bytes([_BOOKEND, i, 0, 0, 0]) for i in range(frames))
-    return event_payloads + body + (bytes([0x38, 9, 9, 9, 9]) if torn else b"")
+    body = b"".join(
+        bytes([0x38, i, 1, 0, 0]) + bytes([0x38, i, 2, 0, 0]) + bytes([_BOOKEND, i, 0, 0, 0]) for i in range(frames)
+    )
+    return event_payloads + body + (bytes([0x38, 9, 1, 0, 0]) if torn else b"")
 
 
 def _slp(events: bytes, *, finalized: bool, tail: bytes = _METADATA) -> bytes:
@@ -59,13 +64,23 @@ def test_finalize_backfills_length_and_appends_footer():
     assert out == data[:11] + struct.pack(">i", 15) + data[15:] + b"U\x08metadata{}}"
 
 
-def test_finalize_drops_half_written_trailing_event():
+def test_finalize_legacy_stream_uses_last_complete_event():
     out = finalize_bytes(_unfinalized(trailing_partial=True))
     assert out is not None
     # the 3-byte partial 0x38 is dropped: rawLength still 15, footer right after
     assert struct.unpack(">i", out[11:15])[0] == 15
     assert out[15 : 15 + 15] == _unfinalized(trailing_partial=False)[15:]
     assert out.endswith(b"U\x08metadata{}}")
+
+
+def test_finalize_modern_stream_drops_torn_two_player_frame():
+    out = finalize_bytes(_slp(_events(2, torn=True), finalized=False))
+    assert out == _slp(_events(2, torn=False), finalized=True, tail=_FOOTER)
+
+
+def test_finalize_modern_stream_needs_a_complete_frame():
+    out = finalize_bytes(_slp(_events(0, torn=True), finalized=False))
+    assert out is None
 
 
 def test_finalize_is_idempotent_on_finalized():
@@ -78,6 +93,21 @@ def test_finalize_rejects_non_slp():
     assert finalize_bytes(b"not a slippi file at all") is None
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        _HEADER,
+        _HEADER + b"\x00\x00",
+        _HEADER + struct.pack(">i", 0),
+        _HEADER + struct.pack(">i", 0) + bytes([0x35]),
+        _HEADER + struct.pack(">i", 0) + bytes([0x35, 0x07, 0x38]),
+        _HEADER + struct.pack(">i", 0) + bytes([0x35, 0x02, 0x38]),
+    ],
+)
+def test_finalize_rejects_truncated_or_malformed_headers_and_command_tables(data: bytes):
+    assert finalize_bytes(data) is None
+
+
 def test_finalize_slp_in_place(tmp_path):
     f = tmp_path / "Game.slp"
     f.write_bytes(_unfinalized(trailing_partial=True))
@@ -85,6 +115,23 @@ def test_finalize_slp_in_place(tmp_path):
     assert finalize_slp(f) is True
     assert is_finalized(f)
     assert finalize_slp(f) is False  # second call is a no-op
+
+
+def test_finalize_replace_failure_preserves_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    replay = tmp_path / "Game.slp"
+    original = _unfinalized(trailing_partial=True)
+    replay.write_bytes(original)
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(slp_finalize.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        finalize_slp(replay)
+
+    assert replay.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [replay]
 
 
 def test_trim_drops_the_torn_trailing_frame(tmp_path):

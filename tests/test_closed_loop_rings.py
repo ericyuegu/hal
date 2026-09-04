@@ -22,7 +22,6 @@ from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.dataloader import relabel_ego
-from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import BASE_ACTION_PROJECTION
 from hal.training.features import BASE_ITEMS_PROJECTION
@@ -33,6 +32,7 @@ from hal.training.features import V6_PLAYER_COLUMNS
 from hal.training.features import ExtraColumns
 from hal.training.features import FeatureProjection
 from hal.training.features import preprocess
+from hal.wire import ACTION_DIM
 from hal.wire import ITEM_SLOTS
 from hal.wire import MASK_INT32
 from hal.wire import item_column
@@ -245,7 +245,7 @@ def _drive(
         assert ctx.slot_ids is not None
         replans.append((at, [int(v) for v in ctx.slot_ids], {k: v.clone() for k, v in ctx.features.items()}))
         # Action chunks whose button channels straddle the 0.5 threshold.
-        return rng.uniform(-1.0, 1.0, size=(ctx.batch, L_CHUNK, A_DIM)).astype(np.float32)
+        return rng.uniform(-1.0, 1.0, size=(ctx.batch, L_CHUNK, ACTION_DIM)).astype(np.float32)
 
     policy = RecedingHorizon(
         predict_chunk=predict_chunk,
@@ -340,7 +340,7 @@ def test_context_pad_tracks_the_refilling_context() -> None:
 
     def predict_chunk(ctx, committed):
         pads.append(int(ctx.ctx_pad[0]))
-        return np.zeros((ctx.batch, 1, A_DIM), dtype=np.float32)
+        return np.zeros((ctx.batch, 1, ACTION_DIM), dtype=np.float32)
 
     policy = RecedingHorizon(
         predict_chunk=predict_chunk, stats=_stats(False, False), L_ctx=L_CTX, L_chunk=1, s=1, d=0, device="cpu"
@@ -471,7 +471,7 @@ def test_shared_row_planning_uses_policy_schedule_and_resets_context() -> None:
 
     def predict_chunk(ctx, committed):
         pads.append(int(ctx.ctx_pad[0]))
-        return np.zeros((ctx.batch, L_CHUNK, A_DIM), dtype=np.float32)
+        return np.zeros((ctx.batch, L_CHUNK, ACTION_DIM), dtype=np.float32)
 
     policy = RecedingHorizon(
         predict_chunk=predict_chunk,
@@ -497,5 +497,5 @@ def test_shared_row_planning_uses_policy_schedule_and_resets_context() -> None:
     reset_plan = policy.plan_rows({slot: [row(5, -123, reset=True)]})[slot]
 
     assert policy.runtime_spec.execution_stride == 4
-    assert first.shape == second.shape == reset_plan.shape == (L_CHUNK, A_DIM)
+    assert first.shape == second.shape == reset_plan.shape == (L_CHUNK, ACTION_DIM)
     assert pads == [L_CTX - 1, L_CTX - 5, L_CTX - 1]

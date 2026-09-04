@@ -1,4 +1,11 @@
-"""MDS writer with bounded asynchronous cloud-upload backlog."""
+"""MDS 0.13.0 writer with a bounded asynchronous upload backlog.
+
+Mosaic 0.13.0 bounds its worker pool but not its pending upload queue. A fast
+encoder can fill local storage while the remote is slow. ``BoundedMDSWriter``
+copies the private shard-finalization seam and applies backpressure. Remove the
+override only when ``tests/test_bounded_writer.py`` passes against an upstream
+writer with a bounded queue.
+"""
 
 import shutil
 import subprocess
@@ -8,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from streaming import MDSWriter
+
+from hal.data.streaming_compat import require_supported_streaming
 
 
 class BoundedMDSWriter(MDSWriter):
@@ -20,6 +29,7 @@ class BoundedMDSWriter(MDSWriter):
     """
 
     def __init__(self, *, max_pending_uploads: int = 2, **kwargs: Any) -> None:
+        require_supported_streaming()
         if max_pending_uploads < 1:
             raise ValueError(f"max_pending_uploads must be positive, got {max_pending_uploads}")
         self._max_pending_uploads = max_pending_uploads
