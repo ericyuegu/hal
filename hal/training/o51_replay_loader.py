@@ -12,8 +12,6 @@ import importlib.metadata
 import os
 import shutil
 import threading
-import time
-from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -221,32 +219,6 @@ class ShardRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class ShardTimings:
-    """Worker-side wall times for one physical shard."""
-
-    prepare_seconds: float = 0.0
-    download_seconds: float = 0.0
-    decompress_seconds: float = 0.0
-    read_seconds: float = 0.0
-    decode_seconds: float = 0.0
-    worker_seconds: float = 0.0
-
-    def __post_init__(self) -> None:
-        if any(value < 0 for value in self.values()):
-            raise ValueError("shard timings must be non-negative")
-
-    def values(self) -> tuple[float, ...]:
-        return (
-            self.prepare_seconds,
-            self.download_seconds,
-            self.decompress_seconds,
-            self.read_seconds,
-            self.decode_seconds,
-            self.worker_seconds,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class DecodedShard:
     """Fixed four-window rows returned by one worker."""
 
@@ -257,8 +229,6 @@ class DecodedShard:
     locators: tuple[PhysicalRow, ...]
     columns: Mapping[str, np.ndarray]
     raw_bytes_read: int = 0
-    timings: ShardTimings = ShardTimings()
-    worker_finished_ns: int = 0
 
     def __post_init__(self) -> None:
         rows = len(self.replay_ids)
@@ -272,8 +242,6 @@ class DecodedShard:
             raise ValueError("a decoded shard has no columns")
         if self.raw_bytes_read < 0:
             raise ValueError("raw bytes read must be non-negative")
-        if self.worker_finished_ns < 0:
-            raise ValueError("worker completion time must be non-negative")
         bad = {
             name: value.shape
             for name, value in self.columns.items()
@@ -551,53 +519,6 @@ class MDSStorageAdapter:
             raise TypeError(f"O51 requires MDS shards, found {type(reader).__name__}")
         return reader
 
-    def _prepare_shard_profiled(self, task: ShardTask) -> tuple[float, float, float]:
-        """Prepare one shard while timing Mosaic's download and decompression calls."""
-        stream_id = int(self.dataset.stream_per_shard[task.global_shard])
-        stream = self.dataset.streams[stream_id]
-        original_download = stream._download_file
-        original_decompress = stream._decompress_shard_part
-        stream_attributes = vars(stream)
-        prior_download = stream_attributes.get("_download_file")
-        prior_decompress = stream_attributes.get("_decompress_shard_part")
-        had_download_override = "_download_file" in stream_attributes
-        had_decompress_override = "_decompress_shard_part" in stream_attributes
-        download_seconds = 0.0
-        decompress_seconds = 0.0
-
-        def timed_download(*args: Any, **kwargs: Any) -> Any:
-            nonlocal download_seconds
-            started = time.perf_counter()
-            try:
-                return original_download(*args, **kwargs)
-            finally:
-                download_seconds += time.perf_counter() - started
-
-        def timed_decompress(*args: Any, **kwargs: Any) -> Any:
-            nonlocal decompress_seconds
-            started = time.perf_counter()
-            try:
-                return original_decompress(*args, **kwargs)
-            finally:
-                decompress_seconds += time.perf_counter() - started
-
-        stream._download_file = timed_download  # type: ignore[invalid-assignment]
-        stream._decompress_shard_part = timed_decompress  # type: ignore[invalid-assignment]
-        started = time.perf_counter()
-        try:
-            self.dataset.prepare_shard(task.global_shard)
-        finally:
-            prepare_seconds = time.perf_counter() - started
-            if had_download_override:
-                stream._download_file = prior_download  # type: ignore[invalid-assignment]
-            else:
-                del stream._download_file
-            if had_decompress_override:
-                stream._decompress_shard_part = prior_decompress  # type: ignore[invalid-assignment]
-            else:
-                del stream._decompress_shard_part
-        return prepare_seconds, download_seconds, decompress_seconds
-
     def read_rows(self, task: ShardTask, rows: Sequence[int]) -> dict[int, Mapping[str, object]]:
         """Prepare a shard, open it once, and decode requested rows in byte order."""
         requested = tuple(sorted(set(int(row) for row in rows)))
@@ -669,34 +590,26 @@ class MDSStorageAdapter:
         labels: ReplayLabels,
         projection: FeatureProjection | None,
     ) -> DecodedShard:
-        worker_started = time.perf_counter()
         rows = task.selected_rows
-        prepare_seconds, download_seconds, decompress_seconds = self._prepare_shard_profiled(task)
+        self.dataset.prepare_shard(task.global_shard)
         reader = self._reader(task)
         filename = Path(reader.dirname) / (reader.split or "") / reader.raw_data.basename
         replay_ids: list[str] = []
         columns: dict[str, np.ndarray] = {}
         raw_bytes_read = 0
-        read_seconds = 0.0
-        decode_seconds = 0.0
         with filename.open("rb", buffering=0) as handle:
-            read_started = time.perf_counter()
             table = handle.read(4 * (reader.samples + 2))
             offsets = np.frombuffer(table, dtype=np.uint32)
-            read_seconds += time.perf_counter() - read_started
             if len(offsets) != reader.samples + 2 or int(offsets[0]) != reader.samples:
                 raise ValueError(f"invalid MDS offset table in {filename}")
             raw_bytes_read += len(table)
             for output_row, row in enumerate(rows):
-                read_started = time.perf_counter()
                 begin, end = int(offsets[row + 1]), int(offsets[row + 2])
                 handle.seek(begin)
                 payload = handle.read(end - begin)
-                read_seconds += time.perf_counter() - read_started
                 if len(payload) != end - begin:
                     raise EOFError(f"short MDS row read from {filename} at row {row}")
                 raw_bytes_read += len(payload)
-                decode_started = time.perf_counter()
                 replay_id, windows = _decode_generation(
                     reader.decode_sample(payload),
                     task=task,
@@ -724,8 +637,6 @@ class MDSStorageAdapter:
                         if value.shape != destination.shape[2:] or value.dtype != destination.dtype:
                             raise ValueError(f"decoded column {name!r} changed shape or dtype within a shard")
                         destination[output_row, window_index] = value
-                decode_seconds += time.perf_counter() - decode_started
-        worker_seconds = time.perf_counter() - worker_started
         return DecodedShard(
             task=task,
             epoch=epoch,
@@ -734,15 +645,6 @@ class MDSStorageAdapter:
             locators=tuple(PhysicalRow(task.source, task.shard, row) for row in rows),
             columns=columns,
             raw_bytes_read=raw_bytes_read,
-            timings=ShardTimings(
-                prepare_seconds=prepare_seconds,
-                download_seconds=download_seconds,
-                decompress_seconds=decompress_seconds,
-                read_seconds=read_seconds,
-                decode_seconds=decode_seconds,
-                worker_seconds=worker_seconds,
-            ),
-            worker_finished_ns=time.monotonic_ns(),
         )
 
 
@@ -1072,10 +974,7 @@ class _O51Iterator(Iterator[object]):
         while self.current is None or self.loader._cursor[2] >= len(self.current.replay_ids):
             if self.current is not None:
                 self.loader._advance_task_cursor()
-            wait_started = time.perf_counter()
             decoded = next(self.shards)
-            received_ns = time.monotonic_ns()
-            parent_wait_seconds = time.perf_counter() - wait_started
             self.loader._raw_bytes_read += decoded.raw_bytes_read
             decoded_bytes = sum(values.nbytes for values in decoded.columns.values())
             self.loader._max_decoded_shard_bytes = max(self.loader._max_decoded_shard_bytes, decoded_bytes)
@@ -1085,7 +984,6 @@ class _O51Iterator(Iterator[object]):
                     "DataLoader released a shard out of committed order: "
                     f"got {(decoded.epoch, decoded.task_offset)}, expected {(epoch, task_offset)}"
                 )
-            self.loader._record_shard_profile(decoded, received_ns, parent_wait_seconds)
             self.current = decoded
             if row_offset > len(decoded.replay_ids):
                 raise RuntimeError("committed row cursor exceeds its shard")
@@ -1155,9 +1053,6 @@ class O51ReplayLoader:
         self._raw_bytes_read = 0
         self._generations_read = 0
         self._max_decoded_shard_bytes = 0
-        self._shard_profile_values: dict[str, deque[float]] = {}
-        self._shard_profile_events: deque[dict[str, object]] = deque(maxlen=8_192)
-        self.reset_shard_profile()
 
     @property
     def metrics(self) -> dict[str, float]:
@@ -1194,90 +1089,6 @@ class O51ReplayLoader:
     @property
     def generations_read(self) -> int:
         return self._generations_read
-
-    @property
-    def shard_profile(self) -> dict[str, float | int]:
-        """Return bounded per-shard phase distributions since the last reset."""
-        metrics: dict[str, float | int] = {"shard_profile_count": len(self._shard_profile_events)}
-        for name, samples in self._shard_profile_values.items():
-            values = np.asarray(samples, dtype=np.float64)
-            prefix = f"shard_{name}_seconds"
-            metrics[f"{prefix}_total"] = float(values.sum()) if len(values) else 0.0
-            metrics[f"{prefix}_mean"] = float(values.mean()) if len(values) else 0.0
-            metrics[f"{prefix}_p50"] = float(np.percentile(values, 50)) if len(values) else 0.0
-            metrics[f"{prefix}_p95"] = float(np.percentile(values, 95)) if len(values) else 0.0
-            metrics[f"{prefix}_p99"] = float(np.percentile(values, 99)) if len(values) else 0.0
-            metrics[f"{prefix}_max"] = float(values.max()) if len(values) else 0.0
-        return metrics
-
-    @property
-    def slowest_shards(self) -> dict[str, tuple[dict[str, object], ...]]:
-        """Return the five slowest recent shard events for each blocking phase."""
-        events = tuple(self._shard_profile_events)
-        fields = (
-            "parent_wait_seconds",
-            "worker_seconds",
-            "download_seconds",
-            "result_delivery_and_order_seconds",
-        )
-        return {
-            field: tuple(sorted(events, key=lambda event: float(event[field]), reverse=True)[:5]) for field in fields
-        }
-
-    def reset_shard_profile(self) -> None:
-        """Start a new bounded shard-profile interval between parent ``next`` calls."""
-        if self._parent_next_active:
-            raise RuntimeError("cannot reset shard profiling while parent-side next() is active")
-        names = (
-            "prepare",
-            "prepare_other",
-            "download",
-            "decompress",
-            "read",
-            "decode",
-            "worker",
-            "result_delivery_and_order",
-            "parent_wait",
-        )
-        self._shard_profile_values = {name: deque(maxlen=8_192) for name in names}
-        self._shard_profile_events = deque(maxlen=8_192)
-
-    def _record_shard_profile(
-        self,
-        shard: DecodedShard,
-        received_ns: int,
-        parent_wait_seconds: float,
-    ) -> None:
-        timings = shard.timings
-        result_delivery_seconds = (
-            max(0.0, (received_ns - shard.worker_finished_ns) / 1e9) if shard.worker_finished_ns else 0.0
-        )
-        values = {
-            "prepare": timings.prepare_seconds,
-            "prepare_other": max(
-                0.0,
-                timings.prepare_seconds - timings.download_seconds - timings.decompress_seconds,
-            ),
-            "download": timings.download_seconds,
-            "decompress": timings.decompress_seconds,
-            "read": timings.read_seconds,
-            "decode": timings.decode_seconds,
-            "worker": timings.worker_seconds,
-            "result_delivery_and_order": result_delivery_seconds,
-            "parent_wait": parent_wait_seconds,
-        }
-        for name, value in values.items():
-            self._shard_profile_values[name].append(value)
-        self._shard_profile_events.append(
-            {
-                "source": shard.task.source,
-                "shard": shard.task.shard,
-                "epoch": shard.epoch,
-                "task_offset": shard.task_offset,
-                "rows": len(shard.replay_ids),
-                **{f"{name}_seconds": value for name, value in values.items()},
-            }
-        )
 
     @property
     def max_decoded_shard_bytes(self) -> int:
