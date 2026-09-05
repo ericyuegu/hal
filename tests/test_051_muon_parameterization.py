@@ -30,7 +30,7 @@ exp = _load()
 
 @pytest.mark.parametrize(
     "command",
-    ["train", "audit-data", "loader-benchmark"],
+    ["train", "audit-data", "loader-benchmark", "eval"],
 )
 def test_nested_config_command_help_is_parseable(command: str) -> None:
     script = Path(exp.__file__).resolve()
@@ -436,6 +436,31 @@ def test_o50_task_awr_and_validation_cohort_remain_frozen() -> None:
         exp.validate_config(replace(cfg, val_n_samples=cfg.val_n_samples // 2))
     with pytest.raises(ValueError, match="fixed base Adam"):
         exp.validate_config(replace(cfg, adam_eps=1e-8))
+
+
+def test_delayed_truncation_policy_uses_resolved_eval_schedule(monkeypatch) -> None:
+    predicted = torch.ones((1, 1, len(exp.ACTION_CHANNELS))).numpy()
+    policy = exp.DelayedTruncationPolicy(
+        predict_chunk=lambda _context, _committed: predicted,
+        stats={},
+        L_ctx=1,
+        L_chunk=1,
+        s=1,
+        d=0,
+        device="cpu",
+    )
+    policy._slots[0] = SimpleNamespace(reset_pending=False)
+    monkeypatch.setattr(policy, "_ingest", lambda _live, _obs: None)
+    monkeypatch.setattr(policy, "_context", lambda due: due)
+    monkeypatch.setattr(policy, "_push_ego", lambda _slot, _action: None)
+    monkeypatch.setattr(exp, "action_vec_to_controller", lambda action: action)
+
+    actions = policy(0, {0: {}})
+
+    assert policy.runtime_spec.prediction_frames == 1
+    assert policy.runtime_spec.execution_stride == 1
+    assert policy.runtime_spec.committed_frames == 0
+    assert actions[0].tolist() == predicted[0, 0].tolist()
 
 
 def test_production_loader_and_compilation_choices_use_supported_values() -> None:

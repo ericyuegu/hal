@@ -50,6 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -58,7 +59,6 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
@@ -158,7 +158,7 @@ _INFERENCE_BUCKETS = (1, 2, 4, 8, 16, 32, 64)
 _PRODUCTION_UPDATES = 2**17
 _PRODUCTION_EVAL_MATCHUPS = 96
 _N_NEAR = 6
-EVAL_HORIZONS = (4,)
+EVAL_HORIZONS = (1, 4)
 DIRECT_LOSS_START = 128
 PREDICTION_FRAMES = 4
 DELAY_FRAMES = 2
@@ -1764,7 +1764,7 @@ class BF16Inference:
 
 @dataclass
 class DelayedTruncationPolicy(RecedingHorizon):
-    """D2/R2 controller: discard +1/+2 and execute +3/+4 two frames later."""
+    """Discard the delay prefix, then execute one complete replan interval."""
 
     _queues: dict[Slot, list[np.ndarray]] = dataclass_field(default_factory=dict)
     _phases: dict[Slot, int] = dataclass_field(default_factory=dict)
@@ -1775,9 +1775,9 @@ class DelayedTruncationPolicy(RecedingHorizon):
     def runtime_spec(self) -> PolicyRuntimeSpec:
         return PolicyRuntimeSpec(
             context_frames=self.L_ctx,
-            prediction_frames=PREDICTION_FRAMES,
-            execution_stride=REPLAN_INTERVAL_FRAMES,
-            committed_frames=DELAY_FRAMES,
+            prediction_frames=self.L_chunk,
+            execution_stride=self.s,
+            committed_frames=self.d,
             action_dim=len(ACTION_CHANNELS),
         )
 
@@ -1793,17 +1793,17 @@ class DelayedTruncationPolicy(RecedingHorizon):
         for slot in live:
             state = self._slots[slot]
             if state.reset_pending or slot not in self._queues:
-                self._queues[slot] = [NEUTRAL_ACTION.copy() for _ in range(DELAY_FRAMES)]
+                self._queues[slot] = [NEUTRAL_ACTION.copy() for _ in range(self.d)]
                 self._phases[slot] = 0
-            if self._phases[slot] % REPLAN_INTERVAL_FRAMES == 0:
+            if self._phases[slot] % self.s == 0:
                 due.append(slot)
         if due:
             context = self._context(due)
             plans = self.predict_chunk(context, None)
-            if plans.shape[:2] != (len(due), PREDICTION_FRAMES):
-                raise ValueError("D2/R2 predictor must return four frames per live slot")
+            if plans.shape[:2] != (len(due), self.L_chunk):
+                raise ValueError(f"predictor must return {self.L_chunk} frames per live slot")
             for row, slot in enumerate(due):
-                self._queues[slot].extend(plans[row, DELAY_FRAMES:].astype(np.float32))
+                self._queues[slot].extend(plans[row, self.d :].astype(np.float32))
         actions = {}
         for slot in live:
             action = self._queues[slot].pop(0)
@@ -1851,8 +1851,8 @@ def make_policy(
         stats=stats,
         L_ctx=cfg.arch.L_ctx,
         L_chunk=horizon,
-        s=REPLAN_INTERVAL_FRAMES,
-        d=0,
+        s=cfg.replan_interval_frames,
+        d=cfg.delay_frames,
         device=device,
         float_dtype=next(model.parameters()).dtype,
         extra=ITEM_COLUMNS,
@@ -3240,6 +3240,9 @@ def eval_checkpoint(
     n_matchups: int | None = None,
     eager: bool = False,
     max_parallel: int | None = None,
+    prediction_frames: int | None = None,
+    delay_frames: int | None = None,
+    replan_interval_frames: int | None = None,
     output_name: str | None = None,
     upload_run: str | None = None,
     backfill_wandb: bool = False,
@@ -3254,6 +3257,20 @@ def eval_checkpoint(
         eval_max_parallel=cfg.eval_max_parallel if max_parallel is None else max_parallel,
     )
     validate_config(cfg)
+    cfg = replace(
+        cfg,
+        prediction_frames=cfg.prediction_frames if prediction_frames is None else prediction_frames,
+        delay_frames=cfg.delay_frames if delay_frames is None else delay_frames,
+        replan_interval_frames=(
+            cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
+        ),
+    )
+    if cfg.prediction_frames not in EVAL_HORIZONS:
+        raise ValueError(f"evaluation prediction frames must be one of {EVAL_HORIZONS}")
+    if cfg.delay_frames < 0 or cfg.replan_interval_frames < 1:
+        raise ValueError("evaluation delay must be nonnegative and replan interval must be positive")
+    if cfg.prediction_frames != cfg.delay_frames + cfg.replan_interval_frames:
+        raise ValueError("truncation evaluation requires prediction frames = delay frames + replan interval")
     horizon = cfg.prediction_frames
     update = int(cast(int, state["step"])) + 1
     if upload_run is not None:
@@ -3310,6 +3327,9 @@ class EvalArgs:
     n_matchups: int | None = None
     eager: bool = False
     max_parallel: int | None = None
+    prediction_frames: int | None = None
+    delay_frames: int | None = None
+    replan_interval_frames: int | None = None
     output_name: str | None = None
     backfill_wandb: bool = False
     companion_wandb: bool = False
@@ -6584,6 +6604,9 @@ def main(args: Command) -> None:
             n_matchups=args.n_matchups,
             eager=args.eager,
             max_parallel=args.max_parallel,
+            prediction_frames=args.prediction_frames,
+            delay_frames=args.delay_frames,
+            replan_interval_frames=args.replan_interval_frames,
             output_name=args.output_name,
             upload_run=args.run,
             backfill_wandb=args.backfill_wandb,
