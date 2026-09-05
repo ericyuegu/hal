@@ -44,7 +44,7 @@
         "val_split", "wandb_log_code", "warmup_steps", "weight_hist_every"
       ],
       "config_round_trip": true,
-      "config_sha256": "e0bc4ccabd208a9c05592e354edcbe265a53b3d84ad6f5cd57cf04158bca6f73",
+      "config_sha256": "ef4defeb2d85aeb458086448a8986b1eba68749bd9db46f7bd2f3d20758239b9",
       "loader_descriptor": {
         "epoch": 3,
         "locator": {"row": 11, "shard": 7, "source": "source"},
@@ -53,7 +53,7 @@
         "slot": 0
       },
       "loader_keys": [
-        "batch_sampler_rng_state", "buffer_geometry", "cursor", "data_protocol", "schema", "slots",
+        "batch_sampler_state", "buffer_geometry", "cursor", "data_protocol", "schema", "slots",
         "source_manifest_sha256", "source_selection_sha256"
       ],
       "top_level_keys": [
@@ -70,13 +70,14 @@
       },
       "decay_grid": [0.0, 0.001, 0.01],
       "depth_alpha": [0.5, 1.0],
-      "experiment": "051_correct_parameterization_v5",
+      "experiment": "051_muon_parameterization_v6",
       "initialization": {
         "hidden_std_multiplier": [0.5, 1.0, 2.0],
         "readout": ["zero", "mup-normal"]
       },
       "loader_grid": {
-        "order": "keyed_physical_shards",
+        "minimum_replay_gap_batches": 200,
+        "order": "stable_keyed_shards_and_balanced_slot_passes",
         "prefetch_factor": 1,
         "replay_slots": 131072,
         "windows_per_generation": 4,

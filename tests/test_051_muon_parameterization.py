@@ -127,7 +127,8 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     assert report["within_batch_unique"] is True
     assert report["cooldown_batches"] == 0
     assert report["identity_coverage_fraction"] == 1.0
-    assert report["identity_rank_chi_square_z"] == 0.0
+    assert report["slot_frequency_spread"] == 0
+    assert report["repeat_floor_passed"] is True
     assert report["steady_state_turnover_passed"] is True
     assert report["shuffle_passed"] is True
 

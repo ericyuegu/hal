@@ -333,7 +333,7 @@ def _stage_known(stage: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return ids, known
 
 
-def derive_spatial(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def derive_spatial(batch: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Engineered relative / stage-geometry / velocity features for one ``[L]`` or
     ``[B, L]`` batch of RAW MDS columns, keyed by :data:`SPATIAL_COLUMNS`.
 
@@ -594,7 +594,7 @@ def float_feature_transform(name: str, extra: ExtraColumns) -> str:
 
 
 def preprocess(
-    batch: dict[str, np.ndarray],
+    batch: Mapping[str, np.ndarray],
     feature_stats: dict[str, FeatureStats],
     *,
     extra: ExtraColumns | None = None,

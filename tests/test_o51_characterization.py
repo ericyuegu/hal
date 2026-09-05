@@ -1,4 +1,4 @@
-"""Parity contract for the direct experiment-051 rewrite."""
+"""Stable model and sweep contract for experiment 051."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _current_contract() -> dict[str, object]:
     return value
 
 
-def test_o51_v5_contract_matches_the_isolated_baseline() -> None:
+def test_o51_contract_matches_the_isolated_baseline() -> None:
     fixture = json.loads(FIXTURE.read_text())
     assert fixture["schema"] == 1
     assert len(fixture["provenance"]["git_commit"]) == 40

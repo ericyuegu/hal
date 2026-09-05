@@ -2,7 +2,7 @@
 
 Mosaic Streaming owns manifests, shard download, decompression, and MDS row
 decoding. This module owns physical-shard order, bounded prefetch, and
-identity-uniform replay sampling.
+balanced replay sampling.
 """
 
 from __future__ import annotations
@@ -41,12 +41,14 @@ from hal.training.dataloader import make_window
 from hal.training.features import FeatureProjection
 
 PREFETCH_FACTOR: Final[int] = 1
-CHECKPOINT_SCHEMA: Final[int] = 1
+CHECKPOINT_SCHEMA: Final[int] = 2
+MIN_REPLAY_GAP_BATCHES: Final[int] = 200
+SHUFFLE_BLOCK_BATCHES: Final[int] = 32
 
 type Window = dict[str, np.ndarray]
 type Generation = tuple[str, tuple[Window, ...]]
 
-type BatchTransform[T] = Callable[[tuple[str, ...], list[Window]], T]
+type BatchTransform[T] = Callable[[tuple[str, ...], Mapping[str, np.ndarray]], T]
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,20 +335,23 @@ def build_shard_plan(
     return tuple(tasks)
 
 
-def _task_key(task: ShardTask, seed: int, epoch: int) -> bytes:
-    value = f"{seed}\0{epoch}\0{task.source}\0{task.shard}".encode()
-    # This personalization is part of existing checkpoint and sample-order identity.
+def _task_key(task: ShardTask, seed: int) -> bytes:
+    value = f"{seed}\0{task.source}\0{task.shard}".encode()
     return hashlib.blake2b(value, digest_size=16, person=b"hal-o51-shards").digest()
 
 
 def permute_shard_tasks(tasks: Sequence[ShardTask], *, seed: int, epoch: int) -> tuple[int, ...]:
-    """Return the complete keyed shard permutation for one source epoch."""
+    """Return one keyed shard order reused across source epochs.
+
+    A stable order prevents a physical row from wrapping early across an epoch
+    boundary. The replay schedule supplies the changing batch composition.
+    """
     if epoch < 0:
         raise ValueError("epoch must be non-negative")
     return tuple(
         sorted(
             range(len(tasks)),
-            key=lambda index: (_task_key(tasks[index], seed, epoch), tasks[index].source, tasks[index].shard),
+            key=lambda index: (_task_key(tasks[index], seed), tasks[index].source, tasks[index].shard),
         )
     )
 
@@ -788,16 +793,14 @@ class _ShardDataset(Dataset[DecodedShard]):
 
 class _ShardSampler(Sampler[ShardRequest]):
     def __init__(self, tasks: tuple[ShardTask, ...], seed: int, cursor: tuple[int, int, int]) -> None:
-        self.tasks = tasks
-        self.seed = seed
+        self.order = permute_shard_tasks(tasks, seed=seed, epoch=0)
         self.cursor = cursor
 
     def __iter__(self) -> Iterator[ShardRequest]:
         epoch, task_offset, _ = self.cursor
         while True:
-            order = permute_shard_tasks(self.tasks, seed=self.seed, epoch=epoch)
-            for offset in range(task_offset, len(order)):
-                yield ShardRequest(epoch, offset, order[offset])
+            for offset in range(task_offset, len(self.order)):
+                yield ShardRequest(epoch, offset, self.order[offset])
             epoch += 1
             task_offset = 0
 
@@ -815,48 +818,100 @@ def _identity(value: DecodedShard) -> DecodedShard:
     return value
 
 
-class _Fenwick:
-    """Order statistics over canonical identity representatives."""
+@dataclass(frozen=True, slots=True)
+class _DecodedRows:
+    shard: DecodedShard
+    start: int
+    stop: int
 
-    def __init__(self, size: int) -> None:
-        self.values = np.zeros(size, dtype=np.uint8)
-        self.tree = np.zeros(size + 1, dtype=np.int64)
+    def __post_init__(self) -> None:
+        if not 0 <= self.start < self.stop <= len(self.shard.replay_ids):
+            raise ValueError("decoded row range is invalid")
 
     @property
-    def total(self) -> int:
-        return int(self.tree[-1]) if len(self.tree) == 2 else int(self.prefix(len(self.values)))
+    def count(self) -> int:
+        return self.stop - self.start
 
-    def prefix(self, stop: int) -> int:
-        total = 0
-        index = stop
-        while index:
-            total += int(self.tree[index])
-            index -= index & -index
-        return total
 
-    def set(self, index: int, present: bool) -> None:
-        target = int(present)
-        delta = target - int(self.values[index])
-        if not delta:
-            return
-        self.values[index] = target
-        cursor = index + 1
-        while cursor < len(self.tree):
-            self.tree[cursor] += delta
-            cursor += cursor & -cursor
+class _BalancedReplaySchedule:
+    """Visit every slot once per pass while keeping consecutive visits far apart."""
 
-    def select(self, rank: int) -> int:
-        if not 0 <= rank < self.prefix(len(self.values)):
-            raise IndexError(rank)
-        index = 0
-        bit = 1 << (len(self.values).bit_length() - 1)
-        while bit:
-            candidate = index + bit
-            if candidate < len(self.tree) and self.tree[candidate] <= rank:
-                index = candidate
-                rank -= int(self.tree[candidate])
-            bit >>= 1
-        return index
+    def __init__(self, capacity: int, batch_size: int, phases: int, seed: int) -> None:
+        if capacity % batch_size or capacity % phases or batch_size % phases:
+            raise ValueError("replay geometry must divide evenly into batches and turnover phases")
+        self.capacity = capacity
+        self.batch_size = batch_size
+        self.phases = phases
+        self.pass_batches = capacity // batch_size
+        self.phase_batch_size = batch_size // phases
+        # A slot moves by at most one block minus one between passes.
+        self.shuffle_block_batches = min(
+            SHUFFLE_BLOCK_BATCHES,
+            max(1, self.pass_batches - MIN_REPLAY_GAP_BATCHES + 1),
+        )
+        self.minimum_gap_batches = self.pass_batches - self.shuffle_block_batches + 1
+        self.rng = np.random.default_rng(seed)
+        self.decks = np.empty(
+            (phases, self.pass_batches, self.phase_batch_size),
+            dtype=np.int32,
+        )
+        for phase in range(phases):
+            slots = np.arange(phase, capacity, phases, dtype=np.int32)
+            self.rng.shuffle(slots)
+            self.decks[phase] = slots.reshape(self.pass_batches, self.phase_batch_size)
+        self.row = 0
+        self.pass_index = 0
+
+    def _shuffle_pass(self) -> None:
+        block = self.shuffle_block_batches
+        offset = int(self.rng.integers(block)) if block > 1 else 0
+        for deck in self.decks:
+            if offset:
+                self.rng.shuffle(deck[:offset].reshape(-1))
+            for start in range(offset, self.pass_batches, block):
+                self.rng.shuffle(deck[start : start + block].reshape(-1))
+        self.row = 0
+        self.pass_index += 1
+
+    def next(self) -> np.ndarray:
+        if self.row == self.pass_batches:
+            self._shuffle_pass()
+        slots = np.ascontiguousarray(self.decks[:, self.row].reshape(-1))
+        self.row += 1
+        return slots
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "decks": self.decks.copy(),
+            "pass_index": self.pass_index,
+            "row": self.row,
+            "rng_state": self.rng.bit_generator.state,
+        }
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        if set(state) != {"decks", "pass_index", "row", "rng_state"}:
+            raise ValueError("batch schedule state has invalid keys")
+        decks = state["decks"]
+        pass_index = state["pass_index"]
+        row = state["row"]
+        rng_state = state["rng_state"]
+        if not isinstance(decks, np.ndarray) or decks.shape != self.decks.shape or decks.dtype != np.int32:
+            raise ValueError("batch schedule decks have invalid geometry")
+        if not isinstance(pass_index, int) or pass_index < 0:
+            raise ValueError("batch schedule pass is invalid")
+        if not isinstance(row, int) or not 0 <= row <= self.pass_batches:
+            raise ValueError("batch schedule row is invalid")
+        if not isinstance(rng_state, dict):
+            raise ValueError("batch schedule RNG state is invalid")
+        if not np.array_equal(np.sort(cast(Any, decks).reshape(-1)), np.arange(self.capacity)):
+            raise ValueError("batch schedule decks are not a slot permutation")
+        for phase, deck in enumerate(decks):
+            if np.any(deck % self.phases != phase):
+                raise ValueError("batch schedule changed a slot's turnover phase")
+        self.decks[:] = decks
+        self.pass_index = pass_index
+        self.row = row
+        self.rng.bit_generator.state = cast(dict[str, Any], rng_state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -869,7 +924,7 @@ class GenerationDescriptor:
 
 
 class ReplayBuffer:
-    """Columnar replay generations sampled uniformly by active identity."""
+    """Columnar replay generations consumed by a balanced slot schedule."""
 
     def __init__(self, capacity: int, batch_size: int, windows_per_generation: int, seed: int) -> None:
         if capacity < batch_size:
@@ -879,35 +934,27 @@ class ReplayBuffer:
         self.capacity = capacity
         self.batch_size = batch_size
         self.windows_per_generation = windows_per_generation
-        self.rng = np.random.default_rng(seed)
+        self.schedule = _BalancedReplaySchedule(capacity, batch_size, windows_per_generation, seed)
         self.columns: dict[str, np.ndarray] = {}
         self.replay_ids: list[str | None] = [None] * capacity
         self.locators: list[PhysicalRow | None] = [None] * capacity
         self.epochs = np.full(capacity, -1, dtype=np.int64)
-        self.next_windows = np.zeros(capacity, dtype=np.uint8)
-        self.identity_slots: dict[str, set[int]] = {}
-        self.representatives = _Fenwick(capacity)
-        self.free_slots = list(range(capacity - 1, -1, -1))
+        self.next_windows = np.zeros(capacity, dtype=np.uint16)
+        self.identity_slots: dict[str, int] = {}
+        self.last_selected_batches = np.full(capacity, -1, dtype=np.int64)
+        self._size = 0
         self.batch_index = 0
-        self.last_seen: dict[str, int] = {}
         self.last_metrics: dict[str, float] = {}
         self.last_sampled_identity_ranks: tuple[int, ...] = ()
         self.last_sampled_identity_count = 0
 
     @property
     def size(self) -> int:
-        return self.capacity - len(self.free_slots)
+        return self._size
 
     @property
     def active_identities(self) -> int:
         return len(self.identity_slots)
-
-    def _set_representative(self, replay_id: str, old: int | None) -> None:
-        if old is not None:
-            self.representatives.set(old, False)
-        slots = self.identity_slots.get(replay_id)
-        if slots:
-            self.representatives.set(min(slots), True)
 
     def _initialize_columns(self, shard: DecodedShard) -> None:
         if self.columns:
@@ -915,100 +962,114 @@ class ReplayBuffer:
         for name, values in shard.columns.items():
             self.columns[name] = np.empty((self.capacity, *values.shape[1:]), dtype=values.dtype)
 
-    def admit(self, shard: DecodedShard, row: int, *, slot: int | None = None) -> int:
-        """Copy one decoded generation into a free slot."""
+    def admit_rows(self, rows: _DecodedRows, slots: np.ndarray, *, stagger: bool) -> None:
+        """Copy a contiguous decoded row range into the selected empty slots."""
+        shard = rows.shard
         if shard.windows_per_generation != self.windows_per_generation:
             raise ValueError("decoded shard does not match replay-buffer window geometry")
         self._initialize_columns(shard)
         if set(self.columns) != set(shard.columns):
             raise ValueError("decoded shard columns changed after buffer allocation")
-        if slot is None:
-            if not self.free_slots:
-                raise RuntimeError("replay buffer is full")
-            slot = self.free_slots.pop()
-        elif slot in self.free_slots:
-            if self.free_slots[-1] == slot:
-                self.free_slots.pop()
-            else:
-                self.free_slots.remove(slot)
-        elif self.replay_ids[slot] is not None:
-            raise RuntimeError(f"replay slot {slot} is already occupied")
+        slots = np.asarray(slots, dtype=np.int64)
+        if slots.shape != (rows.count,) or len(np.unique(slots)) != rows.count:
+            raise ValueError("destination slots do not match decoded rows")
+        if np.any(slots < 0) or np.any(slots >= self.capacity):
+            raise ValueError("destination slot is outside the replay buffer")
+        if any(self.replay_ids[int(slot)] is not None for slot in slots):
+            raise RuntimeError("destination replay slot is already occupied")
+        replay_ids = shard.replay_ids[rows.start : rows.stop]
+        if len(set(replay_ids)) != len(replay_ids):
+            raise ValueError("decoded rows repeat a replay identity")
+        duplicate = next((replay_id for replay_id in replay_ids if replay_id in self.identity_slots), None)
+        if duplicate is not None:
+            raise ValueError(f"replay identity {duplicate!r} is already active")
         for name, destination in self.columns.items():
-            source = shard.columns[name][row]
-            if source.shape != destination.shape[1:] or source.dtype != destination.dtype:
+            source = shard.columns[name][rows.start : rows.stop]
+            if source.shape[1:] != destination.shape[1:] or source.dtype != destination.dtype:
                 raise ValueError(f"decoded column {name!r} does not match the central buffer")
-            destination[slot] = source
-        replay_id = shard.replay_ids[row]
-        existing = self.identity_slots.get(replay_id)
-        old_representative = None if not existing else min(existing)
-        self.replay_ids[slot] = replay_id
-        self.locators[slot] = shard.locators[row]
-        self.epochs[slot] = shard.epoch
-        self.next_windows[slot] = 0
-        self.identity_slots.setdefault(replay_id, set()).add(slot)
-        self._set_representative(replay_id, old_representative)
-        return slot
+            destination[slots] = source
+        locators = shard.locators[rows.start : rows.stop]
+        for slot_value, replay_id, locator in zip(slots, replay_ids, locators, strict=True):
+            slot = int(slot_value)
+            self.replay_ids[slot] = replay_id
+            self.locators[slot] = locator
+            self.identity_slots[replay_id] = slot
+        self.epochs[slots] = shard.epoch
+        # Stagger only the initial fill. One phase then expires in every batch;
+        # all replacement generations consume every window from ordinal zero.
+        self.next_windows[slots] = slots % self.windows_per_generation if stagger else 0
+        self.last_selected_batches[slots] = -1
+        self._size += rows.count
 
-    def remove(self, slot: int) -> None:
-        replay_id = self.replay_ids[slot]
-        if replay_id is None:
-            raise RuntimeError(f"replay slot {slot} is empty")
-        slots = self.identity_slots[replay_id]
-        old_representative = min(slots)
-        slots.remove(slot)
-        if not slots:
+    def append_rows(self, rows: _DecodedRows) -> None:
+        stop = self.size + rows.count
+        if stop > self.capacity:
+            raise RuntimeError("decoded rows exceed replay-buffer capacity")
+        self.admit_rows(rows, np.arange(self.size, stop), stagger=True)
+
+    def retire(self, slots: np.ndarray) -> None:
+        slots = np.asarray(slots, dtype=np.int64)
+        for slot_value in slots:
+            slot = int(slot_value)
+            replay_id = self.replay_ids[slot]
+            if replay_id is None:
+                raise RuntimeError(f"replay slot {slot} is empty")
             del self.identity_slots[replay_id]
-        self._set_representative(replay_id, old_representative)
-        self.replay_ids[slot] = None
-        self.locators[slot] = None
-        self.epochs[slot] = -1
-        self.next_windows[slot] = 0
-        self.free_slots.append(slot)
+            self.replay_ids[slot] = None
+            self.locators[slot] = None
+        self.epochs[slots] = -1
+        self.next_windows[slots] = 0
+        self.last_selected_batches[slots] = -1
+        self._size -= len(slots)
 
-    def sample(self) -> tuple[tuple[str, ...], list[dict[str, np.ndarray]], tuple[int, ...]]:
-        """Consume one window from 512 distinct, identity-uniform replays."""
-        if self.active_identities < self.batch_size:
-            raise RuntimeError(
-                f"replay buffer has {self.active_identities} identities, but a batch needs {self.batch_size}"
-            )
+    def sample(self) -> tuple[tuple[str, ...], dict[str, np.ndarray], np.ndarray]:
+        """Consume one window from every slot in the next balanced batch."""
+        if self.size != self.capacity or self.active_identities != self.capacity:
+            raise RuntimeError("replay buffer must be full of unique identities before sampling")
         self.last_sampled_identity_count = self.active_identities
-        ranks = self.rng.choice(self.last_sampled_identity_count, size=self.batch_size, replace=False)
-        self.last_sampled_identity_ranks = tuple(int(rank) for rank in ranks)
-        slots: list[int] = []
-        replay_ids: list[str] = []
-        windows: list[dict[str, np.ndarray]] = []
-        exhausted: list[int] = []
-        ages: list[int] = []
-        for rank in ranks:
-            representative = self.representatives.select(int(rank))
-            replay_id = self.replay_ids[representative]
-            assert replay_id is not None
-            generations = sorted(self.identity_slots[replay_id])
-            slot = generations[int(self.rng.integers(len(generations)))]
-            ordinal = int(self.next_windows[slot])
-            replay_ids.append(replay_id)
-            slots.append(slot)
-            windows.append({name: values[slot, ordinal] for name, values in self.columns.items()})
-            self.next_windows[slot] += 1
-            if self.next_windows[slot] == self.windows_per_generation:
-                exhausted.append(slot)
-            previous = self.last_seen.get(replay_id)
-            if previous is not None:
-                ages.append(self.batch_index - previous)
-            self.last_seen[replay_id] = self.batch_index
+        slots = self.schedule.next()
+        self.last_sampled_identity_ranks = tuple(int(slot) for slot in slots)
+        replay_ids = tuple(cast(str, self.replay_ids[int(slot)]) for slot in slots)
+        if len(set(replay_ids)) != self.batch_size:
+            raise RuntimeError("balanced batch contains a repeated replay identity")
+        ordinals = self.next_windows[slots].astype(np.int64)
+        columns = {name: values[slots, ordinals] for name, values in self.columns.items()}
+        self.next_windows[slots] += 1
+        exhausted = slots[self.next_windows[slots] == self.windows_per_generation]
+        previous = self.last_selected_batches[slots]
+        ages = self.batch_index - previous[previous >= 0]
+        if len(ages) and int(ages.min()) < self.schedule.minimum_gap_batches:
+            raise RuntimeError("balanced replay schedule violated its minimum reuse gap")
+        self.last_selected_batches[slots] = self.batch_index
         self.batch_index += 1
-        age_values = np.asarray(ages, dtype=np.float64)
+        age_values = ages.astype(np.float64, copy=False)
         self.last_metrics = {
-            "data/replay_age_p01": float(np.percentile(age_values, 1)) if ages else float("nan"),
-            "data/replay_age_p05": float(np.percentile(age_values, 5)) if ages else float("nan"),
-            "data/replay_age_p50": float(np.percentile(age_values, 50)) if ages else float("nan"),
-            "data/replay_age_p95": float(np.percentile(age_values, 95)) if ages else float("nan"),
-            "data/replay_age_le_1_fraction": float(np.mean(age_values <= 1)) if ages else 0.0,
-            "data/replay_age_le_16_fraction": float(np.mean(age_values <= 16)) if ages else 0.0,
+            "data/replay_age_p01": float(np.percentile(age_values, 1)) if len(ages) else float("nan"),
+            "data/replay_age_p05": float(np.percentile(age_values, 5)) if len(ages) else float("nan"),
+            "data/replay_age_p50": float(np.percentile(age_values, 50)) if len(ages) else float("nan"),
+            "data/replay_age_p95": float(np.percentile(age_values, 95)) if len(ages) else float("nan"),
+            "data/replay_age_le_1_fraction": float(np.mean(age_values <= 1)) if len(ages) else 0.0,
+            "data/replay_age_le_16_fraction": float(np.mean(age_values <= 16)) if len(ages) else 0.0,
             "data/active_replay_identities": float(self.active_identities),
-            "data/duplicate_generations": float(self.size - self.active_identities),
+            "data/duplicate_generations": 0.0,
         }
-        return tuple(replay_ids), windows, tuple(exhausted)
+        return replay_ids, columns, exhausted
+
+    def sampler_state_dict(self) -> dict[str, object]:
+        return {"batch_index": self.batch_index, "schedule": self.schedule.state_dict()}
+
+    def load_sampler_state_dict(self, state: Mapping[str, object]) -> None:
+        if set(state) != {"batch_index", "schedule"}:
+            raise ValueError("batch sampler state has invalid keys")
+        batch_index = state["batch_index"]
+        schedule = state["schedule"]
+        if not isinstance(batch_index, int) or batch_index < 0 or not isinstance(schedule, Mapping):
+            raise ValueError("batch sampler state is invalid")
+        self.schedule.load_state_dict(cast(Mapping[str, object], schedule))
+        scheduled_batches = self.schedule.pass_index * self.schedule.pass_batches + self.schedule.row
+        if batch_index != scheduled_batches:
+            raise ValueError("batch sampler state has an inconsistent cursor")
+        self.batch_index = batch_index
 
     def descriptors(self) -> tuple[GenerationDescriptor, ...]:
         out = []
@@ -1050,7 +1111,9 @@ class _PhysicalShardIterator[BatchT](Iterator[BatchT]):
             self.loader._parent_next_active = False
             self._active = False
 
-    def take_generation(self) -> tuple[DecodedShard, int]:
+    def take_rows(self, limit: int) -> _DecodedRows:
+        if limit < 1:
+            raise ValueError("decoded row limit must be positive")
         while self.current is None or self.loader._cursor[2] >= len(self.current.replay_ids):
             if self.current is not None:
                 self.loader._advance_task_cursor()
@@ -1067,10 +1130,11 @@ class _PhysicalShardIterator[BatchT](Iterator[BatchT]):
             self.current = decoded
             if row_offset > len(decoded.replay_ids):
                 raise RuntimeError("committed row cursor exceeds its shard")
-        row = self.loader._cursor[2]
-        self.loader._cursor = (self.loader._cursor[0], self.loader._cursor[1], row + 1)
-        self.loader._generations_read += 1
-        return self.current, row
+        start = self.loader._cursor[2]
+        stop = min(start + limit, len(self.current.replay_ids))
+        self.loader._cursor = (self.loader._cursor[0], self.loader._cursor[1], stop)
+        self.loader._generations_read += stop - start
+        return _DecodedRows(self.current, start, stop)
 
 
 def _shutdown_data_loader_workers(iterator: object | None) -> None:
@@ -1083,7 +1147,7 @@ def _shutdown_data_loader_workers(iterator: object | None) -> None:
 
 
 class PhysicalShardReplayLoader[BatchT]:
-    """Infinite physical-shard loader with descriptor-only checkpoints."""
+    """Infinite physical-shard loader with decoded-array-free checkpoints."""
 
     separate_identity_checkpoint: Final[bool] = True
 
@@ -1150,10 +1214,15 @@ class PhysicalShardReplayLoader[BatchT]:
         self.source_sample_counts = selection.row_counts_by_source()
         self._selection_hash = selection.sha256
         self._cursor: tuple[int, int, int] = (0, 0, 0)
-        # Preserve the established sample sequence for existing v5 checkpoints.
         self._buffer = ReplayBuffer(replay_slots, batch_size, windows_per_generation, seed ^ 0x51B0FF)
+        # The source must not wrap while any generation of that row can remain live.
+        maximum_live_rows = replay_slots + batch_size * (self._buffer.schedule.shuffle_block_batches - 1)
+        if selection.row_count <= maximum_live_rows:
+            raise ValueError(
+                "source selection is too small to prevent a replay from returning while its prior generation is live"
+            )
         self._resume_descriptors: tuple[GenerationDescriptor, ...] | None = None
-        self._resume_rng_state: dict[str, Any] | None = None
+        self._resume_sampler_state: Mapping[str, object] | None = None
         self._iterator: _PhysicalShardIterator[BatchT] | None = None
         self._data_iterator: Iterator[DecodedShard] | None = None
         self._parent_next_active = False
@@ -1181,6 +1250,24 @@ class PhysicalShardReplayLoader[BatchT]:
     @property
     def active_identity_count(self) -> int:
         return self._buffer.active_identities
+
+    @property
+    def minimum_replay_gap_batches(self) -> int:
+        return self._buffer.schedule.minimum_gap_batches
+
+    @property
+    def schedule_pass_batches(self) -> int:
+        return self._buffer.schedule.pass_batches
+
+    @property
+    def missing_raw_shards(self) -> int:
+        missing = 0
+        for task in self.tasks:
+            manifest = self.adapter.manifests[task.source]
+            path = manifest.raw_paths[task.shard]
+            expected_bytes = manifest.raw_bytes_per_shard[task.shard]
+            missing += not path.is_file() or path.stat().st_size != expected_bytes
+        return missing
 
     def count_active_replay_ids(self, replay_ids: Iterable[str]) -> int:
         """Count candidate identities that are live before the next sample."""
@@ -1280,19 +1367,22 @@ class PhysicalShardReplayLoader[BatchT]:
             raise RuntimeError("physical-shard loader is closed")
         if self._resume_descriptors is not None:
             self._restore_buffer(self._resume_descriptors)
-            assert self._resume_rng_state is not None
-            self._buffer.rng.bit_generator.state = self._resume_rng_state
+            assert self._resume_sampler_state is not None
+            self._buffer.load_sampler_state_dict(self._resume_sampler_state)
             self._resume_descriptors = None
-            self._resume_rng_state = None
+            self._resume_sampler_state = None
         while self._buffer.size < self.replay_slots:
-            shard, row = iterator.take_generation()
-            self._buffer.admit(shard, row)
-        replay_ids, windows, exhausted = self._buffer.sample()
-        transformed = self.batch_transform(replay_ids, windows)
-        for slot in exhausted:
-            self._buffer.remove(slot)
-            shard, row = iterator.take_generation()
-            self._buffer.admit(shard, row, slot=slot)
+            rows = iterator.take_rows(self.replay_slots - self._buffer.size)
+            self._buffer.append_rows(rows)
+        replay_ids, columns, exhausted = self._buffer.sample()
+        transformed = self.batch_transform(replay_ids, columns)
+        self._buffer.retire(exhausted)
+        replaced = 0
+        while replaced < len(exhausted):
+            rows = iterator.take_rows(len(exhausted) - replaced)
+            slots = exhausted[replaced : replaced + rows.count]
+            self._buffer.admit_rows(rows, slots, stagger=False)
+            replaced += rows.count
         if not self.pin_memory:
             return transformed
         pin_memory = getattr(transformed, "pin_memory", None)
@@ -1313,7 +1403,7 @@ class PhysicalShardReplayLoader[BatchT]:
             "source_selection_sha256": self._selection_hash,
             "source_manifest_sha256": self.source_manifest_sha256,
             "cursor": self._cursor,
-            "batch_sampler_rng_state": self._buffer.rng.bit_generator.state,
+            "batch_sampler_state": self._buffer.sampler_state_dict(),
             "slots": self._buffer.descriptors(),
             "buffer_geometry": {
                 "replay_slots": self.replay_slots,
@@ -1352,13 +1442,13 @@ class PhysicalShardReplayLoader[BatchT]:
         ):
             raise ValueError("committed source cursor is invalid")
         descriptors = state.get("slots")
-        rng_state = state.get("batch_sampler_rng_state")
+        sampler_state = state.get("batch_sampler_state")
         if not isinstance(descriptors, tuple) or len(descriptors) != self.replay_slots:
             raise ValueError("checkpoint does not describe every replay slot")
         if not all(isinstance(descriptor, GenerationDescriptor) for descriptor in descriptors):
             raise ValueError("checkpoint contains an invalid replay descriptor")
-        if not isinstance(rng_state, dict):
-            raise ValueError("checkpoint has no batch-sampler RNG state")
+        if not isinstance(sampler_state, Mapping):
+            raise ValueError("checkpoint has no batch-sampler state")
         epoch, task_offset, row_offset = typed_cursor
         task_index = permute_shard_tasks(self.tasks, seed=self.seed, epoch=epoch)[task_offset]
         if row_offset > self.tasks[task_index].row_count:
@@ -1380,7 +1470,7 @@ class PhysicalShardReplayLoader[BatchT]:
                 raise ValueError("checkpoint contains an invalid replay descriptor")
         self._cursor = typed_cursor
         self._resume_descriptors = typed_descriptors
-        self._resume_rng_state = cast(dict[str, Any], rng_state)
+        self._resume_sampler_state = cast(Mapping[str, object], sampler_state)
 
     def _restore_buffer(self, descriptors: tuple[GenerationDescriptor, ...]) -> None:
         tasks = {(task.source, task.shard): task for task in self.tasks}
@@ -1420,11 +1510,10 @@ class PhysicalShardReplayLoader[BatchT]:
                 replay_id = replay_ids[row]
                 if _replay_checksum(replay_id) != descriptor.replay_checksum:
                     raise ValueError(f"replay identity changed at {descriptor.locator}")
-                self._buffer.admit(shard, row, slot=descriptor.slot)
-                self._buffer.epochs[descriptor.slot] = descriptor.epoch
-                if not 0 <= descriptor.next_window < self.windows_per_generation:
-                    raise ValueError("checkpoint next-window ordinal is invalid")
-                self._buffer.next_windows[descriptor.slot] = descriptor.next_window
+            slots = np.asarray([descriptor.slot for descriptor in ordered])
+            self._buffer.admit_rows(_DecodedRows(shard, 0, len(ordered)), slots, stagger=False)
+            self._buffer.epochs[slots] = [descriptor.epoch for descriptor in ordered]
+            self._buffer.next_windows[slots] = [descriptor.next_window for descriptor in ordered]
 
     def __enter__(self) -> PhysicalShardReplayLoader[BatchT]:
         if self._closed:

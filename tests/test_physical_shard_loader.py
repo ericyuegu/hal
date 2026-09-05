@@ -23,7 +23,9 @@ from hal.training.physical_shard_loader import ReplayBuffer
 from hal.training.physical_shard_loader import ShardTask
 from hal.training.physical_shard_loader import SourceManifest
 from hal.training.physical_shard_loader import SourceRowSelection
+from hal.training.physical_shard_loader import _BalancedReplaySchedule
 from hal.training.physical_shard_loader import _decode_generation
+from hal.training.physical_shard_loader import _DecodedRows
 from hal.training.physical_shard_loader import _shutdown_data_loader_workers
 from hal.training.physical_shard_loader import _stack_window_rows
 from hal.training.physical_shard_loader import build_shard_plan
@@ -56,13 +58,14 @@ def test_shard_plan_covers_prefix_once_and_excludes_only_sidecar_rows() -> None:
     assert sum(task.row_count for task in tasks) == selection.row_count
 
 
-def test_shard_permutation_is_deterministic_and_changes_by_epoch() -> None:
+def test_shard_permutation_is_deterministic_and_stable_across_epochs() -> None:
     tasks = tuple(ShardTask("source", shard, 0, 2, global_shard=shard) for shard in range(32))
 
     first = permute_shard_tasks(tasks, seed=7, epoch=3)
 
     assert first == permute_shard_tasks(tasks, seed=7, epoch=3)
-    assert first != permute_shard_tasks(tasks, seed=7, epoch=4)
+    assert first == permute_shard_tasks(tasks, seed=7, epoch=4)
+    assert first != permute_shard_tasks(tasks, seed=8, epoch=3)
     assert sorted(first) == list(range(len(tasks)))
 
 
@@ -114,6 +117,24 @@ def test_circular_windows_are_full_and_pairwise_non_overlapping() -> None:
 
     with pytest.raises(ValueError, match="4 windows require"):
         choose_generation_window_starts(1328, 256, 10, 4, np.random.default_rng(4))
+
+
+def test_window_start_selection_is_uniform() -> None:
+    frames = 60
+    context_length = 8
+    chunk_length = 2
+    valid_starts = frames - context_length - chunk_length + 1
+    counts = np.zeros(valid_starts, dtype=np.int64)
+    rng = np.random.default_rng(51)
+
+    for _ in range(20_000):
+        starts = choose_generation_window_starts(frames, context_length, chunk_length, 4, rng)
+        np.add.at(counts, starts, 1)
+
+    expected = counts.sum() / valid_starts
+    chi_square = float(np.sum((counts - expected) ** 2 / expected))
+    z_score = (chi_square - (valid_starts - 1)) / np.sqrt(2 * (valid_starts - 1))
+    assert abs(z_score) < 5
 
 
 def test_short_replay_error_identifies_the_physical_row() -> None:
@@ -182,43 +203,73 @@ def test_window_column_order_does_not_change_schema() -> None:
     assert columns["ego_x"].shape == (1, 4, 2)
 
 
-def test_duplicate_generations_do_not_change_identity_sampling_weight() -> None:
-    buffer = ReplayBuffer(capacity=4, batch_size=1, windows_per_generation=4, seed=9)
+def test_replay_buffer_rejects_duplicate_active_identities() -> None:
+    buffer = ReplayBuffer(capacity=4, batch_size=4, windows_per_generation=4, seed=9)
     shard = _decoded(("a", "a", "b", "c"))
-    for row in range(4):
-        buffer.admit(shard, row)
 
-    counts = {"a": 0, "b": 0, "c": 0}
-    for _ in range(30_000):
-        replay_ids, _windows, _exhausted = buffer.sample()
-        counts[replay_ids[0]] += 1
-        buffer.next_windows[:] = 0
-
-    expected = 10_000
-    assert all(abs(count - expected) < 500 for count in counts.values())
+    with pytest.raises(ValueError, match="repeat a replay identity"):
+        buffer.append_rows(_DecodedRows(shard, 0, 4))
 
 
 def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
     replay_ids = tuple(f"replay-{index}" for index in range(1024))
     buffer = ReplayBuffer(capacity=len(replay_ids), batch_size=512, windows_per_generation=4, seed=10)
     shard = _decoded(replay_ids)
-    for row in range(len(replay_ids)):
-        buffer.admit(shard, row)
+    buffer.append_rows(_DecodedRows(shard, 0, len(replay_ids)))
 
-    sampled, _windows, _exhausted = buffer.sample()
+    sampled, columns, _exhausted = buffer.sample()
 
     assert len(sampled) == len(set(sampled)) == 512
     assert len(buffer.last_sampled_identity_ranks) == len(set(buffer.last_sampled_identity_ranks)) == 512
     assert min(buffer.last_sampled_identity_ranks) >= 0
     assert max(buffer.last_sampled_identity_ranks) < buffer.last_sampled_identity_count == buffer.active_identities
+    slots = np.asarray(buffer.last_sampled_identity_ranks)
+    np.testing.assert_array_equal(columns["value"], shard.columns["value"][slots, slots % 4])
 
 
 def test_count_active_replay_ids_ignores_replaced_generations() -> None:
     loader = object.__new__(PhysicalShardReplayLoader)
-    loader._buffer = ReplayBuffer(capacity=512, batch_size=1, windows_per_generation=4, seed=51)
-    loader._buffer.identity_slots = {"active": {0}, "duplicate": {1, 2}}
+    loader._buffer = ReplayBuffer(capacity=512, batch_size=4, windows_per_generation=4, seed=51)
+    loader._buffer.identity_slots = {"active": 0, "replacement": 1}
 
-    assert loader.count_active_replay_ids(("active", "retired", "duplicate")) == 2
+    assert loader.count_active_replay_ids(("active", "retired", "replacement")) == 2
+
+
+def test_balanced_schedule_has_uniform_exposure_and_a_225_batch_reuse_floor() -> None:
+    capacity = 131_072
+    batch_size = 512
+    schedule = _BalancedReplaySchedule(capacity, batch_size, phases=4, seed=51)
+    last_seen = np.full(capacity, -1, dtype=np.int64)
+    counts = np.zeros(capacity, dtype=np.int64)
+    first_pass: list[frozenset[int]] = []
+    second_pass: list[frozenset[int]] = []
+
+    for batch_index in range(2 * schedule.pass_batches):
+        slots = schedule.next()
+        assert len(slots) == len(np.unique(slots)) == batch_size
+        assert np.bincount(slots % 4, minlength=4).tolist() == [128] * 4
+        previous = last_seen[slots]
+        if np.any(previous >= 0):
+            assert np.min(batch_index - previous[previous >= 0]) >= 225
+        last_seen[slots] = batch_index
+        counts[slots] += 1
+        batches = first_pass if batch_index < schedule.pass_batches else second_pass
+        batches.append(frozenset(map(int, slots)))
+
+    np.testing.assert_array_equal(counts, np.full(capacity, 2))
+    assert all(first != second for first, second in zip(first_pass, second_pass, strict=True))
+
+
+def test_balanced_schedule_turns_over_exactly_one_phase_per_batch() -> None:
+    schedule = _BalancedReplaySchedule(131_072, 512, phases=4, seed=52)
+    next_windows = np.arange(schedule.capacity, dtype=np.uint16) % 4
+
+    for _ in range(4 * schedule.pass_batches):
+        slots = schedule.next()
+        next_windows[slots] += 1
+        exhausted = slots[next_windows[slots] == 4]
+        assert len(exhausted) == 128
+        next_windows[exhausted] = 0
 
 
 class _FakeAdapter:
@@ -237,8 +288,12 @@ class _FakeAdapter:
             windows.append(window)
         return replay_id, tuple(windows)
 
+    @staticmethod
+    def _physical_row(task: ShardTask, row: int) -> int:
+        return task.shard * 16 + row
+
     def decode_task(self, task: ShardTask, epoch: int, task_offset: int, **_kwargs: object) -> DecodedShard:
-        generations = [self._generation(row, epoch) for row in task.selected_rows]
+        generations = [self._generation(self._physical_row(task, row), epoch) for row in task.selected_rows]
         names = tuple(generations[0][1][0])
         columns = {
             name: np.stack([[window[name] for window in generation[1]] for generation in generations])
@@ -257,11 +312,14 @@ class _FakeAdapter:
     def decode_generations(
         self, task: ShardTask, requests: Sequence[tuple[int, int]], **_kwargs: object
     ) -> Mapping[tuple[int, int], tuple[str, tuple[dict[str, np.ndarray], ...]]]:
-        del task
-        return {request: self._generation(*request) for request in requests}
+        return {request: self._generation(self._physical_row(task, request[0]), request[1]) for request in requests}
 
 
 class _DelayedFakeAdapter(_FakeAdapter):
+    def __init__(self, rows: int, length: int) -> None:
+        super().__init__(rows, length)
+        self.manifests = {"source": SourceManifest("source", (16, 16, 16, 16))}
+
     def decode_task(self, task: ShardTask, epoch: int, task_offset: int, **kwargs: object) -> DecodedShard:
         time.sleep(0.01 * (3 - task.shard))
         return super().decode_task(task, epoch, task_offset, **kwargs)
@@ -293,19 +351,18 @@ class _Batch:
         return _Batch(self.replay_ids, self.values.pin_memory())
 
 
-def _collate_batch(replay_ids: tuple[str, ...], windows: list[dict[str, np.ndarray]]) -> _Batch:
-    values = np.stack([window["ego_main_stick_x"] for window in windows])
-    return _Batch(replay_ids, torch.from_numpy(values.copy()))
+def _collate_batch(replay_ids: tuple[str, ...], columns: Mapping[str, np.ndarray]) -> _Batch:
+    return _Batch(replay_ids, torch.from_numpy(columns["ego_main_stick_x"].copy()))
 
 
 def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> PhysicalShardReplayLoader[_Batch]:
-    rows = 8
+    rows = 64
     selection = PhysicalShardSelection(
         sources=(SourceRowSelection("source", rows),),
         sha256="b" * 64,
     )
     tasks = (
-        tuple(ShardTask("source", shard, 0, 2, global_shard=shard) for shard in range(4))
+        tuple(ShardTask("source", shard, 0, 16, global_shard=shard) for shard in range(4))
         if delayed
         else (ShardTask("source", 0, 0, rows, global_shard=0),)
     )
@@ -320,8 +377,8 @@ def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> PhysicalSh
         labels=_no_labels,
         projection=None,
         batch_transform=_collate_batch,
-        batch_size=2,
-        replay_slots=rows,
+        batch_size=4,
+        replay_slots=16,
         seed=seed,
         num_workers=workers,
         context_length=3,
@@ -345,7 +402,7 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
         "source_selection_sha256",
         "source_manifest_sha256",
         "cursor",
-        "batch_sampler_rng_state",
+        "batch_sampler_state",
         "slots",
         "buffer_geometry",
     }
@@ -369,7 +426,7 @@ def test_every_batch_contains_distinct_replay_ids() -> None:
     for _ in range(40):
         batch = next(iterator)
         assert batch.replay_ids is not None
-        assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 2
+        assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 4
 
 
 def test_delayed_workers_and_worker_count_change_preserve_exact_resume() -> None:

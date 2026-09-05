@@ -1,4 +1,4 @@
-"""Emit the experiment-051 v5 contract from an isolated interpreter."""
+"""Emit the current experiment-051 contract from an isolated interpreter."""
 
 from __future__ import annotations
 
@@ -159,12 +159,12 @@ def _checkpoint_contract(module: ModuleType) -> dict[str, object]:
     optimizer = torch.optim.SGD(model.parameters(), lr=0.25)
     scheduler = LambdaLR(optimizer, lambda _step: 1.0)
     loader = {
-        "schema": 1,
-        "data_protocol": "o51-dense-shard-replay-v2",
+        "schema": 2,
+        "data_protocol": "o51-balanced-replay-v3",
         "source_selection_sha256": "a" * 64,
         "source_manifest_sha256": {"source": "b" * 64},
         "cursor": (3, 4, 5),
-        "batch_sampler_rng_state": {"bit_generator": "PCG64"},
+        "batch_sampler_state": {"batch_index": 9, "schedule": {}},
         "slots": (
             GenerationDescriptor(
                 slot=0,

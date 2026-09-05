@@ -608,9 +608,26 @@ def collate_train_batch(
     tables (see ``features.ExtraColumns``); the closed-loop policy must carry the
     same one so both observation paths build the same token.
     """
-    stacked = collate_windows(batch)
-    ctx_pad = torch.from_numpy(stacked["ctx_pad"].astype(np.int64))
-    feats = preprocess(stacked, stats, extra=extra, projection=projection)
+    return train_batch_from_columns(
+        collate_windows(batch),
+        stats=stats,
+        L_ctx=L_ctx,
+        extra=extra,
+        projection=projection,
+    )
+
+
+def train_batch_from_columns(
+    columns: Mapping[str, np.ndarray],
+    *,
+    stats: dict[str, FeatureStats],
+    L_ctx: int,
+    extra: ExtraColumns | None = None,
+    projection: FeatureProjection | None = None,
+) -> TrainBatch:
+    """Convert already-stacked ``[B, seq]`` columns into a training batch."""
+    ctx_pad = torch.from_numpy(columns["ctx_pad"].astype(np.int64, copy=False))
+    feats = preprocess(columns, stats, extra=extra, projection=projection)
     actions = stack_actions(feats)
     context_features = {k: v[:, :L_ctx] for k, v in feats.items()}
     target = actions[:, L_ctx:]
