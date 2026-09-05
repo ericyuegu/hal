@@ -26,14 +26,17 @@ def _write_proc_process(
 
 def test_read_cgroup_memory_reports_absolute_bytes_and_fraction(tmp_path: Path) -> None:
     (tmp_path / "memory.current").write_text(str(3 * 2**30))
+    (tmp_path / "memory.peak").write_text(str(9 * 2**30))
     (tmp_path / "memory.max").write_text(str(12 * 2**30))
     (tmp_path / "memory.stat").write_text(f"anon {2**30}\nfile {2 * 2**30}\ninactive_file {2**29}\nfile_dirty 4096\n")
 
     metrics = system_metrics.read_cgroup_memory(tmp_path)
 
     assert metrics["system/cgroup/current_gib"] == 3.0
+    assert metrics["system/cgroup/peak_gib"] == 9.0
     assert metrics["system/cgroup/limit_gib"] == 12.0
     assert metrics["system/cgroup/usage_fraction"] == 0.25
+    assert metrics["system/cgroup/peak_usage_fraction"] == 0.75
     assert metrics["system/cgroup/anon_gib"] == 1.0
     assert metrics["system/cgroup/file_gib"] == 2.0
 
@@ -43,6 +46,7 @@ def test_read_cgroup_memory_resolves_nested_v2_path(tmp_path: Path) -> None:
     nested = cgroup_root / "jobs" / "trainer"
     nested.mkdir(parents=True)
     (nested / "memory.current").write_text(str(5 * 2**30))
+    (nested / "memory.peak").write_text(str(7 * 2**30))
     (nested / "memory.max").write_text("max")
     (nested / "memory.stat").write_text(f"anon {3 * 2**30}\nfile {2 * 2**30}\n")
     cgroup_file = tmp_path / "self.cgroup"
@@ -51,6 +55,8 @@ def test_read_cgroup_memory_resolves_nested_v2_path(tmp_path: Path) -> None:
     metrics = system_metrics.read_cgroup_memory(cgroup_root, cgroup_file)
 
     assert metrics["system/cgroup/current_gib"] == 5.0
+    assert metrics["system/cgroup/peak_gib"] == 7.0
+    assert "system/cgroup/peak_usage_fraction" not in metrics
     assert "system/cgroup/limit_gib" not in metrics
     assert metrics["system/cgroup/anon_gib"] == 3.0
 
@@ -59,6 +65,7 @@ def test_read_cgroup_memory_supports_namespaced_v1_mount(tmp_path: Path) -> None
     memory_root = tmp_path / "memory"
     memory_root.mkdir()
     (memory_root / "memory.usage_in_bytes").write_text(str(6 * 2**30))
+    (memory_root / "memory.max_usage_in_bytes").write_text(str(18 * 2**30))
     (memory_root / "memory.limit_in_bytes").write_text(str(24 * 2**30))
     (memory_root / "memory.stat").write_text(f"cache {4 * 2**30}\nrss {2 * 2**30}\ninactive_file {3 * 2**30}\n")
     cgroup_file = tmp_path / "self.cgroup"
@@ -68,10 +75,26 @@ def test_read_cgroup_memory_supports_namespaced_v1_mount(tmp_path: Path) -> None
 
     assert metrics["system/cgroup/version"] == 1.0
     assert metrics["system/cgroup/current_gib"] == 6.0
+    assert metrics["system/cgroup/peak_gib"] == 18.0
     assert metrics["system/cgroup/limit_gib"] == 24.0
     assert metrics["system/cgroup/usage_fraction"] == 0.25
+    assert metrics["system/cgroup/peak_usage_fraction"] == 0.75
     assert metrics["system/cgroup/anon_gib"] == 2.0
     assert metrics["system/cgroup/file_gib"] == 4.0
+
+
+@pytest.mark.parametrize("peak", [None, "unknown"])
+def test_read_cgroup_memory_omits_unavailable_peak(tmp_path: Path, peak: str | None) -> None:
+    (tmp_path / "memory.current").write_text(str(3 * 2**30))
+    if peak is not None:
+        (tmp_path / "memory.peak").write_text(peak)
+    (tmp_path / "memory.max").write_text(str(12 * 2**30))
+    (tmp_path / "memory.stat").write_text("")
+
+    metrics = system_metrics.read_cgroup_memory(tmp_path)
+
+    assert "system/cgroup/peak_gib" not in metrics
+    assert "system/cgroup/peak_usage_fraction" not in metrics
 
 
 def test_read_process_tree_memory_excludes_unrelated_processes(tmp_path: Path) -> None:

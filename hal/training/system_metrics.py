@@ -108,6 +108,7 @@ def read_cgroup_memory(
     resolved = _resolve_cgroup_v2_root(cgroup_root, cgroup_file)
     if resolved is not None:
         current = _read_int(resolved / "memory.current")
+        peak = _read_int(resolved / "memory.peak")
         limit = _read_int(resolved / "memory.max")
         memory_stat = _read_keyed_ints(resolved / "memory.stat")
         normalized_stat = {name: memory_stat[name] for name in _CGROUP_MEMORY_KEYS if name in memory_stat}
@@ -117,6 +118,7 @@ def read_cgroup_memory(
         if resolved is None:
             return metrics
         current = _read_int(resolved / "memory.usage_in_bytes")
+        peak = _read_int(resolved / "memory.max_usage_in_bytes")
         limit = _read_int(resolved / "memory.limit_in_bytes")
         memory_stat = _read_keyed_ints(resolved / "memory.stat")
         normalized_stat = {
@@ -125,10 +127,14 @@ def read_cgroup_memory(
         metrics["system/cgroup/version"] = 1.0
     if current is not None:
         metrics["system/cgroup/current_gib"] = current / _GIB
+    if peak is not None:
+        metrics["system/cgroup/peak_gib"] = peak / _GIB
     if limit is not None:
         metrics["system/cgroup/limit_gib"] = limit / _GIB
         if current is not None and limit > 0:
             metrics["system/cgroup/usage_fraction"] = current / limit
+        if peak is not None and limit > 0:
+            metrics["system/cgroup/peak_usage_fraction"] = peak / limit
     for name, value in normalized_stat.items():
         metrics[f"system/cgroup/{name}_gib"] = value / _GIB
     return metrics
