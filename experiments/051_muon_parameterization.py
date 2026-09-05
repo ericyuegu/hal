@@ -150,7 +150,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID: Final[str] = "051_muon_parameterization_v6"
+_EXPERIMENT_ID: Final[str] = "051_muon_parameterization_v7"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -171,7 +171,7 @@ PLAYER_VOCAB_SHA256 = "c67c97c995ad033ea7f5b2223efce5b061394566439f091ff6e7aaa6a
 PLAYER_VOCAB_SIZE = 21_181
 PLAYER_EMBED_DIM = 32
 TRAIN_REPLAYS = 1_300_640
-DATA_PROTOCOL: Final[str] = "o51-balanced-replay-v3"
+DATA_PROTOCOL: Final[str] = "o51-balanced-replay-v4"
 D0: Final[int] = 2**30
 _TRUNK_BASE_LAYERS: Final[int] = 8
 _TEMPORAL_BASE_LAYERS: Final[int] = 2
@@ -4686,7 +4686,7 @@ def select(args: SelectArgs) -> None:
     print(f"selected {selection.winner.arm_id}; wrote {args.output} and {args.evidence}")
 
 
-WINDOWS_PER_GENERATION: Final[int] = 4
+WINDOWS_PER_GENERATION: Final[int] = 8
 DEFAULT_REPLAY_SLOTS: Final[int] = 131_072
 RESERVED_DISK_BYTES: Final[int] = 256 * 2**30
 O51_EXTRA_COLUMNS: Final[ExtraColumns] = ExtraColumns(
@@ -6137,7 +6137,7 @@ def benchmark_train_step(
 def benchmark_loader(
     cfg: TrainConfig,
     *,
-    warmup_batches: int = 10_240,
+    warmup_batches: int = 20_480,
     measured_batches: int = 1_000,
 ) -> dict[str, object]:
     """Measure the direct-source loader without running the model."""
@@ -6415,7 +6415,7 @@ class LoaderBenchmarkArgs:
     tier_scale: Literal[1, 2, 4, 8] = 8
     batch_size: Literal[128, 256, 512, 1024] = 512
     num_workers: Literal[8, 16, 24, 32] = 16
-    warmup_batches: int = 10_240
+    warmup_batches: int = 20_480
     measured_batches: int = 1_000
 
 

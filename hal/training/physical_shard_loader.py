@@ -40,7 +40,7 @@ from hal.training.dataloader import ReplayLabels
 from hal.training.dataloader import make_window
 from hal.training.features import FeatureProjection
 
-PREFETCH_FACTOR: Final[int] = 1
+PREFETCH_FACTOR: Final[int] = 2
 CHECKPOINT_SCHEMA: Final[int] = 2
 MIN_REPLAY_GAP_BATCHES: Final[int] = 200
 SHUFFLE_BLOCK_BATCHES: Final[int] = 32
@@ -356,16 +356,6 @@ def permute_shard_tasks(tasks: Sequence[ShardTask], *, seed: int, epoch: int) ->
     )
 
 
-def _uniform_weak_composition(total: int, parts: int, rng: np.random.Generator) -> np.ndarray:
-    if total < 0 or parts < 1:
-        raise ValueError("weak-composition inputs are invalid")
-    if parts == 1:
-        return np.asarray([total], dtype=np.int64)
-    bars = np.sort(rng.choice(total + parts - 1, size=parts - 1, replace=False))
-    boundaries = np.concatenate((np.asarray([-1]), bars, np.asarray([total + parts - 1])))
-    return np.diff(boundaries).astype(np.int64) - 1
-
-
 def choose_generation_window_starts(
     frames: int,
     context_length: int,
@@ -373,23 +363,19 @@ def choose_generation_window_starts(
     windows_per_generation: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Choose uniformly phased, circularly spaced full windows."""
+    """Choose distinct window starts uniformly without replacement."""
     if windows_per_generation < 1:
         raise ValueError("windows per generation must be positive")
     length = context_length + chunk_length
     if length < 1:
         raise ValueError("window length must be positive")
     starts = frames - length + 1
-    required = windows_per_generation * length
-    if starts < required:
+    if starts < windows_per_generation:
         raise ValueError(
-            f"{frames} frames provide {starts} starts; {windows_per_generation} windows require at least {required}"
+            f"{frames} frames provide {starts} starts; "
+            f"{windows_per_generation} windows require at least {windows_per_generation}"
         )
-    gaps = _uniform_weak_composition(starts - required, windows_per_generation, rng)
-    phase = int(rng.integers(starts))
-    offsets = np.concatenate((np.asarray([0]), np.cumsum(length + gaps[:-1])))
-    spaced = (phase + offsets) % starts
-    return spaced[rng.permutation(windows_per_generation)].astype(np.int64, copy=False)
+    return rng.choice(starts, size=windows_per_generation, replace=False).astype(np.int64, copy=False)
 
 
 def _replay_checksum(replay_id: str) -> int:
@@ -442,7 +428,7 @@ def _decode_generation(
     replay_id = str(compact["replay_id"])
     frames = int(cast(Any, compact["num_frames"]))
     window_length = context_length + chunk_length
-    required_frames = (windows_per_generation + 1) * window_length - 1
+    required_frames = window_length + windows_per_generation - 1
     if frames < required_frames:
         raise ValueError(
             f"short replay {replay_id!r} at source={task.source} shard={task.shard} row={row}: "

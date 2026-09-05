@@ -44,7 +44,7 @@
         "val_split", "wandb_log_code", "warmup_steps", "weight_hist_every"
       ],
       "config_round_trip": true,
-      "config_sha256": "ef4defeb2d85aeb458086448a8986b1eba68749bd9db46f7bd2f3d20758239b9",
+      "config_sha256": "52887d273c09763eecfb939445b63352433829567875b66fb601027a83b6776b",
       "loader_descriptor": {
         "epoch": 3,
         "locator": {"row": 11, "shard": 7, "source": "source"},
@@ -70,7 +70,7 @@
       },
       "decay_grid": [0.0, 0.001, 0.01],
       "depth_alpha": [0.5, 1.0],
-      "experiment": "051_muon_parameterization_v6",
+      "experiment": "051_muon_parameterization_v7",
       "initialization": {
         "hidden_std_multiplier": [0.5, 1.0, 2.0],
         "readout": ["zero", "mup-normal"]
@@ -78,9 +78,9 @@
       "loader_grid": {
         "minimum_replay_gap_batches": 200,
         "order": "stable_keyed_shards_and_balanced_slot_passes",
-        "prefetch_factor": 1,
+        "prefetch_factor": 2,
         "replay_slots": 131072,
-        "windows_per_generation": 4,
+        "windows_per_generation": 8,
         "workers": [8, 16, 24, 32]
       },
       "lr_grid": {

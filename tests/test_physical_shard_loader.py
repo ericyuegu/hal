@@ -97,26 +97,24 @@ def test_host_memory_model_includes_every_concurrent_copy() -> None:
         workers=4,
     )
 
-    assert estimate.queued_shards == 80
+    assert estimate.queued_shards == 160
     assert estimate.worker_outputs_and_workspaces == 92
-    assert estimate.ipc_copies == 80
+    assert estimate.ipc_copies == 160
     assert estimate.parent_result == 20
     assert estimate.pinned_batches == 14
-    assert estimate.peak_bytes == 410
+    assert estimate.peak_bytes == 570
 
 
-def test_circular_windows_are_full_and_pairwise_non_overlapping() -> None:
+def test_window_starts_are_full_and_distinct() -> None:
     length = 266
-    starts = choose_generation_window_starts(1329, 256, 10, 4, np.random.default_rng(4))
+    starts = choose_generation_window_starts(273, 256, 10, 8, np.random.default_rng(4))
 
-    assert len(starts) == 4
-    assert len(set(map(int, starts))) == 4
-    assert all(0 <= int(start) <= 1329 - length for start in starts)
-    intervals = sorted((int(start), int(start) + length) for start in starts)
-    assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:], strict=False))
+    assert len(starts) == 8
+    assert len(set(map(int, starts))) == 8
+    assert all(0 <= int(start) <= 273 - length for start in starts)
 
-    with pytest.raises(ValueError, match="4 windows require"):
-        choose_generation_window_starts(1328, 256, 10, 4, np.random.default_rng(4))
+    with pytest.raises(ValueError, match="8 windows require"):
+        choose_generation_window_starts(272, 256, 10, 8, np.random.default_rng(4))
 
 
 def test_window_start_selection_is_uniform() -> None:
@@ -142,17 +140,17 @@ def test_short_replay_error_identifies_the_physical_row() -> None:
 
     with pytest.raises(
         ValueError,
-        match=("short replay 'replay-9' at source=source shard=7 row=0: frame_count=1328, required_count=1329"),
+        match=("short replay 'replay-9' at source=source shard=7 row=0: frame_count=272, required_count=273"),
     ):
         _decode_generation(
-            {"replay_id": "replay-9", "num_frames": 1328},
+            {"replay_id": "replay-9", "num_frames": 272},
             task=task,
             row=0,
             epoch=0,
             seed=1,
             context_length=256,
             chunk_length=10,
-            windows_per_generation=4,
+            windows_per_generation=8,
             schema_version=7,
             labels=_no_labels,
             projection=None,
@@ -238,7 +236,7 @@ def test_count_active_replay_ids_ignores_replaced_generations() -> None:
 def test_balanced_schedule_has_uniform_exposure_and_a_225_batch_reuse_floor() -> None:
     capacity = 131_072
     batch_size = 512
-    schedule = _BalancedReplaySchedule(capacity, batch_size, phases=4, seed=51)
+    schedule = _BalancedReplaySchedule(capacity, batch_size, phases=8, seed=51)
     last_seen = np.full(capacity, -1, dtype=np.int64)
     counts = np.zeros(capacity, dtype=np.int64)
     first_pass: list[frozenset[int]] = []
@@ -247,7 +245,7 @@ def test_balanced_schedule_has_uniform_exposure_and_a_225_batch_reuse_floor() ->
     for batch_index in range(2 * schedule.pass_batches):
         slots = schedule.next()
         assert len(slots) == len(np.unique(slots)) == batch_size
-        assert np.bincount(slots % 4, minlength=4).tolist() == [128] * 4
+        assert np.bincount(slots % 8, minlength=8).tolist() == [64] * 8
         previous = last_seen[slots]
         if np.any(previous >= 0):
             assert np.min(batch_index - previous[previous >= 0]) >= 225
@@ -261,14 +259,14 @@ def test_balanced_schedule_has_uniform_exposure_and_a_225_batch_reuse_floor() ->
 
 
 def test_balanced_schedule_turns_over_exactly_one_phase_per_batch() -> None:
-    schedule = _BalancedReplaySchedule(131_072, 512, phases=4, seed=52)
-    next_windows = np.arange(schedule.capacity, dtype=np.uint16) % 4
+    schedule = _BalancedReplaySchedule(131_072, 512, phases=8, seed=52)
+    next_windows = np.arange(schedule.capacity, dtype=np.uint16) % 8
 
-    for _ in range(4 * schedule.pass_batches):
+    for _ in range(8 * schedule.pass_batches):
         slots = schedule.next()
         next_windows[slots] += 1
-        exhausted = slots[next_windows[slots] == 4]
-        assert len(exhausted) == 128
+        exhausted = slots[next_windows[slots] == 8]
+        assert len(exhausted) == 64
         next_windows[exhausted] = 0
 
 
