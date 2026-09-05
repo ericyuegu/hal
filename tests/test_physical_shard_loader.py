@@ -273,6 +273,35 @@ def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
     np.testing.assert_array_equal(columns["value"], shard.columns["value"][slots, slots % 4])
 
 
+def test_replay_age_quantiles_are_absent_until_a_replay_is_reused() -> None:
+    replay_ids = tuple(f"replay-{index}" for index in range(8))
+    buffer = ReplayBuffer(capacity=8, batch_size=4, windows_per_generation=4, seed=51)
+    buffer.append_rows(_DecodedRows(_decoded(replay_ids), 0, len(replay_ids)))
+    buffer.next_windows[:] = 0
+
+    buffer.sample()
+
+    assert set(buffer.last_metrics).isdisjoint(
+        {
+            "data/replay_age_p01",
+            "data/replay_age_p05",
+            "data/replay_age_p50",
+            "data/replay_age_p95",
+        }
+    )
+    buffer.sample()
+    buffer.sample()
+    assert all(
+        np.isfinite(buffer.last_metrics[name])
+        for name in (
+            "data/replay_age_p01",
+            "data/replay_age_p05",
+            "data/replay_age_p50",
+            "data/replay_age_p95",
+        )
+    )
+
+
 def test_count_active_replay_ids_ignores_replaced_generations() -> None:
     loader = object.__new__(PhysicalShardReplayLoader)
     loader._buffer = ReplayBuffer(capacity=512, batch_size=4, windows_per_generation=4, seed=51)

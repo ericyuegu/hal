@@ -44,7 +44,7 @@
         "val_split", "wandb_log_code", "warmup_steps", "weight_hist_every"
       ],
       "config_round_trip": true,
-      "config_sha256": "52887d273c09763eecfb939445b63352433829567875b66fb601027a83b6776b",
+      "config_sha256": "a6510d2bdb7f02c30a038cd637813073d6f091a53fdb1d9900e256cc166bdd6b",
       "loader_descriptor": {
         "epoch": 3,
         "locator": {"row": 11, "shard": 7, "source": "source"},
@@ -70,7 +70,7 @@
       },
       "decay_grid": [0.0, 0.001, 0.01],
       "depth_alpha": [0.5, 1.0],
-      "experiment": "051_muon_parameterization_v7",
+      "experiment": "051_muon_parameterization_v8",
       "initialization": {
         "hidden_std_multiplier": [0.5, 1.0, 2.0],
         "readout": ["zero", "mup-normal"]

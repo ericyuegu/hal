@@ -1035,15 +1035,20 @@ class ReplayBuffer:
         self.batch_index += 1
         age_values = ages.astype(np.float64, copy=False)
         self.last_metrics = {
-            "data/replay_age_p01": float(np.percentile(age_values, 1)) if len(ages) else float("nan"),
-            "data/replay_age_p05": float(np.percentile(age_values, 5)) if len(ages) else float("nan"),
-            "data/replay_age_p50": float(np.percentile(age_values, 50)) if len(ages) else float("nan"),
-            "data/replay_age_p95": float(np.percentile(age_values, 95)) if len(ages) else float("nan"),
             "data/replay_age_le_1_fraction": float(np.mean(age_values <= 1)) if len(ages) else 0.0,
             "data/replay_age_le_16_fraction": float(np.mean(age_values <= 16)) if len(ages) else 0.0,
             "data/active_replay_identities": float(self.active_identities),
             "data/duplicate_generations": 0.0,
         }
+        if len(ages):
+            self.last_metrics.update(
+                {
+                    "data/replay_age_p01": float(np.percentile(age_values, 1)),
+                    "data/replay_age_p05": float(np.percentile(age_values, 5)),
+                    "data/replay_age_p50": float(np.percentile(age_values, 50)),
+                    "data/replay_age_p95": float(np.percentile(age_values, 95)),
+                }
+            )
         return replay_ids, columns, exhausted
 
     def sampler_state_dict(self) -> dict[str, object]:

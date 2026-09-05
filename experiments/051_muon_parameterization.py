@@ -150,7 +150,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID: Final[str] = "051_muon_parameterization_v7"
+_EXPERIMENT_ID: Final[str] = "051_muon_parameterization_v8"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -1172,11 +1172,10 @@ class DeviceBatchPrefetcher:
 
     def _load_cpu_batch(self) -> AWRBatch:
         try:
-            cpu_batch = next(self._iterator)
+            return next(self._iterator)
         except StopIteration:
             self._iterator = iter(self._loader)
-            cpu_batch = next(self._iterator)
-        return self._prepare_cpu_batch(cpu_batch)
+            return next(self._iterator)
 
     def _prepare_cpu_batch(self, cpu_batch: AWRBatch) -> AWRBatch:
         """Apply the parent-side transforms to an already-fetched batch."""
@@ -1206,7 +1205,7 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("consume the staged batch before preloading another")
         if self._future is not None:
             raise RuntimeError("finish the background preload before preloading synchronously")
-        cpu_batch = self._load_cpu_batch()
+        cpu_batch = self._prepare_cpu_batch(self._load_cpu_batch())
         self._stage(cpu_batch)
 
     def start_preload(self) -> None:

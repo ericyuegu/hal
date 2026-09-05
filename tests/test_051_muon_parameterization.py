@@ -94,6 +94,30 @@ def test_prepared_o51_data_starts_iterator_before_background_next(monkeypatch) -
     assert events[1][1] != threading.main_thread().ident
 
 
+def test_prefetcher_applies_parent_transforms_once_per_batch() -> None:
+    cfg = _tiny_cfg()
+    batches = [
+        exp.synthetic_awr_batch(cfg, torch.device("cpu")),
+        exp.synthetic_awr_batch(cfg, torch.device("cpu")),
+    ]
+    transformed: list[exp.AWRBatch] = []
+
+    def transform(batch):
+        transformed.append(batch)
+        return batch
+
+    prefetcher = exp.DeviceBatchPrefetcher(batches, cfg, "cpu", transform)
+    try:
+        prefetcher.next()
+        prefetcher.start_preload()
+        prefetcher.finish_preload()
+        prefetcher.next()
+    finally:
+        prefetcher.close()
+
+    assert transformed == batches
+
+
 def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     cfg = exp.TrainConfig()
     replay_ids = tuple(f"replay-{index}" for index in range(cfg.batch_size))
@@ -439,16 +463,19 @@ def test_checkpoint_identity_prevents_o50_or_changed_schedule_resume() -> None:
 def test_older_o51_checkpoint_is_rejected_for_resume_and_evaluation() -> None:
     cfg = exp.config_for("base")
     legacy = exp._checkpoint_config(cfg)
-    legacy["experiment_id"] = "051_correct_parameterization_v4"
-    legacy["reservoir_capacity"] = 4096
+    legacy["experiment_id"] = "051_muon_parameterization_v7"
 
-    with pytest.raises(ValueError, match="unexpected"):
+    with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state(legacy)
-    with pytest.raises(ValueError, match="unexpected"):
+    with pytest.raises(ValueError, match="experiment_id"):
         exp._config_from_eval_state(legacy)
 
 
 def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
+    nonfinite = exp.arm_decision(
+        {"train/loss": math.nan},
+        post_warmup_clip_fraction=0.0,
+    )
     reject = exp.arm_decision(
         {"stability/centered_logit_abs_p999": 65.0},
         post_warmup_clip_fraction=0.0,
@@ -460,6 +487,7 @@ def test_arm_guard_rejects_or_pauses_exact_threshold_violations() -> None:
         },
         post_warmup_clip_fraction=0.0,
     )
+    assert nonfinite == exp.ArmDecision("reject", ("non-finite metrics: ['train/loss']",))
     assert reject.status == "reject"
     assert pause.status == "pause"
 
