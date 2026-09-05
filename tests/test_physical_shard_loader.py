@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+import hal.training.physical_shard_loader as physical_shard_loader
 from hal.training.physical_shard_loader import DecodedShard
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import PhysicalShardReplayLoader
@@ -199,6 +200,53 @@ def test_window_column_order_does_not_change_schema() -> None:
 
     assert tuple(columns) == ("ego_x", "opp_x")
     assert columns["ego_x"].shape == (1, 4, 2)
+
+
+def test_decoded_ctx_pad_remains_scalar(monkeypatch: pytest.MonkeyPatch) -> None:
+    def decode_slices(
+        _compact: Mapping[str, object], ranges: Sequence[tuple[int, int]]
+    ) -> tuple[dict[str, np.ndarray], ...]:
+        return tuple({"value": np.zeros(stop - start, dtype=np.float32)} for start, stop in ranges)
+
+    def make_test_window(
+        sample: dict[str, object],
+        *,
+        ego_prefix: str,
+        start: int,
+        pad: int,
+        length: int,
+        projection: object,
+    ) -> dict[str, np.ndarray]:
+        del ego_prefix, start, pad, length, projection
+        return {"value": np.asarray(sample["value"])}
+
+    monkeypatch.setattr(
+        physical_shard_loader,
+        "decode_policy_world_replay_slices",
+        decode_slices,
+    )
+    monkeypatch.setattr(physical_shard_loader, "make_window", make_test_window)
+    _replay_id, windows = _decode_generation(
+        {
+            "replay_id": "replay-1",
+            "num_frames": 8,
+            "source_schema_version": 7,
+        },
+        task=ShardTask("source", 0, 0, 1),
+        row=0,
+        epoch=0,
+        seed=1,
+        context_length=2,
+        chunk_length=1,
+        windows_per_generation=4,
+        schema_version=7,
+        labels=_no_labels,
+        projection=None,
+    )
+
+    columns = _stack_window_rows((windows,), windows_per_generation=4)
+
+    assert columns["ctx_pad"].shape == (1, 4)
 
 
 def test_replay_buffer_rejects_duplicate_active_identities() -> None:

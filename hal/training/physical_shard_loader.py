@@ -475,7 +475,12 @@ def _decode_generation(
             projection=projection,
         )
         window["ctx_pad"] = np.asarray(0, dtype=np.int64)
-        windows.append({name: np.ascontiguousarray(value) for name, value in window.items()})
+        windows.append(
+            {
+                name: np.asarray(value) if np.ndim(value) == 0 else np.ascontiguousarray(value)
+                for name, value in window.items()
+            }
+        )
     return replay_id, tuple(windows)
 
 
