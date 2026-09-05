@@ -384,7 +384,13 @@ def test_batch_duration_lr_beta_epsilon_and_decay_formulas() -> None:
             "shuffle_algo",
         }
     )
-    assert exp.DEFAULT_REPLAY_SLOTS == 131_072
+    assert exp.REPLAY_SLOTS_BY_TIER == {
+        1: 114_688,
+        2: 131_072,
+        4: 131_072,
+        8: 131_072,
+    }
+    assert defaults.num_workers == 24
     assert exp.scaled_adam_lr(4.25e-4, batch_multiplier=1, duration_multiplier=1) == 4.25e-4
     assert exp.scaled_adam_lr(
         4.25e-4,
@@ -463,7 +469,7 @@ def test_checkpoint_identity_prevents_o50_or_changed_schedule_resume() -> None:
 def test_older_o51_checkpoint_is_rejected_for_resume_and_evaluation() -> None:
     cfg = exp.config_for("base")
     legacy = exp._checkpoint_config(cfg)
-    legacy["experiment_id"] = "051_muon_parameterization_v7"
+    legacy["experiment_id"] = "051_muon_parameterization_v9"
 
     with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state(legacy)

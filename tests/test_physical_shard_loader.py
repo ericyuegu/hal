@@ -323,8 +323,8 @@ def test_count_active_replay_ids_ignores_replaced_generations() -> None:
     assert loader.count_active_replay_ids(("active", "retired", "replacement")) == 2
 
 
-def test_balanced_schedule_has_uniform_exposure_and_a_225_batch_reuse_floor() -> None:
-    capacity = 131_072
+def test_u1_schedule_has_uniform_exposure_and_a_200_batch_reuse_floor() -> None:
+    capacity = 114_688
     batch_size = 512
     schedule = _BalancedReplaySchedule(capacity, batch_size, phases=8, seed=51)
     last_seen = np.full(capacity, -1, dtype=np.int64)
@@ -338,7 +338,7 @@ def test_balanced_schedule_has_uniform_exposure_and_a_225_batch_reuse_floor() ->
         assert np.bincount(slots % 8, minlength=8).tolist() == [64] * 8
         previous = last_seen[slots]
         if np.any(previous >= 0):
-            assert np.min(batch_index - previous[previous >= 0]) >= 225
+            assert np.min(batch_index - previous[previous >= 0]) >= 200
         last_seen[slots] = batch_index
         counts[slots] += 1
         batches = first_pass if batch_index < schedule.pass_batches else second_pass
@@ -358,6 +358,57 @@ def test_balanced_schedule_turns_over_exactly_one_phase_per_batch() -> None:
         exhausted = slots[next_windows[slots] == 8]
         assert len(exhausted) == 64
         next_windows[exhausted] = 0
+
+
+@pytest.mark.parametrize("seed", [0, 3])
+def test_u1_source_wrap_has_no_steady_state_scan_amplification(seed: int) -> None:
+    source_rows = 162_598
+    capacity = 114_688
+    batch_size = 512
+    phases = 8
+    updates = 16_384
+    schedule = _BalancedReplaySchedule(capacity, batch_size, phases, seed ^ 0x51B0FF)
+    next_windows = np.arange(capacity, dtype=np.uint16) % phases
+    replay_by_slot = np.arange(capacity, dtype=np.int32)
+    active = np.zeros(source_rows, dtype=np.bool_)
+    active[:capacity] = True
+    last_selected = np.full(source_rows, -1, dtype=np.int32)
+    scans = np.empty(updates, dtype=np.int32)
+    minimum_replay_age = updates
+    cursor = capacity
+
+    for update in range(updates):
+        slots = schedule.next()
+        replay_ids = replay_by_slot[slots]
+        assert len(np.unique(replay_ids)) == batch_size
+        previous = last_selected[replay_ids]
+        if np.any(previous >= 0):
+            minimum_replay_age = min(minimum_replay_age, int(np.min(update - previous[previous >= 0])))
+        last_selected[replay_ids] = update
+
+        next_windows[slots] += 1
+        exhausted = slots[next_windows[slots] == phases]
+        active[replay_by_slot[exhausted]] = False
+        replacements = np.empty(len(exhausted), dtype=np.int32)
+        admitted = 0
+        scanned = 0
+        while admitted < len(exhausted):
+            replay_id = cursor % source_rows
+            cursor += 1
+            scanned += 1
+            if active[replay_id]:
+                continue
+            active[replay_id] = True
+            replacements[admitted] = replay_id
+            admitted += 1
+        replay_by_slot[exhausted] = replacements
+        next_windows[exhausted] = 0
+        scans[update] = scanned
+
+    expected_turnover = batch_size // phases
+    assert minimum_replay_age >= 200
+    assert int(scans.max()) <= 3 * expected_turnover
+    np.testing.assert_array_equal(scans[4096:], np.full(updates - 4096, expected_turnover))
 
 
 class _FakeAdapter:
@@ -500,6 +551,9 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
         "buffer_geometry",
     }
     assert not any(isinstance(value, np.ndarray) for value in state.values())
+    old_protocol = {**state, "data_protocol": "test-physical-shard-v0"}
+    with pytest.raises(ValueError, match="data protocol"):
+        _loader(seed=17, rows=20).load_state_dict(old_protocol)
     expected = [next(original_iterator) for _ in range(32)]
 
     restored = _loader(seed=17, rows=20)
@@ -522,6 +576,7 @@ def test_every_batch_contains_distinct_replay_ids() -> None:
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 4
         duplicate_generations += loader.metrics["data/duplicate_generations"]
+        assert loader.metrics["data/generations_read"] == loader.generations_read
 
     assert duplicate_generations > 0
 

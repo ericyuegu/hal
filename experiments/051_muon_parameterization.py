@@ -150,7 +150,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID: Final[str] = "051_muon_parameterization_v9"
+_EXPERIMENT_ID: Final[str] = "051_muon_parameterization_v10"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -171,7 +171,7 @@ PLAYER_VOCAB_SHA256 = "c67c97c995ad033ea7f5b2223efce5b061394566439f091ff6e7aaa6a
 PLAYER_VOCAB_SIZE = 21_181
 PLAYER_EMBED_DIM = 32
 TRAIN_REPLAYS = 1_300_640
-DATA_PROTOCOL: Final[str] = "o51-balanced-replay-v5"
+DATA_PROTOCOL: Final[str] = "o51-balanced-replay-v6"
 D0: Final[int] = 2**30
 _TRUNK_BASE_LAYERS: Final[int] = 8
 _TEMPORAL_BASE_LAYERS: Final[int] = 2
@@ -367,7 +367,7 @@ class TrainConfig:
     download_retry: ClassVar[int] = 8
     loader_timeout_s: float = 300.0
     val_split: str = "val"
-    num_workers: int = 16
+    num_workers: int = 24
     push_to_r2: bool = True
     system_metrics_every: int = 25
     system_metrics_interval_s: float = 5.0
@@ -3591,7 +3591,7 @@ class Treatment:
     muon_duration_scaling: Literal["fixed", "inverse-sqrt"] = "fixed"
     compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
     temporal_attention_chunk: int | None = 16_384
-    num_workers: int = 16
+    num_workers: int = 24
 
     def __post_init__(self) -> None:
         positive_floats = {
@@ -4686,7 +4686,12 @@ def select(args: SelectArgs) -> None:
 
 
 WINDOWS_PER_GENERATION: Final[int] = 8
-DEFAULT_REPLAY_SLOTS: Final[int] = 131_072
+REPLAY_SLOTS_BY_TIER: Final[dict[int, int]] = {
+    1: 114_688,
+    2: 131_072,
+    4: 131_072,
+    8: 131_072,
+}
 RESERVED_DISK_BYTES: Final[int] = 256 * 2**30
 O51_EXTRA_COLUMNS: Final[ExtraColumns] = ExtraColumns(
     floats=ITEM_COLUMNS.floats,
@@ -5475,7 +5480,7 @@ def _make_train_loader(
             context_length=cfg.arch.L_ctx,
         ),
         batch_size=cfg.batch_size,
-        replay_slots=DEFAULT_REPLAY_SLOTS,
+        replay_slots=REPLAY_SLOTS_BY_TIER[cfg.tier_scale],
         seed=cfg.seed,
         num_workers=cfg.num_workers,
         labels=ParameterizationReplayLabels(
@@ -5728,7 +5733,7 @@ def _log_training_summary(
     summary["data/windows_per_replay"] = cfg.target_positions / (128 * unique_replays)
     summary["data/D_over_N"] = cfg.target_positions / parameter_counts["total"]
     summary["data/valid_positions_per_update"] = cfg.batch_size * _SUPERVISED_POSITIONS_PER_WINDOW
-    summary["data/replay_slots"] = min(DEFAULT_REPLAY_SLOTS, unique_replays)
+    summary["data/replay_slots"] = min(REPLAY_SLOTS_BY_TIER[cfg.tier_scale], unique_replays)
     summary["data/generation_windows"] = WINDOWS_PER_GENERATION
     summary["data/loader_prefetch_factor"] = PREFETCH_FACTOR
     summary["data/source_mixing"] = "identity_uniform_dense_shards"
@@ -6028,7 +6033,7 @@ def describe() -> dict[str, object]:
         "loader_grid": {
             "workers": LOADER_WORKERS,
             "prefetch_factor": PREFETCH_FACTOR,
-            "replay_slots": DEFAULT_REPLAY_SLOTS,
+            "replay_slots_by_tier": REPLAY_SLOTS_BY_TIER,
             "windows_per_generation": WINDOWS_PER_GENERATION,
             "order": "stable_keyed_shards_and_balanced_slot_passes",
             "minimum_replay_gap_batches": MIN_REPLAY_GAP_BATCHES,
@@ -6413,7 +6418,7 @@ class LoaderBenchmarkArgs:
     level: Literal["base", "proxy", "mid"] = "mid"
     tier_scale: Literal[1, 2, 4, 8] = 8
     batch_size: Literal[128, 256, 512, 1024] = 512
-    num_workers: Literal[8, 16, 24, 32] = 16
+    num_workers: Literal[8, 16, 24, 32] = 24
     warmup_batches: int = 20_480
     measured_batches: int = 1_000
 

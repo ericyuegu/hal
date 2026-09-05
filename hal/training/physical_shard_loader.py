@@ -1296,7 +1296,9 @@ class PhysicalShardReplayLoader[BatchT]:
 
     @property
     def metrics(self) -> dict[str, float]:
-        return dict(self._buffer.last_metrics)
+        metrics = dict(self._buffer.last_metrics)
+        metrics["data/generations_read"] = float(self._generations_read)
+        return metrics
 
     @property
     def buffer_bytes(self) -> int:

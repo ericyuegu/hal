@@ -44,7 +44,7 @@
         "val_split", "wandb_log_code", "warmup_steps", "weight_hist_every"
       ],
       "config_round_trip": true,
-      "config_sha256": "009dfe2da5b78846a2b76542db94eaf55beab7db9089fe81fe1a9c7fd8033560",
+      "config_sha256": "765b3cb6b31f1bdac9dd746f21b39601f4a99c3022d0b8638b035c63151f5d49",
       "loader_descriptor": {
         "epoch": 3,
         "locator": {"row": 11, "shard": 7, "source": "source"},
@@ -70,7 +70,7 @@
       },
       "decay_grid": [0.0, 0.001, 0.01],
       "depth_alpha": [0.5, 1.0],
-      "experiment": "051_muon_parameterization_v9",
+      "experiment": "051_muon_parameterization_v10",
       "initialization": {
         "hidden_std_multiplier": [0.5, 1.0, 2.0],
         "readout": ["zero", "mup-normal"]
@@ -79,7 +79,7 @@
         "minimum_replay_gap_batches": 200,
         "order": "stable_keyed_shards_and_balanced_slot_passes",
         "prefetch_factor": 2,
-        "replay_slots": 131072,
+        "replay_slots_by_tier": {"1": 114688, "2": 131072, "4": 131072, "8": 131072},
         "windows_per_generation": 8,
         "workers": [8, 16, 24, 32]
       },
@@ -133,7 +133,7 @@
     },
     "sweep": {
       "arm_counts": {"batch": 8, "decay": 9, "duration": 6, "initialization-extension": 1, "initialization-screen": 6, "lr": 9, "mid-search": 9, "proxy-transfer": 2, "seed-repeat": 2},
-      "arms_sha256": "3448f4af0e55c531e734867ade37fc7c1295498bad508a96e62222f5b4c8b564",
+      "arms_sha256": "292509b95d3a894338f965a9acc1b4d94b1494f81ea5bfeebf338f24c885e0b7",
       "closed_loop_ranking": ["o51-lr-m0p007-a0p00010625", "o51-lr-m0p007-a0p0002125"],
       "closed_loop_winner": "o51-lr-m0p007-a0p00010625",
       "validation_ranking": ["o51-lr-m0p007-a0p0002125", "o51-lr-m0p007-a0p00010625", "o51-lr-m0p007-a0p000425"],
