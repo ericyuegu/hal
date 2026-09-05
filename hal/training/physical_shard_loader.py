@@ -953,33 +953,38 @@ class ReplayBuffer:
         for name, values in shard.columns.items():
             self.columns[name] = np.empty((self.capacity, *values.shape[1:]), dtype=values.dtype)
 
-    def admit_rows(self, rows: _DecodedRows, slots: np.ndarray, *, stagger: bool) -> None:
-        """Copy a contiguous decoded row range into the selected empty slots."""
-        shard = rows.shard
+    def _admit(
+        self,
+        shard: DecodedShard,
+        selector: slice | np.ndarray,
+        replay_ids: tuple[str, ...],
+        locators: tuple[PhysicalRow, ...],
+        slots: np.ndarray,
+        *,
+        stagger: bool,
+    ) -> None:
         if shard.windows_per_generation != self.windows_per_generation:
             raise ValueError("decoded shard does not match replay-buffer window geometry")
         self._initialize_columns(shard)
         if set(self.columns) != set(shard.columns):
             raise ValueError("decoded shard columns changed after buffer allocation")
         slots = np.asarray(slots, dtype=np.int64)
-        if slots.shape != (rows.count,) or len(np.unique(slots)) != rows.count:
+        if slots.shape != (len(replay_ids),) or len(np.unique(slots)) != len(replay_ids):
             raise ValueError("destination slots do not match decoded rows")
         if np.any(slots < 0) or np.any(slots >= self.capacity):
             raise ValueError("destination slot is outside the replay buffer")
         if any(self.replay_ids[int(slot)] is not None for slot in slots):
             raise RuntimeError("destination replay slot is already occupied")
-        replay_ids = shard.replay_ids[rows.start : rows.stop]
         if len(set(replay_ids)) != len(replay_ids):
             raise ValueError("decoded rows repeat a replay identity")
         duplicate = next((replay_id for replay_id in replay_ids if replay_id in self.identity_slots), None)
         if duplicate is not None:
             raise ValueError(f"replay identity {duplicate!r} is already active")
         for name, destination in self.columns.items():
-            source = shard.columns[name][rows.start : rows.stop]
+            source = shard.columns[name][selector]
             if source.shape[1:] != destination.shape[1:] or source.dtype != destination.dtype:
                 raise ValueError(f"decoded column {name!r} does not match the central buffer")
             destination[slots] = source
-        locators = shard.locators[rows.start : rows.stop]
         for slot_value, replay_id, locator in zip(slots, replay_ids, locators, strict=True):
             slot = int(slot_value)
             self.replay_ids[slot] = replay_id
@@ -990,7 +995,69 @@ class ReplayBuffer:
         # all replacement generations consume every window from ordinal zero.
         self.next_windows[slots] = slots % self.windows_per_generation if stagger else 0
         self.last_selected_batches[slots] = -1
-        self._size += rows.count
+        self._size += len(replay_ids)
+
+    def admit_rows(self, rows: _DecodedRows, slots: np.ndarray, *, stagger: bool) -> None:
+        """Copy a contiguous decoded row range into the selected empty slots."""
+        selector = slice(rows.start, rows.stop)
+        self._admit(
+            rows.shard,
+            selector,
+            rows.shard.replay_ids[selector],
+            rows.shard.locators[selector],
+            slots,
+            stagger=stagger,
+        )
+
+    def replacement_indices(self, rows: _DecodedRows) -> tuple[np.ndarray, int]:
+        """Select rows whose earlier-epoch generation is no longer active."""
+        accepted: list[int] = []
+        seen: set[str] = set()
+        skipped = 0
+        for row in range(rows.start, rows.stop):
+            replay_id = rows.shard.replay_ids[row]
+            if replay_id in seen:
+                raise ValueError("decoded rows repeat a replay identity")
+            seen.add(replay_id)
+            active_slot = self.identity_slots.get(replay_id)
+            if active_slot is None:
+                accepted.append(row)
+                continue
+            active_epoch = int(self.epochs[active_slot])
+            if rows.shard.epoch <= active_epoch:
+                raise ValueError(f"replay identity {replay_id!r} repeats within a source epoch")
+            skipped += 1
+        return np.asarray(accepted, dtype=np.int64), skipped
+
+    def admit_replacement_indices(
+        self,
+        shard: DecodedShard,
+        row_indices: np.ndarray,
+        slots: np.ndarray,
+    ) -> None:
+        row_indices = np.asarray(row_indices, dtype=np.int64)
+        if row_indices.ndim != 1 or not len(row_indices):
+            raise ValueError("replacement row selection must not be empty")
+        if len(np.unique(row_indices)) != len(row_indices):
+            raise ValueError("replacement row indices must be unique")
+        if np.any(row_indices < 0) or np.any(row_indices >= len(shard.replay_ids)):
+            raise ValueError("replacement row index is outside its shard")
+        if np.array_equal(row_indices, np.arange(row_indices[0], row_indices[-1] + 1)):
+            start = int(row_indices[0])
+            stop = int(row_indices[-1]) + 1
+            selector: slice | np.ndarray = slice(start, stop)
+            replay_ids = shard.replay_ids[start:stop]
+            locators = shard.locators[start:stop]
+        else:
+            selector = row_indices
+            replay_ids = tuple(shard.replay_ids[int(row)] for row in row_indices)
+            locators = tuple(shard.locators[int(row)] for row in row_indices)
+        self._admit(shard, selector, replay_ids, locators, slots, stagger=False)
+
+    def record_duplicate_generations(self, count: int) -> None:
+        if count < 0:
+            raise ValueError("duplicate generation count must be non-negative")
+        self.last_metrics["data/duplicate_generations"] += float(count)
 
     def append_rows(self, rows: _DecodedRows) -> None:
         stop = self.size + rows.count
@@ -1211,11 +1278,11 @@ class PhysicalShardReplayLoader[BatchT]:
         self._selection_hash = selection.sha256
         self._cursor: tuple[int, int, int] = (0, 0, 0)
         self._buffer = ReplayBuffer(replay_slots, batch_size, windows_per_generation, seed ^ 0x51B0FF)
-        # The source must not wrap while any generation of that row can remain live.
-        maximum_live_rows = replay_slots + batch_size * (self._buffer.schedule.shuffle_block_batches - 1)
-        if selection.row_count <= maximum_live_rows:
+        # Keep one shuffle block outside the buffer before an identity can return.
+        minimum_source_rows = replay_slots + batch_size * (self._buffer.schedule.shuffle_block_batches - 1)
+        if selection.row_count <= minimum_source_rows:
             raise ValueError(
-                "source selection is too small to prevent a replay from returning while its prior generation is live"
+                "source selection is too small to keep retired replay identities out for one shuffle block"
             )
         self._resume_descriptors: tuple[GenerationDescriptor, ...] | None = None
         self._resume_sampler_state: Mapping[str, object] | None = None
@@ -1374,11 +1441,20 @@ class PhysicalShardReplayLoader[BatchT]:
         transformed = self.batch_transform(replay_ids, columns)
         self._buffer.retire(exhausted)
         replaced = 0
+        scanned_without_admission = 0
         while replaced < len(exhausted):
             rows = iterator.take_rows(len(exhausted) - replaced)
-            slots = exhausted[replaced : replaced + rows.count]
-            self._buffer.admit_rows(rows, slots, stagger=False)
-            replaced += rows.count
+            row_indices, skipped = self._buffer.replacement_indices(rows)
+            self._buffer.record_duplicate_generations(skipped)
+            if not len(row_indices):
+                scanned_without_admission += rows.count
+                if scanned_without_admission >= self.selection.row_count:
+                    raise RuntimeError("source selection has no inactive replay identity for replacement")
+                continue
+            slots = exhausted[replaced : replaced + len(row_indices)]
+            self._buffer.admit_replacement_indices(rows.shard, row_indices, slots)
+            replaced += len(row_indices)
+            scanned_without_admission = 0
         if not self.pin_memory:
             return transformed
         pin_memory = getattr(transformed, "pin_memory", None)

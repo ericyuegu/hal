@@ -257,6 +257,19 @@ def test_replay_buffer_rejects_duplicate_active_identities() -> None:
         buffer.append_rows(_DecodedRows(shard, 0, 4))
 
 
+def test_replay_buffer_skips_only_later_epoch_active_generations() -> None:
+    buffer = ReplayBuffer(capacity=4, batch_size=4, windows_per_generation=4, seed=9)
+    buffer.append_rows(_DecodedRows(_decoded(("a", "b", "c", "d")), 0, 4))
+
+    with pytest.raises(ValueError, match="repeats within a source epoch"):
+        buffer.replacement_indices(_DecodedRows(_decoded(("a",)), 0, 1))
+
+    indices, skipped = buffer.replacement_indices(_DecodedRows(_decoded(("a",), epoch=1), 0, 1))
+
+    assert indices.tolist() == []
+    assert skipped == 1
+
+
 def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
     replay_ids = tuple(f"replay-{index}" for index in range(1024))
     buffer = ReplayBuffer(capacity=len(replay_ids), batch_size=512, windows_per_generation=4, seed=10)
@@ -430,8 +443,13 @@ def _collate_batch(replay_ids: tuple[str, ...], columns: Mapping[str, np.ndarray
     return _Batch(replay_ids, torch.from_numpy(columns["ego_main_stick_x"].copy()))
 
 
-def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> PhysicalShardReplayLoader[_Batch]:
-    rows = 64
+def _loader(
+    seed: int,
+    *,
+    rows: int = 64,
+    workers: int = 0,
+    delayed: bool = False,
+) -> PhysicalShardReplayLoader[_Batch]:
     selection = PhysicalShardSelection(
         sources=(SourceRowSelection("source", rows),),
         sha256="b" * 64,
@@ -466,9 +484,9 @@ def _loader(seed: int, *, workers: int = 0, delayed: bool = False) -> PhysicalSh
 
 
 def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
-    original = _loader(seed=17)
+    original = _loader(seed=17, rows=20)
     original_iterator = iter(original)
-    for _ in range(7):
+    for _ in range(15):
         next(original_iterator)
     state = original.state_dict()
     assert set(state) == {
@@ -484,7 +502,7 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
     assert not any(isinstance(value, np.ndarray) for value in state.values())
     expected = [next(original_iterator) for _ in range(32)]
 
-    restored = _loader(seed=17)
+    restored = _loader(seed=17, rows=20)
     restored.load_state_dict(state)
     restored_iterator = iter(restored)
     actual = [next(restored_iterator) for _ in range(32)]
@@ -495,13 +513,17 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
 
 
 def test_every_batch_contains_distinct_replay_ids() -> None:
-    loader = _loader(seed=31)
+    loader = _loader(seed=31, rows=20)
     iterator = iter(loader)
+    duplicate_generations = 0.0
 
-    for _ in range(40):
+    for _ in range(80):
         batch = next(iterator)
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 4
+        duplicate_generations += loader.metrics["data/duplicate_generations"]
+
+    assert duplicate_generations > 0
 
 
 def test_delayed_workers_and_worker_count_change_preserve_exact_resume() -> None:
