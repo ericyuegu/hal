@@ -2,7 +2,6 @@
 
 import datetime as dt
 import json
-import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -11,24 +10,17 @@ from typing import Any
 import tyro
 from loguru import logger
 
+from hal import r2
 from hal.data.bounded_writer import rclone_copyto
 
 
-def _run(*args: str) -> str:
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
-    if result.returncode:
-        detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f"{' '.join(args)} failed: {detail}")
-    return result.stdout
-
-
 def _objects(prefix: str) -> dict[str, dict[str, Any]]:
-    rows = json.loads(_run("rclone", "lsjson", prefix, "--recursive", "--files-only", "--hash"))
+    rows = json.loads(r2.run_rclone("lsjson", prefix, "--recursive", "--files-only", "--hash"))
     return {str(row["Path"]): row for row in rows}
 
 
 def _cat_json(path: str) -> dict[str, Any]:
-    return json.loads(_run("rclone", "cat", path))
+    return json.loads(r2.run_rclone("cat", path))
 
 
 def audit(prefix: str) -> dict[str, Any]:
@@ -71,7 +63,7 @@ def audit(prefix: str) -> dict[str, Any]:
         raise ValueError(f"{prefix}: projection rows {projected} != indexes {rows_by_split}")
     with tempfile.TemporaryDirectory(prefix="hal-audit-") as temp:
         manifest = Path(temp) / "manifest.jsonl"
-        _run("rclone", "copyto", f"{prefix.rstrip('/')}/manifest.jsonl", str(manifest))
+        r2.copy_file(f"{prefix.rstrip('/')}/manifest.jsonl", manifest)
         manifest_rows: dict[str, list[int]] = {"train": [], "val": [], "test": []}
         with manifest.open() as handle:
             for line in handle:
@@ -112,7 +104,7 @@ def publish_mds(
         raise FileExistsError(f"final prefix is not empty: {final}")
     run_audit = audit if audit_fn is None else audit_fn
     before = run_audit(staging)
-    _run("rclone", "copy", staging, final, "--immutable", "--server-side-across-configs")
+    r2.run_rclone("copy", staging, final, "--immutable", "--server-side-across-configs")
     after = run_audit(final)
     if after != before:
         raise ValueError(f"published audit differs: staging={before}, final={after}")
@@ -128,7 +120,7 @@ def publish_mds(
         marker.write_text(json.dumps(success, indent=2, sort_keys=True) + "\n")
         rclone_copyto(marker, f"{final.rstrip('/')}/_SUCCESS")
     if purge_staging:
-        _run("rclone", "purge", staging)
+        r2.run_rclone("purge", staging)
     logger.info(f"published {staging} -> {final}: {after}")
 
 

@@ -22,14 +22,12 @@ def test_audit_accepts_an_index_referencing_raw_shards(tmp_path: Path, monkeypat
         lambda path: index if path.endswith("index.json") else {"rows": {"train": 1, "val": 1, "test": 1}},
     )
 
-    def run(*args: str) -> str:
-        assert args[:2] == ("rclone", "copyto")
-        destination = Path(args[3])
+    def copy_file(source: str, destination: Path) -> None:
+        assert source.endswith("/manifest.jsonl")
         rows = [{"annotation": {"split": split, "mds_row_idx": 0}} for split in ("train", "val", "test")]
         destination.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-        return ""
 
-    monkeypatch.setattr(module, "_run", run)
+    monkeypatch.setattr(module.r2, "copy_file", copy_file)
 
     result = module.audit("r2:test/raw")
 

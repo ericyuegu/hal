@@ -8,7 +8,6 @@ writer with a bounded queue.
 """
 
 import shutil
-import subprocess
 from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
@@ -16,6 +15,7 @@ from typing import Any
 
 from streaming import MDSWriter
 
+from hal import r2
 from hal.data.streaming_compat import require_supported_streaming
 
 
@@ -79,15 +79,7 @@ class BoundedMDSWriter(MDSWriter):
 
 
 def rclone_copyto(local: Path, destination: str) -> None:
-    result = subprocess.run(
-        ["rclone", "copyto", str(local), destination, "--retries", "5", "--low-level-retries", "10"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode:
-        detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f"rclone upload failed for {destination}: {detail}")
+    r2.copy_file(local, destination)
 
 
 class _RcloneUploader:
