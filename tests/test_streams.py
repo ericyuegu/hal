@@ -19,6 +19,22 @@ def test_policy_world_manifest_has_the_verified_natural_mix() -> None:
     assert sum(streams.POLICY_WORLD_V7_TRAIN_FRAMES.values()) == 13_292_693_140
 
 
+def test_policy_world_v8_manifest_has_the_verified_natural_mix() -> None:
+    names = {source.name for source in streams.POLICY_WORLD_V8_SOURCES}
+
+    assert len(streams.POLICY_WORLD_V8_SOURCES) == len(names) == 44
+    assert names == set(streams.POLICY_WORLD_V8_TRAIN_REPLAYS)
+    assert names == set(streams.POLICY_WORLD_V8_TRAIN_FRAMES)
+    assert sum(streams.POLICY_WORLD_V8_TRAIN_REPLAYS.values()) == 1_295_370
+    assert sum(streams.POLICY_WORLD_V8_TRAIN_FRAMES.values()) == 13_266_364_175
+
+    ranked_one = streams.RANKED_ANONYMIZED_POLICY_WORLD_V8[0]
+    assert ranked_one.name == "ranked-anonymized-1-policy-world-v8"
+    assert ranked_one.remote == "s3://hal/processed/ranked-anonymized-1/mds-policy-world-v8"
+    assert ranked_one.local == Path("data/processed/ranked-anonymized-1/mds-policy-world-v8")
+    assert ranked_one in streams.ALL
+
+
 def test_stats_loader_pulls_only_selected_registered_stream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

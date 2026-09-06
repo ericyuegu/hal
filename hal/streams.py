@@ -279,11 +279,121 @@ POLICY_WORLD_V7_TRAIN_FRAMES: Final[dict[str, int]] = {
     },
 }
 
-_policy_world_names = {source.name for source in POLICY_WORLD_V7_SOURCES}
-if set(POLICY_WORLD_V7_TRAIN_REPLAYS) != _policy_world_names:
-    raise RuntimeError("policy-world replay counts do not cover the registered source set")
-if set(POLICY_WORLD_V7_TRAIN_FRAMES) != _policy_world_names:
-    raise RuntimeError("policy-world frame counts do not cover the registered source set")
+# Verified against the immutable train splits on R2 on 2026-09-06.
+POLICY_WORLD_V8_TRAIN_REPLAYS: Final[dict[str, int]] = {
+    **{
+        f"ranked-anonymized-{rank}-policy-world-v8": count
+        for rank, count in enumerate((112_188, 146_455, 124_398, 143_465, 128_830, 166_189), start=1)
+    },
+    **{
+        f"professional-{slug}-policy-world-v8": count
+        for slug, count in {
+            "aklo": 18_820,
+            "amsa": 23_641,
+            "axe": 1_604,
+            "billybopeep": 749,
+            "bobbybigballz": 2_521,
+            "cody": 62_189,
+            "cookbook": 20_103,
+            "daniel": 7_984,
+            "desertsnoopy": 26_728,
+            "druggedfox": 436,
+            "fknsilver": 5_503,
+            "franz": 15_159,
+            "frenzy": 19_640,
+            "friend": 8_433,
+            "ginger": 20_062,
+            "gosu": 20_314,
+            "grab2win": 5_624,
+            "iliketurtles": 14_667,
+            "isdsar": 5_528,
+            "jchu": 3_235,
+            "jahridin": 25_987,
+            "kjh": 2_172,
+            "kodorin": 8_677,
+            "krudo": 9_577,
+            "m2k": 7_892,
+            "mang0": 30_157,
+            "mof": 1_225,
+            "monotheon": 16_301,
+            "nicki": 2_482,
+            "rapm": 604,
+            "redx": 1_424,
+            "siddward": 16_208,
+            "solobattle": 26_915,
+            "technospider": 4_442,
+            "trif": 13_872,
+            "uhhei": 6_888,
+            "ycz": 7_358,
+            "zain": 8_724,
+        }.items()
+    },
+}
+
+POLICY_WORLD_V8_TRAIN_FRAMES: Final[dict[str, int]] = {
+    **{
+        f"ranked-anonymized-{rank}-policy-world-v8": count
+        for rank, count in enumerate(
+            (1_203_888_017, 1_575_627_575, 1_302_230_197, 1_519_295_587, 1_367_018_722, 1_771_263_420),
+            start=1,
+        )
+    },
+    **{
+        f"professional-{slug}-policy-world-v8": count
+        for slug, count in {
+            "aklo": 169_867_381,
+            "amsa": 199_244_133,
+            "axe": 15_834_068,
+            "billybopeep": 6_773_698,
+            "bobbybigballz": 23_245_358,
+            "cody": 543_859_859,
+            "cookbook": 201_932_010,
+            "daniel": 87_158_051,
+            "desertsnoopy": 262_588_671,
+            "druggedfox": 3_786_376,
+            "fknsilver": 65_291_666,
+            "franz": 145_977_828,
+            "frenzy": 186_046_660,
+            "friend": 95_700_935,
+            "ginger": 171_176_830,
+            "gosu": 171_283_798,
+            "grab2win": 60_667_361,
+            "iliketurtles": 136_304_585,
+            "isdsar": 47_972_508,
+            "jchu": 36_145_258,
+            "jahridin": 252_442_071,
+            "kjh": 20_910_975,
+            "kodorin": 82_658_337,
+            "krudo": 92_484_831,
+            "m2k": 74_365_699,
+            "mang0": 273_478_132,
+            "mof": 12_084_681,
+            "monotheon": 164_767_418,
+            "nicki": 24_006_093,
+            "rapm": 6_168_038,
+            "redx": 18_306_310,
+            "siddward": 157_351_234,
+            "solobattle": 253_644_935,
+            "technospider": 52_286_514,
+            "trif": 146_230_291,
+            "uhhei": 83_719_769,
+            "ycz": 80_696_353,
+            "zain": 100_581_942,
+        }.items()
+    },
+}
+
+_policy_world_v7_names = {source.name for source in POLICY_WORLD_V7_SOURCES}
+if set(POLICY_WORLD_V7_TRAIN_REPLAYS) != _policy_world_v7_names:
+    raise RuntimeError("policy-world v7 replay counts do not cover the registered source set")
+if set(POLICY_WORLD_V7_TRAIN_FRAMES) != _policy_world_v7_names:
+    raise RuntimeError("policy-world v7 frame counts do not cover the registered source set")
+
+_policy_world_v8_names = {source.name for source in POLICY_WORLD_V8_SOURCES}
+if set(POLICY_WORLD_V8_TRAIN_REPLAYS) != _policy_world_v8_names:
+    raise RuntimeError("policy-world v8 replay counts do not cover the registered source set")
+if set(POLICY_WORLD_V8_TRAIN_FRAMES) != _policy_world_v8_names:
+    raise RuntimeError("policy-world v8 frame counts do not cover the registered source set")
 
 # v5 and v6 stay registered: the frozen experiments still read them.
 ALL: Final[tuple[StreamSource, ...]] = (
