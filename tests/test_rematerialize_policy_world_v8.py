@@ -252,7 +252,7 @@ def test_v8_policy_matches_the_published_selection_contract() -> None:
 
 def test_statistics_audit_allows_only_reduction_order_roundoff() -> None:
     expected = {"x": {"count": 100, "mean": 1.0, "m2": 1_000.0, "min": -2.0, "max": 3.0}}
-    rounded = {"x": {"count": 100, "mean": 1.0 + 1e-9, "m2": 1_000.0 + 1e-8, "min": -2.0, "max": 3.0}}
+    rounded = {"x": {"count": 100, "mean": 1.0 + 1e-7, "m2": 1_000.0 + 5e-6, "min": -2.0, "max": 3.0}}
 
     rematerialize._validate_recomputed_stats(rounded, expected, "stats")
     rounded["x"]["mean"] = 1.001

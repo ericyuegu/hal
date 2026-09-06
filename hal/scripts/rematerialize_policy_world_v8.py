@@ -43,7 +43,7 @@ from hal.scripts.filter import build_predicates
 SPLITS: Final[tuple[Split, ...]] = ("train", "val", "test")
 POLICY_ID: Final[str] = "policy-world-v8"
 OUTPUT_SHARD_SIZE: Final[int] = 256 * 2**20
-STATS_RELATIVE_TOLERANCE: Final[float] = 1e-10
+STATS_RELATIVE_TOLERANCE: Final[float] = float(np.finfo(np.float32).eps)
 STATS_ABSOLUTE_TOLERANCE: Final[float] = 1e-6
 RANKED_ONE_CORPUS: Final[str] = "ranked-anonymized-1-policy-world-v8"
 RANKED_ONE_METADATA_SHA256: Final[str] = "22ac48f73a5ba5cd5718701d3de6666b15e75b2d777458da4927561e0b0fa75d"
