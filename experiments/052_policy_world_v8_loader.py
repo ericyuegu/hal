@@ -18,7 +18,9 @@ import resource
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -65,6 +67,10 @@ _CONTEXT = 256
 _CHUNK = 20
 _CACHE_LIMIT = 4 * 2**30
 _WINDOWS_PER_GENERATION = 8
+_CGROUP_MEMORY_PATHS = (
+    Path("/sys/fs/cgroup/memory.current"),
+    Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+)
 
 
 def _git_sha() -> str:
@@ -364,10 +370,12 @@ def _batch_hash(batch: TrainBatch) -> str:
 
 
 def _cgroup_memory() -> int:
-    try:
-        return int(Path("/sys/fs/cgroup/memory.current").read_text())
-    except FileNotFoundError, ValueError:
-        return 0
+    for path in _CGROUP_MEMORY_PATHS:
+        try:
+            return int(path.read_text())
+        except FileNotFoundError, ValueError:
+            continue
+    return 0
 
 
 def _network_bytes() -> int:
@@ -470,12 +478,31 @@ def _percentiles(values: list[float], prefix: str) -> dict[str, float]:
     }
 
 
+def _start_loader(loader: Iterable[TrainBatch]) -> tuple[Iterator[TrainBatch], TrainBatch, float]:
+    started = time.monotonic()
+    iterator = iter(loader)
+    batch = next(iterator)
+    return iterator, batch, time.monotonic() - started
+
+
+def _next_batch(
+    loader: Iterable[TrainBatch],
+    iterator: Iterator[TrainBatch],
+) -> tuple[Iterator[TrainBatch], TrainBatch]:
+    try:
+        return iterator, next(iterator)
+    except StopIteration:
+        iterator = iter(loader)
+        return iterator, next(iterator)
+
+
 def benchmark_condition(
     name: str,
     loader: Iterable[TrainBatch],
     args: Args,
     *,
     cache_root: Path,
+    progress: Callable[[int], None] | None = None,
 ) -> tuple[dict[str, object], list[dict[str, float]]]:
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -488,22 +515,19 @@ def benchmark_condition(
     losses: list[float] = []
     gradients: list[float] = []
     with ResourceSampler(cache_root) as resources:
-        iterator = iter(loader)
-        started = time.monotonic()
-        batch = next(iterator)
-        first_batch_s = time.monotonic() - started
+        iterator, batch, first_batch_s = _start_loader(loader)
         for _ in range(args.warmup_updates):
             loss, gradient = _update(model, optimizer, batch, torch.device("cuda"))
             if not np.isfinite(loss) or not np.isfinite(gradient):
                 raise FloatingPointError(f"{name}: warmup produced non-finite loss or gradient")
-            batch = next(iterator)
+            iterator, batch = _next_batch(loader, iterator)
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         resources.mark_steady_state()
         for update in range(args.measured_updates):
             update_started = time.monotonic()
             wait_started = update_started
-            batch = next(iterator)
+            iterator, batch = _next_batch(loader, iterator)
             loader_wait_s = time.monotonic() - wait_started
             loss, gradient = _update(model, optimizer, batch, torch.device("cuda"))
             torch.cuda.synchronize()
@@ -517,6 +541,8 @@ def benchmark_condition(
             )
             losses.append(loss)
             gradients.append(gradient)
+            if progress is not None and (update + 1) % 100 == 0:
+                progress(update + 1)
         resource_metrics = resources.metrics()
 
     waits = [row["loader_wait_s"] for row in timings]
@@ -652,17 +678,43 @@ def run(args: Args) -> dict[str, object]:
         name=f"policy-world-v8-w{args.num_workers}-r{args.repetition}",
         config=asdict(args),
     )
+    run.define_metric("global_step")
+    run.define_metric("*", step_metric="global_step")
     resume_exact = verify_treatment_resume(args, data)
     conditions: dict[str, dict[str, object]] = {}
     raw_timings: dict[str, list[dict[str, float]]] = {}
-    for name, loader, cache in (
-        ("control", make_control_loader(args, data), Path("data/processed")),
-        ("treatment", make_treatment_loader(args, data), args.cache_root / "mds"),
+    for condition_index, (name, loader, cache) in enumerate(
+        (
+            ("control", make_control_loader(args, data), Path("data/processed")),
+            ("treatment", make_treatment_loader(args, data), args.cache_root / "mds"),
+        )
     ):
-        metrics, timings = benchmark_condition(name, loader, args, cache_root=cache)
+        step_offset = condition_index * args.measured_updates
+
+        def report_progress(update: int, *, offset: int = step_offset, condition: str = name) -> None:
+            run.log(
+                {
+                    "global_step": offset + update,
+                    "condition": condition,
+                    f"{condition}/measured_update": update,
+                }
+            )
+
+        metrics, timings = benchmark_condition(
+            name,
+            loader,
+            args,
+            cache_root=cache,
+            progress=report_progress,
+        )
         conditions[name] = metrics
         raw_timings[name] = timings
-        run.log({f"{name}/{key}": value for key, value in metrics.items() if isinstance(value, int | float)})
+        run.log(
+            {
+                "global_step": step_offset + args.measured_updates,
+                **{f"{name}/{key}": value for key, value in metrics.items() if isinstance(value, int | float)},
+            }
+        )
     if conditions["control"]["initial_model_sha256"] != conditions["treatment"]["initial_model_sha256"]:
         raise RuntimeError("paired conditions did not start from identical model weights")
     gate = _gate(conditions["control"], conditions["treatment"], resume_exact)

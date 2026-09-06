@@ -93,3 +93,55 @@ def test_resume_check_uses_distinct_mosaic_caches(
 
     assert _MODULE.verify_treatment_resume(args, object())
     assert cache_roots == [tmp_path / "resume-source", tmp_path / "resume-restored"]
+
+
+def test_cgroup_memory_supports_modal_v1_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    missing = tmp_path / "memory.current"
+    usage = tmp_path / "memory.usage_in_bytes"
+    usage.write_text("123\n")
+    monkeypatch.setattr(_MODULE, "_CGROUP_MEMORY_PATHS", (missing, usage))
+
+    assert _MODULE._cgroup_memory() == 123
+
+
+def test_first_batch_time_includes_loader_iterator_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    ticks = iter((10.0, 13.0))
+
+    def monotonic() -> float:
+        events.append("clock")
+        return next(ticks)
+
+    class Rows:
+        def __iter__(self):
+            events.append("iter")
+            return iter(("batch",))
+
+    monkeypatch.setattr(_MODULE.time, "monotonic", monotonic)
+
+    _iterator, batch, elapsed = _MODULE._start_loader(Rows())
+
+    assert events == ["clock", "iter", "clock"]
+    assert batch == "batch"
+    assert elapsed == 3.0
+
+
+def test_next_batch_starts_the_next_loader_epoch() -> None:
+    class Rows:
+        def __init__(self) -> None:
+            self.epochs = 0
+
+        def __iter__(self):
+            self.epochs += 1
+            return iter((self.epochs,))
+
+    rows = Rows()
+    iterator = iter(rows)
+    assert next(iterator) == 1
+
+    iterator, batch = _MODULE._next_batch(rows, iterator)
+
+    assert batch == 2
+    assert rows.epochs == 2
+    with pytest.raises(StopIteration):
+        next(iterator)
