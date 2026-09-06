@@ -1132,7 +1132,9 @@ def _validate_recomputed_stats(
                 rel_tol=STATS_RELATIVE_TOLERANCE,
                 abs_tol=STATS_ABSOLUTE_TOLERANCE,
             ):
-                raise ValueError(f"{where}: {name}.{field} differs from retained train rows")
+                raise ValueError(
+                    f"{where}: {name}.{field}={block[field]!r} differs from recomputed {expected_block[field]!r}"
+                )
 
 
 def audit_dataset(

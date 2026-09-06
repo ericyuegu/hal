@@ -256,7 +256,7 @@ def test_statistics_audit_allows_only_reduction_order_roundoff() -> None:
 
     rematerialize._validate_recomputed_stats(rounded, expected, "stats")
     rounded["x"]["mean"] = 1.001
-    with pytest.raises(ValueError, match=r"x\.mean differs"):
+    with pytest.raises(ValueError, match=r"x\.mean=.* differs"):
         rematerialize._validate_recomputed_stats(rounded, expected, "stats")
     rounded["x"]["mean"] = 1.0
     rounded["x"]["count"] = 99
