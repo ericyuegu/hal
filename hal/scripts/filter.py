@@ -107,6 +107,9 @@ def build_predicates(
     min_death_count: int | None = None,
     max_cheap_deaths: int | None = None,
     cheap_death_pct: float = 10.0,
+    human_players_only: bool = False,
+    min_damage_dealt_per_player_exclusive: float | None = None,
+    starting_stocks: int | None = None,
 ) -> list[tuple[str, Predicate]]:
     """Return (label, predicate) pairs. The label is used for diagnostics.
 
@@ -119,6 +122,13 @@ def build_predicates(
     """
     preds: list[tuple[str, Predicate]] = []
 
+    if human_players_only:
+        preds.append(
+            (
+                "human_players_only",
+                lambda e: len(e.players) == 2 and all(player.player_type == "HUMAN" for player in e.players),
+            )
+        )
     if min_frames is not None:
         preds.append((f"min_frames={min_frames}", lambda e: e.frame_count >= min_frames))
     if max_frames is not None:
@@ -178,6 +188,26 @@ def build_predicates(
             )
         )
 
+    if min_damage_dealt_per_player_exclusive is not None:
+        preds.append(
+            (
+                f"damage_dealt_per_player>{min_damage_dealt_per_player_exclusive}",
+                lambda e, t=min_damage_dealt_per_player_exclusive: all(
+                    player.damage_dealt > t for player in _stats_players(e)
+                ),
+            )
+        )
+
+    if starting_stocks is not None:
+        preds.append(
+            (
+                f"starting_stocks={starting_stocks}",
+                lambda e, expected=starting_stocks: all(
+                    player.stocks_remaining + len(player.death_percents) == expected for player in _stats_players(e)
+                ),
+            )
+        )
+
     return preds
 
 
@@ -196,6 +226,9 @@ def filter_index(
     min_death_count: int | None = None,
     max_cheap_deaths: int | None = None,
     cheap_death_pct: float = 10.0,
+    human_players_only: bool = False,
+    min_damage_dealt_per_player_exclusive: float | None = None,
+    starting_stocks: int | None = None,
     log_per_filter: bool = True,
 ) -> int:
     if not index.exists():
@@ -213,6 +246,9 @@ def filter_index(
         min_death_count=min_death_count,
         max_cheap_deaths=max_cheap_deaths,
         cheap_death_pct=cheap_death_pct,
+        human_players_only=human_players_only,
+        min_damage_dealt_per_player_exclusive=min_damage_dealt_per_player_exclusive,
+        starting_stocks=starting_stocks,
     )
 
     needs_stats = (
@@ -220,6 +256,8 @@ def filter_index(
         or (mins is not None and mins.any_set())
         or min_death_count is not None
         or max_cheap_deaths is not None
+        or min_damage_dealt_per_player_exclusive is not None
+        or starting_stocks is not None
     )
 
     paths: list[str] = []
@@ -332,6 +370,15 @@ class FilterConfig:
     """Percent threshold below which a stock loss counts as "cheap" for the
     `max_cheap_deaths` predicate. Ignored if `max_cheap_deaths` is None."""
 
+    human_players_only: bool = False
+    """Keep only replays with exactly two players, both human."""
+
+    min_damage_dealt_per_player_exclusive: float | None = None
+    """Keep only if every player dealt strictly more than this value."""
+
+    starting_stocks: int | None = None
+    """Required `stocks_remaining + death_count` for every player."""
+
 
 def run(cfg: FilterConfig) -> int:
     stages = _resolve_stages(cfg.stages) if cfg.stages else None
@@ -358,6 +405,9 @@ def run(cfg: FilterConfig) -> int:
         min_death_count=cfg.min_death_count,
         max_cheap_deaths=cfg.max_cheap_deaths,
         cheap_death_pct=cfg.cheap_death_pct,
+        human_players_only=cfg.human_players_only,
+        min_damage_dealt_per_player_exclusive=cfg.min_damage_dealt_per_player_exclusive,
+        starting_stocks=cfg.starting_stocks,
     )
 
 
