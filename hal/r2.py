@@ -26,9 +26,9 @@ def run_rclone(*args: str) -> str:
     if not missing_credentials():
         env.setdefault("RCLONE_CONFIG_R2_TYPE", "s3")
         env.setdefault("RCLONE_CONFIG_R2_PROVIDER", "Cloudflare")
+        # Config password fields expect rclone's obscured representation.
+        # env_auth reads the plaintext AWS credentials already supplied to HAL.
         env.setdefault("RCLONE_CONFIG_R2_ENV_AUTH", "true")
-        env.setdefault("RCLONE_CONFIG_R2_ACCESS_KEY_ID", os.environ["AWS_ACCESS_KEY_ID"])
-        env.setdefault("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", os.environ["AWS_SECRET_ACCESS_KEY"])
         env.setdefault("RCLONE_CONFIG_R2_REGION", "auto")
         env.setdefault("RCLONE_CONFIG_R2_ENDPOINT", os.environ["AWS_ENDPOINT_URL"])
     result = subprocess.run(("rclone", *args), capture_output=True, text=True, check=False, env=env)
