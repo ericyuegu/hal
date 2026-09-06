@@ -1,12 +1,11 @@
 """Frozen contracts for the O50 production program."""
 
 import importlib.util
-import json
 import sys
-from concurrent.futures import Future
 from dataclasses import asdict
 from pathlib import Path
 
+import modal
 import pytest
 import torch
 
@@ -61,15 +60,30 @@ def test_frozen_geometry_schedule_and_accounting() -> None:
     assert exp.DIRECT_LOSS_START == 128
     assert cfg.arch.head_offsets == (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     assert cfg.batch_size == 512
+    assert cfg.num_workers == 24
+    assert "cache_limit_gb" not in asdict(cfg)
+    assert "cache_limit" not in exp.loader_kwargs(cfg, {})
     assert cfg.shuffle_block_size == 8192
     assert cfg.predownload == 8192
     assert cfg.max_steps == 2**17
+    assert cfg.warmup_steps == 4096
+    assert cfg.target_positions == 8 * exp.D0
+    assert (cfg.hidden_std_multiplier, cfg.readout_init, cfg.depth_alpha) == (0.5, "mup-normal", 0.5)
+    assert (cfg.muon_lr, cfg.adam_lr, cfg.muon_weight_decay, cfg.adam_weight_decay) == (
+        0.014,
+        4.25e-4,
+        0.0,
+        0.0,
+    )
     assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (8192, 96, 96)
     assert (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) == (4, 2, 2)
     schedule = exp.lr_schedule(cfg)
     assert schedule(0) == pytest.approx(1 / 4096)
     assert schedule(4095) == 1.0
     assert schedule(cfg.max_steps - 1) == pytest.approx(1 / 170)
+    updates = exp.closed_loop_evaluation_updates(cfg.max_steps, cfg.eval_every)
+    assert updates == tuple(range(8192, 131_073, 8192))
+    assert updates.count(cfg.max_steps) == 1
 
 
 def test_awr_activates_on_update_4097() -> None:
@@ -117,35 +131,6 @@ def test_identity_masker_is_window_wide_and_resumable() -> None:
     assert all(torch.unique(row).numel() == 1 for row in actual)
 
 
-def test_external_first_batch_gets_parent_side_transforms() -> None:
-    cfg = _tiny_cfg()
-    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
-    transformed = []
-
-    def masker(value):
-        transformed.append(value)
-        return value
-
-    first_batch: Future = Future()
-    first_batch.set_result(batch)
-    prefetcher = exp.DeviceBatchPrefetcher(
-        (),
-        cfg,
-        "cpu",
-        masker,
-        iterator=iter(()),
-        first_batch_future=first_batch,
-    )
-    try:
-        staged, valid_prefixes = prefetcher.next()
-    finally:
-        prefetcher.close()
-
-    assert transformed == [batch]
-    torch.testing.assert_close(staged.target, batch.target)
-    assert valid_prefixes > 0
-
-
 def test_parameter_contract_records_action_embedding_width_32() -> None:
     assert exp.ARCHITECTURE.action_embed_dim == 32
     assert exp.EXPECTED_PARAMETER_COUNTS["total"] == 216_496_794
@@ -157,26 +142,73 @@ def test_model_tag_names_the_actual_head_architecture() -> None:
     assert "linear-head-no-skip" not in tag
 
 
-def test_eval_request_uses_full_rtx_pro_protocol_and_uploads(tmp_path: Path) -> None:
-    uploads = []
-
-    class Uploader:
-        def upload(self, path: Path, *, key: str) -> None:
-            uploads.append((path, key))
-
-    path = exp._write_eval_request(
-        tmp_path,
-        8192,
-        "a" * 64,
-        96,
-        final=False,
-        uploader=Uploader(),
+def test_o51_initialization_depth_and_effective_rates() -> None:
+    cfg = _tiny_cfg()
+    torch.manual_seed(0)
+    model = exp.GPT(cfg)
+    hidden = model.temporal.blocks[0].qkv.weight
+    assert hidden.std().item() == pytest.approx(0.5 / hidden.shape[1] ** 0.5, rel=0.08)
+    output = model.temporal.outputs["buttons"].down.weight
+    assert output.std().item() == pytest.approx(exp.mup_readout_std(output.shape[1], 128), rel=0.08)
+    assert exp.depth_rule("trunk", 16, 0.5).mlp == pytest.approx(1 / 2**0.5)
+    production = exp.TrainConfig()
+    assert exp.scaled_adam_betas(production) == pytest.approx((0.9875, 0.99375))
+    assert exp.scaled_adam_epsilon(production) == pytest.approx(8**0.5 * 1e-12)
+    assert exp._role_lr(exp.OptimizerRole("adamw", "input", False), production) == pytest.approx(4.25e-4 / 8**0.5)
+    assert exp._role_lr(exp.OptimizerRole("adamw", "output", True, fan_in_multiplier=4), production) == pytest.approx(
+        4.25e-4 / 8**0.5 / 4
     )
-    payload = json.loads(path.read_text())
-    assert payload["n_matchups"] == 96
-    assert payload["gpu"] == "RTX-PRO-6000"
-    assert (payload["prediction_frames"], payload["delay_frames"], payload["replan_interval_frames"]) == (4, 2, 2)
-    assert uploads == [(path, f"eval_requests/{path.name}")]
+
+
+def test_optimizer_roles_cover_every_parameter_and_split_qkv() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    roles = exp.optimizer_roles(model, cfg)
+    assert set(roles) == dict(model.named_parameters()).keys()
+    assert roles["temporal.blocks.0.qkv.weight"].logical_splits == 3
+    assert roles["value_head.up.weight"].logical_splits == 2
+    optimizer = exp.make_optimizer(model, cfg)
+    optimized = {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
+    assert optimized == {id(parameter) for parameter in model.parameters()}
+    muon_groups = [group for group in optimizer.param_groups if group["use_muon"]]
+    assert {group["logical_splits"] for group in muon_groups} == {1, 2, 3}
+    assert all(group["muon_scale_clamp_min_one"] is False for group in muon_groups)
+
+
+def test_v8_corpus_and_checkpoint_identity() -> None:
+    cfg = exp.TrainConfig()
+    assert len(cfg.source_names) == 44
+    assert sum(exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS.values()) == exp.TRAIN_REPLAYS == 1_295_370
+    assert sum(exp.streams.POLICY_WORLD_V8_TRAIN_FRAMES.values()) == exp.TRAIN_FRAMES == 13_266_364_175
+    state = exp._checkpoint_config(cfg)
+    assert state["experiment_id"] == "050_scaled_temporal_awr_v2"
+    state["experiment_id"] = "050_scaled_temporal_awr_v1"
+    with pytest.raises(ValueError, match="experiment_id"):
+        exp.config_from_state(state)
+
+
+def test_closed_loop_spawn_uses_launcher_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    class Evaluator:
+        def spawn(self, *args):
+            calls.append(args)
+            return "call-id"
+
+    monkeypatch.setenv("HAL_MODAL_APP_NAME", "hal-test")
+    monkeypatch.setattr(modal.Function, "from_name", lambda app, name: Evaluator())
+    assert exp.spawn_closed_loop_evaluation("run", 8192, "a" * 64, 96) == "call-id"
+    assert calls == [("run", 8192, "a" * 64, 96)]
+
+
+def test_eval_rejects_checkpoint_before_loading_when_hash_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(exp, "load_checkpoint", lambda *_args, **_kwargs: pytest.fail("loaded bad checkpoint"))
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        exp.eval_checkpoint(str(checkpoint), expected_checkpoint_sha256="0" * 64)
 
 
 def test_companion_eval_logging_keeps_the_checkpoint_step(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -80,6 +80,10 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
 )
 STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
+CLOSED_LOOP_EXPERIMENT: Final[str] = "experiments/050_scaled_temporal_awr.py"
+CLOSED_LOOP_MATCHUPS: Final[int] = 96
+CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
+CLOSED_LOOP_EVERY: Final[int] = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +156,7 @@ class LaunchSpec:
     skip_sm120_probe: bool
     require_cuda: bool = True
     modal_app_url: str | None = None
+    modal_app_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +392,11 @@ def retry_policy(max_retries: int) -> modal.Retries:
     return modal.Retries(max_retries=max_retries, initial_delay=0.0)
 
 
+def closed_loop_retry_policy() -> modal.Retries:
+    """Retry an evaluation twice without retrying the training call."""
+    return modal.Retries(max_retries=2, initial_delay=1.0, backoff_coefficient=2.0)
+
+
 def _state_path(launch_id: str) -> Path:
     try:
         parsed = uuid.UUID(launch_id)
@@ -478,15 +488,20 @@ def _configure_compiler_cache(env: dict[str, str]) -> None:
     env["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "1"
 
 
-def _configure_tracking_context(env: dict[str, str], modal_app_url: str | None) -> None:
+def _configure_tracking_context(
+    env: dict[str, str],
+    modal_app_url: str | None,
+    modal_app_name: str | None = None,
+) -> None:
     """Expose the Modal dashboard in every W&B run launched by this process."""
-    if modal_app_url is None:
-        return
-    env["HAL_MODAL_APP_URL"] = modal_app_url
-    modal_note = f"Modal: {modal_app_url}"
-    existing_notes = env.get("WANDB_NOTES", "").strip()
-    if modal_app_url not in existing_notes:
-        env["WANDB_NOTES"] = f"{existing_notes}\n\n{modal_note}" if existing_notes else modal_note
+    if modal_app_name is not None:
+        env["HAL_MODAL_APP_NAME"] = modal_app_name
+    if modal_app_url is not None:
+        env["HAL_MODAL_APP_URL"] = modal_app_url
+        modal_note = f"Modal: {modal_app_url}"
+        existing_notes = env.get("WANDB_NOTES", "").strip()
+        if modal_app_url not in existing_notes:
+            env["WANDB_NOTES"] = f"{existing_notes}\n\n{modal_note}" if existing_notes else modal_note
 
 
 def _prepare_remote(*, skip_sm120_probe: bool, require_cuda: bool = True) -> dict[str, str]:
@@ -728,7 +743,7 @@ def _run_remote(spec: LaunchSpec) -> int:
         )
     _commit_state(state_path, attempt.state, spec.state_volume)
     env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
-    _configure_tracking_context(env, spec.modal_app_url)
+    _configure_tracking_context(env, spec.modal_app_url, spec.modal_app_name)
     return _run_training(
         attempt.argv,
         attempt.state,
@@ -737,6 +752,45 @@ def _run_remote(spec: LaunchSpec) -> int:
         state_volume_name=spec.state_volume,
         stall_s=spec.stall_s,
     )
+
+
+def _run_closed_loop_eval(
+    run_name: str,
+    update: int,
+    expected_checkpoint_sha256: str,
+    n_matchups: int,
+) -> None:
+    """Evaluate one uploaded O50 milestone and publish its evidence."""
+    if not RUN_NAME.fullmatch(run_name):
+        raise ValueError(f"invalid training run name: {run_name!r}")
+    if update <= 0 or update % CLOSED_LOOP_EVERY:
+        raise ValueError(f"closed-loop update must be a positive multiple of {CLOSED_LOOP_EVERY}")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_checkpoint_sha256):
+        raise ValueError("expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
+    if n_matchups != CLOSED_LOOP_MATCHUPS:
+        raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
+    env = _prepare_remote(skip_sm120_probe=False)
+    checkpoint = f"checkpoints/step-{update:07d}.pt"
+    command = [
+        "uv",
+        "run",
+        CLOSED_LOOP_EXPERIMENT,
+        "eval",
+        "--checkpoint",
+        checkpoint,
+        "--run",
+        run_name,
+        "--n-matchups",
+        str(n_matchups),
+        "--max-parallel",
+        str(CLOSED_LOOP_MAX_PARALLEL),
+        "--output-name",
+        f"eval96-step-{update:07d}",
+        "--companion-wandb",
+        "--expected-checkpoint-sha256",
+        expected_checkpoint_sha256,
+    ]
+    subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
 
 
 def _ignored_python_commands(
@@ -858,8 +912,9 @@ def main(args: Args) -> None:
 
     state_volume = modal.Volume.from_name(args.state_volume, create_if_missing=True)
     app = modal.App(name=name, tags={"provider": "modal", "git_sha": sha, "launch_id": launch_id})
+    image = _image(args.image, args.cmd, secret)
     function = app.function(
-        image=_image(args.image, args.cmd, secret),
+        image=image,
         secrets=[secret],
         volumes={
             str(STATE_ROOT): state_volume,
@@ -876,7 +931,22 @@ def main(args: Args) -> None:
         name="train",
         **resources,
     )(_run_remote)
-    with modal.enable_output(), app.run(name=name, client=client, detach=not args.wait):
+    app.function(
+        image=image,
+        secrets=[secret],
+        gpu="L40S",
+        cpu=32.0,
+        memory=64 * 1024,
+        ephemeral_disk=512 * 1024,
+        timeout=2 * 60 * 60,
+        retries=closed_loop_retry_policy(),
+        max_containers=1,
+        single_use_containers=True,
+        serialized=True,
+        include_source=False,
+        name="closed-loop-eval",
+    )(_run_closed_loop_eval)
+    with modal.enable_output(), app.run(name=name, client=client, detach=True):
         spec = LaunchSpec(
             argv=tuple(args.cmd),
             launch_id=launch_id,
@@ -887,6 +957,7 @@ def main(args: Args) -> None:
             skip_sm120_probe=args.skip_sm120_probe,
             require_cuda=resources["gpu"] is not None,
             modal_app_url=f"https://modal.com/apps/{app.app_id}",
+            modal_app_name=name,
         )
         call = function.spawn(spec)
         loguru.logger.success(f"submitted Modal App {app.app_id}, Function call {call.object_id}, Git {sha[:10]}")

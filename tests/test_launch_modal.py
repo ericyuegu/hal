@@ -24,6 +24,7 @@ RunState = _MODULE.RunState
 drain_run_names = _MODULE._drain_run_names
 configure_compiler_cache = _MODULE._configure_compiler_cache
 configure_tracking_context = _MODULE._configure_tracking_context
+closed_loop_retry_policy = _MODULE.closed_loop_retry_policy
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
 requested_disk_gib = _MODULE.requested_disk_gib
@@ -102,6 +103,14 @@ def test_tracking_context_adds_modal_dashboard_to_wandb_notes() -> None:
 
     assert env["HAL_MODAL_APP_URL"] == "https://modal.com/apps/ap-example"
     assert env["WANDB_NOTES"] == "Existing notes\n\nModal: https://modal.com/apps/ap-example"
+
+
+def test_tracking_context_exposes_same_app_evaluator() -> None:
+    env: dict[str, str] = {}
+
+    configure_tracking_context(env, None, "hal-production")
+
+    assert env == {"HAL_MODAL_APP_NAME": "hal-production"}
 
 
 def test_tracking_context_ignores_non_modal_launches() -> None:
@@ -478,6 +487,27 @@ def test_retry_policy_uses_requested_attempt_count_without_delay() -> None:
 
     assert retries.max_retries == 10
     assert retries.initial_delay.total_seconds() == 0
+
+    eval_retries = closed_loop_retry_policy()
+    assert eval_retries.max_retries == 2
+    assert eval_retries.initial_delay.total_seconds() == 1
+
+
+def test_closed_loop_evaluator_runs_verified_o50_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {"TEST": "1"})
+    monkeypatch.setattr(
+        _MODULE.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    _MODULE._run_closed_loop_eval("run-1", 8192, "a" * 64, 96)
+
+    command, kwargs = calls[0]
+    assert command[:4] == ["uv", "run", "experiments/050_scaled_temporal_awr.py", "eval"]
+    assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
+    assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
 
 
 def test_serialized_remote_function_references_loguru_by_module() -> None:

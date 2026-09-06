@@ -99,6 +99,12 @@ class BackgroundUploader:
         files = (path for path in sorted(root.rglob(pattern)) if path.is_file())
         return sum(1 for path in files if self.upload(path, key=str(path.relative_to(base))))
 
+    def wait(self) -> None:
+        """Wait for all queued uploads and fail if any upload failed."""
+        self._queue.join()
+        if self._failures:
+            raise RuntimeError(f"{self._failures} R2 upload(s) failed")
+
     def close(self) -> None:
         """Drain the queue and fail if any upload failed."""
         self._queue.put(_SENTINEL)

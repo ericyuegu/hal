@@ -36,6 +36,19 @@ def test_uploader_close_drains_all_files(tmp_path: Path, monkeypatch: pytest.Mon
     assert [Path(local).name for local, _, _ in client.uploaded] == ["a.pt", "b.pt"]
 
 
+def test_uploader_wait_confirms_queued_checkpoint_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    uploader = _uploader(monkeypatch, client)
+    path = tmp_path / "checkpoint.pt"
+    path.write_bytes(b"data")
+    uploader.upload(path)
+
+    uploader.wait()
+
+    assert [Path(local).name for local, _, _ in client.uploaded] == ["checkpoint.pt"]
+    uploader.close()
+
+
 def test_uploader_close_fails_after_draining_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _Client(fail_name="a.pt")
     uploader = _uploader(monkeypatch, client)
