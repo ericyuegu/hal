@@ -175,6 +175,25 @@ def _remote_count(job: CorpusJob) -> dict[str, object]:
     return independent_manifest_counts(_store(), job)
 
 
+def _select_status_record(
+    candidates: list[tuple[str, dict[str, object]]],
+    *,
+    published: bool,
+) -> tuple[str, dict[str, object]] | None:
+    if published:
+        audited = [
+            candidate
+            for candidate in candidates
+            if candidate[1].get("state") in {"published", "validated-existing"}
+            and isinstance(candidate[1].get("audit"), dict)
+        ]
+        if audited:
+            candidates = audited
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: str(candidate[1].get("updated_at", "")))
+
+
 def _remote_status(query: StatusQuery) -> dict[str, object]:
     store = _store()
     success = store.head(f"{query.final_prefix}/_SUCCESS") is not None
@@ -187,12 +206,11 @@ def _remote_status(query: StatusQuery) -> dict[str, object]:
             record = json.loads(store.read_bytes(candidate))
     else:
         suffix = f"/{query.name}.json"
-        candidates = sorted(key for key in store.list(f"processed/_runs/{POLICY_ID}/") if key.endswith(suffix))
-        for candidate in candidates:
-            value = json.loads(store.read_bytes(candidate))
-            if record is None or str(value.get("updated_at", "")) > str(record.get("updated_at", "")):
-                record_key = candidate
-                record = value
+        keys = sorted(key for key in store.list(f"processed/_runs/{POLICY_ID}/") if key.endswith(suffix))
+        candidates = [(key, json.loads(store.read_bytes(key))) for key in keys]
+        selected = _select_status_record(candidates, published=success)
+        if selected is not None:
+            record_key, record = selected
     return {
         "corpus": query.name,
         "published": success,

@@ -48,6 +48,7 @@ _LAUNCHER_SPEC.loader.exec_module(_LAUNCHER)
 enumerate_corpus_jobs = _LAUNCHER.enumerate_corpus_jobs
 WORKER_EPHEMERAL_DISK_MIB = _LAUNCHER.WORKER_EPHEMERAL_DISK_MIB
 status_summary = _LAUNCHER._status_summary
+select_status_record = _LAUNCHER._select_status_record
 
 
 def _players(*, human: bool = True) -> list[PlayerEntry]:
@@ -592,6 +593,17 @@ def test_status_summary_reports_only_completed_audits() -> None:
         "train_frames": 20,
         "sources": {"done": audit},
     }
+
+
+def test_status_prefers_audited_publication_to_newer_failed_retry() -> None:
+    published = (
+        "published.json",
+        {"state": "validated-existing", "updated_at": "2026-09-06T01:00:00+00:00", "audit": {}},
+    )
+    failed = ("failed.json", {"state": "failed", "updated_at": "2026-09-06T02:00:00+00:00"})
+
+    assert select_status_record([published, failed], published=True) == published
+    assert select_status_record([published, failed], published=False) == failed
 
 
 def _completed_status_results(retained: int) -> list[dict[str, object]]:
