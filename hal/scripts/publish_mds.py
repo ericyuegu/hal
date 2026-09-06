@@ -15,12 +15,14 @@ from hal.data.bounded_writer import rclone_copyto
 
 
 def _objects(prefix: str) -> dict[str, dict[str, Any]]:
-    rows = json.loads(r2.run_rclone("lsjson", prefix, "--recursive", "--files-only", "--hash"))
-    return {str(row["Path"]): row for row in rows}
+    return {
+        item.path: {"Size": item.size, "Hashes": {"md5": item.md5} if item.md5 is not None else {}}
+        for item in r2.list_objects(prefix)
+    }
 
 
 def _cat_json(path: str) -> dict[str, Any]:
-    return json.loads(r2.run_rclone("cat", path))
+    return r2.read_json(path)
 
 
 def audit(prefix: str) -> dict[str, Any]:
@@ -104,7 +106,7 @@ def publish_mds(
         raise FileExistsError(f"final prefix is not empty: {final}")
     run_audit = audit if audit_fn is None else audit_fn
     before = run_audit(staging)
-    r2.run_rclone("copy", staging, final, "--immutable", "--server-side-across-configs")
+    r2.copy_prefix(staging, final, immutable=True)
     after = run_audit(final)
     if after != before:
         raise ValueError(f"published audit differs: staging={before}, final={after}")
@@ -120,7 +122,7 @@ def publish_mds(
         marker.write_text(json.dumps(success, indent=2, sort_keys=True) + "\n")
         rclone_copyto(marker, f"{final.rstrip('/')}/_SUCCESS")
     if purge_staging:
-        r2.run_rclone("purge", staging)
+        r2.delete_prefix(staging)
     logger.info(f"published {staging} -> {final}: {after}")
 
 

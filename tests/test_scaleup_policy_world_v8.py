@@ -116,14 +116,14 @@ def test_scaleup_refuses_a_partial_final_prefix(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_obsolete_deletion_is_exact_and_refuses_a_success_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, ...]] = []
+    calls: list[str] = []
     monkeypatch.setattr(module.r2, "list_files", lambda _prefix: ["train/index.json"])
-    monkeypatch.setattr(module.r2, "run_rclone", lambda *args: calls.append(args) or "")
+    monkeypatch.setattr(module.r2, "delete_prefix", lambda prefix: calls.append(prefix) or ["train/index.json"])
 
     removed = verify_and_delete_obsolete_rank_one_prefix()
 
     assert removed == ["train/index.json"]
-    assert calls == [("purge", "r2:hal/processed/ranked-anonymized-1/mds-policy-world-v8")]
+    assert calls == ["r2:hal/processed/ranked-anonymized-1/mds-policy-world-v8"]
     monkeypatch.setattr(module.r2, "list_files", lambda _prefix: ["_SUCCESS"])
     with pytest.raises(ValueError, match="refusing to delete"):
         verify_and_delete_obsolete_rank_one_prefix()
@@ -133,7 +133,7 @@ def test_remote_rank_one_metadata_requires_a_pinned_single_object(monkeypatch: p
     digest = "a" * 64
     remote = f"r2:hal/processed/_staging/policy-world-v8/sha/_metadata/ranked-1-index.{digest}.jsonl"
     monkeypatch.setattr(module.r2, "list_files", lambda _prefix: [Path(remote).name])
-    monkeypatch.setattr(module.r2, "run_rclone", lambda *args: '{"count":1,"bytes":120000000}')
+    monkeypatch.setattr(module.r2, "object_size", lambda _path: 120_000_000)
 
     resolved, identity = module._remote_rank_one_metadata(remote)
 

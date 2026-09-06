@@ -139,10 +139,10 @@ def _remote_rank_one_metadata(path: str) -> tuple[str, dict[str, object]]:
     objects = r2.list_files(path)
     if objects != [name]:
         raise FileNotFoundError(f"immutable ranked-1 metadata object differs at {path}: {objects}")
-    size = json.loads(r2.run_rclone("size", path, "--json"))
-    if int(size.get("count", -1)) != 1 or int(size.get("bytes", -1)) < 1:
+    size = r2.object_size(path)
+    if size < 1:
         raise ValueError(f"remote ranked-1 metadata size is invalid: {size}")
-    return path, {"remote": path, "sha256": sha256, "bytes": int(size["bytes"])}
+    return path, {"remote": path, "sha256": sha256, "bytes": size}
 
 
 def stage_rank_one_metadata(path: Path, staging_root: str) -> tuple[str, dict[str, object]]:
@@ -241,7 +241,9 @@ def verify_and_delete_obsolete_rank_one_prefix() -> list[str]:
         raise ValueError(f"refusing to delete a successful artifact at {prefix}")
     if objects:
         logger.warning(f"deleting {len(objects)} objects from authorized incomplete prefix {prefix}")
-        r2.run_rclone("purge", prefix)
+        removed = r2.delete_prefix(prefix)
+        if removed != objects:
+            raise RuntimeError(f"deleted object set changed below {prefix}")
     return objects
 
 
