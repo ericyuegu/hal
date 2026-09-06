@@ -40,7 +40,9 @@ class PolicyWorldV8QualityPolicy:
     player_type: str = "HUMAN"
 
     def to_dict(self) -> dict[str, object]:
-        return dataclasses.asdict(self)
+        value = dataclasses.asdict(self)
+        value["stages"] = list(self.stages)
+        return value
 
 
 V8_QUALITY_POLICY: Final[PolicyWorldV8QualityPolicy] = PolicyWorldV8QualityPolicy()

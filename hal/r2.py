@@ -7,6 +7,7 @@ in exactly one place — see `.env.example` for the variables.
 """
 
 import os
+import subprocess
 from typing import Final
 
 import boto3
@@ -17,6 +18,34 @@ _CRED_VARS: Final[tuple[str, ...]] = ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "
 
 class R2Error(RuntimeError):
     pass
+
+
+def run_rclone(*args: str) -> str:
+    """Run rclone and surface its diagnostic as one R2 boundary error."""
+    result = subprocess.run(("rclone", *args), capture_output=True, text=True, check=False)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise R2Error(f"rclone {' '.join(args)} failed: {detail}")
+    return result.stdout
+
+
+def list_files(prefix: str) -> list[str]:
+    """List file paths below one rclone prefix."""
+    output = run_rclone("lsf", prefix, "--recursive", "--files-only")
+    return [line for line in output.splitlines() if line]
+
+
+def copy_file(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+    """Copy one local or rclone object with the production retry policy."""
+    run_rclone(
+        "copyto",
+        os.fspath(source),
+        os.fspath(destination),
+        "--retries",
+        "5",
+        "--low-level-retries",
+        "10",
+    )
 
 
 def missing_credentials() -> list[str]:

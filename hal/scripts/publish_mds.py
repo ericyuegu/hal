@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,15 +48,16 @@ def audit(prefix: str) -> dict[str, Any]:
         rows_by_split[split] = sum(int(shard["samples"]) for shard in index["shards"])
         for shard in index["shards"]:
             zip_info = shard.get("zip_data")
-            if zip_info is None:
-                raise ValueError(f"{prefix}: {split} contains an uncompressed shard")
-            name = f"{split}/{zip_info['basename']}"
+            data_info = zip_info if zip_info is not None else shard.get("raw_data")
+            if data_info is None:
+                raise ValueError(f"{prefix}: {split} shard has no stored data object")
+            name = f"{split}/{data_info['basename']}"
             remote = objects.get(name)
             if remote is None:
                 raise ValueError(f"{prefix}: index references missing object {name}")
-            if int(remote["Size"]) != int(zip_info["bytes"]):
+            if int(remote["Size"]) != int(data_info["bytes"]):
                 raise ValueError(f"{prefix}: size mismatch for {name}")
-            expected_md5 = zip_info.get("hashes", {}).get("md5")
+            expected_md5 = data_info.get("hashes", {}).get("md5")
             actual_md5 = (remote.get("Hashes") or {}).get("md5") or (remote.get("Hashes") or {}).get("MD5")
             if not expected_md5 or not actual_md5:
                 raise ValueError(f"{prefix}: missing MD5 evidence for {name}")
@@ -87,17 +89,31 @@ def audit(prefix: str) -> dict[str, Any]:
         "objects": len(objects),
         "bytes": sum(int(row["Size"]) for row in objects.values()),
         "failures": int(projection.get("failures", 0)),
+        "object_hashes": {
+            name: {
+                "bytes": int(row["Size"]),
+                "md5": (row.get("Hashes") or {}).get("md5") or (row.get("Hashes") or {}).get("MD5"),
+            }
+            for name, row in sorted(objects.items())
+        },
     }
 
 
-def publish_mds(staging: str, final: str, *, purge_staging: bool = True) -> None:
+def publish_mds(
+    staging: str,
+    final: str,
+    *,
+    purge_staging: bool = True,
+    audit_fn: Callable[[str], dict[str, Any]] | None = None,
+) -> None:
     if not staging.startswith("r2:") or not final.startswith("r2:"):
         raise ValueError("publish_mds requires r2: staging and final prefixes")
     if _objects(final):
         raise FileExistsError(f"final prefix is not empty: {final}")
-    before = audit(staging)
+    run_audit = audit if audit_fn is None else audit_fn
+    before = run_audit(staging)
     _run("rclone", "copy", staging, final, "--immutable", "--server-side-across-configs")
-    after = audit(final)
+    after = run_audit(final)
     if after != before:
         raise ValueError(f"published audit differs: staging={before}, final={after}")
 
