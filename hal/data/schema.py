@@ -231,6 +231,30 @@ MDS_DTYPE_STR_BY_COLUMN: dict[str, str] = {
 # version mismatch instead of crashing in frombuffer on a stale cache.
 MDS_COLUMNS: dict[str, str] = {"schema_version": "int", **MDS_DTYPE_STR_BY_COLUMN}
 
+# ``mds-policy-world-v8`` is a seekable projection of canonical schema v7. It
+# is not canonical replay schema v8. Mosaic sorts these names when it writes a
+# row; ``block_payload`` sorts first so a later reader can seek into the
+# internal chunk index without decoding other variable-size fields.
+POLICY_WORLD_V8_MDS_COLUMNS: dict[str, str] = {
+    "block_payload": "bytes",
+    "replay_id": "bytes",
+    "num_frames": "uint32",
+    "policy_world_schema_version": "uint8",
+    "policy_schema_version": "uint8",
+    "source_schema_version": "uint8",
+    "stage": "uint8",
+    "p1_character": "uint8",
+    "p2_character": "uint8",
+    "p1_nana_present": "uint8",
+    "p2_nana_present": "uint8",
+    "p1_rank": "uint8",
+    "p2_rank": "uint8",
+    "p1_port": "uint8",
+    "p2_port": "uint8",
+    "rank_imputed_mask": "uint8",
+    "mc_terminated": "uint8",
+}
+
 
 def check_schema_version(sample: dict, *, expected: int = SCHEMA_VERSION) -> None:
     """Assert one MDS row was materialized at the schema version the consumer targets.

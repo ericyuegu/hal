@@ -1100,6 +1100,7 @@ dependencies = [
     { name = "vastai" },
     { name = "wandb" },
     { name = "yasoo" },
+    { name = "zstd" },
 ]
 
 [package.dev-dependencies]
@@ -1148,6 +1149,7 @@ requires-dist = [
     { name = "vastai", specifier = ">=1.0.13" },
     { name = "wandb" },
     { name = "yasoo" },
+    { name = "zstd", specifier = "==1.5.7.3" },
 ]
 
 [package.metadata.requires-dev]

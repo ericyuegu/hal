@@ -148,6 +148,11 @@ def _unpack_item_meta(meta: np.ndarray, present: np.ndarray) -> dict[str, np.nda
     return {"type": item_type, "state": state, "owner": owner}
 
 
+def unpack_item_meta(meta: np.ndarray, present: np.ndarray) -> dict[str, np.ndarray]:
+    """Decode one v7 packed item metadata array."""
+    return _unpack_item_meta(meta, present)
+
+
 def encode_policy_world_replay(source: Mapping[str, object], replay_id: str) -> dict[str, object]:
     out = encode_policy_replay(source, replay_id)
     frame_count = out["num_frames"]

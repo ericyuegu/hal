@@ -15,45 +15,9 @@ import numpy as np
 from scipy.signal import lfilter
 
 from hal.data.policy_schema import unpack_player_stock
-from hal.wire import MASK_INT32
-
-
-def stock_loss_events(stock: np.ndarray) -> np.ndarray:
-    """1.0 on each frame whose stock count drops below the frame before it, else 0.0.
-
-    The drop is the event; its size is not (Melee never takes two stocks in one
-    frame). The counter only rises between games, so increments are ignored, and
-    frame 0 has no predecessor, so it can never fire. A masked sentinel on either
-    side of a step suppresses the event instead of reading the sentinel as a drop.
-    """
-    ids = np.asarray(stock).astype(np.int64)
-    known = ids != MASK_INT32
-    out = np.zeros(ids.shape, dtype=np.float32)
-    out[1:] = ((ids[1:] < ids[:-1]) & known[1:] & known[:-1]).astype(np.float32)
-    return out
-
-
-def match_point_events(stock: np.ndarray) -> np.ndarray:
-    """1.0 on the frame a player's last stock is lost (the count drops to 0), else 0.0.
-
-    A subset of :func:`stock_loss_events`: the same drop detection, kept only where
-    the new count is zero. A game that ends by quit-out never empties a stock
-    count, so it has no event.
-    """
-    ids = np.asarray(stock).astype(np.int64)
-    return stock_loss_events(stock) * (ids == 0).astype(np.float32)
-
-
-def damage_taken(percent: np.ndarray) -> np.ndarray:
-    """Per-frame increase in a player's percent, clipped at >= 0.
-
-    The drop back to 0 on a respawn and the NaN of a masked frame are resets, not
-    healing, so only rises count.
-    """
-    values = np.asarray(percent, dtype=np.float32)
-    out = np.zeros(values.shape, dtype=np.float32)
-    out[1:] = np.maximum(values[1:] - values[:-1], 0.0)
-    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+from hal.data.reward_events import damage_taken
+from hal.data.reward_events import match_point_events
+from hal.data.reward_events import stock_loss_events
 
 
 def frame_reward(
