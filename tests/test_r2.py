@@ -29,6 +29,8 @@ def test_rclone_uses_aws_credentials_without_a_config_file(monkeypatch: pytest.M
     assert r2.run_rclone("lsf", "r2:hal") == "object\n"
     assert captured["RCLONE_CONFIG_R2_TYPE"] == "s3"
     assert captured["RCLONE_CONFIG_R2_PROVIDER"] == "Cloudflare"
+    assert captured["RCLONE_CONFIG_R2_ENV_AUTH"] == "true"
     assert captured["RCLONE_CONFIG_R2_ACCESS_KEY_ID"] == "access-key"
     assert captured["RCLONE_CONFIG_R2_SECRET_ACCESS_KEY"] == "secret-key"
+    assert captured["RCLONE_CONFIG_R2_REGION"] == "auto"
     assert captured["RCLONE_CONFIG_R2_ENDPOINT"] == "https://account.r2.cloudflarestorage.com"
