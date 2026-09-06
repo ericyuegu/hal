@@ -67,6 +67,20 @@ _CACHE_LIMIT = 4 * 2**30
 _WINDOWS_PER_GENERATION = 8
 
 
+def _git_sha() -> str:
+    sha = os.environ.get("HAL_GIT_SHA")
+    if sha is None:
+        sha = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
+        raise ValueError("Git SHA must be a 40-character lowercase hexadecimal value")
+    return sha
+
+
 @dataclass(frozen=True, slots=True)
 class Args:
     pilot_prefixes: tuple[str, str]
@@ -638,9 +652,7 @@ def run(args: Args) -> dict[str, object]:
     gate = _gate(conditions["control"], conditions["treatment"], resume_exact)
     report: dict[str, object] = {
         "schema_version": 1,
-        "git_sha": subprocess.run(
-            ("git", "rev-parse", "HEAD"), capture_output=True, text=True, check=True
-        ).stdout.strip(),
+        "git_sha": _git_sha(),
         "wandb": {"entity": run.entity, "project": run.project, "run_id": run.id, "url": run.url},
         "configuration": asdict(args),
         "invariants": {
