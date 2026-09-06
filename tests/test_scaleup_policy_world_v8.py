@@ -17,6 +17,33 @@ def _source() -> streams.StreamSource:
     )
 
 
+def test_git_sha_uses_the_launcher_identity_without_git_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_file = tmp_path / "hal/scripts/scaleup_policy_world_v8.py"
+    module_file.parent.mkdir(parents=True)
+    module_file.touch()
+    monkeypatch.setattr(module, "__file__", str(module_file))
+    monkeypatch.setenv("HAL_GIT_SHA", "a" * 40)
+
+    assert module._git_sha() == "a" * 40
+
+
+def test_git_sha_rejects_an_invalid_launcher_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_file = tmp_path / "hal/scripts/scaleup_policy_world_v8.py"
+    module_file.parent.mkdir(parents=True)
+    module_file.touch()
+    monkeypatch.setattr(module, "__file__", str(module_file))
+    monkeypatch.setenv("HAL_GIT_SHA", "not-a-sha")
+
+    with pytest.raises(ValueError, match="lowercase hexadecimal"):
+        module._git_sha()
+
+
 def _audit() -> dict[str, object]:
     return {
         "rows": {"train": 8, "val": 1, "test": 1},

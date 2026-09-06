@@ -487,6 +487,37 @@ def test_serialized_remote_function_references_loguru_by_module() -> None:
     assert "logger" not in _MODULE._run_remote.__globals__
 
 
+def test_remote_launch_passes_its_source_identity_to_the_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+    spec = _MODULE.LaunchSpec(
+        argv=("true",),
+        launch_id="1" * 32,
+        git_sha="a" * 40,
+        state_volume="test-volume",
+        auto_resume=False,
+        stall_s=60,
+        skip_sm120_probe=True,
+        require_cuda=False,
+        modal_app_url="https://modal.com/apps/ap-example",
+    )
+    monkeypatch.setattr(_MODULE, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(_MODULE.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(_MODULE, "_commit_state", lambda *_args: None)
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {})
+
+    def run_training(*_args: object, env: dict[str, str], **_kwargs: object) -> int:
+        captured.update(env)
+        return 0
+
+    monkeypatch.setattr(_MODULE, "_run_training", run_training)
+
+    assert _MODULE._run_remote(spec) == 0
+    assert captured["HAL_GIT_SHA"] == "a" * 40
+
+
 def test_redact_argv_hides_conventional_secret_values() -> None:
     rendered = redact_argv(("python", "job.py", "--token", "token-value", "--password=hunter2", "--name", "visible"))
 

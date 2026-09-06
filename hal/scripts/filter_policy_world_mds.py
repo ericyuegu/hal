@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -400,8 +402,17 @@ def _write_sidecar(source: Path, output: str, relative: str, local_output: Path 
 
 def _implementation_identity() -> dict[str, object]:
     repo = Path(__file__).resolve().parents[2]
-    result = subprocess.run(("git", "rev-parse", "HEAD"), cwd=repo, capture_output=True, text=True, check=True)
-    dirty = subprocess.run(("git", "diff", "--quiet"), cwd=repo, capture_output=True, check=False).returncode != 0
+    if (repo / ".git").exists():
+        result = subprocess.run(("git", "rev-parse", "HEAD"), cwd=repo, capture_output=True, text=True, check=True)
+        git_sha = result.stdout.strip()
+        dirty = subprocess.run(("git", "diff", "--quiet"), cwd=repo, capture_output=True, check=False).returncode != 0
+    else:
+        git_sha = os.environ.get("HAL_GIT_SHA")
+        if git_sha is None:
+            raise RuntimeError("HAL_GIT_SHA is required when Git metadata is unavailable")
+        if re.fullmatch(r"[0-9a-f]{40}", git_sha) is None:
+            raise ValueError("HAL_GIT_SHA must be a 40-character lowercase hexadecimal Git SHA")
+        dirty = False
     files = (
         Path(__file__),
         repo / "hal/data/policy_world_v8.py",
@@ -410,7 +421,7 @@ def _implementation_identity() -> dict[str, object]:
         repo / "hal/data/bounded_writer.py",
     )
     return {
-        "git_sha": result.stdout.strip(),
+        "git_sha": git_sha,
         "git_dirty": dirty,
         "file_sha256": {str(path.relative_to(repo)): _hash_file(path) for path in files},
     }

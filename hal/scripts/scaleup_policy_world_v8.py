@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import subprocess
 import tempfile
 from collections import Counter
@@ -35,6 +37,13 @@ EXPECTED_V7_ROWS: Final[int] = 1_326_988
 
 def _git_sha() -> str:
     repo = Path(__file__).resolve().parents[2]
+    if not (repo / ".git").exists():
+        sha = os.environ.get("HAL_GIT_SHA")
+        if sha is None:
+            raise RuntimeError("HAL_GIT_SHA is required when Git metadata is unavailable")
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ValueError("HAL_GIT_SHA must be a 40-character lowercase hexadecimal Git SHA")
+        return sha
     return subprocess.run(
         ("git", "rev-parse", "HEAD"),
         cwd=repo,

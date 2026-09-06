@@ -728,6 +728,7 @@ def _run_remote(spec: LaunchSpec) -> int:
         )
     _commit_state(state_path, attempt.state, spec.state_volume)
     env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
+    env["HAL_GIT_SHA"] = spec.git_sha
     _configure_tracking_context(env, spec.modal_app_url)
     return _run_training(
         attempt.argv,
