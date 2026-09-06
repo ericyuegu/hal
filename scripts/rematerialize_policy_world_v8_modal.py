@@ -194,9 +194,26 @@ def _select_status_record(
     return max(candidates, key=lambda candidate: str(candidate[1].get("updated_at", "")))
 
 
+def _record_from_success_marker(payload: dict[str, object], query: StatusQuery) -> dict[str, object]:
+    if payload.get("schema_version") != 1:
+        raise ValueError(f"{query.final_prefix}/_SUCCESS: invalid schema version")
+    if payload.get("corpus") != query.name or payload.get("final_prefix") != query.final_prefix:
+        raise ValueError(f"{query.final_prefix}/_SUCCESS: corpus identity mismatch")
+    if not isinstance(payload.get("audit"), dict):
+        raise ValueError(f"{query.final_prefix}/_SUCCESS: audit is missing")
+    return {
+        "state": "published-marker",
+        "corpus": query.name,
+        "final_prefix": query.final_prefix,
+        "updated_at": payload.get("published_at", ""),
+        "audit": payload["audit"],
+    }
+
+
 def _remote_status(query: StatusQuery) -> dict[str, object]:
     store = _store()
-    success = store.head(f"{query.final_prefix}/_SUCCESS") is not None
+    success_key = f"{query.final_prefix}/_SUCCESS"
+    success = store.head(success_key) is not None
     record: dict[str, object] | None = None
     record_key: str | None = None
     if query.run_id is not None:
@@ -211,10 +228,18 @@ def _remote_status(query: StatusQuery) -> dict[str, object]:
         selected = _select_status_record(candidates, published=success)
         if selected is not None:
             record_key, record = selected
+        if success and (
+            record is None
+            or record.get("state") not in {"published", "validated-existing"}
+            or not isinstance(record.get("audit"), dict)
+        ):
+            marker = json.loads(store.read_bytes(success_key))
+            record_key = success_key
+            record = _record_from_success_marker(marker, query)
     return {
         "corpus": query.name,
         "published": success,
-        "success_key": f"{query.final_prefix}/_SUCCESS" if success else None,
+        "success_key": success_key if success else None,
         "record_key": record_key,
         "record": record,
     }

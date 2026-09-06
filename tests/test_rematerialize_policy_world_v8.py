@@ -49,6 +49,7 @@ enumerate_corpus_jobs = _LAUNCHER.enumerate_corpus_jobs
 WORKER_EPHEMERAL_DISK_MIB = _LAUNCHER.WORKER_EPHEMERAL_DISK_MIB
 status_summary = _LAUNCHER._status_summary
 select_status_record = _LAUNCHER._select_status_record
+record_from_success_marker = _LAUNCHER._record_from_success_marker
 
 
 def _players(*, human: bool = True) -> list[PlayerEntry]:
@@ -604,6 +605,33 @@ def test_status_prefers_audited_publication_to_newer_failed_retry() -> None:
 
     assert select_status_record([published, failed], published=True) == published
     assert select_status_record([published, failed], published=False) == failed
+
+
+def test_status_can_use_the_audit_written_in_a_success_marker() -> None:
+    query = _LAUNCHER.StatusQuery("corpus", "processed/corpus/v8", None)
+    record = record_from_success_marker(
+        {
+            "schema_version": 1,
+            "corpus": "corpus",
+            "final_prefix": "processed/corpus/v8",
+            "published_at": "2026-09-06T01:00:00+00:00",
+            "audit": {"retained": 3},
+        },
+        query,
+    )
+
+    assert record == {
+        "state": "published-marker",
+        "corpus": "corpus",
+        "final_prefix": "processed/corpus/v8",
+        "updated_at": "2026-09-06T01:00:00+00:00",
+        "audit": {"retained": 3},
+    }
+    with pytest.raises(ValueError, match="corpus identity mismatch"):
+        record_from_success_marker(
+            {"schema_version": 1, "corpus": "other", "final_prefix": "processed/corpus/v8", "audit": {}},
+            query,
+        )
 
 
 def _completed_status_results(retained: int) -> list[dict[str, object]]:
