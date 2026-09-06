@@ -45,6 +45,7 @@ sys.modules[_LAUNCHER_SPEC.name] = _LAUNCHER
 _LAUNCHER_SPEC.loader.exec_module(_LAUNCHER)
 enumerate_corpus_jobs = _LAUNCHER.enumerate_corpus_jobs
 WORKER_EPHEMERAL_DISK_MIB = _LAUNCHER.WORKER_EPHEMERAL_DISK_MIB
+status_summary = _LAUNCHER._status_summary
 
 
 def _players(*, human: bool = True) -> list[PlayerEntry]:
@@ -247,6 +248,20 @@ def test_v8_policy_matches_the_published_selection_contract() -> None:
         "starting_stocks": 4,
         "stock_zero_only": False,
     }
+
+
+def test_statistics_audit_allows_only_reduction_order_roundoff() -> None:
+    expected = {"x": {"count": 100, "mean": 1.0, "m2": 1_000.0, "min": -2.0, "max": 3.0}}
+    rounded = {"x": {"count": 100, "mean": 1.0 + 1e-9, "m2": 1_000.0 + 1e-8, "min": -2.0, "max": 3.0}}
+
+    rematerialize._validate_recomputed_stats(rounded, expected, "stats")
+    rounded["x"]["mean"] = 1.001
+    with pytest.raises(ValueError, match=r"x\.mean differs"):
+        rematerialize._validate_recomputed_stats(rounded, expected, "stats")
+    rounded["x"]["mean"] = 1.0
+    rounded["x"]["count"] = 99
+    with pytest.raises(ValueError, match=r"x\.count differs"):
+        rematerialize._validate_recomputed_stats(rounded, expected, "stats")
 
 
 def test_selection_records_overlapping_rejection_reasons() -> None:
@@ -507,3 +522,31 @@ def test_corpus_job_enumeration_is_deterministic() -> None:
     assert jobs[0].staging_prefix == ("processed/_staging/policy-world-v8/run-123/ranked-anonymized-1-policy-world-v8")
     assert jobs == enumerate_corpus_jobs("run-123", "b" * 40)
     assert WORKER_EPHEMERAL_DISK_MIB == 512 * 1024
+
+
+def test_status_summary_reports_only_completed_audits() -> None:
+    audit = {
+        "retained": 3,
+        "rows": {"train": 2, "val": 1, "test": 0},
+        "rejections": 1,
+        "train_frames": 20,
+    }
+    summary = status_summary(
+        [
+            {"corpus": "done", "published": True, "record": {"state": "published", "audit": audit}},
+            {"corpus": "failed", "published": False, "record": {"state": "failed"}},
+            {"corpus": "missing", "published": False, "record": None},
+        ]
+    )
+
+    assert summary == {
+        "corpora": 3,
+        "published": 1,
+        "states": {"failed": 1, "no-record": 1, "published": 1},
+        "audited": 1,
+        "retained": 3,
+        "train_replays": 2,
+        "rejections": 1,
+        "train_frames": 20,
+        "sources": {"done": audit},
+    }

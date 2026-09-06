@@ -43,6 +43,8 @@ from hal.scripts.filter import build_predicates
 SPLITS: Final[tuple[Split, ...]] = ("train", "val", "test")
 POLICY_ID: Final[str] = "policy-world-v8"
 OUTPUT_SHARD_SIZE: Final[int] = 256 * 2**20
+STATS_RELATIVE_TOLERANCE: Final[float] = 1e-10
+STATS_ABSOLUTE_TOLERANCE: Final[float] = 1e-6
 RANKED_ONE_CORPUS: Final[str] = "ranked-anonymized-1-policy-world-v8"
 RANKED_ONE_METADATA_SHA256: Final[str] = "22ac48f73a5ba5cd5718701d3de6666b15e75b2d777458da4927561e0b0fa75d"
 RANKED_ONE_METADATA_KEY: Final[str] = (
@@ -596,8 +598,21 @@ def _validate_stats_payload(payload: dict[str, Any], where: str) -> None:
     for name, raw_block in sufficient.items():
         if not isinstance(raw_block, dict) or set(raw_block) != {"count", "mean", "m2", "min", "max"}:
             raise ValueError(f"{where}: invalid sufficient statistics for {name}")
-        if int(raw_block["count"]) < 0:
-            raise ValueError(f"{where}: negative statistics count for {name}")
+        count = raw_block["count"]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError(f"{where}: invalid statistics count for {name}")
+        values: dict[str, float] = {}
+        for field in ("mean", "m2", "min", "max"):
+            value = raw_block[field]
+            if not isinstance(value, int | float) or isinstance(value, bool) or math.isnan(float(value)):
+                raise ValueError(f"{where}: invalid {field} statistic for {name}")
+            values[field] = float(value)
+        if values["m2"] < 0.0:
+            raise ValueError(f"{where}: negative m2 statistic for {name}")
+        if count == 0 and values != {"mean": 0.0, "m2": 0.0, "min": math.inf, "max": -math.inf}:
+            raise ValueError(f"{where}: noncanonical empty statistics for {name}")
+        if count > 0 and (not all(math.isfinite(value) for value in values.values()) or values["min"] > values["max"]):
+            raise ValueError(f"{where}: invalid nonempty statistics for {name}")
 
 
 def _supplement_manifest_statistics(
@@ -1097,6 +1112,29 @@ def _canonical_sufficient(stats: StatsAccumulator) -> dict[str, dict[str, float 
     }
 
 
+def _validate_recomputed_stats(
+    actual: dict[str, Any],
+    expected: dict[str, dict[str, float | int]],
+    where: str,
+) -> None:
+    for name, expected_block in expected.items():
+        raw_block = actual.get(name)
+        if not isinstance(raw_block, dict):
+            raise ValueError(f"{where}: missing sufficient statistics for {name}")
+        block = cast(dict[str, int | float], raw_block)
+        for field in ("count", "min", "max"):
+            if block[field] != expected_block[field]:
+                raise ValueError(f"{where}: {name}.{field} differs from retained train rows")
+        for field in ("mean", "m2"):
+            if not math.isclose(
+                float(block[field]),
+                float(expected_block[field]),
+                rel_tol=STATS_RELATIVE_TOLERANCE,
+                abs_tol=STATS_ABSOLUTE_TOLERANCE,
+            ):
+                raise ValueError(f"{where}: {name}.{field} differs from retained train rows")
+
+
 def audit_dataset(
     store: ObjectStore,
     prefix: str,
@@ -1287,8 +1325,7 @@ def audit_dataset(
     stats_key = _join(prefix, "stats.json")
     stats_payload = _json_object(store.read_bytes(stats_key), stats_key)
     _validate_stats_payload(stats_payload, stats_key)
-    if stats_payload["sufficient"] != _canonical_sufficient(stats):
-        raise ValueError(f"{stats_key}: sufficient statistics differ from retained train rows")
+    _validate_recomputed_stats(stats_payload["sufficient"], _canonical_sufficient(stats), stats_key)
 
     return {
         "rows": index_rows,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import uuid
+from collections import Counter
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import UTC
@@ -12,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final
 from typing import Literal
+from typing import cast
 
 import modal
 import tyro
@@ -219,6 +221,45 @@ def _queries(jobs: tuple[CorpusJob, ...], run_id: str | None) -> tuple[StatusQue
     return tuple(StatusQuery(job.name, job.final_prefix, run_id) for job in jobs)
 
 
+def _status_summary(results: list[dict[str, object]]) -> dict[str, object]:
+    states: Counter[str] = Counter()
+    sources: dict[str, dict[str, object]] = {}
+    for result in results:
+        raw_record = result.get("record")
+        if not isinstance(raw_record, dict):
+            states["no-record"] += 1
+            continue
+        record = cast(dict[str, object], raw_record)
+        states[str(record.get("state", "unknown"))] += 1
+        raw_audit = record.get("audit")
+        if isinstance(raw_audit, dict):
+            sources[str(result["corpus"])] = cast(dict[str, object], raw_audit)
+
+    def audit_count(audit: dict[str, object], name: str) -> int:
+        value = audit.get(name)
+        if not isinstance(value, int):
+            raise ValueError(f"status audit has invalid {name}")
+        return value
+
+    def train_replays(audit: dict[str, object]) -> int:
+        raw_rows = audit.get("rows")
+        if not isinstance(raw_rows, dict):
+            raise ValueError("status audit has invalid rows")
+        return audit_count(cast(dict[str, object], raw_rows), "train")
+
+    return {
+        "corpora": len(results),
+        "published": sum(bool(result["published"]) for result in results),
+        "states": dict(sorted(states.items())),
+        "audited": len(sources),
+        "retained": sum(audit_count(audit, "retained") for audit in sources.values()),
+        "train_replays": sum(train_replays(audit) for audit in sources.values()),
+        "rejections": sum(audit_count(audit, "rejections") for audit in sources.values()),
+        "train_frames": sum(audit_count(audit, "train_frames") for audit in sources.values()),
+        "sources": sources,
+    }
+
+
 def main(args: Args) -> None:
     if args.pilot and args.command != "launch":
         raise SystemExit("--pilot is valid only with --command launch")
@@ -279,8 +320,10 @@ def main(args: Args) -> None:
     with modal.enable_output(), app.run(name=name, client=client, detach=args.command == "launch" and not args.wait):
         print(f"Modal App {app.app_id}; run_id={run_id}; corpora={len(jobs)}", flush=True)
         if args.command == "status":
-            for result in status.map(_queries(jobs, args.run_id), order_outputs=True):
+            results = list(status.map(_queries(jobs, args.run_id), order_outputs=True))
+            for result in results:
                 print(json.dumps(result, sort_keys=True), flush=True)
+            print(json.dumps({"summary": _status_summary(results)}, sort_keys=True), flush=True)
             return
         if args.pilot:
             job = jobs[0]
