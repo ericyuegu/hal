@@ -22,7 +22,14 @@ class R2Error(RuntimeError):
 
 def run_rclone(*args: str) -> str:
     """Run rclone and surface its diagnostic as one R2 boundary error."""
-    result = subprocess.run(("rclone", *args), capture_output=True, text=True, check=False)
+    env = os.environ.copy()
+    if not missing_credentials():
+        env.setdefault("RCLONE_CONFIG_R2_TYPE", "s3")
+        env.setdefault("RCLONE_CONFIG_R2_PROVIDER", "Cloudflare")
+        env.setdefault("RCLONE_CONFIG_R2_ACCESS_KEY_ID", os.environ["AWS_ACCESS_KEY_ID"])
+        env.setdefault("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", os.environ["AWS_SECRET_ACCESS_KEY"])
+        env.setdefault("RCLONE_CONFIG_R2_ENDPOINT", os.environ["AWS_ENDPOINT_URL"])
+    result = subprocess.run(("rclone", *args), capture_output=True, text=True, check=False, env=env)
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
         raise R2Error(f"rclone {' '.join(args)} failed: {detail}")
