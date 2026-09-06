@@ -302,8 +302,9 @@ def test_ranked_one_uses_only_sha_pinned_supplemental_statistics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    populated = _source_entries()
-    missing = tuple(dataclasses.replace(entry, stats=None) for entry in populated)
+    source_entries = _source_entries()
+    populated = tuple(dataclasses.replace(entry, schema_version=SCHEMA_VERSION - 1) for entry in source_entries)
+    missing = tuple(dataclasses.replace(entry, stats=None) for entry in source_entries)
     store = _write_source(tmp_path / "objects", missing)
     metadata = "".join(json.dumps(entry.to_dict()) + "\n" for entry in populated).encode()
     metadata_key = "metadata/ranked-1-index.jsonl"

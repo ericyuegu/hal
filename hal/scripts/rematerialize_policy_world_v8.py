@@ -627,8 +627,6 @@ def _supplement_manifest_statistics(
             raise ValueError(f"{entry.path}: source and supplemental manifests have no replay statistics")
         source_players = [(player.port, player.player_type) for player in entry.players]
         extra_players = [(player.port, player.player_type) for player in extra.players]
-        if extra.schema_version != SCHEMA_VERSION:
-            raise ValueError(f"{entry.path}: supplemental metadata is not canonical schema v7")
         if extra.stage != entry.stage or extra.frame_count != entry.frame_count or extra_players != source_players:
             raise ValueError(f"{entry.path}: supplemental metadata differs from the source manifest")
         if [player.port for player in extra.stats.players] != [player.port for player in entry.players]:
