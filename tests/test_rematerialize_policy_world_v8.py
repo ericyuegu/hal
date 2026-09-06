@@ -1,3 +1,4 @@
+import base64
 import dataclasses
 import hashlib
 import importlib.util
@@ -27,6 +28,7 @@ from hal.data.replay_stats import PlayerStats
 from hal.data.replay_stats import ReplayStats
 from hal.data.schema import SCHEMA_VERSION
 from hal.scripts.filter import build_predicates
+from hal.scripts.rematerialize_policy_world_v8 import Boto3ObjectStore
 from hal.scripts.rematerialize_policy_world_v8 import CorpusJob
 from hal.scripts.rematerialize_policy_world_v8 import DirectoryObjectStore
 from hal.scripts.rematerialize_policy_world_v8 import StoredObject
@@ -416,6 +418,38 @@ class _RecordingStore(DirectoryObjectStore):
     def copy(self, source: str, destination: str) -> StoredObject:
         self.events.append(("copy", destination))
         return super().copy(source, destination)
+
+
+class _PutObjectClient:
+    def __init__(self) -> None:
+        self.request: dict[str, object] | None = None
+
+    def put_object(self, **request: object) -> None:
+        self.request = request
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        assert Bucket == "bucket"
+        assert self.request is not None and Key == self.request["Key"]
+        body = self.request["Body"]
+        assert isinstance(body, bytes)
+        return {
+            "ContentLength": len(body),
+            "ETag": f'"{hashlib.md5(body).hexdigest()}"',
+            "Metadata": self.request["Metadata"],
+        }
+
+
+def test_boto3_store_uses_a_single_md5_checked_put() -> None:
+    client = _PutObjectClient()
+    store = Boto3ObjectStore(client, "bucket")
+    data = b"one complete object"
+
+    stored = store.put_bytes("prefix/object", data)
+
+    assert client.request is not None
+    assert client.request["ContentLength"] == len(data)
+    assert client.request["ContentMD5"] == base64.b64encode(hashlib.md5(data).digest()).decode()
+    assert stored.etag == hashlib.md5(data).hexdigest()
 
 
 def test_publication_resumes_matching_partial_copy_and_writes_success_last(tmp_path: Path) -> None:
