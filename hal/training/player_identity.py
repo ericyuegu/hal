@@ -111,7 +111,8 @@ class ReplayPlayerLookup:
 
     def ids(self, compact: Mapping[str, object]) -> tuple[int, int]:
         """Return both IDs without allocating per-frame columns."""
-        replay_id = str(compact["replay_id"])
+        raw_replay_id = compact["replay_id"]
+        replay_id = raw_replay_id.hex() if isinstance(raw_replay_id, bytes) else str(raw_replay_id)
         if replay_id in self.professional:
             return self.professional[replay_id]
         ranks = (

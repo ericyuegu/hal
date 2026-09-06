@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from typing import Literal
+from typing import Protocol
 from typing import cast
 
 import numpy as np
@@ -27,6 +28,8 @@ from torch.utils.data import get_worker_info
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import decode_policy_replay
 from hal.data.policy_world_schema import decode_policy_world_replay
+from hal.data.policy_world_v8 import FeatureGroup
+from hal.data.policy_world_v8 import decode_policy_world_v8_slice
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import check_schema_version
 from hal.data.streaming_compat import patch_streaming
@@ -57,9 +60,13 @@ type ReplayTransform = Callable[[ReplayRow], ReplayRow]
 type ReplayLabels = Callable[[Mapping[str, object]], dict[str, np.ndarray]]
 type Window = dict[str, np.ndarray | np.integer]
 type BatchTransform = Callable[[list[Window], TrainBatch], object]
-type ReplayFormat = Literal["full", "policy", "policy-world"]
+type ReplayFormat = Literal["full", "policy", "policy-world", "policy-world-v8"]
 
 _STREAMING_REPLAY_ID = "_streaming_replay_id"
+
+
+class _ResumableWindowDataset(Protocol):
+    def resume_epoch(self, epoch: int) -> None: ...
 
 
 def _loader_generator(seed: int) -> torch.Generator:
@@ -214,7 +221,7 @@ class ResumableStreamingDataLoader(StreamingDataLoader):
         self,
         *args,
         streaming_dataset: StreamingDataset,
-        window_dataset: WindowDataset,
+        window_dataset: _ResumableWindowDataset,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -257,7 +264,7 @@ class ResumableStreamingDataLoader(StreamingDataLoader):
 def _resolve_replay_format(replay_format: ReplayFormat | None) -> ReplayFormat:
     if replay_format is None:
         return "full"
-    if replay_format not in ("full", "policy", "policy-world"):
+    if replay_format not in ("full", "policy", "policy-world", "policy-world-v8"):
         raise ValueError(f"unknown replay_format {replay_format!r}")
     return replay_format
 
@@ -575,9 +582,109 @@ class WindowDataset(IterableDataset):
                 yield window
 
 
-def _stable_window_rng(seed: int, epoch: int, replay_id: str) -> np.random.Generator:
+def _v8_feature_groups(projection: FeatureProjection | None) -> frozenset[FeatureGroup]:
+    groups: set[FeatureGroup] = {"core"}
+    if projection is None or any("_nana_" in name for name in projection.columns):
+        groups.add("nana")
+    if projection is not None and any(name.startswith("item") for name in projection.columns):
+        groups.add("items")
+    return frozenset(groups)
+
+
+class _PolicyWorldV8WindowDataset(IterableDataset):
+    """Decode one selected v8 window for each Mosaic row."""
+
+    def __init__(
+        self,
+        mds: Iterable[dict[str, object]],
+        L_ctx: int,
+        L_chunk: int,
+        *,
+        seed: int,
+        schema_version: int,
+        projection: FeatureProjection | None,
+        replay_labels: ReplayLabels | None,
+        require_full_context: bool,
+    ) -> None:
+        if schema_version != SCHEMA_VERSION:
+            raise ValueError(f"policy-world-v8 projects canonical schema {SCHEMA_VERSION}, got {schema_version}")
+        self._mds = mds
+        self.L_ctx = L_ctx
+        self.L_chunk = L_chunk
+        self._length = L_ctx + L_chunk
+        self._seed = seed
+        self._projection = projection
+        self._groups = _v8_feature_groups(projection)
+        self._replay_labels = replay_labels
+        self._require_full_context = require_full_context
+        self._epoch = 0
+
+    def resume_epoch(self, epoch: int) -> None:
+        """Set the Mosaic epoch used by replay-stable window sampling."""
+        if epoch < 0:
+            raise ValueError(f"epoch must be non-negative, got {epoch}")
+        self._epoch = epoch
+
+    def __iter__(self) -> Iterator[Window]:
+        epoch = self._epoch
+        self._epoch += 1
+        for compact in self._mds:
+            frames = int(np.asarray(compact["num_frames"]).item())
+            replay_id = compact["replay_id"]
+            if not isinstance(replay_id, bytes) or len(replay_id) != 16:
+                raise ValueError("policy-world-v8 replay_id must be exactly 16 bytes")
+            rng = _stable_window_rng(self._seed, epoch, replay_id)
+            chunk_starts = choose_chunk_starts(
+                frames,
+                self.L_ctx,
+                self.L_chunk,
+                1,
+                rng,
+                require_full_context=self._require_full_context,
+            )
+            if len(chunk_starts) != 1:
+                raise ValueError(
+                    f"policy-world-v8 requires exactly one window per row, got {len(chunk_starts)} "
+                    f"for replay {replay_id.hex()} with {frames} frames"
+                )
+            chunk_start = int(chunk_starts[0])
+            virtual_start = chunk_start - self.L_ctx
+            real_start = max(0, virtual_start)
+            real_stop = chunk_start + self.L_chunk
+            pad = max(0, -virtual_start)
+            decoded = cast(
+                dict[str, np.ndarray],
+                decode_policy_world_v8_slice(compact, real_start, real_stop, groups=self._groups),
+            )
+            labels = {} if self._replay_labels is None else self._replay_labels(compact)
+            for name, value in labels.items():
+                array = np.asarray(value)
+                if array.shape == ():
+                    sliced = np.full(real_stop - real_start, array.item(), dtype=array.dtype)
+                elif len(array) == frames:
+                    sliced = array[real_start:real_stop]
+                else:
+                    raise ValueError(f"replay label {name!r} has shape {array.shape}, expected scalar or {(frames,)}")
+                if name in decoded:
+                    raise ValueError(f"replay label {name!r} collides with a decoded column")
+                decoded[name] = sliced
+            ego_prefix = "p1" if rng.random() < 0.5 else "p2"
+            window = make_window(
+                decoded,
+                ego_prefix=ego_prefix,
+                start=0,
+                pad=pad,
+                length=self._length,
+                projection=self._projection,
+            )
+            window["ctx_pad"] = np.int64(min(pad, self.L_ctx))
+            yield window
+
+
+def _stable_window_rng(seed: int, epoch: int, replay_id: str | bytes) -> np.random.Generator:
     """Return a process-independent RNG for one replay in one Mosaic epoch."""
-    digest = hashlib.blake2b(replay_id.encode(), digest_size=8).digest()
+    identity_bytes = replay_id.encode() if isinstance(replay_id, str) else replay_id
+    digest = hashlib.blake2b(identity_bytes, digest_size=8).digest()
     identity = int.from_bytes(digest, "little")
     return np.random.default_rng((seed, epoch, identity & 0xFFFFFFFF, identity >> 32))
 
@@ -746,6 +853,10 @@ def make_loader(
     before the first batch. Set it to a few shards' worth of samples to start fast;
     smaller trades global-shuffle quality for a lighter startup.
 
+    ``replay_format="policy-world-v8"`` reads one selected window from each
+    internally blocked row. It decompresses only the selected frame blocks and
+    requested feature groups. Projectile groups require an explicit projection.
+
     ``resumable=True`` routes Mosaic's epoch/sample cursor through the compact
     replay wrappers. It requires one output window per replay; the custom Mosaic
     loader counts custom ``TrainBatch`` objects and restores the window epoch as
@@ -771,6 +882,11 @@ def make_loader(
         raise ValueError("resumable window loading requires a compact replay format with replay identities")
     if resumable and windows_per_replay != 1:
         raise ValueError("resumable window loading requires windows_per_replay=1")
+    if resolved_format == "policy-world-v8":
+        if windows_per_replay != 1:
+            raise ValueError("policy-world-v8 requires windows_per_replay=1")
+        if replay_transform is not None:
+            raise ValueError("policy-world-v8 does not support a full-replay transform")
     mds, _ = make_streaming_dataset(
         data_root,
         split,
@@ -787,19 +903,35 @@ def make_loader(
         shuffle_algo=shuffle_algo,
         download_retry=download_retry,
     )
-    rows = PolicyReplayDataset(mds, resolved_format, replay_labels=replay_labels) if resolved_format != "full" else mds
-    sampler = WindowDataset(
-        rows,
-        L_ctx,
-        L_chunk,
-        seed=seed,
-        windows_per_replay=windows_per_replay,
-        schema_version=schema_version,
-        projection=projection,
-        replay_transform=replay_transform,
-        require_one_window_per_replay=resumable,
-        require_full_context=require_full_context,
-    )
+    if resolved_format == "policy-world-v8":
+        sampler: _ResumableWindowDataset = _PolicyWorldV8WindowDataset(
+            cast(Iterable[dict[str, object]], mds),
+            L_ctx,
+            L_chunk,
+            seed=seed,
+            schema_version=schema_version,
+            projection=projection,
+            replay_labels=replay_labels,
+            require_full_context=require_full_context,
+        )
+    else:
+        rows = (
+            PolicyReplayDataset(mds, resolved_format, replay_labels=replay_labels)
+            if resolved_format != "full"
+            else mds
+        )
+        sampler = WindowDataset(
+            rows,
+            L_ctx,
+            L_chunk,
+            seed=seed,
+            windows_per_replay=windows_per_replay,
+            schema_version=schema_version,
+            projection=projection,
+            replay_transform=replay_transform,
+            require_one_window_per_replay=resumable,
+            require_full_context=require_full_context,
+        )
     collate = functools.partial(
         _collate_with_batch_transform,
         stats=stats,

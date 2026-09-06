@@ -15,6 +15,11 @@ import numpy as np
 from scipy.signal import lfilter
 
 from hal.data.policy_schema import unpack_player_stock
+from hal.data.policy_world_v8 import P1_MATCH_POINT
+from hal.data.policy_world_v8 import P1_STOCK_LOSS
+from hal.data.policy_world_v8 import P2_MATCH_POINT
+from hal.data.policy_world_v8 import P2_STOCK_LOSS
+from hal.data.policy_world_v8 import decode_policy_world_v8_reward_events
 from hal.data.reward_events import damage_taken
 from hal.data.reward_events import match_point_events
 from hal.data.reward_events import stock_loss_events
@@ -153,6 +158,15 @@ def compact_policy_returns(
     suffix: str,
 ) -> dict[str, np.ndarray]:
     """Compute exact return labels without decoding unrelated replay fields."""
+    if "block_payload" in compact:
+        return _policy_world_v8_returns(
+            compact,
+            gamma=gamma,
+            damage_shaping=damage_shaping,
+            win_reward=win_reward,
+            stock_value=stock_value,
+            suffix=suffix,
+        )
     frames = int(np.asarray(compact["num_frames"]).item())
     sample: dict[str, np.ndarray] = {}
     for port in ("p1", "p2"):
@@ -173,3 +187,49 @@ def compact_policy_returns(
         stock_value=stock_value,
         suffix=suffix,
     )
+
+
+def _policy_world_v8_returns(
+    compact: Mapping[str, object],
+    *,
+    gamma: float,
+    damage_shaping: float,
+    win_reward: float,
+    stock_value: float,
+    suffix: str,
+) -> dict[str, np.ndarray]:
+    frames = int(np.asarray(compact["num_frames"]).item())
+    if frames < 1:
+        raise ValueError(f"num_frames must be positive, got {frames}")
+    events = decode_policy_world_v8_reward_events(compact)
+    event_frames = events["frame"].astype(np.int64, copy=False)
+    flags = events["flags"]
+
+    damage = [np.zeros(frames, dtype=np.float32) for _ in range(2)]
+    damage[0][event_frames] = events["p1_damage_taken"]
+    damage[1][event_frames] = events["p2_damage_taken"]
+    stock = [np.zeros(frames, dtype=np.float32) for _ in range(2)]
+    match = [np.zeros(frames, dtype=np.float32) for _ in range(2)]
+    for target, flag in zip(stock, (P1_STOCK_LOSS, P2_STOCK_LOSS), strict=True):
+        target[event_frames] = ((flags & flag) != 0).astype(np.float32)
+    for target, flag in zip(match, (P1_MATCH_POINT, P2_MATCH_POINT), strict=True):
+        target[event_frames] = ((flags & flag) != 0).astype(np.float32)
+
+    terminated = np.asarray(compact["mc_terminated"])
+    if terminated.shape:
+        raise ValueError(f"mc_terminated must be scalar, got shape {terminated.shape}")
+    complete = bool(terminated.item())
+    out: dict[str, np.ndarray] = {}
+    for side, other in ((0, 1), (1, 0)):
+        reward = stock[other] - stock[side]
+        if stock_value != 1.0:
+            reward = stock_value * reward
+        if win_reward:
+            reward = reward + win_reward * (match[other] - match[side])
+        if damage_shaping:
+            reward = reward + damage_shaping * (damage[other] - damage[side])
+        values = discounted_return(reward, gamma) if complete else np.full(frames, np.nan, dtype=np.float32)
+        port = f"p{side + 1}"
+        out[f"{port}_{suffix}"] = values
+        out[f"{port}_{suffix}_valid"] = np.full(frames, complete, dtype=np.bool_)
+    return out

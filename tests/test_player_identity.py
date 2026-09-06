@@ -88,6 +88,10 @@ def test_replay_lookup_uses_professional_ids_or_rank_aggregates() -> None:
     assert professional["p1_player_id"].tolist() == [7, 7, 7]
     assert professional["p2_player_id"].tolist() == [8, 8, 8]
 
+    binary = lookup({"replay_id": bytes.fromhex("a" * 32), "num_frames": 1})
+    assert binary["p1_player_id"].tolist() == [7]
+    assert binary["p2_player_id"].tolist() == [8]
+
     ranked = lookup(
         {
             "replay_id": "b" * 32,

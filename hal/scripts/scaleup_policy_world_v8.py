@@ -120,6 +120,38 @@ def _rank_one_metadata(
     return destination, {"remote": destination, "sha256": sha256, "bytes": path.stat().st_size}
 
 
+def _remote_rank_one_metadata(path: str) -> tuple[str, dict[str, object]]:
+    name = Path(path).name
+    if not name.startswith("ranked-1-index.") or not name.endswith(".jsonl"):
+        raise ValueError("remote ranked-1 metadata must use its SHA-256-pinned filename")
+    sha256 = name.removeprefix("ranked-1-index.").removesuffix(".jsonl")
+    if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256):
+        raise ValueError("remote ranked-1 metadata filename has an invalid SHA-256")
+    objects = r2.list_files(path)
+    if objects != [name]:
+        raise FileNotFoundError(f"immutable ranked-1 metadata object differs at {path}: {objects}")
+    size = json.loads(r2.run_rclone("size", path, "--json"))
+    if int(size.get("count", -1)) != 1 or int(size.get("bytes", -1)) < 1:
+        raise ValueError(f"remote ranked-1 metadata size is invalid: {size}")
+    return path, {"remote": path, "sha256": sha256, "bytes": int(size["bytes"])}
+
+
+def stage_rank_one_metadata(path: Path, staging_root: str) -> tuple[str, dict[str, object]]:
+    """Upload the local supplemental index before starting a Modal worker."""
+    return _rank_one_metadata(path, staging_root, _git_sha())
+
+
+def _resolve_rank_one_metadata(
+    local: Path,
+    remote: str | None,
+    staging_root: str,
+    git_sha: str,
+) -> tuple[str, dict[str, object]]:
+    if remote is not None:
+        return _remote_rank_one_metadata(remote)
+    return _rank_one_metadata(local, staging_root, git_sha)
+
+
 def _report_row(source: streams.StreamSource, prefix: str, result: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_name": source.name,
@@ -211,8 +243,8 @@ class PolicyWorldV8ScaleupConfig:
     scratch: Path = DEFAULT_SCRATCH
     report: Path = Path("data/builds/policy-world-v8/publication.json")
     rank_one_metadata_index: Path = Path("data/processed/ranked-anonymized-1/index.jsonl")
+    rank_one_metadata_remote: str | None = None
     publish: bool = False
-    delete_obsolete_rank_one: bool = False
     max_concurrent_modal_jobs: int = 8
 
 
@@ -227,11 +259,12 @@ def scaleup_policy_world_v8(cfg: PolicyWorldV8ScaleupConfig) -> dict[str, Any]:
     rank_one_metadata: str | None = None
     metadata_identity: dict[str, object] | None = None
     if any(source.name == RANK_ONE_SOURCE for source in selected):
-        rank_one_metadata, metadata_identity = _rank_one_metadata(
-            cfg.rank_one_metadata_index, cfg.staging_root, git_sha
+        rank_one_metadata, metadata_identity = _resolve_rank_one_metadata(
+            cfg.rank_one_metadata_index,
+            cfg.rank_one_metadata_remote,
+            cfg.staging_root,
+            git_sha,
         )
-    if cfg.delete_obsolete_rank_one:
-        verify_and_delete_obsolete_rank_one_prefix()
 
     staged: dict[str, str] = {}
     audited: dict[str, dict[str, Any]] = {}
@@ -315,6 +348,7 @@ class PolicyWorldV8PilotConfig:
     scratch: Path = DEFAULT_SCRATCH
     report: Path = Path("data/builds/policy-world-v8/pilot.json")
     rank_one_metadata_index: Path = Path("data/processed/ranked-anonymized-1/index.jsonl")
+    rank_one_metadata_remote: str | None = None
     ranked_train_rows: int = 16_384
 
 
@@ -324,7 +358,12 @@ def build_policy_world_v8_pilot(cfg: PolicyWorldV8PilotConfig) -> dict[str, Any]
     git_sha = _git_sha()
     sources_by_name = {source.name: source for source in streams.POLICY_WORLD_V7_SOURCES}
     selected = (sources_by_name[AKLO_SOURCE], sources_by_name[RANK_ONE_SOURCE])
-    rank_one_metadata, metadata = _rank_one_metadata(cfg.rank_one_metadata_index, cfg.staging_root, git_sha)
+    rank_one_metadata, metadata = _resolve_rank_one_metadata(
+        cfg.rank_one_metadata_index,
+        cfg.rank_one_metadata_remote,
+        cfg.staging_root,
+        git_sha,
+    )
     results: dict[str, dict[str, Any]] = {}
     for source in selected:
         pilot_root = f"{cfg.staging_root.rstrip('/')}/pilot"

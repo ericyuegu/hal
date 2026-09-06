@@ -100,3 +100,15 @@ def test_obsolete_deletion_is_exact_and_refuses_a_success_marker(monkeypatch: py
     monkeypatch.setattr(module.r2, "list_files", lambda _prefix: ["_SUCCESS"])
     with pytest.raises(ValueError, match="refusing to delete"):
         verify_and_delete_obsolete_rank_one_prefix()
+
+
+def test_remote_rank_one_metadata_requires_a_pinned_single_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    digest = "a" * 64
+    remote = f"r2:hal/processed/_staging/policy-world-v8/sha/_metadata/ranked-1-index.{digest}.jsonl"
+    monkeypatch.setattr(module.r2, "list_files", lambda _prefix: [Path(remote).name])
+    monkeypatch.setattr(module.r2, "run_rclone", lambda *args: '{"count":1,"bytes":120000000}')
+
+    resolved, identity = module._remote_rank_one_metadata(remote)
+
+    assert resolved == remote
+    assert identity == {"remote": remote, "sha256": digest, "bytes": 120_000_000}

@@ -5,6 +5,7 @@ import pytest
 from streaming import MDSWriter
 from streaming import StreamingDataset
 
+from hal.data.feature_stats import FeatureStats
 from hal.data.policy_schema import FLOAT_STATE_SUFFIXES
 from hal.data.policy_schema import PACKED_STATE_SUFFIXES
 from hal.data.policy_schema import POLICY_SCHEMA_VERSION
@@ -25,6 +26,11 @@ from hal.data.policy_world_v8 import policy_world_v7_row_from_v8
 from hal.data.schema import POLICY_WORLD_V8_MDS_COLUMNS
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
+from hal.training import dataloader
+from hal.training import returns
+from hal.training.features import BASE_ACTION_PROJECTION
+from hal.training.features import FLOAT_FEATURES
+from hal.training.features import FeatureProjection
 from hal.wire import ACTION_CHANNELS
 from hal.wire import ITEM_SLOTS
 from hal.wire import MASK_INT32
@@ -189,6 +195,55 @@ def test_sparse_reward_events_preserve_damage_and_stock_flags() -> None:
     assert not int(by_frame[256]["flags"]) & P2_MATCH_POINT
 
 
+@pytest.mark.parametrize(
+    ("gamma", "damage_shaping", "win_reward", "stock_value"),
+    [
+        (0.0, 0.0, 0.0, 1.0),
+        (0.99618, 1.0, 50.0, 120.0),
+        (1.0, 0.125, 2.0, 1.0),
+    ],
+)
+def test_sparse_returns_match_full_decode_exactly(
+    gamma: float,
+    damage_shaping: float,
+    win_reward: float,
+    stock_value: float,
+) -> None:
+    encoded = _encoded()
+    decoded = decode_policy_world_v8_replay(encoded)
+    kwargs = {
+        "gamma": gamma,
+        "damage_shaping": damage_shaping,
+        "win_reward": win_reward,
+        "stock_value": stock_value,
+        "suffix": "return",
+    }
+
+    expected = returns.replay_returns(decoded, **kwargs)
+    actual = returns.compact_policy_returns(encoded, **kwargs)
+
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+
+def test_sparse_returns_reject_an_unobserved_terminal_tail() -> None:
+    encoded = _encoded()
+    encoded["mc_terminated"] = 0
+
+    actual = returns.compact_policy_returns(
+        encoded,
+        gamma=0.9,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+        suffix="return",
+    )
+
+    for port in ("p1", "p2"):
+        assert np.isnan(actual[f"{port}_return"]).all()
+        assert not actual[f"{port}_return_valid"].any()
+
+
 def test_crc_failure_is_rejected() -> None:
     encoded = _encoded()
     payload = bytearray(encoded["block_payload"])
@@ -210,3 +265,177 @@ def test_v8_columns_round_trip_through_raw_mds(tmp_path) -> None:
     assert loaded["replay_id"] == bytes(range(16))
     assert loaded["block_payload"] == encoded["block_payload"]
     assert decode_policy_world_v8_replay(loaded)["frame"].shape == (_FRAMES,)
+
+
+def test_v8_window_dataset_decodes_only_the_selected_projection(monkeypatch: pytest.MonkeyPatch) -> None:
+    encoded = _encoded()
+    calls: list[tuple[int, int, frozenset[str]]] = []
+    original = dataloader.decode_policy_world_v8_slice
+
+    def observe(
+        source: dict[str, object],
+        start: int,
+        stop: int,
+        *,
+        groups: frozenset[str],
+    ) -> dict[str, np.ndarray | int]:
+        calls.append((start, stop, groups))
+        return original(source, start, stop, groups=groups)  # type: ignore[arg-type]
+
+    def labels(source: dict[str, object]) -> dict[str, np.ndarray]:
+        frames = int(source["num_frames"])
+        return {
+            "p1_marker": np.arange(frames, dtype=np.int32),
+            "p2_marker": np.arange(frames, dtype=np.int32) + 1000,
+        }
+
+    monkeypatch.setattr(dataloader, "decode_policy_world_v8_slice", observe)
+    projection = FeatureProjection(
+        frozenset({"frame", "ego_position_x", "opp_position_x", "ego_rank", "ego_rank_imputed", "ego_marker"}),
+        derive_spatial=False,
+    )
+    dataset = dataloader._PolicyWorldV8WindowDataset(
+        [encoded],
+        6,
+        4,
+        seed=17,
+        schema_version=SCHEMA_VERSION,
+        projection=projection,
+        replay_labels=labels,
+        require_full_context=False,
+    )
+
+    window = next(iter(dataset))
+
+    assert calls and calls[0][2] == frozenset({"core"})
+    assert all(len(value) == 10 for name, value in window.items() if name != "ctx_pad")
+    first_real = int(window["ctx_pad"])
+    frame = int(window["frame"][first_real])
+    marker = int(window["ego_marker"][first_real])
+    assert marker in (frame, frame + 1000)
+    assert not any("nana" in name or name.startswith("item") for name in window)
+
+
+def test_make_loader_routes_v8_directly_to_the_window_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class CapturingLoader:
+        def __init__(self, dataset: object, **_kwargs: object) -> None:
+            captured["dataset"] = dataset
+
+    monkeypatch.setattr(dataloader, "DataLoader", CapturingLoader)
+    monkeypatch.setattr(
+        dataloader,
+        "make_streaming_dataset",
+        lambda *_args, **_kwargs: ([dict(_encoded())], ()),
+    )
+
+    dataloader.make_loader(
+        "unused",
+        "train",
+        stats={},
+        L_ctx=6,
+        L_chunk=4,
+        batch_size=1,
+        seed=17,
+        num_workers=0,
+        replay_format="policy-world-v8",
+    )
+
+    assert isinstance(captured["dataset"], dataloader._PolicyWorldV8WindowDataset)
+
+
+def test_v8_window_uses_the_existing_training_preprocessor() -> None:
+    dataset = dataloader._PolicyWorldV8WindowDataset(
+        [_encoded()],
+        6,
+        4,
+        seed=17,
+        schema_version=SCHEMA_VERSION,
+        projection=BASE_ACTION_PROJECTION,
+        replay_labels=None,
+        require_full_context=True,
+    )
+    window = next(iter(dataset))
+    unit = FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
+    stats = {name: unit for name in FLOAT_FEATURES}
+    stats.update({f"nana_{name}": unit for name in FLOAT_FEATURES})
+
+    batch = dataloader.collate_train_batch(
+        [window],
+        stats=stats,
+        L_ctx=6,
+        projection=BASE_ACTION_PROJECTION,
+    )
+
+    assert batch.target.shape == (1, 4, 14)
+    assert all(value.shape[:2] == (1, 6) for value in batch.context.features.values())
+
+
+def test_v8_window_resume_reproduces_the_remaining_epoch() -> None:
+    first = _encoded()
+    second = dict(_encoded())
+    second["replay_id"] = bytes(reversed(range(16)))
+
+    complete = dataloader._PolicyWorldV8WindowDataset(
+        [first, second],
+        6,
+        4,
+        seed=17,
+        schema_version=SCHEMA_VERSION,
+        projection=BASE_ACTION_PROJECTION,
+        replay_labels=None,
+        require_full_context=True,
+    )
+    expected = list(complete)[1]
+    resumed = dataloader._PolicyWorldV8WindowDataset(
+        [second],
+        6,
+        4,
+        seed=17,
+        schema_version=SCHEMA_VERSION,
+        projection=BASE_ACTION_PROJECTION,
+        replay_labels=None,
+        require_full_context=True,
+    )
+    resumed.resume_epoch(0)
+    actual = next(iter(resumed))
+
+    assert actual.keys() == expected.keys()
+    for name in actual:
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+
+def test_real_mosaic_v8_loader_yields_one_window_per_row(tmp_path) -> None:
+    with MDSWriter(
+        out=str(tmp_path / "train"),
+        columns=POLICY_WORLD_V8_MDS_COLUMNS,
+        compression=None,
+    ) as writer:
+        for index in range(4):
+            row = dict(_encoded())
+            row["replay_id"] = index.to_bytes(16, "little")
+            writer.write(row)
+    unit = FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
+    stats = {name: unit for name in FLOAT_FEATURES}
+    stats.update({f"nana_{name}": unit for name in FLOAT_FEATURES})
+    loader = dataloader.make_loader(
+        str(tmp_path),
+        "train",
+        stats=stats,
+        L_ctx=6,
+        L_chunk=4,
+        batch_size=2,
+        seed=17,
+        shuffle=False,
+        num_workers=0,
+        resumable=True,
+        replay_format="policy-world-v8",
+        projection=BASE_ACTION_PROJECTION,
+        require_full_context=True,
+    )
+
+    batches = list(loader)
+
+    assert len(batches) == 2
+    assert sum(len(batch.target) for batch in batches) == 4
