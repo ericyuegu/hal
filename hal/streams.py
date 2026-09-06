@@ -90,6 +90,17 @@ RANKED_ANONYMIZED_POLICY_WORLD_V7: Final[tuple[StreamSource, ...]] = tuple(
     _ranked_policy_world_source(rank) for rank in range(1, 7)
 )
 
+
+def _ranked_policy_world_v8_source(rank: int) -> StreamSource:
+    name = f"ranked-anonymized-{rank}-policy-world-v8"
+    root = f"processed/ranked-anonymized-{rank}/mds-policy-world-v8"
+    return StreamSource(name=name, remote=f"s3://hal/{root}", local=Path("data") / root)
+
+
+RANKED_ANONYMIZED_POLICY_WORLD_V8: Final[tuple[StreamSource, ...]] = tuple(
+    _ranked_policy_world_v8_source(rank) for rank in range(1, 7)
+)
+
 PROFESSIONAL_PLAYER_SLUGS: Final[tuple[str, ...]] = (
     "aklo",
     "amsa",
@@ -142,9 +153,25 @@ PROFESSIONAL_POLICY_WORLD_V7: Final[dict[str, StreamSource]] = {
     slug: _professional_policy_world_source(slug) for slug in PROFESSIONAL_PLAYER_SLUGS
 }
 
+
+def _professional_policy_world_v8_source(slug: str) -> StreamSource:
+    name = f"professional-{slug}-policy-world-v8"
+    root = f"processed/professional/{slug}/mds-policy-world-v8"
+    return StreamSource(name=name, remote=f"s3://hal/{root}", local=Path("data") / root)
+
+
+PROFESSIONAL_POLICY_WORLD_V8: Final[dict[str, StreamSource]] = {
+    slug: _professional_policy_world_v8_source(slug) for slug in PROFESSIONAL_PLAYER_SLUGS
+}
+
 POLICY_WORLD_V7_SOURCES: Final[tuple[StreamSource, ...]] = (
     *RANKED_ANONYMIZED_POLICY_WORLD_V7,
     *PROFESSIONAL_POLICY_WORLD_V7.values(),
+)
+
+POLICY_WORLD_V8_SOURCES: Final[tuple[StreamSource, ...]] = (
+    *RANKED_ANONYMIZED_POLICY_WORLD_V8,
+    *PROFESSIONAL_POLICY_WORLD_V8.values(),
 )
 
 # Verified against the immutable train splits on R2 on 2026-08-23. The replay
@@ -265,6 +292,7 @@ ALL: Final[tuple[StreamSource, ...]] = (
     RANKED_ANONYMIZED_1_V7,
     RANKED_ANONYMIZED_1_POLICY_V7,
     *POLICY_WORLD_V7_SOURCES,
+    *POLICY_WORLD_V8_SOURCES,
 )
 BY_NAME: Final[dict[str, StreamSource]] = {s.name: s for s in ALL}
 # Reverse map from a cache root to its registered source. This lets training

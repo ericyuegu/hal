@@ -39,6 +39,10 @@ SECRET_KEYS: Final[tuple[str, ...]] = (
 # Modal 1.5.3 rejects the requested 32 GiB ephemeral disk because the current
 # service minimum is 512 GiB. Restore 32 GiB if Modal accepts it in the future.
 WORKER_EPHEMERAL_DISK_MIB: Final[int] = 512 * 1024
+EXPECTED_CORPORA: Final[int] = 44
+EXPECTED_REJECTIONS: Final[int] = 5_380
+EXPECTED_RETAINED: Final[int] = 1_321_524
+EXPECTED_TRAIN_REPLAYS: Final[int] = 1_295_370
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,14 +251,32 @@ def _status_summary(results: list[dict[str, object]]) -> dict[str, object]:
             raise ValueError("status audit has invalid rows")
         return audit_count(cast(dict[str, object], raw_rows), "train")
 
+    published = sum(bool(result["published"]) for result in results)
+    retained = sum(audit_count(audit, "retained") for audit in sources.values())
+    train_rows = sum(train_replays(audit) for audit in sources.values())
+    rejections = sum(audit_count(audit, "rejections") for audit in sources.values())
+    complete = len(results) == published == len(sources) == EXPECTED_CORPORA
+    observed = {
+        "rejections": rejections,
+        "retained": retained,
+        "train_replays": train_rows,
+    }
+    expected = {
+        "rejections": EXPECTED_REJECTIONS,
+        "retained": EXPECTED_RETAINED,
+        "train_replays": EXPECTED_TRAIN_REPLAYS,
+    }
+    if complete and observed != expected:
+        raise ValueError(f"complete v8 corpus totals differ: observed={observed}, expected={expected}")
     return {
         "corpora": len(results),
-        "published": sum(bool(result["published"]) for result in results),
+        "published": published,
         "states": dict(sorted(states.items())),
         "audited": len(sources),
-        "retained": sum(audit_count(audit, "retained") for audit in sources.values()),
-        "train_replays": sum(train_replays(audit) for audit in sources.values()),
-        "rejections": sum(audit_count(audit, "rejections") for audit in sources.values()),
+        "accepted": complete,
+        "retained": retained,
+        "train_replays": train_rows,
+        "rejections": rejections,
         "train_frames": sum(audit_count(audit, "train_frames") for audit in sources.values()),
         "sources": sources,
     }

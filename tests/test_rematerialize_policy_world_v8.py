@@ -276,6 +276,13 @@ def test_selection_records_overlapping_rejection_reasons() -> None:
     )
 
 
+def test_selection_rejects_unexpected_v7_policy_drift() -> None:
+    entry = _entry("v7-drift.slp", "train", 0, stats=_stats(p1_damage=60.0, p2_damage=60.0))
+
+    with pytest.raises(ValueError, match="source rows fail the immutable v7 policy"):
+        select_manifest((entry,), {"train": 1, "val": 0, "test": 0}, where="manifest")
+
+
 @pytest.mark.parametrize("defect", ["missing-stats", "invalid-stats", "duplicate-row", "schema"])
 def test_selection_rejects_malformed_manifests(defect: str) -> None:
     first = _entry("one.slp", "train", 0)
@@ -544,9 +551,37 @@ def test_status_summary_reports_only_completed_audits() -> None:
         "published": 1,
         "states": {"failed": 1, "no-record": 1, "published": 1},
         "audited": 1,
+        "accepted": False,
         "retained": 3,
         "train_replays": 2,
         "rejections": 1,
         "train_frames": 20,
         "sources": {"done": audit},
     }
+
+
+def _completed_status_results(retained: int) -> list[dict[str, object]]:
+    return [
+        {
+            "corpus": f"corpus-{index}",
+            "published": True,
+            "record": {
+                "state": "published",
+                "audit": {
+                    "retained": retained if index == 0 else 0,
+                    "rows": {"train": _LAUNCHER.EXPECTED_TRAIN_REPLAYS if index == 0 else 0},
+                    "rejections": _LAUNCHER.EXPECTED_REJECTIONS if index == 0 else 0,
+                    "train_frames": 1,
+                },
+            },
+        }
+        for index in range(_LAUNCHER.EXPECTED_CORPORA)
+    ]
+
+
+def test_status_summary_enforces_complete_corpus_acceptance_totals() -> None:
+    results = _completed_status_results(_LAUNCHER.EXPECTED_RETAINED)
+
+    assert status_summary(results)["accepted"] is True
+    with pytest.raises(ValueError, match="complete v8 corpus totals differ"):
+        status_summary(_completed_status_results(_LAUNCHER.EXPECTED_RETAINED - 1))
