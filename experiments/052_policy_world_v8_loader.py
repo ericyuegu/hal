@@ -278,8 +278,14 @@ def make_treatment_loader(
     args: Args,
     data: PilotData,
     *,
+    cache_root: Path | None = None,
     num_workers: int | None = None,
 ) -> ResumableStreamingDataLoader:
+    sources = data.treatment_sources
+    if cache_root is not None:
+        sources = tuple(
+            streams.StreamSource(source.name, source.remote, cache_root / source.name) for source in sources
+        )
     loader = make_loader(
         None,
         "train",
@@ -288,7 +294,7 @@ def make_treatment_loader(
         L_chunk=_CHUNK,
         batch_size=args.batch_size,
         seed=args.seed,
-        sources=data.treatment_sources,
+        sources=sources,
         cache_limit=_CACHE_LIMIT,
         shuffle_block_size=8_192,
         shuffle=True,
@@ -596,7 +602,12 @@ def _gate(control: Mapping[str, object], treatment: Mapping[str, object], resume
 
 def verify_treatment_resume(args: Args, data: PilotData) -> bool:
     """Reproduce the next batch and one optimizer update from a Mosaic cursor."""
-    loader = make_treatment_loader(args, data, num_workers=0)
+    loader = make_treatment_loader(
+        args,
+        data,
+        cache_root=args.cache_root / "resume-source",
+        num_workers=0,
+    )
     iterator = iter(loader)
     next(iterator)
     state = loader.state_dict()
@@ -605,7 +616,12 @@ def verify_treatment_resume(args: Args, data: PilotData) -> bool:
     del iterator, loader
     gc.collect()
 
-    restored = make_treatment_loader(args, data, num_workers=0)
+    restored = make_treatment_loader(
+        args,
+        data,
+        cache_root=args.cache_root / "resume-restored",
+        num_workers=0,
+    )
     restored.load_state_dict(state)
     actual = next(iter(restored))
     if _batch_hash(actual) != expected_batch_hash:
