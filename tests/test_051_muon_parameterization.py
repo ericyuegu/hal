@@ -109,13 +109,47 @@ def test_prefetcher_applies_parent_transforms_once_per_batch() -> None:
     prefetcher = exp.DeviceBatchPrefetcher(batches, cfg, "cpu", transform)
     try:
         prefetcher.next()
-        prefetcher.start_preload()
-        prefetcher.finish_preload()
+        prefetcher.fill_lookahead(1)
+        prefetcher.stage_next()
         prefetcher.next()
     finally:
         prefetcher.close()
 
     assert transformed == batches
+
+
+def test_four_batch_lookahead_drains_at_checkpoint_boundary() -> None:
+    cfg = _tiny_cfg()
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    calls: list[int] = []
+
+    class Loader:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            calls.append(threading.get_ident())
+            return batch
+
+    prefetcher = exp.DeviceBatchPrefetcher(Loader(), cfg, "cpu")
+    queue_depths = []
+    try:
+        for update in range(1, 9):
+            prefetcher.next()
+            prefetcher.fill_lookahead(0 if update == 8 else 8 - update)
+            queue_depths.append(prefetcher.queue_depth)
+            if update < 8:
+                prefetcher.stage_next()
+
+        assert prefetcher.drained
+    finally:
+        prefetcher.close()
+
+    assert len(calls) == 8
+    assert len(set(calls)) == 1
+    assert calls[0] != threading.main_thread().ident
+    assert max(queue_depths) == 4
+    assert queue_depths[-1] == 0
 
 
 def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
@@ -149,10 +183,10 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     assert report["loader_only_windows_per_s"] > 0
     assert report["distinct_replays"] == cfg.batch_size
     assert report["within_batch_unique"] is True
-    assert report["cooldown_batches"] == 0
-    assert report["identity_coverage_fraction"] == 1.0
-    assert report["slot_frequency_spread"] == 0
     assert report["repeat_floor_passed"] is True
+    assert report["period_overlap_passed"] is True
+    assert report["decode_admission_ratio"] == 1.0
+    assert report["decoded_chunk_bound_passed"] is True
     assert report["steady_state_turnover_passed"] is True
     assert report["shuffle_passed"] is True
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 import pickle
 import threading
 import time
+from collections import deque
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -16,17 +18,20 @@ import pytest
 import torch
 
 import hal.training.physical_shard_loader as physical_shard_loader
-from hal.training.physical_shard_loader import DecodedShard
+from hal.training.physical_shard_loader import MAX_DECODE_CHUNK_ROWS
+from hal.training.physical_shard_loader import DecodedChunk
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import PhysicalShardReplayLoader
 from hal.training.physical_shard_loader import PhysicalShardSelection
-from hal.training.physical_shard_loader import ReplayBuffer
+from hal.training.physical_shard_loader import ReplayRing
 from hal.training.physical_shard_loader import ShardTask
 from hal.training.physical_shard_loader import SourceManifest
 from hal.training.physical_shard_loader import SourceRowSelection
-from hal.training.physical_shard_loader import _BalancedReplaySchedule
+from hal.training.physical_shard_loader import _ChunkSampler
 from hal.training.physical_shard_loader import _decode_generation
-from hal.training.physical_shard_loader import _DecodedRows
+from hal.training.physical_shard_loader import _DecodeChunkRequest
+from hal.training.physical_shard_loader import _OrderedChunks
+from hal.training.physical_shard_loader import _ReplayRingSchedule
 from hal.training.physical_shard_loader import _shutdown_data_loader_workers
 from hal.training.physical_shard_loader import _stack_window_rows
 from hal.training.physical_shard_loader import build_shard_plan
@@ -90,20 +95,21 @@ def test_disk_requirement_counts_valid_raw_shards_as_already_used(tmp_path: Path
 def test_host_memory_model_includes_every_concurrent_copy() -> None:
     estimate = estimate_host_memory(
         central_buffer_bytes=100,
-        decoded_shard_bytes=20,
+        decoded_chunk_bytes=20,
         replay_workspace_bytes=3,
         pinned_batch_bytes=7,
+        pinned_batch_count=4,
         validation_cache_bytes=11,
         compiler_and_process_bytes=13,
         workers=4,
     )
 
-    assert estimate.queued_shards == 160
+    assert estimate.queued_chunks == 160
     assert estimate.worker_outputs_and_workspaces == 92
     assert estimate.ipc_copies == 160
     assert estimate.parent_result == 20
-    assert estimate.pinned_batches == 14
-    assert estimate.peak_bytes == 570
+    assert estimate.pinned_batches == 28
+    assert estimate.peak_bytes == 584
 
 
 def test_window_starts_are_full_and_distinct() -> None:
@@ -158,27 +164,40 @@ def test_short_replay_error_identifies_the_physical_row() -> None:
         )
 
 
-def _decoded(ids: tuple[str, ...], *, epoch: int = 0) -> DecodedShard:
-    task = ShardTask("source", 0, 0, len(ids), global_shard=0)
-    values = np.arange(len(ids) * 4 * 3, dtype=np.int32).reshape(len(ids), 4, 3)
-    return DecodedShard(
-        task=task,
+def _decoded(
+    ids: tuple[str, ...],
+    *,
+    epoch: int = 0,
+    sequence: int = 0,
+    row_start: int = 0,
+) -> DecodedChunk:
+    task = ShardTask("source", 0, row_start, row_start + len(ids), global_shard=0)
+    request = _DecodeChunkRequest(
+        sequence=sequence,
         epoch=epoch,
         task_offset=0,
+        task_index=0,
+        row_offset=0,
+        rows=task.selected_rows,
+    )
+    values = np.arange(len(ids) * 4 * 3, dtype=np.int32).reshape(len(ids), 4, 3)
+    return DecodedChunk(
+        request=request,
+        task=task,
         replay_ids=ids,
-        locators=tuple(PhysicalRow("source", 0, row) for row in range(len(ids))),
+        locators=tuple(PhysicalRow("source", 0, row) for row in task.selected_rows),
         columns={"value": values},
         windows_per_generation=4,
     )
 
 
-def test_decoded_shard_requires_fixed_four_window_columns() -> None:
+def test_decoded_chunk_requires_fixed_four_window_columns() -> None:
     task = ShardTask("source", 0, 0, 2)
+    request = _DecodeChunkRequest(0, 0, 0, 0, 0, (0, 1))
     with pytest.raises(ValueError, match=r"\[R, 4\]"):
-        DecodedShard(
+        DecodedChunk(
+            request,
             task,
-            0,
-            0,
             ("a", "b"),
             (PhysicalRow("source", 0, 0), PhysicalRow("source", 0, 1)),
             {"value": np.zeros((2, 3, 5), dtype=np.float32)},
@@ -249,166 +268,127 @@ def test_decoded_ctx_pad_remains_scalar(monkeypatch: pytest.MonkeyPatch) -> None
     assert columns["ctx_pad"].shape == (1, 4)
 
 
-def test_replay_buffer_rejects_duplicate_active_identities() -> None:
-    buffer = ReplayBuffer(capacity=4, batch_size=4, windows_per_generation=4, seed=9)
-    shard = _decoded(("a", "a", "b", "c"))
+def test_replay_ring_uses_the_derived_slots_and_window_ordinals() -> None:
+    ring = ReplayRing(capacity=100, batch_size=4, windows_per_generation=4, seed=10)
+    ring.append_chunk(_decoded(tuple(f"replay-{index}" for index in range(64))))
+    ring.append_chunk(_decoded(tuple(f"replay-{index}" for index in range(64, 100)), row_start=64))
 
-    with pytest.raises(ValueError, match="repeat a replay identity"):
-        buffer.append_rows(_DecodedRows(shard, 0, 4))
+    replay_ids, columns = ring.sample()
+    slots = ring.schedule.selected_slots(0)
 
-
-def test_replay_buffer_skips_only_later_epoch_active_generations() -> None:
-    buffer = ReplayBuffer(capacity=4, batch_size=4, windows_per_generation=4, seed=9)
-    buffer.append_rows(_DecodedRows(_decoded(("a", "b", "c", "d")), 0, 4))
-
-    with pytest.raises(ValueError, match="repeats within a source epoch"):
-        buffer.replacement_indices(_DecodedRows(_decoded(("a",)), 0, 1))
-
-    indices, skipped = buffer.replacement_indices(_DecodedRows(_decoded(("a",), epoch=1), 0, 1))
-
-    assert indices.tolist() == []
-    assert skipped == 1
-
-
-def test_full_size_batch_contains_512_distinct_replay_ids() -> None:
-    replay_ids = tuple(f"replay-{index}" for index in range(1024))
-    buffer = ReplayBuffer(capacity=len(replay_ids), batch_size=512, windows_per_generation=4, seed=10)
-    shard = _decoded(replay_ids)
-    buffer.append_rows(_DecodedRows(shard, 0, len(replay_ids)))
-
-    sampled, columns, _exhausted = buffer.sample()
-
-    assert len(sampled) == len(set(sampled)) == 512
-    assert len(buffer.last_sampled_identity_ranks) == len(set(buffer.last_sampled_identity_ranks)) == 512
-    assert min(buffer.last_sampled_identity_ranks) >= 0
-    assert max(buffer.last_sampled_identity_ranks) < buffer.last_sampled_identity_count == buffer.active_identities
-    slots = np.asarray(buffer.last_sampled_identity_ranks)
-    np.testing.assert_array_equal(columns["value"], shard.columns["value"][slots, slots % 4])
-
-
-def test_replay_age_quantiles_are_absent_until_a_replay_is_reused() -> None:
-    replay_ids = tuple(f"replay-{index}" for index in range(8))
-    buffer = ReplayBuffer(capacity=8, batch_size=4, windows_per_generation=4, seed=51)
-    buffer.append_rows(_DecodedRows(_decoded(replay_ids), 0, len(replay_ids)))
-    buffer.next_windows[:] = 0
-
-    buffer.sample()
-
-    assert set(buffer.last_metrics).isdisjoint(
-        {
-            "data/replay_age_p01",
-            "data/replay_age_p05",
-            "data/replay_age_p50",
-            "data/replay_age_p95",
-        }
+    assert len(replay_ids) == len(set(replay_ids)) == 4
+    np.testing.assert_array_equal(
+        columns["value"],
+        ring.columns["value"][slots, ring.schedule.window_ordinals],
     )
-    buffer.sample()
-    buffer.sample()
-    assert all(
-        np.isfinite(buffer.last_metrics[name])
-        for name in (
-            "data/replay_age_p01",
-            "data/replay_age_p05",
-            "data/replay_age_p50",
-            "data/replay_age_p95",
-        )
-    )
+    assert min(ring.schedule.reuse_gaps) >= 1
+    assert max(ring.schedule.reuse_gaps) <= 49
 
 
-def test_count_active_replay_ids_ignores_replaced_generations() -> None:
-    loader = object.__new__(PhysicalShardReplayLoader)
-    loader._buffer = ReplayBuffer(capacity=512, batch_size=4, windows_per_generation=4, seed=51)
-    loader._buffer.identity_slots = {"active": 0, "replacement": 1}
+@pytest.mark.parametrize("seed", [0, 51])
+def test_u1_ring_schedule_has_randomized_reuse_and_zero_period_overlap(seed: int) -> None:
+    schedule = _ReplayRingSchedule(114_688, 512, 8, seed)
+    replay_by_slot = np.arange(schedule.capacity, dtype=np.int64)
+    recent: deque[set[int]] = deque()
+    previous: set[int] = set()
+    first_replacements = set(range(schedule.capacity, schedule.capacity + schedule.replay_lanes))
+    appearances = {replay_id: [] for replay_id in first_replacements}
+    fifo_head = 0
+    next_replay = schedule.capacity
 
-    assert loader.count_active_replay_ids(("active", "retired", "replacement")) == 2
+    assert schedule.replay_lanes == 64
+    assert schedule.period_batches == 224
+    assert schedule.minimum_gap_batches == 200
+    assert schedule.maximum_gap_batches == 248
+    assert all(len(set(map(int, offsets))) == 8 for offsets in schedule.phase_offsets)
 
-
-def test_u1_schedule_has_uniform_exposure_and_a_200_batch_reuse_floor() -> None:
-    capacity = 114_688
-    batch_size = 512
-    schedule = _BalancedReplaySchedule(capacity, batch_size, phases=8, seed=51)
-    last_seen = np.full(capacity, -1, dtype=np.int64)
-    counts = np.zeros(capacity, dtype=np.int64)
-    first_pass: list[frozenset[int]] = []
-    second_pass: list[frozenset[int]] = []
-
-    for batch_index in range(2 * schedule.pass_batches):
-        slots = schedule.next()
-        assert len(slots) == len(np.unique(slots)) == batch_size
-        assert np.bincount(slots % 8, minlength=8).tolist() == [64] * 8
-        previous = last_seen[slots]
-        if np.any(previous >= 0):
-            assert np.min(batch_index - previous[previous >= 0]) >= 200
-        last_seen[slots] = batch_index
-        counts[slots] += 1
-        batches = first_pass if batch_index < schedule.pass_batches else second_pass
-        batches.append(frozenset(map(int, slots)))
-
-    np.testing.assert_array_equal(counts, np.full(capacity, 2))
-    assert all(first != second for first, second in zip(first_pass, second_pass, strict=True))
-
-
-def test_balanced_schedule_turns_over_exactly_one_phase_per_batch() -> None:
-    schedule = _BalancedReplaySchedule(131_072, 512, phases=8, seed=52)
-    next_windows = np.arange(schedule.capacity, dtype=np.uint16) % 8
-
-    for _ in range(8 * schedule.pass_batches):
-        slots = schedule.next()
-        next_windows[slots] += 1
-        exhausted = slots[next_windows[slots] == 8]
-        assert len(exhausted) == 64
-        next_windows[exhausted] = 0
-
-
-@pytest.mark.parametrize("seed", [0, 3])
-def test_u1_source_wrap_has_no_steady_state_scan_amplification(seed: int) -> None:
-    source_rows = 162_598
-    capacity = 114_688
-    batch_size = 512
-    phases = 8
-    updates = 16_384
-    schedule = _BalancedReplaySchedule(capacity, batch_size, phases, seed ^ 0x51B0FF)
-    next_windows = np.arange(capacity, dtype=np.uint16) % phases
-    replay_by_slot = np.arange(capacity, dtype=np.int32)
-    active = np.zeros(source_rows, dtype=np.bool_)
-    active[:capacity] = True
-    last_selected = np.full(source_rows, -1, dtype=np.int32)
-    scans = np.empty(updates, dtype=np.int32)
-    minimum_replay_age = updates
-    cursor = capacity
-
-    for update in range(updates):
-        slots = schedule.next()
+    for batch_index in range(schedule.cohort_count):
+        slots = schedule.selected_slots(fifo_head)
         replay_ids = replay_by_slot[slots]
-        assert len(np.unique(replay_ids)) == batch_size
-        previous = last_selected[replay_ids]
-        if np.any(previous >= 0):
-            minimum_replay_age = min(minimum_replay_age, int(np.min(update - previous[previous >= 0])))
-        last_selected[replay_ids] = update
+        current = set(map(int, replay_ids))
+        assert len(current) == 512
+        assert not current & previous
+        if len(recent) == schedule.period_batches:
+            assert not current & recent.popleft()
+        recent.append(current)
+        previous = current
+        for replay_id in current & first_replacements:
+            appearances[replay_id].append(batch_index)
 
-        next_windows[slots] += 1
-        exhausted = slots[next_windows[slots] == phases]
-        active[replay_by_slot[exhausted]] = False
-        replacements = np.empty(len(exhausted), dtype=np.int32)
-        admitted = 0
-        scanned = 0
-        while admitted < len(exhausted):
-            replay_id = cursor % source_rows
-            cursor += 1
-            scanned += 1
-            if active[replay_id]:
-                continue
-            active[replay_id] = True
-            replacements[admitted] = replay_id
-            admitted += 1
-        replay_by_slot[exhausted] = replacements
-        next_windows[exhausted] = 0
-        scans[update] = scanned
+        start = fifo_head * schedule.replay_lanes
+        stop = start + schedule.replay_lanes
+        replay_by_slot[start:stop] = np.arange(next_replay, next_replay + schedule.replay_lanes)
+        next_replay += schedule.replay_lanes
+        fifo_head = (fifo_head + 1) % schedule.cohort_count
 
-    expected_turnover = batch_size // phases
-    assert minimum_replay_age >= 200
-    assert int(scans.max()) <= 3 * expected_turnover
-    np.testing.assert_array_equal(scans[4096:], np.full(updates - 4096, expected_turnover))
+    for batches in appearances.values():
+        assert len(batches) == 8
+        assert all(200 <= gap <= 248 for gap in np.diff(batches))
+    assert next_replay - schedule.capacity == schedule.cohort_count * 64
+
+
+def test_u1_fifo_replaces_exactly_64_generations_across_source_wraps() -> None:
+    schedule = _ReplayRingSchedule(114_688, 512, 8, 7)
+    source_rows = schedule.capacity + schedule.replay_lanes
+    replay_by_slot = np.arange(schedule.capacity, dtype=np.int64)
+    active = np.zeros(source_rows, dtype=np.bool_)
+    active[: schedule.capacity] = True
+    source_cursor = schedule.capacity
+    fifo_head = 0
+    wraps = 0
+    updates = 2 * schedule.cohort_count
+
+    for _ in range(updates):
+        sampled = replay_by_slot[schedule.selected_slots(fifo_head)]
+        assert len(np.unique(sampled)) == schedule.batch_size
+
+        start = fifo_head * schedule.replay_lanes
+        stop = start + schedule.replay_lanes
+        retired = replay_by_slot[start:stop]
+        active[retired] = False
+        replacements = np.arange(source_cursor, source_cursor + schedule.replay_lanes) % source_rows
+        assert len(replacements) == 64
+        assert not np.any(active[replacements])
+        replay_by_slot[start:stop] = replacements
+        active[replacements] = True
+
+        wraps += (source_cursor + schedule.replay_lanes) // source_rows
+        source_cursor = (source_cursor + schedule.replay_lanes) % source_rows
+        fifo_head = (fifo_head + 1) % schedule.cohort_count
+
+    assert wraps >= 2
+    assert int(active.sum()) == schedule.capacity
+
+
+def test_chunk_sampler_splits_cohorts_at_shard_and_corpus_boundaries() -> None:
+    tasks = (
+        ShardTask("source", 0, 0, 50),
+        ShardTask("source", 1, 0, 50),
+    )
+    sampler = _ChunkSampler(tasks, seed=3, cursor=(0, 0, 0), chunk_rows=64)
+
+    requests = list(islice(sampler, 4))
+
+    assert [len(request.rows) for request in requests] == [50, 14, 36, 28]
+    assert [request.sequence for request in requests] == [0, 1, 2, 3]
+    assert max(len(request.rows) for request in requests) <= MAX_DECODE_CHUNK_ROWS
+    assert requests[3].epoch == 1
+
+    large_cohort = _ChunkSampler(
+        (ShardTask("source", 0, 0, 256),),
+        seed=3,
+        cursor=(0, 0, 0),
+        chunk_rows=128,
+    )
+    assert [len(request.rows) for request in islice(large_cohort, 2)] == [64, 64]
+
+
+def test_ordered_chunks_restore_delayed_worker_order() -> None:
+    chunks = [_decoded((f"replay-{sequence}",), sequence=sequence) for sequence in (2, 0, 1)]
+
+    ordered = list(islice(_OrderedChunks(iter(chunks)), 3))
+
+    assert [chunk.request.sequence for chunk in ordered] == [0, 1, 2]
 
 
 class _FakeAdapter:
@@ -417,51 +397,63 @@ class _FakeAdapter:
         self.length = length
         self.manifests: Mapping[str, SourceManifest] = {"source": SourceManifest("source", (rows,))}
 
-    def _generation(self, row: int, epoch: int) -> tuple[str, tuple[dict[str, np.ndarray], ...]]:
-        replay_id = f"replay-{row}"
+    def _generation(
+        self,
+        task: ShardTask,
+        row: int,
+        epoch: int,
+    ) -> tuple[str, tuple[dict[str, np.ndarray], ...]]:
+        replay_id = f"replay-{task.shard}-{row}"
         windows = []
         for ordinal in range(4):
-            value = np.float32(epoch * 100 + row * 4 + ordinal)
+            value = np.float32(epoch * 10_000 + task.shard * 1_000 + row * 4 + ordinal)
             window = {f"ego_{channel}": np.full(self.length, value, dtype=np.float32) for channel in ACTION_CHANNELS}
             window["ctx_pad"] = np.asarray(0, dtype=np.int64)
             windows.append(window)
         return replay_id, tuple(windows)
 
-    @staticmethod
-    def _physical_row(task: ShardTask, row: int) -> int:
-        return task.shard * 16 + row
-
-    def decode_task(self, task: ShardTask, epoch: int, task_offset: int, **_kwargs: object) -> DecodedShard:
-        generations = [self._generation(self._physical_row(task, row), epoch) for row in task.selected_rows]
+    def decode_chunk(
+        self,
+        request: _DecodeChunkRequest,
+        task: ShardTask,
+        **_kwargs: object,
+    ) -> DecodedChunk:
+        generations = [self._generation(task, row, request.epoch) for row in request.rows]
         names = tuple(generations[0][1][0])
         columns = {
             name: np.stack([[window[name] for window in generation[1]] for generation in generations])
             for name in names
         }
-        return DecodedShard(
-            task,
-            epoch,
-            task_offset,
-            tuple(generation[0] for generation in generations),
-            tuple(PhysicalRow(task.source, task.shard, row) for row in task.selected_rows),
-            columns,
-            4,
+        return DecodedChunk(
+            request=request,
+            task=task,
+            replay_ids=tuple(generation[0] for generation in generations),
+            locators=tuple(PhysicalRow(task.source, task.shard, row) for row in request.rows),
+            columns=columns,
+            windows_per_generation=4,
         )
 
     def decode_generations(
         self, task: ShardTask, requests: Sequence[tuple[int, int]], **_kwargs: object
     ) -> Mapping[tuple[int, int], tuple[str, tuple[dict[str, np.ndarray], ...]]]:
-        return {request: self._generation(self._physical_row(task, request[0]), request[1]) for request in requests}
+        return {request: self._generation(task, request[0], request[1]) for request in requests}
 
 
 class _DelayedFakeAdapter(_FakeAdapter):
     def __init__(self, rows: int, length: int) -> None:
         super().__init__(rows, length)
-        self.manifests = {"source": SourceManifest("source", (16, 16, 16, 16))}
+        base, remainder = divmod(rows, 4)
+        sizes = tuple(base + (shard < remainder) for shard in range(4))
+        self.manifests = {"source": SourceManifest("source", sizes)}
 
-    def decode_task(self, task: ShardTask, epoch: int, task_offset: int, **kwargs: object) -> DecodedShard:
-        time.sleep(0.01 * (3 - task.shard))
-        return super().decode_task(task, epoch, task_offset, **kwargs)
+    def decode_chunk(
+        self,
+        request: _DecodeChunkRequest,
+        task: ShardTask,
+        **kwargs: object,
+    ) -> DecodedChunk:
+        time.sleep(0.005 * (3 - task.shard))
+        return super().decode_chunk(request, task, **kwargs)
 
 
 class _BlockingFakeAdapter(_FakeAdapter):
@@ -470,11 +462,16 @@ class _BlockingFakeAdapter(_FakeAdapter):
         self.started = started
         self.release = release
 
-    def decode_task(self, task: ShardTask, epoch: int, task_offset: int, **kwargs: object) -> DecodedShard:
+    def decode_chunk(
+        self,
+        request: _DecodeChunkRequest,
+        task: ShardTask,
+        **kwargs: object,
+    ) -> DecodedChunk:
         self.started.set()
         if not self.release.wait(timeout=5):
             raise TimeoutError("test did not release the blocking adapter")
-        return super().decode_task(task, epoch, task_offset, **kwargs)
+        return super().decode_chunk(request, task, **kwargs)
 
 
 def _no_labels(_row: Mapping[str, object]) -> dict[str, np.ndarray]:
@@ -497,7 +494,7 @@ def _collate_batch(replay_ids: tuple[str, ...], columns: Mapping[str, np.ndarray
 def _loader(
     seed: int,
     *,
-    rows: int = 64,
+    rows: int = 113,
     workers: int = 0,
     delayed: bool = False,
 ) -> PhysicalShardReplayLoader[_Batch]:
@@ -505,24 +502,21 @@ def _loader(
         sources=(SourceRowSelection("source", rows),),
         sha256="b" * 64,
     )
-    tasks = (
-        tuple(ShardTask("source", shard, 0, 16, global_shard=shard) for shard in range(4))
-        if delayed
-        else (ShardTask("source", 0, 0, rows, global_shard=0),)
-    )
     adapter_type = _DelayedFakeAdapter if delayed else _FakeAdapter
     adapter = adapter_type(rows, 5)
+    sizes = adapter.manifests["source"].samples_per_shard
+    tasks = tuple(ShardTask("source", shard, 0, size, global_shard=shard) for shard, size in enumerate(sizes))
     return PhysicalShardReplayLoader[_Batch](
         selection=selection,
         adapter=adapter,
         tasks=tasks,
-        data_protocol="test-physical-shard-v1",
+        data_protocol="test-physical-shard-v2",
         source_manifest_sha256={"source": "c" * 64},
         labels=_no_labels,
         projection=None,
         batch_transform=_collate_batch,
         batch_size=4,
-        replay_slots=16,
+        replay_slots=100,
         seed=seed,
         num_workers=workers,
         context_length=3,
@@ -535,7 +529,7 @@ def _loader(
 
 
 def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
-    original = _loader(seed=17, rows=20)
+    original = _loader(seed=17)
     original_iterator = iter(original)
     for _ in range(15):
         next(original_iterator)
@@ -546,17 +540,18 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
         "source_selection_sha256",
         "source_manifest_sha256",
         "cursor",
-        "batch_sampler_state",
+        "fifo_head",
+        "batch_index",
         "slots",
         "buffer_geometry",
     }
     assert not any(isinstance(value, np.ndarray) for value in state.values())
     old_protocol = {**state, "data_protocol": "test-physical-shard-v0"}
     with pytest.raises(ValueError, match="data protocol"):
-        _loader(seed=17, rows=20).load_state_dict(old_protocol)
+        _loader(seed=17).load_state_dict(old_protocol)
     expected = [next(original_iterator) for _ in range(32)]
 
-    restored = _loader(seed=17, rows=20)
+    restored = _loader(seed=17)
     restored.load_state_dict(state)
     restored_iterator = iter(restored)
     actual = [next(restored_iterator) for _ in range(32)]
@@ -566,19 +561,42 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
         torch.testing.assert_close(left.values, right.values)
 
 
-def test_every_batch_contains_distinct_replay_ids() -> None:
-    loader = _loader(seed=31, rows=20)
-    iterator = iter(loader)
-    duplicate_generations = 0.0
+def test_resume_reproduces_the_next_optimizer_update() -> None:
+    original = _loader(seed=19)
+    iterator = iter(original)
+    for _ in range(37):
+        next(iterator)
+    state = original.state_dict()
+    expected_batch = next(iterator)
 
-    for _ in range(80):
+    restored = _loader(seed=19)
+    restored.load_state_dict(state)
+    actual_batch = next(iter(restored))
+
+    def update(batch: _Batch) -> torch.Tensor:
+        weight = torch.nn.Parameter(torch.tensor(0.25))
+        optimizer = torch.optim.SGD([weight], lr=0.01)
+        loss = (weight * batch.values.float().mean()).square()
+        loss.backward()
+        optimizer.step()
+        return weight.detach()
+
+    torch.testing.assert_close(update(actual_batch), update(expected_batch))
+
+
+def test_every_batch_contains_distinct_replay_ids() -> None:
+    loader = _loader(seed=31)
+    iterator = iter(loader)
+
+    for _ in range(300):
         batch = next(iterator)
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 4
-        duplicate_generations += loader.metrics["data/duplicate_generations"]
-        assert loader.metrics["data/generations_read"] == loader.generations_read
+        assert loader.metrics["data/decoded_generations"] == loader.decoded_generations
+        assert loader.metrics["data/admitted_generations"] == loader.admitted_generations
 
-    assert duplicate_generations > 0
+    assert loader.decoded_generations == loader.admitted_generations == 400
+    assert loader.max_decoded_chunk_size == 1
 
 
 def test_delayed_workers_and_worker_count_change_preserve_exact_resume() -> None:
@@ -643,7 +661,7 @@ def test_checkpoint_rejects_an_active_parent_next() -> None:
     started = threading.Event()
     release = threading.Event()
     loader = _loader(seed=3)
-    loader.adapter = _BlockingFakeAdapter(8, 5, started, release)
+    loader.adapter = _BlockingFakeAdapter(113, 5, started, release)
     iterator = iter(loader)
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(next, iterator)
