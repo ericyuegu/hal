@@ -12,10 +12,13 @@ import importlib.metadata
 import os
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,7 @@ import numpy as np
 import torch
 from streaming import Stream
 from streaming import StreamingDataset
+from streaming.base.dataset import _ShardState
 from streaming.base.format.mds import MDSReader
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
@@ -553,6 +557,34 @@ class MDSStorageAdapter:
             raise TypeError(f"physical shard loading requires MDS shards, found {type(reader).__name__}")
         return reader
 
+    def prepare_shard(self, task: ShardTask) -> None:
+        """Materialize one raw shard and reject an incomplete download."""
+        try:
+            self.dataset.prepare_shard(task.global_shard)
+            manifest = self.manifests[task.source]
+            if not _raw_shard_is_materialized(manifest, task.shard):
+                raise FileNotFoundError(
+                    f"Mosaic prepared {task.source} shard {task.shard} without its complete raw file"
+                )
+        except Exception:
+            self._reset_failed_prepare(task)
+            raise
+
+    def _reset_failed_prepare(self, task: ShardTask) -> None:
+        """Release Mosaic 0.13 waiters after its downloader raises.
+
+        Mosaic Streaming 0.13.0 leaves the shared state at PREPARING when
+        ``Stream.prepare_shard`` raises. Remove this workaround when Mosaic
+        resets failed downloads itself.
+        """
+        lock = self.dataset._cache_filelock
+        with lock:
+            if self.dataset._shard_states[task.global_shard] != _ShardState.PREPARING:
+                return
+            manifest = self.manifests[task.source]
+            state = _ShardState.LOCAL if _raw_shard_is_materialized(manifest, task.shard) else _ShardState.REMOTE
+            self.dataset._shard_states[task.global_shard] = state
+
     def read_rows(self, task: ShardTask, rows: Sequence[int]) -> dict[int, Mapping[str, object]]:
         """Prepare a shard, open it once, and decode requested rows in byte order."""
         requested = tuple(sorted(set(int(row) for row in rows)))
@@ -560,7 +592,7 @@ class MDSStorageAdapter:
             return {}
         if any(row < task.row_start or row >= task.row_stop or row in task.excluded_rows for row in requested):
             raise ValueError("requested row is outside its shard task")
-        self.dataset.prepare_shard(task.global_shard)
+        self.prepare_shard(task)
         reader = self._reader(task)
         filename = Path(reader.dirname) / (reader.split or "") / reader.raw_data.basename
         with filename.open("rb", buffering=0) as handle:
@@ -659,6 +691,12 @@ class MDSStorageAdapter:
         )
 
 
+def _raw_shard_is_materialized(manifest: SourceManifest, shard: int) -> bool:
+    raw_path = manifest.raw_paths[shard]
+    raw_bytes = manifest.raw_bytes_per_shard[shard]
+    return raw_path.is_file() and raw_path.stat().st_size == raw_bytes
+
+
 def disk_requirement_bytes(
     tasks: Sequence[ShardTask],
     manifests: Mapping[str, SourceManifest],
@@ -674,9 +712,7 @@ def disk_requirement_bytes(
     for task in tasks:
         manifest = manifests[task.source]
         raw_bytes = manifest.raw_bytes_per_shard[task.shard]
-        raw_path = manifest.raw_paths[task.shard]
-        valid_raw = raw_path.is_file() and raw_path.stat().st_size == raw_bytes
-        if not valid_raw:
+        if not _raw_shard_is_materialized(manifest, task.shard):
             missing_raw += raw_bytes
             compressed.append(manifest.zip_bytes_per_shard[task.shard])
     compressed.sort(reverse=True)
@@ -688,6 +724,8 @@ class ShardStorageAdapter(Protocol):
 
     @property
     def manifests(self) -> Mapping[str, SourceManifest]: ...
+
+    def prepare_shard(self, task: ShardTask) -> None: ...
 
     def decode_chunk(
         self,
@@ -838,6 +876,7 @@ class _OrderedChunks(Iterator[DecodedChunk]):
         self._chunks = chunks
         self._expected = 0
         self._pending: dict[int, DecodedChunk] = {}
+        self._max_pending = 0
 
     def __iter__(self) -> _OrderedChunks:
         return self
@@ -849,9 +888,18 @@ class _OrderedChunks(Iterator[DecodedChunk]):
             if sequence < self._expected or sequence in self._pending:
                 raise RuntimeError(f"worker returned duplicate decode chunk {sequence}")
             self._pending[sequence] = chunk
+            self._max_pending = max(self._max_pending, len(self._pending))
         chunk = self._pending.pop(self._expected)
         self._expected += 1
         return chunk
+
+    @property
+    def pending(self) -> int:
+        return len(self._pending)
+
+    @property
+    def max_pending(self) -> int:
+        return self._max_pending
 
 
 class _ReplayRingSchedule:
@@ -947,6 +995,149 @@ class RingSlotDescriptor:
     locator: PhysicalRow
     epoch: int
     replay_checksum: int
+
+
+def _materialization_task_order(
+    tasks: tuple[ShardTask, ...],
+    task_order: tuple[int, ...],
+    cursor_task_offset: int,
+    resume_descriptors: Sequence[RingSlotDescriptor],
+) -> tuple[int, ...]:
+    """Prioritize the cursor and resume ring within deterministic shard order."""
+    if sorted(task_order) != list(range(len(tasks))):
+        raise ValueError("materialization task order is not a permutation")
+    if not 0 <= cursor_task_offset < len(task_order):
+        raise ValueError("materialization cursor is outside the shard order")
+    tasks_by_shard = {(task.source, task.shard): index for index, task in enumerate(tasks)}
+    if len(tasks_by_shard) != len(tasks):
+        raise ValueError("materialization tasks repeat a physical shard")
+    resume_shards = {(item.locator.source, item.locator.shard) for item in resume_descriptors}
+    missing_resume_shards = resume_shards - tasks_by_shard.keys()
+    if missing_resume_shards:
+        raise ValueError(f"resume ring contains shards outside the source plan: {sorted(missing_resume_shards)}")
+
+    prioritized: list[int] = []
+    seen: set[int] = set()
+
+    def add(task_index: int) -> None:
+        if task_index not in seen:
+            seen.add(task_index)
+            prioritized.append(task_index)
+
+    add(task_order[cursor_task_offset])
+    for task_index in task_order:
+        task = tasks[task_index]
+        if (task.source, task.shard) in resume_shards:
+            add(task_index)
+    for task_index in (*task_order[cursor_task_offset:], *task_order[:cursor_task_offset]):
+        add(task_index)
+    return tuple(prioritized)
+
+
+class _ShardMaterializer:
+    """Materialize raw shards once with bounded background concurrency."""
+
+    def __init__(
+        self,
+        adapter: ShardStorageAdapter,
+        tasks: tuple[ShardTask, ...],
+        order: tuple[int, ...],
+        *,
+        workers: int,
+    ) -> None:
+        if workers < 1:
+            raise ValueError("a shard materializer needs at least one worker")
+        if sorted(order) != list(range(len(tasks))):
+            raise ValueError("materialization order is not a task permutation")
+        self._adapter = adapter
+        self._tasks = tasks
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._materialized = {
+            task_index
+            for task_index, task in enumerate(tasks)
+            if _raw_shard_is_materialized(adapter.manifests[task.source], task.shard)
+        }
+        self._prepared_shards = 0
+        self._prepared_bytes = 0
+        self._download_errors = 0
+        self._first_failure: tuple[ShardTask, Exception] | None = None
+        self._started = time.monotonic()
+        self._finished = self._started if len(self._materialized) == len(tasks) else None
+        self._closed = False
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="raw-shard-materializer")
+        self._futures: list[Future[None]] = []
+        try:
+            self._futures = [
+                self._executor.submit(self._prepare, task_index)
+                for task_index in order
+                if task_index not in self._materialized
+            ]
+        except RuntimeError:
+            self._stop.set()
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
+
+    def _prepare(self, task_index: int) -> None:
+        if self._stop.is_set():
+            return
+        task = self._tasks[task_index]
+        try:
+            self._adapter.prepare_shard(task)
+            manifest = self._adapter.manifests[task.source]
+            if not _raw_shard_is_materialized(manifest, task.shard):
+                raise FileNotFoundError(f"materialized {task.source} shard {task.shard} has no complete raw file")
+        except Exception as error:
+            with self._lock:
+                self._download_errors += 1
+                if self._first_failure is None:
+                    self._first_failure = (task, error)
+                    self._stop.set()
+            raise
+        with self._lock:
+            self._materialized.add(task_index)
+            self._prepared_shards += 1
+            self._prepared_bytes += manifest.raw_bytes_per_shard[task.shard]
+            if len(self._materialized) == len(self._tasks):
+                self._finished = time.monotonic()
+
+    def raise_if_failed(self) -> None:
+        with self._lock:
+            failure = self._first_failure
+        if failure is None:
+            return
+        task, error = failure
+        raise RuntimeError(f"background materialization failed for {task.source} shard {task.shard}") from error
+
+    def metrics(self, task_order: tuple[int, ...], cursor_task_offset: int) -> dict[str, float]:
+        with self._lock:
+            materialized = set(self._materialized)
+            prepared_shards = self._prepared_shards
+            prepared_bytes = self._prepared_bytes
+            download_errors = self._download_errors
+            finished = self._finished
+        ordered_lead = (*task_order[cursor_task_offset:], *task_order[:cursor_task_offset])
+        contiguous_lead = 0
+        for task_index in ordered_lead:
+            if task_index not in materialized:
+                break
+            contiguous_lead += 1
+        elapsed = max((finished or time.monotonic()) - self._started, 1e-12)
+        return {
+            "loader/materialized_shards": float(len(materialized)),
+            "loader/remaining_shards": float(len(self._tasks) - len(materialized)),
+            "loader/contiguous_materialized_shard_lead": float(contiguous_lead),
+            "loader/materialization_shards_per_s": prepared_shards / elapsed,
+            "loader/materialization_bytes_per_s": prepared_bytes / elapsed,
+            "loader/materialization_download_errors": float(download_errors),
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
 
 class _ReplayRing:
@@ -1121,7 +1312,9 @@ class _PhysicalShardIterator[BatchT](Iterator[BatchT]):
         rows = 0
         cohort_rows = self.loader._ring.schedule.replay_lanes
         while rows < cohort_rows:
+            self.loader._raise_materialization_failure()
             decoded = next(self.chunks)
+            self.loader._raise_materialization_failure()
             count = len(decoded.replay_ids)
             if rows + count > cohort_rows:
                 raise RuntimeError("decode chunk crosses a replay-cohort boundary")
@@ -1191,6 +1384,7 @@ class PhysicalShardReplayLoader[BatchT]:
         schema_version: int,
         reserved_disk_bytes: int,
         pin_memory: bool,
+        materialization_threads: int = 0,
     ) -> None:
         if replay_slots > selection.row_count:
             raise ValueError("replay slots exceed the selected source rows")
@@ -1204,6 +1398,8 @@ class PhysicalShardReplayLoader[BatchT]:
             raise ValueError("window geometry is invalid")
         if reserved_disk_bytes < 0:
             raise ValueError("reserved disk bytes must be non-negative")
+        if materialization_threads < 0:
+            raise ValueError("materialization threads must be non-negative")
         if not data_protocol:
             raise ValueError("data protocol must not be empty")
         selected_sources = {source.source for source in selection.sources}
@@ -1214,6 +1410,13 @@ class PhysicalShardReplayLoader[BatchT]:
             for digest in source_manifest_sha256.values()
         ):
             raise ValueError("a source manifest SHA-256 is invalid")
+        if materialization_threads:
+            for task in tasks:
+                manifest = adapter.manifests[task.source]
+                if task.global_shard < 0:
+                    raise ValueError("materialized shard tasks need global shard indices")
+                if not manifest.raw_bytes_per_shard or not manifest.zip_bytes_per_shard or not manifest.raw_paths:
+                    raise ValueError(f"materialization needs complete file metadata for {task.source}")
         self.selection = selection
         self.adapter = adapter
         self.tasks = tasks
@@ -1232,6 +1435,7 @@ class PhysicalShardReplayLoader[BatchT]:
         self.schema_version = schema_version
         self.reserved_disk_bytes = reserved_disk_bytes
         self.pin_memory = pin_memory
+        self.materialization_threads = materialization_threads
         self.source_sample_counts = selection.row_counts_by_source()
         self._selection_hash = selection.sha256
         self._task_order = permute_shard_tasks(tasks, seed=seed, epoch=0)
@@ -1248,6 +1452,8 @@ class PhysicalShardReplayLoader[BatchT]:
         self._resume_position: tuple[int, int] | None = None
         self._iterator: _PhysicalShardIterator[BatchT] | None = None
         self._data_iterator: Iterator[DecodedChunk] | None = None
+        self._ordered_chunks: _OrderedChunks | None = None
+        self._materializer: _ShardMaterializer | None = None
         self._parent_next_active = False
         self._raw_bytes_read = 0
         self._decoded_generations = 0
@@ -1273,6 +1479,11 @@ class PhysicalShardReplayLoader[BatchT]:
                 "loader/ring_fifo_head": float(self._ring.fifo_head),
             }
         )
+        if self._ordered_chunks is not None:
+            metrics["loader/reorder_backlog"] = float(self._ordered_chunks.pending)
+            metrics["loader/reorder_backlog_max"] = float(self._ordered_chunks.max_pending)
+        if self._materializer is not None:
+            metrics.update(self._materializer.metrics(self._task_order, self._cursor[1]))
         return metrics
 
     @property
@@ -1296,9 +1507,7 @@ class PhysicalShardReplayLoader[BatchT]:
         missing = 0
         for task in self.tasks:
             manifest = self.adapter.manifests[task.source]
-            path = manifest.raw_paths[task.shard]
-            expected_bytes = manifest.raw_bytes_per_shard[task.shard]
-            missing += not path.is_file() or path.stat().st_size != expected_bytes
+            missing += not _raw_shard_is_materialized(manifest, task.shard)
         return missing
 
     @property
@@ -1323,7 +1532,7 @@ class PhysicalShardReplayLoader[BatchT]:
         return disk_requirement_bytes(
             self.tasks,
             self.adapter.manifests,
-            workers=self.num_workers,
+            workers=self.num_workers + self.materialization_threads,
             reserved_bytes=self.reserved_disk_bytes,
         )
 
@@ -1384,9 +1593,35 @@ class PhysicalShardReplayLoader[BatchT]:
                 generator=torch.Generator().manual_seed(self.seed),
                 in_order=False,
             )
-        self._data_iterator = iter(data_loader)
-        self._iterator = _PhysicalShardIterator(self, _OrderedChunks(self._data_iterator))
+        data_iterator = iter(data_loader)
+        ordered_chunks = _OrderedChunks(data_iterator)
+        materializer = None
+        if self.materialization_threads:
+            materialization_order = _materialization_task_order(
+                self.tasks,
+                self._task_order,
+                self._cursor[1],
+                self._resume_descriptors or (),
+            )
+            try:
+                materializer = _ShardMaterializer(
+                    self.adapter,
+                    self.tasks,
+                    materialization_order,
+                    workers=self.materialization_threads,
+                )
+            except Exception:
+                _shutdown_data_loader_workers(data_iterator)
+                raise
+        self._data_iterator = data_iterator
+        self._ordered_chunks = ordered_chunks
+        self._materializer = materializer
+        self._iterator = _PhysicalShardIterator(self, ordered_chunks)
         return self._iterator
+
+    def _raise_materialization_failure(self) -> None:
+        if self._materializer is not None:
+            self._materializer.raise_if_failed()
 
     def _advance_task_cursor(self) -> None:
         epoch, task_offset, _ = self._cursor
@@ -1399,6 +1634,7 @@ class PhysicalShardReplayLoader[BatchT]:
     def _next_batch(self, iterator: _PhysicalShardIterator[BatchT]) -> BatchT:
         if self._closed:
             raise RuntimeError("physical-shard loader is closed")
+        self._raise_materialization_failure()
         if self._resume_descriptors is not None:
             assert self._resume_position is not None
             self._restore_ring(self._resume_descriptors, *self._resume_position)
@@ -1525,6 +1761,7 @@ class PhysicalShardReplayLoader[BatchT]:
             key = (descriptor.locator.source, descriptor.locator.shard, descriptor.epoch)
             cohorts.setdefault(key, []).append(descriptor)
         for key in sorted(cohorts):
+            self._raise_materialization_failure()
             task_entry = tasks.get(key[:2])
             if task_entry is None:
                 raise ValueError(f"checkpoint row shard {key[:2]} is not in the source plan")
@@ -1594,6 +1831,11 @@ class PhysicalShardReplayLoader[BatchT]:
         if self._closed:
             return
         self._closed = True
+        materializer = self._materializer
+        self._materializer = None
+        if materializer is not None:
+            materializer.close()
         iterator = self._data_iterator
         self._data_iterator = None
+        self._ordered_chunks = None
         _shutdown_data_loader_workers(iterator)

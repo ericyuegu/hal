@@ -5,6 +5,7 @@ import importlib.util
 import json
 import sys
 import threading
+import time
 from dataclasses import asdict
 from dataclasses import fields
 from pathlib import Path
@@ -199,6 +200,60 @@ def test_four_batch_lookahead_drains_at_every_state_boundary() -> None:
     assert calls[0] != threading.main_thread().ident
     assert max(queue_depths) == 4
     assert queue_depths[-1] == 0
+
+
+def test_prefetcher_reports_ready_separately_from_submitted_batches() -> None:
+    cfg = _tiny_cfg()
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    blocked = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class Loader:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                blocked.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("test did not release the CPU loader")
+            return batch
+
+    prefetcher = exp.DeviceBatchPrefetcher(Loader(), cfg, "cpu")
+    try:
+        prefetcher.next()
+        prefetcher.fill_lookahead(4)
+        assert blocked.wait(timeout=5)
+        assert prefetcher.submitted_batches == 4
+        assert prefetcher.ready_batches == 0
+        release.set()
+        deadline = time.monotonic() + 5
+        while prefetcher.ready_batches != 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert prefetcher.ready_batches == 4
+    finally:
+        release.set()
+        prefetcher.close()
+
+
+def test_update_timer_excludes_checkpoint_gap_inside_a_metrics_window() -> None:
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    timer = exp._UpdateTimer(clock)
+    for index in range(25):
+        timer.start()
+        now += 2.0
+        timer.finish()
+        if index == 22:
+            now += 1_000.0
+
+    assert timer.stats_and_reset(25) == (2.0, 2.0)
 
 
 def test_prepared_data_starts_workers_before_background_next(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,6 +453,7 @@ def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.Monke
     assert kwargs["windows_per_generation"] == 8
     assert kwargs["replay_phase_block_batches"] == 25
     assert kwargs["num_workers"] == 24
+    assert kwargs["materialization_threads"] == exp._RAW_SHARD_MATERIALIZATION_THREADS
     assert kwargs["source_manifest_sha256"] == exp.SOURCE_MANIFEST_SHA256
 
 

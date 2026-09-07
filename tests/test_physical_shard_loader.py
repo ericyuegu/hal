@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import numpy as np
 import pytest
@@ -20,15 +22,18 @@ import torch
 import hal.training.physical_shard_loader as physical_shard_loader
 from hal.training.physical_shard_loader import MAX_DECODE_CHUNK_ROWS
 from hal.training.physical_shard_loader import DecodedChunk
+from hal.training.physical_shard_loader import MDSStorageAdapter
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import PhysicalShardReplayLoader
 from hal.training.physical_shard_loader import PhysicalShardSelection
+from hal.training.physical_shard_loader import RingSlotDescriptor
 from hal.training.physical_shard_loader import ShardTask
 from hal.training.physical_shard_loader import SourceManifest
 from hal.training.physical_shard_loader import SourceRowSelection
 from hal.training.physical_shard_loader import _ChunkSampler
 from hal.training.physical_shard_loader import _decode_generation
 from hal.training.physical_shard_loader import _DecodeChunkRequest
+from hal.training.physical_shard_loader import _materialization_task_order
 from hal.training.physical_shard_loader import _OrderedChunks
 from hal.training.physical_shard_loader import _ReplayRing
 from hal.training.physical_shard_loader import _ReplayRingSchedule
@@ -90,6 +95,34 @@ def test_disk_requirement_counts_valid_raw_shards_as_already_used(tmp_path: Path
     required = disk_requirement_bytes(tasks, {"source": manifest}, workers=1, reserved_bytes=1_000)
 
     assert required == 200 + 300 + 30 + 1_000
+
+
+def test_mosaic_download_failure_releases_prepare_waiters(tmp_path: Path) -> None:
+    class FailingDataset:
+        def __init__(self) -> None:
+            self._cache_filelock = threading.Lock()
+            self._shard_states = np.asarray([2], dtype=np.uint8)
+
+        def prepare_shard(self, _shard: int) -> None:
+            raise OSError("exhausted retries")
+
+    dataset = FailingDataset()
+    adapter = object.__new__(MDSStorageAdapter)
+    adapter.dataset = cast(Any, dataset)
+    adapter.manifests = {
+        "source": SourceManifest(
+            "source",
+            (1,),
+            raw_bytes_per_shard=(10,),
+            zip_bytes_per_shard=(5,),
+            raw_paths=(tmp_path / "missing.mds",),
+        )
+    }
+
+    with pytest.raises(OSError, match="exhausted retries"):
+        adapter.prepare_shard(ShardTask("source", 0, 0, 1, global_shard=0))
+
+    assert int(dataset._shard_states[0]) == 1
 
 
 def test_host_memory_model_includes_every_concurrent_copy() -> None:
@@ -358,10 +391,26 @@ def test_chunk_sampler_splits_cohorts_at_shard_and_corpus_boundaries() -> None:
 
 def test_ordered_chunks_restore_delayed_worker_order() -> None:
     chunks = [_decoded((f"replay-{sequence}",), sequence=sequence) for sequence in (2, 0, 1)]
+    ordered_chunks = _OrderedChunks(iter(chunks))
 
-    ordered = list(islice(_OrderedChunks(iter(chunks)), 3))
+    ordered = list(islice(ordered_chunks, 3))
 
     assert [chunk.request.sequence for chunk in ordered] == [0, 1, 2]
+    assert ordered_chunks.pending == 0
+    assert ordered_chunks.max_pending == 2
+
+
+def test_materialization_prioritizes_cursor_and_resume_ring() -> None:
+    tasks = tuple(ShardTask("source", shard, 0, 2, global_shard=shard) for shard in range(5))
+    task_order = (3, 1, 4, 0, 2)
+    descriptors = (
+        RingSlotDescriptor(0, PhysicalRow("source", 2, 0), 0, 1),
+        RingSlotDescriptor(1, PhysicalRow("source", 1, 0), 0, 2),
+    )
+
+    order = _materialization_task_order(tasks, task_order, 2, descriptors)
+
+    assert order == (4, 1, 2, 0, 3)
 
 
 class _FakeAdapter:
@@ -369,6 +418,9 @@ class _FakeAdapter:
         self.rows = rows
         self.length = length
         self.manifests: Mapping[str, SourceManifest] = {"source": SourceManifest("source", (rows,))}
+
+    def prepare_shard(self, task: ShardTask) -> None:
+        del task
 
     def _generation(
         self,
@@ -447,6 +499,63 @@ class _BlockingFakeAdapter(_FakeAdapter):
         return super().decode_chunk(request, task, **kwargs)
 
 
+class _MaterializingFakeAdapter(_FakeAdapter):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        fail_shard: int | None = None,
+        gate: threading.Event | None = None,
+        delay: float = 0.0,
+    ) -> None:
+        sizes = (23, 23, 23, 22, 22)
+        root.mkdir(parents=True, exist_ok=True)
+        super().__init__(sum(sizes), 5)
+        self.manifests = {
+            "source": SourceManifest(
+                "source",
+                sizes,
+                raw_bytes_per_shard=(11, 12, 13, 14, 15),
+                zip_bytes_per_shard=(1, 2, 3, 4, 5),
+                raw_paths=tuple(root / f"shard-{shard}.mds" for shard in range(len(sizes))),
+            )
+        }
+        self.fail_shard = fail_shard
+        self.gate = gate
+        self.delay = delay
+        self.calls: list[int] = []
+        self.started = threading.Event()
+        self.failed = threading.Event()
+        self.completed = threading.Event()
+        self.active = 0
+        self._completed_shards = 0
+        self._lock = threading.Lock()
+
+    def prepare_shard(self, task: ShardTask) -> None:
+        with self._lock:
+            self.calls.append(task.shard)
+            self.active += 1
+            self.started.set()
+        try:
+            if self.gate is not None and not self.gate.wait(timeout=5):
+                raise TimeoutError("test did not release the materializer")
+            if self.delay:
+                time.sleep(self.delay)
+            if task.shard == self.fail_shard:
+                self.failed.set()
+                raise OSError("exhausted fake download retries")
+            manifest = self.manifests[task.source]
+            path = manifest.raw_paths[task.shard]
+            path.write_bytes(bytes([task.shard + 1]) * manifest.raw_bytes_per_shard[task.shard])
+            with self._lock:
+                self._completed_shards += 1
+                if self._completed_shards == len(manifest.samples_per_shard):
+                    self.completed.set()
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
 def _no_labels(_row: Mapping[str, object]) -> dict[str, np.ndarray]:
     return {}
 
@@ -470,13 +579,18 @@ def _loader(
     rows: int = 113,
     workers: int = 0,
     delayed: bool = False,
+    adapter: _FakeAdapter | None = None,
+    materialization_threads: int = 0,
 ) -> PhysicalShardReplayLoader[_Batch]:
+    if adapter is not None:
+        rows = adapter.rows
     selection = PhysicalShardSelection(
         sources=(SourceRowSelection("source", rows),),
         sha256="b" * 64,
     )
-    adapter_type = _DelayedFakeAdapter if delayed else _FakeAdapter
-    adapter = adapter_type(rows, 5)
+    if adapter is None:
+        adapter_type = _DelayedFakeAdapter if delayed else _FakeAdapter
+        adapter = adapter_type(rows, 5)
     sizes = adapter.manifests["source"].samples_per_shard
     tasks = tuple(ShardTask("source", shard, 0, size, global_shard=shard) for shard, size in enumerate(sizes))
     return PhysicalShardReplayLoader[_Batch](
@@ -499,7 +613,99 @@ def _loader(
         schema_version=7,
         reserved_disk_bytes=0,
         pin_memory=False,
+        materialization_threads=materialization_threads,
     )
+
+
+def test_background_materialization_is_ordered_unique_and_observable(tmp_path: Path) -> None:
+    adapter = _MaterializingFakeAdapter(tmp_path, delay=0.001)
+    loader = _loader(seed=7, adapter=adapter, materialization_threads=1)
+    expected = [loader.tasks[index].shard for index in loader._task_order]
+
+    try:
+        iter(loader)
+        assert adapter.completed.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        metrics = loader.metrics
+        while metrics["loader/remaining_shards"] and time.monotonic() < deadline:
+            time.sleep(0.001)
+            metrics = loader.metrics
+    finally:
+        loader.close()
+
+    assert adapter.calls == expected
+    assert len(adapter.calls) == len(set(adapter.calls))
+    assert adapter.active == 0
+    assert metrics["loader/materialized_shards"] == len(loader.tasks)
+    assert metrics["loader/remaining_shards"] == 0
+    assert metrics["loader/contiguous_materialized_shard_lead"] == len(loader.tasks)
+    assert metrics["loader/materialization_shards_per_s"] > 0
+    assert metrics["loader/materialization_download_errors"] == 0
+
+
+def test_background_materialization_cleanup_cancels_queued_shards(tmp_path: Path) -> None:
+    gate = threading.Event()
+    adapter = _MaterializingFakeAdapter(tmp_path, gate=gate)
+    loader = _loader(seed=8, adapter=adapter, materialization_threads=1)
+    iter(loader)
+    assert adapter.started.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        closing = executor.submit(loader.close)
+        assert not closing.done()
+        gate.set()
+        closing.result(timeout=5)
+
+    assert len(adapter.calls) == 1
+    assert adapter.active == 0
+
+
+def test_background_materialization_failure_reaches_loader(tmp_path: Path) -> None:
+    adapter = _MaterializingFakeAdapter(tmp_path)
+    loader = _loader(seed=9, adapter=adapter, materialization_threads=1)
+    first_shard = loader.tasks[loader._task_order[0]].shard
+    adapter.fail_shard = first_shard
+    iterator = iter(loader)
+    assert adapter.failed.wait(timeout=5)
+
+    try:
+        with pytest.raises(RuntimeError, match=f"background materialization failed for source shard {first_shard}"):
+            next(iterator)
+        assert loader.metrics["loader/materialization_download_errors"] == 1
+    finally:
+        loader.close()
+
+
+def test_materialization_does_not_change_batches(tmp_path: Path) -> None:
+    plain = _loader(seed=10, adapter=_MaterializingFakeAdapter(tmp_path / "plain"))
+    materialized = _loader(
+        seed=10,
+        adapter=_MaterializingFakeAdapter(tmp_path / "materialized"),
+        materialization_threads=2,
+    )
+    plain_iterator = iter(plain)
+    materialized_iterator = iter(materialized)
+    try:
+        expected = [next(plain_iterator) for _ in range(32)]
+        actual = [next(materialized_iterator) for _ in range(32)]
+    finally:
+        plain.close()
+        materialized.close()
+
+    for left, right in zip(expected, actual, strict=True):
+        assert left.replay_ids == right.replay_ids
+        torch.testing.assert_close(left.values, right.values)
+
+
+def test_disk_requirement_includes_decode_and_materialization_concurrency(tmp_path: Path) -> None:
+    loader = _loader(
+        seed=11,
+        workers=2,
+        adapter=_MaterializingFakeAdapter(tmp_path),
+        materialization_threads=1,
+    )
+
+    assert loader.required_disk_bytes == sum((11, 12, 13, 14, 15)) + sum((5, 4, 3))
 
 
 def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:

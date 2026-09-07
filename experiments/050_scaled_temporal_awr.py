@@ -208,6 +208,8 @@ EXPECTED_PARAMETER_COUNTS = {
 }
 _TRAIN_METRICS_EVERY = 25
 _TRAIN_PREFETCH_FACTOR = 4
+_RAW_SHARD_MATERIALIZATION_THREADS: Final[int] = 64
+_MATERIALIZATION_CHARACTERIZATION_ENV: Final[str] = "HAL_O50_MATERIALIZATION_THREADS"
 _TRAIN_COMPILE_MODE = "reduce-overhead"
 _TRUNK_ATTENTION_BACKEND = "varlen_flash"
 _ACTIVATION_PERCENTILE_SAMPLE_SIZE = 65_536
@@ -227,6 +229,20 @@ _PRODUCTION_OVERRIDE_FIELDS = frozenset(
         "wandb_log_code",
     }
 )
+
+
+def _raw_shard_materialization_threads() -> int:
+    value = os.environ.get(_MATERIALIZATION_CHARACTERIZATION_ENV)
+    if value is None:
+        return _RAW_SHARD_MATERIALIZATION_THREADS
+    try:
+        threads = int(value)
+    except ValueError as error:
+        raise ValueError(f"{_MATERIALIZATION_CHARACTERIZATION_ENV} must be an integer") from error
+    if threads not in (32, 64, 96):
+        raise ValueError(f"{_MATERIALIZATION_CHARACTERIZATION_ENV} must be 32, 64, or 96")
+    return threads
+
 
 GROUP_NAMES = CONTROLLER_GROUP_NAMES
 GROUP_VOCABS = CONTROLLER_GROUP_VOCABS
@@ -1476,7 +1492,16 @@ class DeviceBatchPrefetcher:
 
     @property
     def queue_depth(self) -> int:
+        """Return submitted CPU batches for legacy telemetry consumers."""
         return len(self._futures)
+
+    @property
+    def submitted_batches(self) -> int:
+        return len(self._futures)
+
+    @property
+    def ready_batches(self) -> int:
+        return sum(future.done() and not future.cancelled() and future.exception() is None for future in self._futures)
 
     @property
     def drained(self) -> bool:
@@ -1485,6 +1510,39 @@ class DeviceBatchPrefetcher:
     def close(self) -> None:
         """Release the background loader thread."""
         self._pool.shutdown(wait=True, cancel_futures=True)
+
+
+class _UpdateTimer:
+    """Measure update work without checkpoint or logging gaps."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._started: float | None = None
+        self._durations: list[float] = []
+
+    def start(self) -> None:
+        if self._started is not None:
+            raise RuntimeError("an update timer is already active")
+        self._started = self._clock()
+
+    def finish(self) -> None:
+        if self._started is None:
+            raise RuntimeError("no update timer is active")
+        duration = self._clock() - self._started
+        if duration < 0:
+            raise RuntimeError("update clock moved backwards")
+        self._durations.append(duration)
+        self._started = None
+
+    def stats_and_reset(self, expected_updates: int) -> tuple[float, float]:
+        if self._started is not None:
+            raise RuntimeError("cannot flush an active update timer")
+        if expected_updates < 1 or len(self._durations) != expected_updates:
+            raise RuntimeError(f"update timer contains {len(self._durations)} updates, expected {expected_updates}")
+        mean = sum(self._durations) / expected_updates
+        p95 = float(np.percentile(self._durations, 95))
+        self._durations.clear()
+        return mean, p95
 
 
 def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> AWRBatch:
@@ -3006,6 +3064,7 @@ def _make_train_loader(
         schema_version=cfg.mds_schema_version,
         reserved_disk_bytes=RESERVED_DISK_BYTES,
         pin_memory=torch.cuda.is_available(),
+        materialization_threads=_raw_shard_materialization_threads(),
     )
     try:
         _require_loader_disk(train_loader)
@@ -3202,6 +3261,7 @@ def _log_training_summary(
     wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * (cfg.arch.L_ctx - DIRECT_LOSS_START)
     wandb.run.summary["data/cpu_lookahead_batches"] = _TRAIN_PREFETCH_FACTOR
     wandb.run.summary["data/loader_prefetch_factor"] = PREFETCH_FACTOR
+    wandb.run.summary["data/raw_shard_materialization_threads"] = train_loader.materialization_threads
     wandb.run.summary["data/replay_slots"] = train_loader.replay_slots
     wandb.run.summary["data/generation_windows"] = WINDOWS_PER_GENERATION
     wandb.run.summary["data/epoch_semantics"] = "replay generations committed to ring / unique train replays"
@@ -3402,6 +3462,7 @@ def _minimal_system_metrics(metrics: dict[str, float]) -> dict[str, float]:
         "system/cgroup/usage_fraction": "system/memory_fraction",
         "system/process_tree/pss_gib": "system/process_memory_gb",
         "system/cache/allocated_gib": "system/cache_gb",
+        "system/network/read_mib_s": "system/network/read_mib_s",
         "system/telemetry_errors": "system/telemetry_errors",
     }
     return {output: metrics[source] for source, output in names.items() if source in metrics}
@@ -3632,10 +3693,11 @@ def train(
     host_metrics.start()
     metric_accumulator = _TrainingMetricAccumulator()
     window_loader_wait_seconds: list[float] = []
-    window_loader_queue_depths: list[int] = []
+    window_loader_submitted_batches: list[int] = []
+    window_loader_ready_batches: list[int] = []
     window_phase_timers: list[CudaPhaseTimer] = []
     window_peak_allocated_gb = 0.0
-    metrics_window_started = time.monotonic()
+    update_timer = _UpdateTimer()
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and B200 hosts.
     model.train()
@@ -3644,6 +3706,7 @@ def train(
     try:
         for step in range(start_step, run_stop):
             update = step + 1
+            update_timer.start()
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
 
@@ -3667,7 +3730,8 @@ def train(
                 phase_timer.record("h2d_end")
             lookahead_limit = 0 if state_boundary_due else next_state_boundary - update
             batch_prefetcher.fill_lookahead(lookahead_limit)
-            window_loader_queue_depths.append(batch_prefetcher.queue_depth)
+            window_loader_submitted_batches.append(batch_prefetcher.submitted_batches)
+            window_loader_ready_batches.append(batch_prefetcher.ready_batches)
             result = train_step(
                 model,
                 batch,
@@ -3699,12 +3763,18 @@ def train(
                     cfg,
                     update=update,
                 )
+            update_timer.finish()
+            if metrics_due:
                 if len(window_loader_wait_seconds) != window_updates:
                     raise RuntimeError("training telemetry window lost an update")
-                if len(window_loader_queue_depths) != window_updates:
-                    raise RuntimeError("training queue telemetry window lost an update")
+                if len(window_loader_submitted_batches) != window_updates:
+                    raise RuntimeError("submitted-batch telemetry window lost an update")
+                if len(window_loader_ready_batches) != window_updates:
+                    raise RuntimeError("ready-batch telemetry window lost an update")
                 loader_wait_s = sum(window_loader_wait_seconds) / window_updates
-                loader_queue_depth = sum(window_loader_queue_depths) / window_updates
+                loader_wait_p95_s = float(np.percentile(window_loader_wait_seconds, 95))
+                submitted_batches = sum(window_loader_submitted_batches) / window_updates
+                ready_batches = sum(window_loader_ready_batches) / window_updates
                 training_elapsed_wall_s = time.monotonic() - run_started
                 completed_updates = update - start_step
                 projected_training_remaining_s = training_elapsed_wall_s * (run_stop - update) / completed_updates
@@ -3714,8 +3784,11 @@ def train(
                     "data/supervised_prefixes": actual_positions,
                     "data/future_targets": actual_positions * len(cfg.arch.head_offsets),
                     "data/dropped_windows": 0,
-                    "loader/queue_depth": loader_queue_depth,
+                    "loader/queue_depth": submitted_batches,
+                    "loader/submitted_cpu_batches": submitted_batches,
+                    "loader/ready_cpu_batches": ready_batches,
                     "loader/uncovered_wait_s": loader_wait_s,
+                    "loader/uncovered_wait_p95_s": loader_wait_p95_s,
                     "progress/elapsed_s": training_elapsed_wall_s,
                     "progress/remaining_s": projected_training_remaining_s,
                     "schedule/muon_lr": result.muon_lr,
@@ -3732,11 +3805,12 @@ def train(
                 if DEVICE == "cuda":
                     log["system/gpu_memory_gb"] = window_peak_allocated_gb
 
-                update_s = (time.monotonic() - metrics_window_started) / window_updates
+                update_s, update_p95_s = update_timer.stats_and_reset(window_updates)
                 samples_per_s = cfg.batch_size / update_s
                 loader_wait_fraction = loader_wait_s / max(update_s, 1e-12)
                 loader_wait_fractions.extend([loader_wait_fraction] * window_updates)
                 log["throughput/update_s"] = update_s
+                log["throughput/update_p95_s"] = update_p95_s
                 log["throughput/samples_per_s"] = samples_per_s
                 if peak_flops is not None:
                     log["throughput/mfu"] = model_flops_utilization(
@@ -3744,7 +3818,6 @@ def train(
                         update_s,
                         peak_flops,
                     )
-                wandb_started = time.monotonic()
                 wandb.log({"global_step": update, **log})
                 if update <= _TRAIN_METRICS_EVERY or update % 50 == 0 or update == run_stop:
                     print(
@@ -3755,10 +3828,10 @@ def train(
                         flush=True,
                     )
                 window_loader_wait_seconds.clear()
-                window_loader_queue_depths.clear()
+                window_loader_submitted_batches.clear()
+                window_loader_ready_batches.clear()
                 window_phase_timers.clear()
                 window_peak_allocated_gb = 0.0
-                metrics_window_started = wandb_started
             checkpoint_path: Path | None = None
             if boundary_due:
                 if not batch_prefetcher.drained:
@@ -3798,7 +3871,6 @@ def train(
                 next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary > update)
                 batch_prefetcher.fill_lookahead(next_state_boundary - update)
                 batch_prefetcher.stage_next()
-                metrics_window_started = time.monotonic()
         if not batch_prefetcher.drained:
             raise RuntimeError("CPU lookahead was not drained at the final update")
         _finalize_training(
