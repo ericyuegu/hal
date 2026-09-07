@@ -17,6 +17,7 @@ vector and the live-item count stays implicit in the sum.
 
 Run:
     uv run experiments/050_scaled_temporal_awr.py train
+    uv run experiments/050_scaled_temporal_awr.py train --proxy
     uv run experiments/050_scaled_temporal_awr.py eval --checkpoint runs/<run>/final.pt
 """
 
@@ -303,6 +304,26 @@ class AWRCalibration:
 
 
 ARCHITECTURE = Architecture()
+PROXY_ARCHITECTURE = replace(
+    ARCHITECTURE,
+    d_model=256,
+    n_layers=16,
+    n_heads=4,
+    temporal_d_model=128,
+    temporal_layers=4,
+    temporal_heads=2,
+    temporal_ff_dim=384,
+    group_head_dim=128,
+    value_hidden_dim=128,
+)
+PROXY_PARAMETER_COUNTS: Final[dict[str, int]] = {
+    "trunk": 12_582_912,
+    "temporal_decoder": 768_752,
+    "group_heads": 202_211,
+    "value_head": 65_665,
+    "other": 861_382,
+    "total": 14_480_922,
+}
 AWR_CALIBRATION = AWRCalibration()
 
 
@@ -408,6 +429,8 @@ def validate_config(cfg: TrainConfig) -> None:
         "value_hidden_dim": cfg.arch.value_hidden_dim,
         "batch_size": cfg.batch_size,
         "max_steps": cfg.max_steps,
+        "warmup_steps": cfg.warmup_steps,
+        "target_positions": cfg.target_positions,
         "download_retry": cfg.download_retry,
         "predownload": cfg.predownload,
         "cache_limit_bytes": cfg.cache_limit_bytes,
@@ -415,8 +438,6 @@ def validate_config(cfg: TrainConfig) -> None:
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    if cfg.max_steps <= 0:
-        raise ValueError(f"max_steps must be positive, got {cfg.max_steps}")
     if cfg.arch.d_model % cfg.arch.n_heads or cfg.arch.temporal_d_model % cfg.arch.temporal_heads:
         raise ValueError("model dimensions must be divisible by their head counts")
     if (cfg.arch.temporal_d_model // cfg.arch.temporal_heads) % 2:
@@ -479,8 +500,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("awr_value_loss_weight must be finite and non-negative")
     if not math.isfinite(cfg.grad_clip) or cfg.grad_clip <= 0:
         raise ValueError(f"grad_clip must be finite and positive, got {cfg.grad_clip}")
-    if cfg.warmup_steps != 4096 or cfg.max_steps != 131_072:
-        raise ValueError("training is frozen to 4,096 warmup and 131,072 total updates")
     if not 0.0 <= cfg.identity_dropout <= 1.0:
         raise ValueError("identity_dropout must be in [0, 1]")
     if cfg.player_vocab_size != PLAYER_VOCAB_SIZE:
@@ -507,8 +526,6 @@ def validate_config(cfg: TrainConfig) -> None:
             "policy-world-v8 registry drift: "
             f"replays={replay_count}/{TRAIN_REPLAYS}, frames={frame_count}/{TRAIN_FRAMES}"
         )
-    if cfg.target_positions != TARGET_POSITIONS:
-        raise ValueError("O50 v3 is frozen to 8D0 supervised positions")
     if cfg.depth_alpha != 0.5 or cfg.hidden_std_multiplier != 0.5 or cfg.readout_init != "mup-normal":
         raise ValueError("O50 v3 uses O51's selected depth and initialization parameterization")
     if (cfg.adam_beta1, cfg.adam_beta2, cfg.adam_eps) != (*_BASE_ADAM_BETAS, _BASE_ADAM_EPS):
@@ -524,14 +541,14 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError(f"{name} must be finite and non-negative")
 
 
-def validate_production_config(cfg: TrainConfig) -> None:
-    """Require frozen settings apart from operations and schedule ablations."""
-    expected = asdict(TrainConfig())
+def _validate_frozen_config(cfg: TrainConfig, expected_cfg: TrainConfig, name: str) -> None:
+    """Require one frozen treatment apart from operational controls."""
+    expected = asdict(expected_cfg)
     actual = asdict(cfg)
     allowed_overrides = _PRODUCTION_OVERRIDE_FIELDS
     unknown_overrides = allowed_overrides - actual.keys()
     if unknown_overrides:
-        raise RuntimeError(f"production overrides are not config fields: {sorted(unknown_overrides)}")
+        raise RuntimeError(f"{name} overrides are not config fields: {sorted(unknown_overrides)}")
     changed = {
         name: (actual[name], expected_value)
         for name, expected_value in expected.items()
@@ -542,7 +559,22 @@ def validate_production_config(cfg: TrainConfig) -> None:
             f"{name}={value!r} (expected {expected_value!r})"
             for name, (value, expected_value) in sorted(changed.items())
         )
-        raise ValueError(f"production config differs from the frozen treatment: {details}")
+        raise ValueError(f"{name} config differs from the frozen treatment: {details}")
+
+
+def proxy_config() -> TrainConfig:
+    """Return the 15M, 16-layer, D0 proxy treatment."""
+    return replace(TrainConfig(), arch=PROXY_ARCHITECTURE, target_positions=D0)
+
+
+def validate_production_config(cfg: TrainConfig) -> None:
+    """Require the frozen 216M, 8D0 treatment."""
+    _validate_frozen_config(cfg, TrainConfig(), "production")
+
+
+def validate_proxy_config(cfg: TrainConfig) -> None:
+    """Require the frozen 15M, 16-layer, D0 proxy treatment."""
+    _validate_frozen_config(cfg, proxy_config(), "proxy")
 
 
 def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
@@ -2554,8 +2586,14 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     counts["total"] = sum(parameter.numel() for parameter in all_parameters)
     if sum(value for name, value in counts.items() if name != "total") != counts["total"]:
         raise RuntimeError("parameter subsystem partition is incomplete")
-    if counts != EXPECTED_PARAMETER_COUNTS:
-        raise RuntimeError(f"parameter contract changed: {counts} != {EXPECTED_PARAMETER_COUNTS}")
+    if model.cfg.arch == ARCHITECTURE:
+        expected = EXPECTED_PARAMETER_COUNTS
+    elif model.cfg.arch == PROXY_ARCHITECTURE:
+        expected = PROXY_PARAMETER_COUNTS
+    else:
+        raise RuntimeError(f"no parameter contract for architecture {model.cfg.arch}")
+    if counts != expected:
+        raise RuntimeError(f"parameter contract changed: {counts} != {expected}")
     return counts
 
 
@@ -2845,8 +2883,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         "train/objective is the optimized policy-plus-value objective"
     )
     wandb.run.summary["architecture/treatment"] = (
-        "O50 216M AWR with policy-world-v8 and O51's selected initialization, depth scaling, "
-        "centered logits, and semantic optimizer roles"
+        f"O50 d{cfg.arch.d_model} L{cfg.arch.n_layers} AWR with policy-world-v8 and O51's selected "
+        "initialization, depth scaling, centered logits, and semantic optimizer roles"
     )
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = None
     wandb.run.summary["optimizer/lr_schedule"] = "cosine"
@@ -3170,13 +3208,18 @@ def train(
     resume_run: str | None = None,
     resume_state: dict | None = None,
     smoke: bool = False,
+    proxy: bool = False,
     stop_after_update: int | None = None,
 ) -> None:
     validate_config(cfg)
-    if not smoke:
+    if smoke and proxy:
+        raise ValueError("proxy and smoke modes are mutually exclusive")
+    if proxy:
+        validate_proxy_config(cfg)
+    elif not smoke:
         validate_production_config(cfg)
-        if stop_after_update is not None:
-            raise ValueError("stop_after_update is a smoke-only control")
+    if not smoke and stop_after_update is not None:
+        raise ValueError("stop_after_update is a smoke-only control")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
         raise ValueError(f"stop_after_update must be in [1, {cfg.max_steps}], got {stop_after_update}")
     run_stop = cfg.max_steps if stop_after_update is None else stop_after_update
@@ -3316,7 +3359,8 @@ def train(
                     "data/supervised_prefixes": actual_positions,
                     "data/future_targets": actual_positions * len(cfg.arch.head_offsets),
                     "data/epoch": update * cfg.batch_size / TRAIN_REPLAYS,
-                    "data/dropped_windows": (update * cfg.batch_size // TRAIN_REPLAYS) * 160,
+                    "data/dropped_windows": (update * cfg.batch_size // TRAIN_REPLAYS)
+                    * (TRAIN_REPLAYS % cfg.batch_size),
                     "loader/wait_s": loader_wait_s,
                     "progress/elapsed_s": training_elapsed_wall_s,
                     "progress/remaining_s": projected_training_remaining_s,
@@ -3582,6 +3626,7 @@ def _remote_run_exists(run_name: str) -> bool:
 @dataclass
 class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
+    proxy: bool = False
     comment: str = ""
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
@@ -3626,6 +3671,8 @@ def main(args: Command) -> None:
         return
     resume_run = resume_state = None
     cfg = args.cfg
+    if args.resume is None and args.proxy:
+        cfg = replace(cfg, arch=PROXY_ARCHITECTURE, target_positions=D0)
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
     if args.resume is None and (args.resume_num_workers is not None or args.resume_predownload is not None):
@@ -3649,6 +3696,8 @@ def main(args: Command) -> None:
             raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
         resume_run = args.resume_as or args.resume
         cfg = config_from_state(resume_state["cfg"])
+        if args.proxy != (cfg.arch == PROXY_ARCHITECTURE and cfg.target_positions == D0):
+            raise SystemExit("--proxy must match the resumed checkpoint treatment")
         cfg = replace(
             cfg,
             num_workers=cfg.num_workers if args.resume_num_workers is None else args.resume_num_workers,
@@ -3677,6 +3726,7 @@ def main(args: Command) -> None:
         resume_run=resume_run,
         resume_state=resume_state,
         smoke=args.smoke,
+        proxy=args.proxy,
         stop_after_update=args.stop_after_update,
     )
 

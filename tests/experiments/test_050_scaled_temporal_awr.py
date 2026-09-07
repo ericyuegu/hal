@@ -160,6 +160,34 @@ def test_parameter_contract_records_action_embedding_width_32() -> None:
     assert exp.EXPECTED_PARAMETER_COUNTS["total"] == 216_496_794
 
 
+def test_proxy_is_the_o51_15m_16_layer_d0_treatment() -> None:
+    cfg = exp.proxy_config()
+    assert cfg.arch == exp.PROXY_ARCHITECTURE
+    assert cfg.arch.n_layers == 16
+    assert (cfg.max_steps, cfg.warmup_steps) == (16_384, 512)
+    assert exp.closed_loop_evaluation_updates(cfg.max_steps, cfg.eval_every) == (8192, 16_384)
+    assert exp.subsystem_parameter_counts(exp.GPT(cfg)) == exp.PROXY_PARAMETER_COUNTS
+    exp.validate_proxy_config(cfg)
+    with pytest.raises(ValueError, match="production config"):
+        exp.validate_production_config(cfg)
+
+
+def test_proxy_cli_selects_the_frozen_treatment(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = {}
+
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+
+    def train(cfg, _stats, **kwargs) -> None:
+        observed["cfg"] = cfg
+        observed["proxy"] = kwargs["proxy"]
+
+    monkeypatch.setattr(exp, "train", train)
+
+    exp.main(exp.TrainArgs(proxy=True))
+
+    assert observed == {"cfg": exp.proxy_config(), "proxy": True}
+
+
 def test_model_tag_names_the_actual_head_architecture() -> None:
     tag = exp.model_tag(exp.TrainConfig())
     assert "nonlinear-head-trunk-skip" in tag
