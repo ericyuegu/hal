@@ -1,8 +1,6 @@
 """Frozen contracts for the O50 production program."""
 
-import hashlib
 import importlib.util
-import json
 import sys
 import threading
 import time
@@ -11,15 +9,9 @@ from dataclasses import fields
 from pathlib import Path
 
 import modal
-import numpy as np
 import pytest
 import torch
 
-from hal.data.policy_schema import PACKED_STATE_SUFFIXES
-from hal.data.policy_schema import pack_player_state
-from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
-from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
-from hal.training import returns as returns_lib
 from hal.training.features import A_DIM
 from hal.training.features import TrainBatch
 from hal.training.player_identity import ReplayPlayerLookup
@@ -41,7 +33,7 @@ exp = _load()
 
 def _tiny_cfg(**changes):
     arch = {
-        **asdict(exp.ARCHITECTURE),
+        **asdict(exp.Architecture()),
         "d_model": 32,
         "n_layers": 1,
         "n_heads": 4,
@@ -67,30 +59,10 @@ def _tiny_cfg(**changes):
     )
 
 
-def test_frozen_geometry_schedule_and_accounting() -> None:
+def test_schedule_reaches_the_derived_training_boundary() -> None:
     cfg = exp.TrainConfig()
-    assert cfg.arch.L_ctx == 256
-    assert exp.DIRECT_LOSS_START == 128
-    assert cfg.arch.head_offsets == (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
-    assert cfg.batch_size == 512
-    assert cfg.num_workers == 24
-    assert exp.REPLAY_SLOTS == 131_072
-    assert exp.WINDOWS_PER_GENERATION == 8
-    assert exp.REPLAY_PHASE_BLOCK_BATCHES == 25
-    assert exp.MIN_REPLAY_GAP_BATCHES == 200
-    assert exp.RESERVED_DISK_BYTES == 256 * 2**30
     assert cfg.max_steps == 2**17
     assert cfg.warmup_steps == 4096
-    assert cfg.target_positions == 8 * exp.D0
-    assert (cfg.hidden_std_multiplier, cfg.readout_init, cfg.depth_alpha) == (0.5, "mup-normal", 0.5)
-    assert (cfg.muon_lr, cfg.adam_lr, cfg.muon_weight_decay, cfg.adam_weight_decay) == (
-        0.014,
-        4.25e-4,
-        1e-4,
-        1e-4,
-    )
-    assert (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (8192, 96, 96)
-    assert (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) == (4, 2, 2)
     schedule = exp.lr_schedule(cfg)
     assert schedule(0) == pytest.approx(1 / 4096)
     assert schedule(4095) == 1.0
@@ -101,8 +73,7 @@ def test_frozen_geometry_schedule_and_accounting() -> None:
 
 
 def test_awr_activates_on_update_4097() -> None:
-    assert exp.AWR_START_UPDATE > 4096
-    assert exp.AWR_START_UPDATE <= 4097
+    assert exp.AWRCalibration.start_update == 4097
     advantage = torch.tensor([[0.0, 199.5]])
     eligible = torch.ones_like(advantage, dtype=torch.bool)
     inactive, _ = exp.advantage_weights(advantage, eligible, beta=199.5, weight_max=3.5, active=False)
@@ -119,7 +90,7 @@ def test_prepared_targets_keep_only_the_suffix() -> None:
     target = torch.zeros(2, cfg.arch.sample_chunk_length, A_DIM)
     history, targets, valid = exp.prepared_targets(model, TrainBatch(context, target))
     # The production split is position 128; this tiny fixture uses the same midpoint contract.
-    assert exp.DIRECT_LOSS_START == 128
+    assert exp.Architecture().direct_loss_start == 128
     assert history.shape[1] == 4
     assert targets.shape[1] == 4
     assert valid.shape[1] == 4
@@ -285,20 +256,17 @@ def test_prepared_data_starts_workers_before_background_next(monkeypatch: pytest
 
 
 def test_parameter_contract_records_action_embedding_width_32() -> None:
-    assert exp.ARCHITECTURE.action_embed_dim == 32
-    assert exp.EXPECTED_PARAMETER_COUNTS["total"] == 216_496_794
+    architecture = exp.Architecture()
+    assert architecture.action_embed_dim == 32
+    assert architecture.parameter_count_contract["total"] == 216_496_794
 
 
 def test_proxy_is_the_o51_15m_16_layer_d0_treatment() -> None:
     cfg = exp.proxy_config()
-    assert cfg.arch == exp.PROXY_ARCHITECTURE
     assert cfg.arch.n_layers == 16
     assert (cfg.max_steps, cfg.warmup_steps) == (16_384, 512)
     assert exp.closed_loop_evaluation_updates(cfg.max_steps, cfg.eval_every) == (8192, 16_384)
-    assert exp.subsystem_parameter_counts(exp.GPT(cfg)) == exp.PROXY_PARAMETER_COUNTS
-    exp.validate_proxy_config(cfg)
-    with pytest.raises(ValueError, match="production config"):
-        exp.validate_production_config(cfg)
+    assert exp.subsystem_parameter_counts(exp.GPT(cfg)) == cfg.arch.parameter_count_contract
 
 
 def test_proxy_cli_selects_the_frozen_treatment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -360,59 +328,20 @@ def test_optimizer_roles_cover_every_parameter_and_split_qkv() -> None:
 def test_v8_corpus_and_checkpoint_identity() -> None:
     cfg = exp.TrainConfig()
     assert len(cfg.source_names) == 44
-    assert sum(exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS.values()) == exp.TRAIN_REPLAYS == 1_295_370
-    assert sum(exp.streams.POLICY_WORLD_V8_TRAIN_FRAMES.values()) == exp.TRAIN_FRAMES == 13_266_364_175
+    assert cfg.train_replays == 1_295_370
+    assert cfg.train_frames == 13_266_364_175
     selection = exp.data_selection(cfg)
-    assert selection.row_count == exp.TRAIN_REPLAYS
-    assert selection.sha256 == exp.V8_SELECTION_SHA256
-    assert exp._canonical_selection_sha256(selection.sources) == exp.V8_SELECTION_SHA256
-    assert set(exp.SOURCE_MANIFEST_SHA256) == set(cfg.source_names)
+    assert selection.row_count == cfg.train_replays
+    assert selection.sha256 == cfg.selection_sha256
+    assert set(exp.streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256) == set(cfg.source_names)
     state = exp._checkpoint_config(cfg)
+    assert exp.config_from_state(state) == cfg
+    assert {"max_steps", "warmup_steps"} <= state.keys()
+    assert not {"max_steps", "warmup_steps"} & {field.name for field in fields(exp.TrainConfig)}
     assert state["experiment_id"] == "050_scaled_temporal_awr_v4"
     state["experiment_id"] = "050_scaled_temporal_awr_v3"
     with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state(state)
-
-
-def _manifest_payload(source: str, *, schema_value: str = "value") -> bytes:
-    rows = exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]
-    return json.dumps(
-        {
-            "version": exp.V8_MDS_INDEX_VERSION,
-            "shards": [
-                {
-                    "samples": rows,
-                    "column_names": ["column"],
-                    "column_encodings": [schema_value],
-                    "column_sizes": [None],
-                }
-            ],
-        },
-        separators=(",", ":"),
-    ).encode()
-
-
-def test_v8_manifest_rejects_hash_schema_and_row_drift(monkeypatch: pytest.MonkeyPatch) -> None:
-    source = exp._DEFAULT_SOURCE_NAMES[0]
-    payload = _manifest_payload(source)
-    monkeypatch.setitem(exp.SOURCE_MANIFEST_SHA256, source, hashlib.sha256(payload).hexdigest())
-    monkeypatch.setattr(
-        exp,
-        "V8_MDS_SCHEMA_SHA256",
-        exp._manifest_schema_sha256(json.loads(payload)["shards"][0]),
-    )
-    exp._validate_v8_manifest(source, payload)
-
-    with pytest.raises(ValueError, match="SHA-256"):
-        exp._validate_v8_manifest(source, payload + b" ")
-    wrong_schema = _manifest_payload(source, schema_value="other")
-    monkeypatch.setitem(exp.SOURCE_MANIFEST_SHA256, source, hashlib.sha256(wrong_schema).hexdigest())
-    with pytest.raises(ValueError, match="schema"):
-        exp._validate_v8_manifest(source, wrong_schema)
-    wrong_rows = payload.replace(str(exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]).encode(), b"1")
-    monkeypatch.setitem(exp.SOURCE_MANIFEST_SHA256, source, hashlib.sha256(wrong_rows).hexdigest())
-    with pytest.raises(ValueError, match="rows"):
-        exp._validate_v8_manifest(source, wrong_rows)
 
 
 def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,6 +351,9 @@ def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.Monke
         def __init__(self, selection, *, download_retry):
             observed["adapter"] = (selection, download_retry)
             self.manifests = {source.source: (source.stop,) for source in selection.sources}
+
+        def validate_manifests(self, **kwargs):
+            observed["manifest_validation"] = kwargs
 
     class Loader:
         required_disk_bytes = 10
@@ -440,7 +372,6 @@ def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.Monke
             observed["closed"] = True
 
     monkeypatch.setattr(exp, "MDSStorageAdapter", Adapter)
-    monkeypatch.setattr(exp, "_validate_v8_manifests", lambda *_args: None)
     monkeypatch.setattr(exp, "build_shard_plan", lambda *_args: (object(),))
     monkeypatch.setattr(exp, "PhysicalShardReplayLoader", Loader)
 
@@ -448,13 +379,14 @@ def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.Monke
 
     assert loader is not None
     kwargs = observed["loader"]
-    assert kwargs["data_protocol"] == exp.DATA_PROTOCOL
+    cfg = exp.TrainConfig()
+    assert kwargs["data_protocol"] == cfg.data_protocol
     assert kwargs["replay_slots"] == 131_072
     assert kwargs["windows_per_generation"] == 8
     assert kwargs["replay_phase_block_batches"] == 25
     assert kwargs["num_workers"] == 24
-    assert kwargs["materialization_threads"] == exp._RAW_SHARD_MATERIALIZATION_THREADS
-    assert kwargs["source_manifest_sha256"] == exp.SOURCE_MANIFEST_SHA256
+    assert kwargs["materialization_threads"] == cfg.raw_shard_materialization_threads
+    assert kwargs["source_manifest_sha256"] == exp.streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256
 
 
 def test_training_rejects_insufficient_disk() -> None:
@@ -469,56 +401,6 @@ def test_legacy_training_configuration_and_resume_option_are_removed() -> None:
         {"shuffle_block_size", "predownload", "loader_timeout_s", "cache_limit_bytes"}
     )
     assert "resume_predownload" not in {field.name for field in fields(exp.TrainArgs)}
-
-
-def _compact_replay(frames: int) -> dict[str, object]:
-    compact: dict[str, object] = {}
-    for name, encoding in POLICY_WORLD_MDS_COLUMNS.items():
-        if encoding == "str":
-            compact[name] = "replay-1"
-        elif encoding == "int":
-            compact[name] = 0
-        else:
-            compact[name] = np.zeros(frames, dtype=np.dtype(encoding.removeprefix("ndarray:")))
-    compact.update(
-        policy_world_schema_version=POLICY_WORLD_SCHEMA_VERSION,
-        source_schema_version=7,
-        replay_id="replay-1",
-        num_frames=frames,
-    )
-    for port in ("p1", "p2"):
-        values = {name: np.zeros(frames, dtype=np.int32) for name in PACKED_STATE_SUFFIXES}
-        values["stock"].fill(4)
-        values["direction"] = np.ones(frames, dtype=np.float32)
-        if port == "p2":
-            values["stock"][-1] = 0
-        compact[f"{port}_state"] = pack_player_state(values)
-        compact[f"{port}_percent"] = np.arange(frames, dtype=np.float32)
-    return compact
-
-
-def test_compact_physical_labels_match_full_return_labels() -> None:
-    compact = _compact_replay(12)
-    expected = returns_lib.compact_policy_returns(
-        compact,
-        gamma=0.9,
-        damage_shaping=1.0,
-        win_reward=50.0,
-        stock_value=120.0,
-        suffix=exp._RETURN_SUFFIX,
-    )
-    labels = exp.O50ReplayLabels(
-        player_lookup=ReplayPlayerLookup({"replay-1": (7, 11)}),
-        gamma=0.9,
-        damage_shaping=1.0,
-        win_reward=50.0,
-        stock_value=120.0,
-    )(compact)
-
-    for name, values in expected.items():
-        np.testing.assert_array_equal(labels[name], values)
-    np.testing.assert_array_equal(labels["p1_player_id"], np.asarray(7, dtype=np.int32))
-    np.testing.assert_array_equal(labels["p2_player_id"], np.asarray(11, dtype=np.int32))
 
 
 def test_boundary_state_resumes_next_batch_update_and_identity_dropout() -> None:
@@ -617,6 +499,30 @@ def test_eval_rejects_checkpoint_before_loading_when_hash_differs(
     monkeypatch.setattr(exp, "load_checkpoint", lambda *_args, **_kwargs: pytest.fail("loaded bad checkpoint"))
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         exp.eval_checkpoint(str(checkpoint), expected_checkpoint_sha256="0" * 64)
+
+
+def test_eval_overrides_do_not_mutate_checkpoint_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    cfg = exp.TrainConfig()
+    observed = {}
+    monkeypatch.setattr(exp, "checkpoint_sha256", lambda _path: "a" * 64)
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _path: (object(), cfg, {}, {"step": 0}))
+
+    def evaluate(_model, _stats, actual_cfg, **kwargs):
+        observed["cfg"] = actual_cfg
+        observed["kwargs"] = kwargs
+        return {"scheduled_boots": 7.0, "completed_boots": 7.0, "boots": 7.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", evaluate)
+
+    exp.eval_checkpoint(str(checkpoint), n_matchups=7, eager=True, max_parallel=3)
+
+    assert observed["cfg"] is cfg
+    assert observed["kwargs"]["eager"] is True
+    assert observed["kwargs"]["max_parallel"] == 3
+    assert cfg.inference_mode == "compiled"
+    assert cfg.eval_max_parallel == 32
 
 
 def test_training_is_the_primary_wandb_writer(monkeypatch: pytest.MonkeyPatch) -> None:

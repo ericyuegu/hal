@@ -4,6 +4,7 @@ import numpy as np
 
 from hal.data.policy_schema import pack_player_state
 from hal.training import returns
+from hal.training.player_identity import ReplayPlayerLookup
 from hal.wire import MASK_INT32
 
 # One six-frame replay, checked by hand below. Player 2's last stock empties on
@@ -149,6 +150,33 @@ def test_compact_policy_returns_match_decoded_replay_exactly() -> None:
     assert actual.keys() == expected.keys()
     for name in expected:
         np.testing.assert_array_equal(actual[name], expected[name])
+
+
+def test_policy_return_labels_add_compact_returns_and_player_ids() -> None:
+    compact = {**_compact_sample(), "replay_id": "replay-1"}
+    callback = returns.PolicyReturnLabels(
+        ReplayPlayerLookup({"replay-1": (7, 11)}),
+        gamma=0.99618,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+        suffix="awr_return",
+    )
+
+    labels = callback(compact)
+
+    expected = returns.compact_policy_returns(
+        compact,
+        gamma=0.99618,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+        suffix="awr_return",
+    )
+    for name, values in expected.items():
+        np.testing.assert_array_equal(labels[name], values)
+    np.testing.assert_array_equal(labels["p1_player_id"], np.asarray(7, dtype=np.int32))
+    np.testing.assert_array_equal(labels["p2_player_id"], np.asarray(11, dtype=np.int32))
 
 
 def test_compact_policy_returns_preserve_truncation_mask() -> None:

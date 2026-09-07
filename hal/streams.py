@@ -383,6 +383,55 @@ POLICY_WORLD_V8_TRAIN_FRAMES: Final[dict[str, int]] = {
     },
 }
 
+# SHA-256 of each immutable policy-world-v8 train/index.json, verified on R2
+# on 2026-09-06 with the row and frame counts above.
+POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256: Final[dict[str, str]] = {
+    "ranked-anonymized-1-policy-world-v8": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8",
+    "ranked-anonymized-2-policy-world-v8": "f629a8a01eada6904ad16be2ddebe3037c9564e0af812794b75c2a826a8a204c",
+    "ranked-anonymized-3-policy-world-v8": "8acb765a597f965bc59bf6c982a2a784f051ac2f5366906f180a04b909943c57",
+    "ranked-anonymized-4-policy-world-v8": "b4424eebc9724e4fb94e3b16f21d2f357cd178212915604ec675f782daea17b5",
+    "ranked-anonymized-5-policy-world-v8": "94b56ea16d6549564b39342a8c882f214d8b3d747b99a28e291d12bfa4a5c7cc",
+    "ranked-anonymized-6-policy-world-v8": "ee58ce5241a510c609e15e9283903163ff941187ccf9a4bff0716b45e157a083",
+    "professional-aklo-policy-world-v8": "1ae04b2ffd57fe0bb1bac86933f61b4fbad151bfe7956f607f6ff19521895f64",
+    "professional-amsa-policy-world-v8": "11945989cd7a99fb38a0e52fc6306fa2b9e72eb6c7094d656f069b02878ac17f",
+    "professional-axe-policy-world-v8": "263f972bb6e629c7e87106d1e2f57d6477ab32d291515dc7fe38f6f316e6e270",
+    "professional-billybopeep-policy-world-v8": "7da1a1c4157937ff28c28af4da8ba1103ee81fedb93e4fe820789ca29e2709c7",
+    "professional-bobbybigballz-policy-world-v8": "53cae8c1df6a2c13e0e3ab32bf8595be4b9c6438ee54ac0e54bbaa5669f0dcbe",
+    "professional-cody-policy-world-v8": "abb6d3e1f790302096270edb6a82c69a646dbd99b544e3ed35507bef293dfb8b",
+    "professional-cookbook-policy-world-v8": "e855d5c4e871259092bd2f7772a5f80f1ea7c732d223eeb729e1760dadd1c585",
+    "professional-daniel-policy-world-v8": "f2683e42e5a3e2dd2525c5643af7ed9b4536b398aa295a0ffec56b6493144d42",
+    "professional-desertsnoopy-policy-world-v8": "23b0af01ab6102edc6be234bfa6055f0c22e7591d5965763524a3ecd4f9b9099",
+    "professional-druggedfox-policy-world-v8": "8e4c425e9a62b317df3c11d85d8d172f2be16d2270a8f6279180f2bb79a48687",
+    "professional-fknsilver-policy-world-v8": "5ff82418f1a3be4d8c9ea0822b204f88cbea0165c93cb5ba5f19fbadb2692966",
+    "professional-franz-policy-world-v8": "5e5720294243254007952fb8f2289b81485fc98ac1df3db304c286286ef80cd7",
+    "professional-frenzy-policy-world-v8": "46a9cce7517bc03fde2b3cf70efedade5092bc3841c23711bafc1fac30da18e5",
+    "professional-friend-policy-world-v8": "05c6821f857d21c20ae1582cdd7362ad230f8f72c933e44aecf9f0cb351bcd67",
+    "professional-ginger-policy-world-v8": "b494bee53cb3c48b2ac673d1aae0ee82926e6cdf8f940d35a20ef6cbfaab1203",
+    "professional-gosu-policy-world-v8": "08e743b829bcb7c46abdae6d31386f2eb384f90998ded32967b4287a9bb3043d",
+    "professional-grab2win-policy-world-v8": "acafaf1e3406166a35f42d5fafb269009218ec6f43237834338236aed875d1e6",
+    "professional-iliketurtles-policy-world-v8": "7690dc9b46de6b2ff7a8f0e99f3f01a21f91388c8a0ab2d4f593a080bf6ae70e",
+    "professional-isdsar-policy-world-v8": "6ce04e9378f414f6cfc5dc27bd2ff3e5a58db798aa38abc37a659408f0da4ecf",
+    "professional-jchu-policy-world-v8": "403f4f38ab482976c61d76748ff0400f1d502e51ab022347ace87feb9fa9fc35",
+    "professional-jahridin-policy-world-v8": "899064901131096198ed9855bd606ff887a20fdb996bfeffacbb72b4a5802a38",
+    "professional-kjh-policy-world-v8": "32deb8672642e653f89de565e58c3737abf4b7d03110286cb05d8d355ddb2b4b",
+    "professional-kodorin-policy-world-v8": "24d36b73c2f5d06b4fffc1aa014f369cf93c99cdc0097ff1f98c87649b18a41b",
+    "professional-krudo-policy-world-v8": "a595bec356530f73a898d6fd0c7fa98eab3efecc05072f0536c87ecc29265f2c",
+    "professional-m2k-policy-world-v8": "da529b454a8a84860c328572f9c2a31694e5983ed46c5ab6579c9ac2c674fbca",
+    "professional-mang0-policy-world-v8": "cb1a23eebefc78e98dcf36f3bf6d32e66e1f1c4b00ee908e78e5988536445340",
+    "professional-mof-policy-world-v8": "eeebeb685c3be5e77cedb8446ea8cc358f5d16286c8d7fdce469b2a9b51bc174",
+    "professional-monotheon-policy-world-v8": "8d1e2f996b6aae3fd17f971f8310b1b4beb5b2d97d7faed402dab42714da4492",
+    "professional-nicki-policy-world-v8": "ac07fe70c0e0a2ea31a3f3a764b53d1216248d3689d5b4558781bf843b5c0e6c",
+    "professional-rapm-policy-world-v8": "58bf73d0868f5e51ef06c1f9f0eb64c5f8153cc77f4053d60c7568d5f20852d1",
+    "professional-redx-policy-world-v8": "d54d66e26e97327452da4762eeddf8e2700ec9ef88cff9960a039eda97e766f5",
+    "professional-siddward-policy-world-v8": "69b182eda72df5700505cf52c9f7302fcf9acb4771f42bf3f4fb6d2a0538b895",
+    "professional-solobattle-policy-world-v8": "eb5084e6340490b9f312f9b0a8ca194d5755a8e83c63043d65668fc482c94bb7",
+    "professional-technospider-policy-world-v8": "1558eadd94b43150e6ab0bd2edb15c036a2136b5aa2766a675df83ee8474cb52",
+    "professional-trif-policy-world-v8": "16f2905d2894807f2f950063bb8387ce69b5a918523f42556b997385f3c5f462",
+    "professional-uhhei-policy-world-v8": "f5414ac89182f6a2af547149cac3d52ce38cfad5549db45e6e1e9979fa6b6101",
+    "professional-ycz-policy-world-v8": "597c813dd86e341848d0436d3dac80316fc76ee9d29683a699c114df832c5897",
+    "professional-zain-policy-world-v8": "6f35dfbb1f5353138b73866a99e3599034f93d859f70cfb421adc484cedf6549",
+}
+
 _policy_world_v7_names = {source.name for source in POLICY_WORLD_V7_SOURCES}
 if set(POLICY_WORLD_V7_TRAIN_REPLAYS) != _policy_world_v7_names:
     raise RuntimeError("policy-world v7 replay counts do not cover the registered source set")
@@ -394,6 +443,13 @@ if set(POLICY_WORLD_V8_TRAIN_REPLAYS) != _policy_world_v8_names:
     raise RuntimeError("policy-world v8 replay counts do not cover the registered source set")
 if set(POLICY_WORLD_V8_TRAIN_FRAMES) != _policy_world_v8_names:
     raise RuntimeError("policy-world v8 frame counts do not cover the registered source set")
+if set(POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256) != _policy_world_v8_names:
+    raise RuntimeError("policy-world v8 manifest hashes do not cover the registered source set")
+if any(
+    len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+    for digest in POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256.values()
+):
+    raise RuntimeError("policy-world v8 manifest hashes contain an invalid SHA-256 digest")
 
 # v5 and v6 stay registered: the frozen experiments still read them.
 ALL: Final[tuple[StreamSource, ...]] = (

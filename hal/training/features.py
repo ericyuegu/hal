@@ -158,6 +158,15 @@ ITEM_COLUMNS: Final[ExtraColumns] = ExtraColumns(
     },
 )
 
+ITEM_FLOATS: Final[tuple[str, ...]] = tuple(ITEM_COLUMNS.floats)
+ITEM_CAT_VOCABS: Final[dict[str, int]] = {
+    name: spec[0] for name, spec in ITEM_COLUMNS.cats.items() if spec is not None
+}
+if set(ITEM_COLUMNS.cats) != {"type", "state"}:
+    raise RuntimeError("the item model requires exactly the type and state categorical columns")
+ITEM_PRESENCE_SUFFIX: Final[str] = "pos_x"
+ITEM_PROBE_COLUMN: Final[str] = item_column(0, ITEM_PRESENCE_SUFFIX)
+
 ITEM_INPUT_COLUMNS: Final[frozenset[str]] = frozenset(
     item_column(slot, suffix) for slot in range(ITEM_SLOTS) for suffix in (*ITEM_COLUMNS.floats, *ITEM_COLUMNS.cats)
 )
@@ -184,6 +193,15 @@ BASE_ACTION_PROJECTION: Final[FeatureProjection] = FeatureProjection(
 # BASE_ACTION_PROJECTION plus the projectile block.
 BASE_ITEMS_PROJECTION: Final[FeatureProjection] = FeatureProjection(
     columns=BASE_ACTION_PROJECTION.columns | ITEM_INPUT_COLUMNS,
+    derive_spatial=False,
+)
+
+ITEM_PLAYER_COLUMNS: Final[ExtraColumns] = ExtraColumns(
+    floats=ITEM_COLUMNS.floats,
+    cats={**ITEM_COLUMNS.cats, "player_id": None},
+)
+ITEM_PLAYER_PROJECTION: Final[FeatureProjection] = FeatureProjection(
+    columns=BASE_ITEMS_PROJECTION.columns | {"ego_player_id"},
     derive_spatial=False,
 )
 

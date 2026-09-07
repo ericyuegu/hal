@@ -25,6 +25,11 @@ def test_policy_world_v8_manifest_has_the_verified_natural_mix() -> None:
     assert len(streams.POLICY_WORLD_V8_SOURCES) == len(names) == 44
     assert names == set(streams.POLICY_WORLD_V8_TRAIN_REPLAYS)
     assert names == set(streams.POLICY_WORLD_V8_TRAIN_FRAMES)
+    assert names == set(streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256)
+    assert all(
+        len(digest) == 64 and not set(digest) - set("0123456789abcdef")
+        for digest in streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256.values()
+    )
     assert sum(streams.POLICY_WORLD_V8_TRAIN_REPLAYS.values()) == 1_295_370
     assert sum(streams.POLICY_WORLD_V8_TRAIN_FRAMES.values()) == 13_266_364_175
 

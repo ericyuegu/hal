@@ -10,11 +10,13 @@ module is their single home; experiments import it instead of copying it.
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.signal import lfilter
 
 from hal.data.policy_schema import unpack_player_stock
+from hal.training.player_identity import ReplayPlayerLookup
 from hal.wire import MASK_INT32
 
 
@@ -209,3 +211,29 @@ def compact_policy_returns(
         stock_value=stock_value,
         suffix=suffix,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyReturnLabels:
+    """Compute compact policy returns and player IDs for one replay row."""
+
+    player_lookup: ReplayPlayerLookup
+    gamma: float
+    damage_shaping: float
+    win_reward: float
+    stock_value: float
+    suffix: str
+
+    def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
+        labels = compact_policy_returns(
+            compact,
+            gamma=self.gamma,
+            damage_shaping=self.damage_shaping,
+            win_reward=self.win_reward,
+            stock_value=self.stock_value,
+            suffix=self.suffix,
+        )
+        p1_id, p2_id = self.player_lookup.ids(compact)
+        labels["p1_player_id"] = np.asarray(p1_id, dtype=np.int32)
+        labels["p2_player_id"] = np.asarray(p2_id, dtype=np.int32)
+        return labels

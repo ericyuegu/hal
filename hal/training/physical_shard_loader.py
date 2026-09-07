@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import json
 import os
 import shutil
 import threading
@@ -90,6 +91,20 @@ class PhysicalShardSelection:
         if len(self.sha256) != 64 or any(character not in "0123456789abcdef" for character in self.sha256):
             raise ValueError("selection SHA-256 is invalid")
 
+    @classmethod
+    def from_sources(cls, sources: tuple[SourceRowSelection, ...]) -> PhysicalShardSelection:
+        """Construct a selection with its canonical persisted identity."""
+        payload = [
+            {
+                "source": source.source,
+                "stop": source.stop,
+                "excluded_rows": list(source.excluded_rows),
+            }
+            for source in sources
+        ]
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return cls(sources, hashlib.sha256(encoded).hexdigest())
+
     @property
     def row_count(self) -> int:
         return sum(source.row_count for source in self.sources)
@@ -120,6 +135,19 @@ class SourceManifest:
         ):
             if values and len(values) != len(self.samples_per_shard):
                 raise ValueError(f"{self.source} {name} metadata does not cover every shard")
+
+
+def _mds_schema_sha256(shard: Mapping[str, object]) -> str:
+    fields = {
+        name: shard.get(name)
+        for name in (
+            "column_names",
+            "column_encodings",
+            "column_sizes",
+        )
+    }
+    encoded = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +578,58 @@ class MDSStorageAdapter:
                 raw_paths=tuple(Path(stream.local) / stream.split / shard.raw_data.basename for shard in shards),
             )
         return manifests
+
+    def validate_manifests(
+        self,
+        *,
+        expected_sha256: Mapping[str, str],
+        expected_index_version: int,
+        expected_schema_sha256: str,
+        expected_rows: Mapping[str, int],
+    ) -> None:
+        """Validate the exact MDS indexes exposed by this adapter."""
+        selected_sources = {source.source for source in self.selection.sources}
+        for name, values in (
+            ("manifest hashes", expected_sha256),
+            ("manifest row counts", expected_rows),
+        ):
+            if set(values) != selected_sources:
+                raise ValueError(f"{name} do not cover the selected sources")
+        if any(
+            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+            for digest in expected_sha256.values()
+        ):
+            raise ValueError("an expected manifest SHA-256 is invalid")
+        if len(expected_schema_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_schema_sha256
+        ):
+            raise ValueError("expected MDS schema SHA-256 is invalid")
+
+        for source in self.selection.sources:
+            name = source.source
+            path = streams_lib.BY_NAME[name].local_root / self.split / "index.json"
+            payload = path.read_bytes()
+            actual_hash = hashlib.sha256(payload).hexdigest()
+            if actual_hash != expected_sha256[name]:
+                raise ValueError(f"{name} {self.split}/index.json SHA-256 {actual_hash} != {expected_sha256[name]}")
+            manifest = json.loads(payload)
+            if not isinstance(manifest, dict) or manifest.get("version") != expected_index_version:
+                raise ValueError(f"{name} {self.split}/index.json has an unsupported MDS index version")
+            shards = manifest.get("shards")
+            if not isinstance(shards, list) or not shards or not all(isinstance(shard, dict) for shard in shards):
+                raise ValueError(f"{name} {self.split}/index.json has invalid shards")
+            schema_hashes = {_mds_schema_sha256(shard) for shard in shards}
+            if schema_hashes != {expected_schema_sha256}:
+                raise ValueError(f"{name} {self.split}/index.json schema differs from the expected MDS schema")
+            try:
+                rows = sum(int(shard["samples"]) for shard in shards)
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"{name} {self.split}/index.json has invalid shard row counts") from error
+            if rows != expected_rows[name]:
+                raise ValueError(f"{name} {self.split}/index.json has {rows} rows, expected {expected_rows[name]}")
+            adapter_rows = sum(self.manifests[name].samples_per_shard)
+            if adapter_rows != rows:
+                raise ValueError(f"{name} adapter exposes {adapter_rows} rows, expected {rows}")
 
     def _reader(self, task: ShardTask) -> MDSReader:
         reader = self.dataset.shards[task.global_shard]

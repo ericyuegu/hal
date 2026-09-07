@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pickle
 import threading
 import time
@@ -20,6 +22,7 @@ import pytest
 import torch
 
 import hal.training.physical_shard_loader as physical_shard_loader
+from hal import streams
 from hal.training.physical_shard_loader import MAX_DECODE_CHUNK_ROWS
 from hal.training.physical_shard_loader import DecodedChunk
 from hal.training.physical_shard_loader import MDSStorageAdapter
@@ -52,6 +55,80 @@ def _selection(rows: int = 19) -> PhysicalShardSelection:
         sources=(SourceRowSelection("source", rows, (3, 11) if rows > 11 else ()),),
         sha256="a" * 64,
     )
+
+
+def test_selection_from_sources_owns_the_canonical_identity() -> None:
+    sources = tuple(
+        SourceRowSelection(source.name, streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source.name])
+        for source in streams.POLICY_WORLD_V8_SOURCES
+    )
+
+    selection = PhysicalShardSelection.from_sources(sources)
+
+    assert selection.sha256 == "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
+
+
+def _manifest_payload(*, rows: int = 19, version: int = 2, encoding: str = "value") -> bytes:
+    return json.dumps(
+        {
+            "version": version,
+            "shards": [
+                {
+                    "samples": rows,
+                    "column_names": ["column"],
+                    "column_encodings": [encoding],
+                    "column_sizes": [None],
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
+
+
+def test_mds_adapter_rejects_manifest_hash_version_schema_and_row_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = streams.StreamSource("source", "s3://bucket/source", Path("cache"))
+    monkeypatch.setattr(streams, "REPO_DIR", str(tmp_path))
+    monkeypatch.setitem(streams.BY_NAME, source.name, source)
+    path = source.local_root / "train" / "index.json"
+    path.parent.mkdir(parents=True)
+    payload = _manifest_payload()
+    path.write_bytes(payload)
+    shard = json.loads(payload)["shards"][0]
+    schema_fields = {name: shard[name] for name in ("column_names", "column_encodings", "column_sizes")}
+    schema_sha256 = hashlib.sha256(
+        json.dumps(schema_fields, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    adapter = object.__new__(MDSStorageAdapter)
+    adapter.selection = PhysicalShardSelection.from_sources((SourceRowSelection(source.name, 19),))
+    adapter.split = "train"
+    adapter.manifests = {source.name: SourceManifest(source.name, (19,))}
+
+    def validate(candidate: bytes) -> None:
+        path.write_bytes(candidate)
+        adapter.validate_manifests(
+            expected_sha256={source.name: hashlib.sha256(candidate).hexdigest()},
+            expected_index_version=2,
+            expected_schema_sha256=schema_sha256,
+            expected_rows={source.name: 19},
+        )
+
+    validate(payload)
+    with pytest.raises(ValueError, match="SHA-256"):
+        adapter.validate_manifests(
+            expected_sha256={source.name: "0" * 64},
+            expected_index_version=2,
+            expected_schema_sha256=schema_sha256,
+            expected_rows={source.name: 19},
+        )
+    with pytest.raises(ValueError, match="version"):
+        validate(_manifest_payload(version=3))
+    with pytest.raises(ValueError, match="schema"):
+        validate(_manifest_payload(encoding="other"))
+    with pytest.raises(ValueError, match="rows"):
+        validate(_manifest_payload(rows=18))
 
 
 def test_shard_plan_covers_prefix_once_and_excludes_only_sidecar_rows() -> None:

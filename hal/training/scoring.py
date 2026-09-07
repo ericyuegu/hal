@@ -30,6 +30,11 @@ from torch import Tensor
 _LN2 = math.log(2.0)
 
 
+def nats_to_bits(values: Tensor) -> Tensor:
+    """Convert natural-log information units to bits."""
+    return values / _LN2
+
+
 # --- discretizers ------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class BinSpec:

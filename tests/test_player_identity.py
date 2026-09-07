@@ -110,6 +110,50 @@ def test_replay_lookup_uses_professional_ids_or_rank_aggregates() -> None:
         )
 
 
+def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    _write_manifest(manifest)
+    source = tmp_path / "source.jsonl.gz"
+    summary = player_identity.build_player_identity_sidecar(
+        (player_identity.ManifestInput("fixture", manifest),),
+        source,
+    )
+    expected = player_identity.load_player_identity_sidecar(source)
+    destination = tmp_path / "downloaded" / "sidecar.jsonl.gz"
+    downloads: list[tuple[str, str, str]] = []
+
+    class Client:
+        def download_file(self, bucket: str, key: str, path: str) -> None:
+            downloads.append((bucket, key, path))
+            Path(path).write_bytes(source.read_bytes())
+
+    monkeypatch.setattr(player_identity.r2, "client", lambda: Client())
+    sidecar = player_identity.load_player_identity_artifact(
+        destination,
+        remote="s3://hal/identity/sidecar.jsonl.gz",
+        expected_sha256=summary["sha256"],
+        expected_vocabulary_size=expected.vocabulary.size,
+        expected_vocabulary_sha256=expected.vocabulary.sha256,
+    )
+
+    assert sidecar == expected
+    assert destination.read_bytes() == source.read_bytes()
+    assert downloads[0][:2] == ("hal", "identity/sidecar.jsonl.gz")
+    with pytest.raises(ValueError, match="vocabulary"):
+        player_identity.load_player_identity_artifact(
+            destination,
+            remote="s3://hal/identity/sidecar.jsonl.gz",
+            expected_sha256=summary["sha256"],
+            expected_vocabulary_size=expected.vocabulary.size + 1,
+            expected_vocabulary_sha256=expected.vocabulary.sha256,
+        )
+    with pytest.raises(ValueError, match="SHA-256"):
+        player_identity.load_player_identity_sidecar(destination, expected_sha256="0" * 64)
+
+
 def test_rank_ids_and_checkpoint_vocabulary_round_trip() -> None:
     vocabulary = player_identity.PlayerVocabulary(("AA#1", "aa#1"))
     encoded = player_identity.vocabulary_buffer(vocabulary)

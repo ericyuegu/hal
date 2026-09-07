@@ -34,11 +34,11 @@ CONTROLLER_DECODE_ORDER: Final[tuple[str, ...]] = (
     "buttons",
 )
 
-_CONTINUOUS_CHANNEL_COUNT = 6
-_TRIGGER_LEFT_CHANNEL = ACTION_CHANNELS.index("trigger_l")
-_TRIGGER_RIGHT_CHANNEL = ACTION_CHANNELS.index("trigger_r")
-_BUTTON_LEFT_CHANNEL = ACTION_CHANNELS.index("button_l")
-_BUTTON_RIGHT_CHANNEL = ACTION_CHANNELS.index("button_r")
+CONTINUOUS_CHANNEL_COUNT: Final[int] = 6
+TRIGGER_LEFT_CHANNEL: Final[int] = ACTION_CHANNELS.index("trigger_l")
+TRIGGER_RIGHT_CHANNEL: Final[int] = ACTION_CHANNELS.index("trigger_r")
+BUTTON_LEFT_CHANNEL: Final[int] = ACTION_CHANNELS.index("button_l")
+BUTTON_RIGHT_CHANNEL: Final[int] = ACTION_CHANNELS.index("button_r")
 
 
 def _rms_norm(values: Tensor) -> Tensor:
@@ -74,8 +74,8 @@ class DiscreteControllerCodec(nn.Module):
         trigger_count = len(self.trigger_centers)
         left_full = trigger_pairs.div(trigger_count, rounding_mode="floor") == trigger_count - 1
         right_full = trigger_pairs.remainder(trigger_count) == trigger_count - 1
-        left_click = button_bits[:, _BUTTON_LEFT_CHANNEL - _CONTINUOUS_CHANNEL_COUNT].bool()
-        right_click = button_bits[:, _BUTTON_RIGHT_CHANNEL - _CONTINUOUS_CHANNEL_COUNT].bool()
+        left_click = button_bits[:, BUTTON_LEFT_CHANNEL - CONTINUOUS_CHANNEL_COUNT].bool()
+        right_click = button_bits[:, BUTTON_RIGHT_CHANNEL - CONTINUOUS_CHANNEL_COUNT].bool()
         valid = (~left_click[None, :] | left_full[:, None]) & (~right_click[None, :] | right_full[:, None])
         self.register_buffer("button_valid_for_trigger", valid)
 
@@ -90,22 +90,22 @@ class DiscreteControllerCodec(nn.Module):
         if actions.shape[-1] != ACTION_DIM:
             raise ValueError(f"controller actions must end in {ACTION_DIM} channels, got {tuple(actions.shape)}")
         out = actions.clone()
-        out[..., _TRIGGER_LEFT_CHANNEL] = torch.where(
-            out[..., _BUTTON_LEFT_CHANNEL] > 0.5,
-            torch.ones_like(out[..., _TRIGGER_LEFT_CHANNEL]),
-            out[..., _TRIGGER_LEFT_CHANNEL],
+        out[..., TRIGGER_LEFT_CHANNEL] = torch.where(
+            out[..., BUTTON_LEFT_CHANNEL] > 0.5,
+            torch.ones_like(out[..., TRIGGER_LEFT_CHANNEL]),
+            out[..., TRIGGER_LEFT_CHANNEL],
         )
-        out[..., _TRIGGER_RIGHT_CHANNEL] = torch.where(
-            out[..., _BUTTON_RIGHT_CHANNEL] > 0.5,
-            torch.ones_like(out[..., _TRIGGER_RIGHT_CHANNEL]),
-            out[..., _TRIGGER_RIGHT_CHANNEL],
+        out[..., TRIGGER_RIGHT_CHANNEL] = torch.where(
+            out[..., BUTTON_RIGHT_CHANNEL] > 0.5,
+            torch.ones_like(out[..., TRIGGER_RIGHT_CHANNEL]),
+            out[..., TRIGGER_RIGHT_CHANNEL],
         )
         return out
 
     def quantize(self, actions: Tensor) -> Tensor:
         actions = self.canonicalize(actions)
-        continuous = actions[..., :_CONTINUOUS_CHANNEL_COUNT]
-        buttons_raw = actions[..., _CONTINUOUS_CHANNEL_COUNT:]
+        continuous = actions[..., :CONTINUOUS_CHANNEL_COUNT]
+        buttons_raw = actions[..., CONTINUOUS_CHANNEL_COUNT:]
         buttons = scoring.buttons_to_combo(buttons_raw)
         main = scoring.nearest_cluster(continuous[..., 0:2], self.main_centers)
         c_stick = scoring.nearest_cluster(continuous[..., 2:4], self.c_centers)

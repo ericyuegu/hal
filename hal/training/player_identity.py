@@ -20,6 +20,7 @@ from typing import Final
 
 import numpy as np
 
+from hal import r2
 from hal.data.policy_schema import policy_replay_identity
 from hal.data.schema import Rank
 
@@ -300,6 +301,44 @@ def load_player_identity_sidecar(path: Path, *, expected_sha256: str | None = No
             raise ValueError(f"player sidecar repeats replay ID {replay_id}")
         by_replay[replay_id] = ids
     return PlayerIdentitySidecar(vocabulary, by_replay, header, digest)
+
+
+def load_player_identity_artifact(
+    path: Path,
+    *,
+    remote: str,
+    expected_sha256: str,
+    expected_vocabulary_size: int,
+    expected_vocabulary_sha256: str,
+) -> PlayerIdentitySidecar:
+    """Acquire and validate one pinned player-identity artifact."""
+    temporary: Path | None = None
+    download: tuple[str, str] | None = None
+    if not path.is_file():
+        bucket, separator, key = remote.removeprefix("s3://").partition("/")
+        if not remote.startswith("s3://") or not separator or not bucket or not key:
+            raise ValueError(f"player identity remote must be an s3 URI, got {remote!r}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.unlink(missing_ok=True)
+        download = (bucket, key)
+
+    candidate = path if temporary is None else temporary
+    try:
+        if download is not None:
+            r2.client().download_file(*download, str(candidate))
+        sidecar = load_player_identity_sidecar(candidate, expected_sha256=expected_sha256)
+        if (
+            sidecar.vocabulary.size != expected_vocabulary_size
+            or sidecar.vocabulary.sha256 != expected_vocabulary_sha256
+        ):
+            raise ValueError("player identity artifact vocabulary differs from the expected vocabulary")
+        if temporary is not None:
+            temporary.replace(path)
+        return sidecar
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def vocabulary_from_checkpoint_buffer(value: np.ndarray | bytes) -> PlayerVocabulary:
