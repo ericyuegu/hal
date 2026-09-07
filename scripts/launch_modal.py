@@ -786,7 +786,7 @@ def _run_closed_loop_eval(
         str(CLOSED_LOOP_MAX_PARALLEL),
         "--output-name",
         f"eval96-step-{update:07d}",
-        "--companion-wandb",
+        "--shared-wandb",
         "--expected-checkpoint-sha256",
         expected_checkpoint_sha256,
     ]

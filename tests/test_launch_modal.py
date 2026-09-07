@@ -506,6 +506,7 @@ def test_closed_loop_evaluator_runs_verified_o50_protocol(monkeypatch: pytest.Mo
 
     command, kwargs = calls[0]
     assert command[:4] == ["uv", "run", "experiments/050_scaled_temporal_awr.py", "eval"]
+    assert "--shared-wandb" in command
     assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
     assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
 

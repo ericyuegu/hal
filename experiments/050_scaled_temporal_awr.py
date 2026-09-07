@@ -147,7 +147,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v2"
+_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v3"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -324,9 +324,9 @@ class TrainConfig:
     batch_size: int = 512
     max_steps: int = dataclass_field(default=_PRODUCTION_UPDATES, init=False)
     muon_lr: float = 0.014
-    muon_weight_decay: float = 0.0
+    muon_weight_decay: float = 1e-4
     adam_lr: float = 4.25e-4
-    adam_weight_decay: float = 0.0
+    adam_weight_decay: float = 1e-4
     grad_clip: float = 1.0
     warmup_steps: int = dataclass_field(default=4096, init=False)
     lr_floor_ratio: float = 1 / 170
@@ -353,6 +353,7 @@ class TrainConfig:
     predownload: int = 8192
     download_retry: int = 8
     loader_timeout_s: float = 300.0
+    cache_limit_bytes: int = 2_000_000_000_000
     val_split: str = "val"
     num_workers: int = 24
     push_to_r2: bool = True
@@ -409,6 +410,7 @@ def validate_config(cfg: TrainConfig) -> None:
         "max_steps": cfg.max_steps,
         "download_retry": cfg.download_retry,
         "predownload": cfg.predownload,
+        "cache_limit_bytes": cfg.cache_limit_bytes,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -497,7 +499,7 @@ def validate_config(cfg: TrainConfig) -> None:
             f"policy_world_schema_version {cfg.policy_world_schema_version} != {POLICY_WORLD_SCHEMA_VERSION}"
         )
     if tuple(cfg.source_names) != _DEFAULT_SOURCE_NAMES:
-        raise ValueError("O50 v2 requires all 44 policy-world-v8 sources")
+        raise ValueError("O50 v3 requires all 44 policy-world-v8 sources")
     replay_count = sum(streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] for name in cfg.source_names)
     frame_count = sum(streams.POLICY_WORLD_V8_TRAIN_FRAMES[name] for name in cfg.source_names)
     if (replay_count, frame_count) != (TRAIN_REPLAYS, TRAIN_FRAMES):
@@ -506,11 +508,11 @@ def validate_config(cfg: TrainConfig) -> None:
             f"replays={replay_count}/{TRAIN_REPLAYS}, frames={frame_count}/{TRAIN_FRAMES}"
         )
     if cfg.target_positions != TARGET_POSITIONS:
-        raise ValueError("O50 v2 is frozen to 8D0 supervised positions")
+        raise ValueError("O50 v3 is frozen to 8D0 supervised positions")
     if cfg.depth_alpha != 0.5 or cfg.hidden_std_multiplier != 0.5 or cfg.readout_init != "mup-normal":
-        raise ValueError("O50 v2 uses O51's selected depth and initialization parameterization")
+        raise ValueError("O50 v3 uses O51's selected depth and initialization parameterization")
     if (cfg.adam_beta1, cfg.adam_beta2, cfg.adam_eps) != (*_BASE_ADAM_BETAS, _BASE_ADAM_EPS):
-        raise ValueError("O50 v2 scales the fixed base Adam betas and epsilon")
+        raise ValueError("O50 v3 scales the fixed base Adam betas and epsilon")
     for name, value in (("muon_lr", cfg.muon_lr), ("adam_lr", cfg.adam_lr), ("adam_eps", cfg.adam_eps)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
@@ -724,7 +726,7 @@ class DepthRule:
 def depth_rule(stack: Literal["trunk", "temporal"], layers: int, alpha: float) -> DepthRule:
     """Return O51's residual multipliers for one stack."""
     if alpha != 0.5:
-        raise ValueError("O50 v2 fixes depth_alpha to 0.5")
+        raise ValueError("O50 v3 fixes depth_alpha to 0.5")
     if layers < 1:
         raise ValueError("stack depth must be positive")
     if stack == "trunk":
@@ -1312,11 +1314,10 @@ class DeviceBatchPrefetcher:
 
     def _load_cpu_batch(self) -> AWRBatch:
         try:
-            cpu_batch = next(self._iterator)
+            return next(self._iterator)
         except StopIteration:
             self._iterator = iter(self._loader)
-            cpu_batch = next(self._iterator)
-        return self._prepare_cpu_batch(cpu_batch)
+            return next(self._iterator)
 
     def _prepare_cpu_batch(self, cpu_batch: AWRBatch) -> AWRBatch:
         """Apply the parent-side transforms to an already-fetched batch."""
@@ -1346,7 +1347,7 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("consume the staged batch before preloading another")
         if self._future is not None:
             raise RuntimeError("finish the background preload before preloading synchronously")
-        cpu_batch = self._load_cpu_batch()
+        cpu_batch = self._prepare_cpu_batch(self._load_cpu_batch())
         self._stage(cpu_batch)
 
     def start_preload(self) -> None:
@@ -2457,7 +2458,7 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
         elif name == "temporal.token_projection.bias":
             roles[name] = OptimizerRole("adamw", "vector", False)
         else:
-            raise RuntimeError(f"O50 v2 has no optimizer role for {name} {tuple(parameter.shape)}")
+            raise RuntimeError(f"O50 v3 has no optimizer role for {name} {tuple(parameter.shape)}")
     return roles
 
 
@@ -2578,7 +2579,8 @@ def model_tag(cfg: TrainConfig) -> str:
     return (
         f"scaled050-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-d2r2-"
-        f"nonlinear-head-trunk-skip-projectiles-v8-o51-optimal-{treatment}"
+        f"nonlinear-head-trunk-skip-projectiles-v8-o51-parameterized-"
+        f"mwd{cfg.muon_weight_decay:g}-awd{cfg.adam_weight_decay:g}-{treatment}"
     )
 
 
@@ -2611,6 +2613,7 @@ class _LoaderKwargs(TypedDict):
     batch_size: int
     seed: int
     schema_version: int
+    cache_limit: int
     extra: ExtraColumns
     projection: FeatureProjection
 
@@ -2628,6 +2631,7 @@ def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKw
         batch_size=cfg.batch_size,
         seed=cfg.seed,
         schema_version=cfg.mds_schema_version,
+        cache_limit=cfg.cache_limit_bytes,
         extra=MODEL_COLUMNS,
         projection=MODEL_PROJECTION,
     )
@@ -2775,6 +2779,7 @@ def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
         download_retry=cfg.download_retry,
         timeout=cfg.loader_timeout_s,
         resumable=True,
+        in_order=True,
         windows_per_replay=1,
         replay_format="policy-world",
         replay_transform=replay_transform,
@@ -2822,6 +2827,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         ],
         config=asdict(cfg),
         settings=wandb.Settings(
+            mode="shared",
+            x_label="training",
+            x_primary=True,
             x_stats_sampling_interval=5.0,
             x_stats_track_process_tree=True,
         ),
@@ -2830,6 +2838,8 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         return
     wandb.define_metric("global_step")
     wandb.define_metric("*", step_metric="global_step")
+    wandb.define_metric("eval/*", step_metric="global_step", summary="none")
+    wandb.define_metric("eval/checkpoint_step", step_metric="global_step", summary="max")
     wandb.run.summary["nll_semantics"] = (
         "train/loss is weighted policy loss in bits; train/nll is its unweighted counterpart; "
         "train/objective is the optimized policy-plus-value objective"
@@ -3480,43 +3490,26 @@ def _upload_eval_evidence(run_name: str, replay_dir: Path) -> None:
     uploader.close()
 
 
-def _log_companion_eval_metrics(wandb_id: str, update: int, values: dict[str, float]) -> None:
-    """Log live evals without concurrently resuming the training process."""
-    companion_id = f"{wandb_id}-eval96"
+def _log_shared_eval_metrics(wandb_id: str, update: int, values: dict[str, float]) -> None:
+    """Log one evaluation from a non-primary writer on the training run."""
     run = wandb.init(
         project="hal",
-        id=companion_id,
-        resume="allow",
-        name=f"{wandb_id} eval96",
-        group=wandb_id,
-        job_type="evaluation",
-        config={"training_wandb_id": wandb_id, "eval_matchups": _PRODUCTION_EVAL_MATCHUPS},
-        allow_val_change=True,
+        id=wandb_id,
+        settings=wandb.Settings(
+            mode="shared",
+            x_label=f"eval96-step-{update:07d}",
+            x_primary=False,
+            x_update_finish_state=False,
+            x_disable_stats=True,
+        ),
     )
     if run is None:
-        raise RuntimeError("W&B companion run initialization returned no run")
+        raise RuntimeError("W&B shared run initialization returned no run")
     try:
-        wandb.define_metric("global_step")
-        wandb.define_metric("eval/*", step_metric="global_step")
         metrics = {f"eval/{name}": value for name, value in _eval_wandb_metrics(values).items()}
-        wandb.log({"global_step": update, **metrics})
-        companion_url = run.url
-        entity = run.entity
+        run.log({"global_step": update, "eval/checkpoint_step": update, **metrics})
     finally:
-        wandb.finish()
-
-    if not entity:
-        raise RuntimeError("W&B companion run has no entity")
-
-    training_run = wandb.Api().run(f"{entity}/hal/{wandb_id}")
-    training_run.config["eval96_run_url"] = companion_url
-    training_run.config["eval96_companion_id"] = companion_id
-    training_run.summary["eval96/run_url"] = companion_url
-    training_run.summary["eval96/latest_step"] = update
-    for name in ("boots", "crashed", "net_stock_per_min", "net_dmg_per_min"):
-        if name in values:
-            training_run.summary[f"eval96/latest_{name}"] = values[name]
-    training_run.update()
+        run.finish()
 
 
 def eval_checkpoint(
@@ -3527,7 +3520,7 @@ def eval_checkpoint(
     max_parallel: int | None = None,
     output_name: str | None = None,
     upload_run: str | None = None,
-    companion_wandb: bool = False,
+    shared_wandb: bool = False,
     expected_checkpoint_sha256: str | None = None,
 ) -> dict[str, float]:
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
@@ -3562,11 +3555,11 @@ def eval_checkpoint(
     require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
     if upload_run is not None:
         _upload_eval_evidence(upload_run, replay_dir)
-    if companion_wandb:
+    if shared_wandb:
         wandb_id = state.get("wandb_id")
         if not isinstance(wandb_id, str):
-            raise RuntimeError("checkpoint has no W&B run id for companion logging")
-        _log_companion_eval_metrics(wandb_id, update, values)
+            raise RuntimeError("checkpoint has no W&B run id for shared logging")
+        _log_shared_eval_metrics(wandb_id, update, values)
     print(f"[eval] step={update} horizon={horizon}: {values}", flush=True)
     return values
 
@@ -3608,7 +3601,7 @@ class EvalArgs:
     eager: bool = False
     max_parallel: int | None = None
     output_name: str | None = None
-    companion_wandb: bool = False
+    shared_wandb: bool = False
     expected_checkpoint_sha256: str | None = None
 
 
@@ -3627,7 +3620,7 @@ def main(args: Command) -> None:
             max_parallel=args.max_parallel,
             output_name=args.output_name,
             upload_run=args.run,
-            companion_wandb=args.companion_wandb,
+            shared_wandb=args.shared_wandb,
             expected_checkpoint_sha256=args.expected_checkpoint_sha256,
         )
         return
