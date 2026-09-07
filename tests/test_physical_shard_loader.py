@@ -568,6 +568,10 @@ def test_every_batch_contains_distinct_replay_ids() -> None:
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 4
 
     assert loader.metrics["data/decoded_generations"] == loader.decoded_generations == 400
+    assert loader.metrics["data/epoch"] == pytest.approx(400 / 113)
+    assert loader.metrics["data/replay_generation_epoch"] == pytest.approx(400 / 113)
+    assert loader.metrics["loader/ring_size"] == 100
+    assert loader.metrics["loader/ring_batch_index"] == 300
     assert loader.max_decoded_chunk_size == 1
 
 

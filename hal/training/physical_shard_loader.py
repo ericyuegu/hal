@@ -1258,10 +1258,19 @@ class PhysicalShardReplayLoader[BatchT]:
     @property
     def metrics(self) -> dict[str, float]:
         metrics = dict(self._ring.schedule.replay_age_metrics)
+        generation_count = self.generation_count
+        generation_epoch = generation_count / self.selection.row_count
         metrics.update(
             {
+                "data/epoch": generation_epoch,
                 "data/decoded_generations": float(self._decoded_generations),
+                "data/replay_generations": float(generation_count),
+                "data/raw_bytes_read": float(self._raw_bytes_read),
+                "data/replay_generation_epoch": generation_epoch,
                 "data/max_decoded_chunk_size": float(self._max_decoded_chunk_size),
+                "loader/ring_size": float(self._ring.size),
+                "loader/ring_batch_index": float(self._ring.batch_index),
+                "loader/ring_fifo_head": float(self._ring.fifo_head),
             }
         )
         return metrics
@@ -1295,6 +1304,11 @@ class PhysicalShardReplayLoader[BatchT]:
     @property
     def decoded_generations(self) -> int:
         return self._decoded_generations
+
+    @property
+    def generation_count(self) -> int:
+        """Return logical source generations committed to the replay ring."""
+        return self._ring.size + self._ring.batch_index * self._ring.schedule.replay_lanes
 
     @property
     def max_decoded_chunk_size(self) -> int:

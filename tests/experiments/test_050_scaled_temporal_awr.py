@@ -1,16 +1,27 @@
 """Frozen contracts for the O50 production program."""
 
+import hashlib
 import importlib.util
+import json
 import sys
+import threading
 from dataclasses import asdict
+from dataclasses import fields
 from pathlib import Path
 
 import modal
+import numpy as np
 import pytest
 import torch
 
+from hal.data.policy_schema import PACKED_STATE_SUFFIXES
+from hal.data.policy_schema import pack_player_state
+from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
+from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.training import returns as returns_lib
 from hal.training.features import A_DIM
 from hal.training.features import TrainBatch
+from hal.training.player_identity import ReplayPlayerLookup
 
 
 def _load():
@@ -27,7 +38,7 @@ def _load():
 exp = _load()
 
 
-def _tiny_cfg():
+def _tiny_cfg(**changes):
     arch = {
         **asdict(exp.ARCHITECTURE),
         "d_model": 32,
@@ -51,6 +62,7 @@ def _tiny_cfg():
         inference_mode="eager",
         num_workers=0,
         push_to_r2=False,
+        **changes,
     )
 
 
@@ -61,10 +73,11 @@ def test_frozen_geometry_schedule_and_accounting() -> None:
     assert cfg.arch.head_offsets == (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)
     assert cfg.batch_size == 512
     assert cfg.num_workers == 24
-    assert cfg.cache_limit_bytes == 2_000_000_000_000
-    assert exp.loader_kwargs(cfg, {})["cache_limit"] == 2_000_000_000_000
-    assert cfg.shuffle_block_size == 8192
-    assert cfg.predownload == 8192
+    assert exp.REPLAY_SLOTS == 131_072
+    assert exp.WINDOWS_PER_GENERATION == 8
+    assert exp.REPLAY_PHASE_BLOCK_BATCHES == 25
+    assert exp.MIN_REPLAY_GAP_BATCHES == 200
+    assert exp.RESERVED_DISK_BYTES == 256 * 2**30
     assert cfg.max_steps == 2**17
     assert cfg.warmup_steps == 4096
     assert cfg.target_positions == 8 * exp.D0
@@ -146,13 +159,74 @@ def test_prefetcher_applies_identity_mask_once_per_batch() -> None:
     prefetcher = exp.DeviceBatchPrefetcher(batches, cfg, "cpu", transform)
     try:
         prefetcher.next()
-        prefetcher.start_preload()
-        prefetcher.finish_preload()
+        prefetcher.fill_lookahead(1)
+        prefetcher.stage_next()
         prefetcher.next()
     finally:
         prefetcher.close()
 
     assert transformed == batches
+
+
+def test_four_batch_lookahead_drains_at_every_state_boundary() -> None:
+    cfg = _tiny_cfg()
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    calls = []
+
+    class Loader:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            calls.append(threading.get_ident())
+            return batch
+
+    prefetcher = exp.DeviceBatchPrefetcher(Loader(), cfg, "cpu")
+    queue_depths = []
+    try:
+        for update in range(1, 9):
+            prefetcher.next()
+            prefetcher.fill_lookahead(0 if update == 8 else 8 - update)
+            queue_depths.append(prefetcher.queue_depth)
+            if update < 8:
+                prefetcher.stage_next()
+        assert prefetcher.drained
+    finally:
+        prefetcher.close()
+
+    assert len(calls) == 8
+    assert len(set(calls)) == 1
+    assert calls[0] != threading.main_thread().ident
+    assert max(queue_depths) == 4
+    assert queue_depths[-1] == 0
+
+
+def test_prepared_data_starts_workers_before_background_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = []
+    batch = object()
+
+    class Loader:
+        def __iter__(self):
+            events.append(("iter", threading.get_ident()))
+            return self
+
+        def __next__(self):
+            events.append(("next", threading.get_ident()))
+            return batch
+
+    loader = Loader()
+    monkeypatch.setattr(exp, "_make_loaders", lambda *_args: (loader, []))
+    sidecar = type("Sidecar", (), {"by_replay": {}})()
+
+    prepared = exp._prepare_training_data(exp.TrainConfig(), {}, sidecar, None)
+    try:
+        assert prepared.first_batch_future.result() is batch
+    finally:
+        prepared.resources.close()
+
+    assert events[0] == ("iter", threading.main_thread().ident)
+    assert events[1][0] == "next"
+    assert events[1][1] != threading.main_thread().ident
 
 
 def test_parameter_contract_records_action_embedding_width_32() -> None:
@@ -233,34 +307,236 @@ def test_v8_corpus_and_checkpoint_identity() -> None:
     assert len(cfg.source_names) == 44
     assert sum(exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS.values()) == exp.TRAIN_REPLAYS == 1_295_370
     assert sum(exp.streams.POLICY_WORLD_V8_TRAIN_FRAMES.values()) == exp.TRAIN_FRAMES == 13_266_364_175
+    selection = exp.data_selection(cfg)
+    assert selection.row_count == exp.TRAIN_REPLAYS
+    assert selection.sha256 == exp.V8_SELECTION_SHA256
+    assert exp._canonical_selection_sha256(selection.sources) == exp.V8_SELECTION_SHA256
+    assert set(exp.SOURCE_MANIFEST_SHA256) == set(cfg.source_names)
     state = exp._checkpoint_config(cfg)
-    assert state["experiment_id"] == "050_scaled_temporal_awr_v3"
-    state["experiment_id"] = "050_scaled_temporal_awr_v2"
+    assert state["experiment_id"] == "050_scaled_temporal_awr_v4"
+    state["experiment_id"] = "050_scaled_temporal_awr_v3"
     with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state(state)
 
 
-def test_training_loader_uses_ordered_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = []
+def _manifest_payload(source: str, *, schema_value: str = "value") -> bytes:
+    rows = exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]
+    return json.dumps(
+        {
+            "version": exp.V8_MDS_INDEX_VERSION,
+            "shards": [
+                {
+                    "samples": rows,
+                    "column_names": ["column"],
+                    "column_encodings": [schema_value],
+                    "column_sizes": [None],
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
 
-    class Sidecar:
-        by_replay = {}
 
-    class FakeResumableLoader:
-        streaming_dataset = range(exp.TRAIN_REPLAYS)
+def test_v8_manifest_rejects_hash_schema_and_row_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = exp._DEFAULT_SOURCE_NAMES[0]
+    payload = _manifest_payload(source)
+    monkeypatch.setitem(exp.SOURCE_MANIFEST_SHA256, source, hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(
+        exp,
+        "V8_MDS_SCHEMA_SHA256",
+        exp._manifest_schema_sha256(json.loads(payload)["shards"][0]),
+    )
+    exp._validate_v8_manifest(source, payload)
 
-    def make_loader(**kwargs):
-        calls.append(kwargs)
-        return FakeResumableLoader() if kwargs.get("resumable") else object()
+    with pytest.raises(ValueError, match="SHA-256"):
+        exp._validate_v8_manifest(source, payload + b" ")
+    wrong_schema = _manifest_payload(source, schema_value="other")
+    monkeypatch.setitem(exp.SOURCE_MANIFEST_SHA256, source, hashlib.sha256(wrong_schema).hexdigest())
+    with pytest.raises(ValueError, match="schema"):
+        exp._validate_v8_manifest(source, wrong_schema)
+    wrong_rows = payload.replace(str(exp.streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]).encode(), b"1")
+    monkeypatch.setitem(exp.SOURCE_MANIFEST_SHA256, source, hashlib.sha256(wrong_rows).hexdigest())
+    with pytest.raises(ValueError, match="rows"):
+        exp._validate_v8_manifest(source, wrong_rows)
 
-    monkeypatch.setattr(exp, "load_identity_sidecar", lambda _cfg: Sidecar())
-    monkeypatch.setattr(exp, "make_loader", make_loader)
-    monkeypatch.setattr(exp, "ResumableStreamingDataLoader", FakeResumableLoader)
-    monkeypatch.setattr(exp, "cache_validation", lambda _loader, _n_samples: [])
 
-    exp._make_loaders(exp.TrainConfig(), {})
+def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = {}
 
-    assert calls[0]["in_order"] is True
+    class Adapter:
+        def __init__(self, selection, *, download_retry):
+            observed["adapter"] = (selection, download_retry)
+            self.manifests = {source.source: (source.stop,) for source in selection.sources}
+
+    class Loader:
+        required_disk_bytes = 10
+        disk_free_bytes = 20
+        minimum_replay_gap_batches = 200
+
+        @classmethod
+        def __class_getitem__(cls, _item):
+            return cls
+
+        def __init__(self, **kwargs):
+            observed["loader"] = kwargs
+            self.source_sample_counts = kwargs["selection"].row_counts_by_source()
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(exp, "MDSStorageAdapter", Adapter)
+    monkeypatch.setattr(exp, "_validate_v8_manifests", lambda *_args: None)
+    monkeypatch.setattr(exp, "build_shard_plan", lambda *_args: (object(),))
+    monkeypatch.setattr(exp, "PhysicalShardReplayLoader", Loader)
+
+    loader = exp._make_train_loader(exp.TrainConfig(), {}, ReplayPlayerLookup({}))
+
+    assert loader is not None
+    kwargs = observed["loader"]
+    assert kwargs["data_protocol"] == exp.DATA_PROTOCOL
+    assert kwargs["replay_slots"] == 131_072
+    assert kwargs["windows_per_generation"] == 8
+    assert kwargs["replay_phase_block_batches"] == 25
+    assert kwargs["num_workers"] == 24
+    assert kwargs["source_manifest_sha256"] == exp.SOURCE_MANIFEST_SHA256
+
+
+def test_training_rejects_insufficient_disk() -> None:
+    loader = type("Loader", (), {"required_disk_bytes": 11, "disk_free_bytes": 10})()
+    with pytest.raises(RuntimeError, match="do not fit"):
+        exp._require_loader_disk(loader)
+
+
+def test_legacy_training_configuration_and_resume_option_are_removed() -> None:
+    config_fields = {field.name for field in fields(exp.TrainConfig)}
+    assert not config_fields.intersection(
+        {"shuffle_block_size", "predownload", "loader_timeout_s", "cache_limit_bytes"}
+    )
+    assert "resume_predownload" not in {field.name for field in fields(exp.TrainArgs)}
+
+
+def _compact_replay(frames: int) -> dict[str, object]:
+    compact: dict[str, object] = {}
+    for name, encoding in POLICY_WORLD_MDS_COLUMNS.items():
+        if encoding == "str":
+            compact[name] = "replay-1"
+        elif encoding == "int":
+            compact[name] = 0
+        else:
+            compact[name] = np.zeros(frames, dtype=np.dtype(encoding.removeprefix("ndarray:")))
+    compact.update(
+        policy_world_schema_version=POLICY_WORLD_SCHEMA_VERSION,
+        source_schema_version=7,
+        replay_id="replay-1",
+        num_frames=frames,
+    )
+    for port in ("p1", "p2"):
+        values = {name: np.zeros(frames, dtype=np.int32) for name in PACKED_STATE_SUFFIXES}
+        values["stock"].fill(4)
+        values["direction"] = np.ones(frames, dtype=np.float32)
+        if port == "p2":
+            values["stock"][-1] = 0
+        compact[f"{port}_state"] = pack_player_state(values)
+        compact[f"{port}_percent"] = np.arange(frames, dtype=np.float32)
+    return compact
+
+
+def test_compact_physical_labels_match_full_return_labels() -> None:
+    compact = _compact_replay(12)
+    expected = returns_lib.compact_policy_returns(
+        compact,
+        gamma=0.9,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+        suffix=exp._RETURN_SUFFIX,
+    )
+    labels = exp.O50ReplayLabels(
+        player_lookup=ReplayPlayerLookup({"replay-1": (7, 11)}),
+        gamma=0.9,
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+    )(compact)
+
+    for name, values in expected.items():
+        np.testing.assert_array_equal(labels[name], values)
+    np.testing.assert_array_equal(labels["p1_player_id"], np.asarray(7, dtype=np.int32))
+    np.testing.assert_array_equal(labels["p2_player_id"], np.asarray(11, dtype=np.int32))
+
+
+def test_boundary_state_resumes_next_batch_update_and_identity_dropout() -> None:
+    cfg = _tiny_cfg()
+
+    class Loader:
+        def __init__(self) -> None:
+            self.cursor = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+            batch.context.features["ego_player_id"].fill_(self.cursor + 3)
+            batch.target.fill_(self.cursor + 1)
+            self.cursor += 1
+            return batch
+
+        def state_dict(self):
+            return {"cursor": self.cursor}
+
+        def load_state_dict(self, state):
+            self.cursor = state["cursor"]
+
+    loader = Loader()
+    masker = exp.IdentityMasker(23, 0.5)
+    prefetcher = exp.DeviceBatchPrefetcher(loader, cfg, "cpu", masker)
+    try:
+        for update in range(1, 9):
+            prefetcher.next()
+            prefetcher.fill_lookahead(0 if update == 8 else 8 - update)
+            if update < 8:
+                prefetcher.stage_next()
+        assert prefetcher.drained
+        loader_state = loader.state_dict()
+        masker_state = masker.state_dict()
+    finally:
+        prefetcher.close()
+
+    expected_prefetcher = exp.DeviceBatchPrefetcher(loader, cfg, "cpu", masker)
+    try:
+        expected_batch, expected_prefixes = expected_prefetcher.next()
+    finally:
+        expected_prefetcher.close()
+
+    restored_loader = Loader()
+    restored_loader.load_state_dict(loader_state)
+    restored_masker = exp.IdentityMasker(999, 0.5)
+    restored_masker.load_state_dict(masker_state)
+    restored_prefetcher = exp.DeviceBatchPrefetcher(restored_loader, cfg, "cpu", restored_masker)
+    try:
+        actual_batch, actual_prefixes = restored_prefetcher.next()
+    finally:
+        restored_prefetcher.close()
+
+    assert actual_prefixes == expected_prefixes
+    torch.testing.assert_close(actual_batch.target, expected_batch.target)
+    torch.testing.assert_close(
+        actual_batch.context.features["ego_player_id"],
+        expected_batch.context.features["ego_player_id"],
+    )
+    assert restored_masker.state_dict()["forced"] == masker.state_dict()["forced"]
+
+    def optimizer_update(batch):
+        weight = torch.nn.Parameter(torch.tensor(0.25))
+        optimizer = torch.optim.SGD([weight], lr=0.01)
+        identity = batch.context.features["ego_player_id"].float().mean()
+        loss = (weight * (batch.target.float().mean() + identity)).square()
+        loss.backward()
+        optimizer.step()
+        return weight.detach()
+
+    torch.testing.assert_close(optimizer_update(actual_batch), optimizer_update(expected_batch))
 
 
 def test_closed_loop_spawn_uses_launcher_app(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -32,11 +32,14 @@ import math
 import os
 import time
 from collections import defaultdict
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -107,8 +110,8 @@ from hal.training.controller_codec import CONTROLLER_GROUP_VOCABS
 from hal.training.controller_codec import MAIN_STICK_GROUP
 from hal.training.controller_codec import TRIGGERS_GROUP
 from hal.training.controller_codec import DiscreteControllerCodec
-from hal.training.dataloader import ResumableStreamingDataLoader
 from hal.training.dataloader import make_loader
+from hal.training.dataloader import train_batch_from_columns
 from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.features import A_DIM
 from hal.training.features import ACTION_CHANNELS
@@ -128,7 +131,14 @@ from hal.training.mfu import bf16_dense_peak_flops
 from hal.training.mfu import bf16_peak_source
 from hal.training.mfu import model_flops_utilization
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
+from hal.training.physical_shard_loader import PREFETCH_FACTOR
+from hal.training.physical_shard_loader import MDSStorageAdapter
+from hal.training.physical_shard_loader import PhysicalShardReplayLoader
+from hal.training.physical_shard_loader import PhysicalShardSelection
+from hal.training.physical_shard_loader import SourceRowSelection
+from hal.training.physical_shard_loader import build_shard_plan
 from hal.training.player_identity import MASKED_PLAYER_ID
+from hal.training.player_identity import PlayerIdentitySidecar
 from hal.training.player_identity import PlayerVocabulary
 from hal.training.player_identity import ReplayPlayerLookup
 from hal.training.player_identity import decode_player_codes
@@ -148,7 +158,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _LN2 = math.log(2.0)
 _N_CONT = 6
 _PLAYER_PREFIXES = BASE_PLAYER_PREFIXES
-_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v3"
+_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v4"
 _RETURN_SUFFIX = "awr_return"
 EGO_RETURN = f"ego_{_RETURN_SUFFIX}"
 EGO_RETURN_VALID = f"{EGO_RETURN}_valid"
@@ -170,6 +180,15 @@ PLAYER_VOCAB_SIZE = 21_181
 PLAYER_EMBED_DIM = 32
 TRAIN_REPLAYS: Final[int] = 1_295_370
 TRAIN_FRAMES: Final[int] = 13_266_364_175
+DATA_PROTOCOL: Final[str] = "o50-replay-ring-v8"
+V8_SELECTION_SHA256: Final[str] = "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
+V8_MDS_INDEX_VERSION: Final[int] = 2
+V8_MDS_SCHEMA_SHA256: Final[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
+REPLAY_SLOTS: Final[int] = 131_072
+WINDOWS_PER_GENERATION: Final[int] = 8
+REPLAY_PHASE_BLOCK_BATCHES: Final[int] = 25
+MIN_REPLAY_GAP_BATCHES: Final[int] = 200
+RESERVED_DISK_BYTES: Final[int] = 256 * 2**30
 D0: Final[int] = 2**30
 TARGET_POSITIONS: Final[int] = 8 * D0
 _BASE_BATCH: Final[int] = 512
@@ -201,7 +220,6 @@ _PRODUCTION_OVERRIDE_FIELDS = frozenset(
         "eval_max_parallel",
         "num_workers",
         "phase_timing_every",
-        "predownload",
         "process_metrics_interval_s",
         "push_to_r2",
         "system_metrics_every",
@@ -242,6 +260,52 @@ _ITEM_PROBE_COLUMN = item_column(0, _ITEM_PRESENCE_SUFFIX)
 _POLICY_WORLD_NAMES = frozenset(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
 _DEFAULT_SOURCE_NAMES = tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
 SOURCE_LIST_SHA256 = hashlib.sha256(json.dumps(_DEFAULT_SOURCE_NAMES, separators=(",", ":")).encode()).hexdigest()
+SOURCE_MANIFEST_SHA256: Final[dict[str, str]] = {
+    "ranked-anonymized-1-policy-world-v8": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8",
+    "ranked-anonymized-2-policy-world-v8": "f629a8a01eada6904ad16be2ddebe3037c9564e0af812794b75c2a826a8a204c",
+    "ranked-anonymized-3-policy-world-v8": "8acb765a597f965bc59bf6c982a2a784f051ac2f5366906f180a04b909943c57",
+    "ranked-anonymized-4-policy-world-v8": "b4424eebc9724e4fb94e3b16f21d2f357cd178212915604ec675f782daea17b5",
+    "ranked-anonymized-5-policy-world-v8": "94b56ea16d6549564b39342a8c882f214d8b3d747b99a28e291d12bfa4a5c7cc",
+    "ranked-anonymized-6-policy-world-v8": "ee58ce5241a510c609e15e9283903163ff941187ccf9a4bff0716b45e157a083",
+    "professional-aklo-policy-world-v8": "1ae04b2ffd57fe0bb1bac86933f61b4fbad151bfe7956f607f6ff19521895f64",
+    "professional-amsa-policy-world-v8": "11945989cd7a99fb38a0e52fc6306fa2b9e72eb6c7094d656f069b02878ac17f",
+    "professional-axe-policy-world-v8": "263f972bb6e629c7e87106d1e2f57d6477ab32d291515dc7fe38f6f316e6e270",
+    "professional-billybopeep-policy-world-v8": "7da1a1c4157937ff28c28af4da8ba1103ee81fedb93e4fe820789ca29e2709c7",
+    "professional-bobbybigballz-policy-world-v8": "53cae8c1df6a2c13e0e3ab32bf8595be4b9c6438ee54ac0e54bbaa5669f0dcbe",
+    "professional-cody-policy-world-v8": "abb6d3e1f790302096270edb6a82c69a646dbd99b544e3ed35507bef293dfb8b",
+    "professional-cookbook-policy-world-v8": "e855d5c4e871259092bd2f7772a5f80f1ea7c732d223eeb729e1760dadd1c585",
+    "professional-daniel-policy-world-v8": "f2683e42e5a3e2dd2525c5643af7ed9b4536b398aa295a0ffec56b6493144d42",
+    "professional-desertsnoopy-policy-world-v8": "23b0af01ab6102edc6be234bfa6055f0c22e7591d5965763524a3ecd4f9b9099",
+    "professional-druggedfox-policy-world-v8": "8e4c425e9a62b317df3c11d85d8d172f2be16d2270a8f6279180f2bb79a48687",
+    "professional-fknsilver-policy-world-v8": "5ff82418f1a3be4d8c9ea0822b204f88cbea0165c93cb5ba5f19fbadb2692966",
+    "professional-franz-policy-world-v8": "5e5720294243254007952fb8f2289b81485fc98ac1df3db304c286286ef80cd7",
+    "professional-frenzy-policy-world-v8": "46a9cce7517bc03fde2b3cf70efedade5092bc3841c23711bafc1fac30da18e5",
+    "professional-friend-policy-world-v8": "05c6821f857d21c20ae1582cdd7362ad230f8f72c933e44aecf9f0cb351bcd67",
+    "professional-ginger-policy-world-v8": "b494bee53cb3c48b2ac673d1aae0ee82926e6cdf8f940d35a20ef6cbfaab1203",
+    "professional-gosu-policy-world-v8": "08e743b829bcb7c46abdae6d31386f2eb384f90998ded32967b4287a9bb3043d",
+    "professional-grab2win-policy-world-v8": "acafaf1e3406166a35f42d5fafb269009218ec6f43237834338236aed875d1e6",
+    "professional-iliketurtles-policy-world-v8": "7690dc9b46de6b2ff7a8f0e99f3f01a21f91388c8a0ab2d4f593a080bf6ae70e",
+    "professional-isdsar-policy-world-v8": "6ce04e9378f414f6cfc5dc27bd2ff3e5a58db798aa38abc37a659408f0da4ecf",
+    "professional-jchu-policy-world-v8": "403f4f38ab482976c61d76748ff0400f1d502e51ab022347ace87feb9fa9fc35",
+    "professional-jahridin-policy-world-v8": "899064901131096198ed9855bd606ff887a20fdb996bfeffacbb72b4a5802a38",
+    "professional-kjh-policy-world-v8": "32deb8672642e653f89de565e58c3737abf4b7d03110286cb05d8d355ddb2b4b",
+    "professional-kodorin-policy-world-v8": "24d36b73c2f5d06b4fffc1aa014f369cf93c99cdc0097ff1f98c87649b18a41b",
+    "professional-krudo-policy-world-v8": "a595bec356530f73a898d6fd0c7fa98eab3efecc05072f0536c87ecc29265f2c",
+    "professional-m2k-policy-world-v8": "da529b454a8a84860c328572f9c2a31694e5983ed46c5ab6579c9ac2c674fbca",
+    "professional-mang0-policy-world-v8": "cb1a23eebefc78e98dcf36f3bf6d32e66e1f1c4b00ee908e78e5988536445340",
+    "professional-mof-policy-world-v8": "eeebeb685c3be5e77cedb8446ea8cc358f5d16286c8d7fdce469b2a9b51bc174",
+    "professional-monotheon-policy-world-v8": "8d1e2f996b6aae3fd17f971f8310b1b4beb5b2d97d7faed402dab42714da4492",
+    "professional-nicki-policy-world-v8": "ac07fe70c0e0a2ea31a3f3a764b53d1216248d3689d5b4558781bf843b5c0e6c",
+    "professional-rapm-policy-world-v8": "58bf73d0868f5e51ef06c1f9f0eb64c5f8153cc77f4053d60c7568d5f20852d1",
+    "professional-redx-policy-world-v8": "d54d66e26e97327452da4762eeddf8e2700ec9ef88cff9960a039eda97e766f5",
+    "professional-siddward-policy-world-v8": "69b182eda72df5700505cf52c9f7302fcf9acb4771f42bf3f4fb6d2a0538b895",
+    "professional-solobattle-policy-world-v8": "eb5084e6340490b9f312f9b0a8ca194d5755a8e83c63043d65668fc482c94bb7",
+    "professional-technospider-policy-world-v8": "1558eadd94b43150e6ab0bd2edb15c036a2136b5aa2766a675df83ee8474cb52",
+    "professional-trif-policy-world-v8": "16f2905d2894807f2f950063bb8387ce69b5a918523f42556b997385f3c5f462",
+    "professional-uhhei-policy-world-v8": "f5414ac89182f6a2af547149cac3d52ce38cfad5549db45e6e1e9979fa6b6101",
+    "professional-ycz-policy-world-v8": "597c813dd86e341848d0436d3dac80316fc76ee9d29683a699c114df832c5897",
+    "professional-zain-policy-world-v8": "6f35dfbb1f5353138b73866a99e3599034f93d859f70cfb421adc484cedf6549",
+}
 MODEL_COLUMNS = ExtraColumns(
     floats=ITEM_COLUMNS.floats,
     cats={**ITEM_COLUMNS.cats, "player_id": None},
@@ -370,11 +434,7 @@ class TrainConfig:
     source_names: tuple[str, ...] = _DEFAULT_SOURCE_NAMES
     mds_schema_version: int = 7
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
-    shuffle_block_size: int = 8192
-    predownload: int = 8192
     download_retry: int = 8
-    loader_timeout_s: float = 300.0
-    cache_limit_bytes: int = 2_000_000_000_000
     val_split: str = "val"
     num_workers: int = 24
     push_to_r2: bool = True
@@ -432,8 +492,6 @@ def validate_config(cfg: TrainConfig) -> None:
         "warmup_steps": cfg.warmup_steps,
         "target_positions": cfg.target_positions,
         "download_retry": cfg.download_retry,
-        "predownload": cfg.predownload,
-        "cache_limit_bytes": cfg.cache_limit_bytes,
     }
     for name, value in positive.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -482,7 +540,6 @@ def validate_config(cfg: TrainConfig) -> None:
         ("system_metrics_interval_s", cfg.system_metrics_interval_s),
         ("process_metrics_interval_s", cfg.process_metrics_interval_s),
         ("cache_metrics_interval_s", cfg.cache_metrics_interval_s),
-        ("loader_timeout_s", cfg.loader_timeout_s),
     ):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive, got {value!r}")
@@ -518,7 +575,7 @@ def validate_config(cfg: TrainConfig) -> None:
             f"policy_world_schema_version {cfg.policy_world_schema_version} != {POLICY_WORLD_SCHEMA_VERSION}"
         )
     if tuple(cfg.source_names) != _DEFAULT_SOURCE_NAMES:
-        raise ValueError("O50 v3 requires all 44 policy-world-v8 sources")
+        raise ValueError("O50 v4 requires all 44 policy-world-v8 sources")
     replay_count = sum(streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] for name in cfg.source_names)
     frame_count = sum(streams.POLICY_WORLD_V8_TRAIN_FRAMES[name] for name in cfg.source_names)
     if (replay_count, frame_count) != (TRAIN_REPLAYS, TRAIN_FRAMES):
@@ -527,9 +584,9 @@ def validate_config(cfg: TrainConfig) -> None:
             f"replays={replay_count}/{TRAIN_REPLAYS}, frames={frame_count}/{TRAIN_FRAMES}"
         )
     if cfg.depth_alpha != 0.5 or cfg.hidden_std_multiplier != 0.5 or cfg.readout_init != "mup-normal":
-        raise ValueError("O50 v3 uses O51's selected depth and initialization parameterization")
+        raise ValueError("O50 v4 uses O51's selected depth and initialization parameterization")
     if (cfg.adam_beta1, cfg.adam_beta2, cfg.adam_eps) != (*_BASE_ADAM_BETAS, _BASE_ADAM_EPS):
-        raise ValueError("O50 v3 scales the fixed base Adam betas and epsilon")
+        raise ValueError("O50 v4 scales the fixed base Adam betas and epsilon")
     for name, value in (("muon_lr", cfg.muon_lr), ("adam_lr", cfg.adam_lr), ("adam_eps", cfg.adam_eps)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
@@ -1324,7 +1381,7 @@ def prepared_targets(
 
 
 class DeviceBatchPrefetcher:
-    """Fetch the next CPU batch during GPU compute and stage it for transfer."""
+    """Keep a bounded serial CPU lookahead and stage one device batch."""
 
     def __init__(
         self,
@@ -1332,17 +1389,24 @@ class DeviceBatchPrefetcher:
         cfg: TrainConfig,
         device: str | torch.device,
         identity_masker: IdentityMasker | None = None,
+        *,
+        iterator: Iterator[AWRBatch] | None = None,
+        first_batch_future: Future[AWRBatch] | None = None,
     ) -> None:
         self._loader = loader
-        self._iterator = iter(loader)
+        self._iterator = iter(loader) if iterator is None else iterator
         self._cfg = cfg
         self._device = torch.device(device)
         self._identity_masker = identity_masker
         self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
         self._staged: tuple[AWRBatch, AWRBatch, int] | None = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
-        self._future: Future[AWRBatch] | None = None
-        self.preload()
+        self._futures: deque[Future[AWRBatch]] = deque()
+        if first_batch_future is None:
+            self.fill_lookahead(1)
+        else:
+            self._futures.append(first_batch_future)
+        self.stage_next()
 
     def _load_cpu_batch(self) -> AWRBatch:
         try:
@@ -1373,33 +1437,29 @@ class DeviceBatchPrefetcher:
                 device_batch = cpu_batch.to(self._device)
         self._staged = (device_batch, cpu_batch, valid_prefixes)
 
-    def preload(self) -> None:
-        """Synchronously stage a batch at startup and checkpoint boundaries."""
+    def fill_lookahead(self, batch_limit: int) -> None:
+        """Submit up to four batches without crossing the next state boundary."""
+        if batch_limit < 0:
+            raise ValueError("lookahead batch limit must be non-negative")
         if self._staged is not None:
-            raise RuntimeError("consume the staged batch before preloading another")
-        if self._future is not None:
-            raise RuntimeError("finish the background preload before preloading synchronously")
-        cpu_batch = self._prepare_cpu_batch(self._load_cpu_batch())
-        self._stage(cpu_batch)
+            raise RuntimeError("consume the staged batch before filling lookahead")
+        if len(self._futures) > batch_limit:
+            raise RuntimeError("queued batches cross the next state boundary")
+        target = min(_TRAIN_PREFETCH_FACTOR, batch_limit)
+        while len(self._futures) < target:
+            self._futures.append(self._pool.submit(self._load_cpu_batch))
 
-    def start_preload(self) -> None:
-        """Start loading the next CPU batch on a background thread."""
+    def stage_next(self) -> float:
+        """Stage the oldest queued batch and return its uncovered wait."""
         if self._staged is not None:
-            raise RuntimeError("consume the staged batch before starting another preload")
-        if self._future is not None:
-            raise RuntimeError("a background preload is already running")
-        self._future = self._pool.submit(self._load_cpu_batch)
-
-    def finish_preload(self) -> float:
-        """Stage a background-loaded batch and measure only its uncovered wait."""
-        if self._future is None:
-            raise RuntimeError("no background preload is running")
+            raise RuntimeError("consume the staged batch before staging another")
+        if not self._futures:
+            raise RuntimeError("fill lookahead before staging another batch")
         started = time.monotonic()
-        future, self._future = self._future, None
+        future = self._futures.popleft()
         cpu_batch = self._prepare_cpu_batch(future.result())
-        loader_wait = time.monotonic() - started
         self._stage(cpu_batch)
-        return loader_wait
+        return time.monotonic() - started
 
     def next(self) -> tuple[AWRBatch, int]:
         """Wait only for the uncovered tail of the staged transfer."""
@@ -1413,6 +1473,14 @@ class DeviceBatchPrefetcher:
         self._staged = None
         del cpu_batch
         return device_batch, valid_prefixes
+
+    @property
+    def queue_depth(self) -> int:
+        return len(self._futures)
+
+    @property
+    def drained(self) -> bool:
+        return self._staged is None and not self._futures
 
     def close(self) -> None:
         """Release the background loader thread."""
@@ -2640,39 +2708,82 @@ def log_wandb_code(run: wandb.Run) -> None:
     run.log_code(root=str(root), include_fn=include)
 
 
-class _LoaderKwargs(TypedDict):
-    data_root: str | None
-    sources: tuple[streams.StreamSource, ...]
-    shuffle_block_size: int
-    shuffle_seed: int
-    stats: dict[str, FeatureStats]
-    L_ctx: int
-    L_chunk: int
-    batch_size: int
-    seed: int
-    schema_version: int
-    cache_limit: int
-    extra: ExtraColumns
-    projection: FeatureProjection
+def _canonical_selection_sha256(sources: tuple[SourceRowSelection, ...]) -> str:
+    payload = [
+        {
+            "source": source.source,
+            "stop": source.stop,
+            "excluded_rows": list(source.excluded_rows),
+        }
+        for source in sources
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def loader_kwargs(cfg: TrainConfig, stats: dict[str, FeatureStats]) -> _LoaderKwargs:
-    sources = tuple(streams.BY_NAME[name] for name in cfg.source_names)
-    return dict(
-        data_root=None,
-        sources=sources,
-        shuffle_block_size=cfg.shuffle_block_size,
-        shuffle_seed=cfg.seed,
-        stats=stats,
-        L_ctx=cfg.arch.L_ctx,
-        L_chunk=cfg.arch.sample_chunk_length,
-        batch_size=cfg.batch_size,
-        seed=cfg.seed,
-        schema_version=cfg.mds_schema_version,
-        cache_limit=cfg.cache_limit_bytes,
-        extra=MODEL_COLUMNS,
-        projection=MODEL_PROJECTION,
-    )
+def data_selection(cfg: TrainConfig) -> PhysicalShardSelection:
+    """Return all policy-world-v8 train rows with their pinned identity."""
+    if tuple(cfg.source_names) != _DEFAULT_SOURCE_NAMES:
+        raise ValueError("O50 v4 selection requires all policy-world-v8 sources in registry order")
+    if set(SOURCE_MANIFEST_SHA256) != set(cfg.source_names):
+        raise RuntimeError("pinned v8 manifests do not cover all configured sources")
+    sources = tuple(SourceRowSelection(name, streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name]) for name in cfg.source_names)
+    actual_hash = _canonical_selection_sha256(sources)
+    if actual_hash != V8_SELECTION_SHA256:
+        raise RuntimeError(f"policy-world-v8 selection hash changed: {actual_hash} != {V8_SELECTION_SHA256}")
+    selection = PhysicalShardSelection(sources, V8_SELECTION_SHA256)
+    if selection.row_count != TRAIN_REPLAYS:
+        raise RuntimeError(f"policy-world-v8 selection has {selection.row_count} rows, expected {TRAIN_REPLAYS}")
+    return selection
+
+
+def _manifest_schema_sha256(shard: Mapping[str, object]) -> str:
+    fields = {
+        name: shard.get(name)
+        for name in (
+            "column_names",
+            "column_encodings",
+            "column_sizes",
+        )
+    }
+    encoded = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_v8_manifest(source: str, payload: bytes) -> None:
+    """Validate one exact train index before any shard worker starts."""
+    expected_hash = SOURCE_MANIFEST_SHA256[source]
+    actual_hash = hashlib.sha256(payload).hexdigest()
+    if actual_hash != expected_hash:
+        raise ValueError(f"{source} train/index.json SHA-256 {actual_hash} != {expected_hash}")
+    manifest = json.loads(payload)
+    if not isinstance(manifest, dict) or manifest.get("version") != V8_MDS_INDEX_VERSION:
+        raise ValueError(f"{source} train/index.json has an unsupported MDS index version")
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or not shards or not all(isinstance(shard, dict) for shard in shards):
+        raise ValueError(f"{source} train/index.json has invalid shards")
+    typed_shards = cast(list[dict[str, object]], shards)
+    schema_hashes = {_manifest_schema_sha256(shard) for shard in typed_shards}
+    if schema_hashes != {V8_MDS_SCHEMA_SHA256}:
+        raise ValueError(f"{source} train/index.json schema differs from policy-world-v8")
+    try:
+        rows = sum(int(cast(int, shard["samples"])) for shard in typed_shards)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"{source} train/index.json has invalid shard row counts") from error
+    expected_rows = streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]
+    if rows != expected_rows:
+        raise ValueError(f"{source} train/index.json has {rows} rows, expected {expected_rows}")
+
+
+def _validate_v8_manifests(adapter: MDSStorageAdapter, selection: PhysicalShardSelection) -> None:
+    for source in selection.sources:
+        path = streams.BY_NAME[source.source].local_root / "train" / "index.json"
+        _validate_v8_manifest(source.source, path.read_bytes())
+        manifest_rows = sum(adapter.manifests[source.source].samples_per_shard)
+        if manifest_rows != source.stop:
+            raise ValueError(
+                f"{source.source} adapter exposes {manifest_rows} rows, expected selected stop {source.stop}"
+            )
 
 
 def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
@@ -2794,59 +2905,219 @@ def load_identity_sidecar(cfg: TrainConfig):
     return sidecar
 
 
-def _make_loaders(cfg: TrainConfig, stats: dict[str, FeatureStats]):
-    common = loader_kwargs(cfg, stats)
-    projection = common["projection"]
-    if projection is not None:
-        common["projection"] = replace(projection, columns=projection.columns | {EGO_RETURN, EGO_RETURN_VALID})
-    replay_transform = functools.partial(
-        returns_lib.label_replay,
-        gamma=cfg.awr.gamma,
-        damage_shaping=cfg.awr.damage_shaping,
-        win_reward=cfg.awr.win_reward,
-        stock_value=cfg.awr.stock_value,
-        suffix=_RETURN_SUFFIX,
-    )
-    replay_labels = ReplayPlayerLookup(load_identity_sidecar(cfg).by_replay)
-    train_loader = make_loader(
-        split="train",
-        num_workers=cfg.num_workers,
-        prefetch_factor=_TRAIN_PREFETCH_FACTOR,
-        drop_last=True,
-        predownload=cfg.predownload,
-        download_retry=cfg.download_retry,
-        timeout=cfg.loader_timeout_s,
-        resumable=True,
-        in_order=True,
-        windows_per_replay=1,
-        replay_format="policy-world",
-        replay_transform=replay_transform,
-        replay_labels=replay_labels,
-        require_full_context=True,
-        batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx),
-        **common,
-    )
-    validation: _LoaderKwargs = {**common, "batch_size": cfg.val_batch_size}
-    val_loader = make_loader(
-        split=cfg.val_split,
-        num_workers=0,
-        replay_format="policy-world",
-        replay_labels=replay_labels,
-        require_full_context=True,
-        shuffle=True,
-        **validation,
-    )
-    if not isinstance(train_loader, ResumableStreamingDataLoader):
-        raise TypeError("training loader must expose Mosaic deterministic resumption")
-    if len(train_loader.streaming_dataset) != TRAIN_REPLAYS:
-        raise ValueError(
-            f"policy-world-v8 registry drift: {len(train_loader.streaming_dataset)} rows != {TRAIN_REPLAYS}"
+@dataclass(frozen=True, slots=True)
+class O50ReplayLabels:
+    """Compute compact AWR returns and player IDs from one v8 replay row."""
+
+    player_lookup: ReplayPlayerLookup
+    gamma: float
+    damage_shaping: float
+    win_reward: float
+    stock_value: float
+
+    def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
+        labels = returns_lib.compact_policy_returns(
+            compact,
+            gamma=self.gamma,
+            damage_shaping=self.damage_shaping,
+            win_reward=self.win_reward,
+            stock_value=self.stock_value,
+            suffix=_RETURN_SUFFIX,
         )
-    return train_loader, cache_validation(val_loader, cfg.val_n_samples)
+        p1_id, p2_id = self.player_lookup.ids(compact)
+        labels["p1_player_id"] = np.asarray(p1_id, dtype=np.int32)
+        labels["p2_player_id"] = np.asarray(p2_id, dtype=np.int32)
+        return labels
+
+
+def _collate_o50_batch(
+    replay_ids: tuple[str, ...],
+    columns: Mapping[str, np.ndarray],
+    *,
+    stats: dict[str, FeatureStats],
+    projection: FeatureProjection,
+    context_length: int,
+) -> AWRBatch:
+    batch = train_batch_from_columns(
+        columns,
+        stats=stats,
+        L_ctx=context_length,
+        extra=MODEL_COLUMNS,
+        projection=projection,
+    )
+    batch = TrainBatch(batch.context, batch.target, replay_ids)
+    next_frames = slice(1, context_length + 1)
+    returns = columns[EGO_RETURN][:, next_frames]
+    eligible = columns[EGO_RETURN_VALID][:, next_frames]
+    return AWRBatch(
+        batch,
+        torch.from_numpy(np.ascontiguousarray(returns)),
+        torch.from_numpy(np.ascontiguousarray(eligible)).bool(),
+    )
+
+
+def _require_loader_disk(loader: PhysicalShardReplayLoader[AWRBatch]) -> None:
+    required = loader.required_disk_bytes
+    available = loader.disk_free_bytes
+    if available < required:
+        raise RuntimeError(
+            "policy-world-v8 raw shards and the 256 GiB reserve do not fit: "
+            f"required={required / 2**30:.1f} GiB, free={available / 2**30:.1f} GiB"
+        )
+
+
+def _make_train_loader(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    player_lookup: ReplayPlayerLookup,
+) -> PhysicalShardReplayLoader[AWRBatch]:
+    selection = data_selection(cfg)
+    adapter = MDSStorageAdapter(selection, download_retry=cfg.download_retry)
+    _validate_v8_manifests(adapter, selection)
+    projection = replace(MODEL_PROJECTION, columns=MODEL_PROJECTION.columns | {EGO_RETURN, EGO_RETURN_VALID})
+    train_loader = PhysicalShardReplayLoader[AWRBatch](
+        selection=selection,
+        adapter=adapter,
+        tasks=build_shard_plan(selection, adapter.manifests),
+        data_protocol=DATA_PROTOCOL,
+        source_manifest_sha256=SOURCE_MANIFEST_SHA256,
+        batch_transform=functools.partial(
+            _collate_o50_batch,
+            stats=stats,
+            projection=projection,
+            context_length=cfg.arch.L_ctx,
+        ),
+        batch_size=cfg.batch_size,
+        replay_slots=REPLAY_SLOTS,
+        seed=cfg.seed,
+        num_workers=cfg.num_workers,
+        labels=O50ReplayLabels(
+            player_lookup=player_lookup,
+            gamma=cfg.awr.gamma,
+            damage_shaping=cfg.awr.damage_shaping,
+            win_reward=cfg.awr.win_reward,
+            stock_value=cfg.awr.stock_value,
+        ),
+        projection=projection,
+        context_length=cfg.arch.L_ctx,
+        chunk_length=cfg.arch.sample_chunk_length,
+        windows_per_generation=WINDOWS_PER_GENERATION,
+        replay_phase_block_batches=REPLAY_PHASE_BLOCK_BATCHES,
+        schema_version=cfg.mds_schema_version,
+        reserved_disk_bytes=RESERVED_DISK_BYTES,
+        pin_memory=torch.cuda.is_available(),
+    )
+    try:
+        _require_loader_disk(train_loader)
+        if sum(train_loader.source_sample_counts.values()) != TRAIN_REPLAYS:
+            raise ValueError("physical-shard loader does not expose every policy-world-v8 training row")
+        if train_loader.minimum_replay_gap_batches < MIN_REPLAY_GAP_BATCHES:
+            raise ValueError("replay ring is too small for the 200-batch reuse-gap contract")
+    except Exception:
+        train_loader.close()
+        raise
+    return train_loader
+
+
+def _make_loaders(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    player_lookup: ReplayPlayerLookup | None = None,
+) -> tuple[PhysicalShardReplayLoader[AWRBatch], list[TrainBatch]]:
+    """Build physical-shard training and the unchanged generic validation cohort."""
+    if player_lookup is None:
+        player_lookup = ReplayPlayerLookup(load_identity_sidecar(cfg).by_replay)
+    train_loader = _make_train_loader(cfg, stats, player_lookup)
+    try:
+        val_loader = make_loader(
+            data_root=None,
+            split=cfg.val_split,
+            stats=stats,
+            L_ctx=cfg.arch.L_ctx,
+            L_chunk=cfg.arch.sample_chunk_length,
+            batch_size=cfg.val_batch_size,
+            seed=cfg.seed,
+            sources=tuple(streams.BY_NAME[name] for name in cfg.source_names),
+            cache_limit="1792gb",
+            shuffle_block_size=8192,
+            shuffle_seed=cfg.seed,
+            num_workers=0,
+            schema_version=cfg.mds_schema_version,
+            extra=MODEL_COLUMNS,
+            projection=MODEL_PROJECTION,
+            replay_format="policy-world",
+            replay_labels=player_lookup,
+            require_full_context=True,
+            shuffle=True,
+        )
+        validation = cache_validation(val_loader, cfg.val_n_samples)
+    except Exception:
+        train_loader.close()
+        raise
+    return train_loader, validation
+
+
+@dataclass(slots=True)
+class PreparedTrainingData:
+    loader: PhysicalShardReplayLoader[AWRBatch]
+    validation: list[TrainBatch]
+    iterator: Iterator[AWRBatch]
+    first_batch_future: Future[AWRBatch]
+    resources: ExitStack
+    worker_start_seconds: float
+    first_batch_seconds: list[float]
+
+
+def _prepare_training_data(
+    cfg: TrainConfig,
+    stats: dict[str, FeatureStats],
+    sidecar: PlayerIdentitySidecar,
+    resume_state: dict[str, object] | None,
+) -> PreparedTrainingData:
+    """Start shard workers and the first batch before CUDA allocation."""
+    train_loader, validation = _make_loaders(cfg, stats, ReplayPlayerLookup(sidecar.by_replay))
+    try:
+        if resume_state is not None:
+            loader_state = resume_state.get("loader")
+            if not isinstance(loader_state, dict):
+                raise ValueError("resume checkpoint does not contain O50 replay-loader state")
+            train_loader.load_state_dict(cast(dict[str, object], loader_state))
+        worker_started = time.monotonic()
+        train_iterator = iter(train_loader)
+        worker_start_seconds = time.monotonic() - worker_started
+    except Exception:
+        train_loader.close()
+        raise
+    first_batch_seconds: list[float] = []
+
+    def load_first_batch() -> AWRBatch:
+        started = time.monotonic()
+        batch = next(train_iterator)
+        first_batch_seconds.append(time.monotonic() - started)
+        return batch
+
+    try:
+        with ExitStack() as setup:
+            executor = setup.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="o50-first-batch"))
+            first_batch = executor.submit(load_first_batch)
+            resources = setup.pop_all()
+    except Exception:
+        train_loader.close()
+        raise
+    return PreparedTrainingData(
+        train_loader,
+        validation,
+        train_iterator,
+        first_batch,
+        resources,
+        worker_start_seconds,
+        first_batch_seconds,
+    )
 
 
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
     """Start tracking and declare the experiment's logging semantics."""
+    selection = data_selection(cfg)
     wandb.init(
         project="hal",
         name=run_name,
@@ -2863,7 +3134,13 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "natural-replay-count-mix",
             "cosine",
         ],
-        config=asdict(cfg),
+        config={
+            **asdict(cfg),
+            "data_protocol": DATA_PROTOCOL,
+            "source_selection_sha256": selection.sha256,
+            "source_manifest_sha256": SOURCE_MANIFEST_SHA256,
+            "mds_manifest_schema_sha256": V8_MDS_SCHEMA_SHA256,
+        },
         settings=wandb.Settings(
             mode="shared",
             x_label="training",
@@ -2896,6 +3173,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
 def _log_training_summary(
     cfg: TrainConfig,
     parameter_counts: dict[str, int],
+    train_loader: PhysicalShardReplayLoader[AWRBatch],
     *,
     flops_per_update: int,
     device_name: str | None,
@@ -2914,12 +3192,24 @@ def _log_training_summary(
     wandb.run.summary["data/unique_replays"] = unique_replays
     wandb.run.summary["data/unique_frames"] = unique_frames
     wandb.run.summary["data/source_list_sha256"] = SOURCE_LIST_SHA256
+    wandb.run.summary["data/source_selection_sha256"] = V8_SELECTION_SHA256
+    wandb.run.summary["data/mds_manifest_schema_sha256"] = V8_MDS_SCHEMA_SHA256
+    wandb.run.summary["data/loader_protocol"] = DATA_PROTOCOL
     supervised_positions = cfg.max_steps * cfg.batch_size * (cfg.arch.L_ctx - DIRECT_LOSS_START)
     wandb.run.summary["data/processed_loss_positions"] = supervised_positions
     wandb.run.summary["data/effective_epochs"] = supervised_positions / unique_frames
     wandb.run.summary["data/D_over_N"] = supervised_positions / parameter_counts["total"]
     wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * (cfg.arch.L_ctx - DIRECT_LOSS_START)
-    wandb.run.summary["data/train_prefetch_factor"] = _TRAIN_PREFETCH_FACTOR
+    wandb.run.summary["data/cpu_lookahead_batches"] = _TRAIN_PREFETCH_FACTOR
+    wandb.run.summary["data/loader_prefetch_factor"] = PREFETCH_FACTOR
+    wandb.run.summary["data/replay_slots"] = train_loader.replay_slots
+    wandb.run.summary["data/generation_windows"] = WINDOWS_PER_GENERATION
+    wandb.run.summary["data/epoch_semantics"] = "replay generations committed to ring / unique train replays"
+    wandb.run.summary["data/replay_phase_block_batches"] = REPLAY_PHASE_BLOCK_BATCHES
+    wandb.run.summary["data/minimum_replay_gap_batches"] = train_loader.minimum_replay_gap_batches
+    wandb.run.summary["system/disk/required_bytes"] = train_loader.required_disk_bytes
+    wandb.run.summary["system/disk/free_bytes_at_start"] = train_loader.disk_free_bytes
+    wandb.run.summary["system/disk/reserved_bytes"] = RESERVED_DISK_BYTES
     wandb.run.summary["training/approx_flops_per_update"] = flops_per_update
     wandb.run.summary["training/flops_formula"] = (
         "6*B*L_ctx*(N_trunk+N_other+N_value+n_offsets*(N_temporal+N_group_heads))"
@@ -2945,7 +3235,7 @@ def _log_training_summary(
         source = bf16_peak_source(device_name or "")
         if source is not None:
             wandb.run.summary["hardware/bf16_dense_peak_source"] = source
-    wandb.run.summary["data/source_mixing"] = "repeat_1"
+    wandb.run.summary["data/source_mixing"] = "identity_uniform_physical_shards"
     for name, weight in zip(cfg.source_names, source_weights, strict=True):
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
@@ -3188,16 +3478,50 @@ def _finalize_training(
         raise RuntimeError("smoke loader gate failed: require mean wait <=5% and p95 <=10%")
 
 
-def _training_loader_state(train_loader: object, identity_masker: IdentityMasker) -> dict[str, object]:
-    state_dict = getattr(train_loader, "state_dict", None)
-    if not callable(state_dict):
-        raise TypeError("training loader must expose state_dict")
-    state = state_dict()
-    if not isinstance(state, dict):
-        raise TypeError("training loader state must be a dict")
-    if getattr(train_loader, "separate_identity_checkpoint", False):
-        return state
-    return {**state, "identity_masker": identity_masker.state_dict()}
+def _compile_synthetic_forward_backward(
+    model: GPT,
+    cfg: TrainConfig,
+    *,
+    step: int,
+    trunk_fn: Callable,
+    temporal_fn: Callable,
+) -> None:
+    """Compile production-shaped graphs without changing any training RNG."""
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_states = torch.cuda.get_rng_state_all() if DEVICE == "cuda" else None
+    try:
+        model.train()
+        model.zero_grad(set_to_none=True)
+        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
+            torch.compiler.cudagraph_mark_step_begin()
+        batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
+        valid_prefixes = cfg.batch_size * (cfg.arch.L_ctx - DIRECT_LOSS_START)
+        loss, _nll, _metrics = microbatch_loss(
+            model,
+            batch,
+            cfg,
+            step=step,
+            valid_prefixes=valid_prefixes,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+        )
+        loss.backward()
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
+    finally:
+        model.zero_grad(set_to_none=True)
+        torch.set_rng_state(cpu_rng_state)
+        if cuda_rng_states is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_states)
+
+
+def _loader_state_boundaries(cfg: TrainConfig, run_stop: int) -> tuple[int, ...]:
+    """Return updates after which fetched CPU batches must be consumed."""
+    boundaries = {run_stop}
+    for cadence in (cfg.val_every, cfg.eval_every, cfg.ckpt_every):
+        if cadence > 0:
+            boundaries.update(range(cadence, run_stop, cadence))
+    return tuple(sorted(boundaries))
 
 
 def train(
@@ -3230,6 +3554,7 @@ def train(
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     sidecar = load_identity_sidecar(cfg)
+    prepared_data = _prepare_training_data(cfg, stats, sidecar, resume_state)
     model = GPT(cfg, sidecar.vocabulary).to(DEVICE)
     counts = subsystem_parameter_counts(model)
     flops_per_update = approximate_training_flops_per_update(cfg, counts)
@@ -3238,6 +3563,7 @@ def train(
     _log_training_summary(
         cfg,
         counts,
+        prepared_data.loader,
         flops_per_update=flops_per_update,
         device_name=device_name,
         peak_flops=peak_flops,
@@ -3264,15 +3590,37 @@ def train(
             )
 
     trunk_fn, temporal_fn = _training_functions(model, cfg)
-
-    train_loader, val_cache = _make_loaders(cfg, stats)
-    if resume_state is not None:
-        loader_state = resume_state.get("loader")
-        if not isinstance(loader_state, dict):
-            raise ValueError("resume checkpoint does not contain Mosaic streaming loader state")
-        train_loader.load_state_dict(loader_state)
+    train_loader, val_cache = prepared_data.loader, prepared_data.validation
+    _compile_synthetic_forward_backward(
+        model,
+        cfg,
+        step=start_step,
+        trunk_fn=trunk_fn,
+        temporal_fn=temporal_fn,
+    )
     run_started = time.monotonic()
-    batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE, identity_masker)
+    try:
+        batch_prefetcher = DeviceBatchPrefetcher(
+            train_loader,
+            cfg,
+            DEVICE,
+            identity_masker,
+            iterator=prepared_data.iterator,
+            first_batch_future=prepared_data.first_batch_future,
+        )
+    finally:
+        prepared_data.resources.close()
+    if len(prepared_data.first_batch_seconds) != 1:
+        raise RuntimeError("first physical-shard batch did not record its fill time")
+    cold_fill_seconds = prepared_data.first_batch_seconds[0]
+    print(
+        f"[loader] workers started in {prepared_data.worker_start_seconds:.1f}s; "
+        f"cold fill completed in {cold_fill_seconds:.1f}s",
+        flush=True,
+    )
+    if wandb.run is not None:
+        wandb.run.summary["loader/worker_start_s"] = prepared_data.worker_start_seconds
+        wandb.run.summary["loader/cold_fill_s"] = cold_fill_seconds
     loader_wait_fractions: list[float] = []
     cache_roots = tuple(streams.BY_NAME[name].local_root for name in cfg.source_names)
     host_metrics = HostMetricsSampler(
@@ -3284,6 +3632,7 @@ def train(
     host_metrics.start()
     metric_accumulator = _TrainingMetricAccumulator()
     window_loader_wait_seconds: list[float] = []
+    window_loader_queue_depths: list[int] = []
     window_phase_timers: list[CudaPhaseTimer] = []
     window_peak_allocated_gb = 0.0
     metrics_window_started = time.monotonic()
@@ -3291,6 +3640,7 @@ def train(
     # deadlocked training on both H100 and B200 hosts.
     model.train()
     evaluation_updates = frozenset(closed_loop_evaluation_updates(run_stop, cfg.eval_every))
+    loader_state_boundaries = _loader_state_boundaries(cfg, run_stop)
     try:
         for step in range(start_step, run_stop):
             update = step + 1
@@ -3301,7 +3651,8 @@ def train(
             eval_due = update in evaluation_updates and update < run_stop
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
             boundary_due = val_due or eval_due or ckpt_due
-            overlap_preload = update < run_stop and not boundary_due
+            state_boundary_due = boundary_due or update == run_stop
+            next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary >= update)
 
             phase_due = (
                 DEVICE == "cuda"
@@ -3314,8 +3665,9 @@ def train(
             batch, valid_prefixes = batch_prefetcher.next()
             if phase_timer is not None:
                 phase_timer.record("h2d_end")
-            if overlap_preload:
-                batch_prefetcher.start_preload()
+            lookahead_limit = 0 if state_boundary_due else next_state_boundary - update
+            batch_prefetcher.fill_lookahead(lookahead_limit)
+            window_loader_queue_depths.append(batch_prefetcher.queue_depth)
             result = train_step(
                 model,
                 batch,
@@ -3329,7 +3681,7 @@ def train(
                 scheduler=scheduler,
                 phase_timer=phase_timer,
             )
-            loader_wait = batch_prefetcher.finish_preload() if overlap_preload else 0.0
+            loader_wait = batch_prefetcher.stage_next() if not state_boundary_due else 0.0
             actual_positions += valid_prefixes
             metric_accumulator.add(result, valid_prefixes)
             window_loader_wait_seconds.append(loader_wait)
@@ -3349,7 +3701,10 @@ def train(
                 )
                 if len(window_loader_wait_seconds) != window_updates:
                     raise RuntimeError("training telemetry window lost an update")
+                if len(window_loader_queue_depths) != window_updates:
+                    raise RuntimeError("training queue telemetry window lost an update")
                 loader_wait_s = sum(window_loader_wait_seconds) / window_updates
+                loader_queue_depth = sum(window_loader_queue_depths) / window_updates
                 training_elapsed_wall_s = time.monotonic() - run_started
                 completed_updates = update - start_step
                 projected_training_remaining_s = training_elapsed_wall_s * (run_stop - update) / completed_updates
@@ -3358,10 +3713,9 @@ def train(
                     "data/windows": update * cfg.batch_size,
                     "data/supervised_prefixes": actual_positions,
                     "data/future_targets": actual_positions * len(cfg.arch.head_offsets),
-                    "data/epoch": update * cfg.batch_size / TRAIN_REPLAYS,
-                    "data/dropped_windows": (update * cfg.batch_size // TRAIN_REPLAYS)
-                    * (TRAIN_REPLAYS % cfg.batch_size),
-                    "loader/wait_s": loader_wait_s,
+                    "data/dropped_windows": 0,
+                    "loader/queue_depth": loader_queue_depth,
+                    "loader/uncovered_wait_s": loader_wait_s,
                     "progress/elapsed_s": training_elapsed_wall_s,
                     "progress/remaining_s": projected_training_remaining_s,
                     "schedule/muon_lr": result.muon_lr,
@@ -3401,11 +3755,14 @@ def train(
                         flush=True,
                     )
                 window_loader_wait_seconds.clear()
+                window_loader_queue_depths.clear()
                 window_phase_timers.clear()
                 window_peak_allocated_gb = 0.0
                 metrics_window_started = wandb_started
             checkpoint_path: Path | None = None
             if boundary_due:
+                if not batch_prefetcher.drained:
+                    raise RuntimeError("CPU lookahead was not drained at a state boundary")
                 checkpoint_path = save_boundary_checkpoint(
                     run_dir,
                     update=update,
@@ -3417,7 +3774,7 @@ def train(
                     milestone=cfg.eval_every > 0 and update % cfg.eval_every == 0,
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
-                    loader_state=_training_loader_state(train_loader, identity_masker),
+                    loader_state=train_loader.state_dict(),
                     identity_masker_state=identity_masker.state_dict(),
                 )
             boundary_metrics: dict[str, float] = {}
@@ -3438,8 +3795,12 @@ def train(
             if boundary_metrics:
                 wandb.log({"global_step": update, **boundary_metrics})
             if update < run_stop and boundary_due:
-                batch_prefetcher.preload()
+                next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary > update)
+                batch_prefetcher.fill_lookahead(next_state_boundary - update)
+                batch_prefetcher.stage_next()
                 metrics_window_started = time.monotonic()
+        if not batch_prefetcher.drained:
+            raise RuntimeError("CPU lookahead was not drained at the final update")
         _finalize_training(
             model=model,
             optimizer=optimizer,
@@ -3451,7 +3812,7 @@ def train(
             replay_dir=replay_dir,
             uploader=uploader,
             loader_wait_fractions=loader_wait_fractions,
-            loader_state=_training_loader_state(train_loader, identity_masker),
+            loader_state=train_loader.state_dict(),
             identity_masker_state=identity_masker.state_dict(),
             update=run_stop,
             actual_loss_positions=actual_positions,
@@ -3459,9 +3820,7 @@ def train(
         )
     finally:
         batch_prefetcher.close()
-        close_loader = getattr(train_loader, "close", None)
-        if callable(close_loader):
-            close_loader()
+        train_loader.close()
         host_metrics.close()
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
@@ -3632,7 +3991,6 @@ class TrainArgs:
     resume_checkpoint: str = "latest.pt"
     resume_as: str | None = None
     resume_num_workers: int | None = None
-    resume_predownload: int | None = None
     smoke: bool = False
     stop_after_update: int | None = None
     eval_max_parallel: int | None = None
@@ -3675,8 +4033,8 @@ def main(args: Command) -> None:
         cfg = replace(cfg, arch=PROXY_ARCHITECTURE, target_positions=D0)
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
-    if args.resume is None and (args.resume_num_workers is not None or args.resume_predownload is not None):
-        raise SystemExit("--resume-num-workers and --resume-predownload require --resume")
+    if args.resume is None and args.resume_num_workers is not None:
+        raise SystemExit("--resume-num-workers requires --resume")
     if args.resume is not None:
         checkpoint = Path(args.resume_checkpoint)
         if (
@@ -3701,7 +4059,6 @@ def main(args: Command) -> None:
         cfg = replace(
             cfg,
             num_workers=cfg.num_workers if args.resume_num_workers is None else args.resume_num_workers,
-            predownload=cfg.predownload if args.resume_predownload is None else args.resume_predownload,
         )
         if args.resume_as is not None:
             if Path(args.resume_as).name != args.resume_as or args.resume_as in ("", ".", ".."):
