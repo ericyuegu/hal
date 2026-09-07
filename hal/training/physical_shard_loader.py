@@ -47,6 +47,7 @@ from hal.training.features import FeatureProjection
 PREFETCH_FACTOR: Final[int] = 2
 CHECKPOINT_SCHEMA: Final[int] = 3
 MAX_DECODE_CHUNK_ROWS: Final[int] = 64
+MATERIALIZATION_LOG_INTERVAL_S: Final[float] = 60.0
 
 type Window = dict[str, np.ndarray]
 type Generation = tuple[str, tuple[Window, ...]]
@@ -1143,8 +1144,24 @@ class _ShardMaterializer:
         self._download_errors = 0
         self._first_failure: tuple[ShardTask, Exception] | None = None
         self._started = time.monotonic()
+        self._last_progress_log = self._started
         self._finished = self._started if len(self._materialized) == len(tasks) else None
         self._closed = False
+        missing = len(tasks) - len(self._materialized)
+        missing_bytes = sum(
+            adapter.manifests[task.source].raw_bytes_per_shard[task.shard]
+            for task_index, task in enumerate(tasks)
+            if task_index not in self._materialized
+        )
+        if missing:
+            print(
+                "[loader] starting background shard materialization: "
+                f"{missing:,} shards ({missing_bytes / 2**30:.1f} GiB) to download with {workers} workers; "
+                f"{len(self._materialized):,}/{len(tasks):,} already local",
+                flush=True,
+            )
+        else:
+            print(f"[loader] background shard materialization: all {len(tasks):,} shards already local", flush=True)
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="raw-shard-materializer")
         self._futures: list[Future[None]] = []
         try:
@@ -1174,12 +1191,35 @@ class _ShardMaterializer:
                     self._first_failure = (task, error)
                     self._stop.set()
             raise
+        progress: tuple[int, int, int, float, bool] | None = None
         with self._lock:
             self._materialized.add(task_index)
             self._prepared_shards += 1
             self._prepared_bytes += manifest.raw_bytes_per_shard[task.shard]
-            if len(self._materialized) == len(self._tasks):
-                self._finished = time.monotonic()
+            now = time.monotonic()
+            complete = len(self._materialized) == len(self._tasks)
+            if complete:
+                self._finished = now
+            if complete or now - self._last_progress_log >= MATERIALIZATION_LOG_INTERVAL_S:
+                self._last_progress_log = now
+                progress = (
+                    len(self._materialized),
+                    self._prepared_shards,
+                    self._prepared_bytes,
+                    now - self._started,
+                    complete,
+                )
+        if progress is not None:
+            ready, downloaded, downloaded_bytes, elapsed, complete = progress
+            state = "complete" if complete else "progress"
+            rate_mib_s = downloaded_bytes / 2**20 / max(elapsed, 1e-12)
+            print(
+                f"[loader] background shard materialization {state}: "
+                f"{ready:,}/{len(self._tasks):,} shards ready; "
+                f"downloaded {downloaded:,} shards ({downloaded_bytes / 2**30:.1f} GiB) "
+                f"in {elapsed:.1f}s ({rate_mib_s:.1f} MiB/s)",
+                flush=True,
+            )
 
     def raise_if_failed(self) -> None:
         with self._lock:

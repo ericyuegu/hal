@@ -694,7 +694,10 @@ def _loader(
     )
 
 
-def test_background_materialization_is_ordered_unique_and_observable(tmp_path: Path) -> None:
+def test_background_materialization_is_ordered_unique_and_observable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(physical_shard_loader, "MATERIALIZATION_LOG_INTERVAL_S", 0.0)
     adapter = _MaterializingFakeAdapter(tmp_path, delay=0.001)
     loader = _loader(seed=7, adapter=adapter, materialization_threads=1)
     expected = [loader.tasks[index].shard for index in loader._task_order]
@@ -718,6 +721,10 @@ def test_background_materialization_is_ordered_unique_and_observable(tmp_path: P
     assert metrics["loader/contiguous_materialized_shard_lead"] == len(loader.tasks)
     assert metrics["loader/materialization_shards_per_s"] > 0
     assert metrics["loader/materialization_download_errors"] == 0
+    output = capsys.readouterr().out
+    assert "[loader] starting background shard materialization: 5 shards" in output
+    assert "[loader] background shard materialization progress: 1/5 shards ready" in output
+    assert "[loader] background shard materialization complete: 5/5 shards ready" in output
 
 
 def test_background_materialization_cleanup_cancels_queued_shards(tmp_path: Path) -> None:

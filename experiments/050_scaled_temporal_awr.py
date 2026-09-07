@@ -31,6 +31,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from collections import defaultdict
 from collections import deque
@@ -167,6 +168,25 @@ from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v4"
+_STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
+
+
+@contextlib.contextmanager
+def _elapsed_heartbeat(message: str) -> Iterator[None]:
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def report() -> None:
+        while not stop.wait(_STARTUP_LOG_INTERVAL_S):
+            print(f"{message}; {time.monotonic() - started:.1f}s elapsed", flush=True)
+
+    reporter = threading.Thread(target=report, name="startup-progress", daemon=True)
+    reporter.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        reporter.join()
 
 
 @dataclass(frozen=True)
@@ -2732,6 +2752,9 @@ def validate_batch_geometry(
 
 
 def cache_validation(loader: Iterable[TrainBatch], n_samples: int) -> list[TrainBatch]:
+    print(f"[validation] caching {n_samples:,} samples", flush=True)
+    started = time.monotonic()
+    last_progress_log = started
     batches: list[TrainBatch] = []
     count = 0
     for batch in loader:
@@ -2749,8 +2772,16 @@ def cache_validation(loader: Iterable[TrainBatch], n_samples: int) -> list[Train
             )
         batches.append(batch)
         count += batch.target.shape[0]
+        now = time.monotonic()
+        if count < n_samples and now - last_progress_log >= _STARTUP_LOG_INTERVAL_S:
+            print(
+                f"[validation] cached {count:,}/{n_samples:,} samples; {now - started:.1f}s elapsed",
+                flush=True,
+            )
+            last_progress_log = now
     if count != n_samples:
         raise RuntimeError(f"validation yielded {count} samples, expected {n_samples}")
+    print(f"[validation] cache complete: {count:,} samples in {time.monotonic() - started:.1f}s", flush=True)
     return batches
 
 
@@ -3162,6 +3193,7 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
             raise RuntimeError(
                 f"compiled CUDA training requires a fused attention path, resolved {model.trunk.attn_path!r} instead"
             )
+        print(f"[compile] calling torch.compile for trunk (mode={cfg.train_compile_mode})", flush=True)
         trunk_fn = torch.compile(
             trunk_fn,
             dynamic=False,
@@ -3169,6 +3201,7 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
             mode=cfg.train_compile_mode,
         )
     if DEVICE == "cuda" and cfg.compile_temporal:
+        print(f"[compile] calling torch.compile for temporal model (mode={cfg.train_compile_mode})", flush=True)
         temporal_fn = torch.compile(
             temporal_fn,
             dynamic=False,
@@ -3431,32 +3464,50 @@ def _compile_synthetic_forward_backward(
     temporal_fn: Callable,
 ) -> None:
     """Compile production-shaped graphs without changing any training RNG."""
+    compile_targets = []
+    if DEVICE == "cuda" and cfg.compile_trunk:
+        compile_targets.append("trunk")
+    if DEVICE == "cuda" and cfg.compile_temporal:
+        compile_targets.append("temporal model")
+    targets = " and ".join(compile_targets)
+    compile_started = None
+    if compile_targets:
+        print(f"[compile] starting synthetic forward/backward to trigger lazy compilation for {targets}", flush=True)
+        compile_started = time.monotonic()
     cpu_rng_state = torch.get_rng_state()
     cuda_rng_states = torch.cuda.get_rng_state_all() if DEVICE == "cuda" else None
     try:
-        model.train()
-        model.zero_grad(set_to_none=True)
-        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
-            torch.compiler.cudagraph_mark_step_begin()
-        batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
-        valid_prefixes = cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start)
-        loss, _nll, _metrics = microbatch_loss(
-            model,
-            batch,
-            cfg,
-            step=step,
-            valid_prefixes=valid_prefixes,
-            trunk_fn=trunk_fn,
-            temporal_fn=temporal_fn,
+        heartbeat = (
+            _elapsed_heartbeat(f"[compile] lazy compilation still running for {targets}")
+            if compile_targets
+            else contextlib.nullcontext()
         )
-        loss.backward()
-        if DEVICE == "cuda":
-            torch.cuda.synchronize()
+        with heartbeat:
+            model.train()
+            model.zero_grad(set_to_none=True)
+            if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
+                torch.compiler.cudagraph_mark_step_begin()
+            batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
+            valid_prefixes = cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start)
+            loss, _nll, _metrics = microbatch_loss(
+                model,
+                batch,
+                cfg,
+                step=step,
+                valid_prefixes=valid_prefixes,
+                trunk_fn=trunk_fn,
+                temporal_fn=temporal_fn,
+            )
+            loss.backward()
+            if DEVICE == "cuda":
+                torch.cuda.synchronize()
     finally:
         model.zero_grad(set_to_none=True)
         torch.set_rng_state(cpu_rng_state)
         if cuda_rng_states is not None:
             torch.cuda.set_rng_state_all(cuda_rng_states)
+    if compile_started is not None:
+        print(f"[compile] lazy compilation complete in {time.monotonic() - compile_started:.1f}s", flush=True)
 
 
 def _loader_state_boundaries(cfg: TrainConfig, run_stop: int) -> tuple[int, ...]:
@@ -3495,7 +3546,10 @@ def train(
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
     sidecar = load_identity_sidecar(cfg)
     prepared_data = _prepare_training_data(cfg, stats, sidecar, resume_state)
+    model_started = time.monotonic()
+    print(f"[model] constructing GPT and moving parameters to {DEVICE}", flush=True)
     model = GPT(cfg, sidecar.vocabulary).to(DEVICE)
+    print(f"[model] construction complete in {time.monotonic() - model_started:.1f}s", flush=True)
     counts = subsystem_parameter_counts(model)
     flops_per_update = approximate_training_flops_per_update(cfg, counts)
     device_name = torch.cuda.get_device_name() if DEVICE == "cuda" else None

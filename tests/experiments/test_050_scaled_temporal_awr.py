@@ -391,6 +391,97 @@ def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.Monke
     assert kwargs["source_manifest_sha256"] == exp.streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256
 
 
+def test_training_functions_log_compile_calls(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Trunk:
+        attn_path = "varlen_flash"
+
+        def resolve_attention(self, device: str) -> None:
+            assert device == "cuda"
+
+    class Temporal:
+        def teacher_forced_nll_with_diagnostics(self) -> None:
+            pass
+
+    class Model:
+        trunk = Trunk()
+        temporal = Temporal()
+
+        def forward(self) -> None:
+            pass
+
+    compiled = []
+
+    def compile_function(function, **kwargs):
+        compiled.append((function, kwargs))
+        return function
+
+    monkeypatch.setattr(exp, "DEVICE", "cuda")
+    monkeypatch.setattr(exp.torch, "compile", compile_function)
+
+    exp._training_functions(Model(), exp.TrainConfig())
+
+    assert len(compiled) == 2
+    output = capsys.readouterr().out
+    assert "[compile] calling torch.compile for trunk" in output
+    assert "[compile] calling torch.compile for temporal model" in output
+
+
+def test_validation_cache_logs_progress_and_completion(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _tiny_cfg()
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    monkeypatch.setattr(exp, "_STARTUP_LOG_INTERVAL_S", 0.0)
+
+    validation = exp.cache_validation([batch, batch], 2 * cfg.batch_size)
+
+    assert len(validation) == 2
+    assert all(item is batch for item in validation)
+    output = capsys.readouterr().out
+    assert "[validation] caching 4 samples" in output
+    assert "[validation] cached 2/4 samples" in output
+    assert "[validation] cache complete: 4 samples" in output
+
+
+def test_compile_warmup_logs_start_heartbeat_and_completion(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Model:
+        def train(self) -> None:
+            pass
+
+        def zero_grad(self, *, set_to_none: bool) -> None:
+            assert set_to_none
+
+    class Loss:
+        def backward(self) -> None:
+            time.sleep(0.03)
+
+    monkeypatch.setattr(exp, "DEVICE", "cuda")
+    monkeypatch.setattr(exp, "_STARTUP_LOG_INTERVAL_S", 0.01)
+    monkeypatch.setattr(exp.torch.cuda, "get_rng_state_all", lambda: [])
+    monkeypatch.setattr(exp.torch.cuda, "set_rng_state_all", lambda _state: None)
+    monkeypatch.setattr(exp.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(exp.torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+    monkeypatch.setattr(exp, "synthetic_awr_batch", lambda _cfg, _device: object())
+    monkeypatch.setattr(exp, "microbatch_loss", lambda *_args, **_kwargs: (Loss(), None, None))
+
+    exp._compile_synthetic_forward_backward(
+        Model(),
+        exp.TrainConfig(),
+        step=0,
+        trunk_fn=lambda: None,
+        temporal_fn=lambda: None,
+    )
+
+    output = capsys.readouterr().out
+    assert "[compile] starting synthetic forward/backward to trigger lazy compilation" in output
+    assert "[compile] lazy compilation still running" in output
+    assert "[compile] lazy compilation complete" in output
+
+
 def test_training_rejects_insufficient_disk() -> None:
     loader = type("Loader", (), {"required_disk_bytes": 11, "disk_free_bytes": 10})()
     with pytest.raises(RuntimeError, match="do not fit"):
