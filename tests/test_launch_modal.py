@@ -105,14 +105,6 @@ def test_tracking_context_adds_modal_dashboard_to_wandb_notes() -> None:
     assert env["WANDB_NOTES"] == "Existing notes\n\nModal: https://modal.com/apps/ap-example"
 
 
-def test_tracking_context_exposes_same_app_evaluator() -> None:
-    env: dict[str, str] = {}
-
-    configure_tracking_context(env, None, "hal-production")
-
-    assert env == {"HAL_MODAL_APP_NAME": "hal-production"}
-
-
 def test_tracking_context_ignores_non_modal_launches() -> None:
     env: dict[str, str] = {}
 
@@ -637,9 +629,52 @@ def test_training_failure_is_persisted_and_not_retried(tmp_path: Path, monkeypat
             state_path=tmp_path / "state.json",
             state_volume_name="test-volume",
             stall_s=10,
+            evaluator=None,
         )
 
     assert states[-1] == RunState(status="failed", run_name="run-1", exit_code=3)
+
+
+def test_training_brokers_evaluation_through_same_app_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    states: list[RunState] = []
+    calls: list[tuple[object, ...]] = []
+
+    class Call:
+        object_id = "fc-eval"
+
+    class Evaluator:
+        def spawn(self, *args: object) -> Call:
+            calls.append(args)
+            return Call()
+
+    script = (
+        "import json, os\n"
+        "broker_fd = int(os.environ['HAL_MODAL_EVAL_FD'])\n"
+        "request = {'run_name': 'run-1', 'update': 8192, "
+        "'expected_checkpoint_sha256': 'a' * 64, 'n_matchups': 96}\n"
+        "os.write(broker_fd, json.dumps(request).encode() + b'\\n')\n"
+        "response = json.loads(os.read(broker_fd, 4096))\n"
+        "assert response == {'function_call_id': 'fc-eval'}\n"
+        "print('[ckpt] writing checkpoints to runs/run-1', flush=True)\n"
+    )
+    monkeypatch.setattr(_MODULE, "REMOTE_ROOT", tmp_path)
+    monkeypatch.setattr(_MODULE, "_commit_state", lambda _path, state, _volume: states.append(state))
+
+    assert (
+        _MODULE._run_training(
+            ("uv", "run", "python", "-c", script),
+            RunState(status="running"),
+            env=dict(_MODULE.os.environ),
+            state_path=tmp_path / "state.json",
+            state_volume_name="test-volume",
+            stall_s=10,
+            evaluator=Evaluator(),
+        )
+        == 0
+    )
+
+    assert calls == [("run-1", 8192, "a" * 64, 96)]
+    assert states[-1] == RunState(status="succeeded", run_name="run-1")
 
 
 def test_training_interrupt_preserves_recoverable_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -673,6 +708,7 @@ def test_training_interrupt_preserves_recoverable_state(tmp_path: Path, monkeypa
             state_path=tmp_path / "state.json",
             state_volume_name="test-volume",
             stall_s=10,
+            evaluator=None,
         )
     for timer in timers:
         timer.join()

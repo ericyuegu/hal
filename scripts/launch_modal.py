@@ -21,9 +21,11 @@ import os
 import queue
 import re
 import resource
+import select
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -84,6 +86,8 @@ CLOSED_LOOP_EXPERIMENT: Final[str] = "experiments/050_scaled_temporal_awr.py"
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
 CLOSED_LOOP_EVERY: Final[int] = 8192
+CLOSED_LOOP_BROKER_FD: Final[str] = "HAL_MODAL_EVAL_FD"
+CLOSED_LOOP_REQUEST_MAX_BYTES: Final[int] = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +160,6 @@ class LaunchSpec:
     skip_sm120_probe: bool
     require_cuda: bool = True
     modal_app_url: str | None = None
-    modal_app_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,11 +494,8 @@ def _configure_compiler_cache(env: dict[str, str]) -> None:
 def _configure_tracking_context(
     env: dict[str, str],
     modal_app_url: str | None,
-    modal_app_name: str | None = None,
 ) -> None:
     """Expose the Modal dashboard in every W&B run launched by this process."""
-    if modal_app_name is not None:
-        env["HAL_MODAL_APP_NAME"] = modal_app_name
     if modal_app_url is not None:
         env["HAL_MODAL_APP_URL"] = modal_app_url
         modal_note = f"Modal: {modal_app_url}"
@@ -616,6 +616,73 @@ def _drain_run_names(
             loguru.logger.info(f"saved retry run name {found!r}")
 
 
+def _broker_response(line: bytes, evaluator: modal.Function) -> bytes:
+    """Validate and dispatch one evaluation request from the training child."""
+    try:
+        value = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return json.dumps({"error": f"invalid evaluation request JSON: {e}"}).encode() + b"\n"
+    fields = {"run_name", "update", "expected_checkpoint_sha256", "n_matchups"}
+    if not isinstance(value, dict) or set(value) != fields:
+        return json.dumps({"error": f"evaluation request must contain exactly {sorted(fields)}"}).encode() + b"\n"
+    run_name = value["run_name"]
+    update = value["update"]
+    checkpoint_sha = value["expected_checkpoint_sha256"]
+    n_matchups = value["n_matchups"]
+    if not isinstance(run_name, str) or not RUN_NAME.fullmatch(run_name):
+        error = f"invalid training run name: {run_name!r}"
+    elif type(update) is not int or update <= 0 or update % CLOSED_LOOP_EVERY:
+        error = f"closed-loop update must be a positive multiple of {CLOSED_LOOP_EVERY}"
+    elif not isinstance(checkpoint_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha):
+        error = "expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters"
+    elif n_matchups != CLOSED_LOOP_MATCHUPS:
+        error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
+    else:
+        try:
+            call = evaluator.spawn(run_name, update, checkpoint_sha, n_matchups)
+            call_id = call.object_id
+        except Exception as e:
+            # This boundary must return Modal failures to the waiting child process.
+            loguru.logger.exception("could not spawn closed-loop evaluation")
+            error = f"{type(e).__name__}: {e}"
+        else:
+            if not isinstance(call_id, str) or re.fullmatch(r"fc-[A-Za-z0-9]+", call_id) is None:
+                error = f"Modal returned invalid evaluation FunctionCall ID {call_id!r}"
+            else:
+                loguru.logger.info(f"spawned closed-loop evaluation {call_id} for {run_name} update {update}")
+                return json.dumps({"function_call_id": call_id}).encode() + b"\n"
+    return json.dumps({"error": error}).encode() + b"\n"
+
+
+def _write_all(fd: int, value: bytes) -> None:
+    while value:
+        value = value[os.write(fd, value) :]
+
+
+def _service_closed_loop_broker(
+    broker: socket.socket,
+    buffer: bytearray,
+    evaluator: modal.Function,
+) -> None:
+    while select.select([broker], [], [], 0.0)[0]:
+        chunk = os.read(broker.fileno(), CLOSED_LOOP_REQUEST_MAX_BYTES)
+        if not chunk:
+            return
+        buffer.extend(chunk)
+    while b"\n" in buffer:
+        line, _, remainder = buffer.partition(b"\n")
+        buffer[:] = remainder
+        if len(line) + 1 > CLOSED_LOOP_REQUEST_MAX_BYTES:
+            response = {"error": f"evaluation request exceeds {CLOSED_LOOP_REQUEST_MAX_BYTES} bytes"}
+            _write_all(broker.fileno(), json.dumps(response).encode() + b"\n")
+        else:
+            _write_all(broker.fileno(), _broker_response(bytes(line), evaluator))
+    if len(buffer) >= CLOSED_LOOP_REQUEST_MAX_BYTES:
+        buffer.clear()
+        response = {"error": f"evaluation request exceeds {CLOSED_LOOP_REQUEST_MAX_BYTES} bytes"}
+        _write_all(broker.fileno(), json.dumps(response).encode() + b"\n")
+
+
 def _run_training(
     argv: tuple[str, ...],
     state: RunState,
@@ -624,6 +691,7 @@ def _run_training(
     state_path: Path,
     state_volume_name: str,
     stall_s: int,
+    evaluator: modal.Function | None,
 ) -> int:
     log_path = REMOTE_ROOT / "train.log"
     log_path.write_text("")
@@ -641,6 +709,16 @@ def _run_training(
     process: subprocess.Popen[bytes] | None = None
     failure: str | None = None
     code: int | None = None
+    broker: socket.socket | None = None
+    child_broker: socket.socket | None = None
+    broker_buffer = bytearray()
+    child_env = env.copy()
+    child_env.pop(CLOSED_LOOP_BROKER_FD, None)
+    pass_fds: tuple[int, ...] = ()
+    if evaluator is not None:
+        broker, child_broker = socket.socketpair()
+        child_env[CLOSED_LOOP_BROKER_FD] = str(child_broker.fileno())
+        pass_fds = (child_broker.fileno(),)
 
     def interrupt(signum: int, _frame: object) -> None:
         interrupted.set()
@@ -655,15 +733,19 @@ def _run_training(
                 process = subprocess.Popen(
                     list(argv),
                     cwd=REMOTE_ROOT,
-                    env=env,
+                    env=child_env,
                     stdout=train_log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
+                    pass_fds=pass_fds,
                 )
             except OSError as e:
                 failure = f"could not start training command: {e}"
                 code = 127
             else:
+                if child_broker is not None:
+                    child_broker.close()
+                    child_broker = None
                 loguru.logger.info(f"training pid={process.pid}: {redact_argv(argv)}")
                 interrupted_at: float | None = None
                 while process.poll() is None:
@@ -676,6 +758,8 @@ def _run_training(
                     if failure is not None:
                         _kill_group(process.pid, signal.SIGKILL)
                         break
+                    if broker is not None and evaluator is not None:
+                        _service_closed_loop_broker(broker, broker_buffer, evaluator)
                     quiet_s = time.time() - log_path.stat().st_mtime
                     if quiet_s >= stall_s:
                         failure = f"no training log output for {int(quiet_s)} seconds"
@@ -700,6 +784,10 @@ def _run_training(
             signal.signal(sig, handler)
         follower_stopped.set()
         log_follower.join(timeout=5)
+        if child_broker is not None:
+            child_broker.close()
+        if broker is not None:
+            broker.close()
 
     if failure is None:
         state, failure = _drain_run_names(
@@ -722,7 +810,7 @@ def _run_training(
     return code
 
 
-def _run_remote(spec: LaunchSpec) -> int:
+def _run_remote(spec: LaunchSpec, evaluator: modal.Function) -> int:
     """One Modal Function attempt. Modal serializes this function into the configured image."""
     os.chdir(REMOTE_ROOT)
     loguru.logger.info(f"starting launch {spec.launch_id} from Git {spec.git_sha[:10]}")
@@ -743,7 +831,7 @@ def _run_remote(spec: LaunchSpec) -> int:
         )
     _commit_state(state_path, attempt.state, spec.state_volume)
     env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
-    _configure_tracking_context(env, spec.modal_app_url, spec.modal_app_name)
+    _configure_tracking_context(env, spec.modal_app_url)
     return _run_training(
         attempt.argv,
         attempt.state,
@@ -751,6 +839,7 @@ def _run_remote(spec: LaunchSpec) -> int:
         state_path=state_path,
         state_volume_name=spec.state_volume,
         stall_s=spec.stall_s,
+        evaluator=evaluator,
     )
 
 
@@ -931,7 +1020,7 @@ def main(args: Args) -> None:
         name="train",
         **resources,
     )(_run_remote)
-    app.function(
+    evaluator = app.function(
         image=image,
         secrets=[secret],
         gpu="L40S",
@@ -957,9 +1046,8 @@ def main(args: Args) -> None:
             skip_sm120_probe=args.skip_sm120_probe,
             require_cuda=resources["gpu"] is not None,
             modal_app_url=f"https://modal.com/apps/{app.app_id}",
-            modal_app_name=name,
         )
-        call = function.spawn(spec)
+        call = function.spawn(spec, evaluator)
         loguru.logger.success(f"submitted Modal App {app.app_id}, Function call {call.object_id}, Git {sha[:10]}")
         loguru.logger.info(f"dashboard: {spec.modal_app_url}")
         loguru.logger.info(f"logs: uv run modal app logs {app.app_id} -f")

@@ -30,6 +30,7 @@ import itertools
 import json
 import math
 import os
+import re
 import time
 from collections import defaultdict
 from collections import deque
@@ -3324,15 +3325,46 @@ def spawn_closed_loop_evaluation(
     update: int,
     expected_checkpoint_sha256: str,
     n_matchups: int,
-) -> object:
-    """Spawn the launcher's serialized same-app L40S evaluator."""
-    app_name = os.environ.get("HAL_MODAL_APP_NAME")
-    if not app_name:
-        raise RuntimeError("HAL_MODAL_APP_NAME is required for automatic closed-loop evaluation")
-    import modal
-
-    evaluator = modal.Function.from_name(app_name, "closed-loop-eval")
-    return evaluator.spawn(run_name, update, expected_checkpoint_sha256, n_matchups)
+) -> str:
+    """Ask the launcher to spawn its same-app L40S evaluator."""
+    raw_fd = os.environ.get("HAL_MODAL_EVAL_FD")
+    if raw_fd is None:
+        raise RuntimeError("HAL_MODAL_EVAL_FD is required for automatic closed-loop evaluation")
+    try:
+        fd = int(raw_fd)
+    except ValueError as e:
+        raise RuntimeError("HAL_MODAL_EVAL_FD must be a file descriptor") from e
+    request = {
+        "run_name": run_name,
+        "update": update,
+        "expected_checkpoint_sha256": expected_checkpoint_sha256,
+        "n_matchups": n_matchups,
+    }
+    payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+    while payload:
+        payload = payload[os.write(fd, payload) :]
+    response = bytearray()
+    while b"\n" not in response:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        response.extend(chunk)
+    line, _, _remainder = response.partition(b"\n")
+    if not line:
+        raise RuntimeError("the Modal evaluation broker closed without a response")
+    try:
+        response = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RuntimeError("the Modal evaluation broker returned invalid JSON") from e
+    if not isinstance(response, dict):
+        raise RuntimeError("the Modal evaluation broker returned a non-object response")
+    error = response.get("error")
+    if isinstance(error, str):
+        raise RuntimeError(f"the Modal evaluation broker rejected the request: {error}")
+    call_id = response.get("function_call_id")
+    if not isinstance(call_id, str) or re.fullmatch(r"fc-[A-Za-z0-9]+", call_id) is None:
+        raise RuntimeError("the Modal evaluation broker returned an invalid FunctionCall ID")
+    return call_id
 
 
 def _finalize_training(

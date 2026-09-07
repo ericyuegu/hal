@@ -1,6 +1,9 @@
 """Frozen contracts for the O50 production program."""
 
 import importlib.util
+import json
+import os
+import socket
 import sys
 import threading
 import time
@@ -8,7 +11,6 @@ from dataclasses import asdict
 from dataclasses import fields
 from pathlib import Path
 
-import modal
 import pytest
 import torch
 
@@ -477,18 +479,31 @@ def test_boundary_state_resumes_next_batch_update_and_identity_dropout() -> None
     torch.testing.assert_close(optimizer_update(actual_batch), optimizer_update(expected_batch))
 
 
-def test_closed_loop_spawn_uses_launcher_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = []
+def test_closed_loop_spawn_uses_launcher_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    launcher, experiment = socket.socketpair()
+    monkeypatch.setenv("HAL_MODAL_EVAL_FD", str(experiment.fileno()))
+    requests = []
 
-    class Evaluator:
-        def spawn(self, *args):
-            calls.append(args)
-            return "call-id"
+    def serve() -> None:
+        with launcher, launcher.makefile("rb") as lines:
+            requests.append(json.loads(lines.readline()))
+            os.write(launcher.fileno(), b'{"function_call_id":"fc-eval"}\n')
 
-    monkeypatch.setenv("HAL_MODAL_APP_NAME", "hal-test")
-    monkeypatch.setattr(modal.Function, "from_name", lambda app, name: Evaluator())
-    assert exp.spawn_closed_loop_evaluation("run", 8192, "a" * 64, 96) == "call-id"
-    assert calls == [("run", 8192, "a" * 64, 96)]
+    server = threading.Thread(target=serve)
+    server.start()
+    try:
+        assert exp.spawn_closed_loop_evaluation("run", 8192, "a" * 64, 96) == "fc-eval"
+    finally:
+        experiment.close()
+        server.join()
+    assert requests == [
+        {
+            "run_name": "run",
+            "update": 8192,
+            "expected_checkpoint_sha256": "a" * 64,
+            "n_matchups": 96,
+        }
+    ]
 
 
 def test_eval_rejects_checkpoint_before_loading_when_hash_differs(
