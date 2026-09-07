@@ -122,9 +122,7 @@ from hal.training.mfu import bf16_peak_source
 from hal.training.mfu import model_flops_utilization
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.physical_shard_loader import MAX_DECODE_CHUNK_ROWS
-from hal.training.physical_shard_loader import MIN_REPLAY_GAP_BATCHES
 from hal.training.physical_shard_loader import PREFETCH_FACTOR
-from hal.training.physical_shard_loader import REPLAY_PHASE_BLOCK_BATCHES
 from hal.training.physical_shard_loader import MDSStorageAdapter
 from hal.training.physical_shard_loader import PhysicalShardReplayLoader
 from hal.training.physical_shard_loader import PhysicalShardSelection
@@ -173,7 +171,6 @@ PLAYER_SIDECAR_SHA256 = "54ccf8a2497fe240313117297ca2ea31158e08db2cc53c67e7aa468
 PLAYER_VOCAB_SHA256 = "c67c97c995ad033ea7f5b2223efce5b061394566439f091ff6e7aaa6a9d1cfd6"
 PLAYER_VOCAB_SIZE = 21_181
 PLAYER_EMBED_DIM = 32
-TRAIN_REPLAYS = 1_300_640
 DATA_PROTOCOL: Final[str] = "o51-replay-ring-v7"
 D0: Final[int] = 2**30
 _TRUNK_BASE_LAYERS: Final[int] = 8
@@ -1118,13 +1115,10 @@ class IdentityMasker:
 
 @dataclass(slots=True)
 class PreparedTrainingData:
-    """An optional loader path started before the training process touches CUDA."""
-
     loader: PhysicalShardReplayLoader[AWRBatch]
     validation: list[TrainBatch]
     iterator: Iterator[AWRBatch]
     first_batch_future: Future[AWRBatch]
-    executor: ThreadPoolExecutor
     resources: ExitStack
 
 
@@ -1168,7 +1162,6 @@ class DeviceBatchPrefetcher:
         self._staged: tuple[AWRBatch, AWRBatch, int] | None = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
         self._futures: deque[Future[AWRBatch]] = deque()
-        self._last_uncovered_wait_seconds = 0.0
         if first_batch_future is not None:
             self._futures.append(first_batch_future)
         else:
@@ -1183,7 +1176,6 @@ class DeviceBatchPrefetcher:
             return next(self._iterator)
 
     def _prepare_cpu_batch(self, cpu_batch: AWRBatch) -> AWRBatch:
-        """Apply the parent-side transforms to an already-fetched batch."""
         if not isinstance(cpu_batch, AWRBatch):
             raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
         if self._identity_masker is not None:
@@ -1212,8 +1204,6 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("consume the staged batch before filling lookahead")
         if len(self._futures) > batch_limit:
             raise RuntimeError("queued batches cross the next state boundary")
-        if batch_limit == 0:
-            self._last_uncovered_wait_seconds = 0.0
         target = min(_TRAIN_PREFETCH_FACTOR, batch_limit)
         while len(self._futures) < target:
             self._futures.append(self._pool.submit(self._load_cpu_batch))
@@ -1228,8 +1218,7 @@ class DeviceBatchPrefetcher:
         future = self._futures.popleft()
         cpu_batch = self._prepare_cpu_batch(future.result())
         self._stage(cpu_batch)
-        self._last_uncovered_wait_seconds = time.monotonic() - started
-        return self._last_uncovered_wait_seconds
+        return time.monotonic() - started
 
     def next(self) -> tuple[AWRBatch, int]:
         """Wait only for the uncovered tail of the staged transfer."""
@@ -1252,15 +1241,7 @@ class DeviceBatchPrefetcher:
     def drained(self) -> bool:
         return self._staged is None and not self._futures
 
-    @property
-    def metrics(self) -> dict[str, float]:
-        return {
-            "loader/queue_depth": float(self.queue_depth),
-            "loader/uncovered_wait_s": self._last_uncovered_wait_seconds,
-        }
-
     def close(self) -> None:
-        """Release the background loader thread."""
         self._pool.shutdown(wait=True, cancel_futures=True)
 
 
@@ -2866,18 +2847,6 @@ def _compile_synthetic_forward_backward(
             torch.cuda.set_rng_state_all(cuda_rng_states)
 
 
-def _training_loader_state(
-    train_loader: PhysicalShardReplayLoader[AWRBatch],
-    identity_masker: IdentityMasker,
-) -> dict[str, object]:
-    state = train_loader.state_dict()
-    if not isinstance(state, dict):
-        raise TypeError("training loader state must be a dict")
-    if getattr(train_loader, "separate_identity_checkpoint", False):
-        return state
-    return {**state, "identity_masker": identity_masker.state_dict()}
-
-
 def _loader_state_boundaries(cfg: TrainConfig, run_stop: int) -> tuple[int, ...]:
     """Return updates after which fetched CPU batches must be fully consumed."""
     boundaries = {run_stop, *(update for update in (8, 9) if update < run_stop)}
@@ -2981,8 +2950,7 @@ def train(
         if not isinstance(loader_state, dict):
             raise ValueError("resume checkpoint does not contain Mosaic streaming loader state")
         train_loader.load_state_dict(cast(dict[str, object], loader_state))
-    source_sample_counts = getattr(train_loader, "source_sample_counts", None)
-    train_replays = sum(source_sample_counts.values()) if isinstance(source_sample_counts, dict) else TRAIN_REPLAYS
+    train_replays = sum(train_loader.source_sample_counts.values())
     run_started = time.monotonic()
     if prepared_data is None:
         batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE, identity_masker)
@@ -3107,9 +3075,7 @@ def train(
                     **identity_masker.metrics(),
                     **_mean_phase_metrics(window_phase_timers),
                 }
-                loader_metrics = getattr(train_loader, "metrics", None)
-                if isinstance(loader_metrics, dict):
-                    log.update(loader_metrics)
+                log.update(train_loader.metrics)
                 if _cadence_in_window(first_window_update, update, cfg.system_metrics_every):
                     log.update(_minimal_system_metrics(host_metrics.snapshot()))
                 if DEVICE == "cuda":
@@ -3158,7 +3124,7 @@ def train(
                     milestone=startup_boundary or (update % 8192 == 0),
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
-                    loader_state=_training_loader_state(train_loader, identity_masker),
+                    loader_state=train_loader.state_dict(),
                     identity_masker_state=identity_masker.state_dict(),
                 )
             boundary_metrics: dict[str, float] = {}
@@ -3195,7 +3161,7 @@ def train(
             replay_dir=replay_dir,
             uploader=uploader,
             loader_wait_fractions=loader_wait_fractions,
-            loader_state=_training_loader_state(train_loader, identity_masker),
+            loader_state=train_loader.state_dict(),
             identity_masker_state=identity_masker.state_dict(),
             update=run_stop,
             actual_loss_positions=actual_positions,
@@ -3205,9 +3171,7 @@ def train(
         )
     finally:
         batch_prefetcher.close()
-        close_loader = getattr(train_loader, "close", None)
-        if callable(close_loader):
-            close_loader()
+        train_loader.close()
         host_metrics.close()
         if uploader is not None:
             uploader.upload_tree(replay_dir, base=run_dir)
@@ -4729,6 +4693,8 @@ def select(args: SelectArgs) -> None:
 
 
 WINDOWS_PER_GENERATION: Final[int] = 8
+MIN_REPLAY_GAP_BATCHES: Final[int] = 200
+REPLAY_PHASE_BLOCK_BATCHES: Final[int] = 25
 REPLAY_SLOTS_BY_TIER: Final[dict[int, int]] = {
     1: 114_688,
     2: 131_072,
@@ -5537,6 +5503,7 @@ def _make_train_loader(
         context_length=cfg.arch.L_ctx,
         chunk_length=cfg.arch.sample_chunk_length,
         windows_per_generation=WINDOWS_PER_GENERATION,
+        replay_phase_block_batches=REPLAY_PHASE_BLOCK_BATCHES,
         schema_version=cfg.mds_schema_version,
         reserved_disk_bytes=RESERVED_DISK_BYTES,
         pin_memory=torch.cuda.is_available(),
@@ -5586,11 +5553,6 @@ def _make_loaders(
     return train_loader, cache_validation(val_loader, cfg.val_n_samples)
 
 
-def _next_awr_batch(iterator: Iterator[AWRBatch]) -> AWRBatch:
-    """Fetch one typed batch on the pre-CUDA setup thread."""
-    return next(iterator)
-
-
 def _prepare_training_data(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
@@ -5607,9 +5569,9 @@ def _prepare_training_data(
     train_iterator = iter(train_loader)
     with ExitStack() as setup:
         executor = setup.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="o51-first-batch"))
-        first_batch = executor.submit(_next_awr_batch, train_iterator)
+        first_batch = executor.submit(train_iterator.__next__)
         resources = setup.pop_all()
-    return PreparedTrainingData(train_loader, validation, train_iterator, first_batch, executor, resources)
+    return PreparedTrainingData(train_loader, validation, train_iterator, first_batch, resources)
 
 
 LOADER_WORKERS: Final[tuple[int, ...]] = (8, 16, 24, 32)
@@ -6198,6 +6160,18 @@ def benchmark_loader(
     stats = load_stats(cfg)
     player_lookup = ReplayPlayerLookup(load_identity_sidecar(cfg).by_replay)
     loader = _make_train_loader(cfg, stats, player_lookup)
+    try:
+        return _benchmark_loader(cfg, loader, warmup_batches, measured_batches)
+    finally:
+        loader.close()
+
+
+def _benchmark_loader(
+    cfg: TrainConfig,
+    loader: PhysicalShardReplayLoader[AWRBatch],
+    warmup_batches: int,
+    measured_batches: int,
+) -> dict[str, object]:
     loader_started = time.monotonic()
     iterator = iter(loader)
     worker_start_seconds = time.monotonic() - loader_started
@@ -6213,9 +6187,8 @@ def benchmark_loader(
                     {
                         "event": "loader_warmup",
                         "completed_batches": warmup_batch + 1,
-                        "decoded_generations": int(getattr(loader, "decoded_generations", 0)),
-                        "admitted_generations": int(getattr(loader, "admitted_generations", 0)),
-                        "raw_gib": int(getattr(loader, "raw_bytes_read", 0)) / 2**30,
+                        "decoded_generations": loader.decoded_generations,
+                        "raw_gib": loader.raw_bytes_read / 2**30,
                     },
                     sort_keys=True,
                 ),
@@ -6223,7 +6196,7 @@ def benchmark_loader(
             )
     steady_warmup_seconds = time.monotonic() - steady_warmup_started
 
-    missing_raw_shards = int(getattr(loader, "missing_raw_shards", 0))
+    missing_raw_shards = loader.missing_raw_shards
     if missing_raw_shards:
         raise RuntimeError(f"loader benchmark reached measurement with {missing_raw_shards} uncached raw shards")
 
@@ -6233,13 +6206,12 @@ def benchmark_loader(
     replay_ages: list[int] = []
     adjacent_repeats: list[int] = []
     previous_batch: set[str] = set()
-    reuse_period = int(getattr(loader, "reuse_period_batches", 0))
-    overlap_lag = REPLAY_SLOTS_BY_TIER[1] // _BASE_BATCH
+    reuse_period = loader.reuse_period_batches
+    overlap_lag = reuse_period
     period_history: deque[set[str]] = deque()
     period_repeats: list[int] = []
-    raw_bytes_at_start = int(getattr(loader, "raw_bytes_read", 0))
-    decoded_at_start = int(getattr(loader, "decoded_generations", 0))
-    admitted_at_start = int(getattr(loader, "admitted_generations", 0))
+    raw_bytes_at_start = loader.raw_bytes_read
+    decoded_at_start = loader.decoded_generations
     started = time.monotonic()
     for batch_index in range(measured_batches):
         batch_started = time.monotonic()
@@ -6259,50 +6231,45 @@ def benchmark_loader(
             replay_frequencies[replay_id] += 1
         adjacent_repeats.append(len(current & previous_batch))
         previous_batch = current
-        if reuse_period:
-            if len(period_history) == overlap_lag:
-                period_repeats.append(len(current & period_history.popleft()))
-            period_history.append(current)
+        if len(period_history) == overlap_lag:
+            period_repeats.append(len(current & period_history.popleft()))
+        period_history.append(current)
     elapsed = time.monotonic() - started
     windows = measured_batches * cfg.batch_size
     minimum_replay_age = min(replay_ages, default=2**63 - 1)
-    required_replay_age = int(getattr(loader, "minimum_replay_gap_batches", 0))
+    required_replay_age = loader.minimum_replay_gap_batches
     repeat_floor_passed = not replay_ages or minimum_replay_age >= required_replay_age
-    adjacent_overlap_passed = reuse_period == 0 or max(adjacent_repeats, default=0) == 0
+    adjacent_overlap_passed = max(adjacent_repeats, default=0) == 0
     period_overlap_passed = not period_repeats or max(period_repeats) == 0
     sampling_contract_passed = repeat_floor_passed and adjacent_overlap_passed and period_overlap_passed
     batch_mean = float(np.mean(batch_seconds))
     batch_p95 = float(np.percentile(batch_seconds, 95))
     batch_p99 = float(np.percentile(batch_seconds, 99))
     batch_cv = float(np.std(batch_seconds) / max(batch_mean, 1e-12))
-    decoded_generations = int(getattr(loader, "decoded_generations", decoded_at_start)) - decoded_at_start
-    admitted_generations = int(getattr(loader, "admitted_generations", admitted_at_start)) - admitted_at_start
+    decoded_generations = loader.decoded_generations - decoded_at_start
     expected_turnover_per_batch = cfg.batch_size // WINDOWS_PER_GENERATION
     expected_generations = measured_batches * expected_turnover_per_batch
-    turnover_per_batch = admitted_generations / measured_batches
-    turnover_passed = admitted_generations == 0 or admitted_generations == expected_generations
-    decode_admission_ratio = decoded_generations / admitted_generations if admitted_generations else 1.0
-    decode_admission_passed = decoded_generations == admitted_generations
-    max_decoded_chunk_size = int(getattr(loader, "max_decoded_chunk_size", 0))
+    turnover_per_batch = decoded_generations / measured_batches
+    turnover_passed = decoded_generations == expected_generations
+    max_decoded_chunk_size = loader.max_decoded_chunk_size
     chunk_bound_passed = max_decoded_chunk_size <= MAX_DECODE_CHUNK_ROWS
     stability_passed = (
         batch_p95 <= 2 * batch_mean
         and batch_p99 <= 3 * batch_mean
         and batch_cv <= 0.5
         and turnover_passed
-        and decode_admission_passed
         and chunk_bound_passed
     )
     speed_passed = batch_mean <= 0.08
-    raw_bytes = int(getattr(loader, "raw_bytes_read", 0)) - raw_bytes_at_start
+    raw_bytes = loader.raw_bytes_read - raw_bytes_at_start
     pinned_batch_bytes = int(batch.target.numel() * batch.target.element_size())
     pinned_batch_bytes += int(batch.returns.numel() * batch.returns.element_size())
     pinned_batch_bytes += int(batch.eligible.numel() * batch.eligible.element_size())
     pinned_batch_bytes += sum(int(value.numel() * value.element_size()) for value in batch.context.features.values())
     pinned_batch_bytes += int(batch.context.ctx_pad.numel() * batch.context.ctx_pad.element_size())
-    decoded_chunk_bytes = int(getattr(loader, "max_decoded_chunk_bytes", 0))
+    decoded_chunk_bytes = loader.max_decoded_chunk_bytes
     host_memory = estimate_host_memory(
-        central_buffer_bytes=int(getattr(loader, "buffer_bytes", 0)),
+        central_buffer_bytes=loader.buffer_bytes,
         decoded_chunk_bytes=decoded_chunk_bytes,
         replay_workspace_bytes=decoded_chunk_bytes,
         pinned_batch_bytes=pinned_batch_bytes,
@@ -6311,14 +6278,14 @@ def benchmark_loader(
         compiler_and_process_bytes=64 * 2**30,
         workers=cfg.num_workers,
     )
-    required_disk_bytes = int(getattr(loader, "required_disk_bytes", 0))
-    disk_free_bytes = int(getattr(loader, "disk_free_bytes", 0))
+    required_disk_bytes = loader.required_disk_bytes
+    disk_free_bytes = loader.disk_free_bytes
     memory_passed = host_memory.peak_bytes <= 300 * 2**30
     metrics: dict[str, object] = {
         "tier_scale": cfg.tier_scale,
         "batch_size": cfg.batch_size,
         "num_workers": cfg.num_workers,
-        "replay_slots": int(getattr(loader, "replay_slots", 0)),
+        "replay_slots": loader.replay_slots,
         "windows_per_generation": WINDOWS_PER_GENERATION,
         "loader_prefetch_factor": PREFETCH_FACTOR,
         "warmup_batches": warmup_batches,
@@ -6347,12 +6314,8 @@ def benchmark_loader(
         "adjacent_batch_repeats_mean": float(np.mean(adjacent_repeats)),
         "adjacent_overlap_passed": adjacent_overlap_passed,
         "sampling_contract_passed": sampling_contract_passed,
-        "shuffle_passed": sampling_contract_passed,
         "within_batch_unique": True,
         "decoded_generations": decoded_generations,
-        "admitted_generations": admitted_generations,
-        "decode_admission_ratio": decode_admission_ratio,
-        "decode_admission_passed": decode_admission_passed,
         "generation_turnover_per_batch": turnover_per_batch,
         "expected_generation_turnover_per_batch": expected_turnover_per_batch,
         "steady_state_turnover_passed": turnover_passed,
@@ -6360,7 +6323,7 @@ def benchmark_loader(
         "raw_bytes_per_window": raw_bytes / windows,
         "effective_raw_gib_per_s": raw_bytes / elapsed / 2**30,
         "missing_raw_shards": missing_raw_shards,
-        "central_buffer_bytes": int(getattr(loader, "buffer_bytes", 0)),
+        "central_buffer_bytes": loader.buffer_bytes,
         "max_decoded_chunk_size": max_decoded_chunk_size,
         "max_decoded_chunk_bytes": decoded_chunk_bytes,
         "decoded_chunk_bound_passed": chunk_bound_passed,
@@ -6376,9 +6339,6 @@ def benchmark_loader(
         "source_sample_counts": loader.source_sample_counts,
     }
     print(json.dumps(metrics, indent=2, sort_keys=True), flush=True)
-    close_loader = getattr(loader, "close", None)
-    if callable(close_loader):
-        close_loader()
     return metrics
 
 

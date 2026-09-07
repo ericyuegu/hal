@@ -41,8 +41,6 @@ from hal.training.features import FeatureProjection
 
 PREFETCH_FACTOR: Final[int] = 2
 CHECKPOINT_SCHEMA: Final[int] = 3
-MIN_REPLAY_GAP_BATCHES: Final[int] = 200
-REPLAY_PHASE_BLOCK_BATCHES: Final[int] = 25
 MAX_DECODE_CHUNK_ROWS: Final[int] = 64
 
 type Window = dict[str, np.ndarray]
@@ -289,22 +287,6 @@ class DecodedChunk:
     @property
     def epoch(self) -> int:
         return self.request.epoch
-
-    @property
-    def task_offset(self) -> int:
-        return self.request.task_offset
-
-    @property
-    def row_offset(self) -> int:
-        return self.request.row_offset
-
-    def windows(self, row: int) -> tuple[dict[str, np.ndarray], ...]:
-        if not 0 <= row < len(self.replay_ids):
-            raise IndexError(row)
-        return tuple(
-            {name: values[row, window] for name, values in self.columns.items()}
-            for window in range(self.windows_per_generation)
-        )
 
 
 def _coerce_manifest(source: str, value: SourceManifest | Sequence[int]) -> SourceManifest:
@@ -875,11 +857,18 @@ class _OrderedChunks(Iterator[DecodedChunk]):
 class _ReplayRingSchedule:
     """Derive replay slots and window ordinals from a FIFO ring position."""
 
-    def __init__(self, capacity: int, batch_size: int, windows_per_generation: int, seed: int) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        batch_size: int,
+        windows_per_generation: int,
+        phase_block_batches: int,
+        seed: int,
+    ) -> None:
         if capacity < 1 or batch_size < 1:
             raise ValueError("replay-ring capacity and batch size must be positive")
-        if not 2 <= windows_per_generation <= REPLAY_PHASE_BLOCK_BATCHES:
-            raise ValueError(f"windows per generation must be in [2, {REPLAY_PHASE_BLOCK_BATCHES}]")
+        if not 2 <= windows_per_generation <= phase_block_batches:
+            raise ValueError("phase block must cover at least two windows per generation")
         if capacity % batch_size or batch_size % windows_per_generation:
             raise ValueError("replay-ring geometry must divide evenly")
         self.capacity = capacity
@@ -888,16 +877,15 @@ class _ReplayRingSchedule:
         self.replay_lanes = batch_size // windows_per_generation
         self.period_batches = capacity // batch_size
         self.cohort_count = capacity // self.replay_lanes
-        self.phase_block_batches = REPLAY_PHASE_BLOCK_BATCHES
-        if self.period_batches < self.phase_block_batches:
-            raise ValueError(f"replay period must cover the {self.phase_block_batches}-batch phase block")
-        self.minimum_gap_batches = self.period_batches - self.phase_block_batches + 1
-        self.maximum_gap_batches = self.period_batches + self.phase_block_batches - 1
+        if self.period_batches < phase_block_batches:
+            raise ValueError(f"replay period must cover the {phase_block_batches}-batch phase block")
+        self.minimum_gap_batches = self.period_batches - phase_block_batches + 1
+        self.maximum_gap_batches = self.period_batches + phase_block_batches - 1
         rng = np.random.default_rng(seed)
         self.phase_offsets = np.stack(
             [
                 rng.choice(
-                    self.phase_block_batches,
+                    phase_block_batches,
                     size=self.windows_per_generation,
                     replace=False,
                 )
@@ -961,16 +949,26 @@ class RingSlotDescriptor:
     replay_checksum: int
 
 
-class ReplayRing:
+class _ReplayRing:
     """Columnar replay generations ordered as FIFO cohorts."""
 
-    def __init__(self, capacity: int, batch_size: int, windows_per_generation: int, seed: int) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        batch_size: int,
+        windows_per_generation: int,
+        phase_block_batches: int,
+        seed: int,
+    ) -> None:
         if capacity < batch_size:
             raise ValueError("replay ring must cover one batch")
-        self.capacity = capacity
-        self.batch_size = batch_size
-        self.windows_per_generation = windows_per_generation
-        self.schedule = _ReplayRingSchedule(capacity, batch_size, windows_per_generation, seed)
+        self.schedule = _ReplayRingSchedule(
+            capacity,
+            batch_size,
+            windows_per_generation,
+            phase_block_batches,
+            seed,
+        )
         self.columns: dict[str, np.ndarray] = {}
         self.replay_ids: list[str | None] = [None] * capacity
         self.locators: list[PhysicalRow | None] = [None] * capacity
@@ -978,7 +976,6 @@ class ReplayRing:
         self._size = 0
         self.fifo_head = 0
         self.batch_index = 0
-        self.last_metrics = dict(self.schedule.replay_age_metrics)
 
     @property
     def size(self) -> int:
@@ -988,7 +985,7 @@ class ReplayRing:
         if self.columns:
             return
         for name, values in chunk.columns.items():
-            self.columns[name] = np.empty((self.capacity, *values.shape[1:]), dtype=values.dtype)
+            self.columns[name] = np.empty((self.schedule.capacity, *values.shape[1:]), dtype=values.dtype)
 
     def _write_chunk(
         self,
@@ -997,7 +994,7 @@ class ReplayRing:
         *,
         require_empty: bool,
     ) -> None:
-        if chunk.windows_per_generation != self.windows_per_generation:
+        if chunk.windows_per_generation != self.schedule.windows_per_generation:
             raise ValueError("decoded chunk does not match replay-ring window geometry")
         self._initialize_columns(chunk)
         if set(self.columns) != set(chunk.columns):
@@ -1005,7 +1002,7 @@ class ReplayRing:
         slots = np.asarray(slots, dtype=np.int64)
         if slots.shape != (len(chunk.replay_ids),) or len(np.unique(slots)) != len(chunk.replay_ids):
             raise ValueError("destination slots do not match decoded rows")
-        if np.any(slots < 0) or np.any(slots >= self.capacity):
+        if np.any(slots < 0) or np.any(slots >= self.schedule.capacity):
             raise ValueError("destination slot is outside the replay ring")
         occupied = [self.replay_ids[int(slot)] is not None for slot in slots]
         if require_empty and any(occupied):
@@ -1027,20 +1024,20 @@ class ReplayRing:
 
     def append_chunk(self, chunk: DecodedChunk) -> None:
         stop = self.size + len(chunk.replay_ids)
-        if stop > self.capacity:
+        if stop > self.schedule.capacity:
             raise RuntimeError("decoded rows exceed replay-ring capacity")
         self._write_chunk(chunk, np.arange(self.size, stop), require_empty=True)
         self._size = stop
 
     def restore_chunk(self, chunk: DecodedChunk, slots: np.ndarray) -> None:
-        if self.size + len(chunk.replay_ids) > self.capacity:
+        if self.size + len(chunk.replay_ids) > self.schedule.capacity:
             raise RuntimeError("restored rows exceed replay-ring capacity")
         self._write_chunk(chunk, slots, require_empty=True)
         self._size += len(chunk.replay_ids)
 
     def sample(self) -> tuple[tuple[str, ...], dict[str, np.ndarray]]:
         """Select the derived window from each replay in the current batch."""
-        if self.size != self.capacity:
+        if self.size != self.schedule.capacity:
             raise RuntimeError("replay ring must be full before sampling")
         if self.fifo_head != self.batch_index % self.schedule.cohort_count:
             raise RuntimeError("replay-ring FIFO and batch cursors diverged")
@@ -1049,7 +1046,7 @@ class ReplayRing:
         if any(replay_id is None for replay_id in selected_ids):
             raise RuntimeError("replay-ring schedule selected an empty slot")
         replay_ids = cast(tuple[str, ...], selected_ids)
-        if len(set(replay_ids)) != self.batch_size:
+        if len(set(replay_ids)) != self.schedule.batch_size:
             raise RuntimeError("replay-ring batch contains a repeated replay identity")
         ordinals = self.schedule.window_ordinals
         columns = {name: values[slots, ordinals] for name, values in self.columns.items()}
@@ -1072,7 +1069,7 @@ class ReplayRing:
         self.batch_index += 1
 
     def set_position(self, fifo_head: int, batch_index: int) -> None:
-        if self.size != self.capacity:
+        if self.size != self.schedule.capacity:
             raise RuntimeError("cannot position an incomplete replay ring")
         if not 0 <= fifo_head < self.schedule.cohort_count or batch_index < 0:
             raise ValueError("replay-ring position is invalid")
@@ -1172,8 +1169,6 @@ def _shutdown_data_loader_workers(iterator: object | None) -> None:
 class PhysicalShardReplayLoader[BatchT]:
     """Infinite physical-shard loader with decoded-array-free checkpoints."""
 
-    separate_identity_checkpoint: Final[bool] = True
-
     def __init__(
         self,
         *,
@@ -1192,6 +1187,7 @@ class PhysicalShardReplayLoader[BatchT]:
         context_length: int,
         chunk_length: int,
         windows_per_generation: int,
+        replay_phase_block_batches: int,
         schema_version: int,
         reserved_disk_bytes: int,
         pin_memory: bool,
@@ -1241,7 +1237,13 @@ class PhysicalShardReplayLoader[BatchT]:
         self._task_order = permute_shard_tasks(tasks, seed=seed, epoch=0)
         self._selected_rows = tuple(task.selected_rows for task in tasks)
         self._cursor: tuple[int, int, int] = (0, 0, 0)
-        self._ring = ReplayRing(replay_slots, batch_size, windows_per_generation, seed ^ 0x51B0FF)
+        self._ring = _ReplayRing(
+            replay_slots,
+            batch_size,
+            windows_per_generation,
+            replay_phase_block_batches,
+            seed ^ 0x51B0FF,
+        )
         self._resume_descriptors: tuple[RingSlotDescriptor, ...] | None = None
         self._resume_position: tuple[int, int] | None = None
         self._iterator: _PhysicalShardIterator[BatchT] | None = None
@@ -1249,18 +1251,16 @@ class PhysicalShardReplayLoader[BatchT]:
         self._parent_next_active = False
         self._raw_bytes_read = 0
         self._decoded_generations = 0
-        self._admitted_generations = 0
         self._max_decoded_chunk_size = 0
         self._max_decoded_chunk_bytes = 0
         self._closed = False
 
     @property
     def metrics(self) -> dict[str, float]:
-        metrics = dict(self._ring.last_metrics)
+        metrics = dict(self._ring.schedule.replay_age_metrics)
         metrics.update(
             {
                 "data/decoded_generations": float(self._decoded_generations),
-                "data/admitted_generations": float(self._admitted_generations),
                 "data/max_decoded_chunk_size": float(self._max_decoded_chunk_size),
             }
         )
@@ -1295,10 +1295,6 @@ class PhysicalShardReplayLoader[BatchT]:
     @property
     def decoded_generations(self) -> int:
         return self._decoded_generations
-
-    @property
-    def admitted_generations(self) -> int:
-        return self._admitted_generations
 
     @property
     def max_decoded_chunk_size(self) -> int:
@@ -1398,12 +1394,10 @@ class PhysicalShardReplayLoader[BatchT]:
             chunks = iterator.take_cohort()
             for chunk in chunks:
                 self._ring.append_chunk(chunk)
-                self._admitted_generations += len(chunk.replay_ids)
         replay_ids, columns = self._ring.sample()
         transformed = self.batch_transform(replay_ids, columns)
         replacements = iterator.take_cohort()
         self._ring.replace_oldest(replacements)
-        self._admitted_generations += self._ring.schedule.replay_lanes
         if not self.pin_memory:
             return transformed
         pin_memory = getattr(transformed, "pin_memory", None)
@@ -1569,7 +1563,6 @@ class PhysicalShardReplayLoader[BatchT]:
                 )
                 count = len(ordered)
                 self._decoded_generations += count
-                self._admitted_generations += count
                 self._max_decoded_chunk_size = max(self._max_decoded_chunk_size, count)
                 decoded_bytes = sum(values.nbytes for values in chunk.columns.values())
                 self._max_decoded_chunk_bytes = max(self._max_decoded_chunk_bytes, decoded_bytes)

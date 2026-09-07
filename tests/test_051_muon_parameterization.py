@@ -87,7 +87,7 @@ def test_prepared_o51_data_starts_iterator_before_background_next(monkeypatch) -
     try:
         assert prepared.first_batch_future.result() is batch
     finally:
-        prepared.executor.shutdown(wait=True)
+        prepared.resources.close()
 
     assert events[0] == ("iter", threading.main_thread().ident)
     assert events[1][0] == "next"
@@ -168,10 +168,27 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
 
     class Loader:
         source_sample_counts = {"source": cfg.batch_size}
+        replay_slots = cfg.batch_size
+        reuse_period_batches = 3
+        minimum_replay_gap_batches = 0
+        missing_raw_shards = 0
+        raw_bytes_read = 0
+        max_decoded_chunk_size = 0
+        max_decoded_chunk_bytes = 0
+        buffer_bytes = 0
+        required_disk_bytes = 0
+        disk_free_bytes = 0
+
+        def __init__(self) -> None:
+            self.decoded_generations = 0
 
         def __iter__(self):
             while True:
+                self.decoded_generations += cfg.batch_size // exp.WINDOWS_PER_GENERATION
                 yield batch
+
+        def close(self) -> None:
+            pass
 
     sidecar = type("Sidecar", (), {"by_replay": {}})()
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
@@ -184,11 +201,10 @@ def test_loader_benchmark_measures_direct_batches(monkeypatch) -> None:
     assert report["distinct_replays"] == cfg.batch_size
     assert report["within_batch_unique"] is True
     assert report["repeat_floor_passed"] is True
+    assert report["overlap_lag_batches"] == 3
     assert report["period_overlap_passed"] is True
-    assert report["decode_admission_ratio"] == 1.0
     assert report["decoded_chunk_bound_passed"] is True
     assert report["steady_state_turnover_passed"] is True
-    assert report["shuffle_passed"] is True
 
 
 @pytest.mark.parametrize("level", ["base", "proxy", "mid", "large"])

@@ -23,7 +23,6 @@ from hal.training.physical_shard_loader import DecodedChunk
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import PhysicalShardReplayLoader
 from hal.training.physical_shard_loader import PhysicalShardSelection
-from hal.training.physical_shard_loader import ReplayRing
 from hal.training.physical_shard_loader import ShardTask
 from hal.training.physical_shard_loader import SourceManifest
 from hal.training.physical_shard_loader import SourceRowSelection
@@ -31,6 +30,7 @@ from hal.training.physical_shard_loader import _ChunkSampler
 from hal.training.physical_shard_loader import _decode_generation
 from hal.training.physical_shard_loader import _DecodeChunkRequest
 from hal.training.physical_shard_loader import _OrderedChunks
+from hal.training.physical_shard_loader import _ReplayRing
 from hal.training.physical_shard_loader import _ReplayRingSchedule
 from hal.training.physical_shard_loader import _shutdown_data_loader_workers
 from hal.training.physical_shard_loader import _stack_window_rows
@@ -269,7 +269,13 @@ def test_decoded_ctx_pad_remains_scalar(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_replay_ring_uses_the_derived_slots_and_window_ordinals() -> None:
-    ring = ReplayRing(capacity=100, batch_size=4, windows_per_generation=4, seed=10)
+    ring = _ReplayRing(
+        capacity=100,
+        batch_size=4,
+        windows_per_generation=4,
+        phase_block_batches=25,
+        seed=10,
+    )
     ring.append_chunk(_decoded(tuple(f"replay-{index}" for index in range(64))))
     ring.append_chunk(_decoded(tuple(f"replay-{index}" for index in range(64, 100)), row_start=64))
 
@@ -287,7 +293,7 @@ def test_replay_ring_uses_the_derived_slots_and_window_ordinals() -> None:
 
 @pytest.mark.parametrize("seed", [0, 51])
 def test_u1_ring_schedule_has_randomized_reuse_and_zero_period_overlap(seed: int) -> None:
-    schedule = _ReplayRingSchedule(114_688, 512, 8, seed)
+    schedule = _ReplayRingSchedule(114_688, 512, 8, 25, seed)
     replay_by_slot = np.arange(schedule.capacity, dtype=np.int64)
     recent: deque[set[int]] = deque()
     previous: set[int] = set()
@@ -325,39 +331,6 @@ def test_u1_ring_schedule_has_randomized_reuse_and_zero_period_overlap(seed: int
         assert len(batches) == 8
         assert all(200 <= gap <= 248 for gap in np.diff(batches))
     assert next_replay - schedule.capacity == schedule.cohort_count * 64
-
-
-def test_u1_fifo_replaces_exactly_64_generations_across_source_wraps() -> None:
-    schedule = _ReplayRingSchedule(114_688, 512, 8, 7)
-    source_rows = schedule.capacity + schedule.replay_lanes
-    replay_by_slot = np.arange(schedule.capacity, dtype=np.int64)
-    active = np.zeros(source_rows, dtype=np.bool_)
-    active[: schedule.capacity] = True
-    source_cursor = schedule.capacity
-    fifo_head = 0
-    wraps = 0
-    updates = 2 * schedule.cohort_count
-
-    for _ in range(updates):
-        sampled = replay_by_slot[schedule.selected_slots(fifo_head)]
-        assert len(np.unique(sampled)) == schedule.batch_size
-
-        start = fifo_head * schedule.replay_lanes
-        stop = start + schedule.replay_lanes
-        retired = replay_by_slot[start:stop]
-        active[retired] = False
-        replacements = np.arange(source_cursor, source_cursor + schedule.replay_lanes) % source_rows
-        assert len(replacements) == 64
-        assert not np.any(active[replacements])
-        replay_by_slot[start:stop] = replacements
-        active[replacements] = True
-
-        wraps += (source_cursor + schedule.replay_lanes) // source_rows
-        source_cursor = (source_cursor + schedule.replay_lanes) % source_rows
-        fifo_head = (fifo_head + 1) % schedule.cohort_count
-
-    assert wraps >= 2
-    assert int(active.sum()) == schedule.capacity
 
 
 def test_chunk_sampler_splits_cohorts_at_shard_and_corpus_boundaries() -> None:
@@ -522,6 +495,7 @@ def _loader(
         context_length=3,
         chunk_length=2,
         windows_per_generation=4,
+        replay_phase_block_batches=25,
         schema_version=7,
         reserved_disk_bytes=0,
         pin_memory=False,
@@ -592,10 +566,8 @@ def test_every_batch_contains_distinct_replay_ids() -> None:
         batch = next(iterator)
         assert batch.replay_ids is not None
         assert len(batch.replay_ids) == len(set(batch.replay_ids)) == 4
-        assert loader.metrics["data/decoded_generations"] == loader.decoded_generations
-        assert loader.metrics["data/admitted_generations"] == loader.admitted_generations
 
-    assert loader.decoded_generations == loader.admitted_generations == 400
+    assert loader.metrics["data/decoded_generations"] == loader.decoded_generations == 400
     assert loader.max_decoded_chunk_size == 1
 
 
