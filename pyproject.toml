@@ -92,6 +92,7 @@ ignore = ["E501"]
 "experiments/benchmark_closed_loop.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
 # Ruff parses jaxtyping dimension strings as forward-reference type expressions.
 "experiments/051_muon_parameterization.py" = ["F722"]
+"experiments/052_adamw_temporal_awr.py" = ["F722"]
 "hal/training/trunk.py" = ["F722"]  # same jaxtyping dim specs as the experiment copies
 
 [tool.pytest.ini_options]
