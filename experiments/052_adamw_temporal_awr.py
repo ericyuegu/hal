@@ -304,10 +304,10 @@ class TrainConfig:
     selection_sha256: ClassVar[str] = "ad28edec1ad37565707d1bb0fb2262d94f05617fc957d4d8c8b234979cf3a381"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
-    replay_slots: ClassVar[int] = 65_536
+    replay_slots: ClassVar[int] = 112_128
     windows_per_generation: ClassVar[int] = 8
     replay_phase_block_batches: ClassVar[int] = 25
-    minimum_replay_gap_batches: ClassVar[int] = 200
+    minimum_replay_gap_batches: ClassVar[int] = 195
     reserved_disk_bytes: ClassVar[int] = 256 * 2**30
     player_sidecar_remote: ClassVar[str] = "s3://hal/processed/player-identity-v1/professional-code-v1.jsonl.gz"
 
@@ -3017,7 +3017,9 @@ def _make_train_loader(
         if sum(train_loader.source_sample_counts.values()) != cfg.train_replays:
             raise ValueError("physical-shard loader does not expose every selected rank-1 training row")
         if train_loader.minimum_replay_gap_batches < cfg.minimum_replay_gap_batches:
-            raise ValueError("replay ring is too small for the 200-batch reuse-gap contract")
+            raise ValueError(
+                f"replay ring is too small for the {cfg.minimum_replay_gap_batches}-batch reuse-gap contract"
+            )
     except Exception:
         train_loader.close()
         raise

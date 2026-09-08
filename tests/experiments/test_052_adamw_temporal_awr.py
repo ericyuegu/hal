@@ -63,8 +63,10 @@ def test_proxy_and_rank1_data_identity_are_fixed() -> None:
     assert cfg.source_names == ("ranked-anonymized-1-policy-world-v8",)
     assert cfg.train_replays == 112_188
     assert cfg.train_frames == 1_203_888_017
-    assert cfg.replay_slots == 65_536
+    assert cfg.replay_slots == 112_128
     assert cfg.replay_slots <= cfg.train_replays
+    assert cfg.replay_slots // cfg.batch_size - cfg.replay_phase_block_batches + 1 == 195
+    assert cfg.minimum_replay_gap_batches == 195
     assert exp.data_selection(cfg).sha256 == cfg.selection_sha256
     assert exp.source_manifest_sha256(cfg) == {
         "ranked-anonymized-1-policy-world-v8": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8"
