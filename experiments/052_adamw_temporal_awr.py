@@ -304,7 +304,7 @@ class TrainConfig:
     selection_sha256: ClassVar[str] = "ad28edec1ad37565707d1bb0fb2262d94f05617fc957d4d8c8b234979cf3a381"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
-    replay_slots: ClassVar[int] = 131_072
+    replay_slots: ClassVar[int] = 65_536
     windows_per_generation: ClassVar[int] = 8
     replay_phase_block_batches: ClassVar[int] = 25
     minimum_replay_gap_batches: ClassVar[int] = 200

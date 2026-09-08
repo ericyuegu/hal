@@ -2,6 +2,8 @@
 
 Registered before the first O52 launch.
 
+Preflight amendment, 2026-09-08: the first smoke run failed before loading a batch because O50's 131,072-slot replay ring exceeded rank-1's 112,188 selected replays. O52 uses 65,536 replay slots. No optimizer update occurred before this correction.
+
 ## Question
 
 Can AdamW train every O50 matrix stably, and which master learning rate is best at the 14.48M proxy scale?
@@ -14,6 +16,7 @@ The control is the O50 AdamW master rate, `4.25e-4`. The treatment rates are `1.
 - Exactly `2^30` supervised positions: 16,384 optimizer updates with 512 warm-up updates; AWR activates at update 4,097 as in O50.
 - Seed 0 and AdamW betas `(0.9, 0.95)`, epsilon `1e-12`, and weight decay `1e-4` before O50 duration scaling.
 - Only the immutable `ranked-anonymized-1-policy-world-v8` train and validation splits.
+- A 65,536-slot replay ring with the O50 generation and replay-gap settings.
 - One Modal `RTX-PRO-6000` per arm. No automatic closed-loop evaluation during screening.
 
 ## Decision rule
