@@ -63,6 +63,7 @@ def test_proxy_and_rank1_data_identity_are_fixed() -> None:
     assert cfg.source_names == ("ranked-anonymized-1-policy-world-v8",)
     assert cfg.train_replays == 112_188
     assert cfg.train_frames == 1_203_888_017
+    assert cfg.val_n_samples == 1024
     assert cfg.replay_slots == 112_128
     assert cfg.replay_slots <= cfg.train_replays
     assert cfg.replay_slots // cfg.batch_size - cfg.replay_phase_block_batches + 1 == 195

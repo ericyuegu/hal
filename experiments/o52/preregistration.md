@@ -2,7 +2,7 @@
 
 Registered before the first O52 launch.
 
-Preflight amendment, 2026-09-08: two smoke runs failed before loading a batch. O50's 131,072-slot replay ring exceeded rank-1's 112,188 selected replays; the first correction to 65,536 slots then violated O50's 200-batch minimum reuse gap. O52 uses the largest batch-aligned ring that fits rank-1: 112,128 slots and a 195-batch minimum reuse gap. No optimizer update occurred before this correction.
+Preflight amendment, 2026-09-08: three smoke runs failed before loading a training batch. O50's 131,072-slot replay ring exceeded rank-1's 112,188 selected replays; the first correction to 65,536 slots then violated O50's 200-batch minimum reuse gap; the third run found that rank-1 has 1,189 validation samples rather than the 2,048 requested by O50. O52 uses the largest batch-aligned ring that fits rank-1, 112,128 slots and a 195-batch minimum reuse gap, and a fixed 1,024-sample validation set. No optimizer update occurred before these corrections.
 
 ## Question
 
@@ -17,6 +17,7 @@ The control is the O50 AdamW master rate, `4.25e-4`. The treatment rates are `1.
 - Seed 0 and AdamW betas `(0.9, 0.95)`, epsilon `1e-12`, and weight decay `1e-4` before O50 duration scaling.
 - Only the immutable `ranked-anonymized-1-policy-world-v8` train and validation splits.
 - A 112,128-slot replay ring with O50's generation settings and a 195-batch minimum reuse gap.
+- A fixed 1,024-sample validation set.
 - One Modal `RTX-PRO-6000` per arm. No automatic closed-loop evaluation during screening.
 
 ## Decision rule

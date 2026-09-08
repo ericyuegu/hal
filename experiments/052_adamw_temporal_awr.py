@@ -336,7 +336,7 @@ class TrainConfig:
 
     wandb_log_code: bool = True
     val_every: int = 4096
-    val_n_samples: int = 2048
+    val_n_samples: int = 1024
     val_batch_size: int = 128
     ckpt_every: int = 2048
     eval_every: int = 8192
