@@ -10,7 +10,9 @@ import time
 from dataclasses import asdict
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -116,6 +118,82 @@ def test_identity_masker_is_window_wide_and_resumable() -> None:
     actual = resumed(batch).context.features["ego_player_id"]
     assert torch.equal(actual, expected)
     assert all(torch.unique(row).numel() == 1 for row in actual)
+
+
+def test_inference_reads_identity_from_the_runtime_context() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    inference = exp.BF16Inference(model, cfg, bucket=2, compiled=False)
+    context = exp._condition_ego_player(exp.synthetic_context(cfg, 2, torch.device("cpu")), 7)
+    captured = {}
+
+    def trunk(features, _ctx_pad, _observed):
+        captured["player_id"] = features["ego_player_id"].clone()
+        return torch.zeros(2, cfg.arch.L_ctx, cfg.arch.d_model)
+
+    def decoder(_hidden, _observed, _uniforms):
+        return torch.zeros(2, cfg.prediction_frames, 4, dtype=torch.long)
+
+    inference._trunks[2] = trunk
+    inference._decoders[(2, cfg.prediction_frames)] = decoder
+    inference.decode(context, cfg.prediction_frames)
+
+    assert torch.equal(captured["player_id"], torch.full((2, cfg.arch.L_ctx), 7))
+
+
+@pytest.mark.parametrize(
+    ("delay", "replan", "expected"),
+    [
+        (2, 2, [0.0, 0.0, 3.0, 4.0]),
+        (0, 1, [1.0, 11.0, 21.0, 31.0]),
+    ],
+)
+def test_truncation_policy_executes_the_selected_timing_slice(
+    monkeypatch: pytest.MonkeyPatch,
+    delay: int,
+    replan: int,
+    expected: list[float],
+) -> None:
+    calls = 0
+
+    def predict(_context, committed):
+        nonlocal calls
+        assert committed is None
+        values = np.zeros((1, 4, exp.A_DIM), dtype=np.float32)
+        values[0, :, 0] = 10 * calls + np.arange(1, 5)
+        calls += 1
+        return values
+
+    policy = exp.DelayedTruncationPolicy(
+        predict_chunk=predict,
+        stats={},
+        L_ctx=8,
+        L_chunk=4,
+        s=replan,
+        d=0,
+        delay_frames=delay,
+        device="cpu",
+    )
+    slot = exp.Slot(0, 1)
+    state = SimpleNamespace(reset_pending=True, last_action=None)
+    policy._slots[slot] = state
+    policy._ingest = lambda _live, _obs: None
+
+    def context(_live):
+        state.reset_pending = False
+        return object()
+
+    policy._context = context
+    monkeypatch.setattr(exp, "action_vec_to_controller", lambda action: action)
+
+    actual = [float(policy(frame, {slot: {}})[slot][0]) for frame in range(4)]
+
+    assert actual == expected
+
+
+def test_deployment_timing_rejects_an_unavailable_prediction_slice() -> None:
+    with pytest.raises(ValueError, match="must not exceed"):
+        exp._validate_deployment_timing(4, delay_frames=2, replan_interval_frames=3)
 
 
 def test_prefetcher_applies_identity_mask_once_per_batch() -> None:
@@ -607,6 +685,85 @@ def test_eval_rejects_checkpoint_before_loading_when_hash_differs(
         exp.eval_checkpoint(str(checkpoint), expected_checkpoint_sha256="0" * 64)
 
 
+def test_cody_fox_d0r1_protocol_records_the_complete_treatment() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+
+    protocol = exp._eval_protocol(
+        cfg,
+        model,
+        n_matchups=96,
+        checkpoint_sha256="a" * 64,
+        max_parallel=3,
+        fixed_ego_character=exp.melee.Character.FOX,
+        ego_player_id=8092,
+        ego_player_code="IBDW#0",
+        delay_frames=0,
+        replan_interval_frames=1,
+    )
+
+    assert protocol.fixed_ego_character == int(exp.melee.Character.FOX.value)
+    assert protocol.ego_player_id == 8092
+    assert protocol.ego_player_code == "IBDW#0"
+    assert protocol.opponent_identity_conditioned is False
+    assert (protocol.oriented_pairs, protocol.ego_characters, protocol.cpu_characters) == (14, 1, 14)
+    assert (protocol.delay_frames, protocol.replan_interval_frames) == (0, 1)
+
+
+def test_eval_resolves_exact_checkpoint_player_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    cfg = exp.TrainConfig()
+    vocabulary = exp.PlayerVocabulary(("AA#1", "IBDW#0"))
+    encoded = torch.from_numpy(exp.vocabulary_buffer(vocabulary))
+    model = SimpleNamespace(get_buffer=lambda _name: encoded)
+    observed = {}
+    monkeypatch.setattr(exp, "checkpoint_sha256", lambda _path: "a" * 64)
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _path: (model, cfg, {}, {"step": 8191}))
+
+    def evaluate(_model, _stats, _cfg, **kwargs):
+        observed.update(kwargs)
+        return {"scheduled_boots": 96.0, "completed_boots": 96.0, "boots": 96.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", evaluate)
+
+    exp.eval_checkpoint(
+        str(checkpoint),
+        player_code=" IBDW#0 ",
+        fixed_ego_character=exp.melee.Character.FOX,
+        delay_frames=0,
+        replan_interval_frames=1,
+    )
+
+    assert observed["ego_player_id"] == vocabulary.id_for_code("IBDW#0")
+    assert observed["ego_player_code"] == "IBDW#0"
+    assert observed["fixed_ego_character"] is exp.melee.Character.FOX
+    assert (observed["delay_frames"], observed["replan_interval_frames"]) == (0, 1)
+
+
+def test_uploaded_eval_variant_requires_distinct_artifact_and_metric_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    cfg = exp.TrainConfig()
+    vocabulary = exp.PlayerVocabulary(("IBDW#0",))
+    encoded = torch.from_numpy(exp.vocabulary_buffer(vocabulary))
+    model = SimpleNamespace(get_buffer=lambda _name: encoded)
+    monkeypatch.setattr(exp, "checkpoint_sha256", lambda _path: "a" * 64)
+    monkeypatch.setattr(exp, "load_checkpoint", lambda _path: (model, cfg, {}, {"step": 8191}))
+
+    with pytest.raises(ValueError, match="output_name"):
+        exp.eval_checkpoint(str(checkpoint), upload_run="run", player_code="IBDW#0")
+    with pytest.raises(ValueError, match="W&B namespace"):
+        exp.eval_checkpoint(
+            str(checkpoint),
+            output_name="cody",
+            shared_wandb=True,
+            player_code="IBDW#0",
+        )
+
+
 def test_eval_overrides_do_not_mutate_checkpoint_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     checkpoint = tmp_path / "checkpoint.pt"
     checkpoint.write_bytes(b"checkpoint")
@@ -705,3 +862,32 @@ def test_shared_eval_logging_keeps_out_of_order_checkpoint_steps(monkeypatch: py
         },
     ]
     assert finished == [True, True]
+
+
+def test_shared_variant_metrics_use_the_requested_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    logs = []
+
+    class SharedRun:
+        def log(self, values) -> None:
+            logs.append(values)
+
+        def finish(self) -> None:
+            pass
+
+    monkeypatch.setattr(exp.wandb, "init", lambda **_kwargs: SharedRun())
+
+    exp._log_shared_eval_metrics(
+        "train-id",
+        8192,
+        {"boots": 96.0, "net_stock_per_min": 0.25},
+        namespace="eval_cody_fox_d0r1",
+    )
+
+    assert logs == [
+        {
+            "global_step": 8192,
+            "eval/checkpoint_step": 8192,
+            "eval_cody_fox_d0r1/boots": 96.0,
+            "eval_cody_fox_d0r1/net_stock_per_min": 0.25,
+        }
+    ]

@@ -1927,6 +1927,23 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
     return Context(features=features, ctx_pad=ctx_pad, slot_ids=slot_ids, reset=reset)
 
 
+def _condition_ego_player(ctx: Context, player_id: int) -> Context:
+    """Attach one runtime ego identity without specializing the compiled graph."""
+    if "opp_player_id" in ctx.features:
+        raise ValueError("opponent identity must never enter inference")
+    if not isinstance(player_id, int) or isinstance(player_id, bool) or player_id < 0:
+        raise ValueError(f"player_id must be a non-negative integer, got {player_id!r}")
+    reference = ctx.features[next(iter(ctx.features))]
+    features = dict(ctx.features)
+    features["ego_player_id"] = torch.full(
+        reference.shape[:2],
+        player_id,
+        dtype=torch.long,
+        device=reference.device,
+    )
+    return replace(ctx, features=features)
+
+
 class BF16Inference:
     """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
 
@@ -2040,16 +2057,10 @@ class BF16Inference:
             raise ValueError(f"horizon must be {self.cfg.prediction_frames}")
         rows = ctx.ctx_pad.shape[0]
         bucket = self._bucket(rows)
-        padded = canonical_context(_pad_context(ctx, bucket), "base", items=True)
-        padded = Context(
-            features={
-                **padded.features,
-                "ego_player_id": torch.zeros_like(padded.features["stage"]),
-            },
-            ctx_pad=padded.ctx_pad,
-            slot_ids=padded.slot_ids,
-            reset=padded.reset,
-        )
+        padded = _pad_context(ctx, bucket)
+        if "ego_player_id" not in padded.features:
+            padded = _condition_ego_player(padded, MASKED_PLAYER_ID)
+        padded = canonical_context(padded, "base", items=True)
         observed = self.model.codec.quantize(stack_actions(padded.features))
         uniform_parts: list[Tensor] = []
         if streams is not None:
@@ -2081,18 +2092,39 @@ class BF16Inference:
         return self.model.codec.dequantize(indices[:rows])
 
 
+def _validate_deployment_timing(prediction_frames: int, delay_frames: int, replan_interval_frames: int) -> None:
+    if not isinstance(delay_frames, int) or isinstance(delay_frames, bool) or delay_frames < 0:
+        raise ValueError(f"delay_frames must be a non-negative integer, got {delay_frames!r}")
+    if (
+        not isinstance(replan_interval_frames, int)
+        or isinstance(replan_interval_frames, bool)
+        or replan_interval_frames < 1
+    ):
+        raise ValueError(f"replan_interval_frames must be a positive integer, got {replan_interval_frames!r}")
+    if delay_frames + replan_interval_frames > prediction_frames:
+        raise ValueError(
+            "delay_frames + replan_interval_frames must not exceed prediction_frames: "
+            f"{delay_frames} + {replan_interval_frames} > {prediction_frames}"
+        )
+
+
 @dataclass
 class DelayedTruncationPolicy(RecedingHorizon):
-    """D2/R2 controller: discard +1/+2 and execute +3/+4 two frames later."""
+    """Discard delayed predictions and enqueue one execution-stride slice."""
 
+    delay_frames: int = 2
     _queues: dict[Slot, list[np.ndarray]] = dataclass_field(default_factory=dict)
     _phases: dict[Slot, int] = dataclass_field(default_factory=dict)
     neutral_actions: int = 0
     total_actions: int = 0
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _validate_deployment_timing(self.L_chunk, self.delay_frames, self.s)
+
     @property
     def inference_delay(self) -> int:
-        return self.L_chunk - self.s
+        return self.delay_frames
 
     @property
     def runtime_spec(self) -> PolicyRuntimeSpec:
@@ -2120,9 +2152,10 @@ class DelayedTruncationPolicy(RecedingHorizon):
             context = self._context(due)
             plans = self.predict_chunk(context, None)
             if plans.shape[:2] != (len(due), self.L_chunk):
-                raise ValueError("D2/R2 predictor must return four frames per live slot")
+                raise ValueError("predictor returned the wrong batch or prediction length")
             for row, slot in enumerate(due):
-                self._queues[slot].extend(plans[row, self.inference_delay :].astype(np.float32))
+                start = self.inference_delay
+                self._queues[slot].extend(plans[row, start : start + self.s].astype(np.float32))
         actions = {}
         for slot in live:
             action = self._queues[slot].pop(0)
@@ -2146,9 +2179,15 @@ def make_policy(
     decode_seed: int | None = None,
     inference: BF16Inference | None = None,
     telemetry: DecodeTelemetry | None = None,
+    ego_player_id: int = MASKED_PLAYER_ID,
+    delay_frames: int | None = None,
+    replan_interval_frames: int | None = None,
     device: str = DEVICE,
 ) -> DelayedTruncationPolicy:
     horizon = cfg.prediction_frames
+    delay = cfg.delay_frames if delay_frames is None else delay_frames
+    replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
+    _validate_deployment_timing(horizon, delay, replan)
     engine = BF16Inference(model, cfg) if inference is None else inference
     random_streams = None if decode_seed is None else SlotGroupRng(decode_seed, CONTROLLER_GROUP_NAMES)
     generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)
@@ -2158,7 +2197,16 @@ def make_policy(
         if committed is not None:
             raise ValueError("O50 uses truncation only and never conditions on a committed prefix")
         started = time.perf_counter()
-        result = engine.decode(ctx, horizon, streams=random_streams, gen=generator).cpu().numpy()
+        result = (
+            engine.decode(
+                _condition_ego_player(ctx, ego_player_id),
+                horizon,
+                streams=random_streams,
+                gen=generator,
+            )
+            .cpu()
+            .numpy()
+        )
         if telemetry is not None:
             telemetry.record(rows=ctx.ctx_pad.shape[0], horizon=horizon, seconds=time.perf_counter() - started)
         return result
@@ -2168,8 +2216,9 @@ def make_policy(
         stats=stats,
         L_ctx=cfg.arch.L_ctx,
         L_chunk=horizon,
-        s=cfg.replan_interval_frames,
+        s=replan,
         d=0,
+        delay_frames=delay,
         device=device,
         float_dtype=next(model.parameters()).dtype,
         extra=ITEM_COLUMNS,
@@ -2179,6 +2228,10 @@ def make_policy(
 
 @dataclass(frozen=True, slots=True)
 class EvalProtocol:
+    fixed_ego_character: int | None
+    ego_player_id: int
+    ego_player_code: str | None
+    opponent_identity_conditioned: bool
     n_matchups: int
     allowed_cpus: int
     hardware_wave_bucket: int
@@ -2205,8 +2258,14 @@ class EvalProtocol:
     start_retries: int = DEFAULT_START_RETRIES
 
 
-def matchup_diversity(n_matchups: int) -> tuple[int, int, int, str]:
-    matchups = matchups_for_vs_cpu(n_matchups)
+def matchup_diversity(
+    n_matchups: int,
+    fixed_ego_character: melee.Character | None = None,
+) -> tuple[int, int, int, str]:
+    matchups = [
+        (scheduled_ego if fixed_ego_character is None else fixed_ego_character, cpu)
+        for scheduled_ego, cpu in matchups_for_vs_cpu(n_matchups)
+    ]
     schedule = [(int(ego.value), int(cpu.value)) for ego, cpu in matchups]
     sha = hashlib.sha256(json.dumps(schedule, separators=(",", ":")).encode()).hexdigest()
     return len(set(schedule)), len({ego for ego, _ in schedule}), len({cpu for _, cpu in schedule}), sha
@@ -2232,9 +2291,24 @@ def _eval_protocol(
     inference_mode: str | None = None,
     inference_compile_mode: str = "reduce-overhead",
     inference_attention_backend: str = "dense_sdpa",
+    fixed_ego_character: melee.Character | None = None,
+    ego_player_id: int = MASKED_PLAYER_ID,
+    ego_player_code: str | None = None,
+    delay_frames: int | None = None,
+    replan_interval_frames: int | None = None,
 ) -> EvalProtocol:
-    pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
+    if fixed_ego_character is None:
+        pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
+    else:
+        pairs, egos, cpus, schedule_sha = matchup_diversity(n_matchups, fixed_ego_character)
+    delay = cfg.delay_frames if delay_frames is None else delay_frames
+    replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
+    _validate_deployment_timing(cfg.prediction_frames, delay, replan)
     return EvalProtocol(
+        fixed_ego_character=None if fixed_ego_character is None else int(fixed_ego_character.value),
+        ego_player_id=ego_player_id,
+        ego_player_code=ego_player_code,
+        opponent_identity_conditioned=False,
         n_matchups=n_matchups,
         allowed_cpus=usable_cpus(),
         hardware_wave_bucket=automatic_parallelism(),
@@ -2249,8 +2323,8 @@ def _eval_protocol(
         ego_characters=egos,
         cpu_characters=cpus,
         prediction_frames=cfg.prediction_frames,
-        delay_frames=cfg.delay_frames,
-        replan_interval_frames=cfg.replan_interval_frames,
+        delay_frames=delay,
+        replan_interval_frames=replan,
         dtype=str(next(model.parameters()).dtype),
         inference_mode=cfg.inference_mode if inference_mode is None else inference_mode,
         inference_compile_mode=inference_compile_mode,
@@ -2289,6 +2363,11 @@ def eval_vs_cpu(
     inference: BF16Inference | None = None,
     eager: bool = False,
     max_parallel: int | None = None,
+    fixed_ego_character: melee.Character | None = None,
+    ego_player_id: int = MASKED_PLAYER_ID,
+    ego_player_code: str | None = None,
+    delay_frames: int | None = None,
+    replan_interval_frames: int | None = None,
 ) -> dict[str, float]:
     horizon = cfg.prediction_frames
     inference_mode = "eager" if eager else cfg.inference_mode
@@ -2313,6 +2392,11 @@ def eval_vs_cpu(
         inference_mode=inference_mode,
         inference_compile_mode=inference.compile_mode,
         inference_attention_backend=inference.attention_backend,
+        fixed_ego_character=fixed_ego_character,
+        ego_player_id=ego_player_id,
+        ego_player_code=ego_player_code,
+        delay_frames=delay_frames,
+        replan_interval_frames=replan_interval_frames,
     )
     if next(model.parameters()).device.type == "cuda" and (
         protocol.inference_mode != "compiled" or not inference.compiled
@@ -2330,6 +2414,9 @@ def eval_vs_cpu(
             decode_seed=protocol.seed + next(policy_index),
             inference=inference,
             telemetry=telemetry,
+            ego_player_id=protocol.ego_player_id,
+            delay_frames=protocol.delay_frames,
+            replan_interval_frames=protocol.replan_interval_frames,
         )
         policies.append(policy)
         return policy
@@ -2351,6 +2438,7 @@ def eval_vs_cpu(
                 ego_port=protocol.ego_port,
                 seed_stage=melee.Stage(protocol.seed_stage),
                 start_retries=protocol.start_retries,
+                fixed_ego_character=fixed_ego_character,
             )
     finally:
         model.train(was_training)
@@ -2362,8 +2450,11 @@ def eval_vs_cpu(
     actions = sum(policy.total_actions for policy in policies)
     metrics["neutral_action_fraction"] = neutral / max(actions, 1)
     metrics["prediction_frames"] = float(cfg.prediction_frames)
-    metrics["delay_frames"] = float(cfg.delay_frames)
-    metrics["replan_interval_frames"] = float(cfg.replan_interval_frames)
+    metrics["delay_frames"] = float(protocol.delay_frames)
+    metrics["replan_interval_frames"] = float(protocol.replan_interval_frames)
+    metrics["ego_player_id"] = float(protocol.ego_player_id)
+    if protocol.fixed_ego_character is not None:
+        metrics["fixed_ego_character"] = float(protocol.fixed_ego_character)
     metrics.update(telemetry.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)
     return metrics
@@ -3896,14 +3987,22 @@ def _upload_eval_evidence(run_name: str, replay_dir: Path) -> None:
     uploader.close()
 
 
-def _log_shared_eval_metrics(wandb_id: str, update: int, values: dict[str, float]) -> None:
+def _log_shared_eval_metrics(
+    wandb_id: str,
+    update: int,
+    values: dict[str, float],
+    *,
+    namespace: str = "eval",
+) -> None:
     """Log one evaluation from a non-primary writer on the training run."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_/-]*", namespace):
+        raise ValueError(f"invalid W&B metric namespace: {namespace!r}")
     run = wandb.init(
         project="hal",
         id=wandb_id,
         settings=wandb.Settings(
             mode="shared",
-            x_label=f"eval96-step-{update:07d}",
+            x_label=f"{namespace.replace('/', '-')}-step-{update:07d}",
             x_primary=False,
             x_update_finish_state=False,
             x_disable_stats=True,
@@ -3912,7 +4011,7 @@ def _log_shared_eval_metrics(wandb_id: str, update: int, values: dict[str, float
     if run is None:
         raise RuntimeError("W&B shared run initialization returned no run")
     try:
-        metrics = {f"eval/{name}": value for name, value in _eval_wandb_metrics(values).items()}
+        metrics = {f"{namespace}/{name}": value for name, value in _eval_wandb_metrics(values).items()}
         run.log({"global_step": update, "eval/checkpoint_step": update, **metrics})
     finally:
         run.finish()
@@ -3928,6 +4027,11 @@ def eval_checkpoint(
     upload_run: str | None = None,
     shared_wandb: bool = False,
     expected_checkpoint_sha256: str | None = None,
+    player_code: str | None = None,
+    fixed_ego_character: melee.Character | None = None,
+    delay_frames: int | None = None,
+    replan_interval_frames: int | None = None,
+    wandb_namespace: str = "eval",
 ) -> dict[str, float]:
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
@@ -3936,7 +4040,27 @@ def eval_checkpoint(
         )
     model, cfg, stats, state = load_checkpoint(path)
     validate_config(cfg)
+    if player_code is None:
+        ego_player_id = MASKED_PLAYER_ID
+        ego_player_code = None
+    else:
+        encoded = model.get_buffer("player_code_bytes")
+        if not encoded.numel():
+            raise ValueError("checkpoint has no embedded identity vocabulary")
+        vocabulary = PlayerVocabulary(decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
+        ego_player_id = vocabulary.id_for_code(player_code)
+        ego_player_code = player_code.strip()
     horizon = cfg.prediction_frames
+    delay = cfg.delay_frames if delay_frames is None else delay_frames
+    replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
+    _validate_deployment_timing(horizon, delay, replan)
+    is_variant = any(
+        value is not None for value in (player_code, fixed_ego_character, delay_frames, replan_interval_frames)
+    )
+    if is_variant and upload_run is not None and output_name is None:
+        raise ValueError("evaluation overrides uploaded to a run require an explicit output_name")
+    if is_variant and shared_wandb and wandb_namespace == "eval":
+        raise ValueError("evaluation overrides require a distinct W&B namespace")
     update = int(state["step"]) + 1
     if upload_run is not None:
         default_name = f"eval_step_{update:07d}_s{horizon}"
@@ -3954,6 +4078,11 @@ def eval_checkpoint(
         checkpoint_sha256=actual_checkpoint_sha256,
         eager=eager,
         max_parallel=max_parallel,
+        fixed_ego_character=fixed_ego_character,
+        ego_player_id=ego_player_id,
+        ego_player_code=ego_player_code,
+        delay_frames=delay,
+        replan_interval_frames=replan,
     )
     require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
     if upload_run is not None:
@@ -3962,8 +4091,12 @@ def eval_checkpoint(
         wandb_id = state.get("wandb_id")
         if not isinstance(wandb_id, str):
             raise RuntimeError("checkpoint has no W&B run id for shared logging")
-        _log_shared_eval_metrics(wandb_id, update, values)
-    print(f"[eval] step={update} horizon={horizon}: {values}", flush=True)
+        _log_shared_eval_metrics(wandb_id, update, values, namespace=wandb_namespace)
+    print(
+        f"[eval] step={update} horizon={horizon} ego_player={ego_player_code!r} "
+        f"fixed_ego_character={None if fixed_ego_character is None else fixed_ego_character.name}: {values}",
+        flush=True,
+    )
     return values
 
 
@@ -4006,11 +4139,26 @@ class EvalArgs:
     output_name: str | None = None
     shared_wandb: bool = False
     expected_checkpoint_sha256: str | None = None
+    player_code: str | None = None
+    fixed_ego_character: str | None = None
+    delay_frames: int | None = None
+    replan_interval_frames: int | None = None
+    wandb_namespace: str = "eval"
 
 
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")] | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
 )
+
+
+def _parse_character(name: str | None) -> melee.Character | None:
+    if name is None:
+        return None
+    normalized = name.strip().upper()
+    try:
+        return melee.Character[normalized]
+    except KeyError as error:
+        raise SystemExit(f"unknown fixed ego character: {name!r}") from error
 
 
 def main(args: Command) -> None:
@@ -4025,6 +4173,11 @@ def main(args: Command) -> None:
             upload_run=args.run,
             shared_wandb=args.shared_wandb,
             expected_checkpoint_sha256=args.expected_checkpoint_sha256,
+            player_code=args.player_code,
+            fixed_ego_character=_parse_character(args.fixed_ego_character),
+            delay_frames=args.delay_frames,
+            replan_interval_frames=args.replan_interval_frames,
+            wandb_namespace=args.wandb_namespace,
         )
         return
     resume_run = resume_state = None
