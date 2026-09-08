@@ -421,6 +421,25 @@ def test_half_muon_fork_keeps_parent_wandb_id_only_as_lineage(
     assert observed["kwargs"]["fork_from_parent"] is True
 
 
+def test_diagnostic_scalars_move_to_cpu_before_stacking() -> None:
+    class DeviceScalar:
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def detach(self) -> DeviceScalar:
+            return self
+
+        def float(self) -> DeviceScalar:
+            return self
+
+        def cpu(self) -> torch.Tensor:
+            return torch.tensor(self.value)
+
+    metrics = {"cpu": DeviceScalar(1.0), "cuda": DeviceScalar(2.0)}
+
+    assert exp._download_scalar_metrics(metrics, 24_576) == {"cpu": 1.0, "cuda": 2.0}
+
+
 def test_model_tag_names_the_actual_head_architecture() -> None:
     tag = exp.model_tag(exp.TrainConfig())
     assert "nonlinear-head-trunk-skip" in tag

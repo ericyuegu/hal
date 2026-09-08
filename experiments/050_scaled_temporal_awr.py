@@ -2236,7 +2236,7 @@ def _download_scalar_metrics(metrics: dict[str, Tensor], update: int) -> dict[st
     if not metrics:
         return {}
     names = tuple(metrics)
-    values = torch.stack([metrics[name].detach().float() for name in names]).cpu()
+    values = torch.stack([metrics[name].detach().float().cpu() for name in names])
     if values.ndim != 1 or not torch.isfinite(values).all():
         raise FloatingPointError(f"update {update}: diagnostics contain a non-finite or non-scalar value")
     return {name: float(value) for name, value in zip(names, values, strict=True)}
