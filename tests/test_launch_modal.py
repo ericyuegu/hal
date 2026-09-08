@@ -213,6 +213,16 @@ def test_resume_as_tracks_destination_run_name() -> None:
             "--resume-checkpoint=branch_D2p29.pt",
             "--resume-as=destination-run",
         ),
+        (
+            "--resume",
+            "source-run",
+            "--resume-checkpoint",
+            "checkpoints/step-0024576.pt",
+            "--resume-as",
+            "destination-run",
+            "--resume-muon-lr-multiplier",
+            "0.5",
+        ),
     ],
 )
 def test_resume_as_retry_resumes_only_destination(fork_flags: tuple[str, ...]) -> None:

@@ -159,15 +159,23 @@ from hal.training.player_identity import vocabulary_buffer
 from hal.training.runs import make_run_name
 from hal.training.runs import setup_run_dir
 from hal.training.system_metrics import HostMetricsSampler
+from hal.training.trunk import Block as TrunkBlock
 from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 from hal.training.trunk import apply_rotary_emb
+from hal.training.trunk import dense_mask
 from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v4"
+_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v5"
+_LEGACY_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v4"
+_HALF_MUON_PARENT_WANDB_ID: Final[str] = "p1fyyp1z"
+_HALF_MUON_PARENT_UPDATE: Final[int] = 24_576
+_HALF_MUON_PARENT_CHECKPOINT: Final[str] = "checkpoints/step-0024576.pt"
+_HALF_MUON_MULTIPLIER: Final[float] = 0.5
+_HALF_MUON_RUN_NAME: Final[str] = "o50-p1fyyp1z-u24576-muon-half"
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 
 
@@ -330,6 +338,7 @@ class TrainConfig:
     eval_seed: int = 0
     batch_size: int = 512
     muon_lr: float = 0.014
+    muon_lr_multiplier: Annotated[float, tyro.conf.Suppress] = 1.0
     muon_weight_decay: float = 1e-4
     adam_lr: float = 4.25e-4
     adam_weight_decay: float = 1e-4
@@ -364,6 +373,11 @@ class TrainConfig:
     cache_metrics_interval_s: float = 30.0
     phase_timing_every: int = 256
     identity_dropout: float = 0.10
+    continuation_diagnostics: Annotated[bool, tyro.conf.Suppress] = False
+    parent_run_name: Annotated[str | None, tyro.conf.Suppress] = None
+    parent_checkpoint_name: Annotated[str | None, tyro.conf.Suppress] = None
+    parent_checkpoint_sha256: Annotated[str | None, tyro.conf.Suppress] = None
+    parent_wandb_id: Annotated[str | None, tyro.conf.Suppress] = None
     player_sidecar_local: str = "data/processed/player-identity-v1/professional-code-v1.jsonl.gz"
     player_sidecar_sha256: str = "54ccf8a2497fe240313117297ca2ea31158e08db2cc53c67e7aa46853a8dac1c"
     player_vocab_sha256: str = "c67c97c995ad033ea7f5b2223efce5b061394566439f091ff6e7aaa6a9d1cfd6"
@@ -530,12 +544,17 @@ def validate_config(cfg: TrainConfig) -> None:
             f"policy_world_schema_version {cfg.policy_world_schema_version} != {POLICY_WORLD_SCHEMA_VERSION}"
         )
     if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
-        raise ValueError("O50 v4 requires all 44 policy-world-v8 sources")
+        raise ValueError("O50 requires all 44 policy-world-v8 sources")
     if cfg.depth_alpha != 0.5 or cfg.hidden_std_multiplier != 0.5 or cfg.readout_init != "mup-normal":
-        raise ValueError("O50 v4 uses O51's selected depth and initialization parameterization")
+        raise ValueError("O50 uses O51's selected depth and initialization parameterization")
     if (cfg.adam_beta1, cfg.adam_beta2, cfg.adam_eps) != (*cfg.base_adam_betas, cfg.base_adam_eps):
-        raise ValueError("O50 v4 scales the fixed base Adam betas and epsilon")
-    for name, value in (("muon_lr", cfg.muon_lr), ("adam_lr", cfg.adam_lr), ("adam_eps", cfg.adam_eps)):
+        raise ValueError("O50 scales the fixed base Adam betas and epsilon")
+    for name, value in (
+        ("muon_lr", cfg.muon_lr),
+        ("muon_lr_multiplier", cfg.muon_lr_multiplier),
+        ("adam_lr", cfg.adam_lr),
+        ("adam_eps", cfg.adam_eps),
+    ):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
     for name, value in (
@@ -544,6 +563,25 @@ def validate_config(cfg: TrainConfig) -> None:
     ):
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be finite and non-negative")
+    lineage = (
+        cfg.parent_run_name,
+        cfg.parent_checkpoint_name,
+        cfg.parent_checkpoint_sha256,
+        cfg.parent_wandb_id,
+    )
+    if cfg.muon_lr_multiplier == 1.0:
+        if cfg.continuation_diagnostics or any(value is not None for value in lineage):
+            raise ValueError("continuation diagnostics and lineage require a Muon LR treatment")
+    elif (
+        cfg.muon_lr_multiplier != _HALF_MUON_MULTIPLIER
+        or not cfg.continuation_diagnostics
+        or cfg.parent_checkpoint_name != _HALF_MUON_PARENT_CHECKPOINT
+        or cfg.parent_wandb_id != _HALF_MUON_PARENT_WANDB_ID
+        or cfg.parent_run_name is None
+        or cfg.parent_checkpoint_sha256 is None
+        or re.fullmatch(r"[0-9a-f]{64}", cfg.parent_checkpoint_sha256) is None
+    ):
+        raise ValueError("the only O50 continuation treatment is the recorded half-Muon fork from update 24,576")
 
 
 def proxy_config() -> TrainConfig:
@@ -1894,6 +1932,316 @@ def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dic
     }
 
 
+def _slice_train_batch(batch: TrainBatch, rows: int) -> TrainBatch:
+    if rows < 1 or rows > batch.context.batch:
+        raise ValueError(f"cannot take {rows} rows from a batch of {batch.context.batch}")
+    context = batch.context
+    return TrainBatch(
+        context=Context(
+            features={name: value[:rows].detach().cpu().clone() for name, value in context.features.items()},
+            ctx_pad=context.ctx_pad[:rows].detach().cpu().clone(),
+        ),
+        target=batch.target[:rows].detach().cpu().clone(),
+        replay_ids=None if batch.replay_ids is None else batch.replay_ids[:rows],
+    )
+
+
+def _train_batch_state(batch: TrainBatch) -> dict[str, object]:
+    if batch.context.slot_ids is not None or batch.context.reset is not None:
+        raise ValueError("the fixed diagnostic batch must not contain closed-loop metadata")
+    return {
+        "features": {name: value.detach().cpu().contiguous() for name, value in batch.context.features.items()},
+        "ctx_pad": batch.context.ctx_pad.detach().cpu().contiguous(),
+        "target": batch.target.detach().cpu().contiguous(),
+        "replay_ids": batch.replay_ids,
+    }
+
+
+def _train_batch_from_state(state: dict[str, object]) -> TrainBatch:
+    if set(state) != {"features", "ctx_pad", "target", "replay_ids"}:
+        raise ValueError("fixed diagnostic batch state has the wrong fields")
+    features = state["features"]
+    ctx_pad = state["ctx_pad"]
+    target = state["target"]
+    replay_ids = state["replay_ids"]
+    if not isinstance(features, dict) or not all(
+        isinstance(name, str) and isinstance(value, Tensor) for name, value in features.items()
+    ):
+        raise TypeError("fixed diagnostic features must be tensors keyed by name")
+    if not isinstance(ctx_pad, Tensor) or not isinstance(target, Tensor):
+        raise TypeError("fixed diagnostic context padding and target must be tensors")
+    if replay_ids is not None and not (
+        isinstance(replay_ids, tuple) and all(isinstance(replay_id, str) for replay_id in replay_ids)
+    ):
+        raise TypeError("fixed diagnostic replay ids must be a tuple of strings or None")
+    cpu_features = {name: value.detach().cpu() for name, value in cast(dict[str, Tensor], features).items()}
+    return TrainBatch(
+        Context(cpu_features, ctx_pad.detach().cpu()),
+        target.detach().cpu(),
+        cast(tuple[str, ...] | None, replay_ids),
+    )
+
+
+def _train_batch_sha256(batch: TrainBatch) -> str:
+    digest = hashlib.sha256()
+    state = _train_batch_state(batch)
+    features = cast(dict[str, Tensor], state["features"])
+    tensors = [(f"feature/{name}", features[name]) for name in sorted(features)]
+    tensors.extend((("ctx_pad", cast(Tensor, state["ctx_pad"])), ("target", cast(Tensor, state["target"]))))
+    for name, tensor in tensors:
+        digest.update(name.encode())
+        digest.update(str(tensor.dtype).encode())
+        digest.update(json.dumps(tuple(tensor.shape)).encode())
+        digest.update(tensor.numpy().tobytes())
+    digest.update(json.dumps(state["replay_ids"], separators=(",", ":")).encode())
+    return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def _capture_linear_outputs(modules: Iterable[nn.Linear]) -> Iterator[list[Tensor]]:
+    outputs: list[Tensor] = []
+    handles = []
+
+    def capture(_module: nn.Module, _inputs: tuple[Tensor, ...], output: Tensor) -> None:
+        outputs.append(output.detach())
+
+    try:
+        for module in modules:
+            handles.append(module.register_forward_hook(capture))
+        yield outputs
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+def _normalized_attention_entropy(qkv: Tensor, n_heads: int, mask: Tensor, rotary: Rotary) -> tuple[Tensor, Tensor]:
+    batch, length, fused_width = qkv.shape
+    d_model = fused_width // 3
+    head_dim = d_model // n_heads
+    q, k, _v = qkv.split(d_model, dim=-1)
+    q = q.view(batch, length, n_heads, head_dim)
+    k = k.view(batch, length, n_heads, head_dim)
+    cos, sin = rotary(q)
+    q = apply_rotary_emb(q, cos, sin).transpose(1, 2).float()
+    k = apply_rotary_emb(k, cos, sin).transpose(1, 2).float()
+    scores = (q @ k.transpose(-2, -1)) * (head_dim**-0.5)
+    keep = mask.expand(batch, 1, length, length)
+    log_probabilities = F.log_softmax(scores.masked_fill(~keep, -torch.inf), dim=-1)
+    probabilities = log_probabilities.exp()
+    entropy = -(probabilities * log_probabilities.masked_fill(~keep, 0)).sum(dim=-1)
+    legal_counts = keep.sum(dim=-1).expand(batch, n_heads, length)
+    valid = legal_counts > 1
+    normalized = entropy / legal_counts.clamp_min(2).log()
+    head_denominator = valid.sum(dim=(0, 2)).clamp_min(1)
+    head_means = normalized.masked_fill(~valid, 0).sum(dim=(0, 2)) / head_denominator
+    return normalized[valid].mean(), head_means.min()
+
+
+@torch.no_grad()
+def fixed_policy_diagnostics(
+    model: GPT,
+    batch: TrainBatch,
+    cfg: TrainConfig,
+) -> tuple[dict[str, Tensor], dict[str, Tensor], Tensor]:
+    """Return fixed-batch log probabilities and stability diagnostics."""
+    was_training = model.training
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_states = torch.cuda.get_rng_state_all() if next(model.parameters()).device.type == "cuda" else None
+    device_batch = batch.to(next(model.parameters()).device)
+    trunk_blocks = [cast(TrunkBlock, block) for block in model.trunk.blocks]
+    trunk_modules = [block.attn.c_attn for block in trunk_blocks]
+    temporal_modules = [cast(TemporalBlock, block).qkv for block in model.temporal.blocks]
+    try:
+        model.eval()
+        with (
+            _capture_linear_outputs(trunk_modules) as trunk_qkv,
+            _capture_linear_outputs(temporal_modules) as temporal_qkv,
+        ):
+            history, targets, valid = prepared_targets(model, device_batch)
+            with amp_context(cfg, device_batch.target.device):
+                hidden = model.forward_dense(device_batch.context.features, device_batch.context.ctx_pad)
+                hidden = hidden[:, cfg.arch.direct_loss_start :]
+                logits = model.temporal.teacher_forced_logits_by_group(hidden, history, targets)
+    finally:
+        model.train(was_training)
+        torch.set_rng_state(cpu_rng_state)
+        if cuda_rng_states is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_states)
+    if len(trunk_qkv) != cfg.arch.n_layers or len(temporal_qkv) != cfg.arch.temporal_layers:
+        raise RuntimeError("fixed diagnostics did not capture every attention layer")
+
+    metrics: dict[str, Tensor] = {}
+    centered_values: list[Tensor] = []
+    log_probabilities: dict[str, Tensor] = {}
+    for name, group_logits in logits.items():
+        float_logits = group_logits.detach().float()
+        legal = torch.isfinite(float_logits)
+        legal_count = legal.sum(dim=-1, keepdim=True)
+        if not bool((legal_count > 0).all()):
+            raise RuntimeError(f"fixed diagnostic batch has no legal {name} class")
+        legal_sum = float_logits.masked_fill(~legal, 0).sum(dim=-1, keepdim=True)
+        centered = (float_logits - legal_sum / legal_count).masked_fill(~legal, 0)
+        selected = centered[legal]
+        centered_values.append(selected)
+        prefix = f"diagnostics/fixed_logits/{name}"
+        metrics[f"{prefix}/rms"] = selected.square().mean().sqrt()
+        metrics[f"{prefix}/abs_p999"] = _sampled_quantile(selected, 99.9, absolute=True)
+        log_probabilities[name] = F.log_softmax(float_logits, dim=-1).cpu()
+    all_centered = torch.cat(centered_values)
+    metrics["diagnostics/fixed_logits/all/rms"] = all_centered.square().mean().sqrt()
+    metrics["diagnostics/fixed_logits/all/abs_p999"] = _sampled_quantile(all_centered, 99.9, absolute=True)
+
+    trunk_mask = dense_mask(device_batch.context.ctx_pad, cfg.arch.L_ctx, cfg.arch.attn_window)
+    trunk_means: list[Tensor] = []
+    for index, (qkv, block) in enumerate(zip(trunk_qkv, trunk_blocks, strict=True)):
+        mean, minimum = _normalized_attention_entropy(qkv, cfg.arch.n_heads, trunk_mask, block.attn.rotary)
+        metrics[f"diagnostics/attention/trunk/layer_{index:02d}/mean"] = mean
+        metrics[f"diagnostics/attention/trunk/layer_{index:02d}/min_head_mean"] = minimum
+        trunk_means.append(mean)
+    temporal_mask = torch.ones(
+        (1, 1, len(cfg.arch.head_offsets), len(cfg.arch.head_offsets)),
+        dtype=torch.bool,
+        device=device_batch.target.device,
+    ).tril()
+    temporal_means: list[Tensor] = []
+    for index, (qkv, block) in enumerate(zip(temporal_qkv, model.temporal.blocks, strict=True)):
+        temporal_block = cast(TemporalBlock, block)
+        mean, minimum = _normalized_attention_entropy(
+            qkv,
+            cfg.arch.temporal_heads,
+            temporal_mask,
+            temporal_block.rotary,
+        )
+        metrics[f"diagnostics/attention/temporal/layer_{index:02d}/mean"] = mean
+        metrics[f"diagnostics/attention/temporal/layer_{index:02d}/min_head_mean"] = minimum
+        temporal_means.append(mean)
+    metrics["diagnostics/attention/trunk/mean"] = torch.stack(trunk_means).mean()
+    metrics["diagnostics/attention/temporal/mean"] = torch.stack(temporal_means).mean()
+    return log_probabilities, metrics, valid.detach().cpu()
+
+
+def _fixed_policy_kl(
+    reference: dict[str, Tensor],
+    current: dict[str, Tensor],
+    valid: Tensor,
+    namespace: str,
+) -> dict[str, Tensor]:
+    metrics: dict[str, Tensor] = {}
+    total = torch.zeros(())
+    for name in CONTROLLER_GROUP_NAMES:
+        reference_log = reference[name].float()
+        current_log = current[name].float()
+        if reference_log.shape != current_log.shape or not torch.equal(
+            torch.isfinite(reference_log), torch.isfinite(current_log)
+        ):
+            raise ValueError(f"fixed policy support changed for {name}")
+        legal = torch.isfinite(reference_log)
+        terms = torch.where(legal, reference_log.exp() * (reference_log - current_log), 0)
+        row_kl = terms.sum(dim=-1)
+        selected = row_kl[valid[..., None].expand_as(row_kl)]
+        value = selected.mean()
+        metrics[f"diagnostics/fixed_policy_kl/{namespace}/{name}_nats"] = value
+        total += value
+    metrics[f"diagnostics/fixed_policy_kl/{namespace}/total_nats"] = total
+    return metrics
+
+
+@dataclass(slots=True)
+class FixedDiagnosticTracker:
+    batch: TrainBatch
+    batch_sha256: str
+    baseline_log_probabilities: dict[str, Tensor]
+    previous_log_probabilities: dict[str, Tensor]
+    previous_update: int
+
+    @classmethod
+    def create(
+        cls,
+        model: GPT,
+        validation: list[TrainBatch],
+        cfg: TrainConfig,
+        update: int,
+    ) -> tuple[FixedDiagnosticTracker, dict[str, Tensor]]:
+        if not validation or validation[0].context.batch < 8:
+            raise RuntimeError("validation does not contain the eight-row fixed diagnostic batch")
+        batch = _slice_train_batch(validation[0], 8)
+        if bool((batch.context.ctx_pad != 0).any()):
+            raise RuntimeError("the fixed diagnostic batch must have complete contexts")
+        log_probabilities, metrics, valid = fixed_policy_diagnostics(model, batch, cfg)
+        metrics.update(_fixed_policy_kl(log_probabilities, log_probabilities, valid, "from_parent"))
+        metrics.update(_fixed_policy_kl(log_probabilities, log_probabilities, valid, "from_previous"))
+        return (
+            cls(batch, _train_batch_sha256(batch), log_probabilities, log_probabilities, update),
+            metrics,
+        )
+
+    @classmethod
+    def from_state(cls, state: dict[str, object]) -> FixedDiagnosticTracker:
+        expected = {
+            "batch",
+            "batch_sha256",
+            "baseline_log_probabilities",
+            "previous_log_probabilities",
+            "previous_update",
+        }
+        if set(state) != expected:
+            raise ValueError("fixed diagnostic state has the wrong fields")
+        batch_state = state["batch"]
+        if not isinstance(batch_state, dict):
+            raise TypeError("fixed diagnostic batch state must be a mapping")
+        batch = _train_batch_from_state(cast(dict[str, object], batch_state))
+        batch_sha256 = state["batch_sha256"]
+        if not isinstance(batch_sha256, str) or batch_sha256 != _train_batch_sha256(batch):
+            raise ValueError("fixed diagnostic batch hash does not match its tensors")
+        baseline = state["baseline_log_probabilities"]
+        previous = state["previous_log_probabilities"]
+        previous_update = state["previous_update"]
+        if not isinstance(baseline, dict) or not isinstance(previous, dict):
+            raise TypeError("fixed diagnostic policy references must be mappings")
+        if set(baseline) != set(CONTROLLER_GROUP_NAMES) or set(previous) != set(CONTROLLER_GROUP_NAMES):
+            raise ValueError("fixed diagnostic policy references have the wrong controller groups")
+        if not all(isinstance(value, Tensor) for value in (*baseline.values(), *previous.values())):
+            raise TypeError("fixed diagnostic policy references must be tensors")
+        if not isinstance(previous_update, int) or isinstance(previous_update, bool):
+            raise TypeError("fixed diagnostic previous update must be an integer")
+        return cls(
+            batch,
+            batch_sha256,
+            {name: value.detach().cpu() for name, value in cast(dict[str, Tensor], baseline).items()},
+            {name: value.detach().cpu() for name, value in cast(dict[str, Tensor], previous).items()},
+            previous_update,
+        )
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "batch": _train_batch_state(self.batch),
+            "batch_sha256": self.batch_sha256,
+            "baseline_log_probabilities": self.baseline_log_probabilities,
+            "previous_log_probabilities": self.previous_log_probabilities,
+            "previous_update": self.previous_update,
+        }
+
+    def measure(self, model: GPT, cfg: TrainConfig, update: int) -> dict[str, Tensor]:
+        if update <= self.previous_update:
+            raise ValueError(f"fixed diagnostic update {update} is not after {self.previous_update}")
+        current, metrics, valid = fixed_policy_diagnostics(model, self.batch, cfg)
+        metrics.update(_fixed_policy_kl(self.baseline_log_probabilities, current, valid, "from_parent"))
+        metrics.update(_fixed_policy_kl(self.previous_log_probabilities, current, valid, "from_previous"))
+        self.previous_log_probabilities = current
+        self.previous_update = update
+        return metrics
+
+
+def _download_scalar_metrics(metrics: dict[str, Tensor], update: int) -> dict[str, float]:
+    if not metrics:
+        return {}
+    names = tuple(metrics)
+    values = torch.stack([metrics[name].detach().float() for name in names]).cpu()
+    if values.ndim != 1 or not torch.isfinite(values).all():
+        raise FloatingPointError(f"update {update}: diagnostics contain a non-finite or non-scalar value")
+    return {name: float(value) for name, value in zip(names, values, strict=True)}
+
+
 def _pad_context(ctx: Context, bucket: int) -> Context:
     rows = ctx.ctx_pad.shape[0]
     if rows == bucket:
@@ -2661,7 +3009,7 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
 
 def _role_lr(role: OptimizerRole, cfg: TrainConfig) -> float:
     if role.optimizer == "muon":
-        return cfg.muon_lr
+        return cfg.muon_lr * cfg.muon_lr_multiplier
     batch_multiplier, duration_multiplier = scaling_multipliers(cfg)
     lr = cfg.adam_lr * math.sqrt(batch_multiplier / duration_multiplier)
     return lr / role.fan_in_multiplier if role.lr_kind == "output" else lr
@@ -2709,6 +3057,34 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
     return SingleDeviceMuonWithAuxAdam(groups)
 
 
+def rebase_restored_muon_schedule(
+    optimizer: SingleDeviceMuonWithAuxAdam,
+    scheduler: LambdaLR,
+    multiplier: float,
+) -> None:
+    """Apply a one-time LR treatment to a restored Muon schedule."""
+    if multiplier != _HALF_MUON_MULTIPLIER:
+        raise ValueError(f"the restored Muon multiplier must be {_HALF_MUON_MULTIPLIER}")
+    scheduler_state = scheduler.state_dict()
+    base_lrs = list(scheduler_state["base_lrs"])
+    last_lrs = list(scheduler_state["_last_lr"])
+    groups = optimizer.param_groups
+    if len(groups) != len(base_lrs) or len(groups) != len(last_lrs):
+        raise ValueError("optimizer and scheduler group counts differ")
+    for index, group in enumerate(groups):
+        if not group["use_muon"]:
+            continue
+        group["lr"] = float(group["lr"]) * multiplier
+        if "initial_lr" not in group:
+            raise ValueError("restored optimizer group has no initial_lr")
+        group["initial_lr"] = float(group["initial_lr"]) * multiplier
+        base_lrs[index] *= multiplier
+        last_lrs[index] *= multiplier
+    scheduler_state["base_lrs"] = base_lrs
+    scheduler_state["_last_lr"] = last_lrs
+    scheduler.load_state_dict(scheduler_state)
+
+
 def _button_path_parameters(model: GPT) -> dict[str, nn.Parameter]:
     """Return the action-path matrices monitored before clipping."""
     button_head = cast(NonlinearActionHead, model.temporal.outputs["buttons"])
@@ -2729,7 +3105,8 @@ def _button_gradient_abs_max(model: GPT) -> Tensor:
     return torch.stack(maxima).amax()
 
 
-def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
+def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
+    """Partition every parameter by the model subsystem that owns it."""
     all_parameters = tuple(model.parameters())
     trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
     head_modules = nn.ModuleList([model.temporal.outputs, model.temporal.trunk_outputs])
@@ -2737,18 +3114,26 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     temporal_ids = {id(parameter) for parameter in model.temporal.parameters() if id(parameter) not in head_ids}
     value_ids = {id(parameter) for parameter in model.value_head.parameters()}
     other_ids = {id(parameter) for parameter in all_parameters} - trunk_ids - temporal_ids - head_ids - value_ids
-    partitions = {
+    partition_ids = {
         "trunk": trunk_ids,
         "temporal_decoder": temporal_ids,
         "group_heads": head_ids,
         "value_head": value_ids,
         "other": other_ids,
     }
-    counts = {
-        name: sum(parameter.numel() for parameter in all_parameters if id(parameter) in parameter_ids)
-        for name, parameter_ids in partitions.items()
+    partitions = {
+        name: tuple(parameter for parameter in all_parameters if id(parameter) in parameter_ids)
+        for name, parameter_ids in partition_ids.items()
     }
-    counts["total"] = sum(parameter.numel() for parameter in all_parameters)
+    if sum(len(parameters) for parameters in partitions.values()) != len(all_parameters):
+        raise RuntimeError("parameter subsystem partition is incomplete")
+    return partitions
+
+
+def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
+    partitions = parameter_subsystems(model)
+    counts = {name: sum(parameter.numel() for parameter in parameters) for name, parameters in partitions.items()}
+    counts["total"] = sum(parameter.numel() for parameter in model.parameters())
     if sum(value for name, value in counts.items() if name != "total") != counts["total"]:
         raise RuntimeError("parameter subsystem partition is incomplete")
     try:
@@ -2758,6 +3143,122 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     if counts != expected:
         raise RuntimeError(f"parameter contract changed: {counts} != {expected}")
     return counts
+
+
+@dataclass(slots=True)
+class OptimizerStepDiagnostics:
+    """Measure sampled gradients and exact parameter deltas by subsystem."""
+
+    buckets: dict[tuple[str, str], tuple[nn.Parameter, ...]]
+    snapshots: dict[int, Tensor]
+    _gradient_squares: dict[tuple[str, str], Tensor] = dataclass_field(default_factory=dict)
+    _parameter_squares: dict[tuple[str, str], Tensor] = dataclass_field(default_factory=dict)
+
+    @classmethod
+    def create(cls, model: GPT, cfg: TrainConfig) -> OptimizerStepDiagnostics:
+        subsystem_by_parameter = {
+            id(parameter): subsystem
+            for subsystem, parameters in parameter_subsystems(model).items()
+            for parameter in parameters
+        }
+        buckets: dict[tuple[str, str], list[nn.Parameter]] = defaultdict(list)
+        named_parameters = dict(model.named_parameters())
+        for name, role in optimizer_roles(model, cfg).items():
+            parameter = named_parameters[name]
+            buckets[(subsystem_by_parameter[id(parameter)], role.optimizer)].append(parameter)
+        frozen_buckets = {key: tuple(parameters) for key, parameters in buckets.items()}
+        snapshots = {id(parameter): torch.empty_like(parameter) for parameter in model.parameters()}
+        return cls(frozen_buckets, snapshots)
+
+    @staticmethod
+    def _sum_squares(tensors: Iterable[Tensor]) -> Tensor:
+        values = [tensor.detach().float().square().sum() for tensor in tensors]
+        if not values:
+            raise ValueError("cannot measure an empty tensor collection")
+        return torch.stack(values).sum()
+
+    @torch.no_grad()
+    def begin(self) -> None:
+        if self._gradient_squares or self._parameter_squares:
+            raise RuntimeError("optimizer diagnostics already have an active sample")
+        for key, parameters in self.buckets.items():
+            for parameter in parameters:
+                self.snapshots[id(parameter)].copy_(parameter)
+            gradients = [
+                parameter.grad if parameter.grad is not None else torch.zeros_like(parameter)
+                for parameter in parameters
+            ]
+            self._gradient_squares[key] = self._sum_squares(gradients)
+            self._parameter_squares[key] = self._sum_squares(parameters)
+
+    @staticmethod
+    def _combine_by_subsystem(values: dict[tuple[str, str], Tensor]) -> dict[str, Tensor]:
+        combined: dict[str, Tensor] = {}
+        for (subsystem, _optimizer), value in values.items():
+            combined[subsystem] = combined.get(subsystem, torch.zeros_like(value)) + value
+        return combined
+
+    @torch.no_grad()
+    def finish(self, gradient_norm: Tensor, clip_threshold: float) -> dict[str, Tensor]:
+        if not self._gradient_squares or not self._parameter_squares:
+            raise RuntimeError("optimizer diagnostics have no active sample")
+        update_squares = {
+            key: self._sum_squares(self.snapshots[id(parameter)].sub_(parameter) for parameter in parameters)
+            for key, parameters in self.buckets.items()
+        }
+        clip_scale = (gradient_norm.detach().float() + 1e-6).reciprocal().mul(clip_threshold).clamp(max=1.0)
+        metrics: dict[str, Tensor] = {}
+
+        def add_metrics(
+            prefix: str,
+            gradient_square: Tensor,
+            parameter_square: Tensor,
+            update_square: Tensor,
+            element_count: int,
+        ) -> None:
+            gradient_l2 = gradient_square.sqrt()
+            update_l2 = update_square.sqrt()
+            parameter_l2 = parameter_square.sqrt()
+            root_count = math.sqrt(element_count)
+            metrics[f"{prefix}/grad_l2_pre_clip"] = gradient_l2
+            metrics[f"{prefix}/grad_l2_post_clip"] = gradient_l2 * clip_scale
+            metrics[f"{prefix}/grad_rms_pre_clip"] = gradient_l2 / root_count
+            metrics[f"{prefix}/grad_rms_post_clip"] = gradient_l2 * clip_scale / root_count
+            metrics[f"{prefix}/update_l2"] = update_l2
+            metrics[f"{prefix}/update_rms"] = update_l2 / root_count
+            metrics[f"{prefix}/update_parameter_rms_ratio"] = update_l2 / parameter_l2.clamp_min(
+                torch.finfo(torch.float32).tiny
+            )
+
+        for key in sorted(self.buckets):
+            subsystem, optimizer_name = key
+            add_metrics(
+                f"diagnostics/optimizer/{subsystem}/{optimizer_name}",
+                self._gradient_squares[key],
+                self._parameter_squares[key],
+                update_squares[key],
+                sum(parameter.numel() for parameter in self.buckets[key]),
+            )
+        subsystem_gradients = self._combine_by_subsystem(self._gradient_squares)
+        subsystem_parameters = self._combine_by_subsystem(self._parameter_squares)
+        subsystem_updates = self._combine_by_subsystem(update_squares)
+        for subsystem in sorted(subsystem_gradients):
+            parameters = tuple(
+                parameter
+                for (name, _optimizer), bucket in self.buckets.items()
+                if name == subsystem
+                for parameter in bucket
+            )
+            add_metrics(
+                f"diagnostics/optimizer/{subsystem}/all",
+                subsystem_gradients[subsystem],
+                subsystem_parameters[subsystem],
+                subsystem_updates[subsystem],
+                sum(parameter.numel() for parameter in parameters),
+            )
+        self._gradient_squares.clear()
+        self._parameter_squares.clear()
+        return metrics
 
 
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
@@ -2890,6 +3391,7 @@ def save_boundary_checkpoint(
     actual_loss_positions: int,
     loader_state: dict[str, object],
     identity_masker_state: dict[str, object] | None = None,
+    fixed_diagnostic_state: dict[str, object] | None = None,
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
@@ -2912,6 +3414,7 @@ def save_boundary_checkpoint(
             "identity_masker": (
                 loader_state.get("identity_masker") if identity_masker_state is None else identity_masker_state
             ),
+            "fixed_diagnostics": fixed_diagnostic_state,
         },
     )
     os.replace(temporary, snapshot)
@@ -3248,7 +3751,8 @@ def _log_training_summary(
     )
     input_lr = cfg.adam_lr * math.sqrt(scaling_multipliers(cfg)[0] / scaling_multipliers(cfg)[1])
     wandb.run.summary["optimizer/muon_master_lr"] = cfg.muon_lr
-    wandb.run.summary["optimizer/muon_effective_lr"] = cfg.muon_lr
+    wandb.run.summary["optimizer/muon_lr_multiplier"] = cfg.muon_lr_multiplier
+    wandb.run.summary["optimizer/muon_effective_lr"] = cfg.muon_lr * cfg.muon_lr_multiplier
     wandb.run.summary["optimizer/muon_momentum"] = 0.95
     wandb.run.summary["optimizer/muon_weight_decay"] = cfg.muon_weight_decay
     wandb.run.summary["optimizer/muon_scale_clamp_min_one"] = False
@@ -3260,6 +3764,12 @@ def _log_training_summary(
     wandb.run.summary["optimizer/adam_betas"] = scaled_adam_betas(cfg)
     wandb.run.summary["optimizer/adam_epsilon"] = scaled_adam_epsilon(cfg)
     wandb.run.summary["optimizer/adam_weight_decay"] = cfg.adam_weight_decay
+    if cfg.parent_wandb_id is not None:
+        wandb.run.summary["lineage/parent_wandb_id"] = cfg.parent_wandb_id
+        wandb.run.summary["lineage/parent_run_name"] = cfg.parent_run_name
+        wandb.run.summary["lineage/parent_checkpoint_name"] = cfg.parent_checkpoint_name
+        wandb.run.summary["lineage/parent_checkpoint_sha256"] = cfg.parent_checkpoint_sha256
+        wandb.run.summary["lineage/parent_update"] = _HALF_MUON_PARENT_UPDATE
     if device_name is not None:
         wandb.run.summary["hardware/gpu_name"] = device_name
     if peak_flops is not None:
@@ -3309,6 +3819,7 @@ class TrainStepResult:
     metrics: dict[str, Tensor]
     muon_lr: float
     adam_lr: float
+    optimizer_diagnostics: dict[str, Tensor]
 
 
 @dataclass(slots=True)
@@ -3384,6 +3895,7 @@ def train_step(
     optimizer: SingleDeviceMuonWithAuxAdam,
     scheduler: LambdaLR,
     phase_timer: CudaPhaseTimer | None = None,
+    optimizer_diagnostics: OptimizerStepDiagnostics | None = None,
 ) -> TrainStepResult:
     """Run one complete optimization step on a device-resident batch."""
     if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
@@ -3403,6 +3915,8 @@ def train_step(
     if phase_timer is not None:
         phase_timer.record("backward_end")
     metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
+    if optimizer_diagnostics is not None:
+        optimizer_diagnostics.begin()
     gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
     metrics["optimizer/clip_fraction"] = (gradient_norm > cfg.grad_clip).float()
     if phase_timer is not None:
@@ -3410,10 +3924,13 @@ def train_step(
     muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
     adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
     optimizer.step()
+    diagnostic_metrics = (
+        {} if optimizer_diagnostics is None else optimizer_diagnostics.finish(gradient_norm, cfg.grad_clip)
+    )
     scheduler.step()
     if phase_timer is not None:
         phase_timer.record("optimizer_end")
-    return TrainStepResult(nll_sum, gradient_norm, metrics, muon_lr, adam_lr)
+    return TrainStepResult(nll_sum, gradient_norm, metrics, muon_lr, adam_lr, diagnostic_metrics)
 
 
 def _cadence_in_window(first_update: int, last_update: int, every: int) -> bool:
@@ -3508,6 +4025,7 @@ def _finalize_training(
     update: int,
     actual_loss_positions: int,
     smoke: bool,
+    fixed_diagnostics: FixedDiagnosticTracker | None,
 ) -> None:
     """Save the final model and queue evaluation for a separate L40S worker."""
     snapshot = save_boundary_checkpoint(
@@ -3523,6 +4041,7 @@ def _finalize_training(
         actual_loss_positions=actual_loss_positions,
         loader_state=loader_state,
         identity_masker_state=identity_masker_state,
+        fixed_diagnostic_state=None if fixed_diagnostics is None else fixed_diagnostics.state_dict(),
     )
     final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
     advance_checkpoint_link(snapshot, final_path)
@@ -3620,8 +4139,15 @@ def train(
     smoke: bool = False,
     proxy: bool = False,
     stop_after_update: int | None = None,
+    fork_from_parent: bool = False,
 ) -> None:
     validate_config(cfg)
+    if fork_from_parent and (
+        resume_state is None
+        or cfg.muon_lr_multiplier != _HALF_MUON_MULTIPLIER
+        or cfg.parent_wandb_id != _HALF_MUON_PARENT_WANDB_ID
+    ):
+        raise ValueError("the parent fork flag requires the validated half-Muon continuation state")
     if smoke and proxy:
         raise ValueError("proxy and smoke modes are mutually exclusive")
     if not smoke and stop_after_update is not None:
@@ -3630,8 +4156,14 @@ def train(
         raise ValueError(f"stop_after_update must be in [1, {cfg.max_steps}], got {stop_after_update}")
     run_stop = cfg.max_steps if stop_after_update is None else stop_after_update
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), "policy-world-v8", comment)
+    if fork_from_parent and run_name != _HALF_MUON_RUN_NAME:
+        raise ValueError(f"the half-Muon continuation run name must be {_HALF_MUON_RUN_NAME}")
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     _init_wandb(cfg, run_name, resume_state)
+    if cfg.continuation_diagnostics and (wandb.run is None or not isinstance(wandb.run.id, str)):
+        raise RuntimeError("the continuation requires a child W&B run id")
+    if cfg.parent_wandb_id is not None and wandb.run is not None and wandb.run.id == cfg.parent_wandb_id:
+        raise RuntimeError("the continuation must use a new W&B run id")
     run_dir, replay_dir = setup_run_dir(run_name)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high" if cfg.allow_tf32 else "highest")
@@ -3662,6 +4194,8 @@ def train(
         model.load_state_dict(resume_state["model"])
         optimizer.load_state_dict(resume_state["opt"])
         scheduler.load_state_dict(resume_state["sched"])
+        if fork_from_parent:
+            rebase_restored_muon_schedule(optimizer, scheduler, cfg.muon_lr_multiplier)
         identity_state = resume_state.get("identity_masker")
         if not isinstance(identity_state, dict):
             raise ValueError("resume checkpoint has no identity-mask RNG state")
@@ -3674,6 +4208,25 @@ def train(
                 f"checkpoint actual_loss_positions={actual_positions} is invalid after {start_step} updates"
             )
 
+    optimizer_step_diagnostics = OptimizerStepDiagnostics.create(model, cfg) if cfg.continuation_diagnostics else None
+    fixed_diagnostics: FixedDiagnosticTracker | None = None
+    initial_diagnostic_metrics: dict[str, Tensor] = {}
+    if cfg.continuation_diagnostics:
+        fixed_state = None if resume_state is None else resume_state.get("fixed_diagnostics")
+        if fork_from_parent:
+            if start_step != _HALF_MUON_PARENT_UPDATE or fixed_state is not None:
+                raise ValueError("the parent fork must start at update 24,576 without child diagnostic state")
+            fixed_diagnostics, initial_diagnostic_metrics = FixedDiagnosticTracker.create(
+                model,
+                prepared_data.validation,
+                cfg,
+                start_step,
+            )
+        else:
+            if not isinstance(fixed_state, dict):
+                raise ValueError("the diagnostic continuation checkpoint has no fixed diagnostic state")
+            fixed_diagnostics = FixedDiagnosticTracker.from_state(cast(dict[str, object], fixed_state))
+
     trunk_fn, temporal_fn = _training_functions(model, cfg)
     train_loader, val_cache = prepared_data.loader, prepared_data.validation
     _compile_synthetic_forward_backward(
@@ -3683,6 +4236,40 @@ def train(
         trunk_fn=trunk_fn,
         temporal_fn=temporal_fn,
     )
+    if fork_from_parent:
+        if resume_state is None or fixed_diagnostics is None:
+            raise RuntimeError("the parent fork lost its resume or diagnostic state")
+        parent_loader_state = resume_state.get("loader")
+        parent_identity_state = resume_state.get("identity_masker")
+        if not isinstance(parent_loader_state, dict) or not isinstance(parent_identity_state, dict):
+            raise ValueError("the parent checkpoint is missing exact resume state")
+        initial_snapshot = save_boundary_checkpoint(
+            run_dir,
+            update=start_step,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            cfg=cfg,
+            uploader=uploader,
+            milestone=True,
+            wandb_id=None if wandb.run is None else wandb.run.id,
+            actual_loss_positions=actual_positions,
+            loader_state=cast(dict[str, object], parent_loader_state),
+            identity_masker_state=cast(dict[str, object], parent_identity_state),
+            fixed_diagnostic_state=fixed_diagnostics.state_dict(),
+        )
+        if uploader is None:
+            raise RuntimeError("the production continuation requires R2 checkpoint upload")
+        uploader.wait()
+        spawn_closed_loop_evaluation(
+            run_name,
+            start_step,
+            checkpoint_sha256(initial_snapshot),
+            cfg.eval_n_matchups,
+        )
+        if wandb.run is not None:
+            wandb.run.summary["diagnostics/fixed_batch_sha256"] = fixed_diagnostics.batch_sha256
+        wandb.log({"global_step": start_step, **_download_scalar_metrics(initial_diagnostic_metrics, start_step)})
     run_started = time.monotonic()
     try:
         batch_prefetcher = DeviceBatchPrefetcher(
@@ -3756,6 +4343,9 @@ def train(
             batch_prefetcher.fill_lookahead(lookahead_limit)
             window_loader_submitted_batches.append(batch_prefetcher.submitted_batches)
             window_loader_ready_batches.append(batch_prefetcher.ready_batches)
+            optimizer_diagnostic_due = cfg.continuation_diagnostics and (
+                update % cfg.train_metrics_every == 0 or update in evaluation_updates
+            )
             result = train_step(
                 model,
                 batch,
@@ -3768,6 +4358,7 @@ def train(
                 optimizer=optimizer,
                 scheduler=scheduler,
                 phase_timer=phase_timer,
+                optimizer_diagnostics=optimizer_step_diagnostics if optimizer_diagnostic_due else None,
             )
             loader_wait = batch_prefetcher.stage_next() if not state_boundary_due else 0.0
             actual_positions += valid_prefixes
@@ -3788,6 +4379,16 @@ def train(
                     update=update,
                 )
             update_timer.finish()
+            diagnostic_values = _download_scalar_metrics(result.optimizer_diagnostics, update)
+            fixed_diagnostic_due = cfg.continuation_diagnostics and (
+                (cfg.val_every > 0 and update % cfg.val_every == 0) or update == run_stop
+            )
+            if fixed_diagnostic_due:
+                if fixed_diagnostics is None:
+                    raise RuntimeError("fixed diagnostics are enabled but not initialized")
+                diagnostic_values.update(
+                    _download_scalar_metrics(fixed_diagnostics.measure(model, cfg, update), update)
+                )
             if metrics_due:
                 if len(window_loader_wait_seconds) != window_updates:
                     raise RuntimeError("training telemetry window lost an update")
@@ -3820,6 +4421,7 @@ def train(
                     **window_metric_values,
                     **identity_masker.metrics(),
                     **_mean_phase_metrics(window_phase_timers),
+                    **diagnostic_values,
                 }
                 loader_metrics = getattr(train_loader, "metrics", None)
                 if isinstance(loader_metrics, dict):
@@ -3856,6 +4458,8 @@ def train(
                 window_loader_ready_batches.clear()
                 window_phase_timers.clear()
                 window_peak_allocated_gb = 0.0
+            elif diagnostic_values:
+                wandb.log({"global_step": update, **diagnostic_values})
             checkpoint_path: Path | None = None
             if boundary_due:
                 if not batch_prefetcher.drained:
@@ -3873,6 +4477,7 @@ def train(
                     actual_loss_positions=actual_positions,
                     loader_state=train_loader.state_dict(),
                     identity_masker_state=identity_masker.state_dict(),
+                    fixed_diagnostic_state=(None if fixed_diagnostics is None else fixed_diagnostics.state_dict()),
                 )
             boundary_metrics: dict[str, float] = {}
             if val_due:
@@ -3913,6 +4518,7 @@ def train(
             update=run_stop,
             actual_loss_positions=actual_positions,
             smoke=smoke,
+            fixed_diagnostics=fixed_diagnostics,
         )
     finally:
         batch_prefetcher.close()
@@ -3942,6 +4548,28 @@ def config_from_state(values: dict) -> TrainConfig:
     """Restore a checkpoint written by the current experiment definition."""
     derived_fields = {"max_steps", "warmup_steps"}
     runtime_fields = {item.name for item in fields(TrainConfig)} - {"arch", "awr"}
+    experiment_id = values.get("experiment_id")
+    if experiment_id == _LEGACY_EXPERIMENT_ID:
+        treatment_fields = {
+            "muon_lr_multiplier": 1.0,
+            "continuation_diagnostics": False,
+            "parent_run_name": None,
+            "parent_checkpoint_name": None,
+            "parent_checkpoint_sha256": None,
+            "parent_wandb_id": None,
+        }
+        expected_legacy = {
+            "experiment_id",
+            "architecture",
+            "awr_calibration",
+            *(runtime_fields - treatment_fields.keys()),
+            *derived_fields,
+        }
+        missing = expected_legacy - values.keys()
+        unexpected = values.keys() - expected_legacy
+        if missing or unexpected:
+            raise ValueError(f"checkpoint config mismatch: missing={sorted(missing)}, unexpected={sorted(unexpected)}")
+        values = {**values, **treatment_fields, "experiment_id": _EXPERIMENT_ID}
     expected = {"experiment_id", "architecture", "awr_calibration", *runtime_fields, *derived_fields}
     missing = expected - values.keys()
     unexpected = values.keys() - expected
@@ -4124,6 +4752,7 @@ class TrainArgs:
     resume_checkpoint: str = "latest.pt"
     resume_as: str | None = None
     resume_num_workers: int | None = None
+    resume_muon_lr_multiplier: float | None = None
     smoke: bool = False
     stop_after_update: int | None = None
     eval_max_parallel: int | None = None
@@ -4181,6 +4810,7 @@ def main(args: Command) -> None:
         )
         return
     resume_run = resume_state = None
+    fork_from_parent = False
     cfg = args.cfg
     proxy_arch: Architecture | None = None
     target_positions: int | None = None
@@ -4192,6 +4822,8 @@ def main(args: Command) -> None:
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
     if args.resume is None and args.resume_num_workers is not None:
         raise SystemExit("--resume-num-workers requires --resume")
+    if args.resume is None and args.resume_muon_lr_multiplier is not None:
+        raise SystemExit("--resume-muon-lr-multiplier requires --resume")
     if args.resume is not None:
         checkpoint = Path(args.resume_checkpoint)
         if (
@@ -4226,7 +4858,36 @@ def main(args: Command) -> None:
                 raise SystemExit(
                     f"resume destination {args.resume_as!r} already exists; continue it with --resume {args.resume_as}"
                 )
+            if args.resume_muon_lr_multiplier is not None:
+                parent_wandb_id = resume_state.get("wandb_id")
+                parent_update = int(resume_state["step"]) + 1
+                parent_scheduler = resume_state.get("sched")
+                if args.resume_muon_lr_multiplier != _HALF_MUON_MULTIPLIER:
+                    raise SystemExit(f"--resume-muon-lr-multiplier must be {_HALF_MUON_MULTIPLIER}")
+                if args.resume_checkpoint != _HALF_MUON_PARENT_CHECKPOINT:
+                    raise SystemExit(f"the half-Muon fork requires --resume-checkpoint {_HALF_MUON_PARENT_CHECKPOINT}")
+                if args.resume_as != _HALF_MUON_RUN_NAME:
+                    raise SystemExit(f"the half-Muon fork requires --resume-as {_HALF_MUON_RUN_NAME}")
+                if parent_wandb_id != _HALF_MUON_PARENT_WANDB_ID or parent_update != _HALF_MUON_PARENT_UPDATE:
+                    raise SystemExit("the half-Muon fork source is not W&B run p1fyyp1z at update 24,576")
+                if resume_state["cfg"].get("experiment_id") != _LEGACY_EXPERIMENT_ID:
+                    raise SystemExit("the half-Muon fork source must be the immutable O50 v4 checkpoint")
+                if not isinstance(parent_scheduler, dict) or parent_scheduler.get("last_epoch") != parent_update:
+                    raise SystemExit("the half-Muon fork scheduler is not at the update 24,576 boundary")
+                checkpoint_path = Path("runs") / args.resume / args.resume_checkpoint
+                cfg = replace(
+                    cfg,
+                    muon_lr_multiplier=_HALF_MUON_MULTIPLIER,
+                    continuation_diagnostics=True,
+                    parent_run_name=args.resume,
+                    parent_checkpoint_name=args.resume_checkpoint,
+                    parent_checkpoint_sha256=checkpoint_sha256(checkpoint_path),
+                    parent_wandb_id=parent_wandb_id,
+                )
+                fork_from_parent = True
             resume_state = {**resume_state, "wandb_id": None}
+        elif args.resume_muon_lr_multiplier is not None:
+            raise SystemExit("--resume-muon-lr-multiplier requires --resume-as to protect the parent run")
     cfg = replace(
         cfg,
         arch=cfg.arch if proxy_arch is None else proxy_arch,
@@ -4244,6 +4905,7 @@ def main(args: Command) -> None:
         smoke=args.smoke,
         proxy=args.proxy,
         stop_after_update=args.stop_after_update,
+        fork_from_parent=fork_from_parent,
     )
 
 

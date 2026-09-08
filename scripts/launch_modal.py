@@ -77,6 +77,7 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
         "--resume",
         "--resume-as",
         "--resume-checkpoint",
+        "--resume-muon-lr-multiplier",
         "--target-positions",
     }
 )

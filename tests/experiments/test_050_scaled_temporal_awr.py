@@ -365,6 +365,62 @@ def test_proxy_cli_selects_the_frozen_treatment(monkeypatch: pytest.MonkeyPatch)
     assert observed == {"cfg": exp.proxy_config(), "proxy": True}
 
 
+def test_half_muon_fork_keeps_parent_wandb_id_only_as_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "production-source"
+    checkpoint_name = "checkpoints/step-0024576.pt"
+    checkpoint_path = tmp_path / "runs" / source / checkpoint_name
+    checkpoint_path.parent.mkdir(parents=True)
+    checkpoint_path.write_bytes(b"parent checkpoint")
+    parent_config = exp._checkpoint_config(exp.TrainConfig())
+    parent_config["experiment_id"] = "050_scaled_temporal_awr_v4"
+    for name in (
+        "muon_lr_multiplier",
+        "continuation_diagnostics",
+        "parent_run_name",
+        "parent_checkpoint_name",
+        "parent_checkpoint_sha256",
+        "parent_wandb_id",
+    ):
+        parent_config.pop(name)
+    resume_state = {
+        "cfg": parent_config,
+        "sched": {"last_epoch": 24_576},
+        "step": 24_575,
+        "wandb_id": "p1fyyp1z",
+    }
+    observed = {}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(exp, "load_for_resume", lambda *_args, **_kwargs: resume_state)
+    monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})
+    monkeypatch.setattr(exp, "_remote_run_exists", lambda _run: False)
+
+    def train(cfg, _stats, **kwargs) -> None:
+        observed["cfg"] = cfg
+        observed["kwargs"] = kwargs
+
+    monkeypatch.setattr(exp, "train", train)
+
+    exp.main(
+        exp.TrainArgs(
+            resume=source,
+            resume_checkpoint=checkpoint_name,
+            resume_as="o50-p1fyyp1z-u24576-muon-half",
+            resume_muon_lr_multiplier=0.5,
+        )
+    )
+
+    cfg = observed["cfg"]
+    assert cfg.muon_lr_multiplier == 0.5
+    assert cfg.continuation_diagnostics is True
+    assert cfg.parent_wandb_id == "p1fyyp1z"
+    assert cfg.parent_checkpoint_sha256 == exp.checkpoint_sha256(checkpoint_path)
+    assert observed["kwargs"]["resume_state"]["wandb_id"] is None
+    assert observed["kwargs"]["fork_from_parent"] is True
+
+
 def test_model_tag_names_the_actual_head_architecture() -> None:
     tag = exp.model_tag(exp.TrainConfig())
     assert "nonlinear-head-trunk-skip" in tag
@@ -418,10 +474,135 @@ def test_v8_corpus_and_checkpoint_identity() -> None:
     assert exp.config_from_state(state) == cfg
     assert {"max_steps", "warmup_steps"} <= state.keys()
     assert not {"max_steps", "warmup_steps"} & {field.name for field in fields(exp.TrainConfig)}
-    assert state["experiment_id"] == "050_scaled_temporal_awr_v4"
+    assert state["experiment_id"] == "050_scaled_temporal_awr_v5"
+    legacy = dict(state)
+    legacy["experiment_id"] = "050_scaled_temporal_awr_v4"
+    for name in (
+        "muon_lr_multiplier",
+        "continuation_diagnostics",
+        "parent_run_name",
+        "parent_checkpoint_name",
+        "parent_checkpoint_sha256",
+        "parent_wandb_id",
+    ):
+        legacy.pop(name)
+    assert exp.config_from_state(legacy) == cfg
     state["experiment_id"] = "050_scaled_temporal_awr_v3"
     with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state(state)
+
+
+def test_restored_muon_schedule_is_rebased_without_changing_adam() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+    before = [
+        (group["use_muon"], group["lr"], group["initial_lr"], scheduler.base_lrs[index])
+        for index, group in enumerate(optimizer.param_groups)
+    ]
+
+    exp.rebase_restored_muon_schedule(optimizer, scheduler, 0.5)
+
+    for index, (use_muon, lr, initial_lr, base_lr) in enumerate(before):
+        expected = 0.5 if use_muon else 1.0
+        group = optimizer.param_groups[index]
+        assert group["lr"] == pytest.approx(lr * expected)
+        assert group["initial_lr"] == pytest.approx(initial_lr * expected)
+        assert scheduler.base_lrs[index] == pytest.approx(base_lr * expected)
+        assert scheduler.get_last_lr()[index] == pytest.approx(lr * expected)
+
+
+def test_optimizer_diagnostics_match_direct_parameter_deltas() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+    before = {id(parameter): parameter.detach().clone() for parameter in model.parameters()}
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    diagnostics = exp.OptimizerStepDiagnostics.create(model, cfg)
+
+    result = exp.train_step(
+        model,
+        batch,
+        cfg,
+        step=0,
+        update=1,
+        valid_prefixes=cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start),
+        trunk_fn=model.forward,
+        temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        optimizer_diagnostics=diagnostics,
+    )
+
+    gradient_square = torch.zeros(())
+    for subsystem, parameters in exp.parameter_subsystems(model).items():
+        direct_update_l2 = (
+            torch.stack([(before[id(parameter)] - parameter).float().square().sum() for parameter in parameters])
+            .sum()
+            .sqrt()
+        )
+        prefix = f"diagnostics/optimizer/{subsystem}/all"
+        torch.testing.assert_close(result.optimizer_diagnostics[f"{prefix}/update_l2"], direct_update_l2)
+        gradient_square += result.optimizer_diagnostics[f"{prefix}/grad_l2_pre_clip"].square()
+    torch.testing.assert_close(gradient_square.sqrt(), result.gradient_norm)
+
+
+def test_fixed_diagnostics_are_centered_and_checkpointable() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu")).batch
+    batch = exp.TrainBatch(
+        exp.Context(
+            {name: value.repeat(4, 1) for name, value in batch.context.features.items()},
+            batch.context.ctx_pad.repeat(4),
+        ),
+        batch.target.repeat(4, 1, 1),
+    )
+    validation = [batch]
+    cpu_rng = torch.get_rng_state()
+
+    tracker, metrics = exp.FixedDiagnosticTracker.create(model, validation, cfg, 24_576)
+
+    assert torch.equal(torch.get_rng_state(), cpu_rng)
+    assert all(torch.isfinite(value) for value in metrics.values())
+    assert metrics["diagnostics/fixed_policy_kl/from_parent/total_nats"] == 0
+    assert 0 <= metrics["diagnostics/attention/trunk/mean"] <= 1
+    assert 0 <= metrics["diagnostics/attention/temporal/mean"] <= 1
+    restored = exp.FixedDiagnosticTracker.from_state(tracker.state_dict())
+    assert restored.batch_sha256 == tracker.batch_sha256
+    for name in exp.CONTROLLER_GROUP_NAMES:
+        torch.testing.assert_close(
+            restored.baseline_log_probabilities[name],
+            tracker.baseline_log_probabilities[name],
+        )
+    with torch.no_grad():
+        button_head = exp.cast(exp.NonlinearActionHead, model.temporal.outputs["buttons"])
+        button_head.down.bias[0].add_(0.5)
+    changed = restored.measure(model, cfg, 28_672)
+    assert changed["diagnostics/fixed_policy_kl/from_parent/total_nats"] > 0
+    assert changed["diagnostics/fixed_policy_kl/from_previous/total_nats"] > 0
+    assert restored.previous_update == 28_672
+
+
+def test_fixed_legal_logits_ignore_common_class_shifts() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu")).batch
+    before_log_probabilities, before_metrics, _valid = exp.fixed_policy_diagnostics(model, batch, cfg)
+    with torch.no_grad():
+        for head in model.temporal.outputs.values():
+            cast_head = exp.cast(exp.NonlinearActionHead, head)
+            cast_head.down.bias.add_(7)
+
+    after_log_probabilities, after_metrics, _valid = exp.fixed_policy_diagnostics(model, batch, cfg)
+
+    for name in exp.CONTROLLER_GROUP_NAMES:
+        torch.testing.assert_close(after_log_probabilities[name], before_log_probabilities[name])
+        prefix = f"diagnostics/fixed_logits/{name}"
+        torch.testing.assert_close(after_metrics[f"{prefix}/rms"], before_metrics[f"{prefix}/rms"])
+        torch.testing.assert_close(after_metrics[f"{prefix}/abs_p999"], before_metrics[f"{prefix}/abs_p999"])
 
 
 def test_training_constructs_the_physical_shard_loader(monkeypatch: pytest.MonkeyPatch) -> None:
