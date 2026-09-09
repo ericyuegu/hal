@@ -9,6 +9,9 @@ from typing import Any
 import pytest
 import torch
 
+from hal.training.features import AWRBatch
+from hal.training.features import Context
+from hal.training.features import TrainBatch
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 
 
@@ -42,6 +45,23 @@ def test_probe_replay_labels_expand_player_ids_to_frame_length() -> None:
     assert labels["return"].shape == (3,)
     assert labels["p1_player_id"].shape == (3,)
     assert labels["p2_player_id"].shape == (3,)
+
+
+def test_batch_identity_does_not_require_replay_ids() -> None:
+    batch = AWRBatch(
+        TrainBatch(
+            Context(features={"feature": torch.arange(6).reshape(2, 3)}, ctx_pad=torch.zeros(2, dtype=torch.long)),
+            target=torch.arange(8).reshape(2, 2, 2),
+        ),
+        returns=torch.arange(6).reshape(2, 3),
+        eligible=torch.ones(2, 3, dtype=torch.bool),
+    )
+
+    first = NOTEBOOK._batch_identity(batch)
+    second = NOTEBOOK._batch_identity(batch)
+
+    assert first == second
+    assert len(first) == 32
 
 
 def test_checkpoint_updates_requires_complete_milestones() -> None:

@@ -696,9 +696,14 @@ def make_lazy_probe_loader(
 def _batch_identity(batch: AWRBatch) -> bytes:
     digest = hashlib.sha256()
     replay_ids = batch.batch.replay_ids
-    if replay_ids is None:
-        raise RuntimeError("probe loader did not retain replay IDs")
-    digest.update(json.dumps(replay_ids, separators=(",", ":")).encode())
+    if replay_ids is not None:
+        digest.update(json.dumps(replay_ids, separators=(",", ":")).encode())
+    for name in sorted(batch.batch.context.features):
+        value = batch.batch.context.features[name]
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(json.dumps(tuple(value.shape)).encode())
+        digest.update(value.numpy().tobytes())
     digest.update(batch.batch.context.ctx_pad.numpy().tobytes())
     digest.update(batch.batch.target.numpy().tobytes())
     digest.update(batch.returns.numpy().tobytes())
