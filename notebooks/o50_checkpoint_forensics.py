@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import functools
+import gc
 import hashlib
 import json
 import math
@@ -37,6 +38,7 @@ import torch.nn.functional as F
 import tyro
 import wandb
 from botocore.exceptions import ClientError
+from streaming.base.util import clean_stale_shared_memory
 from torch import Tensor
 from torch import nn
 
@@ -73,7 +75,10 @@ class Args:
     """Unique artifact name below analysis/o50-checkpoint-forensics/v1/."""
     through_update: int = 65_536
     probe_batches: int = 64
-    probe_batch_size: int = 512
+    probe_batch_size: int = 128
+    activation_probe_batches: int = 8
+    head_probe_batches: int = 8
+    sentinel_parameter_count: int = 12
     cache_limit: str = "64gb"
     cache_dir: str = "/tmp/o50-checkpoint-forensics-cache"
     output_dir: str = "/tmp/o50-checkpoint-forensics-output"
@@ -84,7 +89,7 @@ class Args:
     treatment_wandb_id: str = _TREATMENT_WANDB_ID
     wandb_entity: str = "ericyuegu"
     wandb_project: str = "hal"
-    coordinate_sample_size: int = 1_000_000
+    coordinate_sample_size: int = 100_000
     upload: bool = False
 
     @property
@@ -169,6 +174,12 @@ def _validate_args(args: Args) -> None:
         raise ValueError(f"through_update must be a multiple of {_CHECKPOINT_EVERY} at or after {_FORK_UPDATE}")
     if args.probe_batches < 1 or args.probe_batch_size < 1:
         raise ValueError("probe_batches and probe_batch_size must be positive")
+    if not 1 <= args.activation_probe_batches <= args.probe_batches:
+        raise ValueError("activation_probe_batches must be between 1 and probe_batches")
+    if not 1 <= args.head_probe_batches <= args.probe_batches:
+        raise ValueError("head_probe_batches must be between 1 and probe_batches")
+    if args.sentinel_parameter_count < 1:
+        raise ValueError("sentinel_parameter_count must be positive")
     if args.coordinate_sample_size < 1:
         raise ValueError("coordinate_sample_size must be positive")
 
@@ -549,6 +560,36 @@ def select_turning_updates(
     return tuple(sorted({fork_update, worst, through_update}))
 
 
+def sentinel_parameter_names(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    arm: str,
+    update: int,
+    top_count: int,
+) -> frozenset[str]:
+    """Select state outliers and the full button-output path for batch probes."""
+    matching = [row for row in rows if row["arm"] == arm and int(row["update"]) == update]
+    if not matching:
+        raise ValueError(f"no checkpoint parameter rows for {arm} at {update}")
+    ranked = sorted(
+        matching,
+        key=lambda row: float(row["implied_update_weight_rms_ratio"]),
+        reverse=True,
+    )
+    selected = {str(row["parameter"]) for row in ranked[:top_count]}
+    button_fragments = (
+        "temporal.group_condition.buttons.",
+        "temporal.outputs.buttons.",
+        "temporal.trunk_outputs.buttons.",
+    )
+    selected.update(
+        str(row["parameter"])
+        for row in matching
+        if any(fragment in str(row["parameter"]) for fragment in button_fragments)
+    )
+    return frozenset(selected)
+
+
 def _wandb_history(args: Args, wandb_id: str, arm: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     api = wandb.Api()
     run = api.run(f"{args.wandb_entity}/{args.wandb_project}/{wandb_id}")
@@ -865,6 +906,7 @@ class ActivationRecorder:
     """Collect activation RMS and maximum values for named leaf modules."""
 
     def __init__(self, model: nn.Module) -> None:
+        self.enabled = True
         self.squares: dict[str, Tensor] = {}
         self.counts: dict[str, int] = defaultdict(int)
         self.maxima: dict[str, Tensor] = {}
@@ -874,7 +916,7 @@ class ActivationRecorder:
                 self.handles.append(module.register_forward_hook(functools.partial(self._capture, name)))
 
     def _capture(self, name: str, _module: nn.Module, _inputs: tuple[Any, ...], output: Any) -> None:
-        if not isinstance(output, Tensor):
+        if not self.enabled or not isinstance(output, Tensor):
             return
         value = output.detach().float()
         square = value.square().sum()
@@ -952,16 +994,25 @@ def probe_checkpoint(
     args: Args,
     device: torch.device,
     expected_batch_sha256: str | None,
+    sentinel_names: frozenset[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Run bounded held-out forward/backward probes without optimizer.step()."""
+    """Run bounded held-out forward/backward probes without optimizer.step().
+
+    Every batch contributes gradients and subsystem statistics. Exact hypothetical
+    updates use the mean clipped gradient once per parameter. A small sentinel set
+    also receives exact per-batch updates to expose data-triggered variance.
+    """
     model, optimizer, cfg, _state = _load_model_optimizer(experiment, ref, device)
     del _state
     stats = experiment.load_stats(cfg)
-    loader = make_lazy_probe_loader(experiment, cfg, stats, args)
     bindings = _parameter_bindings(model, optimizer)
+    unknown_sentinels = sentinel_names - {name for name, _parameter, _group in bindings.values()}
+    if unknown_sentinels:
+        raise ValueError(f"sentinel parameters are absent from the checkpoint: {sorted(unknown_sentinels)}")
     subsystems = _subsystem_names(experiment, model)
     recorder = ActivationRecorder(model)
     parameter_accumulators: dict[tuple[str, str], ScalarAccumulator] = {}
+    mean_gradients: dict[int, Tensor] = {}
     subsystem_accumulators: dict[tuple[str, str], ScalarAccumulator] = {}
     head_accumulators: dict[tuple[str, str], ScalarAccumulator] = {}
     batch_digest = hashlib.sha256()
@@ -973,6 +1024,7 @@ def probe_checkpoint(
         for value in state.values()
         if isinstance(value, Tensor)
     }
+    loader = make_lazy_probe_loader(experiment, cfg, stats, args)
     processed_batches = 0
     try:
         for batch_index, cpu_batch in enumerate(iter_probe_batches(loader, args.probe_batches)):
@@ -980,24 +1032,26 @@ def probe_checkpoint(
                 raise TypeError(f"lazy probe loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
             batch_digest.update(_batch_identity(cpu_batch))
             batch = cpu_batch.to(device)
+            recorder.enabled = batch_index < args.activation_probe_batches
             model.zero_grad(set_to_none=True)
             loss, hidden, logits, dense_nll, weights, valid, _targets = _probe_objective(
                 experiment, model, batch, cfg, ref.update
             )
             for group_index, name in enumerate(experiment.CONTROLLER_GROUP_NAMES):
                 group_loss = _group_objective(experiment, dense_nll[..., group_index], weights, valid, cfg)
-                hidden_gradient, logit_gradient = torch.autograd.grad(
-                    group_loss, (hidden, logits[name]), retain_graph=True
-                )
-                hidden_norm = _rms(hidden_gradient)
-                logit_norm = _rms(logit_gradient)
-                for metric, value in (
-                    ("hidden_gradient_rms", hidden_norm),
-                    ("logit_gradient_rms", logit_norm),
-                    ("local_amplification", hidden_norm / max(logit_norm, torch.finfo(torch.float32).tiny)),
-                    ("loss", float(group_loss.detach())),
-                ):
-                    head_accumulators.setdefault((name, metric), ScalarAccumulator()).add(value)
+                head_accumulators.setdefault((name, "loss"), ScalarAccumulator()).add(float(group_loss.detach()))
+                if batch_index < args.head_probe_batches:
+                    hidden_gradient, logit_gradient = torch.autograd.grad(
+                        group_loss, (hidden, logits[name]), retain_graph=True
+                    )
+                    hidden_norm = _rms(hidden_gradient)
+                    logit_norm = _rms(logit_gradient)
+                    for metric, value in (
+                        ("hidden_gradient_rms", hidden_norm),
+                        ("logit_gradient_rms", logit_norm),
+                        ("local_amplification", hidden_norm / max(logit_norm, torch.finfo(torch.float32).tiny)),
+                    ):
+                        head_accumulators.setdefault((name, metric), ScalarAccumulator()).add(value)
                 for horizon_index, offset in enumerate(model.head_offsets):
                     horizon_nll = dense_nll[..., horizon_index, group_index].float()[valid]
                     horizon_weights = weights[valid] if horizon_index < experiment.AWRCalibration.near_offsets else 1.0
@@ -1013,48 +1067,50 @@ def probe_checkpoint(
             subsystem_accumulators.setdefault(("total", "gradient_norm"), ScalarAccumulator()).add(global_norm)
             subsystem_accumulators.setdefault(("total", "clip_scale"), ScalarAccumulator()).add(clip_scale)
 
-            per_subsystem_squares: dict[str, float] = defaultdict(float)
+            per_subsystem_squares: dict[str, Tensor] = {}
             per_subsystem_count: dict[str, int] = defaultdict(int)
-            per_subsystem_max: dict[str, float] = defaultdict(float)
+            per_subsystem_max: dict[str, Tensor] = {}
             for _parameter_id, (name, parameter, group) in bindings.items():
                 gradient = parameter.grad
                 if gradient is None:
                     raise RuntimeError(f"{name} has no gradient on probe batch {batch_index}")
                 raw_gradient = gradient.detach()
+                clipped_gradient = raw_gradient * clip_scale
+                if id(parameter) not in mean_gradients:
+                    mean_gradients[id(parameter)] = torch.zeros_like(raw_gradient, dtype=torch.float32)
+                mean_gradients[id(parameter)].add_(clipped_gradient.float())
                 optimizer_state = optimizer.state[parameter]
-                for state_name, reset in (("stored", False), ("reset", True)):
-                    result = hypothetical_update(
-                        parameter.detach(), raw_gradient * clip_scale, optimizer_state, group, reset_state=reset
-                    )
-                    rho = _rms(result.delta) / max(_rms(parameter), torch.finfo(torch.float32).tiny)
-                    parameter_accumulators.setdefault((name, f"{state_name}_rho"), ScalarAccumulator()).add(rho)
-                    parameter_accumulators.setdefault((name, f"{state_name}_update_rms"), ScalarAccumulator()).add(
-                        _rms(result.delta)
-                    )
-                if not group["use_muon"]:
-                    second = cast(Tensor, optimizer_state["exp_avg_sq"])
-                    beta2 = float(group["betas"][1])
-                    correction = 1 - beta2 ** _step_number(optimizer_state)
-                    ratio = raw_gradient.float().square() / (second.float() / correction + float(group["eps"]) ** 2)
-                    parameter_accumulators.setdefault((name, "grad_squared_over_v_mean"), ScalarAccumulator()).add(
-                        float(ratio.mean())
-                    )
-                    first = cast(Tensor, optimizer_state["exp_avg"]).float()
-                    cosine = F.cosine_similarity(raw_gradient.float().reshape(1, -1), first.reshape(1, -1), dim=1)
-                    parameter_accumulators.setdefault((name, "gradient_momentum_cosine"), ScalarAccumulator()).add(
-                        float(cosine)
-                    )
+                if name in sentinel_names:
+                    for state_name, reset in (("stored", False), ("reset", True)):
+                        result = hypothetical_update(
+                            parameter.detach(), clipped_gradient, optimizer_state, group, reset_state=reset
+                        )
+                        prefix = f"batch_postclip_{state_name}"
+                        rho = _rms(result.delta) / max(_rms(parameter), torch.finfo(torch.float32).tiny)
+                        parameter_accumulators.setdefault((name, f"{prefix}_rho"), ScalarAccumulator()).add(rho)
+                        parameter_accumulators.setdefault((name, f"{prefix}_update_rms"), ScalarAccumulator()).add(
+                            _rms(result.delta)
+                        )
                 subsystem = subsystems[id(parameter)]
-                per_subsystem_squares[subsystem] += float(raw_gradient.float().square().sum())
+                square = raw_gradient.float().square().sum()
+                maximum = raw_gradient.abs().max()
+                per_subsystem_squares[subsystem] = (
+                    square if subsystem not in per_subsystem_squares else per_subsystem_squares[subsystem] + square
+                )
                 per_subsystem_count[subsystem] += raw_gradient.numel()
-                per_subsystem_max[subsystem] = max(per_subsystem_max[subsystem], float(raw_gradient.abs().max()))
+                per_subsystem_max[subsystem] = (
+                    maximum
+                    if subsystem not in per_subsystem_max
+                    else torch.maximum(per_subsystem_max[subsystem], maximum)
+                )
             for subsystem in per_subsystem_count:
-                raw_rms = math.sqrt(per_subsystem_squares[subsystem] / per_subsystem_count[subsystem])
+                raw_rms = float((per_subsystem_squares[subsystem] / per_subsystem_count[subsystem]).sqrt())
+                raw_max = float(per_subsystem_max[subsystem])
                 for metric, value in (
                     ("gradient_rms", raw_rms),
-                    ("gradient_abs_max", per_subsystem_max[subsystem]),
+                    ("gradient_abs_max", raw_max),
                     ("postclip_gradient_rms", raw_rms * clip_scale),
-                    ("postclip_gradient_abs_max", per_subsystem_max[subsystem] * clip_scale),
+                    ("postclip_gradient_abs_max", raw_max * clip_scale),
                 ):
                     subsystem_accumulators.setdefault((subsystem, metric), ScalarAccumulator()).add(value)
             print(
@@ -1065,9 +1121,37 @@ def probe_checkpoint(
             processed_batches += 1
     finally:
         recorder.close()
+        del loader
+        gc.collect()
+        clean_stale_shared_memory()
 
     if processed_batches != args.probe_batches:
         raise RuntimeError(f"validation yielded {processed_batches} batches, expected {args.probe_batches}")
+
+    for _parameter_id, (name, parameter, group) in bindings.items():
+        mean_gradient = mean_gradients[id(parameter)] / processed_batches
+        optimizer_state = optimizer.state[parameter]
+        for state_name, reset in (("stored", False), ("reset", True)):
+            result = hypothetical_update(parameter.detach(), mean_gradient, optimizer_state, group, reset_state=reset)
+            prefix = f"mean_postclip_{state_name}"
+            rho = _rms(result.delta) / max(_rms(parameter), torch.finfo(torch.float32).tiny)
+            parameter_accumulators.setdefault((name, f"{prefix}_rho"), ScalarAccumulator()).add(rho)
+            parameter_accumulators.setdefault((name, f"{prefix}_update_rms"), ScalarAccumulator()).add(
+                _rms(result.delta)
+            )
+        if not group["use_muon"]:
+            second = cast(Tensor, optimizer_state["exp_avg_sq"])
+            beta2 = float(group["betas"][1])
+            correction = 1 - beta2 ** _step_number(optimizer_state)
+            ratio = mean_gradient.square() / (second.float() / correction + float(group["eps"]) ** 2)
+            parameter_accumulators.setdefault(
+                (name, "mean_postclip_gradient_squared_over_v_mean"), ScalarAccumulator()
+            ).add(float(ratio.mean()))
+            first = cast(Tensor, optimizer_state["exp_avg"]).float()
+            cosine = F.cosine_similarity(mean_gradient.reshape(1, -1), first.reshape(1, -1), dim=1)
+            parameter_accumulators.setdefault(
+                (name, "mean_postclip_gradient_momentum_cosine"), ScalarAccumulator()
+            ).add(float(cosine))
 
     if parameter_versions != {id(parameter): parameter._version for parameter in parameters}:
         raise RuntimeError("no-step probe mutated model parameters")
@@ -1108,7 +1192,8 @@ def probe_checkpoint(
         }
         for name in sorted(recorder.counts)
     ]
-    del optimizer, model
+    del mean_gradients, bindings, parameters, recorder, optimizer, model
+    gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return parameter_rows, subsystem_rows, head_rows, activation_rows, actual_batch_sha256
@@ -1157,8 +1242,8 @@ def _write_report(
     checkpoint = pd.DataFrame(checkpoint_rows)
     latest = checkpoint[checkpoint["update"] == args.through_update].nlargest(15, "implied_update_weight_rms_ratio")
     probe = pd.DataFrame(probe_rows)
-    stored = probe[probe["metric"] == "stored_rho"].rename(columns={"mean": "stored"})
-    reset = probe[probe["metric"] == "reset_rho"].rename(columns={"mean": "reset"})
+    stored = probe[probe["metric"] == "mean_postclip_stored_rho"].rename(columns={"mean": "stored"})
+    reset = probe[probe["metric"] == "mean_postclip_reset_rho"].rename(columns={"mean": "reset"})
     joined = stored.merge(reset[["arm", "update", "parameter", "reset"]], on=["arm", "update", "parameter"])
     joined["stored_reset_ratio"] = joined["stored"] / joined["reset"].clip(lower=np.finfo(np.float32).tiny)
     contaminated = joined.nlargest(15, "stored_reset_ratio")
@@ -1196,7 +1281,7 @@ def _write_report(
         "",
         amplification[["arm", "update", "group", "mean", "max"]].head(20).to_markdown(index=False),
         "",
-        "The Parquet tables contain per-parameter trajectories, coordinate tails, checkpoint displacement, fixed-policy KL, centered legal logits, per-head attention entropy, activations, subsystem gradients, and all no-step update probes.",
+        "The Parquet tables contain per-parameter trajectories, coordinate tails, checkpoint displacement, fixed-policy KL, centered legal logits, per-head attention entropy, activations, subsystem gradients, mean-gradient update probes, and batch-level sentinel probes.",
     ]
     (output / "report.md").write_text("\n".join(lines) + "\n")
 
@@ -1329,11 +1414,24 @@ def run(args: Args) -> Path:
     probe_heads: list[dict[str, Any]] = []
     activations: list[dict[str, Any]] = []
     batch_sha256: str | None = None
+    probe_sentinels: dict[str, list[str]] = {}
     probe_updates = sorted({update for values in selected.values() for update in values})
     for arm in ("reference", "half_muon"):
         for update in probe_updates:
+            sentinels = sentinel_parameter_names(
+                checkpoint_rows,
+                arm=arm,
+                update=update,
+                top_count=args.sentinel_parameter_count,
+            )
+            probe_sentinels[f"{arm}:{update}"] = sorted(sentinels)
             result = probe_checkpoint(
-                experiment, by_key[(arm, update)], args, device, expected_batch_sha256=batch_sha256
+                experiment,
+                by_key[(arm, update)],
+                args,
+                device,
+                expected_batch_sha256=batch_sha256,
+                sentinel_names=sentinels,
             )
             parameter_values, subsystem_values, head_values, activation_values, actual_hash = result
             batch_sha256 = actual_hash if batch_sha256 is None else batch_sha256
@@ -1369,6 +1467,7 @@ def run(args: Args) -> Path:
         "checkpoints": [asdict(ref) | {"path": str(ref.path)} for ref in refs],
         "fork_validation": fork_validation,
         "selected_probe_updates": selected,
+        "sentinel_parameters": probe_sentinels,
         "held_out_batch_stream_sha256": batch_sha256,
         "python": sys.version,
         "platform": platform.platform(),

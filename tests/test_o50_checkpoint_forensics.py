@@ -87,6 +87,52 @@ def test_turning_updates_use_gameplay_lcb() -> None:
     assert NOTEBOOK.select_turning_updates(rows, through_update=65_536) == (24_576, 32_768, 65_536)
 
 
+def test_sentinel_parameters_include_state_outliers_and_button_path() -> None:
+    rows = [
+        {
+            "arm": "reference",
+            "update": 65_536,
+            "parameter": "trunk.ordinary.weight",
+            "implied_update_weight_rms_ratio": 3.0,
+        },
+        {
+            "arm": "reference",
+            "update": 65_536,
+            "parameter": "trunk.second.weight",
+            "implied_update_weight_rms_ratio": 2.0,
+        },
+        {
+            "arm": "reference",
+            "update": 65_536,
+            "parameter": "temporal.outputs.buttons.down.weight",
+            "implied_update_weight_rms_ratio": 0.1,
+        },
+        {
+            "arm": "half_muon",
+            "update": 65_536,
+            "parameter": "other.weight",
+            "implied_update_weight_rms_ratio": 100.0,
+        },
+    ]
+
+    selected = NOTEBOOK.sentinel_parameter_names(rows, arm="reference", update=65_536, top_count=1)
+
+    assert selected == {
+        "trunk.ordinary.weight",
+        "temporal.outputs.buttons.down.weight",
+    }
+
+
+def test_efficient_probe_defaults_bound_expensive_work() -> None:
+    args = NOTEBOOK.Args(analysis_id="test")
+
+    assert args.probe_batch_size == 128
+    assert args.activation_probe_batches == 8
+    assert args.head_probe_batches == 8
+    assert args.sentinel_parameter_count == 12
+    assert args.coordinate_sample_size == 100_000
+
+
 def test_fork_validation_allows_only_half_muon_learning_rate(tmp_path: Path) -> None:
     parent_path = tmp_path / "parent.pt"
     child_path = tmp_path / "child.pt"
