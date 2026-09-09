@@ -1,5 +1,6 @@
-"""Frozen contracts for the O50 production program."""
+"""Contracts for the O50 production program."""
 
+import copy
 import importlib.util
 import json
 import os
@@ -383,6 +384,7 @@ def test_half_muon_fork_keeps_parent_wandb_id_only_as_lineage(
         "parent_checkpoint_name",
         "parent_checkpoint_sha256",
         "parent_wandb_id",
+        "optimizer",
     ):
         parent_config.pop(name)
     resume_state = {
@@ -445,6 +447,8 @@ def test_model_tag_names_the_actual_head_architecture() -> None:
     assert "nonlinear-head-trunk-skip" in tag
     assert "o51-parameterized-mwd0.0001-awd0.0001" in tag
     assert "linear-head-no-skip" not in tag
+    adamw_tag = exp.model_tag(exp.TrainConfig(optimizer="adamw", adam_lr=8e-4))
+    assert "all-adamw-alr0.0008" in adamw_tag
 
 
 def test_o51_initialization_depth_and_effective_rates() -> None:
@@ -480,6 +484,36 @@ def test_optimizer_roles_cover_every_parameter_and_split_qkv() -> None:
     assert all(group["muon_scale_clamp_min_one"] is False for group in muon_groups)
 
 
+def test_adamw_mode_uses_semantic_lr_groups_for_every_parameter() -> None:
+    cfg = _tiny_cfg(optimizer="adamw", adam_lr=8e-4)
+    model = exp.GPT(cfg)
+    roles = exp.optimizer_roles(model, cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    memberships = {id(parameter): group for group in optimizer.param_groups for parameter in group["params"]}
+
+    assert isinstance(optimizer, torch.optim.AdamW)
+    assert all(role.optimizer == "adamw" for role in roles.values())
+    assert set(memberships) == {id(parameter) for parameter in model.parameters()}
+    hidden_lr = (
+        cfg.adam_lr
+        * (cfg.batch_size / cfg.reference_batch_size / (cfg.target_positions / cfg.reference_positions)) ** 0.5
+    )
+    qkv = model.temporal.blocks[0].qkv.weight
+    output = model.temporal.outputs["buttons"].down.weight
+    assert memberships[id(qkv)]["lr"] == pytest.approx(hidden_lr)
+    assert memberships[id(output)]["lr"] == pytest.approx(hidden_lr / (cfg.arch.group_head_dim / 128))
+    assert memberships[id(qkv)]["weight_decay"] == cfg.adam_weight_decay
+    assert optimizer.defaults["betas"] == pytest.approx(exp.scaled_adam_betas(cfg))
+    assert optimizer.defaults["eps"] == pytest.approx(exp.scaled_adam_epsilon(cfg))
+
+
+def test_adamw_rejects_muon_continuation_options() -> None:
+    with pytest.raises(ValueError, match="Muon continuation options"):
+        exp.validate_config(_tiny_cfg(optimizer="adamw", continuation_diagnostics=True))
+    with pytest.raises(ValueError, match="Muon continuation options"):
+        exp.validate_config(_tiny_cfg(optimizer="adamw", muon_lr_multiplier=0.5))
+
+
 def test_v8_corpus_and_checkpoint_identity() -> None:
     cfg = exp.TrainConfig()
     assert len(cfg.source_names) == 44
@@ -493,9 +527,13 @@ def test_v8_corpus_and_checkpoint_identity() -> None:
     assert exp.config_from_state(state) == cfg
     assert {"max_steps", "warmup_steps"} <= state.keys()
     assert not {"max_steps", "warmup_steps"} & {field.name for field in fields(exp.TrainConfig)}
-    assert state["experiment_id"] == "050_scaled_temporal_awr_v5"
-    legacy = dict(state)
-    legacy["experiment_id"] = "050_scaled_temporal_awr_v4"
+    assert state["experiment_id"] == "050_scaled_temporal_awr_v6"
+    v5 = dict(state)
+    v5["experiment_id"] = "050_scaled_temporal_awr_v5"
+    v5.pop("optimizer")
+    assert exp.config_from_state(v5) == cfg
+    v4 = dict(v5)
+    v4["experiment_id"] = "050_scaled_temporal_awr_v4"
     for name in (
         "muon_lr_multiplier",
         "continuation_diagnostics",
@@ -504,8 +542,8 @@ def test_v8_corpus_and_checkpoint_identity() -> None:
         "parent_checkpoint_sha256",
         "parent_wandb_id",
     ):
-        legacy.pop(name)
-    assert exp.config_from_state(legacy) == cfg
+        v4.pop(name)
+    assert exp.config_from_state(v4) == cfg
     state["experiment_id"] = "050_scaled_temporal_awr_v3"
     with pytest.raises(ValueError, match="experiment_id"):
         exp.config_from_state(state)
@@ -566,6 +604,300 @@ def test_optimizer_diagnostics_match_direct_parameter_deltas() -> None:
         torch.testing.assert_close(result.optimizer_diagnostics[f"{prefix}/update_l2"], direct_update_l2)
         gradient_square += result.optimizer_diagnostics[f"{prefix}/grad_l2_pre_clip"].square()
     torch.testing.assert_close(gradient_square.sqrt(), result.gradient_norm)
+
+
+def test_adamw_state_restores_the_exact_next_update() -> None:
+    cfg = _tiny_cfg(optimizer="adamw", adam_lr=8e-4)
+    torch.manual_seed(7)
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    kwargs = {
+        "cfg": cfg,
+        "valid_prefixes": cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start),
+    }
+
+    exp.train_step(
+        model,
+        batch,
+        step=0,
+        update=1,
+        trunk_fn=model.forward,
+        temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        **kwargs,
+    )
+    model_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    optimizer_state = copy.deepcopy(optimizer.state_dict())
+    scheduler_state = copy.deepcopy(scheduler.state_dict())
+
+    resumed = exp.GPT(cfg)
+    resumed.load_state_dict(model_state)
+    resumed_optimizer = exp.make_optimizer(resumed, cfg)
+    resumed_optimizer.load_state_dict(optimizer_state)
+    resumed_scheduler = torch.optim.lr_scheduler.LambdaLR(resumed_optimizer, exp.lr_schedule(cfg))
+    resumed_scheduler.load_state_dict(scheduler_state)
+
+    for candidate_model, candidate_optimizer, candidate_scheduler in (
+        (model, optimizer, scheduler),
+        (resumed, resumed_optimizer, resumed_scheduler),
+    ):
+        exp.train_step(
+            candidate_model,
+            batch,
+            step=1,
+            update=2,
+            trunk_fn=candidate_model.forward,
+            temporal_fn=candidate_model.temporal.teacher_forced_nll_with_diagnostics,
+            optimizer=candidate_optimizer,
+            scheduler=candidate_scheduler,
+            **kwargs,
+        )
+
+    for expected, actual in zip(model.parameters(), resumed.parameters(), strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+def test_logical_matrix_samples_split_qkv_film_and_token_columns() -> None:
+    cfg = _tiny_cfg(optimizer="adamw")
+    model = exp.GPT(cfg)
+    samples = exp.logical_parameter_samples(model)
+
+    assert {
+        "trunk/layer_00/q",
+        "trunk/layer_00/k",
+        "trunk/layer_00/v",
+        "temporal/layer_00/q",
+        "temporal/layer_00/k",
+        "temporal/layer_00/v",
+        "temporal/token_projection/trunk_columns",
+        "temporal/token_projection/action_columns",
+        "temporal/token_projection/offset_columns",
+        "action/buttons/film_scale",
+        "action/buttons/film_shift",
+        "value/gate",
+        "value/value",
+        "remaining/item_encoder/gate",
+        "remaining/item_encoder/value",
+    } <= samples.keys()
+    assert all(sample.rows.numel() <= 4096 for sample in samples.values())
+    covered = {}
+    for sample in samples.values():
+        covered[id(sample.parameter)] = covered.get(id(sample.parameter), 0) + sample.element_count
+    assert covered == {id(parameter): parameter.numel() for parameter in model.parameters() if parameter.ndim == 2}
+
+
+def test_adamw_diagnostics_match_samples_moments_and_action_gradients() -> None:
+    cfg = _tiny_cfg(optimizer="adamw", adam_lr=8e-4, grad_clip=1e9)
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+    diagnostics = exp.AdamWStepDiagnostics.create(model)
+    matrix = diagnostics.matrices["temporal/layer_00/q"]
+    before = matrix.from_tensor(matrix.parameter).clone()
+
+    result = exp.train_step(
+        model,
+        exp.synthetic_awr_batch(cfg, torch.device("cpu")),
+        cfg,
+        step=0,
+        update=1,
+        valid_prefixes=cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start),
+        trunk_fn=model.forward,
+        temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        optimizer_diagnostics=diagnostics,
+    )
+
+    prefix = "diagnostics/optimizer/matrix/temporal/layer_00/q"
+    after = matrix.from_tensor(matrix.parameter)
+    update_rms = (before - after).square().mean().sqrt()
+    weight_rms = before.square().mean().sqrt()
+    state = optimizer.state[matrix.parameter]
+    torch.testing.assert_close(result.optimizer_diagnostics[f"{prefix}/update_rms"], update_rms)
+    torch.testing.assert_close(result.optimizer_diagnostics[f"{prefix}/pre_step_weight_rms"], weight_rms)
+    torch.testing.assert_close(
+        result.optimizer_diagnostics[f"{prefix}/update_weight_rms_ratio"],
+        update_rms / weight_rms,
+    )
+    torch.testing.assert_close(
+        result.optimizer_diagnostics[f"{prefix}/adam_m_rms"],
+        matrix.from_tensor(state["exp_avg"]).square().mean().sqrt(),
+    )
+    for name, parameters in exp.action_group_parameters(model).items():
+        expected = (
+            torch.stack([parameter.grad.float().square().sum() for parameter in parameters]).sum()
+            / sum(parameter.numel() for parameter in parameters)
+        ).sqrt()
+        torch.testing.assert_close(
+            result.optimizer_diagnostics[f"diagnostics/optimizer/action_group/{name}/grad_rms_pre_clip"],
+            expected,
+        )
+
+
+def test_activation_diagnostics_cover_action_and_value_projections() -> None:
+    cfg = _tiny_cfg(optimizer="adamw")
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+
+    result = exp.train_step(
+        model,
+        exp.synthetic_awr_batch(cfg, torch.device("cpu")),
+        cfg,
+        step=0,
+        update=1,
+        valid_prefixes=cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start),
+        trunk_fn=model.forward,
+        temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+
+    for name in exp.CONTROLLER_GROUP_NAMES:
+        prefix = f"diagnostics/activations/action/{name}"
+        assert {
+            f"{prefix}/up/input_rms",
+            f"{prefix}/up/input_abs_max",
+            f"{prefix}/up/output_rms",
+            f"{prefix}/down/input_rms",
+            f"{prefix}/down/output_abs_p999",
+            f"{prefix}/trunk_skip/input_rms",
+            f"{prefix}/trunk_skip/output_abs_p99",
+            f"{prefix}/combined_centered_logits/output_rms",
+        } <= result.metrics.keys()
+    assert {
+        "diagnostics/activations/value/gate/input_rms",
+        "diagnostics/activations/value/gate/output_abs_p999",
+        "diagnostics/activations/value/value/output_rms",
+        "diagnostics/activations/value/down/input_abs_max",
+        "diagnostics/activations/value/down/output_abs_p99",
+    } <= result.metrics.keys()
+    assert all(torch.isfinite(value) for value in result.metrics.values())
+
+
+def test_action_and_value_diagnostic_paths_preserve_forward_values() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    values = torch.randn(2, 3, cfg.arch.temporal_d_model)
+    for name in exp.CONTROLLER_GROUP_NAMES:
+        head = exp.cast(exp.NonlinearActionHead, model.temporal.outputs[name])
+        safer = name == "buttons"
+        actual, normalized, _up_output, _down_input = head.projection_activations(
+            values,
+            safer_norm=safer,
+        )
+        expected_input = exp.action_rmsnorm(values) if safer else exp.decoder_rmsnorm(values)
+        expected = head.down(torch.nn.functional.silu(head.up(expected_input)))
+        torch.testing.assert_close(normalized, expected_input)
+        torch.testing.assert_close(actual, expected)
+
+    value_inputs = torch.randn(2, 3, cfg.arch.d_model)
+    actual_value, _metrics = exp.value_with_activation_diagnostics(model.value_head, value_inputs)
+    torch.testing.assert_close(actual_value, model.value_head(value_inputs))
+
+
+def test_activation_output_statistics_exclude_illegal_logits() -> None:
+    metrics = exp._activation_output_metrics("logits", torch.tensor([1.0, 2.0, -torch.inf]))
+
+    assert metrics["logits/output_rms"] == pytest.approx((2.5) ** 0.5)
+    assert metrics["logits/output_abs_p99"] == 2
+    assert metrics["logits/output_abs_p999"] == 2
+
+
+def test_projection_local_target_gradient_attribution_uses_objective_coefficients() -> None:
+    cfg = _tiny_cfg()
+    nll = torch.full((1, 1, len(cfg.arch.head_offsets), exp.CONTROLLER_GROUP_COUNT), torch.log(torch.tensor(2.0)))
+    metrics = exp.projection_local_target_gradient_l1(
+        nll,
+        torch.tensor([[2.0]]),
+        offsets=cfg.arch.head_offsets,
+        valid_prefixes=1,
+        aux_loss_weight=cfg.awr.auxiliary_loss_weight,
+        valid=torch.ones(1, 1, dtype=torch.bool),
+    )
+
+    near = 0.5 * 2 / (cfg.awr.near_offsets * (1 + cfg.awr.auxiliary_loss_weight))
+    far = (
+        0.5
+        * cfg.awr.auxiliary_loss_weight
+        / ((len(cfg.arch.head_offsets) - cfg.awr.near_offsets) * (1 + cfg.awr.auxiliary_loss_weight))
+    )
+    assert metrics["diagnostics/projection_local/target_logit_grad_l1/o01/buttons"] == pytest.approx(near)
+    assert metrics["diagnostics/projection_local/target_logit_grad_l1/o09/buttons"] == pytest.approx(far)
+    assert metrics["diagnostics/projection_local/target_logit_grad_l1/by_offset/o01"] == pytest.approx(
+        exp.CONTROLLER_GROUP_COUNT * near
+    )
+    assert metrics["diagnostics/projection_local/target_logit_grad_l1/by_action_group/buttons"] == pytest.approx(
+        cfg.awr.near_offsets * near + 4 * far
+    )
+
+
+def test_train_step_uses_one_backward_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _tiny_cfg(optimizer="adamw")
+    model = exp.GPT(cfg)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+    backward_calls = 0
+
+    class Loss:
+        def backward(self) -> None:
+            nonlocal backward_calls
+            backward_calls += 1
+            for parameter in model.parameters():
+                parameter.grad = torch.ones_like(parameter)
+
+    monkeypatch.setattr(
+        exp,
+        "microbatch_loss",
+        lambda *_args, **_kwargs: (
+            Loss(),
+            torch.zeros(len(cfg.arch.head_offsets), exp.CONTROLLER_GROUP_COUNT),
+            {},
+        ),
+    )
+
+    exp.train_step(
+        model,
+        object(),
+        cfg,
+        step=0,
+        update=1,
+        valid_prefixes=1,
+        trunk_fn=model.forward,
+        temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+
+    assert backward_calls == 1
+
+
+def test_optimizer_diagnostics_share_the_training_metric_download() -> None:
+    cfg = _tiny_cfg()
+    accumulator = exp._TrainingMetricAccumulator()
+    result = exp.TrainStepResult(
+        nll_sum=torch.zeros(len(cfg.arch.head_offsets), exp.CONTROLLER_GROUP_COUNT),
+        gradient_norm=torch.tensor(2.0),
+        metrics={"train/loss": torch.tensor(3.0)},
+        muon_lr=1.0,
+        adam_lr=1.0,
+        optimizer_diagnostics={},
+    )
+    accumulator.add(result, valid_prefixes=4)
+
+    values, updates, prefixes = accumulator.flush(
+        cfg,
+        update=1,
+        diagnostics={"diagnostics/sample": torch.tensor(5.0)},
+    )
+
+    assert (updates, prefixes) == (1, 4)
+    assert values["train/loss"] == 3
+    assert values["diagnostics/sample"] == 5
 
 
 def test_fixed_diagnostics_are_centered_and_checkpointable() -> None:

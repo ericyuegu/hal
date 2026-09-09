@@ -169,8 +169,12 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v5"
-_LEGACY_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v4"
+_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v6"
+_LEGACY_EXPERIMENT_IDS: Final[tuple[str, ...]] = (
+    "050_scaled_temporal_awr_v4",
+    "050_scaled_temporal_awr_v5",
+)
+_HALF_MUON_PARENT_EXPERIMENT_ID: Final[str] = "050_scaled_temporal_awr_v4"
 _HALF_MUON_PARENT_WANDB_ID: Final[str] = "p1fyyp1z"
 _HALF_MUON_PARENT_UPDATE: Final[int] = 24_576
 _HALF_MUON_PARENT_CHECKPOINT: Final[str] = "checkpoints/step-0024576.pt"
@@ -337,6 +341,7 @@ class TrainConfig:
     seed: int = 0
     eval_seed: int = 0
     batch_size: int = 512
+    optimizer: Literal["muon", "adamw"] = "muon"
     muon_lr: float = 0.014
     muon_lr_multiplier: Annotated[float, tyro.conf.Suppress] = 1.0
     muon_weight_decay: float = 1e-4
@@ -433,6 +438,8 @@ class TrainConfig:
 
 
 def validate_config(cfg: TrainConfig) -> None:
+    if cfg.optimizer not in ("muon", "adamw"):
+        raise ValueError(f"optimizer must be 'muon' or 'adamw', got {cfg.optimizer!r}")
     positive = {
         "d_model": cfg.arch.d_model,
         "n_layers": cfg.arch.n_layers,
@@ -569,6 +576,10 @@ def validate_config(cfg: TrainConfig) -> None:
         cfg.parent_checkpoint_sha256,
         cfg.parent_wandb_id,
     )
+    if cfg.optimizer == "adamw" and (
+        cfg.muon_lr_multiplier != 1.0 or cfg.continuation_diagnostics or any(value is not None for value in lineage)
+    ):
+        raise ValueError("Muon continuation options require optimizer='muon'")
     if cfg.muon_lr_multiplier == 1.0:
         if cfg.continuation_diagnostics or any(value is not None for value in lineage):
             raise ValueError("continuation diagnostics and lineage require a Muon LR treatment")
@@ -734,8 +745,20 @@ class NonlinearActionHead(nn.Module):
 
     def forward_with_input(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """Return logits and the normalized tensor read by the hidden layer."""
-        normalized = action_rmsnorm(x)
-        return self.down(F.silu(self.up(normalized))), normalized
+        logits, normalized, _up_output, _down_input = self.projection_activations(x, safer_norm=True)
+        return logits, normalized
+
+    def projection_activations(
+        self,
+        x: Tensor,
+        *,
+        safer_norm: bool = False,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Return the output and the tensors at both projection boundaries."""
+        normalized = action_rmsnorm(x) if safer_norm else decoder_rmsnorm(x)
+        up_output = self.up(normalized)
+        down_input = F.silu(up_output)
+        return self.down(down_input), normalized, up_output, down_input
 
 
 def _sampled_quantile(tensor: Tensor, percentile: float, *, absolute: bool = False) -> Tensor:
@@ -752,6 +775,41 @@ def _sampled_quantile(tensor: Tensor, percentile: float, *, absolute: bool = Fal
         sample = sample.abs()
     rank = min(max(math.ceil(percentile * sample.numel() / 100.0), 1), sample.numel())
     return torch.kthvalue(sample, rank).values
+
+
+def _bounded_flat_sample(tensor: Tensor) -> Tensor:
+    """Return a deterministic activation sample without retaining its source."""
+    values = tensor.detach().flatten()
+    sample_size = Architecture.activation_percentile_sample_size
+    stride = max((values.numel() + sample_size - 1) // sample_size, 1)
+    return values[::stride][:sample_size].float()
+
+
+def _activation_input_metrics(prefix: str, tensor: Tensor) -> dict[str, Tensor]:
+    values = _bounded_flat_sample(tensor)
+    return {
+        f"{prefix}/input_rms": values.square().mean().sqrt(),
+        f"{prefix}/input_abs_max": values.abs().amax(),
+    }
+
+
+def _activation_output_metrics(prefix: str, tensor: Tensor) -> dict[str, Tensor]:
+    """Measure a bounded output sample, ignoring masked infinite logits."""
+    values = _bounded_flat_sample(tensor)
+    legal = torch.isfinite(values)
+    count = legal.sum().clamp_min(1)
+    finite = values.masked_fill(~legal, 0)
+    ordered = values.abs().masked_fill(~legal, torch.inf).sort().values
+
+    def percentile(numerator: int, denominator: int) -> Tensor:
+        rank = (count * numerator + denominator - 1).div(denominator, rounding_mode="floor").clamp_min(1)
+        return ordered.gather(0, (rank - 1).reshape(1)).squeeze(0)
+
+    return {
+        f"{prefix}/output_rms": (finite.square().sum() / count).sqrt(),
+        f"{prefix}/output_abs_p99": percentile(99, 100),
+        f"{prefix}/output_abs_p999": percentile(999, 1000),
+    }
 
 
 def short_causal_attention(
@@ -873,6 +931,7 @@ class CausalTemporalDecoder(nn.Module):
         self.head_offsets = tuple(cfg.arch.head_offsets)
         self.live_horizons = (cfg.prediction_frames,)
         self.d_model = cfg.arch.temporal_d_model
+        self.training_diagnostics = cfg.optimizer == "adamw"
         controller_width = CONTROLLER_GROUP_COUNT * cfg.arch.action_embed_dim
         self.offset_embedding = nn.Embedding(cfg.arch.sample_chunk_length + 1, cfg.arch.offset_embed_dim)
         self.token_projection = nn.Linear(
@@ -973,30 +1032,45 @@ class CausalTemporalDecoder(nn.Module):
         hidden: Tensor,
         observed: Tensor,
         targets: Tensor,
-    ) -> tuple[dict[str, Tensor], tuple[Tensor, Tensor, Tensor, Tensor]]:
-        """Return group logits and the button tensors used for diagnostics."""
+    ) -> tuple[
+        dict[str, Tensor],
+        tuple[Tensor, Tensor, Tensor, Tensor],
+        dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
+    ]:
+        """Return group logits and tensors at the action projection boundaries."""
         states = self.teacher_forced_states(hidden, observed, targets)
         embedded = self.codec.embed_groups(targets)
         logits: dict[str, Tensor] = {}
+        projection_values: dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = {}
         button_values: tuple[Tensor, Tensor, Tensor] | None = None
         for name in CONTROLLER_GROUP_NAMES:
             features = self.group_features(states, name, embedded)
+            head = cast(NonlinearActionHead, self.outputs[name])
+            head_output, head_input, up_output, down_input = head.projection_activations(
+                features,
+                safer_norm=name == "buttons",
+            )
+            trunk_output = self.trunk_outputs[name](hidden)
+            combined_logits = head_output + trunk_output[..., None, :]
+            projection_values[name] = (
+                head_input,
+                up_output,
+                down_input,
+                head_output,
+                hidden,
+                trunk_output,
+            )
             if name == "buttons":
-                head = cast(NonlinearActionHead, self.outputs[name])
-                combined_logits, head_input = head.forward_with_input(features)
-                combined_logits = combined_logits + self.trunk_outputs[name](hidden)[..., None, :]
                 button_values = (features, head_input, combined_logits)
-            else:
-                combined_logits = self.outputs[name](features) + self.trunk_outputs[name](hidden)[..., None, :]
             logits[name] = self._center(combined_logits)
         if button_values is None:
             raise RuntimeError("button head was not evaluated")
         button_mask = self.codec.button_mask(targets[..., TRIGGERS_GROUP])
         logits["buttons"] = logits["buttons"].masked_fill(button_mask, float("-inf"))
-        return logits, (*button_values, button_mask)
+        return logits, (*button_values, button_mask), projection_values
 
     def teacher_forced_logits_by_group(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> dict[str, Tensor]:
-        logits, _ = self._teacher_forced_outputs(hidden, observed, targets)
+        logits, _button_values, _projection_values = self._teacher_forced_outputs(hidden, observed, targets)
         return logits
 
     @staticmethod
@@ -1022,7 +1096,7 @@ class CausalTemporalDecoder(nn.Module):
         targets: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Return NLL plus a compact button-boundary stability signal."""
-        logits, button_values = self._teacher_forced_outputs(hidden, observed, targets)
+        logits, button_values, projection_values = self._teacher_forced_outputs(hidden, observed, targets)
         features, head_input, raw_logits, button_mask = button_values
         feature_rms = features.detach().float().square().mean(dim=-1).sqrt()
         input_values = head_input.detach()
@@ -1038,6 +1112,17 @@ class CausalTemporalDecoder(nn.Module):
             "stability/button_logit_abs_p999": _sampled_quantile(raw_logits_values, 99.9, absolute=True),
             "stability/button_margin_mean": margin.mean(),
         }
+        if self.training_diagnostics:
+            for name, values in projection_values.items():
+                head_input, up_output, down_input, down_output, trunk_input, trunk_output = values
+                prefix = f"diagnostics/activations/action/{name}"
+                metrics.update(_activation_input_metrics(f"{prefix}/up", head_input))
+                metrics.update(_activation_output_metrics(f"{prefix}/up", up_output))
+                metrics.update(_activation_input_metrics(f"{prefix}/down", down_input))
+                metrics.update(_activation_output_metrics(f"{prefix}/down", down_output))
+                metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip", trunk_input))
+                metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip", trunk_output))
+                metrics.update(_activation_output_metrics(f"{prefix}/combined_centered_logits", logits[name]))
         return self.nll_from_logits(logits, targets), metrics
 
     def teacher_forced_logits(self, hidden: Tensor, observed: Tensor, targets: Tensor) -> list[dict[str, Tensor]]:
@@ -1652,6 +1737,58 @@ def temporal_objective_parts(
     return near, far, total
 
 
+def projection_local_target_gradient_l1(
+    nll: Tensor,
+    weight: Tensor,
+    *,
+    offsets: tuple[int, ...],
+    valid_prefixes: int,
+    aux_loss_weight: float,
+    valid: Tensor,
+) -> dict[str, Tensor]:
+    """Attribute the exact policy gradient on each target logit."""
+    near_offsets = AWRCalibration.near_offsets
+    far_offsets = len(offsets) - near_offsets
+    normalization = 1.0 + aux_loss_weight
+    near_coefficient = weight.float() / (valid_prefixes * near_offsets * normalization)
+    far_coefficient = torch.full_like(weight, aux_loss_weight / (valid_prefixes * far_offsets * normalization))
+    coefficients = torch.cat(
+        (
+            near_coefficient[..., None].expand(*weight.shape, near_offsets),
+            far_coefficient[..., None].expand(*weight.shape, far_offsets),
+        ),
+        dim=-1,
+    )
+    target_derivative = -torch.expm1(-nll.detach().float())
+    values = torch.where(valid[..., None, None], target_derivative * coefficients[..., None], 0).sum(dim=(0, 1))
+    metrics: dict[str, Tensor] = {}
+    for depth, offset in enumerate(offsets):
+        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
+            metrics[f"diagnostics/projection_local/target_logit_grad_l1/o{offset:02d}/{name}"] = values[depth, group]
+        metrics[f"diagnostics/projection_local/target_logit_grad_l1/by_offset/o{offset:02d}"] = values[depth].sum()
+    for group, name in enumerate(CONTROLLER_GROUP_NAMES):
+        metrics[f"diagnostics/projection_local/target_logit_grad_l1/by_action_group/{name}"] = values[:, group].sum()
+    metrics["diagnostics/projection_local/target_logit_grad_l1/total"] = values.sum()
+    return metrics
+
+
+def value_with_activation_diagnostics(head: SwiGLU, inputs: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
+    """Evaluate the value head and measure its existing projection path."""
+    gate_output, value_output = head.up(inputs).chunk(2, dim=-1)
+    down_input = F.silu(gate_output) * value_output
+    output = head.down(down_input)
+    prefix = "diagnostics/activations/value"
+    metrics = {
+        **_activation_input_metrics(f"{prefix}/gate", inputs),
+        **_activation_output_metrics(f"{prefix}/gate", gate_output),
+        **_activation_input_metrics(f"{prefix}/value", inputs),
+        **_activation_output_metrics(f"{prefix}/value", value_output),
+        **_activation_input_metrics(f"{prefix}/down", down_input),
+        **_activation_output_metrics(f"{prefix}/down", output),
+    }
+    return output, metrics
+
+
 def microbatch_loss(
     model: GPT,
     batch: AWRBatch,
@@ -1688,7 +1825,12 @@ def microbatch_loss(
         if phase_timer is not None:
             phase_timer.record("temporal_end")
     value_features = decoder_rmsnorm(hidden).detach()
-    value = model.value_head(value_features.float()).squeeze(-1)
+    if cfg.optimizer == "adamw":
+        value_output, value_diagnostics = value_with_activation_diagnostics(model.value_head, value_features.float())
+    else:
+        value_output = model.value_head(value_features.float())
+        value_diagnostics = {}
+    value = value_output.squeeze(-1)
     value_loss, advantage, value_stats = value_objective(
         value,
         batch.returns[:, suffix_start:],
@@ -1718,6 +1860,18 @@ def microbatch_loss(
         aux_loss_weight=cfg.awr.auxiliary_loss_weight,
         valid=valid,
     )
+    projection_attribution = (
+        projection_local_target_gradient_l1(
+            dense_nll,
+            weights,
+            offsets=cfg.arch.head_offsets,
+            valid_prefixes=valid_prefixes,
+            aux_loss_weight=cfg.awr.auxiliary_loss_weight,
+            valid=valid,
+        )
+        if cfg.optimizer == "adamw"
+        else {}
+    )
     loss = policy_loss + cfg.awr.value_loss_weight * value_loss
     nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
     extra = {
@@ -1735,6 +1889,8 @@ def microbatch_loss(
         "awr/cap_fraction": stats["weight_clip_frac"],
         "awr/button_loss_correlation": stats["weight_button_loss_correlation"],
         **button_diagnostics,
+        **value_diagnostics,
+        **projection_attribution,
     }
     if phase_timer is not None:
         phase_timer.record("objective_end")
@@ -2986,16 +3142,16 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
             )
         elif name.startswith("trunk.blocks."):
             splits = 3 if name.endswith("attn.c_attn.weight") else 1
-            roles[name] = OptimizerRole("muon", "hidden", True, logical_splits=splits)
+            roles[name] = OptimizerRole(cfg.optimizer, "hidden", True, logical_splits=splits)
         elif name.startswith("temporal.blocks."):
             splits = 3 if name.endswith("qkv.weight") else 1
-            roles[name] = OptimizerRole("muon", "hidden", True, logical_splits=splits)
+            roles[name] = OptimizerRole(cfg.optimizer, "hidden", True, logical_splits=splits)
         elif name == "temporal.token_projection.weight" or (
             name.startswith("temporal.outputs.") and name.endswith("up.weight")
         ):
-            roles[name] = OptimizerRole("muon", "hidden", True)
+            roles[name] = OptimizerRole(cfg.optimizer, "hidden", True)
         elif name == "value_head.up.weight":
-            roles[name] = OptimizerRole("muon", "hidden", True, logical_splits=2)
+            roles[name] = OptimizerRole(cfg.optimizer, "hidden", True, logical_splits=2)
         elif name.startswith(embedding_prefixes):
             roles[name] = OptimizerRole("adamw", "input", False)
         elif name.startswith(finite_prefixes):
@@ -3015,8 +3171,8 @@ def _role_lr(role: OptimizerRole, cfg: TrainConfig) -> float:
     return lr / role.fan_in_multiplier if role.lr_kind == "output" else lr
 
 
-def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
-    """Build O51's semantic Muon and AdamW parameter groups."""
+def make_optimizer(model: GPT, cfg: TrainConfig) -> torch.optim.Optimizer:
+    """Build the selected optimizer with O51's semantic learning-rate roles."""
     roles = optimizer_roles(model, cfg)
     named = dict(model.named_parameters())
     buckets: dict[tuple[object, ...], list[nn.Parameter]] = defaultdict(list)
@@ -3054,7 +3210,14 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> SingleDeviceMuonWithAuxAdam:
                     "use_muon": False,
                 }
             )
-    return SingleDeviceMuonWithAuxAdam(groups)
+    if cfg.optimizer == "muon":
+        return SingleDeviceMuonWithAuxAdam(groups)
+    return torch.optim.AdamW(
+        groups,
+        betas=scaled_adam_betas(cfg),
+        eps=scaled_adam_epsilon(cfg),
+        fused=DEVICE == "cuda",
+    )
 
 
 def rebase_restored_muon_schedule(
@@ -3199,7 +3362,12 @@ class OptimizerStepDiagnostics:
         return combined
 
     @torch.no_grad()
-    def finish(self, gradient_norm: Tensor, clip_threshold: float) -> dict[str, Tensor]:
+    def finish(
+        self,
+        _optimizer: torch.optim.Optimizer,
+        gradient_norm: Tensor,
+        clip_threshold: float,
+    ) -> dict[str, Tensor]:
         if not self._gradient_squares or not self._parameter_squares:
             raise RuntimeError("optimizer diagnostics have no active sample")
         update_squares = {
@@ -3261,6 +3429,221 @@ class OptimizerStepDiagnostics:
         return metrics
 
 
+@dataclass(frozen=True, slots=True)
+class LogicalMatrixSample:
+    """A bounded deterministic sample from one logical parameter matrix."""
+
+    parameter: nn.Parameter
+    rows: Tensor
+    columns: Tensor
+    element_count: int
+
+    def from_tensor(self, tensor: Tensor) -> Tensor:
+        return tensor[self.rows, self.columns].detach().float()
+
+
+def logical_parameter_samples(model: GPT) -> dict[str, LogicalMatrixSample]:
+    """Split every learned matrix at its semantic boundaries."""
+    samples: dict[str, LogicalMatrixSample] = {}
+    covered: dict[int, int] = defaultdict(int)
+    limit = 4096
+
+    def add(
+        name: str,
+        parameter_tensor: Tensor,
+        row_start: int = 0,
+        row_stop: int | None = None,
+        column_start: int = 0,
+        column_stop: int | None = None,
+    ) -> None:
+        parameter = cast(nn.Parameter, parameter_tensor)
+        if name in samples:
+            raise RuntimeError(f"duplicate logical matrix name {name!r}")
+        row_stop = parameter.shape[0] if row_stop is None else row_stop
+        column_stop = parameter.shape[1] if column_stop is None else column_stop
+        height = row_stop - row_start
+        width = column_stop - column_start
+        element_count = height * width
+        stride = max((element_count + limit - 1) // limit, 1)
+        linear = torch.arange(0, element_count, stride, device=parameter.device)[:limit]
+        samples[name] = LogicalMatrixSample(
+            parameter,
+            row_start + linear.div(width, rounding_mode="floor"),
+            column_start + linear.remainder(width),
+            element_count,
+        )
+        covered[id(parameter)] += element_count
+
+    for index, module in enumerate(model.trunk.blocks):
+        block = cast(TrunkBlock, module)
+        width = block.attn.c_attn.weight.shape[1]
+        for part, name in enumerate(("q", "k", "v")):
+            add(
+                f"trunk/layer_{index:02d}/{name}",
+                block.attn.c_attn.weight,
+                part * width,
+                (part + 1) * width,
+            )
+        add(f"trunk/layer_{index:02d}/o", block.attn.c_proj.weight)
+        add(f"trunk/layer_{index:02d}/mlp_up", block.mlp.c_fc.weight)
+        add(f"trunk/layer_{index:02d}/mlp_down", block.mlp.c_proj.weight)
+
+    for index, module in enumerate(model.temporal.blocks):
+        block = cast(TemporalBlock, module)
+        width = block.qkv.weight.shape[1]
+        for part, name in enumerate(("q", "k", "v")):
+            add(
+                f"temporal/layer_{index:02d}/{name}",
+                block.qkv.weight,
+                part * width,
+                (part + 1) * width,
+            )
+        add(f"temporal/layer_{index:02d}/o", block.proj.weight)
+        add(f"temporal/layer_{index:02d}/mlp_up", block.up.weight)
+        add(f"temporal/layer_{index:02d}/mlp_down", block.down.weight)
+
+    token_weight = model.temporal.token_projection.weight
+    trunk_stop = model.temporal.trunk_width
+    action_stop = trunk_stop + model.temporal.controller_width
+    add("temporal/token_projection/trunk_columns", token_weight, column_stop=trunk_stop)
+    add("temporal/token_projection/action_columns", token_weight, column_start=trunk_stop, column_stop=action_stop)
+    add("temporal/token_projection/offset_columns", token_weight, column_start=action_stop)
+
+    for name in CONTROLLER_GROUP_NAMES:
+        if name in model.temporal.group_condition:
+            condition = cast(nn.Linear, model.temporal.group_condition[name])
+            weight = condition.weight
+            midpoint = weight.shape[0] // 2
+            add(f"action/{name}/film_scale", weight, row_stop=midpoint)
+            add(f"action/{name}/film_shift", weight, row_start=midpoint)
+        head = cast(NonlinearActionHead, model.temporal.outputs[name])
+        add(f"action/{name}/up", head.up.weight)
+        add(f"action/{name}/down", head.down.weight)
+        trunk_output = cast(nn.Linear, model.temporal.trunk_outputs[name])
+        add(f"action/{name}/trunk_skip", trunk_output.weight)
+
+    value_midpoint = model.value_head.up.weight.shape[0] // 2
+    add("value/gate", model.value_head.up.weight, row_stop=value_midpoint)
+    add("value/value", model.value_head.up.weight, row_start=value_midpoint)
+    add("value/down", model.value_head.down.weight)
+
+    item_midpoint = model.item_encoder.up.weight.shape[0] // 2
+    add("remaining/item_encoder/gate", model.item_encoder.up.weight, row_stop=item_midpoint)
+    add("remaining/item_encoder/value", model.item_encoder.up.weight, row_start=item_midpoint)
+    add("remaining/item_encoder/down", model.item_encoder.down.weight)
+
+    for name, parameter in model.named_parameters():
+        if parameter.ndim == 2 and id(parameter) not in covered:
+            add(f"remaining/{name.replace('.', '/')}", parameter)
+
+    matrices = {id(parameter): parameter for parameter in model.parameters() if parameter.ndim == 2}
+    wrong = {
+        name: (covered.get(parameter_id, 0), parameter.numel())
+        for parameter_id, parameter in matrices.items()
+        if covered.get(parameter_id, 0) != parameter.numel()
+        for name in [next(name for name, candidate in model.named_parameters() if candidate is parameter)]
+    }
+    if wrong:
+        raise RuntimeError(f"logical matrix partition is incomplete: {wrong}")
+    return samples
+
+
+def action_group_parameters(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
+    """Return the disjoint parameters owned by each action group."""
+    groups: dict[str, tuple[nn.Parameter, ...]] = {}
+    for name in CONTROLLER_GROUP_NAMES:
+        modules: list[nn.Module] = [
+            model.codec.class_embeddings[name],
+            model.codec.semantic_projections[name],
+            model.temporal.outputs[name],
+            model.temporal.trunk_outputs[name],
+        ]
+        if name in model.temporal.group_condition:
+            modules.append(model.temporal.group_condition[name])
+        groups[name] = tuple(parameter for module in modules for parameter in module.parameters())
+    identifiers = [id(parameter) for parameters in groups.values() for parameter in parameters]
+    if len(identifiers) != len(set(identifiers)):
+        raise RuntimeError("action-group parameter ownership overlaps")
+    return groups
+
+
+@dataclass(slots=True)
+class AdamWStepDiagnostics:
+    """Measure Adam moments and realized updates from bounded matrix samples."""
+
+    matrices: dict[str, LogicalMatrixSample]
+    action_groups: dict[str, tuple[nn.Parameter, ...]]
+    snapshots: dict[str, Tensor] = dataclass_field(default_factory=dict)
+    weight_rms: dict[str, Tensor] = dataclass_field(default_factory=dict)
+    gradient_rms: dict[str, Tensor] = dataclass_field(default_factory=dict)
+    action_gradient_rms: dict[str, Tensor] = dataclass_field(default_factory=dict)
+
+    @classmethod
+    def create(cls, model: GPT) -> AdamWStepDiagnostics:
+        return cls(logical_parameter_samples(model), action_group_parameters(model))
+
+    @staticmethod
+    def _rms(values: Tensor) -> Tensor:
+        return values.square().mean().sqrt()
+
+    @torch.no_grad()
+    def begin(self) -> None:
+        if self.snapshots:
+            raise RuntimeError("AdamW diagnostics already have an active sample")
+        for name, matrix in self.matrices.items():
+            gradient = matrix.parameter.grad
+            if gradient is None:
+                raise RuntimeError(f"logical matrix {name!r} has no gradient")
+            weights = matrix.from_tensor(matrix.parameter)
+            self.snapshots[name] = weights.clone()
+            self.weight_rms[name] = self._rms(weights)
+            self.gradient_rms[name] = self._rms(matrix.from_tensor(gradient))
+        for name, parameters in self.action_groups.items():
+            gradients = []
+            element_count = 0
+            for parameter in parameters:
+                if parameter.grad is None:
+                    raise RuntimeError(f"action group {name!r} has a parameter without a gradient")
+                gradients.append(parameter.grad.detach().float().square().sum())
+                element_count += parameter.numel()
+            self.action_gradient_rms[name] = (torch.stack(gradients).sum() / element_count).sqrt()
+
+    @torch.no_grad()
+    def finish(
+        self,
+        optimizer: torch.optim.Optimizer,
+        _gradient_norm: Tensor,
+        _clip_threshold: float,
+    ) -> dict[str, Tensor]:
+        if not self.snapshots:
+            raise RuntimeError("AdamW diagnostics have no active sample")
+        metrics: dict[str, Tensor] = {}
+        tiny = torch.finfo(torch.float32).tiny
+        for name, matrix in self.matrices.items():
+            state = optimizer.state.get(matrix.parameter)
+            if not isinstance(state, dict) or not {"exp_avg", "exp_avg_sq"} <= state.keys():
+                raise RuntimeError(f"AdamW state is missing moments for logical matrix {name!r}")
+            moment = state["exp_avg"]
+            second_moment = state["exp_avg_sq"]
+            if not isinstance(moment, Tensor) or not isinstance(second_moment, Tensor):
+                raise TypeError(f"AdamW moments for logical matrix {name!r} must be tensors")
+            update_rms = self._rms(self.snapshots[name] - matrix.from_tensor(matrix.parameter))
+            prefix = f"diagnostics/optimizer/matrix/{name}"
+            metrics[f"{prefix}/pre_step_weight_rms"] = self.weight_rms[name]
+            metrics[f"{prefix}/grad_rms_pre_clip"] = self.gradient_rms[name]
+            metrics[f"{prefix}/adam_m_rms"] = self._rms(matrix.from_tensor(moment))
+            metrics[f"{prefix}/adam_v_rms"] = self._rms(matrix.from_tensor(second_moment))
+            metrics[f"{prefix}/update_rms"] = update_rms
+            metrics[f"{prefix}/update_weight_rms_ratio"] = update_rms / self.weight_rms[name].clamp_min(tiny)
+        for name, gradient_rms in self.action_gradient_rms.items():
+            metrics[f"diagnostics/optimizer/action_group/{name}/grad_rms_pre_clip"] = gradient_rms
+        self.snapshots.clear()
+        self.weight_rms.clear()
+        self.gradient_rms.clear()
+        self.action_gradient_rms.clear()
+        return metrics
+
+
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
     """Estimate forward-backward FLOPs from each subsystem's parameter uses."""
     full = cfg.arch.L_ctx
@@ -3278,10 +3661,11 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
     treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
+    optimizer = "" if cfg.optimizer == "muon" else f"all-adamw-alr{cfg.adam_lr:g}-"
     return (
         f"scaled050-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-d2r2-"
-        f"nonlinear-head-trunk-skip-projectiles-v8-o51-parameterized-"
+        f"nonlinear-head-trunk-skip-projectiles-v8-o51-parameterized-{optimizer}"
         f"mwd{cfg.muon_weight_decay:g}-awd{cfg.adam_weight_decay:g}-{treatment}"
     )
 
@@ -3382,7 +3766,7 @@ def save_boundary_checkpoint(
     *,
     update: int,
     model: GPT,
-    optimizer: SingleDeviceMuonWithAuxAdam,
+    optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
     cfg: TrainConfig,
     uploader: BackgroundUploader | None,
@@ -3695,9 +4079,21 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         f"O50 d{cfg.arch.d_model} L{cfg.arch.n_layers} AWR with policy-world-v8 and O51's selected "
         "initialization, depth scaling, centered logits, and semantic optimizer roles"
     )
+    wandb.run.summary["optimizer/name"] = "Muon+AdamW" if cfg.optimizer == "muon" else "AdamW"
+    wandb.run.summary["optimizer/all_parameters_use_adamw"] = cfg.optimizer == "adamw"
+    wandb.run.summary["optimizer/implementation"] = (
+        "SingleDeviceMuonWithAuxAdam" if cfg.optimizer == "muon" else "torch.optim.AdamW"
+    )
+    wandb.run.summary["optimizer/fused"] = cfg.optimizer == "adamw" and DEVICE == "cuda"
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = None
     wandb.run.summary["optimizer/lr_schedule"] = "cosine"
     wandb.run.summary["optimizer/update_clip_semantics"] = "global pre-step gradient norm clipping only"
+    wandb.run.summary["diagnostics/activation_sample_limit"] = Architecture.activation_percentile_sample_size
+    wandb.run.summary["diagnostics/parameter_sample_limit"] = 4096
+    wandb.run.summary["diagnostics/realized_update_semantics"] = "post-step delta including weight decay"
+    wandb.run.summary["diagnostics/target_logit_gradient_semantics"] = (
+        "exact projection-local L1 from NLL and objective coefficient; not a shared-trunk decomposition"
+    )
     if cfg.wandb_log_code:
         log_wandb_code(wandb.run)
 
@@ -3750,13 +4146,14 @@ def _log_training_summary(
         "6*B*L_ctx*(N_trunk+N_other+N_value+n_offsets*(N_temporal+N_group_heads))"
     )
     input_lr = cfg.adam_lr * math.sqrt(scaling_multipliers(cfg)[0] / scaling_multipliers(cfg)[1])
-    wandb.run.summary["optimizer/muon_master_lr"] = cfg.muon_lr
-    wandb.run.summary["optimizer/muon_lr_multiplier"] = cfg.muon_lr_multiplier
-    wandb.run.summary["optimizer/muon_effective_lr"] = cfg.muon_lr * cfg.muon_lr_multiplier
-    wandb.run.summary["optimizer/muon_momentum"] = 0.95
-    wandb.run.summary["optimizer/muon_weight_decay"] = cfg.muon_weight_decay
-    wandb.run.summary["optimizer/muon_scale_clamp_min_one"] = False
-    wandb.run.summary["optimizer/muon_logical_splits"] = "QKV=3, SwiGLU=2"
+    if cfg.optimizer == "muon":
+        wandb.run.summary["optimizer/muon_master_lr"] = cfg.muon_lr
+        wandb.run.summary["optimizer/muon_lr_multiplier"] = cfg.muon_lr_multiplier
+        wandb.run.summary["optimizer/muon_effective_lr"] = cfg.muon_lr * cfg.muon_lr_multiplier
+        wandb.run.summary["optimizer/muon_momentum"] = 0.95
+        wandb.run.summary["optimizer/muon_weight_decay"] = cfg.muon_weight_decay
+        wandb.run.summary["optimizer/muon_scale_clamp_min_one"] = False
+        wandb.run.summary["optimizer/muon_logical_splits"] = "QKV=3, SwiGLU=2"
     wandb.run.summary["optimizer/adam_master_lr"] = cfg.adam_lr
     wandb.run.summary["optimizer/adam_input_lr"] = input_lr
     wandb.run.summary["optimizer/adam_vector_lr"] = input_lr
@@ -3849,11 +4246,24 @@ class _TrainingMetricAccumulator:
         self.updates += 1
         self.valid_prefixes += valid_prefixes
 
-    def flush(self, cfg: TrainConfig, *, update: int) -> tuple[dict[str, float], int, int]:
+    def flush(
+        self,
+        cfg: TrainConfig,
+        *,
+        update: int,
+        diagnostics: dict[str, Tensor] | None = None,
+    ) -> tuple[dict[str, float], int, int]:
         """Synchronize once, return window means, and reset the accumulator."""
         if self._sum is None or self.updates == 0 or self.valid_prefixes == 0:
             raise RuntimeError("cannot flush an empty training metric accumulator")
-        payload = self._sum.cpu()
+        diagnostic_names = () if diagnostics is None else tuple(diagnostics)
+        diagnostic_values = (
+            self._sum.new_empty(0)
+            if diagnostics is None
+            else torch.stack([diagnostics[name].detach().float() for name in diagnostic_names])
+        )
+        training_value_count = self._sum.numel()
+        payload = torch.cat((self._sum, diagnostic_values)).cpu()
         if not torch.isfinite(payload).all():
             raise FloatingPointError(f"update {update}: accumulated training metrics contain a non-finite value")
 
@@ -3861,7 +4271,7 @@ class _TrainingMetricAccumulator:
         mean_nll = (
             payload[:nll_values].reshape(len(cfg.arch.head_offsets), CONTROLLER_GROUP_COUNT) / self.valid_prefixes
         )
-        scalar_values = payload[nll_values:] / self.updates
+        scalar_values = payload[nll_values:training_value_count] / self.updates
         nll_metrics = nll_mean_metrics(
             mean_nll,
             cfg.arch.head_offsets,
@@ -3872,6 +4282,9 @@ class _TrainingMetricAccumulator:
             "optimizer/grad_norm": float(scalar_values[0]),
         }
         values.update({name: float(value) for name, value in zip(self._metric_names, scalar_values[1:], strict=True)})
+        values.update(
+            {name: float(value) for name, value in zip(diagnostic_names, payload[training_value_count:], strict=True)}
+        )
 
         updates = self.updates
         valid_prefixes = self.valid_prefixes
@@ -3892,10 +4305,10 @@ def train_step(
     valid_prefixes: int,
     trunk_fn: Callable,
     temporal_fn: Callable,
-    optimizer: SingleDeviceMuonWithAuxAdam,
+    optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
     phase_timer: CudaPhaseTimer | None = None,
-    optimizer_diagnostics: OptimizerStepDiagnostics | None = None,
+    optimizer_diagnostics: OptimizerStepDiagnostics | AdamWStepDiagnostics | None = None,
 ) -> TrainStepResult:
     """Run one complete optimization step on a device-resident batch."""
     if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
@@ -3921,11 +4334,15 @@ def train_step(
     metrics["optimizer/clip_fraction"] = (gradient_norm > cfg.grad_clip).float()
     if phase_timer is not None:
         phase_timer.record("grad_norm_end")
-    muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
-    adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
+    if cfg.optimizer == "muon":
+        muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
+        adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
+    else:
+        muon_lr = 0.0
+        adam_lr = float(max(group["lr"] for group in optimizer.param_groups))
     optimizer.step()
     diagnostic_metrics = (
-        {} if optimizer_diagnostics is None else optimizer_diagnostics.finish(gradient_norm, cfg.grad_clip)
+        {} if optimizer_diagnostics is None else optimizer_diagnostics.finish(optimizer, gradient_norm, cfg.grad_clip)
     )
     scheduler.step()
     if phase_timer is not None:
@@ -4011,7 +4428,7 @@ def spawn_closed_loop_evaluation(
 def _finalize_training(
     *,
     model: GPT,
-    optimizer: SingleDeviceMuonWithAuxAdam,
+    optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
@@ -4195,7 +4612,11 @@ def train(
         optimizer.load_state_dict(resume_state["opt"])
         scheduler.load_state_dict(resume_state["sched"])
         if fork_from_parent:
-            rebase_restored_muon_schedule(optimizer, scheduler, cfg.muon_lr_multiplier)
+            rebase_restored_muon_schedule(
+                cast(SingleDeviceMuonWithAuxAdam, optimizer),
+                scheduler,
+                cfg.muon_lr_multiplier,
+            )
         identity_state = resume_state.get("identity_masker")
         if not isinstance(identity_state, dict):
             raise ValueError("resume checkpoint has no identity-mask RNG state")
@@ -4208,7 +4629,13 @@ def train(
                 f"checkpoint actual_loss_positions={actual_positions} is invalid after {start_step} updates"
             )
 
-    optimizer_step_diagnostics = OptimizerStepDiagnostics.create(model, cfg) if cfg.continuation_diagnostics else None
+    optimizer_step_diagnostics: OptimizerStepDiagnostics | AdamWStepDiagnostics | None
+    if cfg.optimizer == "adamw":
+        optimizer_step_diagnostics = AdamWStepDiagnostics.create(model)
+    elif cfg.continuation_diagnostics:
+        optimizer_step_diagnostics = OptimizerStepDiagnostics.create(model, cfg)
+    else:
+        optimizer_step_diagnostics = None
     fixed_diagnostics: FixedDiagnosticTracker | None = None
     initial_diagnostic_metrics: dict[str, Tensor] = {}
     if cfg.continuation_diagnostics:
@@ -4343,8 +4770,10 @@ def train(
             batch_prefetcher.fill_lookahead(lookahead_limit)
             window_loader_submitted_batches.append(batch_prefetcher.submitted_batches)
             window_loader_ready_batches.append(batch_prefetcher.ready_batches)
-            optimizer_diagnostic_due = cfg.continuation_diagnostics and (
-                update % cfg.train_metrics_every == 0 or update in evaluation_updates
+            metrics_due = update % cfg.train_metrics_every == 0 or update == run_stop
+            optimizer_diagnostic_due = (cfg.optimizer == "adamw" and metrics_due) or (
+                cfg.continuation_diagnostics
+                and (update % cfg.train_metrics_every == 0 or update in evaluation_updates)
             )
             result = train_step(
                 model,
@@ -4372,14 +4801,14 @@ def train(
                     torch.cuda.max_memory_allocated() / 2**30,
                 )
 
-            metrics_due = update % cfg.train_metrics_every == 0 or update == run_stop
             if metrics_due:
                 window_metric_values, window_updates, window_valid_prefixes = metric_accumulator.flush(
                     cfg,
                     update=update,
+                    diagnostics=result.optimizer_diagnostics,
                 )
             update_timer.finish()
-            diagnostic_values = _download_scalar_metrics(result.optimizer_diagnostics, update)
+            diagnostic_values = {} if metrics_due else _download_scalar_metrics(result.optimizer_diagnostics, update)
             fixed_diagnostic_due = cfg.continuation_diagnostics and (
                 (cfg.val_every > 0 and update % cfg.val_every == 0) or update == run_stop
             )
@@ -4549,27 +4978,31 @@ def config_from_state(values: dict) -> TrainConfig:
     derived_fields = {"max_steps", "warmup_steps"}
     runtime_fields = {item.name for item in fields(TrainConfig)} - {"arch", "awr"}
     experiment_id = values.get("experiment_id")
-    if experiment_id == _LEGACY_EXPERIMENT_ID:
-        treatment_fields = {
-            "muon_lr_multiplier": 1.0,
-            "continuation_diagnostics": False,
-            "parent_run_name": None,
-            "parent_checkpoint_name": None,
-            "parent_checkpoint_sha256": None,
-            "parent_wandb_id": None,
-        }
+    if experiment_id in _LEGACY_EXPERIMENT_IDS:
+        migrated_fields: dict[str, object] = {"optimizer": "muon"}
+        if experiment_id == _HALF_MUON_PARENT_EXPERIMENT_ID:
+            migrated_fields.update(
+                {
+                    "muon_lr_multiplier": 1.0,
+                    "continuation_diagnostics": False,
+                    "parent_run_name": None,
+                    "parent_checkpoint_name": None,
+                    "parent_checkpoint_sha256": None,
+                    "parent_wandb_id": None,
+                }
+            )
         expected_legacy = {
             "experiment_id",
             "architecture",
             "awr_calibration",
-            *(runtime_fields - treatment_fields.keys()),
+            *(runtime_fields - migrated_fields.keys()),
             *derived_fields,
         }
         missing = expected_legacy - values.keys()
         unexpected = values.keys() - expected_legacy
         if missing or unexpected:
             raise ValueError(f"checkpoint config mismatch: missing={sorted(missing)}, unexpected={sorted(unexpected)}")
-        values = {**values, **treatment_fields, "experiment_id": _EXPERIMENT_ID}
+        values = cast(dict, {**values, **migrated_fields, "experiment_id": _EXPERIMENT_ID})
     expected = {"experiment_id", "architecture", "awr_calibration", *runtime_fields, *derived_fields}
     missing = expected - values.keys()
     unexpected = values.keys() - expected
@@ -4870,7 +5303,7 @@ def main(args: Command) -> None:
                     raise SystemExit(f"the half-Muon fork requires --resume-as {_HALF_MUON_RUN_NAME}")
                 if parent_wandb_id != _HALF_MUON_PARENT_WANDB_ID or parent_update != _HALF_MUON_PARENT_UPDATE:
                     raise SystemExit("the half-Muon fork source is not W&B run p1fyyp1z at update 24,576")
-                if resume_state["cfg"].get("experiment_id") != _LEGACY_EXPERIMENT_ID:
+                if resume_state["cfg"].get("experiment_id") != _HALF_MUON_PARENT_EXPERIMENT_ID:
                     raise SystemExit("the half-Muon fork source must be the immutable O50 v4 checkpoint")
                 if not isinstance(parent_scheduler, dict) or parent_scheduler.get("last_epoch") != parent_update:
                     raise SystemExit("the half-Muon fork scheduler is not at the update 24,576 boundary")

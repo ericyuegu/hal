@@ -23,3 +23,17 @@ The control is the O50 AdamW master rate, `4.25e-4`. The treatment rates are `1.
 ## Decision rule
 
 Every arm must reach update 16,384 with finite loss, gradients, and final validation metrics. Rank eligible arms by final validation NLL, then far NLL, then rollout NLL, then lower learning rate. Evaluate the top two final checkpoints over the same fixed 96 closed-loop matchups before selecting a rate for larger training.
+
+Post-training decision amendment, 2026-09-08: before any O52 gameplay result was available, the user rejected validation-based screening. Evaluate every eligible arm over the same fixed 96 closed-loop matchups. Select by net-stock cluster-bootstrap lower bound, then mean net stock per minute, then mean net damage per minute, then lower learning rate. Offline validation metrics are diagnostic only and cannot select an arm.
+
+## Full-data follow-up
+
+Registered 2026-09-09 before launch.
+
+The treatment is O50 trained with AdamW on every parameter at master learning rate `8e-4`. It keeps the global pre-step gradient clip at `1.0`; it does not add per-head clipping. The control is the historical full-data O50 Muon-plus-AdamW run. No new matched Muon control will be launched.
+
+The architecture, initialization, objective, 44-source corpus and mixture, 2,048-example validation cohort, replay-ring order, seed, identity-mask RNG, `8 * 2^30` supervised positions, 4,096-update warm-up, automatic evaluation schedule, weight decay, duration-scaled Adam betas and epsilon, semantic learning-rate roles, and readout fan-in scaling remain fixed. The AdamW hidden and input learning rate is approximately `2.828e-4` before schedule scaling.
+
+Passive diagnostics are descriptive evidence for divergence. At each 25-update boundary they measure bounded logical-matrix samples, Adam moments, realized updates including weight decay, exact action-group gradient RMS, projection activations, centered legal logits, and the exact target-logit gradient L1 implied by each local cross-entropy term and its objective coefficient. The target-logit attribution is local to the output projection. It does not decompose gradients in the shared trunk. These diagnostics add no model pass or backward pass.
+
+Run eligibility requires finite training and validation metrics through 131,072 updates and complete scheduled gameplay evaluations. Compare the treatment with the historical control by the registered gameplay rule: net-stock cluster-bootstrap lower bound, then mean net stock per minute, then mean net damage per minute. Offline metrics and passive diagnostics are for diagnosis only. They cannot select the treatment.
