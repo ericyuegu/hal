@@ -110,6 +110,19 @@ class UpdateResult:
     next_second_moment: Tensor | None
 
 
+@dataclass(frozen=True, slots=True)
+class ProbeReplayLabels:
+    """Combine lazy returns with frame-length player identity labels."""
+
+    returns: Any
+    players: ReplayPlayerLookup
+
+    def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
+        labels = self.returns(compact)
+        labels.update(self.players(compact))
+        return labels
+
+
 class ScalarAccumulator:
     """Aggregate finite scalars without retaining per-batch tensors."""
 
@@ -624,13 +637,16 @@ def make_lazy_probe_loader(
     sidecar_cfg = replace(cfg, player_sidecar_local=str(sidecar_path))
     sidecar = experiment.load_identity_sidecar(sidecar_cfg)
     player_lookup = ReplayPlayerLookup(sidecar.by_replay)
-    labels = returns_lib.PolicyReturnLabels(
-        player_lookup=player_lookup,
-        gamma=cfg.awr.gamma,
-        damage_shaping=cfg.awr.damage_shaping,
-        win_reward=cfg.awr.win_reward,
-        stock_value=cfg.awr.stock_value,
-        suffix=cfg.awr.return_suffix,
+    labels = ProbeReplayLabels(
+        returns=returns_lib.PolicyReturnLabels(
+            player_lookup=player_lookup,
+            gamma=cfg.awr.gamma,
+            damage_shaping=cfg.awr.damage_shaping,
+            win_reward=cfg.awr.win_reward,
+            stock_value=cfg.awr.stock_value,
+            suffix=cfg.awr.return_suffix,
+        ),
+        players=player_lookup,
     )
     projection = experiment.FeatureProjection(
         columns=ITEM_PLAYER_PROJECTION.columns | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column},

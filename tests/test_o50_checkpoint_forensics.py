@@ -25,6 +25,25 @@ def _load_notebook() -> Any:
 NOTEBOOK = _load_notebook()
 
 
+def test_probe_replay_labels_expand_player_ids_to_frame_length() -> None:
+    class Returns:
+        def __call__(self, _compact: Any) -> dict[str, Any]:
+            return {"return": torch.arange(3).numpy(), "p1_player_id": torch.tensor(7).numpy()}
+
+    class Players:
+        def __call__(self, _compact: Any) -> dict[str, Any]:
+            return {
+                "p1_player_id": torch.full((3,), 7).numpy(),
+                "p2_player_id": torch.full((3,), 8).numpy(),
+            }
+
+    labels = NOTEBOOK.ProbeReplayLabels(Returns(), Players())({})
+
+    assert labels["return"].shape == (3,)
+    assert labels["p1_player_id"].shape == (3,)
+    assert labels["p2_player_id"].shape == (3,)
+
+
 def test_checkpoint_updates_requires_complete_milestones() -> None:
     assert NOTEBOOK.checkpoint_updates(65_536) == (24_576, 32_768, 40_960, 49_152, 57_344, 65_536)
     with pytest.raises(ValueError, match="not an O50 milestone"):
