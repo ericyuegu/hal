@@ -133,6 +133,17 @@ def test_efficient_probe_defaults_bound_expensive_work() -> None:
     assert args.coordinate_sample_size == 100_000
 
 
+def test_explicit_git_sha_does_not_require_a_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("git must not run")
+
+    monkeypatch.setattr(NOTEBOOK.subprocess, "run", fail)
+
+    assert NOTEBOOK._git_sha("a" * 40) == "a" * 40
+    with pytest.raises(ValueError, match="full lowercase"):
+        NOTEBOOK._git_sha("short")
+
+
 def test_wandb_history_queries_only_common_subsystem_update_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     requested_keys: list[list[str]] = []
 

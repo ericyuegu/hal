@@ -73,6 +73,8 @@ class Args:
 
     analysis_id: str
     """Unique artifact name below analysis/o50-checkpoint-forensics/v1/."""
+    git_sha: str = ""
+    """Exact source commit. Empty is allowed only when the Git checkout is present."""
     through_update: int = 65_536
     probe_batches: int = 64
     probe_batch_size: int = 128
@@ -156,13 +158,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _git_sha() -> str:
-    return subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+def _git_sha(configured: str) -> str:
+    if configured:
+        if len(configured) != 40 or any(character not in "0123456789abcdef" for character in configured):
+            raise ValueError("git_sha must be a full lowercase Git SHA")
+        return configured
+    try:
+        return subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("the source has no Git checkout; pass --git-sha explicitly") from error
 
 
 def _validate_args(args: Args) -> None:
@@ -1327,10 +1336,11 @@ def _upload(output: Path, args: Args, completion: Mapping[str, Any]) -> None:
 def run(args: Args) -> Path:
     """Run the complete read-only analysis and return its local artifact path."""
     _validate_args(args)
+    git_sha = _git_sha(args.git_sha)
     if args.upload:
         existing = _remote_complete(args)
         if existing is not None:
-            if existing.get("git_sha") != _git_sha() or existing.get("through_update") != args.through_update:
+            if existing.get("git_sha") != git_sha or existing.get("through_update") != args.through_update:
                 raise RuntimeError(f"artifact prefix {args.artifact_prefix} already contains a different analysis")
             print(f"[complete] existing r2://{r2.bucket()}/{args.artifact_prefix}/complete.json", flush=True)
             return Path(args.output_dir)
@@ -1460,7 +1470,7 @@ def run(args: Args) -> Path:
         "schema_version": _SCHEMA_VERSION,
         "args": asdict(args),
         "artifact_prefix": args.artifact_prefix,
-        "git_sha": _git_sha(),
+        "git_sha": git_sha,
         "experiment_path": _EXPERIMENT_PATH,
         "experiment_sha256": _EXPERIMENT_SHA256,
         "checkpoints": [asdict(ref) | {"path": str(ref.path)} for ref in refs],
