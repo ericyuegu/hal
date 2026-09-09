@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import itertools
 import json
 import math
 import platform
@@ -711,6 +710,21 @@ def _batch_identity(batch: AWRBatch) -> bytes:
     return digest.digest()
 
 
+def iter_probe_batches(loader: Iterable[AWRBatch], count: int) -> Iterable[AWRBatch]:
+    """Yield a fixed count across deterministic lazy validation epochs."""
+    produced = 0
+    while produced < count:
+        epoch_count = 0
+        for batch in loader:
+            yield batch
+            produced += 1
+            epoch_count += 1
+            if produced == count:
+                return
+        if epoch_count == 0:
+            raise RuntimeError("validation loader yielded no batches")
+
+
 def _attention_head_means(qkv: Tensor, n_heads: int, mask: Tensor, rotary: Any) -> Tensor:
     batch, length, fused_width = qkv.shape
     d_model = fused_width // 3
@@ -961,7 +975,7 @@ def probe_checkpoint(
     }
     processed_batches = 0
     try:
-        for batch_index, cpu_batch in enumerate(itertools.islice(loader, args.probe_batches)):
+        for batch_index, cpu_batch in enumerate(iter_probe_batches(loader, args.probe_batches)):
             if not isinstance(cpu_batch, AWRBatch):
                 raise TypeError(f"lazy probe loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
             batch_digest.update(_batch_identity(cpu_batch))
@@ -988,11 +1002,11 @@ def probe_checkpoint(
                     horizon_nll = dense_nll[..., horizon_index, group_index].float()[valid]
                     horizon_weights = weights[valid] if horizon_index < experiment.AWRCalibration.near_offsets else 1.0
                     head_accumulators.setdefault((name, f"nll_offset_{offset}"), ScalarAccumulator()).add(
-                        float(horizon_nll.mean())
+                        float(horizon_nll.detach().mean())
                     )
                     weighted = horizon_nll * horizon_weights
                     head_accumulators.setdefault((name, f"weighted_nll_offset_{offset}"), ScalarAccumulator()).add(
-                        float(weighted.mean())
+                        float(weighted.detach().mean())
                     )
             loss.backward()
             global_norm, clip_scale = _gradient_scale(parameters, cfg.grad_clip)

@@ -64,6 +64,12 @@ def test_batch_identity_does_not_require_replay_ids() -> None:
     assert len(first) == 32
 
 
+def test_probe_batches_cycle_lazy_validation_epochs() -> None:
+    assert list(NOTEBOOK.iter_probe_batches((1, 2), 5)) == [1, 2, 1, 2, 1]
+    with pytest.raises(RuntimeError, match="yielded no batches"):
+        list(NOTEBOOK.iter_probe_batches((), 1))
+
+
 def test_checkpoint_updates_requires_complete_milestones() -> None:
     assert NOTEBOOK.checkpoint_updates(65_536) == (24_576, 32_768, 40_960, 49_152, 57_344, 65_536)
     with pytest.raises(ValueError, match="not an O50 milestone"):
