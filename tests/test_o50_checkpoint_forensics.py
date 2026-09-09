@@ -133,6 +133,35 @@ def test_efficient_probe_defaults_bound_expensive_work() -> None:
     assert args.coordinate_sample_size == 100_000
 
 
+def test_wandb_history_queries_only_common_subsystem_update_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_keys: list[list[str]] = []
+
+    class FakeRun:
+        def scan_history(self, *, keys: list[str], page_size: int) -> list[dict[str, Any]]:
+            assert page_size == 1000
+            requested_keys.append(keys)
+            if len(requested_keys) == 1:
+                return []
+            return [{"global_step": 25, keys[1]: 0.01}]
+
+    class FakeApi:
+        def run(self, _path: str) -> FakeRun:
+            return FakeRun()
+
+    monkeypatch.setattr(NOTEBOOK.wandb, "Api", FakeApi)
+
+    _eval_rows, update_rows = NOTEBOOK._wandb_history(
+        NOTEBOOK.Args(analysis_id="test"),
+        "wandb-id",
+        "half_muon",
+    )
+
+    assert len(requested_keys) == 2
+    assert all("/all/" in key for key in requested_keys[1][1:])
+    assert update_rows[0]["update"] == 25
+    assert update_rows[0][requested_keys[1][1]] == 0.01
+
+
 def test_fork_validation_allows_only_half_muon_learning_rate(tmp_path: Path) -> None:
     parent_path = tmp_path / "parent.pt"
     child_path = tmp_path / "child.pt"

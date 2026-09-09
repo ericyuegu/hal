@@ -622,9 +622,8 @@ def _wandb_history(args: Args, wandb_id: str, arm: str) -> tuple[list[dict[str, 
     update_rows: list[dict[str, Any]] = []
     if arm == "half_muon":
         prefixes = [
-            f"diagnostics/optimizer/{subsystem}/{optimizer_name}"
+            f"diagnostics/optimizer/{subsystem}/all"
             for subsystem in ("trunk", "temporal_decoder", "group_heads", "value_head", "other")
-            for optimizer_name in ("muon", "adamw", "all")
         ]
         diagnostic_keys = [
             "global_step",
