@@ -72,11 +72,12 @@ def _known_dolphin_version(version: melee.console.DolphinVersion) -> Iterator[No
 
 @dataclass(frozen=True, slots=True)
 class NetplaySetup:
-    """The local character and remote Slippi code for one match."""
+    """The local character, remote Slippi code, and selected stage."""
 
     character: melee.Character
     opponent_code: str
     costume: int = 0
+    stage: melee.Stage = melee.Stage.FINAL_DESTINATION
 
 
 class NetplaySession:
@@ -157,6 +158,8 @@ class NetplaySession:
         """Connect to the remote player and return the first live frame."""
         if self._console is None:
             raise RuntimeError("NetplaySession must be used as a context manager")
+        if self._controller is not None:
+            raise RuntimeError("NetplaySession has already launched Dolphin")
         if not setup.opponent_code:
             raise ValueError("opponent_code must be non-empty")
         # Controller construction creates configuration and the named pipe that
@@ -184,6 +187,34 @@ class NetplaySession:
             raise RuntimeError(f"first netplay frame has invalid id {frame_id!r}")
         self._last_frame_id = frame_id
         return first_frame
+
+    def start_rematch(self, setup: NetplaySetup) -> dict:
+        """Navigate the existing direct-connect session into its next game."""
+        if self._console is None or self._controller is None or self._menu_helper is None:
+            raise RuntimeError("start_match must complete before start_rematch")
+        if self._last_frame_id is not None:
+            raise RuntimeError("the current netplay match has not ended")
+        self._controller.release_all()
+        self._controller.flush()
+        first_frame = self._navigate_to_live(setup)
+        frame_id = first_frame.get("id")
+        if not isinstance(frame_id, int):
+            raise RuntimeError(f"first netplay frame has invalid id {frame_id!r}")
+        self._last_frame_id = frame_id
+        return first_frame
+
+    def park_menu(self) -> melee.Menu:
+        """Send neutral input while a connected player decides on a rematch."""
+        if self._console is None or self._controller is None:
+            raise RuntimeError("start_match must complete before park_menu")
+        if self._last_frame_id is not None:
+            raise RuntimeError("cannot park the menu while a match is live")
+        self._controller.release_all()
+        self._controller.flush()
+        gamestate = step_blocking(self._console, self.step_timeout_seconds)
+        if gamestate.menu_state in LIVE_MENU_STATES:
+            raise RuntimeError("netplay entered a game while waiting for a rematch")
+        return gamestate.menu_state
 
     def _navigate_to_live(self, setup: NetplaySetup) -> dict:
         assert self._console is not None
@@ -218,7 +249,7 @@ class NetplaySession:
                     gamestate=gamestate,
                     controller=self._controller,
                     character_selected=setup.character,
-                    stage_selected=melee.Stage.FINAL_DESTINATION,
+                    stage_selected=setup.stage,
                     connect_code=setup.opponent_code,
                     costume=setup.costume,
                     autostart=True,
@@ -275,6 +306,7 @@ class NetplaySession:
         frame = canonical_frame(gamestate)
         in_game = gamestate.menu_state in LIVE_MENU_STATES
         if not in_game:
+            self._last_frame_id = None
             return frame, False
         frame_id = frame.get("id")
         if not isinstance(frame_id, int):

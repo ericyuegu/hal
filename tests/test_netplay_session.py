@@ -116,8 +116,15 @@ def test_character_selection_is_passed_to_menu_helper(tmp_path: Path, monkeypatc
     )
     monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: next(states))
     monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: {"id": 0})
-    session._navigate_to_live(NetplaySetup(melee.Character.FALCO, "HUMAN#1"))
+    session._navigate_to_live(
+        NetplaySetup(
+            melee.Character.FALCO,
+            "HUMAN#1",
+            stage=melee.Stage.YOSHIS_STORY,
+        )
+    )
     assert selection == [melee.Character.FALCO]
+    assert helper.menu_helper_simple.call_args.kwargs["stage_selected"] is melee.Stage.YOSHIS_STORY
 
 
 def test_main_menu_uses_libmelee_direct_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,6 +199,45 @@ def test_step_requires_an_explicit_input_even_when_neutral(tmp_path: Path) -> No
 
     neutral = ControllerInputsValue(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
     assert neutral.main_x == 0.0
+
+
+def test_finished_match_can_rematch_without_relaunching_dolphin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session(tmp_path)
+    session._console = console = Mock()
+    session._controller = controller = Mock()
+    session._menu_helper = Mock()
+    session._last_frame_id = None
+    navigate = Mock(return_value={"id": 0})
+    monkeypatch.setattr(session, "_navigate_to_live", navigate)
+
+    setup = NetplaySetup(melee.Character.MARTH, "HUMAN#1", stage=melee.Stage.BATTLEFIELD)
+    assert session.start_rematch(setup) == {"id": 0}
+    console.run.assert_not_called()
+    controller.release_all.assert_called_once()
+    controller.flush.assert_called_once()
+    navigate.assert_called_once_with(setup)
+
+
+def test_menu_parking_sends_neutral_and_does_not_navigate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session(tmp_path)
+    session._console = console = Mock()
+    session._controller = controller = Mock()
+    session._menu_helper = helper = Mock()
+    session._last_frame_id = None
+    state = SimpleNamespace(menu_state=melee.Menu.CHARACTER_SELECT)
+    monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: state)
+
+    assert session.park_menu() is melee.Menu.CHARACTER_SELECT
+    controller.release_all.assert_called_once()
+    controller.flush.assert_called_once()
+    helper.menu_helper_simple.assert_not_called()
+    console.run.assert_not_called()
 
 
 @pytest.mark.parametrize("frame_id", [9, 10, 12])
