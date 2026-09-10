@@ -424,14 +424,14 @@
         <div class="artifact interactive">
           <div class="figure-head">
             <div>
-              <h4>O50 architecture and training recipe</h4>
+              <h4>Flagship architecture and training recipe</h4>
               <p>Select a module to inspect the exact recipe.</p>
             </div>
             <button id="clear-highlight" type="button" class="lineage-tab" style="border:1px solid var(--ink);width:auto" aria-label="Show the full model"><b>Full model</b></button>
           </div>
           <div class="architecture-wrap">
             <div class="architecture-details">
-              <svg id="architecture-diagram" class="chart" viewBox="0 0 650 470" role="img" aria-label="O50 model architecture"></svg>
+              <svg id="architecture-diagram" class="chart" viewBox="0 0 650 470" role="img" aria-label="Production model architecture"></svg>
               <div id="module-detail" class="module-detail"></div>
             </div>
           </div>
@@ -442,7 +442,7 @@
             <div class="stat"><span class="stat-value">+52.72 [+45.14]</span><span class="stat-label">net damage/min · mean [LCB]</span></div>
           </div>
         </div>
-        <figcaption>Fig 1: The 216.5M-parameter O50 policy. The temporal decoder predicts a controller plan from one trunk state; the standard runtime executes two frames before replanning. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
+        <figcaption>Fig 1: The 216.5M-parameter production policy. The temporal decoder predicts a controller plan from one trunk state; the standard runtime executes two frames before replanning. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
       </figure>
 
       <ul class="question-list">
@@ -537,10 +537,10 @@
             </div>
           </div>
         </div>
-        <figcaption>Fig 2: Action-decoder lineage. C, M, T, and B are C-stick, main stick, triggers, and buttons. O50 trains offsets <span class="mono">1–6, 9, 12, 16, 20</span> and uses offsets <span class="mono">1–4</span> in play. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
+        <figcaption>Fig 2: Action-decoder lineage. C, M, T, and B are C-stick, main stick, triggers, and buttons. The production model trains offsets <span class="mono">1–6, 9, 12, 16, 20</span> and uses offsets <span class="mono">1–4</span> in play. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
-      <p>The clean comparison is O37. It separates two questions: should later predicted frames depend on earlier predicted frames, and should later controller parts depend on earlier parts from the same frame?</p>
+      <p>The clean comparison separates two questions: should later predicted frames depend on earlier predicted frames, and should later controller parts depend on earlier parts from the same frame?</p>
 
       <figure class="breakout">
         <div class="artifact">
@@ -550,13 +550,13 @@
               <p>Same parameters, data, updates, initialization procedure, and deployment.</p>
             </div>
           </div>
-          <div id="factor-chart" class="factor-bars" aria-label="Closed-loop scores for the four O37 factorization experiments"></div>
+          <div id="factor-chart" class="factor-bars" aria-label="Closed-loop scores for the four factorization experiments"></div>
         </div>
-        <figcaption>Fig 3: O37’s complete 2×2. Across-frame feedback adds <span class="mono">+0.361</span> stocks/min and <span class="mono">+13.49</span> damage/min on average. Within-frame feedback adds <span class="mono">+0.245</span> and <span class="mono">+8.48</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/98r9smrj">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/a117chkw">within-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/50q39o9j">across-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">autoregressive MTP</a>.</span></figcaption>
+        <figcaption>Fig 3: The complete 2×2. Across-frame feedback adds <span class="mono">+0.361</span> stocks/min and <span class="mono">+13.49</span> damage/min on average. Within-frame feedback adds <span class="mono">+0.245</span> and <span class="mono">+8.48</span>. <span class="run-source">Internal experiment: O37. <a href="https://wandb.ai/ericyuegu/hal/runs/98r9smrj">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/a117chkw">within-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/50q39o9j">across-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
       <h4>Controller codec</h4>
-      <p>The old codec collapsed simultaneous buttons and used a sparse set of analog targets. I replaced it with an 8-bit button mask and fixed Cartesian stick centers, then tested a polar stick layout without changing the rest of the O52 system.</p>
+      <p>The old codec collapsed simultaneous buttons and used a sparse set of analog targets. I replaced it with an 8-bit button mask and fixed Cartesian stick centers, then tested a polar stick layout without changing the rest of the matched system.</p>
 
       <figure class="breakout">
         <div class="artifact">
@@ -568,7 +568,7 @@
           </div>
           <div class="codec-lineage" aria-label="Legacy, Cartesian, and polar controller codecs">
             <section class="codec-stage">
-              <div class="codec-stage-head"><b>Legacy</b><span>O43 bridge</span></div>
+              <div class="codec-stage-head"><b>Legacy</b><span>lossy reducer</span></div>
               <div class="codec-button-demo">
                 <span class="codec-lane-label">button chord · A + B</span>
                 <div class="codec-collapse"><span class="codec-chord">A + B</span><i>→</i><span class="codec-class">A</span></div>
@@ -588,7 +588,7 @@
             </section>
 
             <section class="codec-stage">
-              <div class="codec-stage-head"><b>Cartesian</b><span>O26 · O52</span></div>
+              <div class="codec-stage-head"><b>Cartesian</b><span>fixed XY</span></div>
               <div class="codec-button-demo">
                 <span class="codec-lane-label">button chord · A + B</span>
                 <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
@@ -609,7 +609,7 @@
             </section>
 
             <section class="codec-stage polar">
-              <div class="codec-stage-head"><b>Polar</b><span>O53</span></div>
+              <div class="codec-stage-head"><b>Polar</b><span>radius + angle</span></div>
               <div class="codec-button-demo">
                 <span class="codec-lane-label">button chord · A + B</span>
                 <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
@@ -631,7 +631,7 @@
           </div>
           <div id="codec-results" class="codec-results" aria-label="Closed-loop results for two matched controller-codec comparisons"></div>
         </div>
-        <figcaption>Fig 4: Two matched comparisons. Cartesian beat the full legacy package by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Polar then beat its matched Cartesian baseline by <span class="mono">+0.095</span> stocks/min and <span class="mono">+0.88</span> damage/min; its stock LCB moved from <span class="mono">−0.074</span> to <span class="mono">+0.016</span>. Scores should only be compared within each pair. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">O26 Cartesian</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yxy8brhx">O52 Cartesian</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yi7yyyu0">O53 polar</a>.</span></figcaption>
+        <figcaption>Fig 4: Two matched comparisons. Cartesian beat the full legacy package by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Polar then beat its matched Cartesian baseline by <span class="mono">+0.095</span> stocks/min and <span class="mono">+0.88</span> damage/min; its stock LCB moved from <span class="mono">−0.074</span> to <span class="mono">+0.016</span>. Scores should only be compared within each pair. <span class="run-source">Internal experiments: O43, O26/O52, and O53. <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">Cartesian, first comparison</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yxy8brhx">Cartesian, second comparison</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yi7yyyu0">polar</a>.</span></figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -651,10 +651,10 @@
       <details class="author-note">
         <summary>Draft notes · encoding</summary>
         <ul>
-          <li>Lead with O37. It is the clean causal result.</li>
-          <li>Use O11 → O12 → O37 as design history, not as a score ladder.</li>
+          <li>Lead with the complete factorization ablation. It is the clean causal result.</li>
+          <li>Use next-frame → independent MTP → autoregressive MTP as design history, not as a score ladder.</li>
           <li>The codec forensics ended with the opposite result from the initial hypothesis: the legacy codec was worse.</li>
-          <li>Keep the codec results as two matched pairs. The Cartesian control differs between the O43 and O53 comparisons.</li>
+          <li>Keep the codec results as two matched pairs. The Cartesian control differs between the legacy and polar comparisons.</li>
         </ul>
       </details>
 
@@ -702,7 +702,7 @@
           </div>
           <div id="objective-branches" class="branch-list"></div>
         </div>
-        <figcaption>Fig 7: Flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with O26 BC; neither beats it.</figcaption>
+        <figcaption>Fig 7: Flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with the same behavior-cloning baseline; neither beats it.</figcaption>
       </figure>
 
       <div class="section-map-anchor">
@@ -788,7 +788,7 @@
             </div>
           </div>
         </div>
-        <figcaption>Fig 10: O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
+        <figcaption>Fig 10: The four factorization checkpoints at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -796,7 +796,7 @@
           <div class="figure-head">
             <div>
               <h4>Capacity against imposed delay</h4>
-              <p>O39 checkpoints at <span class="mono">D = 2³⁰</span> supervised positions.</p>
+              <p>Capacity-sweep checkpoints at <span class="mono">D = 2³⁰</span> supervised positions.</p>
             </div>
             <div class="controls" style="padding:0">
               <select id="delay-model" aria-label="Model size"></select>
@@ -809,7 +809,7 @@
           <svg id="delay-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Model performance at several imposed delays"></svg>
           <p id="delay-note" class="chart-note"></p>
         </div>
-        <figcaption>Fig 11: Select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
+        <figcaption>Fig 11: Select a model. Delay 1 is not automatically best, and size does not give a stable ordering. <span class="run-source">Internal experiment: O39. <a href="../experiments/039_capacity_scaling.py">Capacity-scaling source</a>.</span></figcaption>
       </figure>
 
       <figure class="breakout">
@@ -830,7 +830,7 @@
       </figure>
 
       <div class="truth-note">
-        <p>I do not have the true fixed-compute closed-loop Pareto curve. O48 was designed but not run. Figure 13 fixes processed data, not training FLOPs.</p>
+        <p>I do not have the true fixed-compute closed-loop Pareto curve. I designed that study but did not run it. Figure 13 fixes processed data, not training FLOPs.</p>
       </div>
 
       <details class="author-note">
@@ -838,7 +838,7 @@
         <ul>
           <li>The expected inverted-U is not cleanly visible.</li>
           <li>The strongest result is robustness to longer execution horizons when actions are modeled autoregressively across frames.</li>
-          <li>Keep model-size conclusions narrow: O39 supports “can help under some deployment settings,” not monotonic scaling.</li>
+          <li>Keep model-size conclusions narrow: the capacity sweep supports “can help under some deployment settings,” not monotonic scaling.</li>
         </ul>
       </details>
 
@@ -846,14 +846,14 @@
         <h2 id="scaling">Scaling experiments <span class="section-number">§ 3</span></h2>
         <aside class="architecture-context" data-focus="trunk optimizer" aria-hidden="true"><span class="context-label">Model map · scale</span><svg viewBox="0 0 238 286"></svg></aside>
       </div>
-      <p>Validation NLL has a broad relationship with closed-loop play in O39. It is not reliable enough to select a checkpoint or capacity.</p>
+      <p>Validation NLL has a broad relationship with closed-loop play in the capacity sweep. It is not reliable enough to select a checkpoint or capacity.</p>
 
       <figure class="breakout">
         <div class="artifact interactive">
           <div class="figure-head">
             <div>
               <h4>Validation NLL vs. closed-loop play</h4>
-              <p>All healthy O39 model-budget points evaluated at delay 4.</p>
+              <p>All healthy model-budget points evaluated at delay 4.</p>
             </div>
           </div>
           <div class="scaling-grid">
@@ -867,7 +867,7 @@
             </div>
           </div>
         </div>
-        <figcaption>Fig 13: Hover a point for its model, data budget, and score. This is an association inside O39, not a model-selection rule.</figcaption>
+        <figcaption>Fig 13: Hover a point for its model, data budget, and score. This is an association inside one capacity sweep, not a model-selection rule.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -896,7 +896,7 @@
       </figure>
 
       <details class="raw">
-        <summary>Show the 33 O39 points used in Fig. 13</summary>
+        <summary>Show the 33 points used in Fig. 13</summary>
         <div class="table-scroll">
           <table class="raw-table">
             <thead><tr><th>Model</th><th>Data</th><th>Validation NLL</th><th>Stocks/min</th><th>Damage/min</th><th class="run-source-cell">Run</th></tr></thead>
@@ -980,7 +980,7 @@
             </ul>
           </div>
         </div>
-        <figcaption>Fig 16: Closed-loop evaluations during the earlier Muon O50 run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</span></figcaption>
+        <figcaption>Fig 16: Closed-loop evaluations during the earlier Muon scale-up. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <span class="run-source">Internal experiment: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</span></figcaption>
       </figure>
 
       <div class="aside">
@@ -992,13 +992,13 @@
         <summary>Draft notes · ending</summary>
         <ul>
           <li>The honest headline is not “scale solved it.” Sequence factorization, replay diversity, optimizer-update count, and deployment timing had clearer effects.</li>
-          <li>The all-AdamW O50 checkpoint reached <span class="mono">+0.494 [+0.398]</span> under standard deployment. The Cody/Fox fast-deployment combination reached <span class="mono">+0.874</span>, but identity, character, delay, and replan changed together.</li>
+          <li>The all-AdamW production checkpoint reached <span class="mono">+0.494 [+0.398]</span> under standard deployment. The Cody/Fox fast-deployment combination reached <span class="mono">+0.874</span>, but identity, character, delay, and replan changed together.</li>
           <li>Possible ending: release links, video, then the remaining clean experiments rather than a stronger causal claim.</li>
         </ul>
       </details>
 
       <div class="footnotes">
-        <p><strong>Sources.</strong> <a href="blog_experiment_evidence.md">Audited experiment ledger</a>, <a href="blog_experiment_runs.csv">run CSV</a>, <a href="../results/039_capacity_scaling/">O39 results</a>, and the W&amp;B runs linked inline. All stock and damage values are per active minute. LCB means the saved one-sided 95% lower bound unless a figure says otherwise.</p>
+        <p><strong>Sources.</strong> <a href="blog_experiment_evidence.md">Audited experiment ledger</a>, <a href="blog_experiment_runs.csv">run CSV</a>, <a href="../results/039_capacity_scaling/">capacity-scaling results</a>, and the W&amp;B runs linked inline. All stock and damage values are per active minute. LCB means the saved one-sided 95% lower bound unless a figure says otherwise.</p>
       </div>
     </article>
   </main>
@@ -1435,7 +1435,7 @@
       },
       mtp: {
         title: 'Independent future heads',
-        text: 'O12 reuses one trunk state to predict offsets 1, 5, 9, and 13. Each future head is conditionally independent of the other predicted frames.',
+        text: 'The independent model reuses one trunk state to predict offsets 1, 5, 9, and 13. Each future head is conditionally independent of the other predicted frames.',
         source: '<a href="' + WAND_B + 'shjnxxsu">O12 · shjnxxsu</a>',
         offsets: [1, 5, 9, 13]
       },
@@ -1745,7 +1745,7 @@
 
     function renderFactor() {
       one('#factor-chart').innerHTML =
-        '<div class="factor-bar-head"><span>O37 condition</span><span>net stocks / min</span><span>net damage / min</span></div>' +
+        '<div class="factor-bar-head"><span>condition</span><span>net stocks / min</span><span>net damage / min</span></div>' +
         factorRows.map(function (row, index) {
           return '<div class="factor-bar-row' + (index === factorRows.length - 1 ? ' flagship' : '') + '">' +
             '<div class="factor-bar-label"><b>' + row.name + '</b><span>' + row.label + ' · ' + row.note + '</span></div>' +
@@ -1803,7 +1803,7 @@
 
     var codecComparisons = [
       {
-        title: 'O43 bridge', note: 'same O26 architecture, loss, data, and updates',
+        title: 'Legacy → Cartesian', note: 'same architecture, loss, data, and updates',
         delta: 'Δ +0.292 stock · +16.16 damage',
         rows: [
           { name: 'Legacy', role: 'control', stock: -0.132712, damage: 21.371409 },
@@ -1811,7 +1811,7 @@
         ]
       },
       {
-        title: 'O52 → O53', note: 'only the stick classes and stick semantics change',
+        title: 'Cartesian → Polar', note: 'only the stick classes and stick semantics change',
         delta: 'Δ +0.095 stock · +0.88 damage',
         rows: [
           { name: 'Cartesian', role: 'control', stock: 0.031839, damage: 33.963848 },
@@ -1857,7 +1857,7 @@
         id: 'cross', name: 'Head cross-attention', diagram: 'cross',
         control: 'final trunk state hₜ', treatment: 'queries cross-attend to trunk history',
         stock: null, damage: null,
-        noResult: 'O24 scored −0.398 stocks/min and +21.55 damage/min, but its nearest reference changes the trunk, codec, offsets, and decoder size.',
+        noResult: 'The retained run scored −0.398 stocks/min and +21.55 damage/min, but its nearest reference changes the trunk, codec, offsets, and decoder size.',
         text: 'Twenty action-prefix queries used causal cross-attention over earlier trunk tokens.',
         links: [['O24', '4hoe86s7'], ['O26 reference', 'cqbbbg77']]
       },
@@ -2026,7 +2026,7 @@
     var objectiveBranches = [
       {
         id: 'iql', name: 'Attached IQL', diagram: 'iql',
-        control: 'O26 behavior cloning', treatment: 'actor + Q₁/Q₂/V losses',
+        control: 'behavior cloning', treatment: 'actor + Q₁/Q₂/V losses',
         stock: -2.009, damage: -95.85,
         text: 'The tested critics + IQL loss failed despite more parameters, data, and work. This does not reject every form of offline Q-learning.',
         links: [['BC', 'cqbbbg77'], ['IQL', '06fi5jms']]
@@ -2040,16 +2040,16 @@
       },
       {
         id: 'xm1', name: 'Exploration modeling · K=1', diagram: 'xm1',
-        control: 'O26 behavior cloning', treatment: 'one latent trajectory',
+        control: 'behavior cloning', treatment: 'one latent trajectory',
         stock: -1.667, damage: -89.37,
         text: 'K=1 changes the decoder and objective, sees twice the samples, and uses nearly twice the estimated training work.',
         links: [['O26 BC', 'cqbbbg77'], ['XM K=1', 'mz8dk2gh']]
       },
       {
         id: 'xm8', name: 'Exploration modeling · K=8', diagram: 'xm8',
-        control: 'O26 behavior cloning', treatment: 'best of eight latent trajectories',
+        control: 'behavior cloning', treatment: 'best of eight latent trajectories',
         stock: -0.807, damage: -44.33,
-        text: 'K=8 is better than K=1, but still worse than O26 BC. It also stopped earlier and changed microbatching and training work.',
+        text: 'K=8 is better than K=1, but still worse than behavior cloning. It also stopped earlier and changed microbatching and training work.',
         links: [['O26 BC', 'cqbbbg77'], ['XM K=8', 'feic18gt']]
       }
     ];
@@ -2068,7 +2068,7 @@
       for (var index = 0; index < count; index += 1) {
         candidates += '<span class="toy-token' + (index === count - 1 ? ' hot' : '') + '">z' + (index + 1) + '</span>';
       }
-      return contrast('O26 BC', '<div class="toy-flow vertical"><span class="toy-node">hₜ</span><div class="toy-token-row"><span class="toy-token hot">a+1</span><span class="toy-token hot">a+2</span><span class="toy-token hot">…</span></div><span class="toy-sub">teacher-forced causal plan</span></div>',
+      return contrast('behavior cloning', '<div class="toy-flow vertical"><span class="toy-node">hₜ</span><div class="toy-token-row"><span class="toy-token hot">a+1</span><span class="toy-token hot">a+2</span><span class="toy-token hot">…</span></div><span class="toy-sub">teacher-forced causal plan</span></div>',
         'XM · K=' + count, '<div class="toy-flow vertical"><div class="toy-token-row">' + candidates + '</div><span class="toy-link">↓ decode trajectories</span><span class="toy-node hot">minimum-loss candidate</span></div>');
     }
 
@@ -2225,8 +2225,8 @@
         ]
       },
       {
-        id: 'O26',
-        name: 'O26 base · 7.08M',
+        id: 'L8',
+        name: 'L8 · 7.08M',
         run: 'bpsr9sji',
         rows: [[1, -3.198, -80.7, 5.99, true], [2, -1.719, -44.3, 8.80, true], [4, -1.818, -71.4, 11.06, true]]
       },
@@ -2391,7 +2391,7 @@
         [28, 1.9136, -1.698, -56.0, 'gpfbsp9a'],
         [29, 1.8750, -1.387, -63.7, 'z0q5csaf'],
         [30, 1.8461, -1.818, -71.4, 'bpsr9sji']
-      ].map(function (row) { return scalePoint('O26', 7081967, row); }))
+      ].map(function (row) { return scalePoint('L8', 7081967, row); }))
       .concat([
         [26, 2.0365, -2.155, -52.9, 'la5p7wpo'],
         [27, 1.9621, -1.910, -42.8, '54gkmcl9'],
@@ -2471,7 +2471,7 @@
         'stroke-width': 1.5,
         'stroke-dasharray': '5 4'
       }));
-      var modelOrder = ['L5', 'O26', 'L7', 'L10', 'L13', 'L16', 'L18'];
+      var modelOrder = ['L5', 'L8', 'L7', 'L10', 'L13', 'L16', 'L18'];
       scalingPoints.forEach(function (row) {
         var sizeFraction = (Math.log10(row.params) - Math.log10(6988015)) /
           (Math.log10(293127087) - Math.log10(6988015));
@@ -2775,7 +2775,7 @@
       var module = moduleById(activeModule) || moduleById(highlightedModules[0]);
       if (!module) {
         one('#module-detail').innerHTML =
-          '<span class="verdict">Flagship policy</span><h4>O50 production</h4>' +
+          '<span class="verdict">Flagship policy</span><h4>Production policy</h4>' +
           '<p>A causal observation trunk feeds an autoregressive controller plan. Training combines behavior cloning with detached-value AWR.</p>' +
           '<ul class="recipe-list"><li><span>parameters</span><span>216,496,794</span></li>' +
           '<li><span>context</span><span>256 frames</span></li><li><span>training</span><span>8 × 2³⁰ positions</span></li>' +
@@ -2953,7 +2953,7 @@
         id: 'within', order: 37.2, code: 'O37', category: 'architecture', title: 'Within-frame controller feedback',
         stock: 0.245, damage: 8.48, evidence: 'controlled', modules: ['groups'],
         control: 'controller parts independent', treatment: 'earlier parts condition later parts',
-        summary: 'Average main effect across both across-frame backgrounds. O37 tests conditioning against none; it does not compare FiLM with concatenation.',
+        summary: 'Average main effect across both across-frame backgrounds. This tests conditioning against none; it does not compare FiLM with concatenation.',
         links: [['D0', '98r9smrj'], ['D1', 'a117chkw'], ['D2', '50q39o9j'], ['D3', '5wfk2esf']]
       },
       {
@@ -2966,8 +2966,8 @@
       {
         id: 'next_loss', order: 43.2, code: 'O43', category: 'objective', title: '50% loss on the next frame',
         stock: 0.138, damage: 3.55, evidence: 'controlled', modules: ['objective'],
-        control: 'O26 loss · legacy codec', treatment: 'half action loss at offset 1',
-        summary: 'Helpful under the legacy-code O43 model. It has not been transferred to the current O50 recipe.',
+        control: 'previous loss · legacy codec', treatment: 'half action loss at offset 1',
+        summary: 'Helpful under the legacy-code model. It has not been transferred to the current production recipe.',
         links: [['old loss', 'acbbeb76'], ['next-frame', '1imfy8v3']]
       },
       {
@@ -2994,7 +2994,7 @@
       {
         id: 'iql', order: 30, code: 'O30', category: 'objective', title: 'Attached offline IQL',
         stock: -2.009, damage: -95.85, evidence: 'package', modules: ['objective'],
-        control: 'O26 behavior cloning', treatment: 'critics + attached IQL loss',
+        control: 'behavior cloning', treatment: 'critics + attached IQL loss',
         summary: 'The tested IQL system failed despite more data, parameters, and work. It does not reject every offline Q-learning method.',
         links: [['BC', 'cqbbbg77'], ['IQL', '06fi5jms']]
       },
@@ -3058,7 +3058,7 @@
         id: 'replan', order: 37.3, code: 'O37', category: 'deployment', title: 'Execute / replan 1 → 6',
         stock: -0.431, damage: -30.20, evidence: 'package', modules: ['runtime', 'temporal'],
         control: 'execute and replan 1', treatment: 'execute and replan 6',
-        summary: 'Average across the O37 checkpoints. Execution length and replan interval moved together.',
+        summary: 'Average across the four factorization checkpoints. Execution length and replan interval moved together.',
         links: [['D0', '98r9smrj'], ['D3', '5wfk2esf']]
       },
       {
@@ -3078,21 +3078,21 @@
       {
         id: 'xm1', order: 33.1, code: 'O33', category: 'architecture', title: 'Exploration modeling · K=1',
         stock: -1.667, damage: -89.37, evidence: 'package', modules: ['temporal', 'objective'],
-        control: 'O26 behavior cloning', treatment: 'one latent trajectory',
-        summary: 'The O33 K=1 system was worse than O26 BC. The comparison also changes the decoder and objective, doubles the samples, and nearly doubles estimated training work.',
+        control: 'behavior cloning', treatment: 'one latent trajectory',
+        summary: 'The K=1 system was worse than behavior cloning. The comparison also changes the decoder and objective, doubles the samples, and nearly doubles estimated training work.',
         links: [['O26 BC', 'cqbbbg77'], ['K=1', 'mz8dk2gh']]
       },
       {
         id: 'xm8', order: 33.2, code: 'O33', category: 'architecture', title: 'Exploration modeling · K=8',
         stock: -0.807, damage: -44.33, evidence: 'package', modules: ['temporal', 'objective'],
-        control: 'O26 behavior cloning', treatment: 'best of eight latent trajectories',
-        summary: 'K=8 was better than K=1 but still worse than O26 BC. It stopped earlier and differs in microbatching and training work, so the K effect is not isolated.',
+        control: 'behavior cloning', treatment: 'best of eight latent trajectories',
+        summary: 'K=8 was better than K=1 but still worse than behavior cloning. It stopped earlier and differs in microbatching and training work, so the K effect is not isolated.',
         links: [['O26 BC', 'cqbbbg77'], ['K=8', 'feic18gt']]
       },
       {
-        id: 'o42', order: 42.2, code: 'O42', category: 'architecture', title: 'O26 → O42 bundle',
+        id: 'o42', order: 42.2, code: 'O42', category: 'architecture', title: 'Architecture + sampler bundle',
         stock: -0.217, damage: -10.81, evidence: 'package', modules: ['data', 'trunk', 'groups'],
-        control: 'O26 architecture + sampler', treatment: 'O42 architecture + sampler',
+        control: 'earlier architecture + sampler', treatment: 'revised architecture + sampler',
         summary: 'Projection, heads, trunk skip, FiLM, normalization, residual scaling, and sampler all changed. No component can be isolated.',
         links: [['O26', 'cqbbbg77'], ['O42', 'k8nb00xv']]
       },
@@ -3107,7 +3107,7 @@
         id: 'training', order: 50.9, code: 'O50', category: 'training', title: 'More training',
         stock: null, damage: null, evidence: 'descriptive', modules: ['objective', 'optimizer'],
         control: 'earlier checkpoint', treatment: 'later checkpoint',
-        summary: 'Offline likelihood improves steadily. Play regresses through the middle of O50, then recovers at the final checkpoint.',
+        summary: 'Offline likelihood improves steadily. Play regresses through the middle of training, then recovers at the final checkpoint.',
         links: [['Muon checkpoint series', 'p1fyyp1z'], ['all-AdamW production', 'tgpuo1be']]
       }
     ];
@@ -3190,7 +3190,7 @@
         row.setAttribute('aria-expanded', selectedLedger === experiment.id ? 'true' : 'false');
         row.innerHTML =
           '<td><span class="experiment-title">' + experiment.title + '</span><span class="experiment-sub">' +
-          experiment.code + ' · ' + experiment.category + '</span></td>' +
+          '<span class="run-source">' + experiment.code + ' · </span>' + experiment.category + '</span></td>' +
           '<td>' + experiment.control + ' → ' + experiment.treatment + '</td>' +
           '<td class="num"><span class="delta ' + deltaClass(value) + '">' +
           (Number.isFinite(value) ? signed(value, ledgerMetric === 'stock' ? 3 : 2) : 'no stable order') +
