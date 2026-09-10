@@ -130,7 +130,9 @@
     .decoder-arrow,.time-arrow{font:400 .8rem/1 var(--mono);color:var(--ink-faint);text-align:center}
     .action-plan{min-width:0}
     .plan-note{display:block;margin:0 0 7px;font:400 .58rem/1.3 var(--mono);color:var(--ink-faint)}
-    .action-frames{display:flex;align-items:center;gap:5px;min-width:0}
+    .action-frames{display:grid;align-items:center;min-width:0}
+    .action-frames.single,.action-frames.independent{grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+    .action-frames.autoregressive{grid-template-columns:minmax(0,1fr) 14px minmax(0,1fr) 14px minmax(0,1fr) 14px minmax(0,1fr)}
     .action-frame{flex:1;min-width:0;border-top:1px solid var(--ink);padding-top:5px}
     .action-frame>span{display:block;font:600 .58rem/1.25 var(--mono);color:var(--ink-mono);margin-bottom:5px}
     .action-groups{display:grid;grid-template-columns:repeat(7,auto);gap:2px;align-items:center;justify-content:start}
@@ -140,8 +142,6 @@
     .action-frame.conditioned .action-groups i{border-color:var(--oxblood)}
     .action-frame.conditioned .action-groups em{color:var(--oxblood)}
     .action-frame.conditioned>span,.decoder-row.flagship .time-arrow{color:var(--oxblood)}
-    .teacher-seed{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:45px;font:500 .55rem/1.2 var(--mono);color:var(--ink-mono)}
-    .teacher-seed small{font:400 .5rem/1.2 var(--mono);color:var(--ink-faint)}
     .factor-bars{padding:14px 3px 4px}
     .factor-bar-head,.factor-bar-row{display:grid;grid-template-columns:175px 1fr 1fr;gap:18px;align-items:center}
     .factor-bar-head{padding-bottom:8px;border-bottom:1px solid var(--rule)}
@@ -256,7 +256,7 @@
     .arch-node.dim{opacity:.24}
     .arch-edge{fill:none;stroke:var(--ink-faint);stroke-width:1.2}
     .section-map-anchor{position:relative}
-    .architecture-context{display:none;position:absolute;left:calc(100% + 48px);top:-12px;width:238px;color:var(--ink-faint);pointer-events:none}
+    .architecture-context{display:none;position:absolute;left:calc(100% + 165px);top:-12px;width:220px;color:var(--ink-faint);pointer-events:none}
     .architecture-context .context-label{display:block;margin-bottom:3px;font:500 .58rem/1.35 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-ghost)}
     .architecture-context svg{display:block;width:100%;height:auto;opacity:.72}
     .context-edge{stroke:var(--rule-dotted);stroke-width:1;fill:none}
@@ -322,7 +322,7 @@
       .ledger-row td:nth-child(2){grid-column:1/-1;grid-row:2;color:var(--ink-soft);font-size:.84rem}
       .ledger-row td:nth-child(3){grid-column:2;grid-row:1;text-align:right}
       #architecture-diagram .arch-node text{font-size:14px}
-      #architecture-diagram .arch-node .arch-small{font-size:10px}
+      #architecture-diagram .arch-node .arch-small{font-size:12px}
       .expanded-row{display:block}
       .expanded-row td{display:block}
     }
@@ -330,14 +330,13 @@
       .decoder-flow{grid-template-columns:1fr;gap:7px}
       .decoder-state{width:72px}
       .decoder-arrow{transform:rotate(90deg);width:72px}
-      .action-frames{flex-direction:column;align-items:stretch}
+      .action-frames,.action-frames.single,.action-frames.independent,.action-frames.autoregressive{display:flex;flex-direction:column;align-items:stretch;gap:5px}
       .action-frame{width:100%;display:grid;grid-template-columns:45px 1fr;align-items:center;border-top:0;border-left:1px solid var(--ink);padding:5px 0 5px 8px}
       .action-frame.conditioned{border-left-color:var(--oxblood)}
       .action-frame>span{margin:0}
       .time-arrow{transform:rotate(90deg);align-self:flex-start;margin-left:47px}
-      .teacher-seed{align-items:flex-start;margin-left:8px}
     }
-    @media(min-width:1260px){.architecture-context{display:block}}
+    @media(min-width:1400px){.architecture-context{display:block}}
     @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
     @media print{
       body{background:#fff}.site-top,.controls,.control-plate,.ledger-controls,.author-note{display:none!important}
@@ -387,7 +386,7 @@
             <div class="stat"><span class="stat-value">+52.72 [+45.14]</span><span class="stat-label">net damage/min · mean [LCB]</span></div>
           </div>
         </div>
-        <figcaption>Fig. 1 — the 216.5M-parameter O50 policy. The temporal decoder predicts a controller plan from one trunk state; the standard runtime executes two frames before replanning. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
+        <figcaption>Fig 1: The 216.5M-parameter O50 policy. The temporal decoder predicts a controller plan from one trunk state; the standard runtime executes two frames before replanning. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
       </figure>
 
       <ul class="question-list">
@@ -451,7 +450,7 @@
               <div class="decoder-name"><b>Next-frame prediction</b><span>One action. Replan after every frame.</span></div>
               <div class="decoder-flow">
                 <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
-                <div class="action-plan"><span class="plan-note">one output head</span><div class="action-frames">
+                <div class="action-plan"><span class="plan-note">one output head</span><div class="action-frames single">
                   <div class="action-frame"><span>action +1</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
                 </div></div>
               </div>
@@ -460,7 +459,7 @@
               <div class="decoder-name"><b>Independent MTP</b><span>Several future heads share hₜ, but not predictions.</span></div>
               <div class="decoder-flow">
                 <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
-                <div class="action-plan"><span class="plan-note">independent heads · no action feedback</span><div class="action-frames">
+                <div class="action-plan"><span class="plan-note">independent heads · no action feedback</span><div class="action-frames independent">
                   <div class="action-frame"><span>action +1</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
                   <div class="action-frame"><span>action +5</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
                   <div class="action-frame"><span>action +9</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
@@ -472,17 +471,17 @@
               <div class="decoder-name"><b>Autoregressive MTP</b><span>Earlier frames condition later frames; controller groups condition the next group.</span></div>
               <div class="decoder-flow">
                 <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
-                <div class="action-plan"><span class="plan-note">training: previous target · play: realized previous action</span><div class="action-frames">
-                  <div class="teacher-seed"><span>aₜ</span><small>observed</small></div><div class="time-arrow">→</div>
+                <div class="action-plan"><span class="plan-note">starts from aₜ · then previous target in training or realized action in play</span><div class="action-frames autoregressive">
                   <div class="action-frame conditioned"><span>action +1</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
                   <div class="action-frame conditioned"><span>action +2</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
-                  <div class="action-frame conditioned"><span>action +3…20</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div>
+                  <div class="action-frame conditioned"><span>action +3</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
+                  <div class="action-frame conditioned"><span>action +4</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div>
                 </div></div>
               </div>
             </div>
           </div>
         </div>
-        <figcaption>Fig. 2 — action-decoder lineage. C, M, T, and B are C-stick, main stick, triggers, and buttons. O50 trains offsets <span class="mono">1–6, 9, 12, 16, 20</span> and uses offsets <span class="mono">1–4</span> in play. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
+        <figcaption>Fig 2: Action-decoder lineage. C, M, T, and B are C-stick, main stick, triggers, and buttons. O50 trains offsets <span class="mono">1–6, 9, 12, 16, 20</span> and uses offsets <span class="mono">1–4</span> in play. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
       <p>The clean comparison is O37. It separates two questions: should later predicted frames depend on earlier predicted frames, and should later controller parts depend on earlier parts from the same frame?</p>
@@ -497,7 +496,7 @@
           </div>
           <div id="factor-chart" class="factor-bars" aria-label="Closed-loop scores for the four O37 factorization experiments"></div>
         </div>
-        <figcaption>Fig. 3 — O37’s complete 2×2. Across-frame feedback adds <span class="mono">+0.361</span> stocks/min and <span class="mono">+13.49</span> damage/min on average. Within-frame feedback adds <span class="mono">+0.245</span> and <span class="mono">+8.48</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/98r9smrj">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/a117chkw">within-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/50q39o9j">across-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">autoregressive MTP</a>.</span></figcaption>
+        <figcaption>Fig 3: O37’s complete 2×2. Across-frame feedback adds <span class="mono">+0.361</span> stocks/min and <span class="mono">+13.49</span> damage/min on average. Within-frame feedback adds <span class="mono">+0.245</span> and <span class="mono">+8.48</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/98r9smrj">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/a117chkw">within-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/50q39o9j">across-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
       <h4>Controller codec</h4>
@@ -520,7 +519,7 @@
             <div id="codec-detail"></div>
           </div>
         </div>
-        <figcaption>Fig. 4 — current code beat the legacy codec by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Learned physical past-action embeddings beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot history</a>.</span></figcaption>
+        <figcaption>Fig 4: Current code beat the legacy codec by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Learned physical past-action embeddings beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot history</a>.</span></figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -534,7 +533,7 @@
           </div>
           <div id="representation-list" class="branch-list" aria-label="Representation branches"></div>
         </div>
-        <figcaption>Fig. 5 — the bars use one scale across the section: ±3 stocks/min and ±180 damage/min. Blank results mean that the retained run does not support an intervention delta.</figcaption>
+        <figcaption>Fig 5: The bars use one scale across the section: ±3 stocks/min and ±180 damage/min. Blank results mean that the retained run does not support an intervention delta.</figcaption>
       </figure>
 
       <details class="author-note">
@@ -576,7 +575,7 @@
             </div>
           </div>
         </div>
-        <figcaption>Fig. 6 — mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.</figcaption>
+        <figcaption>Fig 6: Mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.</figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -590,7 +589,7 @@
           </div>
           <div id="objective-branches" class="branch-list"></div>
         </div>
-        <figcaption>Fig. 7 — flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with O26 BC; neither beats it.</figcaption>
+        <figcaption>Fig 7: Flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with O26 BC; neither beats it.</figcaption>
       </figure>
 
       <div class="section-map-anchor">
@@ -618,7 +617,7 @@
             <div id="sampler-copy" class="sampler-copy"></div>
           </div>
         </div>
-        <figcaption>Fig. 8 — four windows per replay → one changed stock score from <span class="mono">−0.598</span> to <span class="mono">+0.130</span>, a <span class="mono">+0.728</span> gain. Damage changed from <span class="mono">+40.50</span> to <span class="mono">+34.27</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/uw05bvm2">four windows</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">one window</a>.</span></figcaption>
+        <figcaption>Fig 8: Four windows per replay → one changed stock score from <span class="mono">−0.598</span> to <span class="mono">+0.130</span>, a <span class="mono">+0.728</span> gain. Damage changed from <span class="mono">+40.50</span> to <span class="mono">+34.27</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/uw05bvm2">four windows</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">one window</a>.</span></figcaption>
       </figure>
 
       <figure class="breakout">
@@ -636,7 +635,7 @@
             <div class="stat"><span class="stat-value">38 ms</span><span class="stat-label">uncovered loader wait/update</span></div>
           </div>
         </div>
-        <figcaption>Fig. 9 — loader lineage. These are infrastructure measurements, not model-quality comparisons.</figcaption>
+        <figcaption>Fig 9: Loader lineage. These are infrastructure measurements, not model-quality comparisons.</figcaption>
       </figure>
 
       <details class="author-note">
@@ -676,7 +675,7 @@
             </div>
           </div>
         </div>
-        <figcaption>Fig. 10 — O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
+        <figcaption>Fig 10: O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -697,7 +696,7 @@
           <svg id="delay-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Model performance at several imposed delays"></svg>
           <p id="delay-note" class="chart-note"></p>
         </div>
-        <figcaption>Fig. 11 — select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
+        <figcaption>Fig 11: Select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -714,7 +713,7 @@
           </div>
           <svg id="frontier-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Best deployable model at each delay"></svg>
         </div>
-        <figcaption>Fig. 12 — best measured deployable damage result at each delay for the <span class="mono">D = 2³⁰</span> checkpoints. The stock view shows those same damage-selected models.</figcaption>
+        <figcaption>Fig 12: Best measured deployable damage result at each delay for the <span class="mono">D = 2³⁰</span> checkpoints. The stock view shows those same damage-selected models.</figcaption>
       </figure>
 
       <div class="truth-note">
@@ -755,7 +754,7 @@
             </div>
           </div>
         </div>
-        <figcaption>Fig. 13 — hover a point for its model, data budget, score, and W&amp;B run. This is an association inside O39, not a model-selection rule.</figcaption>
+        <figcaption>Fig 13: Hover a point for its model, data budget, and score. This is an association inside O39, not a model-selection rule.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -780,7 +779,7 @@
             <div><b id="fit-loss">—</b><span>predicted validation NLL</span></div>
           </div>
         </div>
-        <figcaption>Fig. 14 — robust fit over 35 non-diverged cooldown checkpoints; RMS residual <span class="mono">0.0046</span> NLL, maximum <span class="mono">0.0112</span>. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.</figcaption>
+        <figcaption>Fig 14: Robust fit over 35 non-diverged cooldown checkpoints; RMS residual <span class="mono">0.0046</span> NLL, maximum <span class="mono">0.0112</span>. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.</figcaption>
       </figure>
 
       <details class="raw">
@@ -839,7 +838,7 @@
             </table>
           </div>
         </div>
-        <figcaption>Fig. 15 — mean changes, not lower bounds. Open a row for the comparison caveat. “No stable order” is retained where a scalar delta would be misleading.</figcaption>
+        <figcaption>Fig 15: Mean changes, not lower bounds. Open a row for the comparison caveat. “No stable order” is retained where a scalar delta would be misleading.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -868,7 +867,7 @@
             </ul>
           </div>
         </div>
-        <figcaption>Fig. 16 — closed-loop evaluations during the earlier Muon O50 run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</span></figcaption>
+        <figcaption>Fig 16: Closed-loop evaluations during the earlier Muon O50 run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</span></figcaption>
       </figure>
 
       <div class="aside">
@@ -2520,6 +2519,7 @@
         id: 'history',
         label: 'Observation + action history',
         labelLines: ['Observation + action', 'history'],
+        mobileLabelLines: ['Observation', '+ action history'],
         sublabel: '256 frames',
         x: 18, y: 148, w: 145, h: 70,
         title: 'Input representation',
@@ -2539,6 +2539,7 @@
         id: 'temporal',
         label: 'Temporal decoder',
         sublabel: 'across-frame feedback',
+        mobileSublabel: 'across-frame AR',
         x: 480, y: 35, w: 150, h: 68,
         title: 'Across-frame action model',
         text: 'Every token receives the trunk state, its offset, and the preceding selected controller frame. Causal self-attention also exposes all earlier temporal tokens.',
@@ -2548,6 +2549,7 @@
         id: 'groups',
         label: 'Controller groups',
         sublabel: 'within-frame FiLM',
+        mobileSublabel: 'within-frame AR',
         x: 480, y: 148, w: 150, h: 70,
         title: 'Within-frame controller model',
         text: 'Controller groups are generated as C-stick → main stick → triggers → buttons. Earlier groups provide bounded FiLM; every group also has a direct trunk-to-logit path.',
@@ -2585,8 +2587,18 @@
 
     var architectureEdges = [
       ['data', 'history'], ['history', 'trunk'], ['trunk', 'temporal'], ['temporal', 'groups'],
-      ['groups', 'objective'], ['objective', 'optimizer'], ['optimizer', 'trunk'], ['groups', 'runtime']
+      ['groups', 'objective'], ['objective', 'optimizer'], ['groups', 'runtime']
     ];
+    var architectureMobilePositions = {
+      data: [8, 20, 112, 58],
+      history: [133, 20, 124, 58],
+      trunk: [270, 20, 112, 58],
+      temporal: [18, 142, 150, 64],
+      groups: [222, 142, 150, 64],
+      objective: [18, 264, 150, 64],
+      runtime: [222, 264, 150, 64],
+      optimizer: [18, 382, 150, 60]
+    };
     var activeModule = '';
     var highlightedModules = [];
     var selectedLedger = '';
@@ -2635,17 +2647,29 @@
     function renderArchitecture() {
       var target = one('#architecture-diagram');
       empty(target);
+      var mobile = window.matchMedia('(max-width: 720px)').matches;
+      target.setAttribute('viewBox', mobile ? '0 0 390 465' : '0 0 650 470');
+      var layoutModules = architectureModules.map(function (module) {
+        if (!mobile) return module;
+        var position = architectureMobilePositions[module.id];
+        return Object.assign({}, module, {
+          x: position[0], y: position[1], w: position[2], h: position[3]
+        });
+      });
+      function layoutModuleById(id) {
+        return layoutModules.filter(function (module) { return module.id === id; })[0];
+      }
       var marker = arrowMarker(target);
       architectureEdges.forEach(function (edge) {
-        var from = moduleById(edge[0]);
-        var to = moduleById(edge[1]);
+        var from = layoutModuleById(edge[0]);
+        var to = layoutModuleById(edge[1]);
         var endpoints = edgeEndpoints(from, to);
         target.appendChild(svgElement('line', {
           x1: endpoints[0], y1: endpoints[1], x2: endpoints[2], y2: endpoints[3],
           class: 'arch-edge', 'marker-end': marker
         }));
       });
-      architectureModules.forEach(function (module) {
+      layoutModules.forEach(function (module) {
         var group = svgElement('g', {'data-module': module.id, class: 'arch-node'});
         var isHighlighted = highlightedModules.indexOf(module.id) !== -1;
         if (highlightedModules.length) {
@@ -2656,13 +2680,14 @@
         group.appendChild(svgElement('rect', {
           x: module.x, y: module.y, width: module.w, height: module.h
         }));
-        var labelLines = module.labelLines || [module.label];
+        var labelLines = (mobile && module.mobileLabelLines) || module.labelLines || [module.label];
         labelLines.forEach(function (line, index) {
           addText(group, module.x + module.w / 2, module.y + module.h / 2 - 7 + index * 12, line, {
             'text-anchor': 'middle', 'font-weight': 600
           });
         });
-        addText(group, module.x + module.w / 2, module.y + module.h / 2 + (labelLines.length > 1 ? 24 : 15), module.sublabel, {
+        addText(group, module.x + module.w / 2, module.y + module.h / 2 + (labelLines.length > 1 ? 24 : 15),
+          (mobile && module.mobileSublabel) || module.sublabel, {
           'text-anchor': 'middle', class: 'arch-small'
         });
         group.setAttribute('tabindex', '0');
@@ -2683,10 +2708,10 @@
         });
         target.appendChild(group);
       });
-      addText(target, 322, 224, 'training path', {
+      addText(target, mobile ? 93 : 322, mobile ? 245 : 224, 'training path', {
         'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
       });
-      addText(target, 553, 326, 'deployment path', {
+      addText(target, mobile ? 297 : 553, mobile ? 245 : 326, 'deployment path', {
         'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
       });
       renderModuleDetail();
@@ -3135,6 +3160,9 @@
     one('#source-toggle').addEventListener('click', function () {
       setRunSourcesVisible(!document.body.classList.contains('show-run-sources'));
     });
+
+    var architectureMedia = window.matchMedia('(max-width: 720px)');
+    if (architectureMedia.addEventListener) architectureMedia.addEventListener('change', renderArchitecture);
 
     renderProductionChart('#production-chart', 'stock', false);
     renderFactor();
