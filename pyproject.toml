@@ -93,6 +93,7 @@ ignore = ["E501"]
 # Ruff parses jaxtyping dimension strings as forward-reference type expressions.
 "experiments/051_muon_parameterization.py" = ["F722"]
 "experiments/052_adamw_temporal_awr.py" = ["F722"]
+"experiments/053_polar_controller.py" = ["F722"]
 "hal/training/trunk.py" = ["F722"]  # same jaxtyping dim specs as the experiment copies
 
 [tool.pytest.ini_options]
