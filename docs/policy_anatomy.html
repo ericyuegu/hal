@@ -146,32 +146,53 @@
     .delta-pair div{border-top:1px solid var(--rule);padding-top:8px}
     .delta-pair b{font:700 .95rem/1.3 var(--mono)}
     .delta-pair span{display:block;font:400 .64rem/1.4 var(--mono);color:var(--ink-faint)}
-    .branch-wrap{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px;padding:14px 3px 3px}
-    .branch-menu{border-right:1px solid var(--rule);padding-right:12px}
-    .branch-menu button{width:100%;display:flex;justify-content:space-between;gap:10px;text-align:left;padding:8px 9px;background:transparent;border:0;border-bottom:1px dotted var(--rule-dotted);cursor:pointer;font:400 .68rem/1.35 var(--mono);color:var(--ink-mono)}
-    .branch-menu button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
-    .branch-detail h4{margin:.2rem 0 .45rem}
-    .branch-detail p{font-size:.92rem;color:var(--ink-soft)}
+    .decoder-lineage-body{padding:16px 3px 5px}
+    .decoder-lineage-body .lineage-copy{display:grid;grid-template-columns:190px minmax(0,1fr) auto;gap:16px;align-items:start;margin-top:8px}
+    .decoder-lineage-body .lineage-copy h4,.decoder-lineage-body .lineage-copy p{margin:0}
+    .branch-list{padding:0 4px}
+    .branch-study{display:grid;grid-template-columns:180px minmax(300px,1fr) 225px;gap:20px;align-items:center;padding:21px 0;border-bottom:1px dotted var(--rule-dotted)}
+    .branch-study:last-child{border-bottom:0}
+    .branch-study h4{margin:0 0 .35rem;font-size:1rem}
+    .branch-study p{margin:0;color:var(--ink-soft);font-size:.86rem;line-height:1.45}
+    .branch-study .source-line{margin-top:.55rem;font-size:.63rem}
+    .contrast{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);gap:7px;align-items:center}
+    .contrast-side{min-height:118px;border-top:1px solid var(--ink);padding:7px 6px;background:var(--paper)}
+    .contrast-label{display:block;font:600 .59rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--ink-faint);margin:-7px -6px 13px;padding:5px 6px;background:var(--surface-aside)}
+    .contrast-arrow{text-align:center;font:400 .8rem/1 var(--mono);color:var(--ink-faint)}
+    .toy-flow{display:flex;align-items:center;justify-content:center;gap:5px;min-height:60px}
+    .toy-flow.vertical{flex-direction:column;gap:3px}
+    .toy-node{display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:5px 7px;border:1px solid var(--rule-dotted);background:var(--paper);font:500 .6rem/1.25 var(--mono);text-align:center;color:var(--ink)}
+    .toy-node.hot{border-color:var(--oxblood);color:var(--oxblood)}
+    .toy-node.wide{width:100%}
+    .toy-link{font:400 .65rem/1 var(--mono);color:var(--ink-faint)}
+    .toy-token-row{display:flex;gap:3px;align-items:center;justify-content:center;flex-wrap:wrap}
+    .toy-token{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:25px;padding:0 4px;border:1px solid var(--rule-dotted);font:500 .56rem/1 var(--mono);background:var(--paper)}
+    .toy-token.hot{border-color:var(--oxblood);color:var(--oxblood)}
+    .toy-sub{display:block;margin-top:6px;font:400 .56rem/1.35 var(--mono);color:var(--ink-faint);text-align:center}
+    .delta-block{font-family:var(--mono);font-variant-numeric:tabular-nums}
+    .delta-block-title{font:400 .59rem/1.35 var(--mono);color:var(--ink-faint);margin-bottom:8px}
+    .delta-row{display:grid;grid-template-columns:46px 1fr 57px;gap:7px;align-items:center;margin:8px 0}
+    .delta-name{font:500 .58rem/1.2 var(--mono);color:var(--ink-mono)}
+    .delta-value{text-align:right;font:700 .65rem/1.2 var(--mono)}
+    .delta-track{position:relative;height:10px;background:var(--rule)}
+    .delta-track::after{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;border-left:1px solid var(--ink-faint)}
+    .delta-track i{position:absolute;top:2px;height:6px;background:var(--ink)}
+    .delta-track i.negative{background:var(--oxblood)}
+    .delta-scale{display:flex;justify-content:space-between;margin:3px 57px 0 53px;font:400 .5rem/1.2 var(--mono);color:var(--ink-ghost)}
+    .no-result{border-left:1px solid var(--rule-dotted);padding-left:10px;font:400 .62rem/1.45 var(--mono);color:var(--ink-faint)}
     .verdict{display:inline-block;font:600 .61rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;border:1px solid var(--rule-dotted);padding:2px 5px;color:var(--ink-mono)}
     .verdict.negative{border-color:var(--oxblood);color:var(--oxblood)}
     .bar-pair{display:grid;grid-template-columns:95px 1fr auto;gap:10px;align-items:center;margin:9px 0;font:400 .66rem/1.3 var(--mono)}
     .bar-track{height:8px;background:var(--rule);position:relative}
     .bar-track i{position:absolute;top:0;height:100%;background:var(--ink)}
     .bar-track i.negative{background:var(--oxblood)}
-    .objective-row{display:grid;grid-template-columns:150px 1fr 90px;gap:14px;align-items:center;width:100%;padding:11px 8px;border:0;border-bottom:1px dotted var(--rule-dotted);background:transparent;text-align:left;cursor:pointer;color:var(--ink)}
-    .objective-row:hover,.objective-row[aria-expanded="true"]{background:var(--surface-aside)}
-    .objective-row b{display:block;font:600 .7rem/1.35 var(--mono)}
-    .objective-row small{display:block;font:400 .62rem/1.35 var(--mono);color:var(--ink-faint);margin-top:2px}
-    .impact-track{height:12px;position:relative}
-    .impact-track::after{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:1px solid var(--rule-dotted)}
-    .impact-track i{position:absolute;top:2px;height:8px;background:var(--ink)}
-    .impact-track i.negative{background:var(--oxblood)}
-    .objective-detail{padding:10px 12px 14px 164px;background:var(--surface-aside);font-size:.88rem;color:var(--ink-soft);border-bottom:1px solid var(--rule)}
-    .optimizer-map{display:grid;grid-template-columns:1fr 44px 1fr;align-items:center;gap:8px;margin:16px 0}
-    .parameter-stack{border:1px solid var(--rule-dotted);padding:10px}
-    .parameter-stack span{display:block;border-bottom:1px solid var(--rule);padding:6px 4px;font:400 .67rem/1.3 var(--mono)}
-    .parameter-stack span:last-child{border:0}
     .arrow{text-align:center;font:400 .9rem/1 var(--mono);color:var(--ink-faint)}
+    .bitmask{margin-top:10px;padding-top:9px;border-top:1px dotted var(--rule-dotted)}
+    .bit-labels,.bit-values{display:grid;grid-template-columns:repeat(8,1fr);gap:3px}
+    .bit-labels span{text-align:center;font:500 .52rem/1.3 var(--mono);color:var(--ink-faint)}
+    .bit-values span{height:28px;display:flex;align-items:center;justify-content:center;border:1px solid var(--rule-dotted);font:600 .66rem/1 var(--mono);background:var(--paper)}
+    .bit-values span.on{border-color:var(--oxblood);color:var(--oxblood);background:rgba(123,46,46,.05)}
+    .bit-equation{display:flex;justify-content:space-between;gap:12px;margin-top:6px;font:500 .59rem/1.4 var(--mono);color:var(--ink-mono)}
     .sampler-wrap{display:grid;grid-template-columns:minmax(0,1.2fr) 250px;gap:20px;padding:16px 3px 4px}
     .sampler-copy h4{margin:.2rem 0 .4rem}
     .replay-row{display:grid;grid-template-columns:70px repeat(8,1fr);gap:3px;align-items:center;margin:6px 0}
@@ -230,7 +251,6 @@
     .delta{font:700 .72rem/1.3 var(--mono)}
     .delta.pos{color:var(--ink)}
     .delta.neg{color:var(--oxblood)}
-    .evidence{font:400 .61rem/1.3 var(--mono);color:var(--ink-mono);white-space:nowrap}
     .production-layout{display:grid;grid-template-columns:minmax(0,1.45fr) 220px;gap:18px;align-items:start}
     .recipe-list{margin:.3rem 0 0;padding:0;list-style:none;border-top:1px solid var(--rule)}
     .recipe-list li{display:flex;justify-content:space-between;gap:14px;margin:0;padding:7px 0;border-bottom:1px dotted var(--rule-dotted);font-size:.86rem}
@@ -244,13 +264,14 @@
       .site-top{padding-top:22px}
       main{padding:38px 20px 0}
       h1{font-size:2.35rem}
-      .release-list,.metrics-strip,.stats,.lineage-body,.matrix-wrap,.codec-wrap,.branch-wrap,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout{grid-template-columns:1fr}
+      .release-list,.metrics-strip,.stats,.lineage-body,.matrix-wrap,.codec-wrap,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout,.branch-study{grid-template-columns:1fr}
       .release-list li,.metrics-strip>div,.stat{border-right:0;border-bottom:1px solid var(--rule)}
       .release-list li:last-child,.metrics-strip>div:last-child,.stat:last-child{border-bottom:0}
       .lineage-tabs{grid-template-columns:1fr}
       .lineage-tab{border-right:0;border-bottom:1px solid var(--rule-dotted)}
       .factor-matrix{grid-template-columns:58px repeat(2,1fr);grid-template-rows:45px repeat(2,108px)}
-      .branch-menu{border-right:0;border-bottom:1px solid var(--rule);padding:0 0 10px}
+      .decoder-lineage-body .lineage-copy{grid-template-columns:1fr}
+      .branch-study{gap:13px;padding:19px 0}
       .codec-groups{grid-template-columns:repeat(2,1fr)}
       .pipeline{grid-template-columns:1fr}
       .pipe-arrow{transform:rotate(90deg);text-align:center}
@@ -260,8 +281,6 @@
       .figure-head{display:block}
       .figure-head .segmented{margin-top:8px}
       .expanded-grid{grid-template-columns:1fr}
-      .objective-row{grid-template-columns:110px 1fr 72px;padding-left:5px;padding-right:5px}
-      .objective-detail{padding-left:12px}
       .axis-chart text{font-size:14px}
       #lineage-diagram text{font-size:12px}
       .ledger-table,.ledger-table tbody{display:block;width:100%}
@@ -271,7 +290,6 @@
       .ledger-row td:nth-child(1){grid-column:1;grid-row:1}
       .ledger-row td:nth-child(2){grid-column:1/-1;grid-row:2;color:var(--ink-soft);font-size:.84rem}
       .ledger-row td:nth-child(3){grid-column:2;grid-row:1;text-align:right}
-      .ledger-row td:nth-child(4){grid-column:1/-1;grid-row:3;text-align:left;margin-top:2px}
       #architecture-diagram .arch-node text{font-size:14px}
       #architecture-diagram .arch-node .arch-small{font-size:10px}
       .expanded-row{display:block}
@@ -319,11 +337,11 @@
           <div class="stats">
             <div class="stat"><span class="stat-value">216.5M</span><span class="stat-label">parameters</span></div>
             <div class="stat"><span class="stat-value">8.59B</span><span class="stat-label">supervised positions</span></div>
-            <div class="stat"><span class="stat-value">+0.345 [+0.244]</span><span class="stat-label">net stocks/min · mean [LCB]</span></div>
-            <div class="stat"><span class="stat-value">+37.59 [+30.61]</span><span class="stat-label">net damage/min · mean [LCB]</span></div>
+            <div class="stat"><span class="stat-value">+0.494 [+0.398]</span><span class="stat-label">net stocks/min · mean [LCB]</span></div>
+            <div class="stat"><span class="stat-value">+52.72 [+45.14]</span><span class="stat-label">net damage/min · mean [LCB]</span></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 1 — the 216,496,794-parameter O50 run. Hover a checkpoint for both scores. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 1 — the line is the earlier Muon checkpoint series; the red endpoint is the all-AdamW production run. Both have 216,496,794 parameters and <span class="mono">8 × 2³⁰</span> supervised positions. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">Muon</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">all-AdamW</a>.</figcaption>
       </figure>
 
       <ul class="question-list">
@@ -378,12 +396,12 @@
             <button class="lineage-tab" type="button" role="tab" data-lineage="mtp" aria-selected="false"><b>Independent MTP</b><span>O12 · four targets</span></button>
             <button class="lineage-tab" type="button" role="tab" data-lineage="temporal" aria-selected="false"><b>Temporal MTP</b><span>O37 · causal targets</span></button>
           </div>
-          <div class="lineage-body">
-            <svg id="lineage-diagram" class="chart" viewBox="0 0 610 300" role="img" aria-label="Selected action decoder architecture"></svg>
+          <div class="decoder-lineage-body">
+            <svg id="lineage-diagram" class="chart" viewBox="0 0 900 360" role="img" aria-label="Selected action decoder architecture"></svg>
             <div id="lineage-copy" class="lineage-copy"></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 2 — architecture lineage. “DSv3-style” means a small causal decoder over selected future offsets; it is a design label, not a claim of exact code lineage. The three rows are historical steps, not a controlled score comparison.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 2 — architecture lineage. The temporal view shows the exact O50 dependencies in training and at D2/R2 deployment. “DSv3-style” is a design label, not a claim of exact code lineage.</figcaption>
       </figure>
 
       <p>The clean comparison is O37. It separates two questions: should later predicted frames depend on earlier predicted frames, and should later controller parts depend on earlier parts from the same frame?</p>
@@ -426,7 +444,7 @@
           <div class="figure-head">
             <div>
               <h4>Old simplifying codec vs. current codec</h4>
-              <p>The bridge changes the full codec package, so it does not isolate one class count.</p>
+              <p>The bridge changes the full codec configuration, so it does not isolate one class count.</p>
             </div>
             <div class="segmented" aria-label="Controller codec">
               <button type="button" data-codec="legacy" aria-pressed="false">legacy</button>
@@ -438,24 +456,21 @@
             <div id="codec-detail"></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 4 — current code beat the legacy package by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min: <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> vs. <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a>. Learned physical past-action embeddings also beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min: <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot</a>.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 4 — current code beat the legacy codec by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min: <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> vs. <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a>. Learned physical past-action embeddings also beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min: <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot</a>.</figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
       <figure class="breakout">
-        <div class="artifact interactive">
+        <div class="artifact">
           <div class="figure-head">
             <div>
               <h4>Representation branches</h4>
-              <p>Select a branch for the result and the confound that matters.</p>
+              <p>Each row shows the mechanism first, then the closed-loop change when one can be defended.</p>
             </div>
           </div>
-          <div class="branch-wrap">
-            <div id="representation-menu" class="branch-menu" aria-label="Representation branches"></div>
-            <div id="representation-detail" class="branch-detail"></div>
-          </div>
+          <div id="representation-list" class="branch-list" aria-label="Representation branches"></div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 5 — branches are marked “controlled,” “package,” or “unresolved.” A failed package rejects that package, not every version of the idea.</figcaption>
+        <figcaption>Fig. 5 — the bars use one scale across the section: ±3 stocks/min and ±180 damage/min. Blank results mean that the retained run does not support an intervention delta.</figcaption>
       </figure>
 
       <details class="author-note">
@@ -463,12 +478,14 @@
         <ul>
           <li>Lead with O37. It is the clean causal result.</li>
           <li>Use O11 → O12 → O37 as design history, not as a score ladder.</li>
-          <li>The codec forensics ended with the opposite result from the initial hypothesis: the legacy package was worse.</li>
+          <li>The codec forensics ended with the opposite result from the initial hypothesis: the legacy codec was worse.</li>
         </ul>
       </details>
 
       <h3>Optimization</h3>
       <p>Muon, but not on long runs. AWR.</p>
+
+      <p>The small optimizer comparison changed the optimizer and learning rates together. Muon + AdamW changed stock score by <span class="mono">+0.030</span> and damage by <span class="mono">−30.11</span> relative to AdamW. I used all-AdamW for the final long run. <a href="https://wandb.ai/ericyuegu/hal/runs/o3nihah5">AdamW</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">Muon + AdamW</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">production</a>.</p>
 
       <figure class="breakout">
         <div class="artifact interactive">
@@ -487,7 +504,7 @@
             <div class="lineage-copy">
               <h4><span class="mono">w = min(3.5, exp(βA))</span></h4>
               <p><span class="mono">A = G(t+1) − V(s<sub>t</sub>)</span>. The actor loss does not backpropagate through the value estimate.</p>
-              <p>In the modern near-control, AWR changed stock score by <span class="mono">+0.076</span> and damage by <span class="mono">+10.80</span>. Helpful, but smaller than action-sequence modeling.</p>
+              <p>In the modern comparison, AWR changed stock score by <span class="mono">+0.076</span> and damage by <span class="mono">+10.80</span>. Helpful, but smaller than action-sequence modeling.</p>
               <p class="source-line"><a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">BC 5wfk2esf</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/hwzv0k9a">AWR hwzv0k9a</a></p>
             </div>
           </div>
@@ -495,41 +512,18 @@
         <figcaption><span class="interactive-mark">Interactive</span>Fig. 6 — mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.</figcaption>
       </figure>
 
+      <h4>Ideas that didn’t work as well</h4>
       <figure class="breakout">
         <div class="artifact">
           <div class="figure-head">
             <div>
-              <h4>Optimizer split</h4>
-              <p>What Muon touched, and what the evidence does not establish.</p>
-            </div>
-          </div>
-          <div class="optimizer-map">
-            <div class="parameter-stack"><span>attention matrices</span><span>MLP matrices</span><span>projection matrices</span></div>
-            <div class="arrow">→</div>
-            <div class="parameter-stack"><span><b>Muon</b> · matrix parameters</span></div>
-            <div class="parameter-stack"><span>embeddings</span><span>biases + norms</span><span>readouts</span></div>
-            <div class="arrow">→</div>
-            <div class="parameter-stack"><span><b>AdamW</b> · other parameters</span></div>
-          </div>
-          <div class="aside">
-            <p>The old optimizer comparison changed optimizer and learning rates together: <span class="mono">+0.030</span> stocks/min but <span class="mono">−30.11</span> damage/min. O50 used Muon, but its long-run instability does not identify Muon as the cause. Button-logit absolute p99.9 rose from about <span class="mono">19.3</span> to <span class="mono">121.5</span>.</p>
-          </div>
-        </div>
-        <figcaption>Fig. 7 — parameter ownership in the final recipe. <a href="https://wandb.ai/ericyuegu/hal/runs/o3nihah5">AdamW</a> vs. <a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">Muon + AdamW</a>.</figcaption>
-      </figure>
-
-      <h4>Ideas that didn’t work as well</h4>
-      <figure class="breakout">
-        <div class="artifact interactive">
-          <div class="figure-head">
-            <div>
               <h4>Objective and decoder branches</h4>
-              <p>Mean change from the closest useful control.</p>
+              <p>Mean change from the named BC reference.</p>
             </div>
           </div>
-          <div id="objective-branches" style="padding:14px 3px 4px"></div>
+          <div id="objective-branches" class="branch-list"></div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 8 — flow matching, attached IQL, and exploration modeling. Hover the bars for exact values and caveats.</figcaption>
+        <figcaption>Fig. 7 — flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with O26 BC; neither beats it.</figcaption>
       </figure>
 
       <h3>Data &amp; infra</h3>
@@ -554,7 +548,7 @@
             <div id="sampler-copy" class="sampler-copy"></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 9 — four windows per replay → one changed stock score from <span class="mono">−0.598</span> to <span class="mono">+0.130</span>, a <span class="mono">+0.728</span> gain. Damage changed from <span class="mono">+40.50</span> to <span class="mono">+34.27</span>. <a href="https://wandb.ai/ericyuegu/hal/runs/uw05bvm2">four windows</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">one window</a>.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 8 — four windows per replay → one changed stock score from <span class="mono">−0.598</span> to <span class="mono">+0.130</span>, a <span class="mono">+0.728</span> gain. Damage changed from <span class="mono">+40.50</span> to <span class="mono">+34.27</span>. <a href="https://wandb.ai/ericyuegu/hal/runs/uw05bvm2">four windows</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">one window</a>.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -572,7 +566,7 @@
             <div class="stat"><span class="stat-value">38 ms</span><span class="stat-label">uncovered loader wait/update</span></div>
           </div>
         </div>
-        <figcaption>Fig. 10 — loader lineage. These are infrastructure measurements, not model-quality comparisons.</figcaption>
+        <figcaption>Fig. 9 — loader lineage. These are infrastructure measurements, not model-quality comparisons.</figcaption>
       </figure>
 
       <details class="author-note">
@@ -609,7 +603,7 @@
             </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 11 — O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 10 — O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -630,7 +624,7 @@
           <svg id="delay-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Model performance at several imposed delays"></svg>
           <p id="delay-note" class="chart-note"></p>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 12 — select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 11 — select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -647,7 +641,7 @@
           </div>
           <svg id="frontier-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Best deployable model at each delay"></svg>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 13 — best measured deployable damage result at each delay for the <span class="mono">D = 2³⁰</span> checkpoints. The stock view shows those same damage-selected models.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 12 — best measured deployable damage result at each delay for the <span class="mono">D = 2³⁰</span> checkpoints. The stock view shows those same damage-selected models.</figcaption>
       </figure>
 
       <div class="truth-note">
@@ -685,7 +679,7 @@
             </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 14 — hover a point for its model, data budget, score, and W&amp;B run. This is evidence of association inside O39, not a model-selection rule.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 13 — hover a point for its model, data budget, score, and W&amp;B run. This is an association inside O39, not a model-selection rule.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -710,11 +704,11 @@
             <div><b id="fit-loss">—</b><span>predicted validation NLL</span></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 15 — robust fit over 35 non-diverged cooldown checkpoints; RMS residual <span class="mono">0.0046</span> NLL, maximum <span class="mono">0.0112</span>. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 14 — robust fit over 35 non-diverged cooldown checkpoints; RMS residual <span class="mono">0.0046</span> NLL, maximum <span class="mono">0.0112</span>. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.</figcaption>
       </figure>
 
       <details class="raw">
-        <summary>Show the 33 O39 points used in Fig. 14</summary>
+        <summary>Show the 33 O39 points used in Fig. 13</summary>
         <div class="table-scroll">
           <table class="raw-table">
             <thead><tr><th>Model</th><th>Data</th><th>Validation NLL</th><th>Stocks/min</th><th>Damage/min</th><th>Run</th></tr></thead>
@@ -751,7 +745,7 @@
             </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 16 — the 216.5M-parameter O50 recipe. The controller code is current, not legacy. Prediction 4, delay 2, replan 2.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 15 — the 216.5M-parameter O50 recipe. The controller code is current, the optimizer is AdamW, and deployment uses prediction 4, delay 2, replan 2. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -775,25 +769,24 @@
                 <option value="gain_asc">gain ↑</option>
                 <option value="chronology">chronology</option>
                 <option value="category">category</option>
-                <option value="evidence">evidence</option>
               </select>
             </div>
           </div>
           <div class="table-scroll">
             <table class="ledger-table">
-              <thead><tr><th>Experiment</th><th>Change</th><th id="ledger-delta-head">Stock Δ</th><th>Evidence</th></tr></thead>
+              <thead><tr><th>Experiment</th><th>Change</th><th id="ledger-delta-head">Stock Δ</th></tr></thead>
               <tbody id="ledger-body"></tbody>
             </table>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 17 — mean changes, not lower bounds. A package result changes more than one factor. “No stable order” is retained where a scalar delta would be misleading.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 16 — mean changes, not lower bounds. Open a row for the comparison caveat. “No stable order” is retained where a scalar delta would be misleading.</figcaption>
       </figure>
 
       <figure class="breakout">
         <div class="artifact interactive">
           <div class="figure-head">
             <div>
-              <h4>Production training did not improve monotonically</h4>
+              <h4>The earlier Muon run did not improve monotonically</h4>
               <p>Final validation NLL fell from <span class="mono">1.579</span> to <span class="mono">1.379</span>.</p>
             </div>
             <div class="segmented" aria-label="Production result metric">
@@ -815,19 +808,19 @@
             </ul>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 18 — closed-loop evaluations during the O50 production run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</figcaption>
+        <figcaption><span class="interactive-mark">Interactive</span>Fig. 17 — closed-loop evaluations during the earlier Muon O50 run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</figcaption>
       </figure>
 
       <div class="aside">
         <p class="aside-label">Historical reference</p>
-        <p>The old model reached <span class="mono">+1.227</span> net stocks/min after 16.78M supervised examples. The old and new evaluation systems are not identical, so the gap to O50’s <span class="mono">+0.345</span> is descriptive, not a controlled comparison. <a href="https://wandb.ai/ericyuegu/hal/runs/wa7x0psv">W&amp;B wa7x0psv</a>.</p>
+        <p>The old model reached <span class="mono">+1.227</span> net stocks/min after 16.78M supervised examples. The old and new evaluation systems are not identical, so the gap to the current model’s <span class="mono">+0.494</span> is descriptive, not a controlled comparison. <a href="https://wandb.ai/ericyuegu/hal/runs/wa7x0psv">W&amp;B wa7x0psv</a>.</p>
       </div>
 
       <details class="author-note">
         <summary>Draft notes · ending</summary>
         <ul>
           <li>The honest headline is not “scale solved it.” Sequence factorization, replay diversity, optimizer-update count, and deployment timing had clearer effects.</li>
-          <li>O50 is the best standard modern result. The Cody/Fox fast-deployment package reached <span class="mono">+0.874</span>, but identity, character, delay, and replan changed together.</li>
+          <li>The all-AdamW O50 checkpoint reached <span class="mono">+0.494 [+0.398]</span> under standard deployment. The Cody/Fox fast-deployment combination reached <span class="mono">+0.874</span>, but identity, character, delay, and replan changed together.</li>
           <li>Possible ending: release links, video, then the remaining clean experiments rather than a stronger causal claim.</li>
         </ul>
       </details>
@@ -1160,11 +1153,15 @@
       {update: 122880, stock: 0.292, damage: 41.48, stockLcb: 0.196},
       {update: 131072, stock: 0.345, damage: 37.59, stockLcb: 0.244, damageLcb: 30.61}
     ];
+    var adamwProduction = {
+      update: 131072, stock: 0.4936706061, damage: 52.71964931,
+      stockLcb: 0.3978857534, damageLcb: 45.13586218
+    };
 
     function renderProductionChart(targetSelector, metric, hero) {
       var target = one(targetSelector);
       var mobile = sizeAxisChart(target, hero ? 900 : 680, hero ? 300 : 390, hero ? 300 : 350);
-      var yDomain = metric === 'stock' ? [-0.25, 0.42] : [0, 56];
+      var yDomain = metric === 'stock' ? [-0.25, hero ? 0.57 : 0.42] : [0, 60];
       var frame = chartFrame(target, {
         xDomain: [0, 131072],
         yDomain: yDomain,
@@ -1182,8 +1179,8 @@
           y: row[metric],
           stock: row.stock,
           damage: row.damage,
-          radius: row.update === 131072 ? 5.4 : 4,
-          color: row.update === 131072 ? COLORS.oxblood : COLORS.ink
+          radius: row.update === 131072 ? 4.8 : 4,
+          color: COLORS.ink
         };
       });
       drawSeries(target, frame, points, {
@@ -1200,7 +1197,7 @@
           x2: frame.x(finalRow.update),
           y1: frame.y(finalRow[metric]),
           y2: frame.y(lower),
-          stroke: COLORS.oxblood,
+          stroke: hero ? COLORS.faint : COLORS.oxblood,
           'stroke-width': 1.4
         }));
         target.appendChild(svgElement('line', {
@@ -1208,17 +1205,41 @@
           x2: frame.x(finalRow.update) + 5,
           y1: frame.y(lower),
           y2: frame.y(lower),
-          stroke: COLORS.oxblood,
+          stroke: hero ? COLORS.faint : COLORS.oxblood,
           'stroke-width': 1.4
         }));
       }
-      addText(target, frame.x(131072) - 7, frame.y(finalRow[metric]) - 11, 'final ' + signed(finalRow[metric], metric === 'stock' ? 3 : 2), {
+      addText(target, frame.x(131072) - 7, frame.y(finalRow[metric]) - 11, (hero ? 'Muon ' : 'final ') + signed(finalRow[metric], metric === 'stock' ? 3 : 2), {
         'text-anchor': 'end',
-        fill: COLORS.oxblood,
+        fill: hero ? COLORS.faint : COLORS.oxblood,
         'font-family': 'var(--mono)',
         'font-size': 10,
         'font-weight': 600
       });
+      if (hero) {
+        var currentY = frame.y(adamwProduction[metric]);
+        var currentLower = frame.y(adamwProduction[metric + 'Lcb']);
+        target.appendChild(svgElement('line', {
+          x1: frame.x(adamwProduction.update), x2: frame.x(adamwProduction.update),
+          y1: currentY, y2: currentLower, stroke: COLORS.oxblood, 'stroke-width': 1.5
+        }));
+        target.appendChild(svgElement('line', {
+          x1: frame.x(adamwProduction.update) - 5, x2: frame.x(adamwProduction.update) + 5,
+          y1: currentLower, y2: currentLower, stroke: COLORS.oxblood, 'stroke-width': 1.5
+        }));
+        var currentPoint = svgElement('rect', {
+          x: frame.x(adamwProduction.update) - 4.5, y: currentY - 4.5, width: 9, height: 9,
+          fill: COLORS.oxblood, stroke: COLORS.paper, 'stroke-width': 1
+        });
+        target.appendChild(currentPoint);
+        bindTip(currentPoint, 'all-AdamW · U131,072 · stocks ' + signed(adamwProduction.stock, 3) +
+          ' [' + signed(adamwProduction.stockLcb, 3) + '] · damage ' + signed(adamwProduction.damage, 2) +
+          ' [' + signed(adamwProduction.damageLcb, 2) + ']', WAND_B + 'tgpuo1be');
+        addText(target, frame.x(adamwProduction.update) - 7, currentY - 11, 'AdamW ' +
+          signed(adamwProduction[metric], metric === 'stock' ? 3 : 2), {
+          'text-anchor': 'end', fill: COLORS.oxblood, 'font-family': 'var(--mono)', 'font-size': 10, 'font-weight': 600
+        });
+      }
     }
 
     var lineage = {
@@ -1236,60 +1257,248 @@
       },
       temporal: {
         title: 'A causal decoder over the plan',
-        text: 'O37 feeds earlier predicted actions into later predicted frames. Its 2×2 ablation below isolates this dependency from within-frame controller-part feedback.',
-        source: '<a href="' + WAND_B + '5wfk2esf">O37 D3 · 5wfk2esf</a>',
-        offsets: [1, 2, 4, 6]
+        text: 'Every selected-offset token receives the same trunk state, its own offset, and the previous selected controller frame. Training feeds targets; play feeds realized actions and advances a KV cache.',
+        source: '<a href="' + WAND_B + 'tgpuo1be">O50 production · tgpuo1be</a> · <a href="' + WAND_B + '5wfk2esf">O37 ablation · 5wfk2esf</a>',
+        offsets: [1, 2, 3, 4, 5, 6, 9, 12, 16, 20]
       }
     };
 
     var currentLineage = 'next';
+
+    function renderLineageMobile(target, marker) {
+      target.setAttribute('viewBox', currentLineage === 'temporal' ? '0 0 390 635' : '0 0 390 330');
+      if (currentLineage === 'next') {
+        diagramBox(target, 8, 125, 82, 54, 'history', '256 frames', false);
+        diagramBox(target, 105, 125, 78, 54, 'trunk', 'hₜ', false);
+        diagramBox(target, 198, 125, 82, 54, 'head', 'offset +1', true);
+        diagramBox(target, 295, 125, 82, 54, 'âₜ₊₁', 'one frame', true);
+        diagramArrow(target, 90, 152, 105, 152, marker);
+        diagramArrow(target, 183, 152, 198, 152, marker);
+        diagramArrow(target, 280, 152, 295, 152, marker);
+        addText(target, 239, 111, 'four group distributions', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8
+        });
+        return;
+      }
+      if (currentLineage === 'mtp') {
+        diagramBox(target, 8, 135, 82, 54, 'history', '256 frames', false);
+        diagramBox(target, 108, 135, 74, 54, 'trunk', 'one hₜ', false);
+        diagramArrow(target, 90, 162, 108, 162, marker);
+        lineage.mtp.offsets.forEach(function (offset, index) {
+          var y = 28 + index * 76;
+          diagramBox(target, 215, y, 79, 46, 'head +' + offset, 'independent', index === 0);
+          diagramBox(target, 323, y, 59, 46, 'â+' + offset, '', index === 0);
+          diagramArrow(target, 182, 162, 215, y + 23, marker, '3 3');
+          diagramArrow(target, 294, y + 23, 323, y + 23, marker);
+        });
+        return;
+      }
+
+      addText(target, 8, 18, 'TRAIN · ONE TEACHER-FORCED PASS', {
+        fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 9.5, 'font-weight': 600
+      });
+      addText(target, 8, 37, 'token = hₜ + E(previous target) + E(offset)', {
+        fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.8
+      });
+      diagramBox(target, 8, 57, 42, 35, 'hₜ', '', false);
+      target.appendChild(svgElement('line', {x1: 50, y1: 74, x2: 378, y2: 74, stroke: COLORS.faint, 'stroke-width': 1, 'stroke-dasharray': '3 3'}));
+      lineage.temporal.offsets.forEach(function (offset, index) {
+        var x = 70 + index * 31;
+        target.appendChild(svgElement('rect', {
+          x: x, y: 101, width: 26, height: 27, fill: index < 6 ? 'rgba(123,46,46,.05)' : COLORS.paper,
+          stroke: index < 6 ? COLORS.oxblood : COLORS.faint, 'stroke-width': 1
+        }));
+        addText(target, x + 13, 119, '+' + offset, {
+          'text-anchor': 'middle', fill: index < 6 ? COLORS.oxblood : COLORS.ink,
+          'font-family': 'var(--mono)', 'font-size': offset >= 10 ? 7 : 8, 'font-weight': 600
+        });
+        target.appendChild(svgElement('line', {x1: x + 13, y1: 74, x2: x + 13, y2: 99, stroke: COLORS.faint, 'stroke-width': 1}));
+      });
+      addText(target, 70, 147, 'previous: aₜ, a*+1, a*+2, …, a*+16', {
+        fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.8
+      });
+      diagramBox(target, 70, 166, 305, 44, '4-layer causal Transformer', 'token i attends to every token ≤ i', true);
+      addText(target, 222, 231, 'a* = target · logits do not feed training inputs', {
+        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.6
+      });
+      addText(target, 222, 250, 'train: +1…+6, +9/+12/+16/+20', {
+        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.8
+      });
+      addText(target, 222, 269, 'live: +1…+4', {
+        'text-anchor': 'middle', fill: COLORS.oxblood, 'font-family': 'var(--mono)', 'font-size': 8.2, 'font-weight': 600
+      });
+      target.appendChild(svgElement('line', {x1: 8, y1: 289, x2: 382, y2: 289, stroke: COLORS.rule, 'stroke-width': 1}));
+
+      addText(target, 8, 314, 'PLAY · D2/R2 · CACHED SEQUENTIAL DECODE', {
+        fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 9.5, 'font-weight': 600
+      });
+      diagramBox(target, 8, 348, 42, 35, 'hₜ', '', false);
+      var live = [
+        {offset: 1, state: 'forced'}, {offset: 2, state: 'forced'},
+        {offset: 3, state: 'sample'}, {offset: 4, state: 'sample'}
+      ];
+      live.forEach(function (row, index) {
+        var x = 70 + index * 78;
+        diagramBox(target, x, 348, 62, 45, '+' + row.offset, row.state, row.state === 'sample');
+        if (index === 0) diagramArrow(target, 50, 365, x, 370, marker, '3 3');
+        if (index > 0) diagramArrow(target, x - 16, 370, x, 370, marker);
+      });
+      target.appendChild(svgElement('line', {x1: 70, y1: 338, x2: 366, y2: 338, stroke: COLORS.faint, 'stroke-width': 1, 'stroke-dasharray': '3 3'}));
+      addText(target, 218, 332, 'KV cache carries all earlier tokens', {
+        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.5
+      });
+      addText(target, 218, 413, 'whole realized frame feeds the next offset', {
+        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.7
+      });
+      ['C 9', 'main 65', 'trig. 25', 'buttons 256'].forEach(function (part, index) {
+        var x = 8 + index * 95;
+        diagramBox(target, x, 442, 82, 40, part, index ? 'FiLM prefix' : 'first', index > 0);
+        if (index > 0) diagramArrow(target, x - 13, 462, x, 462, marker);
+      });
+      addText(target, 195, 506, 'hₜ skips to every head · trigger masks buttons', {
+        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.5
+      });
+      diagramBox(target, 98, 532, 194, 43, 'queue +3, +4', 'then replan after 2 frames', true);
+      diagramArrow(target, 195, 484, 195, 532, marker);
+      addText(target, 195, 603, 'sampled groups condition the next group', {
+        'text-anchor': 'middle', fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 8
+      });
+    }
 
     function renderLineage() {
       setSelected('data-lineage', currentLineage);
       var target = one('#lineage-diagram');
       empty(target);
       var marker = arrowMarker(target);
-      diagramBox(target, 18, 115, 120, 58, 'history', 'observation + actions', false);
-      diagramBox(target, 184, 115, 116, 58, 'trunk', 'causal state', false);
-      diagramArrow(target, 138, 144, 184, 144, marker);
+      if (window.matchMedia('(max-width: 720px)').matches) {
+        renderLineageMobile(target, marker);
+        var mobileItem = lineage[currentLineage];
+        one('#lineage-copy').innerHTML =
+          '<h4>' + mobileItem.title + '</h4><p>' + mobileItem.text + '</p><p class="source-line">' + mobileItem.source + '</p>';
+        return;
+      }
+      target.setAttribute('viewBox', '0 0 900 360');
       if (currentLineage === 'next') {
-        diagramBox(target, 354, 115, 100, 58, 'head', 'offset +1', true);
-        diagramBox(target, 500, 115, 90, 58, 'aₜ₊₁', 'controller', true);
-        diagramArrow(target, 300, 144, 354, 144, marker);
-        diagramArrow(target, 454, 144, 500, 144, marker);
+        diagramBox(target, 60, 142, 165, 64, '256-frame history', 'state + past actions', false);
+        diagramBox(target, 300, 142, 145, 64, 'causal trunk', 'hₜ', false);
+        diagramBox(target, 520, 142, 145, 64, 'one action head', 'offset +1', true);
+        diagramBox(target, 740, 142, 105, 64, 'âₜ₊₁', 'one frame', true);
+        diagramArrow(target, 225, 174, 300, 174, marker);
+        diagramArrow(target, 445, 174, 520, 174, marker);
+        diagramArrow(target, 665, 174, 740, 174, marker);
+        addText(target, 592, 126, 'four controller-group distributions', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 9
+        });
       } else if (currentLineage === 'mtp') {
+        diagramBox(target, 35, 142, 150, 64, '256-frame history', 'state + past actions', false);
+        diagramBox(target, 235, 142, 125, 64, 'causal trunk', 'one hₜ', false);
+        diagramArrow(target, 185, 174, 235, 174, marker);
         lineage.mtp.offsets.forEach(function (offset, index) {
-          var y = 26 + index * 66;
-          diagramBox(target, 370, y, 98, 43, 'head +' + offset, 'independent', index === 0);
-          diagramBox(target, 515, y, 74, 43, 'aₜ₊' + offset, '', index === 0);
-          diagramArrow(target, 300, 144, 370, y + 21, marker);
-          diagramArrow(target, 468, y + 21, 515, y + 21, marker);
+          var y = 40 + index * 78;
+          diagramBox(target, 455, y, 135, 48, 'head +' + offset, 'no action feedback', index === 0);
+          diagramBox(target, 690, y, 105, 48, 'âₜ₊' + offset, 'whole frame', index === 0);
+          diagramArrow(target, 360, 174, 455, y + 24, marker, '3 3');
+          diagramArrow(target, 590, y + 24, 690, y + 24, marker);
+        });
+        addText(target, 522, 354, 'The heads share hₜ, but cannot see one another’s targets or samples.', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 9.5
         });
       } else {
-        var offsets = lineage.temporal.offsets;
-        offsets.forEach(function (offset, index) {
-          var x = 332 + index * 68;
-          diagramBox(target, x, 86, 54, 47, 'a+' + offset, index ? 'sees prior' : 'start', true);
-          if (index === 0) diagramArrow(target, 300, 144, x, 109, marker);
-          if (index > 0) diagramArrow(target, x - 14, 109, x, 109, marker);
+        target.appendChild(svgElement('line', {x1: 450, y1: 12, x2: 450, y2: 346, stroke: COLORS.rule, 'stroke-width': 1}));
+        addText(target, 18, 28, 'TRAIN · ONE TEACHER-FORCED PASS', {
+          fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 10, 'font-weight': 600
         });
-        addText(target, 440, 59, 'across-frame feedback', {
-          'text-anchor': 'middle',
-          fill: COLORS.oxblood,
-          'font-family': 'var(--mono)',
-          'font-size': 9.5
+        addText(target, 468, 28, 'PLAY · CACHED SEQUENTIAL DECODE', {
+          fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 10, 'font-weight': 600
         });
-        ['C', 'main', 'trig.', 'buttons'].forEach(function (part, index) {
-          var x = 332 + index * 68;
-          diagramBox(target, x, 190, 54, 38, part, '', index > 0);
-          if (index > 0) diagramArrow(target, x - 14, 209, x, 209, marker);
+        addText(target, 18, 49, 'xᵢ = Wₕhₜ + WₐE(previous selected frame) + WₒE(offsetᵢ)', {
+          fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.8
         });
-        diagramArrow(target, 242, 173, 332, 209, marker, '3 3');
-        addText(target, 440, 253, 'within-frame feedback', {
-          'text-anchor': 'middle',
-          fill: COLORS.faint,
-          'font-family': 'var(--mono)',
-          'font-size': 9.5
+        diagramBox(target, 20, 77, 58, 38, 'hₜ', 'shared', false);
+        target.appendChild(svgElement('line', {x1: 78, y1: 96, x2: 421, y2: 96, stroke: COLORS.faint, 'stroke-width': 1, 'stroke-dasharray': '3 3'}));
+        addText(target, 250, 87, 'broadcast to every selected offset', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8
+        });
+        lineage.temporal.offsets.forEach(function (offset, index) {
+          var x = 105 + index * 32;
+          target.appendChild(svgElement('rect', {
+            x: x, y: 121, width: 27, height: 28, fill: index < 6 ? 'rgba(123,46,46,.05)' : COLORS.paper,
+            stroke: index < 6 ? COLORS.oxblood : COLORS.faint, 'stroke-width': 1
+          }));
+          addText(target, x + 13.5, 139, '+' + offset, {
+            'text-anchor': 'middle', fill: index < 6 ? COLORS.oxblood : COLORS.ink,
+            'font-family': 'var(--mono)', 'font-size': offset >= 10 ? 7.5 : 8.5, 'font-weight': 600
+          });
+          var previousLabel = index === 0 ? 'aₜ' : (index === 1 ? 'a*+1' : (index === 2 ? 'a*+2' :
+            (index === 5 ? '…' : (index === 9 ? 'a*+16' : ''))));
+          if (previousLabel) {
+            addText(target, x + 13.5, 165, previousLabel, {
+              'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.3
+            });
+          }
+          target.appendChild(svgElement('line', {x1: x + 13.5, y1: 96, x2: x + 13.5, y2: 119, stroke: COLORS.faint, 'stroke-width': 1}));
+        });
+        addText(target, 87, 165, 'prev.', {fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.5});
+        diagramBox(target, 105, 187, 315, 45, '4-layer causal Transformer', 'token i attends to every token ≤ i', true);
+        lineage.temporal.offsets.forEach(function (_offset, index) {
+          var x = 118.5 + index * 32;
+          target.appendChild(svgElement('line', {x1: x, y1: 149, x2: x, y2: 185, stroke: COLORS.faint, 'stroke-width': 1}));
+          target.appendChild(svgElement('line', {x1: x, y1: 234, x2: x, y2: 252, stroke: COLORS.faint, 'stroke-width': 1}));
+        });
+        addText(target, 105, 271, 'â+1', {fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 8});
+        addText(target, 386, 271, 'â+20', {fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 8});
+        addText(target, 262, 293, 'a* = ground truth · outputs are not fed back during training', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
+        });
+        addText(target, 262, 317, 'train +1…+6, +9/+12/+16/+20', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
+        });
+        addText(target, 262, 336, 'live decoder uses +1…+4', {
+          'text-anchor': 'middle', fill: COLORS.oxblood, 'font-family': 'var(--mono)', 'font-size': 8.5, 'font-weight': 600
+        });
+
+        diagramBox(target, 470, 65, 56, 38, 'hₜ', 'shared', false);
+        addText(target, 546, 57, 'realized previous frame + offset', {
+          fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.2
+        });
+        var live = [
+          {offset: 1, state: 'forced'}, {offset: 2, state: 'forced'},
+          {offset: 3, state: 'sample'}, {offset: 4, state: 'sample'}
+        ];
+        live.forEach(function (row, index) {
+          var x = 548 + index * 82;
+          diagramBox(target, x, 79, 64, 48, '+' + row.offset, row.state, row.state === 'sample');
+          if (index === 0) diagramArrow(target, 526, 84, x, 103, marker, '3 3');
+          if (index > 0) diagramArrow(target, x - 18, 103, x, 103, marker);
+          addText(target, x + 32, 146, index === 0 ? 'aₜ' : 'a+' + index, {
+            'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8
+          });
+        });
+        target.appendChild(svgElement('path', {
+          d: 'M548,69 L858,69', fill: 'none', stroke: COLORS.faint, 'stroke-width': 1,
+          'stroke-dasharray': '3 3', 'marker-end': marker
+        }));
+        addText(target, 703, 64, 'temporal KV cache carries all earlier tokens', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8
+        });
+        addText(target, 468, 180, 'within each sampled frame', {
+          fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
+        });
+        ['C-stick 9', 'main 65', 'triggers 25', 'buttons 256'].forEach(function (part, index) {
+          var x = 472 + index * 101;
+          diagramBox(target, x, 195, 82, 40, part, index ? 'FiLM prefix' : 'first', index > 0);
+          if (index > 0) diagramArrow(target, x - 19, 215, x, 215, marker);
+        });
+        addText(target, 674, 257, 'sampled groups condition the next group', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
+        });
+        addText(target, 674, 274, 'hₜ skips to every logit head · trigger masks buttons', {
+          'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 7.7
+        });
+        diagramBox(target, 575, 287, 198, 42, 'queue +3, +4', 'then replan after 2 frames', true);
+        diagramArrow(target, 674, 237, 674, 287, marker);
+        addText(target, 674, 348, 'The whole realized controller frame becomes the next offset’s input.', {
+          'text-anchor': 'middle', fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 8.5
         });
       }
       var item = lineage[currentLineage];
@@ -1388,6 +1597,21 @@
     };
     var currentCodec = 'current';
 
+    function codecVisual(name) {
+      if (name === 'legacy') {
+        return '<div class="bitmask"><span class="contrast-label">simultaneous press</span>' +
+          '<div class="toy-flow"><span class="toy-node hot">A + B</span><span class="toy-link">→</span>' +
+          '<span class="toy-node">latest button</span><span class="toy-link">→</span><span class="toy-node">1 label</span></div>' +
+          '<span class="toy-sub">The reducer discards part of the physical chord.</span></div>';
+      }
+      var labels = ['D↑', 'L', 'R', 'Z', 'Y', 'X', 'B', 'A'];
+      var bits = [0, 0, 0, 0, 0, 0, 1, 1];
+      return '<div class="bitmask"><span class="contrast-label">one categorical bitmask</span>' +
+        '<div class="bit-labels">' + labels.map(function (label) { return '<span>' + label + '</span>'; }).join('') + '</div>' +
+        '<div class="bit-values">' + bits.map(function (bit) { return '<span class="' + (bit ? 'on' : '') + '">' + bit + '</span>'; }).join('') + '</div>' +
+        '<div class="bit-equation"><span>A + B = 00000011₂ = class 3</span><strong>2⁸ = 256</strong></div></div>';
+    }
+
     function renderCodec() {
       setPressed('data-codec', currentCodec);
       var codec = codecs[currentCodec];
@@ -1397,90 +1621,73 @@
       }).join('');
       one('#codec-detail').innerHTML =
         '<span class="verdict">' + codec.label + '</span><div class="codec-groups">' + groups + '</div>' +
-        '<p>' + codec.copy + '</p><div class="delta-pair"><div><b>' + signed(codec.stock, 3) +
+        codecVisual(currentCodec) + '<p>' + codec.copy + '</p><div class="delta-pair"><div><b>' + signed(codec.stock, 3) +
         '</b><span>stock score</span></div><div><b>' + signed(codec.damage, 2) +
         '</b><span>damage score</span></div></div>';
     }
 
     var representationBranches = [
       {
-        id: 'physical',
-        name: 'One-hot past actions',
-        evidence: 'controlled',
-        tone: 'negative',
-        stock: -0.260,
-        damage: -23.68,
-        text: 'A 256-way one-hot history lost to learned class + physical embeddings despite receiving more parameters and twice the examples.',
+        id: 'physical', name: 'Past-action input', diagram: 'physical',
+        control: '256-way class one-hot', treatment: 'class + physical embedding',
+        stock: 0.260, damage: 23.68,
+        text: 'The physical embedding won despite fewer examples and fewer parameters.',
         links: [['one-hot', '1zzstd2d'], ['physical', 'cqbbbg77']]
       },
       {
-        id: 'geometry',
-        name: 'Geometric features',
-        evidence: 'unresolved',
-        stock: null,
-        damage: null,
-        text: 'No clean retained run isolates the hand-built geometric features. I would not assign them a gain from the surviving evidence.',
-        links: [['feature baseline', 'fxhtoxu8']]
+        id: 'geometry', name: 'Geometric features', diagram: 'geometry',
+        control: 'raw measured state', treatment: 'derived relative geometry',
+        stock: null, damage: null,
+        noResult: 'Two spatial-feature attempts stopped without a closed-loop result. There is no intervention score.',
+        text: 'The derived block included relative positions, velocities, and stage geometry.',
+        links: [['baseline', 'fxhtoxu8'], ['attempt 1', '6mmt6o4c'], ['attempt 2', '60esc6s8']]
       },
       {
-        id: 'cross',
-        name: 'Head cross-attention',
-        evidence: 'package',
-        stock: null,
-        damage: null,
-        text: 'The temporal output head that cross-attended to earlier trunk tokens was only preserved inside a changing package. It does not isolate cross-attention.',
-        links: [['package', '4hoe86s7']]
+        id: 'cross', name: 'Head cross-attention', diagram: 'cross',
+        control: 'final trunk state hₜ', treatment: 'queries cross-attend to trunk history',
+        stock: null, damage: null,
+        noResult: 'O24 scored −0.398 stocks/min and +21.55 damage/min, but its nearest reference changes the trunk, codec, offsets, and decoder size.',
+        text: 'Twenty action-prefix queries used causal cross-attention over earlier trunk tokens.',
+        links: [['O24', '4hoe86s7'], ['O26 reference', 'cqbbbg77']]
       },
       {
-        id: 'flat',
-        name: 'Flattened action tokens',
-        evidence: 'weak',
-        stock: null,
-        damage: null,
-        text: 'Interleaving state and controller-part tokens can work, but it re-runs much more of the trunk. Context, compute, and evaluation protocol changed across the retained runs.',
-        links: [['short', '7tlk11io'], ['full', 'lxo3id9l']]
+        id: 'flat', name: 'Flattened action tokens', diagram: 'flat',
+        control: 'one trunk token per frame', treatment: 'state + four action-part tokens',
+        stock: null, damage: null,
+        noResult: '51-frame: −0.101 stock / +28.82 damage in a later 96-boot eval. 256-frame: +0.262 / +41.34 under the older protocol and about 5× the training work. No clean delta.',
+        text: 'This puts controller groups inside the main sequence instead of a small output decoder.',
+        links: [['frame-token reference', '6g1fud8e'], ['51-frame', '7tlk11io'], ['256-frame', 'lxo3id9l']]
       },
       {
-        id: 'bpe',
-        name: 'BPE / RLE spans',
-        evidence: 'package',
-        tone: 'negative',
-        stock: -2.635,
-        damage: -172.16,
-        text: 'Compressing repeated actions changed the output format, execution cadence, parameter count, and crash rate. The tested system failed; the result is not a codec-only ablation.',
-        links: [['BPE/RLE', 'xgj1dwot']]
+        id: 'bpe', name: 'BPE / RLE spans', diagram: 'bpe',
+        control: 'one action target per frame', treatment: 'action + duration event spans',
+        stock: -2.635, damage: -172.16,
+        text: 'Output format, execution cadence, parameter count, and crash rate also changed. The complete tested system failed.',
+        links: [['frame-aligned', 'fxhtoxu8'], ['BPE/RLE', 'xgj1dwot']]
       },
       {
-        id: 'chording',
-        name: 'Chording',
-        evidence: 'unresolved',
-        stock: null,
-        damage: null,
-        text: 'The experiment exists in source, but no completed production result was retained. There is no number to report.',
-        links: []
+        id: 'chording', name: 'Joint action chords', diagram: 'chord',
+        control: 'four factorized groups', treatment: 'one joint frame token',
+        stock: null, damage: null,
+        noResult: 'The only retained run stopped after three diagnostic steps. It has no closed-loop evaluation.',
+        text: 'A data-derived vocabulary maps the full controller state to one token, then autoregresses over frames.',
+        links: [['three-step diagnostic', 'vgwbv53u']]
       },
       {
-        id: 'state',
-        name: 'Game-state expert',
-        evidence: 'package',
-        tone: 'negative',
-        stock: -0.048,
-        damage: -12.60,
-        text: 'A future-state auxiliary model did not improve the deployed policy despite 8% more parameters, twice the examples, and more than twice the estimated training work.',
-        links: [['auxiliary task', 'qxcjjwl8'], ['control', 'cqbbbg77']]
+        id: 'state', name: 'Game-state expert', diagram: 'state',
+        control: 'policy objective only', treatment: 'training-only future-state expert',
+        stock: -0.048, damage: -12.60,
+        text: 'The treatment had 8% more parameters, twice the examples, and more than twice the estimated training work.',
+        links: [['policy', 'cqbbbg77'], ['future-state expert', 'qxcjjwl8']]
       },
       {
-        id: 'delay',
-        name: 'Fixed long delay',
-        evidence: 'package',
-        tone: 'negative',
-        stock: -1.105,
-        damage: -85.71,
-        text: 'Delay 1 → 12 failed sharply, but plan length, replan interval, and the future-data buffer also changed. It rejects the deployment package.',
+        id: 'delay', name: 'Fixed long delay', diagram: 'delay',
+        control: 'act near the observation', treatment: 'act twelve frames ahead',
+        stock: -1.105, damage: -85.71,
+        text: 'Plan length, replan interval, and the future-data buffer changed with delay. The tested deployment combination failed.',
         links: [['delay 1', '1imfy8v3'], ['delay 12', '2qs05au4']]
       }
     ];
-    var selectedRepresentation = 'physical';
 
     function branchLinks(links) {
       if (!links.length) return '<span>source only; no completed run</span>';
@@ -1489,30 +1696,74 @@
       }).join(' · ');
     }
 
+    function contrast(leftLabel, left, rightLabel, right) {
+      return '<div class="contrast"><div class="contrast-side"><span class="contrast-label">' + leftLabel +
+        '</span>' + left + '</div><div class="contrast-arrow">→</div><div class="contrast-side"><span class="contrast-label">' +
+        rightLabel + '</span>' + right + '</div></div>';
+    }
+
+    function branchDiagram(kind) {
+      if (kind === 'physical') {
+        return contrast('control', '<div class="toy-flow"><span class="toy-node">class 37</span><span class="toy-link">→</span><span class="toy-node">one-hot[256]</span></div>',
+          'treatment', '<div class="toy-flow vertical"><div class="toy-flow"><span class="toy-node">class 37</span><span class="toy-link">+</span><span class="toy-node hot">physical bits / xy</span></div><span class="toy-link">↓</span><span class="toy-node wide">learned embedding</span></div>');
+      }
+      if (kind === 'geometry') {
+        return contrast('control', '<div class="toy-flow"><span class="toy-node">x, y, speed, state</span><span class="toy-link">→</span><span class="toy-node">trunk</span></div>',
+          'treatment', '<div class="toy-flow vertical"><div class="toy-token-row"><span class="toy-token hot">Δx</span><span class="toy-token hot">Δy</span><span class="toy-token hot">range</span><span class="toy-token hot">ledge</span></div><span class="toy-link">+</span><span class="toy-node wide">raw state → trunk</span></div>');
+      }
+      if (kind === 'cross') {
+        return contrast('state-only head', '<div class="toy-flow"><span class="toy-token">hₜ₋₂</span><span class="toy-token">hₜ₋₁</span><span class="toy-node hot">hₜ</span><span class="toy-link">→ head</span></div>',
+          'cross-attention head', '<div class="toy-flow vertical"><div class="toy-token-row"><span class="toy-token">hₜ₋₂</span><span class="toy-token">hₜ₋₁</span><span class="toy-token">hₜ</span></div><span class="toy-link">↑ attends</span><div class="toy-token-row"><span class="toy-token hot">q+1</span><span class="toy-token hot">q+2</span><span class="toy-token hot">…q+20</span></div></div>');
+      }
+      if (kind === 'flat') {
+        return contrast('frame tokens', '<div class="toy-token-row"><span class="toy-token">sₜ₋₁</span><span class="toy-token">sₜ</span><span class="toy-token">sₜ₊₁</span></div><span class="toy-sub">256 frames → 256 trunk tokens</span>',
+          'interleaved', '<div class="toy-token-row"><span class="toy-token hot">s</span><span class="toy-token">C</span><span class="toy-token">M</span><span class="toy-token">T</span><span class="toy-token">B</span></div><span class="toy-sub">256 frames → 1,280 trunk tokens</span>');
+      }
+      if (kind === 'bpe') {
+        return contrast('frame aligned', '<div class="toy-token-row"><span class="toy-token">A</span><span class="toy-token">A</span><span class="toy-token">A</span><span class="toy-token">B</span><span class="toy-token">B</span><span class="toy-token">C</span></div><span class="toy-sub">six frames · six targets</span>',
+          'run-length events', '<div class="toy-token-row"><span class="toy-token hot">A</span><span class="toy-token">×3</span><span class="toy-token hot">B</span><span class="toy-token">×2</span><span class="toy-token hot">C</span><span class="toy-token">×1</span></div><span class="toy-sub">variable event sequence</span>');
+      }
+      if (kind === 'chord') {
+        return contrast('factorized frame', '<div class="toy-token-row"><span class="toy-token">C</span><span class="toy-token">main</span><span class="toy-token">trig.</span><span class="toy-token">btn.</span></div><span class="toy-sub">four categorical decisions</span>',
+          'joint chord', '<div class="toy-flow vertical"><div class="toy-token-row"><span class="toy-token">C</span><span class="toy-token">M</span><span class="toy-token">Tₗ</span><span class="toy-token">Tᵣ</span><span class="toy-token">B</span></div><span class="toy-link">↓ mixed-radix pack</span><span class="toy-node hot">chord 4,219</span></div>');
+      }
+      if (kind === 'state') {
+        return contrast('policy only', '<div class="toy-flow"><span class="toy-node">hₜ</span><span class="toy-link">→</span><span class="toy-node hot">action loss</span></div>',
+          'auxiliary expert', '<div class="toy-flow vertical"><span class="toy-node">hₜ</span><div class="toy-flow"><span class="toy-link">↙</span><span class="toy-link">↘</span></div><div class="toy-token-row"><span class="toy-node hot">action loss</span><span class="toy-node">future state loss</span></div></div>');
+      }
+      return contrast('delay 1', '<div class="toy-flow"><span class="toy-node">observe t</span><span class="toy-link">→</span><span class="toy-node hot">act t+1</span></div>',
+        'delay 12', '<div class="toy-flow vertical"><span class="toy-node">observe t</span><div class="toy-token-row"><span class="toy-token">·</span><span class="toy-token">·</span><span class="toy-token">12-frame queue</span><span class="toy-token">·</span></div><span class="toy-node hot">act t+12</span></div>');
+    }
+
+    function deltaBar(value, extent) {
+      var fraction = Math.min(50, Math.abs(value) / extent * 50);
+      var left = value < 0 ? 50 - fraction : 50;
+      return '<div class="delta-track"><i class="' + (value < 0 ? 'negative' : '') +
+        '" style="left:' + left + '%;width:' + fraction + '%"></i></div>';
+    }
+
+    function impactBlock(branch) {
+      if (!Number.isFinite(branch.stock) || !Number.isFinite(branch.damage)) {
+        return '<div class="no-result">' + branch.noResult + '</div>';
+      }
+      return '<div class="delta-block"><div class="delta-block-title">treatment − reference</div>' +
+        '<div class="delta-row"><span class="delta-name">stock</span>' + deltaBar(branch.stock, 3) +
+        '<span class="delta-value">' + signed(branch.stock, 3) + '</span></div>' +
+        '<div class="delta-row"><span class="delta-name">damage</span>' + deltaBar(branch.damage, 180) +
+        '<span class="delta-value">' + signed(branch.damage, 2) + '</span></div>' +
+        '<div class="delta-scale"><span>−</span><span>0</span><span>+</span></div></div>';
+    }
+
     function renderRepresentation() {
-      var menu = one('#representation-menu');
-      empty(menu);
+      var target = one('#representation-list');
+      empty(target);
       representationBranches.forEach(function (branch) {
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.setAttribute('aria-pressed', branch.id === selectedRepresentation ? 'true' : 'false');
-        button.innerHTML = '<span>' + branch.name + '</span><span>' +
-          (branch.stock === null ? '—' : signed(branch.stock, 3)) + '</span>';
-        button.addEventListener('click', function () {
-          selectedRepresentation = branch.id;
-          renderRepresentation();
-        });
-        menu.appendChild(button);
+        var row = document.createElement('section');
+        row.className = 'branch-study';
+        row.innerHTML = '<div><h4>' + branch.name + '</h4><p>' + branch.text + '</p><p class="source-line">' +
+          branchLinks(branch.links) + '</p></div>' + branchDiagram(branch.diagram) + impactBlock(branch);
+        target.appendChild(row);
       });
-      var selected = representationBranches.filter(function (branch) { return branch.id === selectedRepresentation; })[0];
-      var impacts = selected.stock === null ? '' :
-        '<div class="delta-pair"><div><b>' + signed(selected.stock, 3) +
-        '</b><span>stocks/min Δ</span></div><div><b>' + signed(selected.damage, 2) +
-        '</b><span>damage/min Δ</span></div></div>';
-      one('#representation-detail').innerHTML =
-        '<span class="verdict ' + (selected.tone || '') + '">' + selected.evidence + '</span>' +
-        '<h4>' + selected.name + '</h4><p>' + selected.text + '</p>' + impacts +
-        '<p class="source-line">' + branchLinks(selected.links) + '</p>';
     }
 
     var awrRows = [
@@ -1563,67 +1814,62 @@
 
     var objectiveBranches = [
       {
-        id: 'iql',
-        name: 'Attached IQL package',
-        evidence: 'package',
-        stock: -2.009,
-        damage: -95.85,
+        id: 'iql', name: 'Attached IQL', diagram: 'iql',
+        control: 'O26 behavior cloning', treatment: 'actor + Q₁/Q₂/V losses',
+        stock: -2.009, damage: -95.85,
         text: 'The tested critics + IQL loss failed despite more parameters, data, and work. This does not reject every form of offline Q-learning.',
         links: [['BC', 'cqbbbg77'], ['IQL', '06fi5jms']]
       },
       {
-        id: 'flow',
-        name: 'Endpoint flow decoder',
-        evidence: 'controlled',
-        stock: -0.186,
-        damage: -32.93,
+        id: 'flow', name: 'Endpoint flow decoder', diagram: 'flow',
+        control: 'categorical temporal decoder', treatment: 'parallel endpoint flow',
+        stock: -0.186, damage: -32.93,
         text: 'The endpoint-flow decoder lost to the categorical temporal decoder despite 25% more parameters and training work and 7% more inference work.',
         links: [['categorical', '5wfk2esf'], ['flow', 't4s3gohe']]
       },
       {
-        id: 'xm',
-        name: 'Exploration modeling K8',
-        evidence: 'package',
-        stock: 0.860,
-        damage: 45.04,
-        text: 'K8 improved the exploration-modeling package over K1, but trajectory work and microbatching changed and both policies remained poor.',
-        links: [['K1', 'mz8dk2gh'], ['K8', 'feic18gt']]
+        id: 'xm1', name: 'Exploration modeling · K=1', diagram: 'xm1',
+        control: 'O26 behavior cloning', treatment: 'one latent trajectory',
+        stock: -1.667, damage: -89.37,
+        text: 'K=1 changes the decoder and objective, sees twice the samples, and uses nearly twice the estimated training work.',
+        links: [['O26 BC', 'cqbbbg77'], ['XM K=1', 'mz8dk2gh']]
+      },
+      {
+        id: 'xm8', name: 'Exploration modeling · K=8', diagram: 'xm8',
+        control: 'O26 behavior cloning', treatment: 'best of eight latent trajectories',
+        stock: -0.807, damage: -44.33,
+        text: 'K=8 is better than K=1, but still worse than O26 BC. It also stopped earlier and changed microbatching and training work.',
+        links: [['O26 BC', 'cqbbbg77'], ['XM K=8', 'feic18gt']]
       }
     ];
-    var selectedObjective = '';
 
-    function objectiveImpact(value) {
-      var extent = 2.1;
-      var fraction = Math.min(0.5, Math.abs(value) / extent * 0.5);
-      var left = value < 0 ? 0.5 - fraction : 0.5;
-      return '<div class="impact-track"><i class="' + (value < 0 ? 'negative' : '') +
-        '" style="left:' + (left * 100) + '%;width:' + (fraction * 100) + '%"></i></div>';
+    function objectiveDiagram(kind) {
+      if (kind === 'iql') {
+        return contrast('behavior cloning', '<div class="toy-flow"><span class="toy-node">hₜ</span><span class="toy-link">→</span><span class="toy-node hot">−log π(a|s)</span></div>',
+          'attached IQL', '<div class="toy-flow vertical"><span class="toy-node">hₜ, aₜ, return</span><div class="toy-token-row"><span class="toy-node hot">actor</span><span class="toy-node">Q₁</span><span class="toy-node">Q₂</span><span class="toy-node">V</span></div></div>');
+      }
+      if (kind === 'flow') {
+        return contrast('categorical AR', '<div class="toy-token-row"><span class="toy-token hot">a+1</span><span class="toy-link">→</span><span class="toy-token hot">a+2</span><span class="toy-link">→</span><span class="toy-token hot">a+3</span></div><span class="toy-sub">sample selected frames in order</span>',
+          'endpoint flow', '<div class="toy-flow vertical"><div class="toy-token-row"><span class="toy-token">noise</span><span class="toy-link">→</span><span class="toy-token">v₁</span><span class="toy-link">→</span><span class="toy-token hot">endpoints</span></div><span class="toy-sub">ten offsets move in parallel · NFE 4</span></div>');
+      }
+      var count = kind === 'xm8' ? 8 : 1;
+      var candidates = '';
+      for (var index = 0; index < count; index += 1) {
+        candidates += '<span class="toy-token' + (index === count - 1 ? ' hot' : '') + '">z' + (index + 1) + '</span>';
+      }
+      return contrast('O26 BC', '<div class="toy-flow vertical"><span class="toy-node">hₜ</span><div class="toy-token-row"><span class="toy-token hot">a+1</span><span class="toy-token hot">a+2</span><span class="toy-token hot">…</span></div><span class="toy-sub">teacher-forced causal plan</span></div>',
+        'XM · K=' + count, '<div class="toy-flow vertical"><div class="toy-token-row">' + candidates + '</div><span class="toy-link">↓ decode trajectories</span><span class="toy-node hot">minimum-loss candidate</span></div>');
     }
 
     function renderObjectives() {
       var target = one('#objective-branches');
       empty(target);
       objectiveBranches.forEach(function (branch) {
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'objective-row';
-        button.setAttribute('aria-expanded', branch.id === selectedObjective ? 'true' : 'false');
-        button.innerHTML =
-          '<span><b>' + branch.name + '</b><small>' + branch.evidence + '</small></span>' +
-          objectiveImpact(branch.stock) +
-          '<span class="mono">' + signed(branch.stock, 3) + '<br>' + signed(branch.damage, 2) + '</span>';
-        bindTip(button, branch.name + ' · Δ stocks ' + signed(branch.stock, 3) + ' · Δ damage ' + signed(branch.damage, 2));
-        button.addEventListener('click', function () {
-          selectedObjective = selectedObjective === branch.id ? '' : branch.id;
-          renderObjectives();
-        });
-        target.appendChild(button);
-        if (selectedObjective === branch.id) {
-          var detail = document.createElement('div');
-          detail.className = 'objective-detail';
-          detail.innerHTML = '<p>' + branch.text + '</p><p class="source-line">' + branchLinks(branch.links) + '</p>';
-          target.appendChild(detail);
-        }
+        var row = document.createElement('section');
+        row.className = 'branch-study';
+        row.innerHTML = '<div><h4>' + branch.name + '</h4><p>' + branch.text + '</p><p class="source-line">' +
+          branchLinks(branch.links) + '</p></div>' + objectiveDiagram(branch.diagram) + impactBlock(branch);
+        target.appendChild(row);
       });
     }
 
@@ -2227,8 +2473,8 @@
         sublabel: 'across-frame feedback',
         x: 480, y: 35, w: 150, h: 68,
         title: 'Across-frame action model',
-        text: 'Earlier predicted actions condition later predictions at offsets 1–6, 9, 12, 16, and 20.',
-        specs: [['target offsets', '10'], ['decoder', 'categorical'], ['action feedback', 'causal']]
+        text: 'Every token receives the trunk state, its offset, and the preceding selected controller frame. Causal self-attention also exposes all earlier temporal tokens.',
+        specs: [['training offsets', '1–6, 9, 12, 16, 20'], ['decoder', 'd512 × 4'], ['live offsets', '1–4']]
       },
       {
         id: 'groups',
@@ -2236,8 +2482,8 @@
         sublabel: 'within-frame FiLM',
         x: 480, y: 148, w: 150, h: 70,
         title: 'Within-frame controller model',
-        text: 'Controller groups are generated as C-stick → main stick → triggers → buttons, with nonlinear heads and a direct trunk-to-logit path.',
-        specs: [['conditioning', 'bounded FiLM'], ['heads', 'nonlinear'], ['logit path', 'trunk skip']]
+        text: 'Controller groups are generated as C-stick → main stick → triggers → buttons. Earlier groups provide bounded FiLM; every group also has a direct trunk-to-logit path.',
+        specs: [['conditioning', 'bounded FiLM'], ['heads', 'nonlinear'], ['buttons', 'trigger-masked']]
       },
       {
         id: 'objective',
@@ -2250,11 +2496,11 @@
       },
       {
         id: 'optimizer',
-        label: 'Muon + AdamW',
-        sublabel: 'split by parameter type',
+        label: 'AdamW',
+        sublabel: 'all parameters',
         x: 18, y: 356, w: 145, h: 66,
         title: 'Optimization',
-        text: 'Muon updates matrix parameters. AdamW updates embeddings, biases, norms, and readouts.',
+        text: 'The final long run uses AdamW for every parameter. Muon remains a small-scale branch, not an ingredient of this checkpoint.',
         specs: [['updates', '131,072'], ['positions', '8 × 2³⁰'], ['batch', '512']]
       },
       {
@@ -2400,7 +2646,7 @@
       {
         id: 'codec', order: 43.1, code: 'O43', category: 'representation', title: 'Current controller codec',
         stock: 0.292, damage: 16.16, evidence: 'controlled', modules: ['history', 'groups'],
-        control: 'legacy codec package', treatment: 'current physical codec',
+        control: 'legacy codec', treatment: 'current physical codec',
         summary: 'The legacy controller code did not explain the old model. It reduced performance in the exact bridge.',
         links: [['legacy', 'acbbeb76'], ['current', 'cqbbbg77']]
       },
@@ -2454,10 +2700,10 @@
         links: [['BC', '5wfk2esf'], ['AWR', 'hwzv0k9a']]
       },
       {
-        id: 'iql', order: 30, code: 'O30', category: 'objective', title: 'Attached offline IQL package',
+        id: 'iql', order: 30, code: 'O30', category: 'objective', title: 'Attached offline IQL',
         stock: -2.009, damage: -95.85, evidence: 'package', modules: ['objective'],
         control: 'O26 behavior cloning', treatment: 'critics + attached IQL loss',
-        summary: 'The tested package failed despite more data, parameters, and work. It does not reject every offline Q-learning method.',
+        summary: 'The tested IQL system failed despite more data, parameters, and work. It does not reject every offline Q-learning method.',
         links: [['BC', 'cqbbbg77'], ['IQL', '06fi5jms']]
       },
       {
@@ -2513,7 +2759,7 @@
         id: 'delay', order: 44, code: 'O44', category: 'deployment', title: 'Delay 1 → 12',
         stock: -1.105, damage: -85.71, evidence: 'package', modules: ['runtime'],
         control: 'delay 1', treatment: 'delay 12',
-        summary: 'The long-delay package failed. Plan length, replan interval, and future-data buffer also changed.',
+        summary: 'The long-delay configuration failed. Plan length, replan interval, and future-data buffer also changed.',
         links: [['delay 1', '1imfy8v3'], ['delay 12', '2qs05au4']]
       },
       {
@@ -2527,25 +2773,32 @@
         id: 'fast', order: 50.1, code: 'O50', category: 'deployment', title: 'Cody / Fox fast deployment',
         stock: 0.757, damage: 59.91, evidence: 'package', modules: ['history', 'runtime'],
         control: 'standard D2/R2 · identity masked', treatment: 'Cody · Fox · D0/R1',
-        summary: 'The package is strong. Identity, character, delay, and replan all changed, so the gain cannot be assigned to one factor.',
+        summary: 'The combination is strong. Identity, character, delay, and replan all changed, so the gain cannot be assigned to one factor.',
         links: [['O50 proxy', 'a9ud18bc']]
       },
       {
         id: 'bpe', order: 18, code: 'O18', category: 'representation', title: 'BPE / RLE action spans',
         stock: -2.635, damage: -172.16, evidence: 'package', modules: ['history', 'groups', 'runtime'],
         control: 'frame-aligned action targets', treatment: 'compressed action spans',
-        summary: 'Output format, execution cadence, parameters, and crash rate changed. The tested package failed.',
+        summary: 'Output format, execution cadence, parameters, and crash rate changed. The tested system failed.',
         links: [['BPE/RLE', 'xgj1dwot']]
       },
       {
-        id: 'xm', order: 33, code: 'O33', category: 'architecture', title: 'Exploration modeling K1 → K8',
-        stock: 0.860, damage: 45.04, evidence: 'package', modules: ['temporal', 'objective'],
-        control: 'one parallel trajectory', treatment: 'eight parallel trajectories',
-        summary: 'K8 improves the XM package, but uses much more trajectory work per update and different microbatching. Both policies remain poor.',
-        links: [['K1', 'mz8dk2gh'], ['K8', 'feic18gt']]
+        id: 'xm1', order: 33.1, code: 'O33', category: 'architecture', title: 'Exploration modeling · K=1',
+        stock: -1.667, damage: -89.37, evidence: 'package', modules: ['temporal', 'objective'],
+        control: 'O26 behavior cloning', treatment: 'one latent trajectory',
+        summary: 'The O33 K=1 system was worse than O26 BC. The comparison also changes the decoder and objective, doubles the samples, and nearly doubles estimated training work.',
+        links: [['O26 BC', 'cqbbbg77'], ['K=1', 'mz8dk2gh']]
       },
       {
-        id: 'o42', order: 42.2, code: 'O42', category: 'architecture', title: 'O26 → O42 package',
+        id: 'xm8', order: 33.2, code: 'O33', category: 'architecture', title: 'Exploration modeling · K=8',
+        stock: -0.807, damage: -44.33, evidence: 'package', modules: ['temporal', 'objective'],
+        control: 'O26 behavior cloning', treatment: 'best of eight latent trajectories',
+        summary: 'K=8 was better than K=1 but still worse than O26 BC. It stopped earlier and differs in microbatching and training work, so the K effect is not isolated.',
+        links: [['O26 BC', 'cqbbbg77'], ['K=8', 'feic18gt']]
+      },
+      {
+        id: 'o42', order: 42.2, code: 'O42', category: 'architecture', title: 'O26 → O42 bundle',
         stock: -0.217, damage: -10.81, evidence: 'package', modules: ['data', 'trunk', 'groups'],
         control: 'O26 architecture + sampler', treatment: 'O42 architecture + sampler',
         summary: 'Projection, heads, trunk skip, FiLM, normalization, residual scaling, and sampler all changed. No component can be isolated.',
@@ -2563,7 +2816,7 @@
         stock: null, damage: null, evidence: 'descriptive', modules: ['objective', 'optimizer'],
         control: 'earlier checkpoint', treatment: 'later checkpoint',
         summary: 'Offline likelihood improves steadily. Play regresses through the middle of O50, then recovers at the final checkpoint.',
-        links: [['production', 'p1fyyp1z']]
+        links: [['Muon checkpoint series', 'p1fyyp1z'], ['all-AdamW production', 'tgpuo1be']]
       }
     ];
     var ledgerMetric = 'stock';
@@ -2619,9 +2872,6 @@
         rows.sort(function (a, b) { return a.order - b.order; });
       } else if (ledgerSort === 'category') {
         rows.sort(function (a, b) { return a.category.localeCompare(b.category) || a.order - b.order; });
-      } else if (ledgerSort === 'evidence') {
-        var rank = {'controlled': 0, 'near-control': 1, 'package': 2, 'descriptive': 3};
-        rows.sort(function (a, b) { return rank[a.evidence] - rank[b.evidence] || a.order - b.order; });
       }
       return rows;
     }
@@ -2652,7 +2902,7 @@
           '<td>' + experiment.control + ' → ' + experiment.treatment + '</td>' +
           '<td class="num"><span class="delta ' + deltaClass(value) + '">' +
           (Number.isFinite(value) ? signed(value, ledgerMetric === 'stock' ? 3 : 2) : 'no stable order') +
-          '</span></td><td><span class="evidence">' + experiment.evidence + '</span></td>';
+          '</span></td>';
         row.addEventListener('click', function () { selectExperiment(experiment.id); });
         row.addEventListener('keydown', function (event) {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -2665,7 +2915,7 @@
           var expanded = document.createElement('tr');
           expanded.className = 'expanded-row';
           expanded.innerHTML =
-            '<td colspan="4"><div class="expanded-grid"><div><p>' + experiment.summary + '</p>' +
+            '<td colspan="3"><div class="expanded-grid"><div><p>' + experiment.summary + '</p>' +
             '<p class="source-line">' + runLinks(experiment.links) + '</p></div>' +
             '<div class="compare-toy"><div class="compare-box"><b>control</b><span>' +
             experiment.control + '</span></div><div class="compare-arrow">→</div>' +
@@ -2795,6 +3045,9 @@
       renderLedger();
       renderArchitecture();
     });
+
+    var lineageMedia = window.matchMedia('(max-width: 720px)');
+    if (lineageMedia.addEventListener) lineageMedia.addEventListener('change', renderLineage);
 
     renderProductionChart('#hero-chart', 'stock', true);
     renderProductionChart('#production-chart', 'stock', false);
