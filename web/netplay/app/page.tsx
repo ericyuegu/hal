@@ -8,7 +8,6 @@ import {
   CircleDot,
   Gamepad2,
   LoaderCircle,
-  LockKeyhole,
   RotateCcw,
   X,
 } from 'lucide-react';
@@ -166,7 +165,6 @@ export default function Home() {
         inputSchema: {
           type: 'object',
           properties: {
-            invite_code: { type: 'string', minLength: 20 },
             player_code: { type: 'string' },
             character: {
               type: 'string',
@@ -178,13 +176,7 @@ export default function Home() {
             },
             online_delay: { type: 'integer', enum: [2, 3] },
           },
-          required: [
-            'invite_code',
-            'player_code',
-            'character',
-            'imitation',
-            'online_delay',
-          ],
+          required: ['player_code', 'character', 'imitation', 'online_delay'],
           additionalProperties: false,
         },
         annotations: { readOnlyHint: false, untrustedContentHint: false },
@@ -295,12 +287,9 @@ function JoinForm({
   function submit(event: SyntheticEvent<HTMLFormElement, SubmitEvent>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const inviteCode = form.get('invite_code');
     const playerCode = form.get('player_code');
-    if (typeof inviteCode !== 'string' || typeof playerCode !== 'string')
-      return;
+    if (typeof playerCode !== 'string') return;
     void join({
-      invite_code: inviteCode,
       player_code: playerCode.toUpperCase(),
       character,
       imitation,
@@ -335,19 +324,6 @@ function JoinForm({
               name="player_code"
               placeholder="CRYO#610"
               autoCapitalize="characters"
-              required
-            />
-          </Field>
-          <Field
-            label="Invite code"
-            htmlFor="invite-code"
-            hint="Invite codes are private and player-bound."
-          >
-            <Input
-              id="invite-code"
-              name="invite_code"
-              type="password"
-              autoComplete="off"
               required
             />
           </Field>
@@ -679,13 +655,6 @@ function QueueAside({ capacity }: { capacity: Capacity }) {
           <li>Play up to five games on the same connection.</li>
         </ol>
       </section>
-      <section className="flex gap-3 rounded-xl border border-white/8 px-4 py-4 text-sm leading-6 text-muted-foreground">
-        <LockKeyhole className="mt-1 size-4 shrink-0 text-emerald-300" />
-        <p>
-          Replays are private. Production games expire after 30 days. Soak-test
-          replays are discarded.
-        </p>
-      </section>
     </aside>
   );
 }
@@ -870,12 +839,7 @@ function validateToolInput(input: unknown, options: Options): CreateJob {
   if (typeof input !== 'object' || input === null)
     throw new Error('Queue input must be an object.');
   const values = input as Record<string, unknown>;
-  const strings = [
-    'invite_code',
-    'player_code',
-    'character',
-    'imitation',
-  ] as const;
+  const strings = ['player_code', 'character', 'imitation'] as const;
   for (const name of strings)
     if (typeof values[name] !== 'string' || !values[name])
       throw new Error(`${name} must be a non-empty string.`);

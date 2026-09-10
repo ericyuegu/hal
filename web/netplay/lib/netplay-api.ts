@@ -39,7 +39,6 @@ export type Job = {
 export type JobCredentials = Job & { token: string };
 
 export type CreateJob = {
-  invite_code: string;
   player_code: string;
   character: string;
   imitation: string;

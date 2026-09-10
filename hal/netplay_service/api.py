@@ -20,6 +20,7 @@ from fastapi import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.security import HTTPBearer
+from loguru import logger
 from prometheus_client import CollectorRegistry
 from prometheus_client import Counter
 from prometheus_client import Gauge
@@ -39,7 +40,6 @@ from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.queue import ActiveJobError
 from hal.netplay_service.queue import AuthenticationError
 from hal.netplay_service.queue import InvalidTransitionError
-from hal.netplay_service.queue import InviteError
 from hal.netplay_service.queue import QueueStore
 
 
@@ -93,7 +93,6 @@ class OptionsResponse(BaseModel):
 
 class CreateJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    invite_code: str = Field(min_length=20, max_length=256)
     player_code: str = Field(min_length=3, max_length=13)
     character: str
     imitation: str
@@ -176,7 +175,9 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     async def reap() -> None:
         while True:
             await asyncio.sleep(1)
-            await asyncio.to_thread(queue.reap_expired)
+            expired = await asyncio.to_thread(queue.reap_expired)
+            if expired:
+                logger.info("expired {} stale netplay reservations", expired)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -264,16 +265,22 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     def create_job(body: CreateJobRequest) -> CreatedJobResponse:
         try:
             credentials = queue.create_job(
-                body.invite_code,
                 body.player_code,
                 MatchChoices(body.character, body.imitation, body.online_delay),
             )
-        except InviteError as error:
-            raise HTTPException(status_code=403, detail=str(error)) from error
         except ActiveJobError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        logger.info(
+            "reservation {} queued player={} position={} character={} delay={} imitate={}",
+            credentials.job.id,
+            credentials.job.player_code,
+            credentials.job.queue_position,
+            credentials.job.choices.character,
+            credentials.job.choices.online_delay,
+            credentials.job.choices.imitation,
+        )
         return CreatedJobResponse(**_job(credentials.job).model_dump(), token=credentials.token)
 
     @app.get("/v1/jobs/{job_id}", response_model=JobResponse)
@@ -286,21 +293,21 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     @app.delete("/v1/jobs/{job_id}", response_model=JobResponse)
     def cancel_job(job_id: str, job_token: Annotated[str, Depends(token)]) -> JobResponse:
         try:
-            return _job(queue.cancel(job_id, job_token))
+            job = queue.cancel(job_id, job_token)
         except AuthenticationError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
+        logger.info("reservation {} cancel requested status={}", job.id, job.status.value)
+        return _job(job)
 
     @app.post("/v1/jobs/{job_id}/rematch", response_model=JobResponse)
     def rematch(job_id: str, body: RematchRequest, job_token: Annotated[str, Depends(token)]) -> JobResponse:
         try:
-            return _job(
-                queue.request_rematch(
-                    job_id,
-                    job_token,
-                    character=body.character,
-                    imitation=body.imitation,
-                    stage=body.stage,
-                )
+            job = queue.request_rematch(
+                job_id,
+                job_token,
+                character=body.character,
+                imitation=body.imitation,
+                stage=body.stage,
             )
         except AuthenticationError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
@@ -308,6 +315,14 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        logger.info(
+            "reservation {} rematch ready character={} stage={} imitate={}",
+            job.id,
+            job.choices.character,
+            job.choices.requested_stage,
+            job.choices.imitation,
+        )
+        return _job(job)
 
     return app
 

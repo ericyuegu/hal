@@ -19,8 +19,9 @@ from hal.netplay_service.domain import validate_imitation
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.domain import validate_stage
 
-_SCHEMA_VERSION: Final[int] = 1
+_SCHEMA_VERSION: Final[int] = 2
 _ACTIVE_SQL: Final[str] = "'queued','leased','connecting','playing','rematch_wait','rematch_ready'"
+_IN_SERVICE_SQL: Final[str] = "'leased','connecting','playing','rematch_wait','rematch_ready'"
 
 
 class QueueError(RuntimeError):
@@ -32,10 +33,6 @@ class AuthenticationError(QueueError):
 
 
 class InvalidTransitionError(QueueError):
-    pass
-
-
-class InviteError(QueueError):
     pass
 
 
@@ -79,19 +76,11 @@ class QueueStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, _SCHEMA_VERSION):
+            if version not in (0, 1, _SCHEMA_VERSION):
                 raise QueueError(f"unsupported netplay queue schema {version}")
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 f"""
-                CREATE TABLE IF NOT EXISTS invites (
-                    digest BLOB PRIMARY KEY,
-                    label TEXT NOT NULL,
-                    player_code TEXT,
-                    active INTEGER NOT NULL CHECK (active IN (0, 1)),
-                    created_at REAL NOT NULL,
-                    last_used_at REAL
-                );
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
                     token_digest BLOB NOT NULL,
@@ -137,52 +126,18 @@ class QueueStore:
                 );
                 """
             )
+            if version == 1:
+                connection.execute("DROP TABLE invites")
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             connection.execute("PRAGMA optimize")
 
-    def create_invite(self, label: str) -> str:
-        if not label.strip():
-            raise ValueError("invite label must be non-empty")
-        code = secrets.token_urlsafe(24)
-        with self._transaction() as connection:
-            connection.execute(
-                "INSERT INTO invites(digest, label, active, created_at) VALUES (?, ?, 1, ?)",
-                (_digest(code), label.strip(), self._now()),
-            )
-        return code
-
-    def add_invite(self, code: str, label: str) -> None:
-        if len(code) < 20:
-            raise ValueError("invite codes must contain at least 20 characters")
-        if not label.strip():
-            raise ValueError("invite label must be non-empty")
-        with self._transaction() as connection:
-            connection.execute(
-                "INSERT INTO invites(digest, label, active, created_at) VALUES (?, ?, 1, ?)",
-                (_digest(code), label.strip(), self._now()),
-            )
-
-    def create_job(self, invite_code: str, player_code: str, choices: MatchChoices) -> JobCredentials:
+    def create_job(self, player_code: str, choices: MatchChoices) -> JobCredentials:
         validate_player_code(player_code)
-        if not invite_code:
-            raise InviteError("invite code is required")
         job_id = secrets.token_urlsafe(18)
         token = secrets.token_urlsafe(32)
         timestamp = self._now()
         try:
             with self._transaction() as connection:
-                invite = connection.execute(
-                    "SELECT player_code, active FROM invites WHERE digest = ?",
-                    (_digest(invite_code),),
-                ).fetchone()
-                if invite is None or not invite["active"]:
-                    raise InviteError("invite code is invalid")
-                if invite["player_code"] is not None and invite["player_code"] != player_code:
-                    raise InviteError("invite code belongs to a different player code")
-                connection.execute(
-                    "UPDATE invites SET player_code = ?, last_used_at = ? WHERE digest = ?",
-                    (player_code, timestamp, _digest(invite_code)),
-                )
                 queue_seq = int(connection.execute("SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM jobs").fetchone()[0])
                 connection.execute(
                     """
@@ -270,7 +225,9 @@ class QueueStore:
 
     def active_count(self) -> int:
         with self._connect() as connection:
-            return int(connection.execute(f"SELECT COUNT(*) FROM jobs WHERE status IN ({_ACTIVE_SQL})").fetchone()[0])
+            return int(
+                connection.execute(f"SELECT COUNT(*) FROM jobs WHERE status IN ({_IN_SERVICE_SQL})").fetchone()[0]
+            )
 
     def claim_next(self, worker_id: str, *, lease_seconds: float = 15.0) -> Job | None:
         if not worker_id:

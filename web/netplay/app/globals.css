@@ -65,30 +65,19 @@
   body {
     @apply bg-background text-foreground;
     min-width: 320px;
-    background-image:
-      radial-gradient(
-        circle at 12% 5%,
-        oklch(0.52 0.14 290 / 16%),
-        transparent 28rem
-      ),
-      linear-gradient(oklch(1 0 0 / 2%) 1px, transparent 1px),
-      linear-gradient(90deg, oklch(1 0 0 / 2%) 1px, transparent 1px);
-    background-size:
-      auto,
-      48px 48px,
-      48px 48px;
+    background-image: radial-gradient(
+      circle at 12% 0%,
+      oklch(0.45 0.1 275 / 12%),
+      transparent 30rem
+    );
   }
 }
 
 .surface {
   border: 1px solid oklch(1 0 0 / 11%);
   border-radius: 1rem;
-  background: linear-gradient(
-    145deg,
-    oklch(0.19 0.035 274 / 94%),
-    oklch(0.15 0.025 274 / 94%)
-  );
-  box-shadow: 0 24px 70px oklch(0.05 0.02 274 / 35%);
+  background: var(--card);
+  box-shadow: 0 12px 40px oklch(0.05 0.02 274 / 24%);
 }
 
 .logo-mark {
@@ -98,11 +87,7 @@
   place-items: center;
   border: 1px solid oklch(0.77 0.14 211 / 45%);
   border-radius: 0.65rem;
-  background: linear-gradient(
-    135deg,
-    oklch(0.77 0.14 211),
-    oklch(0.68 0.18 294)
-  );
+  background: var(--primary);
   color: oklch(0.13 0.03 274);
   font-family: var(--font-geist-mono);
   font-weight: 800;

@@ -8,9 +8,8 @@ from hal.netplay_service.api import create_app
 from hal.netplay_service.queue import QueueStore
 
 
-def _client(tmp_path: Path) -> tuple[TestClient, QueueStore, str]:
+def _client(tmp_path: Path) -> tuple[TestClient, QueueStore]:
     store = QueueStore(tmp_path / "queue.sqlite3")
-    invite = store.create_invite("tester")
     app = create_app(
         ApiConfig(
             tmp_path / "queue.sqlite3",
@@ -19,12 +18,11 @@ def _client(tmp_path: Path) -> tuple[TestClient, QueueStore, str]:
         ),
         store,
     )
-    return TestClient(app), store, invite
+    return TestClient(app), store
 
 
-def _request(invite: str) -> dict[str, object]:
+def _request() -> dict[str, object]:
     return {
-        "invite_code": invite,
         "player_code": "CRYO#610",
         "character": "FOX",
         "imitation": "IBDW#0",
@@ -33,7 +31,7 @@ def _request(invite: str) -> dict[str, object]:
 
 
 def test_options_and_capacity_are_public(tmp_path: Path) -> None:
-    client, _store, _invite = _client(tmp_path)
+    client, _store = _client(tmp_path)
     with client:
         options = client.get("/v1/options")
         capacity = client.get("/v1/capacity")
@@ -42,6 +40,15 @@ def test_options_and_capacity_are_public(tmp_path: Path) -> None:
     assert options.json()["online_delays"] == [2, 3]
     assert len(options.json()["characters"]) == 26
     assert capacity.json() == {"capacity": 2, "active": 0, "queued": 0}
+
+
+def test_capacity_separates_queued_and_active_reservations(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    with client:
+        assert client.post("/v1/jobs", json=_request()).status_code == 201
+        assert client.get("/v1/capacity").json() == {"capacity": 2, "active": 0, "queued": 1}
+        assert store.claim_next("slot-0") is not None
+        assert client.get("/v1/capacity").json() == {"capacity": 2, "active": 1, "queued": 0}
 
 
 def test_readiness_requires_a_fresh_runner_heartbeat(tmp_path: Path) -> None:
@@ -63,9 +70,9 @@ def test_readiness_requires_a_fresh_runner_heartbeat(tmp_path: Path) -> None:
 
 
 def test_create_poll_and_cancel_job(tmp_path: Path) -> None:
-    client, _store, invite = _client(tmp_path)
+    client, _store = _client(tmp_path)
     with client:
-        created = client.post("/v1/jobs", json=_request(invite))
+        created = client.post("/v1/jobs", json=_request())
         assert created.status_code == 201
         values = created.json()
         headers = {"Authorization": f"Bearer {values['token']}"}
@@ -78,9 +85,9 @@ def test_create_poll_and_cancel_job(tmp_path: Path) -> None:
 
 
 def test_job_credentials_do_not_reveal_existence(tmp_path: Path) -> None:
-    client, _store, invite = _client(tmp_path)
+    client, _store = _client(tmp_path)
     with client:
-        created = client.post("/v1/jobs", json=_request(invite)).json()
+        created = client.post("/v1/jobs", json=_request()).json()
         missing = client.get(f"/v1/jobs/{created['id']}")
         wrong = client.get(
             f"/v1/jobs/{created['id']}",
@@ -91,13 +98,11 @@ def test_job_credentials_do_not_reveal_existence(tmp_path: Path) -> None:
     assert wrong.status_code == 404
 
 
-def test_invite_and_active_player_errors_are_bounded(tmp_path: Path) -> None:
-    client, _store, invite = _client(tmp_path)
+def test_active_player_and_request_size_errors_are_bounded(tmp_path: Path) -> None:
+    client, _store = _client(tmp_path)
     with client:
-        invalid = _request("x" * 24)
-        assert client.post("/v1/jobs", json=invalid).status_code == 403
-        assert client.post("/v1/jobs", json=_request(invite)).status_code == 201
-        duplicate = client.post("/v1/jobs", json=_request(invite))
+        assert client.post("/v1/jobs", json=_request()).status_code == 201
+        duplicate = client.post("/v1/jobs", json=_request())
         oversized = client.post(
             "/v1/jobs",
             content=b"x" * 20_000,
@@ -109,7 +114,7 @@ def test_invite_and_active_player_errors_are_bounded(tmp_path: Path) -> None:
 
 
 def test_cors_allows_only_configured_frontend(tmp_path: Path) -> None:
-    client, _store, _invite = _client(tmp_path)
+    client, _store = _client(tmp_path)
     with client:
         allowed = client.options(
             "/v1/jobs",

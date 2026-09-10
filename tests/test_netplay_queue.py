@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,6 @@ from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.queue import ActiveJobError
 from hal.netplay_service.queue import InvalidTransitionError
-from hal.netplay_service.queue import InviteError
 from hal.netplay_service.queue import QueueStore
 
 
@@ -29,27 +29,39 @@ def _store(tmp_path: Path, clock: Clock) -> QueueStore:
     return QueueStore(tmp_path / "queue.sqlite3", now=clock)
 
 
-def test_invite_binds_to_exact_player_and_one_active_job(tmp_path: Path) -> None:
+def test_schema_one_database_drops_obsolete_invites(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE invites(digest BLOB PRIMARY KEY)")
+        connection.execute("PRAGMA user_version = 1")
+
+    QueueStore(path)
+    with sqlite3.connect(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        invite_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'invites'"
+        ).fetchone()
+    assert version == 2
+    assert invite_table is None
+
+
+def test_only_one_active_job_is_allowed_per_player(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    credentials = store.create_job(invite, "CRYO#610", _choices())
+    credentials = store.create_job("CRYO#610", _choices())
 
     assert credentials.job.status is JobStatus.QUEUED
     assert credentials.job.queue_position == 1
     with pytest.raises(ActiveJobError):
-        store.create_job(invite, "CRYO#610", _choices())
-    with pytest.raises(InviteError, match="different player"):
-        store.create_job(invite, "OTHER#1", _choices())
+        store.create_job("CRYO#610", _choices())
+    assert store.create_job("OTHER#1", _choices()).job.queue_position == 2
 
 
 def test_fifo_queue_and_retry_at_front(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    first_invite = store.create_invite("first")
-    second_invite = store.create_invite("second")
-    first = store.create_job(first_invite, "FIRST#1", _choices())
-    second = store.create_job(second_invite, "SECOND#2", _choices(3))
+    first = store.create_job("FIRST#1", _choices())
+    second = store.create_job("SECOND#2", _choices(3))
 
     claimed = store.claim_next("slot-0")
     assert claimed is not None and claimed.id == first.job.id
@@ -60,11 +72,20 @@ def test_fifo_queue_and_retry_at_front(tmp_path: Path) -> None:
     assert store.claim_next("slot-0").id == second.job.id  # type: ignore[union-attr]
 
 
+def test_capacity_counts_claimed_jobs_separately_from_the_queue(tmp_path: Path) -> None:
+    store = _store(tmp_path, Clock())
+    store.create_job("FIRST#1", _choices())
+    store.create_job("SECOND#2", _choices())
+
+    assert (store.active_count(), store.queue_depth()) == (0, 2)
+    assert store.claim_next("slot-0") is not None
+    assert (store.active_count(), store.queue_depth()) == (1, 1)
+
+
 def test_no_show_expires_and_releases_player(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    credentials = store.create_job(invite, "CRYO#610", _choices())
+    credentials = store.create_job("CRYO#610", _choices())
     job = store.claim_next("slot-0")
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
@@ -72,28 +93,26 @@ def test_no_show_expires_and_releases_player(tmp_path: Path) -> None:
     clock.advance(61)
     assert store.reap_expired() == 1
     assert store.get_job(job.id, credentials.token).status is JobStatus.NO_SHOW
-    assert store.create_job(invite, "CRYO#610", _choices()).job.status is JobStatus.QUEUED
+    assert store.create_job("CRYO#610", _choices()).job.status is JobStatus.QUEUED
 
 
 def test_worker_can_mark_no_show_and_release_player(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    credentials = store.create_job(invite, "CRYO#610", _choices())
+    credentials = store.create_job("CRYO#610", _choices())
     job = store.claim_next("slot-0")
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
 
     store.mark_no_show(job.id, "slot-0")
     assert store.get_job(job.id, credentials.token).status is JobStatus.NO_SHOW
-    assert store.create_job(invite, "CRYO#610", _choices()).job.status is JobStatus.QUEUED
+    assert store.create_job("CRYO#610", _choices()).job.status is JobStatus.QUEUED
 
 
 def test_rematch_updates_choices_but_not_delay(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    credentials = store.create_job(invite, "CRYO#610", _choices(3))
+    credentials = store.create_job("CRYO#610", _choices(3))
     job = store.claim_next("slot-0")
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
@@ -115,8 +134,7 @@ def test_rematch_updates_choices_but_not_delay(tmp_path: Path) -> None:
 def test_rematch_timeout_completes_reservation(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    credentials = store.create_job(invite, "CRYO#610", _choices())
+    credentials = store.create_job("CRYO#610", _choices())
     job = store.claim_next("slot-0")
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
@@ -139,8 +157,7 @@ def test_rematch_timeout_completes_reservation(tmp_path: Path) -> None:
 def test_cancel_during_play_stops_after_game(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    credentials = store.create_job(invite, "CRYO#610", _choices())
+    credentials = store.create_job("CRYO#610", _choices())
     job = store.claim_next("slot-0")
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
@@ -153,8 +170,7 @@ def test_cancel_during_play_stops_after_game(tmp_path: Path) -> None:
 def test_replay_recording_is_idempotent_for_recovery(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
-    invite = store.create_invite("tester")
-    job = store.create_job(invite, "CRYO#610", _choices()).job
+    job = store.create_job("CRYO#610", _choices()).job
     claimed = store.claim_next("slot-0")
     assert claimed is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
