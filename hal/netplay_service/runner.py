@@ -437,6 +437,9 @@ def _slot_worker(
     connection: Connection,
     stop: _StopEvent,
 ) -> None:
+    # The supervisor owns terminal signals. A SIGINT in Event.wait() can kill
+    # a spawned worker while it holds the event lock and deadlock shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     store = QueueStore(config.database)
     with ServingArena.attach(descriptor) as arena:
         policy = RemotePolicy(spec, runtime, arena, connection, config.slot)
@@ -457,6 +460,14 @@ def _slot_worker(
                 logger.exception("reservation {} failed: {}", job.id, type(error).__name__)
                 with suppress(InvalidTransitionError):
                     store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
+
+
+def _start_slot_process(process: BaseProcess) -> None:
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        process.start()
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def run(config: RunnerConfig) -> None:
@@ -483,10 +494,11 @@ def run(config: RunnerConfig) -> None:
     logger.info("netplay policy ready after {:.2f}s", time.perf_counter() - started)
     stop = mp.get_context("spawn").Event()
     thread_stop = threading.Event()
+    shutdown_requested = False
 
     def request_stop(_signum: int, _frame: object) -> None:
-        stop.set()
-        thread_stop.set()
+        nonlocal shutdown_requested
+        shutdown_requested = True
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
@@ -535,7 +547,7 @@ def run(config: RunnerConfig) -> None:
                 ),
                 name=f"hal-netplay-slot-{slot}",
             )
-            process.start()
+            _start_slot_process(process)
             processes.append(process)
 
         engine_error: list[BaseException] = []
@@ -559,7 +571,7 @@ def run(config: RunnerConfig) -> None:
         engine.start()
         logger.info("netplay runner ready slots={} policy_sha256={}", len(processes), policy_sha256)
         try:
-            while not stop.wait(0.5):
+            while not shutdown_requested:
                 if engine_error:
                     raise RuntimeError("netplay inference engine failed") from engine_error[0]
                 failed = [process for process in processes if not process.is_alive()]
@@ -570,6 +582,7 @@ def run(config: RunnerConfig) -> None:
                     policy_sha256=policy_sha256,
                     slots=len(config.user_jsons),
                 )
+                time.sleep(0.5)
         finally:
             stop.set()
             thread_stop.set()

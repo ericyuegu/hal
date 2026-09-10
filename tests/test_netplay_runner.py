@@ -1,8 +1,10 @@
 import json
+import signal
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import melee
 import pytest
@@ -56,6 +58,21 @@ def test_runner_rejects_duplicate_slippi_accounts(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="distinct connect codes"):
         runner._bot_connect_codes((first, second))
+
+
+def test_slot_process_inherits_ignored_terminal_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = Mock()
+    previous = Mock()
+    set_signal = Mock(side_effect=(previous, None))
+    monkeypatch.setattr(runner.signal, "signal", set_signal)
+
+    runner._start_slot_process(process)
+
+    assert set_signal.call_args_list == [
+        ((signal.SIGINT, signal.SIG_IGN),),
+        ((signal.SIGINT, previous),),
+    ]
+    process.start.assert_called_once_with()
 
 
 def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
