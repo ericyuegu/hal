@@ -42,6 +42,7 @@ Use this order:
 ## Research
 
 - State the treatment, control, and invariant inputs before a run.
+- Select sweep runs by gameplay evaluation. Use offline validation metrics only for diagnosis, never selection.
 - Do not hide a scientific change inside a refactor.
 - Record the Git SHA, resolved configuration, seed, environment, data manifests, and artifact hashes.
 - Exact resume restores the model, optimizer, scheduler, loader cursor, and every random-number generator.
