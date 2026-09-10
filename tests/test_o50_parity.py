@@ -115,7 +115,8 @@ def test_portable_model_matches_frozen_o50_trunk_and_decoder() -> None:
     portable_indices = portable.temporal.sample_conditioned(
         portable_hidden,
         portable_observed[:, -1],
-        torch.empty(batch, 0, CONTROLLER_GROUP_COUNT, dtype=torch.long),
+        torch.zeros(batch, 4, CONTROLLER_GROUP_COUNT, dtype=torch.long),
+        torch.zeros(batch, 4, dtype=torch.bool),
         uniforms,
     )
     assert torch.equal(frozen_indices, portable_indices)
