@@ -54,42 +54,42 @@ def resolve_checkpoint(source: str, *, cache_root: str | Path = "runs") -> Path:
         return path.resolve()
 
     bucket, key = parse_r2_uri(source)
-    client = r2.client()
-    remote = client.head_object(Bucket=bucket, Key=key)
-    etag = remote.get("ETag")
-    size = remote.get("ContentLength")
-    if not isinstance(etag, str) or not isinstance(size, int) or isinstance(size, bool) or size < 0:
-        raise RuntimeError(f"R2 returned invalid identity metadata for {source}")
-    cache_key = hashlib.sha256(source.encode()).hexdigest()
-    filename = Path(key).name
-    cache_dir = Path(cache_root) / "r2-checkpoints" / cache_key
-    path = cache_dir / filename
-    metadata_path = cache_dir / f"{filename}.metadata.json"
-    expected: dict[str, object] = {"uri": source, "etag": etag, "size": size}
-    if _valid_cache(path, metadata_path, expected):
-        return path.resolve()
+    with contextlib.closing(r2.client()) as client:
+        remote = client.head_object(Bucket=bucket, Key=key)
+        etag = remote.get("ETag")
+        size = remote.get("ContentLength")
+        if not isinstance(etag, str) or not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise RuntimeError(f"R2 returned invalid identity metadata for {source}")
+        cache_key = hashlib.sha256(source.encode()).hexdigest()
+        filename = Path(key).name
+        cache_dir = Path(cache_root) / "r2-checkpoints" / cache_key
+        path = cache_dir / filename
+        metadata_path = cache_dir / f"{filename}.metadata.json"
+        expected: dict[str, object] = {"uri": source, "etag": etag, "size": size}
+        if _valid_cache(path, metadata_path, expected):
+            return path.resolve()
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    partial = path.with_suffix(path.suffix + ".partial")
-    partial.unlink(missing_ok=True)
-    digest = hashlib.sha256()
-    downloaded = 0
-    try:
-        response = client.get_object(Bucket=bucket, Key=key)
-        response_etag = response.get("ETag")
-        if response_etag is not None and response_etag != etag:
-            raise RuntimeError(f"R2 object changed while downloading {source}")
-        body = response["Body"]
-        with contextlib.closing(body), partial.open("wb") as output:
-            while chunk := body.read(1024 * 1024):
-                output.write(chunk)
-                digest.update(chunk)
-                downloaded += len(chunk)
-        if downloaded != size:
-            raise RuntimeError(f"R2 object size mismatch for {source}: expected {size}, got {downloaded}")
-        os.replace(partial, path)
-    finally:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(path.suffix + ".partial")
         partial.unlink(missing_ok=True)
+        digest = hashlib.sha256()
+        downloaded = 0
+        try:
+            response = client.get_object(Bucket=bucket, Key=key)
+            response_etag = response.get("ETag")
+            if response_etag is not None and response_etag != etag:
+                raise RuntimeError(f"R2 object changed while downloading {source}")
+            body = response["Body"]
+            with contextlib.closing(body), partial.open("wb") as output:
+                while chunk := body.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+                    downloaded += len(chunk)
+            if downloaded != size:
+                raise RuntimeError(f"R2 object size mismatch for {source}: expected {size}, got {downloaded}")
+            os.replace(partial, path)
+        finally:
+            partial.unlink(missing_ok=True)
     metadata = {**expected, "sha256": digest.hexdigest()}
     metadata_partial = metadata_path.with_suffix(metadata_path.suffix + ".partial")
     metadata_partial.write_text(json.dumps(metadata, separators=(",", ":"), sort_keys=True))

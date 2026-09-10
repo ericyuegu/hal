@@ -441,7 +441,7 @@ def _slot_worker(
     # a spawned worker while it holds the event lock and deadlock shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     store = QueueStore(config.database)
-    with ServingArena.attach(descriptor) as arena:
+    with connection, ServingArena.attach(descriptor) as arena:
         policy = RemotePolicy(spec, runtime, arena, connection, config.slot)
         while not stop.is_set():
             _drain_pending_uploads(config.replay_dir / f"slot-{config.slot}", store)
@@ -462,11 +462,12 @@ def _slot_worker(
                     store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
 
 
-def _start_slot_process(process: BaseProcess) -> None:
+def _start_slot_process(process: BaseProcess, child_connection: Connection) -> None:
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         process.start()
     finally:
+        child_connection.close()
         signal.signal(signal.SIGINT, previous)
 
 
@@ -547,7 +548,7 @@ def run(config: RunnerConfig) -> None:
                 ),
                 name=f"hal-netplay-slot-{slot}",
             )
-            _start_slot_process(process)
+            _start_slot_process(process, child_connections[slot])
             processes.append(process)
 
         engine_error: list[BaseException] = []

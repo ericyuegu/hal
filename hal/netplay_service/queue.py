@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import closing
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -74,7 +75,7 @@ class QueueStore:
             connection.close()
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version not in (0, 1, _SCHEMA_VERSION):
                 raise QueueError(f"unsupported netplay queue schema {version}")
@@ -165,14 +166,14 @@ class QueueStore:
         return JobCredentials(self.get_job(job_id, token), token)
 
     def get_job(self, job_id: str, token: str) -> Job:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None or not secrets.compare_digest(bytes(row["token_digest"]), _digest(token)):
                 raise AuthenticationError("job credentials are invalid")
             return self._job(connection, row)
 
     def get_worker_job(self, job_id: str, worker_id: str) -> Job:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None or row["lease_owner"] != worker_id:
                 raise InvalidTransitionError("worker does not own this job")
@@ -220,11 +221,11 @@ class QueueStore:
         )
 
     def queue_depth(self) -> int:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return int(connection.execute("SELECT COUNT(*) FROM jobs WHERE status = 'queued'").fetchone()[0])
 
     def active_count(self) -> int:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return int(
                 connection.execute(f"SELECT COUNT(*) FROM jobs WHERE status IN ({_IN_SERVICE_SQL})").fetchone()[0]
             )

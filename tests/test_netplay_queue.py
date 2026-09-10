@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -31,18 +32,45 @@ def _store(tmp_path: Path, clock: Clock) -> QueueStore:
 
 def test_schema_one_database_drops_obsolete_invites(tmp_path: Path) -> None:
     path = tmp_path / "queue.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute("CREATE TABLE invites(digest BLOB PRIMARY KEY)")
         connection.execute("PRAGMA user_version = 1")
+        connection.commit()
 
     QueueStore(path)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         invite_table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'invites'"
         ).fetchone()
     assert version == 2
     assert invite_table is None
+
+
+def test_queue_operations_close_every_sqlite_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[sqlite3.Connection] = []
+    original_connect = QueueStore._connect
+
+    def tracked_connect(store: QueueStore) -> sqlite3.Connection:
+        connection = original_connect(store)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(QueueStore, "_connect", tracked_connect)
+    store = _store(tmp_path, Clock())
+    credentials = store.create_job("CRYO#610", _choices())
+    claimed = store.claim_next("slot-0")
+    assert claimed is not None
+    for _ in range(20):
+        store.get_job(credentials.job.id, credentials.token)
+        store.get_worker_job(claimed.id, "slot-0")
+        store.queue_depth()
+        store.active_count()
+
+    assert opened
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
 
 
 def test_only_one_active_job_is_allowed_per_player(tmp_path: Path) -> None:

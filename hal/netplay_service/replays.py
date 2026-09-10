@@ -80,6 +80,18 @@ def _etag(value: object) -> str:
     return value.strip('"')
 
 
+@contextmanager
+def _r2_client(client: Any | None) -> Iterator[Any]:
+    if client is not None:
+        yield client
+        return
+    remote = r2.client()
+    try:
+        yield remote
+    finally:
+        remote.close()
+
+
 def _metadata_json(metadata: ReplayMetadata, replay: UploadedReplay) -> bytes:
     values = asdict(metadata)
     values["started_at"] = metadata.started_at.astimezone(UTC).isoformat()
@@ -106,42 +118,44 @@ def upload_replay(path: str | Path, metadata: ReplayMetadata, *, client: Any | N
     digest = _sha256(source)
     key = replay_object_key(metadata)
     bucket = r2.bucket()
-    remote = r2.client() if client is None else client
-    with source.open("rb") as body:
-        response = remote.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=body,
-            ContentType="application/octet-stream",
-            Metadata={"sha256": digest},
-        )
-    etag = _etag(response.get("ETag"))
-    head = remote.head_object(Bucket=bucket, Key=key)
-    if head.get("ContentLength") != size:
-        raise RuntimeError(f"R2 replay size differs after upload: expected {size}, got {head.get('ContentLength')}")
-    if head.get("Metadata", {}).get("sha256") != digest:
-        raise RuntimeError("R2 replay SHA-256 metadata differs after upload")
-    if _etag(head.get("ETag")) != etag:
-        raise RuntimeError("R2 replay ETag differs after upload")
+    with _r2_client(client) as remote:
+        with source.open("rb") as body:
+            response = remote.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=body,
+                ContentType="application/octet-stream",
+                Metadata={"sha256": digest},
+            )
+        etag = _etag(response.get("ETag"))
+        head = remote.head_object(Bucket=bucket, Key=key)
+        if head.get("ContentLength") != size:
+            raise RuntimeError(
+                f"R2 replay size differs after upload: expected {size}, got {head.get('ContentLength')}"
+            )
+        if head.get("Metadata", {}).get("sha256") != digest:
+            raise RuntimeError("R2 replay SHA-256 metadata differs after upload")
+        if _etag(head.get("ETag")) != etag:
+            raise RuntimeError("R2 replay ETag differs after upload")
 
-    metadata_key = key.removesuffix(".slp") + ".json"
-    uploaded = UploadedReplay(key, metadata_key, digest, size, etag)
-    encoded = _metadata_json(metadata, uploaded)
-    metadata_sha256 = hashlib.sha256(encoded).hexdigest()
-    metadata_response = remote.put_object(
-        Bucket=bucket,
-        Key=metadata_key,
-        Body=encoded,
-        ContentType="application/json",
-        Metadata={"sha256": metadata_sha256},
-    )
-    metadata_head = remote.head_object(Bucket=bucket, Key=metadata_key)
-    if metadata_head.get("ContentLength") != len(encoded):
-        raise RuntimeError("R2 replay metadata size differs after upload")
-    if metadata_head.get("Metadata", {}).get("sha256") != metadata_sha256:
-        raise RuntimeError("R2 replay metadata SHA-256 differs after upload")
-    if _etag(metadata_head.get("ETag")) != _etag(metadata_response.get("ETag")):
-        raise RuntimeError("R2 replay metadata ETag differs after upload")
+        metadata_key = key.removesuffix(".slp") + ".json"
+        uploaded = UploadedReplay(key, metadata_key, digest, size, etag)
+        encoded = _metadata_json(metadata, uploaded)
+        metadata_sha256 = hashlib.sha256(encoded).hexdigest()
+        metadata_response = remote.put_object(
+            Bucket=bucket,
+            Key=metadata_key,
+            Body=encoded,
+            ContentType="application/json",
+            Metadata={"sha256": metadata_sha256},
+        )
+        metadata_head = remote.head_object(Bucket=bucket, Key=metadata_key)
+        if metadata_head.get("ContentLength") != len(encoded):
+            raise RuntimeError("R2 replay metadata size differs after upload")
+        if metadata_head.get("Metadata", {}).get("sha256") != metadata_sha256:
+            raise RuntimeError("R2 replay metadata SHA-256 differs after upload")
+        if _etag(metadata_head.get("ETag")) != _etag(metadata_response.get("ETag")):
+            raise RuntimeError("R2 replay metadata ETag differs after upload")
     return uploaded
 
 
@@ -154,24 +168,24 @@ def upload_and_delete(path: str | Path, metadata: ReplayMetadata, *, client: Any
 
 def ensure_replay_lifecycle(*, client: Any | None = None) -> None:
     """Install the 30-day rule without replacing unrelated bucket rules."""
-    remote = r2.client() if client is None else client
     bucket = r2.bucket()
-    try:
-        current = remote.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
-    except ClientError as error:
-        code = error.response.get("Error", {}).get("Code")
-        if code not in ("NoSuchLifecycleConfiguration", "NoSuchLifecycle"):
-            raise
-        current = []
-    rule = {
-        "ID": REPLAY_LIFECYCLE_ID,
-        "Status": "Enabled",
-        "Filter": {"Prefix": REPLAY_PREFIX},
-        "Expiration": {"Days": 30},
-    }
-    rules = [existing for existing in current if existing.get("ID") != REPLAY_LIFECYCLE_ID]
-    rules.append(rule)
-    remote.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={"Rules": rules})
+    with _r2_client(client) as remote:
+        try:
+            current = remote.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if code not in ("NoSuchLifecycleConfiguration", "NoSuchLifecycle"):
+                raise
+            current = []
+        rule = {
+            "ID": REPLAY_LIFECYCLE_ID,
+            "Status": "Enabled",
+            "Filter": {"Prefix": REPLAY_PREFIX},
+            "Expiration": {"Days": 30},
+        }
+        rules = [existing for existing in current if existing.get("ID") != REPLAY_LIFECYCLE_ID]
+        rules.append(rule)
+        remote.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={"Rules": rules})
 
 
 @contextmanager

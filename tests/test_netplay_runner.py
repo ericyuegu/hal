@@ -62,17 +62,19 @@ def test_runner_rejects_duplicate_slippi_accounts(tmp_path: Path) -> None:
 
 def test_slot_process_inherits_ignored_terminal_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
     process = Mock()
+    child_connection = Mock()
     previous = Mock()
     set_signal = Mock(side_effect=(previous, None))
     monkeypatch.setattr(runner.signal, "signal", set_signal)
 
-    runner._start_slot_process(process)
+    runner._start_slot_process(process, child_connection)
 
     assert set_signal.call_args_list == [
         ((signal.SIGINT, signal.SIG_IGN),),
         ((signal.SIGINT, previous),),
     ]
     process.start.assert_called_once_with()
+    child_connection.close.assert_called_once_with()
 
 
 def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

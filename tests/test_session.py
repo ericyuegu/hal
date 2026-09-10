@@ -8,6 +8,7 @@ menu hang surfaces as a clean ``TimeoutError`` instead of spinning forever
 """
 
 import time
+from unittest.mock import Mock
 
 import melee
 import pytest
@@ -219,3 +220,14 @@ def test_teardown_kills_dolphin_when_console_stop_raises() -> None:
     assert process.terminated
     assert process.killed
     assert session._console is None
+
+
+def test_teardown_disconnects_controllers_and_breaks_console_references() -> None:
+    controller = Mock()
+    console = Mock(_process=None, controllers=[controller])
+
+    session_module.teardown_console(console, None)
+
+    controller.disconnect.assert_called_once_with()
+    assert console.controllers == []
+    console.stop.assert_called_once_with()

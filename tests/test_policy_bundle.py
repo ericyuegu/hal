@@ -21,6 +21,10 @@ class _R2Client:
         self.payload = payload
         self.etag = '"version-1"'
         self.downloads = 0
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
         assert (Bucket, Key) == ("hal", "runs/o50/checkpoint.pt")
@@ -118,6 +122,7 @@ def test_checkpoint_resolver_validates_local_cache(tmp_path: Path, monkeypatch: 
     resolved.write_bytes(b"bad")
     assert checkpoints.resolve_checkpoint(uri, cache_root=tmp_path).read_bytes() == client.payload
     assert client.downloads == 2
+    assert client.closes == 3
 
 
 @pytest.mark.parametrize("uri", ["r2://hal", "r2:///key", "r2://hal/path/"])

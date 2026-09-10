@@ -211,6 +211,12 @@ def teardown_console(console: melee.Console | None, replay_dir: str | None) -> N
         except (OSError, RuntimeError) as error:
             logger.warning(f"Console SIGTERM wait failed: {error}")
     kill_dolphin(console)
+    controllers = getattr(console, "controllers", None)
+    if isinstance(controllers, list):
+        for controller in controllers:
+            with suppress(OSError):
+                controller.disconnect()
+        controllers.clear()
     try:
         console.stop()
     except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as error:

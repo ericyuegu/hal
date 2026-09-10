@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 
+from hal import r2
 from hal.netplay_service.replays import REPLAY_LIFECYCLE_ID
 from hal.netplay_service.replays import REPLAY_PREFIX
 from hal.netplay_service.replays import ReplayMetadata
@@ -35,6 +36,10 @@ class FakeR2:
         self.objects: dict[str, tuple[bytes, dict[str, str], str]] = {}
         self.lifecycle: list[dict] | None = None
         self.exceptions = SimpleNamespace(ClientError=ClientError)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
     def put_object(self, *, Key: str, Body, Metadata: dict[str, str], **_kwargs):
         value = Body.read() if hasattr(Body, "read") else bytes(Body)
@@ -71,6 +76,19 @@ def test_upload_validates_r2_and_deletes_local_copy(tmp_path: Path, monkeypatch:
     assert uploaded.key in remote.objects
     assert uploaded.metadata_key in remote.objects
     assert remote.objects[uploaded.key][1]["sha256"] == hashlib.sha256(b"valid replay bytes").hexdigest()
+    assert not remote.closed
+
+
+def test_upload_closes_internally_created_r2_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_BUCKET", "hal")
+    source = tmp_path / "game.slp"
+    source.write_bytes(b"valid replay bytes")
+    remote = FakeR2()
+    monkeypatch.setattr(r2, "client", lambda: remote)
+
+    upload_and_delete(source, _metadata())
+
+    assert remote.closed
 
 
 def test_failed_validation_keeps_local_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,9 +101,11 @@ def test_failed_validation_keeps_local_copy(tmp_path: Path, monkeypatch: pytest.
         return {"ContentLength": 0, "Metadata": {}, "ETag": '"wrong"'}
 
     remote.head_object = wrong_head  # type: ignore[method-assign]
+    monkeypatch.setattr(r2, "client", lambda: remote)
     with pytest.raises(RuntimeError, match="size differs"):
-        upload_and_delete(source, _metadata(), client=remote)
+        upload_and_delete(source, _metadata())
     assert source.exists()
+    assert remote.closed
 
 
 def test_lifecycle_preserves_unrelated_rules(monkeypatch: pytest.MonkeyPatch) -> None:
