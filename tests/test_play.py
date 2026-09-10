@@ -68,6 +68,9 @@ class _Session:
     def start_match(self, _setup: NetplaySetup) -> dict:
         return _frame(0, NEUTRAL_CONTROLLER_ACTION)
 
+    def start_rematch(self, _setup: NetplaySetup) -> dict:
+        return _frame(0, NEUTRAL_CONTROLLER_ACTION)
+
     def step(self, action: ControllerAction) -> tuple[dict, bool]:
         self.submitted.append(action)
         due = self.queue.popleft()
@@ -137,6 +140,23 @@ def test_match_loop_flushes_delay_and_passes_real_conditioning(monkeypatch: pyte
     assert len(result.trajectory) == 10
     assert result.inference_p95_ms >= 0.0
     assert result.transport_correction_frames == 0
+    assert result.stage == 32
+
+
+def test_match_loop_uses_persistent_rematch_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    session = _Session()
+    session.start_match = lambda _setup: pytest.fail("initial match entrypoint used")
+    result = run_netplay_match(
+        session,
+        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+        _Policy(),
+        RuntimeConfig(1, (2,), 2),
+        max_frames=10,
+        rematch=True,
+    )
+    assert len(result.trajectory) == 10
 
 
 def test_match_loop_accepts_a_recent_slippi_time_sync_replay(monkeypatch: pytest.MonkeyPatch) -> None:

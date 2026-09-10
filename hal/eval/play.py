@@ -3,6 +3,7 @@
 import math
 import time
 from collections import deque
+from collections.abc import Callable
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ class PlayResult:
     trajectory: Trajectory
     ego_port: int
     opponent_port: int
+    stage: int
     wall_seconds: float
     inference_seconds: tuple[float, ...]
     transport_correction_frames: int
@@ -114,6 +116,9 @@ def run_netplay_match(
     *,
     player_identity: str | None = None,
     max_frames: int = 28_800,
+    rematch: bool = False,
+    on_live: Callable[[], None] | None = None,
+    stream_id: int = 0,
 ) -> PlayResult:
     """Play one game after flushing menu inputs from Slippi's delay queue."""
     delay = runtime.require_single_delay()
@@ -121,11 +126,16 @@ def run_netplay_match(
         raise ValueError(f"max_frames must be at least transport delay + 3, got {max_frames}")
     if session.online_delay != delay:
         raise ValueError(f"session delay {session.online_delay} differs from policy delay {delay}")
-    first_frame = session.start_match(setup)
+    first_frame = session.start_rematch(setup) if rematch else session.start_match(setup)
     if session.ego_port is None or session.opponent_port is None:
         raise RuntimeError("netplay ports were not discovered")
     ego_port = session.ego_port
     opponent_port = session.opponent_port
+    stage = first_frame.get("stage")
+    if not isinstance(stage, int):
+        raise RuntimeError(f"first live netplay frame has invalid stage {stage!r}")
+    if on_live is not None:
+        on_live()
     characters = {port: int(first_frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
     captured = [first_frame]
     transport = ActionTransport(delay)
@@ -160,7 +170,7 @@ def run_netplay_match(
     first_policy_frame = True
     while len(captured) < max_frames:
         item = PolicyInput(
-            stream_id=0,
+            stream_id=stream_id,
             frame_id=int(current["id"]),
             controlled_port=ego_port,
             observation=_flat_observation(current, characters),
@@ -195,6 +205,7 @@ def run_netplay_match(
         trajectory=Trajectory.from_capture(captured, (1, 2)),
         ego_port=ego_port,
         opponent_port=opponent_port,
+        stage=stage,
         wall_seconds=time.monotonic() - started,
         inference_seconds=tuple(inference_seconds),
         transport_correction_frames=transport_correction_frames,

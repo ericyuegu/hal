@@ -75,6 +75,20 @@ def test_no_show_expires_and_releases_player(tmp_path: Path) -> None:
     assert store.create_job(invite, "CRYO#610", _choices()).job.status is JobStatus.QUEUED
 
 
+def test_worker_can_mark_no_show_and_release_player(tmp_path: Path) -> None:
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    invite = store.create_invite("tester")
+    credentials = store.create_job(invite, "CRYO#610", _choices())
+    job = store.claim_next("slot-0")
+    assert job is not None
+    store.mark_connecting(job.id, "slot-0", "HAL#1")
+
+    store.mark_no_show(job.id, "slot-0")
+    assert store.get_job(job.id, credentials.token).status is JobStatus.NO_SHOW
+    assert store.create_job(invite, "CRYO#610", _choices()).job.status is JobStatus.QUEUED
+
+
 def test_rematch_updates_choices_but_not_delay(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
@@ -134,3 +148,21 @@ def test_cancel_during_play_stops_after_game(tmp_path: Path) -> None:
 
     assert store.cancel(job.id, credentials.token).cancel_after_game
     assert store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="win") is JobStatus.COMPLETE
+
+
+def test_replay_recording_is_idempotent_for_recovery(tmp_path: Path) -> None:
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    invite = store.create_invite("tester")
+    job = store.create_job(invite, "CRYO#610", _choices()).job
+    claimed = store.claim_next("slot-0")
+    assert claimed is not None
+    store.mark_connecting(job.id, "slot-0", "HAL#1")
+    store.mark_playing(job.id, "slot-0")
+    store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="win")
+
+    values = {"key": "replay.slp", "sha256": "a" * 64, "size": 10, "etag": "etag"}
+    store.record_replay(job.id, 1, **values)
+    store.record_replay(job.id, 1, **values)
+    with pytest.raises(InvalidTransitionError, match="different replay"):
+        store.record_replay(job.id, 1, key="other.slp", sha256="b" * 64, size=11, etag="other")

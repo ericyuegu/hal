@@ -329,6 +329,18 @@ class QueueStore:
             rematch_deadline=None,
         )
 
+    def mark_no_show(self, job_id: str, worker_id: str) -> None:
+        timestamp = self._now()
+        with self._transaction() as connection:
+            self._owned_job(connection, job_id, worker_id, (JobStatus.CONNECTING,))
+            connection.execute(
+                """
+                UPDATE jobs SET status = 'no_show', connect_deadline = NULL,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?
+                """,
+                (timestamp, job_id),
+            )
+
     def finish_game(self, job_id: str, worker_id: str, *, actual_stage: str, result: str) -> JobStatus:
         validate_stage(actual_stage)
         if not result:
@@ -495,6 +507,21 @@ class QueueStore:
         etag: str,
     ) -> None:
         with self._transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT replay_key, replay_sha256, replay_size, replay_etag FROM games
+                WHERE job_id = ? AND game_number = ?
+                """,
+                (job_id, game_number),
+            ).fetchone()
+            if row is None:
+                raise InvalidTransitionError("game is absent")
+            existing = (row["replay_key"], row["replay_sha256"], row["replay_size"], row["replay_etag"])
+            requested = (key, sha256, size, etag)
+            if existing == requested:
+                return
+            if row["replay_key"] is not None:
+                raise InvalidTransitionError("game already has a different replay")
             cursor = connection.execute(
                 """
                 UPDATE games SET replay_key = ?, replay_sha256 = ?, replay_size = ?, replay_etag = ?
@@ -503,7 +530,7 @@ class QueueStore:
                 (key, sha256, size, etag, job_id, game_number),
             )
             if cursor.rowcount != 1:
-                raise InvalidTransitionError("game is absent or already has a replay")
+                raise InvalidTransitionError("game replay changed during recording")
 
     def _worker_transition(
         self,

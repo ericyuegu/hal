@@ -333,6 +333,8 @@ class RemotePolicy:
         arena: ServingArena,
         connection: Connection,
         slot: int,
+        *,
+        initial_sequence: int = 0,
     ) -> None:
         if runtime.max_batch_size < 1:
             raise ValueError("remote policy runtime needs a positive batch size")
@@ -341,7 +343,9 @@ class RemotePolicy:
         self._arena = arena
         self._connection = connection
         self._slot = slot
-        self._sequence = 0
+        if initial_sequence < 0:
+            raise ValueError("initial_sequence must be non-negative")
+        self._sequence = initial_sequence
 
     @property
     def spec(self) -> PolicySpec:

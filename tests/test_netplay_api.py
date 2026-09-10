@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -41,6 +42,24 @@ def test_options_and_capacity_are_public(tmp_path: Path) -> None:
     assert options.json()["online_delays"] == [2, 3]
     assert len(options.json()["characters"]) == 26
     assert capacity.json() == {"capacity": 2, "active": 0, "queued": 0}
+
+
+def test_readiness_requires_a_fresh_runner_heartbeat(tmp_path: Path) -> None:
+    status = tmp_path / "runner.json"
+    app = create_app(
+        ApiConfig(
+            tmp_path / "queue.sqlite3",
+            allowed_origins=("https://play.example",),
+            allowed_hosts=("testserver",),
+            runner_status=status,
+        )
+    )
+    with TestClient(app) as client:
+        assert client.get("/health/ready").status_code == 503
+        status.write_text('{"updated_at":0}')
+        assert client.get("/health/ready").status_code == 503
+        status.write_text(f'{{"updated_at":{time.time()}}}')
+        assert client.get("/health/ready").status_code == 200
 
 
 def test_create_poll_and_cancel_job(tmp_path: Path) -> None:

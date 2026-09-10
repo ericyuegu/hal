@@ -59,6 +59,7 @@ hal-play = "hal.scripts.policy:play_main"
 hal-policy = "hal.scripts.policy:main"
 hal-netplay-admin = "hal.netplay_service.admin:main"
 hal-netplay-api = "hal.netplay_service.api:main"
+hal-netplay-runner = "hal.netplay_service.runner:main"
 slp-link = "hal.scripts.slp_link:main"
 slippi-jwt = "hal.scripts.slippi_jwt:main"
 

@@ -2,7 +2,9 @@
 
 import argparse
 import asyncio
+import json
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextlib import suppress
@@ -47,6 +49,7 @@ class ApiConfig:
     capacity: int = 2
     allowed_origins: tuple[str, ...] = ("http://localhost:3000",)
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
+    runner_status: Path | None = None
 
     def __post_init__(self) -> None:
         if self.capacity < 1:
@@ -67,6 +70,7 @@ class ApiConfig:
             capacity=int(os.environ.get("HAL_NETPLAY_CAPACITY", "2")),
             allowed_origins=origins,
             allowed_hosts=hosts,
+            runner_status=(Path(value).resolve() if (value := os.environ.get("HAL_NETPLAY_RUNNER_STATUS")) else None),
         )
 
 
@@ -199,8 +203,15 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     @app.middleware("http")
     async def secure_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
         content_length = request.headers.get("content-length")
-        if content_length is not None and int(content_length) > 16 * 1024:
-            return Response(status_code=413)
+        if content_length is not None:
+            try:
+                length = int(content_length)
+            except ValueError:
+                return Response(status_code=400)
+            if length < 0:
+                return Response(status_code=400)
+            if length > 16 * 1024:
+                return Response(status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
@@ -223,6 +234,14 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     @app.get("/health/ready", include_in_schema=False)
     def ready() -> dict[str, str]:
         queue.queue_depth()
+        if config.runner_status is not None:
+            try:
+                status = json.loads(config.runner_status.read_text())
+                updated_at = float(status["updated_at"])
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+                raise HTTPException(status_code=503, detail="runner is not ready") from error
+            if time.time() - updated_at > 5.0:
+                raise HTTPException(status_code=503, detail="runner heartbeat is stale")
         return {"status": "ready"}
 
     @app.get("/metrics", include_in_schema=False)
