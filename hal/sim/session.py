@@ -94,7 +94,7 @@ def _spawn_parent_bound(command: object, *args: Any, **kwargs: Any) -> subproces
 
 
 @contextmanager
-def _popen_with_pdeathsig() -> Iterator[None]:
+def popen_with_pdeathsig() -> Iterator[None]:
     """Route libmelee's Dolphin launch through a parent-bound exec wrapper.
 
     The extra executable avoids ``preexec_fn``, which can deadlock when another
@@ -114,6 +114,115 @@ def _popen_with_pdeathsig() -> Iterator[None]:
 
 # Menu states that signal "match is live, drive() can take over."
 LIVE_MENU_STATES: frozenset[melee.Menu] = frozenset({melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH})
+
+_DOLPHIN_INI_KEYS: dict[str, str] = {
+    key.lower(): key
+    for key in (
+        "Backend",
+        "BackgroundInput",
+        "BlockingPipes",
+        "DumpFrames",
+        "EmulationSpeed",
+        "Fullscreen",
+        "GFXBackend",
+        "HLE_BS2",
+        "Overclock",
+        "OverclockEnable",
+        "SIDevice0",
+        "SIDevice1",
+        "SIDevice2",
+        "SIDevice3",
+        "SlippiEnableSpectator",
+        "SlippiOnlineDelay",
+        "SlippiReplayDir",
+        "SlippiReplayMonthlyFolders",
+        "SlippiSaveReplays",
+        "SlippiSpectatorLocalPort",
+    )
+}
+
+
+def step_blocking(console: melee.Console, timeout_seconds: float) -> melee.GameState:
+    """Poll until Dolphin produces a frame or the connection times out."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        gamestate = console.step()
+        if gamestate is not None:
+            return gamestate
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Dolphin produced no frame in {timeout_seconds:.1f}s; emulator hung or slippstream disconnected"
+            )
+
+
+def canonical_frame(gamestate: melee.GameState) -> dict:
+    """Convert one live gamestate and retain its stage."""
+    frame = gamestate.to_canonical_dict()
+    frame["stage"] = int(gamestate.stage.value)
+    return frame
+
+
+def fix_dolphin_ini_case(console: melee.Console) -> None:
+    """Restore option-name case after libmelee writes Dolphin.ini."""
+    try:
+        ini_path = Path(console._get_dolphin_config_path()) / "Dolphin.ini"
+    except AttributeError:
+        return
+    if not ini_path.is_file():
+        return
+    lines = ini_path.read_text().splitlines(keepends=True)
+    output = []
+    for line in lines:
+        stripped = line.lstrip()
+        if "=" in stripped and not stripped.startswith("["):
+            key, value = stripped.split("=", 1)
+            canonical = _DOLPHIN_INI_KEYS.get(key.rstrip().lower())
+            if canonical is not None:
+                line = f"{canonical} ={value}"
+        output.append(line)
+    ini_path.write_text("".join(output))
+
+
+def kill_dolphin(console: melee.Console | None) -> None:
+    """Hard-kill Dolphin if it is still running."""
+    if console is None:
+        return
+    process = getattr(console, "_process", None)
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.kill()
+        process.wait(timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        logger.warning(f"Dolphin SIGKILL failed: {error}")
+
+
+def teardown_console(console: melee.Console | None, replay_dir: str | None) -> None:
+    """Stop Dolphin, release libmelee state, and finalize recorded replays."""
+    if console is None:
+        return
+    process = getattr(console, "_process", None)
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=_DOLPHIN_TERM_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        except (OSError, RuntimeError) as error:
+            logger.warning(f"Console SIGTERM wait failed: {error}")
+    kill_dolphin(console)
+    try:
+        console.stop()
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as error:
+        logger.warning(f"Console.stop() raised on teardown: {error}")
+    if replay_dir is not None:
+        try:
+            repaired = finalize_replay_dir(replay_dir)
+        except Exception as error:
+            logger.warning(f"Failed to finalize replays in {replay_dir}: {error}")
+        else:
+            if repaired:
+                logger.info(f"finalized {len(repaired)} unclosed .slp in {replay_dir}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +397,10 @@ class Session:
             slippi_port=self.slippi_port,
             blocking_input=self.blocking_input,
             polling_mode=self.polling_mode,
+            # Console.step() flushes every controller before polling. With a
+            # zero timeout, _step_blocking can flush several commands before
+            # one frame arrives and the newest command overwrites the others.
+            polling_timeout=self.step_timeout_seconds if self.polling_mode else 0,
             setup_gecko_codes=self.setup_gecko_codes,
             tmp_home_directory=self.tmp_home_directory,
             replay_dir=self.replay_dir,
@@ -304,65 +417,21 @@ class Session:
         # option names ("slippireplaydir = ..."); Slippi-Ishiiruka's own parser
         # only honors the CamelCase ``SlippiReplayDir``, so without this fixup
         # ``replay_dir`` is silently ignored and .slps land in ~/Slippi.
-        if self.replay_dir:
-            self._fix_dolphin_ini_case()
+        fix_dolphin_ini_case(self._console)
         # Belt-and-suspenders cleanup: if Python exits between __enter__ and
         # __exit__ (e.g. unhandled exception in __enter__ caller, sys.exit
         # mid-test, hard interpreter shutdown), still SIGKILL Dolphin.
         atexit.register(self._atexit_kill)
 
     def _fix_dolphin_ini_case(self) -> None:
-        """Replace libmelee's lowercased ``slippireplaydir = ...`` with the
-        CamelCase ``SlippiReplayDir`` that Ishiiruka actually reads. Leaving
-        both in place would also confuse libmelee's own
-        ``setup_dolphin_controller``: it re-parses the ini via configparser,
-        which treats the two cases as a duplicate option and raises."""
-        if self._console is None:
-            return
-        try:
-            ini_path = Path(self._console._get_dolphin_config_path()) / "Dolphin.ini"
-        except AttributeError:
-            return
-        if not ini_path.is_file():
-            return
-        lines = ini_path.read_text().splitlines(keepends=True)
-        target = f"SlippiReplayDir = {self.replay_dir}\n"
-        out: list[str] = []
-        replaced = False
-        for line in lines:
-            if line.lower().lstrip().startswith("slippireplaydir"):
-                if not replaced:
-                    out.append(target)
-                    replaced = True
-                # Drop any further duplicates.
-                continue
-            out.append(line)
-        if not replaced:
-            # libmelee didn't write the lowercased key (replay_dir was None at
-            # that time?), so insert ours at the top of [Core].
-            text = "".join(out)
-            if "[Core]\n" in text:
-                text = text.replace("[Core]\n", f"[Core]\n{target}", 1)
-            else:
-                text = text.rstrip() + f"\n\n[Core]\n{target}"
-            ini_path.write_text(text)
-            return
-        ini_path.write_text("".join(out))
+        if self._console is not None:
+            fix_dolphin_ini_case(self._console)
 
     def _kill_dolphin_only(self) -> None:
         """Hard-kill the Dolphin subprocess. Idempotent, swallow-all. Called
         from _teardown (graceful path) and as an atexit handler (last-ditch).
         Does NOT touch libmelee's internal state — that's _teardown's job."""
-        if self._console is None:
-            return
-        proc = getattr(self._console, "_process", None)
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            proc.kill()
-            proc.wait(timeout=2.0)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            logger.warning(f"Dolphin SIGKILL failed: {e}")
+        kill_dolphin(self._console)
 
     def _teardown(self) -> None:
         # Unhook the atexit handler first so a normal teardown doesn't fire it
@@ -370,50 +439,7 @@ class Session:
         with suppress(Exception):
             atexit.unregister(self._atexit_kill)
         try:
-            if self._console is None:
-                return
-            proc = getattr(self._console, "_process", None)
-            # 1. Graceful SIGTERM so Slippi can finish flushing its current frame and
-            #    cleanly close a match that reached GAME_END (which finalizes the
-            #    .slp with full metadata). A match abandoned mid-game — stopped at
-            #    max_frames while still IN_GAME — never gets GAME_END, so SIGTERM
-            #    can't finalize it; step 4 repairs those.
-            if proc is not None and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=_DOLPHIN_TERM_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    # Expected for EXI FFW while it blocks on the input device. The
-                    # hard kill and replay repair below are the normal fallback.
-                    pass
-                except (OSError, RuntimeError) as e:
-                    logger.warning(f"Console SIGTERM wait failed: {e}")
-            # 2. Hard SIGKILL ourselves before delegating to libmelee — its
-            #    Console.stop() can raise inside slippstream.shutdown() when the
-            #    worker never started, leaving its own proc.kill() unreached and
-            #    Dolphin orphaned (PID 575155 incident, 2026-05-21).
-            self._kill_dolphin_only()
-            # 3. Now let libmelee tear down its state (slippstream worker handle,
-            #    temp Dolphin home). Errors here are non-fatal since the
-            #    Dolphin process is already dead.
-            try:
-                self._console.stop()
-            except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as e:
-                logger.warning(f"Console.stop() raised on teardown: {e}")
-            # 4. Finalize any .slp Slippi left unclosed (rawLength == 0): a match
-            #    that hit max_frames mid-game is otherwise unparseable by peppi /
-            #    slippilab even though the frame data is intact. No-op for matches
-            #    that ended cleanly (already finalized by Dolphin at GAME_END).
-            if self.replay_dir is not None:
-                try:
-                    repaired = finalize_replay_dir(self.replay_dir)
-                except Exception as e:
-                    # Replay repair is best-effort teardown. It must not replace
-                    # an exception from the Session body or retain live state.
-                    logger.warning(f"Failed to finalize replays in {self.replay_dir}: {e}")
-                else:
-                    if repaired:
-                        logger.info(f"finalized {len(repaired)} unclosed .slp in {self.replay_dir}")
+            teardown_console(self._console, self.replay_dir)
         finally:
             self._console = None
             self._controllers.clear()
@@ -445,7 +471,8 @@ class Session:
             self._instrument_controller_flush(player.port, controller)
             self._controllers[player.port] = controller
 
-        with _popen_with_pdeathsig():
+        fix_dolphin_ini_case(self._console)
+        with popen_with_pdeathsig():
             self._console.run(iso_path=self.iso_path)
         if not self._console.connect():
             raise RuntimeError("failed to connect to Dolphin Slippi server")
@@ -538,10 +565,7 @@ class Session:
 
     @staticmethod
     def _canonical(gamestate: melee.GameState) -> dict:
-        """Add the live stage because canonical frames do not include it."""
-        d = gamestate.to_canonical_dict()
-        d["stage"] = int(gamestate.stage.value)
-        return d
+        return canonical_frame(gamestate)
 
     def step(
         self,
@@ -581,16 +605,7 @@ class Session:
         otherwise spin forever.
         """
         assert self._console is not None
-        deadline = time.monotonic() + self.step_timeout_seconds
-        while True:
-            gs = self._console.step()
-            if gs is not None:
-                return gs
-            if time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"Dolphin produced no frame in {self.step_timeout_seconds:.1f}s; "
-                    "emulator hung or slippstream disconnected"
-                )
+        return step_blocking(self._console, self.step_timeout_seconds)
 
     def _drive_menus(self, gamestate: melee.GameState) -> None:
         assert self._matchup is not None

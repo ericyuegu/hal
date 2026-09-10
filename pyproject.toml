@@ -31,6 +31,7 @@ dependencies = [
     "py7zr==1.1.0",
     "pyarrow>=22",
     "s3fs>=2025",
+    "safetensors>=0.7.0",
     "scikit-learn",
     "scipy>=1.17.1",
     "seaborn",
@@ -47,6 +48,8 @@ dependencies = [
 
 [project.scripts]
 fetch = "hal.scripts.fetch:main"
+hal-play = "hal.scripts.policy:play_main"
+hal-policy = "hal.scripts.policy:main"
 slp-link = "hal.scripts.slp_link:main"
 slippi-jwt = "hal.scripts.slippi_jwt:main"
 

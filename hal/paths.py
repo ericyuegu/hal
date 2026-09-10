@@ -15,6 +15,10 @@ ISO_PATH: Final[str] = _env_path("HAL_ISO_PATH", _DATA_DIR / "emulator" / "ssbm.
 EMULATOR_PATH: Final[str] = _env_path(
     "HAL_EMULATOR_PATH", _DATA_DIR / "emulator" / "exiai" / "squashfs-root" / "AppRun"
 )
+NETPLAY_EMULATOR_PATH: Final[str] = _env_path(
+    "HAL_NETPLAY_EMULATOR_PATH",
+    _DATA_DIR / "emulator" / "slippi-3.6.4" / "Slippi_Online-x86_64.AppImage",
+)
 DEV_ARCHIVE_PATH: Final[str] = _env_path("HAL_DEV_ARCHIVE", _DATA_DIR / "raw" / "dev.7z")
 DEV_MDS_DIR: Final[str] = _env_path("HAL_DEV_MDS_DIR", _DATA_DIR / "processed" / "dev" / "mds")
 

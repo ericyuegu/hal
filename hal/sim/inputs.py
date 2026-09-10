@@ -11,13 +11,19 @@ See ``hal.wire`` for the controller data model.
 """
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from numbers import Integral
+from numbers import Real
 from typing import Protocol
+from typing import cast
 from typing import runtime_checkable
 
 import melee
 import numpy as np
 
+from hal.controller import POLICY_BUTTON_MASK
+from hal.controller import ControllerAction
+from hal.controller import ControllerInputs
 from hal.wire import ACTION_CHANNELS
 from hal.wire import ACTION_DIM
 from hal.wire import BUTTON_BITS
@@ -27,22 +33,12 @@ from hal.wire import slp_button_to_melee
 # dispatch. Derived from wire.BUTTON_BITS so MDS columns and live punches
 # share one canonical bit layout. Order matters only for diagnostics;
 # press_button / release_button are commutative within a frame.
+_POLICY_BUTTON_NAMES = tuple(channel.removeprefix("button_") for channel in ACTION_CHANNELS[6:])
 _BUTTON_DISPATCH: tuple[tuple[int, melee.enums.Button], ...] = tuple(
-    (bit, slp_button_to_melee(name)) for name, bit in BUTTON_BITS.items()
+    (BUTTON_BITS[name], slp_button_to_melee(name)) for name in _POLICY_BUTTON_NAMES
 )
-
-
-@runtime_checkable
-class ControllerInputs(Protocol):
-    """Structural protocol for one frame of controller state for one port."""
-
-    main_x: float
-    main_y: float
-    c_x: float
-    c_y: float
-    trigger_l: float
-    trigger_r: float
-    buttons: int  # uint16 bitmask matching wire.BUTTON_BITS
+if sum(bit for bit, _button in _BUTTON_DISPATCH) != POLICY_BUTTON_MASK:
+    raise RuntimeError("controller action schema and Slippi button wire disagree")
 
 
 @runtime_checkable
@@ -57,20 +53,61 @@ class ControllerSink(Protocol):
     def press_shoulder(self, button: melee.enums.Button, amount: float) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class ControllerInputsValue:
-    """Concrete value object satisfying ControllerInputs.
+# Historical simulator name. New policy code uses ``ControllerAction`` directly.
+ControllerInputsValue = ControllerAction
 
-    Used by sources that produce inputs from scratch, such as models and scripts.
-    """
 
-    main_x: float
-    main_y: float
-    c_x: float
-    c_y: float
-    trigger_l: float
-    trigger_r: float
-    buttons: int
+def canonical_pre_to_action(pre: Mapping[str, object]) -> ControllerAction:
+    """Read the controller state recorded on one canonical Slippi frame."""
+
+    def pair(name: str, first: str, second: str) -> tuple[float, float]:
+        value = pre[name]
+        if not isinstance(value, Mapping):
+            raise ValueError(f"canonical pre.{name} must be an object")
+        fields = cast(Mapping[str, object], value)
+        try:
+            first_value = fields[first]
+            second_value = fields[second]
+        except KeyError as error:
+            raise ValueError(f"canonical pre.{name} must contain numeric {first} and {second}") from error
+        if (
+            not isinstance(first_value, Real)
+            or isinstance(first_value, bool)
+            or not isinstance(second_value, Real)
+            or isinstance(second_value, bool)
+        ):
+            raise ValueError(f"canonical pre.{name} must contain numeric {first} and {second}")
+        return float(first_value), float(second_value)
+
+    main_x, main_y = pair("joystick", "x", "y")
+    c_x, c_y = pair("cstick", "x", "y")
+    trigger_l, trigger_r = pair("triggers_physical", "l", "r")
+    try:
+        buttons_value = pre["buttons_physical"]
+    except KeyError as error:
+        raise ValueError("canonical pre.buttons_physical must be an integer") from error
+    if not isinstance(buttons_value, Integral) or isinstance(buttons_value, bool):
+        raise ValueError("canonical pre.buttons_physical must be an integer")
+    buttons = int(buttons_value)
+    return ControllerAction(main_x, main_y, c_x, c_y, trigger_l, trigger_r, buttons)
+
+
+def controller_actions_match(
+    expected: ControllerInputs,
+    actual: ControllerInputs,
+    *,
+    analog_tolerance: float = 0.02,
+) -> bool:
+    """Compare a punched action with its quantized Slippi representation."""
+    return (
+        abs(expected.main_x - actual.main_x) <= analog_tolerance
+        and abs(expected.main_y - actual.main_y) <= analog_tolerance
+        and abs(expected.c_x - actual.c_x) <= analog_tolerance
+        and abs(expected.c_y - actual.c_y) <= analog_tolerance
+        and abs(expected.trigger_l - actual.trigger_l) <= analog_tolerance
+        and abs(expected.trigger_r - actual.trigger_r) <= analog_tolerance
+        and expected.buttons == actual.buttons
+    )
 
 
 def action_vec_to_controller(action: np.ndarray) -> ControllerInputsValue:
@@ -123,6 +160,12 @@ def apply_inputs(controller: ControllerSink, src: ControllerInputs) -> None:
     _require_finite("c_y", c_y)
     _require_finite("trigger_l", trigger_l)
     _require_finite("trigger_r", trigger_r)
+    if not isinstance(src.buttons, Integral) or isinstance(src.buttons, bool):
+        raise ValueError(f"controller input buttons must be an integer, got {src.buttons!r}")
+    buttons = int(src.buttons)
+    unknown_buttons = buttons & ~POLICY_BUTTON_MASK
+    if unknown_buttons:
+        raise ValueError(f"controller input has unsupported button bits 0x{unknown_buttons:04x}")
 
     controller.tilt_analog(
         melee.enums.Button.BUTTON_MAIN,
@@ -137,7 +180,6 @@ def apply_inputs(controller: ControllerSink, src: ControllerInputs) -> None:
     controller.press_shoulder(melee.enums.Button.BUTTON_L, melee.controller.fix_analog_trigger(trigger_l))
     controller.press_shoulder(melee.enums.Button.BUTTON_R, melee.controller.fix_analog_trigger(trigger_r))
 
-    buttons = src.buttons
     for bit, button in _BUTTON_DISPATCH:
         if buttons & bit:
             controller.press_button(button)

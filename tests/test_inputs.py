@@ -15,6 +15,7 @@ import pytest
 from hal.sim.inputs import ControllerInputsValue
 from hal.sim.inputs import apply_inputs
 from hal.sim.sources import MDSControllerSource
+from hal.wire import ACTION_CHANNELS
 from hal.wire import BUTTON_BITS
 
 
@@ -118,7 +119,14 @@ def test_apply_inputs_converts_logical_to_wire_and_dispatches_buttons() -> None:
     assert sink.shoulders[melee.enums.Button.BUTTON_R] == melee.controller.fix_analog_trigger(0.0)
     assert set(sink.pressed) == {melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_L}
     # Every non-pressed button is explicitly released (no stale carry-over).
-    assert len(sink.pressed) + len(sink.released) == len(BUTTON_BITS)
+    assert len(sink.pressed) + len(sink.released) == len(ACTION_CHANNELS) - 6
+
+
+def test_apply_inputs_rejects_start_and_unknown_buttons() -> None:
+    sink = _RecordingSink()
+    src = ControllerInputsValue(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, BUTTON_BITS["start"])
+    with pytest.raises(ValueError, match="unsupported button bits"):
+        apply_inputs(sink, src)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])

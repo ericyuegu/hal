@@ -33,6 +33,27 @@ def _session(start_timeout: float) -> Session:
     return s
 
 
+def test_polling_waits_for_one_frame_before_flushing_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs: dict[str, object] = {}
+
+    class Console:
+        def __init__(self, **values: object) -> None:
+            kwargs.update(values)
+
+    monkeypatch.setattr(session_module.melee, "Console", Console)
+    monkeypatch.setattr(session_module.atexit, "register", lambda _callback: None)
+    session = Session(
+        iso_path="unused.iso",
+        dolphin_path="unused",
+        polling_mode=True,
+        step_timeout_seconds=7.5,
+    )
+
+    session._boot()
+
+    assert kwargs["polling_timeout"] == 7.5
+
+
 def test_navigate_to_live_times_out_when_menu_never_goes_live() -> None:
     s = _session(0.05)
     s._step_blocking = lambda: _FakeGameState(melee.Menu.MAIN_MENU)  # type: ignore[method-assign]
