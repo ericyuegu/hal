@@ -47,7 +47,7 @@ def _user_json(override: str | None) -> Path:
     return path.resolve()
 
 
-def _player_identity(value: str) -> str:
+def _normalize_imitate(value: str) -> str:
     rank = value.upper()
     return rank if rank in _RANK_IDENTITIES else value
 
@@ -64,7 +64,8 @@ def _policy_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("policy")
     evaluate.add_argument(
         "--imitate",
-        type=_player_identity,
+        type=_normalize_imitate,
+        metavar="PLAYER",
         default="IBDW#0",
         help="exact connect code or PLATINUM, DIAMOND, or MASTER",
     )
@@ -88,7 +89,8 @@ def _play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--character", type=_character, default=melee.Character.FOX)
     parser.add_argument(
         "--imitate",
-        type=_player_identity,
+        type=_normalize_imitate,
+        metavar="PLAYER",
         default="IBDW#0",
         help="exact connect code or PLATINUM, DIAMOND, or MASTER",
     )

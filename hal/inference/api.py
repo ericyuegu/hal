@@ -77,7 +77,8 @@ class PolicyInput:
     """One observed stream and the exact controller actions around it.
 
     ``applied_action`` produced this observation. ``pending_actions`` are in
-    execution order for the next transport-delayed frames.
+    execution order for the next transport-delayed frames. ``player_identity``
+    selects the behavior to imitate; it does not identify the live opponent.
     """
 
     stream_id: int

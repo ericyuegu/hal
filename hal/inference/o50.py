@@ -638,11 +638,8 @@ class O50Policy:
     def _player_id(self, identity: str | None) -> int:
         if identity is None:
             raise ValueError("O50 requires a player identity")
-        try:
-            rank = Rank[identity]
-        except KeyError:
-            pass
-        else:
+        rank = Rank.__members__.get(identity)
+        if rank is not None:
             return self._player_vocabulary.id_for_rank(rank)
         try:
             return self._code_to_id[identity]

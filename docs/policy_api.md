@@ -41,7 +41,8 @@ hal-policy eval policy.halpolicy --transport-delay 2
 
 `hal-play` reads the bot login from `HAL_SLIPPI_USER_JSON`. `--user-json`
 overrides it. `--imitate` accepts an exact connect code or `PLATINUM`,
-`DIAMOND`, or `MASTER`. Its defaults are Fox, `IBDW#0`, and Slippi delay 2.
+`DIAMOND`, or `MASTER`. It conditions policy behavior and does not affect
+matchmaking. Its defaults are Fox, `IBDW#0`, and Slippi delay 2.
 
 The pinned Slippi 3.6.4 session uses Vulkan. Its default OpenGL renderer can
 stall CUDA inference when Dolphin and the policy share an NVIDIA GPU.
