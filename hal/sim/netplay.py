@@ -16,8 +16,11 @@ import melee
 import melee.console
 from loguru import logger
 
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
+from hal.sim.inputs import canonical_pre_to_action
+from hal.sim.inputs import controller_actions_match
 from hal.sim.session import LIVE_MENU_STATES
 from hal.sim.session import canonical_frame
 from hal.sim.session import fix_dolphin_ini_case
@@ -252,7 +255,7 @@ class NetplaySession:
                 last_status = status
             if gamestate.menu_state in LIVE_MENU_STATES:
                 self._discover_ports(gamestate, setup)
-                return canonical_frame(gamestate)
+                return self._reach_neutral_frame_zero(gamestate)
             if gamestate.menu_state in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
                 self._menu_helper.choose_direct_online(gamestate, self._controller)
             else:
@@ -265,6 +268,30 @@ class NetplaySession:
                     costume=setup.costume,
                     autostart=True,
                 )
+
+    def _reach_neutral_frame_zero(self, gamestate: melee.GameState) -> dict:
+        """Send neutral through the intro and return exact playable frame zero."""
+        assert self._console is not None
+        assert self._controller is not None
+        assert self.ego_port is not None
+        while True:
+            frame = canonical_frame(gamestate)
+            frame_id = frame.get("id")
+            if not isinstance(frame_id, int):
+                raise RuntimeError(f"netplay countdown frame has invalid id {frame_id!r}")
+            if frame_id >= 0:
+                if frame_id != 0:
+                    raise RuntimeError(f"netplay reached playable frame {frame_id}; expected frame 0")
+                pre = frame["ports"][self.ego_port]["leader"]["pre"]
+                actual = canonical_pre_to_action(pre)
+                if not controller_actions_match(NEUTRAL_CONTROLLER_ACTION, actual):
+                    raise RuntimeError(f"local controller is not neutral at frame 0: {actual!r}")
+                return frame
+            self._controller.release_all()
+            self._controller.flush()
+            gamestate = step_blocking(self._console, self.step_timeout_seconds)
+            if gamestate.menu_state not in LIVE_MENU_STATES:
+                raise RuntimeError("netplay left the game during the pre-game countdown")
 
     def _discover_ports(self, gamestate: melee.GameState, setup: NetplaySetup) -> None:
         ports = {port: player for port, player in gamestate.players.items() if port in (1, 2)}

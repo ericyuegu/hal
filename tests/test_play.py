@@ -68,16 +68,13 @@ class _Session:
     def __init__(
         self,
         *,
-        start_frame: int = 0,
-        suppress_before_zero: bool = False,
         corrupt_frame: int | None = None,
         replay_frame: int | None = None,
         replay_age: int = 1,
     ) -> None:
-        self.frame_id = start_frame
+        self.frame_id = 0
         self.queue = deque([NEUTRAL_CONTROLLER_ACTION] * self.online_delay)
         self.submitted: list[ControllerAction] = []
-        self.suppress_before_zero = suppress_before_zero
         self.corrupt_frame = corrupt_frame
         self.replay_frame = replay_frame
         self.replay_age = replay_age
@@ -94,9 +91,7 @@ class _Session:
         due = self.queue.popleft()
         self.queue.append(action)
         self.frame_id += 1
-        if self.suppress_before_zero and self.frame_id < 0:
-            due = NEUTRAL_CONTROLLER_ACTION
-        elif self.frame_id == self.corrupt_frame:
+        if self.frame_id == self.corrupt_frame:
             due = ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
         elif self.frame_id == self.replay_frame:
             due = self.applied[-self.replay_age]
@@ -134,7 +129,7 @@ def _flatten(frame: dict) -> dict[str, int]:
     }
 
 
-def test_match_loop_flushes_delay_and_passes_real_conditioning(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_match_loop_starts_policy_at_frame_zero_with_real_conditioning(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
     monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
     policy = _Policy()
@@ -150,13 +145,12 @@ def test_match_loop_flushes_delay_and_passes_real_conditioning(monkeypatch: pyte
     )
     first = policy.inputs[0]
     assert first.reset
-    assert first.frame_id == 3
+    assert first.frame_id == 0
     assert first.applied_action == NEUTRAL_CONTROLLER_ACTION
     assert first.pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2
     assert first.player_identity == "MASTER"
-    assert first.observation == {"stage": 8, "p1_character": 1, "p2_character": 22}
-    assert session.submitted[:3] == [NEUTRAL_CONTROLLER_ACTION] * 3
-    assert session.submitted[3].main_x == 0.1
+    assert first.observation == {"stage": 32, "p1_character": 1, "p2_character": 22}
+    assert session.submitted[0].main_x == 0.1
     assert len(result.trajectory) == 10
     assert result.inference_p95_ms >= 0.0
     assert result.transport_correction_frames == 0
@@ -179,25 +173,16 @@ def test_match_loop_uses_persistent_rematch_entrypoint(monkeypatch: pytest.Monke
     assert len(result.trajectory) == 10
 
 
-def test_match_loop_stays_neutral_until_dolphin_accepts_gameplay_input(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
-    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
-    policy = _Policy()
-    session = _Session(start_frame=-6, suppress_before_zero=True)
-
-    run_netplay_match(
-        session,
-        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
-        policy,
-        RuntimeConfig(1, (2,), 2),
-        max_frames=20,
-    )
-
-    assert policy.inputs[0].frame_id == 0
-    assert session.submitted[:6] == [NEUTRAL_CONTROLLER_ACTION] * 6
-    assert session.submitted[6].main_x == 0.1
+def test_match_loop_rejects_a_broken_frame_zero_session_contract() -> None:
+    session = _Session()
+    session.start_match = lambda _setup: _frame(-1, NEUTRAL_CONTROLLER_ACTION)
+    with pytest.raises(RuntimeError, match="expected frame 0"):
+        run_netplay_match(
+            session,
+            NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+            _Policy(),
+            RuntimeConfig(1, (2,), 2),
+        )
 
 
 def test_match_loop_accepts_a_recent_slippi_time_sync_replay(monkeypatch: pytest.MonkeyPatch) -> None:

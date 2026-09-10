@@ -9,6 +9,8 @@ import melee.console
 import pytest
 
 import hal.sim.netplay as netplay
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
+from hal.controller import ControllerAction
 from hal.sim.inputs import ControllerInputsValue
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
@@ -33,6 +35,22 @@ def _live(*, ego_port: int = 1, character: melee.Character = melee.Character.FOX
         opponent_port: SimpleNamespace(character=character, costume=0, connectCode="HUMAN#1"),
     }
     return SimpleNamespace(menu_state=melee.Menu.IN_GAME, players=players, stage=melee.Stage.BATTLEFIELD)
+
+
+def _pre(action: ControllerAction) -> dict:
+    return {
+        "joystick": {"x": action.main_x, "y": action.main_y},
+        "cstick": {"x": action.c_x, "y": action.c_y},
+        "triggers_physical": {"l": action.trigger_l, "r": action.trigger_r},
+        "buttons_physical": action.buttons,
+    }
+
+
+def _canonical_live(frame_id: int, action: ControllerAction = NEUTRAL_CONTROLLER_ACTION) -> dict:
+    return {
+        "id": frame_id,
+        "ports": {1: {"leader": {"pre": _pre(action)}}},
+    }
 
 
 def _dolphin_version() -> melee.console.DolphinVersion:
@@ -93,7 +111,7 @@ def test_controller_is_created_before_dolphin_launch(tmp_path: Path, monkeypatch
     monkeypatch.setattr("hal.sim.netplay.fix_dolphin_ini_case", lambda _console: events.append("fix"))
     monkeypatch.setattr("hal.sim.netplay.popen_with_pdeathsig", nullcontext)
     monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: _live())
-    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: {"id": 0})
+    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(0))
     session = _session(tmp_path)
     session._console = console
     session.start_match(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
@@ -115,7 +133,7 @@ def test_character_selection_is_passed_to_menu_helper(tmp_path: Path, monkeypatc
         ]
     )
     monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: next(states))
-    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: {"id": 0})
+    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(0))
     session._navigate_to_live(
         NetplaySetup(
             melee.Character.FALCO,
@@ -144,10 +162,53 @@ def test_main_menu_uses_libmelee_direct_helper(tmp_path: Path, monkeypatch: pyte
         ]
     )
     monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: next(states))
-    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: {"id": 0})
+    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(0))
     session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
     helper.choose_direct_online.assert_called_once()
     assert helper.choose_direct_online.call_args.args[1] is controller
+
+
+def test_countdown_sends_neutral_and_returns_exact_neutral_frame_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session(tmp_path)
+    session._console = Mock()
+    session._controller = controller = Mock()
+    session._menu_helper = Mock()
+    non_neutral = ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+    states = [_live() for _ in range(4)]
+    frame_ids = {-3: non_neutral, -2: non_neutral, -1: non_neutral, 0: NEUTRAL_CONTROLLER_ACTION}
+    for state, frame_id in zip(states, frame_ids, strict=True):
+        state.frame = frame_id
+    stream = iter(states)
+    monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: next(stream))
+    monkeypatch.setattr(
+        "hal.sim.netplay.canonical_frame",
+        lambda state: _canonical_live(state.frame, frame_ids[state.frame]),
+    )
+
+    frame = session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+
+    assert frame["id"] == 0
+    assert controller.release_all.call_count == 3
+    assert controller.flush.call_count == 3
+
+
+def test_countdown_rejects_non_neutral_frame_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session(tmp_path)
+    session._console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+    state = _live()
+    monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: state)
+    monkeypatch.setattr(
+        "hal.sim.netplay.canonical_frame",
+        lambda _state: _canonical_live(0, ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)),
+    )
+
+    with pytest.raises(RuntimeError, match="not neutral at frame 0"):
+        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
 
 
 def test_unknown_dolphin_build_is_rejected(tmp_path: Path) -> None:

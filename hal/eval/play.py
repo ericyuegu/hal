@@ -180,7 +180,7 @@ def run_netplay_match(
     on_live: Callable[[], None] | None = None,
     stream_id: int = 0,
 ) -> PlayResult:
-    """Play one game after flushing menu inputs from Slippi's delay queue."""
+    """Play one game from a neutral frame-zero session boundary."""
     delay = session.online_delay
     if delay not in runtime.transport_delays:
         raise ValueError(f"session delay {delay} is absent from prepared policy delays {runtime.transport_delays}")
@@ -191,6 +191,11 @@ def run_netplay_match(
         raise RuntimeError("netplay ports were not discovered")
     ego_port = session.ego_port
     opponent_port = session.opponent_port
+    if first_frame.get("id") != 0:
+        raise RuntimeError(f"netplay session started at frame {first_frame.get('id')!r}; expected frame 0")
+    first_action = _frame_action(first_frame, ego_port)
+    if not controller_actions_match(NEUTRAL_CONTROLLER_ACTION, first_action):
+        raise RuntimeError(f"local controller is not neutral at frame 0: {first_action!r}")
     stage = first_frame.get("stage")
     if not isinstance(stage, int):
         raise RuntimeError(f"first live netplay frame has invalid stage {stage!r}")
@@ -211,32 +216,7 @@ def run_netplay_match(
     captured = [first_frame]
     transport = ActionTransport(delay)
     started = time.monotonic()
-
-    # Menu navigation can leave actions in Dolphin's queue. A Slippi time-sync
-    # stall can hold one sample, so flush until a neutral state is observed.
     current = first_frame
-    for flush_index in range(delay + 120):
-        transport.submit(NEUTRAL_CONTROLLER_ACTION)
-        current, in_game = session.step(NEUTRAL_CONTROLLER_ACTION)
-        captured.append(current)
-        if not in_game:
-            raise RuntimeError("netplay left live play while flushing menu inputs")
-        if flush_index >= delay and controller_actions_match(
-            NEUTRAL_CONTROLLER_ACTION,
-            _frame_action(current, ego_port),
-        ):
-            break
-    else:
-        raise RuntimeError("netplay did not reach a neutral controller state after menu navigation")
-
-    # Slippi suppresses controller input during the negative-frame character
-    # intros. Keep the transport queue neutral until gameplay accepts input.
-    while int(current["id"]) < 0:
-        transport.submit(NEUTRAL_CONTROLLER_ACTION)
-        current, in_game = session.step(NEUTRAL_CONTROLLER_ACTION)
-        captured.append(current)
-        if not in_game:
-            raise RuntimeError("netplay left live play during the pre-game countdown")
 
     inference_seconds: list[float] = []
     transport_correction_frames = 0
