@@ -616,7 +616,7 @@ class O50Policy:
     @torch.inference_mode()
     def _prewarm(self) -> None:
         runtime = self._require_runtime()
-        rows = runtime.max_batch_size
+        rows = runtime.max_batch_size if self._compiled else 1
         features = self._synthetic_features(rows)
         padding = torch.zeros(rows, dtype=torch.long, device=self._device)
         neutral = torch.zeros(rows, self._config.prediction_frames, len(ACTION_CHANNELS), device=self._device)
@@ -769,10 +769,11 @@ class O50Policy:
         runtime = self._require_runtime()
         context = self._context(due)
         real_rows = len(due)
-        features, padding = self._pad_context(context, runtime.max_batch_size)
+        inference_rows = runtime.max_batch_size if self._compiled else real_rows
+        features, padding = self._pad_context(context, inference_rows)
         horizon = self._config.prediction_frames
-        forced_actions = np.zeros((runtime.max_batch_size, horizon, len(ACTION_CHANNELS)), dtype=np.float32)
-        force_mask = np.zeros((runtime.max_batch_size, horizon), dtype=np.bool_)
+        forced_actions = np.zeros((inference_rows, horizon, len(ACTION_CHANNELS)), dtype=np.float32)
+        force_mask = np.zeros((inference_rows, horizon), dtype=np.bool_)
         delays = []
         for row, (item, _state) in enumerate(due):
             delay = len(item.pending_actions)
@@ -792,7 +793,7 @@ class O50Policy:
             for depth in range(horizon)
         ]
         uniforms = torch.stack(draws)
-        uniforms = F.pad(uniforms, (0, runtime.max_batch_size - real_rows), value=0.5)
+        uniforms = F.pad(uniforms, (0, inference_rows - real_rows), value=0.5)
         planned = self._decode(features, padding, forced, force_mask_tensor, uniforms)[:real_rows]
         values = planned.float().cpu().numpy()
         for row, (item, state) in enumerate(due):
@@ -821,7 +822,7 @@ def load_o50_policy(
     *,
     device: str,
     seed: int | None,
-    compiled: bool = True,
+    compiled: bool = False,
 ) -> Policy:
     """Load and validate a portable O50 bundle without importing an experiment."""
     target = torch.device(device)

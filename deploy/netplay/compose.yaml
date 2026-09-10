@@ -32,6 +32,7 @@ services:
     command:
       - hal-netplay-runner
       - /run/hal-policy/policy.halpolicy
+      - --compiled
       - --database
       - /var/lib/hal-netplay/queue.sqlite3
       - --user-jsons

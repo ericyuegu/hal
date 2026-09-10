@@ -37,6 +37,13 @@ _ACTION_WIDTH = 7
 _EMPTY_SEQUENCE = np.iinfo(np.uint64).max
 
 
+def _p95_ms(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return 1_000.0 * ordered[math.ceil(0.95 * len(ordered)) - 1]
+
+
 @dataclass(frozen=True, slots=True)
 class ServingArenaDescriptor:
     """Immutable identity and shape of a serving shared-memory block."""
@@ -64,17 +71,24 @@ class ServingArenaDescriptor:
 class _ObservationView(Mapping[str, ObservationScalar]):
     """Typed read-only view over one shared observation row."""
 
-    __slots__ = ("_fields", "_integer", "_values")
+    __slots__ = ("_fields", "_index", "_integer", "_values")
 
-    def __init__(self, fields: tuple[str, ...], values: np.ndarray, integer: np.ndarray) -> None:
+    def __init__(
+        self,
+        fields: tuple[str, ...],
+        index: Mapping[str, int],
+        values: np.ndarray,
+        integer: np.ndarray,
+    ) -> None:
         self._fields = fields
+        self._index = index
         self._values = values
         self._integer = integer
 
     def __getitem__(self, key: str) -> ObservationScalar:
         try:
-            index = self._fields.index(key)
-        except ValueError as error:
+            index = self._index[key]
+        except KeyError as error:
             raise KeyError(key) from error
         value = self._values[index]
         return int(value) if self._integer[index] else float(value)
@@ -187,6 +201,7 @@ class ServingArena:
 
     def _build_views(self) -> None:
         descriptor = self.descriptor
+        self._observation_index = {name: index for index, name in enumerate(descriptor.observation_fields)}
         offset = 0
         self.request_sequence, offset = self._view(offset, (descriptor.slots,), np.dtype("<u8"))
         self.response_sequence, offset = self._view(offset, (descriptor.slots,), np.dtype("<u8"))
@@ -264,6 +279,7 @@ class ServingArena:
             controlled_port=int(self.controlled_port[slot]),
             observation=_ObservationView(
                 self.descriptor.observation_fields,
+                self._observation_index,
                 self.observation[slot],
                 self.observation_integer[slot],
             ),
@@ -412,6 +428,15 @@ class ContinuousBatcher:
         self.batch_items = 0
         self.max_batch_items = 0
         self._policy_seconds: deque[float] = deque(maxlen=1_200)
+        self._batch_wait_seconds: deque[float] = deque(maxlen=1_200)
+        self._timing_lock = threading.Lock()
+
+    def timing_p95_ms(self) -> tuple[float | None, float | None]:
+        """Return model and request-coalescing p95 latency."""
+        with self._timing_lock:
+            policy_seconds = tuple(self._policy_seconds)
+            batch_wait_seconds = tuple(self._batch_wait_seconds)
+        return _p95_ms(policy_seconds), _p95_ms(batch_wait_seconds)
 
     def serve(self, stop: threading.Event) -> None:
         """Run until stopped; policy or protocol failures terminate the engine."""
@@ -419,6 +444,7 @@ class ContinuousBatcher:
             ready = cast(list[Connection], wait(self.connections.values(), timeout=0.05))
             if not ready:
                 continue
+            wait_started = time.perf_counter()
             deadline = time.perf_counter() + self.batch_wait_seconds
             pending = list(ready)
             seen = set(pending)
@@ -437,9 +463,9 @@ class ContinuousBatcher:
                     break
                 pending.extend(more)
                 seen.update(more)
-            self._serve_batch(pending)
+            self._serve_batch(pending, time.perf_counter() - wait_started)
 
-    def _serve_batch(self, connections: Sequence[Connection]) -> None:
+    def _serve_batch(self, connections: Sequence[Connection], batch_wait_seconds: float) -> None:
         requests: list[tuple[int, int, PolicyInput, Connection]] = []
         try:
             for connection in connections:
@@ -455,7 +481,9 @@ class ContinuousBatcher:
             validate_policy_inputs(self.policy.spec, self.runtime, inputs)
             policy_started = time.perf_counter()
             outputs = validate_policy_outputs(inputs, tuple(self.policy.step(inputs)))
-            self._policy_seconds.append(time.perf_counter() - policy_started)
+            with self._timing_lock:
+                self._policy_seconds.append(time.perf_counter() - policy_started)
+                self._batch_wait_seconds.append(batch_wait_seconds)
             self.batch_calls += 1
             self.batch_items += len(inputs)
             self.max_batch_items = max(self.max_batch_items, len(inputs))

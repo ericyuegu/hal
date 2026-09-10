@@ -15,6 +15,7 @@ def test_play_cli_defaults_are_calibrated() -> None:
     assert args.online_delay == 2
     assert args.replay_dir == Path("replays/human-play")
     assert args.slippi_port == 51441
+    assert args.compiled is False
 
 
 @pytest.mark.parametrize(

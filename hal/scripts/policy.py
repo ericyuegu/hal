@@ -102,7 +102,7 @@ def _play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slippi-port", type=int, default=51441)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-frames", type=int, default=54_000)
     return parser
 

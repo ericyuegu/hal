@@ -13,7 +13,7 @@ def load_policy(
     *,
     device: str = "cuda",
     seed: int | None = None,
-    compiled: bool = True,
+    compiled: bool = False,
 ) -> Policy:
     """Load a known backend without importing an experiment module."""
     manifest = read_policy_manifest(path)

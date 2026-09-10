@@ -1,7 +1,9 @@
 import json
 import subprocess
 import sys
+import threading
 from dataclasses import asdict
+from multiprocessing import Pipe
 from pathlib import Path
 from types import MethodType
 
@@ -25,6 +27,9 @@ from hal.inference.o50_model import CONTROLLER_GROUP_COUNT
 from hal.inference.o50_model import O50Architecture
 from hal.inference.o50_model import O50Config
 from hal.inference.o50_model import O50Model
+from hal.netplay_service.inference import ContinuousBatcher
+from hal.netplay_service.inference import RemotePolicy
+from hal.netplay_service.inference import ServingArena
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import RingSlotDescriptor
 from hal.training.player_identity import FIRST_CONNECT_CODE_ID
@@ -274,6 +279,78 @@ def test_runtime_batches_delay_two_and_three_without_crossing_stream_state(
     ]
     assert len(policy._states[2].queued) == 1
     assert len(policy._states[3].queued) == 0
+
+
+def test_eager_runtime_decodes_only_active_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = _policy()
+    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    shapes: list[int] = []
+
+    def fake_decode(
+        features: dict[str, Tensor],
+        padding: Tensor,
+        forced: Tensor,
+        force_mask: Tensor,
+        uniforms: Tensor,
+    ) -> Tensor:
+        rows = features["stage"].shape[0]
+        shapes.append(rows)
+        assert padding.shape == (rows,)
+        assert forced.shape[0] == rows
+        assert force_mask.shape[0] == rows
+        assert uniforms.shape[-1] == rows
+        return torch.zeros(rows, 4, 14)
+
+    monkeypatch.setattr(policy, "_decode", fake_decode)
+
+    policy.step([_input(0, 3, reset=True)])
+
+    assert shapes == [1]
+
+
+def test_compiled_runtime_keeps_the_prepared_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = _policy()
+    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    policy._compiled = True
+    shapes: list[int] = []
+
+    def fake_decode(features: dict[str, Tensor], *_args: Tensor) -> Tensor:
+        rows = features["stage"].shape[0]
+        shapes.append(rows)
+        return torch.zeros(rows, 4, 14)
+
+    monkeypatch.setattr(policy, "_decode", fake_decode)
+
+    policy.step([_input(0, 3, reset=True)])
+
+    assert shapes == [2]
+
+
+@pytest.mark.parametrize("delay", [2, 3])
+def test_remote_policy_actions_exactly_match_the_direct_path(delay: int) -> None:
+    runtime = RuntimeConfig(max_batch_size=1, transport_delays=(delay,))
+    torch.manual_seed(17)
+    direct = _policy(seed=11)
+    torch.manual_seed(17)
+    served = _policy(seed=11)
+    direct.prepare(runtime)
+    served.prepare(runtime)
+    parent, child = Pipe()
+    with ServingArena.create(1, delay, served.spec.required_observation_fields) as arena:
+        stop = threading.Event()
+        batcher = ContinuousBatcher(served, runtime, arena, {0: parent})
+        server = threading.Thread(target=batcher.serve, args=(stop,), daemon=True)
+        server.start()
+        remote = RemotePolicy(served.spec, runtime, arena, child, 0)
+        try:
+            for frame_id in range(6):
+                item = _input(frame_id, delay, stream_id=5, reset=frame_id == 0)
+                assert remote.step((item,)) == tuple(direct.step((item,)))
+        finally:
+            stop.set()
+            server.join(timeout=1.0)
+            parent.close()
+            child.close()
 
 
 def test_stream_delay_can_change_only_with_reset(monkeypatch: pytest.MonkeyPatch) -> None:
