@@ -48,7 +48,7 @@ class RuntimeConfig:
     """Run shape fixed before a policy starts compiling or accumulating state."""
 
     max_batch_size: int
-    transport_delay_frames: int
+    transport_delays: tuple[int, ...]
     replan_interval_frames: int | None = None
 
     def __post_init__(self) -> None:
@@ -58,18 +58,24 @@ class RuntimeConfig:
             or self.max_batch_size < 1
         ):
             raise ValueError("max_batch_size must be a positive integer")
-        if (
-            not isinstance(self.transport_delay_frames, int)
-            or isinstance(self.transport_delay_frames, bool)
-            or self.transport_delay_frames < 0
-        ):
-            raise ValueError("transport_delay_frames must be a non-negative integer")
+        if not self.transport_delays:
+            raise ValueError("transport_delays must be non-empty")
+        if any(not isinstance(delay, int) or isinstance(delay, bool) or delay < 0 for delay in self.transport_delays):
+            raise ValueError("transport_delays must contain non-negative integers")
+        if tuple(sorted(set(self.transport_delays))) != self.transport_delays:
+            raise ValueError("transport_delays must be sorted and unique")
         if self.replan_interval_frames is not None and (
             not isinstance(self.replan_interval_frames, int)
             or isinstance(self.replan_interval_frames, bool)
             or self.replan_interval_frames < 1
         ):
             raise ValueError("replan_interval_frames must be a positive integer or None")
+
+    def require_single_delay(self) -> int:
+        """Return the configured delay for a path that cannot mix delays."""
+        if len(self.transport_delays) != 1:
+            raise ValueError(f"this path requires one transport delay, got {self.transport_delays}")
+        return self.transport_delays[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +138,10 @@ def validate_controller_action(action: ControllerAction) -> None:
 
 def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequence[PolicyInput]) -> None:
     """Validate one batch before it crosses a backend boundary."""
-    if config.transport_delay_frames not in spec.supported_transport_delays:
+    unsupported = set(config.transport_delays) - set(spec.supported_transport_delays)
+    if unsupported:
         raise ValueError(
-            f"policy {spec.name!r} does not support transport delay {config.transport_delay_frames}; "
+            f"policy {spec.name!r} does not support transport delays {sorted(unsupported)}; "
             f"supported delays are {spec.supported_transport_delays}"
         )
     if not inputs or len(inputs) > config.max_batch_size:
@@ -152,10 +159,11 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
             raise ValueError(f"stream {item.stream_id} controls unsupported port {item.controlled_port}")
         if not isinstance(item.reset, bool):
             raise ValueError(f"stream {item.stream_id} reset must be a boolean")
-        if len(item.pending_actions) != config.transport_delay_frames:
+        delay = len(item.pending_actions)
+        if delay not in config.transport_delays:
             raise ValueError(
-                f"stream {item.stream_id} has {len(item.pending_actions)} pending actions; "
-                f"expected {config.transport_delay_frames}"
+                f"stream {item.stream_id} has {delay} pending actions; prepared transport delays are "
+                f"{config.transport_delays}"
             )
         missing = required - item.observation.keys()
         if missing:

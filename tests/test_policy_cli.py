@@ -45,7 +45,7 @@ def test_play_prepares_before_dolphin_connects(tmp_path: Path, monkeypatch: pyte
 
     class Policy:
         def prepare(self, runtime) -> None:
-            assert runtime.transport_delay_frames == 2
+            assert runtime.transport_delays == (2,)
             events.append("prepare")
 
     class Session:

@@ -31,7 +31,7 @@ def test_policy_contract_is_model_independent_and_batched() -> None:
         supported_transport_delays=(0, 2, 3),
         requires_player_identity=True,
     )
-    config = RuntimeConfig(max_batch_size=2, transport_delay_frames=2)
+    config = RuntimeConfig(max_batch_size=2, transport_delays=(2, 3))
     inputs = [_input(4), _input(9)]
     validate_policy_inputs(spec, config, inputs)
     actions = validate_policy_outputs(
@@ -44,9 +44,18 @@ def test_policy_contract_is_model_independent_and_batched() -> None:
     assert set(actions) == {4, 9}
 
 
+def test_runtime_delays_are_explicit_and_canonical() -> None:
+    assert RuntimeConfig(2, (2,)).require_single_delay() == 2
+    with pytest.raises(ValueError, match="requires one"):
+        RuntimeConfig(2, (2, 3)).require_single_delay()
+    for delays in ((), (3, 2), (2, 2), (-1,)):
+        with pytest.raises(ValueError, match="transport_delays"):
+            RuntimeConfig(2, delays)
+
+
 def test_policy_contract_rejects_missing_fields_and_wrong_queue_length() -> None:
     spec = PolicySpec("fake", "tests.fake.v1", ("missing",), (2,))
-    config = RuntimeConfig(1, 2)
+    config = RuntimeConfig(1, (2,))
     with pytest.raises(ValueError, match="missing observation fields"):
         validate_policy_inputs(spec, config, [_input(0)])
     with pytest.raises(ValueError, match="pending actions"):
@@ -59,7 +68,7 @@ def test_policy_contract_rejects_missing_fields_and_wrong_queue_length() -> None
 
 def test_policy_contract_requires_a_nonempty_player_identity() -> None:
     spec = PolicySpec("fake", "tests.fake.v1", ("position",), (2,), requires_player_identity=True)
-    config = RuntimeConfig(1, 2)
+    config = RuntimeConfig(1, (2,))
     item = _input(0)
     for identity in (None, ""):
         invalid = PolicyInput(
@@ -90,7 +99,7 @@ def test_policy_contract_rejects_non_numeric_or_infinite_observations(value: obj
     with pytest.raises(ValueError, match="observation"):
         validate_policy_inputs(
             PolicySpec("fake", "tests.fake.v1", ("position",), (2,)),
-            RuntimeConfig(1, 2),
+            RuntimeConfig(1, (2,)),
             [invalid],
         )
 

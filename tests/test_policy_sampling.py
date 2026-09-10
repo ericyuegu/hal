@@ -42,6 +42,22 @@ def test_slot_reset_starts_a_new_generation() -> None:
     assert not torch.equal(rng.uniforms("a"), first)
 
 
+def test_inactive_slot_does_not_advance_its_random_stream() -> None:
+    mixed = SlotGroupRng(7, ("a",))
+    mixed.begin(_context([10, 20]))
+    mixed.uniforms("a", [True, False])
+    second = mixed.uniforms("a", [True, True])
+
+    slot_10 = SlotGroupRng(7, ("a",))
+    slot_10.begin(_context([10]))
+    slot_10.uniforms("a")
+    slot_20 = SlotGroupRng(7, ("a",))
+    slot_20.begin(_context([20]))
+
+    assert second[0] == slot_10.uniforms("a")[0]
+    assert second[1] == slot_20.uniforms("a")[0]
+
+
 def test_slot_rng_rejects_unknown_groups() -> None:
     rng = SlotGroupRng(7, ("a",))
     rng.begin(_context([10]))

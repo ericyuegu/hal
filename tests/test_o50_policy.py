@@ -129,6 +129,7 @@ def _input(
     frame_id: int,
     delay: int,
     *,
+    stream_id: int = 3,
     controlled_port: int = 1,
     player_identity: str = "IBDW#0",
     reset: bool = False,
@@ -140,7 +141,7 @@ def _input(
         for index in range(delay)
     )
     return PolicyInput(
-        stream_id=3,
+        stream_id=stream_id,
         frame_id=frame_id,
         controlled_port=controlled_port,
         observation=_observation(),
@@ -212,19 +213,20 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delay_frames=delay))
-    forced_calls: list[Tensor] = []
+    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(delay,)))
+    forced_calls: list[tuple[Tensor, Tensor]] = []
 
     def fake_decode(
         _features: dict[str, Tensor],
         _padding: Tensor,
         forced: Tensor,
+        force_mask: Tensor,
         _uniforms: Tensor,
     ) -> Tensor:
-        forced_calls.append(forced.detach().cpu())
-        output = torch.zeros(2, 4 - delay, 14)
-        for index in range(4 - delay):
-            output[:, index, 0] = 0.25 + 0.25 * index
+        forced_calls.append((forced.detach().cpu(), force_mask.detach().cpu()))
+        output = torch.zeros(2, 4, 14)
+        for index in range(delay, 4):
+            output[:, index, 0] = 0.25 + 0.25 * (index - delay)
         return output
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
@@ -233,7 +235,55 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
     assert [output.action.main_x for output in outputs[:replan]] == [0.25 + 0.25 * index for index in range(replan)]
     pending = torch.from_numpy(np.stack([o50._action_vector(action) for action in _input(0, delay).pending_actions]))
     expected_forced = policy._model.codec.quantize(pending)
-    assert torch.equal(forced_calls[0][0], expected_forced)
+    assert torch.equal(forced_calls[0][0][0, :delay], expected_forced)
+    assert forced_calls[0][1][0].tolist() == [index < delay for index in range(4)]
+
+
+def test_runtime_batches_delay_two_and_three_without_crossing_stream_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy()
+    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    masks: list[Tensor] = []
+
+    def fake_decode(
+        _features: dict[str, Tensor],
+        _padding: Tensor,
+        _forced: Tensor,
+        force_mask: Tensor,
+        _uniforms: Tensor,
+    ) -> Tensor:
+        masks.append(force_mask.detach().cpu())
+        output = torch.zeros(2, 4, 14)
+        output[0, 2:, 0] = torch.tensor([0.25, 0.5])
+        output[1, 3, 0] = 0.75
+        return output
+
+    monkeypatch.setattr(policy, "_decode", fake_decode)
+    outputs = policy.step(
+        [
+            _input(0, 2, stream_id=2, reset=True),
+            _input(0, 3, stream_id=3, reset=True),
+        ]
+    )
+
+    assert [output.action.main_x for output in outputs] == [0.25, 0.75]
+    assert masks[0].tolist() == [
+        [True, True, False, False],
+        [True, True, True, False],
+    ]
+    assert len(policy._states[2].queued) == 1
+    assert len(policy._states[3].queued) == 0
+
+
+def test_stream_delay_can_change_only_with_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = _policy()
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2, 3)))
+    monkeypatch.setattr(policy, "_decode", lambda *_args: torch.zeros(1, 4, 14))
+    policy.step([_input(0, 2, reset=True)])
+    with pytest.raises(ValueError, match="changed transport delay"):
+        policy.step([_input(1, 3)])
+    policy.step([_input(1, 3, reset=True)])
 
 
 @pytest.mark.parametrize("delay", [2, 3])
@@ -257,16 +307,20 @@ def test_temporal_decoder_advances_through_every_forced_action(
 
     monkeypatch.setattr(decoder, "_decode_step", MethodType(record_step, decoder))
     observed = torch.zeros(1, CONTROLLER_GROUP_COUNT, dtype=torch.long)
-    forced = torch.arange(1, delay + 1, dtype=torch.long)[None, :, None].expand(-1, -1, CONTROLLER_GROUP_COUNT)
-    uniforms = torch.full((4 - delay, CONTROLLER_GROUP_COUNT, 1), 0.5)
+    forced = torch.zeros(1, 4, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    forced[:, :delay] = torch.arange(1, delay + 1, dtype=torch.long)[None, :, None]
+    force_mask = torch.arange(4)[None, :] < delay
+    uniforms = torch.full((4, CONTROLLER_GROUP_COUNT, 1), 0.5)
     sampled = decoder.sample_conditioned(
         torch.zeros(1, config.architecture.L_ctx, config.architecture.d_model),
         observed,
         forced,
+        force_mask,
         uniforms,
         argmax=True,
+        sample_start=delay,
     )
-    assert sampled.shape == (1, 4 - delay, CONTROLLER_GROUP_COUNT)
+    assert sampled.shape == (1, 4, CONTROLLER_GROUP_COUNT)
     assert torch.equal(seen[0], observed)
     for depth in range(1, delay + 1):
         assert torch.equal(seen[depth], forced[:, depth - 1])
@@ -274,7 +328,7 @@ def test_temporal_decoder_advances_through_every_forced_action(
 
 def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delay_frames=3))
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
     with pytest.raises(KeyError, match="ibdw"):
         policy.step([_input(0, 3, player_identity="ibdw#0")])
     with pytest.raises(KeyError, match="IBDW#0 "):
@@ -289,7 +343,7 @@ def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
 
 def test_port_relative_adapter_and_applied_action_alignment() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delay_frames=3))
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
     item = _input(0, 3, controlled_port=2, reset=True)
     observation = dict(item.observation)
     observation["p1_position_x"] = 1.0
@@ -315,7 +369,7 @@ def test_port_relative_adapter_and_applied_action_alignment() -> None:
 
 def test_new_stream_requires_reset_and_frame_gap_clears_context() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delay_frames=3))
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
     with pytest.raises(ValueError, match="reset=True"):
         policy.step([_input(0, 3)])
     policy.step([_input(0, 3, reset=True)])
@@ -325,7 +379,7 @@ def test_new_stream_requires_reset_and_frame_gap_clears_context() -> None:
 
 def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delay_frames=3))
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
     original = _input(0, 3, reset=True)
     observation = dict(original.observation)
     observation["item0_type"] = (1 << 31) - 1

@@ -75,14 +75,21 @@ class SlotGroupRng:
         self.slot_ids = slot_ids
         self.device = context.slot_ids.device
 
-    def uniforms(self, group: str) -> Tensor:
+    def uniforms(self, group: str, active: Sequence[bool] | None = None) -> Tensor:
+        """Draw once for each active slot and leave inactive counters unchanged."""
         try:
             group_index = self.group_index[group]
         except KeyError as error:
             raise ValueError(f"unknown group {group!r}") from error
+        mask = (True,) * len(self.slot_ids) if active is None else tuple(active)
+        if len(mask) != len(self.slot_ids):
+            raise ValueError(f"active mask has {len(mask)} rows, expected {len(self.slot_ids)}")
         values: list[float] = []
         group_key = _splitmix64(group_index + 1)
-        for slot_id in self.slot_ids:
+        for slot_id, enabled in zip(self.slot_ids, mask, strict=True):
+            if not enabled:
+                values.append(0.5)
+                continue
             generation = self.generations[slot_id]
             key = (slot_id, generation, group)
             counter = self.counters[key]

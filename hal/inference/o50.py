@@ -463,6 +463,7 @@ class _StreamState:
     last_frame_id: int | None = None
     controlled_port: int | None = None
     player_id: int | None = None
+    transport_delay: int | None = None
     reset_pending: bool = True
 
     def reset(self) -> None:
@@ -471,11 +472,12 @@ class _StreamState:
         self.last_frame_id = None
         self.controlled_port = None
         self.player_id = None
+        self.transport_delay = None
         self.reset_pending = True
 
 
 TrunkCall = Callable[[dict[str, Tensor], Tensor, Tensor], Tensor]
-DecoderCall = Callable[[Tensor, Tensor, Tensor, Tensor], Tensor]
+DecoderCall = Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], Tensor]
 
 
 class O50Policy:
@@ -507,7 +509,6 @@ class O50Policy:
         self._compiled_requested = compiled
         self._compiled = False
         self._runtime: RuntimeConfig | None = None
-        self._replan_interval = 0
         self._states: dict[int, _StreamState] = {}
         self._rng: SlotGroupRng | None = None
         self._trunk: TrunkCall | None = None
@@ -527,27 +528,35 @@ class O50Policy:
     def prepare(self, config: RuntimeConfig) -> None:
         if self._runtime is not None:
             raise RuntimeError("O50 policy is already prepared")
-        delay = config.transport_delay_frames
-        if delay not in _SUPPORTED_DELAYS:
-            raise ValueError(f"O50 does not support transport delay {delay}")
-        if delay in (2, 3):
-            expected = self._config.prediction_frames - delay
-            replan = expected if config.replan_interval_frames is None else config.replan_interval_frames
-            if replan != expected:
-                raise ValueError(f"O50 delay {delay} requires replan interval {expected}, got {replan}")
-        else:
-            replan = 1 if config.replan_interval_frames is None else config.replan_interval_frames
-            if replan not in (1, 2):
-                raise ValueError("O50 delay 0 supports replan interval 1 or 2")
+        unsupported = set(config.transport_delays) - set(_SUPPORTED_DELAYS)
+        if unsupported:
+            raise ValueError(f"O50 does not support transport delays {sorted(unsupported)}")
+        if len(config.transport_delays) > 1 and config.replan_interval_frames is not None:
+            raise ValueError("mixed-delay O50 derives each stream's replan interval")
+        for delay in config.transport_delays:
+            self._replan_for_delay(delay, config.replan_interval_frames)
         self._runtime = config
-        self._replan_interval = replan
         self._states.clear()
         self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
         self._compiled = self._compiled_requested and self._device.type == "cuda"
         trunk: TrunkCall = self._model.forward_dense
+        sample_start = min(config.transport_delays)
 
-        def decode_tail(hidden: Tensor, observed: Tensor, forced: Tensor, uniforms: Tensor) -> Tensor:
-            return self._model.temporal.sample_conditioned(hidden, observed, forced, uniforms)
+        def decode_tail(
+            hidden: Tensor,
+            observed: Tensor,
+            forced: Tensor,
+            force_mask: Tensor,
+            uniforms: Tensor,
+        ) -> Tensor:
+            return self._model.temporal.sample_conditioned(
+                hidden,
+                observed,
+                forced,
+                force_mask,
+                uniforms,
+                sample_start=sample_start,
+            )
 
         decoder: DecoderCall = decode_tail
 
@@ -567,6 +576,18 @@ class O50Policy:
             self._decoder = None
             self._rng = None
             raise
+
+    def _replan_for_delay(self, delay: int, override: int | None) -> int:
+        if delay in (2, 3):
+            expected = self._config.prediction_frames - delay
+            replan = expected if override is None else override
+            if replan != expected:
+                raise ValueError(f"O50 delay {delay} requires replan interval {expected}, got {replan}")
+            return replan
+        replan = 1 if override is None else override
+        if replan not in (1, 2):
+            raise ValueError("O50 delay 0 supports replan interval 1 or 2")
+        return replan
 
     def _synthetic_features(self, rows: int) -> dict[str, Tensor]:
         length = self._config.architecture.L_ctx
@@ -596,19 +617,24 @@ class O50Policy:
     def _prewarm(self) -> None:
         runtime = self._require_runtime()
         rows = runtime.max_batch_size
-        delay = runtime.transport_delay_frames
         features = self._synthetic_features(rows)
         padding = torch.zeros(rows, dtype=torch.long, device=self._device)
-        neutral = torch.zeros(rows, delay, len(ACTION_CHANNELS), device=self._device)
+        neutral = torch.zeros(rows, self._config.prediction_frames, len(ACTION_CHANNELS), device=self._device)
         forced = self._model.codec.quantize(neutral)
+        delays = torch.tensor(
+            [runtime.transport_delays[row % len(runtime.transport_delays)] for row in range(rows)],
+            device=self._device,
+        )
+        depths = torch.arange(self._config.prediction_frames, device=self._device)
+        force_mask = depths[None, :] < delays[:, None]
         uniforms = torch.full(
-            (self._config.prediction_frames - delay, CONTROLLER_GROUP_COUNT, rows),
+            (self._config.prediction_frames, CONTROLLER_GROUP_COUNT, rows),
             0.5,
             device=self._device,
         )
         repeats = 2 if self._compiled else 1
         for _ in range(repeats):
-            self._decode(features, padding, forced, uniforms)
+            self._decode(features, padding, forced, force_mask, uniforms)
         if self._device.type == "cuda":
             torch.cuda.synchronize(self._device)
 
@@ -623,6 +649,7 @@ class O50Policy:
         features: dict[str, Tensor],
         context_padding: Tensor,
         forced: Tensor,
+        force_mask: Tensor,
         uniforms: Tensor,
     ) -> Tensor:
         if self._trunk is None or self._decoder is None:
@@ -632,7 +659,7 @@ class O50Policy:
         observed = self._model.codec.quantize(stack_actions(features))
         with amp_context(self._config, self._device):
             hidden = self._trunk(features, context_padding, observed)
-            indices = self._decoder(hidden, observed[:, -1], forced, uniforms)
+            indices = self._decoder(hidden, observed[:, -1], forced, force_mask, uniforms)
         return self._model.codec.dequantize(indices)
 
     def _player_id(self, identity: str | None) -> int:
@@ -661,8 +688,12 @@ class O50Policy:
             raise ValueError(f"stream {item.stream_id} changed controlled port without a reset")
         if state.player_id is not None and state.player_id != player_id:
             raise ValueError(f"stream {item.stream_id} changed player identity without a reset")
+        delay = len(item.pending_actions)
+        if state.transport_delay is not None and state.transport_delay != delay:
+            raise ValueError(f"stream {item.stream_id} changed transport delay without a reset")
         state.controlled_port = item.controlled_port
         state.player_id = player_id
+        state.transport_delay = delay
         state.last_frame_id = item.frame_id
         state.history.append(_relative_observation(item))
         while len(state.history) > self._config.architecture.L_ctx:
@@ -739,38 +770,35 @@ class O50Policy:
         context = self._context(due)
         real_rows = len(due)
         features, padding = self._pad_context(context, runtime.max_batch_size)
-        forced_actions = (
-            np.stack([np.stack([_action_vector(action) for action in item.pending_actions]) for item, _state in due])
-            if runtime.transport_delay_frames
-            else np.empty((real_rows, 0, len(ACTION_CHANNELS)), dtype=np.float32)
-        )
+        horizon = self._config.prediction_frames
+        forced_actions = np.zeros((runtime.max_batch_size, horizon, len(ACTION_CHANNELS)), dtype=np.float32)
+        force_mask = np.zeros((runtime.max_batch_size, horizon), dtype=np.bool_)
+        delays = []
+        for row, (item, _state) in enumerate(due):
+            delay = len(item.pending_actions)
+            delays.append(delay)
+            if delay:
+                forced_actions[row, :delay] = np.stack([_action_vector(action) for action in item.pending_actions])
+                force_mask[row, :delay] = True
         forced = self._model.codec.quantize(torch.from_numpy(forced_actions).to(self._device))
-        if real_rows < runtime.max_batch_size:
-            forced = torch.cat(
-                (
-                    forced,
-                    torch.zeros(
-                        runtime.max_batch_size - real_rows,
-                        runtime.transport_delay_frames,
-                        CONTROLLER_GROUP_COUNT,
-                        dtype=torch.long,
-                        device=self._device,
-                    ),
-                )
-            )
+        force_mask_tensor = torch.from_numpy(force_mask).to(self._device)
         if self._rng is None:
             raise RuntimeError("O50 random streams are not prepared")
         self._rng.begin(context)
         draws = [
-            torch.stack([self._rng.uniforms(name) for name in CONTROLLER_GROUP_NAMES])
-            for _ in range(self._config.prediction_frames - runtime.transport_delay_frames)
+            torch.stack(
+                [self._rng.uniforms(name, [depth >= delay for delay in delays]) for name in CONTROLLER_GROUP_NAMES]
+            )
+            for depth in range(horizon)
         ]
         uniforms = torch.stack(draws)
         uniforms = F.pad(uniforms, (0, runtime.max_batch_size - real_rows), value=0.5)
-        planned = self._decode(features, padding, forced, uniforms)[:real_rows, : self._replan_interval]
+        planned = self._decode(features, padding, forced, force_mask_tensor, uniforms)[:real_rows]
         values = planned.float().cpu().numpy()
-        for row, (_item, state) in enumerate(due):
-            state.queued.extend(_controller_action(action) for action in values[row])
+        for row, (item, state) in enumerate(due):
+            delay = len(item.pending_actions)
+            replan = self._replan_for_delay(delay, runtime.replan_interval_frames)
+            state.queued.extend(_controller_action(action) for action in values[row, delay : delay + replan])
             state.reset_pending = False
 
     def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:

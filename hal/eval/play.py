@@ -116,12 +116,11 @@ def run_netplay_match(
     max_frames: int = 28_800,
 ) -> PlayResult:
     """Play one game after flushing menu inputs from Slippi's delay queue."""
-    if max_frames < runtime.transport_delay_frames + 3:
+    delay = runtime.require_single_delay()
+    if max_frames < delay + 3:
         raise ValueError(f"max_frames must be at least transport delay + 3, got {max_frames}")
-    if session.online_delay != runtime.transport_delay_frames:
-        raise ValueError(
-            f"session delay {session.online_delay} differs from policy delay {runtime.transport_delay_frames}"
-        )
+    if session.online_delay != delay:
+        raise ValueError(f"session delay {session.online_delay} differs from policy delay {delay}")
     first_frame = session.start_match(setup)
     if session.ego_port is None or session.opponent_port is None:
         raise RuntimeError("netplay ports were not discovered")
@@ -129,19 +128,19 @@ def run_netplay_match(
     opponent_port = session.opponent_port
     characters = {port: int(first_frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
     captured = [first_frame]
-    transport = ActionTransport(runtime.transport_delay_frames)
+    transport = ActionTransport(delay)
     started = time.monotonic()
 
     # Menu navigation can leave actions in Dolphin's queue. A Slippi time-sync
     # stall can hold one sample, so flush until a neutral state is observed.
     current = first_frame
-    for flush_index in range(runtime.transport_delay_frames + 120):
+    for flush_index in range(delay + 120):
         transport.submit(NEUTRAL_CONTROLLER_ACTION)
         current, in_game = session.step(NEUTRAL_CONTROLLER_ACTION)
         captured.append(current)
         if not in_game:
             raise RuntimeError("netplay left live play while flushing menu inputs")
-        if flush_index >= runtime.transport_delay_frames and controller_actions_match(
+        if flush_index >= delay and controller_actions_match(
             NEUTRAL_CONTROLLER_ACTION,
             _frame_action(current, ego_port),
         ):

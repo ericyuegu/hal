@@ -116,7 +116,7 @@ def test_match_loop_flushes_delay_and_passes_real_conditioning(monkeypatch: pyte
     monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
     policy = _Policy()
     session = _Session()
-    runtime = RuntimeConfig(1, 2, 2)
+    runtime = RuntimeConfig(1, (2,), 2)
     result = run_netplay_match(
         session,
         NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
@@ -146,7 +146,7 @@ def test_match_loop_accepts_a_recent_slippi_time_sync_replay(monkeypatch: pytest
         _Session(replay_frame=8, replay_age=2),
         NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
         _Policy(),
-        RuntimeConfig(1, 2, 2),
+        RuntimeConfig(1, (2,), 2),
         max_frames=10,
     )
     assert result.transport_correction_frames == 1
@@ -160,7 +160,7 @@ def test_match_loop_detects_controller_transport_mismatch(monkeypatch: pytest.Mo
             session,
             NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
             _Policy(),
-            RuntimeConfig(1, 2, 2),
+            RuntimeConfig(1, (2,), 2),
             max_frames=10,
         )
 
@@ -171,7 +171,7 @@ def test_match_loop_rejects_delay_mismatch() -> None:
             _Session(),
             NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
             _Policy(),
-            RuntimeConfig(1, 3),
+            RuntimeConfig(1, (3,)),
         )
 
 

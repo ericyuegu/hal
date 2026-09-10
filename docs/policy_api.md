@@ -6,10 +6,14 @@ It does not expose model-specific tensors to the match loop.
 
 ```python
 policy = load_policy("policy.halpolicy", device="cuda")
-runtime = RuntimeConfig(max_batch_size=1, transport_delay_frames=2)
+runtime = RuntimeConfig(max_batch_size=2, transport_delays=(2, 3))
 policy.prepare(runtime)  # Load and compile before Dolphin starts.
 outputs = policy.step(inputs)
 ```
+
+The runtime declares the delays that one prepared batch can accept. Each input's
+`pending_actions` length selects its actual delay, so delay-2 and delay-3 games
+can share one compiled call.
 
 Each `PolicyInput` has three action-time fields:
 

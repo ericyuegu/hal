@@ -50,7 +50,7 @@ def test_adapter_pairs_actual_actions_and_orders_pending_queue(
 ) -> None:
     monkeypatch.setattr("hal.eval.policy.flatten_canonical_frame", lambda frame: {"flat": frame["flat"]})
     policy = _TaggedPolicy()
-    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, delay))
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (delay,)))
     slot = Slot(0, 1)
     applied = NEUTRAL_CONTROLLER_ACTION
     returned = []
@@ -68,7 +68,7 @@ def test_adapter_pairs_actual_actions_and_orders_pending_queue(
 def test_adapter_resets_transport_on_frame_discontinuity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hal.eval.policy.flatten_canonical_frame", lambda frame: {"flat": frame["flat"]})
     policy = _TaggedPolicy()
-    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, 2))
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)))
     slot = Slot(0, 1)
     adapter(0, {slot: _frame(10, NEUTRAL_CONTROLLER_ACTION)})
     result = adapter(1, {slot: _frame(-123, NEUTRAL_CONTROLLER_ACTION)})

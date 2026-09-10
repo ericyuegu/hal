@@ -629,28 +629,34 @@ class _CausalTemporalDecoder(nn.Module):
         hidden: Tensor,
         observed: Tensor,
         forced: Tensor,
+        force_mask: Tensor,
         uniforms: Tensor,
         *,
         argmax: bool = False,
+        sample_start: int = 0,
     ) -> Tensor:
-        """Force the committed prefix and sample only the uncommitted tail."""
-        delay = forced.shape[1]
+        """Force each row's committed prefix and sample its uncommitted tail."""
         horizon = 4
-        if forced.shape != (hidden.shape[0], delay, CONTROLLER_GROUP_COUNT):
+        if forced.shape != (hidden.shape[0], horizon, CONTROLLER_GROUP_COUNT):
             raise ValueError("O50 forced actions have the wrong shape")
-        if not 0 <= delay < horizon:
-            raise ValueError(f"O50 transport delay must be in [0, {horizon - 1}], got {delay}")
-        if uniforms.shape != (horizon - delay, CONTROLLER_GROUP_COUNT, hidden.shape[0]):
-            raise ValueError("O50 uniform table must cover only sampled tail actions")
+        if force_mask.shape != (hidden.shape[0], horizon):
+            raise ValueError("O50 force mask has the wrong shape")
+        if force_mask.dtype != torch.bool:
+            raise ValueError("O50 force mask must be boolean")
+        if uniforms.shape != (horizon, CONTROLLER_GROUP_COUNT, hidden.shape[0]):
+            raise ValueError("O50 uniform table must cover the full prediction horizon")
+        if not 0 <= sample_start < horizon:
+            raise ValueError(f"O50 sample_start must be in [0, {horizon - 1}], got {sample_start}")
         raw_trunk = hidden[:, -1]
         state_bias = self._state_bias(_decoder_rmsnorm(raw_trunk))
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
-        sampled = []
+        trajectory = []
         for depth, offset in enumerate(self.head_offsets[:horizon]):
             state, caches = self._decode_step(previous, offset, state_bias, caches)
-            if depth < delay:
+            if depth < sample_start:
                 previous = forced[:, depth]
+                trajectory.append(previous)
                 continue
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
@@ -665,13 +671,14 @@ class _CausalTemporalDecoder(nn.Module):
                 pick = sample_categorical(
                     logits,
                     argmax=argmax,
-                    uniform=uniforms[depth - delay, group],
+                    uniform=uniforms[depth, group],
                 )
                 picks[name] = pick
                 embedded[name] = self.codec.group_embedding(name, pick)
-            previous = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
-            sampled.append(previous)
-        return torch.stack(sampled, dim=1)
+            sampled = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
+            previous = torch.where(force_mask[:, depth, None], forced[:, depth], sampled)
+            trajectory.append(previous)
+        return torch.stack(trajectory, dim=1)
 
 
 class O50Model(nn.Module):

@@ -120,7 +120,7 @@ def _eval(args: argparse.Namespace) -> None:
     parallel = resolve_parallelism(args.n_matches, args.max_parallel)
     runtime = RuntimeConfig(
         max_batch_size=parallel,
-        transport_delay_frames=args.transport_delay,
+        transport_delays=(args.transport_delay,),
         replan_interval_frames=args.replan_interval,
     )
     bundle = resolve_checkpoint(args.policy)
@@ -154,7 +154,7 @@ def _eval(args: argparse.Namespace) -> None:
 
 
 def _play(args: argparse.Namespace) -> None:
-    runtime = RuntimeConfig(max_batch_size=1, transport_delay_frames=args.online_delay)
+    runtime = RuntimeConfig(max_batch_size=1, transport_delays=(args.online_delay,))
     bundle = resolve_checkpoint(args.policy)
     policy = load_policy(bundle, device=args.device, seed=args.seed, compiled=args.compiled)
     policy.prepare(runtime)

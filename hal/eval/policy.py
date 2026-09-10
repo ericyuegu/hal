@@ -47,13 +47,14 @@ class PolicyBatchAdapter:
         del frame_index
         if not obs:
             return {}
+        delay = self.runtime.require_single_delay()
         items = []
         for slot, frame in obs.items():
             frame_id = int(frame["id"])
             state = self._states.get(slot)
             reset = state is None or frame_id != state.last_frame_id + 1
             if reset:
-                state = _StreamState(ActionTransport(self.runtime.transport_delay_frames), frame_id)
+                state = _StreamState(ActionTransport(delay), frame_id)
                 self._states[slot] = state
             applied = canonical_pre_to_action(frame["ports"][slot.port]["leader"]["pre"])
             if (
