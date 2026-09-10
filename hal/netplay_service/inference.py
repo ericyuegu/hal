@@ -3,6 +3,7 @@
 import math
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -16,6 +17,7 @@ from numbers import Real
 from typing import cast
 
 import numpy as np
+from loguru import logger
 
 from hal.controller import ControllerAction
 from hal.inference.api import ObservationScalar
@@ -406,6 +408,10 @@ class ContinuousBatcher:
         self.connections = dict(connections)
         self.batch_wait_seconds = batch_wait_seconds
         self._slot_of = {connection: slot for slot, connection in connections.items()}
+        self.batch_calls = 0
+        self.batch_items = 0
+        self.max_batch_items = 0
+        self._policy_seconds: deque[float] = deque(maxlen=1_200)
 
     def serve(self, stop: threading.Event) -> None:
         """Run until stopped; policy or protocol failures terminate the engine."""
@@ -447,7 +453,33 @@ class ContinuousBatcher:
                 requests.append((slot, message.sequence, item, connection))
             inputs = tuple(request[2] for request in requests)
             validate_policy_inputs(self.policy.spec, self.runtime, inputs)
+            policy_started = time.perf_counter()
             outputs = validate_policy_outputs(inputs, tuple(self.policy.step(inputs)))
+            self._policy_seconds.append(time.perf_counter() - policy_started)
+            self.batch_calls += 1
+            self.batch_items += len(inputs)
+            self.max_batch_items = max(self.max_batch_items, len(inputs))
+            if self.batch_calls == 1:
+                logger.info(
+                    "inference engine active batch_size={} streams={} delays={} resets={}",
+                    len(inputs),
+                    [item.stream_id for item in inputs],
+                    [len(item.pending_actions) for item in inputs],
+                    [item.reset for item in inputs],
+                )
+            elif self.batch_calls % 600 == 0:
+                ordered_seconds = sorted(self._policy_seconds)
+                p95_seconds = ordered_seconds[math.ceil(0.95 * len(ordered_seconds)) - 1]
+                logger.info(
+                    "inference batches={} items={} mean_batch={:.2f} max_batch={} "
+                    "recent_policy_p95={:.1f}ms recent_policy_max={:.1f}ms",
+                    self.batch_calls,
+                    self.batch_items,
+                    self.batch_items / self.batch_calls,
+                    self.max_batch_items,
+                    1_000.0 * p95_seconds,
+                    1_000.0 * max(self._policy_seconds),
+                )
             for slot, sequence, item, connection in requests:
                 self.arena.write_response(slot, sequence, outputs[item.stream_id])
                 send_control(

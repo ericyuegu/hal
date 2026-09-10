@@ -14,6 +14,9 @@ The API and runner use the optional Python extra:
 uv sync --extra netplay-server
 ```
 
+The runner uses eager PyTorch by default. Pass `--compiled` only after the
+deployed policy and GPU have passed the no-recompile latency qualification.
+
 ## Host setup
 
 Use the tested Slippi 3.6.4 AppImage and the same Melee CISO used by local
@@ -21,10 +24,9 @@ qualification. Do not replace either file without running the compatibility and
 timing tests. The runner checks the Dolphin executable hash before each launch.
 
 Copy `deploy/netplay/.env.example` to an untracked file outside the repository.
-Set the exact deployed Git SHA, policy bundle, account JSON, game assets, R2
-credentials, Sites origin, API hostname, and Cloudflare tunnel token. The single
-account file is mounted into both isolated Dolphin homes; this is the tested
-two-slot setup.
+Set the exact deployed Git SHA, policy bundle, two account JSON files, game
+assets, R2 credentials, Sites origin, API hostname, and Cloudflare tunnel token.
+Each slot's account must have a distinct connect code.
 
 Configure the Cloudflare tunnel hostname to send traffic to `http://api:8080`.
 The API has no host port and the runner receives no inbound Internet traffic.
@@ -36,13 +38,9 @@ docker compose --env-file /secure/path/hal-netplay.env \
   -f deploy/netplay/compose.yaml up --build -d
 ```
 
-Create an invite and install the 30-day R2 lifecycle rule:
+Install the 30-day R2 lifecycle rule:
 
 ```text
-docker compose --env-file /secure/path/hal-netplay.env \
-  -f deploy/netplay/compose.yaml exec api \
-  hal-netplay-admin invite beta-player
-
 docker compose --env-file /secure/path/hal-netplay.env \
   -f deploy/netplay/compose.yaml exec runner \
   hal-netplay-admin install-replay-lifecycle

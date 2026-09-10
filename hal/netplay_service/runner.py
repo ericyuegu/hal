@@ -89,6 +89,7 @@ class RunnerConfig:
     git_sha: str
     device: str = "cuda"
     seed: int | None = None
+    compiled: bool = False
     batch_wait_seconds: float = 0.0005
     max_frames: int = 54_000
 
@@ -144,6 +145,13 @@ def _bot_connect_code(path: Path) -> str:
     if not isinstance(value, str):
         raise ValueError(f"Slippi account JSON {path} has no connectCode")
     return validate_player_code(value)
+
+
+def _bot_connect_codes(paths: Sequence[Path]) -> tuple[str, ...]:
+    codes = tuple(_bot_connect_code(path) for path in paths)
+    if len(set(codes)) != len(codes):
+        raise ValueError("runner Slippi accounts must have distinct connect codes")
+    return codes
 
 
 def _human_result(result: PlayResult) -> str:
@@ -245,6 +253,14 @@ def _complete_pending_upload(sidecar: Path, store: QueueStore) -> None:
         size=uploaded.size,
         etag=uploaded.etag,
     )
+    logger.info(
+        "replay uploaded reservation={} game={} key={} size={} etag={}",
+        metadata.reservation_id,
+        metadata.game_number,
+        uploaded.key,
+        uploaded.size,
+        uploaded.etag,
+    )
     replay.unlink()
     sidecar.unlink()
 
@@ -254,7 +270,12 @@ def _drain_pending_uploads(root: Path, store: QueueStore) -> None:
         try:
             _complete_pending_upload(sidecar, store)
         except Exception as error:  # Replay failures are isolated from active games.
-            logger.warning("pending replay upload failed: {}: {}", type(error).__name__, sidecar)
+            logger.warning(
+                "pending replay upload failed: {}: {}: {}",
+                type(error).__name__,
+                error,
+                sidecar,
+            )
 
 
 def _heartbeat(store: QueueStore, job_id: str, worker_id: str, stop: threading.Event) -> None:
@@ -283,11 +304,30 @@ def _run_reservation(
     )
     heartbeat.start()
     live = False
+    logger.info(
+        "reservation {} starting on slot {} player={} character={} delay={} first_stage=random "
+        "requested_stage={} imitate={} game={}",
+        job.id,
+        config.slot,
+        job.player_code,
+        job.choices.character,
+        job.choices.online_delay,
+        job.choices.requested_stage,
+        job.choices.imitation,
+        job.game_count + 1,
+    )
 
     def mark_live() -> None:
         nonlocal live
         store.mark_playing(job.id, config.worker_id)
         live = True
+        logger.info(
+            "reservation {} live on slot {} game={} delay={}",
+            job.id,
+            config.slot,
+            job.game_count + 1,
+            job.choices.online_delay,
+        )
 
     store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=60.0)
     try:
@@ -321,12 +361,30 @@ def _run_reservation(
                 human_result = _human_result(result)
                 limit_ms = 33.3 if job.choices.online_delay == 2 else 16.7
                 if result.inference_p95_ms >= limit_ms:
-                    raise RuntimeError(f"inference p95 {result.inference_p95_ms:.1f} ms exceeds {limit_ms:.1f} ms")
+                    logger.warning(
+                        "reservation {} missed the delay-{} policy deadline: p95={:.1f}ms limit={:.1f}ms",
+                        job.id,
+                        job.choices.online_delay,
+                        result.inference_p95_ms,
+                        limit_ms,
+                    )
                 next_status = store.finish_game(
                     job.id,
                     config.worker_id,
                     actual_stage=actual_stage,
                     result=human_result,
+                )
+                logger.info(
+                    "reservation {} game={} complete frames={} wall={:.1f}s stage={} human_result={} "
+                    "policy_p95={:.1f}ms corrections={}",
+                    job.id,
+                    job.game_count + 1,
+                    len(result.trajectory),
+                    result.wall_seconds,
+                    actual_stage,
+                    human_result,
+                    result.inference_p95_ms,
+                    result.transport_correction_frames,
                 )
                 metadata = ReplayMetadata(
                     reservation_id=job.id,
@@ -343,7 +401,7 @@ def _run_reservation(
                 try:
                     _complete_pending_upload(sidecar, store)
                 except Exception as error:  # R2 availability must not end a session.
-                    logger.warning("replay upload deferred: {}", type(error).__name__)
+                    logger.warning("replay upload deferred: {}: {}", type(error).__name__, error)
                 if next_status is JobStatus.COMPLETE:
                     return
                 while not stop.is_set():
@@ -392,7 +450,7 @@ def _slot_worker(
             try:
                 _run_reservation(config, store, policy, runtime, job, stop)
             except (KeyError, ValueError) as error:
-                logger.error("reservation {} rejected: {}", job.id, type(error).__name__)
+                logger.error("reservation {} rejected: {}: {}", job.id, type(error).__name__, error)
                 with suppress(InvalidTransitionError):
                     store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=False)
             except Exception as error:  # A reservation cannot kill a long-running slot.
@@ -403,9 +461,26 @@ def _slot_worker(
 
 def run(config: RunnerConfig) -> None:
     """Load and prepare one policy, then supervise fixed Dolphin slots."""
+    bot_connect_codes = _bot_connect_codes(config.user_jsons)
     runtime = RuntimeConfig(max_batch_size=len(config.user_jsons), transport_delays=(2, 3))
-    policy = load_policy(config.policy, device=config.device, seed=config.seed, compiled=True)
+    started = time.perf_counter()
+    logger.info(
+        "loading netplay policy {} on {} mode={} slots={} delays={} display={}",
+        config.policy,
+        config.device,
+        "compiled" if config.compiled else "eager",
+        len(config.user_jsons),
+        runtime.transport_delays,
+        os.environ.get("DISPLAY", "unset"),
+    )
+    policy = load_policy(
+        config.policy,
+        device=config.device,
+        seed=config.seed,
+        compiled=config.compiled,
+    )
     policy.prepare(runtime)
+    logger.info("netplay policy ready after {:.2f}s", time.perf_counter() - started)
     stop = mp.get_context("spawn").Event()
     thread_stop = threading.Event()
 
@@ -430,14 +505,16 @@ def run(config: RunnerConfig) -> None:
         max(runtime.transport_delays),
         policy.spec.required_observation_fields,
     ) as arena:
-        for slot, (user_json, slippi_port) in enumerate(zip(config.user_jsons, config.slippi_ports, strict=True)):
+        for slot, (user_json, bot_connect_code, slippi_port) in enumerate(
+            zip(config.user_jsons, bot_connect_codes, config.slippi_ports, strict=True)
+        ):
             slot_config = SlotConfig(
                 slot=slot,
                 worker_id=f"slot-{slot}",
                 stream_id=slot,
                 database=config.database,
                 user_json=user_json,
-                bot_connect_code=_bot_connect_code(user_json),
+                bot_connect_code=bot_connect_code,
                 slippi_port=slippi_port,
                 iso_path=config.iso_path,
                 dolphin_path=config.dolphin_path,
@@ -480,6 +557,7 @@ def run(config: RunnerConfig) -> None:
 
         engine = threading.Thread(target=serve, name="hal-netplay-inference", daemon=True)
         engine.start()
+        logger.info("netplay runner ready slots={} policy_sha256={}", len(processes), policy_sha256)
         try:
             while not stop.wait(0.5):
                 if engine_error:
@@ -503,6 +581,9 @@ def run(config: RunnerConfig) -> None:
             for connection in (*parent_connections.values(), *child_connections.values()):
                 connection.close()
             config.status_path.unlink(missing_ok=True)
+            logger.info("netplay runner stopped")
+        if engine_error:
+            raise RuntimeError("netplay inference engine failed") from engine_error[0]
 
 
 def _paths(value: str) -> tuple[Path, ...]:
@@ -525,6 +606,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--git-sha", default=os.environ.get("HAL_GIT_SHA"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
     if args.user_jsons is None:
@@ -533,8 +615,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("set HAL_GIT_SHA or pass --git-sha")
     user_jsons = _paths(args.user_jsons)
     ports = tuple(int(value) for value in args.slippi_ports.split(","))
-    if len(user_jsons) == 1 and len(ports) > 1:
-        user_jsons = user_jsons * len(ports)
     policy = resolve_checkpoint(args.policy)
     database = args.database.resolve()
     run(
@@ -550,6 +630,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             git_sha=args.git_sha,
             device=args.device,
             seed=args.seed,
+            compiled=args.compiled,
             max_frames=args.max_frames,
         )
     )

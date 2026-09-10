@@ -212,6 +212,8 @@ def test_finished_match_can_rematch_without_relaunching_dolphin(
     session._last_frame_id = None
     navigate = Mock(return_value={"id": 0})
     monkeypatch.setattr(session, "_navigate_to_live", navigate)
+    helper_type = Mock()
+    monkeypatch.setattr("hal.sim.netplay.melee.MenuHelper", helper_type)
 
     setup = NetplaySetup(melee.Character.MARTH, "HUMAN#1", stage=melee.Stage.BATTLEFIELD)
     assert session.start_rematch(setup) == {"id": 0}
@@ -219,6 +221,7 @@ def test_finished_match_can_rematch_without_relaunching_dolphin(
     controller.release_all.assert_called_once()
     controller.flush.assert_called_once()
     navigate.assert_called_once_with(setup)
+    assert session._menu_helper is helper_type.return_value
 
 
 def test_menu_parking_sends_neutral_and_does_not_navigate(

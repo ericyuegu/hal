@@ -35,7 +35,7 @@ services:
       - --database
       - /var/lib/hal-netplay/queue.sqlite3
       - --user-jsons
-      - /run/hal-secrets/slippi-user.json
+      - /run/hal-secrets/slippi-user-a.json,/run/hal-secrets/slippi-user-b.json
       - --slippi-ports
       - "51441,51442"
       - --iso-path
@@ -56,7 +56,8 @@ services:
     volumes:
       - state:/var/lib/hal-netplay
       - ${HAL_NETPLAY_POLICY:?set HAL_NETPLAY_POLICY}:/run/hal-policy/policy.halpolicy:ro
-      - ${HAL_NETPLAY_USER_JSON:?set HAL_NETPLAY_USER_JSON}:/run/hal-secrets/slippi-user.json:ro
+      - ${HAL_NETPLAY_USER_JSON_A:?set HAL_NETPLAY_USER_JSON_A}:/run/hal-secrets/slippi-user-a.json:ro
+      - ${HAL_NETPLAY_USER_JSON_B:?set HAL_NETPLAY_USER_JSON_B}:/run/hal-secrets/slippi-user-b.json:ro
       - ${HAL_ISO_PATH:?set HAL_ISO_PATH}:/run/hal-assets/ssbm.ciso:ro
       - ${HAL_NETPLAY_EMULATOR_PATH:?set HAL_NETPLAY_EMULATOR_PATH}:/run/hal-assets/Slippi_Online-x86_64.AppImage:ro
     shm_size: 1gb

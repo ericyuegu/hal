@@ -48,6 +48,39 @@ def test_bot_account_code_is_read_without_fallback(tmp_path: Path) -> None:
         runner._bot_connect_code(account)
 
 
+def test_runner_rejects_duplicate_slippi_accounts(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text('{"connectCode":"HAL#1"}')
+    second.write_text('{"connectCode":"HAL#1"}')
+
+    with pytest.raises(ValueError, match="distinct connect codes"):
+        runner._bot_connect_codes((first, second))
+
+
+def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    account = tmp_path / "user.json"
+    account.write_text('{"connectCode":"HAL#1"}')
+    policy = tmp_path / "policy.halpolicy"
+    policy.touch()
+    captured: list[runner.RunnerConfig] = []
+    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
+    monkeypatch.setattr(runner, "run", captured.append)
+
+    runner.main(
+        [
+            str(policy),
+            "--user-jsons",
+            str(account),
+            "--slippi-ports",
+            "51441",
+            "--git-sha",
+            "test-sha",
+        ]
+    )
+    assert captured[0].compiled is False
+
+
 def test_first_game_is_random_and_rematch_uses_requested_stage() -> None:
     first = runner._setup(_job(), rematch=False)
     rematch = runner._setup(_job(stage="YOSHIS_STORY"), rematch=True)

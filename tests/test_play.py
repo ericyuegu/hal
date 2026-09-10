@@ -31,11 +31,26 @@ def _frame(frame_id: int, action: ControllerAction, *, ended: bool = False) -> d
         "id": frame_id,
         "stage": 32 if frame_id == 0 else 8,
         "ports": {
-            1: {"leader": {"pre": _pre(action), "post": {"character": 1, "stock": 0 if ended else 4}}},
+            1: {
+                "leader": {
+                    "pre": _pre(action),
+                    "post": {
+                        "character": 1,
+                        "stock": 0 if ended else 4,
+                        "percent": 12.0,
+                        "position": {"x": 1.0, "y": 2.0},
+                    },
+                }
+            },
             2: {
                 "leader": {
                     "pre": _pre(NEUTRAL_CONTROLLER_ACTION),
-                    "post": {"character": 22, "stock": 4},
+                    "post": {
+                        "character": 22,
+                        "stock": 4,
+                        "percent": 34.0,
+                        "position": {"x": 3.0, "y": 4.0},
+                    },
                 }
             },
         },
@@ -90,7 +105,7 @@ class _Policy:
         name="fake",
         backend="tests.fake",
         required_observation_fields=("stage", "p1_character", "p2_character"),
-        supported_transport_delays=(2,),
+        supported_transport_delays=(2, 3),
     )
 
     def __init__(self) -> None:
@@ -186,13 +201,27 @@ def test_match_loop_detects_controller_transport_mismatch(monkeypatch: pytest.Mo
 
 
 def test_match_loop_rejects_delay_mismatch() -> None:
-    with pytest.raises(ValueError, match="differs from policy delay"):
+    with pytest.raises(ValueError, match="absent from prepared policy delays"):
         run_netplay_match(
             _Session(),
             NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
             _Policy(),
             RuntimeConfig(1, (3,)),
         )
+
+
+def test_match_loop_accepts_a_mixed_delay_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    result = run_netplay_match(
+        _Session(),
+        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+        _Policy(),
+        RuntimeConfig(2, (2, 3)),
+        max_frames=10,
+        stream_id=7,
+    )
+    assert len(result.trajectory) == 10
 
 
 @pytest.mark.parametrize("method", [EndMethod.TIME, EndMethod.GAME, EndMethod.RESOLVED])

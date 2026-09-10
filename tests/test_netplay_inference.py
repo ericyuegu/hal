@@ -87,6 +87,7 @@ def test_continuous_batcher_combines_mixed_delays_and_preserves_types() -> None:
 
         assert [result[0].action.main_x for result in results if result is not None] == [0.7, 0.8]
         assert len(policy.batches) == 1
+        assert (batcher.batch_calls, batcher.batch_items, batcher.max_batch_items) == (1, 2, 2)
         first, second = policy.batches[0]
         assert (len(first.pending_actions), len(second.pending_actions)) == (2, 3)
         assert isinstance(first.observation["integer"], int)

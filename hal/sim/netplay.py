@@ -162,6 +162,14 @@ class NetplaySession:
             raise RuntimeError("NetplaySession has already launched Dolphin")
         if not setup.opponent_code:
             raise ValueError("opponent_code must be non-empty")
+        logger.info(
+            "starting Dolphin slippi_port={} delay={} character={} stage={} replay_dir={}",
+            self.slippi_port,
+            self.online_delay,
+            setup.character.name,
+            setup.stage.name,
+            self.replay_dir,
+        )
         # Controller construction creates configuration and the named pipe that
         # Dolphin reads during launch.
         self._controller = melee.Controller(
@@ -180,7 +188,7 @@ class NetplaySession:
         if not self._console.connect():
             raise RuntimeError("failed to connect to Dolphin Slippi server")
         self._menu_helper = melee.MenuHelper()
-        logger.info("waiting for direct-connect opponent")
+        logger.info("waiting for direct-connect opponent {}", setup.opponent_code)
         first_frame = self._navigate_to_live(setup)
         frame_id = first_frame.get("id")
         if not isinstance(frame_id, int):
@@ -194,6 +202,9 @@ class NetplaySession:
             raise RuntimeError("start_match must complete before start_rematch")
         if self._last_frame_id is not None:
             raise RuntimeError("the current netplay match has not ended")
+        # MenuHelper latches its character and stage choices. A rematch can
+        # change either one, so it needs a fresh navigation state machine.
+        self._menu_helper = melee.MenuHelper()
         self._controller.release_all()
         self._controller.flush()
         first_frame = self._navigate_to_live(setup)
@@ -328,6 +339,7 @@ class NetplaySession:
         try:
             teardown_console(self._console, self.replay_dir)
         finally:
+            logger.info("netplay session closed slippi_port={}", self.slippi_port)
             self._console = None
             self._controller = None
             self._menu_helper = None
