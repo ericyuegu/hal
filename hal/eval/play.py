@@ -229,6 +229,15 @@ def run_netplay_match(
     else:
         raise RuntimeError("netplay did not reach a neutral controller state after menu navigation")
 
+    # Slippi suppresses controller input during the negative-frame character
+    # intros. Keep the transport queue neutral until gameplay accepts input.
+    while int(current["id"]) < 0:
+        transport.submit(NEUTRAL_CONTROLLER_ACTION)
+        current, in_game = session.step(NEUTRAL_CONTROLLER_ACTION)
+        captured.append(current)
+        if not in_game:
+            raise RuntimeError("netplay left live play during the pre-game countdown")
+
     inference_seconds: list[float] = []
     transport_correction_frames = 0
     changed_frames = 0

@@ -68,30 +68,35 @@ class _Session:
     def __init__(
         self,
         *,
+        start_frame: int = 0,
+        suppress_before_zero: bool = False,
         corrupt_frame: int | None = None,
         replay_frame: int | None = None,
         replay_age: int = 1,
     ) -> None:
-        self.frame_id = 0
+        self.frame_id = start_frame
         self.queue = deque([NEUTRAL_CONTROLLER_ACTION] * self.online_delay)
         self.submitted: list[ControllerAction] = []
+        self.suppress_before_zero = suppress_before_zero
         self.corrupt_frame = corrupt_frame
         self.replay_frame = replay_frame
         self.replay_age = replay_age
         self.applied = [NEUTRAL_CONTROLLER_ACTION]
 
     def start_match(self, _setup: NetplaySetup) -> dict:
-        return _frame(0, NEUTRAL_CONTROLLER_ACTION)
+        return _frame(self.frame_id, NEUTRAL_CONTROLLER_ACTION)
 
     def start_rematch(self, _setup: NetplaySetup) -> dict:
-        return _frame(0, NEUTRAL_CONTROLLER_ACTION)
+        return _frame(self.frame_id, NEUTRAL_CONTROLLER_ACTION)
 
     def step(self, action: ControllerAction) -> tuple[dict, bool]:
         self.submitted.append(action)
         due = self.queue.popleft()
         self.queue.append(action)
         self.frame_id += 1
-        if self.frame_id == self.corrupt_frame:
+        if self.suppress_before_zero and self.frame_id < 0:
+            due = NEUTRAL_CONTROLLER_ACTION
+        elif self.frame_id == self.corrupt_frame:
             due = ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
         elif self.frame_id == self.replay_frame:
             due = self.applied[-self.replay_age]
@@ -172,6 +177,27 @@ def test_match_loop_uses_persistent_rematch_entrypoint(monkeypatch: pytest.Monke
         rematch=True,
     )
     assert len(result.trajectory) == 10
+
+
+def test_match_loop_stays_neutral_until_dolphin_accepts_gameplay_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    policy = _Policy()
+    session = _Session(start_frame=-6, suppress_before_zero=True)
+
+    run_netplay_match(
+        session,
+        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+        policy,
+        RuntimeConfig(1, (2,), 2),
+        max_frames=20,
+    )
+
+    assert policy.inputs[0].frame_id == 0
+    assert session.submitted[:6] == [NEUTRAL_CONTROLLER_ACTION] * 6
+    assert session.submitted[6].main_x == 0.1
 
 
 def test_match_loop_accepts_a_recent_slippi_time_sync_replay(monkeypatch: pytest.MonkeyPatch) -> None:
