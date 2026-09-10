@@ -91,6 +91,82 @@ The capacity response must report one healthy slot before users submit jobs.
 Use `docker compose logs -f runner api` with the same environment file and
 Compose file options for live logs.
 
+## Run without Docker
+
+Install the Python and frontend dependencies once:
+
+```text
+uv sync --extra netplay-server
+cd web/netplay
+npm ci
+cd ../..
+```
+
+The direct host deployment uses the same completed environment file as the
+Compose deployment. Run each command from the repository root in a separate
+terminal. Install `xvfb-run` and `cloudflared` on the host before you start.
+
+Start the API:
+
+```text
+set -a
+source /secure/path/hal-netplay.env
+set +a
+HAL_NETPLAY_DATABASE="$PWD/runs/netplay/queue.sqlite3" \
+HAL_NETPLAY_CAPACITY=1 \
+HAL_NETPLAY_ALLOWED_ORIGINS=https://play.example.com,http://localhost:3000,http://127.0.0.1:3000 \
+HAL_NETPLAY_ALLOWED_HOSTS=api.example.com,localhost,127.0.0.1 \
+HAL_NETPLAY_RUNNER_STATUS="$PWD/runs/netplay/runner-status.json" \
+uv run hal-netplay-api --host 127.0.0.1 --port 8080
+```
+
+Start the one-slot runner. `xvfb-run` gives Slippi the display that its Vulkan
+renderer requires:
+
+```text
+set -a
+source /secure/path/hal-netplay.env
+set +a
+xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
+  --compiled \
+  --database "$PWD/runs/netplay/queue.sqlite3" \
+  --user-jsons "$HAL_NETPLAY_USER_JSON_A" \
+  --slippi-ports 51441 \
+  --iso-path "$HAL_ISO_PATH" \
+  --dolphin-path "$HAL_NETPLAY_EMULATOR_PATH" \
+  --replay-dir "$PWD/runs/netplay/replays" \
+  --status-path "$PWD/runs/netplay/runner-status.json" \
+  --git-sha "$HAL_GIT_SHA"
+```
+
+Start the configured Cloudflare tunnel to expose the API:
+
+```text
+set -a
+source /secure/path/hal-netplay.env
+set +a
+cloudflared tunnel --no-autoupdate run \
+  --token "$CLOUDFLARE_TUNNEL_TOKEN"
+```
+
+Check the direct API and runner:
+
+```text
+curl --fail http://127.0.0.1:8080/health/ready
+curl --fail http://127.0.0.1:8080/v1/capacity
+```
+
+For local frontend development, run:
+
+```text
+cd web/netplay
+NEXT_PUBLIC_HAL_API_URL=http://localhost:8080 \
+npm run dev -- --host 127.0.0.1 --port 3000
+```
+
+These processes stop when their terminals close. Use systemd or another process
+supervisor for automatic restart on a production host.
+
 ## Frontend
 
 The frontend is an independent static Sites project in `web/netplay`. Its npm
@@ -102,7 +178,14 @@ npm ci
 NEXT_PUBLIC_HAL_API_URL=https://api.example.com npm run build
 ```
 
-Deploy the built Sites project, then open its public hostname to submit a job.
+Deploy the built Worker and static assets after `npx wrangler login`:
+
+```text
+npx wrangler deploy --config dist/server/wrangler.json
+```
+
+Open the deployed frontend hostname to submit a job. Its exact origin must be
+present in `HAL_NETPLAY_ALLOWED_ORIGINS` when the API starts.
 
 ## Operations
 
