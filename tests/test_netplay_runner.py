@@ -147,6 +147,24 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
     assert not sidecar.exists()
 
 
+def test_pending_replay_retry_is_limited_to_once_per_minute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drain = Mock()
+    times = iter((100.0, 110.0, 160.0))
+    monkeypatch.setattr(runner, "_drain_pending_uploads", drain)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(times))
+    store = Mock()
+
+    next_attempt = runner._retry_pending_uploads(tmp_path, store, 0.0)
+    next_attempt = runner._retry_pending_uploads(tmp_path, store, next_attempt)
+    next_attempt = runner._retry_pending_uploads(tmp_path, store, next_attempt)
+
+    assert next_attempt == 220.0
+    assert drain.call_args_list == [((tmp_path, store),), ((tmp_path, store),)]
+
+
 @pytest.mark.parametrize(
     ("ego_port", "p1", "p2", "expected"),
     [(1, 4, 0, "loss"), (2, 4, 0, "win"), (1, 2, 2, "tie")],

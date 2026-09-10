@@ -48,6 +48,8 @@ from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 
+_PENDING_UPLOAD_RETRY_SECONDS = 60.0
+
 
 class _StopEvent(Protocol):
     def is_set(self) -> bool: ...
@@ -278,6 +280,14 @@ def _drain_pending_uploads(root: Path, store: QueueStore) -> None:
             )
 
 
+def _retry_pending_uploads(root: Path, store: QueueStore, next_attempt: float) -> float:
+    now = time.monotonic()
+    if now < next_attempt:
+        return next_attempt
+    _drain_pending_uploads(root, store)
+    return now + _PENDING_UPLOAD_RETRY_SECONDS
+
+
 def _heartbeat(store: QueueStore, job_id: str, worker_id: str, stop: threading.Event) -> None:
     while not stop.wait(5.0):
         try:
@@ -441,10 +451,15 @@ def _slot_worker(
     # a spawned worker while it holds the event lock and deadlock shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     store = QueueStore(config.database)
+    next_upload_attempt = 0.0
     with connection, ServingArena.attach(descriptor) as arena:
         policy = RemotePolicy(spec, runtime, arena, connection, config.slot)
         while not stop.is_set():
-            _drain_pending_uploads(config.replay_dir / f"slot-{config.slot}", store)
+            next_upload_attempt = _retry_pending_uploads(
+                config.replay_dir / f"slot-{config.slot}",
+                store,
+                next_upload_attempt,
+            )
             job = store.claim_next(config.worker_id, lease_seconds=20.0)
             if job is None:
                 stop.wait(0.25)
