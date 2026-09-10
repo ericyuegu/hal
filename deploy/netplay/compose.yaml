@@ -13,7 +13,7 @@ services:
     command: ["hal-netplay-api", "--host", "0.0.0.0", "--port", "8080"]
     environment:
       HAL_NETPLAY_DATABASE: /var/lib/hal-netplay/queue.sqlite3
-      HAL_NETPLAY_CAPACITY: "2"
+      HAL_NETPLAY_CAPACITY: "1"
       HAL_NETPLAY_ALLOWED_ORIGINS: ${HAL_NETPLAY_ALLOWED_ORIGINS:?set the Sites origin}
       HAL_NETPLAY_ALLOWED_HOSTS: ${HAL_NETPLAY_ALLOWED_HOSTS:?set the API hostname}
       HAL_NETPLAY_RUNNER_STATUS: /var/lib/hal-netplay/runner-status.json
@@ -36,9 +36,9 @@ services:
       - --database
       - /var/lib/hal-netplay/queue.sqlite3
       - --user-jsons
-      - /run/hal-secrets/slippi-user-a.json,/run/hal-secrets/slippi-user-b.json
+      - /run/hal-secrets/slippi-user-a.json
       - --slippi-ports
-      - "51441,51442"
+      - "51441"
       - --iso-path
       - /run/hal-assets/ssbm.ciso
       - --dolphin-path
@@ -58,7 +58,6 @@ services:
       - state:/var/lib/hal-netplay
       - ${HAL_NETPLAY_POLICY:?set HAL_NETPLAY_POLICY}:/run/hal-policy/policy.halpolicy:ro
       - ${HAL_NETPLAY_USER_JSON_A:?set HAL_NETPLAY_USER_JSON_A}:/run/hal-secrets/slippi-user-a.json:ro
-      - ${HAL_NETPLAY_USER_JSON_B:?set HAL_NETPLAY_USER_JSON_B}:/run/hal-secrets/slippi-user-b.json:ro
       - ${HAL_ISO_PATH:?set HAL_ISO_PATH}:/run/hal-assets/ssbm.ciso:ro
       - ${HAL_NETPLAY_EMULATOR_PATH:?set HAL_NETPLAY_EMULATOR_PATH}:/run/hal-assets/Slippi_Online-x86_64.AppImage:ro
     shm_size: 1gb

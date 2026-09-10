@@ -50,7 +50,7 @@ def test_compiled_policy_latency_has_no_post_prepare_recompile(delay: int, limit
     if not value or not Path(value).is_file():
         pytest.fail("HAL_NETPLAY_POLICY must name the production policy bundle")
     policy = load_policy(value, device="cuda", seed=0, compiled=True)
-    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    policy.prepare(RuntimeConfig(max_batch_size=rows, transport_delays=(2, 3)))
 
     with torch.compiler.set_stance("fail_on_recompile"):
         p95_ms = _measure(policy, rows, delay)

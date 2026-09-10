@@ -16,7 +16,9 @@ uv sync --extra netplay-server
 
 The runner and `hal-play` use eager PyTorch by default. The production Compose
 command passes `--compiled`; deploy it only after the policy and GPU pass the
-batch-one and batch-two no-recompile qualification.
+batch-one no-recompile qualification. Compose intentionally runs one slot. Do
+not raise its capacity until two concurrent live games pass the batch-two
+qualification and the frame-latency limits below.
 
 The runner reports rolling game FPS and p95 frame interval, Dolphin step,
 policy round trip, model inference, and batching wait through `/v1/capacity`
@@ -37,9 +39,8 @@ qualification. Do not replace either file without running the compatibility and
 timing tests. The runner checks the Dolphin executable hash before each launch.
 
 Copy `deploy/netplay/.env.example` to an untracked file outside the repository.
-Set the exact deployed Git SHA, policy bundle, two account JSON files, game
-assets, R2 credentials, Sites origin, API hostname, and Cloudflare tunnel token.
-Each slot's account must have a distinct connect code.
+Set the exact deployed Git SHA, policy bundle, account JSON file, game assets,
+R2 credentials, Sites origin, API hostname, and Cloudflare tunnel token.
 
 Configure the Cloudflare tunnel hostname to send traffic to `http://api:8080`.
 The API has no host port and the runner receives no inbound Internet traffic.
@@ -60,7 +61,7 @@ docker compose --env-file /secure/path/hal-netplay.env \
 ```
 
 SQLite state and replay upload spools live in the `state` volume. Back up this
-volume. Do not run two runner containers against the same two Slippi slots.
+volume. Do not run two runner containers against the same Slippi account.
 
 Production replays are private at:
 
