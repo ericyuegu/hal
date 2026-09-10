@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import json
 import os
 import time
 from collections.abc import AsyncIterator
@@ -37,6 +36,11 @@ from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Choice
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.health import RUNNER_HEARTBEAT_MAX_AGE_SECONDS
+from hal.netplay_service.health import TARGET_GAME_FPS
+from hal.netplay_service.health import RunnerState
+from hal.netplay_service.health import RunnerStatus
+from hal.netplay_service.health import read_runner_status
 from hal.netplay_service.queue import ActiveJobError
 from hal.netplay_service.queue import AuthenticationError
 from hal.netplay_service.queue import InvalidTransitionError
@@ -133,8 +137,23 @@ class CreatedJobResponse(JobResponse):
 
 class CapacityResponse(BaseModel):
     capacity: int
+    healthy_slots: int
     active: int
     queued: int
+    service_status: str
+    service_message: str
+    target_fps: float
+    game_fps: float | None
+    frame_interval_p95_ms: float | None
+    dolphin_step_p95_ms: float | None
+    policy_round_trip_p95_ms: float | None
+    model_inference_p95_ms: float | None
+    batch_wait_p95_ms: float | None
+    recoveries: int
+
+
+class _RunnerUnavailableError(RuntimeError):
+    pass
 
 
 def _choices(values: tuple[Choice, ...]) -> tuple[ChoiceResponse, ...]:
@@ -163,6 +182,76 @@ def _job(job: Job) -> JobResponse:
     )
 
 
+def _runner_health(config: ApiConfig) -> RunnerStatus:
+    if config.runner_status is None:
+        return RunnerStatus(
+            state=RunnerState.READY,
+            message="Game servers are ready.",
+            policy_sha256="0" * 64,
+            slots=config.capacity,
+            healthy_slots=config.capacity,
+            target_fps=TARGET_GAME_FPS,
+            game_fps=None,
+            frame_interval_p95_ms=None,
+            dolphin_step_p95_ms=None,
+            policy_round_trip_p95_ms=None,
+            model_inference_p95_ms=None,
+            batch_wait_p95_ms=None,
+            recoveries=0,
+            updated_at=time.time(),
+        )
+    try:
+        status = read_runner_status(config.runner_status)
+    except ValueError as error:
+        raise _RunnerUnavailableError("runner status is unavailable") from error
+    age = time.time() - status.updated_at
+    if not -RUNNER_HEARTBEAT_MAX_AGE_SECONDS <= age <= RUNNER_HEARTBEAT_MAX_AGE_SECONDS:
+        raise _RunnerUnavailableError("runner heartbeat is stale")
+    if status.slots != config.capacity:
+        raise _RunnerUnavailableError(
+            f"runner has {status.slots} slots, but the API is configured for {config.capacity}"
+        )
+    return status
+
+
+def _capacity(config: ApiConfig, queue: QueueStore) -> CapacityResponse:
+    try:
+        status = _runner_health(config)
+    except _RunnerUnavailableError:
+        return CapacityResponse(
+            capacity=config.capacity,
+            healthy_slots=0,
+            active=queue.active_count(),
+            queued=queue.queue_depth(),
+            service_status=RunnerState.UNAVAILABLE.value,
+            service_message="Game servers are unavailable. Try again shortly.",
+            target_fps=TARGET_GAME_FPS,
+            game_fps=None,
+            frame_interval_p95_ms=None,
+            dolphin_step_p95_ms=None,
+            policy_round_trip_p95_ms=None,
+            model_inference_p95_ms=None,
+            batch_wait_p95_ms=None,
+            recoveries=0,
+        )
+    return CapacityResponse(
+        capacity=config.capacity,
+        healthy_slots=status.healthy_slots,
+        active=queue.active_count(),
+        queued=queue.queue_depth(),
+        service_status=status.state.value,
+        service_message=status.message,
+        target_fps=status.target_fps,
+        game_fps=status.game_fps,
+        frame_interval_p95_ms=status.frame_interval_p95_ms,
+        dolphin_step_p95_ms=status.dolphin_step_p95_ms,
+        policy_round_trip_p95_ms=status.policy_round_trip_p95_ms,
+        model_inference_p95_ms=status.model_inference_p95_ms,
+        batch_wait_p95_ms=status.batch_wait_p95_ms,
+        recoveries=status.recoveries,
+    )
+
+
 def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     queue = QueueStore(config.database) if store is None else store
     registry = CollectorRegistry()
@@ -171,6 +260,34 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     )
     queue_gauge = Gauge("hal_netplay_queue_depth", "Queued reservations", registry=registry)
     active_gauge = Gauge("hal_netplay_active_reservations", "Active reservations", registry=registry)
+    healthy_slots_gauge = Gauge("hal_netplay_healthy_slots", "Healthy Dolphin slots", registry=registry)
+    game_fps_gauge = Gauge("hal_netplay_game_fps", "Lowest recent Dolphin frame rate", registry=registry)
+    frame_p95_gauge = Gauge(
+        "hal_netplay_frame_interval_p95_ms",
+        "Highest recent p95 Dolphin frame interval",
+        registry=registry,
+    )
+    dolphin_p95_gauge = Gauge(
+        "hal_netplay_dolphin_step_p95_ms",
+        "Highest recent p95 blocking Dolphin step",
+        registry=registry,
+    )
+    policy_p95_gauge = Gauge(
+        "hal_netplay_policy_round_trip_p95_ms",
+        "Highest recent p95 worker-to-policy round trip",
+        registry=registry,
+    )
+    model_p95_gauge = Gauge(
+        "hal_netplay_model_inference_p95_ms",
+        "Recent p95 model inference time",
+        registry=registry,
+    )
+    batch_wait_p95_gauge = Gauge(
+        "hal_netplay_batch_wait_p95_ms",
+        "Recent p95 request-coalescing wait",
+        registry=registry,
+    )
+    recoveries_gauge = Gauge("hal_netplay_slot_recoveries", "Automatic Dolphin slot recoveries", registry=registry)
 
     async def reap() -> None:
         while True:
@@ -235,20 +352,25 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     @app.get("/health/ready", include_in_schema=False)
     def ready() -> dict[str, str]:
         queue.queue_depth()
-        if config.runner_status is not None:
-            try:
-                status = json.loads(config.runner_status.read_text())
-                updated_at = float(status["updated_at"])
-            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
-                raise HTTPException(status_code=503, detail="runner is not ready") from error
-            if time.time() - updated_at > 5.0:
-                raise HTTPException(status_code=503, detail="runner heartbeat is stale")
+        try:
+            _runner_health(config)
+        except _RunnerUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         return {"status": "ready"}
 
     @app.get("/metrics", include_in_schema=False)
     def metrics() -> Response:
-        queue_gauge.set(queue.queue_depth())
-        active_gauge.set(queue.active_count())
+        capacity_status = _capacity(config, queue)
+        queue_gauge.set(capacity_status.queued)
+        active_gauge.set(capacity_status.active)
+        healthy_slots_gauge.set(capacity_status.healthy_slots)
+        game_fps_gauge.set(capacity_status.game_fps or 0.0)
+        frame_p95_gauge.set(capacity_status.frame_interval_p95_ms or 0.0)
+        dolphin_p95_gauge.set(capacity_status.dolphin_step_p95_ms or 0.0)
+        policy_p95_gauge.set(capacity_status.policy_round_trip_p95_ms or 0.0)
+        model_p95_gauge.set(capacity_status.model_inference_p95_ms or 0.0)
+        batch_wait_p95_gauge.set(capacity_status.batch_wait_p95_ms or 0.0)
+        recoveries_gauge.set(capacity_status.recoveries)
         return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/v1/options", response_model=OptionsResponse)
@@ -259,10 +381,16 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
 
     @app.get("/v1/capacity", response_model=CapacityResponse)
     def capacity() -> CapacityResponse:
-        return CapacityResponse(capacity=config.capacity, active=queue.active_count(), queued=queue.queue_depth())
+        return _capacity(config, queue)
 
     @app.post("/v1/jobs", response_model=CreatedJobResponse, status_code=201)
     def create_job(body: CreateJobRequest) -> CreatedJobResponse:
+        try:
+            status = _runner_health(config)
+        except _RunnerUnavailableError as error:
+            raise HTTPException(status_code=503, detail="Game servers are unavailable. Try again shortly.") from error
+        if status.healthy_slots == 0:
+            raise HTTPException(status_code=503, detail=status.message)
         try:
             credentials = queue.create_job(
                 body.player_code,

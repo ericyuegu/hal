@@ -40,6 +40,22 @@ import {
 type SavedJob = { id: string; token: string };
 const savedJobKey = 'hal-netplay-job-v1';
 const terminal = new Set(['complete', 'failed', 'canceled', 'no_show']);
+const unavailableCapacity: Capacity = {
+  capacity: 2,
+  healthy_slots: 0,
+  active: 0,
+  queued: 0,
+  service_status: 'unavailable',
+  service_message: 'Game servers are unavailable. Try again shortly.',
+  target_fps: 60,
+  game_fps: null,
+  frame_interval_p95_ms: null,
+  dolphin_step_p95_ms: null,
+  policy_round_trip_p95_ms: null,
+  model_inference_p95_ms: null,
+  batch_wait_p95_ms: null,
+  recoveries: 0,
+};
 
 function readSavedJob(): SavedJob | null {
   if (typeof window === 'undefined') return null;
@@ -59,11 +75,7 @@ function readSavedJob(): SavedJob | null {
 
 export default function Home() {
   const [options, setOptions] = useState<Options>(fallbackOptions);
-  const [capacity, setCapacity] = useState<Capacity>({
-    capacity: 2,
-    active: 0,
-    queued: 0,
-  });
+  const [capacity, setCapacity] = useState<Capacity>(unavailableCapacity);
   const [saved, setSaved] = useState<SavedJob | null>(readSavedJob);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState('');
@@ -111,14 +123,15 @@ export default function Home() {
   useEffect(() => {
     let canceled = false;
     async function refresh() {
-      const next = await getCapacity();
-      if (!canceled) setCapacity(next);
+      try {
+        const next = await getCapacity();
+        if (!canceled) setCapacity(next);
+      } catch {
+        if (!canceled) setCapacity(unavailableCapacity);
+      }
     }
-    void refresh().catch(() => undefined);
-    const timer = window.setInterval(
-      () => void refresh().catch(() => undefined),
-      5000,
-    );
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5000);
     return () => {
       canceled = true;
       window.clearInterval(timer);
@@ -216,7 +229,7 @@ export default function Home() {
   return (
     <main className="min-h-screen px-5 py-6 sm:px-8 lg:px-12 lg:py-10">
       <div className="mx-auto max-w-[1180px]">
-        <Header connected={!error} />
+        <Header capacity={capacity} />
         <div className="grid gap-8 pt-9 lg:grid-cols-[minmax(0,1fr)_330px] lg:gap-12">
           <section aria-labelledby="queue-title">
             {job ? (
@@ -235,6 +248,7 @@ export default function Home() {
             ) : (
               <JoinForm
                 options={options}
+                capacity={capacity}
                 busy={busy}
                 error={error}
                 join={join}
@@ -248,7 +262,8 @@ export default function Home() {
   );
 }
 
-function Header({ connected }: { connected: boolean }) {
+function Header({ capacity }: { capacity: Capacity }) {
+  const status = serviceStatus(capacity.service_status);
   return (
     <header className="flex items-center justify-between border-b border-white/10 pb-5">
       <div className="flex items-center gap-3">
@@ -260,10 +275,10 @@ function Header({ connected }: { connected: boolean }) {
       </div>
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <span
-          className={connected ? 'status-pulse' : 'status-pulse offline'}
+          className={`status-pulse ${capacity.service_status}`}
           aria-hidden="true"
         />
-        {connected ? 'Queue service' : 'Reconnecting'}
+        {status}
       </div>
     </header>
   );
@@ -271,11 +286,13 @@ function Header({ connected }: { connected: boolean }) {
 
 function JoinForm({
   options,
+  capacity,
   busy,
   error,
   join,
 }: {
   options: Options;
+  capacity: Capacity;
   busy: boolean;
   error: string;
   join: (values: CreateJob) => Promise<Job>;
@@ -371,7 +388,7 @@ function JoinForm({
             type="submit"
             size="lg"
             className="queue-button"
-            disabled={busy}
+            disabled={busy || capacity.healthy_slots === 0}
           >
             {busy ? (
               <LoaderCircle className="animate-spin" />
@@ -382,6 +399,11 @@ function JoinForm({
             )}
           </Button>
         </div>
+        {capacity.healthy_slots === 0 && (
+          <output className="mt-4 block text-sm text-amber-200">
+            {capacity.service_message}
+          </output>
+        )}
         <ErrorMessage value={error} />
       </form>
     </>
@@ -634,6 +656,7 @@ function RematchForm({
 }
 
 function QueueAside({ capacity }: { capacity: Capacity }) {
+  const fps = capacity.game_fps;
   return (
     <aside className="space-y-5" aria-label="Queue information">
       <section className="surface overflow-hidden">
@@ -641,8 +664,20 @@ function QueueAside({ capacity }: { capacity: Capacity }) {
           <p className="eyebrow">LIVE CAPACITY</p>
         </div>
         <div className="grid grid-cols-2 divide-x divide-white/10">
-          <Stat value={String(capacity.capacity)} label="Game slots" />
+          <Stat
+            value={`${capacity.healthy_slots}/${capacity.capacity}`}
+            label="Healthy slots"
+          />
           <Stat value={String(capacity.queued)} label="In queue" />
+        </div>
+        <div className="border-t border-white/10 px-5 py-4">
+          <p className="text-sm font-medium">
+            {serviceStatus(capacity.service_status)}
+            {fps === null ? '' : ` · ${fps.toFixed(1)} FPS`}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {capacity.service_message}
+          </p>
         </div>
       </section>
       <section className="surface p-5">
@@ -657,6 +692,10 @@ function QueueAside({ capacity }: { capacity: Capacity }) {
       </section>
     </aside>
   );
+}
+
+function serviceStatus(status: Capacity['service_status']): string {
+  return status[0].toUpperCase() + status.slice(1);
 }
 
 function ChoiceSelect({

@@ -48,6 +48,10 @@ from hal.wire import slp_stage_to_libmelee
 _DOLPHIN_TERM_GRACE_SECONDS = 0.25
 
 
+class FrameTimeout(TimeoutError):
+    """Dolphin did not produce the next frame before its deadline."""
+
+
 class SessionOptions(TypedDict):
     """Spawn-safe constructor arguments used by evaluation workers."""
 
@@ -150,7 +154,7 @@ def step_blocking(console: melee.Console, timeout_seconds: float) -> melee.GameS
         if gamestate is not None:
             return gamestate
         if time.monotonic() > deadline:
-            raise TimeoutError(
+            raise FrameTimeout(
                 f"Dolphin produced no frame in {timeout_seconds:.1f}s; emulator hung or slippstream disconnected"
             )
 

@@ -116,7 +116,7 @@ class _Policy:
 
     def step(self, inputs: tuple[PolicyInput, ...]) -> tuple[PolicyOutput, ...]:
         self.inputs.extend(inputs)
-        action = ControllerAction(len(self.inputs) / 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        action = ControllerAction(((len(self.inputs) - 1) % 10 + 1) / 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
         return (PolicyOutput(inputs[0].stream_id, action),)
 
 
@@ -153,6 +153,8 @@ def test_match_loop_starts_policy_at_frame_zero_with_real_conditioning(monkeypat
     assert session.submitted[0].main_x == 0.1
     assert len(result.trajectory) == 10
     assert result.inference_p95_ms >= 0.0
+    assert result.game_fps > 0.0
+    assert result.frame_interval_p95_ms >= result.dolphin_step_p95_ms
     assert result.transport_correction_frames == 0
     assert result.stage == 32
 
@@ -183,6 +185,25 @@ def test_match_loop_rejects_a_broken_frame_zero_session_contract() -> None:
             _Policy(),
             RuntimeConfig(1, (2,), 2),
         )
+
+
+def test_new_match_resets_existing_policy_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    policy = _Policy()
+    runtime = RuntimeConfig(1, (2,), 2)
+
+    for _ in range(2):
+        run_netplay_match(
+            _Session(),
+            NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+            policy,
+            runtime,
+            max_frames=10,
+        )
+
+    reset_frames = [item.frame_id for item in policy.inputs if item.reset]
+    assert reset_frames == [0, 0]
 
 
 def test_match_loop_accepts_a_recent_slippi_time_sync_replay(monkeypatch: pytest.MonkeyPatch) -> None:

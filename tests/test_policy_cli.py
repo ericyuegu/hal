@@ -62,7 +62,13 @@ def test_play_prepares_before_dolphin_connects(tmp_path: Path, monkeypatch: pyte
 
     def run_match(*_args, **_kwargs):
         events.append("connect")
-        return SimpleNamespace(trajectory=[1], inference_p95_ms=1.0, transport_correction_frames=0)
+        return SimpleNamespace(
+            trajectory=[1],
+            game_fps=60.0,
+            frame_interval_p95_ms=16.7,
+            inference_p95_ms=1.0,
+            transport_correction_frames=0,
+        )
 
     monkeypatch.setattr(cli, "resolve_checkpoint", lambda _path: bundle)
     monkeypatch.setattr(cli, "load_policy", lambda *_args, **_kwargs: Policy())

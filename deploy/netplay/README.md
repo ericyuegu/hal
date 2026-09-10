@@ -14,8 +14,21 @@ The API and runner use the optional Python extra:
 uv sync --extra netplay-server
 ```
 
-The runner uses eager PyTorch by default. Pass `--compiled` only after the
-deployed policy and GPU have passed the no-recompile latency qualification.
+The runner and `hal-play` use eager PyTorch by default. The production Compose
+command passes `--compiled`; deploy it only after the policy and GPU pass the
+batch-one and batch-two no-recompile qualification.
+
+The runner reports rolling game FPS and p95 frame interval, Dolphin step,
+policy round trip, model inference, and batching wait through `/v1/capacity`
+and `/metrics`. After 120 playable frames, a slot is degraded below 59 FPS,
+above a 20 ms frame-interval p95, or above its delay-specific policy deadline.
+
+Eight continuous seconds of bad frame cadence closes Dolphin and retries the
+reservation once. A two-second frame-stream stall retries immediately. Slow
+inference removes the slot from healthy capacity but does not restart Dolphin.
+An inference-engine or worker-process failure exits the runner, and Compose's
+`unless-stopped` policy restarts it. The API rejects new reservations only when
+no healthy slot remains.
 
 ## Host setup
 

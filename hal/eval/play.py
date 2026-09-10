@@ -7,6 +7,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import peppi_py
 from loguru import logger
@@ -37,12 +38,33 @@ class PlayResult:
     stage: int
     wall_seconds: float
     inference_seconds: tuple[float, ...]
+    frame_interval_seconds: tuple[float, ...]
+    dolphin_step_seconds: tuple[float, ...]
     transport_correction_frames: int
 
     @property
     def inference_p95_ms(self) -> float:
         """Nearest-rank p95 of the complete policy call."""
         return _p95_ms(self.inference_seconds)
+
+    @property
+    def game_fps(self) -> float:
+        elapsed = sum(self.frame_interval_seconds)
+        return len(self.frame_interval_seconds) / elapsed if elapsed > 0 else 0.0
+
+    @property
+    def frame_interval_p95_ms(self) -> float:
+        return _p95_ms(self.frame_interval_seconds)
+
+    @property
+    def dolphin_step_p95_ms(self) -> float:
+        return _p95_ms(self.dolphin_step_seconds)
+
+
+class PlayObserver(Protocol):
+    def observe_policy(self, seconds: float) -> None: ...
+
+    def observe_frame(self, frame_id: int, dolphin_step_seconds: float) -> None: ...
 
 
 def _p95_ms(values: Collection[float]) -> float:
@@ -178,6 +200,7 @@ def run_netplay_match(
     max_frames: int = 28_800,
     rematch: bool = False,
     on_live: Callable[[], None] | None = None,
+    observer: PlayObserver | None = None,
     stream_id: int = 0,
 ) -> PlayResult:
     """Play one game from a neutral frame-zero session boundary."""
@@ -233,6 +256,9 @@ def run_netplay_match(
         maxlen=8,
     )
     first_policy_frame = True
+    frame_interval_seconds: list[float] = []
+    dolphin_step_seconds: list[float] = []
+    last_frame_at = time.perf_counter()
     while len(captured) < max_frames:
         item = PolicyInput(
             stream_id=stream_id,
@@ -247,7 +273,10 @@ def run_netplay_match(
         validate_policy_inputs(policy.spec, runtime, (item,))
         inference_started = time.perf_counter()
         outputs = tuple(policy.step((item,)))
-        inference_seconds.append(time.perf_counter() - inference_started)
+        inference_elapsed = time.perf_counter() - inference_started
+        inference_seconds.append(inference_elapsed)
+        if observer is not None:
+            observer.observe_policy(inference_elapsed)
         action = validate_policy_outputs((item,), outputs)[stream_id]
         if previous_submitted is not None:
             changed_frames += action != previous_submitted
@@ -263,9 +292,16 @@ def run_netplay_match(
         previous_submitted = action
         due = transport.submit(action)
         recent_scheduled.append(due)
+        dolphin_step_started = time.perf_counter()
         current, in_game = session.step(action)
+        frame_at = time.perf_counter()
+        dolphin_step_seconds.append(frame_at - dolphin_step_started)
+        frame_interval_seconds.append(frame_at - last_frame_at)
+        last_frame_at = frame_at
         captured.append(current)
         if in_game:
+            if observer is not None:
+                observer.observe_frame(int(current["id"]), dolphin_step_seconds[-1])
             observed = _frame_action(current, ego_port)
             transport_correction_frames += _transport_was_corrected(
                 current,
@@ -296,12 +332,19 @@ def run_netplay_match(
         raise RuntimeError(f"netplay game did not finish within {max_frames} frames")
 
     wall_seconds = time.monotonic() - started
+    frame_interval_values = tuple(frame_interval_seconds)
+    dolphin_step_values = tuple(dolphin_step_seconds)
+    game_fps = len(frame_interval_values) / sum(frame_interval_values)
     logger.info(
-        "netplay game ended stream={} frames={} wall={:.1f}s policy_p95={:.1f}ms corrections={} "
-        "output_changes={}/{} button_edges={} main_changes={} c_changes={}",
+        "netplay game ended stream={} frames={} wall={:.1f}s fps={:.1f} frame_p95={:.1f}ms "
+        "dolphin_p95={:.1f}ms policy_p95={:.1f}ms corrections={} output_changes={}/{} "
+        "button_edges={} main_changes={} c_changes={}",
         stream_id,
         len(captured),
         wall_seconds,
+        game_fps,
+        _p95_ms(frame_interval_values),
+        _p95_ms(dolphin_step_values),
         _p95_ms(inference_seconds),
         transport_correction_frames,
         changed_frames,
@@ -317,5 +360,7 @@ def run_netplay_match(
         stage=stage,
         wall_seconds=wall_seconds,
         inference_seconds=tuple(inference_seconds),
+        frame_interval_seconds=frame_interval_values,
+        dolphin_step_seconds=dolphin_step_values,
         transport_correction_frames=transport_correction_frames,
     )

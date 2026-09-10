@@ -109,7 +109,13 @@
   box-shadow: 0 0 0 4px oklch(0.79 0.17 157 / 12%);
 }
 
-.status-pulse.offline {
+.status-pulse.degraded,
+.status-pulse.recovering {
+  background: oklch(0.8 0.14 80);
+  box-shadow: 0 0 0 4px oklch(0.8 0.14 80 / 12%);
+}
+
+.status-pulse.unavailable {
   background: oklch(0.7 0.13 30);
   box-shadow: 0 0 0 4px oklch(0.7 0.13 30 / 12%);
 }

@@ -185,7 +185,8 @@ def _play(args: argparse.Namespace) -> None:
     if result.inference_p95_ms >= limit_ms:
         raise RuntimeError(f"policy p95 {result.inference_p95_ms:.1f} ms must stay below {limit_ms:.1f} ms")
     print(
-        f"completed {len(result.trajectory)} frames; policy p95={result.inference_p95_ms:.1f} ms; "
+        f"completed {len(result.trajectory)} frames at {result.game_fps:.1f} FPS; "
+        f"frame p95={result.frame_interval_p95_ms:.1f} ms; policy p95={result.inference_p95_ms:.1f} ms; "
         f"Slippi transport corrections={result.transport_correction_frames}; replay={replay}"
     )
 

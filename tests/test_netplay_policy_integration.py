@@ -172,5 +172,7 @@ def _assert_gameplay(results: tuple[PlayResult, PlayResult], delay: int) -> None
         summary = summarize_trajectory(result.trajectory)
         assert min(summary.p1_stocks_left, summary.p2_stocks_left) == 0
         assert result.inference_p95_ms < limit_ms
+        assert result.game_fps >= 59.0
+        assert result.frame_interval_p95_ms <= 20.0
         position = result.trajectory.post[result.ego_port]["position_x"]
         assert np.nanmax(position) - np.nanmin(position) > 5.0

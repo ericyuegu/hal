@@ -35,6 +35,19 @@ from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import validate_player_code
+from hal.netplay_service.health import FRAME_STALL_SECONDS
+from hal.netplay_service.health import SLOT_HEARTBEAT_MAX_AGE_SECONDS
+from hal.netplay_service.health import SLOT_STARTUP_GRACE_SECONDS
+from hal.netplay_service.health import RunnerState
+from hal.netplay_service.health import RunnerStatus
+from hal.netplay_service.health import RuntimeHealth
+from hal.netplay_service.health import RuntimeSnapshot
+from hal.netplay_service.health import SlotState
+from hal.netplay_service.health import SlotStatus
+from hal.netplay_service.health import aggregate_runner_status
+from hal.netplay_service.health import read_slot_status
+from hal.netplay_service.health import write_runner_status
+from hal.netplay_service.health import write_slot_status
 from hal.netplay_service.inference import ContinuousBatcher
 from hal.netplay_service.inference import RemotePolicy
 from hal.netplay_service.inference import ServingArena
@@ -47,8 +60,10 @@ from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
+from hal.sim.session import FrameTimeout
 
 _PENDING_UPLOAD_RETRY_SECONDS = 60.0
+_SLOT_STATUS_INTERVAL_SECONDS = 1.0
 
 
 class _StopEvent(Protocol):
@@ -71,9 +86,15 @@ class SlotConfig:
     iso_path: Path
     dolphin_path: Path
     replay_dir: Path
+    status_path: Path
     policy_sha256: str
     git_sha: str
     max_frames: int = 54_000
+    recovery_cooldown_seconds: float = 2.0
+
+    def __post_init__(self) -> None:
+        if self.recovery_cooldown_seconds < 0:
+            raise ValueError("slot recovery cooldown must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +131,134 @@ class RunnerConfig:
             raise ValueError("runner max_frames must be at least 6")
 
 
+class _RecoverableRuntimeError(RuntimeError):
+    pass
+
+
+class _SlotHealthReporter:
+    """Publish one slot heartbeat without file I/O in the frame loop."""
+
+    def __init__(self, slot: int, path: Path) -> None:
+        self._slot = slot
+        self._path = path
+        self._monitor = RuntimeHealth()
+        self._state = SlotState.STARTING
+        self._reason: str | None = None
+        self._delay: int | None = None
+        self._recoveries = 0
+        self._lock = threading.RLock()
+        self._write_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._publisher_error: BaseException | None = None
+        self._publisher = threading.Thread(
+            target=self._publish_loop,
+            name=f"hal-netplay-slot-{slot}-health",
+            daemon=True,
+        )
+
+    def __enter__(self) -> _SlotHealthReporter:
+        self._publish()
+        self._publisher.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._publisher.join(timeout=2.0)
+
+    def idle(self) -> None:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            if self._state is SlotState.IDLE:
+                return
+            self._monitor.finish()
+            self._state = SlotState.IDLE
+            self._reason = None
+            self._delay = None
+        self._publish()
+
+    def connecting(self, delay: int) -> None:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            self._monitor.finish()
+            self._state = SlotState.CONNECTING
+            self._reason = None
+            self._delay = delay
+        self._publish()
+
+    def playing(self) -> None:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            if self._delay is None:
+                raise RuntimeError("slot health has no online delay")
+            self._monitor.begin(self._delay, time.monotonic())
+            self._state = SlotState.PLAYING
+            self._reason = None
+        self._publish()
+
+    def observe_frame(self, frame_id: int, dolphin_step_seconds: float) -> None:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            snapshot = self._monitor.observe_frame(frame_id, dolphin_step_seconds, time.monotonic())
+        self._raise_if_recovery_required(snapshot)
+
+    def observe_policy(self, seconds: float) -> None:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            snapshot = self._monitor.observe_policy(seconds, time.monotonic())
+        self._raise_if_recovery_required(snapshot)
+
+    def recovering(self, reason: str) -> None:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            self._monitor.finish()
+            self._state = SlotState.RECOVERING
+            self._reason = reason
+            self._recoveries += 1
+        self._publish()
+
+    def status(self) -> SlotStatus:
+        with self._lock:
+            self._raise_if_publisher_failed()
+            snapshot = self._monitor.snapshot(time.monotonic())
+            state = self._state
+            reason = self._reason
+            if state is SlotState.PLAYING and snapshot.reason is not None:
+                state = SlotState.RECOVERING if snapshot.recovery_required else SlotState.DEGRADED
+                reason = snapshot.reason
+            return SlotStatus(
+                slot=self._slot,
+                state=state,
+                game_fps=snapshot.game_fps,
+                frame_interval_p95_ms=snapshot.frame_interval_p95_ms,
+                dolphin_step_p95_ms=snapshot.dolphin_step_p95_ms,
+                policy_round_trip_p95_ms=snapshot.policy_round_trip_p95_ms,
+                reason=reason,
+                recoveries=self._recoveries,
+                updated_at=time.time(),
+            )
+
+    @staticmethod
+    def _raise_if_recovery_required(snapshot: RuntimeSnapshot) -> None:
+        if snapshot.recovery_required:
+            raise _RecoverableRuntimeError(snapshot.reason or "runtime_degraded")
+
+    def _raise_if_publisher_failed(self) -> None:
+        if self._publisher_error is not None:
+            raise RuntimeError("slot health publisher failed") from self._publisher_error
+
+    def _publish(self) -> None:
+        with self._write_lock:
+            write_slot_status(self._path, self.status())
+
+    def _publish_loop(self) -> None:
+        try:
+            while not self._stop.wait(_SLOT_STATUS_INTERVAL_SECONDS):
+                self._publish()
+        except BaseException as error:
+            with self._lock:
+                self._publisher_error = error
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -118,22 +267,61 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_status(path: Path, *, policy_sha256: str, slots: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".partial")
-    temporary.write_text(
-        json.dumps(
-            {
-                "policy_sha256": policy_sha256,
-                "schema_version": 1,
-                "slots": slots,
-                "updated_at": time.time(),
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+def _slot_status_path(path: Path, slot: int) -> Path:
+    return path.with_name(f"{path.name}.slot-{slot}.json")
+
+
+def _unavailable_slot_status(slot: int, now: float, *, starting: bool) -> SlotStatus:
+    return SlotStatus(
+        slot=slot,
+        state=SlotState.STARTING if starting else SlotState.RECOVERING,
+        game_fps=None,
+        frame_interval_p95_ms=None,
+        dolphin_step_p95_ms=None,
+        policy_round_trip_p95_ms=None,
+        reason="slot_starting" if starting else "slot_heartbeat_missing",
+        recoveries=0,
+        updated_at=now,
     )
-    temporary.replace(path)
+
+
+def _load_slot_statuses(paths: tuple[Path, ...], *, now: float, started_at: float) -> tuple[SlotStatus, ...]:
+    statuses: list[SlotStatus] = []
+    starting = now - started_at <= SLOT_STARTUP_GRACE_SECONDS
+    for slot, path in enumerate(paths):
+        try:
+            status = read_slot_status(path)
+        except ValueError:
+            statuses.append(_unavailable_slot_status(slot, now, starting=starting))
+            continue
+        age = now - status.updated_at
+        if status.slot != slot or not -SLOT_HEARTBEAT_MAX_AGE_SECONDS <= age <= SLOT_HEARTBEAT_MAX_AGE_SECONDS:
+            statuses.append(_unavailable_slot_status(slot, now, starting=False))
+            continue
+        statuses.append(status)
+    return tuple(statuses)
+
+
+def _write_status(
+    path: Path,
+    *,
+    policy_sha256: str,
+    slot_paths: tuple[Path, ...],
+    started_at: float,
+    model_inference_p95_ms: float | None,
+    batch_wait_p95_ms: float | None,
+) -> RunnerStatus:
+    now = time.time()
+    slots = _load_slot_statuses(slot_paths, now=now, started_at=started_at)
+    status = aggregate_runner_status(
+        policy_sha256,
+        slots,
+        now,
+        model_inference_p95_ms=model_inference_p95_ms,
+        batch_wait_p95_ms=batch_wait_p95_ms,
+    )
+    write_runner_status(path, status)
+    return status
 
 
 def _bot_connect_code(path: Path) -> str:
@@ -303,6 +491,7 @@ def _run_reservation(
     runtime: RuntimeConfig,
     job: Job,
     stop: _StopEvent,
+    health: _SlotHealthReporter,
 ) -> None:
     replay_dir = config.replay_dir / f"slot-{config.slot}"
     replay_dir.mkdir(parents=True, exist_ok=True)
@@ -330,6 +519,7 @@ def _run_reservation(
     def mark_live() -> None:
         nonlocal live
         store.mark_playing(job.id, config.worker_id)
+        health.playing()
         live = True
         logger.info(
             "reservation {} live on slot {} game={} delay={}",
@@ -340,6 +530,7 @@ def _run_reservation(
         )
 
     store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=60.0)
+    health.connecting(job.choices.online_delay)
     try:
         with NetplaySession(
             config.iso_path,
@@ -348,6 +539,7 @@ def _run_reservation(
             online_delay=job.choices.online_delay,
             replay_dir=replay_dir,
             slippi_port=config.slippi_port,
+            step_timeout_seconds=FRAME_STALL_SECONDS,
             connect_timeout_seconds=60.0,
         ) as session:
             rematch = False
@@ -363,6 +555,7 @@ def _run_reservation(
                     max_frames=config.max_frames,
                     rematch=rematch,
                     on_live=mark_live,
+                    observer=health,
                     stream_id=config.stream_id,
                 )
                 ended_at = datetime.now(UTC)
@@ -385,15 +578,18 @@ def _run_reservation(
                     result=human_result,
                 )
                 logger.info(
-                    "reservation {} game={} complete frames={} wall={:.1f}s stage={} human_result={} "
-                    "policy_p95={:.1f}ms corrections={}",
+                    "reservation {} game={} complete frames={} wall={:.1f}s fps={:.1f} frame_p95={:.1f}ms "
+                    "dolphin_p95={:.1f}ms policy_p95={:.1f}ms stage={} human_result={} corrections={}",
                     job.id,
                     job.game_count + 1,
                     len(result.trajectory),
                     result.wall_seconds,
+                    result.game_fps,
+                    result.frame_interval_p95_ms,
+                    result.dolphin_step_p95_ms,
+                    result.inference_p95_ms,
                     actual_stage,
                     human_result,
-                    result.inference_p95_ms,
                     result.transport_correction_frames,
                 )
                 metadata = ReplayMetadata(
@@ -414,6 +610,7 @@ def _run_reservation(
                     logger.warning("replay upload deferred: {}: {}", type(error).__name__, error)
                 if next_status is JobStatus.COMPLETE:
                     return
+                health.idle()
                 while not stop.is_set():
                     session.park_menu()
                     try:
@@ -423,11 +620,14 @@ def _run_reservation(
                     if job.status is JobStatus.REMATCH_READY:
                         rematch = True
                         live = False
+                        health.connecting(job.choices.online_delay)
                         break
                     if job.status in TERMINAL_STATUSES:
                         return
                     if job.status is not JobStatus.REMATCH_WAIT:
                         raise RuntimeError(f"unexpected reservation status {job.status.value}")
+    except FrameTimeout:
+        raise _RecoverableRuntimeError("frame_stream_stalled") from None
     except TimeoutError:
         if not live:
             with suppress(InvalidTransitionError):
@@ -452,9 +652,14 @@ def _slot_worker(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     store = QueueStore(config.database)
     next_upload_attempt = 0.0
-    with connection, ServingArena.attach(descriptor) as arena:
+    with (
+        connection,
+        ServingArena.attach(descriptor) as arena,
+        _SlotHealthReporter(config.slot, config.status_path) as health,
+    ):
         policy = RemotePolicy(spec, runtime, arena, connection, config.slot)
         while not stop.is_set():
+            health.idle()
             next_upload_attempt = _retry_pending_uploads(
                 config.replay_dir / f"slot-{config.slot}",
                 store,
@@ -465,16 +670,39 @@ def _slot_worker(
                 stop.wait(0.25)
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
-            try:
-                _run_reservation(config, store, policy, runtime, job, stop)
-            except (KeyError, ValueError) as error:
-                logger.error("reservation {} rejected: {}: {}", job.id, type(error).__name__, error)
-                with suppress(InvalidTransitionError):
-                    store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=False)
-            except Exception as error:  # A reservation cannot kill a long-running slot.
-                logger.exception("reservation {} failed: {}", job.id, type(error).__name__)
-                with suppress(InvalidTransitionError):
-                    store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
+            _handle_reservation(config, store, policy, runtime, job, stop, health)
+
+
+def _handle_reservation(
+    config: SlotConfig,
+    store: QueueStore,
+    policy: RemotePolicy,
+    runtime: RuntimeConfig,
+    job: Job,
+    stop: _StopEvent,
+    health: _SlotHealthReporter,
+) -> None:
+    try:
+        _run_reservation(config, store, policy, runtime, job, stop, health)
+    except _RecoverableRuntimeError as error:
+        logger.error(
+            "reservation {} degraded on slot {}: {}; retrying with a fresh Dolphin",
+            job.id,
+            config.slot,
+            error,
+        )
+        health.recovering(str(error))
+        with suppress(InvalidTransitionError):
+            store.fail(job.id, config.worker_id, "runtime_degraded", retryable=True)
+        stop.wait(config.recovery_cooldown_seconds)
+    except (KeyError, ValueError) as error:
+        logger.error("reservation {} rejected: {}: {}", job.id, type(error).__name__, error)
+        with suppress(InvalidTransitionError):
+            store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=False)
+    except Exception as error:  # A reservation cannot kill a long-running slot.
+        logger.exception("reservation {} failed: {}", job.id, type(error).__name__)
+        with suppress(InvalidTransitionError):
+            store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
 
 
 def _start_slot_process(process: BaseProcess, child_connection: Connection) -> None:
@@ -528,6 +756,19 @@ def run(config: RunnerConfig) -> None:
 
     policy_sha256 = _sha256(config.policy)
     processes: list[BaseProcess] = []
+    slot_status_paths = tuple(_slot_status_path(config.status_path, slot) for slot in range(len(config.user_jsons)))
+    config.status_path.unlink(missing_ok=True)
+    for status_path in slot_status_paths:
+        status_path.unlink(missing_ok=True)
+    status_started_at = time.time()
+    _write_status(
+        config.status_path,
+        policy_sha256=policy_sha256,
+        slot_paths=slot_status_paths,
+        started_at=status_started_at,
+        model_inference_p95_ms=None,
+        batch_wait_p95_ms=None,
+    )
     with ServingArena.create(
         len(config.user_jsons),
         max(runtime.transport_delays),
@@ -547,6 +788,7 @@ def run(config: RunnerConfig) -> None:
                 iso_path=config.iso_path,
                 dolphin_path=config.dolphin_path,
                 replay_dir=config.replay_dir,
+                status_path=slot_status_paths[slot],
                 policy_sha256=policy_sha256,
                 git_sha=config.git_sha,
                 max_frames=config.max_frames,
@@ -586,6 +828,7 @@ def run(config: RunnerConfig) -> None:
         engine = threading.Thread(target=serve, name="hal-netplay-inference", daemon=True)
         engine.start()
         logger.info("netplay runner ready slots={} policy_sha256={}", len(processes), policy_sha256)
+        previous_state: RunnerState | None = None
         try:
             while not shutdown_requested:
                 if engine_error:
@@ -593,11 +836,32 @@ def run(config: RunnerConfig) -> None:
                 failed = [process for process in processes if not process.is_alive()]
                 if failed:
                     raise RuntimeError(f"netplay slot process exited with code {failed[0].exitcode}")
-                _write_status(
+                model_p95_ms, batch_wait_p95_ms = batcher.timing_p95_ms()
+                status = _write_status(
                     config.status_path,
                     policy_sha256=policy_sha256,
-                    slots=len(config.user_jsons),
+                    slot_paths=slot_status_paths,
+                    started_at=status_started_at,
+                    model_inference_p95_ms=model_p95_ms,
+                    batch_wait_p95_ms=batch_wait_p95_ms,
                 )
+                if status.state is not previous_state:
+                    logger.info(
+                        "netplay service state={} healthy_slots={}/{} game_fps={} "
+                        "frame_p95_ms={} dolphin_p95_ms={} policy_p95_ms={} "
+                        "model_p95_ms={} batch_wait_p95_ms={} recoveries={}",
+                        status.state.value,
+                        status.healthy_slots,
+                        status.slots,
+                        status.game_fps,
+                        status.frame_interval_p95_ms,
+                        status.dolphin_step_p95_ms,
+                        status.policy_round_trip_p95_ms,
+                        status.model_inference_p95_ms,
+                        status.batch_wait_p95_ms,
+                        status.recoveries,
+                    )
+                    previous_state = status.state
                 time.sleep(0.5)
         finally:
             stop.set()
@@ -610,6 +874,8 @@ def run(config: RunnerConfig) -> None:
             for connection in (*parent_connections.values(), *child_connections.values()):
                 connection.close()
             config.status_path.unlink(missing_ok=True)
+            for status_path in slot_status_paths:
+                status_path.unlink(missing_ok=True)
             logger.info("netplay runner stopped")
         if engine_error:
             raise RuntimeError("netplay inference engine failed") from engine_error[0]

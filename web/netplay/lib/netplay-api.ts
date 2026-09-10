@@ -12,8 +12,19 @@ export type Options = {
 
 export type Capacity = {
   capacity: number;
+  healthy_slots: number;
   active: number;
   queued: number;
+  service_status: 'ready' | 'degraded' | 'recovering' | 'unavailable';
+  service_message: string;
+  target_fps: number;
+  game_fps: number | null;
+  frame_interval_p95_ms: number | null;
+  dolphin_step_p95_ms: number | null;
+  policy_round_trip_p95_ms: number | null;
+  model_inference_p95_ms: number | null;
+  batch_wait_p95_ms: number | null;
+  recoveries: number;
 };
 
 export type Job = {
