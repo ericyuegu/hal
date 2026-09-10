@@ -29,6 +29,7 @@ from hal import streams
 from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
+from hal.data.schema import Rank
 from hal.eval.policy_sampling import SlotGroupRng
 from hal.inference.api import ObservationScalar
 from hal.inference.api import Policy
@@ -66,6 +67,7 @@ from hal.training.features import stack_actions
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import RingSlotDescriptor
 from hal.training.player_identity import FIRST_CONNECT_CODE_ID
+from hal.training.player_identity import PlayerVocabulary
 from hal.training.player_identity import decode_player_codes
 from hal.training.player_identity import encode_player_codes
 from hal.wire import BUTTON_BITS
@@ -460,7 +462,6 @@ class _StreamState:
     queued: deque[ControllerAction] = field(default_factory=deque)
     last_frame_id: int | None = None
     controlled_port: int | None = None
-    player_code: str | None = None
     player_id: int | None = None
     reset_pending: bool = True
 
@@ -469,7 +470,6 @@ class _StreamState:
         self.queued.clear()
         self.last_frame_id = None
         self.controlled_port = None
-        self.player_code = None
         self.player_id = None
         self.reset_pending = True
 
@@ -500,6 +500,7 @@ class O50Policy:
         self._model = model
         self._config = config
         self._stats = dict(stats)
+        self._player_vocabulary = PlayerVocabulary(codes)
         self._code_to_id = {code: FIRST_CONNECT_CODE_ID + index for index, code in enumerate(codes)}
         self._device = device
         self._seed = secrets.randbits(64) if seed is None else seed
@@ -516,7 +517,7 @@ class O50Policy:
             backend=O50_BACKEND,
             required_observation_fields=O50_REQUIRED_OBSERVATION_FIELDS,
             supported_transport_delays=_SUPPORTED_DELAYS,
-            requires_player_code=True,
+            requires_player_identity=True,
         )
 
     @property
@@ -634,18 +635,24 @@ class O50Policy:
             indices = self._decoder(hidden, observed[:, -1], forced, uniforms)
         return self._model.codec.dequantize(indices)
 
-    def _player_id(self, code: str | None) -> int:
-        if code is None:
-            raise ValueError("O50 requires an exact player code")
+    def _player_id(self, identity: str | None) -> int:
+        if identity is None:
+            raise ValueError("O50 requires a player identity")
         try:
-            return self._code_to_id[code]
+            rank = Rank[identity]
+        except KeyError:
+            pass
+        else:
+            return self._player_vocabulary.id_for_rank(rank)
+        try:
+            return self._code_to_id[identity]
         except KeyError as error:
-            raise KeyError(f"player code {code!r} is absent from the O50 training vocabulary") from error
+            raise KeyError(f"player identity {identity!r} is absent from the O50 training vocabulary") from error
 
     def _ingest(self, item: PolicyInput) -> _StreamState:
         if not isinstance(item.frame_id, int) or isinstance(item.frame_id, bool):
             raise ValueError(f"stream {item.stream_id} frame_id must be an integer")
-        player_id = self._player_id(item.player_code)
+        player_id = self._player_id(item.player_identity)
         is_new = item.stream_id not in self._states
         if is_new and not item.reset:
             raise ValueError(f"new O50 stream {item.stream_id} must start with reset=True")
@@ -655,10 +662,9 @@ class O50Policy:
             state.reset()
         if state.controlled_port is not None and state.controlled_port != item.controlled_port:
             raise ValueError(f"stream {item.stream_id} changed controlled port without a reset")
-        if state.player_code is not None and state.player_code != item.player_code:
-            raise ValueError(f"stream {item.stream_id} changed player code without a reset")
+        if state.player_id is not None and state.player_id != player_id:
+            raise ValueError(f"stream {item.stream_id} changed player identity without a reset")
         state.controlled_port = item.controlled_port
-        state.player_code = item.player_code
         state.player_id = player_id
         state.last_frame_id = item.frame_id
         state.history.append(_relative_observation(item))

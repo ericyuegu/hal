@@ -23,7 +23,7 @@ class PolicySpec:
     backend: str
     required_observation_fields: tuple[str, ...]
     supported_transport_delays: tuple[int, ...]
-    requires_player_code: bool = False
+    requires_player_identity: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -86,7 +86,7 @@ class PolicyInput:
     observation: Mapping[str, ObservationScalar]
     applied_action: ControllerAction
     pending_actions: tuple[ControllerAction, ...]
-    player_code: str | None = None
+    player_identity: str | None = None
     reset: bool = False
 
 
@@ -166,8 +166,12 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
                 raise ValueError(f"stream {item.stream_id} observation {name!r} must be numeric, got {value!r}")
             if isinstance(value, Real) and math.isinf(float(value)):
                 raise ValueError(f"stream {item.stream_id} observation {name!r} must not be infinite")
-        if spec.requires_player_code and not item.player_code:
-            raise ValueError(f"stream {item.stream_id} requires a player code")
+        if item.player_identity is not None and (
+            not isinstance(item.player_identity, str) or not item.player_identity
+        ):
+            raise ValueError(f"stream {item.stream_id} player identity must be a non-empty string")
+        if spec.requires_player_identity and item.player_identity is None:
+            raise ValueError(f"stream {item.stream_id} requires a player identity")
         validate_controller_action(item.applied_action)
         for action in item.pending_actions:
             validate_controller_action(action)

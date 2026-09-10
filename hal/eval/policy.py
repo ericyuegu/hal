@@ -32,11 +32,11 @@ class PolicyBatchAdapter:
         policy: Policy,
         runtime: RuntimeConfig,
         *,
-        player_code: str | None = None,
+        player_identity: str | None = None,
     ) -> None:
         self.policy = policy
         self.runtime = runtime
-        self.player_code = player_code
+        self.player_identity = player_identity
         self._states: dict[Slot, _StreamState] = {}
 
     def __call__(
@@ -74,7 +74,7 @@ class PolicyBatchAdapter:
                     observation=flatten_canonical_frame(frame),
                     applied_action=applied,
                     pending_actions=state.transport.pending,
-                    player_code=self.player_code,
+                    player_identity=self.player_identity,
                     reset=reset,
                 )
             )

@@ -112,7 +112,7 @@ def run_netplay_match(
     policy: Policy,
     runtime: RuntimeConfig,
     *,
-    player_code: str | None = None,
+    player_identity: str | None = None,
     max_frames: int = 28_800,
 ) -> PlayResult:
     """Play one game after flushing menu inputs from Slippi's delay queue."""
@@ -167,7 +167,7 @@ def run_netplay_match(
             observation=_flat_observation(current, characters),
             applied_action=_frame_action(current, ego_port),
             pending_actions=transport.pending,
-            player_code=player_code,
+            player_identity=player_identity,
             reset=first_policy_frame,
         )
         validate_policy_inputs(policy.spec, runtime, (item,))

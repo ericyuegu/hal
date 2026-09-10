@@ -11,10 +11,19 @@ from hal.scripts import policy as cli
 def test_play_cli_defaults_are_calibrated() -> None:
     args = cli._play_parser().parse_args(["policy.halpolicy", "HUMAN#1"])
     assert args.character is melee.Character.FOX
-    assert args.player_code == "IBDW#0"
+    assert args.imitate == "IBDW#0"
     assert args.online_delay == 2
     assert args.replay_dir == Path("replays/human-play")
     assert args.slippi_port == 51441
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("platinum", "PLATINUM"), ("Diamond", "DIAMOND"), ("MASTER", "MASTER"), ("ZAIN#0", "ZAIN#0")],
+)
+def test_play_cli_accepts_rank_or_exact_player_identity(value: str, expected: str) -> None:
+    args = cli._play_parser().parse_args(["policy.halpolicy", "HUMAN#1", "--imitate", value])
+    assert args.imitate == expected
 
 
 def test_user_json_environment_and_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

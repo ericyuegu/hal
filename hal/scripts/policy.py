@@ -8,6 +8,7 @@ from pathlib import Path
 import melee
 import torch
 
+from hal.data.schema import Rank
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import run_matches_vec
@@ -25,6 +26,8 @@ from hal.sim.netplay import NetplaySetup
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.vec import VecMatch
+
+_RANK_IDENTITIES = tuple(rank.name for rank in (Rank.PLATINUM, Rank.DIAMOND, Rank.MASTER))
 
 
 def _character(name: str) -> melee.Character:
@@ -44,6 +47,11 @@ def _user_json(override: str | None) -> Path:
     return path.resolve()
 
 
+def _player_identity(value: str) -> str:
+    rank = value.upper()
+    return rank if rank in _RANK_IDENTITIES else value
+
+
 def _policy_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hal-policy")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -54,7 +62,12 @@ def _policy_parser() -> argparse.ArgumentParser:
 
     evaluate = commands.add_parser("eval", help="run a portable policy against local CPUs")
     evaluate.add_argument("policy")
-    evaluate.add_argument("--player-code", default="IBDW#0")
+    evaluate.add_argument(
+        "--imitate",
+        type=_player_identity,
+        default="IBDW#0",
+        help="exact connect code or PLATINUM, DIAMOND, or MASTER",
+    )
     evaluate.add_argument("--transport-delay", type=int, choices=(0, 2, 3), default=2)
     evaluate.add_argument("--replan-interval", type=int)
     evaluate.add_argument("--n-matches", type=int, default=1)
@@ -73,7 +86,12 @@ def _play_parser() -> argparse.ArgumentParser:
     parser.add_argument("policy")
     parser.add_argument("opponent_code")
     parser.add_argument("--character", type=_character, default=melee.Character.FOX)
-    parser.add_argument("--player-code", default="IBDW#0")
+    parser.add_argument(
+        "--imitate",
+        type=_player_identity,
+        default="IBDW#0",
+        help="exact connect code or PLATINUM, DIAMOND, or MASTER",
+    )
     parser.add_argument("--online-delay", type=int, choices=(2, 3), default=2)
     parser.add_argument("--user-json")
     parser.add_argument("--replay-dir", type=Path, default=Path("replays/human-play"))
@@ -119,7 +137,7 @@ def _eval(args: argparse.Namespace) -> None:
         )
         for ego, cpu in matchups_for_vs_cpu(args.n_matches)
     ]
-    adapter = PolicyBatchAdapter(policy, runtime, player_code=args.player_code)
+    adapter = PolicyBatchAdapter(policy, runtime, player_identity=args.imitate)
     boots = run_matches_vec(
         default_session_cfg(args.replay_dir),
         matches,
@@ -157,7 +175,7 @@ def _play(args: argparse.Namespace) -> None:
             setup,
             policy,
             runtime,
-            player_code=args.player_code,
+            player_identity=args.imitate,
             max_frames=args.max_frames,
         )
     replay = require_completed_replay(replay_dir, previous_replays)

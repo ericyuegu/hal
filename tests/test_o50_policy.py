@@ -14,6 +14,7 @@ import hal.inference.o50 as o50
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
+from hal.data.schema import Rank
 from hal.inference.api import PolicyInput
 from hal.inference.api import RuntimeConfig
 from hal.inference.o50 import O50_REQUIRED_OBSERVATION_FIELDS
@@ -129,7 +130,7 @@ def _input(
     delay: int,
     *,
     controlled_port: int = 1,
-    player_code: str = "IBDW#0",
+    player_identity: str = "IBDW#0",
     reset: bool = False,
 ) -> PolicyInput:
     pending = tuple(
@@ -145,7 +146,7 @@ def _input(
         observation=_observation(),
         applied_action=NEUTRAL_CONTROLLER_ACTION,
         pending_actions=pending,
-        player_code=player_code,
+        player_identity=player_identity,
         reset=reset,
     )
 
@@ -271,13 +272,19 @@ def test_temporal_decoder_advances_through_every_forced_action(
         assert torch.equal(seen[depth], forced[:, depth - 1])
 
 
-def test_player_code_resolution_is_exact_and_case_sensitive() -> None:
+def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
     policy = _policy()
     policy.prepare(RuntimeConfig(max_batch_size=1, transport_delay_frames=3))
     with pytest.raises(KeyError, match="ibdw"):
-        policy.step([_input(0, 3, player_code="ibdw#0")])
+        policy.step([_input(0, 3, player_identity="ibdw#0")])
     with pytest.raises(KeyError, match="IBDW#0 "):
-        policy.step([_input(0, 3, player_code="IBDW#0 ")])
+        policy.step([_input(0, 3, player_identity="IBDW#0 ")])
+    assert policy._player_id("PLATINUM") == int(Rank.PLATINUM)
+    assert policy._player_id("DIAMOND") == int(Rank.DIAMOND)
+    assert policy._player_id("MASTER") == int(Rank.MASTER)
+    assert policy._player_id("IBDW#0") == FIRST_CONNECT_CODE_ID
+    with pytest.raises(ValueError, match="Platinum, Diamond, or Master"):
+        policy._player_id("PRO")
 
 
 def test_port_relative_adapter_and_applied_action_alignment() -> None:
@@ -296,7 +303,7 @@ def test_port_relative_adapter_and_applied_action_alignment() -> None:
             observation=observation,
             applied_action=applied,
             pending_actions=item.pending_actions,
-            player_code=item.player_code,
+            player_identity=item.player_identity,
             reset=True,
         )
     )
@@ -330,7 +337,7 @@ def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None
         observation=observation,
         applied_action=original.applied_action,
         pending_actions=original.pending_actions,
-        player_code=original.player_code,
+        player_identity=original.player_identity,
         reset=True,
     )
     state = policy._ingest(item)

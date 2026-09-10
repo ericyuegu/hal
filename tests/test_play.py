@@ -122,6 +122,7 @@ def test_match_loop_flushes_delay_and_passes_real_conditioning(monkeypatch: pyte
         NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
         policy,
         runtime,
+        player_identity="MASTER",
         max_frames=10,
     )
     first = policy.inputs[0]
@@ -129,6 +130,7 @@ def test_match_loop_flushes_delay_and_passes_real_conditioning(monkeypatch: pyte
     assert first.frame_id == 3
     assert first.applied_action == NEUTRAL_CONTROLLER_ACTION
     assert first.pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2
+    assert first.player_identity == "MASTER"
     assert first.observation == {"stage": 8, "p1_character": 1, "p2_character": 22}
     assert session.submitted[:3] == [NEUTRAL_CONTROLLER_ACTION] * 3
     assert session.submitted[3].main_x == 0.1
