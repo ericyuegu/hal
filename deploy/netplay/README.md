@@ -1,13 +1,5 @@
 # HAL netplay deployment
 
-The frontend is an independent static Sites project in `web/netplay`. Its npm
-dependencies are not HAL dependencies. Build it with the public API origin:
-
-```text
-cd web/netplay
-NEXT_PUBLIC_HAL_API_URL=https://api.example.com npm run build
-```
-
 The API and runner use the optional Python extra:
 
 ```text
@@ -32,25 +24,87 @@ An inference-engine or worker-process failure exits the runner, and Compose's
 `unless-stopped` policy restarts it. The API rejects new reservations only when
 no healthy slot remains.
 
-## Host setup
+## Requirements
+
+The host needs Docker Engine, Docker Compose, the NVIDIA Container Toolkit, and
+an NVIDIA GPU that passed `tests/test_netplay_hardware.py`. Confirm that a
+container can use the GPU before deployment.
+
+Qualify the compiled policy on the deployment GPU:
+
+```text
+HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1 \
+HAL_NETPLAY_POLICY=/absolute/path/to/policy.halpolicy \
+uv run pytest -q tests/test_netplay_hardware.py -m integration
+```
 
 Use the tested Slippi 3.6.4 AppImage and the same Melee CISO used by local
 qualification. Do not replace either file without running the compatibility and
 timing tests. The runner checks the Dolphin executable hash before each launch.
 
-Copy `deploy/netplay/.env.example` to an untracked file outside the repository.
-Set the exact deployed Git SHA, policy bundle, account JSON file, game assets,
-R2 credentials, Sites origin, API hostname, and Cloudflare tunnel token.
+## Run one slot
+
+From the repository root, copy the environment template to a protected path
+outside the repository:
+
+```text
+cp deploy/netplay/.env.example /secure/path/hal-netplay.env
+```
+
+Set all values in that file. `HAL_GIT_SHA` must be the full commit that you
+will deploy. Set the policy bundle, one account JSON file, game assets, R2
+credentials, Sites origin, API hostname, and Cloudflare tunnel token.
 
 Configure the Cloudflare tunnel hostname to send traffic to `http://api:8080`.
 The API has no host port and the runner receives no inbound Internet traffic.
 
-Start the service:
+Validate the resolved Compose configuration:
+
+```text
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml config --quiet
+```
+
+Build and start the API, one-slot runner, and tunnel:
 
 ```text
 docker compose --env-file /secure/path/hal-netplay.env \
   -f deploy/netplay/compose.yaml up --build -d
 ```
+
+Check container state, API readiness, capacity, and runner logs:
+
+```text
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml ps
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml exec api \
+  curl --fail http://localhost:8080/health/ready
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml exec api \
+  curl --fail http://localhost:8080/v1/capacity
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml logs --tail=100 runner
+```
+
+The capacity response must report one healthy slot before users submit jobs.
+Use `docker compose logs -f runner api` with the same environment file and
+Compose file options for live logs.
+
+## Frontend
+
+The frontend is an independent static Sites project in `web/netplay`. Its npm
+dependencies are not HAL dependencies. Build it with the public API origin:
+
+```text
+cd web/netplay
+npm ci
+NEXT_PUBLIC_HAL_API_URL=https://api.example.com npm run build
+```
+
+Deploy the built Sites project, then open its public hostname to submit a job.
+
+## Operations
 
 Install the 30-day R2 lifecycle rule:
 
@@ -58,6 +112,20 @@ Install the 30-day R2 lifecycle rule:
 docker compose --env-file /secure/path/hal-netplay.env \
   -f deploy/netplay/compose.yaml exec runner \
   hal-netplay-admin install-replay-lifecycle
+```
+
+Restart only the runner after a transient GPU or Dolphin fault:
+
+```text
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml restart runner
+```
+
+Stop the service without deleting its named state volume:
+
+```text
+docker compose --env-file /secure/path/hal-netplay.env \
+  -f deploy/netplay/compose.yaml down
 ```
 
 SQLite state and replay upload spools live in the `state` volume. Back up this
