@@ -46,10 +46,19 @@ dependencies = [
     "yasoo",
 ]
 
+[project.optional-dependencies]
+netplay-server = [
+    "fastapi",
+    "prometheus-client",
+    "uvicorn[standard]",
+]
+
 [project.scripts]
 fetch = "hal.scripts.fetch:main"
 hal-play = "hal.scripts.policy:play_main"
 hal-policy = "hal.scripts.policy:main"
+hal-netplay-admin = "hal.netplay_service.admin:main"
+hal-netplay-api = "hal.netplay_service.api:main"
 slp-link = "hal.scripts.slp_link:main"
 slippi-jwt = "hal.scripts.slippi_jwt:main"
 
@@ -57,6 +66,7 @@ slippi-jwt = "hal.scripts.slippi_jwt:main"
 dev = [
     "autoflake",
     "autotyping",
+    "httpx",
     "ipykernel",
     "pre-commit",
     "pytest",
