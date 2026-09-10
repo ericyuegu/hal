@@ -57,7 +57,12 @@
     .artifact.interactive{transition:transform .14s ease,box-shadow .14s ease}
     .artifact.interactive:hover{transform:translate(-1px,-1px);box-shadow:4px 4px 0 rgba(28,37,48,.18)}
     figcaption{font:400 .72rem/1.5 var(--mono);letter-spacing:.02em;color:var(--ink-mono);margin-top:9px}
-    .interactive-mark{color:var(--oxblood);font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin-right:.5rem}
+    .source-toggle{border:0;border-bottom:1px solid var(--rule-underline);padding:0;background:transparent;color:var(--ink-mono);font:inherit;cursor:pointer}
+    .source-toggle:hover{color:var(--oxblood);border-color:var(--oxblood)}
+    .source-line,.run-source,.run-source-cell{display:none}
+    body.show-run-sources .source-line{display:block}
+    body.show-run-sources .run-source{display:inline}
+    body.show-run-sources .run-source-cell{display:table-cell}
     .figure-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;padding:3px 3px 11px;border-bottom:1px solid var(--rule)}
     .figure-head h4{margin:0;font-size:1.03rem}
     .figure-head p{margin:.18rem 0 0;color:var(--ink-soft);font-size:.9rem}
@@ -108,33 +113,51 @@
     .chart .point{stroke:var(--white);stroke-width:1.5;cursor:crosshair}
     .chart .point:focus{stroke:var(--ink);stroke-width:2}
     .chart-note{font-size:.86rem;color:var(--ink-soft);line-height:1.45;margin:8px 3px 0}
-    .lineage-tabs{display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid var(--ink)}
-    .lineage-tab{padding:12px 13px;text-align:left;background:var(--paper);border:0;border-right:1px solid var(--rule-dotted);cursor:pointer}
-    .lineage-tab:last-child{border-right:0}
-    .lineage-tab[aria-selected="true"]{background:var(--ink);color:var(--paper)}
+    .lineage-tab{padding:12px 13px;text-align:left;background:var(--paper);border:0;cursor:pointer}
     .lineage-tab b{display:block;font:600 .7rem/1.3 var(--mono)}
-    .lineage-tab span{display:block;font:400 .65rem/1.4 var(--mono);opacity:.72;margin-top:.25rem}
-    .lineage-body{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(220px,.75fr);gap:18px;padding:18px 3px 5px;align-items:center}
-    .lineage-copy{border-left:2px solid var(--rule-dotted);padding-left:15px}
-    .lineage-copy h4{margin:0 0 .4rem}
-    .lineage-copy p{font-size:.92rem;color:var(--ink-soft)}
     .source-line{font-size:.68rem;line-height:1.5;color:var(--ink-mono)}
     .source-line a{color:var(--ink-mono);text-decoration:underline;text-decoration-color:var(--rule-underline);text-underline-offset:3px}
-    .matrix-wrap{display:grid;grid-template-columns:minmax(330px,.9fr) minmax(0,1.2fr);gap:22px;padding:18px 3px 4px}
-    .factor-matrix{display:grid;grid-template-columns:74px repeat(2,1fr);grid-template-rows:52px repeat(2,120px);gap:4px}
-    .matrix-axis{font:400 .64rem/1.35 var(--mono);color:var(--ink-mono);display:flex;align-items:center;justify-content:center;text-align:center}
-    .factor-cell{border:1px solid var(--rule-dotted);background:var(--paper);padding:11px;cursor:pointer;text-align:left}
-    .factor-cell:hover{border-color:var(--ink)}
-    .factor-cell[aria-pressed="true"]{border:2px solid var(--oxblood);padding:10px;background:var(--surface-aside)}
-    .factor-cell b{display:block;font:600 .7rem/1.3 var(--mono)}
-    .factor-cell .score{display:block;font:700 1.1rem/1.3 var(--mono);margin-top:.7rem}
-    .factor-cell .bound{display:block;font:400 .63rem/1.35 var(--mono);color:var(--ink-mono)}
-    .factor-explain{align-self:stretch;border-left:1px solid var(--rule);padding-left:20px}
-    .factor-explain h4{margin:.25rem 0 .4rem}
-    .mini-specs{display:grid;grid-template-columns:repeat(2,1fr);border-top:1px solid var(--rule);margin-top:1rem}
-    .mini-specs div{padding:9px 9px 4px 0}
-    .mini-specs b{display:block;font:600 .66rem/1.3 var(--mono)}
-    .mini-specs span{font-size:.85rem;color:var(--ink-soft)}
+    .decoder-comparison{padding:2px 4px 4px}
+    .decoder-row{display:grid;grid-template-columns:155px minmax(0,1fr);gap:18px;align-items:center;padding:20px 0;border-bottom:1px dotted var(--rule-dotted)}
+    .decoder-row:last-child{border-bottom:0}
+    .decoder-name b{display:block;font:600 .7rem/1.35 var(--mono)}
+    .decoder-name span{display:block;margin-top:.35rem;font-size:.82rem;line-height:1.4;color:var(--ink-soft)}
+    .decoder-row.flagship .decoder-name b{color:var(--oxblood)}
+    .decoder-flow{display:grid;grid-template-columns:64px 25px minmax(0,1fr);align-items:center;min-height:96px}
+    .decoder-state{border:1px solid var(--ink);padding:10px 5px;text-align:center;background:var(--paper)}
+    .decoder-state b{display:block;font:600 .75rem/1.2 var(--mono)}
+    .decoder-state span{font:400 .57rem/1.3 var(--mono);color:var(--ink-faint)}
+    .decoder-arrow,.time-arrow{font:400 .8rem/1 var(--mono);color:var(--ink-faint);text-align:center}
+    .action-plan{min-width:0}
+    .plan-note{display:block;margin:0 0 7px;font:400 .58rem/1.3 var(--mono);color:var(--ink-faint)}
+    .action-frames{display:flex;align-items:center;gap:5px;min-width:0}
+    .action-frame{flex:1;min-width:0;border-top:1px solid var(--ink);padding-top:5px}
+    .action-frame>span{display:block;font:600 .58rem/1.25 var(--mono);color:var(--ink-mono);margin-bottom:5px}
+    .action-groups{display:grid;grid-template-columns:repeat(7,auto);gap:2px;align-items:center;justify-content:start}
+    .action-groups i{display:flex;width:20px;height:23px;align-items:center;justify-content:center;border:1px solid var(--rule-dotted);background:var(--paper);font:normal 500 .55rem/1 var(--mono);color:var(--ink)}
+    .action-groups em{min-width:5px;font:normal 400 .56rem/1 var(--mono);color:transparent}
+    .action-frame.conditioned{border-color:var(--oxblood)}
+    .action-frame.conditioned .action-groups i{border-color:var(--oxblood)}
+    .action-frame.conditioned .action-groups em{color:var(--oxblood)}
+    .action-frame.conditioned>span,.decoder-row.flagship .time-arrow{color:var(--oxblood)}
+    .teacher-seed{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:45px;font:500 .55rem/1.2 var(--mono);color:var(--ink-mono)}
+    .teacher-seed small{font:400 .5rem/1.2 var(--mono);color:var(--ink-faint)}
+    .factor-bars{padding:14px 3px 4px}
+    .factor-bar-head,.factor-bar-row{display:grid;grid-template-columns:175px 1fr 1fr;gap:18px;align-items:center}
+    .factor-bar-head{padding-bottom:8px;border-bottom:1px solid var(--rule)}
+    .factor-bar-head span{font:500 .61rem/1.3 var(--mono);color:var(--ink-faint)}
+    .factor-bar-head span:not(:first-child){text-align:center}
+    .factor-bar-row{padding:11px 0;border-bottom:1px dotted var(--rule-dotted)}
+    .factor-bar-row:last-child{border-bottom:0}
+    .factor-bar-label b{display:block;font:600 .66rem/1.3 var(--mono)}
+    .factor-bar-label span{display:block;font:400 .57rem/1.35 var(--mono);color:var(--ink-faint);margin-top:2px}
+    .factor-bar-row.flagship .factor-bar-label b{color:var(--oxblood)}
+    .factor-track{position:relative;height:30px;background:var(--surface-aside);overflow:visible}
+    .factor-track::before{content:"";position:absolute;left:var(--zero);top:-3px;bottom:-3px;border-left:1px solid var(--ink-faint)}
+    .factor-track i{position:absolute;top:8px;height:14px;background:var(--ink);opacity:.65}
+    .factor-bar-row.flagship .factor-track i{background:var(--oxblood);opacity:1}
+    .factor-track output{position:absolute;top:5px;font:600 .61rem/1.3 var(--mono);white-space:nowrap;color:var(--ink)}
+    .factor-bar-row.flagship .factor-track output{color:var(--oxblood)}
     .codec-wrap{display:grid;grid-template-columns:260px minmax(0,1fr);gap:24px;align-items:center;padding:16px 3px 6px}
     .controller-img{width:100%;display:block;filter:grayscale(1);opacity:.82}
     .codec-groups{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:1rem 0}
@@ -146,9 +169,6 @@
     .delta-pair div{border-top:1px solid var(--rule);padding-top:8px}
     .delta-pair b{font:700 .95rem/1.3 var(--mono)}
     .delta-pair span{display:block;font:400 .64rem/1.4 var(--mono);color:var(--ink-faint)}
-    .decoder-lineage-body{padding:16px 3px 5px}
-    .decoder-lineage-body .lineage-copy{display:grid;grid-template-columns:190px minmax(0,1fr) auto;gap:16px;align-items:start;margin-top:8px}
-    .decoder-lineage-body .lineage-copy h4,.decoder-lineage-body .lineage-copy p{margin:0}
     .branch-list{padding:0 4px}
     .branch-study{display:grid;grid-template-columns:180px minmax(300px,1fr) 225px;gap:20px;align-items:center;padding:21px 0;border-bottom:1px dotted var(--rule-dotted)}
     .branch-study:last-child{border-bottom:0}
@@ -235,6 +255,15 @@
     .arch-node.active rect{stroke:var(--oxblood);stroke-width:2;fill:rgba(123,46,46,.06)}
     .arch-node.dim{opacity:.24}
     .arch-edge{fill:none;stroke:var(--ink-faint);stroke-width:1.2}
+    .section-map-anchor{position:relative}
+    .architecture-context{display:none;position:absolute;left:calc(100% + 48px);top:-12px;width:238px;color:var(--ink-faint);pointer-events:none}
+    .architecture-context .context-label{display:block;margin-bottom:3px;font:500 .58rem/1.35 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-ghost)}
+    .architecture-context svg{display:block;width:100%;height:auto;opacity:.72}
+    .context-edge{stroke:var(--rule-dotted);stroke-width:1;fill:none}
+    .context-node rect{fill:none;stroke:var(--rule-dotted);stroke-width:1}
+    .context-node text{font:500 8.5px/1 var(--mono);fill:var(--ink-ghost)}
+    .context-node.focus rect{stroke:var(--oxblood);stroke-width:1.5;fill:rgba(123,46,46,.04)}
+    .context-node.focus text{fill:var(--oxblood)}
     .ledger-controls{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 3px}
     .ledger-row{cursor:pointer}
     .ledger-row:hover{background:var(--surface-aside)}
@@ -264,13 +293,15 @@
       .site-top{padding-top:22px}
       main{padding:38px 20px 0}
       h1{font-size:2.35rem}
-      .release-list,.metrics-strip,.stats,.lineage-body,.matrix-wrap,.codec-wrap,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout,.branch-study{grid-template-columns:1fr}
+      .release-list,.metrics-strip,.stats,.codec-wrap,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout,.branch-study{grid-template-columns:1fr}
       .release-list li,.metrics-strip>div,.stat{border-right:0;border-bottom:1px solid var(--rule)}
       .release-list li:last-child,.metrics-strip>div:last-child,.stat:last-child{border-bottom:0}
-      .lineage-tabs{grid-template-columns:1fr}
-      .lineage-tab{border-right:0;border-bottom:1px solid var(--rule-dotted)}
-      .factor-matrix{grid-template-columns:58px repeat(2,1fr);grid-template-rows:45px repeat(2,108px)}
-      .decoder-lineage-body .lineage-copy{grid-template-columns:1fr}
+      .decoder-row{grid-template-columns:1fr;gap:10px}
+      .factor-bar-head,.factor-bar-row{grid-template-columns:128px 1fr;gap:10px}
+      .factor-bar-head span:first-child{display:none}
+      .factor-bar-head span:nth-child(2){grid-column:1;text-align:left}
+      .factor-bar-head span:nth-child(3){grid-column:2;text-align:left}
+      .factor-bar-row .factor-bar-label{grid-column:1/-1}
       .branch-study{gap:13px;padding:19px 0}
       .codec-groups{grid-template-columns:repeat(2,1fr)}
       .pipeline{grid-template-columns:1fr}
@@ -295,6 +326,18 @@
       .expanded-row{display:block}
       .expanded-row td{display:block}
     }
+    @media(max-width:520px){
+      .decoder-flow{grid-template-columns:1fr;gap:7px}
+      .decoder-state{width:72px}
+      .decoder-arrow{transform:rotate(90deg);width:72px}
+      .action-frames{flex-direction:column;align-items:stretch}
+      .action-frame{width:100%;display:grid;grid-template-columns:45px 1fr;align-items:center;border-top:0;border-left:1px solid var(--ink);padding:5px 0 5px 8px}
+      .action-frame.conditioned{border-left-color:var(--oxblood)}
+      .action-frame>span{margin:0}
+      .time-arrow{transform:rotate(90deg);align-self:flex-start;margin-left:47px}
+      .teacher-seed{align-items:flex-start;margin-left:8px}
+    }
+    @media(min-width:1260px){.architecture-context{display:block}}
     @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
     @media print{
       body{background:#fff}.site-top,.controls,.control-plate,.ledger-controls,.author-note{display:none!important}
@@ -315,7 +358,8 @@
       <h1>Anatomy of a <em>Melee</em> policy</h1>
       <div class="meta">
         <span>2026-09-09</span><span>·</span>
-        <a href="https://github.com/ericyuegu/hal">github.com/ericyuegu/hal</a>
+        <a href="https://github.com/ericyuegu/hal">github.com/ericyuegu/hal</a><span>·</span>
+        <button id="source-toggle" class="source-toggle" type="button" aria-pressed="false">show run sources</button>
       </div>
 
       <p class="lede">A year ago, I <a href="https://ericyuegu.com/melee-pt1/">trained</a> a <em>Melee</em> behavior cloning policy on expert human demonstrations.</p>
@@ -325,15 +369,17 @@
         <div class="artifact interactive">
           <div class="figure-head">
             <div>
-              <h4>The model I ended up training</h4>
-              <p>Closed-loop play did not improve monotonically with training.</p>
+              <h4>O50 architecture and training recipe</h4>
+              <p>Select a module to inspect the exact recipe.</p>
             </div>
-            <div class="segmented" aria-label="Production chart metric">
-              <button type="button" data-hero-metric="stock" aria-pressed="true">stocks</button>
-              <button type="button" data-hero-metric="damage" aria-pressed="false">damage</button>
+            <button id="clear-highlight" type="button" class="lineage-tab" style="border:1px solid var(--ink);width:auto" aria-label="Show the full model"><b>Full model</b></button>
+          </div>
+          <div class="architecture-wrap">
+            <div class="architecture-details">
+              <svg id="architecture-diagram" class="chart" viewBox="0 0 650 470" role="img" aria-label="O50 model architecture"></svg>
+              <div id="module-detail" class="module-detail"></div>
             </div>
           </div>
-          <svg id="hero-chart" class="chart" viewBox="0 0 900 300" role="img" aria-label="O50 closed-loop results during training"></svg>
           <div class="stats">
             <div class="stat"><span class="stat-value">216.5M</span><span class="stat-label">parameters</span></div>
             <div class="stat"><span class="stat-value">8.59B</span><span class="stat-label">supervised positions</span></div>
@@ -341,7 +387,7 @@
             <div class="stat"><span class="stat-value">+52.72 [+45.14]</span><span class="stat-label">net damage/min · mean [LCB]</span></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 1 — the line is the earlier Muon checkpoint series; the red endpoint is the all-AdamW production run. Both have 216,496,794 parameters and <span class="mono">8 × 2³⁰</span> supervised positions. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">Muon</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">all-AdamW</a>.</figcaption>
+        <figcaption>Fig. 1 — the 216.5M-parameter O50 policy. The temporal decoder predicts a controller plan from one trunk state; the standard runtime executes two frames before replanning. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
       </figure>
 
       <ul class="question-list">
@@ -386,54 +432,72 @@
 
       <h2 id="experiments">Experiments <span class="section-number">§ 1</span></h2>
 
-      <h3>Encoding and representation learning</h3>
-      <p>Next-frame prediction → independent multi-token prediction → DSv3-style multi-token prediction.</p>
+      <div class="section-map-anchor">
+        <h3>Encoding and representation learning</h3>
+        <aside class="architecture-context" data-focus="history temporal groups" aria-hidden="true"><span class="context-label">Model map · representation</span><svg viewBox="0 0 238 286"></svg></aside>
+      </div>
+      <p>Next-frame prediction → independent multi-token prediction → autoregressive multi-token prediction.</p>
 
       <figure class="breakout">
-        <div class="artifact interactive">
-          <div class="lineage-tabs" role="tablist" aria-label="Action decoder lineage">
-            <button class="lineage-tab" type="button" role="tab" data-lineage="next" aria-selected="true"><b>Next frame</b><span>O11 · one target</span></button>
-            <button class="lineage-tab" type="button" role="tab" data-lineage="mtp" aria-selected="false"><b>Independent MTP</b><span>O12 · four targets</span></button>
-            <button class="lineage-tab" type="button" role="tab" data-lineage="temporal" aria-selected="false"><b>Temporal MTP</b><span>O37 · causal targets</span></button>
+        <div class="artifact">
+          <div class="figure-head">
+            <div>
+              <h4>From one action to a conditioned plan</h4>
+              <p>Every row starts from the same observation-trunk state.</p>
+            </div>
           </div>
-          <div class="decoder-lineage-body">
-            <svg id="lineage-diagram" class="chart" viewBox="0 0 900 360" role="img" aria-label="Selected action decoder architecture"></svg>
-            <div id="lineage-copy" class="lineage-copy"></div>
+          <div class="decoder-comparison" aria-label="Action decoder lineage">
+            <div class="decoder-row">
+              <div class="decoder-name"><b>Next-frame prediction</b><span>One action. Replan after every frame.</span></div>
+              <div class="decoder-flow">
+                <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
+                <div class="action-plan"><span class="plan-note">one output head</span><div class="action-frames">
+                  <div class="action-frame"><span>action +1</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
+                </div></div>
+              </div>
+            </div>
+            <div class="decoder-row">
+              <div class="decoder-name"><b>Independent MTP</b><span>Several future heads share hₜ, but not predictions.</span></div>
+              <div class="decoder-flow">
+                <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
+                <div class="action-plan"><span class="plan-note">independent heads · no action feedback</span><div class="action-frames">
+                  <div class="action-frame"><span>action +1</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
+                  <div class="action-frame"><span>action +5</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
+                  <div class="action-frame"><span>action +9</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
+                  <div class="action-frame"><span>action +13</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
+                </div></div>
+              </div>
+            </div>
+            <div class="decoder-row flagship">
+              <div class="decoder-name"><b>Autoregressive MTP</b><span>Earlier frames condition later frames; controller groups condition the next group.</span></div>
+              <div class="decoder-flow">
+                <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
+                <div class="action-plan"><span class="plan-note">training: previous target · play: realized previous action</span><div class="action-frames">
+                  <div class="teacher-seed"><span>aₜ</span><small>observed</small></div><div class="time-arrow">→</div>
+                  <div class="action-frame conditioned"><span>action +1</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
+                  <div class="action-frame conditioned"><span>action +2</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
+                  <div class="action-frame conditioned"><span>action +3…20</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div>
+                </div></div>
+              </div>
+            </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 2 — architecture lineage. The temporal view shows the exact O50 dependencies in training and at D2/R2 deployment. “DSv3-style” is a design label, not a claim of exact code lineage.</figcaption>
+        <figcaption>Fig. 2 — action-decoder lineage. C, M, T, and B are C-stick, main stick, triggers, and buttons. O50 trains offsets <span class="mono">1–6, 9, 12, 16, 20</span> and uses offsets <span class="mono">1–4</span> in play. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
       <p>The clean comparison is O37. It separates two questions: should later predicted frames depend on earlier predicted frames, and should later controller parts depend on earlier parts from the same frame?</p>
 
       <figure class="breakout">
-        <div class="artifact interactive">
+        <div class="artifact">
           <div class="figure-head">
             <div>
-              <h4>Two kinds of autoregression</h4>
+              <h4>Factorization ablation</h4>
               <p>Same parameters, data, updates, initialization procedure, and deployment.</p>
             </div>
-            <div class="segmented" aria-label="Factorization metric">
-              <button type="button" data-factor-metric="stock" aria-pressed="true">stocks</button>
-              <button type="button" data-factor-metric="damage" aria-pressed="false">damage</button>
-            </div>
           </div>
-          <div class="matrix-wrap">
-            <div class="factor-matrix">
-              <div></div>
-              <div class="matrix-axis">within-frame<br>off</div>
-              <div class="matrix-axis">within-frame<br>on</div>
-              <div class="matrix-axis">across-frame<br>off</div>
-              <button class="factor-cell" type="button" data-factor="0" aria-pressed="false"></button>
-              <button class="factor-cell" type="button" data-factor="1" aria-pressed="false"></button>
-              <div class="matrix-axis">across-frame<br>on</div>
-              <button class="factor-cell" type="button" data-factor="2" aria-pressed="false"></button>
-              <button class="factor-cell" type="button" data-factor="3" aria-pressed="true"></button>
-            </div>
-            <div id="factor-explain" class="factor-explain"></div>
-          </div>
+          <div id="factor-chart" class="factor-bars" aria-label="Closed-loop scores for the four O37 factorization experiments"></div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 3 — O37’s complete 2×2. Across-frame feedback adds <span class="mono">+0.361</span> stocks/min and <span class="mono">+13.49</span> damage/min on average. Within-frame feedback adds <span class="mono">+0.245</span> and <span class="mono">+8.48</span>. Runs: <a href="https://wandb.ai/ericyuegu/hal/runs/98r9smrj">D0</a>, <a href="https://wandb.ai/ericyuegu/hal/runs/a117chkw">D1</a>, <a href="https://wandb.ai/ericyuegu/hal/runs/50q39o9j">D2</a>, <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">D3</a>.</figcaption>
+        <figcaption>Fig. 3 — O37’s complete 2×2. Across-frame feedback adds <span class="mono">+0.361</span> stocks/min and <span class="mono">+13.49</span> damage/min on average. Within-frame feedback adds <span class="mono">+0.245</span> and <span class="mono">+8.48</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/98r9smrj">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/a117chkw">within-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/50q39o9j">across-frame only</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
       <h4>Controller codec</h4>
@@ -456,7 +520,7 @@
             <div id="codec-detail"></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 4 — current code beat the legacy codec by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min: <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> vs. <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a>. Learned physical past-action embeddings also beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min: <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot</a>.</figcaption>
+        <figcaption>Fig. 4 — current code beat the legacy codec by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Learned physical past-action embeddings beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot history</a>.</span></figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -482,10 +546,13 @@
         </ul>
       </details>
 
-      <h3>Optimization</h3>
+      <div class="section-map-anchor">
+        <h3>Optimization</h3>
+        <aside class="architecture-context" data-focus="objective optimizer" aria-hidden="true"><span class="context-label">Model map · optimization</span><svg viewBox="0 0 238 286"></svg></aside>
+      </div>
       <p>Muon, but not on long runs. AWR.</p>
 
-      <p>The small optimizer comparison changed the optimizer and learning rates together. Muon + AdamW changed stock score by <span class="mono">+0.030</span> and damage by <span class="mono">−30.11</span> relative to AdamW. I used all-AdamW for the final long run. <a href="https://wandb.ai/ericyuegu/hal/runs/o3nihah5">AdamW</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">Muon + AdamW</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">production</a>.</p>
+      <p>The small optimizer comparison changed the optimizer and learning rates together. Muon + AdamW changed stock score by <span class="mono">+0.030</span> and damage by <span class="mono">−30.11</span> relative to AdamW. I used all-AdamW for the final long run. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/o3nihah5">AdamW</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">Muon + AdamW</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">production</a>.</span></p>
 
       <figure class="breakout">
         <div class="artifact interactive">
@@ -509,7 +576,7 @@
             </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 6 — mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.</figcaption>
+        <figcaption>Fig. 6 — mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.</figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -526,7 +593,10 @@
         <figcaption>Fig. 7 — flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with O26 BC; neither beats it.</figcaption>
       </figure>
 
-      <h3>Data &amp; infra</h3>
+      <div class="section-map-anchor">
+        <h3>Data &amp; infra</h3>
+        <aside class="architecture-context" data-focus="data" aria-hidden="true"><span class="context-label">Model map · data</span><svg viewBox="0 0 238 286"></svg></aside>
+      </div>
       <p>One window per replay, sufficient shuffle block size.</p>
       <p>Low-dimensional data with training sample trajectories considerably shorter than full episodes caused a disk-read bottleneck rather than a CPU or memory bottleneck when training on a large GPU.</p>
       <p>The workaround was to read more windows per episode into an in-memory buffer, then shuffle and sample uniformly from waves of slots, with a minimum number of batches before re-sampling the same window.</p>
@@ -548,7 +618,7 @@
             <div id="sampler-copy" class="sampler-copy"></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 8 — four windows per replay → one changed stock score from <span class="mono">−0.598</span> to <span class="mono">+0.130</span>, a <span class="mono">+0.728</span> gain. Damage changed from <span class="mono">+40.50</span> to <span class="mono">+34.27</span>. <a href="https://wandb.ai/ericyuegu/hal/runs/uw05bvm2">four windows</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">one window</a>.</figcaption>
+        <figcaption>Fig. 8 — four windows per replay → one changed stock score from <span class="mono">−0.598</span> to <span class="mono">+0.130</span>, a <span class="mono">+0.728</span> gain. Damage changed from <span class="mono">+40.50</span> to <span class="mono">+34.27</span>. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/uw05bvm2">four windows</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">one window</a>.</span></figcaption>
       </figure>
 
       <figure class="breakout">
@@ -578,7 +648,10 @@
         </ul>
       </details>
 
-      <h2 id="latency">Optimal model size vs. latency <span class="section-number">§ 2</span></h2>
+      <div class="section-map-anchor">
+        <h2 id="latency">Optimal model size vs. latency <span class="section-number">§ 2</span></h2>
+        <aside class="architecture-context" data-focus="trunk temporal runtime" aria-hidden="true"><span class="context-label">Model map · deployment</span><svg viewBox="0 0 238 286"></svg></aside>
+      </div>
       <p>The data here is noisy.</p>
 
       <figure class="breakout">
@@ -603,7 +676,7 @@
             </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 10 — O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
+        <figcaption>Fig. 10 — O37 at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -624,7 +697,7 @@
           <svg id="delay-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Model performance at several imposed delays"></svg>
           <p id="delay-note" class="chart-note"></p>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 11 — select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
+        <figcaption>Fig. 11 — select a model. Delay 1 is not automatically best, and size does not give a stable ordering. O39 source: <a href="../experiments/039_capacity_scaling.py">039_capacity_scaling.py</a>.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -641,7 +714,7 @@
           </div>
           <svg id="frontier-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Best deployable model at each delay"></svg>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 12 — best measured deployable damage result at each delay for the <span class="mono">D = 2³⁰</span> checkpoints. The stock view shows those same damage-selected models.</figcaption>
+        <figcaption>Fig. 12 — best measured deployable damage result at each delay for the <span class="mono">D = 2³⁰</span> checkpoints. The stock view shows those same damage-selected models.</figcaption>
       </figure>
 
       <div class="truth-note">
@@ -657,7 +730,10 @@
         </ul>
       </details>
 
-      <h2 id="scaling">Scaling experiments <span class="section-number">§ 3</span></h2>
+      <div class="section-map-anchor">
+        <h2 id="scaling">Scaling experiments <span class="section-number">§ 3</span></h2>
+        <aside class="architecture-context" data-focus="trunk optimizer" aria-hidden="true"><span class="context-label">Model map · scale</span><svg viewBox="0 0 238 286"></svg></aside>
+      </div>
       <p>Validation NLL has a broad relationship with closed-loop play in O39. It is not reliable enough to select a checkpoint or capacity.</p>
 
       <figure class="breakout">
@@ -679,14 +755,14 @@
             </div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 13 — hover a point for its model, data budget, score, and W&amp;B run. This is an association inside O39, not a model-selection rule.</figcaption>
+        <figcaption>Fig. 13 — hover a point for its model, data budget, score, and W&amp;B run. This is an association inside O39, not a model-selection rule.</figcaption>
       </figure>
 
       <figure class="breakout">
         <div class="artifact interactive">
           <div class="figure-head">
             <div>
-              <h4>Interactive iso-FLOP fit</h4>
+              <h4>Iso-FLOP fit</h4>
               <p><span class="mono">L(N,D) = 1.6350 + 89.11/N<sup>.368</sup> + 2009/D<sup>.498</sup></span></p>
             </div>
           </div>
@@ -704,14 +780,14 @@
             <div><b id="fit-loss">—</b><span>predicted validation NLL</span></div>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 14 — robust fit over 35 non-diverged cooldown checkpoints; RMS residual <span class="mono">0.0046</span> NLL, maximum <span class="mono">0.0112</span>. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.</figcaption>
+        <figcaption>Fig. 14 — robust fit over 35 non-diverged cooldown checkpoints; RMS residual <span class="mono">0.0046</span> NLL, maximum <span class="mono">0.0112</span>. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.</figcaption>
       </figure>
 
       <details class="raw">
         <summary>Show the 33 O39 points used in Fig. 13</summary>
         <div class="table-scroll">
           <table class="raw-table">
-            <thead><tr><th>Model</th><th>Data</th><th>Validation NLL</th><th>Stocks/min</th><th>Damage/min</th><th>Run</th></tr></thead>
+            <thead><tr><th>Model</th><th>Data</th><th>Validation NLL</th><th>Stocks/min</th><th>Damage/min</th><th class="run-source-cell">Run</th></tr></thead>
             <tbody id="scaling-rows"></tbody>
           </table>
         </div>
@@ -726,27 +802,11 @@
         </ul>
       </details>
 
-      <h2 id="recipe">Current recipe <span class="section-number">§ 4</span></h2>
-      <p>The final model combines the pieces that survived the small-scale tests. Select a module, or select an experiment from the ledger beneath it.</p>
-
-      <figure class="breakout">
-        <div class="artifact interactive">
-          <div class="figure-head">
-            <div>
-              <h4>O50 architecture and training recipe</h4>
-              <p>Selected experiments dim unrelated modules.</p>
-            </div>
-            <button id="clear-highlight" type="button" class="lineage-tab" style="border:1px solid var(--ink);width:auto" aria-label="Clear experiment highlight"><b>Clear highlight</b></button>
-          </div>
-          <div class="architecture-wrap">
-            <div class="architecture-details">
-              <svg id="architecture-diagram" class="chart" viewBox="0 0 650 470" role="img" aria-label="O50 model architecture"></svg>
-              <div id="module-detail" class="module-detail"></div>
-            </div>
-          </div>
-        </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 15 — the 216.5M-parameter O50 recipe. The controller code is current, the optimizer is AdamW, and deployment uses prediction 4, delay 2, replan 2. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</figcaption>
-      </figure>
+      <div class="section-map-anchor">
+        <h2 id="recipe">Current recipe <span class="section-number">§ 4</span></h2>
+        <aside class="architecture-context" data-dynamic="true" aria-hidden="true"><span class="context-label">Model map · selected experiment</span><svg viewBox="0 0 238 286"></svg></aside>
+      </div>
+      <p>The final model combines the pieces that survived the small-scale tests. Select an experiment to connect it to the final recipe in Figure 1.</p>
 
       <figure class="breakout">
         <div class="artifact interactive">
@@ -779,7 +839,7 @@
             </table>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 16 — mean changes, not lower bounds. Open a row for the comparison caveat. “No stable order” is retained where a scalar delta would be misleading.</figcaption>
+        <figcaption>Fig. 15 — mean changes, not lower bounds. Open a row for the comparison caveat. “No stable order” is retained where a scalar delta would be misleading.</figcaption>
       </figure>
 
       <figure class="breakout">
@@ -808,12 +868,12 @@
             </ul>
           </div>
         </div>
-        <figcaption><span class="interactive-mark">Interactive</span>Fig. 17 — closed-loop evaluations during the earlier Muon O50 run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</figcaption>
+        <figcaption>Fig. 16 — closed-loop evaluations during the earlier Muon O50 run. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/p1fyyp1z">W&amp;B p1fyyp1z</a>.</span></figcaption>
       </figure>
 
       <div class="aside">
         <p class="aside-label">Historical reference</p>
-        <p>The old model reached <span class="mono">+1.227</span> net stocks/min after 16.78M supervised examples. The old and new evaluation systems are not identical, so the gap to the current model’s <span class="mono">+0.494</span> is descriptive, not a controlled comparison. <a href="https://wandb.ai/ericyuegu/hal/runs/wa7x0psv">W&amp;B wa7x0psv</a>.</p>
+        <p>The old model reached <span class="mono">+1.227</span> net stocks/min after 16.78M supervised examples. The old and new evaluation systems are not identical, so the gap to the current model’s <span class="mono">+0.494</span> is descriptive, not a controlled comparison. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/wa7x0psv">W&amp;B wa7x0psv</a>.</span></p>
       </div>
 
       <details class="author-note">
@@ -974,15 +1034,27 @@
       });
       target.addEventListener('blur', hideTip);
       if (url) {
-        target.style.cursor = 'pointer';
-        target.addEventListener('click', function () { window.open(url, '_blank', 'noopener'); });
+        target.setAttribute('data-run-source-url', url);
+        target.addEventListener('click', function () {
+          if (document.body.classList.contains('show-run-sources')) window.open(url, '_blank', 'noopener');
+        });
         target.addEventListener('keydown', function (event) {
-          if (event.key === 'Enter' || event.key === ' ') {
+          if ((event.key === 'Enter' || event.key === ' ') && document.body.classList.contains('show-run-sources')) {
             event.preventDefault();
             window.open(url, '_blank', 'noopener');
           }
         });
       }
+    }
+
+    function setRunSourcesVisible(visible) {
+      document.body.classList.toggle('show-run-sources', visible);
+      var button = one('#source-toggle');
+      button.setAttribute('aria-pressed', visible ? 'true' : 'false');
+      button.textContent = visible ? 'hide run sources' : 'show run sources';
+      many('[data-run-source-url]').forEach(function (target) {
+        target.style.cursor = visible ? 'pointer' : '';
+      });
     }
 
     function chartFrame(target, options) {
@@ -1507,10 +1579,10 @@
     }
 
     var factorRows = [
-      {label: 'D0', across: false, within: false, stock: -0.702, stockLcb: -0.798, damage: 2.77, damageLcb: -4.56, run: '98r9smrj'},
-      {label: 'D1', across: false, within: true, stock: -0.313, stockLcb: -0.408, damage: 13.05, damageLcb: 6.00, run: 'a117chkw'},
-      {label: 'D2', across: true, within: false, stock: -0.196, stockLcb: -0.297, damage: 18.06, damageLcb: 11.91, run: '50q39o9j'},
-      {label: 'D3', across: true, within: true, stock: -0.096, stockLcb: -0.212, damage: 24.75, damageLcb: 17.10, run: '5wfk2esf'}
+      {label: 'D0', name: 'Independent MTP', note: 'no feedback', across: false, within: false, stock: -0.702, stockLcb: -0.798, damage: 2.77, damageLcb: -4.56, run: '98r9smrj'},
+      {label: 'D1', name: 'Within-frame AR', note: 'controller groups only', across: false, within: true, stock: -0.313, stockLcb: -0.408, damage: 13.05, damageLcb: 6.00, run: 'a117chkw'},
+      {label: 'D2', name: 'Across-frame AR', note: 'future frames only', across: true, within: false, stock: -0.196, stockLcb: -0.297, damage: 18.06, damageLcb: 11.91, run: '50q39o9j'},
+      {label: 'D3', name: 'Autoregressive MTP', note: 'both kinds of feedback', across: true, within: true, stock: -0.096, stockLcb: -0.212, damage: 24.75, damageLcb: 17.10, run: '5wfk2esf'}
     ];
     var factorMetric = 'stock';
     var selectedFactor = 3;
@@ -1543,30 +1615,25 @@
       return html;
     }
 
+    function factorBar(value, minimum, maximum, digits) {
+      var zero = (0 - minimum) / (maximum - minimum) * 100;
+      var point = (value - minimum) / (maximum - minimum) * 100;
+      var left = Math.min(zero, point);
+      var width = Math.abs(point - zero);
+      var label = Math.max(2, Math.min(86, point));
+      return '<div class="factor-track" style="--zero:' + zero.toFixed(2) + '%">' +
+        '<i style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%"></i>' +
+        '<output style="left:' + label.toFixed(2) + '%">' + signed(value, digits) + '</output></div>';
+    }
+
     function renderFactor() {
-      setPressed('data-factor-metric', factorMetric);
-      many('[data-factor]').forEach(function (button, index) {
-        var row = factorRows[index];
-        button.setAttribute('aria-pressed', index === selectedFactor ? 'true' : 'false');
-        var value = row[factorMetric];
-        var lower = row[factorMetric + 'Lcb'];
-        button.innerHTML = '<b>' + row.label + ' · ' +
-          (row.across ? 'across' : 'independent') + ' / ' +
-          (row.within ? 'within' : 'parallel') + '</b>' +
-          '<span class="score">' + signed(value, factorMetric === 'stock' ? 3 : 2) + '</span>' +
-          '<span class="bound">LCB ' + signed(lower, factorMetric === 'stock' ? 3 : 2) + '</span>';
-      });
-      var selected = factorRows[selectedFactor];
-      var acrossText = selected.across ? 'Earlier predicted frames feed later frames.' : 'Future frames are conditionally independent.';
-      var withinText = selected.within ? 'C-stick → main stick → triggers → buttons.' : 'Controller parts are predicted in parallel.';
-      one('#factor-explain').innerHTML =
-        '<span class="verdict">' + selected.label + '</span>' +
-        '<h4>' + acrossText + '</h4><p>' + withinText + '</p>' +
-        factorToy(selected) +
-        '<div class="mini-specs"><div><b>stocks/min</b><span>' + signed(selected.stock, 3) +
-        ' [' + signed(selected.stockLcb, 3) + ']</span></div><div><b>damage/min</b><span>' +
-        signed(selected.damage, 2) + ' [' + signed(selected.damageLcb, 2) + ']</span></div></div>' +
-        '<p class="source-line"><a href="' + WAND_B + selected.run + '">W&amp;B ' + selected.run + '</a></p>';
+      one('#factor-chart').innerHTML =
+        '<div class="factor-bar-head"><span>O37 condition</span><span>net stocks / min</span><span>net damage / min</span></div>' +
+        factorRows.map(function (row, index) {
+          return '<div class="factor-bar-row' + (index === factorRows.length - 1 ? ' flagship' : '') + '">' +
+            '<div class="factor-bar-label"><b>' + row.name + '</b><span>' + row.label + ' · ' + row.note + '</span></div>' +
+            factorBar(row.stock, -0.8, 0.1, 3) + factorBar(row.damage, -5, 30, 2) + '</div>';
+        }).join('');
     }
 
     var codecs = {
@@ -2106,7 +2173,8 @@
       var latencies = model.rows.map(function (row) { return row[3]; });
       one('#delay-note').innerHTML = model.name + ' · measured p95 inference ' +
         Math.min.apply(null, latencies).toFixed(2) + '–' + Math.max.apply(null, latencies).toFixed(2) +
-        ' ms · <a href="' + WAND_B + model.run + '">checkpoint run ' + model.run + '</a>. Hollow points missed the recorded real-time fit check.';
+        ' ms. Hollow points missed the recorded real-time fit check. <span class="run-source"><a href="' +
+        WAND_B + model.run + '">Checkpoint run ' + model.run + '</a>.</span>';
     }
 
     var frontierRows = [
@@ -2306,7 +2374,7 @@
         return '<tr><td><span class="mono">' + row.model + '</span> · ' + compact(row.params) +
           '</td><td class="num">2^' + row.dPow + '</td><td class="num">' + row.nll.toFixed(4) +
           '</td><td class="num">' + signed(row.stock, 3) + '</td><td class="num">' +
-          signed(row.damage, 1) + '</td><td class="num"><a href="' + WAND_B + row.run + '">' +
+          signed(row.damage, 1) + '</td><td class="num run-source-cell"><a href="' + WAND_B + row.run + '">' +
           row.run + '</a></td></tr>';
       }).join('');
     }
@@ -2519,7 +2587,7 @@
       ['data', 'history'], ['history', 'trunk'], ['trunk', 'temporal'], ['temporal', 'groups'],
       ['groups', 'objective'], ['objective', 'optimizer'], ['optimizer', 'trunk'], ['groups', 'runtime']
     ];
-    var activeModule = 'temporal';
+    var activeModule = '';
     var highlightedModules = [];
     var selectedLedger = '';
 
@@ -2547,7 +2615,16 @@
     }
 
     function renderModuleDetail() {
-      var module = moduleById(activeModule) || moduleById(highlightedModules[0]) || moduleById('temporal');
+      var module = moduleById(activeModule) || moduleById(highlightedModules[0]);
+      if (!module) {
+        one('#module-detail').innerHTML =
+          '<span class="verdict">Flagship policy</span><h4>O50 production</h4>' +
+          '<p>A causal observation trunk feeds an autoregressive controller plan. Training combines behavior cloning with detached-value AWR.</p>' +
+          '<ul class="recipe-list"><li><span>parameters</span><span>216,496,794</span></li>' +
+          '<li><span>context</span><span>256 frames</span></li><li><span>training</span><span>8 × 2³⁰ positions</span></li>' +
+          '<li><span>deployment</span><span>P4 · D2 · R2</span></li></ul>';
+        return;
+      }
       one('#module-detail').innerHTML =
         '<span class="verdict">' + module.label + '</span><h4>' + module.title + '</h4><p>' + module.text + '</p>' +
         '<ul class="recipe-list">' + module.specs.map(function (spec) {
@@ -2613,6 +2690,44 @@
         'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
       });
       renderModuleDetail();
+      renderContextMaps();
+    }
+
+    function renderContextMaps() {
+      var layouts = {
+        data: [74, 8, 90, 28, 'Data'],
+        history: [74, 46, 90, 28, 'Inputs'],
+        trunk: [74, 84, 90, 32, 'Trunk'],
+        temporal: [9, 144, 98, 32, 'Temporal AR'],
+        groups: [131, 144, 98, 32, 'Controller AR'],
+        objective: [9, 202, 98, 32, 'AWR loss'],
+        runtime: [131, 202, 98, 32, 'D2 / R2'],
+        optimizer: [9, 248, 98, 28, 'AdamW']
+      };
+      many('.architecture-context').forEach(function (container) {
+        var target = one('svg', container);
+        empty(target);
+        var focus = container.getAttribute('data-dynamic') === 'true' ?
+          highlightedModules : (container.getAttribute('data-focus') || '').split(/\s+/).filter(Boolean);
+        [['data', 'history'], ['history', 'trunk'], ['trunk', 'temporal'], ['temporal', 'groups'],
+          ['groups', 'objective'], ['objective', 'optimizer'], ['groups', 'runtime']].forEach(function (edge) {
+          var from = layouts[edge[0]];
+          var to = layouts[edge[1]];
+          target.appendChild(svgElement('line', {
+            x1: from[0] + from[2] / 2, y1: from[1] + from[3],
+            x2: to[0] + to[2] / 2, y2: to[1], class: 'context-edge'
+          }));
+        });
+        Object.keys(layouts).forEach(function (id) {
+          var box = layouts[id];
+          var group = svgElement('g', {class: 'context-node' + (focus.indexOf(id) !== -1 ? ' focus' : '')});
+          group.appendChild(svgElement('rect', {x: box[0], y: box[1], width: box[2], height: box[3]}));
+          group.appendChild(svgElement('text', {
+            x: box[0] + box[2] / 2, y: box[1] + box[3] / 2 + 3, 'text-anchor': 'middle'
+          }, box[4]));
+          target.appendChild(group);
+        });
+      });
     }
 
     function runLinks(links) {
@@ -2880,7 +2995,7 @@
       selectedLedger = selectedLedger === id ? '' : id;
       var selected = selectedLedger ? experimentById(selectedLedger) : null;
       highlightedModules = selected ? selected.modules.slice() : [];
-      activeModule = selected ? selected.modules[0] : 'temporal';
+      activeModule = selected ? selected.modules[0] : '';
       renderLedger();
       renderArchitecture();
     }
@@ -2926,40 +3041,11 @@
       });
     }
 
-    many('[data-hero-metric]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        var metric = button.getAttribute('data-hero-metric');
-        setPressed('data-hero-metric', metric);
-        renderProductionChart('#hero-chart', metric, true);
-      });
-    });
-
     many('[data-production-metric]').forEach(function (button) {
       button.addEventListener('click', function () {
         var metric = button.getAttribute('data-production-metric');
         setPressed('data-production-metric', metric);
         renderProductionChart('#production-chart', metric, false);
-      });
-    });
-
-    many('[data-lineage]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        currentLineage = button.getAttribute('data-lineage');
-        renderLineage();
-      });
-    });
-
-    many('[data-factor-metric]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        factorMetric = button.getAttribute('data-factor-metric');
-        renderFactor();
-      });
-    });
-
-    many('[data-factor]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        selectedFactor = Number(button.getAttribute('data-factor'));
-        renderFactor();
       });
     });
 
@@ -3026,7 +3112,7 @@
         if (ledgerCategory !== 'all' && selected.category !== ledgerCategory) {
           selectedLedger = '';
           highlightedModules = [];
-          activeModule = 'temporal';
+          activeModule = '';
           renderArchitecture();
         }
       }
@@ -3041,17 +3127,16 @@
     one('#clear-highlight').addEventListener('click', function () {
       selectedLedger = '';
       highlightedModules = [];
-      activeModule = 'temporal';
+      activeModule = '';
       renderLedger();
       renderArchitecture();
     });
 
-    var lineageMedia = window.matchMedia('(max-width: 720px)');
-    if (lineageMedia.addEventListener) lineageMedia.addEventListener('change', renderLineage);
+    one('#source-toggle').addEventListener('click', function () {
+      setRunSourcesVisible(!document.body.classList.contains('show-run-sources'));
+    });
 
-    renderProductionChart('#hero-chart', 'stock', true);
     renderProductionChart('#production-chart', 'stock', false);
-    renderLineage();
     renderFactor();
     renderCodec();
     renderRepresentation();
@@ -3070,6 +3155,7 @@
     renderLedgerFilters();
     renderLedger();
     renderArchitecture();
+    setRunSourcesVisible(false);
   }());
   </script>
 </body>
