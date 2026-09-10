@@ -158,13 +158,54 @@
     .factor-bar-row.flagship .factor-track i{background:var(--oxblood);opacity:1}
     .factor-track output{position:absolute;top:5px;font:600 .61rem/1.3 var(--mono);white-space:nowrap;color:var(--ink)}
     .factor-bar-row.flagship .factor-track output{color:var(--oxblood)}
-    .codec-wrap{display:grid;grid-template-columns:260px minmax(0,1fr);gap:24px;align-items:center;padding:16px 3px 6px}
-    .controller-img{width:100%;display:block;filter:grayscale(1);opacity:.82}
-    .codec-groups{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:1rem 0}
-    .codec-group{border:1px solid var(--rule-dotted);padding:9px;min-height:82px}
-    .codec-group b{display:block;font:600 .65rem/1.3 var(--mono)}
-    .codec-group strong{display:block;font:700 1.25rem/1.2 var(--mono);margin-top:.5rem}
-    .codec-group span{font-size:.76rem;color:var(--ink-soft)}
+    .codec-lineage{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;padding:18px 3px 8px}
+    .codec-stage{min-width:0;border-top:1px solid var(--ink);padding-top:9px}
+    .codec-stage-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:12px}
+    .codec-stage-head b{font:600 .72rem/1.3 var(--mono)}
+    .codec-stage-head span{font:400 .58rem/1.3 var(--mono);color:var(--ink-faint);text-align:right}
+    .codec-stage.polar .codec-stage-head b{color:var(--oxblood)}
+    .codec-lane-label{display:block;margin-bottom:6px;font:500 .56rem/1.3 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint)}
+    .codec-button-demo{min-height:79px;padding-bottom:11px;border-bottom:1px dotted var(--rule-dotted)}
+    .codec-collapse{display:grid;grid-template-columns:minmax(0,1fr) 18px minmax(0,1fr);gap:5px;align-items:center;margin-top:11px}
+    .codec-chord,.codec-class{display:flex;min-height:30px;align-items:center;justify-content:center;border:1px solid var(--rule-dotted);font:600 .61rem/1.25 var(--mono);text-align:center}
+    .codec-collapse i{font:normal 400 .65rem/1 var(--mono);color:var(--ink-faint);text-align:center}
+    .codec-stick{padding:12px 0 10px;border-bottom:1px dotted var(--rule-dotted)}
+    .codec-stick-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+    .codec-stick-head b{font:600 .61rem/1.3 var(--mono)}
+    .codec-stick-head span{font:400 .56rem/1.3 var(--mono);color:var(--ink-faint);text-align:right}
+    .codec-stick-map{display:block;width:100%;height:132px;margin:5px 0 1px}
+    .codec-stick-map .stick-axis{stroke:var(--rule-dotted);stroke-width:1}
+    .codec-stick-map .stick-rim{fill:none;stroke:var(--rule);stroke-width:1}
+    .codec-stick-map .stick-ring{fill:none;stroke:var(--rule-dotted);stroke-width:1;stroke-dasharray:2 3}
+    .codec-stick-map .stick-point{fill:var(--ink);opacity:.68}
+    .codec-stage.polar .codec-stick-map .stick-point{fill:var(--oxblood);opacity:.88}
+    .codec-vocab{margin:0;padding:8px 0 0}
+    .codec-vocab div{display:grid;grid-template-columns:76px 34px 1fr;gap:7px;padding:4px 0;border-bottom:1px dotted var(--rule-dotted)}
+    .codec-vocab div:last-child{border-bottom:0}
+    .codec-vocab dt,.codec-vocab dd{margin:0;font:400 .56rem/1.35 var(--mono)}
+    .codec-vocab dt{color:var(--ink-mono)}
+    .codec-vocab dd:first-of-type{font-weight:600;text-align:right}
+    .codec-vocab dd:last-of-type{color:var(--ink-faint)}
+    .codec-formula{display:block;margin-top:8px;font:500 .57rem/1.35 var(--mono);color:var(--ink-mono)}
+    .codec-stage.polar .codec-formula{color:var(--oxblood)}
+    .codec-results{padding:20px 3px 2px;border-top:1px solid var(--rule);margin-top:14px}
+    .codec-result-head,.codec-result-row{display:grid;grid-template-columns:190px 1fr 1fr;gap:18px;align-items:center}
+    .codec-result-head{padding-bottom:8px;border-bottom:1px solid var(--rule)}
+    .codec-result-head span{font:500 .61rem/1.3 var(--mono);color:var(--ink-faint)}
+    .codec-result-head span:not(:first-child){text-align:center}
+    .codec-result-pair{padding:12px 0 4px;border-bottom:1px dotted var(--rule-dotted)}
+    .codec-result-pair:last-child{border-bottom:0}
+    .codec-pair-title{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:3px;font-family:var(--mono)}
+    .codec-pair-title b{font-size:.65rem}
+    .codec-pair-title span{font-size:.58rem;color:var(--ink-faint);text-align:right}
+    .codec-result-row{padding:7px 0}
+    .codec-result-label b{display:block;font:600 .64rem/1.3 var(--mono)}
+    .codec-result-label span{display:block;margin-top:2px;font:400 .56rem/1.3 var(--mono);color:var(--ink-faint)}
+    .codec-result-row.treatment .codec-result-label b,.codec-result-row.treatment .factor-track output{color:var(--oxblood)}
+    .codec-result-row.treatment .factor-track i{background:var(--oxblood);opacity:1}
+    .factor-track output.inside,.factor-bar-row.flagship .factor-track output.inside,.codec-result-row.treatment .factor-track output.inside{color:var(--paper)}
+    .codec-pair-diagnostics{display:flex;gap:20px;justify-content:flex-end;padding:3px 0 7px;font:400 .56rem/1.35 var(--mono);color:var(--ink-faint)}
+    .codec-pair-diagnostics b{color:var(--ink-mono)}
     .delta-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:1rem}
     .delta-pair div{border-top:1px solid var(--rule);padding-top:8px}
     .delta-pair b{font:700 .95rem/1.3 var(--mono)}
@@ -293,7 +334,7 @@
       .site-top{padding-top:22px}
       main{padding:38px 20px 0}
       h1{font-size:2.35rem}
-      .release-list,.metrics-strip,.stats,.codec-wrap,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout,.branch-study{grid-template-columns:1fr}
+      .release-list,.metrics-strip,.stats,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout,.branch-study{grid-template-columns:1fr}
       .release-list li,.metrics-strip>div,.stat{border-right:0;border-bottom:1px solid var(--rule)}
       .release-list li:last-child,.metrics-strip>div:last-child,.stat:last-child{border-bottom:0}
       .decoder-row{grid-template-columns:1fr;gap:10px}
@@ -303,7 +344,17 @@
       .factor-bar-head span:nth-child(3){grid-column:2;text-align:left}
       .factor-bar-row .factor-bar-label{grid-column:1/-1}
       .branch-study{gap:13px;padding:19px 0}
-      .codec-groups{grid-template-columns:repeat(2,1fr)}
+      .codec-lineage{grid-template-columns:1fr;gap:22px}
+      .codec-stage{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+      .codec-stage-head{grid-column:1/-1}
+      .codec-button-demo{border-bottom:0;border-right:1px dotted var(--rule-dotted);padding-right:18px}
+      .codec-stick{padding:0 0 8px;border-bottom:0}
+      .codec-vocab,.codec-formula{grid-column:1/-1}
+      .codec-result-head,.codec-result-row{grid-template-columns:128px 1fr;gap:10px}
+      .codec-result-head span:first-child{display:none}
+      .codec-result-head span:nth-child(2){grid-column:1;text-align:left}
+      .codec-result-head span:nth-child(3){grid-column:2;text-align:left}
+      .codec-result-row .codec-result-label{grid-column:1/-1}
       .pipeline{grid-template-columns:1fr}
       .pipe-arrow{transform:rotate(90deg);text-align:center}
       .slider-row{grid-template-columns:1fr}
@@ -335,6 +386,11 @@
       .action-frame.conditioned{border-left-color:var(--oxblood)}
       .action-frame>span{margin:0}
       .time-arrow{transform:rotate(90deg);align-self:flex-start;margin-left:47px}
+      .codec-stage{display:block}
+      .codec-button-demo{border-right:0;border-bottom:1px dotted var(--rule-dotted);padding-right:0}
+      .codec-stick{padding-top:12px;border-bottom:1px dotted var(--rule-dotted)}
+      .codec-pair-title,.codec-pair-diagnostics{display:block}
+      .codec-pair-title span,.codec-pair-diagnostics span{display:block;margin-top:4px;text-align:left}
     }
     @media(min-width:1400px){.architecture-context{display:block}}
     @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
@@ -500,26 +556,82 @@
       </figure>
 
       <h4>Controller codec</h4>
-      <p>The old codec simplified simultaneous buttons and analog controls. The current codec keeps the controller closer to the replay and learns both a class embedding and a projection of the physical value.</p>
+      <p>The old codec collapsed simultaneous buttons and used a sparse set of analog targets. I replaced it with an 8-bit button mask and fixed Cartesian stick centers, then tested a polar stick layout without changing the rest of the O52 system.</p>
 
       <figure class="breakout">
-        <div class="artifact interactive">
+        <div class="artifact">
           <div class="figure-head">
             <div>
-              <h4>Old simplifying codec vs. current codec</h4>
-              <p>The bridge changes the full codec configuration, so it does not isolate one class count.</p>
-            </div>
-            <div class="segmented" aria-label="Controller codec">
-              <button type="button" data-codec="legacy" aria-pressed="false">legacy</button>
-              <button type="button" data-codec="current" aria-pressed="true">current</button>
+              <h4>Three controller representations</h4>
+              <p>The first change replaces the full legacy package. The second changes only the stick vocabulary.</p>
             </div>
           </div>
-          <div class="codec-wrap">
-            <img class="controller-img" src="policy_anatomy_assets/illustrations/GCController_Layout.svg" alt="GameCube controller layout">
-            <div id="codec-detail"></div>
+          <div class="codec-lineage" aria-label="Legacy, Cartesian, and polar controller codecs">
+            <section class="codec-stage">
+              <div class="codec-stage-head"><b>Legacy</b><span>O43 bridge</span></div>
+              <div class="codec-button-demo">
+                <span class="codec-lane-label">button chord · A + B</span>
+                <div class="codec-collapse"><span class="codec-chord">A + B</span><i>→</i><span class="codec-class">A</span></div>
+                <span class="toy-sub">One newly pressed button survives.</span>
+              </div>
+              <div class="codec-stick">
+                <div class="codec-stick-head"><b>Main stick</b><span>37 irregular XY centers</span></div>
+                <svg class="codec-stick-map" data-stick-codec="legacy" viewBox="0 0 240 132" role="img" aria-label="Legacy main-stick class centers"></svg>
+              </div>
+              <dl class="codec-vocab">
+                <div><dt>buttons</dt><dd>6</dd><dd>A · B · X/Y · Z · L/R · none</dd></div>
+                <div><dt>main stick</dt><dd>37</dd><dd>nearest fixed XY center</dd></div>
+                <div><dt>C-stick</dt><dd>9</dd><dd>cardinals + diagonals</dd></div>
+                <div><dt>shoulders</dt><dd>5</dd><dd>max(L, R), then quantize</dd></div>
+              </dl>
+              <span class="codec-formula">changed chord → lowest-index new button</span>
+            </section>
+
+            <section class="codec-stage">
+              <div class="codec-stage-head"><b>Cartesian</b><span>O26 · O52</span></div>
+              <div class="codec-button-demo">
+                <span class="codec-lane-label">button chord · A + B</span>
+                <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
+                <div class="bit-values"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span></div>
+                <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
+              </div>
+              <div class="codec-stick">
+                <div class="codec-stick-head"><b>Main stick</b><span>65 fixed XY centers</span></div>
+                <svg class="codec-stick-map" data-stick-codec="cartesian" viewBox="0 0 240 132" role="img" aria-label="Cartesian main-stick class centers"></svg>
+              </div>
+              <dl class="codec-vocab">
+                <div><dt>buttons</dt><dd>256</dd><dd>one categorical 8-bit mask</dd></div>
+                <div><dt>main stick</dt><dd>65</dd><dd>nearest fixed XY center</dd></div>
+                <div><dt>C-stick</dt><dd>9</dd><dd>nearest fixed XY center</dd></div>
+                <div><dt>triggers</dt><dd>25</dd><dd>5 left × 5 right</dd></div>
+              </dl>
+              <span class="codec-formula">class embedding + projection([x, y])</span>
+            </section>
+
+            <section class="codec-stage polar">
+              <div class="codec-stage-head"><b>Polar</b><span>O53</span></div>
+              <div class="codec-button-demo">
+                <span class="codec-lane-label">button chord · A + B</span>
+                <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
+                <div class="bit-values"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span></div>
+                <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
+              </div>
+              <div class="codec-stick">
+                <div class="codec-stick-head"><b>Main stick</b><span>origin + 4 / 16 / 64</span></div>
+                <svg class="codec-stick-map" data-stick-codec="polar" viewBox="0 0 240 132" role="img" aria-label="Polar main-stick class centers"></svg>
+              </div>
+              <dl class="codec-vocab">
+                <div><dt>buttons</dt><dd>256</dd><dd>unchanged from Cartesian</dd></div>
+                <div><dt>main stick</dt><dd>85</dd><dd>three radius-angle rings</dd></div>
+                <div><dt>C-stick</dt><dd>13</dd><dd>origin + 4 / 8</dd></div>
+                <div><dt>triggers</dt><dd>25</dd><dd>unchanged from Cartesian</dd></div>
+              </dl>
+              <span class="codec-formula">class embedding + projection([r, sin θ, cos θ])</span>
+            </section>
           </div>
+          <div id="codec-results" class="codec-results" aria-label="Closed-loop results for two matched controller-codec comparisons"></div>
         </div>
-        <figcaption>Fig 4: Current code beat the legacy codec by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Learned physical past-action embeddings beat one-hot history by <span class="mono">+0.260</span> stocks/min and <span class="mono">+23.68</span> damage/min. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">current</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy bridge</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/1zzstd2d">one-hot history</a>.</span></figcaption>
+        <figcaption>Fig 4: Two matched comparisons. Cartesian beat the full legacy package by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Polar then beat its matched Cartesian baseline by <span class="mono">+0.095</span> stocks/min and <span class="mono">+0.88</span> damage/min; its stock LCB moved from <span class="mono">−0.074</span> to <span class="mono">+0.016</span>. Scores should only be compared within each pair. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">O26 Cartesian</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yxy8brhx">O52 Cartesian</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yi7yyyu0">O53 polar</a>.</span></figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -542,6 +654,7 @@
           <li>Lead with O37. It is the clean causal result.</li>
           <li>Use O11 → O12 → O37 as design history, not as a score ladder.</li>
           <li>The codec forensics ended with the opposite result from the initial hypothesis: the legacy codec was worse.</li>
+          <li>Keep the codec results as two matched pairs. The Cartesian control differs between the O43 and O53 comparisons.</li>
         </ul>
       </details>
 
@@ -1619,10 +1732,15 @@
       var point = (value - minimum) / (maximum - minimum) * 100;
       var left = Math.min(zero, point);
       var width = Math.abs(point - zero);
-      var label = Math.max(2, Math.min(86, point));
+      var positive = value >= 0;
+      var inside = positive ? point > 82 : point < 18;
+      var label = inside ? (positive ? point - 1.5 : point + 1.5) : (positive ? point + 1.5 : point - 1.5);
+      var labelEndsAtPoint = (positive && inside) || (!positive && !inside);
+      var transform = labelEndsAtPoint ? 'transform:translateX(-100%);' : '';
       return '<div class="factor-track" style="--zero:' + zero.toFixed(2) + '%">' +
         '<i style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%"></i>' +
-        '<output style="left:' + label.toFixed(2) + '%">' + signed(value, digits) + '</output></div>';
+        '<output class="' + (inside ? 'inside' : '') + '" style="left:' + label.toFixed(2) + '%;' + transform + '">' +
+        signed(value, digits) + '</output></div>';
     }
 
     function renderFactor() {
@@ -1635,61 +1753,88 @@
         }).join('');
     }
 
-    var codecs = {
-      legacy: {
-        label: 'Legacy simplifying codec',
-        groups: [
-          ['buttons', 'latest of 6', 'concurrent presses reduced'],
-          ['main stick', '37', 'discrete classes'],
-          ['C-stick', '9', 'discrete classes'],
-          ['shoulder', 'fused', 'early-release reducer']
-        ],
-        stock: -0.133,
-        damage: 21.37,
-        copy: 'This was the hypothesized explanation for the old model. In the exact O26 bridge, it was worse.'
-      },
-      current: {
-        label: 'Current physical codec',
-        groups: [
-          ['buttons', '256', 'retained combinations'],
-          ['main stick', '65', 'discrete classes'],
-          ['C-stick', '9', 'discrete classes'],
-          ['trigger pair', '25', 'left × right']
-        ],
-        stock: 0.159,
-        damage: 37.53,
-        copy: 'The policy keeps concurrent buttons, uses a denser main-stick grid, and embeds the physical past action as well as its class.'
-      }
-    };
-    var currentCodec = 'current';
+    var legacyStickPoints = [
+      [0, 0], [.35, 0], [-.35, 0], [0, .35], [0, -.35], [.675, 0], [-.675, 0], [0, .675], [0, -.675],
+      [1, 0], [0, 1], [-1, 0], [0, -1], [.95, -.3], [-.95, -.3], [.95, .3], [-.95, .3],
+      [.85, -.5], [.85, .5], [-.85, -.5], [-.85, .5], [.7, -.7], [-.7, -.7], [.7, .7], [-.7, .7],
+      [.5, .5], [-.5, .5], [.5, -.5], [-.5, -.5], [.5, .85], [-.5, .85], [.5, -.85], [-.5, -.85],
+      [.3, -.95], [.3, .95], [-.3, -.95], [-.3, .95]
+    ];
 
-    function codecVisual(name) {
-      if (name === 'legacy') {
-        return '<div class="bitmask"><span class="contrast-label">simultaneous press</span>' +
-          '<div class="toy-flow"><span class="toy-node hot">A + B</span><span class="toy-link">→</span>' +
-          '<span class="toy-node">latest button</span><span class="toy-link">→</span><span class="toy-node">1 label</span></div>' +
-          '<span class="toy-sub">The reducer discards part of the physical chord.</span></div>';
-      }
-      var labels = ['D↑', 'L', 'R', 'Z', 'Y', 'X', 'B', 'A'];
-      var bits = [0, 0, 0, 0, 0, 0, 1, 1];
-      return '<div class="bitmask"><span class="contrast-label">one categorical bitmask</span>' +
-        '<div class="bit-labels">' + labels.map(function (label) { return '<span>' + label + '</span>'; }).join('') + '</div>' +
-        '<div class="bit-values">' + bits.map(function (bit) { return '<span class="' + (bit ? 'on' : '') + '">' + bit + '</span>'; }).join('') + '</div>' +
-        '<div class="bit-equation"><span>A + B = 00000011₂ = class 3</span><strong>2⁸ = 256</strong></div></div>';
+    function ringPoints(radius, count) {
+      return Array.from({ length: count }, function (_, index) {
+        var angle = index / count * Math.PI * 2;
+        return [radius * Math.cos(angle), radius * Math.sin(angle)];
+      });
     }
 
-    function renderCodec() {
-      setPressed('data-codec', currentCodec);
-      var codec = codecs[currentCodec];
-      var groups = codec.groups.map(function (group) {
-        return '<div class="codec-group"><b>' + group[0] + '</b><strong>' + group[1] +
-          '</strong><span>' + group[2] + '</span></div>';
-      }).join('');
-      one('#codec-detail').innerHTML =
-        '<span class="verdict">' + codec.label + '</span><div class="codec-groups">' + groups + '</div>' +
-        codecVisual(currentCodec) + '<p>' + codec.copy + '</p><div class="delta-pair"><div><b>' + signed(codec.stock, 3) +
-        '</b><span>stock score</span></div><div><b>' + signed(codec.damage, 2) +
-        '</b><span>damage score</span></div></div>';
+    function cartesianStickPoints() {
+      return [[0, 0], [.35, 0], [-.35, 0], [0, .35], [0, -.35], [.675, 0], [-.675, 0], [0, .675], [0, -.675]]
+        .concat(ringPoints(.5, 8), ringPoints(.85, 8), ringPoints(1, 40));
+    }
+
+    function polarStickPoints() {
+      return [[0, 0]].concat(ringPoints(23 / 80, 4), ringPoints(Math.sqrt(23 * 80) / 80, 16), ringPoints(1, 64));
+    }
+
+    function renderCodecSticks() {
+      var pointSets = {
+        legacy: legacyStickPoints,
+        cartesian: cartesianStickPoints(),
+        polar: polarStickPoints()
+      };
+      many('[data-stick-codec]').forEach(function (svg) {
+        var name = svg.getAttribute('data-stick-codec');
+        var rings = name === 'polar' ? [23 / 80, Math.sqrt(23 * 80) / 80] : name === 'cartesian' ? [.5, .85] : [];
+        var html = '<line class="stick-axis" x1="62" y1="66" x2="178" y2="66"></line>' +
+          '<line class="stick-axis" x1="120" y1="8" x2="120" y2="124"></line>' +
+          '<circle class="stick-rim" cx="120" cy="66" r="56"></circle>';
+        html += rings.map(function (radius) {
+          return '<circle class="stick-ring" cx="120" cy="66" r="' + (radius * 56).toFixed(2) + '"></circle>';
+        }).join('');
+        html += pointSets[name].map(function (point) {
+          var radius = name === 'polar' && pointSets[name].length > 80 ? 1.55 : name === 'cartesian' ? 1.8 : 2.1;
+          return '<circle class="stick-point" cx="' + (120 + point[0] * 56).toFixed(2) + '" cy="' +
+            (66 - point[1] * 56).toFixed(2) + '" r="' + radius + '"></circle>';
+        }).join('');
+        svg.innerHTML = html;
+      });
+    }
+
+    var codecComparisons = [
+      {
+        title: 'O43 bridge', note: 'same O26 architecture, loss, data, and updates',
+        delta: 'Δ +0.292 stock · +16.16 damage',
+        rows: [
+          { name: 'Legacy', role: 'control', stock: -0.132712, damage: 21.371409 },
+          { name: 'Cartesian', role: 'treatment', stock: 0.159110, damage: 37.529324 }
+        ]
+      },
+      {
+        title: 'O52 → O53', note: 'only the stick classes and stick semantics change',
+        delta: 'Δ +0.095 stock · +0.88 damage',
+        rows: [
+          { name: 'Cartesian', role: 'control', stock: 0.031839, damage: 33.963848 },
+          { name: 'Polar', role: 'treatment', stock: 0.127288, damage: 34.839119 }
+        ],
+        diagnostics: '<span>stock LCB <b>−0.074 → +0.016 · Δ +0.090</b></span>' +
+          '<span>decode p95 <b>15.40 → 15.94 ms · Δ +0.54 ms</b></span>'
+      }
+    ];
+
+    function renderCodecResults() {
+      one('#codec-results').innerHTML =
+        '<div class="codec-result-head"><span>matched comparison</span><span>net stocks / min</span><span>net damage / min</span></div>' +
+        codecComparisons.map(function (comparison) {
+          return '<section class="codec-result-pair"><div class="codec-pair-title"><b>' + comparison.title +
+            '</b><span>' + comparison.note + ' · ' + comparison.delta + '</span></div>' +
+            comparison.rows.map(function (row) {
+              return '<div class="codec-result-row ' + row.role + '"><div class="codec-result-label"><b>' + row.name +
+                '</b><span>' + row.role + '</span></div>' + factorBar(row.stock, -.18, .18, 3) +
+                factorBar(row.damage, 0, 42, 2) + '</div>';
+            }).join('') + (comparison.diagnostics ? '<div class="codec-pair-diagnostics">' + comparison.diagnostics + '</div>' : '') +
+            '</section>';
+        }).join('');
     }
 
     var representationBranches = [
@@ -2791,6 +2936,13 @@
         links: [['legacy', 'acbbeb76'], ['current', 'cqbbbg77']]
       },
       {
+        id: 'polar_codec', order: 53, code: 'O53', category: 'representation', title: 'Polar stick codec',
+        stock: 0.095, damage: 0.88, evidence: 'controlled', modules: ['history', 'groups'],
+        control: 'fixed Cartesian stick classes', treatment: 'fixed polar stick classes',
+        summary: 'Polar was slightly better at U16,384. The stock LCB moved from −0.074 to +0.016 while decode p95 increased by 0.54 ms.',
+        links: [['Cartesian', 'yxy8brhx'], ['polar', 'yi7yyyu0']]
+      },
+      {
         id: 'physical_history', order: 28, code: 'O28', category: 'representation', title: 'Physical past-action embeddings',
         stock: 0.260, damage: 23.68, evidence: 'controlled', modules: ['history'],
         control: '256-way one-hot history', treatment: 'class + physical embeddings',
@@ -3074,13 +3226,6 @@
       });
     });
 
-    many('[data-codec]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        currentCodec = button.getAttribute('data-codec');
-        renderCodec();
-      });
-    });
-
     many('[data-awr-metric]').forEach(function (button) {
       button.addEventListener('click', function () {
         awrMetric = button.getAttribute('data-awr-metric');
@@ -3166,7 +3311,8 @@
 
     renderProductionChart('#production-chart', 'stock', false);
     renderFactor();
-    renderCodec();
+    renderCodecSticks();
+    renderCodecResults();
     renderRepresentation();
     renderAwr();
     renderObjectives();
