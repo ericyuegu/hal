@@ -270,7 +270,7 @@ class AWRCalibration:
 
     beta: float = 199.5
     weight_max: float = 3.5
-    gamma: float = 0.99618
+    gamma: float = 0.99855
     stock_value: float = 120.0
     damage_shaping: float = 1.0
     win_reward: float = 50.0
