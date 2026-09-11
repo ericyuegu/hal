@@ -118,9 +118,11 @@
     .candidate-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:8px;font-family:var(--mono)}
     .candidate-head b{font-size:.66rem;line-height:1.35}
     .candidate-head span{font-size:.58rem;line-height:1.35;color:var(--ink-faint);text-align:right}
-    .architecture-candidates,.mtp-candidates{padding:1px 4px 3px}
-    .architecture-candidate,.mtp-candidate{padding:18px 0 20px;border-bottom:1px dotted var(--rule-dotted)}
-    .architecture-candidate:last-child,.mtp-candidate:last-child{border-bottom:0;padding-bottom:5px}
+    .mtp-candidates{padding:1px 4px 3px}
+    .mtp-candidate{padding:18px 0 20px;border-bottom:1px dotted var(--rule-dotted)}
+    .mtp-candidate:last-child{border-bottom:0;padding-bottom:5px}
+    .architecture-figure{padding:15px 3px 3px}
+    .architecture-panel+.architecture-panel{margin-top:13px;padding-top:14px;border-top:1px dotted var(--rule-dotted)}
     .model-diagram{display:block;width:100%;height:auto;overflow:visible}
     .model-diagram text{font-family:var(--mono);font-size:10px;fill:var(--ink-mono)}
     .model-diagram .diagram-title{font-size:11px;font-weight:600;fill:var(--ink)}
@@ -142,11 +144,13 @@
     .model-diagram [data-module].module-focus{opacity:1}
     .model-diagram [data-module].module-focus .model-box,.model-diagram [data-module].module-focus .model-token,.model-diagram [data-module].module-focus .model-layer{stroke:var(--oxblood);stroke-width:1.5}
     .model-diagram [data-module].module-focus .model-wire{stroke:var(--oxblood)}
-    .architecture-layout-columnar .model-diagram{max-width:760px;margin:0 auto}
-    .architecture-candidate .model-diagram text{font-size:12px}
-    .architecture-candidate .model-diagram .diagram-title{font-size:13px}
-    .architecture-candidate .model-diagram .diagram-label{font-size:12.5px}
-    .architecture-candidate .model-diagram .diagram-note{font-size:10.5px}
+    .architecture-figure .model-diagram text{font-size:11.5px}
+    .architecture-figure .model-diagram .diagram-title{font-size:13px}
+    .architecture-figure .model-diagram .diagram-label{font-size:11.5px}
+    .architecture-figure .model-diagram .diagram-note{font-size:11px}
+    .architecture-figure .model-diagram .diagram-note.accent{fill:var(--oxblood)}
+    .architecture-figure .model-diagram .joint-divider{stroke:var(--rule-dotted);stroke-width:1}
+    .architecture-figure .model-diagram .zoom-outline{fill:none;stroke:var(--oxblood);stroke-width:1.25}
     .model-diagram .flow-cell,.model-diagram .flow-core{transform-box:fill-box;transform-origin:center;animation:model-data-pulse 8.4s ease-in-out infinite both;animation-delay:calc(var(--flow-step) * .29s)}
     .model-diagram .flow-core{animation-name:model-core-pulse}
     .model-diagram .flow-link{animation:model-link-pulse 8.4s ease-in-out infinite both;animation-delay:calc(var(--flow-step) * .29s)}
@@ -329,6 +333,10 @@
     .site-foot{max-width:680px;margin:0 auto;padding:46px 24px 38px;font:400 .7rem/1.5 var(--mono);color:var(--ink-mono)}
     .site-foot a{color:var(--ink-mono);text-decoration:underline;text-decoration-color:var(--rule-underline);text-underline-offset:3px}
     @media(max-width:900px){
+      .architecture-figure .model-diagram text{font-size:14.5px}
+      .architecture-figure .model-diagram .diagram-title{font-size:16px}
+      .architecture-figure .model-diagram .diagram-label{font-size:14.5px}
+      .architecture-figure .model-diagram .diagram-note{font-size:14px}
       .branch-study{grid-template-columns:110px minmax(0,1fr);gap:13px;padding:19px 0}
       .branch-study>div:first-child,.branch-study>.branch-impact{grid-column:1/-1}
       .branch-map{width:104px}
@@ -375,6 +383,10 @@
       .expanded-row td{display:block}
     }
     @media(max-width:520px){
+      .architecture-figure .model-diagram text{font-size:12px}
+      .architecture-figure .model-diagram .diagram-title{font-size:13px}
+      .architecture-figure .model-diagram .diagram-label{font-size:12px}
+      .architecture-figure .model-diagram .diagram-note{font-size:11.5px}
       .candidate-head{display:block}
       .candidate-head span{display:block;margin-top:2px;text-align:left}
       .branch-study{grid-template-columns:1fr}
@@ -418,21 +430,19 @@
           <div class="figure-head">
             <div>
               <h4>Flagship model architecture</h4>
-              <p>Two layouts of the same two-Transformer dataflow.</p>
+              <p>A future action chunk is predicted from every context prefix.</p>
             </div>
           </div>
-          <div class="architecture-candidates">
-            <section class="architecture-candidate architecture-layout-horizontal">
-              <div class="candidate-head"><b>A · horizontal</b><span>parallel token lanes</span></div>
-              <svg id="architecture-horizontal" class="model-diagram" role="img" aria-label="Horizontal diagram of the parallel context Transformer and causal action-chunk decoder Transformer"></svg>
+          <div class="architecture-figure">
+            <section class="architecture-panel">
+              <svg id="architecture-overview" class="model-diagram" role="img" aria-label="Joint state and action tokens pass through a causal context Transformer; one shared decoder head predicts a future action chunk at every context prefix"></svg>
             </section>
-            <section class="architecture-candidate architecture-layout-columnar">
-              <div class="candidate-head"><b>C · folded</b><span>aligned training positions</span></div>
-              <svg id="architecture-columnar" class="model-diagram" role="img" aria-label="Folded diagram of the parallel context Transformer and causal action-chunk decoder Transformer"></svg>
+            <section class="architecture-panel">
+              <svg id="architecture-decoder-detail" class="model-diagram" role="img" aria-label="Enlarged action decoder with a growing action prefix across frames and causal controller groups within each frame"></svg>
             </section>
           </div>
         </div>
-        <figcaption>Fig 1: Both causal Transformers process their full training sequences in parallel. At inference, the action-chunk decoder uses its causal cache to emit <span class="mono">aₜ … aₜ₊₃</span> autoregressively; each frame is decoded <span class="mono">C → M → T → B</span>. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
+        <figcaption>Fig 1: Each context token concatenates state and action. One shared decoder head predicts a future action chunk at every context prefix. In play, the action prefix grows one frame at a time; each frame is decoded <span class="mono">C → M → T → B</span>. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
       </figure>
 
       <ul class="question-list">
@@ -1352,9 +1362,17 @@
       return parent.lastChild;
     }
 
-    var architectureHistoryLabels = ['sₜ₋₂', 'aₜ₋₂', 'sₜ₋₁', 'aₜ₋₁', 'sₜ'];
-    var architectureActionLabels = ['aₜ', 'aₜ₊₁', 'aₜ₊₂', 'aₜ₊₃'];
-    var architectureShiftedLabels = ['aₜ₋₁', 'aₜ', 'aₜ₊₁', 'aₜ₊₂'];
+    var architectureContextFrames = [
+      {state: 'sₜ₋₂', action: 'aₜ₋₂', chunk: 'aₜ₋₁  aₜ  …'},
+      {state: 'sₜ₋₁', action: 'aₜ₋₁', chunk: 'aₜ  aₜ₊₁  …'},
+      {state: 'sₜ', action: 'aₜ', chunk: 'aₜ₊₁  aₜ₊₂  …'}
+    ];
+    var architectureDecoderFrames = [
+      {prefix: ['aₜ'], output: 'aₜ₊₁'},
+      {prefix: ['aₜ', 'aₜ₊₁'], output: 'aₜ₊₂'},
+      {prefix: ['aₜ', 'aₜ₊₁', 'aₜ₊₂'], output: 'aₜ₊₃'},
+      {prefix: ['aₜ', 'aₜ₊₁', 'aₜ₊₂', 'aₜ₊₃'], output: 'aₜ₊₄'}
+    ];
 
     function flowStyle(step) {
       return '--flow-step:' + step;
@@ -1381,27 +1399,38 @@
       return node;
     }
 
-    function drawFlowToken(target, x, y, width, height, label, step) {
+    function drawFlowToken(target, x, y, width, height, label, step, accent) {
       target.appendChild(svgElement('rect', {
         x: x, y: y, width: width, height: height,
-        class: 'model-token flow-cell', style: flowStyle(step)
+        class: 'model-token flow-cell' + (accent ? ' accent' : ''), style: flowStyle(step)
       }));
       addText(target, x + width / 2, y + height / 2 + 3, label, {
         'text-anchor': 'middle', class: 'diagram-label'
       });
     }
 
-    function drawParallelTokens(target, labels, positions, width, height, moduleId, step) {
-      var group = modelPart(target, moduleId);
-      positions.forEach(function (position, index) {
-        drawFlowToken(group, position[0], position[1], width, height, labels[index], step);
+    function drawJointToken(target, x, y, width, height, state, action, step) {
+      var group = modelPart(target, 'history');
+      group.appendChild(svgElement('rect', {
+        x: x, y: y, width: width, height: height,
+        class: 'model-token flow-cell', style: flowStyle(step)
+      }));
+      group.appendChild(svgElement('line', {
+        x1: x + width / 2, y1: y + 5, x2: x + width / 2, y2: y + height - 5,
+        class: 'joint-divider'
+      }));
+      addText(group, x + width / 4, y + height / 2 + 4, state, {
+        'text-anchor': 'middle', class: 'diagram-label'
+      });
+      addText(group, x + width * 3 / 4, y + height / 2 + 4, action, {
+        'text-anchor': 'middle', class: 'diagram-label'
       });
       return group;
     }
 
-    function drawArchitectureTransformer(target, x, y, width, height, title, moduleId, step, note) {
+    function drawStackedModule(target, x, y, width, height, title, moduleId, step, note) {
       var group = modelPart(target, moduleId);
-      [9, 4.5].forEach(function (offset) {
+      [8, 4].forEach(function (offset) {
         group.appendChild(svgElement('rect', {
           x: x - offset, y: y + offset, width: width, height: height,
           class: 'model-layer'
@@ -1411,69 +1440,36 @@
         x: x, y: y, width: width, height: height,
         class: 'model-box flow-core', style: flowStyle(step)
       }));
-      addText(group, x + width / 2, y + 22, title, {
+      addText(group, x + width / 2, y + (height > 80 || note ? 29 : height / 2 + 4), title, {
         'text-anchor': 'middle', class: 'diagram-title'
       });
-      var tall = height > 150;
-      var blockTop = y + (tall ? 60 : 41);
-      var innerWidth = width - 30;
-      var blockHeight = tall ? 38 : 27;
-      var blockGap = tall ? 17 : 9;
-      group.appendChild(svgElement('rect', {
-        x: x + 15, y: blockTop, width: innerWidth, height: blockHeight, class: 'model-layer'
-      }));
-      addText(group, x + width / 2, blockTop + blockHeight / 2 + 4, 'causal self-attention', {
-          'text-anchor': 'middle', class: 'diagram-label'
-        });
-      group.appendChild(svgElement('rect', {
-        x: x + 15, y: blockTop + blockHeight + blockGap,
-        width: innerWidth, height: blockHeight, class: 'model-layer'
-      }));
-      addText(group, x + width / 2, blockTop + blockHeight + blockGap + blockHeight / 2 + 4, 'MLP', {
-        'text-anchor': 'middle', class: 'diagram-label'
-      });
       if (note) {
-        addText(group, x + width / 2, y + height - 13, note, {
+        addText(group, x + width / 2, y + 50, note, {
           'text-anchor': 'middle', class: 'diagram-note'
         });
       }
-      return {x: x, y: y, width: width, height: height};
+      return group;
     }
 
-    function drawActionDecoderShell(target, x, y, width, height) {
+    function drawDecoderHead(target, x, y, width, height, step) {
       var group = modelPart(target, 'temporal');
-      [9, 4.5].forEach(function (offset) {
-        group.appendChild(svgElement('rect', {
-          x: x - offset, y: y + offset, width: width, height: height,
-          class: 'model-layer'
-        }));
-      });
+      group.appendChild(svgElement('rect', {
+        x: x - 4, y: y + 4, width: width, height: height, class: 'model-layer'
+      }));
       group.appendChild(svgElement('rect', {
         x: x, y: y, width: width, height: height,
-        class: 'model-box flow-core', style: flowStyle(3)
+        class: 'model-box flow-core', style: flowStyle(step)
       }));
-      addText(group, x + width / 2, y + 22,
-        width < 230 ? 'ACTION DECODER TRANSFORMER' : 'ACTION-CHUNK DECODER TRANSFORMER', {
+      addText(group, x + width / 2, y + height / 2 + 4, 'DECODER HEAD', {
         'text-anchor': 'middle', class: 'diagram-title'
       });
       return group;
     }
 
-    function drawCausalPrefix(target, x, y, width, height, depth) {
-      target.appendChild(svgElement('rect', {
-        x: x, y: y, width: width, height: height, class: 'model-layer'
-      }));
-      var size = Math.min(10, (width - 21) / 4);
-      var gap = 3;
-      var total = size * 4 + gap * 3;
-      var left = x + (width - total) / 2;
-      for (var index = 0; index < 4; index += 1) {
-        target.appendChild(svgElement('rect', {
-          x: left + index * (size + gap), y: y + (height - size) / 2,
-          width: size, height: size,
-          class: 'attention-cell' + (index <= depth ? ' on' : '')
-        }));
-      }
+    function drawChunkSummary(target, x, y, width, height, label, step) {
+      var group = modelPart(target, 'groups');
+      drawFlowToken(group, x, y, width, height, label, step, false);
+      return group;
     }
 
     function drawActionCells(target, x, y, cellWidth, cellHeight, gap, startStep, marker) {
@@ -1540,230 +1536,140 @@
       });
     }
 
-    function drawActionDecoderRows(target, settings, marker) {
-      var shell = drawActionDecoderShell(target, settings.x, settings.y, settings.width, settings.height);
-      if (settings.contextNote) {
-        addText(shell, settings.x + settings.width / 2, settings.y + 38,
-          'context at every action position', {
+    function renderArchitectureOverview(target, mobile) {
+      empty(target);
+      var width = mobile ? 360 : 880;
+      var centers = mobile ? [63, 180, 297] : [155, 440, 725];
+      var tokenWidth = mobile ? 102 : 174;
+      var transformerX = mobile ? 20 : 70;
+      var transformerWidth = mobile ? 320 : 740;
+      var headWidth = mobile ? 98 : 154;
+      var chunkWidth = mobile ? 106 : 174;
+      var marker = modelMarker(target, 'overview', COLORS.faint);
+
+      target.setAttribute('viewBox', '0 0 ' + width + ' 350');
+      addText(target, width / 2, 16, 'ONE JOINT TOKEN PER FRAME', {
+        'text-anchor': 'middle', class: 'diagram-note'
+      });
+      architectureContextFrames.forEach(function (frame, index) {
+        drawJointToken(target, centers[index] - tokenWidth / 2, 31,
+          tokenWidth, 38, frame.state, frame.action, 0);
+        flowLine(modelPart(target, 'history'), centers[index], 69,
+          centers[index], 98, 1, marker);
+      });
+
+      drawStackedModule(target, transformerX, 106, transformerWidth, 68,
+        'CAUSAL CONTEXT TRANSFORMER', 'trunk', 1, 'all context positions run in parallel');
+
+      architectureContextFrames.forEach(function (frame, index) {
+        var headX = centers[index] - headWidth / 2;
+        var chunkX = centers[index] - chunkWidth / 2;
+        flowLine(modelPart(target, 'trunk'), centers[index], 174,
+          centers[index], 201, 2, marker);
+        drawDecoderHead(target, headX, 209, headWidth, 40, 2);
+        flowLine(modelPart(target, 'temporal'), centers[index], 249,
+          centers[index], 272, 3, marker);
+        drawChunkSummary(target, chunkX, 280, chunkWidth, 34, frame.chunk, 3);
+      });
+
+      target.appendChild(svgElement('rect', {
+        x: centers[2] - chunkWidth / 2 - 7, y: 201,
+        width: chunkWidth + 14, height: 121,
+        class: 'zoom-outline', 'stroke-dasharray': '3 3'
+      }));
+      addText(target, centers[2], 337, 'ENLARGED BELOW', {
+        'text-anchor': 'middle', class: 'diagram-note accent'
+      });
+      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
+    }
+
+    function drawTemporalPrefix(target, x, y, labels, width, height, gap, step) {
+      var group = modelPart(target, 'temporal');
+      labels.forEach(function (label, index) {
+        drawFlowToken(group, x + index * (width + gap), y, width, height, label, step, false);
+      });
+      return x + labels.length * width + (labels.length - 1) * gap;
+    }
+
+    function drawDecoderDetailRow(target, settings, frame, index, marker) {
+      var step = 2 + index * 5;
+      var end = drawTemporalPrefix(target, settings.prefixX, settings.rowYs[index],
+        frame.prefix, settings.prefixWidth, settings.rowHeight, settings.prefixGap, step);
+      var centerY = settings.rowYs[index] + settings.rowHeight / 2;
+      var outputLabelHalf = settings.outputLabelHalf || 34;
+      flowLine(modelPart(target, 'temporal'), end + 5, centerY,
+        settings.outputLabelX - outputLabelHalf - 1, centerY, step + 1, marker);
+      addText(modelPart(target, 'temporal'), settings.outputLabelX, centerY + 4,
+        frame.output, {'text-anchor': 'middle', class: 'diagram-label'});
+      flowLine(modelPart(target, 'temporal'), settings.outputLabelX + outputLabelHalf, centerY,
+        settings.cellsX - 7, centerY, step + 1, marker);
+      drawActionCells(target, settings.cellsX, settings.rowYs[index],
+        settings.cellWidth, settings.rowHeight, settings.cellGap, step + 1, marker);
+    }
+
+    function renderArchitectureDecoderDetail(target, mobile) {
+      empty(target);
+      var marker = modelMarker(target, 'decoder-detail', COLORS.faint);
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 510');
+        addText(target, 180, 16, 'ONE DECODER HEAD, ENLARGED', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        drawJointToken(target, 105, 29, 150, 38, 'sₜ', 'aₜ', 0);
+        flowLine(modelPart(target, 'history'), 180, 67, 180, 103, 1, marker);
+        drawStackedModule(target, 15, 111, 330, 371,
+          'CAUSAL ACTION DECODER TRANSFORMER', 'temporal', 1);
+        addText(target, 25, 157, 'GROWING ACTION PREFIX', {class: 'diagram-note'});
+        addText(target, 283, 157, 'NEXT FRAME', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        var mobileSettings = {
+          prefixX: 25, prefixWidth: 36, prefixGap: 4,
+          rowYs: [174, 244, 314, 384], rowHeight: 28,
+          outputLabelX: 216, outputLabelHalf: 24,
+          cellsX: 253, cellWidth: 16.5, cellGap: 3
+        };
+        architectureDecoderFrames.forEach(function (frame, index) {
+          drawDecoderDetailRow(target, mobileSettings, frame, index, marker);
+        });
+        addText(target, 180, 464,
+          'parallel in training · autoregressive in play', {
+            'text-anchor': 'middle', class: 'diagram-note'
+          });
+      } else {
+        target.setAttribute('viewBox', '0 0 880 330');
+        addText(target, 16, 16, 'ONE DECODER HEAD, ENLARGED', {class: 'diagram-note'});
+        addText(target, 81, 94, 'CONTEXT PREFIX', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        drawJointToken(target, 16, 106, 130, 40, 'sₜ', 'aₜ', 0);
+        flowLine(modelPart(target, 'history'), 146, 126, 178, 126, 1, marker);
+        drawStackedModule(target, 186, 32, 670, 270,
+          'CAUSAL ACTION DECODER TRANSFORMER', 'temporal', 1);
+        addText(target, 220, 77, 'GROWING ACTION PREFIX', {class: 'diagram-note'});
+        addText(target, 666, 77, 'NEXT FRAME · WITHIN-FRAME AR', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        var desktopSettings = {
+          prefixX: 220, prefixWidth: 44, prefixGap: 6,
+          rowYs: [92, 136, 180, 224], rowHeight: 28,
+          outputLabelX: 530, cellsX: 580, cellWidth: 31, cellGap: 7
+        };
+        architectureDecoderFrames.forEach(function (frame, index) {
+          drawDecoderDetailRow(target, desktopSettings, frame, index, marker);
+        });
+        addText(target, 521, 285,
+          'parallel in training · autoregressive in play', {
             'text-anchor': 'middle', class: 'diagram-note'
           });
       }
-      var headerY = settings.rowYs[0] - 8;
-      addText(shell, settings.inputX + settings.inputWidth / 2, headerY, 'INPUT', {
-        'text-anchor': 'middle', class: 'diagram-note'
-      });
-      addText(shell, settings.prefixX + settings.prefixWidth / 2, headerY, 'CAUSAL PREFIX', {
-        'text-anchor': 'middle', class: 'diagram-note'
-      });
-      settings.rowYs.forEach(function (rowY, index) {
-        var outputStep = 4 + index * 4;
-        drawFlowToken(shell, settings.inputX, rowY, settings.inputWidth, settings.rowHeight,
-          architectureShiftedLabels[index], 2);
-        flowLine(shell, settings.inputX + settings.inputWidth, rowY + settings.rowHeight / 2,
-          settings.prefixX, rowY + settings.rowHeight / 2, 3, marker);
-        drawCausalPrefix(shell, settings.prefixX, rowY, settings.prefixWidth, settings.rowHeight, index);
-        flowLine(shell, settings.prefixX + settings.prefixWidth, rowY + settings.rowHeight / 2,
-          settings.mlpX, rowY + settings.rowHeight / 2, 3, marker);
-        shell.appendChild(svgElement('rect', {
-          x: settings.mlpX, y: rowY, width: settings.mlpWidth,
-          height: settings.rowHeight, class: 'model-layer'
-        }));
-        addText(shell, settings.mlpX + settings.mlpWidth / 2,
-          rowY + settings.rowHeight / 2 + 4, 'MLP', {
-            'text-anchor': 'middle', class: 'diagram-label'
-          });
-        if (settings.outputInside) {
-          flowLine(shell, settings.mlpX + settings.mlpWidth, rowY + settings.rowHeight / 2,
-            settings.outputX, rowY + settings.rowHeight / 2, outputStep, marker);
-        } else {
-          flowLine(shell, settings.mlpX + settings.mlpWidth, rowY + settings.rowHeight / 2,
-            settings.x + settings.width, rowY + settings.rowHeight / 2, outputStep);
-          flowLine(target, settings.x + settings.width, rowY + settings.rowHeight / 2,
-            settings.outputX, rowY + settings.rowHeight / 2, outputStep, marker);
-        }
-        var outputWidth = settings.cellWidth * 4 + settings.cellGap * 3;
-        var labelGroup = modelPart(target, 'temporal');
-        addText(labelGroup, settings.outputX + outputWidth / 2, rowY - 7,
-          architectureActionLabels[index], {'text-anchor': 'middle', class: 'diagram-label'});
-        drawActionCells(target, settings.outputX, rowY, settings.cellWidth,
-          settings.rowHeight, settings.cellGap, outputStep, marker);
-      });
-      addText(shell, settings.x + settings.width / 2, settings.y + settings.height - 27,
-        'parallel in training', {'text-anchor': 'middle', class: 'diagram-note'});
-      addText(shell, settings.x + settings.width / 2, settings.y + settings.height - 13,
-        settings.width < 230 ? 'KV cache at inference' : 'KV-cached autoregressive decode in play', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-    }
-
-    function drawActionDecoderColumns(target, settings, marker) {
-      var shell = drawActionDecoderShell(target, settings.x, settings.y, settings.width, settings.height);
-      addText(shell, settings.x + settings.width / 2, settings.y + 44,
-        'shifted inputs · growing causal prefix · positions run together in training', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-      settings.centers.forEach(function (center, index) {
-        var outputStep = 4 + index * 4;
-        drawFlowToken(shell, center - settings.inputWidth / 2, settings.inputY,
-          settings.inputWidth, settings.inputHeight, architectureShiftedLabels[index], 2);
-        flowLine(shell, center, settings.inputY + settings.inputHeight,
-          center, settings.prefixY, 3, marker);
-        drawCausalPrefix(shell, center - settings.prefixWidth / 2, settings.prefixY,
-          settings.prefixWidth, settings.prefixHeight, index);
-        flowLine(shell, center, settings.prefixY + settings.prefixHeight,
-          center, settings.mlpY, 3, marker);
-        shell.appendChild(svgElement('rect', {
-          x: center - settings.mlpWidth / 2, y: settings.mlpY,
-          width: settings.mlpWidth, height: settings.mlpHeight, class: 'model-layer'
-        }));
-        addText(shell, center, settings.mlpY + settings.mlpHeight / 2 + 4, 'MLP', {
-          'text-anchor': 'middle', class: 'diagram-label'
-        });
-        flowLine(shell, center, settings.mlpY + settings.mlpHeight,
-          center, settings.y + settings.height, outputStep);
-        var outputX = center - (settings.cellWidth * 4 + settings.cellGap * 3) / 2;
-        flowLine(target, center, settings.y + settings.height,
-          center, settings.outputY, outputStep, marker);
-        drawActionCells(target, outputX, settings.outputY, settings.cellWidth,
-          settings.outputHeight, settings.cellGap, outputStep, marker);
-        addText(modelPart(target, 'temporal'), center,
-          settings.outputY + settings.outputHeight + 15, architectureActionLabels[index], {
-            'text-anchor': 'middle', class: 'diagram-label'
-          });
-      });
-      var guideY = settings.outputY + settings.outputHeight + 34;
-      for (var index = 1; index < settings.centers.length; index += 1) {
-        flowLine(target, settings.centers[index - 1], guideY,
-          settings.centers[index], guideY, 4 + index * 4, marker);
-      }
-      addText(target, settings.x + settings.width / 2, guideY + 17,
-        'KV-CACHED AUTOREGRESSIVE INFERENCE', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-    }
-
-    function drawParallelHistoryRow(target, positions, width, height, busY, transformerY, marker) {
-      drawParallelTokens(target, architectureHistoryLabels, positions, width, height, 'history', 0);
-      var lines = modelPart(target, 'history');
-      positions.forEach(function (position) {
-        flowLine(lines, position[0] + width / 2, position[1] + height,
-          position[0] + width / 2, busY, 1);
-      });
-      flowLine(lines, positions[0][0] + width / 2, busY,
-        positions[positions.length - 1][0] + width / 2, busY, 1);
-      var center = (positions[0][0] + positions[positions.length - 1][0] + width) / 2;
-      flowLine(lines, center, busY, center, transformerY, 1, marker);
-    }
-
-    function renderArchitectureHorizontal(target, mobile) {
-      empty(target);
-      var marker = modelMarker(target, 'horizontal', COLORS.faint);
-      if (mobile) {
-        target.setAttribute('viewBox', '0 0 360 625');
-        addText(target, 180, 17, 'CONTEXT TOKENS · PARALLEL INPUT', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-        drawParallelHistoryRow(target,
-          [[10, 29], [82, 29], [154, 29], [226, 29], [298, 29]],
-          42, 28, 75, 81, marker);
-        drawArchitectureTransformer(target, 45, 90, 270, 122,
-          'CONTEXT DECODER TRANSFORMER', 'trunk', 1);
-        flowPath(target, 'M180,212 V240 H126 V261', 3, marker);
-        addText(target, 288, 257, 'CONTROLLER FRAME', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-        drawActionDecoderRows(target, {
-          x: 24, y: 270, width: 204, height: 325,
-          inputX: 38, inputWidth: 45,
-          prefixX: 99, prefixWidth: 55,
-          mlpX: 170, mlpWidth: 40,
-          outputX: 247, cellWidth: 17.5, cellGap: 4,
-          rowYs: [333, 390, 447, 504], rowHeight: 28,
-          contextNote: true
-        }, marker);
-      } else {
-        target.setAttribute('viewBox', '0 0 760 325');
-        addText(target, 39.5, 29, 'CONTEXT TOKENS', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-        var historyPositions = [[12, 55], [12, 99], [12, 143], [12, 187], [12, 231]];
-        drawParallelTokens(target, architectureHistoryLabels, historyPositions, 55, 28, 'history', 0);
-        var historyLines = modelPart(target, 'history');
-        historyPositions.forEach(function (position) {
-          flowLine(historyLines, position[0] + 55, position[1] + 14,
-            91, position[1] + 14, 1, marker);
-        });
-        drawArchitectureTransformer(target, 100, 45, 180, 234,
-          'CONTEXT TRANSFORMER', 'trunk', 1, 'parallel across positions');
-        flowLine(target, 280, 162, 316, 162, 3, marker);
-        addText(target, 681, 23, 'CONTROLLER FRAMES', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-        drawActionDecoderRows(target, {
-          x: 325, y: 35, width: 270, height: 260,
-          inputX: 338, inputWidth: 44,
-          prefixX: 397, prefixWidth: 54,
-          mlpX: 465, mlpWidth: 38,
-          outputX: 635, cellWidth: 20, cellGap: 4,
-          rowYs: [96, 140, 184, 228], rowHeight: 28,
-          contextNote: true
-        }, marker);
-      }
       applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
     }
 
-    function renderArchitectureColumnar(target, mobile) {
-      empty(target);
-      var marker = modelMarker(target, 'columnar', COLORS.faint);
-      if (mobile) {
-        target.setAttribute('viewBox', '0 0 360 625');
-        addText(target, 180, 17, 'CONTEXT TOKENS · PARALLEL INPUT', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-        drawParallelHistoryRow(target,
-          [[10, 29], [82, 29], [154, 29], [226, 29], [298, 29]],
-          42, 28, 75, 81, marker);
-        drawArchitectureTransformer(target, 45, 90, 270, 122,
-          'CONTEXT DECODER TRANSFORMER', 'trunk', 1);
-        flowLine(target, 180, 212, 180, 261, 3, marker);
-        drawActionDecoderRows(target, {
-          x: 24, y: 270, width: 312, height: 325,
-          inputX: 38, inputWidth: 43,
-          prefixX: 96, prefixWidth: 52,
-          mlpX: 163, mlpWidth: 36,
-          outputX: 226, cellWidth: 20, cellGap: 4,
-          rowYs: [333, 390, 447, 504], rowHeight: 28,
-          outputInside: true, contextNote: true
-        }, marker);
-      } else {
-        target.setAttribute('viewBox', '0 0 760 680');
-        addText(target, 380, 19, 'CONTEXT TOKENS · PARALLEL INPUT', {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-        drawParallelHistoryRow(target,
-          [[80, 32], [215, 32], [350, 32], [485, 32], [620, 32]],
-          60, 28, 85, 96, marker);
-        drawArchitectureTransformer(target, 130, 105, 500, 120,
-          'CONTEXT DECODER TRANSFORMER', 'trunk', 1);
-        flowLine(target, 380, 225, 380, 281, 3, marker);
-        addText(target, 392, 260, 'context at every action position', {class: 'diagram-note'});
-        drawActionDecoderColumns(target, {
-          x: 70, y: 290, width: 620, height: 250,
-          centers: [155, 305, 455, 605],
-          inputY: 350, inputWidth: 58, inputHeight: 28,
-          prefixY: 402, prefixWidth: 68, prefixHeight: 28,
-          mlpY: 452, mlpWidth: 46, mlpHeight: 27,
-          outputY: 584, outputHeight: 28,
-          cellWidth: 20, cellGap: 4
-        }, marker);
-      }
-      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
-    }
-
-    function renderArchitectureCandidates() {
+    function renderArchitectureFigure() {
       var mobile = window.matchMedia('(max-width: 520px)').matches;
-      renderArchitectureHorizontal(one('#architecture-horizontal'), mobile);
-      renderArchitectureColumnar(one('#architecture-columnar'), mobile);
+      renderArchitectureOverview(one('#architecture-overview'), mobile);
+      renderArchitectureDecoderDetail(one('#architecture-decoder-detail'), mobile);
     }
 
     function mtpLabel(target, x, y, title, note, accent) {
@@ -3683,7 +3589,7 @@
     }
 
     function renderArchitecture() {
-      renderArchitectureCandidates();
+      renderArchitectureFigure();
       renderContextMaps();
     }
 
@@ -4097,7 +4003,7 @@
     if (architectureMedia.addEventListener) architectureMedia.addEventListener('change', renderArchitecture);
     var compactDiagramMedia = window.matchMedia('(max-width: 520px)');
     if (compactDiagramMedia.addEventListener) compactDiagramMedia.addEventListener('change', function () {
-      renderArchitectureCandidates();
+      renderArchitectureFigure();
       renderMtpCandidates();
     });
 
