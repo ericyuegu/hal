@@ -29,9 +29,6 @@ required_variables=(
   HAL_NETPLAY_USER_JSON_A
   HAL_ISO_PATH
   HAL_NETPLAY_EMULATOR_PATH
-  HAL_NETPLAY_ALLOWED_ORIGINS
-  HAL_NETPLAY_ALLOWED_HOSTS
-  CLOUDFLARE_TUNNEL_TOKEN
   AWS_ENDPOINT_URL
   AWS_ACCESS_KEY_ID
   AWS_SECRET_ACCESS_KEY
@@ -43,7 +40,15 @@ for variable in "${required_variables[@]}"; do
     exit 2
   fi
 done
-for command in uv xvfb-run cloudflared; do
+
+export HAL_NETPLAY_ALLOWED_ORIGINS=${HAL_NETPLAY_ALLOWED_ORIGINS:-http://127.0.0.1:3000}
+export HAL_NETPLAY_ALLOWED_HOSTS=${HAL_NETPLAY_ALLOWED_HOSTS:-127.0.0.1,localhost}
+
+required_commands=(uv xvfb-run)
+if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} ]]; then
+  required_commands+=(cloudflared)
+fi
+for command in "${required_commands[@]}"; do
   if ! command -v "$command" >/dev/null; then
     echo "required command is not installed: $command" >&2
     exit 2
@@ -83,8 +88,10 @@ xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --git-sha "$HAL_GIT_SHA" &
 process_ids+=("$!")
 
-cloudflared tunnel --no-autoupdate run \
-  --token "$CLOUDFLARE_TUNNEL_TOKEN" &
-process_ids+=("$!")
+if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} ]]; then
+  cloudflared tunnel --no-autoupdate run \
+    --token "$CLOUDFLARE_TUNNEL_TOKEN" &
+  process_ids+=("$!")
+fi
 
 wait -n "${process_ids[@]}"

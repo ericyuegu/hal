@@ -75,18 +75,15 @@ network, disk, and lifecycle options.
 
 ## Netplay service
 
-Production runs one compiled policy slot. Copy and complete the environment
-file, then start the host service and deploy the frontend:
+Run one compiled policy slot locally:
 
 ```bash
 cp deploy/netplay/.env.example deploy/netplay/.env
-deploy/netplay/run-host.sh
-deploy/netplay/deploy-frontend.sh
+deploy/netplay/run-local.sh
 ```
 
-Keep the second command running and execute the third in another terminal. See
-[deploy/netplay/README.md](deploy/netplay/README.md) for requirements, Docker,
-health checks, and GPU qualification.
+See [deploy/netplay/README.md](deploy/netplay/README.md) for requirements,
+Cloudflare publishing, Docker, health checks, and GPU qualification.
 
 
 ## Data

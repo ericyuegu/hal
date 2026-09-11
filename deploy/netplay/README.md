@@ -4,25 +4,37 @@ Production runs one compiled policy slot. Use the tested Slippi 3.6.4 AppImage,
 the qualified Melee CISO, one Slippi account, and an NVIDIA GPU. The runner
 checks the Dolphin hash before each game.
 
-## Direct deployment
+## Run locally
 
-Install `uv`, `npm`, `xvfb-run`, and `cloudflared`. From the repository root:
+Install `uv`, `npm`, and `xvfb-run`. From the repository root:
 
 ```text
 cp deploy/netplay/.env.example deploy/netplay/.env
+deploy/netplay/run-local.sh
+```
+
+Set the local paths and R2 values in `.env`, then open
+`http://127.0.0.1:3000`. The command starts the API, one-slot runner, and
+frontend. Press Ctrl-C to stop all three. Cloudflare values can stay empty.
+
+## Publish with Cloudflare
+
+Set the public origins, API URL, and tunnel token in `.env`. Install
+`cloudflared`, then run these commands in separate terminals:
+
+```text
 deploy/netplay/run-host.sh
 deploy/netplay/deploy-frontend.sh
 ```
 
-Set every value in `.env` before you run the last two commands. Keep
-`run-host.sh` open and run `deploy-frontend.sh` in another terminal. The scripts
-install their locked dependencies. If Wrangler requests authentication, run
-`npx wrangler login` once.
+The scripts install their locked dependencies. If Wrangler requests
+authentication, run `npx wrangler login` once.
 
 Configure the Cloudflare tunnel to send the API hostname to
 `http://127.0.0.1:8080`. The frontend origin must match
 `HAL_NETPLAY_ALLOWED_ORIGINS` exactly. Both scripts accept a different
-environment-file path as their only argument.
+environment-file path as their only argument. An empty tunnel token disables
+Cloudflare.
 
 ## Docker alternative
 
