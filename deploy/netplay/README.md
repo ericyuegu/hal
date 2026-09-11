@@ -64,9 +64,10 @@ For Docker, use `docker compose logs -f api runner`, `docker compose restart
 runner`, and `docker compose down` from `deploy/netplay`.
 
 The runner reports FPS and p95 frame, Dolphin, policy, model, and batching
-times. It retries one stalled or persistently slow game after closing Dolphin.
-Slow inference pauses new reservations. A policy-worker failure exits the
-runner so the process supervisor can restart it.
+times. Low FPS and frame stutter mark the service as degraded without ending
+the game. The runner retries one stalled game after closing Dolphin. Slow
+inference pauses new reservations. A policy-worker failure exits the runner so
+the process supervisor can restart it.
 
 Install the 30-day R2 replay lifecycle rule once:
 

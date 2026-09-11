@@ -17,8 +17,7 @@ MIN_GAME_FPS: Final[float] = 59.0
 FRAME_INTERVAL_P95_LIMIT_MS: Final[float] = 20.0
 MIN_HEALTH_FRAMES: Final[int] = 120
 HEALTH_WINDOW_FRAMES: Final[int] = 300
-FRAME_STALL_SECONDS: Final[float] = 2.0
-RECOVERY_AFTER_SECONDS: Final[float] = 8.0
+FRAME_STALL_SECONDS: Final[float] = 10.0
 SLOT_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 3.0
 SLOT_STARTUP_GRACE_SECONDS: Final[float] = 30.0
 RUNNER_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 5.0
@@ -70,8 +69,6 @@ class RuntimeHealth:
         self._active = False
         self._delay: int | None = None
         self._last_frame_at: float | None = None
-        self._bad_cadence_since: float | None = None
-        self._recovery_required = False
         self._next_assessment = 0.0
         self._snapshot = RuntimeSnapshot(None, None, None, None, None, False)
 
@@ -85,8 +82,6 @@ class RuntimeHealth:
         self._active = True
         self._delay = delay
         self._last_frame_at = now
-        self._bad_cadence_since = None
-        self._recovery_required = False
         self._next_assessment = now
         self._snapshot = RuntimeSnapshot(None, None, None, None, None, False)
 
@@ -97,8 +92,6 @@ class RuntimeHealth:
         self._active = False
         self._delay = None
         self._last_frame_at = None
-        self._bad_cadence_since = None
-        self._recovery_required = False
         self._snapshot = RuntimeSnapshot(None, None, None, None, None, False)
 
     def observe_frame(self, frame_id: int, dolphin_step_seconds: float, now: float) -> RuntimeSnapshot:
@@ -146,12 +139,6 @@ class RuntimeHealth:
 
         stalled = self._active and self._last_frame_at is not None and now - self._last_frame_at >= FRAME_STALL_SECONDS
         cadence_reason = self._cadence_reason(game_fps, frame_p95)
-        if cadence_reason is None:
-            self._bad_cadence_since = None
-        elif self._bad_cadence_since is None:
-            self._bad_cadence_since = now
-        elif now - self._bad_cadence_since >= RECOVERY_AFTER_SECONDS:
-            self._recovery_required = True
 
         slow_inference = (
             self._delay is not None
@@ -168,7 +155,7 @@ class RuntimeHealth:
             dolphin_step_p95_ms=None if dolphin_p95 is None else 1_000.0 * dolphin_p95,
             policy_round_trip_p95_ms=None if policy_p95 is None else 1_000.0 * policy_p95,
             reason=reason,
-            recovery_required=stalled or self._recovery_required,
+            recovery_required=stalled,
         )
 
     def _cadence_reason(self, game_fps: float | None, frame_p95: float | None) -> str | None:

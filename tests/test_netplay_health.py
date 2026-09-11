@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from hal.netplay_service.health import FRAME_STALL_SECONDS
-from hal.netplay_service.health import RECOVERY_AFTER_SECONDS
 from hal.netplay_service.health import RUNNER_HEARTBEAT_MAX_AGE_SECONDS
 from hal.netplay_service.health import RunnerState
 from hal.netplay_service.health import RuntimeHealth
@@ -68,25 +67,20 @@ def test_runtime_health_stays_ready_for_ten_minutes_at_60_fps() -> None:
     assert status.policy_round_trip_p95_ms == pytest.approx(10.0)
 
 
-def test_low_fps_recovers_only_after_eight_continuous_seconds() -> None:
+def test_low_fps_stays_degraded_without_recovery() -> None:
     monitor = RuntimeHealth()
-    now = _drive(monitor, fps=58.0, frames=120, policy_seconds=0.010)
-    assert monitor.snapshot(now).reason == "low_frame_rate"
-    assert monitor.snapshot(now).recovery_required is False
+    now = _drive(monitor, fps=58.0, frames=1_200, policy_seconds=0.010)
+    status = monitor.snapshot(now)
 
-    for frame_id in range(121, 121 + int((RECOVERY_AFTER_SECONDS + 1.0) * 58.0)):
-        monitor.observe_policy(0.010, now)
-        now += 1.0 / 58.0
-        monitor.observe_frame(frame_id, 0.005, now)
-
-    assert monitor.snapshot(now).recovery_required is True
+    assert status.reason == "low_frame_rate"
+    assert status.recovery_required is False
 
 
-def test_frame_stutter_is_degraded_after_120_frames() -> None:
+def test_frame_stutter_stays_degraded_without_recovery() -> None:
     monitor = RuntimeHealth()
     monitor.begin(2, 0.0)
     now = 0.0
-    for frame_id in range(1, 121):
+    for frame_id in range(1, 1_201):
         monitor.observe_policy(0.010, now)
         now += 0.030 if frame_id % 10 == 0 else 0.015
         monitor.observe_frame(frame_id, 0.004, now)
@@ -113,7 +107,7 @@ def test_policy_deadline_degrades_without_restarting_dolphin() -> None:
     assert status.recovery_required is False
 
 
-def test_two_second_frame_stall_requires_immediate_recovery() -> None:
+def test_ten_second_frame_stall_requires_immediate_recovery() -> None:
     monitor = RuntimeHealth()
     monitor.begin(2, 10.0)
 
@@ -129,10 +123,8 @@ def test_runtime_health_survives_repeated_recovery_cycles() -> None:
 
     for _ in range(64):
         monitor.begin(2, now)
-        for frame_id in range(1, 701):
-            monitor.observe_policy(0.010, now)
-            now += 1.0 / 58.0
-            status = monitor.observe_frame(frame_id, 0.005, now)
+        now += FRAME_STALL_SECONDS + 0.01
+        status = monitor.snapshot(now)
         assert status.recovery_required is True
         monitor.finish()
         now += 0.1
