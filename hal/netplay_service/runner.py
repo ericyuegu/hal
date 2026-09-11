@@ -22,10 +22,11 @@ from typing import Protocol
 import melee
 import torch
 from loguru import logger
+from peppi_py.game import EndMethod
 
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.play import PlayResult
-from hal.eval.play import require_completed_replay
+from hal.eval.play import read_new_replay_end
 from hal.eval.play import run_netplay_match
 from hal.inference.api import PolicySpec
 from hal.inference.api import RuntimeConfig
@@ -559,7 +560,19 @@ def _run_reservation(
                     stream_id=config.stream_id,
                 )
                 ended_at = datetime.now(UTC)
-                replay = require_completed_replay(replay_dir, previous)
+                replay_end = read_new_replay_end(replay_dir, previous)
+                if replay_end.method is EndMethod.NO_CONTEST:
+                    store.mark_no_contest(job.id, config.worker_id)
+                    logger.info(
+                        "reservation {} ended by no contest on slot {} replay={}",
+                        job.id,
+                        config.slot,
+                        replay_end.path,
+                    )
+                    return
+                if not replay_end.completed:
+                    raise RuntimeError(f"netplay replay ended via {replay_end.method.name}: {replay_end.path}")
+                replay = replay_end.path
                 actual_stage = _stage_name(result.stage)
                 human_result = _human_result(result)
                 limit_ms = 33.3 if job.choices.online_delay == 2 else 16.7

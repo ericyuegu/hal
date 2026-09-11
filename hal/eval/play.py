@@ -61,6 +61,16 @@ class PlayResult:
         return _p95_ms(self.dolphin_step_seconds)
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayEnd:
+    path: Path
+    method: EndMethod
+
+    @property
+    def completed(self) -> bool:
+        return self.method in (EndMethod.TIME, EndMethod.GAME, EndMethod.RESOLVED)
+
+
 class PlayObserver(Protocol):
     def observe_policy(self, seconds: float) -> None: ...
 
@@ -169,8 +179,8 @@ def _log_match_progress(
     )
 
 
-def require_completed_replay(replay_dir: Path, previous: Collection[Path]) -> Path:
-    """Return this invocation's replay after validating its game-end record."""
+def read_new_replay_end(replay_dir: Path, previous: Collection[Path]) -> ReplayEnd:
+    """Read the game-end record from this invocation's replay."""
     replays = sorted(set(replay_dir.rglob("*.slp")) - set(previous))
     if len(replays) != 1:
         raise RuntimeError(f"expected one new replay in {replay_dir}, found {len(replays)}")
@@ -185,9 +195,15 @@ def require_completed_replay(replay_dir: Path, previous: Collection[Path]) -> Pa
         method = EndMethod(int(game.end.method))
     except (TypeError, ValueError) as error:
         raise RuntimeError(f"netplay replay has unknown game-end method: {replay}") from error
-    if method not in (EndMethod.TIME, EndMethod.GAME, EndMethod.RESOLVED):
-        raise RuntimeError(f"netplay replay ended via {method.name}: {replay}")
-    return replay
+    return ReplayEnd(replay, method)
+
+
+def require_completed_replay(replay_dir: Path, previous: Collection[Path]) -> Path:
+    """Return this invocation's replay after validating its game-end record."""
+    replay_end = read_new_replay_end(replay_dir, previous)
+    if not replay_end.completed:
+        raise RuntimeError(f"netplay replay ended via {replay_end.method.name}: {replay_end.path}")
+    return replay_end.path
 
 
 def run_netplay_match(

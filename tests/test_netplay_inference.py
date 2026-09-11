@@ -2,6 +2,9 @@ import threading
 import time
 from multiprocessing import Pipe
 
+import pytest
+
+import hal.netplay_service.inference as inference
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.inference.api import PolicyInput
@@ -125,6 +128,54 @@ def test_continuous_batcher_does_not_wait_for_an_idle_slot() -> None:
         assert elapsed < 0.1
         assert len(policy.batches) == 1
         assert len(policy.batches[0]) == 1
+
+
+def test_continuous_batcher_ignores_a_pipe_reset_during_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = RuntimeConfig(1, (2, 3))
+    policy = _Policy()
+    parent, child = Pipe()
+    try:
+        with ServingArena.create(1, 3, policy.spec.required_observation_fields) as arena:
+            stop = threading.Event()
+            batcher = ContinuousBatcher(policy, runtime, arena, {0: parent})
+            monkeypatch.setattr(inference, "wait", lambda *_args, **_kwargs: [parent])
+
+            def reset_during_shutdown(*_args: object) -> None:
+                stop.set()
+                raise ConnectionResetError
+
+            monkeypatch.setattr(batcher, "_serve_batch", reset_during_shutdown)
+
+            batcher.serve(stop)
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_continuous_batcher_raises_a_pipe_reset_during_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = RuntimeConfig(1, (2, 3))
+    policy = _Policy()
+    parent, child = Pipe()
+    try:
+        with ServingArena.create(1, 3, policy.spec.required_observation_fields) as arena:
+            stop = threading.Event()
+            batcher = ContinuousBatcher(policy, runtime, arena, {0: parent})
+            monkeypatch.setattr(inference, "wait", lambda *_args, **_kwargs: [parent])
+
+            def reset_during_service(*_args: object) -> None:
+                raise ConnectionResetError
+
+            monkeypatch.setattr(batcher, "_serve_batch", reset_during_service)
+
+            with pytest.raises(ConnectionResetError):
+                batcher.serve(stop)
+    finally:
+        parent.close()
+        child.close()
 
 
 def test_continuous_batcher_sustains_one_minute_of_two_slot_frame_traffic() -> None:

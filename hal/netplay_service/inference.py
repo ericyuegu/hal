@@ -463,7 +463,12 @@ class ContinuousBatcher:
                     break
                 pending.extend(more)
                 seen.update(more)
-            self._serve_batch(pending, time.perf_counter() - wait_started)
+            try:
+                self._serve_batch(pending, time.perf_counter() - wait_started)
+            except BrokenPipeError, ConnectionResetError, EOFError:
+                if stop.is_set():
+                    return
+                raise
 
     def _serve_batch(self, connections: Sequence[Connection], batch_wait_seconds: float) -> None:
         requests: list[tuple[int, int, PolicyInput, Connection]] = []

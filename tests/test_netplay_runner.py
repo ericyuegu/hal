@@ -9,8 +9,10 @@ from unittest.mock import Mock
 
 import melee
 import pytest
+from peppi_py.game import EndMethod
 
 import hal.netplay_service.runner as runner
+from hal.eval.play import ReplayEnd
 from hal.inference.api import RuntimeConfig
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -279,6 +281,54 @@ def test_recoverable_failure_resets_slot_and_retries_once(
     health.recovering.assert_called_once_with("frame_stutter")
     store.fail.assert_called_once_with("reservation", "slot-0", "runtime_degraded", retryable=True)
     stop.wait.assert_called_once_with(0.0)
+
+
+def test_no_contest_ends_reservation_without_a_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Session:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    def play(*_args: object, **kwargs: object) -> object:
+        on_live = kwargs["on_live"]
+        assert callable(on_live)
+        on_live()
+        return object()
+
+    replay = tmp_path / "replays" / "slot-0" / "game.slp"
+    monkeypatch.setattr(runner, "NetplaySession", Session)
+    monkeypatch.setattr(runner, "run_netplay_match", play)
+    monkeypatch.setattr(
+        runner,
+        "read_new_replay_end",
+        lambda *_args: ReplayEnd(replay, EndMethod.NO_CONTEST),
+    )
+    store = Mock()
+    stop = Mock()
+    stop.is_set.return_value = False
+    health = Mock()
+
+    runner._run_reservation(
+        _slot_config(tmp_path),
+        store,
+        Mock(),
+        RuntimeConfig(1, (2, 3)),
+        _job(),
+        stop,
+        health,
+    )
+
+    store.mark_no_contest.assert_called_once_with("reservation", "slot-0")
+    store.finish_game.assert_not_called()
+    health.playing.assert_called_once_with()
 
 
 def test_first_game_is_random_and_rematch_uses_requested_stage() -> None:

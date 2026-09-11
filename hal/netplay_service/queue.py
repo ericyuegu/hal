@@ -299,6 +299,19 @@ class QueueStore:
                 (timestamp, job_id),
             )
 
+    def mark_no_contest(self, job_id: str, worker_id: str) -> None:
+        timestamp = self._now()
+        with self._transaction() as connection:
+            self._owned_job(connection, job_id, worker_id, (JobStatus.PLAYING,))
+            connection.execute(
+                """
+                UPDATE jobs SET status = 'canceled', connect_deadline = NULL,
+                    rematch_deadline = NULL, lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = ? WHERE id = ?
+                """,
+                (timestamp, job_id),
+            )
+
     def finish_game(self, job_id: str, worker_id: str, *, actual_stage: str, result: str) -> JobStatus:
         validate_stage(actual_stage)
         if not result:

@@ -195,6 +195,25 @@ def test_cancel_during_play_stops_after_game(tmp_path: Path) -> None:
     assert store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="win") is JobStatus.COMPLETE
 
 
+def test_no_contest_cancels_without_recording_a_game(tmp_path: Path) -> None:
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    credentials = store.create_job("CRYO#610", _choices())
+    job = store.claim_next("slot-0")
+    assert job is not None
+    store.mark_connecting(job.id, "slot-0", "HAL#1")
+    store.mark_playing(job.id, "slot-0")
+
+    store.mark_no_contest(job.id, "slot-0")
+
+    canceled = store.get_job(job.id, credentials.token)
+    assert canceled.status is JobStatus.CANCELED
+    assert canceled.game_count == 0
+    assert canceled.last_result is None
+    assert canceled.lease_owner is None
+    assert store.create_job("CRYO#610", _choices()).job.status is JobStatus.QUEUED
+
+
 def test_replay_recording_is_idempotent_for_recovery(tmp_path: Path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
