@@ -329,6 +329,11 @@
     .footnotes{border-top:1px solid var(--rule);margin-top:3rem;padding-top:1rem;font-size:.88rem;color:var(--ink-soft)}
     .site-foot{max-width:680px;margin:0 auto;padding:46px 24px 38px;font:400 .7rem/1.5 var(--mono);color:var(--ink-mono)}
     .site-foot a{color:var(--ink-mono);text-decoration:underline;text-decoration-color:var(--rule-underline);text-underline-offset:3px}
+    @media(max-width:900px){
+      .branch-study{grid-template-columns:110px minmax(0,1fr);gap:13px;padding:19px 0}
+      .branch-study>div:first-child,.branch-study>.branch-impact{grid-column:1/-1}
+      .branch-map{width:104px}
+    }
     @media(max-width:720px){
       .site-top{padding-top:22px}
       main{padding:38px 20px 0}
@@ -341,9 +346,6 @@
       .factor-bar-head span:nth-child(2){grid-column:1;text-align:left}
       .factor-bar-head span:nth-child(3){grid-column:2;text-align:left}
       .factor-bar-row .factor-bar-label{grid-column:1/-1}
-      .branch-study{grid-template-columns:110px minmax(0,1fr);gap:13px;padding:19px 0}
-      .branch-study>div:first-child,.branch-study>.branch-impact{grid-column:1/-1}
-      .branch-map{width:104px}
       .codec-lineage{grid-template-columns:1fr;gap:22px}
       .codec-stage{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
       .codec-stage-head{grid-column:1/-1}
