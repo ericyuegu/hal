@@ -142,6 +142,27 @@
     .model-diagram [data-module].module-focus{opacity:1}
     .model-diagram [data-module].module-focus .model-box,.model-diagram [data-module].module-focus .model-token,.model-diagram [data-module].module-focus .model-layer{stroke:var(--oxblood);stroke-width:1.5}
     .model-diagram [data-module].module-focus .model-wire{stroke:var(--oxblood)}
+    .architecture-layout-vertical .model-diagram{max-width:560px;margin:0 auto}
+    .architecture-layout-columnar .model-diagram{max-width:820px;margin:0 auto}
+    .architecture-candidate .model-diagram text{font-size:12px}
+    .architecture-candidate .model-diagram .diagram-title{font-size:13px}
+    .architecture-candidate .model-diagram .diagram-label{font-size:12.5px}
+    .architecture-candidate .model-diagram .diagram-note{font-size:10.5px}
+    .model-diagram .flow-cell,.model-diagram .flow-core{transform-box:fill-box;transform-origin:center;animation:model-data-pulse 8.4s ease-in-out infinite both;animation-delay:calc(var(--flow-step) * .29s)}
+    .model-diagram .flow-core{animation-name:model-core-pulse}
+    .model-diagram .flow-link{animation:model-link-pulse 8.4s ease-in-out infinite both;animation-delay:calc(var(--flow-step) * .29s)}
+    @keyframes model-data-pulse{
+      0%,11%,100%{fill:var(--paper);stroke:var(--rule-dotted);transform:scale(1)}
+      5%{fill:rgba(123,46,46,.10);stroke:var(--oxblood);transform:scale(1.025)}
+    }
+    @keyframes model-core-pulse{
+      0%,11%,100%{fill:var(--paper);stroke:var(--ink);transform:scale(1)}
+      5%{fill:rgba(123,46,46,.06);stroke:var(--oxblood);transform:scale(1.012)}
+    }
+    @keyframes model-link-pulse{
+      0%,11%,100%{stroke:var(--ink-faint);opacity:.72}
+      5%{stroke:var(--oxblood);opacity:1}
+    }
     .mtp-diagram{min-height:164px}
     .factor-bars{padding:14px 3px 4px}
     .factor-bar-head,.factor-bar-row{display:grid;grid-template-columns:175px 1fr 1fr;gap:18px;align-items:center}
@@ -364,7 +385,7 @@
       .codec-pair-title{display:block}
     }
     @media(min-width:1400px){.architecture-context{display:block}}
-    @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+    @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
     @media print{
       body{background:#fff}.site-top,.controls,.control-plate,.ledger-controls,.author-note{display:none!important}
       .artifact{box-shadow:none}.breakout{width:100%;margin-left:0;transform:none}
@@ -396,25 +417,25 @@
           <div class="figure-head">
             <div>
               <h4>Flagship model architecture</h4>
-              <p>Three views of the same two-stage Transformer.</p>
+              <p>Three layouts of the same causal dataflow.</p>
             </div>
           </div>
           <div class="architecture-candidates">
-            <section class="architecture-candidate">
-              <div class="candidate-head"><b>A · stacked pipeline</b><span>conventional block view</span></div>
-              <svg id="architecture-stack" class="model-diagram" role="img" aria-label="Stacked pipeline view of the production model"></svg>
+            <section class="architecture-candidate architecture-layout-horizontal">
+              <div class="candidate-head"><b>A · horizontal</b><span>shortest reading path</span></div>
+              <svg id="architecture-horizontal" class="model-diagram" role="img" aria-label="Horizontal dependency graph of the production model"></svg>
             </section>
-            <section class="architecture-candidate">
-              <div class="candidate-head"><b>B · dependency graph</b><span>shared state and causal plan</span></div>
-              <svg id="architecture-dependencies" class="model-diagram" role="img" aria-label="Dependency graph view of the production model"></svg>
+            <section class="architecture-candidate architecture-layout-vertical">
+              <div class="candidate-head"><b>B · vertical</b><span>clearest decode order</span></div>
+              <svg id="architecture-vertical" class="model-diagram" role="img" aria-label="Vertical dependency graph of the production model"></svg>
             </section>
-            <section class="architecture-candidate">
-              <div class="candidate-head"><b>C · attention view</b><span>two causal sequences</span></div>
-              <svg id="architecture-attention" class="model-diagram" role="img" aria-label="Attention-matrix view of the production model"></svg>
+            <section class="architecture-candidate architecture-layout-columnar">
+              <div class="candidate-head"><b>C · columnar</b><span>least connector overlap</span></div>
+              <svg id="architecture-columnar" class="model-diagram" role="img" aria-label="Columnar dependency graph of the production model"></svg>
             </section>
           </div>
         </div>
-        <figcaption>Fig 1: A causal observation Transformer compresses the recent game history into <span class="mono">hₜ</span>. A smaller causal Transformer uses that state to predict a controller plan. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
+        <figcaption>Fig 1: An alternating state/action history enters a causal Transformer. The controller plan is decoded from <span class="mono">aₜ</span> through <span class="mono">aₜ₊₃</span>, and each frame is decoded <span class="mono">C → M → T → B</span>. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
       </figure>
 
       <ul class="question-list">
@@ -1334,67 +1355,142 @@
       return parent.lastChild;
     }
 
-    function drawHistoryTokens(target, x, y, count, gap, moduleId) {
-      var group = modelPart(target, moduleId || 'history');
-      for (var index = 0; index < count; index += 1) {
-        var tokenX = x + index * gap;
-        group.appendChild(svgElement('rect', {
-          x: tokenX, y: y, width: 30, height: 54, class: 'model-token'
-        }));
-        group.appendChild(svgElement('line', {
-          x1: tokenX, y1: y + 27, x2: tokenX + 30, y2: y + 27,
-          class: 'model-wire ghost'
-        }));
-        addText(group, tokenX + 15, y + 18, 's' + (index === count - 1 ? 'ₜ' : '−' + (count - 1 - index)), {
-          'text-anchor': 'middle', class: 'diagram-label'
-        });
-        addText(group, tokenX + 15, y + 45, 'a' + (index === count - 1 ? 'ₜ' : '−' + (count - 1 - index)), {
-          'text-anchor': 'middle', class: 'diagram-note'
-        });
-      }
-      return group;
+    var architectureHistoryLabels = ['sₜ₋₂', 'aₜ₋₂', 'sₜ₋₁', 'aₜ₋₁', 'sₜ'];
+    var architectureActionLabels = ['aₜ', 'aₜ₊₁', 'aₜ₊₂', 'aₜ₊₃'];
+
+    function flowStyle(step) {
+      return '--flow-step:' + step;
     }
 
-    function drawTransformerStack(target, x, y, width, height, label, depth, moduleId) {
-      var group = modelPart(target, moduleId);
-      [10, 5].forEach(function (offset) {
+    function flowLine(target, x1, y1, x2, y2, step, marker) {
+      var attributes = {
+        x1: x1, y1: y1, x2: x2, y2: y2,
+        class: 'model-wire flow-link', style: flowStyle(step)
+      };
+      if (marker) attributes['marker-end'] = marker;
+      var line = svgElement('line', attributes);
+      target.appendChild(line);
+      return line;
+    }
+
+    function flowPath(target, path, step, marker) {
+      var attributes = {
+        d: path, class: 'model-wire flow-link', style: flowStyle(step)
+      };
+      if (marker) attributes['marker-end'] = marker;
+      var node = svgElement('path', attributes);
+      target.appendChild(node);
+      return node;
+    }
+
+    function drawFlowToken(target, x, y, width, height, label, step) {
+      target.appendChild(svgElement('rect', {
+        x: x, y: y, width: width, height: height,
+        class: 'model-token flow-cell', style: flowStyle(step)
+      }));
+      addText(target, x + width / 2, y + height / 2 + 3, label, {
+        'text-anchor': 'middle', class: 'diagram-label'
+      });
+    }
+
+    function drawArchitectureHistory(target, positions, width, height, marker) {
+      var group = modelPart(target, 'history');
+      positions.forEach(function (position, index) {
+        drawFlowToken(group, position[0], position[1], width, height, architectureHistoryLabels[index], index);
+        if (!index) return;
+        var previous = positions[index - 1];
+        if (previous[1] === position[1]) {
+          flowLine(group, previous[0] + width, previous[1] + height / 2,
+            position[0], position[1] + height / 2, index, marker);
+        } else {
+          flowLine(group, previous[0] + width / 2, previous[1] + height,
+            position[0] + width / 2, position[1], index, marker);
+        }
+      });
+      return {
+        first: positions[0],
+        last: positions[positions.length - 1],
+        width: width,
+        height: height
+      };
+    }
+
+    function drawFlowTransformer(target, x, y, width, height) {
+      var group = modelPart(target, 'trunk');
+      [9, 4.5].forEach(function (offset) {
         group.appendChild(svgElement('rect', {
           x: x - offset, y: y + offset, width: width, height: height,
           class: 'model-layer'
         }));
       });
-      group.appendChild(svgElement('rect', {x: x, y: y, width: width, height: height, class: 'model-box'}));
-      addText(group, x + width / 2, y + 20, label, {'text-anchor': 'middle', class: 'diagram-title'});
-      addText(group, x + width / 2, y + 35, '×' + depth, {'text-anchor': 'middle', class: 'diagram-note'});
-      var blockTop = y + 48;
       group.appendChild(svgElement('rect', {
-        x: x + 18, y: blockTop, width: width - 36, height: 25, class: 'model-layer'
+        x: x, y: y, width: width, height: height,
+        class: 'model-box flow-core', style: flowStyle(5)
       }));
-      addText(group, x + width / 2, blockTop + 16, 'causal self-attention', {
+      addText(group, x + width / 2, y + 21, 'CAUSAL TRANSFORMER', {
+        'text-anchor': 'middle', class: 'diagram-title'
+      });
+      var blockTop = y + 36;
+      var innerWidth = width - 30;
+      group.appendChild(svgElement('rect', {
+        x: x + 15, y: blockTop, width: innerWidth, height: 27, class: 'model-layer'
+      }));
+      addText(group, x + width / 2, blockTop + 17,
+        width < 145 ? 'self-attention' : 'causal self-attention', {
+          'text-anchor': 'middle', class: 'diagram-label'
+        });
+      group.appendChild(svgElement('rect', {
+        x: x + 15, y: blockTop + 36, width: innerWidth, height: 25, class: 'model-layer'
+      }));
+      addText(group, x + width / 2, blockTop + 52, 'MLP', {
         'text-anchor': 'middle', class: 'diagram-label'
       });
+      return {x: x, y: y, width: width, height: height};
+    }
+
+    function drawPlanShell(target, x, y, width, height) {
+      var group = modelPart(target, 'temporal');
       group.appendChild(svgElement('rect', {
-        x: x + 18, y: blockTop + 34, width: width - 36, height: 25, class: 'model-layer'
+        x: x, y: y, width: width, height: height, class: 'model-layer'
       }));
-      addText(group, x + width / 2, blockTop + 50, 'MLP', {
-        'text-anchor': 'middle', class: 'diagram-label'
+      addText(group, x + width / 2, y + 18, 'AUTOREGRESSIVE CONTROLLER PLAN', {
+        'text-anchor': 'middle', class: 'diagram-title'
       });
-      modelPath(group, 'M' + (x + width - 28) + ',' + (blockTop + 4) +
-        ' C' + (x + width - 7) + ',' + (blockTop + 4) + ' ' + (x + width - 7) + ',' +
-        (blockTop + 59) + ' ' + (x + width - 28) + ',' + (blockTop + 59), {ghost: true});
-      addText(group, x + width - 11, blockTop + 34, '+', {'text-anchor': 'middle', class: 'diagram-note'});
       return group;
     }
 
-    function drawActionFrame(target, x, y, label, moduleId, accent) {
-      var group = modelPart(target, moduleId || 'temporal');
-      group.appendChild(svgElement('rect', {
-        x: x, y: y, width: 46, height: 38,
-        class: 'model-token' + (accent ? ' accent' : '')
-      }));
-      addText(group, x + 23, y + 16, label, {'text-anchor': 'middle', class: 'diagram-label'});
-      addText(group, x + 23, y + 30, 'C M T B', {'text-anchor': 'middle', class: 'diagram-note'});
-      return group;
+    function drawActionCells(target, x, y, cellWidth, cellHeight, gap, startStep, marker) {
+      var group = modelPart(target, 'groups');
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        var left = x + index * (cellWidth + gap);
+        drawFlowToken(group, left, y, cellWidth, cellHeight, label, startStep + index);
+        if (index) {
+          flowLine(group, left - gap, y + cellHeight / 2, left, y + cellHeight / 2,
+            startStep + index, marker);
+        }
+      });
+      return {
+        x: x,
+        y: y,
+        width: cellWidth * 4 + gap * 3,
+        height: cellHeight,
+        centerX: x + (cellWidth * 4 + gap * 3) / 2
+      };
+    }
+
+    function drawActionFrameTop(target, x, y, label, startStep, cellWidth, gap, marker) {
+      var labelGroup = modelPart(target, 'temporal');
+      var cells = drawActionCells(target, x, y + 17, cellWidth, 26, gap, startStep, marker);
+      addText(labelGroup, cells.centerX, y + 9, label, {
+        'text-anchor': 'middle', class: 'diagram-label'
+      });
+      return cells;
+    }
+
+    function drawActionFrameSide(target, x, y, label, startStep, cellWidth, gap, marker) {
+      var labelGroup = modelPart(target, 'temporal');
+      addText(labelGroup, x, y + 18, label, {class: 'diagram-label'});
+      return drawActionCells(target, x + 48, y, cellWidth, 27, gap, startStep, marker);
     }
 
     function drawGroupChain(target, x, y, moduleId, accent) {
@@ -1427,157 +1523,177 @@
       });
     }
 
-    function renderArchitectureStack(target, mobile) {
-      empty(target);
-      var marker = modelMarker(target, 'ink', COLORS.faint);
-      if (mobile) {
-        target.setAttribute('viewBox', '0 0 360 510');
-        addText(target, 180, 18, 'recent frames', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawHistoryTokens(target, 81, 28, 4, 40, 'history');
-        modelWire(target, 180, 84, 180, 112, {marker: marker});
-        drawTransformerStack(target, 70, 112, 220, 125, 'OBSERVATION TRANSFORMER', '16', 'trunk');
-        modelWire(target, 180, 237, 180, 269, {marker: marker});
-        modelBox(target, 151, 269, 58, 42, 'hₜ', {module: 'trunk', note: 'shared state'});
-        modelWire(target, 180, 311, 180, 340, {marker: marker});
-        drawTransformerStack(target, 85, 340, 190, 112, 'TEMPORAL TRANSFORMER', '4', 'temporal');
-        modelWire(target, 180, 452, 180, 472, {marker: marker});
-        drawGroupChain(target, 126, 476, 'groups', true);
-      } else {
-        target.setAttribute('viewBox', '0 0 880 205');
-        addText(target, 88, 28, 'recent game + action frames', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawHistoryTokens(target, 20, 65, 4, 38, 'history');
-        modelWire(target, 164, 92, 205, 92, {marker: marker});
-        drawTransformerStack(target, 215, 26, 220, 144, 'OBSERVATION TRANSFORMER', '16', 'trunk');
-        modelWire(target, 435, 98, 475, 98, {marker: marker});
-        modelBox(target, 480, 76, 58, 44, 'hₜ', {module: 'trunk', note: 'shared'});
-        modelWire(target, 538, 98, 570, 98, {marker: marker});
-        drawTransformerStack(target, 580, 36, 160, 124, 'TEMPORAL TRANSFORMER', '4', 'temporal');
-        modelWire(target, 740, 98, 767, 98, {marker: marker});
-        drawGroupChain(target, 773, 86, 'groups', true);
-        addText(target, 826, 129, 'per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+    function connectActionFramesHorizontal(target, frames, marker) {
+      for (var index = 1; index < frames.length; index += 1) {
+        var previous = frames[index - 1];
+        var current = frames[index];
+        flowLine(target, previous.x + previous.width, previous.y + previous.height / 2,
+          current.x, current.y + current.height / 2, 6 + index * 4, marker);
       }
-      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
     }
 
-    function renderArchitectureDependencies(target, mobile) {
+    function connectActionFramesVertical(target, frames, marker) {
+      for (var index = 1; index < frames.length; index += 1) {
+        var previous = frames[index - 1];
+        var current = frames[index];
+        flowLine(target, previous.centerX, previous.y + previous.height,
+          current.centerX, current.y, 6 + index * 4, marker);
+      }
+    }
+
+    function renderArchitectureHorizontal(target, mobile) {
       empty(target);
-      var marker = modelMarker(target, 'ink', COLORS.faint);
-      var accentMarker = modelMarker(target, 'accent', COLORS.oxblood);
+      var marker = modelMarker(target, 'horizontal', COLORS.faint);
+      var history;
+      var transformer;
+      var plan;
+      var frames = [];
+
       if (mobile) {
-        target.setAttribute('viewBox', '0 0 360 490');
-        drawHistoryTokens(target, 81, 22, 4, 40, 'history');
-        modelWire(target, 180, 78, 180, 103, {marker: marker});
-        drawTransformerStack(target, 95, 103, 170, 112, 'CAUSAL TRANSFORMER', '16', 'trunk');
-        modelWire(target, 180, 215, 180, 243, {marker: marker});
-        modelBox(target, 153, 243, 54, 40, 'hₜ', {module: 'trunk'});
-        var mobileXs = [48, 132, 216, 300];
-        var mobileShell = modelPart(target, 'temporal');
-        mobileShell.appendChild(svgElement('rect', {x: 22, y: 321, width: 316, height: 116, class: 'model-layer'}));
-        mobileShell.appendChild(svgElement('rect', {x: 27, y: 316, width: 306, height: 116, class: 'model-box'}));
-        addText(mobileShell, 180, 426, 'TEMPORAL TRANSFORMER ×4', {'text-anchor': 'middle', class: 'diagram-note'});
-        mobileXs.forEach(function (x, index) {
-          modelWire(target, 180, 283, x, 333, {module: 'temporal'});
-          drawActionFrame(target, x - 23, 333, 'a' + (index + 1), 'temporal', true);
-        });
-        for (var mobileFrom = 0; mobileFrom < mobileXs.length - 1; mobileFrom += 1) {
-          for (var mobileTo = mobileFrom + 1; mobileTo < mobileXs.length; mobileTo += 1) {
-            var mobileDepth = 382 + (mobileTo - mobileFrom) * 8 + mobileFrom * 2;
-            modelPath(target, 'M' + mobileXs[mobileFrom] + ',371 C' + mobileXs[mobileFrom] + ',' + mobileDepth + ' ' +
-              mobileXs[mobileTo] + ',' + mobileDepth + ' ' + mobileXs[mobileTo] + ',371', {
-                module: 'temporal', accent: true, marker: accentMarker
-              });
-          }
-        }
-        addText(target, 180, 308, 'hₜ to every action', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawGroupChain(target, 126, 450, 'groups', true);
-      } else {
-        target.setAttribute('viewBox', '0 0 880 270');
-        drawHistoryTokens(target, 18, 74, 4, 38, 'history');
-        modelWire(target, 162, 101, 201, 101, {marker: marker});
-        drawTransformerStack(target, 211, 36, 190, 132, 'CAUSAL TRANSFORMER', '16', 'trunk');
-        modelWire(target, 401, 102, 437, 102, {marker: marker});
-        modelBox(target, 442, 81, 54, 42, 'hₜ', {module: 'trunk'});
-        var xs = [570, 655, 740, 825];
-        var temporalShell = modelPart(target, 'temporal');
-        temporalShell.appendChild(svgElement('rect', {x: 529, y: 132, width: 337, height: 99, class: 'model-layer'}));
-        temporalShell.appendChild(svgElement('rect', {x: 534, y: 127, width: 327, height: 99, class: 'model-box'}));
-        addText(temporalShell, 698, 220, 'TEMPORAL TRANSFORMER ×4', {'text-anchor': 'middle', class: 'diagram-note'});
-        xs.forEach(function (x, index) {
-          modelWire(target, 496, 102, x, 137, {module: 'temporal'});
-          drawActionFrame(target, x - 23, 137, 'a' + (index + 1), 'temporal', true);
-        });
-        for (var from = 0; from < xs.length - 1; from += 1) {
-          for (var to = from + 1; to < xs.length; to += 1) {
-            var arcY = 184 + (to - from) * 8 + from * 2;
-            modelPath(target, 'M' + xs[from] + ',175 C' + xs[from] + ',' + arcY + ' ' + xs[to] + ',' +
-              arcY + ' ' + xs[to] + ',175', {
-              module: 'temporal', accent: true, marker: accentMarker
-            });
-          }
-        }
-        addText(target, 698, 28, 'hₜ conditions every action · causal attention connects earlier actions', {
+        target.setAttribute('viewBox', '0 0 360 410');
+        addText(target, 180, 17, 'OBSERVED HISTORY', {
           'text-anchor': 'middle', class: 'diagram-note'
         });
-        drawGroupChain(target, 646, 239, 'groups', true);
+        history = drawArchitectureHistory(target,
+          [[10, 29], [82, 29], [154, 29], [226, 29], [298, 29]], 42, 29, marker);
+        transformer = drawFlowTransformer(target, 65, 101, 230, 112);
+        flowPath(target, 'M' + (history.last[0] + history.width / 2) + ',58 V82 H180 V92', 5, marker);
+        plan = drawPlanShell(target, 12, 254, 336, 128);
+        flowLine(target, 180, transformer.y + transformer.height, 180, 245, 6, marker);
+        [16, 100, 184, 268].forEach(function (x, index) {
+          frames.push(drawActionFrameTop(target, x, 289, architectureActionLabels[index],
+            6 + index * 4, 15, 3, marker));
+        });
+        connectActionFramesHorizontal(target, frames, marker);
+        addText(plan, 180, 368, 'C → M → T → B · then the next frame', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      } else {
+        target.setAttribute('viewBox', '0 0 880 205');
+        addText(target, 128, 29, 'OBSERVED HISTORY', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        history = drawArchitectureHistory(target,
+          [[18, 75], [64, 75], [110, 75], [156, 75], [202, 75]], 36, 32, marker);
+        transformer = drawFlowTransformer(target, 274, 40, 168, 124);
+        flowLine(target, history.last[0] + history.width, 91, 265, 91, 5, marker);
+        plan = drawPlanShell(target, 478, 30, 384, 150);
+        flowLine(target, transformer.x + transformer.width, 102, 469, 102, 6, marker);
+        [492, 585, 678, 771].forEach(function (x, index) {
+          frames.push(drawActionFrameTop(target, x, 77, architectureActionLabels[index],
+            6 + index * 4, 14, 5, marker));
+        });
+        connectActionFramesHorizontal(target, frames, marker);
+        addText(plan, 670, 159, 'C → M → T → B · then the next frame', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
       }
       applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
     }
 
-    function drawAttentionMatrix(target, x, y, size, count, accent, moduleId) {
-      var group = modelPart(target, moduleId);
-      for (var row = 0; row < count; row += 1) {
-        for (var column = 0; column < count; column += 1) {
-          group.appendChild(svgElement('rect', {
-            x: x + column * size,
-            y: y + row * size,
-            width: size - 2,
-            height: size - 2,
-            class: 'attention-cell' + (column <= row ? (accent ? ' accent' : ' on') : '')
-          }));
-        }
+    function renderArchitectureVertical(target, mobile) {
+      empty(target);
+      var marker = modelMarker(target, 'vertical', COLORS.faint);
+      var history;
+      var transformer;
+      var plan;
+      var frames = [];
+
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 760');
+        addText(target, 180, 17, 'OBSERVED HISTORY', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        history = drawArchitectureHistory(target,
+          [[148, 29], [148, 72], [148, 115], [148, 158], [148, 201]], 64, 28, marker);
+        transformer = drawFlowTransformer(target, 70, 266, 220, 118);
+        flowLine(target, 180, history.last[1] + history.height, 180, 257, 5, marker);
+        plan = drawPlanShell(target, 26, 425, 308, 305);
+        flowLine(target, 180, transformer.y + transformer.height, 180, 416, 6, marker);
+        [472, 528, 584, 640].forEach(function (y, index) {
+          frames.push(drawActionFrameSide(target, 62, y, architectureActionLabels[index],
+            6 + index * 4, 29, 6, marker));
+        });
+        connectActionFramesVertical(target, frames, marker);
+        addText(plan, 180, 711, 'each action attends to the completed actions above', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      } else {
+        target.setAttribute('viewBox', '0 0 520 640');
+        addText(target, 260, 22, 'OBSERVED HISTORY', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        history = drawArchitectureHistory(target,
+          [[124, 38], [182, 38], [240, 38], [298, 38], [356, 38]], 40, 32, marker);
+        transformer = drawFlowTransformer(target, 145, 118, 230, 125);
+        flowLine(target, history.last[0] + history.width / 2, 70, 260, 109, 5, marker);
+        plan = drawPlanShell(target, 85, 285, 350, 320);
+        flowLine(target, 260, transformer.y + transformer.height, 260, 276, 6, marker);
+        [330, 392, 454, 516].forEach(function (y, index) {
+          frames.push(drawActionFrameSide(target, 142, y, architectureActionLabels[index],
+            6 + index * 4, 30, 8, marker));
+        });
+        connectActionFramesVertical(target, frames, marker);
+        addText(plan, 260, 587, 'each action attends to the completed actions above', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
       }
-      return group;
+      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
     }
 
-    function renderArchitectureAttention(target, mobile) {
+    function renderArchitectureColumnar(target, mobile) {
       empty(target);
-      var marker = modelMarker(target, 'ink', COLORS.faint);
+      var marker = modelMarker(target, 'columnar', COLORS.faint);
+      var history;
+      var transformer;
+      var plan;
+      var frames = [];
+
       if (mobile) {
-        target.setAttribute('viewBox', '0 0 360 500');
-        addText(target, 180, 19, 'attention over recent frames', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawAttentionMatrix(target, 112, 32, 17, 8, false, 'trunk');
-        addText(target, 180, 186, 'observation Transformer ×16', {'text-anchor': 'middle', class: 'diagram-title'});
-        modelWire(target, 180, 198, 180, 229, {marker: marker});
-        modelBox(target, 153, 229, 54, 40, 'hₜ', {module: 'trunk'});
-        modelWire(target, 180, 269, 180, 300, {marker: marker});
-        addText(target, 180, 293, 'attention over predicted actions', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawAttentionMatrix(target, 136, 305, 22, 4, true, 'temporal');
-        addText(target, 180, 413, 'temporal Transformer ×4', {'text-anchor': 'middle', class: 'diagram-title'});
-        modelWire(target, 180, 425, 180, 450, {marker: marker});
-        drawGroupChain(target, 126, 456, 'groups', true);
+        target.setAttribute('viewBox', '0 0 360 560');
+        addText(target, 48, 19, 'HISTORY', {'text-anchor': 'middle', class: 'diagram-note'});
+        history = drawArchitectureHistory(target,
+          [[20, 36], [20, 74], [20, 112], [20, 150], [20, 188]], 56, 27, marker);
+        transformer = drawFlowTransformer(target, 108, 260, 144, 110);
+        flowPath(target, 'M48,215 V238 H180 V251', 5, marker);
+        plan = drawPlanShell(target, 12, 410, 336, 130);
+        flowLine(target, 180, transformer.y + transformer.height, 180, 401, 6, marker);
+        [16, 100, 184, 268].forEach(function (x, index) {
+          frames.push(drawActionFrameTop(target, x, 446, architectureActionLabels[index],
+            6 + index * 4, 15, 3, marker));
+        });
+        connectActionFramesHorizontal(target, frames, marker);
+        addText(plan, 180, 525, 'C → M → T → B · then the next frame', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
       } else {
-        target.setAttribute('viewBox', '0 0 880 220');
-        addText(target, 178, 22, 'recent frames', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawAttentionMatrix(target, 110, 35, 17, 8, false, 'trunk');
-        addText(target, 178, 189, 'observation Transformer ×16', {'text-anchor': 'middle', class: 'diagram-title'});
-        modelWire(target, 248, 102, 330, 102, {marker: marker});
-        modelBox(target, 335, 81, 54, 42, 'hₜ', {module: 'trunk'});
-        modelWire(target, 389, 102, 493, 102, {marker: marker});
-        addText(target, 550, 22, 'predicted actions', {'text-anchor': 'middle', class: 'diagram-note'});
-        drawAttentionMatrix(target, 502, 45, 24, 4, true, 'temporal');
-        addText(target, 550, 164, 'temporal Transformer ×4', {'text-anchor': 'middle', class: 'diagram-title'});
-        modelWire(target, 598, 102, 686, 102, {marker: marker});
-        drawGroupChain(target, 697, 90, 'groups', true);
-        addText(target, 750, 130, 'C → M → T → B', {'text-anchor': 'middle', class: 'diagram-note'});
+        target.setAttribute('viewBox', '0 0 820 410');
+        addText(target, 80, 31, 'OBSERVED HISTORY', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        history = drawArchitectureHistory(target,
+          [[48, 58], [48, 108], [48, 158], [48, 208], [48, 258]], 64, 31, marker);
+        transformer = drawFlowTransformer(target, 250, 120, 200, 135);
+        flowPath(target, 'M112,273.5 C178,273.5 180,187.5 241,187.5', 5, marker);
+        plan = drawPlanShell(target, 535, 42, 255, 335);
+        flowLine(target, transformer.x + transformer.width, 187.5, 526, 187.5, 6, marker);
+        [90, 157, 224, 291].forEach(function (y, index) {
+          frames.push(drawActionFrameSide(target, 556, y, architectureActionLabels[index],
+            6 + index * 4, 26, 6, marker));
+        });
+        connectActionFramesVertical(target, frames, marker);
+        addText(plan, 662.5, 358, 'completed frames remain in causal context', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
       }
-      applyModelFocus(target, ['trunk', 'temporal', 'groups']);
+      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
     }
 
     function renderArchitectureCandidates() {
       var mobile = window.matchMedia('(max-width: 520px)').matches;
-      renderArchitectureStack(one('#architecture-stack'), mobile);
-      renderArchitectureDependencies(one('#architecture-dependencies'), mobile);
-      renderArchitectureAttention(one('#architecture-attention'), mobile);
+      renderArchitectureHorizontal(one('#architecture-horizontal'), mobile);
+      renderArchitectureVertical(one('#architecture-vertical'), mobile);
+      renderArchitectureColumnar(one('#architecture-columnar'), mobile);
     }
 
     function mtpLabel(target, x, y, title, note, accent) {

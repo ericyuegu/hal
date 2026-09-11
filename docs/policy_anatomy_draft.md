@@ -16,14 +16,14 @@ My intention was to train a good-enough checkpoint to warm start self-play RL,
 but a number of lingering questions compelled me to revisit whether it was
 possible to train an even more capable model.
 
-> **FIGURE 1 — Flagship architecture candidates**
+> **FIGURE 1 — Flagship architecture**
 >
-> Stand-in for three simple views of the same model: a stacked pipeline, a
-> dependency graph, and two causal attention patterns.
+> Stand-in for horizontal, vertical, and columnar layouts of the same dependency
+> graph.
 
-*Fig 1: A causal observation Transformer compresses the recent game history into
-one state. A smaller causal Transformer uses that state to predict a controller
-plan.*
+*Fig 1: An alternating state/action history enters a causal Transformer. The
+controller plan is decoded from aₜ through aₜ₊₃, and each frame is decoded
+C → M → T → B.*
 
 <!--
 FIGURE 1 NOTES
@@ -34,6 +34,10 @@ FIGURE 1 NOTES
 - 8 × 2^30 = 8.59B supervised positions.
 - Standard deployment: prediction 4, delay 2, replan 2.
 - Result: +0.494 [+0.398] stocks/min; +52.72 [+45.14] damage/min.
+- Inputs shown: sₜ₋₂, aₜ₋₂, sₜ₋₁, aₜ₋₁, sₜ.
+- Outputs shown: aₜ, aₜ₊₁, aₜ₊₂, aₜ₊₃.
+- Animate the dataflow in order: input history, causal Transformer, then
+  C → M → T → B within each output frame before advancing to the next frame.
 - Keep parameters, optimization, scores, and deployment timing out of the
   diagram itself.
 -->
