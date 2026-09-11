@@ -16,13 +16,14 @@ My intention was to train a good-enough checkpoint to warm start self-play RL,
 but a number of lingering questions compelled me to revisit whether it was
 possible to train an even more capable model.
 
-> **FIGURE 1 — Flagship architecture and training recipe**
+> **FIGURE 1 — Flagship architecture candidates**
 >
-> Stand-in for the complete model diagram and headline results.
+> Stand-in for three simple views of the same model: a stacked pipeline, a
+> dependency graph, and two causal attention patterns.
 
-*Fig 1: The 216.5M-parameter production policy. The temporal decoder predicts a
-controller plan from one trunk state; the standard runtime executes two frames
-before replanning.*
+*Fig 1: A causal observation Transformer compresses the recent game history into
+one state. A smaller causal Transformer uses that state to predict a controller
+plan.*
 
 <!--
 FIGURE 1 NOTES
@@ -33,7 +34,8 @@ FIGURE 1 NOTES
 - 8 × 2^30 = 8.59B supervised positions.
 - Standard deployment: prediction 4, delay 2, replan 2.
 - Result: +0.494 [+0.398] stocks/min; +52.72 [+45.14] damage/min.
-- Keep the module-selection details in the HTML figure, not the prose.
+- Keep parameters, optimization, scores, and deployment timing out of the
+  diagram itself.
 -->
 
 - **Better encodings**
@@ -104,9 +106,9 @@ multi-token prediction.
 > Stand-in for the aligned next-frame, independent MTP, and autoregressive MTP
 > diagrams.
 
-*Fig 2: Action-decoder lineage. C, M, T, and B are C-stick, main stick,
-triggers, and buttons. The production model trains offsets 1–6, 9, 12, 16,
-and 20 and uses offsets 1–4 in play.*
+*Fig 2: Every predicted action receives the same trunk state. In autoregressive
+MTP, action i can also attend to actions 1 through i−1. Four consecutive actions
+are shown for clarity.*
 
 <!--
 FIGURE 2 NOTES
@@ -119,6 +121,8 @@ FIGURE 2 NOTES
 - Training feeds the previous target. Play feeds the realized previous action
   and advances the temporal KV cache.
 - Within each frame, decode C-stick → main stick → triggers → buttons.
+- Show three candidates back to back until one is selected: dependency wires,
+  attention masks, and receptive sets.
 -->
 
 The clean comparison separates two questions: should later predicted frames
@@ -158,10 +162,9 @@ matched system.
 > Stand-in for the Legacy, Cartesian, and Polar codec diagrams and the two
 > matched score comparisons.
 
-*Fig 4: Cartesian beat the full legacy package by +0.292 stocks/min and +16.16
-damage/min. Polar then beat its matched Cartesian baseline by +0.095 stocks/min
-and +0.88 damage/min; its stock LCB moved from −0.074 to +0.016. Scores should
-only be compared within each pair.*
+*Fig 4: In matched comparisons, Cartesian beat legacy by +0.292 stocks/min and
++16.16 damage/min. Polar beat Cartesian by +0.095 and +0.88; stock LCB crossed
+zero (−0.074 → +0.016).*
 
 <!--
 FIGURE 4 NOTES
@@ -201,8 +204,8 @@ FIGURE 4 NOTES
 
 > **FIGURE 5 — Representation branches**
 >
-> Stand-in for the aligned control/treatment diagrams and intervention-delta
-> bars.
+> Stand-in for a miniature flagship map, an aligned control/treatment diagram,
+> and intervention-delta bars for each branch.
 
 *Fig 5: The bars use one scale across the section: ±3 stocks/min and ±180
 damage/min. Blank results mean that the retained run does not support an
@@ -210,6 +213,10 @@ intervention delta.*
 
 <!--
 FIGURE 5 NOTES
+- Each row reuses the Figure 1 model shape. Grey the full stack and highlight
+  the changed locus before showing the local mechanism.
+- Loci: past-action input, observation input, trunk → plan, trunk sequence,
+  plan + runtime, controller frame, training heads, and plan + runtime.
 - Physical past-action embedding vs one-hot: +0.260 stock; +23.68 damage.
   Runs 1zzstd2d and cqbbbg77.
 - Geometric features: no completed closed-loop treatment.

@@ -113,35 +113,36 @@
     .chart .point{stroke:var(--white);stroke-width:1.5;cursor:crosshair}
     .chart .point:focus{stroke:var(--ink);stroke-width:2}
     .chart-note{font-size:.86rem;color:var(--ink-soft);line-height:1.45;margin:8px 3px 0}
-    .lineage-tab{padding:12px 13px;text-align:left;background:var(--paper);border:0;cursor:pointer}
-    .lineage-tab b{display:block;font:600 .7rem/1.3 var(--mono)}
     .source-line{font-size:.68rem;line-height:1.5;color:var(--ink-mono)}
     .source-line a{color:var(--ink-mono);text-decoration:underline;text-decoration-color:var(--rule-underline);text-underline-offset:3px}
-    .decoder-comparison{padding:2px 4px 4px}
-    .decoder-row{display:grid;grid-template-columns:155px minmax(0,1fr);gap:18px;align-items:center;padding:20px 0;border-bottom:1px dotted var(--rule-dotted)}
-    .decoder-row:last-child{border-bottom:0}
-    .decoder-name b{display:block;font:600 .7rem/1.35 var(--mono)}
-    .decoder-name span{display:block;margin-top:.35rem;font-size:.82rem;line-height:1.4;color:var(--ink-soft)}
-    .decoder-row.flagship .decoder-name b{color:var(--oxblood)}
-    .decoder-flow{display:grid;grid-template-columns:64px 25px minmax(0,1fr);align-items:center;min-height:96px}
-    .decoder-state{border:1px solid var(--ink);padding:10px 5px;text-align:center;background:var(--paper)}
-    .decoder-state b{display:block;font:600 .75rem/1.2 var(--mono)}
-    .decoder-state span{font:400 .57rem/1.3 var(--mono);color:var(--ink-faint)}
-    .decoder-arrow,.time-arrow{font:400 .8rem/1 var(--mono);color:var(--ink-faint);text-align:center}
-    .action-plan{min-width:0}
-    .plan-note{display:block;margin:0 0 7px;font:400 .58rem/1.3 var(--mono);color:var(--ink-faint)}
-    .action-frames{display:grid;align-items:center;min-width:0}
-    .action-frames.single,.action-frames.independent{grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
-    .action-frames.autoregressive{grid-template-columns:minmax(0,1fr) 14px minmax(0,1fr) 14px minmax(0,1fr) 14px minmax(0,1fr)}
-    .action-frame{flex:1;min-width:0;border-top:1px solid var(--ink);padding-top:5px}
-    .action-frame>span{display:block;font:600 .58rem/1.25 var(--mono);color:var(--ink-mono);margin-bottom:5px}
-    .action-groups{display:grid;grid-template-columns:repeat(7,auto);gap:2px;align-items:center;justify-content:start}
-    .action-groups i{display:flex;width:20px;height:23px;align-items:center;justify-content:center;border:1px solid var(--rule-dotted);background:var(--paper);font:normal 500 .55rem/1 var(--mono);color:var(--ink)}
-    .action-groups em{min-width:5px;font:normal 400 .56rem/1 var(--mono);color:transparent}
-    .action-frame.conditioned{border-color:var(--oxblood)}
-    .action-frame.conditioned .action-groups i{border-color:var(--oxblood)}
-    .action-frame.conditioned .action-groups em{color:var(--oxblood)}
-    .action-frame.conditioned>span,.decoder-row.flagship .time-arrow{color:var(--oxblood)}
+    .candidate-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:8px;font-family:var(--mono)}
+    .candidate-head b{font-size:.66rem;line-height:1.35}
+    .candidate-head span{font-size:.58rem;line-height:1.35;color:var(--ink-faint);text-align:right}
+    .architecture-candidates,.mtp-candidates{padding:1px 4px 3px}
+    .architecture-candidate,.mtp-candidate{padding:18px 0 20px;border-bottom:1px dotted var(--rule-dotted)}
+    .architecture-candidate:last-child,.mtp-candidate:last-child{border-bottom:0;padding-bottom:5px}
+    .model-diagram{display:block;width:100%;height:auto;overflow:visible}
+    .model-diagram text{font-family:var(--mono);font-size:10px;fill:var(--ink-mono)}
+    .model-diagram .diagram-title{font-size:11px;font-weight:600;fill:var(--ink)}
+    .model-diagram .diagram-title.accent{fill:var(--oxblood)}
+    .model-diagram .diagram-label{font-size:9px;font-weight:600;fill:var(--ink)}
+    .model-diagram .diagram-note{font-size:8px;fill:var(--ink-faint)}
+    .model-diagram .model-box{fill:var(--paper);stroke:var(--ink);stroke-width:1}
+    .model-diagram .model-layer{fill:var(--surface-aside);stroke:var(--rule-dotted);stroke-width:1}
+    .model-diagram .model-token{fill:var(--paper);stroke:var(--rule-dotted);stroke-width:1}
+    .model-diagram .model-token.accent,.model-diagram .model-box.accent{fill:rgba(123,46,46,.05);stroke:var(--oxblood)}
+    .model-diagram .model-wire{fill:none;stroke:var(--ink-faint);stroke-width:1.1}
+    .model-diagram .model-wire.accent{stroke:var(--oxblood);stroke-width:1.35}
+    .model-diagram .model-wire.ghost{stroke:var(--rule-dotted)}
+    .model-diagram .attention-cell{fill:var(--paper);stroke:var(--rule-dotted);stroke-width:1}
+    .model-diagram .attention-cell.on{fill:var(--ink);stroke:var(--ink)}
+    .model-diagram .attention-cell.accent{fill:var(--oxblood);stroke:var(--oxblood)}
+    .model-diagram [data-module]{transition:opacity .14s ease}
+    .model-diagram [data-module].module-dim{opacity:.16}
+    .model-diagram [data-module].module-focus{opacity:1}
+    .model-diagram [data-module].module-focus .model-box,.model-diagram [data-module].module-focus .model-token,.model-diagram [data-module].module-focus .model-layer{stroke:var(--oxblood);stroke-width:1.5}
+    .model-diagram [data-module].module-focus .model-wire{stroke:var(--oxblood)}
+    .mtp-diagram{min-height:164px}
     .factor-bars{padding:14px 3px 4px}
     .factor-bar-head,.factor-bar-row{display:grid;grid-template-columns:175px 1fr 1fr;gap:18px;align-items:center}
     .factor-bar-head{padding-bottom:8px;border-bottom:1px solid var(--rule)}
@@ -156,7 +157,7 @@
     .factor-track::before{content:"";position:absolute;left:var(--zero);top:-3px;bottom:-3px;border-left:1px solid var(--ink-faint)}
     .factor-track i{position:absolute;top:8px;height:14px;background:var(--ink);opacity:.65}
     .factor-bar-row.flagship .factor-track i{background:var(--oxblood);opacity:1}
-    .factor-track output{position:absolute;top:5px;font:600 .61rem/1.3 var(--mono);white-space:nowrap;color:var(--ink)}
+    .factor-track output{position:absolute;top:50%;font:600 .61rem/1 var(--mono);white-space:nowrap;color:var(--ink)}
     .factor-bar-row.flagship .factor-track output{color:var(--oxblood)}
     .codec-lineage{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;padding:18px 3px 8px}
     .codec-stage{min-width:0;border-top:1px solid var(--ink);padding-top:9px}
@@ -179,15 +180,6 @@
     .codec-stick-map .stick-ring{fill:none;stroke:var(--rule-dotted);stroke-width:1;stroke-dasharray:2 3}
     .codec-stick-map .stick-point{fill:var(--ink);opacity:.68}
     .codec-stage.polar .codec-stick-map .stick-point{fill:var(--oxblood);opacity:.88}
-    .codec-vocab{margin:0;padding:8px 0 0}
-    .codec-vocab div{display:grid;grid-template-columns:76px 34px 1fr;gap:7px;padding:4px 0;border-bottom:1px dotted var(--rule-dotted)}
-    .codec-vocab div:last-child{border-bottom:0}
-    .codec-vocab dt,.codec-vocab dd{margin:0;font:400 .56rem/1.35 var(--mono)}
-    .codec-vocab dt{color:var(--ink-mono)}
-    .codec-vocab dd:first-of-type{font-weight:600;text-align:right}
-    .codec-vocab dd:last-of-type{color:var(--ink-faint)}
-    .codec-formula{display:block;margin-top:8px;font:500 .57rem/1.35 var(--mono);color:var(--ink-mono)}
-    .codec-stage.polar .codec-formula{color:var(--oxblood)}
     .codec-results{padding:20px 3px 2px;border-top:1px solid var(--rule);margin-top:14px}
     .codec-result-head,.codec-result-row{display:grid;grid-template-columns:190px 1fr 1fr;gap:18px;align-items:center}
     .codec-result-head{padding-bottom:8px;border-bottom:1px solid var(--rule)}
@@ -195,27 +187,29 @@
     .codec-result-head span:not(:first-child){text-align:center}
     .codec-result-pair{padding:12px 0 4px;border-bottom:1px dotted var(--rule-dotted)}
     .codec-result-pair:last-child{border-bottom:0}
-    .codec-pair-title{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:3px;font-family:var(--mono)}
+    .codec-pair-title{margin-bottom:3px;font-family:var(--mono)}
     .codec-pair-title b{font-size:.65rem}
-    .codec-pair-title span{font-size:.58rem;color:var(--ink-faint);text-align:right}
     .codec-result-row{padding:7px 0}
     .codec-result-label b{display:block;font:600 .64rem/1.3 var(--mono)}
-    .codec-result-label span{display:block;margin-top:2px;font:400 .56rem/1.3 var(--mono);color:var(--ink-faint)}
     .codec-result-row.treatment .codec-result-label b,.codec-result-row.treatment .factor-track output{color:var(--oxblood)}
     .codec-result-row.treatment .factor-track i{background:var(--oxblood);opacity:1}
     .factor-track output.inside,.factor-bar-row.flagship .factor-track output.inside,.codec-result-row.treatment .factor-track output.inside{color:var(--paper)}
-    .codec-pair-diagnostics{display:flex;gap:20px;justify-content:flex-end;padding:3px 0 7px;font:400 .56rem/1.35 var(--mono);color:var(--ink-faint)}
-    .codec-pair-diagnostics b{color:var(--ink-mono)}
     .delta-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:1rem}
     .delta-pair div{border-top:1px solid var(--rule);padding-top:8px}
     .delta-pair b{font:700 .95rem/1.3 var(--mono)}
     .delta-pair span{display:block;font:400 .64rem/1.4 var(--mono);color:var(--ink-faint)}
     .branch-list{padding:0 4px}
-    .branch-study{display:grid;grid-template-columns:180px minmax(300px,1fr) 225px;gap:20px;align-items:center;padding:21px 0;border-bottom:1px dotted var(--rule-dotted)}
+    .branch-study{display:grid;grid-template-columns:165px 116px minmax(290px,1fr) 205px;gap:13px;align-items:center;padding:23px 0;border-bottom:1px dotted var(--rule-dotted)}
     .branch-study:last-child{border-bottom:0}
     .branch-study h4{margin:0 0 .35rem;font-size:1rem}
     .branch-study p{margin:0;color:var(--ink-soft);font-size:.86rem;line-height:1.45}
     .branch-study .source-line{margin-top:.55rem;font-size:.63rem}
+    .branch-locus{min-width:0;text-align:center}
+    .branch-locus-label{display:block;margin-bottom:5px;font:500 .54rem/1.25 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint)}
+    .branch-map{display:block;width:116px;height:auto;margin:0 auto;opacity:.92}
+    .branch-map [data-module].module-dim{opacity:.28}
+    .branch-mechanism{display:block;width:100%;height:auto;overflow:visible}
+    .branch-impact{min-width:0}
     .contrast{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);gap:7px;align-items:center}
     .contrast-side{min-height:118px;border-top:1px solid var(--ink);padding:7px 6px;background:var(--paper)}
     .contrast-label{display:block;font:600 .59rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--ink-faint);margin:-7px -6px 13px;padding:5px 6px;background:var(--surface-aside)}
@@ -285,26 +279,10 @@
     .table-scroll{overflow-x:auto}
     details.raw{margin-top:1rem}
     details.raw>summary{cursor:pointer;font:400 .69rem/1.5 var(--mono);color:var(--ink-mono)}
-    .architecture-wrap{padding:14px 3px 4px}
-    .architecture-details{display:grid;grid-template-columns:1fr 240px;gap:18px}
-    .module-detail{border-left:2px solid var(--rule-dotted);padding-left:15px}
-    .module-detail h4{margin:.2rem 0 .4rem}
-    .arch-node{cursor:pointer;transition:opacity .14s ease}
-    .arch-node rect{fill:var(--paper);stroke:var(--ink);stroke-width:1}
-    .arch-node text{font-family:var(--mono);font-size:11px;fill:var(--ink)}
-    .arch-node .arch-small{font-size:8.5px;fill:var(--ink-mono)}
-    .arch-node.active rect{stroke:var(--oxblood);stroke-width:2;fill:rgba(123,46,46,.06)}
-    .arch-node.dim{opacity:.24}
-    .arch-edge{fill:none;stroke:var(--ink-faint);stroke-width:1.2}
     .section-map-anchor{position:relative}
     .architecture-context{display:none;position:absolute;left:calc(100% + 165px);top:-12px;width:220px;color:var(--ink-faint);pointer-events:none}
     .architecture-context .context-label{display:block;margin-bottom:3px;font:500 .58rem/1.35 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-ghost)}
     .architecture-context svg{display:block;width:100%;height:auto;opacity:.72}
-    .context-edge{stroke:var(--rule-dotted);stroke-width:1;fill:none}
-    .context-node rect{fill:none;stroke:var(--rule-dotted);stroke-width:1}
-    .context-node text{font:500 8.5px/1 var(--mono);fill:var(--ink-ghost)}
-    .context-node.focus rect{stroke:var(--oxblood);stroke-width:1.5;fill:rgba(123,46,46,.04)}
-    .context-node.focus text{fill:var(--oxblood)}
     .ledger-controls{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 3px}
     .ledger-row{cursor:pointer}
     .ledger-row:hover{background:var(--surface-aside)}
@@ -334,22 +312,22 @@
       .site-top{padding-top:22px}
       main{padding:38px 20px 0}
       h1{font-size:2.35rem}
-      .release-list,.metrics-strip,.stats,.sampler-wrap,.horizon-layout,.scaling-grid,.architecture-details,.production-layout,.branch-study{grid-template-columns:1fr}
+      .release-list,.metrics-strip,.stats,.sampler-wrap,.horizon-layout,.scaling-grid,.production-layout,.branch-study{grid-template-columns:1fr}
       .release-list li,.metrics-strip>div,.stat{border-right:0;border-bottom:1px solid var(--rule)}
       .release-list li:last-child,.metrics-strip>div:last-child,.stat:last-child{border-bottom:0}
-      .decoder-row{grid-template-columns:1fr;gap:10px}
       .factor-bar-head,.factor-bar-row{grid-template-columns:128px 1fr;gap:10px}
       .factor-bar-head span:first-child{display:none}
       .factor-bar-head span:nth-child(2){grid-column:1;text-align:left}
       .factor-bar-head span:nth-child(3){grid-column:2;text-align:left}
       .factor-bar-row .factor-bar-label{grid-column:1/-1}
-      .branch-study{gap:13px;padding:19px 0}
+      .branch-study{grid-template-columns:110px minmax(0,1fr);gap:13px;padding:19px 0}
+      .branch-study>div:first-child,.branch-study>.branch-impact{grid-column:1/-1}
+      .branch-map{width:104px}
       .codec-lineage{grid-template-columns:1fr;gap:22px}
       .codec-stage{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
       .codec-stage-head{grid-column:1/-1}
       .codec-button-demo{border-bottom:0;border-right:1px dotted var(--rule-dotted);padding-right:18px}
       .codec-stick{padding:0 0 8px;border-bottom:0}
-      .codec-vocab,.codec-formula{grid-column:1/-1}
       .codec-result-head,.codec-result-row{grid-template-columns:128px 1fr;gap:10px}
       .codec-result-head span:first-child{display:none}
       .codec-result-head span:nth-child(2){grid-column:1;text-align:left}
@@ -364,7 +342,6 @@
       .figure-head .segmented{margin-top:8px}
       .expanded-grid{grid-template-columns:1fr}
       .axis-chart text{font-size:14px}
-      #lineage-diagram text{font-size:12px}
       .ledger-table,.ledger-table tbody{display:block;width:100%}
       .ledger-table thead{display:none}
       .ledger-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 14px;padding:12px 6px;border-bottom:1px solid var(--rule)}
@@ -372,25 +349,19 @@
       .ledger-row td:nth-child(1){grid-column:1;grid-row:1}
       .ledger-row td:nth-child(2){grid-column:1/-1;grid-row:2;color:var(--ink-soft);font-size:.84rem}
       .ledger-row td:nth-child(3){grid-column:2;grid-row:1;text-align:right}
-      #architecture-diagram .arch-node text{font-size:14px}
-      #architecture-diagram .arch-node .arch-small{font-size:12px}
       .expanded-row{display:block}
       .expanded-row td{display:block}
     }
     @media(max-width:520px){
-      .decoder-flow{grid-template-columns:1fr;gap:7px}
-      .decoder-state{width:72px}
-      .decoder-arrow{transform:rotate(90deg);width:72px}
-      .action-frames,.action-frames.single,.action-frames.independent,.action-frames.autoregressive{display:flex;flex-direction:column;align-items:stretch;gap:5px}
-      .action-frame{width:100%;display:grid;grid-template-columns:45px 1fr;align-items:center;border-top:0;border-left:1px solid var(--ink);padding:5px 0 5px 8px}
-      .action-frame.conditioned{border-left-color:var(--oxblood)}
-      .action-frame>span{margin:0}
-      .time-arrow{transform:rotate(90deg);align-self:flex-start;margin-left:47px}
+      .candidate-head{display:block}
+      .candidate-head span{display:block;margin-top:2px;text-align:left}
+      .branch-study{grid-template-columns:1fr}
+      .branch-locus{grid-column:1}
+      .branch-map{width:142px}
       .codec-stage{display:block}
       .codec-button-demo{border-right:0;border-bottom:1px dotted var(--rule-dotted);padding-right:0}
       .codec-stick{padding-top:12px;border-bottom:1px dotted var(--rule-dotted)}
-      .codec-pair-title,.codec-pair-diagnostics{display:block}
-      .codec-pair-title span,.codec-pair-diagnostics span{display:block;margin-top:4px;text-align:left}
+      .codec-pair-title{display:block}
     }
     @media(min-width:1400px){.architecture-context{display:block}}
     @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
@@ -421,28 +392,29 @@
       <p>My intention was to train a good-enough checkpoint to warm start self-play RL, but a number of lingering questions compelled me to revisit whether it was possible to train an even more capable model.</p>
 
       <figure class="breakout">
-        <div class="artifact interactive">
+        <div class="artifact">
           <div class="figure-head">
             <div>
-              <h4>Flagship architecture and training recipe</h4>
-              <p>Select a module to inspect the exact recipe.</p>
-            </div>
-            <button id="clear-highlight" type="button" class="lineage-tab" style="border:1px solid var(--ink);width:auto" aria-label="Show the full model"><b>Full model</b></button>
-          </div>
-          <div class="architecture-wrap">
-            <div class="architecture-details">
-              <svg id="architecture-diagram" class="chart" viewBox="0 0 650 470" role="img" aria-label="Production model architecture"></svg>
-              <div id="module-detail" class="module-detail"></div>
+              <h4>Flagship model architecture</h4>
+              <p>Three views of the same two-stage Transformer.</p>
             </div>
           </div>
-          <div class="stats">
-            <div class="stat"><span class="stat-value">216.5M</span><span class="stat-label">parameters</span></div>
-            <div class="stat"><span class="stat-value">8.59B</span><span class="stat-label">supervised positions</span></div>
-            <div class="stat"><span class="stat-value">+0.494 [+0.398]</span><span class="stat-label">net stocks/min · mean [LCB]</span></div>
-            <div class="stat"><span class="stat-value">+52.72 [+45.14]</span><span class="stat-label">net damage/min · mean [LCB]</span></div>
+          <div class="architecture-candidates">
+            <section class="architecture-candidate">
+              <div class="candidate-head"><b>A · stacked pipeline</b><span>conventional block view</span></div>
+              <svg id="architecture-stack" class="model-diagram" role="img" aria-label="Stacked pipeline view of the production model"></svg>
+            </section>
+            <section class="architecture-candidate">
+              <div class="candidate-head"><b>B · dependency graph</b><span>shared state and causal plan</span></div>
+              <svg id="architecture-dependencies" class="model-diagram" role="img" aria-label="Dependency graph view of the production model"></svg>
+            </section>
+            <section class="architecture-candidate">
+              <div class="candidate-head"><b>C · attention view</b><span>two causal sequences</span></div>
+              <svg id="architecture-attention" class="model-diagram" role="img" aria-label="Attention-matrix view of the production model"></svg>
+            </section>
           </div>
         </div>
-        <figcaption>Fig 1: The 216.5M-parameter production policy. The temporal decoder predicts a controller plan from one trunk state; the standard runtime executes two frames before replanning. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
+        <figcaption>Fig 1: A causal observation Transformer compresses the recent game history into <span class="mono">hₜ</span>. A smaller causal Transformer uses that state to predict a controller plan. <span class="run-source">Internal model: O50. <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">W&amp;B tgpuo1be</a>.</span></figcaption>
       </figure>
 
       <ul class="question-list">
@@ -498,46 +470,25 @@
           <div class="figure-head">
             <div>
               <h4>From one action to a conditioned plan</h4>
-              <p>Every row starts from the same observation-trunk state.</p>
+              <p>Three candidate views of the same dependency change.</p>
             </div>
           </div>
-          <div class="decoder-comparison" aria-label="Action decoder lineage">
-            <div class="decoder-row">
-              <div class="decoder-name"><b>Next-frame prediction</b><span>One action. Replan after every frame.</span></div>
-              <div class="decoder-flow">
-                <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
-                <div class="action-plan"><span class="plan-note">one output head</span><div class="action-frames single">
-                  <div class="action-frame"><span>action +1</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
-                </div></div>
-              </div>
-            </div>
-            <div class="decoder-row">
-              <div class="decoder-name"><b>Independent MTP</b><span>Several future heads share hₜ, but not predictions.</span></div>
-              <div class="decoder-flow">
-                <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
-                <div class="action-plan"><span class="plan-note">independent heads · no action feedback</span><div class="action-frames independent">
-                  <div class="action-frame"><span>action +1</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
-                  <div class="action-frame"><span>action +5</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
-                  <div class="action-frame"><span>action +9</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
-                  <div class="action-frame"><span>action +13</span><div class="action-groups"><i>C</i><em>·</em><i>M</i><em>·</em><i>T</i><em>·</em><i>B</i></div></div>
-                </div></div>
-              </div>
-            </div>
-            <div class="decoder-row flagship">
-              <div class="decoder-name"><b>Autoregressive MTP</b><span>Earlier frames condition later frames; controller groups condition the next group.</span></div>
-              <div class="decoder-flow">
-                <div class="decoder-state"><b>hₜ</b><span>trunk state</span></div><div class="decoder-arrow">→</div>
-                <div class="action-plan"><span class="plan-note">starts from aₜ · then previous target in training or realized action in play</span><div class="action-frames autoregressive">
-                  <div class="action-frame conditioned"><span>action +1</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
-                  <div class="action-frame conditioned"><span>action +2</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
-                  <div class="action-frame conditioned"><span>action +3</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div><div class="time-arrow">→</div>
-                  <div class="action-frame conditioned"><span>action +4</span><div class="action-groups"><i>C</i><em>→</em><i>M</i><em>→</em><i>T</i><em>→</em><i>B</i></div></div>
-                </div></div>
-              </div>
-            </div>
+          <div class="mtp-candidates" aria-label="Action decoder lineage candidates">
+            <section class="mtp-candidate">
+              <div class="candidate-head"><b>A · dependency wires</b><span>direct edges</span></div>
+              <svg id="mtp-wires" class="model-diagram mtp-diagram" role="img" aria-label="Dependency-wire comparison of next-frame, independent MTP, and autoregressive MTP"></svg>
+            </section>
+            <section class="mtp-candidate">
+              <div class="candidate-head"><b>B · attention masks</b><span>one cell per available input</span></div>
+              <svg id="mtp-masks" class="model-diagram mtp-diagram" role="img" aria-label="Attention-mask comparison of next-frame, independent MTP, and autoregressive MTP"></svg>
+            </section>
+            <section class="mtp-candidate">
+              <div class="candidate-head"><b>C · receptive sets</b><span>inputs available to each action</span></div>
+              <svg id="mtp-sets" class="model-diagram mtp-diagram" role="img" aria-label="Receptive-set comparison of next-frame, independent MTP, and autoregressive MTP"></svg>
+            </section>
           </div>
         </div>
-        <figcaption>Fig 2: Action-decoder lineage. C, M, T, and B are C-stick, main stick, triggers, and buttons. The production model trains offsets <span class="mono">1–6, 9, 12, 16, 20</span> and uses offsets <span class="mono">1–4</span> in play. <span class="run-source"><a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
+        <figcaption>Fig 2: Every predicted action receives <span class="mono">hₜ</span>. In autoregressive MTP, action <span class="mono">i</span> can also attend to actions <span class="mono">1…i−1</span>. Four consecutive actions are shown for clarity. <span class="run-source">The production model trains offsets 1–6, 9, 12, 16, and 20. <a href="https://wandb.ai/ericyuegu/hal/runs/vlim96s9">next-frame</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/shjnxxsu">independent MTP</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/tgpuo1be">autoregressive MTP</a>.</span></figcaption>
       </figure>
 
       <p>The clean comparison separates two questions: should later predicted frames depend on earlier predicted frames, and should later controller parts depend on earlier parts from the same frame?</p>
@@ -563,75 +514,53 @@
           <div class="figure-head">
             <div>
               <h4>Three controller representations</h4>
-              <p>The first change replaces the full legacy package. The second changes only the stick vocabulary.</p>
+              <p>Two matched comparisons; do not compare bars across pairs.</p>
             </div>
           </div>
           <div class="codec-lineage" aria-label="Legacy, Cartesian, and polar controller codecs">
             <section class="codec-stage">
-              <div class="codec-stage-head"><b>Legacy</b><span>lossy reducer</span></div>
+              <div class="codec-stage-head"><b>Legacy</b><span>one button at a time</span></div>
               <div class="codec-button-demo">
-                <span class="codec-lane-label">button chord · A + B</span>
+                <span class="codec-lane-label">A + B</span>
                 <div class="codec-collapse"><span class="codec-chord">A + B</span><i>→</i><span class="codec-class">A</span></div>
-                <span class="toy-sub">One newly pressed button survives.</span>
               </div>
               <div class="codec-stick">
-                <div class="codec-stick-head"><b>Main stick</b><span>37 irregular XY centers</span></div>
+                <div class="codec-stick-head"><b>Main stick</b><span>37 targets</span></div>
                 <svg class="codec-stick-map" data-stick-codec="legacy" viewBox="0 0 240 132" role="img" aria-label="Legacy main-stick class centers"></svg>
               </div>
-              <dl class="codec-vocab">
-                <div><dt>buttons</dt><dd>6</dd><dd>A · B · X/Y · Z · L/R · none</dd></div>
-                <div><dt>main stick</dt><dd>37</dd><dd>nearest fixed XY center</dd></div>
-                <div><dt>C-stick</dt><dd>9</dd><dd>cardinals + diagonals</dd></div>
-                <div><dt>shoulders</dt><dd>5</dd><dd>max(L, R), then quantize</dd></div>
-              </dl>
-              <span class="codec-formula">changed chord → lowest-index new button</span>
             </section>
 
             <section class="codec-stage">
-              <div class="codec-stage-head"><b>Cartesian</b><span>fixed XY</span></div>
+              <div class="codec-stage-head"><b>Cartesian</b><span>8-bit button mask</span></div>
               <div class="codec-button-demo">
-                <span class="codec-lane-label">button chord · A + B</span>
+                <span class="codec-lane-label">A + B</span>
                 <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
                 <div class="bit-values"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span></div>
                 <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
               </div>
               <div class="codec-stick">
-                <div class="codec-stick-head"><b>Main stick</b><span>65 fixed XY centers</span></div>
+                <div class="codec-stick-head"><b>Main stick</b><span>65 XY targets</span></div>
                 <svg class="codec-stick-map" data-stick-codec="cartesian" viewBox="0 0 240 132" role="img" aria-label="Cartesian main-stick class centers"></svg>
               </div>
-              <dl class="codec-vocab">
-                <div><dt>buttons</dt><dd>256</dd><dd>one categorical 8-bit mask</dd></div>
-                <div><dt>main stick</dt><dd>65</dd><dd>nearest fixed XY center</dd></div>
-                <div><dt>C-stick</dt><dd>9</dd><dd>nearest fixed XY center</dd></div>
-                <div><dt>triggers</dt><dd>25</dd><dd>5 left × 5 right</dd></div>
-              </dl>
-              <span class="codec-formula">class embedding + projection([x, y])</span>
             </section>
 
             <section class="codec-stage polar">
-              <div class="codec-stage-head"><b>Polar</b><span>radius + angle</span></div>
+              <div class="codec-stage-head"><b>Polar</b><span>8-bit button mask</span></div>
               <div class="codec-button-demo">
-                <span class="codec-lane-label">button chord · A + B</span>
+                <span class="codec-lane-label">A + B</span>
                 <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
                 <div class="bit-values"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span></div>
                 <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
               </div>
               <div class="codec-stick">
-                <div class="codec-stick-head"><b>Main stick</b><span>origin + 4 / 16 / 64</span></div>
+                <div class="codec-stick-head"><b>Main stick</b><span>85 polar targets</span></div>
                 <svg class="codec-stick-map" data-stick-codec="polar" viewBox="0 0 240 132" role="img" aria-label="Polar main-stick class centers"></svg>
               </div>
-              <dl class="codec-vocab">
-                <div><dt>buttons</dt><dd>256</dd><dd>unchanged from Cartesian</dd></div>
-                <div><dt>main stick</dt><dd>85</dd><dd>three radius-angle rings</dd></div>
-                <div><dt>C-stick</dt><dd>13</dd><dd>origin + 4 / 8</dd></div>
-                <div><dt>triggers</dt><dd>25</dd><dd>unchanged from Cartesian</dd></div>
-              </dl>
-              <span class="codec-formula">class embedding + projection([r, sin θ, cos θ])</span>
             </section>
           </div>
           <div id="codec-results" class="codec-results" aria-label="Closed-loop results for two matched controller-codec comparisons"></div>
         </div>
-        <figcaption>Fig 4: Two matched comparisons. Cartesian beat the full legacy package by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Polar then beat its matched Cartesian baseline by <span class="mono">+0.095</span> stocks/min and <span class="mono">+0.88</span> damage/min; its stock LCB moved from <span class="mono">−0.074</span> to <span class="mono">+0.016</span>. Scores should only be compared within each pair. <span class="run-source">Internal experiments: O43, O26/O52, and O53. <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">Cartesian, first comparison</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yxy8brhx">Cartesian, second comparison</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yi7yyyu0">polar</a>.</span></figcaption>
+        <figcaption>Fig 4: In matched comparisons, Cartesian beat legacy by <span class="mono">+0.292</span> stocks/min and <span class="mono">+16.16</span> damage/min. Polar beat Cartesian by <span class="mono">+0.095</span> and <span class="mono">+0.88</span>; stock LCB crossed zero (<span class="mono">−0.074 → +0.016</span>). <span class="run-source">Internal experiments: O43, O26/O52, and O53. <a href="https://wandb.ai/ericyuegu/hal/runs/acbbeb76">legacy</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/cqbbbg77">Cartesian, first comparison</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yxy8brhx">Cartesian, second comparison</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/yi7yyyu0">polar</a>.</span></figcaption>
       </figure>
 
       <h4>Ideas that didn’t work as well</h4>
@@ -640,7 +569,7 @@
           <div class="figure-head">
             <div>
               <h4>Representation branches</h4>
-              <p>Each row shows the mechanism first, then the closed-loop change when one can be defended.</p>
+              <p>Each row locates the changed component, then compares the two mechanisms.</p>
             </div>
           </div>
           <div id="representation-list" class="branch-list" aria-label="Representation branches"></div>
@@ -783,7 +712,7 @@
             <div>
               <div id="horizon-checks" class="model-checks"></div>
               <div class="aside">
-                <p>Across-frame AR is much less sensitive at <span class="mono">H4</span> and <span class="mono">H6</span>. The independent model falls from <span class="mono">+0.096</span> at H1 to <span class="mono">−0.905</span> at H6; D3 goes from <span class="mono">+0.053</span> to <span class="mono">−0.021</span>.</p>
+                <p>Across-frame AR is much less sensitive at <span class="mono">H4</span> and <span class="mono">H6</span>. The independent model falls from <span class="mono">+0.096</span> at H1 to <span class="mono">−0.905</span> at H6; the autoregressive model goes from <span class="mono">+0.053</span> to <span class="mono">−0.021</span>.</p>
               </div>
             </div>
           </div>
@@ -1326,6 +1255,492 @@
       }));
     }
 
+    function modelMarker(target, suffix, color) {
+      var markerId = target.id + '-' + suffix;
+      var defs = one('defs', target);
+      if (!defs) {
+        defs = svgElement('defs');
+        target.appendChild(defs);
+      }
+      var marker = svgElement('marker', {
+        id: markerId,
+        viewBox: '0 0 10 10',
+        refX: 9,
+        refY: 5,
+        markerWidth: 5,
+        markerHeight: 5,
+        orient: 'auto-start-reverse'
+      });
+      marker.appendChild(svgElement('path', {d: 'M 0 0 L 10 5 L 0 10 z', fill: color}));
+      defs.appendChild(marker);
+      return 'url(#' + markerId + ')';
+    }
+
+    function modelPart(target, moduleId) {
+      var group = svgElement('g', {'data-module': moduleId});
+      target.appendChild(group);
+      return group;
+    }
+
+    function modelBox(target, x, y, width, height, label, options) {
+      var settings = options || {};
+      var group = settings.module ? modelPart(target, settings.module) : svgElement('g');
+      if (!settings.module) target.appendChild(group);
+      group.appendChild(svgElement('rect', {
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        class: 'model-box' + (settings.accent ? ' accent' : '')
+      }));
+      addText(group, x + width / 2, y + height / 2 + (settings.note ? -3 : 3), label, {
+        'text-anchor': 'middle',
+        class: settings.title ? 'diagram-title' : 'diagram-label'
+      });
+      if (settings.note) {
+        addText(group, x + width / 2, y + height / 2 + 12, settings.note, {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      }
+      return group;
+    }
+
+    function modelWire(target, x1, y1, x2, y2, options) {
+      var settings = options || {};
+      var parent = settings.module ? modelPart(target, settings.module) : target;
+      var attributes = {
+        x1: x1,
+        y1: y1,
+        x2: x2,
+        y2: y2,
+        class: 'model-wire' + (settings.accent ? ' accent' : '') + (settings.ghost ? ' ghost' : '')
+      };
+      if (settings.marker) attributes['marker-end'] = settings.marker;
+      if (settings.dash) attributes['stroke-dasharray'] = settings.dash;
+      parent.appendChild(svgElement('line', attributes));
+      return parent.lastChild;
+    }
+
+    function modelPath(target, path, options) {
+      var settings = options || {};
+      var parent = settings.module ? modelPart(target, settings.module) : target;
+      var attributes = {
+        d: path,
+        class: 'model-wire' + (settings.accent ? ' accent' : '') + (settings.ghost ? ' ghost' : '')
+      };
+      if (settings.marker) attributes['marker-end'] = settings.marker;
+      if (settings.dash) attributes['stroke-dasharray'] = settings.dash;
+      parent.appendChild(svgElement('path', attributes));
+      return parent.lastChild;
+    }
+
+    function drawHistoryTokens(target, x, y, count, gap, moduleId) {
+      var group = modelPart(target, moduleId || 'history');
+      for (var index = 0; index < count; index += 1) {
+        var tokenX = x + index * gap;
+        group.appendChild(svgElement('rect', {
+          x: tokenX, y: y, width: 30, height: 54, class: 'model-token'
+        }));
+        group.appendChild(svgElement('line', {
+          x1: tokenX, y1: y + 27, x2: tokenX + 30, y2: y + 27,
+          class: 'model-wire ghost'
+        }));
+        addText(group, tokenX + 15, y + 18, 's' + (index === count - 1 ? 'ₜ' : '−' + (count - 1 - index)), {
+          'text-anchor': 'middle', class: 'diagram-label'
+        });
+        addText(group, tokenX + 15, y + 45, 'a' + (index === count - 1 ? 'ₜ' : '−' + (count - 1 - index)), {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      }
+      return group;
+    }
+
+    function drawTransformerStack(target, x, y, width, height, label, depth, moduleId) {
+      var group = modelPart(target, moduleId);
+      [10, 5].forEach(function (offset) {
+        group.appendChild(svgElement('rect', {
+          x: x - offset, y: y + offset, width: width, height: height,
+          class: 'model-layer'
+        }));
+      });
+      group.appendChild(svgElement('rect', {x: x, y: y, width: width, height: height, class: 'model-box'}));
+      addText(group, x + width / 2, y + 20, label, {'text-anchor': 'middle', class: 'diagram-title'});
+      addText(group, x + width / 2, y + 35, '×' + depth, {'text-anchor': 'middle', class: 'diagram-note'});
+      var blockTop = y + 48;
+      group.appendChild(svgElement('rect', {
+        x: x + 18, y: blockTop, width: width - 36, height: 25, class: 'model-layer'
+      }));
+      addText(group, x + width / 2, blockTop + 16, 'causal self-attention', {
+        'text-anchor': 'middle', class: 'diagram-label'
+      });
+      group.appendChild(svgElement('rect', {
+        x: x + 18, y: blockTop + 34, width: width - 36, height: 25, class: 'model-layer'
+      }));
+      addText(group, x + width / 2, blockTop + 50, 'MLP', {
+        'text-anchor': 'middle', class: 'diagram-label'
+      });
+      modelPath(group, 'M' + (x + width - 28) + ',' + (blockTop + 4) +
+        ' C' + (x + width - 7) + ',' + (blockTop + 4) + ' ' + (x + width - 7) + ',' +
+        (blockTop + 59) + ' ' + (x + width - 28) + ',' + (blockTop + 59), {ghost: true});
+      addText(group, x + width - 11, blockTop + 34, '+', {'text-anchor': 'middle', class: 'diagram-note'});
+      return group;
+    }
+
+    function drawActionFrame(target, x, y, label, moduleId, accent) {
+      var group = modelPart(target, moduleId || 'temporal');
+      group.appendChild(svgElement('rect', {
+        x: x, y: y, width: 46, height: 38,
+        class: 'model-token' + (accent ? ' accent' : '')
+      }));
+      addText(group, x + 23, y + 16, label, {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(group, x + 23, y + 30, 'C M T B', {'text-anchor': 'middle', class: 'diagram-note'});
+      return group;
+    }
+
+    function drawGroupChain(target, x, y, moduleId, accent) {
+      var group = modelPart(target, moduleId || 'groups');
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        var left = x + index * 27;
+        group.appendChild(svgElement('rect', {
+          x: left, y: y, width: 20, height: 24,
+          class: 'model-token' + (accent ? ' accent' : '')
+        }));
+        addText(group, left + 10, y + 16, label, {'text-anchor': 'middle', class: 'diagram-label'});
+        if (index) {
+          group.appendChild(svgElement('line', {
+            x1: left - 7, y1: y + 12, x2: left - 1, y2: y + 12,
+            class: 'model-wire' + (accent ? ' accent' : '')
+          }));
+        }
+      });
+      return group;
+    }
+
+    function applyModelFocus(target, allowedModules) {
+      var focus = highlightedModules.filter(function (moduleId) {
+        return allowedModules.indexOf(moduleId) !== -1;
+      });
+      many('[data-module]', target).forEach(function (part) {
+        part.classList.remove('module-dim', 'module-focus');
+        if (!focus.length) return;
+        part.classList.add(focus.indexOf(part.getAttribute('data-module')) !== -1 ? 'module-focus' : 'module-dim');
+      });
+    }
+
+    function renderArchitectureStack(target, mobile) {
+      empty(target);
+      var marker = modelMarker(target, 'ink', COLORS.faint);
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 510');
+        addText(target, 180, 18, 'recent frames', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawHistoryTokens(target, 81, 28, 4, 40, 'history');
+        modelWire(target, 180, 84, 180, 112, {marker: marker});
+        drawTransformerStack(target, 70, 112, 220, 125, 'OBSERVATION TRANSFORMER', '16', 'trunk');
+        modelWire(target, 180, 237, 180, 269, {marker: marker});
+        modelBox(target, 151, 269, 58, 42, 'hₜ', {module: 'trunk', note: 'shared state'});
+        modelWire(target, 180, 311, 180, 340, {marker: marker});
+        drawTransformerStack(target, 85, 340, 190, 112, 'TEMPORAL TRANSFORMER', '4', 'temporal');
+        modelWire(target, 180, 452, 180, 472, {marker: marker});
+        drawGroupChain(target, 126, 476, 'groups', true);
+      } else {
+        target.setAttribute('viewBox', '0 0 880 205');
+        addText(target, 88, 28, 'recent game + action frames', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawHistoryTokens(target, 20, 65, 4, 38, 'history');
+        modelWire(target, 164, 92, 205, 92, {marker: marker});
+        drawTransformerStack(target, 215, 26, 220, 144, 'OBSERVATION TRANSFORMER', '16', 'trunk');
+        modelWire(target, 435, 98, 475, 98, {marker: marker});
+        modelBox(target, 480, 76, 58, 44, 'hₜ', {module: 'trunk', note: 'shared'});
+        modelWire(target, 538, 98, 570, 98, {marker: marker});
+        drawTransformerStack(target, 580, 36, 160, 124, 'TEMPORAL TRANSFORMER', '4', 'temporal');
+        modelWire(target, 740, 98, 767, 98, {marker: marker});
+        drawGroupChain(target, 773, 86, 'groups', true);
+        addText(target, 826, 129, 'per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      }
+      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
+    }
+
+    function renderArchitectureDependencies(target, mobile) {
+      empty(target);
+      var marker = modelMarker(target, 'ink', COLORS.faint);
+      var accentMarker = modelMarker(target, 'accent', COLORS.oxblood);
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 490');
+        drawHistoryTokens(target, 81, 22, 4, 40, 'history');
+        modelWire(target, 180, 78, 180, 103, {marker: marker});
+        drawTransformerStack(target, 95, 103, 170, 112, 'CAUSAL TRANSFORMER', '16', 'trunk');
+        modelWire(target, 180, 215, 180, 243, {marker: marker});
+        modelBox(target, 153, 243, 54, 40, 'hₜ', {module: 'trunk'});
+        var mobileXs = [48, 132, 216, 300];
+        var mobileShell = modelPart(target, 'temporal');
+        mobileShell.appendChild(svgElement('rect', {x: 22, y: 321, width: 316, height: 116, class: 'model-layer'}));
+        mobileShell.appendChild(svgElement('rect', {x: 27, y: 316, width: 306, height: 116, class: 'model-box'}));
+        addText(mobileShell, 180, 426, 'TEMPORAL TRANSFORMER ×4', {'text-anchor': 'middle', class: 'diagram-note'});
+        mobileXs.forEach(function (x, index) {
+          modelWire(target, 180, 283, x, 333, {module: 'temporal'});
+          drawActionFrame(target, x - 23, 333, 'a' + (index + 1), 'temporal', true);
+        });
+        for (var mobileFrom = 0; mobileFrom < mobileXs.length - 1; mobileFrom += 1) {
+          for (var mobileTo = mobileFrom + 1; mobileTo < mobileXs.length; mobileTo += 1) {
+            var mobileDepth = 382 + (mobileTo - mobileFrom) * 8 + mobileFrom * 2;
+            modelPath(target, 'M' + mobileXs[mobileFrom] + ',371 C' + mobileXs[mobileFrom] + ',' + mobileDepth + ' ' +
+              mobileXs[mobileTo] + ',' + mobileDepth + ' ' + mobileXs[mobileTo] + ',371', {
+                module: 'temporal', accent: true, marker: accentMarker
+              });
+          }
+        }
+        addText(target, 180, 308, 'hₜ to every action', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawGroupChain(target, 126, 450, 'groups', true);
+      } else {
+        target.setAttribute('viewBox', '0 0 880 270');
+        drawHistoryTokens(target, 18, 74, 4, 38, 'history');
+        modelWire(target, 162, 101, 201, 101, {marker: marker});
+        drawTransformerStack(target, 211, 36, 190, 132, 'CAUSAL TRANSFORMER', '16', 'trunk');
+        modelWire(target, 401, 102, 437, 102, {marker: marker});
+        modelBox(target, 442, 81, 54, 42, 'hₜ', {module: 'trunk'});
+        var xs = [570, 655, 740, 825];
+        var temporalShell = modelPart(target, 'temporal');
+        temporalShell.appendChild(svgElement('rect', {x: 529, y: 132, width: 337, height: 99, class: 'model-layer'}));
+        temporalShell.appendChild(svgElement('rect', {x: 534, y: 127, width: 327, height: 99, class: 'model-box'}));
+        addText(temporalShell, 698, 220, 'TEMPORAL TRANSFORMER ×4', {'text-anchor': 'middle', class: 'diagram-note'});
+        xs.forEach(function (x, index) {
+          modelWire(target, 496, 102, x, 137, {module: 'temporal'});
+          drawActionFrame(target, x - 23, 137, 'a' + (index + 1), 'temporal', true);
+        });
+        for (var from = 0; from < xs.length - 1; from += 1) {
+          for (var to = from + 1; to < xs.length; to += 1) {
+            var arcY = 184 + (to - from) * 8 + from * 2;
+            modelPath(target, 'M' + xs[from] + ',175 C' + xs[from] + ',' + arcY + ' ' + xs[to] + ',' +
+              arcY + ' ' + xs[to] + ',175', {
+              module: 'temporal', accent: true, marker: accentMarker
+            });
+          }
+        }
+        addText(target, 698, 28, 'hₜ conditions every action · causal attention connects earlier actions', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+        drawGroupChain(target, 646, 239, 'groups', true);
+      }
+      applyModelFocus(target, ['history', 'trunk', 'temporal', 'groups']);
+    }
+
+    function drawAttentionMatrix(target, x, y, size, count, accent, moduleId) {
+      var group = modelPart(target, moduleId);
+      for (var row = 0; row < count; row += 1) {
+        for (var column = 0; column < count; column += 1) {
+          group.appendChild(svgElement('rect', {
+            x: x + column * size,
+            y: y + row * size,
+            width: size - 2,
+            height: size - 2,
+            class: 'attention-cell' + (column <= row ? (accent ? ' accent' : ' on') : '')
+          }));
+        }
+      }
+      return group;
+    }
+
+    function renderArchitectureAttention(target, mobile) {
+      empty(target);
+      var marker = modelMarker(target, 'ink', COLORS.faint);
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 500');
+        addText(target, 180, 19, 'attention over recent frames', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawAttentionMatrix(target, 112, 32, 17, 8, false, 'trunk');
+        addText(target, 180, 186, 'observation Transformer ×16', {'text-anchor': 'middle', class: 'diagram-title'});
+        modelWire(target, 180, 198, 180, 229, {marker: marker});
+        modelBox(target, 153, 229, 54, 40, 'hₜ', {module: 'trunk'});
+        modelWire(target, 180, 269, 180, 300, {marker: marker});
+        addText(target, 180, 293, 'attention over predicted actions', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawAttentionMatrix(target, 136, 305, 22, 4, true, 'temporal');
+        addText(target, 180, 413, 'temporal Transformer ×4', {'text-anchor': 'middle', class: 'diagram-title'});
+        modelWire(target, 180, 425, 180, 450, {marker: marker});
+        drawGroupChain(target, 126, 456, 'groups', true);
+      } else {
+        target.setAttribute('viewBox', '0 0 880 220');
+        addText(target, 178, 22, 'recent frames', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawAttentionMatrix(target, 110, 35, 17, 8, false, 'trunk');
+        addText(target, 178, 189, 'observation Transformer ×16', {'text-anchor': 'middle', class: 'diagram-title'});
+        modelWire(target, 248, 102, 330, 102, {marker: marker});
+        modelBox(target, 335, 81, 54, 42, 'hₜ', {module: 'trunk'});
+        modelWire(target, 389, 102, 493, 102, {marker: marker});
+        addText(target, 550, 22, 'predicted actions', {'text-anchor': 'middle', class: 'diagram-note'});
+        drawAttentionMatrix(target, 502, 45, 24, 4, true, 'temporal');
+        addText(target, 550, 164, 'temporal Transformer ×4', {'text-anchor': 'middle', class: 'diagram-title'});
+        modelWire(target, 598, 102, 686, 102, {marker: marker});
+        drawGroupChain(target, 697, 90, 'groups', true);
+        addText(target, 750, 130, 'C → M → T → B', {'text-anchor': 'middle', class: 'diagram-note'});
+      }
+      applyModelFocus(target, ['trunk', 'temporal', 'groups']);
+    }
+
+    function renderArchitectureCandidates() {
+      var mobile = window.matchMedia('(max-width: 520px)').matches;
+      renderArchitectureStack(one('#architecture-stack'), mobile);
+      renderArchitectureDependencies(one('#architecture-dependencies'), mobile);
+      renderArchitectureAttention(one('#architecture-attention'), mobile);
+    }
+
+    function mtpLabel(target, x, y, title, note, accent) {
+      addText(target, x, y, title, {
+        class: 'diagram-title' + (accent ? ' accent' : '')
+      });
+      addText(target, x, y + 16, note, {class: 'diagram-note'});
+    }
+
+    function drawMtpNodes(target, xs, y, count, accent) {
+      var nodes = [];
+      for (var index = 0; index < count; index += 1) {
+        var group = modelBox(target, xs[index] - 22, y, 44, 34, 'a' + (index + 1), {accent: accent});
+        nodes.push(group);
+      }
+      return nodes;
+    }
+
+    function drawMtpWirePanel(target, x, y, width, kind) {
+      var marker = modelMarker(target, 'panel-' + kind + '-' + x + '-' + y, COLORS.faint);
+      var accentMarker = modelMarker(target, 'panel-accent-' + kind + '-' + x + '-' + y, COLORS.oxblood);
+      var count = kind === 'next' ? 1 : 4;
+      var title = kind === 'next' ? 'Next-frame prediction' : kind === 'independent' ? 'Independent MTP' : 'Autoregressive MTP';
+      var note = kind === 'next' ? 'one output' : kind === 'independent' ? 'hₜ only' : 'hₜ + all earlier actions';
+      var center = x + width / 2;
+      var actionGap = Math.min(58, (width - 34) / 4);
+      var firstAction = count === 1 ? center : center - actionGap * 1.5;
+      var actionXs = Array.from({length: count}, function (_, index) {
+        return firstAction + index * actionGap;
+      });
+      var actionY = y + 104;
+
+      mtpLabel(target, x + 8, y + 18, title, note, kind === 'autoregressive');
+      modelBox(target, center - 24, y + 43, 48, 38, 'hₜ', {note: 'trunk'});
+      actionXs.forEach(function (actionX) {
+        modelPath(target, 'M' + center + ',' + (y + 81) + ' L' + actionX + ',' + actionY, {
+          marker: marker
+        });
+      });
+      drawMtpNodes(target, actionXs, actionY, count, kind === 'autoregressive');
+
+      if (kind !== 'autoregressive') return;
+      for (var from = 0; from < count - 1; from += 1) {
+        for (var to = from + 1; to < count; to += 1) {
+          var depth = actionY + 43 + (to - from) * 7 + from * 2;
+          modelPath(target, 'M' + actionXs[from] + ',' + (actionY + 34) +
+            ' C' + actionXs[from] + ',' + depth + ' ' + actionXs[to] + ',' + depth + ' ' +
+            actionXs[to] + ',' + (actionY + 34), {
+              accent: true, marker: accentMarker
+            });
+        }
+      }
+    }
+
+    function renderMtpWires(target, mobile) {
+      empty(target);
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 570');
+        drawMtpWirePanel(target, 0, 4, 360, 'next');
+        drawMtpWirePanel(target, 0, 188, 360, 'independent');
+        drawMtpWirePanel(target, 0, 372, 360, 'autoregressive');
+        [180, 364].forEach(function (y) {
+          target.appendChild(svgElement('line', {x1: 4, y1: y, x2: 356, y2: y, class: 'model-wire ghost', 'stroke-dasharray': '2 3'}));
+        });
+        return;
+      }
+      target.setAttribute('viewBox', '0 0 860 194');
+      drawMtpWirePanel(target, 0, 4, 280, 'next');
+      drawMtpWirePanel(target, 290, 4, 280, 'independent');
+      drawMtpWirePanel(target, 580, 4, 280, 'autoregressive');
+      [285, 575].forEach(function (x) {
+        target.appendChild(svgElement('line', {x1: x, y1: 5, x2: x, y2: 189, class: 'model-wire ghost', 'stroke-dasharray': '2 3'}));
+      });
+    }
+
+    function maskGrid(target, x, y, rows, columns, kind, cellSize) {
+      var labels = ['hₜ', 'a₁', 'a₂', 'a₃'];
+      labels.slice(0, columns).forEach(function (label, index) {
+        addText(target, x + index * cellSize + (cellSize - 3) / 2, y - 7, label, {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      });
+      for (var row = 0; row < rows; row += 1) {
+        addText(target, x - 11, y + row * cellSize + cellSize / 2 + 3, 'a' + (row + 1), {
+          'text-anchor': 'end', class: 'diagram-note'
+        });
+        for (var column = 0; column < columns; column += 1) {
+          var active = column === 0 || (kind === 'autoregressive' && column <= row);
+          target.appendChild(svgElement('rect', {
+            x: x + column * cellSize,
+            y: y + row * cellSize,
+            width: cellSize - 3,
+            height: cellSize - 3,
+            class: 'attention-cell' + (active ? (kind === 'autoregressive' && column > 0 ? ' accent' : ' on') : '')
+          }));
+        }
+      }
+    }
+
+    function renderMtpMasks(target, mobile) {
+      empty(target);
+      if (mobile) {
+        target.setAttribute('viewBox', '0 0 360 465');
+        mtpLabel(target, 8, 18, 'Next-frame prediction', 'available inputs', false);
+        maskGrid(target, 145, 28, 1, 1, 'next', 28);
+        mtpLabel(target, 8, 112, 'Independent MTP', 'only hₜ is available', false);
+        maskGrid(target, 145, 126, 4, 4, 'independent', 28);
+        mtpLabel(target, 8, 292, 'Autoregressive MTP', 'hₜ and earlier actions', true);
+        maskGrid(target, 145, 306, 4, 4, 'autoregressive', 28);
+      } else {
+        target.setAttribute('viewBox', '0 0 860 255');
+        mtpLabel(target, 14, 34, 'Next-frame prediction', 'available inputs', false);
+        maskGrid(target, 305, 20, 1, 1, 'next', 27);
+        mtpLabel(target, 14, 110, 'Independent MTP', 'only hₜ is available', false);
+        maskGrid(target, 305, 91, 4, 4, 'independent', 27);
+        mtpLabel(target, 475, 110, 'Autoregressive MTP', 'hₜ and earlier actions', true);
+        maskGrid(target, 710, 91, 4, 4, 'autoregressive', 27);
+        addText(target, 430, 239, 'filled cell = an input available to that action', {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      }
+    }
+
+    function drawSetRow(target, y, kind, mobile) {
+      var labelX = mobile ? 8 : 14;
+      var startX = mobile ? (kind === 'next' ? 151 : 49) : 280;
+      var gap = mobile ? 68 : 130;
+      var count = kind === 'next' ? 1 : 4;
+      var title = kind === 'next' ? 'Next-frame prediction' : kind === 'independent' ? 'Independent MTP' : 'Autoregressive MTP';
+      var note = kind === 'next' ? 'one head' : kind === 'independent' ? 'same state, separate heads' : 'causal prefix grows';
+      mtpLabel(target, labelX, y + 18, title, note, kind === 'autoregressive');
+      for (var index = 0; index < count; index += 1) {
+        var x = startX + index * gap;
+        var inputs = kind === 'autoregressive' ? ['hₜ'].concat(Array.from({length: index}, function (_, item) {
+          return 'a' + (item + 1);
+        })) : ['hₜ'];
+        modelBox(target, x, y + (mobile ? 43 : 0), mobile ? 58 : 94, 42, 'a' + (index + 1), {
+          accent: kind === 'autoregressive', note: '{' + inputs.join(', ') + '}'
+        });
+      }
+    }
+
+    function renderMtpSets(target, mobile) {
+      empty(target);
+      target.setAttribute('viewBox', mobile ? '0 0 360 390' : '0 0 860 235');
+      if (mobile) {
+        drawSetRow(target, 10, 'next', true);
+        drawSetRow(target, 132, 'independent', true);
+        drawSetRow(target, 263, 'autoregressive', true);
+      } else {
+        drawSetRow(target, 22, 'next', false);
+        drawSetRow(target, 92, 'independent', false);
+        drawSetRow(target, 169, 'autoregressive', false);
+      }
+    }
+
+    function renderMtpCandidates() {
+      var mobile = window.matchMedia('(max-width: 520px)').matches;
+      renderMtpWires(one('#mtp-wires'), mobile);
+      renderMtpMasks(one('#mtp-masks'), mobile);
+      renderMtpSets(one('#mtp-sets'), mobile);
+    }
+
     var production = [
       {update: 8192, stock: -0.218, damage: 9.54},
       {update: 16384, stock: 0.058, damage: 45.03},
@@ -1513,7 +1928,7 @@
       });
       target.appendChild(svgElement('line', {x1: 8, y1: 289, x2: 382, y2: 289, stroke: COLORS.rule, 'stroke-width': 1}));
 
-      addText(target, 8, 314, 'PLAY · D2/R2 · CACHED SEQUENTIAL DECODE', {
+      addText(target, 8, 314, 'PLAY · DELAY 2 · REPLAN 2 · CACHED SEQUENTIAL DECODE', {
         fill: COLORS.ink, 'font-family': 'var(--mono)', 'font-size': 9.5, 'font-weight': 600
       });
       diagramBox(target, 8, 348, 42, 35, 'hₜ', '', false);
@@ -1691,10 +2106,10 @@
     }
 
     var factorRows = [
-      {label: 'D0', name: 'Independent MTP', note: 'no feedback', across: false, within: false, stock: -0.702, stockLcb: -0.798, damage: 2.77, damageLcb: -4.56, run: '98r9smrj'},
-      {label: 'D1', name: 'Within-frame AR', note: 'controller groups only', across: false, within: true, stock: -0.313, stockLcb: -0.408, damage: 13.05, damageLcb: 6.00, run: 'a117chkw'},
-      {label: 'D2', name: 'Across-frame AR', note: 'future frames only', across: true, within: false, stock: -0.196, stockLcb: -0.297, damage: 18.06, damageLcb: 11.91, run: '50q39o9j'},
-      {label: 'D3', name: 'Autoregressive MTP', note: 'both kinds of feedback', across: true, within: true, stock: -0.096, stockLcb: -0.212, damage: 24.75, damageLcb: 17.10, run: '5wfk2esf'}
+      {name: 'Independent MTP', note: 'no feedback', across: false, within: false, stock: -0.702, stockLcb: -0.798, damage: 2.77, damageLcb: -4.56, run: '98r9smrj'},
+      {name: 'Within-frame AR', note: 'controller groups only', across: false, within: true, stock: -0.313, stockLcb: -0.408, damage: 13.05, damageLcb: 6.00, run: 'a117chkw'},
+      {name: 'Across-frame AR', note: 'future frames only', across: true, within: false, stock: -0.196, stockLcb: -0.297, damage: 18.06, damageLcb: 11.91, run: '50q39o9j'},
+      {name: 'Autoregressive MTP', note: 'both kinds of feedback', across: true, within: true, stock: -0.096, stockLcb: -0.212, damage: 24.75, damageLcb: 17.10, run: '5wfk2esf'}
     ];
     var factorMetric = 'stock';
     var selectedFactor = 3;
@@ -1736,7 +2151,7 @@
       var inside = positive ? point > 82 : point < 18;
       var label = inside ? (positive ? point - 1.5 : point + 1.5) : (positive ? point + 1.5 : point - 1.5);
       var labelEndsAtPoint = (positive && inside) || (!positive && !inside);
-      var transform = labelEndsAtPoint ? 'transform:translateX(-100%);' : '';
+      var transform = labelEndsAtPoint ? 'transform:translate(-100%,-50%);' : 'transform:translateY(-50%);';
       return '<div class="factor-track" style="--zero:' + zero.toFixed(2) + '%">' +
         '<i style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%"></i>' +
         '<output class="' + (inside ? 'inside' : '') + '" style="left:' + label.toFixed(2) + '%;' + transform + '">' +
@@ -1748,7 +2163,7 @@
         '<div class="factor-bar-head"><span>condition</span><span>net stocks / min</span><span>net damage / min</span></div>' +
         factorRows.map(function (row, index) {
           return '<div class="factor-bar-row' + (index === factorRows.length - 1 ? ' flagship' : '') + '">' +
-            '<div class="factor-bar-label"><b>' + row.name + '</b><span>' + row.label + ' · ' + row.note + '</span></div>' +
+            '<div class="factor-bar-label"><b>' + row.name + '</b><span>' + row.note + '</span></div>' +
             factorBar(row.stock, -0.8, 0.1, 3) + factorBar(row.damage, -5, 30, 2) + '</div>';
         }).join('');
     }
@@ -1803,22 +2218,18 @@
 
     var codecComparisons = [
       {
-        title: 'Legacy → Cartesian', note: 'same architecture, loss, data, and updates',
-        delta: 'Δ +0.292 stock · +16.16 damage',
+        title: 'Legacy → Cartesian',
         rows: [
           { name: 'Legacy', role: 'control', stock: -0.132712, damage: 21.371409 },
           { name: 'Cartesian', role: 'treatment', stock: 0.159110, damage: 37.529324 }
         ]
       },
       {
-        title: 'Cartesian → Polar', note: 'only the stick classes and stick semantics change',
-        delta: 'Δ +0.095 stock · +0.88 damage',
+        title: 'Cartesian → Polar',
         rows: [
           { name: 'Cartesian', role: 'control', stock: 0.031839, damage: 33.963848 },
           { name: 'Polar', role: 'treatment', stock: 0.127288, damage: 34.839119 }
-        ],
-        diagnostics: '<span>stock LCB <b>−0.074 → +0.016 · Δ +0.090</b></span>' +
-          '<span>decode p95 <b>15.40 → 15.94 ms · Δ +0.54 ms</b></span>'
+        ]
       }
     ];
 
@@ -1827,19 +2238,19 @@
         '<div class="codec-result-head"><span>matched comparison</span><span>net stocks / min</span><span>net damage / min</span></div>' +
         codecComparisons.map(function (comparison) {
           return '<section class="codec-result-pair"><div class="codec-pair-title"><b>' + comparison.title +
-            '</b><span>' + comparison.note + ' · ' + comparison.delta + '</span></div>' +
+            '</b></div>' +
             comparison.rows.map(function (row) {
               return '<div class="codec-result-row ' + row.role + '"><div class="codec-result-label"><b>' + row.name +
-                '</b><span>' + row.role + '</span></div>' + factorBar(row.stock, -.18, .18, 3) +
+                '</b></div>' + factorBar(row.stock, -.18, .18, 3) +
                 factorBar(row.damage, 0, 42, 2) + '</div>';
-            }).join('') + (comparison.diagnostics ? '<div class="codec-pair-diagnostics">' + comparison.diagnostics + '</div>' : '') +
-            '</section>';
+            }).join('') + '</section>';
         }).join('');
     }
 
     var representationBranches = [
       {
         id: 'physical', name: 'Past-action input', diagram: 'physical',
+        focus: ['history'], locus: 'past-action input',
         control: '256-way class one-hot', treatment: 'class + physical embedding',
         stock: 0.260, damage: 23.68,
         text: 'The physical embedding won despite fewer examples and fewer parameters.',
@@ -1847,6 +2258,7 @@
       },
       {
         id: 'geometry', name: 'Geometric features', diagram: 'geometry',
+        focus: ['history'], locus: 'observation input',
         control: 'raw measured state', treatment: 'derived relative geometry',
         stock: null, damage: null,
         noResult: 'Two spatial-feature attempts stopped without a closed-loop result. There is no intervention score.',
@@ -1855,6 +2267,7 @@
       },
       {
         id: 'cross', name: 'Head cross-attention', diagram: 'cross',
+        focus: ['trunk', 'temporal'], locus: 'trunk → plan',
         control: 'final trunk state hₜ', treatment: 'queries cross-attend to trunk history',
         stock: null, damage: null,
         noResult: 'The retained run scored −0.398 stocks/min and +21.55 damage/min, but its nearest reference changes the trunk, codec, offsets, and decoder size.',
@@ -1863,6 +2276,7 @@
       },
       {
         id: 'flat', name: 'Flattened action tokens', diagram: 'flat',
+        focus: ['history', 'trunk'], locus: 'trunk sequence',
         control: 'one trunk token per frame', treatment: 'state + four action-part tokens',
         stock: null, damage: null,
         noResult: '51-frame: −0.101 stock / +28.82 damage in a later 96-boot eval. 256-frame: +0.262 / +41.34 under the older protocol and about 5× the training work. No clean delta.',
@@ -1871,6 +2285,7 @@
       },
       {
         id: 'bpe', name: 'BPE / RLE spans', diagram: 'bpe',
+        focus: ['temporal', 'runtime'], locus: 'plan + runtime',
         control: 'one action target per frame', treatment: 'action + duration event spans',
         stock: -2.635, damage: -172.16,
         text: 'Output format, execution cadence, parameter count, and crash rate also changed. The complete tested system failed.',
@@ -1878,6 +2293,7 @@
       },
       {
         id: 'chording', name: 'Joint action chords', diagram: 'chord',
+        focus: ['groups'], locus: 'controller frame',
         control: 'four factorized groups', treatment: 'one joint frame token',
         stock: null, damage: null,
         noResult: 'The only retained run stopped after three diagnostic steps. It has no closed-loop evaluation.',
@@ -1886,6 +2302,7 @@
       },
       {
         id: 'state', name: 'Game-state expert', diagram: 'state',
+        focus: ['trunk', 'objective'], locus: 'training heads',
         control: 'policy objective only', treatment: 'training-only future-state expert',
         stock: -0.048, damage: -12.60,
         text: 'The treatment had 8% more parameters, twice the examples, and more than twice the estimated training work.',
@@ -1893,6 +2310,7 @@
       },
       {
         id: 'delay', name: 'Fixed long delay', diagram: 'delay',
+        focus: ['temporal', 'runtime'], locus: 'plan + runtime',
         control: 'act near the observation', treatment: 'act twelve frames ahead',
         stock: -1.105, damage: -85.71,
         text: 'Plan length, replan interval, and the future-data buffer changed with delay. The tested deployment combination failed.',
@@ -1946,6 +2364,214 @@
         'delay 12', '<div class="toy-flow vertical"><span class="toy-node">observe t</span><div class="toy-token-row"><span class="toy-token">·</span><span class="toy-token">·</span><span class="toy-token">12-frame queue</span><span class="toy-token">·</span></div><span class="toy-node hot">act t+12</span></div>');
     }
 
+    function branchCanvas(target) {
+      empty(target);
+      target.setAttribute('viewBox', '0 0 390 132');
+      addText(target, 8, 13, 'REFERENCE', {class: 'diagram-note'});
+      addText(target, 216, 13, 'TEST', {class: 'diagram-note', fill: COLORS.oxblood});
+      target.appendChild(svgElement('line', {
+        x1: 195, y1: 4, x2: 195, y2: 128,
+        class: 'model-wire ghost', 'stroke-dasharray': '2 3'
+      }));
+      addText(target, 195, 70, '→', {'text-anchor': 'middle', class: 'diagram-title'});
+    }
+
+    function smallTransformer(target, x, y, accent) {
+      [6, 3].forEach(function (offset) {
+        target.appendChild(svgElement('rect', {
+          x: x - offset, y: y + offset, width: 58, height: 37, class: 'model-layer'
+        }));
+      });
+      target.appendChild(svgElement('rect', {
+        x: x, y: y, width: 58, height: 37,
+        class: 'model-box' + (accent ? ' accent' : '')
+      }));
+      addText(target, x + 29, y + 17, 'Transformer', {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(target, x + 29, y + 29, 'causal', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function segmentedVector(target, x, y, width, labels, accentStart) {
+      var segmentWidth = width / labels.length;
+      labels.forEach(function (label, index) {
+        target.appendChild(svgElement('rect', {
+          x: x + index * segmentWidth,
+          y: y,
+          width: segmentWidth - 1,
+          height: 25,
+          class: 'model-token' + (index >= accentStart ? ' accent' : '')
+        }));
+        addText(target, x + index * segmentWidth + (segmentWidth - 1) / 2, y + 16, label, {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      });
+    }
+
+    function renderPhysicalBranch(target) {
+      branchCanvas(target);
+      var marker = modelMarker(target, 'physical', COLORS.faint);
+      modelBox(target, 20, 37, 54, 30, 'class id', {});
+      modelWire(target, 74, 52, 92, 52, {marker: marker});
+      segmentedVector(target, 96, 40, 75, ['', '', '1', '', '', '', '', ''], 8);
+      addText(target, 133, 82, 'one-hot class vector', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      modelBox(target, 218, 32, 55, 28, 'class id', {});
+      segmentedVector(target, 283, 34, 88, ['B', 'x', 'y', 'C', 'L', 'R'], 0);
+      modelWire(target, 245, 60, 278, 94, {marker: marker});
+      modelWire(target, 327, 59, 315, 94, {marker: marker});
+      modelBox(target, 276, 94, 77, 28, 'embedding', {accent: true});
+      addText(target, 327, 76, 'physical values', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderGeometryBranch(target) {
+      branchCanvas(target);
+      segmentedVector(target, 17, 44, 151, ['x', 'y', 'v', 'state', '%'], 5);
+      modelWire(target, 92, 69, 92, 88, {});
+      smallTransformer(target, 63, 88, false);
+      addText(target, 92, 35, 'measured state', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      segmentedVector(target, 211, 44, 168, ['x', 'y', 'v', 'state', '%', 'Δx', 'Δy', 'range', 'ledge'], 5);
+      modelWire(target, 295, 69, 295, 88, {});
+      smallTransformer(target, 266, 88, true);
+      addText(target, 295, 35, 'wider input vector', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function drawHiddenStates(target, x, y, accent) {
+      ['h₋₃', 'h₋₂', 'h₋₁', 'hₜ'].forEach(function (label, index) {
+        modelBox(target, x + index * 34, y, 28, 25, label, {accent: accent && index < 3});
+      });
+    }
+
+    function renderCrossBranch(target) {
+      branchCanvas(target);
+      var marker = modelMarker(target, 'cross', COLORS.faint);
+      drawHiddenStates(target, 17, 31, false);
+      modelWire(target, 147, 56, 147, 81, {marker: marker});
+      ['q₁', 'q₂', 'q₃'].forEach(function (label, index) {
+        modelBox(target, 85 + index * 35, 86, 28, 25, label, {});
+      });
+      addText(target, 87, 122, 'heads use hₜ', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      drawHiddenStates(target, 218, 31, true);
+      target.appendChild(svgElement('line', {x1: 220, y1: 68, x2: 348, y2: 68, class: 'model-wire accent'}));
+      [232, 266, 300, 334].forEach(function (x) {
+        modelWire(target, x, 56, x, 68, {accent: true});
+      });
+      ['q₁', 'q₂', 'q₃'].forEach(function (label, index) {
+        var x = 264 + index * 35;
+        modelWire(target, x + 14, 68, x + 14, 84, {accent: true, marker: marker});
+        modelBox(target, x, 86, 28, 25, label, {accent: true});
+      });
+      addText(target, 295, 122, 'queries attend to trunk history', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function frameToken(target, x, y, expanded) {
+      if (expanded) {
+        segmentedVector(target, x, y, 87, ['s', 'C', 'M', 'T', 'B'], 1);
+      } else {
+        segmentedVector(target, x, y, 43, ['s', 'a'], 2);
+      }
+    }
+
+    function renderFlatBranch(target) {
+      branchCanvas(target);
+      frameToken(target, 14, 39, false);
+      frameToken(target, 61, 39, false);
+      frameToken(target, 108, 39, false);
+      addText(target, 84, 79, 'one token per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      smallTransformer(target, 111, 87, false);
+
+      frameToken(target, 213, 39, true);
+      frameToken(target, 304, 39, true);
+      addText(target, 296, 79, 'five tokens per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      smallTransformer(target, 267, 87, true);
+    }
+
+    function renderBpeBranch(target) {
+      branchCanvas(target);
+      ['A', 'A', 'A', 'B', 'B', 'C'].forEach(function (label, index) {
+        modelBox(target, 18 + index * 26, 47, 21, 27, label, {});
+      });
+      addText(target, 90, 90, 'one token per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      addText(target, 90, 105, 'fixed cadence', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      [['A', '×3'], ['B', '×2'], ['C', '×1']].forEach(function (pair, index) {
+        var x = 222 + index * 52;
+        modelBox(target, x, 43, 46, 34, pair[0], {accent: true, note: pair[1]});
+      });
+      addText(target, 295, 94, 'one token per event span', {'text-anchor': 'middle', class: 'diagram-note'});
+      addText(target, 295, 109, 'variable cadence', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderChordBranch(target) {
+      branchCanvas(target);
+      drawGroupChain(target, 39, 51, '', false);
+      addText(target, 91, 91, 'four decisions', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var outer = svgElement('g');
+      target.appendChild(outer);
+      outer.appendChild(svgElement('rect', {x: 235, y: 45, width: 120, height: 37, class: 'model-box accent'}));
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        if (index) outer.appendChild(svgElement('line', {
+          x1: 235 + index * 30, y1: 45, x2: 235 + index * 30, y2: 82, class: 'model-wire ghost'
+        }));
+        addText(outer, 250 + index * 30, 68, label, {'text-anchor': 'middle', class: 'diagram-label'});
+      });
+      addText(target, 295, 99, 'one joint class', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function drawActionPlanMini(target, x, y, accent) {
+      [0, 1, 2, 3].forEach(function (index) {
+        modelBox(target, x + index * 29, y, 23, 27, 'a' + (index + 1), {accent: accent});
+      });
+    }
+
+    function renderStateBranch(target) {
+      branchCanvas(target);
+      modelBox(target, 18, 47, 34, 30, 'hₜ', {});
+      drawActionPlanMini(target, 66, 34, false);
+      modelWire(target, 52, 62, 66, 48, {});
+      modelBox(target, 89, 87, 62, 25, 'action loss', {});
+      modelWire(target, 120, 61, 120, 87, {});
+
+      modelBox(target, 213, 47, 34, 30, 'hₜ', {});
+      drawActionPlanMini(target, 259, 24, true);
+      modelWire(target, 247, 60, 259, 38, {accent: true});
+      modelBox(target, 282, 86, 62, 25, 'action loss', {accent: true});
+      modelWire(target, 313, 51, 313, 86, {accent: true});
+      modelBox(target, 259, 52, 108, 25, 'future state', {});
+      modelWire(target, 247, 63, 259, 64, {});
+      addText(target, 313, 123, 'training-only auxiliary head', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderDelayBranch(target) {
+      branchCanvas(target);
+      var marker = modelMarker(target, 'delay', COLORS.faint);
+      modelBox(target, 16, 45, 52, 29, 'observe t', {});
+      modelWire(target, 68, 59, 91, 59, {marker: marker});
+      modelBox(target, 96, 45, 48, 29, 'act t+1', {accent: true});
+      addText(target, 80, 96, 'near the observation', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      modelBox(target, 211, 45, 52, 29, 'observe t', {});
+      modelWire(target, 263, 59, 280, 59, {});
+      [0, 1, 2].forEach(function (index) {
+        modelBox(target, 283 + index * 20, 48, 15, 23, '·', {});
+      });
+      modelWire(target, 338, 59, 348, 59, {marker: marker});
+      modelBox(target, 351, 45, 35, 29, 'a₁₂', {accent: true});
+      addText(target, 300, 96, 'twelve-frame prediction gap', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderBranchMechanism(target, kind) {
+      if (kind === 'physical') return renderPhysicalBranch(target);
+      if (kind === 'geometry') return renderGeometryBranch(target);
+      if (kind === 'cross') return renderCrossBranch(target);
+      if (kind === 'flat') return renderFlatBranch(target);
+      if (kind === 'bpe') return renderBpeBranch(target);
+      if (kind === 'chord') return renderChordBranch(target);
+      if (kind === 'state') return renderStateBranch(target);
+      return renderDelayBranch(target);
+    }
+
     function deltaBar(value, extent) {
       var fraction = Math.min(50, Math.abs(value) / extent * 50);
       var left = value < 0 ? 50 - fraction : 50;
@@ -1972,8 +2598,15 @@
         var row = document.createElement('section');
         row.className = 'branch-study';
         row.innerHTML = '<div><h4>' + branch.name + '</h4><p>' + branch.text + '</p><p class="source-line">' +
-          branchLinks(branch.links) + '</p></div>' + branchDiagram(branch.diagram) + impactBlock(branch);
+          branchLinks(branch.links) + '</p></div><div class="branch-locus"><span class="branch-locus-label">' +
+          htmlEscape(branch.locus) + '</span><svg class="branch-map" role="img" aria-label="Location of ' +
+          htmlEscape(branch.name) + ' in the policy"></svg></div><svg id="branch-' + branch.id +
+          '" class="model-diagram branch-mechanism" role="img" aria-label="' +
+          htmlEscape(branch.control + ' compared with ' + branch.treatment) + '"></svg><div class="branch-impact">' +
+          impactBlock(branch) + '</div>';
         target.appendChild(row);
+        renderMasterMap(one('.branch-map', row), branch.focus);
+        renderBranchMechanism(one('.branch-mechanism', row), branch.diagram);
       });
     }
 
@@ -2118,7 +2751,7 @@
     var horizonSeries = [
       {
         id: 'D0',
-        label: 'D0 · neither',
+        label: 'Independent MTP',
         color: COLORS.ghost,
         dash: '2 4',
         stock: [0.0955, -0.1590, -0.7017, -0.9051],
@@ -2126,7 +2759,7 @@
       },
       {
         id: 'D1',
-        label: 'D1 · within only',
+        label: 'Within-frame AR',
         color: COLORS.faint,
         dash: '7 4',
         stock: [0.1326, 0.0477, -0.3129, -0.4670],
@@ -2134,7 +2767,7 @@
       },
       {
         id: 'D2',
-        label: 'D2 · across only',
+        label: 'Across-frame AR',
         color: COLORS.soft,
         dash: '3 2',
         stock: [-0.1857, -0.0637, -0.1963, -0.2335],
@@ -2142,7 +2775,7 @@
       },
       {
         id: 'D3',
-        label: 'D3 · both',
+        label: 'Autoregressive MTP',
         color: COLORS.oxblood,
         dash: '',
         stock: [0.053, 0, -0.0956, -0.0212],
@@ -2722,7 +3355,7 @@
         id: 'runtime',
         label: 'Receding-horizon runtime',
         labelLines: ['Receding-horizon', 'runtime'],
-        sublabel: 'prediction 4 · D2/R2',
+        sublabel: 'prediction 4 · delay 2 · replan 2',
         x: 480, y: 356, w: 150, h: 66,
         title: 'Deployment',
         text: 'The standard evaluation requests four predictions, observes with delay two, and replans every two frames.',
@@ -2779,7 +3412,7 @@
           '<p>A causal observation trunk feeds an autoregressive controller plan. Training combines behavior cloning with detached-value AWR.</p>' +
           '<ul class="recipe-list"><li><span>parameters</span><span>216,496,794</span></li>' +
           '<li><span>context</span><span>256 frames</span></li><li><span>training</span><span>8 × 2³⁰ positions</span></li>' +
-          '<li><span>deployment</span><span>P4 · D2 · R2</span></li></ul>';
+          '<li><span>deployment</span><span>prediction 4 · delay 2 · replan 2</span></li></ul>';
         return;
       }
       one('#module-detail').innerHTML =
@@ -2789,114 +3422,90 @@
         }).join('') + '</ul>';
     }
 
-    function renderArchitecture() {
-      var target = one('#architecture-diagram');
+    function renderMasterMap(target, focus) {
       empty(target);
-      var mobile = window.matchMedia('(max-width: 720px)').matches;
-      target.setAttribute('viewBox', mobile ? '0 0 390 465' : '0 0 650 470');
-      var layoutModules = architectureModules.map(function (module) {
-        if (!mobile) return module;
-        var position = architectureMobilePositions[module.id];
-        return Object.assign({}, module, {
-          x: position[0], y: position[1], w: position[2], h: position[3]
-        });
-      });
-      function layoutModuleById(id) {
-        return layoutModules.filter(function (module) { return module.id === id; })[0];
-      }
-      var marker = arrowMarker(target);
-      architectureEdges.forEach(function (edge) {
-        var from = layoutModuleById(edge[0]);
-        var to = layoutModuleById(edge[1]);
-        var endpoints = edgeEndpoints(from, to);
-        target.appendChild(svgElement('line', {
-          x1: endpoints[0], y1: endpoints[1], x2: endpoints[2], y2: endpoints[3],
-          class: 'arch-edge', 'marker-end': marker
+      target.classList.add('model-diagram');
+      target.setAttribute('viewBox', '0 0 160 120');
+
+      var data = modelPart(target, 'data');
+      data.appendChild(svgElement('rect', {x: 2, y: 4, width: 23, height: 15, class: 'model-token'}));
+      addText(data, 13.5, 14, 'data', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var history = modelPart(target, 'history');
+      [0, 1, 2].forEach(function (index) {
+        history.appendChild(svgElement('rect', {
+          x: 3 + index * 8, y: 35, width: 10, height: 29, class: 'model-token'
         }));
       });
-      layoutModules.forEach(function (module) {
-        var group = svgElement('g', {'data-module': module.id, class: 'arch-node'});
-        var isHighlighted = highlightedModules.indexOf(module.id) !== -1;
-        if (highlightedModules.length) {
-          group.classList.add(isHighlighted ? 'active' : 'dim');
-        } else if (module.id === activeModule) {
-          group.classList.add('active');
-        }
-        group.appendChild(svgElement('rect', {
-          x: module.x, y: module.y, width: module.w, height: module.h
+      addText(history, 16, 75, 'input', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var trunk = modelPart(target, 'trunk');
+      [6, 3].forEach(function (offset) {
+        trunk.appendChild(svgElement('rect', {
+          x: 35 - offset, y: 21 + offset, width: 40, height: 58, class: 'model-layer'
         }));
-        var labelLines = (mobile && module.mobileLabelLines) || module.labelLines || [module.label];
-        labelLines.forEach(function (line, index) {
-          addText(group, module.x + module.w / 2, module.y + module.h / 2 - 7 + index * 12, line, {
-            'text-anchor': 'middle', 'font-weight': 600
-          });
-        });
-        addText(group, module.x + module.w / 2, module.y + module.h / 2 + (labelLines.length > 1 ? 24 : 15),
-          (mobile && module.mobileSublabel) || module.sublabel, {
-          'text-anchor': 'middle', class: 'arch-small'
-        });
-        group.setAttribute('tabindex', '0');
-        group.setAttribute('role', 'button');
-        group.setAttribute('aria-label', module.title);
-        group.addEventListener('click', function () {
-          selectedLedger = '';
-          highlightedModules = [];
-          activeModule = module.id;
-          renderLedger();
-          renderArchitecture();
-        });
-        group.addEventListener('keydown', function (event) {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            group.dispatchEvent(new Event('click'));
-          }
-        });
-        target.appendChild(group);
       });
-      addText(target, mobile ? 93 : 322, mobile ? 245 : 224, 'training path', {
-        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
+      trunk.appendChild(svgElement('rect', {x: 35, y: 21, width: 40, height: 58, class: 'model-box'}));
+      addText(trunk, 55, 47, 'TFM', {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(trunk, 55, 61, '×16', {'text-anchor': 'middle', class: 'diagram-note'});
+      trunk.appendChild(svgElement('rect', {x: 82, y: 41, width: 19, height: 20, class: 'model-token'}));
+      addText(trunk, 91.5, 55, 'hₜ', {'text-anchor': 'middle', class: 'diagram-label'});
+
+      var temporal = modelPart(target, 'temporal');
+      [5, 2.5].forEach(function (offset) {
+        temporal.appendChild(svgElement('rect', {
+          x: 110 - offset, y: 24 + offset, width: 39, height: 52, class: 'model-layer'
+        }));
       });
-      addText(target, mobile ? 297 : 553, mobile ? 245 : 326, 'deployment path', {
-        'text-anchor': 'middle', fill: COLORS.faint, 'font-family': 'var(--mono)', 'font-size': 8.5
+      temporal.appendChild(svgElement('rect', {x: 110, y: 24, width: 39, height: 52, class: 'model-box'}));
+      addText(temporal, 129.5, 47, 'TFM', {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(temporal, 129.5, 61, '×4', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var groups = modelPart(target, 'groups');
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        var x = 102 + index * 14;
+        groups.appendChild(svgElement('rect', {x: x, y: 85, width: 11, height: 16, class: 'model-token'}));
+        addText(groups, x + 5.5, 97, label, {'text-anchor': 'middle', class: 'diagram-note'});
       });
-      renderModuleDetail();
+
+      var objective = modelPart(target, 'objective');
+      objective.appendChild(svgElement('rect', {x: 66, y: 94, width: 28, height: 15, class: 'model-token'}));
+      addText(objective, 80, 105, 'loss', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var runtime = modelPart(target, 'runtime');
+      runtime.appendChild(svgElement('rect', {x: 119, y: 106, width: 38, height: 12, class: 'model-token'}));
+      addText(runtime, 138, 115, 'runtime', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var optimizer = modelPart(target, 'optimizer');
+      optimizer.appendChild(svgElement('path', {
+        d: 'M29,88 L29,117 L101,117 L101,88', class: 'model-wire ghost'
+      }));
+      addText(optimizer, 32, 113, 'update', {class: 'diagram-note'});
+
+      modelWire(target, 13.5, 19, 13.5, 35, {});
+      modelWire(target, 27, 50, 32, 50, {});
+      modelWire(target, 75, 50, 82, 50, {});
+      modelWire(target, 101, 50, 107, 50, {});
+      modelWire(target, 129.5, 76, 129.5, 85, {});
+      modelWire(target, 91, 61, 80, 94, {});
+      modelWire(target, 143, 101, 138, 106, {});
+
+      many('[data-module]', target).forEach(function (part) {
+        if (!focus.length) return;
+        part.classList.add(focus.indexOf(part.getAttribute('data-module')) !== -1 ? 'module-focus' : 'module-dim');
+      });
+    }
+
+    function renderArchitecture() {
+      renderArchitectureCandidates();
       renderContextMaps();
     }
 
     function renderContextMaps() {
-      var layouts = {
-        data: [74, 8, 90, 28, 'Data'],
-        history: [74, 46, 90, 28, 'Inputs'],
-        trunk: [74, 84, 90, 32, 'Trunk'],
-        temporal: [9, 144, 98, 32, 'Temporal AR'],
-        groups: [131, 144, 98, 32, 'Controller AR'],
-        objective: [9, 202, 98, 32, 'AWR loss'],
-        runtime: [131, 202, 98, 32, 'D2 / R2'],
-        optimizer: [9, 248, 98, 28, 'AdamW']
-      };
       many('.architecture-context').forEach(function (container) {
-        var target = one('svg', container);
-        empty(target);
         var focus = container.getAttribute('data-dynamic') === 'true' ?
           highlightedModules : (container.getAttribute('data-focus') || '').split(/\s+/).filter(Boolean);
-        [['data', 'history'], ['history', 'trunk'], ['trunk', 'temporal'], ['temporal', 'groups'],
-          ['groups', 'objective'], ['objective', 'optimizer'], ['groups', 'runtime']].forEach(function (edge) {
-          var from = layouts[edge[0]];
-          var to = layouts[edge[1]];
-          target.appendChild(svgElement('line', {
-            x1: from[0] + from[2] / 2, y1: from[1] + from[3],
-            x2: to[0] + to[2] / 2, y2: to[1], class: 'context-edge'
-          }));
-        });
-        Object.keys(layouts).forEach(function (id) {
-          var box = layouts[id];
-          var group = svgElement('g', {class: 'context-node' + (focus.indexOf(id) !== -1 ? ' focus' : '')});
-          group.appendChild(svgElement('rect', {x: box[0], y: box[1], width: box[2], height: box[3]}));
-          group.appendChild(svgElement('text', {
-            x: box[0] + box[2] / 2, y: box[1] + box[3] / 2 + 3, 'text-anchor': 'middle'
-          }, box[4]));
-          target.appendChild(group);
-        });
+        renderMasterMap(one('svg', container), focus);
       });
     }
 
@@ -3064,7 +3673,7 @@
       {
         id: 'fast', order: 50.1, code: 'O50', category: 'deployment', title: 'Cody / Fox fast deployment',
         stock: 0.757, damage: 59.91, evidence: 'package', modules: ['history', 'runtime'],
-        control: 'standard D2/R2 · identity masked', treatment: 'Cody · Fox · D0/R1',
+        control: 'delay 2 · replan 2 · identity masked', treatment: 'Cody · Fox · delay 0 · replan 1',
         summary: 'The combination is strong. Identity, character, delay, and replan all changed, so the gain cannot be assigned to one factor.',
         links: [['O50 proxy', 'a9ud18bc']]
       },
@@ -3294,22 +3903,20 @@
       renderLedger();
     });
 
-    one('#clear-highlight').addEventListener('click', function () {
-      selectedLedger = '';
-      highlightedModules = [];
-      activeModule = '';
-      renderLedger();
-      renderArchitecture();
-    });
-
     one('#source-toggle').addEventListener('click', function () {
       setRunSourcesVisible(!document.body.classList.contains('show-run-sources'));
     });
 
     var architectureMedia = window.matchMedia('(max-width: 720px)');
     if (architectureMedia.addEventListener) architectureMedia.addEventListener('change', renderArchitecture);
+    var compactDiagramMedia = window.matchMedia('(max-width: 520px)');
+    if (compactDiagramMedia.addEventListener) compactDiagramMedia.addEventListener('change', function () {
+      renderArchitectureCandidates();
+      renderMtpCandidates();
+    });
 
     renderProductionChart('#production-chart', 'stock', false);
+    renderMtpCandidates();
     renderFactor();
     renderCodecSticks();
     renderCodecResults();
