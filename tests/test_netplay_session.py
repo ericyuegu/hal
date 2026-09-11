@@ -1,3 +1,4 @@
+import configparser
 import hashlib
 from contextlib import nullcontext
 from pathlib import Path
@@ -85,6 +86,21 @@ def test_console_uses_blocking_uncapped_non_exi_settings(tmp_path: Path, monkeyp
     assert kwargs["enable_ffw"] is False
     assert kwargs["online_delay"] == 2
     assert kwargs["replay_monthly_folders"] is False
+
+
+def test_console_sets_native_internal_resolution(tmp_path: Path) -> None:
+    config_path = tmp_path / "Config"
+    config_path.mkdir()
+    ini_path = config_path / "GFX.ini"
+    ini_path.write_text("[Settings]\nMSAA = 1\nEFBScale = 4\n")
+    console = SimpleNamespace(_get_dolphin_config_path=lambda: str(config_path))
+
+    netplay._set_native_internal_resolution(console)
+
+    config = configparser.ConfigParser()
+    config.read(ini_path)
+    assert config.get("Settings", "EFBScale") == "2"
+    assert config.get("Settings", "MSAA") == "1"
 
 
 def test_controller_is_created_before_dolphin_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

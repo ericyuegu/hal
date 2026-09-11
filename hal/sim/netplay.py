@@ -1,6 +1,7 @@
 """One local Dolphin session for Slippi direct-connect netplay."""
 
 import atexit
+import configparser
 import hashlib
 import threading
 import time
@@ -31,6 +32,12 @@ from hal.sim.session import teardown_console
 
 _SLIPPI_3_6_4_LINUX_SHA256 = "e0f984e5bbecb98e3a746da1f173a475b06c3a1ba6b73e2e31bbe85a5f5a5e8a"
 _DOLPHIN_VERSION_PATCH_LOCK = threading.RLock()
+_NATIVE_EFB_SCALE = "2"
+
+
+class _CaseSensitiveConfigParser(configparser.ConfigParser):
+    def optionxform(self, optionstr: str) -> str:
+        return optionstr
 
 
 def _tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
@@ -51,6 +58,23 @@ def _tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
         version="3.6.4",
         build=melee.console.DolphinBuild.NETPLAY,
     )
+
+
+def _set_native_internal_resolution(console: melee.Console) -> None:
+    """Set native rendering in the isolated Slippi 3.6.4 profile."""
+    config_path = Path(console._get_dolphin_config_path())
+    config_path.mkdir(parents=True, exist_ok=True)
+    ini_path = config_path / "GFX.ini"
+    config = _CaseSensitiveConfigParser(interpolation=None)
+    config.read(ini_path)
+    if not config.has_section("Settings"):
+        config.add_section("Settings")
+    # Pinned libmelee 0.47.0 does not expose EFBScale. Slippi uses 2 for
+    # native resolution and defaults to 4 (2x). Remove this when libmelee can
+    # configure the internal resolution directly.
+    config.set("Settings", "EFBScale", _NATIVE_EFB_SCALE)
+    with ini_path.open("w") as output:
+        config.write(output)
 
 
 @contextmanager
@@ -146,6 +170,7 @@ class NetplaySession:
                 enable_ffw=False,
             )
         fix_dolphin_ini_case(self._console)
+        _set_native_internal_resolution(self._console)
         atexit.register(self._atexit_kill)
         return self
 
