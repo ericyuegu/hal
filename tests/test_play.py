@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -69,11 +70,13 @@ class _Session:
     def __init__(
         self,
         *,
+        countdown_start: int | None = None,
         corrupt_frame: int | None = None,
         replay_frame: int | None = None,
         replay_age: int = 1,
     ) -> None:
         self.frame_id = 0
+        self.countdown_start = countdown_start
         self.queue = deque([NEUTRAL_CONTROLLER_ACTION] * self.online_delay)
         self.submitted: list[ControllerAction] = []
         self.corrupt_frame = corrupt_frame
@@ -81,10 +84,26 @@ class _Session:
         self.replay_age = replay_age
         self.applied = [NEUTRAL_CONTROLLER_ACTION]
 
-    def start_match(self, _setup: NetplaySetup) -> dict:
+    def start_match(
+        self,
+        _setup: NetplaySetup,
+        *,
+        on_countdown_frame: Callable[[dict], None] | None = None,
+    ) -> dict:
+        if self.countdown_start is not None and on_countdown_frame is not None:
+            for frame_id in range(self.countdown_start, 0):
+                on_countdown_frame(_frame(frame_id, NEUTRAL_CONTROLLER_ACTION))
         return _frame(self.frame_id, NEUTRAL_CONTROLLER_ACTION)
 
-    def start_rematch(self, _setup: NetplaySetup) -> dict:
+    def start_rematch(
+        self,
+        _setup: NetplaySetup,
+        *,
+        on_countdown_frame: Callable[[dict], None] | None = None,
+    ) -> dict:
+        if self.countdown_start is not None and on_countdown_frame is not None:
+            for frame_id in range(self.countdown_start, 0):
+                on_countdown_frame(_frame(frame_id, NEUTRAL_CONTROLLER_ACTION))
         return _frame(self.frame_id, NEUTRAL_CONTROLLER_ACTION)
 
     def step(self, action: ControllerAction) -> tuple[dict, bool]:
@@ -160,11 +179,32 @@ def test_match_loop_starts_policy_at_frame_zero_with_real_conditioning(monkeypat
     assert result.stage == 32
 
 
+def test_countdown_primes_policy_context_before_frame_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    policy = _Policy()
+    session = _Session(countdown_start=-3)
+
+    run_netplay_match(
+        session,
+        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+        policy,
+        RuntimeConfig(1, (2,), 2),
+        player_identity="MASTER",
+        max_frames=10,
+    )
+
+    assert [item.frame_id for item in policy.inputs[:4]] == [-3, -2, -1, 0]
+    assert [item.reset for item in policy.inputs[:4]] == [True, False, False, False]
+    assert all(item.pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2 for item in policy.inputs[:4])
+    assert session.submitted[0].main_x == 0.4
+
+
 def test_match_loop_uses_persistent_rematch_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
     monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
     session = _Session()
-    session.start_match = lambda _setup: pytest.fail("initial match entrypoint used")
+    session.start_match = lambda _setup, **_kwargs: pytest.fail("initial match entrypoint used")
     result = run_netplay_match(
         session,
         NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
@@ -178,7 +218,7 @@ def test_match_loop_uses_persistent_rematch_entrypoint(monkeypatch: pytest.Monke
 
 def test_match_loop_rejects_a_broken_frame_zero_session_contract() -> None:
     session = _Session()
-    session.start_match = lambda _setup: _frame(-1, NEUTRAL_CONTROLLER_ACTION)
+    session.start_match = lambda _setup, **_kwargs: _frame(-1, NEUTRAL_CONTROLLER_ACTION)
     with pytest.raises(RuntimeError, match="expected frame 0"):
         run_netplay_match(
             session,
@@ -194,17 +234,18 @@ def test_new_match_resets_existing_policy_stream(monkeypatch: pytest.MonkeyPatch
     policy = _Policy()
     runtime = RuntimeConfig(1, (2,), 2)
 
-    for _ in range(2):
+    for rematch in (False, True):
         run_netplay_match(
-            _Session(),
+            _Session(countdown_start=-3),
             NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
             policy,
             runtime,
             max_frames=10,
+            rematch=rematch,
         )
 
     reset_frames = [item.frame_id for item in policy.inputs if item.reset]
-    assert reset_frames == [0, 0]
+    assert reset_frames == [-3, -3]
 
 
 def test_match_loop_accepts_a_recent_slippi_time_sync_replay(monkeypatch: pytest.MonkeyPatch) -> None:

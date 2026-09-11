@@ -5,6 +5,7 @@ import configparser
 import hashlib
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextlib import suppress
@@ -182,8 +183,13 @@ class NetplaySession:
     ) -> None:
         self._teardown()
 
-    def start_match(self, setup: NetplaySetup) -> dict:
-        """Connect to the remote player and return the first live frame."""
+    def start_match(
+        self,
+        setup: NetplaySetup,
+        *,
+        on_countdown_frame: Callable[[dict], None] | None = None,
+    ) -> dict:
+        """Connect and emit countdown states before returning frame zero."""
         if self._console is None:
             raise RuntimeError("NetplaySession must be used as a context manager")
         if self._controller is not None:
@@ -217,15 +223,20 @@ class NetplaySession:
             raise RuntimeError("failed to connect to Dolphin Slippi server")
         self._menu_helper = melee.MenuHelper()
         logger.info("waiting for direct-connect opponent {}", setup.opponent_code)
-        first_frame = self._navigate_to_live(setup)
+        first_frame = self._navigate_to_live(setup, on_countdown_frame=on_countdown_frame)
         frame_id = first_frame.get("id")
         if not isinstance(frame_id, int):
             raise RuntimeError(f"first netplay frame has invalid id {frame_id!r}")
         self._last_frame_id = frame_id
         return first_frame
 
-    def start_rematch(self, setup: NetplaySetup) -> dict:
-        """Navigate the existing direct-connect session into its next game."""
+    def start_rematch(
+        self,
+        setup: NetplaySetup,
+        *,
+        on_countdown_frame: Callable[[dict], None] | None = None,
+    ) -> dict:
+        """Navigate to a rematch and emit countdown states before frame zero."""
         if self._console is None or self._controller is None or self._menu_helper is None:
             raise RuntimeError("start_match must complete before start_rematch")
         if self._last_frame_id is not None:
@@ -235,7 +246,7 @@ class NetplaySession:
         self._menu_helper = melee.MenuHelper()
         self._controller.release_all()
         self._controller.flush()
-        first_frame = self._navigate_to_live(setup)
+        first_frame = self._navigate_to_live(setup, on_countdown_frame=on_countdown_frame)
         frame_id = first_frame.get("id")
         if not isinstance(frame_id, int):
             raise RuntimeError(f"first netplay frame has invalid id {frame_id!r}")
@@ -255,7 +266,12 @@ class NetplaySession:
             raise RuntimeError("netplay entered a game while waiting for a rematch")
         return gamestate.menu_state
 
-    def _navigate_to_live(self, setup: NetplaySetup) -> dict:
+    def _navigate_to_live(
+        self,
+        setup: NetplaySetup,
+        *,
+        on_countdown_frame: Callable[[dict], None] | None = None,
+    ) -> dict:
         assert self._console is not None
         assert self._controller is not None
         assert self._menu_helper is not None
@@ -280,7 +296,10 @@ class NetplaySession:
                 last_status = status
             if gamestate.menu_state in LIVE_MENU_STATES:
                 self._discover_ports(gamestate, setup)
-                return self._reach_neutral_frame_zero(gamestate)
+                return self._reach_neutral_frame_zero(
+                    gamestate,
+                    on_countdown_frame=on_countdown_frame,
+                )
             if gamestate.menu_state in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
                 self._menu_helper.choose_direct_online(gamestate, self._controller)
             else:
@@ -294,7 +313,12 @@ class NetplaySession:
                     autostart=True,
                 )
 
-    def _reach_neutral_frame_zero(self, gamestate: melee.GameState) -> dict:
+    def _reach_neutral_frame_zero(
+        self,
+        gamestate: melee.GameState,
+        *,
+        on_countdown_frame: Callable[[dict], None] | None = None,
+    ) -> dict:
         """Send neutral through the intro and return exact playable frame zero."""
         assert self._console is not None
         assert self._controller is not None
@@ -312,6 +336,8 @@ class NetplaySession:
                 if not controller_actions_match(NEUTRAL_CONTROLLER_ACTION, actual):
                     raise RuntimeError(f"local controller is not neutral at frame 0: {actual!r}")
                 return frame
+            if on_countdown_frame is not None:
+                on_countdown_frame(frame)
             self._controller.release_all()
             self._controller.flush()
             gamestate = step_blocking(self._console, self.step_timeout_seconds)

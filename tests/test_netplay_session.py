@@ -203,10 +203,15 @@ def test_countdown_sends_neutral_and_returns_exact_neutral_frame_zero(
         "hal.sim.netplay.canonical_frame",
         lambda state: _canonical_live(state.frame, frame_ids[state.frame]),
     )
+    countdown_frames = []
 
-    frame = session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+    frame = session._navigate_to_live(
+        NetplaySetup(melee.Character.FOX, "HUMAN#1"),
+        on_countdown_frame=countdown_frames.append,
+    )
 
     assert frame["id"] == 0
+    assert [value["id"] for value in countdown_frames] == [-3, -2, -1]
     assert controller.release_all.call_count == 3
     assert controller.flush.call_count == 3
 
@@ -297,7 +302,7 @@ def test_finished_match_can_rematch_without_relaunching_dolphin(
     console.run.assert_not_called()
     controller.release_all.assert_called_once()
     controller.flush.assert_called_once()
-    navigate.assert_called_once_with(setup)
+    navigate.assert_called_once_with(setup, on_countdown_frame=None)
     assert session._menu_helper is helper_type.return_value
 
 

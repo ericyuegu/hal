@@ -225,7 +225,33 @@ def run_netplay_match(
         raise ValueError(f"session delay {delay} is absent from prepared policy delays {runtime.transport_delays}")
     if max_frames < delay + 3:
         raise ValueError(f"max_frames must be at least transport delay + 3, got {max_frames}")
-    first_frame = session.start_rematch(setup) if rematch else session.start_match(setup)
+    countdown_policy_frames = 0
+    neutral_pending = (NEUTRAL_CONTROLLER_ACTION,) * delay
+
+    def prime_policy(frame: dict) -> None:
+        nonlocal countdown_policy_frames
+        if session.ego_port is None:
+            raise RuntimeError("netplay local port was not discovered before the countdown")
+        ego_port = session.ego_port
+        characters = {port: int(frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
+        item = PolicyInput(
+            stream_id=stream_id,
+            frame_id=int(frame["id"]),
+            controlled_port=ego_port,
+            observation=_flat_observation(frame, characters),
+            applied_action=_frame_action(frame, ego_port),
+            pending_actions=neutral_pending,
+            player_identity=player_identity,
+            reset=countdown_policy_frames == 0,
+        )
+        validate_policy_inputs(policy.spec, runtime, (item,))
+        validate_policy_outputs((item,), tuple(policy.step((item,))))
+        countdown_policy_frames += 1
+
+    if rematch:
+        first_frame = session.start_rematch(setup, on_countdown_frame=prime_policy)
+    else:
+        first_frame = session.start_match(setup, on_countdown_frame=prime_policy)
     if session.ego_port is None or session.opponent_port is None:
         raise RuntimeError("netplay ports were not discovered")
     ego_port = session.ego_port
@@ -242,7 +268,8 @@ def run_netplay_match(
         on_live()
     characters = {port: int(first_frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
     logger.info(
-        "netplay live stream={} delay={} stage={} local_port={} opponent_port={} characters={}:{} imitate={}",
+        "netplay live stream={} delay={} stage={} local_port={} opponent_port={} characters={}:{} "
+        "imitate={} countdown_frames={}",
         stream_id,
         delay,
         stage,
@@ -251,6 +278,7 @@ def run_netplay_match(
         characters[ego_port],
         characters[opponent_port],
         player_identity,
+        countdown_policy_frames,
     )
     captured = [first_frame]
     transport = ActionTransport(delay)
@@ -271,7 +299,7 @@ def run_netplay_match(
         (NEUTRAL_CONTROLLER_ACTION,),
         maxlen=8,
     )
-    first_policy_frame = True
+    first_policy_frame = countdown_policy_frames == 0
     frame_interval_seconds: list[float] = []
     dolphin_step_seconds: list[float] = []
     last_frame_at = time.perf_counter()
