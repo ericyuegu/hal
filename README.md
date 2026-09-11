@@ -75,20 +75,18 @@ network, disk, and lifecycle options.
 
 ## Netplay service
 
-The production netplay service runs one compiled policy slot with Docker
-Compose. It needs one Slippi account, the tested Slippi 3.6.4 AppImage, a Melee
-CISO, the policy bundle, R2 credentials, and a Cloudflare tunnel.
-
-Copy and complete the environment template, then start the service:
+Production runs one compiled policy slot. Copy and complete the environment
+file, then start the host service and deploy the frontend:
 
 ```bash
-cp deploy/netplay/.env.example /secure/path/hal-netplay.env
-docker compose --env-file /secure/path/hal-netplay.env \
-  -f deploy/netplay/compose.yaml up --build -d
+cp deploy/netplay/.env.example deploy/netplay/.env
+deploy/netplay/run-host.sh
+deploy/netplay/deploy-frontend.sh
 ```
 
-See [deploy/netplay/README.md](deploy/netplay/README.md) for host requirements,
-health checks, logs, frontend setup, and shutdown commands.
+Keep the second command running and execute the third in another terminal. See
+[deploy/netplay/README.md](deploy/netplay/README.md) for requirements, Docker,
+health checks, and GPU qualification.
 
 
 ## Data
