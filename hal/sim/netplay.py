@@ -21,8 +21,6 @@ from loguru import logger
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
-from hal.sim.inputs import canonical_pre_to_action
-from hal.sim.inputs import controller_actions_match
 from hal.sim.session import LIVE_MENU_STATES
 from hal.sim.session import canonical_frame
 from hal.sim.session import fix_dolphin_ini_case
@@ -187,7 +185,7 @@ class NetplaySession:
         self,
         setup: NetplaySetup,
         *,
-        on_countdown_frame: Callable[[dict], None] | None = None,
+        on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
     ) -> dict:
         """Connect and emit countdown states before returning frame zero."""
         if self._console is None:
@@ -234,7 +232,7 @@ class NetplaySession:
         self,
         setup: NetplaySetup,
         *,
-        on_countdown_frame: Callable[[dict], None] | None = None,
+        on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
     ) -> dict:
         """Navigate to a rematch and emit countdown states before frame zero."""
         if self._console is None or self._controller is None or self._menu_helper is None:
@@ -270,7 +268,7 @@ class NetplaySession:
         self,
         setup: NetplaySetup,
         *,
-        on_countdown_frame: Callable[[dict], None] | None = None,
+        on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
     ) -> dict:
         assert self._console is not None
         assert self._controller is not None
@@ -296,7 +294,7 @@ class NetplaySession:
                 last_status = status
             if gamestate.menu_state in LIVE_MENU_STATES:
                 self._discover_ports(gamestate, setup)
-                return self._reach_neutral_frame_zero(
+                return self._reach_frame_zero(
                     gamestate,
                     on_countdown_frame=on_countdown_frame,
                 )
@@ -313,13 +311,13 @@ class NetplaySession:
                     autostart=True,
                 )
 
-    def _reach_neutral_frame_zero(
+    def _reach_frame_zero(
         self,
         gamestate: melee.GameState,
         *,
-        on_countdown_frame: Callable[[dict], None] | None = None,
+        on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
     ) -> dict:
-        """Send neutral through the intro and return exact playable frame zero."""
+        """Apply countdown inputs and return exact playable frame zero."""
         assert self._console is not None
         assert self._controller is not None
         assert self.ego_port is not None
@@ -331,15 +329,9 @@ class NetplaySession:
             if frame_id >= 0:
                 if frame_id != 0:
                     raise RuntimeError(f"netplay reached playable frame {frame_id}; expected frame 0")
-                pre = frame["ports"][self.ego_port]["leader"]["pre"]
-                actual = canonical_pre_to_action(pre)
-                if not controller_actions_match(NEUTRAL_CONTROLLER_ACTION, actual):
-                    raise RuntimeError(f"local controller is not neutral at frame 0: {actual!r}")
                 return frame
-            if on_countdown_frame is not None:
-                on_countdown_frame(frame)
-            self._controller.release_all()
-            self._controller.flush()
+            inputs = NEUTRAL_CONTROLLER_ACTION if on_countdown_frame is None else on_countdown_frame(frame)
+            apply_inputs(self._controller, inputs)
             gamestate = step_blocking(self._console, self.step_timeout_seconds)
             if gamestate.menu_state not in LIVE_MENU_STATES:
                 raise RuntimeError("netplay left the game during the pre-game countdown")

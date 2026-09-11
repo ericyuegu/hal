@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from unittest.mock import call
 
 import melee
 import melee.console
@@ -184,7 +185,7 @@ def test_main_menu_uses_libmelee_direct_helper(tmp_path: Path, monkeypatch: pyte
     assert helper.choose_direct_online.call_args.args[1] is controller
 
 
-def test_countdown_sends_neutral_and_returns_exact_neutral_frame_zero(
+def test_countdown_applies_callback_actions_and_returns_exact_frame_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -194,10 +195,17 @@ def test_countdown_sends_neutral_and_returns_exact_neutral_frame_zero(
     session._menu_helper = Mock()
     non_neutral = ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
     states = [_live() for _ in range(4)]
-    frame_ids = {-3: non_neutral, -2: non_neutral, -1: non_neutral, 0: NEUTRAL_CONTROLLER_ACTION}
+    frame_ids = {-3: non_neutral, -2: non_neutral, -1: non_neutral, 0: non_neutral}
     for state, frame_id in zip(states, frame_ids, strict=True):
         state.frame = frame_id
     stream = iter(states)
+    countdown_actions = {
+        -3: ControllerAction(0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+        -2: ControllerAction(0.50, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+        -1: ControllerAction(0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+    }
+    applied = Mock()
+    monkeypatch.setattr("hal.sim.netplay.apply_inputs", applied)
     monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: next(stream))
     monkeypatch.setattr(
         "hal.sim.netplay.canonical_frame",
@@ -205,18 +213,27 @@ def test_countdown_sends_neutral_and_returns_exact_neutral_frame_zero(
     )
     countdown_frames = []
 
+    def countdown_action(frame: dict) -> ControllerAction:
+        countdown_frames.append(frame)
+        return countdown_actions[frame["id"]]
+
     frame = session._navigate_to_live(
         NetplaySetup(melee.Character.FOX, "HUMAN#1"),
-        on_countdown_frame=countdown_frames.append,
+        on_countdown_frame=countdown_action,
     )
 
     assert frame["id"] == 0
     assert [value["id"] for value in countdown_frames] == [-3, -2, -1]
-    assert controller.release_all.call_count == 3
-    assert controller.flush.call_count == 3
+    assert applied.call_args_list == [
+        call(controller, countdown_actions[-3]),
+        call(controller, countdown_actions[-2]),
+        call(controller, countdown_actions[-1]),
+    ]
+    controller.release_all.assert_not_called()
+    controller.flush.assert_not_called()
 
 
-def test_countdown_rejects_non_neutral_frame_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_countdown_accepts_non_neutral_frame_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session(tmp_path)
     session._console = Mock()
     session._controller = Mock()
@@ -228,8 +245,9 @@ def test_countdown_rejects_non_neutral_frame_zero(tmp_path: Path, monkeypatch: p
         lambda _state: _canonical_live(0, ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)),
     )
 
-    with pytest.raises(RuntimeError, match="not neutral at frame 0"):
-        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+    frame = session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+
+    assert frame["id"] == 0
 
 
 def test_unknown_dolphin_build_is_rejected(tmp_path: Path) -> None:

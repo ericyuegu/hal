@@ -9,6 +9,7 @@ from peppi_py.game import EndMethod
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
+from hal.eval.play import _policy_applied_action
 from hal.eval.play import read_new_replay_end
 from hal.eval.play import require_completed_replay
 from hal.eval.play import run_netplay_match
@@ -17,6 +18,7 @@ from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
 from hal.inference.api import RuntimeConfig
 from hal.sim.netplay import NetplaySetup
+from hal.wire import BUTTON_BITS
 
 
 def _pre(action: ControllerAction) -> dict:
@@ -88,23 +90,30 @@ class _Session:
         self,
         _setup: NetplaySetup,
         *,
-        on_countdown_frame: Callable[[dict], None] | None = None,
+        on_countdown_frame: Callable[[dict], ControllerAction] | None = None,
     ) -> dict:
-        if self.countdown_start is not None and on_countdown_frame is not None:
-            for frame_id in range(self.countdown_start, 0):
-                on_countdown_frame(_frame(frame_id, NEUTRAL_CONTROLLER_ACTION))
-        return _frame(self.frame_id, NEUTRAL_CONTROLLER_ACTION)
+        return self._start(on_countdown_frame)
 
     def start_rematch(
         self,
         _setup: NetplaySetup,
         *,
-        on_countdown_frame: Callable[[dict], None] | None = None,
+        on_countdown_frame: Callable[[dict], ControllerAction] | None = None,
     ) -> dict:
+        return self._start(on_countdown_frame)
+
+    def _start(self, on_countdown_frame: Callable[[dict], ControllerAction] | None) -> dict:
+        applied = NEUTRAL_CONTROLLER_ACTION
         if self.countdown_start is not None and on_countdown_frame is not None:
             for frame_id in range(self.countdown_start, 0):
-                on_countdown_frame(_frame(frame_id, NEUTRAL_CONTROLLER_ACTION))
-        return _frame(self.frame_id, NEUTRAL_CONTROLLER_ACTION)
+                action = on_countdown_frame(_frame(frame_id, applied))
+                due = self.queue.popleft()
+                self.queue.append(action)
+                self.applied.append(due)
+                applied = due
+        if self.corrupt_frame == 0:
+            applied = ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        return _frame(self.frame_id, applied)
 
     def step(self, action: ControllerAction) -> tuple[dict, bool]:
         self.submitted.append(action)
@@ -147,6 +156,15 @@ def _flatten(frame: dict) -> dict[str, int]:
         "p1_character": matchup["character"][1],
         "p2_character": matchup["character"][2],
     }
+
+
+def test_policy_applied_action_excludes_the_start_button() -> None:
+    buttons = BUTTON_BITS["a"] | BUTTON_BITS["start"]
+    action = ControllerAction(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, buttons)
+
+    applied = _policy_applied_action(_frame(-123, action), 1)
+
+    assert applied.buttons == BUTTON_BITS["a"]
 
 
 def test_match_loop_starts_policy_at_frame_zero_with_real_conditioning(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,8 +214,26 @@ def test_countdown_primes_policy_context_before_frame_zero(monkeypatch: pytest.M
 
     assert [item.frame_id for item in policy.inputs[:4]] == [-3, -2, -1, 0]
     assert [item.reset for item in policy.inputs[:4]] == [True, False, False, False]
-    assert all(item.pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2 for item in policy.inputs[:4])
+    assert policy.inputs[0].pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2
+    assert [action.main_x for action in policy.inputs[3].pending_actions] == [0.2, 0.3]
+    assert policy.inputs[3].applied_action.main_x == 0.1
     assert session.submitted[0].main_x == 0.4
+
+
+def test_countdown_validates_scheduled_non_neutral_frame_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    session = _Session(countdown_start=-3, corrupt_frame=0)
+
+    with pytest.raises(RuntimeError, match="transport mismatch at frame 0"):
+        run_netplay_match(
+            session,
+            NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+            _Policy(),
+            RuntimeConfig(1, (2,), 2),
+            max_frames=10,
+        )
 
 
 def test_match_loop_uses_persistent_rematch_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:

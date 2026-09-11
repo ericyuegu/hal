@@ -14,6 +14,7 @@ from loguru import logger
 from peppi_py.game import EndMethod
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
+from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.inference.api import Policy
 from hal.inference.api import PolicyInput
@@ -90,6 +91,19 @@ def _frame_action(frame: dict, port: int) -> ControllerAction:
     except (KeyError, TypeError) as error:
         raise ValueError(f"canonical frame has no leader pre-state for port {port}") from error
     return canonical_pre_to_action(pre)
+
+
+def _policy_applied_action(frame: dict, port: int) -> ControllerAction:
+    action = _frame_action(frame, port)
+    return ControllerAction(
+        main_x=action.main_x,
+        main_y=action.main_y,
+        c_x=action.c_x,
+        c_y=action.c_y,
+        trigger_l=action.trigger_l,
+        trigger_r=action.trigger_r,
+        buttons=action.buttons & POLICY_BUTTON_MASK,
+    )
 
 
 def _flat_observation(frame: dict, characters: dict[int, int]) -> dict[str, float | int]:
@@ -219,48 +233,73 @@ def run_netplay_match(
     observer: PlayObserver | None = None,
     stream_id: int = 0,
 ) -> PlayResult:
-    """Play one game from a neutral frame-zero session boundary."""
+    """Play one game from an exact frame-zero session boundary."""
     delay = session.online_delay
     if delay not in runtime.transport_delays:
         raise ValueError(f"session delay {delay} is absent from prepared policy delays {runtime.transport_delays}")
     if max_frames < delay + 3:
         raise ValueError(f"max_frames must be at least transport delay + 3, got {max_frames}")
+    transport = ActionTransport(delay)
+    # Slippi 3.6.4 can replay a recent local pad during its 30-frame clock
+    # correction. Its rollback window is seven frames, so retain the current
+    # scheduled action and the seven that precede it.
+    recent_scheduled: deque[ControllerAction] = deque(
+        (NEUTRAL_CONTROLLER_ACTION,),
+        maxlen=8,
+    )
     countdown_policy_frames = 0
-    neutral_pending = (NEUTRAL_CONTROLLER_ACTION,) * delay
+    expected_countdown_action: ControllerAction | None = None
+    transport_correction_frames = 0
 
-    def prime_policy(frame: dict) -> None:
+    def countdown_action(frame: dict) -> ControllerAction:
         nonlocal countdown_policy_frames
+        nonlocal expected_countdown_action
+        nonlocal transport_correction_frames
         if session.ego_port is None:
             raise RuntimeError("netplay local port was not discovered before the countdown")
         ego_port = session.ego_port
+        if expected_countdown_action is not None and countdown_policy_frames > delay:
+            transport_correction_frames += _transport_was_corrected(
+                frame,
+                ego_port,
+                expected_countdown_action,
+                tuple(recent_scheduled),
+            )
         characters = {port: int(frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
         item = PolicyInput(
             stream_id=stream_id,
             frame_id=int(frame["id"]),
             controlled_port=ego_port,
             observation=_flat_observation(frame, characters),
-            applied_action=_frame_action(frame, ego_port),
-            pending_actions=neutral_pending,
+            applied_action=_policy_applied_action(frame, ego_port),
+            pending_actions=transport.pending,
             player_identity=player_identity,
             reset=countdown_policy_frames == 0,
         )
         validate_policy_inputs(policy.spec, runtime, (item,))
-        validate_policy_outputs((item,), tuple(policy.step((item,))))
+        action = validate_policy_outputs((item,), tuple(policy.step((item,))))[stream_id]
+        expected_countdown_action = transport.submit(action)
+        recent_scheduled.append(expected_countdown_action)
         countdown_policy_frames += 1
+        return action
 
     if rematch:
-        first_frame = session.start_rematch(setup, on_countdown_frame=prime_policy)
+        first_frame = session.start_rematch(setup, on_countdown_frame=countdown_action)
     else:
-        first_frame = session.start_match(setup, on_countdown_frame=prime_policy)
+        first_frame = session.start_match(setup, on_countdown_frame=countdown_action)
     if session.ego_port is None or session.opponent_port is None:
         raise RuntimeError("netplay ports were not discovered")
     ego_port = session.ego_port
     opponent_port = session.opponent_port
     if first_frame.get("id") != 0:
         raise RuntimeError(f"netplay session started at frame {first_frame.get('id')!r}; expected frame 0")
-    first_action = _frame_action(first_frame, ego_port)
-    if not controller_actions_match(NEUTRAL_CONTROLLER_ACTION, first_action):
-        raise RuntimeError(f"local controller is not neutral at frame 0: {first_action!r}")
+    if expected_countdown_action is not None and countdown_policy_frames > delay:
+        transport_correction_frames += _transport_was_corrected(
+            first_frame,
+            ego_port,
+            expected_countdown_action,
+            tuple(recent_scheduled),
+        )
     stage = first_frame.get("stage")
     if not isinstance(stage, int):
         raise RuntimeError(f"first live netplay frame has invalid stage {stage!r}")
@@ -281,24 +320,15 @@ def run_netplay_match(
         countdown_policy_frames,
     )
     captured = [first_frame]
-    transport = ActionTransport(delay)
     started = time.monotonic()
     current = first_frame
 
     inference_seconds: list[float] = []
-    transport_correction_frames = 0
     changed_frames = 0
     button_edges = 0
     main_stick_changes = 0
     c_stick_changes = 0
     previous_submitted: ControllerAction | None = None
-    # Slippi 3.6.4 can replay a recent local pad during its 30-frame clock
-    # correction. Its rollback window is seven frames, so retain the current
-    # scheduled action and the seven that precede it.
-    recent_scheduled: deque[ControllerAction] = deque(
-        (NEUTRAL_CONTROLLER_ACTION,),
-        maxlen=8,
-    )
     first_policy_frame = countdown_policy_frames == 0
     frame_interval_seconds: list[float] = []
     dolphin_step_seconds: list[float] = []
@@ -309,7 +339,7 @@ def run_netplay_match(
             frame_id=int(current["id"]),
             controlled_port=ego_port,
             observation=_flat_observation(current, characters),
-            applied_action=_frame_action(current, ego_port),
+            applied_action=_policy_applied_action(current, ego_port),
             pending_actions=transport.pending,
             player_identity=player_identity,
             reset=first_policy_frame,
