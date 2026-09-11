@@ -18,12 +18,11 @@ possible to train an even more capable model.
 
 > **FIGURE 1 — Flagship architecture**
 >
-> Stand-in for horizontal, vertical, and columnar layouts of the same dependency
-> graph.
+> Stand-in for horizontal and folded layouts of the same dependency graph.
 
-*Fig 1: An alternating state/action history enters a causal Transformer. The
-controller plan is decoded from aₜ through aₜ₊₃, and each frame is decoded
-C → M → T → B.*
+*Fig 1: Both causal Transformers process their full training sequences in
+parallel. At inference, the action-chunk decoder uses its causal cache to emit
+aₜ … aₜ₊₃ autoregressively; each frame is decoded C → M → T → B.*
 
 <!--
 FIGURE 1 NOTES
@@ -36,8 +35,16 @@ FIGURE 1 NOTES
 - Result: +0.494 [+0.398] stocks/min; +52.72 [+45.14] damage/min.
 - Inputs shown: sₜ₋₂, aₜ₋₂, sₜ₋₁, aₜ₋₁, sₜ.
 - Outputs shown: aₜ, aₜ₊₁, aₜ₊₂, aₜ₊₃.
-- Animate the dataflow in order: input history, causal Transformer, then
-  C → M → T → B within each output frame before advancing to the next frame.
+- The context Transformer receives every history position in one parallel
+  causal pass.
+- During training, teacher_forced_states sends the full shifted action sequence
+  through the temporal Transformer in parallel.
+- During inference, _decode_step uses the temporal Transformer KV cache and
+  generates one action frame at a time.
+- Within each frame, group_features conditions C → M → T → B on the groups
+  already decoded for that frame.
+- Animate the parallel inputs together, then C → M → T → B within each
+  output frame before advancing to the next frame.
 - Keep parameters, optimization, scores, and deployment timing out of the
   diagram itself.
 -->
