@@ -41,7 +41,7 @@ for variable in "${required_variables[@]}"; do
   fi
 done
 
-export HAL_NETPLAY_ALLOWED_ORIGINS=${HAL_NETPLAY_ALLOWED_ORIGINS:-http://127.0.0.1:3000}
+export HAL_NETPLAY_ALLOWED_ORIGINS=${HAL_NETPLAY_ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}
 export HAL_NETPLAY_ALLOWED_HOSTS=${HAL_NETPLAY_ALLOWED_HOSTS:-127.0.0.1,localhost}
 
 required_commands=(uv xvfb-run)
@@ -60,21 +60,41 @@ mkdir -p "$state_dir/replays"
 cd "$repo_dir"
 uv sync --extra netplay-server --locked
 
-process_ids=()
+process_groups=()
 stop() {
+  local alive
+  local process_group
+
   trap - EXIT INT TERM
-  if (( ${#process_ids[@]} )); then
-    kill -TERM "${process_ids[@]}" 2>/dev/null || true
-    wait "${process_ids[@]}" 2>/dev/null || true
-  fi
+  for process_group in "${process_groups[@]}"; do
+    kill -TERM -- "-$process_group" 2>/dev/null || true
+  done
+  for _ in {1..20}; do
+    alive=false
+    for process_group in "${process_groups[@]}"; do
+      if kill -0 -- "-$process_group" 2>/dev/null; then
+        alive=true
+        break
+      fi
+    done
+    if [[ $alive == false ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  for process_group in "${process_groups[@]}"; do
+    kill -KILL -- "-$process_group" 2>/dev/null || true
+  done
+  wait "${process_groups[@]}" 2>/dev/null || true
 }
 trap stop EXIT INT TERM
 
+set -m
 HAL_NETPLAY_DATABASE="$state_dir/queue.sqlite3" \
 HAL_NETPLAY_CAPACITY=1 \
 HAL_NETPLAY_RUNNER_STATUS="$state_dir/runner-status.json" \
-uv run hal-netplay-api --host 127.0.0.1 --port 8080 &
-process_ids+=("$!")
+uv run hal-netplay-api --host 127.0.0.1 --port 8080 </dev/null &
+process_groups+=("$!")
 
 xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --compiled \
@@ -85,13 +105,14 @@ xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --dolphin-path "$HAL_NETPLAY_EMULATOR_PATH" \
   --replay-dir "$state_dir/replays" \
   --status-path "$state_dir/runner-status.json" \
-  --git-sha "$HAL_GIT_SHA" &
-process_ids+=("$!")
+  --git-sha "$HAL_GIT_SHA" </dev/null &
+process_groups+=("$!")
 
 if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} ]]; then
   cloudflared tunnel --no-autoupdate run \
-    --token "$CLOUDFLARE_TUNNEL_TOKEN" &
-  process_ids+=("$!")
+    --token "$CLOUDFLARE_TUNNEL_TOKEN" </dev/null &
+  process_groups+=("$!")
 fi
+set +m
 
-wait -n "${process_ids[@]}"
+wait -n "${process_groups[@]}"
