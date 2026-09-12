@@ -2,7 +2,7 @@
  {
   "key": "architecture",
   "name": "The policy, end to end",
-  "caption": "Each observed frame becomes one joint state–action token. One causal context Transformer reads 256 of them; its state for the current frame feeds one causal action decoder, which writes the next controller frames one at a time, and the game plays the first two before the next plan. Select a stage to open it.",
+  "caption": "Each observed frame becomes one joint state–action token. One causal context Transformer reads them; its state for the current frame is handed to one causal action decoder, which writes the next controller frames in order. The first two are played, the rest are replaced by the next plan. Select a stage to open it.",
   "studies": [
    "training_checkpoint_series",
    "optimizer_full_scale",
@@ -16,7 +16,7 @@
  {
   "key": "action-dependencies",
   "name": "Where a predicted action may look",
-  "caption": "Three generations of the decoder, drawn as dependency wires. Every predicted action reads the trunk state, which itself reads earlier frames. Independent multi-token prediction adds more actions but no wires between them. The autoregressive decoder adds the two remaining families: each action reads the actions before it, and inside a frame each controller group reads the groups already chosen.",
+  "caption": "Three decoder generations in one notation. Next-frame prediction writes one frame from the trunk state. Independent multi-token prediction writes several at once from the trunk state alone. The autoregressive decoder writes them in order, each handed the frames before it — the same rule that orders the controller groups inside a frame.",
   "studies": [
    "decoder_lineage",
    "action_factorization_o37",

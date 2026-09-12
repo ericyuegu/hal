@@ -1,73 +1,32 @@
-/* ---------- custom workbench figures ---------- */
-.arch-figure .arch-ghost,.logit-figure .ghost,.rle-figure .ghost{align-self:flex-start;white-space:nowrap;font:.72rem/1.4 var(--mono);color:var(--ink-mono)}
-.arch-figure svg,.deps-diagram svg{display:block;width:100%;height:auto}
-.arch-figure svg text,.deps-diagram text{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.arch-figure .lbl,.deps-diagram .lbl{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;fill:var(--ink)}
-.arch-figure .sub,.deps-diagram .sub{font-size:10px;fill:var(--ink-mono)}
-.arch-figure .sym,.deps-diagram .sym{font-size:11px;fill:var(--ink)}
-.arch-figure .tiny,.deps-diagram .tiny{font-size:8.5px;fill:var(--ink-mono)}
-.arch-figure .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
-.arch-figure .cell{fill:var(--paper);stroke:var(--rule-dotted);stroke-width:1}
-.arch-figure .wire{fill:none;stroke:var(--ink-faint);stroke-width:1.1}
-.arch-figure .wire.time{stroke-dasharray:2 3}
-.arch-figure .wire.chunk{stroke:var(--oxblood)}
-.arch-figure .group{fill:var(--paper);stroke:var(--ink-faint);stroke-width:.8}
-.arch-figure .group.b{fill:color-mix(in srgb,var(--oxblood) 10%,var(--paper))}
-.arch-diagram .stage{cursor:pointer}
-.arch-diagram .stage .hit{fill:transparent;stroke:none}
-.arch-diagram .stage:hover .plate,.arch-diagram .stage:focus-visible .plate{stroke-width:1.8}
-.arch-diagram[data-sel] .stage{opacity:.32;transition:opacity .14s ease}
-.arch-diagram[data-sel] .stage.is-sel{opacity:1}
-.arch-diagram[data-sel] .stage.is-sel .plate{stroke-width:1.8}
-.arch-diagram .pulse{transform-box:fill-box;transform-origin:center;animation:arch-pulse 9s ease-in-out infinite both;animation-delay:calc(var(--step) * .34s)}
-.arch-diagram .pulse-wire{animation:arch-wire 9s ease-in-out infinite both;animation-delay:calc(var(--step) * .34s)}
-@keyframes arch-pulse{0%,9%,100%{transform:scale(1)}4%{transform:scale(1.04)}}
-@keyframes arch-wire{0%,9%,100%{stroke:var(--ink-faint)}4%{stroke:var(--oxblood)}}
-.arch-diagram[data-sel] .pulse,.arch-diagram[data-sel] .pulse-wire{animation:none}
-.arch-cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:12px 0 0}
-.arch-cards button{text-align:left;font:inherit;background:var(--paper);border:1px solid var(--rule-dotted);padding:9px 11px;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:74px;transition:border-color .14s ease,background .14s ease}
+/* ---------- custom workbench figures: architecture + dependencies share the page's model-diagram grammar ---------- */
+.arch-figure .model-diagram,.deps-figure .model-diagram{display:block;width:100%;height:auto}
+.architecture-figure .model-diagram .diagram-note.play{fill:var(--oxblood)}
+.architecture-figure .model-diagram .model-token.played{fill:color-mix(in srgb,var(--oxblood) 8%,var(--paper));stroke:var(--oxblood)}
+.architecture-figure .model-diagram .model-token.given{fill:var(--surface-aside);stroke:var(--rule-dotted)}
+.architecture-figure .model-diagram .model-token.given text,.architecture-figure .model-diagram .given-label{fill:var(--ink-soft)}
+.architecture-figure .model-diagram .model-token.queued{fill:var(--paper);stroke:var(--ink-faint);stroke-dasharray:3 3}
+.architecture-figure .model-diagram .model-wire.ghost{stroke-dasharray:2 4}
+.architecture-figure .model-diagram [data-module]{transition:opacity .16s ease}
+.architecture-figure .model-diagram .hit{fill:transparent;stroke:none;cursor:pointer}
+.arch-cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:14px 0 0}
+.arch-cards button{text-align:left;font:inherit;background:var(--paper);border:1px solid var(--rule-dotted);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:74px;transition:border-color .14s ease,background .14s ease}
 .arch-cards button:hover{border-color:var(--ink)}
-.arch-cards button[aria-selected="true"]{background:var(--white);border:1px solid var(--ink);box-shadow:2px 2px 0 var(--shadow-soft)}
+.arch-cards button[aria-selected="true"]{background:var(--white);border-color:var(--ink);box-shadow:2px 2px 0 var(--shadow-soft)}
 .arch-cards .n{font:600 .62rem/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mono)}
 .arch-cards button[aria-selected="true"] .n{color:var(--oxblood)}
-.arch-cards .t{font-size:.94rem;line-height:1.3}
-.arch-cards .r{font:.66rem/1.35 var(--mono);color:var(--ink-mono)}
-.arch-detail{margin-top:10px;border-top:1px dotted var(--rule-dotted);padding-top:12px;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(220px,.9fr);gap:18px}
+.arch-cards .t{font-size:.96rem;line-height:1.3}
+.arch-cards .r{font:.68rem/1.4 var(--mono);color:var(--ink-mono)}
+.arch-detail{margin-top:12px;border-top:1px dotted var(--rule-dotted);padding-top:14px}
 .arch-detail[hidden]{display:none}
-.arch-detail h5{margin:0 0 6px;font-size:1rem;line-height:1.3}
-.arch-detail p{font-size:.86rem;line-height:1.5;margin:0 0 .6em;color:var(--ink-soft)}
-.arch-detail dl{display:grid;grid-template-columns:auto 1fr;gap:0 12px;margin:0;border-top:1px solid var(--rule)}
-.arch-detail dt{font:.62rem/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-mono);padding:5px 0;border-bottom:1px solid var(--rule);white-space:nowrap}
-.arch-detail dd{margin:0;font:.72rem/1.5 var(--mono);color:var(--ink);padding:5px 0;border-bottom:1px solid var(--rule);text-align:right}
-.arch-detail .mech{background:var(--surface-aside);border:1px solid var(--aside-border);padding:10px 12px}
-.arch-detail .mech svg{display:block;width:100%;height:auto}
-.arch-detail .close{justify-self:end;font:.66rem/1.3 var(--mono);color:var(--ink-mono);background:transparent;border:0;border-bottom:1px dotted var(--rule-dotted);cursor:pointer;padding:0}
+.arch-detail .row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:6px}
+.arch-detail h5{margin:0;font-size:1.05rem;line-height:1.3}
+.arch-detail .close{font:.66rem/1.3 var(--mono);color:var(--ink-mono);background:transparent;border:0;border-bottom:1px dotted var(--rule-dotted);cursor:pointer;padding:0}
 .arch-detail .close:hover{color:var(--oxblood)}
-.arch-detail .row{grid-column:1/-1;display:flex;justify-content:space-between;align-items:baseline;gap:12px}
-.arch-detail .prefix-row{animation:arch-row 6s ease-in-out infinite both;animation-delay:calc(var(--step) * 1.2s)}
-@keyframes arch-row{0%,18%,100%{opacity:.42}6%,12%{opacity:1}}
-.arch-detail .grp-step{animation:arch-grp 6s ease-in-out infinite both;animation-delay:calc(var(--step) * .3s)}
-@keyframes arch-grp{0%,12%,100%{fill:var(--paper)}4%,8%{fill:color-mix(in srgb,var(--oxblood) 18%,var(--paper))}}
-@media (max-width:760px){.arch-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.arch-detail{grid-template-columns:minmax(0,1fr)}.arch-diagram,.deps-diagram{overflow-x:auto}.arch-diagram svg,.deps-diagram svg{min-width:760px}}
-@media (prefers-reduced-motion:reduce){.arch-diagram .pulse,.arch-diagram .pulse-wire,.arch-detail .prefix-row,.arch-detail .grp-step{animation:none}}
-
-.deps-figure .deps-axes{flex-wrap:wrap}
-.deps-diagram .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
-.deps-diagram .h{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
-.deps-diagram .a{fill:var(--paper);stroke:var(--ink-faint);stroke-width:1}
-.deps-diagram .a.cur{stroke:var(--ink)}
-.deps-diagram .w{fill:none;stroke-width:1.2;transition:opacity .14s ease}
-.deps-diagram .w.time{stroke:var(--ink-faint);stroke-dasharray:2 3}
-.deps-diagram .w.trunk{stroke:var(--ink-faint)}
-.deps-diagram .w.chunk{stroke:var(--oxblood)}
-.deps-diagram .w.frame{stroke:var(--oxblood)}
-.deps-diagram .g{fill:var(--paper);stroke:var(--ink-faint);stroke-width:.8}
-.deps-diagram .divider{stroke:var(--rule-dotted);stroke-dasharray:2 3}
-.deps-diagram .title{font-size:11px;font-weight:600;fill:var(--ink)}
-.deps-diagram .title.cur{fill:var(--oxblood)}
-.deps-diagram[data-axis="time"] .w:not(.time):not(.trunk),.deps-diagram[data-axis="chunk"] .w:not(.chunk),.deps-diagram[data-axis="frame"] .w:not(.frame){opacity:.14}
-.deps-diagram[data-axis="chunk"] .w.trunk,.deps-diagram[data-axis="frame"] .w.trunk{opacity:.14}
-.deps-diagram .legend{font-size:10px;fill:var(--ink-mono)}
+.arch-detail .mech{margin:4px 0 12px}
+.arch-detail .mech svg{display:block;width:100%;height:auto}
+.arch-detail .prose{columns:2;column-gap:28px;max-width:none}
+.arch-detail .prose p{font-size:.9rem;line-height:1.55;margin:0 0 .7em;color:var(--ink-soft);break-inside:avoid}
+@media (max-width:760px){.arch-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.arch-detail .prose{columns:1}.arch-figure .model-diagram,.deps-figure .model-diagram{min-width:0}}
 
 /* ---------- action logit paths ---------- */
 .logit-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:18px;align-items:start}

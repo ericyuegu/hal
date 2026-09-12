@@ -1,17 +1,11 @@
-<figure class="breakout deps-figure" id="deps">
+<figure class="breakout architecture-figure deps-figure" id="deps">
   <div class="artifact interactive">
     <div class="figure-head">
       <div>
-        <h4>Where a predicted action may look</h4>
-        <p>Three decoder generations, one wire per allowed dependency.</p>
-      </div>
-      <div class="segmented deps-axes" id="deps-axes" aria-label="Highlight one dependency family">
-        <button type="button" data-axis="all" aria-pressed="true">all</button>
-        <button type="button" data-axis="time" aria-pressed="false">across time</button>
-        <button type="button" data-axis="chunk" aria-pressed="false">across the chunk</button>
-        <button type="button" data-axis="frame" aria-pressed="false">within a frame</button>
+        <h4>What a predicted action is given</h4>
+        <p>Three decoder generations in one notation: the grey prefix is what the model is handed, the box on the right is the one thing it writes.</p>
       </div>
     </div>
-    <div class="deps-diagram" id="deps-diagram"></div>
+    <svg class="model-diagram" id="deps-diagram" role="img" aria-label="Next-frame prediction: the trunk state produces one action. Independent multi-token prediction: the trunk state alone produces four actions at once. Autoregressive multi-token prediction: each action is produced from the trunk state and every action written before it, and inside a frame each controller group is produced from the groups already chosen."></svg>
   </div>
 </figure>

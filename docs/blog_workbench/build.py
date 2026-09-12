@@ -507,7 +507,8 @@ def build() -> None:
 
     (DIST / "figures" / "anatomy.js").write_text(main_script())
     (DIST / "figures" / "explorer.js").write_text(explorer_scripts())
-    (DIST / "figures" / "custom.js").write_text("\n".join(f["js"] for f in custom))
+    kit = (HERE / "figures_src" / "diagram-kit.js").read_text()
+    (DIST / "figures" / "custom.js").write_text(kit + "\n" + "\n".join(f["js"] for f in custom))
 
     shell = (HERE / "shell.html").read_text()
     html = (

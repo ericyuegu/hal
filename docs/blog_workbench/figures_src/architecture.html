@@ -1,13 +1,12 @@
-<figure class="breakout arch-figure" id="arch">
+<figure class="breakout architecture-figure arch-figure" id="arch">
   <div class="artifact interactive">
     <div class="figure-head">
       <div>
         <h4>The policy, end to end</h4>
-        <p>One causal Transformer over observed frames, one causal decoder over the frames it will write.</p>
+        <p>One causal Transformer over the frames it has seen, one causal decoder over the frames it will write.</p>
       </div>
-      <span class="ghost arch-ghost">O50 · 216.5M parameters</span>
     </div>
-    <div class="arch-diagram" id="arch-diagram"></div>
+    <svg class="model-diagram" id="arch-overview" role="img" aria-label="Three joint state–action tokens feed a causal context Transformer. Its state for the current frame feeds a single causal action decoder, which writes the next controller frames; the first two are played and the rest are replaced by the next plan."></svg>
     <div class="arch-cards" id="arch-cards" role="tablist" aria-label="Stages"></div>
     <div class="arch-detail" id="arch-detail" hidden></div>
   </div>
