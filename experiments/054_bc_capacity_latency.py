@@ -2021,8 +2021,8 @@ class LatencyRow:
             raise ValueError("p99 latency must be finite and non-negative")
         if not math.isfinite(self.frame_period_seconds) or self.frame_period_seconds <= 0:
             raise ValueError("frame period must be finite and positive")
-        if (self.batch_size, self.warmup_calls, self.measured_calls) != (32, 50, 500):
-            raise ValueError("latency rows require eager B32 with 50 warm-ups and 500 measurements")
+        if self.batch_size < 1 or self.warmup_calls < 0 or self.measured_calls < 1:
+            raise ValueError("latency measurement geometry is invalid")
 
     @property
     def timing(self) -> TimingConfig:
@@ -2096,11 +2096,17 @@ def _latency_manifest_payload(rows: Sequence[LatencyRow], gpu_name: str) -> dict
     }
 
 
+def _is_official_latency_row(row: LatencyRow) -> bool:
+    return (row.batch_size, row.warmup_calls, row.measured_calls) == (32, 50, 500)
+
+
 def write_latency_manifest(path: Path, rows: Sequence[LatencyRow], gpu_name: str) -> str:
     if tuple(row.width for row in rows) != WIDTHS:
         raise ValueError(f"latency manifest must cover widths {WIDTHS} in order")
     if any(not row.meets_deadline for row in rows):
         raise ValueError("latency manifest contains a row that misses its deadline")
+    if any(not _is_official_latency_row(row) for row in rows):
+        raise ValueError("latency manifest requires eager B32 with 50 warm-ups and 500 measurements")
     payload = _latency_manifest_payload(rows, gpu_name)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(encoded).hexdigest()
@@ -2125,7 +2131,11 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
     if not isinstance(raw_rows, list):
         raise ValueError("latency manifest has no rows")
     rows = tuple(LatencyRow(**row) for row in raw_rows)
-    if tuple(row.width for row in rows) != WIDTHS or any(not row.meets_deadline for row in rows):
+    if (
+        tuple(row.width for row in rows) != WIDTHS
+        or any(not row.meets_deadline for row in rows)
+        or any(not _is_official_latency_row(row) for row in rows)
+    ):
         raise ValueError("latency manifest does not contain the accepted width matrix")
     return {row.width: row for row in rows}, actual
 
@@ -2191,6 +2201,7 @@ def latency_bucket_frontier(rows: Mapping[int, LatencyRow]) -> tuple[int, ...]:
 def benchmark_width_latency(
     width: int,
     *,
+    batch_size: int = 32,
     frame_period_seconds: float = 1 / 60,
     warmup_calls: int = 50,
     measured_calls: int = 500,
@@ -2198,6 +2209,8 @@ def benchmark_width_latency(
 ) -> LatencyRow:
     if not torch.cuda.is_available():
         raise RuntimeError("latency preflight requires the target CUDA GPU")
+    if batch_size < 1:
+        raise ValueError("latency batch size must be positive")
     device = torch.device("cuda")
     for delay in range(1, 7):
         torch.cuda.empty_cache()
@@ -2215,7 +2228,7 @@ def benchmark_width_latency(
         try:
             model = GPT(cfg).to(device=device, dtype=torch.bfloat16).eval()
             inference = BF16Inference(model, cfg, compiled=False)
-            context = synthetic_context(cfg, 32, device)
+            context = synthetic_context(cfg, batch_size, device)
             generator = torch.Generator(device=device).manual_seed(cfg.eval_seed)
             for _ in range(warmup_calls):
                 inference.decode(context, cfg.prediction_frames, gen=generator)
@@ -2236,6 +2249,7 @@ def benchmark_width_latency(
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
                 peak_reserved_bytes=torch.cuda.max_memory_reserved(device),
                 frame_period_seconds=frame_period_seconds,
+                batch_size=batch_size,
                 warmup_calls=warmup_calls,
                 measured_calls=measured_calls,
             )
@@ -2250,13 +2264,14 @@ def benchmark_width_latency(
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
                 peak_reserved_bytes=torch.cuda.max_memory_reserved(device),
                 frame_period_seconds=frame_period_seconds,
+                batch_size=batch_size,
                 warmup_calls=warmup_calls,
                 measured_calls=measured_calls,
             )
             _log_latency_probe(probe)
             if on_probe is not None:
                 on_probe(probe)
-            raise LatencyProbeFailure(f"width {width} ran out of CUDA memory at d={delay}") from error
+            raise LatencyProbeFailure(f"B{batch_size} width {width} ran out of CUDA memory at d={delay}") from error
         finally:
             del inference, model, context
             torch.cuda.empty_cache()
@@ -2272,12 +2287,13 @@ def benchmark_width_latency(
             prediction_frames=2 * delay,
             p99_seconds=p99,
             frame_period_seconds=frame_period_seconds,
+            batch_size=batch_size,
             warmup_calls=warmup_calls,
             measured_calls=measured_calls,
         )
         if row.meets_deadline:
             return row
-    raise LatencyProbeFailure(f"width {width} cannot meet the buffered deadline with d <= 6")
+    raise LatencyProbeFailure(f"B{batch_size} width {width} cannot meet the buffered deadline with d <= 6")
 
 
 def run_latency_preflight(path: Path) -> str:
@@ -2304,6 +2320,35 @@ def run_latency_preflight(path: Path) -> str:
     if failures:
         raise LatencyProbeFailure(f"latency preflight rejected widths: {'; '.join(failures)}")
     return write_latency_manifest(path, rows, gpu_name)
+
+
+def run_latency_diagnostic(path: Path, batch_sizes: Sequence[int]) -> None:
+    """Measure non-official batch sizes without creating an accepted manifest."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("latency diagnostic requires CUDA")
+    if not batch_sizes or any(batch_size < 1 for batch_size in batch_sizes):
+        raise ValueError("diagnostic batch sizes must be positive")
+    if len(set(batch_sizes)) != len(batch_sizes):
+        raise ValueError("diagnostic batch sizes must be unique")
+    gpu_name = torch.cuda.get_device_name()
+    if "RTX 3060" not in gpu_name:
+        raise RuntimeError(f"latency diagnostic requires the target RTX 3060, found {gpu_name!r}")
+    probes: list[LatencyProbe] = []
+
+    def record(probe: LatencyProbe) -> None:
+        probes.append(probe)
+        write_latency_probe_report(path, probes, gpu_name)
+
+    print(f"[latency] raw diagnostic report: {path}", flush=True)
+    failures: list[str] = []
+    for batch_size in batch_sizes:
+        for width in WIDTHS:
+            try:
+                benchmark_width_latency(width, batch_size=batch_size, on_probe=record)
+            except LatencyProbeFailure as error:
+                failures.append(str(error))
+    if failures:
+        raise LatencyProbeFailure(f"latency diagnostic rejected configurations: {'; '.join(failures)}")
 
 
 def _validate_deployment_timing(prediction_frames: int, delay_frames: int, replan_interval_frames: int) -> None:
@@ -4429,10 +4474,17 @@ class LatencyPreflightArgs:
     output: Path = Path("runs/054_latency_manifest.json")
 
 
+@dataclass
+class LatencyDiagnosticArgs:
+    output: Path = Path("runs/054_latency_b1_b4.probes.json")
+    batch_sizes: tuple[int, ...] = (1, 4)
+
+
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[LatencyPreflightArgs, tyro.conf.subcommand(name="latency-preflight")]
+    | Annotated[LatencyDiagnosticArgs, tyro.conf.subcommand(name="latency-diagnostic")]
 )
 
 
@@ -4447,6 +4499,9 @@ def _parse_character(name: str | None) -> melee.Character | None:
 
 
 def main(args: Command) -> None:
+    if isinstance(args, LatencyDiagnosticArgs):
+        run_latency_diagnostic(args.output, args.batch_sizes)
+        return
     if isinstance(args, LatencyPreflightArgs):
         digest = run_latency_preflight(args.output)
         print(f"[latency] wrote {args.output} sha256={digest}", flush=True)

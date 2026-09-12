@@ -225,6 +225,10 @@ def test_latency_manifest_is_hashed_and_strict(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="SHA-256"):
         exp.load_latency_manifest(path)
 
+    diagnostic_rows = (replace(rows[0], batch_size=4), *rows[1:])
+    with pytest.raises(ValueError, match="requires eager B32"):
+        exp.write_latency_manifest(path, diagnostic_rows, "NVIDIA GeForce RTX 3060")
+
 
 def test_latency_probe_report_preserves_raw_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
