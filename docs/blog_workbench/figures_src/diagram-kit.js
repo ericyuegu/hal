@@ -30,9 +30,7 @@ window.HALDIAG = (function () {
   }
   function jointToken(target, x, y, w, h, state, action, cls) {
     target.appendChild(el('rect', {x: x, y: y, width: w, height: h, class: 'model-token' + (cls ? ' ' + cls : '')}));
-    target.appendChild(el('line', {x1: x + w / 2, y1: y + 5, x2: x + w / 2, y2: y + h - 5, class: 'joint-divider'}));
-    text(target, x + w / 4, y + h / 2 + 4, state, {'text-anchor': 'middle', class: 'diagram-label' + (cls === 'given' ? ' given-label' : '')});
-    text(target, x + w * 3 / 4, y + h / 2 + 4, action, {'text-anchor': 'middle', class: 'diagram-label' + (cls === 'given' ? ' given-label' : '')});
+    text(target, x + w / 2, y + h / 2 + 4, '(' + state + ', ' + action + ')', {'text-anchor': 'middle', class: 'diagram-label' + (cls === 'given' ? ' given-label' : '')});
   }
   function stacked(target, x, y, w, h, title, note) {
     [8, 4].forEach(function (o) { target.appendChild(el('rect', {x: x - o, y: y + o, width: w, height: h, class: 'model-layer'})); });
@@ -63,9 +61,9 @@ window.HALDIAG = (function () {
     var o = Object.assign({w: 44, h: 28, gap: 6, arrow: 40, mk: null, producedCls: '', joint: false}, opts || {});
     var cx = x;
     given.forEach(function (g) {
-      if (o.joint && Array.isArray(g)) jointToken(target, cx, y, o.w * 2, o.h, g[0], g[1], 'given');
+      if (o.joint && Array.isArray(g)) jointToken(target, cx, y, o.w, o.h, g[0], g[1], 'given');
       else token(target, cx, y, o.w, o.h, g, 'given');
-      cx += (o.joint && Array.isArray(g) ? o.w * 2 : o.w) + o.gap;
+      cx += o.w + o.gap;
     });
     if (!given.length) cx = x;
     var arrowStart = cx - o.gap + 6;
