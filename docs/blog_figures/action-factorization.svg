@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">O37 action factorization matrix</title>
+  <desc id="desc">A two by two matrix compares across-frame action feedback and within-frame controller-part feedback. Both improve stock and damage at execution horizon four.</desc>
+  <style>
+    .bg { fill: #fbfaf7; }
+    .cell0 { fill: #f2eee9; stroke: #cfc8bf; stroke-width: 1.5; }
+    .cell1 { fill: #e5eef4; stroke: #9bb5c8; stroke-width: 1.5; }
+    .cell2 { fill: #dbe9f2; stroke: #7fa3bd; stroke-width: 1.5; }
+    .cell3 { fill: #c7dfec; stroke: #527f9f; stroke-width: 2; }
+    .pill { fill: #fff; stroke: #d7d2ca; stroke-width: 1.4; }
+    .line { fill: none; stroke: #315f8c; stroke-width: 2.2; marker-end: url(#arrow); }
+    .line2 { fill: none; stroke: #b95f36; stroke-width: 2.2; marker-end: url(#arrow2); }
+    .ink { fill: #22201e; font-family: Inter, Arial, sans-serif; }
+    .muted { fill: #6f6962; font-family: Inter, Arial, sans-serif; }
+    .blue { fill: #315f8c; font-family: Inter, Arial, sans-serif; }
+    .orange { fill: #a54f2c; font-family: Inter, Arial, sans-serif; }
+    .mono { fill: #22201e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .h1 { font-size: 30px; font-weight: 700; }
+    .h2 { font-size: 18px; font-weight: 700; }
+    .axis { font-size: 16px; font-weight: 700; }
+    .label { font-size: 15px; font-weight: 650; }
+    .small { font-size: 13px; }
+    .score { font-size: 22px; font-weight: 750; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#315f8c"/></marker>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#b95f36"/></marker>
+  </defs>
+  <rect class="bg" width="1200" height="720"/>
+  <text class="ink h1" x="44" y="54">Two Axes of Action Feedback</text>
+  <text class="muted small" x="44" y="80">O37 · identical 7.148M models · B512 · U16,384 · 8.39M examples · H4 · 96 boots</text>
+
+  <text class="blue axis" x="690" y="122" text-anchor="middle">Within-frame controller-part feedback</text>
+  <text class="muted label" x="485" y="154" text-anchor="middle">Off</text>
+  <text class="muted label" x="895" y="154" text-anchor="middle">On</text>
+  <text class="orange axis" transform="translate(96 395) rotate(-90)" text-anchor="middle">Across-frame action feedback</text>
+  <text class="muted label" x="150" y="276" text-anchor="middle">Off</text>
+  <text class="muted label" x="150" y="508" text-anchor="middle">On</text>
+
+  <rect class="cell0" x="280" y="172" width="390" height="206" rx="10"/>
+  <text class="ink h2" x="306" y="207">D0 · neither</text>
+  <text class="muted small" x="306" y="231">Each future frame and controller part stands alone</text>
+  <text class="mono score" x="306" y="286">-0.702</text>
+  <text class="muted small" x="306" y="309">net stocks / min</text>
+  <text class="mono score" x="496" y="286">+2.8</text>
+  <text class="muted small" x="496" y="309">net damage / min</text>
+  <text class="muted small" x="306" y="349">98r9smrj</text>
+
+  <rect class="cell1" x="690" y="172" width="390" height="206" rx="10"/>
+  <text class="ink h2" x="716" y="207">D1 · within-frame only</text>
+  <text class="muted small" x="716" y="231">Later controller parts read earlier parts</text>
+  <text class="mono score" x="716" y="286">-0.313</text>
+  <text class="muted small" x="716" y="309">net stocks / min</text>
+  <text class="mono score" x="906" y="286">+13.0</text>
+  <text class="muted small" x="906" y="309">net damage / min</text>
+  <text class="muted small" x="716" y="349">a117chkw</text>
+
+  <rect class="cell2" x="280" y="398" width="390" height="206" rx="10"/>
+  <text class="ink h2" x="306" y="433">D2 · across-frame only</text>
+  <text class="muted small" x="306" y="457">Later frames read earlier predicted actions</text>
+  <text class="mono score" x="306" y="512">-0.196</text>
+  <text class="muted small" x="306" y="535">net stocks / min</text>
+  <text class="mono score" x="496" y="512">+18.1</text>
+  <text class="muted small" x="496" y="535">net damage / min</text>
+  <text class="muted small" x="306" y="575">50q39o9j</text>
+
+  <rect class="cell3" x="690" y="398" width="390" height="206" rx="10"/>
+  <text class="ink h2" x="716" y="433">D3 · both</text>
+  <text class="muted small" x="716" y="457">A causal plan and ordered controller parts</text>
+  <text class="mono score" x="716" y="512">-0.096</text>
+  <text class="muted small" x="716" y="535">net stocks / min</text>
+  <text class="mono score" x="906" y="512">+24.7</text>
+  <text class="muted small" x="906" y="535">net damage / min</text>
+  <text class="muted small" x="716" y="575">5wfk2esf</text>
+
+  <path class="line" d="M670 270 L686 270"/>
+  <path class="line" d="M670 496 L686 496"/>
+  <path class="line2" d="M475 378 L475 394"/>
+  <path class="line2" d="M885 378 L885 394"/>
+
+  <rect class="pill" x="280" y="630" width="390" height="58" rx="9"/>
+  <text class="blue label" x="300" y="654">Within-frame average effect</text>
+  <text class="mono" x="300" y="676">+0.245 stock · +8.48 damage</text>
+  <rect class="pill" x="690" y="630" width="390" height="58" rx="9"/>
+  <text class="orange label" x="710" y="654">Across-frame average effect</text>
+  <text class="mono" x="710" y="676">+0.361 stock · +13.49 damage</text>
+</svg>

@@ -1,0 +1,66 @@
+/* ericyuegu.com design system — "Quiet Notebook": warm paper, cool ink, oxblood.
+   Tokens copied from the design system; ink mode is the paper metaphor inverted. */
+@font-face{font-family:Charter;font-style:normal;font-weight:400;font-display:swap;src:local("Charter"),url("fonts/charter_regular.woff2") format("woff2")}
+@font-face{font-family:Charter;font-style:italic;font-weight:400;font-display:swap;src:local("Charter Italic"),local("Charter-Italic"),url("fonts/charter_italic.woff2") format("woff2")}
+@font-face{font-family:Charter;font-style:normal;font-weight:700;font-display:swap;src:local("Charter Bold"),local("Charter-Bold"),url("fonts/charter_bold.woff2") format("woff2")}
+@font-face{font-family:Charter;font-style:italic;font-weight:700;font-display:swap;src:local("Charter Bold Italic"),local("Charter-BoldItalic"),url("fonts/charter_bold_italic.woff2") format("woff2")}
+
+:root{
+  color-scheme:light;
+  --paper:#FBFAF6; --paper-warm:#F4F1E8;
+  --ink:#1C2530; --ink-soft:#5F5B50; --ink-faint:#8C8779; --ink-ghost:#A8A294; --ink-mono:#6E6A5E;
+  --oxblood:#7B2E2E; --sage:#4F6C58; --white:#FFFFFF;
+  --rule:#EDE9DD; --rule-dotted:#CFC8B6; --rule-underline:#D8D2C2; --frame-border:#1C2530; --aside-border:#E2DCCB;
+  --surface-page:var(--paper); --surface-card:var(--white); --surface-aside:#F5F2E8; --surface-inverse:var(--ink);
+  --text-body:var(--ink); --text-mono:var(--ink-mono); --text-inverse:var(--paper);
+  --accent:var(--oxblood); --link:var(--accent);
+  --selection:color-mix(in srgb,var(--accent) 18%,transparent);
+  --code-bg:rgba(28,37,48,.05);
+  --shadow-ink-10:rgba(28,37,48,.10); --shadow-ink-12:rgba(28,37,48,.12); --shadow-ink-14:rgba(28,37,48,.14); --shadow-ink-18:rgba(28,37,48,.18);
+  --shadow:var(--shadow-ink-12); --shadow-soft:var(--shadow-ink-10);
+
+  --font-serif:Charter,"Bitstream Charter","Sitka Text",Cambria,Georgia,serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --serif:var(--font-serif); --mono:var(--font-mono);
+
+  --fs-body:17px; --lh-body:1.6;
+  --mono-marker-size:.78rem; --mono-marker-ls:.10em; --mono-marker-weight:600;
+  --mono-meta-size:.72rem; --mono-meta-ls:.02em; --mono-meta-weight:400;
+  --mono-ghost-size:.70rem; --mono-ghost-ls:.03em; --mono-ghost-weight:400;
+
+  --col-max:680px; --measure:640px; --col-pad:24px; --breakout:920px; --cols-breakout:920px;
+  --space-section:2.7rem; --space-fig:2.3rem; --space-para:.9em;
+
+  --radius:0;
+  --border-hair:1px solid var(--rule); --border-frame:1px solid var(--frame-border); --border-dotted:1px dotted var(--rule-dotted); --border-heavy:2px solid var(--ink);
+  --frame-pad:12px; --frame-pad-tight:4px;
+  --shadow-frame-sm:2px 2px 0 var(--shadow-ink-10); --shadow-frame:3px 3px 0 var(--shadow-ink-12); --shadow-frame-lg:5px 5px 0 var(--shadow-ink-14); --shadow-frame-hover:4px 4px 0 var(--shadow-ink-18);
+  --focus-color:var(--text-body); --focus-outline:2px solid var(--focus-color); --focus-offset:2px;
+
+  --ease:ease; --dur-fast:.14s; --dur-mid:.18s; --dur-view:.22s; --dur-flash:.3s; --flash-hold:1500ms;
+  --lift:translate(-1px,-1px);
+}
+
+/* ink mode tokens — one block, applied under every dark stamp */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --paper:#151B22; --paper-warm:#1D242C;
+    --ink:#E9E5DB; --ink-soft:#B4AEA1; --ink-faint:#8A857A; --ink-ghost:#6E6A61; --ink-mono:#9A9488;
+    --oxblood:#C86F63; --sage:#7FA189; --white:#1E262F;
+    --rule:#262E38; --rule-dotted:#3A434E; --rule-underline:#3F4852; --frame-border:#57626D; --aside-border:#2E3742;
+    --surface-aside:#212A33; --surface-inverse:#E9E5DB; --text-inverse:#151B22;
+    --code-bg:rgba(233,229,219,.07);
+    --shadow-ink-10:rgba(0,0,0,.45); --shadow-ink-12:rgba(0,0,0,.52); --shadow-ink-14:rgba(0,0,0,.58); --shadow-ink-18:rgba(0,0,0,.68);
+  }
+}
+:root[data-theme="dark"],:root[data-theme="ink"]{
+  color-scheme:dark;
+  --paper:#151B22; --paper-warm:#1D242C;
+  --ink:#E9E5DB; --ink-soft:#B4AEA1; --ink-faint:#8A857A; --ink-ghost:#6E6A61; --ink-mono:#9A9488;
+  --oxblood:#C86F63; --sage:#7FA189; --white:#1E262F;
+  --rule:#262E38; --rule-dotted:#3A434E; --rule-underline:#3F4852; --frame-border:#57626D; --aside-border:#2E3742;
+  --surface-aside:#212A33; --surface-inverse:#E9E5DB; --text-inverse:#151B22;
+  --code-bg:rgba(233,229,219,.07);
+  --shadow-ink-10:rgba(0,0,0,.45); --shadow-ink-12:rgba(0,0,0,.52); --shadow-ink-14:rgba(0,0,0,.58); --shadow-ink-18:rgba(0,0,0,.68);
+}

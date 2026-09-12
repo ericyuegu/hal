@@ -1,0 +1,83 @@
+<title>Anatomy of a Melee Policy</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/*__TOKENS__*/
+</style>
+<style>
+/*__MAIN_CSS__*/
+</style>
+<style>
+/*__EXPLORER_CSS__*/
+</style>
+<style>
+/*__ENGINE_CSS__*/
+</style>
+
+<div class="wb-shell">
+  <header class="wb-top">
+    <div class="wb-top-left">
+      <span class="wb-name">Eric Gu</span>
+      <span class="wb-kicker">HAL · working draft</span>
+    </div>
+    <div class="wb-tools" role="toolbar" aria-label="Workbench tools">
+      <span class="wb-status" id="wb-status" aria-live="polite">loading document…</span>
+      <button type="button" class="wb-tool" id="wb-edit" aria-pressed="false">edit</button>
+      <button type="button" class="wb-tool" id="wb-data" aria-pressed="false">data</button>
+      <button type="button" class="wb-tool" id="wb-notes" aria-pressed="false">notes</button>
+      <button type="button" class="wb-tool source-toggle" id="source-toggle" aria-pressed="false">show run sources</button>
+      <button type="button" class="wb-tool" id="wb-export">copy markdown</button>
+      <button type="button" class="wb-tool" id="wb-theme" aria-label="Switch theme">ink</button>
+    </div>
+  </header>
+
+  <main class="wb-main">
+    <article class="wb-article" id="wb-article">
+      <div class="wb-doc" id="wb-doc"></div>
+    </article>
+
+    <section class="wb-parked" id="wb-parked" hidden>
+      <h2 class="wb-parked-head">Parked blocks <span class="section-number" id="wb-parked-count"></span></h2>
+      <p class="wb-parked-note">Hidden from the draft and the export. Restore a block to put it back where it was.</p>
+      <div id="wb-parked-list"></div>
+    </section>
+  </main>
+
+  <footer class="wb-foot">
+    <span>Content lives in this artifact's document store; figures and data ship with the page.</span>
+    <span id="wb-foot-meta"></span>
+  </footer>
+</div>
+
+<div id="tip" class="tip" role="status" aria-live="polite"></div>
+<div id="xtip" class="xfig tip" role="status" aria-live="polite"></div>
+
+<div id="wb-fig-pool" hidden>
+<!--__FIGURE_POOL__-->
+</div>
+
+<template id="wb-block-menu">
+  <div class="wb-menu" role="menu">
+    <button type="button" data-act="edit" role="menuitem">edit</button>
+    <button type="button" data-act="up" role="menuitem">move up</button>
+    <button type="button" data-act="down" role="menuitem">move down</button>
+    <button type="button" data-act="note" role="menuitem">note</button>
+    <button type="button" data-act="park" role="menuitem">park</button>
+    <button type="button" data-act="duplicate" role="menuitem">duplicate</button>
+    <button type="button" data-act="delete" role="menuitem" class="danger">delete</button>
+  </div>
+</template>
+
+<script id="wb-registry" type="application/json">
+/*__REGISTRY__*/
+</script>
+
+<script id="wb-evidence" type="application/json">
+/*__EVIDENCE__*/
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="figures/anatomy.js"></script>
+<script src="figures/explorer.js"></script>
+<script>
+/*__ENGINE_JS__*/
+</script>

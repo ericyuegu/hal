@@ -1,0 +1,5 @@
+dist/
+preview/
+export/
+seed/
+__pycache__/

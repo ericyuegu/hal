@@ -1,0 +1,1290 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-09-12",
+  "purpose": "Machine-readable evidence for the HAL experiment blog. This file stores gameplay means, direct treatment deltas, setup differences, and source breadcrumbs.",
+  "metrics": {
+    "stock": "net stocks per active game minute; higher is better",
+    "damage": "net damage per active game minute; higher is better"
+  },
+  "uncertainty_policy": {
+    "rule": "Form the treatment-minus-control difference first. Use paired match or boot differences when both arms share evaluation units. Otherwise combine independent standard errors.",
+    "warning": "Do not subtract arm-level lower confidence bounds. A saved one-sided lower bound is not a confidence interval for the treatment difference.",
+    "missing": "Most historical runs retain only aggregate means and one-sided lower bounds. Their direct difference interval is null until match_rows.json is consolidated.",
+    "reported_head_intervals": "The O43 architecture table contains direct treatment-minus-control 95% intervals supplied with the completed ablation. Other entries do not claim a direct interval unless stated."
+  },
+  "evidence_levels": {
+    "strong": "One planned factor changes. Model size, data, training work, and evaluation are otherwise matched, or the same checkpoint is evaluated twice.",
+    "strong_rejection": "The treatment had more model capacity, data, or work and still lost. This is strong evidence against the tested treatment package, although the resource mismatch prevents an exact effect-size estimate.",
+    "near": "The comparison is useful, but one secondary input also changes.",
+    "package": "Several factors change. The result tests the complete package only.",
+    "descriptive": "No causal treatment comparison is available.",
+    "missing": "The run was not completed or a suitable control does not exist."
+  },
+  "source_indexes": [
+    "docs/blog_experiment_evidence.md",
+    "docs/blog_experiment_runs.csv",
+    "docs/policy_anatomy.html",
+    "docs/policy_anatomy_artifact_export.html"
+  ],
+  "wandb_run_url_template": "https://wandb.ai/ericyuegu/hal/runs/{run}",
+  "studies": [
+    {
+      "id": "codec_legacy_cartesian",
+      "section": "action_space",
+      "title": "Legacy controller classes versus Cartesian controller classes",
+      "evidence": "strong",
+      "code": [
+        "experiments/026_temporal_mtp.py",
+        "experiments/043_legacy_codec.py",
+        "docs/experiments/043_legacy_codec.md"
+      ],
+      "setup": "15.05M parameters; batch 512; 16,384 updates; 8.39M examples; ranked-anonymized-1 v7; O26 loss; matched H4 evaluation.",
+      "arms": [
+        {
+          "name": "legacy",
+          "run": "acbbeb76",
+          "stock": -0.133,
+          "damage": 21.4
+        },
+        {
+          "name": "cartesian",
+          "run": "cqbbbg77",
+          "stock": 0.159,
+          "damage": 37.53,
+          "stock_lcb_one_sided": 0.031888,
+          "damage_lcb_one_sided": 29.849074
+        }
+      ],
+      "comparison": {
+        "treatment": "cartesian",
+        "control": "legacy",
+        "stock_delta": 0.292,
+        "damage_delta": 16.16,
+        "delta_ci95": null,
+        "uncertainty_note": "Direct match-level interval not yet consolidated."
+      },
+      "claim": "The legacy codec did not explain the old performance. In this bridge it was worse."
+    },
+    {
+      "id": "codec_cartesian_polar",
+      "section": "action_space",
+      "title": "Cartesian stick classes versus fixed polar stick classes",
+      "evidence": "strong",
+      "code": [
+        "experiments/052_adamw_temporal_awr.py",
+        "experiments/053_polar_controller.py",
+        "experiments/o53/preregistration.md"
+      ],
+      "setup": "14.48M proxy; batch 512; 16,384 updates; 2^30 supervised positions; ranked-anonymized-1 v8; all AdamW; D2/R2; same 96 matchups.",
+      "arms": [
+        {
+          "name": "cartesian",
+          "run": "yxy8brhx",
+          "parameters": 14480922,
+          "stock": 0.031839,
+          "damage": 33.96385,
+          "stock_lcb_cluster": -0.07433,
+          "damage_lcb_cluster": 26.0076
+        },
+        {
+          "name": "polar",
+          "run": "yi7yyyu0",
+          "parameters": 14490994,
+          "stock": 0.127288,
+          "damage": 34.83912,
+          "stock_lcb_cluster": 0.01591,
+          "damage_lcb_cluster": 27.95546
+        }
+      ],
+      "comparison": {
+        "treatment": "polar",
+        "control": "cartesian",
+        "stock_delta": 0.095449,
+        "damage_delta": 0.87527,
+        "delta_ci95": null,
+        "uncertainty_note": "The matchups are shared, but the paired match rows have not been consolidated here."
+      },
+      "claim": "The fixed polar grid gave a small stock gain and almost no damage gain."
+    },
+    {
+      "id": "projectile_inputs",
+      "section": "action_space",
+      "title": "Projectile inputs",
+      "evidence": "strong",
+      "code": [
+        "experiments/041_architectural_stability.py",
+        "hal/training/features.py"
+      ],
+      "setup": "7.1M policy; batch 128; 16,384 updates; 2.10M examples; ranked-anonymized-1 v7; four pooled projectile slots.",
+      "arms": [
+        {
+          "name": "no projectiles",
+          "run": "v9xku05q",
+          "stock": -1.4283,
+          "damage": -44.384
+        },
+        {
+          "name": "projectiles",
+          "run": "9wh7qhr1",
+          "stock": -1.3361,
+          "damage": -33.905
+        }
+      ],
+      "comparison": {
+        "treatment": "projectiles",
+        "control": "no projectiles",
+        "stock_delta": 0.0922,
+        "damage_delta": 10.479,
+        "delta_ci95": null
+      },
+      "claim": "Projectile state gave a small positive effect."
+    },
+    {
+      "id": "ice_climbers_inputs",
+      "section": "action_space",
+      "title": "Ice Climbers follower inputs",
+      "evidence": "missing",
+      "code": [
+        "hal/training/features.py",
+        "experiments/016_spatial_features.py",
+        "experiments/050_scaled_temporal_awr.py"
+      ],
+      "setup": "The observation token has four player blocks: ego, ego follower, opponent follower, opponent. Missing follower values use masks.",
+      "arms": [],
+      "comparison": null,
+      "claim": "The feature path is known, but no clean gameplay ablation was found."
+    },
+    {
+      "id": "past_action_encoding",
+      "section": "action_space",
+      "title": "Past-action input encoding",
+      "evidence": "strong_rejection",
+      "code": [
+        "experiments/026_temporal_mtp.py",
+        "experiments/028_onehot_controller.py"
+      ],
+      "setup": "O26 family; context 128; 15.05M versus 15.22M parameters. The one-hot arm used batch 1,024 and saw 16.78M examples; the learned physical encoding used batch 512 and saw 8.39M.",
+      "arms": [
+        {
+          "name": "256-way one-hot",
+          "run": "1zzstd2d",
+          "parameters": 15218143,
+          "examples": 16777216,
+          "stock": -0.101,
+          "damage": 13.85
+        },
+        {
+          "name": "learned class plus physical value",
+          "run": "cqbbbg77",
+          "parameters": 15053039,
+          "examples": 8388608,
+          "stock": 0.159,
+          "damage": 37.53
+        }
+      ],
+      "comparison": {
+        "treatment": "learned class plus physical value",
+        "control": "256-way one-hot",
+        "stock_delta": 0.26,
+        "damage_delta": 23.68,
+        "delta_ci95": null,
+        "uncertainty_note": "The one-hot arm had more parameters and twice the data and still lost. The direction is persuasive; the mismatch prevents a precise causal effect size."
+      },
+      "claim": "A learned class embedding plus physical stick and trigger values is better than one-hot action history."
+    },
+    {
+      "id": "onehot_button_pruning",
+      "section": "action_space",
+      "title": "Rare one-hot button classes",
+      "evidence": "strong",
+      "code": [
+        "experiments/028_onehot_controller.py"
+      ],
+      "setup": "Same O28 family; batch 1,024; 16,384 updates; 16.78M examples.",
+      "arms": [
+        {
+          "name": "256 button classes",
+          "run": "1zzstd2d"
+        },
+        {
+          "name": "52 retained button classes",
+          "run": "4wyxy1g2"
+        }
+      ],
+      "comparison": {
+        "treatment": "52 retained button classes",
+        "control": "256 button classes",
+        "stock_delta": 0.037,
+        "damage_delta": -7.63,
+        "delta_ci95": null
+      },
+      "claim": "Pruning rare one-hot classes did not give a clear overall gain."
+    },
+    {
+      "id": "hand_features",
+      "section": "action_space",
+      "title": "Hand-designed spatial features",
+      "evidence": "missing",
+      "code": [
+        "experiments/016_spatial_features.py"
+      ],
+      "setup": "Derived relative position, velocity, range, and stage geometry were appended to the frame token.",
+      "arms": [
+        {
+          "name": "attempt 1",
+          "run": "6mmt6o4c"
+        },
+        {
+          "name": "attempt 2",
+          "run": "60esc6s8"
+        }
+      ],
+      "comparison": null,
+      "claim": "Both attempts stopped before a valid closed-loop result. Do not call this a negative result."
+    },
+    {
+      "id": "lean_feature_bundle",
+      "section": "action_space",
+      "title": "Lean observation feature bundle",
+      "evidence": "near",
+      "code": [
+        "experiments/016_spatial_features.py",
+        "experiments/021_v6_features.py"
+      ],
+      "setup": "d256, 8 layers, context 256, batch 512, 16,384 updates, 8.39M examples; old evaluation protocol.",
+      "arms": [
+        {
+          "name": "full features",
+          "run": "fxhtoxu8"
+        },
+        {
+          "name": "lean features",
+          "run": "pu8jpmbf"
+        }
+      ],
+      "comparison": {
+        "treatment": "lean features",
+        "control": "full features",
+        "stock_delta": -0.268,
+        "damage_delta": -13.37,
+        "delta_ci95": null
+      },
+      "claim": "Removing or changing the state-feature bundle hurt play. The test does not identify one responsible column."
+    },
+    {
+      "id": "rle_bpe_actions",
+      "section": "action_space",
+      "title": "Run-length and BPE action spans",
+      "evidence": "package",
+      "code": [
+        "experiments/018_bpe_rle.py",
+        "notebooks/tokenizer_audit.py"
+      ],
+      "setup": "d256, 8 layers, context 256, batch 512, 16,384 updates, 8.39M examples; variable spans up to 16 frames; 7.75M parameters.",
+      "arms": [
+        {
+          "name": "frame-aligned actions",
+          "run": "fxhtoxu8"
+        },
+        {
+          "name": "BPE/RLE spans",
+          "run": "xgj1dwot",
+          "crash_fraction": 0.577
+        }
+      ],
+      "comparison": {
+        "treatment": "BPE/RLE spans",
+        "control": "frame-aligned actions",
+        "stock_delta": -2.635,
+        "damage_delta": -172.16,
+        "delta_ci95": null,
+        "uncertainty_note": "Output representation, execution cadence, parameters, and crash rate changed."
+      },
+      "claim": "The complete tested RLE/BPE policy failed. This does not isolate compression itself."
+    },
+    {
+      "id": "joint_action_chords",
+      "section": "action_space",
+      "title": "One joint controller token per frame",
+      "evidence": "missing",
+      "code": [
+        "experiments/006_chord_ar.py",
+        "experiments/008_rle_events.py"
+      ],
+      "setup": "The main stick, C-stick, two triggers, and buttons were packed into one data-derived chord class.",
+      "arms": [
+        {
+          "name": "diagnostic run",
+          "run": "vgwbv53u",
+          "updates": 3
+        }
+      ],
+      "comparison": null,
+      "claim": "The retained run stopped after three diagnostic updates. There is no gameplay result."
+    },
+    {
+      "id": "action_factorization_o37",
+      "section": "architecture",
+      "title": "Across-frame and within-frame action feedback",
+      "evidence": "strong",
+      "code": [
+        "experiments/037_factorization_matrix.py",
+        "docs/experiments/037_factorization_matrix.md"
+      ],
+      "setup": "7.148M parameters in every arm; batch 512; 16,384 updates; 8.39M examples; ranked-anonymized-1 v7; same H4 96-boot protocol.",
+      "arms": [
+        {
+          "name": "D0: no across-frame feedback; no learned within-frame feedback",
+          "run": "98r9smrj",
+          "stock": -0.7017,
+          "damage": 2.7712
+        },
+        {
+          "name": "D1: within-frame feedback only",
+          "run": "a117chkw",
+          "stock": -0.3129,
+          "damage": 13.049
+        },
+        {
+          "name": "D2: across-frame feedback only",
+          "run": "50q39o9j",
+          "stock": -0.1963,
+          "damage": 18.0595
+        },
+        {
+          "name": "D3: both forms of feedback",
+          "run": "5wfk2esf",
+          "stock": -0.0956,
+          "damage": 24.7452
+        }
+      ],
+      "main_effects": [
+        {
+          "name": "across-frame action feedback",
+          "stock_delta": 0.361,
+          "damage_delta": 13.49,
+          "delta_ci95": null
+        },
+        {
+          "name": "within-frame controller-part feedback",
+          "stock_delta": 0.245,
+          "damage_delta": 8.48,
+          "delta_ci95": null
+        }
+      ],
+      "claim": "Both types of feedback helped at H4. Across-frame feedback had the larger average effect."
+    },
+    {
+      "id": "decoder_lineage",
+      "section": "architecture",
+      "title": "Next-frame, independent multi-frame, and autoregressive multi-frame prediction",
+      "evidence": "descriptive",
+      "code": [
+        "experiments/011_muon.py",
+        "experiments/012_multi_token.py",
+        "experiments/037_factorization_matrix.py",
+        "experiments/050_scaled_temporal_awr.py"
+      ],
+      "setup": "Representative runs: next-frame vlim96s9; independent multi-frame shjnxxsu; autoregressive multi-frame 5wfk2esf or tgpuo1be.",
+      "arms": [],
+      "comparison": null,
+      "claim": "Use this as design history. O37 isolates action feedback; the older lineage does not form a clean score ladder."
+    },
+    {
+      "id": "within_frame_order",
+      "section": "architecture",
+      "title": "Order of controller parts within one frame",
+      "evidence": "missing",
+      "code": [
+        "experiments/037_factorization_matrix.py",
+        "experiments/050_scaled_temporal_awr.py"
+      ],
+      "setup": "The current order is C-stick, main stick, triggers, buttons.",
+      "arms": [],
+      "comparison": null,
+      "claim": "No clean order ablation was found. O37 tests feedback versus no learned feedback, not alternate orders."
+    },
+    {
+      "id": "o43_action_head_components",
+      "section": "architecture",
+      "title": "FiLM initialization, action-head shape, and trunk-to-logit skip",
+      "evidence": "strong",
+      "code": [
+        "experiments/043_legacy_codec.py",
+        "docs/experiments/043_legacy_codec.md"
+      ],
+      "setup": "O43 arm A control; 15.05M class; batch 512; ranked-anonymized-1; same initialization and evaluation units. Each arm changes one component.",
+      "arms": [
+        {
+          "name": "zero-initialize FiLM projections",
+          "run": "vzd242t6",
+          "updates": 4096,
+          "character_suite_stock_delta": -1.09,
+          "character_suite_stock_delta_ci95_half_width": 0.34,
+          "fox_suite_stock_delta": -1.2,
+          "fox_suite_stock_delta_ci95_half_width": 0.37
+        },
+        {
+          "name": "remove trunk-to-logit skip",
+          "run": "j4skyy83",
+          "updates": 4096,
+          "character_suite_stock_delta": -0.89,
+          "character_suite_stock_delta_ci95_half_width": 0.4,
+          "fox_suite_stock_delta": -1.13,
+          "fox_suite_stock_delta_ci95_half_width": 0.46
+        },
+        {
+          "name": "replace SiLU MLP heads with normalized linear heads",
+          "run": "apj3rw8b",
+          "updates": 8192,
+          "character_suite_stock_delta": -2.03,
+          "character_suite_stock_delta_ci95_half_width": 0.28,
+          "fox_suite_stock_delta": -2.41,
+          "fox_suite_stock_delta_ci95_half_width": 0.32
+        }
+      ],
+      "control": {
+        "name": "ordinary FiLM initialization; SiLU MLP heads; trunk-to-logit skip",
+        "run": "1imfy8v3"
+      },
+      "claim": "Each O42-like removal hurt in its O43 test. The 4,096-update FiLM result can also reflect slower learning, so it does not prove the final-step result."
+    },
+    {
+      "id": "film_vs_concatenation",
+      "section": "architecture",
+      "title": "FiLM versus plain feature concatenation",
+      "evidence": "missing",
+      "code": [
+        "experiments/037_factorization_matrix.py",
+        "experiments/043_legacy_codec.py"
+      ],
+      "setup": "O37 compares active FiLM with the same FiLM layers fed fixed zero inputs. O43 tests FiLM initialization. Neither test uses plain concatenation as the treatment.",
+      "arms": [],
+      "comparison": null,
+      "claim": "There is no FiLM-versus-concatenation ablation."
+    },
+    {
+      "id": "o26_to_o42_package",
+      "section": "architecture",
+      "title": "O26 to O42 architecture and sampler package",
+      "evidence": "package",
+      "code": [
+        "experiments/026_temporal_mtp.py",
+        "experiments/042_architecture_data_ablation.py"
+      ],
+      "setup": "Equal-step comparison. O42 uses SwiGLU trunk and temporal blocks, normalized linear action heads, no trunk-to-logit skip, zero-initialized bounded FiLM, normalized temporal input, symmetric residual scaling, and a different one-window sampler.",
+      "arms": [
+        {
+          "name": "O26",
+          "run": "cqbbbg77",
+          "stock": 0.159,
+          "damage": 37.53
+        },
+        {
+          "name": "O42 ranked-only",
+          "run": "k8nb00xv",
+          "stock": -0.058,
+          "damage": 26.72
+        }
+      ],
+      "comparison": {
+        "treatment": "O42 ranked-only",
+        "control": "O26",
+        "stock_delta": -0.217,
+        "damage_delta": -10.81,
+        "delta_ci95": null
+      },
+      "claim": "The complete O42 package was worse. Its many simultaneous changes prevent a component claim."
+    },
+    {
+      "id": "old_head_capacity",
+      "section": "architecture",
+      "title": "Historical action-head capacity test",
+      "evidence": "near",
+      "code": [
+        "experiments/023_mtp_heads.py"
+      ],
+      "setup": "Historical O23 comparison. The larger state MLP used 12.6% more parameters and compute.",
+      "arms": [
+        {
+          "name": "linear head",
+          "run": "obx3o3az",
+          "stock": -0.69
+        },
+        {
+          "name": "larger state MLP",
+          "run": "q3aojgfm",
+          "stock": -0.58
+        }
+      ],
+      "comparison": {
+        "treatment": "larger state MLP",
+        "control": "linear head",
+        "stock_delta": 0.11,
+        "damage_delta": null,
+        "delta_ci95": null
+      },
+      "claim": "This suggested a small gain, but the later O43 one-change test is much stronger evidence for nonlinear heads."
+    },
+    {
+      "id": "future_state_expert",
+      "section": "architecture",
+      "title": "Training-only future-state expert",
+      "evidence": "strong_rejection",
+      "code": [
+        "experiments/029_game_state_flow.py"
+      ],
+      "setup": "O26 actor plus a future-state auxiliary model; 16.31M total parameters; batch 1,024; 16.78M examples; more than twice the estimated training work.",
+      "arms": [
+        {
+          "name": "policy only",
+          "run": "cqbbbg77"
+        },
+        {
+          "name": "future-state expert",
+          "run": "qxcjjwl8"
+        }
+      ],
+      "comparison": {
+        "treatment": "future-state expert",
+        "control": "policy only",
+        "stock_delta": -0.048,
+        "damage_delta": -12.6,
+        "delta_ci95": null
+      },
+      "claim": "The tested auxiliary expert did not help despite favorable resource differences."
+    },
+    {
+      "id": "temporal_head_cross_attention",
+      "section": "architecture",
+      "title": "Output queries cross-attend to trunk history",
+      "evidence": "package",
+      "code": [
+        "experiments/024_temporal_mtp.py"
+      ],
+      "setup": "O24 used 20 action-prefix queries with causal cross-attention over prior trunk tokens.",
+      "arms": [
+        {
+          "name": "cross-attention head",
+          "run": "4hoe86s7",
+          "stock": -0.398,
+          "damage": 21.55
+        }
+      ],
+      "comparison": null,
+      "claim": "The nearest reference also changes the trunk, codec, offsets, and decoder size. Keep the arm score, but do not report a causal delta."
+    },
+    {
+      "id": "flattened_action_tokens",
+      "section": "architecture",
+      "title": "Controller parts flattened into the main Transformer sequence",
+      "evidence": "package",
+      "code": [
+        "experiments/013_multi_token.py"
+      ],
+      "setup": "Each frame became one state token plus four controller-part tokens, so a 256-frame context became 1,280 tokens and used about five times the trunk work.",
+      "arms": [
+        {
+          "name": "51-frame context",
+          "run": "7tlk11io",
+          "stock": -0.101,
+          "damage": 28.82,
+          "eval_note": "later 96-boot re-evaluation"
+        },
+        {
+          "name": "256-frame context",
+          "run": "lxo3id9l",
+          "stock": 0.262,
+          "damage": 41.34,
+          "eval_note": "older protocol"
+        }
+      ],
+      "comparison": null,
+      "claim": "Both arms are interesting historical systems, but neither has a clean equal-work control."
+    },
+    {
+      "id": "fixed_long_delay",
+      "section": "architecture",
+      "title": "Fixed twelve-frame prediction delay",
+      "evidence": "near",
+      "code": [
+        "experiments/043_legacy_codec.py",
+        "experiments/044_fixed_prediction_delay.py",
+        "docs/experiments/044_fixed_prediction_delay.md"
+      ],
+      "setup": "O43 delay 1 versus O44 delay 12. O44 kept H6/R1 but used a longer future-data buffer.",
+      "arms": [
+        {
+          "name": "delay 1",
+          "run": "1imfy8v3",
+          "stock": 0.24
+        },
+        {
+          "name": "delay 12",
+          "run": "2qs05au4",
+          "stock": -0.86
+        }
+      ],
+      "comparison": {
+        "treatment": "delay 12",
+        "control": "delay 1",
+        "stock_delta": -1.105,
+        "damage_delta": -85.71,
+        "delta_ci95": null
+      },
+      "claim": "The long-delay package failed. The buffer difference prevents a delay-only effect estimate."
+    },
+    {
+      "id": "rank_weighted_bc",
+      "section": "architecture",
+      "title": "Rank-weighted behavior cloning",
+      "evidence": "strong",
+      "code": [
+        "experiments/034_rank_weighted_bc.py",
+        "docs/experiments/034_rank_weighted_bc.md"
+      ],
+      "setup": "Exact O26 policy and training recipe; Platinum, Diamond, and Master replay weights 1, 2, and 4; batch 512; 16,384 updates; 8.39M examples.",
+      "arms": [
+        {
+          "name": "uniform behavior cloning",
+          "run": "cqbbbg77"
+        },
+        {
+          "name": "rank weights 1/2/4",
+          "run": "c5cxoyk8"
+        }
+      ],
+      "comparison": {
+        "treatment": "rank weights 1/2/4",
+        "control": "uniform behavior cloning",
+        "stock_delta": -0.122,
+        "damage_delta": null,
+        "delta_ci95": null
+      },
+      "claim": "Replay-rank weighting did not help. This is not advantage-weighted regression."
+    },
+    {
+      "id": "awr_actor_weighting",
+      "section": "learning_objective",
+      "title": "Detached-value advantage-weighted regression",
+      "evidence": "near",
+      "code": [
+        "experiments/036_advantage_weighted_bc.py",
+        "docs/experiments/036_advantage_weighted_bc.md"
+      ],
+      "setup": "7.15M O37-style actor; batch 512; 16,384 updates; 8.39M examples; ranked-anonymized-1 v7. BC used 96 boots and AWR used 128 boots, so the evaluations are not paired.",
+      "arms": [
+        {
+          "name": "behavior cloning",
+          "run": "5wfk2esf",
+          "stock": -0.0956,
+          "damage": 24.7452
+        },
+        {
+          "name": "AWR",
+          "run": "hwzv0k9a",
+          "stock": -0.0199,
+          "damage": 35.54
+        }
+      ],
+      "comparison": {
+        "treatment": "AWR",
+        "control": "behavior cloning",
+        "stock_delta": 0.0757,
+        "damage_delta": 10.795,
+        "delta_ci95": null
+      },
+      "claim": "AWR gave a modest, consistent gain in the modern comparison."
+    },
+    {
+      "id": "awr_gamma",
+      "section": "learning_objective",
+      "title": "AWR return horizon",
+      "evidence": "strong",
+      "code": [
+        "experiments/052_adamw_temporal_awr.py",
+        "notebooks/awr_explorer.py"
+      ],
+      "setup": "14.48M O52 proxy; batch 512; 16,384 updates; 2^30 supervised positions; ranked-anonymized-1 v8; D2/R2; 96 boots. Gamma is the planned treatment.",
+      "arms": [
+        {
+          "name": "gamma 0.99618",
+          "run": "yxy8brhx",
+          "half_life_frames": 181,
+          "stock": 0.031839,
+          "damage": 33.9638
+        },
+        {
+          "name": "gamma 0.99855",
+          "run": "0ksityvv",
+          "half_life_frames": 478,
+          "stock": 0.397852,
+          "damage": 67.9696
+        },
+        {
+          "name": "gamma 0.99920",
+          "run": "8t9koblm",
+          "half_life_frames": 866,
+          "stock": 0.350041,
+          "damage": 64.8297
+        }
+      ],
+      "comparisons": [
+        {
+          "treatment": "gamma 0.99855",
+          "control": "gamma 0.99618",
+          "stock_delta": 0.366013,
+          "damage_delta": 34.0058,
+          "delta_ci95": null
+        },
+        {
+          "treatment": "gamma 0.99920",
+          "control": "gamma 0.99618",
+          "stock_delta": 0.318202,
+          "damage_delta": 30.8659,
+          "delta_ci95": null
+        }
+      ],
+      "claim": "AWR improved when the return half-life was long enough to reach the actions that caused later rewards. The middle setting was best in this three-point sweep."
+    },
+    {
+      "id": "endpoint_flow",
+      "section": "learning_objective",
+      "title": "Sparse endpoint flow",
+      "evidence": "strong_rejection",
+      "code": [
+        "experiments/038_sparse_endpoint_flow.py",
+        "docs/experiments/038_sparse_endpoint_flow.md"
+      ],
+      "setup": "Same d256 trunk, data, updates, examples, H4, and 96-boot protocol as O37 D3. Flow used 8.95M parameters, 25.2% more training work, four flow steps, and 7.3% more estimated inference work.",
+      "arms": [
+        {
+          "name": "categorical autoregressive decoder",
+          "run": "5wfk2esf",
+          "stock": -0.0956,
+          "damage": 24.7452
+        },
+        {
+          "name": "parallel endpoint flow",
+          "run": "t4s3gohe",
+          "stock": -0.2811,
+          "damage": -8.1861
+        }
+      ],
+      "comparison": {
+        "treatment": "parallel endpoint flow",
+        "control": "categorical autoregressive decoder",
+        "stock_delta": -0.1855,
+        "damage_delta": -32.9313,
+        "delta_ci95": null
+      },
+      "claim": "The tested flow package was worse despite more capacity and work."
+    },
+    {
+      "id": "continuous_action_flow",
+      "section": "learning_objective",
+      "title": "Continuous controller flow prototype",
+      "evidence": "package",
+      "code": [
+        "experiments/001_flow_matching_baseline.py"
+      ],
+      "setup": "4.994M parameters; d256, 6 layers, 8 heads; 256 context frames plus 16 action queries; eight flow steps; effective batch 512; 131,072 updates; 67.11M examples; old evaluation protocol.",
+      "arms": [
+        {
+          "name": "continuous 16-frame flow policy",
+          "run": "xummemli",
+          "stock": -2.262,
+          "damage": -112.129
+        }
+      ],
+      "comparison": null,
+      "claim": "This early model generated continuous stick and trigger values, but it has no matched control. Architecture, loss, action format, training budget, and execution all differ from the later policies."
+    },
+    {
+      "id": "attached_iql",
+      "section": "learning_objective",
+      "title": "Attached implicit Q-learning",
+      "evidence": "strong_rejection",
+      "code": [
+        "experiments/027_temporal_mtp.py"
+      ],
+      "setup": "Exact O26 policy path plus Q and value heads; batch 1,024; 16,384 updates; 16.78M examples; 1.43% more total parameters; about twice the estimated training work.",
+      "arms": [
+        {
+          "name": "behavior cloning",
+          "run": "cqbbbg77",
+          "stock": 0.159,
+          "damage": 37.53
+        },
+        {
+          "name": "attached IQL",
+          "run": "06fi5jms",
+          "stock": -1.85,
+          "damage": -58.32
+        }
+      ],
+      "comparison": {
+        "treatment": "attached IQL",
+        "control": "behavior cloning",
+        "stock_delta": -2.009,
+        "damage_delta": -95.85,
+        "delta_ci95": null
+      },
+      "claim": "The tested IQL system failed despite more data, capacity, and work. This does not reject all offline Q-learning methods."
+    },
+    {
+      "id": "exploration_modeling",
+      "section": "learning_objective",
+      "title": "Exploration Modeling with one or eight latent trajectories",
+      "evidence": "package",
+      "code": [
+        "experiments/033_parallel_latent_trajectory.py"
+      ],
+      "setup": "O26 trunk with a non-causal parallel trajectory decoder. K=1 used batch 1,024, 16,384 updates, and 16.78M examples. K=8 stopped at 10,240 updates and changed microbatching.",
+      "arms": [
+        {
+          "name": "O26 behavior cloning",
+          "run": "cqbbbg77",
+          "stock": 0.159,
+          "damage": 37.53
+        },
+        {
+          "name": "XM K=1",
+          "run": "mz8dk2gh",
+          "stock": -1.508,
+          "damage": -51.84
+        },
+        {
+          "name": "XM K=8",
+          "run": "feic18gt",
+          "stock": -0.648,
+          "damage": -6.8
+        }
+      ],
+      "comparisons": [
+        {
+          "treatment": "XM K=1",
+          "control": "O26 behavior cloning",
+          "stock_delta": -1.667,
+          "damage_delta": -89.37,
+          "delta_ci95": null
+        },
+        {
+          "treatment": "XM K=8",
+          "control": "O26 behavior cloning",
+          "stock_delta": -0.807,
+          "damage_delta": -44.33,
+          "delta_ci95": null
+        },
+        {
+          "treatment": "XM K=8",
+          "control": "XM K=1",
+          "stock_delta": 0.86,
+          "damage_delta": 45.04,
+          "delta_ci95": null,
+          "uncertainty_note": "K=8 used much more trajectory compute per example but stopped earlier, so K is not isolated."
+        }
+      ],
+      "claim": "K=8 was much better than K=1, but neither tested XM system beat O26 behavior cloning."
+    },
+    {
+      "id": "windows_per_replay",
+      "section": "data",
+      "title": "One training window per replay",
+      "evidence": "strong",
+      "code": [
+        "experiments/012_multi_token.py"
+      ],
+      "setup": "Same d256 independent multi-frame model; batch 1,024; 16,384 updates; 16.78M examples; old evaluation protocol. Only the recorded windows-per-replay setting changed.",
+      "arms": [
+        {
+          "name": "four windows per replay",
+          "run": "uw05bvm2",
+          "stock": -0.598,
+          "damage": 40.5
+        },
+        {
+          "name": "one window per replay",
+          "run": "shjnxxsu",
+          "stock": 0.13,
+          "damage": 34.27
+        }
+      ],
+      "comparison": {
+        "treatment": "one window per replay",
+        "control": "four windows per replay",
+        "stock_delta": 0.728,
+        "damage_delta": -6.23,
+        "delta_ci95": null
+      },
+      "claim": "One window per replay improved stock score, while damage score fell slightly. The current replay ring should repeat this test before treating it as universal."
+    },
+    {
+      "id": "dataset_v8_cleaning",
+      "section": "data",
+      "title": "Policy-world v8 data cleaning",
+      "evidence": "descriptive",
+      "code": [
+        "hal/scripts/rematerialize_policy_world_v8.py",
+        "hal/streams.py",
+        "data/builds/policy-world-v8/publication.json"
+      ],
+      "setup": "v8 keeps human games where both players dealt more than 50 damage and both started with four stocks.",
+      "counts": {
+        "v7_train_replays": 1300640,
+        "v8_train_replays": 1295370,
+        "removed_train_replays": 5270,
+        "removed_train_replay_fraction": 0.004052,
+        "v7_train_frames": 13292693140,
+        "v8_train_frames": 13266364175,
+        "removed_train_frames": 26328965,
+        "removed_train_frame_fraction": 0.001981
+      },
+      "ranked_anonymized_1": {
+        "v7_train_replays": 112409,
+        "v8_train_replays": 112188,
+        "removed_train_replays": 221,
+        "rejection_reasons_all_splits": {
+          "damage_dealt_per_player_gt_50": 214,
+          "starting_stocks_equal_4": 13
+        }
+      },
+      "comparison": null,
+      "claim": "v8 removed 0.405% of training replays and 0.198% of training frames. No clean gameplay test isolates this cleaning."
+    },
+    {
+      "id": "data_source_mix",
+      "section": "data",
+      "title": "Ranked-only data versus all 44 sources",
+      "evidence": "strong",
+      "code": [
+        "experiments/042_architecture_data_ablation.py"
+      ],
+      "setup": "O42 architecture. The corrected comparison uses equal update counts; ranked-anonymized-1 is the control and the natural 44-source mix is the treatment.",
+      "arms": [
+        {
+          "name": "ranked-anonymized-1",
+          "run": "k8nb00xv"
+        },
+        {
+          "name": "all 44 sources",
+          "run": "bevhq159"
+        }
+      ],
+      "comparison": {
+        "treatment": "all 44 sources",
+        "control": "ranked-anonymized-1",
+        "stock_delta": -0.058,
+        "damage_delta": 6.31,
+        "delta_ci95": null
+      },
+      "claim": "The full mix improved damage but did not improve stock at equal training steps."
+    },
+    {
+      "id": "rtc",
+      "section": "inference",
+      "title": "Real-time chunking with queued-action feedback",
+      "evidence": "missing",
+      "code": [
+        "experiments/046_ar_rtc.py",
+        "docs/experiments/046_ar_rtc.md"
+      ],
+      "setup": "The treatment trained dense offsets 1 through 20 with random committed prefixes. The only retained treatment run, c6yd7zxx, stopped at 4,096 updates. The planned dense autoregressive control was not run.",
+      "arms": [
+        {
+          "name": "RTC treatment",
+          "run": "c6yd7zxx",
+          "updates": 4096,
+          "character_suite_stock": -1.167,
+          "character_suite_damage": -22.319,
+          "fox_suite_stock": -0.622,
+          "fox_suite_damage": -23.182
+        }
+      ],
+      "comparison": null,
+      "claim": "RTC is unresolved. The treatment score alone does not show whether queued-action feedback helped."
+    },
+    {
+      "id": "execution_horizon",
+      "section": "inference",
+      "title": "Frames executed before replanning",
+      "evidence": "strong",
+      "code": [
+        "experiments/037_factorization_matrix.py",
+        "docs/experiments/037_factorization_matrix.md"
+      ],
+      "setup": "Each of four fixed checkpoints was evaluated at 1, 2, 4, and 6 frames per plan. In this older runtime, execution horizon and replan interval are the same setting.",
+      "series": [
+        {
+          "name": "D0",
+          "run": "98r9smrj",
+          "horizons": [1, 2, 4, 6],
+          "stock": [0.0955, -0.159, -0.7017, -0.9051],
+          "damage": [35.5039, 21.0396, 2.7712, -19.0119]
+        },
+        {
+          "name": "D1",
+          "run": "a117chkw",
+          "horizons": [1, 2, 4, 6],
+          "stock": [0.1326, 0.0477, -0.3129, -0.467],
+          "damage": [40.7768, 36.1129, 13.049, -1.4068]
+        },
+        {
+          "name": "D2",
+          "run": "50q39o9j",
+          "horizons": [1, 2, 4, 6],
+          "stock": [-0.1857, -0.0637, -0.1963, -0.2335],
+          "damage": [29.4782, 28.0807, 18.0595, 15.6934]
+        },
+        {
+          "name": "D3",
+          "run": "5wfk2esf",
+          "horizons": [1, 2, 4, 6],
+          "stock": [0.053, 0.0, -0.0956, -0.0212],
+          "damage": [36.3244, 31.5488, 24.7452, 25.8506]
+        }
+      ],
+      "comparison": {
+        "treatment": "execute and replan every 6 frames",
+        "control": "execute and replan every 1 frame",
+        "stock_delta_mean_across_models": -0.431,
+        "damage_delta_mean_across_models": -30.2,
+        "delta_ci95": null
+      },
+      "claim": "Longer execution hurt the models that did not receive across-frame feedback. It had little effect on D3. This is not a replan-only test."
+    },
+    {
+      "id": "next_frame_loss_share",
+      "section": "learning_objective",
+      "title": "Half of the action loss on the next frame",
+      "evidence": "strong",
+      "code": [
+        "experiments/043_legacy_codec.py"
+      ],
+      "setup": "Same legacy codec and O43 architecture; batch 512; 16,384 updates; ranked-anonymized-1. The bridge changes only loss allocation.",
+      "arms": [
+        {
+          "name": "O26 loss allocation",
+          "run": "acbbeb76",
+          "stock": -0.133,
+          "damage": 21.4
+        },
+        {
+          "name": "50% next-frame loss",
+          "run": "1imfy8v3",
+          "stock": 0.005,
+          "damage": 24.9
+        }
+      ],
+      "comparison": {
+        "treatment": "50% next-frame loss",
+        "control": "O26 loss allocation",
+        "stock_delta": 0.138,
+        "damage_delta": 3.5,
+        "delta_ci95": null
+      },
+      "claim": "More weight on the next frame recovered part of the legacy-codec penalty."
+    },
+    {
+      "id": "future_target_offsets",
+      "section": "learning_objective",
+      "title": "Additional far-future target",
+      "evidence": "near",
+      "code": [
+        "experiments/old/value_trainer lineage at commit 2aa752d"
+      ],
+      "setup": "Historical near-control. Adding offset 18 also reduced the relative share of offset 1.",
+      "arms": [
+        {
+          "name": "offsets 1 and 12",
+          "run": "c6r7edxf",
+          "stock": 1.1
+        },
+        {
+          "name": "offsets 1, 12, and 18",
+          "run": "8fo0kube",
+          "stock": 0.9
+        }
+      ],
+      "comparison": {
+        "treatment": "offsets 1, 12, and 18",
+        "control": "offsets 1 and 12",
+        "stock_delta": -0.2,
+        "damage_delta": null,
+        "delta_ci95": null
+      },
+      "claim": "The extra far target did not help, but target distance and next-frame loss share changed together."
+    },
+    {
+      "id": "batch_size_fixed_examples",
+      "section": "other",
+      "title": "Batch size at fixed examples",
+      "evidence": "strong",
+      "code": [
+        "experiments/026_temporal_mtp.py"
+      ],
+      "setup": "Every arm saw 2.097M examples. Smaller batches therefore received more optimizer updates.",
+      "series": {
+        "batch": [128, 256, 512, 1024, 2048],
+        "stock": [-0.32, -0.49, -0.72, -0.56, -0.79]
+      },
+      "comparison": {
+        "treatment": "batch 128; 16,384 updates",
+        "control": "batch 2,048; 1,024 updates",
+        "stock_delta": 0.47,
+        "damage_delta": 27.92,
+        "delta_ci95": null,
+        "runs": [
+          "nt4gh4mk",
+          "rri7scjc"
+        ]
+      },
+      "claim": "At fixed examples, more optimizer updates helped. This is a batch-and-update trade, not batch size alone."
+    },
+    {
+      "id": "learning_rate_sweep",
+      "section": "other",
+      "title": "Muon and AdamW learning-rate pair",
+      "evidence": "strong",
+      "code": [
+        "experiments/026_temporal_mtp.py"
+      ],
+      "setup": "Fixed model and data. Muon and AdamW rates moved together.",
+      "series": {
+        "muon_lr": [0.014, 0.028, 0.04, 0.056, 0.08, 0.112],
+        "adamw_lr": [0.000595, 0.00119, 0.0017, 0.00238, 0.0034, 0.00476],
+        "stock": [-0.59, -0.43, -0.37, -0.46, -0.54, -0.51]
+      },
+      "comparison": {
+        "treatment": "best pair 0.040 / 0.00170",
+        "control": "worst pair 0.014 / 0.000595",
+        "stock_delta": 0.22,
+        "damage_delta": null,
+        "delta_ci95": null,
+        "runs": [
+          "7hy8xjjh",
+          "9luwu85n"
+        ]
+      },
+      "claim": "The best point was inside the sweep. The test selects a rate pair, not one optimizer's rate alone."
+    },
+    {
+      "id": "player_identity",
+      "section": "other",
+      "title": "Ego-player identity conditioning",
+      "evidence": "strong",
+      "code": [
+        "experiments/049_player_identity_conditioning.py",
+        "docs/experiments/049_player_identity_conditioning.md"
+      ],
+      "setup": "16M model; 16,384 updates; Fox-only model side; 96 boots. The baseline uses the same trained model and evaluation but masks the player embedding.",
+      "arms": [
+        {
+          "name": "identity masked",
+          "run": "u1gvby0r",
+          "stock": 0.547,
+          "damage": 55.85
+        },
+        {
+          "name": "Cody",
+          "run": "dg0u00w5",
+          "stock": 0.629,
+          "damage": 87.01,
+          "stock_delta": 0.081,
+          "damage_delta": 31.16
+        },
+        {
+          "name": "Master",
+          "run": "dg0u00w5",
+          "stock": 0.526,
+          "damage": 60.07,
+          "stock_delta": -0.021,
+          "damage_delta": 4.22
+        },
+        {
+          "name": "Mang0",
+          "run": "dg0u00w5",
+          "stock": 0.479,
+          "damage": 62.94,
+          "stock_delta": -0.068,
+          "damage_delta": 7.09
+        },
+        {
+          "name": "Platinum",
+          "run": "dg0u00w5",
+          "stock": 0.228,
+          "damage": 46.61,
+          "stock_delta": -0.319,
+          "damage_delta": -9.24
+        }
+      ],
+      "claim": "Identity changes behavior. Cody raised damage strongly, but not every identity improved stock."
+    },
+    {
+      "id": "optimizer_full_scale",
+      "section": "other",
+      "title": "Muon plus AdamW versus all AdamW",
+      "evidence": "strong",
+      "code": [
+        "experiments/050_scaled_temporal_awr.py",
+        "experiments/052_adamw_temporal_awr.py"
+      ],
+      "setup": "216.5M production architecture; 131,072 updates; full policy-world-v8 corpus; 96-boot standard evaluation. The optimizer recipe, including rates and parameter routing, is the treatment.",
+      "arms": [
+        {
+          "name": "Muon matrices plus AdamW other parameters",
+          "run": "p1fyyp1z",
+          "stock": 0.34496,
+          "damage": 37.5902
+        },
+        {
+          "name": "all AdamW",
+          "run": "tgpuo1be",
+          "stock": 0.49367,
+          "damage": 52.7196
+        }
+      ],
+      "comparison": {
+        "treatment": "all AdamW",
+        "control": "Muon plus AdamW",
+        "stock_delta": 0.14871,
+        "damage_delta": 15.1294,
+        "delta_ci95": null
+      },
+      "claim": "The all-AdamW production recipe won. This is an optimizer-recipe result, not a pure algorithm result."
+    },
+    {
+      "id": "training_checkpoint_series",
+      "section": "other",
+      "title": "Offline loss and gameplay across training",
+      "evidence": "descriptive",
+      "code": [
+        "experiments/050_scaled_temporal_awr.py"
+      ],
+      "setup": "216.5M Muon production run; full policy-world-v8; 96 boots at each completed checkpoint.",
+      "run": "p1fyyp1z",
+      "series": {
+        "updates": [8192, 16384, 24576, 40960, 57344, 98304, 114688, 122880, 131072],
+        "stock": [-0.218, 0.058, 0.164, -0.154, -0.175, 0.138, 0.26, 0.292, 0.34496],
+        "damage": [9.54, 45.03, 50.31, 39.58, 27.19, 31.63, 37.51, 41.48, 37.5902]
+      },
+      "claim": "Validation likelihood improved steadily, but gameplay was not monotonic. Checkpoint selection needs closed-loop evaluation."
+    },
+    {
+      "id": "capacity_and_latency",
+      "section": "optimal_model_size",
+      "title": "Model size, data, and control timing",
+      "evidence": "descriptive",
+      "code": [
+        "experiments/039_capacity_scaling.py",
+        "experiments/047_legacy_capacity_scaling.py",
+        "experiments/048_iso_flop_scaling.py",
+        "experiments/054_bc_capacity_latency.py",
+        "results/039_capacity_scaling"
+      ],
+      "setup": "The older O39 sweep shows strong interactions between size and deployment timing. O54 is the replacement measurement and is still outside this frozen evidence set.",
+      "comparison": null,
+      "claim": "Do not publish one monotonic size claim from the older sweep. Use the new matched size and latency results when complete."
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Two matched controller-codec comparisons</title>
+  <desc id="desc">The O26 family compares the legacy codec with a Cartesian codec. The O52 and O53 family compares Cartesian and polar stick grids. The two families are kept in separate panels.</desc>
+  <style>
+    .bg { fill: #fbfaf7; }
+    .card { fill: #fff; stroke: #d8d5ce; stroke-width: 1.5; }
+    .rule { stroke: #d8d5ce; stroke-width: 1; }
+    .zero { stroke: #776f66; stroke-width: 1.5; }
+    .grid { stroke: #ebe8e1; stroke-width: 1; }
+    .control { fill: #a9a39a; }
+    .cartesian { fill: #315f8c; }
+    .polar { fill: #bb6339; }
+    .ink { fill: #22201e; font-family: Inter, Arial, sans-serif; }
+    .muted { fill: #6f6962; font-family: Inter, Arial, sans-serif; }
+    .mono { fill: #22201e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .h1 { font-size: 30px; font-weight: 700; }
+    .h2 { font-size: 20px; font-weight: 700; }
+    .h3 { font-size: 15px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .label { font-size: 16px; }
+    .small { font-size: 13px; }
+    .value { font-size: 16px; font-weight: 700; }
+    .pill { fill: #eef4f8; stroke: #b7c9d8; }
+  </style>
+  <rect class="bg" width="1200" height="720"/>
+  <text class="ink h1" x="48" y="54">Codec Bridges</text>
+  <text class="muted label" x="48" y="82">Two one-factor tests. The Cartesian controls come from different model families.</text>
+
+  <rect class="card" x="40" y="112" width="545" height="536" rx="10"/>
+  <text class="ink h2" x="68" y="150">O26 / O43 family</text>
+  <text class="muted small" x="68" y="174">Legacy classes to Cartesian physical codec</text>
+  <text class="muted small" x="68" y="194">15.05M · B512 · U16,384 · ranked-anon-1 v7 · H4</text>
+
+  <text class="ink h3" x="68" y="238">Net stocks / min</text>
+  <line class="grid" x1="210" y1="252" x2="210" y2="356"/>
+  <line class="zero" x1="350" y1="252" x2="350" y2="356"/>
+  <line class="grid" x1="490" y1="252" x2="490" y2="356"/>
+  <text class="muted small" x="196" y="374">-0.2</text>
+  <text class="muted small" x="345" y="374">0</text>
+  <text class="muted small" x="478" y="374">+0.2</text>
+  <text class="ink label" x="68" y="286">Legacy</text>
+  <rect class="control" x="257" y="266" width="93" height="27" rx="3"/>
+  <text class="mono value" x="246" y="286" text-anchor="end">-0.133</text>
+  <text class="ink label" x="68" y="333">Cartesian</text>
+  <rect class="cartesian" x="350" y="313" width="111" height="27" rx="3"/>
+  <text class="mono value" x="471" y="333">+0.159</text>
+
+  <text class="ink h3" x="68" y="416">Net damage / min</text>
+  <line class="zero" x1="210" y1="430" x2="210" y2="534"/>
+  <line class="grid" x1="350" y1="430" x2="350" y2="534"/>
+  <line class="grid" x1="490" y1="430" x2="490" y2="534"/>
+  <text class="muted small" x="206" y="552">0</text>
+  <text class="muted small" x="340" y="552">20</text>
+  <text class="muted small" x="480" y="552">40</text>
+  <text class="ink label" x="68" y="464">Legacy</text>
+  <rect class="control" x="210" y="444" width="150" height="27" rx="3"/>
+  <text class="mono value" x="370" y="464">+21.4</text>
+  <text class="ink label" x="68" y="511">Cartesian</text>
+  <rect class="cartesian" x="210" y="491" width="263" height="27" rx="3"/>
+  <text class="mono value" x="483" y="511">+37.5</text>
+  <rect class="pill" x="68" y="580" width="320" height="42" rx="21"/>
+  <text class="mono value" x="228" y="607" text-anchor="middle">Δ +0.292 stock · +16.2 damage</text>
+
+  <rect class="card" x="615" y="112" width="545" height="536" rx="10"/>
+  <text class="ink h2" x="643" y="150">O52 / O53 family</text>
+  <text class="muted small" x="643" y="174">Cartesian stick grid to fixed polar stick grid</text>
+  <text class="muted small" x="643" y="194">14.48M · B512 · U16,384 · rank-1 v8 · D2/R2</text>
+
+  <text class="ink h3" x="643" y="238">Net stocks / min</text>
+  <line class="zero" x1="785" y1="252" x2="785" y2="356"/>
+  <line class="grid" x1="925" y1="252" x2="925" y2="356"/>
+  <line class="grid" x1="1065" y1="252" x2="1065" y2="356"/>
+  <text class="muted small" x="781" y="374">0</text>
+  <text class="muted small" x="913" y="374">+0.1</text>
+  <text class="muted small" x="1053" y="374">+0.2</text>
+  <text class="ink label" x="643" y="286">Cartesian</text>
+  <rect class="control" x="785" y="266" width="45" height="27" rx="3"/>
+  <text class="mono value" x="840" y="286">+0.032</text>
+  <text class="ink label" x="643" y="333">Polar</text>
+  <rect class="polar" x="785" y="313" width="178" height="27" rx="3"/>
+  <text class="mono value" x="973" y="333">+0.127</text>
+
+  <text class="ink h3" x="643" y="416">Net damage / min</text>
+  <line class="zero" x1="785" y1="430" x2="785" y2="534"/>
+  <line class="grid" x1="925" y1="430" x2="925" y2="534"/>
+  <line class="grid" x1="1065" y1="430" x2="1065" y2="534"/>
+  <text class="muted small" x="781" y="552">0</text>
+  <text class="muted small" x="915" y="552">20</text>
+  <text class="muted small" x="1055" y="552">40</text>
+  <text class="ink label" x="643" y="464">Cartesian</text>
+  <rect class="control" x="785" y="444" width="238" height="27" rx="3"/>
+  <text class="mono value" x="1033" y="464">+34.0</text>
+  <text class="ink label" x="643" y="511">Polar</text>
+  <rect class="polar" x="785" y="491" width="244" height="27" rx="3"/>
+  <text class="mono value" x="1039" y="511">+34.8</text>
+  <rect class="pill" x="643" y="580" width="314" height="42" rx="21"/>
+  <text class="mono value" x="800" y="607" text-anchor="middle">Δ +0.095 stock · +0.88 damage</text>
+
+  <text class="muted small" x="40" y="690">Bars show arm means. Direct paired intervals have not yet been consolidated for these two tests.</text>
+</svg>

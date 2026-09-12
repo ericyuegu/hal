@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 500" role="img" aria-labelledby="title desc">
+  <title id="title">BPE turns repeated controller frames into variable-length action spans</title>
+  <desc id="desc">A frame-aligned stream of joint controller symbols is greedily segmented into learned BPE tokens. Early learned merges are pure repeated holds. One sampled token can cover several game frames.</desc>
+  <style>
+    .bg { fill: #fbfaf7; }
+    .card { fill: #fff; stroke: #d8d5ce; stroke-width: 1.5; }
+    .a { fill: #dceaf4; stroke: #769bbb; }
+    .b { fill: #f1e2d8; stroke: #bd7e58; }
+    .c { fill: #e6eddc; stroke: #8fa870; }
+    .span-a { fill: #315f8c; stroke: #274d72; }
+    .span-b { fill: #b95f36; stroke: #934823; }
+    .span-c { fill: #6f8b4d; stroke: #546c38; }
+    .line { stroke: #756f68; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    .ink { fill: #22201e; font-family: Inter, Arial, sans-serif; }
+    .white { fill: #fff; font-family: Inter, Arial, sans-serif; }
+    .muted { fill: #6f6962; font-family: Inter, Arial, sans-serif; }
+    .mono { fill: #22201e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .h1 { font-size: 28px; font-weight: 700; }
+    .h2 { font-size: 17px; font-weight: 700; }
+    .label { font-size: 15px; font-weight: 650; }
+    .small { font-size: 13px; }
+    .token { font-size: 16px; font-weight: 700; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#756f68"/></marker>
+  </defs>
+  <rect class="bg" width="1120" height="500"/>
+  <text class="ink h1" x="42" y="52">Run-Length Actions</text>
+  <text class="muted small" x="42" y="78">O18 learns spans with BPE over the joint controller symbol. It does not emit a separate duration token.</text>
+
+  <rect class="card" x="42" y="108" width="1036" height="326" rx="10"/>
+  <text class="ink h2" x="68" y="144">Frame-aligned controller stream</text>
+  <text class="muted small" x="68" y="166">Each box is one game frame after the four controller groups are packed together.</text>
+
+  <g>
+    <rect class="a" x="68" y="188" width="92" height="58" rx="7"/>
+    <rect class="a" x="170" y="188" width="92" height="58" rx="7"/>
+    <rect class="a" x="272" y="188" width="92" height="58" rx="7"/>
+    <rect class="b" x="374" y="188" width="92" height="58" rx="7"/>
+    <rect class="b" x="476" y="188" width="92" height="58" rx="7"/>
+    <rect class="c" x="578" y="188" width="92" height="58" rx="7"/>
+    <rect class="c" x="680" y="188" width="92" height="58" rx="7"/>
+    <rect class="a" x="782" y="188" width="92" height="58" rx="7"/>
+    <text class="mono token" x="114" y="223" text-anchor="middle">A</text>
+    <text class="mono token" x="216" y="223" text-anchor="middle">A</text>
+    <text class="mono token" x="318" y="223" text-anchor="middle">A</text>
+    <text class="mono token" x="420" y="223" text-anchor="middle">B</text>
+    <text class="mono token" x="522" y="223" text-anchor="middle">B</text>
+    <text class="mono token" x="624" y="223" text-anchor="middle">C</text>
+    <text class="mono token" x="726" y="223" text-anchor="middle">C</text>
+    <text class="mono token" x="828" y="223" text-anchor="middle">A</text>
+    <text class="muted small" x="68" y="267">8 frames · 8 repeated decisions in a frame-level head</text>
+  </g>
+
+  <path class="line" d="M470 278 L470 312"/>
+  <text class="muted small" x="493" y="302">greedy BPE segmentation</text>
+
+  <text class="ink h2" x="68" y="344">Learned span tokens</text>
+  <g>
+    <rect class="span-a" x="68" y="362" width="296" height="50" rx="7"/>
+    <rect class="span-b" x="374" y="362" width="194" height="50" rx="7"/>
+    <rect class="span-c" x="578" y="362" width="194" height="50" rx="7"/>
+    <rect class="span-a" x="782" y="362" width="92" height="50" rx="7"/>
+    <text class="white token" x="216" y="393" text-anchor="middle">token: A × 3</text>
+    <text class="white token" x="471" y="393" text-anchor="middle">B × 2</text>
+    <text class="white token" x="675" y="393" text-anchor="middle">C × 2</text>
+    <text class="white token" x="828" y="393" text-anchor="middle">A</text>
+  </g>
+
+  <rect class="card" x="902" y="178" width="150" height="166" rx="8"/>
+  <text class="ink label" x="977" y="208" text-anchor="middle">What BPE found</text>
+  <text class="muted small" x="977" y="236" text-anchor="middle">13.8× compression</text>
+  <text class="muted small" x="977" y="258" text-anchor="middle">at vocab 4,096</text>
+  <text class="muted small" x="977" y="290" text-anchor="middle">First 256 merges:</text>
+  <text class="ink label" x="977" y="315" text-anchor="middle">100% pure holds</text>
+
+  <text class="muted small" x="42" y="470">The deployed token could span up to 16 frames and was executed to completion. That cadence change is part of the failed O18 package.</text>
+</svg>
