@@ -354,7 +354,7 @@
   "key": "observation-token",
   "name": "The observation token",
   "source": "custom",
-  "caption": "Every source of one token. The four player blocks share one encoder; the four projectile slots share another and are summed, so an empty slot adds nothing and order does not matter. Characters, stage and the player identity are embedded directly. The previous controller frame enters as the classes the decoder predicts, each class carrying its learned embedding and the physical stick or trigger value.",
+  "caption": "Every source of one token. Player blocks carry a validity mask; an absent follower is all zeros with its mask set. The four projectile slots share one encoder whose output is multiplied by the slot’s presence flag before the sum, so an empty slot adds exactly zero and order does not matter. Characters, stage and the player identity are embedded directly. The previous controller frame enters as the classes the decoder predicts, each class carrying its learned embedding and the physical stick or trigger value.",
   "data": [],
   "studies": [
    "projectile_inputs",
