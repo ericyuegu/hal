@@ -2083,6 +2083,10 @@ class LatencyProbe:
         return p99 is not None and p99 < self.deadline_seconds
 
 
+class LatencyProbeFailure(RuntimeError):
+    """One width cannot satisfy the measured deployment contract."""
+
+
 def _latency_manifest_payload(rows: Sequence[LatencyRow], gpu_name: str) -> dict[str, object]:
     return {
         "schema": 1,
@@ -2252,7 +2256,7 @@ def benchmark_width_latency(
             _log_latency_probe(probe)
             if on_probe is not None:
                 on_probe(probe)
-            raise RuntimeError(f"width {width} ran out of CUDA memory at d={delay}") from error
+            raise LatencyProbeFailure(f"width {width} ran out of CUDA memory at d={delay}") from error
         finally:
             del inference, model, context
             torch.cuda.empty_cache()
@@ -2273,7 +2277,7 @@ def benchmark_width_latency(
         )
         if row.meets_deadline:
             return row
-    raise RuntimeError(f"width {width} cannot meet the buffered deadline with d <= 6")
+    raise LatencyProbeFailure(f"width {width} cannot meet the buffered deadline with d <= 6")
 
 
 def run_latency_preflight(path: Path) -> str:
@@ -2290,7 +2294,15 @@ def run_latency_preflight(path: Path) -> str:
         write_latency_probe_report(report_path, probes, gpu_name)
 
     print(f"[latency] raw probe report: {report_path}", flush=True)
-    rows = tuple(benchmark_width_latency(width, on_probe=record) for width in WIDTHS)
+    rows: list[LatencyRow] = []
+    failures: list[str] = []
+    for width in WIDTHS:
+        try:
+            rows.append(benchmark_width_latency(width, on_probe=record))
+        except LatencyProbeFailure as error:
+            failures.append(str(error))
+    if failures:
+        raise LatencyProbeFailure(f"latency preflight rejected widths: {'; '.join(failures)}")
     return write_latency_manifest(path, rows, gpu_name)
 
 

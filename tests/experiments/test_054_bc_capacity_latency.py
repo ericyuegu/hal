@@ -268,6 +268,29 @@ def test_latency_probe_distinguishes_oom_from_a_deadline_miss() -> None:
     assert not probe.meets_deadline
 
 
+def test_latency_preflight_measures_all_widths_before_rejecting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    measured: list[int] = []
+
+    def benchmark(width: int, *, on_probe):
+        del on_probe
+        measured.append(width)
+        if width in (512, 1024):
+            raise exp.LatencyProbeFailure(f"width {width} missed")
+        delay = exp.INITIAL_DELAYS[width]
+        return exp.LatencyRow(width, delay, delay, 2 * delay, 0.001, 1 / 60)
+
+    monkeypatch.setattr(exp.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(exp.torch.cuda, "get_device_name", lambda: "NVIDIA GeForce RTX 3060")
+    monkeypatch.setattr(exp, "benchmark_width_latency", benchmark)
+
+    with pytest.raises(exp.LatencyProbeFailure, match="width 512 missed; width 1024 missed"):
+        exp.run_latency_preflight(tmp_path / "latency.json")
+
+    assert measured == list(exp.WIDTHS)
+
+
 def test_checkpoint_contains_no_advantage_or_value_configuration() -> None:
     state = exp._checkpoint_config(exp.config_for_width(256, updates=16_384))
 
