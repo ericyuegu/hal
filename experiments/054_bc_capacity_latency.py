@@ -2037,6 +2037,52 @@ class LatencyRow:
         return self.p99_seconds < self.inference_delay_frames * self.frame_period_seconds
 
 
+@dataclass(frozen=True, slots=True)
+class LatencyProbe:
+    width: int
+    inference_delay_frames: int
+    replan_interval_frames: int
+    prediction_frames: int
+    status: Literal["measured", "oom"]
+    samples_seconds: tuple[float, ...]
+    peak_allocated_bytes: int
+    peak_reserved_bytes: int
+    frame_period_seconds: float = 1 / 60
+    batch_size: int = 32
+    warmup_calls: int = 50
+    measured_calls: int = 500
+
+    def __post_init__(self) -> None:
+        TimingConfig(
+            self.inference_delay_frames,
+            self.replan_interval_frames,
+            self.prediction_frames,
+        )
+        if self.status == "measured":
+            if len(self.samples_seconds) != self.measured_calls:
+                raise ValueError("measured latency probe has the wrong sample count")
+            if any(not math.isfinite(sample) or sample < 0 for sample in self.samples_seconds):
+                raise ValueError("latency samples must be finite and non-negative")
+        elif self.samples_seconds:
+            raise ValueError("OOM latency probe cannot contain timing samples")
+        if self.peak_allocated_bytes < 0 or self.peak_reserved_bytes < self.peak_allocated_bytes:
+            raise ValueError("latency probe has invalid CUDA memory peaks")
+
+    @property
+    def deadline_seconds(self) -> float:
+        return self.inference_delay_frames * self.frame_period_seconds
+
+    def percentile_seconds(self, percentile: float) -> float | None:
+        if not self.samples_seconds:
+            return None
+        return float(np.percentile(self.samples_seconds, percentile))
+
+    @property
+    def meets_deadline(self) -> bool:
+        p99 = self.percentile_seconds(99)
+        return p99 is not None and p99 < self.deadline_seconds
+
+
 def _latency_manifest_payload(rows: Sequence[LatencyRow], gpu_name: str) -> dict[str, object]:
     return {
         "schema": 1,
@@ -2080,6 +2126,51 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
     return {row.width: row for row in rows}, actual
 
 
+def write_latency_probe_report(path: Path, probes: Sequence[LatencyProbe], gpu_name: str) -> None:
+    """Atomically persist every raw latency sample, including partial runs."""
+    payload = {
+        "schema": 1,
+        "gpu_name": gpu_name,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "device_total_memory_bytes": torch.cuda.get_device_properties(0).total_memory,
+        "probes": [asdict(probe) for probe in probes],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def _log_latency_probe(probe: LatencyProbe) -> None:
+    allocated_gib = probe.peak_allocated_bytes / 2**30
+    reserved_gib = probe.peak_reserved_bytes / 2**30
+    prefix = (
+        f"[latency] W{probe.width} d={probe.inference_delay_frames} "
+        f"R={probe.replan_interval_frames} H={probe.prediction_frames} B={probe.batch_size}"
+    )
+    if probe.status == "oom":
+        print(
+            f"{prefix} OOM peak_allocated={allocated_gib:.3f} GiB peak_reserved={reserved_gib:.3f} GiB",
+            flush=True,
+        )
+        return
+    p50 = probe.percentile_seconds(50)
+    p95 = probe.percentile_seconds(95)
+    p99 = probe.percentile_seconds(99)
+    maximum = max(probe.samples_seconds)
+    assert p50 is not None and p95 is not None and p99 is not None
+    margin_ms = (probe.deadline_seconds - p99) * 1e3
+    result = "PASS" if probe.meets_deadline else "MISS"
+    print(
+        f"{prefix} p50={p50 * 1e3:.3f} ms p95={p95 * 1e3:.3f} ms "
+        f"p99={p99 * 1e3:.3f} ms max={maximum * 1e3:.3f} ms "
+        f"deadline={probe.deadline_seconds * 1e3:.3f} ms margin={margin_ms:.3f} ms "
+        f"peak_allocated={allocated_gib:.3f} GiB peak_reserved={reserved_gib:.3f} GiB {result}",
+        flush=True,
+    )
+
+
 def latency_bucket_frontier(rows: Mapping[int, LatencyRow]) -> tuple[int, ...]:
     """Return the largest benchmarked width in each observed delay bucket."""
     frontier: dict[int, int] = {}
@@ -2099,11 +2190,14 @@ def benchmark_width_latency(
     frame_period_seconds: float = 1 / 60,
     warmup_calls: int = 50,
     measured_calls: int = 500,
+    on_probe: Callable[[LatencyProbe], None] | None = None,
 ) -> LatencyRow:
     if not torch.cuda.is_available():
         raise RuntimeError("latency preflight requires the target CUDA GPU")
     device = torch.device("cuda")
     for delay in range(1, 7):
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
         cfg = replace(
             config_for_width(width, updates=1),
             timing=TimingConfig(delay, delay, 2 * delay),
@@ -2111,20 +2205,62 @@ def benchmark_width_latency(
             compile_trunk=False,
             compile_temporal=False,
         )
-        model = GPT(cfg).to(device=device, dtype=torch.bfloat16).eval()
-        inference = BF16Inference(model, cfg, compiled=False)
-        context = synthetic_context(cfg, 32, device)
-        generator = torch.Generator(device=device).manual_seed(cfg.eval_seed)
-        for _ in range(warmup_calls):
-            inference.decode(context, cfg.prediction_frames, gen=generator)
-        torch.cuda.synchronize(device)
-        samples = np.empty(measured_calls, dtype=np.float64)
-        for index in range(measured_calls):
-            started = time.perf_counter()
-            inference.decode(context, cfg.prediction_frames, gen=generator)
+        model: GPT | None = None
+        inference: BF16Inference | None = None
+        context: Context | None = None
+        try:
+            model = GPT(cfg).to(device=device, dtype=torch.bfloat16).eval()
+            inference = BF16Inference(model, cfg, compiled=False)
+            context = synthetic_context(cfg, 32, device)
+            generator = torch.Generator(device=device).manual_seed(cfg.eval_seed)
+            for _ in range(warmup_calls):
+                inference.decode(context, cfg.prediction_frames, gen=generator)
             torch.cuda.synchronize(device)
-            samples[index] = time.perf_counter() - started
-        p99 = float(np.percentile(samples, 99))
+            samples = np.empty(measured_calls, dtype=np.float64)
+            for index in range(measured_calls):
+                started = time.perf_counter()
+                inference.decode(context, cfg.prediction_frames, gen=generator)
+                torch.cuda.synchronize(device)
+                samples[index] = time.perf_counter() - started
+            probe = LatencyProbe(
+                width=width,
+                inference_delay_frames=delay,
+                replan_interval_frames=delay,
+                prediction_frames=2 * delay,
+                status="measured",
+                samples_seconds=tuple(map(float, samples)),
+                peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
+                peak_reserved_bytes=torch.cuda.max_memory_reserved(device),
+                frame_period_seconds=frame_period_seconds,
+                warmup_calls=warmup_calls,
+                measured_calls=measured_calls,
+            )
+        except torch.cuda.OutOfMemoryError as error:
+            probe = LatencyProbe(
+                width=width,
+                inference_delay_frames=delay,
+                replan_interval_frames=delay,
+                prediction_frames=2 * delay,
+                status="oom",
+                samples_seconds=(),
+                peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
+                peak_reserved_bytes=torch.cuda.max_memory_reserved(device),
+                frame_period_seconds=frame_period_seconds,
+                warmup_calls=warmup_calls,
+                measured_calls=measured_calls,
+            )
+            _log_latency_probe(probe)
+            if on_probe is not None:
+                on_probe(probe)
+            raise RuntimeError(f"width {width} ran out of CUDA memory at d={delay}") from error
+        finally:
+            del inference, model, context
+            torch.cuda.empty_cache()
+        _log_latency_probe(probe)
+        if on_probe is not None:
+            on_probe(probe)
+        p99 = probe.percentile_seconds(99)
+        assert p99 is not None
         row = LatencyRow(
             width=width,
             inference_delay_frames=delay,
@@ -2135,8 +2271,6 @@ def benchmark_width_latency(
             warmup_calls=warmup_calls,
             measured_calls=measured_calls,
         )
-        del inference, model, context
-        torch.cuda.empty_cache()
         if row.meets_deadline:
             return row
     raise RuntimeError(f"width {width} cannot meet the buffered deadline with d <= 6")
@@ -2148,7 +2282,15 @@ def run_latency_preflight(path: Path) -> str:
     gpu_name = torch.cuda.get_device_name()
     if "RTX 3060" not in gpu_name:
         raise RuntimeError(f"latency preflight requires the target RTX 3060, found {gpu_name!r}")
-    rows = tuple(benchmark_width_latency(width) for width in WIDTHS)
+    report_path = path.with_suffix(".probes.json")
+    probes: list[LatencyProbe] = []
+
+    def record(probe: LatencyProbe) -> None:
+        probes.append(probe)
+        write_latency_probe_report(report_path, probes, gpu_name)
+
+    print(f"[latency] raw probe report: {report_path}", flush=True)
+    rows = tuple(benchmark_width_latency(width, on_probe=record) for width in WIDTHS)
     return write_latency_manifest(path, rows, gpu_name)
 
 

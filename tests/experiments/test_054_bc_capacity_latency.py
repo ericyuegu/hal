@@ -226,6 +226,48 @@ def test_latency_manifest_is_hashed_and_strict(tmp_path: Path) -> None:
         exp.load_latency_manifest(path)
 
 
+def test_latency_probe_report_preserves_raw_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        exp.torch.cuda, "get_device_properties", lambda _device: SimpleNamespace(total_memory=12 * 2**30)
+    )
+    probe = exp.LatencyProbe(
+        width=512,
+        inference_delay_frames=2,
+        replan_interval_frames=2,
+        prediction_frames=4,
+        status="measured",
+        samples_seconds=(0.010, 0.020, 0.030),
+        peak_allocated_bytes=4 * 2**30,
+        peak_reserved_bytes=5 * 2**30,
+        measured_calls=3,
+    )
+    path = tmp_path / "latency.probes.json"
+
+    exp.write_latency_probe_report(path, (probe,), "NVIDIA GeForce RTX 3060")
+    payload = exp.json.loads(path.read_text())
+
+    assert payload["device_total_memory_bytes"] == 12 * 2**30
+    assert payload["probes"][0]["samples_seconds"] == [0.010, 0.020, 0.030]
+    assert probe.percentile_seconds(99) == pytest.approx(0.0298)
+    assert probe.meets_deadline
+
+
+def test_latency_probe_distinguishes_oom_from_a_deadline_miss() -> None:
+    probe = exp.LatencyProbe(
+        width=512,
+        inference_delay_frames=6,
+        replan_interval_frames=6,
+        prediction_frames=12,
+        status="oom",
+        samples_seconds=(),
+        peak_allocated_bytes=11 * 2**30,
+        peak_reserved_bytes=12 * 2**30,
+    )
+
+    assert probe.percentile_seconds(99) is None
+    assert not probe.meets_deadline
+
+
 def test_checkpoint_contains_no_advantage_or_value_configuration() -> None:
     state = exp._checkpoint_config(exp.config_for_width(256, updates=16_384))
 
