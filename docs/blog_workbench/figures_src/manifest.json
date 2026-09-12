@@ -58,5 +58,17 @@
    "onehot_button_pruning"
   ],
   "data": []
+ },
+ {
+  "key": "awr-ledger",
+  "name": "Reward, return and weight, frame by frame",
+  "caption": "One game from the ego port’s side. Damage dealt and taken and stock changes are the reward; the return discounts it with the chosen half-life; the weight is the capped exponential of the return over a baseline, divided by β. The knobs default to the O52 values.",
+  "studies": [
+   "awr_actor_weighting",
+   "awr_gamma"
+  ],
+  "data": [
+   "awrLedgerRows"
+  ]
  }
 ]

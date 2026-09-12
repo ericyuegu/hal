@@ -1,0 +1,31 @@
+<figure class="breakout ledger-figure" id="awr-ledger">
+  <div class="artifact interactive">
+    <div class="figure-head">
+      <div>
+        <h4>Reward, return and weight, frame by frame</h4>
+        <p>One game from the ego port’s side. Move over the strips to read a frame.</p>
+      </div>
+    </div>
+    <div class="ledger-controls">
+      <div class="ledger-row">
+        <div class="segmented" id="ledger-games" aria-label="Game"></div>
+        <div class="segmented" id="ledger-ego" aria-label="Ego port">
+          <button type="button" data-ego="1" aria-pressed="true">port 1</button>
+          <button type="button" data-ego="2" aria-pressed="false">port 2</button>
+        </div>
+        <div class="segmented" id="ledger-base" aria-label="Baseline">
+          <button type="button" data-base="ema" aria-pressed="true">baseline: causal EMA</button>
+          <button type="button" data-base="mean" aria-pressed="false">game mean</button>
+        </div>
+      </div>
+      <div class="ledger-row ledger-knobs">
+        <label><span>return half-life</span><input type="range" id="ledger-hl" min="0.5" max="20" step="0.5" value="8"><output id="ledger-hl-v"></output></label>
+        <label><span>β</span><input type="range" id="ledger-beta" min="1.3" max="3" step="0.01" value="2.3"><output id="ledger-beta-v"></output></label>
+        <label><span>weight cap</span><input type="range" id="ledger-cap" min="1" max="10" step="0.5" value="3.5"><output id="ledger-cap-v"></output></label>
+        <button type="button" class="ledger-reset" id="ledger-reset">O52 values</button>
+      </div>
+    </div>
+    <svg class="ledger-svg" id="ledger-svg" role="img" aria-label="Three strips on one time axis: damage and stock events, the discounted return with its baseline, and the resulting AWR weight on a log scale."></svg>
+    <div class="ledger-readout" id="ledger-readout"></div>
+  </div>
+</figure>

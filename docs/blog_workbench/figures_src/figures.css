@@ -62,3 +62,32 @@
 .rle-diagram .span{fill:color-mix(in srgb,var(--oxblood) 9%,var(--paper));stroke:var(--oxblood);stroke-width:1.1}
 .rle-diagram .brace{fill:none;stroke:var(--ink-faint);stroke-width:1}
 .rle-diagram .stat{font-size:15px;fill:var(--ink)}
+
+/* ---------- AWR ledger ---------- */
+.ledger-controls{display:flex;flex-direction:column;gap:8px;margin:0 0 10px}
+.ledger-row{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
+.ledger-knobs label{display:inline-flex;align-items:center;gap:8px;font:400 .72rem/1.4 var(--mono);color:var(--ink-mono)}
+.ledger-knobs label span{min-width:0}
+.ledger-knobs input[type=range]{width:150px;accent-color:var(--oxblood);margin:0}
+.ledger-knobs output{font-variant-numeric:tabular-nums;color:var(--ink);min-width:7ch}
+.ledger-reset{font:400 .72rem/1.4 var(--mono);color:var(--ink-mono);background:transparent;border:1px dotted var(--rule-dotted);padding:4px 9px;cursor:pointer}
+.ledger-reset:hover{color:var(--ink);border-color:var(--ink)}
+.ledger-svg{display:block;width:100%;height:auto;cursor:crosshair}
+.ledger-svg text{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.ledger-svg .lbl{font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;fill:var(--ink)}
+.ledger-svg .tick{font-size:9px;fill:var(--ink-mono)}
+.ledger-svg .grid{stroke:var(--rule);stroke-width:1}
+.ledger-svg .axis{stroke:var(--rule-dotted);stroke-width:1}
+.ledger-svg .ev-dealt{stroke:var(--ink);stroke-width:1}
+.ledger-svg .ev-taken{stroke:var(--oxblood);stroke-width:1}
+.ledger-svg .death-opp{fill:var(--ink)}
+.ledger-svg .death-ego{fill:var(--oxblood)}
+.ledger-svg .line-G{fill:none;stroke:var(--ink);stroke-width:1.4}
+.ledger-svg .line-B{fill:none;stroke:var(--ink-faint);stroke-width:1;stroke-dasharray:3 3}
+.ledger-svg .area-w{fill:color-mix(in srgb,var(--oxblood) 12%,transparent)}
+.ledger-svg .line-w{fill:none;stroke:var(--oxblood);stroke-width:1.4}
+.ledger-svg .rule-one{stroke:var(--ink-faint);stroke-width:1}
+.ledger-svg .rule-cap{stroke:var(--oxblood);stroke-width:1;stroke-dasharray:2 3}
+.ledger-svg .head{stroke:var(--ink);stroke-width:1}
+.ledger-readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:4px 14px;margin-top:8px;font:400 .72rem/1.5 var(--mono);color:var(--ink-mono);font-variant-numeric:tabular-nums;min-height:2.4em}
+.ledger-readout b{color:var(--ink);font-weight:500}

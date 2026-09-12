@@ -508,7 +508,8 @@ def build() -> None:
     (DIST / "figures" / "anatomy.js").write_text(main_script())
     (DIST / "figures" / "explorer.js").write_text(explorer_scripts())
     kit = (HERE / "figures_src" / "diagram-kit.js").read_text()
-    (DIST / "figures" / "custom.js").write_text(kit + "\n" + "\n".join(f["js"] for f in custom))
+    ledger = "window.HALFIG_AWR_LEDGER = " + (HERE / "figures_src" / "awr-ledger.json").read_text().strip() + ";\n"
+    (DIST / "figures" / "custom.js").write_text(kit + "\n" + ledger + "\n".join(f["js"] for f in custom))
 
     shell = (HERE / "shell.html").read_text()
     html = (

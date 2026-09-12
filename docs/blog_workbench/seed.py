@@ -456,6 +456,10 @@ def compose() -> None:
             blocks_md("Block name: Reward must travel far enough backward"),
             note=fig_note("Figure name: AWR Weight Explorer"),
         )
+        figure(
+            "awr-ledger",
+            note="Option A of the AWR explorer brainstorm (2026-09-12): the ledger; a stage view or self-hosted slippilab may follow.",
+        )
         text(blocks_md("- **All AdamW versus Muon plus AdamW.**"))
         text(blocks_md("- **Batch size at fixed examples.**"))
         figure("batch-sweep")
