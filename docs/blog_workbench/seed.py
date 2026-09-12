@@ -430,14 +430,9 @@ def compose() -> None:
             hidden=True,
             note="Draft SVG from blog_figures/. Parked: Fig 4 already shows both matched tests.",
         )
-        figure(
-            "io-paths",
-            "The past controller frame enters through the same class set the output head predicts: a learned class embedding plus a projection of the physical stick and trigger values.",
-            note="Explorer figure; blocks.md 'Action History Path — reuse/refine'. Pairs with the past-action block below.",
-        )
+        figure("observation-token", note="Replaces io-paths + the observation-inputs SVG (2026-09-12, option A).")
         text(blocks_md("Block name: Remember the physical control"))
         text(blocks_md("Block name: One observation token"))
-        figure("svg-observation-inputs", note=fig_note("Figure name: Observation Inputs"))
         text(blocks_md("Block name: Nonlinear action readouts matter"))
         text(blocks_md("Block name: Three paths into the action logits"))
         figure("action-logit-paths", note=fig_note("Figure name: Action Logit Paths"))
