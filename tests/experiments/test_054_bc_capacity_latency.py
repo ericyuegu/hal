@@ -56,23 +56,27 @@ def test_behavior_cloning_objective_normalizes_by_offset_weight_sum() -> None:
 
 def test_parameter_and_compute_contracts() -> None:
     expected_totals = {
-        128: 4_248_857,
-        256: 14_415_257,
-        384: 31_249_945,
-        512: 54_752_921,
+        128: 1_692_953,
+        256: 5_764_505,
+        384: 17_094_169,
+        512: 39_024_281,
+        640: 70_178_585,
         768: 121_763_737,
-        1024: 215_447_705,
+        896: 194_172_953,
+        1024: 278_362_265,
     }
     for width, expected in expected_totals.items():
         cfg = exp.config_for_width(width)
+        assert cfg.arch.n_layers == exp.TRUNK_DEPTHS[width]
         model = exp.GPT(cfg)
         counts = exp.subsystem_parameter_counts(model)
         assert counts["total"] == expected
         assert exp.approximate_training_flops_per_update(cfg, counts) == (
             6 * 512 * 128 * exp.effective_parameter_count(counts)
         )
-    assert exp.iso_compute_updates(256) == (16_384, 61_024)
-    assert exp.scientific_checkpoint_updates(exp.config_for_width(768)) == (28_864,)
+    assert exp.iso_compute_updates(256) == (16_384, 84_320)
+    assert exp.scientific_checkpoint_updates(exp.config_for_width(768)) == (35_072,)
+    assert exp.scientific_checkpoint_updates(exp.config_for_width(256)) == (84_320,)
 
 
 def test_data_selection_is_the_frozen_all_44_order() -> None:
@@ -86,15 +90,28 @@ def test_data_selection_is_the_frozen_all_44_order() -> None:
     assert cfg.generations_per_replay * cfg.windows_per_generation == 32
 
 
-def test_optimizer_does_not_scale_with_duration() -> None:
+def test_powerlines_weight_decay_scales_with_duration_and_capacity() -> None:
     short = exp.config_for_width(128, updates=1_000)
     long = exp.config_for_width(128, updates=10_000)
     short_optimizer = exp.make_optimizer(exp.GPT(short), short)
     long_optimizer = exp.make_optimizer(exp.GPT(long), long)
 
-    assert [(group["lr"], group["betas"], group["eps"]) for group in short_optimizer.param_groups] == [
-        (group["lr"], group["betas"], group["eps"]) for group in long_optimizer.param_groups
-    ]
+    assert exp.config_for_width(512, updates=16_384).adam_weight_decay == pytest.approx(1e-4)
+    assert short.adam_weight_decay > long.adam_weight_decay
+    assert short.adam_weight_decay == pytest.approx(
+        exp.powerlines_weight_decay(short.target_positions, exp.PARAMETER_COUNT_CONTRACTS[128]["total"])
+    )
+    assert {group["lr"] for group in short_optimizer.param_groups} == {
+        group["lr"] for group in long_optimizer.param_groups
+    }
+    assert {group["weight_decay"] for group in short_optimizer.param_groups} == {
+        0.0,
+        short.adam_weight_decay,
+    }
+    assert {group["weight_decay"] for group in long_optimizer.param_groups} == {
+        0.0,
+        long.adam_weight_decay,
+    }
     assert exp.lr_schedule(short)(511) == 1.0
     assert exp.lr_schedule(short)(50_000) == 1.0
 

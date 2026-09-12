@@ -1,6 +1,7 @@
 """Experiment 054: behavior-cloning capacity versus buffered latency.
 
-This standalone experiment scales O52's policy architecture at fixed depth.
+This standalone experiment scales O52's policy architecture along one joint
+width-depth family.
 It uses pure behavior cloning over nested prefixes of the all-44
 policy-world-v8 corpus and evaluates each width with its measured buffered
 deployment timing.
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import gc
 import hashlib
 import itertools
 import json
@@ -163,7 +165,7 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "054_bc_capacity_latency_v1"
+_EXPERIMENT_ID: Final[str] = "054_bc_capacity_latency_v2"
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 
 
@@ -196,7 +198,7 @@ class Architecture:
     temporal_reference_attention_scale: ClassVar[float] = 0.5
 
     d_model: int = 1024
-    n_layers: int = 16
+    n_layers: int = 21
     n_heads: int = 16
     attn_window: int = 0
     L_ctx: int = 256
@@ -227,6 +229,7 @@ class Architecture:
             raise ValueError(f"width must be one of {WIDTHS}, got {width}")
         return cls(
             d_model=width,
+            n_layers=TRUNK_DEPTHS[width],
             n_heads=width // 64,
             temporal_d_model=width // 2,
             temporal_heads=width // 128,
@@ -274,6 +277,16 @@ class TimingConfig:
 
 
 WIDTHS: Final[tuple[int, ...]] = (128, 256, 384, 512, 640, 768, 896, 1024)
+TRUNK_DEPTHS: Final[dict[int, int]] = {
+    128: 3,
+    256: 5,
+    384: 8,
+    512: 11,
+    640: 13,
+    768: 16,
+    896: 19,
+    1024: 21,
+}
 INITIAL_DELAYS: Final[dict[int, int]] = {
     128: 1,
     256: 1,
@@ -285,55 +298,55 @@ INITIAL_DELAYS: Final[dict[int, int]] = {
     1024: 6,
 }
 MAX_UPDATES: Final[dict[int, int]] = {
-    128: 54_656,
-    256: 61_024,
-    384: 28_480,
-    512: 63_648,
+    128: 54_048,
+    256: 84_320,
+    384: 33_472,
+    512: 97_696,
     640: 16_384,
-    768: 28_864,
+    768: 35_072,
     896: 16_384,
     1024: 16_384,
 }
 ISO_COMPUTE_CHECKPOINTS: Final[dict[str, tuple[tuple[int, int], ...]]] = {
-    "C1": ((128, 54_656), (256, 16_384), (384, 7_648)),
-    "C2": ((256, 61_024), (384, 28_480), (512, 16_384)),
-    "C3": ((512, 63_648), (768, 28_864), (1024, 16_384)),
+    "C1": ((128, 54_048), (256, 16_384), (384, 6_496)),
+    "C2": ((256, 84_320), (384, 33_472), (512, 16_384)),
+    "C3": ((512, 97_696), (768, 35_072), (1024, 16_384)),
 }
 PARAMETER_COUNT_CONTRACTS: Final[dict[int, dict[str, int]]] = {
     128: {
-        "trunk": 3_145_728,
+        "trunk": 589_824,
         "temporal_decoder": 218_416,
         "group_heads": 84_899,
         "inputs": 799_814,
-        "total": 4_248_857,
+        "total": 1_692_953,
     },
     256: {
-        "trunk": 12_582_912,
+        "trunk": 3_932_160,
         "temporal_decoder": 768_752,
         "group_heads": 202_211,
         "inputs": 861_382,
-        "total": 14_415_257,
+        "total": 5_764_505,
     },
     384: {
-        "trunk": 28_311_552,
+        "trunk": 14_155_776,
         "temporal_decoder": 1_663_152,
         "group_heads": 352_291,
         "inputs": 922_950,
-        "total": 31_249_945,
+        "total": 17_094_169,
     },
     512: {
-        "trunk": 50_331_648,
+        "trunk": 34_603_008,
         "temporal_decoder": 2_901_616,
         "group_heads": 535_139,
         "inputs": 984_518,
-        "total": 54_752_921,
+        "total": 39_024_281,
     },
     640: {
-        "trunk": 78_643_200,
+        "trunk": 63_897_600,
         "temporal_decoder": 4_484_144,
         "group_heads": 750_755,
         "inputs": 1_046_086,
-        "total": 84_924_185,
+        "total": 70_178_585,
     },
     768: {
         "trunk": 113_246_208,
@@ -343,20 +356,40 @@ PARAMETER_COUNT_CONTRACTS: Final[dict[int, dict[str, int]]] = {
         "total": 121_763_737,
     },
     896: {
-        "trunk": 154_140_672,
+        "trunk": 183_042_048,
         "temporal_decoder": 8_681_392,
         "group_heads": 1_280_291,
         "inputs": 1_169_222,
-        "total": 165_271_577,
+        "total": 194_172_953,
     },
     1024: {
-        "trunk": 201_326_592,
+        "trunk": 264_241_152,
         "temporal_decoder": 11_296_112,
         "group_heads": 1_594_211,
         "inputs": 1_230_790,
-        "total": 215_447_705,
+        "total": 278_362_265,
     },
 }
+
+POWERLINES_EXPONENT: Final[float] = 0.52
+POWERLINES_REFERENCE_WIDTH: Final[int] = 512
+POWERLINES_REFERENCE_POSITIONS: Final[int] = 2**30
+POWERLINES_REFERENCE_WEIGHT_DECAY: Final[float] = 1e-4
+
+
+def powerlines_weight_decay(positions: int, total_parameters: int) -> float:
+    """Scale AdamW decay from the declared W512, D=2^30 anchor."""
+    if positions < 1 or total_parameters < 1:
+        raise ValueError("Power Lines positions and parameters must be positive")
+    reference_parameters = PARAMETER_COUNT_CONTRACTS[POWERLINES_REFERENCE_WIDTH]["total"]
+    tokens_per_parameter_ratio = (positions / total_parameters) / (
+        POWERLINES_REFERENCE_POSITIONS / reference_parameters
+    )
+    return (
+        POWERLINES_REFERENCE_WEIGHT_DECAY
+        * (POWERLINES_REFERENCE_POSITIONS / positions)
+        * tokens_per_parameter_ratio**POWERLINES_EXPONENT
+    )
 
 
 def timing_for_width(width: int) -> TimingConfig:
@@ -370,7 +403,6 @@ def timing_for_width(width: int) -> TimingConfig:
 @dataclass(frozen=True, slots=True)
 class TrainConfig:
     reference_batch_size: ClassVar[int] = 512
-    reference_positions: ClassVar[int] = 2**30
     base_adam_betas: ClassVar[tuple[float, float]] = (0.9, 0.95)
     base_adam_eps: ClassVar[float] = 1e-12
     inference_buckets: ClassVar[tuple[int, ...]] = (1, 2, 4, 8, 16, 32, 64)
@@ -407,7 +439,6 @@ class TrainConfig:
     eval_seed: int = 0
     batch_size: int = 512
     adam_lr: float = 8e-4
-    adam_weight_decay: float = 1e-4
     grad_clip: float = 1.0
     amp_dtype: str = "bfloat16"
     allow_tf32: bool = True
@@ -476,6 +507,10 @@ class TrainConfig:
         return 512
 
     @property
+    def adam_weight_decay(self) -> float:
+        return powerlines_weight_decay(self.target_positions, self.arch.parameter_count_contract["total"])
+
+    @property
     def source_list_sha256(self) -> str:
         encoded = json.dumps(self.source_names, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
@@ -539,8 +574,9 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("head_offsets extend beyond sample_chunk_length")
     if offsets != (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20):
         raise ValueError("O54 uses the fixed dense-12 plus 16 and 20 offset set")
-    if cfg.arch.n_layers != 16:
-        raise ValueError("O54 fixes trunk depth at 16")
+    expected_architecture = Architecture.for_width(cfg.arch.d_model)
+    if cfg.arch != expected_architecture:
+        raise ValueError(f"O54 requires the joint width-depth architecture {expected_architecture}, got {cfg.arch}")
     if not 1 <= cfg.delay_frames <= 6:
         raise ValueError("measured inference delay must be in [1, 6]")
     if (cfg.replan_interval_frames, cfg.prediction_frames) != (cfg.delay_frames, 2 * cfg.delay_frames):
@@ -618,9 +654,8 @@ def validate_config(cfg: TrainConfig) -> None:
     for name, value in (("adam_lr", cfg.adam_lr), ("adam_eps", cfg.adam_eps)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
-    for name, value in (("adam_weight_decay", cfg.adam_weight_decay),):
-        if not math.isfinite(value) or value < 0:
-            raise ValueError(f"{name} must be finite and non-negative")
+    if not math.isfinite(cfg.adam_weight_decay) or cfg.adam_weight_decay <= 0:
+        raise ValueError("derived AdamW weight decay must be finite and positive")
 
 
 def proxy_config() -> TrainConfig:
@@ -2087,11 +2122,22 @@ class LatencyProbeFailure(RuntimeError):
     """One width cannot satisfy the measured deployment contract."""
 
 
+def _latency_architecture_family() -> list[dict[str, object]]:
+    family: list[dict[str, object]] = []
+    for width in WIDTHS:
+        values: dict[str, object] = asdict(Architecture.for_width(width))
+        values["head_offsets"] = list(cast(tuple[int, ...], values["head_offsets"]))
+        family.append(values)
+    return family
+
+
 def _latency_manifest_payload(rows: Sequence[LatencyRow], gpu_name: str) -> dict[str, object]:
     return {
-        "schema": 1,
+        "schema": 2,
+        "experiment_id": _EXPERIMENT_ID,
         "gpu_name": gpu_name,
         "inference_mode": "eager",
+        "architecture_family": _latency_architecture_family(),
         "rows": [asdict(row) for row in rows],
     }
 
@@ -2125,7 +2171,12 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
     actual = hashlib.sha256(encoded).hexdigest()
     if digest != actual:
         raise ValueError(f"latency manifest SHA-256 mismatch: {digest!r} != {actual}")
-    if document.get("schema") != 1 or document.get("inference_mode") != "eager":
+    if (
+        document.get("schema") != 2
+        or document.get("experiment_id") != _EXPERIMENT_ID
+        or document.get("inference_mode") != "eager"
+        or document.get("architecture_family") != _latency_architecture_family()
+    ):
         raise ValueError("unsupported latency manifest")
     raw_rows = document.get("rows")
     if not isinstance(raw_rows, list):
@@ -2143,11 +2194,13 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
 def write_latency_probe_report(path: Path, probes: Sequence[LatencyProbe], gpu_name: str) -> None:
     """Atomically persist every raw latency sample, including partial runs."""
     payload = {
-        "schema": 1,
+        "schema": 2,
+        "experiment_id": _EXPERIMENT_ID,
         "gpu_name": gpu_name,
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device_total_memory_bytes": torch.cuda.get_device_properties(0).total_memory,
+        "architecture_family": _latency_architecture_family(),
         "probes": [asdict(probe) for probe in probes],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2160,7 +2213,7 @@ def _log_latency_probe(probe: LatencyProbe) -> None:
     allocated_gib = probe.peak_allocated_bytes / 2**30
     reserved_gib = probe.peak_reserved_bytes / 2**30
     prefix = (
-        f"[latency] W{probe.width} d={probe.inference_delay_frames} "
+        f"[latency] W{probe.width} L{TRUNK_DEPTHS[probe.width]} d={probe.inference_delay_frames} "
         f"R={probe.replan_interval_frames} H={probe.prediction_frames} B={probe.batch_size}"
     )
     if probe.status == "oom":
@@ -2213,6 +2266,7 @@ def benchmark_width_latency(
         raise ValueError("latency batch size must be positive")
     device = torch.device("cuda")
     for delay in range(1, 7):
+        gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         cfg = replace(
@@ -2274,6 +2328,7 @@ def benchmark_width_latency(
             raise LatencyProbeFailure(f"B{batch_size} width {width} ran out of CUDA memory at d={delay}") from error
         finally:
             del inference, model, context
+            gc.collect()
             torch.cuda.empty_cache()
         _log_latency_probe(probe)
         if on_probe is not None:
@@ -3454,12 +3509,18 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "projectiles",
             "all-44-v8",
             "all-adamw",
+            "powerlines-weight-decay",
             "constant-lr",
         ],
         config={
             **asdict(cfg),
             "max_steps": cfg.max_steps,
             "warmup_steps": cfg.warmup_steps,
+            "adam_weight_decay": cfg.adam_weight_decay,
+            "powerlines_exponent": POWERLINES_EXPONENT,
+            "powerlines_reference_width": POWERLINES_REFERENCE_WIDTH,
+            "powerlines_reference_positions": POWERLINES_REFERENCE_POSITIONS,
+            "powerlines_reference_weight_decay": POWERLINES_REFERENCE_WEIGHT_DECAY,
             "data_protocol": cfg.data_protocol,
             "source_selection_sha256": selection.sha256,
             "source_manifest_sha256": source_manifest_sha256(cfg),
@@ -3483,7 +3544,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         "train/loss is the normalized offset-weighted behavior-cloning objective in bits"
     )
     wandb.run.summary["architecture/treatment"] = (
-        f"O54 d{cfg.arch.d_model} L16 pure BC over all-44 policy-world-v8 with "
+        f"O54 d{cfg.arch.d_model} L{cfg.arch.n_layers} pure BC over all-44 policy-world-v8 with "
         "O52 representation, initialization, centered logits, and AdamW"
     )
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = None
@@ -3553,6 +3614,7 @@ def _log_training_summary(
     wandb.run.summary["optimizer/adam_betas"] = (cfg.adam_beta1, cfg.adam_beta2)
     wandb.run.summary["optimizer/adam_epsilon"] = cfg.adam_eps
     wandb.run.summary["optimizer/adam_weight_decay"] = cfg.adam_weight_decay
+    wandb.run.summary["optimizer/weight_decay_scaling"] = "Power Lines D/N timescale, exponent 0.52"
     if device_name is not None:
         wandb.run.summary["hardware/gpu_name"] = device_name
     if peak_flops is not None:
@@ -3919,10 +3981,9 @@ def iso_compute_updates(width: int) -> tuple[int, ...]:
 
 
 def scientific_checkpoint_updates(cfg: TrainConfig) -> tuple[int, ...]:
-    updates = set(iso_compute_updates(cfg.arch.d_model))
-    if cfg.fixed_d_frontier:
-        updates.add(16_384)
-    return tuple(sorted(update for update in updates if update <= cfg.max_steps))
+    is_iso_compute_endpoint = cfg.max_steps in iso_compute_updates(cfg.arch.d_model)
+    is_fixed_d_endpoint = cfg.fixed_d_frontier and cfg.max_steps == 16_384
+    return (cfg.max_steps,) if is_iso_compute_endpoint or is_fixed_d_endpoint else ()
 
 
 def train(
