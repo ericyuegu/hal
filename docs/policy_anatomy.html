@@ -332,6 +332,20 @@
     .footnotes{border-top:1px solid var(--rule);margin-top:3rem;padding-top:1rem;font-size:.88rem;color:var(--ink-soft)}
     .site-foot{max-width:680px;margin:0 auto;padding:46px 24px 38px;font:400 .7rem/1.5 var(--mono);color:var(--ink-mono)}
     .site-foot a{color:var(--ink-mono);text-decoration:underline;text-decoration-color:var(--rule-underline);text-underline-offset:3px}
+    body.figure-catalog .site-top,body.figure-catalog .site-foot{display:none}
+    body.figure-catalog main{max-width:var(--breakout);padding:34px 0 64px}
+    body.figure-catalog article>.figure-catalog-head~:not(figure){display:none}
+    body.figure-catalog article>figure{width:100%;margin:0 0 4rem;transform:none;scroll-margin-top:22px}
+    body.figure-catalog article>figure:last-child{margin-bottom:0}
+    .figure-catalog-head{margin-bottom:2.6rem}
+    .figure-catalog-head h1{font-size:2.6rem;margin:.4rem 0 .7rem}
+    .figure-catalog-head .meta{margin-bottom:1.3rem;padding-bottom:1rem}
+    .figure-catalog-index{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--ink)}
+    .figure-catalog-index a{padding:8px 5px;border-bottom:1px dotted var(--rule-dotted);font:500 .72rem/1.35 var(--mono);color:var(--ink)}
+    .figure-catalog-index a:nth-child(odd){padding-right:16px}
+    .figure-catalog-index a:nth-child(even){padding-left:16px;border-left:1px dotted var(--rule-dotted)}
+    .figure-catalog-index a:hover{color:var(--oxblood);text-decoration:none}
+    .catalog-caption-name{font-weight:600;color:var(--ink)}
     @media(max-width:900px){
       .architecture-figure .model-diagram text{font-size:14.5px}
       .architecture-figure .model-diagram .diagram-title{font-size:16px}
@@ -344,6 +358,7 @@
     @media(max-width:720px){
       .site-top{padding-top:22px}
       main{padding:38px 20px 0}
+      body.figure-catalog main{padding:28px 20px 48px}
       h1{font-size:2.35rem}
       .release-list,.metrics-strip,.stats,.sampler-wrap,.horizon-layout,.scaling-grid,.production-layout,.branch-study{grid-template-columns:1fr}
       .release-list li,.metrics-strip>div,.stat{border-right:0;border-bottom:1px solid var(--rule)}
@@ -383,6 +398,8 @@
       .expanded-row td{display:block}
     }
     @media(max-width:520px){
+      .figure-catalog-index{grid-template-columns:1fr}
+      .figure-catalog-index a:nth-child(n){padding:9px 4px;border-left:0}
       .architecture-figure .model-diagram text{font-size:12px}
       .architecture-figure .model-diagram .diagram-title{font-size:13px}
       .architecture-figure .model-diagram .diagram-label{font-size:12px}
@@ -419,6 +436,7 @@
       <div class="meta">
         <span>2026-09-09</span><span>·</span>
         <a href="https://github.com/ericyuegu/hal">github.com/ericyuegu/hal</a><span>·</span>
+        <a href="policy_anatomy.html?view=figures">figure catalog</a><span>·</span>
         <button id="source-toggle" class="source-toggle" type="button" aria-pressed="false">show run sources</button>
       </div>
 
@@ -3593,6 +3611,72 @@
       renderContextMaps();
     }
 
+    // Reorder this list to reorder the catalog. Stable keys do not depend on article numbering.
+    var figureCatalogEntries = [
+      {key: 'flagship-model-architecture', name: 'Flagship model architecture', anchor: '#architecture-overview'},
+      {key: 'conditioned-action-plan', name: 'From one action to a conditioned plan', anchor: '#mtp-wires'},
+      {key: 'factorization-ablation', name: 'Factorization ablation', anchor: '#factor-chart'},
+      {key: 'controller-representations', name: 'Three controller representations', anchor: '#codec-results'},
+      {key: 'representation-branches', name: 'Representation branches', anchor: '#representation-list'},
+      {key: 'advantage-weighted-behavior-cloning', name: 'Advantage-weighted behavior cloning', anchor: '#awr-chart'},
+      {key: 'objective-decoder-branches', name: 'Objective and decoder branches', anchor: '#objective-branches'},
+      {key: 'replay-diversity', name: 'Replay diversity inside a batch', anchor: '#sampler-diagram'},
+      {key: 'loader-lineage', name: 'Loader lineage', anchor: '.pipeline'},
+      {key: 'execution-horizon', name: 'Execution horizon', anchor: '#horizon-chart'},
+      {key: 'capacity-against-delay', name: 'Capacity against imposed delay', anchor: '#delay-chart'},
+      {key: 'deployment-frontier', name: 'The closest complete deployment frontier', anchor: '#frontier-chart'},
+      {key: 'nll-closed-loop-play', name: 'Validation NLL vs. closed-loop play', anchor: '#nll-chart'},
+      {key: 'iso-flop-fit', name: 'Iso-FLOP fit', anchor: '#isoflop-chart'},
+      {key: 'experiment-ledger', name: 'Experiment ledger', anchor: '#ledger-body'},
+      {key: 'closed-loop-training-path', name: 'The earlier Muon run did not improve monotonically', anchor: '#production-chart'}
+    ];
+
+    function catalogFigures() {
+      return figureCatalogEntries.map(function (entry) {
+        var anchor = one(entry.anchor);
+        if (!anchor) throw new Error('Figure catalog anchor is missing: ' + entry.anchor);
+        var figure = anchor.closest('figure');
+        if (!figure) throw new Error('Figure catalog item has no figure: ' + entry.anchor);
+        figure.id = entry.key;
+        figure.setAttribute('data-figure-name', entry.name);
+        return {entry: entry, figure: figure};
+      });
+    }
+
+    function activateFigureCatalog() {
+      var figures = catalogFigures();
+      if (new URLSearchParams(window.location.search).get('view') !== 'figures') return;
+
+      document.body.classList.add('figure-catalog');
+      document.title = 'Figure catalog — Anatomy of a Melee policy';
+      var article = one('article');
+      var header = document.createElement('header');
+      header.className = 'figure-catalog-head';
+      header.innerHTML =
+        '<p class="kicker">HAL · working sheet</p>' +
+        '<h1>Figure catalog</h1>' +
+        '<div class="meta"><a href="policy_anatomy.html">Return to draft</a></div>' +
+        '<nav class="figure-catalog-index" aria-label="Figure catalog">' +
+        figures.map(function (item) {
+          return '<a href="#' + item.entry.key + '">' + item.entry.name + '</a>';
+        }).join('') +
+        '</nav>';
+      article.insertBefore(header, article.firstChild);
+
+      figures.forEach(function (item) {
+        var caption = item.figure.querySelector(':scope > figcaption');
+        if (!caption) throw new Error('Figure catalog caption is missing: ' + item.entry.key);
+        if (caption.firstChild && caption.firstChild.nodeType === Node.TEXT_NODE) {
+          caption.firstChild.nodeValue = caption.firstChild.nodeValue.replace(/^Fig\s+\d+:\s*/, '');
+        }
+        var name = document.createElement('span');
+        name.className = 'catalog-caption-name';
+        name.textContent = item.entry.name + ': ';
+        caption.insertBefore(name, caption.firstChild);
+        article.appendChild(item.figure);
+      });
+    }
+
     function renderContextMaps() {
       many('.architecture-context').forEach(function (container) {
         var focus = container.getAttribute('data-dynamic') === 'true' ?
@@ -4029,6 +4113,7 @@
     renderLedger();
     renderArchitecture();
     setRunSourcesVisible(false);
+    activateFigureCatalog();
   }());
   </script>
 </body>
