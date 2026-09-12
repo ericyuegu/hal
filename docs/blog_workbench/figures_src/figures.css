@@ -1,0 +1,105 @@
+/* ---------- custom workbench figures ---------- */
+.arch-figure .arch-ghost,.logit-figure .ghost,.rle-figure .ghost{align-self:flex-start;white-space:nowrap;font:.72rem/1.4 var(--mono);color:var(--ink-mono)}
+.arch-figure svg,.deps-diagram svg{display:block;width:100%;height:auto}
+.arch-figure svg text,.deps-diagram text{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.arch-figure .lbl,.deps-diagram .lbl{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;fill:var(--ink)}
+.arch-figure .sub,.deps-diagram .sub{font-size:10px;fill:var(--ink-mono)}
+.arch-figure .sym,.deps-diagram .sym{font-size:11px;fill:var(--ink)}
+.arch-figure .tiny,.deps-diagram .tiny{font-size:8.5px;fill:var(--ink-mono)}
+.arch-figure .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
+.arch-figure .cell{fill:var(--paper);stroke:var(--rule-dotted);stroke-width:1}
+.arch-figure .wire{fill:none;stroke:var(--ink-faint);stroke-width:1.1}
+.arch-figure .wire.time{stroke-dasharray:2 3}
+.arch-figure .wire.chunk{stroke:var(--oxblood)}
+.arch-figure .group{fill:var(--paper);stroke:var(--ink-faint);stroke-width:.8}
+.arch-figure .group.b{fill:color-mix(in srgb,var(--oxblood) 10%,var(--paper))}
+.arch-diagram .stage{cursor:pointer}
+.arch-diagram .stage .hit{fill:transparent;stroke:none}
+.arch-diagram .stage:hover .plate,.arch-diagram .stage:focus-visible .plate{stroke-width:1.8}
+.arch-diagram[data-sel] .stage{opacity:.32;transition:opacity .14s ease}
+.arch-diagram[data-sel] .stage.is-sel{opacity:1}
+.arch-diagram[data-sel] .stage.is-sel .plate{stroke-width:1.8}
+.arch-diagram .pulse{transform-box:fill-box;transform-origin:center;animation:arch-pulse 9s ease-in-out infinite both;animation-delay:calc(var(--step) * .34s)}
+.arch-diagram .pulse-wire{animation:arch-wire 9s ease-in-out infinite both;animation-delay:calc(var(--step) * .34s)}
+@keyframes arch-pulse{0%,9%,100%{transform:scale(1)}4%{transform:scale(1.04)}}
+@keyframes arch-wire{0%,9%,100%{stroke:var(--ink-faint)}4%{stroke:var(--oxblood)}}
+.arch-diagram[data-sel] .pulse,.arch-diagram[data-sel] .pulse-wire{animation:none}
+.arch-cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:12px 0 0}
+.arch-cards button{text-align:left;font:inherit;background:var(--paper);border:1px solid var(--rule-dotted);padding:9px 11px;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:74px;transition:border-color .14s ease,background .14s ease}
+.arch-cards button:hover{border-color:var(--ink)}
+.arch-cards button[aria-selected="true"]{background:var(--white);border:1px solid var(--ink);box-shadow:2px 2px 0 var(--shadow-soft)}
+.arch-cards .n{font:600 .62rem/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mono)}
+.arch-cards button[aria-selected="true"] .n{color:var(--oxblood)}
+.arch-cards .t{font-size:.94rem;line-height:1.3}
+.arch-cards .r{font:.66rem/1.35 var(--mono);color:var(--ink-mono)}
+.arch-detail{margin-top:10px;border-top:1px dotted var(--rule-dotted);padding-top:12px;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(220px,.9fr);gap:18px}
+.arch-detail[hidden]{display:none}
+.arch-detail h5{margin:0 0 6px;font-size:1rem;line-height:1.3}
+.arch-detail p{font-size:.86rem;line-height:1.5;margin:0 0 .6em;color:var(--ink-soft)}
+.arch-detail dl{display:grid;grid-template-columns:auto 1fr;gap:0 12px;margin:0;border-top:1px solid var(--rule)}
+.arch-detail dt{font:.62rem/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-mono);padding:5px 0;border-bottom:1px solid var(--rule);white-space:nowrap}
+.arch-detail dd{margin:0;font:.72rem/1.5 var(--mono);color:var(--ink);padding:5px 0;border-bottom:1px solid var(--rule);text-align:right}
+.arch-detail .mech{background:var(--surface-aside);border:1px solid var(--aside-border);padding:10px 12px}
+.arch-detail .mech svg{display:block;width:100%;height:auto}
+.arch-detail .close{justify-self:end;font:.66rem/1.3 var(--mono);color:var(--ink-mono);background:transparent;border:0;border-bottom:1px dotted var(--rule-dotted);cursor:pointer;padding:0}
+.arch-detail .close:hover{color:var(--oxblood)}
+.arch-detail .row{grid-column:1/-1;display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.arch-detail .prefix-row{animation:arch-row 6s ease-in-out infinite both;animation-delay:calc(var(--step) * 1.2s)}
+@keyframes arch-row{0%,18%,100%{opacity:.42}6%,12%{opacity:1}}
+.arch-detail .grp-step{animation:arch-grp 6s ease-in-out infinite both;animation-delay:calc(var(--step) * .3s)}
+@keyframes arch-grp{0%,12%,100%{fill:var(--paper)}4%,8%{fill:color-mix(in srgb,var(--oxblood) 18%,var(--paper))}}
+@media (max-width:760px){.arch-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.arch-detail{grid-template-columns:minmax(0,1fr)}.arch-diagram,.deps-diagram{overflow-x:auto}.arch-diagram svg,.deps-diagram svg{min-width:760px}}
+@media (prefers-reduced-motion:reduce){.arch-diagram .pulse,.arch-diagram .pulse-wire,.arch-detail .prefix-row,.arch-detail .grp-step{animation:none}}
+
+.deps-figure .deps-axes{flex-wrap:wrap}
+.deps-diagram .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
+.deps-diagram .h{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
+.deps-diagram .a{fill:var(--paper);stroke:var(--ink-faint);stroke-width:1}
+.deps-diagram .a.cur{stroke:var(--ink)}
+.deps-diagram .w{fill:none;stroke-width:1.2;transition:opacity .14s ease}
+.deps-diagram .w.time{stroke:var(--ink-faint);stroke-dasharray:2 3}
+.deps-diagram .w.trunk{stroke:var(--ink-faint)}
+.deps-diagram .w.chunk{stroke:var(--oxblood)}
+.deps-diagram .w.frame{stroke:var(--oxblood)}
+.deps-diagram .g{fill:var(--paper);stroke:var(--ink-faint);stroke-width:.8}
+.deps-diagram .divider{stroke:var(--rule-dotted);stroke-dasharray:2 3}
+.deps-diagram .title{font-size:11px;font-weight:600;fill:var(--ink)}
+.deps-diagram .title.cur{fill:var(--oxblood)}
+.deps-diagram[data-axis="time"] .w:not(.time):not(.trunk),.deps-diagram[data-axis="chunk"] .w:not(.chunk),.deps-diagram[data-axis="frame"] .w:not(.frame){opacity:.14}
+.deps-diagram[data-axis="chunk"] .w.trunk,.deps-diagram[data-axis="frame"] .w.trunk{opacity:.14}
+.deps-diagram .legend{font-size:10px;fill:var(--ink-mono)}
+
+/* ---------- action logit paths ---------- */
+.logit-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:18px;align-items:start}
+.logit-path svg,.logit-forest svg,.rle-diagram svg{display:block;width:100%;height:auto}
+.logit-path text,.logit-forest text,.rle-diagram text{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.logit-path .lbl,.logit-forest .lbl,.rle-diagram .lbl{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;fill:var(--ink)}
+.logit-path .sub,.logit-forest .sub,.rle-diagram .sub{font-size:10px;fill:var(--ink-mono)}
+.logit-path .tiny,.logit-forest .tiny,.rle-diagram .tiny{font-size:8.5px;fill:var(--ink-mono)}
+.logit-path .sym,.rle-diagram .sym{font-size:11px;fill:var(--ink)}
+.logit-path .plate,.rle-diagram .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
+.logit-path .wire{fill:none;stroke:var(--ink-faint);stroke-width:1.1}
+.logit-path .comp{cursor:default;transition:opacity .14s ease}
+.logit-path[data-hl] .comp{opacity:.28}
+.logit-path[data-hl] .comp.is-hl{opacity:1}
+.logit-path[data-hl] .comp.is-hl .plate{stroke:var(--oxblood);stroke-width:1.6}
+.logit-forest .row{cursor:default}
+.logit-forest .row rect.hit{fill:transparent}
+.logit-forest .row:hover rect.hit{fill:color-mix(in srgb,var(--oxblood) 5%,transparent)}
+.logit-forest .ci{stroke-width:1.4}
+.logit-forest .ci.char{stroke:var(--ink)}
+.logit-forest .ci.fox{stroke:var(--oxblood)}
+.logit-forest .pt.char{fill:var(--ink)}
+.logit-forest .pt.fox{fill:var(--oxblood)}
+.logit-forest .zero{stroke:var(--ink);stroke-width:1}
+.logit-forest .grid{stroke:var(--rule);stroke-width:1}
+.logit-forest .val{font-size:9.5px;fill:var(--ink)}
+@media (max-width:760px){.logit-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* ---------- run-length spans ---------- */
+.rle-diagram .frame{fill:var(--paper);stroke:var(--ink);stroke-width:1}
+.rle-diagram .frame.b{fill:color-mix(in srgb,var(--ink) 8%,var(--paper))}
+.rle-diagram .frame.c{fill:color-mix(in srgb,var(--ink) 16%,var(--paper))}
+.rle-diagram .span{fill:color-mix(in srgb,var(--oxblood) 9%,var(--paper));stroke:var(--oxblood);stroke-width:1.1}
+.rle-diagram .brace{fill:none;stroke:var(--ink-faint);stroke-width:1}
+.rle-diagram .stat{font-size:15px;fill:var(--ink)}

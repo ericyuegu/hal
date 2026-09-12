@@ -19,6 +19,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from build import extract_element
+from build import main_catalog
 
 HERE = Path(__file__).resolve().parent
 DOCS = HERE.parent
@@ -27,7 +28,7 @@ DRAFT = (DOCS / "policy_anatomy_draft.md").read_text()
 BLOCKS = (DOCS / "blog_experiment_blocks.md").read_text().split("\n")
 EXPLORER = (DOCS / "policy_anatomy_artifact_export.html").read_text()
 REGISTRY = json.loads((HERE / "registry.json").read_text())
-CATALOG = [r["key"] for r in REGISTRY if r["source"] == "anatomy"]
+CATALOG = [e["key"] for e in main_catalog()]  # the draft numbers FIGURE 1..16 against the page's catalog order
 CAPTIONS = {r["key"]: r["caption"] for r in REGISTRY}
 
 doc: list[dict] = []
@@ -48,15 +49,33 @@ def heading(text: str, level: int = 2, **kw) -> dict:
 
 
 def text(md: str, **kw) -> dict:
+    md, sources = split_sources(md)
+    if sources:
+        kw["note"] = (kw.get("note", "") + "\n" if kw.get("note") else "") + sources
     return add({"type": "text", "md": md.strip(), **kw})
+
+
+def split_sources(md: str) -> tuple[str, str]:
+    """Move a trailing/inline `**Sources:** …` paragraph out of the prose; it belongs in the editorial note."""
+    m = re.search(r"(?:^|\n\n|\s)\*\*Sources:\*\*\s*(.*?)(?=\n\n|$)", md, re.S)
+    if not m:
+        m = re.search(r"\sSources: (.*?)(?=\n\n|$)", md, re.S)  # the plain "Sources: …" form in the bullet blocks
+        if not m:
+            return md, ""
+    sources = "Sources: " + re.sub(r"\s*\n\s*", " ", m.group(1).strip()).rstrip(".")
+    md = (md[: m.start()] + md[m.end() :]).rstrip()
+    return md, sources
 
 
 def callout(md: str, **kw) -> dict:
     return add({"type": "callout", "md": md.strip(), **kw})
 
 
+RETIRED = {"flagship-model-architecture", "conditioned-action-plan"}  # remapped in compose()
+
+
 def figure(key: str, caption: str | None = None, **kw) -> dict:
-    assert any(r["key"] == key for r in REGISTRY), key
+    assert key in RETIRED or any(r["key"] == key for r in REGISTRY), key
     return add(
         {
             "type": "figure",
@@ -382,12 +401,11 @@ def compose() -> None:
     a["What I’m releasing"]["level"] = 3
     a["How to read the results"]["level"] = 3
 
-    with after(a["flagship-model-architecture"]):
-        figure(
-            "stage-map",
-            "The same policy as five runtime stages on one time axis: the trunk reads 128 observed frames, the decoder writes to the right of *now*, and only the first predicted frame reaches the game. Select a stage to inspect its shapes and parameter share.",
-            note="From the explorer artifact (O43-era parameter counts: 15,053,039). blocks.md: keep stage-map as the headline overview. Decide whether Fig 1 or this carries the intro; park the other.",
-        )
+    # Fig 1 and Fig 2 are the single-choice rebuilds (2026-09-12): one causal trunk, one causal decoder, cards for detail
+    a["flagship-model-architecture"]["fig"] = "architecture"
+    a["flagship-model-architecture"]["caption"] = CAPTIONS["architecture"]
+    a["conditioned-action-plan"]["fig"] = "action-dependencies"
+    a["conditioned-action-plan"]["caption"] = CAPTIONS["action-dependencies"]
 
     with after(a["How to read the results"], skip_text=True):
         callout(
@@ -395,19 +413,12 @@ def compose() -> None:
             note="Explorer's framing callout. Overlaps the bullet list above — merge or park.",
         )
         text(
-            blocks_md("Introduce terminology here").split("\n", 1)[1]
-            if False
-            else blocks_md("Use these terms consistently"),
+            blocks_md("Use these terms consistently"),
             note="blocks.md terminology table. The plan-timing figure in §2 draws these terms.",
         )
 
     # ---- encoding and representation
     with after(a["conditioned-action-plan"]):
-        figure(
-            "ar-axes",
-            "Three separate orderings hide behind the word “autoregressive”: across time in the trunk, across the predicted chunk in the decoder, and across controller groups inside one frame.",
-            note="Explorer companion to Fig 2 (blocks.md: 'useful conceptual companion').",
-        )
         text(blocks_md("Block name: From one action to a causal plan"))
     with after(a["factorization-ablation"]):
         figure("svg-two-axes-action-feedback", hidden=True, note=fig_note("Figure name: Two Axes of Action Feedback"))
@@ -429,13 +440,13 @@ def compose() -> None:
         figure("svg-observation-inputs", note=fig_note("Figure name: Observation Inputs"))
         text(blocks_md("Block name: Nonlinear action readouts matter"))
         text(blocks_md("Block name: Three paths into the action logits"))
-        figure("svg-action-logit-paths", note=fig_note("Figure name: Action Logit Paths"))
+        figure("action-logit-paths", note=fig_note("Figure name: Action Logit Paths"))
         text(blocks_md("- **Next-frame loss share.**"), note="From blocks.md 'other important experiments'.")
         text(blocks_md("- **Ego-player identity.**"), note="From blocks.md 'other important experiments'.")
     with after(a["representation-branches"]):
         text(blocks_md("Block name: Derived geometry never reached a valid test"))
         text(blocks_md("Block name: Compress holds into action spans"))
-        figure("svg-rle-action-spans", note=fig_note("Figure name: Run-Length Actions"))
+        figure("rle-action-spans", note=fig_note("Figure name: Run-Length Actions"))
         text(blocks_md("Block name: One token for the full controller"))
         text(blocks_md("Block name: Predicting future state did not improve action choice"))
         text(blocks_md("Block name: Let the output head reread history"))

@@ -82,6 +82,23 @@ body{margin:0;background:var(--paper);color:var(--ink);font:var(--fs-body)/var(-
 .wb-drawer .empty{color:var(--text-mono);font-family:var(--font-mono);font-size:.72rem}
 body.wb-showdata .wb-drawer{display:block}
 
+/* ---------- floating contents ---------- */
+.wb-toc{position:fixed;left:18px;top:96px;z-index:15;max-width:220px;font-family:var(--font-mono)}
+.wb-toc-toggle{font:600 .62rem/1.3 var(--font-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-mono);background:var(--paper);border:1px dotted var(--rule-dotted);padding:5px 9px;cursor:pointer}
+.wb-toc-toggle:hover,.wb-toc[data-open="true"] .wb-toc-toggle{color:var(--ink);border-color:var(--ink)}
+.wb-toc-list{list-style:none;margin:6px 0 0;padding:8px 0 8px 10px;border-left:2px solid var(--rule);max-height:calc(100vh - 150px);overflow:auto;background:var(--paper)}
+.wb-toc[data-open="false"] .wb-toc-list{display:none}
+.wb-toc-list li{margin:0;padding:0}
+.wb-toc-list a{display:block;font:.68rem/1.5 var(--font-mono);letter-spacing:.02em;color:var(--ink-mono);text-decoration:none;padding:2px 8px 2px 6px;margin-left:-12px;border-left:2px solid transparent;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px}
+.wb-toc-list a:hover{color:var(--ink)}
+.wb-toc-list a[aria-current="true"]{color:var(--ink);border-left-color:var(--oxblood)}
+.wb-toc-list li[data-level="3"] a{padding-left:16px;color:var(--ink-faint)}
+.wb-toc-list li[data-level="3"] a:hover,.wb-toc-list li[data-level="3"] a[aria-current="true"]{color:var(--ink)}
+.wb-toc-list li[data-level="4"]{display:none}
+.wb-toc-list .num{color:var(--ink-faint);margin-right:6px}
+@media (max-width:1180px){.wb-toc{left:12px;top:auto;bottom:16px;max-width:260px}.wb-toc-list{max-height:50vh;box-shadow:var(--shadow-frame-sm);border:1px solid var(--rule-dotted);border-left:2px solid var(--rule);padding-right:8px}}
+@media (max-width:760px){.wb-toc{display:none}}
+
 /* ---------- edit mode ---------- */
 .wb-handle,.wb-menu-btn,.wb-insert,.wb-note{display:none}
 body.wb-edit .wb-block{padding-left:0;border-left:2px solid transparent;transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
@@ -100,7 +117,7 @@ body.wb-edit .wb-block[data-type="figure"] .wb-menu-btn{right:-44px}
 .wb-menu button:hover{background:var(--surface-aside)}
 .wb-menu button.danger{color:var(--oxblood)}
 body.wb-edit .wb-insert{display:flex;justify-content:center;height:0;position:relative;z-index:5}
-body.wb-edit .wb-insert button{position:relative;top:-11px;font:500 .68rem/1 var(--font-mono);letter-spacing:.06em;color:var(--ink-faint);background:var(--paper);border:1px dotted transparent;padding:4px 10px;cursor:pointer;opacity:0;transition:opacity var(--dur-fast) var(--ease)}
+body.wb-edit .wb-insert button{position:relative;top:-11px;font:500 .68rem/1 var(--font-mono);letter-spacing:.06em;color:var(--ink-faint);background:var(--paper);border:1px dotted var(--rule);padding:4px 10px;cursor:pointer;opacity:.55;transition:opacity var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
 body.wb-edit .wb-insert:hover button,body.wb-edit .wb-insert button:focus-visible,body.wb-edit .wb-insert button[aria-expanded="true"]{opacity:1;border-color:var(--rule-dotted);color:var(--ink)}
 .wb-insert-menu{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:30;background:var(--white);border:1px solid var(--frame-border);box-shadow:var(--shadow-frame);padding:8px;display:grid;grid-template-columns:repeat(4,auto);gap:4px}
 .wb-insert-menu button{font:var(--mono-meta-size)/1.4 var(--font-mono);color:var(--ink);background:transparent;border:1px dotted var(--rule-dotted);padding:6px 10px;cursor:pointer}

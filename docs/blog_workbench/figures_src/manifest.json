@@ -1,0 +1,50 @@
+[
+ {
+  "key": "architecture",
+  "name": "The policy, end to end",
+  "caption": "Each observed frame becomes one joint state–action token. One causal context Transformer reads 256 of them; its state for the current frame feeds one causal action decoder, which writes the next controller frames one at a time, and the game plays the first two before the next plan. Select a stage to open it.",
+  "studies": [
+   "training_checkpoint_series",
+   "optimizer_full_scale",
+   "action_factorization_o37"
+  ],
+  "data": [
+   "architectureModules",
+   "architectureEdges"
+  ]
+ },
+ {
+  "key": "action-dependencies",
+  "name": "Where a predicted action may look",
+  "caption": "Three generations of the decoder, drawn as dependency wires. Every predicted action reads the trunk state, which itself reads earlier frames. Independent multi-token prediction adds more actions but no wires between them. The autoregressive decoder adds the two remaining families: each action reads the actions before it, and inside a frame each controller group reads the groups already chosen.",
+  "studies": [
+   "decoder_lineage",
+   "action_factorization_o37",
+   "within_frame_order"
+  ],
+  "data": []
+ },
+ {
+  "key": "action-logit-paths",
+  "name": "Three paths into the action logits",
+  "caption": "O43 arm A feeds the action logits three ways: the temporal decoder’s future-frame state, conditioned within the frame by FiLM and read by a SiLU MLP head, plus a direct skip from the trunk state. Removing any one of them cost stocks on both evaluation suites; hover a row to see the path it removed.",
+  "studies": [
+   "o43_action_head_components",
+   "film_vs_concatenation",
+   "o26_to_o42_package",
+   "old_head_capacity"
+  ],
+  "data": [
+   "logitPathRows"
+  ]
+ },
+ {
+  "key": "rle-action-spans",
+  "name": "Run-length action spans",
+  "caption": "O18 packed the four controller groups into one symbol per frame and let BPE merge repeated holds into span tokens of up to 16 frames. The compression was real; executing a token to completion was not, and the package lost 2.6 stocks per minute.",
+  "studies": [
+   "rle_bpe_actions"
+  ],
+  "data": []
+ }
+]

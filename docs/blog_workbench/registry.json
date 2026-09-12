@@ -1,30 +1,5 @@
 [
  {
-  "key": "flagship-model-architecture",
-  "name": "Flagship model architecture",
-  "source": "anatomy",
-  "caption": "Each context token concatenates state and action. One shared decoder head predicts a future action chunk at every context prefix. In play, the action prefix grows one frame at a time; each frame is decoded C → M → T → B. Internal model: O50. W&B tgpuo1be.",
-  "data": [
-   "architectureModules",
-   "architectureEdges"
-  ],
-  "studies": [
-   "training_checkpoint_series",
-   "optimizer_full_scale"
-  ]
- },
- {
-  "key": "conditioned-action-plan",
-  "name": "From one action to a conditioned plan",
-  "source": "anatomy",
-  "caption": "Every predicted action receives hₜ. In autoregressive MTP, action i can also attend to actions 1…i−1. Four consecutive actions are shown for clarity. The production model trains offsets 1–6, 9, 12, 16, and 20. next-frame · independent MTP · autoregressive MTP.",
-  "data": [],
-  "studies": [
-   "decoder_lineage",
-   "action_factorization_o37"
-  ]
- },
- {
   "key": "factorization-ablation",
   "name": "Factorization ablation",
   "source": "anatomy",
@@ -222,14 +197,6 @@
   ]
  },
  {
-  "key": "stage-map",
-  "name": "The five stages, on one time axis",
-  "source": "explorer",
-  "caption": "",
-  "data": [],
-  "studies": []
- },
- {
   "key": "plan-timing",
   "name": "One plan against the transport queue",
   "source": "explorer",
@@ -238,17 +205,6 @@
   "studies": [
    "rtc",
    "execution_horizon"
-  ]
- },
- {
-  "key": "ar-axes",
-  "name": "The three autoregressive orderings",
-  "source": "explorer",
-  "caption": "Three orderings, three independent switches. Experiment 037 turned ② and ③ on and off in every combination while holding everything else fixed.",
-  "data": [],
-  "studies": [
-   "decoder_lineage",
-   "action_factorization_o37"
   ]
  },
  {
@@ -333,16 +289,6 @@
   ]
  },
  {
-  "key": "svg-rle-action-spans",
-  "name": "Run-length actions (draft SVG)",
-  "source": "svg",
-  "caption": "Frame actions followed by the variable-length span tokens learned by BPE.",
-  "data": [],
-  "studies": [
-   "rle_bpe_actions"
-  ]
- },
- {
   "key": "svg-two-axes-action-feedback",
   "name": "Two axes of action feedback (draft SVG)",
   "source": "svg",
@@ -353,16 +299,55 @@
   ]
  },
  {
-  "key": "svg-action-logit-paths",
-  "name": "Action logit paths (draft SVG)",
-  "source": "svg",
-  "caption": "Three paths into the action logits and the one-change deltas.",
+  "key": "architecture",
+  "name": "The policy, end to end",
+  "source": "custom",
+  "caption": "Each observed frame becomes one joint state–action token. One causal context Transformer reads 256 of them; its state for the current frame feeds one causal action decoder, which writes the next controller frames one at a time, and the game plays the first two before the next plan. Select a stage to open it.",
+  "data": [
+   "architectureModules",
+   "architectureEdges"
+  ],
+  "studies": [
+   "training_checkpoint_series",
+   "optimizer_full_scale",
+   "action_factorization_o37"
+  ]
+ },
+ {
+  "key": "action-dependencies",
+  "name": "Where a predicted action may look",
+  "source": "custom",
+  "caption": "Three generations of the decoder, drawn as dependency wires. Every predicted action reads the trunk state, which itself reads earlier frames. Independent multi-token prediction adds more actions but no wires between them. The autoregressive decoder adds the two remaining families: each action reads the actions before it, and inside a frame each controller group reads the groups already chosen.",
   "data": [],
+  "studies": [
+   "decoder_lineage",
+   "action_factorization_o37",
+   "within_frame_order"
+  ]
+ },
+ {
+  "key": "action-logit-paths",
+  "name": "Three paths into the action logits",
+  "source": "custom",
+  "caption": "O43 arm A feeds the action logits three ways: the temporal decoder’s future-frame state, conditioned within the frame by FiLM and read by a SiLU MLP head, plus a direct skip from the trunk state. Removing any one of them cost stocks on both evaluation suites; hover a row to see the path it removed.",
+  "data": [
+   "logitPathRows"
+  ],
   "studies": [
    "o43_action_head_components",
    "film_vs_concatenation",
    "o26_to_o42_package",
    "old_head_capacity"
+  ]
+ },
+ {
+  "key": "rle-action-spans",
+  "name": "Run-length action spans",
+  "source": "custom",
+  "caption": "O18 packed the four controller groups into one symbol per frame and let BPE merge repeated holds into span tokens of up to 16 frames. The compression was real; executing a token to completion was not, and the package lost 2.6 stocks per minute.",
+  "data": [],
+  "studies": [
+   "rle_bpe_actions"
   ]
  }
 ]

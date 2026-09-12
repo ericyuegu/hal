@@ -1,0 +1,17 @@
+<figure class="breakout deps-figure" id="deps">
+  <div class="artifact interactive">
+    <div class="figure-head">
+      <div>
+        <h4>Where a predicted action may look</h4>
+        <p>Three decoder generations, one wire per allowed dependency.</p>
+      </div>
+      <div class="segmented deps-axes" id="deps-axes" aria-label="Highlight one dependency family">
+        <button type="button" data-axis="all" aria-pressed="true">all</button>
+        <button type="button" data-axis="time" aria-pressed="false">across time</button>
+        <button type="button" data-axis="chunk" aria-pressed="false">across the chunk</button>
+        <button type="button" data-axis="frame" aria-pressed="false">within a frame</button>
+      </div>
+    </div>
+    <div class="deps-diagram" id="deps-diagram"></div>
+  </div>
+</figure>

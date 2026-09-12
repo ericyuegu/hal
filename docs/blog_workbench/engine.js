@@ -222,9 +222,12 @@
   }
 
   function anatomyRows(name) {
-    var api = window.HALFIG_ANATOMY;
-    if (!api || !api.data[name]) return null;
-    try { return api.data[name](); } catch (err) { return null; }
+    var apis = [window.HALFIG_ANATOMY, window.HALFIG_CUSTOM];
+    for (var i = 0; i < apis.length; i++) {
+      var api = apis[i];
+      if (api && api.data && api.data[name]) { try { return api.data[name](); } catch (err) { return null; } }
+    }
+    return null;
   }
   function figureDatasets(entry) {
     var sets = [];
@@ -458,6 +461,7 @@
     });
     docEl.replaceChildren(frag);
     renderParked();
+    renderToc();
     var figCount = Object.keys(figNums).filter(function (k) { return k.slice(0, 2) === 'b_' || state.blocks[k]; }).length;
     footMeta.textContent = ids.length + ' blocks · ' + visibleIds().filter(function (id) { return state.blocks[id].type === 'figure'; }).length + ' figures placed · ' + REGISTRY.length + ' in the registry' + (missing ? ' · ' + missing + ' outline ids without a block' : '');
     void figCount;
@@ -465,6 +469,53 @@
       render.warmed = true;
       setTimeout(function () { try { window.HALFIG_ANATOMY.rerender(); } catch (err) { /* figure code owns its errors */ } }, 0);
     }
+  }
+
+  var tocList = document.getElementById('wb-toc-list');
+  var tocEl = document.getElementById('wb-toc');
+  function renderToc() {
+    if (!tocList) return;
+    var secNums = sectionNumbers();
+    tocList.replaceChildren();
+    visibleIds().forEach(function (id) {
+      var b = state.blocks[id];
+      if (b.type !== 'heading') return;
+      var level = b.level || 2;
+      if (level === 1 || level > 3) return;
+      var li = el('li', {'data-level': String(level)});
+      var a = el('a', {href: '#' + (b.anchor || id)});
+      if (level === 2 && secNums[id]) a.appendChild(el('span', {class: 'num', text: '§ ' + secNums[id]}));
+      a.appendChild(document.createTextNode((b.md || '').replace(/^#+\s*/, '').replace(/[*_`]/g, '')));
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        var target = document.getElementById(b.anchor || id);
+        if (target) { target.scrollIntoView({block: 'start'}); history.replaceState(null, '', '#' + (b.anchor || id)); }
+      });
+      li.appendChild(a);
+      tocList.appendChild(li);
+    });
+    spyToc();
+  }
+  function spyToc() {
+    if (!tocList) return;
+    var links = $$('a', tocList);
+    var current = null;
+    links.forEach(function (a) {
+      var target = document.getElementById(a.getAttribute('href').slice(1));
+      if (target && target.getBoundingClientRect().top <= 120) current = a;
+    });
+    links.forEach(function (a) { a.setAttribute('aria-current', String(a === current)); });
+  }
+  window.addEventListener('scroll', function () { if (!spyToc.tick) { spyToc.tick = true; requestAnimationFrame(function () { spyToc.tick = false; spyToc(); }); } }, {passive: true});
+  var tocToggle = document.getElementById('wb-toc-toggle');
+  if (tocToggle) {
+    tocToggle.addEventListener('click', function () {
+      var open = tocEl.getAttribute('data-open') !== 'true';
+      tocEl.setAttribute('data-open', String(open));
+      tocToggle.setAttribute('aria-expanded', String(open));
+      try { localStorage.setItem('wb-toc', open ? '1' : '0'); } catch (err) { /* per-viewer convenience only */ }
+    });
+    try { if (localStorage.getItem('wb-toc') === '0' || window.innerWidth < 1180) { tocEl.setAttribute('data-open', 'false'); tocToggle.setAttribute('aria-expanded', 'false'); } } catch (err) { /* ignore */ }
   }
 
   function renderParked() {
@@ -506,6 +557,12 @@
       e.stopPropagation();
       closeMenus();
       if (act === 'edit' || act === 'note') openEditor(id, act === 'note');
+      if (act === 'below-text' || act === 'below-heading' || act === 'below-callout') {
+        var kind = act.slice(6);
+        var nid = insertAt(order().indexOf(id) + 1, kind === 'heading' ? {type: 'heading', level: 3, md: 'New section'} : {type: kind, md: kind === 'callout' ? '**NB.** ' : 'New paragraph.'});
+        setTimeout(function () { openEditor(nid); }, 0);
+      }
+      if (act === 'below-figure') openPicker(order().indexOf(id) + 1);
       if (act === 'up') shift(id, -1);
       if (act === 'down') shift(id, 1);
       if (act === 'park') patchBlock(id, {hidden: true});

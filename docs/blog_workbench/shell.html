@@ -30,6 +30,11 @@
     </div>
   </header>
 
+  <nav class="wb-toc" id="wb-toc" aria-label="Contents" data-open="true">
+    <button type="button" class="wb-toc-toggle" id="wb-toc-toggle" aria-expanded="true" aria-controls="wb-toc-list">contents</button>
+    <ol class="wb-toc-list" id="wb-toc-list"></ol>
+  </nav>
+
   <main class="wb-main">
     <article class="wb-article" id="wb-article">
       <div class="wb-doc" id="wb-doc"></div>
@@ -58,6 +63,10 @@
 <template id="wb-block-menu">
   <div class="wb-menu" role="menu">
     <button type="button" data-act="edit" role="menuitem">edit</button>
+    <button type="button" data-act="below-text" role="menuitem">+ text below</button>
+    <button type="button" data-act="below-heading" role="menuitem">+ heading below</button>
+    <button type="button" data-act="below-callout" role="menuitem">+ callout below</button>
+    <button type="button" data-act="below-figure" role="menuitem">+ figure below…</button>
     <button type="button" data-act="up" role="menuitem">move up</button>
     <button type="button" data-act="down" role="menuitem">move down</button>
     <button type="button" data-act="note" role="menuitem">note</button>
@@ -78,6 +87,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="figures/anatomy.js"></script>
 <script src="figures/explorer.js"></script>
+<script src="figures/custom.js"></script>
 <script>
 /*__ENGINE_JS__*/
 </script>

@@ -146,6 +146,16 @@ COLOR_VARS = {
     "white": "var(--white)",
 }
 
+# figures superseded by hand-written modules in figures_src/ (single choice per diagram, 2026-09-12)
+RETIRED = {
+    "flagship-model-architecture",
+    "stage-map",
+    "conditioned-action-plan",
+    "ar-axes",
+    "svg-action-logit-paths",
+    "svg-rle-action-spans",
+}
+
 # data behind each anatomy figure, exposed for the data drawer
 ANATOMY_DATA = {
     "flagship-model-architecture": ["architectureModules", "architectureEdges"],
@@ -323,6 +333,20 @@ def explorer_scripts() -> str:
     return "(function () {\n" + js + "\n})();\n"
 
 
+# ---------------------------------------------------------------- hand-written figures
+
+
+def custom_figures() -> list[dict]:
+    src = HERE / "figures_src"
+    entries = json.loads((src / "manifest.json").read_text())
+    out = []
+    for e in entries:
+        html = (src / f"{e['key']}.html").read_text()
+        js = (src / f"{e['key']}.js").read_text()
+        out.append({**e, "source": "custom", "html": html, "js": js})
+    return out
+
+
 # ---------------------------------------------------------------- shell
 
 # evidence.json studies that back each figure (the data drawer's "studies" tab)
@@ -386,7 +410,7 @@ def registry_json(figures: list[dict]) -> str:
                 "source": f["source"],
                 "caption": f.get("caption", ""),
                 "data": f.get("data", []),
-                "studies": FIG_STUDIES[f["key"]],
+                "studies": f["studies"] if "studies" in f else FIG_STUDIES[f["key"]],
             }
         )
     return json.dumps(entries, ensure_ascii=False, indent=1)
@@ -466,24 +490,34 @@ def build() -> None:
             "data": ["scalingPoints"],
         }
     )
-    figures = anatomy + explorer + svg_figures
+    figures_hidden_pool: list[dict] = []
+    custom = custom_figures()
+    figures = [f for f in anatomy + explorer + svg_figures if f["key"] not in RETIRED] + custom
     keys = [f["key"] for f in figures]
     assert len(keys) == len(set(keys)), "duplicate figure keys"
 
+    # retired anatomy/explorer figures stay in the hidden pool so their shared scripts still find their ids; they never render
+    for f in anatomy + explorer:
+        if f["key"] in RETIRED:
+            figures_hidden_pool.append(f)
     pool = []
-    for f in figures:
+    for f in figures + figures_hidden_pool:
         cls = "xfig" if f["source"] == "explorer" else f["source"]
         pool.append(f'<div class="fig-src {cls}" data-fig="{f["key"]}">\n{f["html"]}\n</div>')
 
     (DIST / "figures" / "anatomy.js").write_text(main_script())
     (DIST / "figures" / "explorer.js").write_text(explorer_scripts())
+    (DIST / "figures" / "custom.js").write_text("\n".join(f["js"] for f in custom))
 
     shell = (HERE / "shell.html").read_text()
     html = (
         shell.replace("/*__TOKENS__*/", (HERE / "tokens.css").read_text())
         .replace("/*__MAIN_CSS__*/", main_css())
         .replace("/*__EXPLORER_CSS__*/", explorer_css())
-        .replace("/*__ENGINE_CSS__*/", (HERE / "engine.css").read_text())
+        .replace(
+            "/*__ENGINE_CSS__*/",
+            (HERE / "engine.css").read_text() + "\n" + (HERE / "figures_src" / "figures.css").read_text(),
+        )
         .replace("<!--__FIGURE_POOL__-->", "\n".join(pool))
         .replace("/*__REGISTRY__*/", registry_json(figures))
         .replace(
