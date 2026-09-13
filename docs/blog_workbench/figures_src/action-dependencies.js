@@ -18,28 +18,30 @@
   var X = P - ROW.arrow - 0; // where an empty prefix's arrow starts
 
   // 1 · next-frame prediction
-  panelTitle(24, 'Next-frame prediction', 'one frame from hₜ');
+  panelTitle(24, 'Next-frame prediction', 'one frame');
   var r1 = D.row(svg, P - ROW.arrow + ROW.gap - 6, 40, [], ['aₜ'], ROW);
   hLabel(r1.arrowStart + 18, 54);
 
   D.wire(svg, 16, 96, 864, 96, null, {ghost: true});
 
   // 2 · independent multi-token prediction
-  panelTitle(122, 'Independent multi-token prediction', 'several frames at once, each from hₜ alone');
+  panelTitle(122, 'Independent multi-token prediction', 'several frames at once');
   var r2 = D.row(svg, P - ROW.arrow + ROW.gap - 6, 138, [], ['aₜ', 'aₜ₊₁', 'aₜ₊₂', 'aₜ₊₃'], ROW);
   hLabel(r2.arrowStart + 18, 152);
 
   D.wire(svg, 16, 200, 864, 200, null, {ghost: true});
 
   // 3 · autoregressive multi-token prediction (the current decoder)
-  panelTitle(220, 'Autoregressive multi-token prediction', 'each frame is handed hₜ and the frames before it', true);
+  panelTitle(220, 'Autoregressive multi-token prediction', 'each frame is handed the frames before it', true);
   var prefixes = [[], ['aₜ'], ['aₜ', 'aₜ₊₁'], ['aₜ', 'aₜ₊₁', 'aₜ₊₂']];
   var outs = ['aₜ', 'aₜ₊₁', 'aₜ₊₂', 'aₜ₊₃'];
+  var X0 = P - ROW.arrow + ROW.gap - 6; // the arrow column, shared with the panels above
   prefixes.forEach(function (p, i) {
     var y = 246 + i * 40;
-    // right-align the prefixes so the produced column lines up
-    var x = P - ROW.arrow + ROW.gap - 6 - p.length * (ROW.w + ROW.gap);
-    var r = D.row(svg, x, y, p, [outs[i]], ROW);
-    hLabel(r.arrowStart + 18, y + 14);
+    D.wire(svg, X0, y + 14, X0 + ROW.arrow - 8, y + 14, mk);
+    if (i === 0) hLabel(X0 + 18, y + 14);
+    var x = X0 + ROW.arrow;
+    p.forEach(function (g, k) { D.token(svg, x + k * (ROW.w + ROW.gap), y, ROW.w, ROW.h, g, 'given'); });
+    D.token(svg, x + p.length * (ROW.w + ROW.gap), y, ROW.w, ROW.h, outs[i]);
   });
 }());

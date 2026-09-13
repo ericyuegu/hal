@@ -82,15 +82,15 @@
   function mechTrunk(s) {
     var mk = D.marker(s, 'arrow', FAINT);
     s.setAttribute('viewBox', '0 0 880 170');
-    var w = 96, gap = 8, y0 = 20, rowH = 30, step = 44, right = 520;
+    var w = 96, gap = 8, y0 = 20, rowH = 30, step = 44, x0 = 16;
     var states = ['hₜ₋₂', 'hₜ₋₁', 'hₜ'];
     frames.forEach(function (_, i) {
       var y = y0 + i * step;
       var given = frames.slice(0, i + 1);
-      var x = right - given.length * (w + gap) + gap;
-      given.forEach(function (f, k) { D.jointToken(s, x + k * (w + gap), y, w, rowH, f[0], f[1], 'given'); });
-      D.wire(s, right + 6, y + rowH / 2, 630, y + rowH / 2, mk);
-      D.text(s, right + 40, y + rowH / 2 - 5, states[i], {class: 'diagram-label', 'text-anchor': 'middle'});
+      given.forEach(function (f, k) { D.jointToken(s, x0 + k * (w + gap), y, w, rowH, f[0], f[1], k === i ? '' : 'given'); });
+      var end = x0 + given.length * (w + gap) - gap;
+      D.wire(s, end + 6, y + rowH / 2, 630, y + rowH / 2, mk);
+      D.text(s, end + 30, y + rowH / 2 - 5, states[i], {class: 'diagram-label', 'text-anchor': 'middle'});
     });
     D.box(s, 640, y0, 220, 2 * step + rowH, 'CAUSAL ACTION DECODER');
   }
@@ -104,17 +104,19 @@
     D.text(temporal, 152, 105, 'hₜ', {class: 'diagram-label'});
     D.stacked(temporal, 186, 20, 670, 262, 'CAUSAL ACTION DECODER');
     var prefixes = [['aₜ₋₁'], ['aₜ₋₁', 'aₜ'], ['aₜ₋₁', 'aₜ', 'aₜ₊₁'], ['aₜ₋₁', 'aₜ', 'aₜ₊₁', 'aₜ₊₂']];
-    var w = 48, gap = 6, right = 470, cells = 606;
+    var w = 48, gap = 6, x0 = 262, cells = 620;
     prefixes.forEach(function (p, i) {
       var y = 62 + i * 44;
-      var x = right - p.length * (w + gap) + gap;
-      D.row(temporal, x, y, p, [outs[i]], {w: w, h: 28, gap: gap, arrow: 40, mk: mk});
+      D.wire(temporal, 214, y + 14, 254, y + 14, mk);
+      p.forEach(function (g, k) { D.token(temporal, x0 + k * (w + gap), y, w, 28, g, 'given'); });
+      var px = x0 + p.length * (w + gap);
+      D.token(temporal, px, y, w, 28, outs[i]);
+      D.wire(temporal, px + w + 6, y + 14, cells - 7, y + 14, mk);
       ['C', 'M', 'T', 'B'].forEach(function (g, k) {
         var cx = cells + k * 38;
         D.token(temporal, cx, y, 31, 28, g);
         if (k) D.wire(temporal, cx - 7, y + 14, cx - 1, y + 14, mk);
       });
-      D.wire(temporal, right + 40 + w + 6, y + 14, cells - 7, y + 14, mk);
     });
   }
   function mechFrame(s) {
@@ -122,12 +124,12 @@
     s.setAttribute('viewBox', '0 0 880 150');
     var names = {C: 'C-stick', M: 'main stick', T: 'triggers', B: 'buttons'};
     var chain = ['C', 'M', 'T', 'B'];
-    var w = 40, gap = 6, right = 200;
+    var w = 40, gap = 6, x0 = 60;
     for (var i = 1; i < chain.length; i++) {
       var y = 20 + (i - 1) * 40;
-      var given = chain.slice(0, i);
-      var x = right - given.length * (w + gap) + gap;
-      D.row(s, x, y, given, [chain[i]], {w: w, h: 28, gap: gap, arrow: 48, mk: mk});
+      D.wire(s, 16, y + 14, 52, y + 14, mk);
+      chain.slice(0, i).forEach(function (g, k) { D.token(s, x0 + k * (w + gap), y, w, 28, g, 'given'); });
+      D.token(s, x0 + i * (w + gap), y, w, 28, chain[i]);
     }
     chain.forEach(function (c, i) { D.note(s, 330, 38 + i * 26, c + '  ' + names[c]); });
   }
