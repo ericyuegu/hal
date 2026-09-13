@@ -148,6 +148,12 @@ COLOR_VARS = {
 
 # figures superseded by hand-written modules in figures_src/ (single choice per diagram, 2026-09-12)
 RETIRED = {
+    "advantage-weighted-behavior-cloning",
+    "objective-decoder-branches",
+    "replay-diversity",
+    "execution-horizon",
+    "batch-sweep",
+    "lr-sweep",
     "flagship-model-architecture",
     "stage-map",
     "conditioned-action-plan",
@@ -472,6 +478,13 @@ def registry_json(figures: list[dict]) -> str:
     return json.dumps(entries, ensure_ascii=False, indent=1)
 
 
+def inline_evidence() -> dict:
+    """The studies for the data drawer; the per-boot rows stay in data/evidence.json only."""
+    evidence = json.loads((DOCS / "blog_experiment_data.json").read_text())
+    evidence.pop("raw_evaluation_data", None)
+    return evidence
+
+
 def build() -> None:
     if DIST.exists():
         shutil.rmtree(DIST)
@@ -589,7 +602,9 @@ def build() -> None:
     (DIST / "figures" / "explorer.js").write_text(explorer_scripts())
     kit = (HERE / "figures_src" / "diagram-kit.js").read_text()
     ledger = "window.HALFIG_AWR_LEDGER = " + (HERE / "figures_src" / "awr-ledger.json").read_text().strip() + ";\n"
-    (DIST / "figures" / "custom.js").write_text(kit + "\n" + ledger + "\n".join(f["js"] for f in custom))
+    # every treatment − baseline interval the figures draw; produced by ci_stats.py
+    ci = "window.HALFIG_CI = " + json.dumps(json.loads((HERE / "ci.json").read_text())) + ";\n"
+    (DIST / "figures" / "custom.js").write_text(kit + "\n" + ledger + ci + "\n".join(f["js"] for f in custom))
 
     shell = (HERE / "shell.html").read_text()
     html = (
@@ -604,9 +619,7 @@ def build() -> None:
         .replace("/*__REGISTRY__*/", registry_json(figures))
         .replace(
             "/*__EVIDENCE__*/",
-            json.dumps(json.loads((DOCS / "blog_experiment_data.json").read_text()), ensure_ascii=False).replace(
-                "</", "<\\/"
-            ),
+            json.dumps(inline_evidence(), ensure_ascii=False).replace("</", "<\\/"),
         )
         .replace("/*__ENGINE_JS__*/", (HERE / "engine.js").read_text())
     )

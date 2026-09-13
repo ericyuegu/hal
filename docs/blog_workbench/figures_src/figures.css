@@ -91,3 +91,18 @@
 .ledger-svg .head{stroke:var(--ink);stroke-width:1}
 .ledger-readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:4px 14px;margin-top:8px;font:400 .72rem/1.5 var(--mono);color:var(--ink-mono);font-variant-numeric:tabular-nums;min-height:2.4em}
 .ledger-readout b{color:var(--ink);font-weight:500}
+
+/* ---------- effects: treatment − baseline with 95% intervals ---------- */
+.effects-figure .model-diagram{display:block;width:100%;height:auto}
+.model-diagram .effect-ci{stroke:var(--ink);stroke-width:1.4}
+.model-diagram .effect-pt{fill:var(--ink)}
+.model-diagram .effect-ci.accent{stroke:var(--oxblood)}
+.model-diagram .effect-pt.accent{fill:var(--oxblood)}
+.model-diagram .effect-val.accent{fill:var(--oxblood)}
+.model-diagram .effect-zero{stroke:var(--ink);stroke-width:1}
+.model-diagram .effect-grid{stroke:var(--rule);stroke-width:1}
+.model-diagram .effect-line{fill:none;stroke:var(--ink-faint);stroke-width:1.2}
+.model-diagram .effect-line.accent{stroke:var(--oxblood);stroke-width:1.5}
+.model-diagram .model-token.window{fill:var(--paper);stroke:var(--rule-dotted)}
+.model-diagram .model-token.window.hot{fill:var(--ink);stroke:var(--ink)}
+@media (max-width:760px){.effects-figure .model-diagram{min-width:0}}

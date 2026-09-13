@@ -76,6 +76,68 @@ window.HALDIAG = (function () {
     });
     return {end: cx - o.gap, producedStart: start, arrowStart: arrowStart};
   }
+
+  /* ---- treatment − baseline with its 95% interval ---- */
+  function signed(v, digits) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(digits); }
+  function scale(range, lo, hi) { return function (v) { return range[0] + (v - lo) / (hi - lo) * (range[1] - range[0]); }; }
+  function niceStep(span) {
+    var raw = span / 4, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), r = raw / mag;
+    return (r < 1.5 ? 1 : r < 3.5 ? 2 : r < 7.5 ? 5 : 10) * mag;
+  }
+  /* Axis domain covering every interval in `series` (list of {lo, hi}) plus zero. */
+  function domain(series) {
+    var lo = 0, hi = 0;
+    series.forEach(function (d) { lo = Math.min(lo, d.lo); hi = Math.max(hi, d.hi); });
+    var step = niceStep(hi - lo || 1), pad = step * 0.35;
+    lo = Math.floor((lo - pad) / step) * step; hi = Math.ceil((hi + pad) / step) * step;
+    var ticks = []; for (var v = lo; v <= hi + step / 2; v += step) ticks.push(Math.abs(v) < step / 1e6 ? 0 : v);
+    return {lo: lo, hi: hi, ticks: ticks, digits: step >= 1 ? 0 : step >= 0.1 ? 1 : 2};
+  }
+  /* One effect: whisker over [lo, hi], dot at delta, value text at a fixed column. */
+  function effect(target, x, y, d, opts) {
+    var o = Object.assign({accent: false, digits: 2, valueX: null}, opts || {});
+    var cls = o.accent ? ' accent' : '';
+    target.appendChild(el('line', {x1: x(d.lo), y1: y, x2: x(d.hi), y2: y, class: 'effect-ci' + cls}));
+    target.appendChild(el('circle', {cx: x(d.delta), cy: y, r: 3.6, class: 'effect-pt' + cls}));
+    if (o.valueX !== null) text(target, o.valueX, y + 4, signed(d.delta, o.digits), {class: 'diagram-label effect-val' + cls});
+  }
+  /* Zero line, grid ticks and a column title for one effect column. */
+  function effectAxis(target, x, dom, yTop, yBottom, title) {
+    var px = Math.abs(x(dom.ticks[1]) - x(dom.ticks[0]));
+    var every = px >= 40 ? 1 : px >= 20 ? 2 : 4;
+    var zi = dom.ticks.indexOf(0);
+    dom.ticks.forEach(function (v, i) {
+      target.appendChild(el('line', {x1: x(v), y1: yTop, x2: x(v), y2: yBottom, class: v === 0 ? 'effect-zero' : 'effect-grid'}));
+      var labelled = v === 0 || ((i - zi) % every === 0 && Math.abs(i - zi) >= every);
+      if (labelled) text(target, x(v), yBottom + 14, signed(v, dom.digits), {class: 'diagram-note', 'text-anchor': 'middle'});
+    });
+    if (title) text(target, (x(dom.lo) + x(dom.hi)) / 2, yTop - 14, title, {class: 'diagram-note', 'text-anchor': 'middle'});
+  }
+  /* A whole forest: rows of {label, sub, stock, damage, accent, baseline}; stocks and damage side by side. */
+  function forest(svg, rows, opts) {
+    var o = Object.assign({width: 880, labelX: 16, cols: [[336, 540], [640, 826]], rowH: 44, top: 60, sub: true}, opts || {});
+    var H = o.top + rows.length * o.rowH + 34;
+    svg.setAttribute('viewBox', '0 0 ' + o.width + ' ' + H);
+    var live = rows.filter(function (r) { return !r.baseline; });
+    var doms = [domain(live.map(function (r) { return r.stock; })), domain(live.map(function (r) { return r.damage; }))];
+    var xs = doms.map(function (d, k) { return scale(o.cols[k], d.lo, d.hi); });
+    var yEnd = o.top + rows.length * o.rowH - 8;
+    effectAxis(svg, xs[0], doms[0], o.top - 14, yEnd, 'Δ net stocks / min');
+    effectAxis(svg, xs[1], doms[1], o.top - 14, yEnd, 'Δ net damage / min');
+    text(svg, o.labelX, o.top - 14 - 14, o.header || 'treatment − baseline · dot and 95% interval', {class: 'diagram-note'});
+    rows.forEach(function (r, i) {
+      var y = o.top + i * o.rowH + o.rowH / 2 - 6;
+      text(svg, o.labelX, y + (r.sub ? 0 : 4), r.label, {class: 'diagram-title' + (r.accent ? ' accent' : '')});
+      if (r.sub) text(svg, o.labelX, y + 14, r.sub, {class: 'diagram-note'});
+      if (r.baseline) {
+        xs.forEach(function (x, k) { text(svg, x(0) + 6, y + 4, 'baseline', {class: 'diagram-note'}); });
+        return;
+      }
+      effect(svg, xs[0], y, r.stock, {accent: r.accent, digits: 2, valueX: o.cols[0][1] + 8});
+      effect(svg, xs[1], y, r.damage, {accent: r.accent, digits: 1, valueX: o.cols[1][1] + 8});
+    });
+    return {xs: xs, doms: doms};
+  }
   function focus(svg, moduleId) {
     Array.prototype.forEach.call(svg.querySelectorAll('[data-module]'), function (p) {
       p.classList.remove('module-dim', 'module-focus');
@@ -83,5 +145,5 @@ window.HALDIAG = (function () {
       p.classList.add(p.getAttribute('data-module') === moduleId ? 'module-focus' : 'module-dim');
     });
   }
-  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus};
+  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest};
 }());

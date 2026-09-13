@@ -16,14 +16,15 @@
  {
   "key": "action-dependencies",
   "name": "What a predicted action is given",
-  "caption": "The four O37 cells, same parameters, data, updates and deployment. Across-frame conditioning hands the decoder the frames it has already written; within-frame conditioning hands each controller group the groups already chosen in that frame. Averaged over the other axis, across-frame conditioning was worth +0.361 stocks/min and +13.49 damage/min, within-frame conditioning +0.245 and +8.48.",
+  "caption": "The four O37 cells, same parameters, data, updates and deployment. Across-frame conditioning hands the decoder the frames it has already written; within-frame conditioning hands each controller group the groups already chosen in that frame. Each cell is shown as its change from the unconditioned cell with a 95% interval. Averaged over the other axis, across-frame conditioning was worth +0.36 [+0.24, +0.49] stocks/min and +13.5 [+5.2, +21.8] damage/min; within-frame conditioning +0.25 [+0.14, +0.35] and +8.5 [+0.5, +16.2].",
   "studies": [
    "action_factorization_o37",
    "within_frame_order",
    "decoder_lineage"
   ],
   "data": [
-   "o37Cells"
+   "o37Cells",
+   "o37MainEffects"
   ]
  },
  {
@@ -82,5 +83,77 @@
    "dataset_v8_cleaning"
   ],
   "data": []
+ },
+ {
+  "key": "objective-effects",
+  "name": "Other objectives against behavior cloning",
+  "caption": "Each tested package minus its behavior-cloning baseline, with a 95% interval. Attached IQL: −2.01 [−2.21, −1.80] stocks/min. Endpoint flow: −0.19 [−0.37, +0.00] stocks/min and −32.9 [−44.2, −21.6] damage/min with more compute. Exploration modeling: −1.67 [−1.94, −1.41] with one plan, −0.81 [−0.98, −0.63] with eight.",
+  "studies": [
+   "attached_iql",
+   "endpoint_flow",
+   "exploration_modeling",
+   "continuous_action_flow"
+  ],
+  "data": [
+   "objectiveEffects"
+  ]
+ },
+ {
+  "key": "awr-effects",
+  "name": "What advantage weighting was worth",
+  "caption": "AWR − behavior cloning: +0.08 [−0.10, +0.26] stocks/min, +10.8 [−1.4, +23.0] damage/min; the two evaluations were not paired (96 and 128 boots), so the interval combines the two arms' standard errors. An 8-second return half-life vs 3 seconds: +0.37 [+0.20, +0.54] stocks/min; 14 seconds vs 3: +0.32 [+0.16, +0.48].",
+  "studies": [
+   "awr_actor_weighting",
+   "awr_gamma",
+   "rank_weighted_bc"
+  ],
+  "data": [
+   "awrEffects"
+  ]
+ },
+ {
+  "key": "replay-windows",
+  "name": "Windows per replay in one batch",
+  "caption": "One window per replay − four: +0.73 [−0.07, +1.53] stocks/min, −6.2 [−46.5, +34.1] damage/min. An old evaluation with few matches per arm, so the intervals are wide.",
+  "studies": [
+   "windows_per_replay"
+  ],
+  "data": [
+   "replayWindows"
+  ]
+ },
+ {
+  "key": "horizon-effects",
+  "name": "Frames played before replanning",
+  "caption": "Each O37 checkpoint at 1, 2, 4 and 6 frames per plan, as the change from 1 frame with a 95% interval. Six frames instead of one: −1.00 [−1.20, −0.81] stocks/min for the cell conditioned on nothing, −0.07 [−0.23, +0.08] for the cell conditioned on frames and groups. Execution length and replan interval change together, so this is not a replan-only result.",
+  "studies": [
+   "execution_horizon",
+   "rtc"
+  ],
+  "data": [
+   "horizonEffects"
+  ]
+ },
+ {
+  "key": "batch-effects",
+  "name": "Batch size at fixed data",
+  "caption": "Batch size at a fixed 2.1 million examples, each arm as its change from batch 2,048 with a 95% interval. Every arm saw the same data, so a smaller batch simply bought more optimizer updates. Batch 128: +0.47 [+0.25, +0.69] stocks/min. One seed.",
+  "studies": [
+   "batch_size_fixed_examples"
+  ],
+  "data": [
+   "batchEffects"
+  ]
+ },
+ {
+  "key": "lr-effects",
+  "name": "The learning-rate pair",
+  "caption": "The Muon and AdamW rates move together as one pair; each arm is its change from the smallest pair with a 95% interval. The pair .040 / .00170 gains +0.22 [+0.02, +0.42] stocks/min and sits inside the sweep, but its neighbours are not separated from it.",
+  "studies": [
+   "learning_rate_sweep"
+  ],
+  "data": [
+   "lrEffects"
+  ]
  }
 ]
