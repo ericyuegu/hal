@@ -163,14 +163,14 @@ RETIRED = {
 }
 
 # data providers that an attach module in figures_src adds to an extracted figure
-CUSTOM_DATA = {"codecEffects", "pastActionEffect"}
+CUSTOM_DATA = {"pastActionEffect"}
 
 # data behind each anatomy figure, exposed for the data drawer
 ANATOMY_DATA = {
     "flagship-model-architecture": ["architectureModules", "architectureEdges"],
     "conditioned-action-plan": [],
     "factorization-ablation": ["factorRows"],
-    "controller-representations": ["codecEffects", "codecComparisons"],
+    "controller-representations": [],
     "representation-branches": ["representationBranches"],
     "advantage-weighted-behavior-cloning": ["awrRows"],
     "objective-decoder-branches": ["objectiveBranches"],
@@ -509,14 +509,21 @@ def build() -> None:
     for svg in (REPO / "docs" / "blog_figures").glob("*.svg"):
         shutil.copy(svg, DIST / "figures" / svg.name)
 
+    orphan_containers: list[str] = []
     anatomy = main_figures()
     for f in anatomy:
         f["data"] = ANATOMY_DATA[f["key"]]
-        if f["key"] == "controller-representations":  # the results table is redrawn as differences by codec-effects.js
-            f["html"] = f["html"].replace(
-                "Two matched comparisons; do not compare bars across pairs.",
-                "Two matched comparisons, each as treatment minus baseline with a 95% interval.",
+        if f["key"] == "controller-representations":  # the results live in the codec-effects figure
+            table = re.search(r'<div id="codec-results".*?</div>', f["html"], re.S).group(0)
+            f["html"] = (
+                f["html"]
+                .replace(table, "")
+                .replace(
+                    "Two matched comparisons; do not compare bars across pairs.",
+                    "The three controller codecs that were compared.",
+                )
             )
+            orphan_containers.append(table)  # anatomy.js still renders into it; it stays in the hidden pool
     explorer = explorer_figures()
     svg_figures = [
         {
@@ -605,7 +612,9 @@ def build() -> None:
     for f in anatomy + explorer:
         if f["key"] in RETIRED:
             figures_hidden_pool.append(f)
-    pool = []
+    pool = [
+        '<div class="fig-src anatomy" data-fig="orphans"><figure>' + "\n".join(orphan_containers) + "</figure></div>"
+    ]
     for f in figures + figures_hidden_pool:
         cls = "xfig" if f["source"] == "explorer" else f["source"]
         pool.append(f'<div class="fig-src {cls}" data-fig="{f["key"]}">\n{f["html"]}\n</div>')

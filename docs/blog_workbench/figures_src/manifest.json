@@ -157,11 +157,19 @@
   ]
  },
  {
-  "key": "codec-effects",
-  "attach": "controller-representations"
- },
- {
   "key": "past-action-effect",
   "attach": "past-action-encoding"
+ },
+ {
+  "key": "codec-effects",
+  "name": "What the codec changes were worth",
+  "caption": "Cartesian − legacy: +0.29 [+0.08, +0.52] stocks/min, +16.2 [+3.5, +29.0] damage/min. Polar − Cartesian: +0.10 [−0.09, +0.27] stocks/min, +0.9 [−10.2, +12.7] damage/min.",
+  "studies": [
+   "codec_legacy_cartesian",
+   "codec_cartesian_polar"
+  ],
+  "data": [
+   "codecEffects"
+  ]
  }
 ]

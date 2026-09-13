@@ -17,10 +17,7 @@
   "name": "Three controller representations",
   "source": "anatomy",
   "caption": "In matched comparisons, Cartesian beat legacy by +0.292 stocks/min and +16.16 damage/min. Polar beat Cartesian by +0.095 and +0.88; stock LCB crossed zero (−0.074 → +0.016). Internal experiments: O43, O26/O52, and O53. legacy · Cartesian, first comparison · Cartesian, second comparison · polar.",
-  "data": [
-   "codecEffects",
-   "codecComparisons"
-  ],
+  "data": [],
   "studies": [
    "codec_legacy_cartesian",
    "codec_cartesian_polar"
@@ -410,6 +407,19 @@
   ],
   "studies": [
    "learning_rate_sweep"
+  ]
+ },
+ {
+  "key": "codec-effects",
+  "name": "What the codec changes were worth",
+  "source": "custom",
+  "caption": "Cartesian − legacy: +0.29 [+0.08, +0.52] stocks/min, +16.2 [+3.5, +29.0] damage/min. Polar − Cartesian: +0.10 [−0.09, +0.27] stocks/min, +0.9 [−10.2, +12.7] damage/min.",
+  "data": [
+   "codecEffects"
+  ],
+  "studies": [
+   "codec_legacy_cartesian",
+   "codec_cartesian_polar"
   ]
  }
 ]

@@ -71,12 +71,19 @@
   /* ------------------------------------------------------------------ document model */
   function order() { return (state.outline && state.outline.order) || []; }
   function visibleIds() { return order().filter(function (id) { var b = state.blocks[id]; return b && !b.hidden; }); }
+  /* Figures number in order; a figure with `sub: true` shares the previous figure's number as 2a, 2b, … */
   function figureNumbers() {
-    var n = 0, map = {};
+    var n = 0, map = {}, group = [], owner = {};
+    function label(k) { return group.length > 1 ? n + String.fromCharCode(96 + k) : String(n); }
+    function relabel() { group.forEach(function (gid, k) { map[gid] = label(k + 1); }); }
     visibleIds().forEach(function (id) {
       var b = state.blocks[id];
-      if (b.type === 'figure') { n += 1; map[id] = n; if (b.fig && !(b.fig in map)) map[b.fig] = n; }
+      if (b.type !== 'figure') return;
+      if (b.sub && group.length) group.push(id); else { n += 1; group = [id]; }
+      if (b.fig && !(b.fig in owner)) owner[b.fig] = id;
+      relabel();
     });
+    Object.keys(owner).forEach(function (f) { map[f] = map[owner[f]]; });
     return map;
   }
   function sectionNumbers() {
