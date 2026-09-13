@@ -9,7 +9,7 @@
 .architecture-figure .model-diagram [data-module]{transition:opacity .16s ease}
 .architecture-figure .model-diagram .hit{fill:transparent;stroke:none;cursor:pointer}
 .arch-cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:14px 0 0}
-.arch-cards button{text-align:left;font:inherit;background:var(--paper);border:1px solid var(--rule-dotted);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:58px;transition:border-color .14s ease,background .14s ease}
+.arch-cards button{text-align:left;font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--rule-dotted);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:58px;transition:border-color .14s ease,background .14s ease}
 .arch-cards button:hover{border-color:var(--ink)}
 .arch-cards button[aria-selected="true"]{background:var(--white);border-color:var(--ink);box-shadow:2px 2px 0 var(--shadow-soft)}
 .arch-cards .n{font:600 .62rem/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mono)}
