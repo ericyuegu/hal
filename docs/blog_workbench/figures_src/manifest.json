@@ -29,8 +29,8 @@
  },
  {
   "key": "action-logit-paths",
-  "name": "Three paths into the action logits",
-  "caption": "O43 arm A feeds the action logits three ways: the temporal decoder’s future-frame state, conditioned within the frame by FiLM and read by a SiLU MLP head, plus a direct skip from the trunk state. Removing any one of them cost stocks on both evaluation suites; hover a row to see the path it removed.",
+  "name": "Inside one written frame",
+  "caption": "One decoder token per future frame, (hₜ, previous written frame, offset), through two causal attention blocks; each frame’s four heads then fire in order, C-stick first. Later heads see the picks made so far through FiLM on the frame state; every head is a norm → linear → SiLU → linear stack whose logits also receive a linear skip from the trunk state hₜ. O43 tested each part against the model without it: zero-init FiLM → ordinary init +1.09 [+0.75, +1.43] stocks/min, no trunk skip → trunk skip +0.89 [+0.49, +1.29], linear head → SiLU MLP head +2.03 [+1.75, +2.31] on the character suite; the Fox suite agrees. Hover a row to light the part.",
   "studies": [
    "o43_action_head_components",
    "film_vs_concatenation",

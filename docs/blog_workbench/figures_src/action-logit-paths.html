@@ -1,14 +1,12 @@
-<figure class="breakout logit-figure" id="logit-paths">
+<figure class="breakout architecture-figure logit-figure" id="logit-paths">
   <div class="artifact interactive">
     <div class="figure-head">
       <div>
-        <h4>Three paths into the action logits</h4>
-        <p>O43 removed one path at a time from the same control; every change lost stocks.</p>
+        <h4>Inside one written frame</h4>
+        <p>One decoder token per future frame; each frame’s four heads fire in order. O43 tested the three highlighted parts.</p>
       </div>
     </div>
-    <div class="logit-grid">
-      <div class="logit-path" id="logit-path"></div>
-      <div class="logit-forest" id="logit-forest"></div>
-    </div>
+    <svg class="model-diagram" id="logit-anatomy" role="img" aria-label="The trunk state and the previous written frame form one token per future offset; two causal attention blocks turn them into frame states. One frame is opened: its four heads, C-stick, main stick, triggers and buttons, run in order. Each later head applies FiLM from the picks made so far, then a norm, linear, SiLU, linear head; a linear skip from the trunk state is added to the logits; the sampled class is embedded and joins the picks."></svg>
+    <svg class="model-diagram" id="logit-forest" role="img" aria-label="Three comparisons, each adding one part to the model without it: ordinary FiLM initialisation gains about 1.1 net stocks per minute, the trunk skip about 0.9, the SiLU MLP head about 2.0, on both evaluation suites with intervals above zero."></svg>
   </div>
 </figure>

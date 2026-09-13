@@ -29,31 +29,17 @@
 @media (max-width:760px){.arch-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.arch-detail .prose{columns:1}.arch-figure .model-diagram,.deps-figure .model-diagram{min-width:0}}
 
 /* ---------- action logit paths ---------- */
-.logit-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:18px;align-items:start}
-.logit-path svg,.logit-forest svg,.rle-diagram svg{display:block;width:100%;height:auto}
-.logit-path text,.logit-forest text,.rle-diagram text{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.logit-path .lbl,.logit-forest .lbl,.rle-diagram .lbl{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;fill:var(--ink)}
-.logit-path .sub,.logit-forest .sub,.rle-diagram .sub{font-size:10px;fill:var(--ink-mono)}
-.logit-path .tiny,.logit-forest .tiny,.rle-diagram .tiny{font-size:8.5px;fill:var(--ink-mono)}
-.logit-path .sym,.rle-diagram .sym{font-size:11px;fill:var(--ink)}
-.logit-path .plate,.rle-diagram .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
-.logit-path .wire{fill:none;stroke:var(--ink-faint);stroke-width:1.1}
-.logit-path .comp{cursor:default;transition:opacity .14s ease}
-.logit-path[data-hl] .comp{opacity:.28}
-.logit-path[data-hl] .comp.is-hl{opacity:1}
-.logit-path[data-hl] .comp.is-hl .plate{stroke:var(--oxblood);stroke-width:1.6}
-.logit-forest .row{cursor:default}
-.logit-forest .row rect.hit{fill:transparent}
-.logit-forest .row:hover rect.hit{fill:color-mix(in srgb,var(--oxblood) 5%,transparent)}
-.logit-forest .ci{stroke-width:1.4}
-.logit-forest .ci.char{stroke:var(--ink)}
-.logit-forest .ci.fox{stroke:var(--oxblood)}
-.logit-forest .pt.char{fill:var(--ink)}
-.logit-forest .pt.fox{fill:var(--oxblood)}
-.logit-forest .zero{stroke:var(--ink);stroke-width:1}
-.logit-forest .grid{stroke:var(--rule);stroke-width:1}
-.logit-forest .val{font-size:9.5px;fill:var(--ink)}
-@media (max-width:760px){.logit-grid{grid-template-columns:minmax(0,1fr)}}
+.logit-figure .model-diagram{display:block;width:100%;height:auto}
+.logit-figure #logit-forest{margin-top:14px;padding-top:12px;border-top:1px dotted var(--rule-dotted)}
+.logit-figure .forest-row .hit{fill:transparent;stroke:none}
+.logit-figure .forest-row:hover .hit{fill:color-mix(in srgb,var(--oxblood) 5%,transparent)}
+.rle-diagram svg{display:block;width:100%;height:auto}
+.rle-diagram text{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.rle-diagram .lbl{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;fill:var(--ink)}
+.rle-diagram .sub{font-size:10px;fill:var(--ink-mono)}
+.rle-diagram .tiny{font-size:8.5px;fill:var(--ink-mono)}
+.rle-diagram .sym{font-size:11px;fill:var(--ink)}
+.rle-diagram .plate{fill:var(--paper);stroke:var(--ink);stroke-width:1.1}
 
 /* ---------- run-length spans ---------- */
 .rle-diagram .frame{fill:var(--paper);stroke:var(--ink);stroke-width:1}

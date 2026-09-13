@@ -271,9 +271,9 @@
  },
  {
   "key": "action-logit-paths",
-  "name": "Three paths into the action logits",
+  "name": "Inside one written frame",
   "source": "custom",
-  "caption": "O43 arm A feeds the action logits three ways: the temporal decoder’s future-frame state, conditioned within the frame by FiLM and read by a SiLU MLP head, plus a direct skip from the trunk state. Removing any one of them cost stocks on both evaluation suites; hover a row to see the path it removed.",
+  "caption": "One decoder token per future frame, (hₜ, previous written frame, offset), through two causal attention blocks; each frame’s four heads then fire in order, C-stick first. Later heads see the picks made so far through FiLM on the frame state; every head is a norm → linear → SiLU → linear stack whose logits also receive a linear skip from the trunk state hₜ. O43 tested each part against the model without it: zero-init FiLM → ordinary init +1.09 [+0.75, +1.43] stocks/min, no trunk skip → trunk skip +0.89 [+0.49, +1.29], linear head → SiLU MLP head +2.03 [+1.75, +2.31] on the character suite; the Fox suite agrees. Hover a row to light the part.",
   "data": [
    "logitPathRows"
   ],
@@ -348,7 +348,7 @@
  },
  {
   "key": "awr-effects",
-  "name": "What advantage weighting was worth",
+  "name": "Advantage weighting",
   "source": "custom",
   "caption": "Behavior cloning → AWR: +0.08 [−0.10, +0.26] stocks/min, +10.8 [−1.4, +23.0] damage/min; the two evaluations were not paired (96 and 128 boots), so the interval combines the two arms' standard errors. Return half-life 3 s → 8 s: +0.37 [+0.19, +0.54] stocks/min; 3 s → 14 s: +0.32 [+0.16, +0.48].",
   "data": [
@@ -411,7 +411,7 @@
  },
  {
   "key": "codec-effects",
-  "name": "What the codec changes were worth",
+  "name": "Codec comparisons",
   "source": "custom",
   "caption": "Legacy → Cartesian: +0.29 [+0.08, +0.51] stocks/min, +16.3 [+3.4, +29.1] damage/min. Cartesian → polar: +0.10 [−0.08, +0.28] stocks/min, +0.9 [−10.8, +12.6] damage/min.",
   "data": [

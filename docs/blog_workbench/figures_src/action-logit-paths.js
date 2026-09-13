@@ -1,108 +1,153 @@
-/* Fig: three paths into the action logits, and what removing each one cost. */
+/* Fig: one written frame opened up — the token strip, then the four heads in order with FiLM,
+   the SiLU MLP head and the trunk skip — and what each of the three parts was worth (O43). */
 (function () {
   'use strict';
-  var NS = 'http://www.w3.org/2000/svg';
-  var pathHost = document.getElementById('logit-path');
-  var forestHost = document.getElementById('logit-forest');
-  if (!pathHost || !forestHost) return;
-  function svgEl(name, attrs, text) {
-    var n = document.createElementNS(NS, name);
-    Object.keys(attrs || {}).forEach(function (k) { n.setAttribute(k, String(attrs[k])); });
-    if (text !== undefined) n.textContent = text;
-    return n;
-  }
+  var D = window.HALDIAG;
+  var svg = document.getElementById('logit-anatomy');
+  var forest = document.getElementById('logit-forest');
+  if (!D || !svg || !forest) return;
 
+  // baseline → treatment on both evaluation suites; the baseline of each row is O43 without that part
   var ROWS = [
-    {id: 'film', change: 'Zero-initialize FiLM', at: 'U4,096', run: 'vzd242t6', char: [-1.09, 0.34], fox: [-1.20, 0.37], comp: 'film'},
-    {id: 'skip', change: 'Remove the trunk skip', at: 'U4,096', run: 'j4skyy83', char: [-0.89, 0.40], fox: [-1.13, 0.46], comp: 'skip'},
-    {id: 'head', change: 'Linear heads instead of SiLU MLP', at: 'U8,192', run: 'apj3rw8b', char: [-2.03, 0.28], fox: [-2.41, 0.32], comp: 'head'}
+    {comp: 'film', label: 'zero-init FiLM → ordinary init', sub: 'vzd242t6 → 1imfy8v3 · 4,096 updates',
+      char: {delta: 1.09, lo: 0.75, hi: 1.43}, fox: {delta: 1.20, lo: 0.83, hi: 1.57}},
+    {comp: 'skip', label: 'no trunk skip → trunk skip', sub: 'j4skyy83 → 1imfy8v3 · 4,096 updates',
+      char: {delta: 0.89, lo: 0.49, hi: 1.29}, fox: {delta: 1.13, lo: 0.67, hi: 1.59}},
+    {comp: 'head', label: 'linear head → SiLU MLP head', sub: 'apj3rw8b → 1imfy8v3 · 8,192 updates',
+      char: {delta: 2.03, lo: 1.75, hi: 2.31}, fox: {delta: 2.41, lo: 2.09, hi: 2.73}}
   ];
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.logitPathRows = function () {
-    return ROWS.map(function (r) { return {change: r.change, updates: r.at, run: r.run, control: '1imfy8v3', character_suite_delta: r.char[0], character_suite_ci95: r.char[1], fox_suite_delta: r.fox[0], fox_suite_ci95: r.fox[1]}; });
+    return ROWS.map(function (r) {
+      return {comparison: r.label, runs: r.sub.split(' · ')[0], updates: r.sub.split(' · ')[1],
+        character_suite_delta: r.char.delta, character_suite_ci95_lo: r.char.lo, character_suite_ci95_hi: r.char.hi,
+        fox_suite_delta: r.fox.delta, fox_suite_ci95_lo: r.fox.lo, fox_suite_ci95_hi: r.fox.hi};
+    });
   };
 
-  /* ---- the path diagram ---- */
-  var s = svgEl('svg', {viewBox: '0 0 410 250', role: 'img', 'aria-label': 'The trunk state feeds the temporal decoder, whose future-frame state is conditioned by FiLM on earlier controller parts and read by a SiLU MLP head; a direct skip from the trunk state also adds into the action logits.'});
-  var defs = svgEl('defs');
-  var m = svgEl('marker', {id: 'lp-arrow', viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '5', markerHeight: '5', orient: 'auto', markerUnits: 'strokeWidth'});
-  m.appendChild(svgEl('path', {d: 'M0 1 L10 5 L0 9 Z', fill: 'var(--ink-faint)'}));
-  defs.appendChild(m);
-  s.appendChild(defs);
-  function comp(key, x, y, w, h, title, note) {
-    var g = svgEl('g', {'class': 'comp', 'data-comp': key});
-    g.appendChild(svgEl('rect', {x: x, y: y, width: w, height: h, 'class': 'plate'}));
-    g.appendChild(svgEl('text', {x: x + w / 2, y: y + 15, 'class': 'sym', 'text-anchor': 'middle'}, title));
-    if (note) g.appendChild(svgEl('text', {x: x + w / 2, y: y + 28, 'class': 'tiny', 'text-anchor': 'middle'}, note));
-    s.appendChild(g);
-    return g;
-  }
-  function wire(d, key) {
-    var p = svgEl('path', {d: d, 'class': 'wire', 'marker-end': 'url(#lp-arrow)'});
-    if (key) { var g = svgEl('g', {'class': 'comp', 'data-comp': key}); g.appendChild(p); s.appendChild(g); return g; }
-    s.appendChild(p);
-    return p;
-  }
-  s.appendChild(svgEl('text', {x: 8, y: 16, 'class': 'lbl'}, 'Complete O43 control · arm A'));
-  comp('trunk', 8, 60, 92, 36, 'trunk state', 'hₜ');
-  wire('M 100 78 L 128 78');
-  comp('dec', 130, 60, 120, 36, 'temporal decoder', 'future-frame state');
-  wire('M 250 78 L 292 78');
-  // FiLM is a modifier on the head's input, not a stage of its own
-  var film = svgEl('g', {'class': 'comp', 'data-comp': 'film'});
-  film.appendChild(svgEl('path', {d: 'M 271 128 L 271 84', 'class': 'wire', 'marker-end': 'url(#lp-arrow)'}));
-  film.appendChild(svgEl('text', {x: 271, y: 142, 'class': 'tiny', 'text-anchor': 'middle'}, 'FiLM · earlier controller parts'));
-  s.appendChild(film);
-  comp('head', 294, 60, 112, 36, 'SiLU MLP head');
-  wire('M 350 96 L 350 180');
-  // the direct skip
-  wire('M 54 96 L 54 194 L 336 194', 'skip');
-  var skipLabel = svgEl('g', {'class': 'comp', 'data-comp': 'skip'});
-  skipLabel.appendChild(svgEl('text', {x: 64, y: 188, 'class': 'tiny'}, 'direct trunk skip · hₜ → linear logits'));
-  s.appendChild(skipLabel);
-  s.appendChild(svgEl('circle', {cx: 350, cy: 194, r: 12, 'class': 'plate'}));
-  s.appendChild(svgEl('text', {x: 350, y: 198.5, 'class': 'sym', 'text-anchor': 'middle'}, 'Σ'));
-  wire('M 362 194 L 382 194');
-  s.appendChild(svgEl('rect', {x: 384, y: 182, width: 16, height: 24, 'class': 'plate', 'stroke-dasharray': '2 2'}));
-  s.appendChild(svgEl('text', {x: 8, y: 236, 'class': 'tiny'}, 'hover a row to see which path the test removed'));
-  pathHost.appendChild(s);
+  var FAINT = 'var(--ink-faint)', ACCENT = 'var(--oxblood)';
 
-  /* ---- the forest plot ---- */
-  var W = 460, H = 276, L = 12, R = 24, top = 44, rowH = 58;
-  var xmin = -3.2, xmax = 0.3;
-  function X(v) { return L + 150 + (v - xmin) / (xmax - xmin) * (W - L - R - 150); }
-  var f = svgEl('svg', {viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'Forest plot of three one-change ablations: each lost between 0.9 and 2.4 stocks per minute on both evaluation suites, with intervals that exclude zero.'});
-  f.appendChild(svgEl('text', {x: L, y: 16, 'class': 'lbl'}, 'Change in net stocks / min'));
-  f.appendChild(svgEl('text', {x: L, y: 30, 'class': 'sub'}, 'treatment minus control · point and 95% interval'));
-  [-3, -2.5, -2, -1.5, -1, -0.5].forEach(function (v) {
-    f.appendChild(svgEl('line', {x1: X(v), y1: top, x2: X(v), y2: top + rowH * 3, 'class': 'grid'}));
-    f.appendChild(svgEl('text', {x: X(v), y: top + rowH * 3 + 14, 'class': 'tiny', 'text-anchor': 'middle'}, String(v)));
+  /* ------------------------------------------------------------- anatomy */
+  svg.setAttribute('viewBox', '0 0 900 560');
+  var mk = D.marker(svg, 'arrow', FAINT), mka = D.marker(svg, 'arrow-accent', ACCENT);
+  function dot(target, x, y) { target.appendChild(D.el('circle', {cx: x, cy: y, r: 2.4, fill: FAINT})); }
+  function op(target, cx, y, w, label, cls) {
+    target.appendChild(D.el('rect', {x: cx - w / 2, y: y, width: w, height: 20, class: 'model-token' + (cls ? ' ' + cls : '')}));
+    D.text(target, cx, y + 14, label, {'text-anchor': 'middle', class: 'diagram-label'});
+  }
+
+  // — the token strip: hₜ and one token per future offset
+  var strip = D.part(svg, 'strip');
+  D.note(strip, 120, 18, 'one token per future frame · two causal attention blocks over them');
+  D.token(strip, 24, 44, 56, 30, 'hₜ', 'given');
+  D.note(strip, 52, 38, 'trunk state', 'middle');
+  D.wire(strip, 80, 59, 118, 59, mk);
+  var TOK = [
+    {x: 120, label: '(hₜ, aₜ₋₁, 1)', writes: 'writes aₜ'},
+    {x: 242, label: '(hₜ, aₜ, 2)', writes: 'writes aₜ₊₁', open: true},
+    {x: 364, label: '(hₜ, aₜ₊₁, 3)', writes: 'writes aₜ₊₂'},
+    {x: 486, label: '(hₜ, aₜ₊₂, 4)', writes: 'writes aₜ₊₃'},
+    {x: 650, label: '(hₜ, aₜ₊₁₉, 20)', writes: 'writes aₜ₊₂₀'}
+  ];
+  TOK.forEach(function (t, i) {
+    D.token(strip, t.x, 44, 112, 30, t.label, t.open ? 'played' : '');
+    D.note(strip, t.x + 56, 92, t.writes, 'middle', t.open ? 'play' : '');
+    if (i > 0 && i < 4) D.wire(strip, TOK[i - 1].x + 112, 59, t.x - 2, 59, mk);
   });
-  f.appendChild(svgEl('line', {x1: X(0), y1: top - 6, x2: X(0), y2: top + rowH * 3, 'class': 'zero'}));
-  f.appendChild(svgEl('text', {x: X(0), y: top + rowH * 3 + 14, 'class': 'tiny', 'text-anchor': 'middle'}, '0'));
-  f.appendChild(svgEl('text', {x: X(0), y: top + rowH * 3 + 25, 'class': 'tiny', 'text-anchor': 'middle'}, 'control'));
+  D.note(strip, 624, 63, '···', 'middle');
+  // causal attention: every token attends to the tokens before it
+  [0, 1, 2].forEach(function (i) {
+    var x1 = TOK[i].x + 56, x2 = TOK[3].x + 56, lift = 12 + (3 - i) * 6;
+    D.path(strip, 'M ' + x1 + ' 44 Q ' + ((x1 + x2) / 2) + ' ' + (44 - lift) + ' ' + x2 + ' 44', mk, {ghost: true});
+  });
+  D.note(strip, 706, 112, 'attends only to earlier tokens', 'middle');
+
+  // — the opened frame: frame state bus and trunk bus
+  var opened = D.part(svg, 'frame');
+  D.wire(opened, 298, 74, 298, 150, mka, {accent: true});
+  D.note(opened, 306, 112, 'attention → norm → frame state s₂', 'start', 'play');
+  var CX = [160, 340, 520, 700];
+  var YS = 150, YH = 172, YF = 196, YM = 236, YSUM = 380, YL = 402, YSAMPLE = 436, YE = 470, YP = 516;
+  D.wire(opened, 100, YS, 790, YS, null, {accent: true});
+  D.note(opened, 96, YS + 4, 's₂', 'end', 'play');
+  var skipbus = D.part(svg, 'skip');
+  D.wire(skipbus, 52, 74, 52, YH);
+  D.wire(skipbus, 52, YH, 790, YH);
+  D.note(skipbus, 60, YH + 14, 'hₜ skip bus');
+  var picksbus = D.part(svg, 'picks');
+  D.wire(picksbus, 140, YP, 790, YP, mk);
+  D.note(picksbus, 800, YP + 4, 'aₜ₊₁ → token 3');
+  D.note(picksbus, 140, YP + 16, 'picks so far, concatenated');
+
+  var GROUPS = ['C-stick', 'main stick', 'triggers', 'buttons'];
+  GROUPS.forEach(function (name, j) {
+    var cx = CX[j];
+    D.text(svg, cx, 138, (j + 1) + '. ' + name, {'text-anchor': 'middle', class: 'diagram-title'});
+    // frame state into the column
+    var col = D.part(svg, 'col' + j);
+    dot(col, cx, YS);
+    if (j === 0) {
+      D.wire(col, cx, YS, cx, YM + 8, mk);
+      D.note(col, cx - 8, YF + 14, 'first: no FiLM', 'end');
+    } else {
+      D.wire(col, cx, YS, cx, YF, mk);
+      var film = D.part(svg, 'film');
+      op(film, cx, YF, 84, 'FiLM  γ, β');
+      // γ, β come from the picks made earlier in this frame
+      var tx = cx - 72;
+      dot(film, tx, YP);
+      D.path(film, 'M ' + tx + ' ' + YP + ' L ' + tx + ' ' + (YF + 10) + ' L ' + (cx - 44) + ' ' + (YF + 10), mk);
+      D.wire(col, cx, YF + 20, cx, YM + 8, mk);
+    }
+    // the head: norm → linear → SiLU → linear
+    var head = D.part(svg, 'head');
+    head.appendChild(D.el('rect', {x: cx - 44, y: YM, width: 88, height: 130, class: 'model-token queued'}));
+    ['norm', 'linear', 'SiLU', 'linear'].forEach(function (label, i) { op(head, cx, YM + 8 + i * 26, 64, label); });
+    D.note(head, cx, YM + 121, 'SiLU MLP head', 'middle');
+    D.wire(col, cx, YM + 130, cx, YSUM - 10, mk);
+    // Σ with the trunk skip from the right
+    col.appendChild(D.el('circle', {cx: cx, cy: YSUM, r: 9, class: 'model-token'}));
+    D.text(col, cx, YSUM + 4, '+', {'text-anchor': 'middle', class: 'diagram-label'});
+    var sx = cx + 72;
+    dot(skipbus, sx, YH);
+    D.wire(skipbus, sx, YH, sx, 300);
+    op(skipbus, sx, 300, 52, 'linear');
+    D.path(skipbus, 'M ' + sx + ' 320 L ' + sx + ' ' + YSUM + ' L ' + (cx + 10) + ' ' + YSUM, mk);
+    // logits → sample → embed → picks bus
+    D.wire(col, cx, YSUM + 9, cx, YL, mk);
+    op(col, cx, YL, 84, 'logits · mask');
+    D.wire(col, cx, YL + 20, cx, YSAMPLE, mk);
+    op(col, cx, YSAMPLE, 84, 'sample');
+    D.wire(col, cx, YSAMPLE + 20, cx, YE, mk);
+    op(col, cx, YE, 84, 'embed');
+    D.wire(col, cx, YE + 20, cx, YP);
+    dot(picksbus, cx, YP);
+  });
+  D.note(svg, CX[3] + 104, 314, 'trunk skip');
+
+  /* ------------------------------------------------------------- forest */
+  var W = 900, top = 68, rowH = 54, L = 16, COLX = [430, 690], VALX = 704;
+  forest.setAttribute('viewBox', '0 0 ' + W + ' ' + (top + ROWS.length * rowH + 40));
+  var dom = D.domain(ROWS.map(function (r) { return r.char; }).concat(ROWS.map(function (r) { return r.fox; })));
+  var x = D.scale(COLX, dom.lo, dom.hi);
+  D.effectAxis(forest, x, dom, top - 14, top + ROWS.length * rowH - 8, 'Δ net stocks / min');
+  var lg = top - 40;
+  D.note(forest, L, lg, 'baseline → treatment · 95% interval · each baseline is O43 without that part');
+  forest.appendChild(D.el('circle', {cx: 690, cy: lg - 4, r: 3.2, class: 'effect-pt'}));
+  D.note(forest, 698, lg, 'character suite');
+  forest.appendChild(D.el('circle', {cx: 820, cy: lg - 4, r: 3.2, class: 'effect-pt accent'}));
+  D.note(forest, 828, lg, 'Fox suite');
   ROWS.forEach(function (r, i) {
-    var y0 = top + i * rowH;
-    var g = svgEl('g', {'class': 'row', 'data-comp': r.comp});
-    g.appendChild(svgEl('rect', {x: 0, y: y0, width: W, height: rowH, 'class': 'hit'}));
-    g.appendChild(svgEl('line', {x1: L, y1: y0 + rowH, x2: W - R, y2: y0 + rowH, 'class': 'grid'}));
-    g.appendChild(svgEl('text', {x: L, y: y0 + 18, 'class': 'sym', 'font-size': '10'}, r.change));
-    g.appendChild(svgEl('text', {x: L, y: y0 + 31, 'class': 'tiny'}, r.at + ' · ' + r.run));
-    g.appendChild(svgEl('text', {x: L, y: y0 + 46, 'class': 'val', 'font-size': '9'}, r.char[0].toFixed(2) + ' ± ' + r.char[1].toFixed(2) + '  ·  ' + r.fox[0].toFixed(2) + ' ± ' + r.fox[1].toFixed(2)));
-    [['char', r.char, 22, 'character suite'], ['fox', r.fox, 40, 'Fox suite']].forEach(function (series) {
-      var v = series[1], y = y0 + series[2];
-      g.appendChild(svgEl('line', {x1: X(v[0] - v[1]), y1: y, x2: X(v[0] + v[1]), y2: y, 'class': 'ci ' + series[0]}));
-      g.appendChild(svgEl('circle', {cx: X(v[0]), cy: y, r: 3.4, 'class': 'pt ' + series[0]}));
-    });
-    g.addEventListener('mouseenter', function () { pathHost.setAttribute('data-hl', r.comp); s.querySelectorAll('.comp').forEach(function (c) { c.classList.toggle('is-hl', c.dataset.comp === r.comp); }); });
-    g.addEventListener('mouseleave', function () { pathHost.removeAttribute('data-hl'); s.querySelectorAll('.comp').forEach(function (c) { c.classList.remove('is-hl'); }); });
-    f.appendChild(g);
+    var y = top + i * rowH + rowH / 2 - 6;
+    var g = D.el('g', {class: 'forest-row'});
+    g.appendChild(D.el('rect', {x: 0, y: top + i * rowH - 4, width: W, height: rowH, class: 'hit'}));
+    D.text(g, L, y, r.label, {class: 'diagram-title'});
+    D.text(g, L, y + 14, r.sub, {class: 'diagram-note'});
+    D.effect(g, x, y - 7, r.char, {digits: 2, valueX: VALX});
+    D.effect(g, x, y + 9, r.fox, {digits: 2, valueX: VALX, accent: true});
+    g.addEventListener('mouseenter', function () { D.focus(svg, r.comp); });
+    g.addEventListener('mouseleave', function () { D.focus(svg, null); });
+    forest.appendChild(g);
   });
-  var ly = top + rowH * 3 + 44;
-  f.appendChild(svgEl('circle', {cx: L + 4, cy: ly, r: 3.4, 'class': 'pt char'}));
-  f.appendChild(svgEl('text', {x: L + 12, y: ly + 3.5, 'class': 'tiny'}, 'character suite'));
-  f.appendChild(svgEl('circle', {cx: L + 124, cy: ly, r: 3.4, 'class': 'pt fox'}));
-  f.appendChild(svgEl('text', {x: L + 132, y: ly + 3.5, 'class': 'tiny'}, 'Fox suite'));
-  f.appendChild(svgEl('text', {x: W - R, y: ly + 3.5, 'class': 'tiny', 'text-anchor': 'end'}, 'left is worse · every interval excludes zero'));
-  forestHost.appendChild(f);
+  D.note(forest, L, top + ROWS.length * rowH + 30, 'hover a row to light the part it added');
 }());
