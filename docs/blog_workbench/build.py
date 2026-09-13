@@ -582,7 +582,7 @@ def build() -> None:
             "name": "Past-action encoding",
             "source": "anatomy",
             "html": past,
-            "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. Physical − one-hot: +0.26 [+0.09, +0.43] stocks/min, +23.7 [+13.9, +33.1] damage/min, despite fewer examples and fewer parameters.",
+            "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. Physical − one-hot: +0.26 [+0.08, +0.44] stocks/min, +23.7 [+13.8, +33.6] damage/min, despite fewer examples and fewer parameters.",
             "data": ["pastActionEffect", "representationBranches"],
         }
     )

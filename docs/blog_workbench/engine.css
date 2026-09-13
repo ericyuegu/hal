@@ -190,3 +190,6 @@ body.wb-edit .wb-block[data-type="text"] .wb-body,body.wb-edit .wb-block[data-ty
   .wb-insert-menu{grid-template-columns:repeat(2,auto)}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important}}
+
+.wb-math{font-size:.95em}
+div.wb-math{margin:0 0 var(--space-para);overflow-x:auto;max-width:var(--measure)}

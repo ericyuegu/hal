@@ -198,12 +198,33 @@
       return '<a class="figref" href="#fig-' + escapeHtml(key) + '">Fig ' + n + '</a>';
     });
   }
+  /* TeX spans ($$…$$ display, $…$ inline) bypass markdown untouched; MathJax typesets them after paint. */
+  function protectMath(src) {
+    var spans = [];
+    var out = src.replace(/\$\$([\s\S]+?)\$\$|(?<!\\)\$([^\n$]+?)\$/g, function (m, display, inline) {
+      spans.push(display !== undefined ? '<div class="wb-math">$$' + display + '$$</div>' : '<span class="wb-math">\\(' + inline + '\\)</span>');
+      return '\u0000MATH' + (spans.length - 1) + '\u0000';
+    });
+    return {src: out, spans: spans};
+  }
   function md2html(md, figNums) {
     var src = resolveFigRefs(md || '', figNums || figureNumbers());
     if (!window.marked) return '<pre>' + escapeHtml(src) + '</pre>';
-    var html = window.marked.parse(src);
+    var kept = protectMath(src);
+    var html = window.marked.parse(kept.src).replace(/\u0000MATH(\d+)\u0000/g, function (_, i) { return kept.spans[Number(i)]; });
     // wide tables scroll on their own
     return html.replace(/<table>/g, '<div class="wb-body-tablewrap"><table>').replace(/<\/table>/g, '</table></div>');
+  }
+  document.addEventListener('mathjax-ready', function () { typesetMath(); });
+  var typesetQueued = false;
+  function typesetMath() {
+    if (typesetQueued || !window.MathJax || !window.MathJax.typesetPromise) return;
+    typesetQueued = true;
+    setTimeout(function () {
+      typesetQueued = false;
+      var nodes = $$('.wb-math').filter(function (n) { return !n.querySelector('mjx-container'); });
+      if (nodes.length) window.MathJax.typesetPromise(nodes).catch(function () { /* leave the TeX source visible */ });
+    }, 0);
   }
   function headingHtml(b, secNums, id) {
     var level = b.level || 2;
@@ -418,6 +439,7 @@
       return node;
     }
     body.innerHTML = md2html(b.md || '', figNums);
+    typesetMath();
     return node;
   }
 
@@ -624,6 +646,7 @@
     function paintPreview() {
       if (isFigure) { preview.innerHTML = ta.value ? md2html(ta.value) : ''; return; }
       preview.innerHTML = b.type === 'heading' ? headingHtml({md: ta.value, level: Number(fields.level.value)}, {}, id) : md2html(ta.value);
+      typesetMath();
     }
     ta.addEventListener('input', function () { autosize(ta); paintPreview(); });
     editor.addEventListener('keydown', function (e) {

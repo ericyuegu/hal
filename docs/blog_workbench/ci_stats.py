@@ -2,13 +2,16 @@
 
 Reads ../blog_experiment_data.json (its ``computed_differences`` and raw boot rows) plus
 wandb_sweep_evals.json (W&B aggregates for runs whose match rows were not archived), and
-writes ci.json. Three estimators, in order of preference:
+writes ci.json. Three estimators:
 
-* ``computed`` — the interval already stored in the evidence file.
-* ``paired``   — matchup-blocked bootstrap of shared boots (same matchup schedule in both
-  arms): resample boot indices jointly, recompute each arm's pooled rate, difference.
-* ``independent`` — Δ ± 1.96·sqrt(SE_T² + SE_B²), SE backed out of each arm's one-sided
-  95% net LCB (cluster bootstrap where W&B logged it, otherwise the conservative LCB).
+* ``paired``  — a paired t-test over Dolphin boots. Both arms play the same seeded match-ups,
+  so boot i of the treatment is paired with boot i of the baseline; the per-boot net rate
+  differences d_i give Δ = mean(d), CI = Δ ± t_{0.975, n−1} · sd(d)/√n. Main effects average
+  several such pairs boot by boot.
+* ``welch``   — arms with boot rows on different boot sets: Welch's t-test on per-boot rates.
+* ``independent`` — arms with only W&B aggregates: Δ ± 1.96·sqrt(SE_T² + SE_B²), SE
+  backed out of each arm's one-sided 95% net LCB (cluster bootstrap where W&B logged it,
+  otherwise the conservative LCB).
 
 Run: uv run --no-project ci_stats.py
 """
@@ -20,6 +23,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+from scipy import stats
 
 HERE = Path(__file__).parent
 DATA = json.loads((HERE / ".." / "blog_experiment_data.json").read_text())
@@ -31,43 +35,36 @@ LCB_Z = 1.645
 METRICS = {"stock": ("stocks_taken", "stocks_lost"), "damage": ("damage_dealt", "damage_taken")}
 
 
-def boots(eval_id: str) -> dict[str, np.ndarray]:
-    rows = EVALS[eval_id]["boots"]
-    rows = sorted(rows, key=lambda r: r["boot_index"])
-    out = {"minutes": np.array([r["active_frames"] / 3600.0 for r in rows])}
-    for m, (pos, neg) in METRICS.items():
-        out[m] = np.array([r[pos] - r[neg] for r in rows], dtype=float)
-    out["matchup"] = [(r["ego_character"], r["opp_character"]) for r in rows]
+def boots(eval_id: str) -> dict:
+    """Per-boot net rates, keyed by boot index, with the match-up each boot played."""
+    out = {}
+    for r in EVALS[eval_id]["boots"]:
+        minutes = r["active_frames"] / 3600.0
+        if minutes <= 0:
+            continue
+        out[r["boot_index"]] = {
+            "matchup": (r["ego_character"], r["opp_character"]),
+            "stock": (r["stocks_taken"] - r["stocks_lost"]) / minutes,
+            "damage": (r["damage_dealt"] - r["damage_taken"]) / minutes,
+        }
     return out
 
 
-def pooled(net: np.ndarray, minutes: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    return net[idx].sum(axis=1) / minutes[idx].sum(axis=1)
-
-
 def paired(treat_ids: list[str], control_ids: list[str], *, weights=None) -> dict:
-    """Difference of pooled rates; ``weights`` lets a main effect average several (T − C) pairs."""
+    """Paired t-test on per-boot differences; ``weights`` lets a main effect average several (T − C) pairs."""
     arms = [boots(e) for e in treat_ids + control_ids]
-    n = len(arms[0]["minutes"])
-    for a in arms:
-        assert len(a["minutes"]) == n and a["matchup"] == arms[0]["matchup"], "arms do not share a matchup schedule"
-    rng = np.random.default_rng(0)
-    idx = rng.integers(0, n, size=(RESAMPLES, n))
-    full = np.arange(n)[None, :]
+    shared = sorted(set.intersection(*(set(a) for a in arms)))
+    for i in shared:  # the schedule is seeded, so paired boots must have played the same match-up
+        assert len({a[i]["matchup"] for a in arms}) == 1, f"boot {i} is not the same match-up in every arm"
     k = len(treat_ids)
     weights = weights or [1.0 / k] * k
+    n = len(shared)
     out = {"method": "paired", "n_boots": n}
-
-    def delta(m: str, ix: np.ndarray) -> np.ndarray:
-        return sum(
-            w * (pooled(arms[i][m], arms[i]["minutes"], ix) - pooled(arms[k + i][m], arms[k + i]["minutes"], ix))
-            for i, w in enumerate(weights)
-        )
-
     for m in METRICS:
-        point = float(delta(m, full)[0])
-        lo, hi = np.percentile(delta(m, idx), [2.5, 97.5])
-        out[m] = {"delta": point, "lo": float(lo), "hi": float(hi)}
+        d = np.array([sum(w * (arms[j][i][m] - arms[k + j][i][m]) for j, w in enumerate(weights)) for i in shared])
+        se = d.std(ddof=1) / math.sqrt(n)
+        half = stats.t.ppf(0.975, n - 1) * se
+        out[m] = {"delta": float(d.mean()), "lo": float(d.mean() - half), "hi": float(d.mean() + half)}
     return out
 
 
@@ -94,15 +91,31 @@ def independent(treat: str, control: str) -> dict:
     return out
 
 
-def computed(study_id: str, treatment: str | None = None) -> dict:
+def welch(treat_id: str, control_id: str) -> dict:
+    """Welch's t-test on per-boot rates for arms evaluated on different boot sets."""
+    a, b = boots(treat_id), boots(control_id)
+    out = {"method": "welch", "n_boots": {"treatment": len(a), "control": len(b)}}
+    for m in METRICS:
+        x = np.array([r[m] for r in a.values()])
+        y = np.array([r[m] for r in b.values()])
+        res = stats.ttest_ind(x, y, equal_var=False)
+        lo, hi = res.confidence_interval(0.95)
+        out[m] = {"delta": float(x.mean() - y.mean()), "lo": float(lo), "hi": float(hi)}
+    return out
+
+
+def study_pair(study_id: str, treatment: str | None = None) -> dict:
+    """Paired t-test (shared match-ups) or Welch's t-test for a study whose evaluation ids the evidence file links."""
     study = next(s for s in DATA["studies"] if s["id"] == study_id)
     diffs = study["computed_differences"]
     d = diffs[0] if treatment is None else next(x for x in diffs if x["treatment"] == treatment)
-    out = {"method": "computed", "treatment": d["treatment"], "control": d["control"]}
-    for m, key in (("stock", "net_stocks_per_min"), ("damage", "net_damage_per_min")):
-        x = d[key]
-        out[m] = {"delta": x["point_delta"], "lo": x["ci95"][0], "hi": x["ci95"][1]}
-    return out
+    shared = "shared" in d["net_stocks_per_min"]["method"]
+    est = (
+        paired([d["treatment_evaluation_id"]], [d["control_evaluation_id"]])
+        if shared
+        else welch(d["treatment_evaluation_id"], d["control_evaluation_id"])
+    )
+    return {**est, "treatment": d["treatment"], "control": d["control"]}
 
 
 def main() -> None:
@@ -130,7 +143,7 @@ def main() -> None:
         "optimizer_full_scale": [None],
     }.items():
         for name in names:
-            ci[sid if name is None else f"{sid}:{name}"] = computed(sid, name)
+            ci[sid if name is None else f"{sid}:{name}"] = study_pair(sid, name)
 
     # O37 cells: H4 evaluations on one matchup schedule
     o37 = {
@@ -204,7 +217,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # sanity: the paired estimator must reproduce a stored computed difference
-    chk = paired(["eval-5d3916bd7dabb115"], ["eval-a5c3924cb8fa96ce"])
-    print("check codec_legacy_cartesian paired:", {m: {k: round(x, 3) for k, x in chk[m].items()} for m in METRICS})
     main()
