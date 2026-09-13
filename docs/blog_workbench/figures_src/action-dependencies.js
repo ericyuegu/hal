@@ -9,16 +9,16 @@
   svg.setAttribute('viewBox', '0 0 880 330');
 
   var CELLS = [
-    {id: 'D0', name: 'neither', across: false, within: false, stock: -0.702, damage: 2.77, run: '98r9smrj'},
+    {id: 'D0', name: 'no feedback', across: false, within: false, stock: -0.702, damage: 2.77, run: '98r9smrj'},
     {id: 'D1', name: 'within the frame', across: false, within: true, stock: -0.313, damage: 13.05, run: 'a117chkw'},
     {id: 'D2', name: 'across frames', across: true, within: false, stock: -0.196, damage: 18.06, run: '50q39o9j'},
-    {id: 'D3', name: 'both', across: true, within: true, stock: -0.096, damage: 24.75, run: '5wfk2esf', cur: true}
+    {id: 'D3', name: 'across and within', across: true, within: true, stock: -0.096, damage: 24.75, run: '5wfk2esf', cur: true}
   ];
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
-  window.HALFIG_CUSTOM.data.o37Cells = function () { return CELLS.map(function (c) { return {cell: c.id, feedback: c.name, across_frames: c.across, within_frame: c.within, net_stocks_per_min: c.stock, net_damage_per_min: c.damage, run: c.run}; }); };
+  window.HALFIG_CUSTOM.data.o37Cells = function () { return CELLS.map(function (c) { return {o37_cell: c.id, feedback: c.name, across_frames: c.across, within_frame: c.within, net_stocks_per_min: c.stock, net_damage_per_min: c.damage, run: c.run}; }); };
 
   var W = 44, H = 28, GAP = 6;
-  var X0 = 150;                  // arrow column
+  var X0 = 158;                  // arrow column
   var TOK = X0 + 56;             // first token column
   var GRP = 400;                 // the written frame, opened into its groups
   var BAR = {stock: [612, 700], damage: [736, 852]};
@@ -38,8 +38,7 @@
 
   CELLS.forEach(function (c, i) {
     var y = y0 + i * step;
-    D.text(svg, 16, y + 13, c.id, {class: 'diagram-title' + (c.cur ? ' accent' : '')});
-    D.text(svg, 16, y + 26, c.name, {class: 'diagram-note'});
+    D.text(svg, 16, y + H / 2 + 4, c.name, {class: 'diagram-title' + (c.cur ? ' accent' : '')});
     // what the decoder is handed
     D.wire(svg, X0, y + H / 2, X0 + 48, y + H / 2, mk);
     if (i === 0) D.text(svg, X0 + 18, y + H / 2 - 6, 'hₜ', {class: 'diagram-label'});

@@ -194,7 +194,62 @@ def main_script() -> str:
     )
     tail = js.rfind("}());")
     js = js[:tail] + hook + js[tail:]
+    js = split_representation_branches(js)
     js = js.replace("var tip = one('#tip');", "var tip = one('#tip');  // shared tooltip element in the shell")
+    return js
+
+
+# outcomes for the branches that had no matched control or failed outright: no numbers (Eric, 2026-09-13)
+BRANCH_OUTCOMES = {
+    "geometry": "Stopped without a closed-loop result.",
+    "cross": "No matched control; the nearest reference changes the trunk, codec, offsets and decoder size.",
+    "flat": "No matched control; the two arms use different context lengths and evaluation protocols.",
+    "bpe": "The tested package lost, and it also changed execution cadence, parameter count and crash rate.",
+    "chording": "Stopped after three diagnostic steps.",
+    "state": "Lost with more parameters, twice the examples and more than twice the training work.",
+    "delay": "Lost; plan length, replan interval and the future-data buffer changed with the delay.",
+}
+
+
+def split_representation_branches(js: str) -> str:
+    """Past-action encoding worked; it gets its own figure and keeps its delta. The rest keep only an outcome."""
+    old = """    function renderRepresentation() {
+      var target = one('#representation-list');
+      empty(target);
+      representationBranches.forEach(function (branch) {"""
+    assert old in js, "renderRepresentation changed shape"
+    outcomes = json.dumps(BRANCH_OUTCOMES)
+    new = (
+        """    var BRANCH_OUTCOMES = """
+        + outcomes
+        + """;
+    function renderRepresentation() {
+      var lists = [
+        [one('#past-action-list'), representationBranches.filter(function (b) { return b.id === 'physical'; })],
+        [one('#representation-list'), representationBranches.filter(function (b) { return b.id !== 'physical'; }).map(function (b) {
+          return Object.assign({}, b, {stock: null, damage: null, noResult: BRANCH_OUTCOMES[b.id] || b.noResult});
+        })]
+      ];
+      lists.forEach(function (pair) {
+      var target = pair[0];
+      if (!target) return;
+      empty(target);
+      pair[1].forEach(function (branch) {"""
+    )
+    js = js.replace(old, new)
+    old_tail = """        renderMasterMap(one('.branch-map', row), branch.focus);
+        renderBranchMechanism(one('.branch-mechanism', row), branch.diagram);
+      });
+    }"""
+    assert old_tail in js
+    js = js.replace(
+        old_tail,
+        """        renderMasterMap(one('.branch-map', row), branch.focus);
+        renderBranchMechanism(one('.branch-mechanism', row), branch.diagram);
+      });
+      });
+    }""",
+    )
     return js
 
 
@@ -397,6 +452,7 @@ FIG_STUDIES = {
         "old_head_capacity",
     ],
     "scaling-points-table": ["capacity_and_latency"],
+    "past-action-encoding": ["past_action_encoding", "onehot_button_pruning"],
 }
 
 
@@ -478,6 +534,30 @@ def build() -> None:
     for f in svg_figures:
         f["html"] = f'<figure class="svg-figure"><img src="figures/{f["file"]}" alt="{f["name"]}"></figure>'
 
+    branches = next(f for f in anatomy if f["key"] == "representation-branches")
+    past = (
+        branches["html"]
+        .replace('id="representation-list"', 'id="past-action-list"')
+        .replace("Representation branches", "Past-action encoding")
+        .replace(
+            "Each row locates the changed component, then compares the two mechanisms.",
+            "Where the previous controller frame enters, and the two encodings compared.",
+        )
+        .replace('aria-label="Representation branches"', 'aria-label="Past-action encoding"')
+    )
+    anatomy.append(
+        {
+            "key": "past-action-encoding",
+            "name": "Past-action encoding",
+            "source": "anatomy",
+            "html": past,
+            "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. The physical encoding won by +0.260 stocks/min and +23.68 damage/min despite fewer examples and fewer parameters.",
+            "data": ["representationBranches"],
+        }
+    )
+    branches["caption"] = (
+        "Each row locates the changed component and compares the two mechanisms. None of these produced a matched win; the outcome column says why no delta is reported."
+    )
     raw = element_at(MAIN, '<details class="raw">')
     raw = raw.replace('<details class="raw">', '<details class="raw" open>')
     anatomy.append(

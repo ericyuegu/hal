@@ -437,6 +437,10 @@ def compose() -> None:
         )
         figure("observation-token", note="Replaces io-paths + the observation-inputs SVG (2026-09-12, option A).")
         text(blocks_md("Block name: Remember the physical control"))
+        figure(
+            "past-action-encoding",
+            note="Split out of the representation-branches figure (2026-09-13): it worked, the others did not.",
+        )
         text(blocks_md("Block name: One observation token"))
         text(blocks_md("Block name: Nonlinear action readouts matter"))
         text(blocks_md("Block name: Three paths into the action logits"))

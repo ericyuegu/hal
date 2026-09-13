@@ -29,7 +29,7 @@
   "key": "representation-branches",
   "name": "Representation branches",
   "source": "anatomy",
-  "caption": "The bars use one scale across the section: ±3 stocks/min and ±180 damage/min. Blank results mean that the retained run does not support an intervention delta.",
+  "caption": "Each row locates the changed component and compares the two mechanisms. None of these produced a matched win; the outcome column says why no delta is reported.",
   "data": [
    "representationBranches"
   ],
@@ -182,6 +182,19 @@
   "studies": [
    "training_checkpoint_series",
    "optimizer_full_scale"
+  ]
+ },
+ {
+  "key": "past-action-encoding",
+  "name": "Past-action encoding",
+  "source": "anatomy",
+  "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. The physical encoding won by +0.260 stocks/min and +23.68 damage/min despite fewer examples and fewer parameters.",
+  "data": [
+   "representationBranches"
+  ],
+  "studies": [
+   "past_action_encoding",
+   "onehot_button_pruning"
   ]
  },
  {
