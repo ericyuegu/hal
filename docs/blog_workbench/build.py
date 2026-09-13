@@ -515,12 +515,14 @@ def build() -> None:
         f["data"] = ANATOMY_DATA[f["key"]]
         if f["key"] == "controller-representations":  # the results live in the codec-effects figure
             table = re.search(r'<div id="codec-results".*?</div>', f["html"], re.S).group(0)
+            f["name"] = "Controller codecs"
             f["html"] = (
                 f["html"]
                 .replace(table, "")
+                .replace("<h4>Three controller representations</h4>", "<h4>Controller codecs</h4>")
                 .replace(
                     "Two matched comparisons; do not compare bars across pairs.",
-                    "The three controller codecs that were compared.",
+                    "How each codec discretises the buttons and the main stick.",
                 )
             )
             orphan_containers.append(table)  # anatomy.js still renders into it; it stays in the hidden pool

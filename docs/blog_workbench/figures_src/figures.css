@@ -106,3 +106,9 @@
 .model-diagram .model-token.window{fill:var(--paper);stroke:var(--rule-dotted)}
 .model-diagram .model-token.window.hot{fill:var(--ink);stroke:var(--ink)}
 @media (max-width:760px){.effects-figure .model-diagram{min-width:0}}
+
+/* Fig 2a: the three codec columns share row heights so the stick maps sit level */
+@media (min-width: 721px) {
+  .codec-stage { display: flex; flex-direction: column; }
+  .codec-button-demo { flex: 1; }
+}
