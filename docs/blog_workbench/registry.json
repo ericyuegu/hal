@@ -18,6 +18,7 @@
   "source": "anatomy",
   "caption": "In matched comparisons, Cartesian beat legacy by +0.292 stocks/min and +16.16 damage/min. Polar beat Cartesian by +0.095 and +0.88; stock LCB crossed zero (−0.074 → +0.016). Internal experiments: O43, O26/O52, and O53. legacy · Cartesian, first comparison · Cartesian, second comparison · polar.",
   "data": [
+   "codecEffects",
    "codecComparisons"
   ],
   "studies": [
@@ -137,8 +138,9 @@
   "key": "past-action-encoding",
   "name": "Past-action encoding",
   "source": "anatomy",
-  "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. The physical encoding won by +0.260 stocks/min and +23.68 damage/min despite fewer examples and fewer parameters.",
+  "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. Physical − one-hot: +0.26 [+0.09, +0.43] stocks/min, +23.7 [+13.9, +33.1] damage/min, despite fewer examples and fewer parameters.",
   "data": [
+   "pastActionEffect",
    "representationBranches"
   ],
   "studies": [

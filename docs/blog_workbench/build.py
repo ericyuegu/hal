@@ -162,12 +162,15 @@ RETIRED = {
     "svg-rle-action-spans",
 }
 
+# data providers that an attach module in figures_src adds to an extracted figure
+CUSTOM_DATA = {"codecEffects", "pastActionEffect"}
+
 # data behind each anatomy figure, exposed for the data drawer
 ANATOMY_DATA = {
     "flagship-model-architecture": ["architectureModules", "architectureEdges"],
     "conditioned-action-plan": [],
     "factorization-ablation": ["factorRows"],
-    "controller-representations": ["codecComparisons"],
+    "controller-representations": ["codecEffects", "codecComparisons"],
     "representation-branches": ["representationBranches"],
     "advantage-weighted-behavior-cloning": ["awrRows"],
     "objective-decoder-branches": ["objectiveBranches"],
@@ -190,7 +193,7 @@ def main_script() -> str:
     # rgba oxblood tints become a token-aware mix so ink mode keeps them visible
     js = js.replace("'rgba(123,46,46,.06)'", "'color-mix(in srgb, var(--oxblood) 7%, transparent)'")
     js = js.replace("'rgba(123,46,46,.05)'", "'color-mix(in srgb, var(--oxblood) 6%, transparent)'")
-    names = sorted({n for ns in ANATOMY_DATA.values() for n in ns})
+    names = sorted({n for ns in ANATOMY_DATA.values() for n in ns} - CUSTOM_DATA)
     for n in names:
         assert re.search(rf"\bvar {n}\b", js), f"anatomy data constant missing: {n}"
     exposed = ", ".join(f"{n}: function () {{ return {n}; }}" for n in names)
@@ -402,8 +405,11 @@ def custom_figures() -> list[dict]:
     entries = json.loads((src / "manifest.json").read_text())
     out = []
     for e in entries:
-        html = (src / f"{e['key']}.html").read_text()
         js = (src / f"{e['key']}.js").read_text()
+        if "attach" in e:  # script-only module that re-renders part of an extracted figure
+            out.append({**e, "source": "custom", "js": js})
+            continue
+        html = (src / f"{e['key']}.html").read_text()
         out.append({**e, "source": "custom", "html": html, "js": js})
     return out
 
@@ -506,6 +512,11 @@ def build() -> None:
     anatomy = main_figures()
     for f in anatomy:
         f["data"] = ANATOMY_DATA[f["key"]]
+        if f["key"] == "controller-representations":  # the results table is redrawn as differences by codec-effects.js
+            f["html"] = f["html"].replace(
+                "Two matched comparisons; do not compare bars across pairs.",
+                "Two matched comparisons, each as treatment minus baseline with a 95% interval.",
+            )
     explorer = explorer_figures()
     svg_figures = [
         {
@@ -564,8 +575,8 @@ def build() -> None:
             "name": "Past-action encoding",
             "source": "anatomy",
             "html": past,
-            "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. The physical encoding won by +0.260 stocks/min and +23.68 damage/min despite fewer examples and fewer parameters.",
-            "data": ["representationBranches"],
+            "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. Physical − one-hot: +0.26 [+0.09, +0.43] stocks/min, +23.7 [+13.9, +33.1] damage/min, despite fewer examples and fewer parameters.",
+            "data": ["pastActionEffect", "representationBranches"],
         }
     )
     branches["caption"] = (
@@ -584,7 +595,8 @@ def build() -> None:
         }
     )
     figures_hidden_pool: list[dict] = []
-    custom = custom_figures()
+    modules = custom_figures()
+    custom = [f for f in modules if "attach" not in f]
     figures = [f for f in anatomy + explorer + svg_figures if f["key"] not in RETIRED] + custom
     keys = [f["key"] for f in figures]
     assert len(keys) == len(set(keys)), "duplicate figure keys"
@@ -604,7 +616,7 @@ def build() -> None:
     ledger = "window.HALFIG_AWR_LEDGER = " + (HERE / "figures_src" / "awr-ledger.json").read_text().strip() + ";\n"
     # every treatment − baseline interval the figures draw; produced by ci_stats.py
     ci = "window.HALFIG_CI = " + json.dumps(json.loads((HERE / "ci.json").read_text())) + ";\n"
-    (DIST / "figures" / "custom.js").write_text(kit + "\n" + ledger + ci + "\n".join(f["js"] for f in custom))
+    (DIST / "figures" / "custom.js").write_text(kit + "\n" + ledger + ci + "\n".join(f["js"] for f in modules))
 
     shell = (HERE / "shell.html").read_text()
     html = (

@@ -155,5 +155,13 @@
   "data": [
    "lrEffects"
   ]
+ },
+ {
+  "key": "codec-effects",
+  "attach": "controller-representations"
+ },
+ {
+  "key": "past-action-effect",
+  "attach": "past-action-encoding"
  }
 ]
