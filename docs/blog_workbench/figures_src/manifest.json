@@ -2,7 +2,7 @@
  {
   "key": "architecture",
   "name": "The policy, end to end",
-  "caption": "Each frame becomes one token (sₜ, aₜ₋₁). A causal context Transformer reads the sequence; its state for the current frame, hₜ, is handed to a causal action decoder that writes aₜ, aₜ₊₁, … in order. The first two are played, the rest are replaced by the next plan.",
+  "caption": "The policy as one dataflow; bars are vectors drawn to width. Each frame’s game state, characters, stage and previous controller frame are concatenated and projected to one token uₜ; N causal blocks over the last L tokens give a state per frame, and play uses only hₜ. The decoder builds one token per future frame from norm(hₜ), the previous written frame and an offset embedding, runs M causal blocks over those, and reads each frame state with four heads in order — later heads conditioned by FiLM on the picks so far, every head an MLP whose logits also receive a linear skip from hₜ. Two written frames are played before the next plan. Click a band for detail.",
   "studies": [
    "training_checkpoint_series",
    "optimizer_full_scale",
