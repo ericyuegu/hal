@@ -315,14 +315,16 @@
  },
  {
   "key": "action-dependencies",
-  "name": "Where a predicted action may look",
+  "name": "What a predicted action is given",
   "source": "custom",
-  "caption": "Next-frame prediction writes aₜ from hₜ. Independent multi-token prediction writes several frames at once from hₜ alone. The autoregressive decoder writes them in order, each handed the frames before it.",
-  "data": [],
+  "caption": "The four O37 cells, same parameters, data, updates and deployment. Across-frame feedback hands the decoder the frames it has already written; within-frame feedback chains the four controller groups. Averaged over the other axis, across-frame feedback was worth +0.361 stocks/min and +13.49 damage/min, within-frame feedback +0.245 and +8.48.",
+  "data": [
+   "o37Cells"
+  ],
   "studies": [
-   "decoder_lineage",
    "action_factorization_o37",
-   "within_frame_order"
+   "within_frame_order",
+   "decoder_lineage"
   ]
  },
  {

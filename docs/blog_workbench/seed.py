@@ -71,7 +71,11 @@ def callout(md: str, **kw) -> dict:
     return add({"type": "callout", "md": md.strip(), **kw})
 
 
-RETIRED = {"flagship-model-architecture", "conditioned-action-plan"}  # remapped in compose()
+RETIRED = {
+    "flagship-model-architecture",
+    "conditioned-action-plan",
+    "factorization-ablation",
+}  # remapped or dropped in compose()
 
 
 def figure(key: str, caption: str | None = None, **kw) -> dict:
@@ -406,6 +410,7 @@ def compose() -> None:
     a["flagship-model-architecture"]["caption"] = CAPTIONS["architecture"]
     a["conditioned-action-plan"]["fig"] = "action-dependencies"
     a["conditioned-action-plan"]["caption"] = CAPTIONS["action-dependencies"]
+    a["factorization-ablation"]["hidden"] = True  # its results now live in Fig 2 (2026-09-13); dropped from the store
 
     with after(a["How to read the results"], skip_text=True):
         callout(

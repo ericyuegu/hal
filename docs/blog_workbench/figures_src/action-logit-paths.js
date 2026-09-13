@@ -23,7 +23,7 @@
   };
 
   /* ---- the path diagram ---- */
-  var s = svgEl('svg', {viewBox: '0 0 400 250', role: 'img', 'aria-label': 'The trunk state feeds the temporal decoder, whose future-frame state is conditioned by FiLM on earlier controller parts and read by a SiLU MLP head; a direct skip from the trunk state also adds into the action logits.'});
+  var s = svgEl('svg', {viewBox: '0 0 410 250', role: 'img', 'aria-label': 'The trunk state feeds the temporal decoder, whose future-frame state is conditioned by FiLM on earlier controller parts and read by a SiLU MLP head; a direct skip from the trunk state also adds into the action logits.'});
   var defs = svgEl('defs');
   var m = svgEl('marker', {id: 'lp-arrow', viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '5', markerHeight: '5', orient: 'auto', markerUnits: 'strokeWidth'});
   m.appendChild(svgEl('path', {d: 'M0 1 L10 5 L0 9 Z', fill: 'var(--ink-faint)'}));
@@ -44,25 +44,26 @@
     return p;
   }
   s.appendChild(svgEl('text', {x: 8, y: 16, 'class': 'lbl'}, 'Complete O43 control · arm A'));
-  comp('trunk', 8, 40, 84, 36, 'trunk state', 'hₜ');
-  wire('M 92 58 L 108 58');
-  comp('dec', 110, 40, 124, 36, 'temporal decoder', 'future-frame state');
-  wire('M 234 58 L 248 58');
-  comp('film', 250, 40, 142, 36, 'within-frame FiLM', 'earlier controller parts');
-  wire('M 321 76 L 321 104');
-  comp('head', 250, 106, 142, 40, 'SiLU MLP head', 'norm · linear · SiLU · linear');
-  wire('M 321 146 L 321 176');
-  // skip path
-  wire('M 50 76 L 50 194 L 304 194', 'skip');
+  comp('trunk', 8, 60, 92, 36, 'trunk state', 'hₜ');
+  wire('M 100 78 L 128 78');
+  comp('dec', 130, 60, 120, 36, 'temporal decoder', 'future-frame state');
+  wire('M 250 78 L 292 78');
+  // FiLM is a modifier on the head's input, not a stage of its own
+  var film = svgEl('g', {'class': 'comp', 'data-comp': 'film'});
+  film.appendChild(svgEl('path', {d: 'M 271 128 L 271 84', 'class': 'wire', 'marker-end': 'url(#lp-arrow)'}));
+  film.appendChild(svgEl('text', {x: 271, y: 142, 'class': 'tiny', 'text-anchor': 'middle'}, 'FiLM · earlier controller parts'));
+  s.appendChild(film);
+  comp('head', 294, 60, 112, 36, 'SiLU MLP head');
+  wire('M 350 96 L 350 180');
+  // the direct skip
+  wire('M 54 96 L 54 194 L 336 194', 'skip');
   var skipLabel = svgEl('g', {'class': 'comp', 'data-comp': 'skip'});
-  skipLabel.appendChild(svgEl('text', {x: 60, y: 188, 'class': 'tiny'}, 'direct trunk skip · hₜ → linear logits'));
+  skipLabel.appendChild(svgEl('text', {x: 64, y: 188, 'class': 'tiny'}, 'direct trunk skip · hₜ → linear logits'));
   s.appendChild(skipLabel);
-  // sum + logits
-  s.appendChild(svgEl('circle', {cx: 321, cy: 194, r: 12, 'class': 'plate'}));
-  s.appendChild(svgEl('text', {x: 321, y: 198.5, 'class': 'sym', 'text-anchor': 'middle'}, 'Σ'));
-  wire('M 333 194 L 360 194');
-  s.appendChild(svgEl('rect', {x: 364, y: 182, width: 30, height: 24, 'class': 'plate', 'stroke-dasharray': '2 2'}));
-  s.appendChild(svgEl('text', {x: 379, y: 197, 'class': 'tiny', 'text-anchor': 'middle', 'font-size': '7.5'}, 'logits'));
+  s.appendChild(svgEl('circle', {cx: 350, cy: 194, r: 12, 'class': 'plate'}));
+  s.appendChild(svgEl('text', {x: 350, y: 198.5, 'class': 'sym', 'text-anchor': 'middle'}, 'Σ'));
+  wire('M 362 194 L 382 194');
+  s.appendChild(svgEl('rect', {x: 384, y: 182, width: 16, height: 24, 'class': 'plate', 'stroke-dasharray': '2 2'}));
   s.appendChild(svgEl('text', {x: 8, y: 236, 'class': 'tiny'}, 'hover a row to see which path the test removed'));
   pathHost.appendChild(s);
 
@@ -93,8 +94,8 @@
       g.appendChild(svgEl('line', {x1: X(v[0] - v[1]), y1: y, x2: X(v[0] + v[1]), y2: y, 'class': 'ci ' + series[0]}));
       g.appendChild(svgEl('circle', {cx: X(v[0]), cy: y, r: 3.4, 'class': 'pt ' + series[0]}));
     });
-    g.addEventListener('mouseenter', function () { s.setAttribute('data-hl', r.comp); s.querySelectorAll('.comp').forEach(function (c) { c.classList.toggle('is-hl', c.dataset.comp === r.comp); }); });
-    g.addEventListener('mouseleave', function () { s.removeAttribute('data-hl'); s.querySelectorAll('.comp').forEach(function (c) { c.classList.remove('is-hl'); }); });
+    g.addEventListener('mouseenter', function () { pathHost.setAttribute('data-hl', r.comp); s.querySelectorAll('.comp').forEach(function (c) { c.classList.toggle('is-hl', c.dataset.comp === r.comp); }); });
+    g.addEventListener('mouseleave', function () { pathHost.removeAttribute('data-hl'); s.querySelectorAll('.comp').forEach(function (c) { c.classList.remove('is-hl'); }); });
     f.appendChild(g);
   });
   var ly = top + rowH * 3 + 44;
