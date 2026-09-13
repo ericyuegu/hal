@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -224,13 +225,52 @@ def test_buffered_policy_rejects_overlapping_inference() -> None:
     policy._infer([slot])
 
 
-def test_latency_manifest_is_hashed_and_strict(tmp_path: Path) -> None:
+def test_latency_manifest_is_hashed_and_strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        exp.torch.cuda, "get_device_properties", lambda _device: SimpleNamespace(total_memory=12 * 2**30)
+    )
     rows = tuple(
         exp.LatencyRow(width, delay, delay, 2 * delay, 0.001, 1 / 60)
         for width, delay in zip(exp.WIDTHS, (1, 1, 2, 2, 3, 4, 5, 6), strict=True)
     )
     path = tmp_path / "latency.json"
-    digest = exp.write_latency_manifest(path, rows, "NVIDIA GeForce RTX 3060")
+    dolphin = exp.DolphinLoadEvidence("AppRun", "d" * 64)
+    probes_path = path.with_suffix(".probes.json")
+    probes = tuple(
+        exp.LatencyProbe(
+            width=row.width,
+            inference_delay_frames=row.inference_delay_frames,
+            replan_interval_frames=row.replan_interval_frames,
+            prediction_frames=row.prediction_frames,
+            status="measured",
+            samples_seconds=(row.p99_seconds,) * exp.LATENCY_MEASURED_CALLS,
+            peak_allocated_bytes=0,
+            peak_reserved_bytes=0,
+            trial_index=trial,
+        )
+        for trial in range(exp.LATENCY_TRIALS)
+        for row in rows
+    )
+    raw_digest = exp.write_latency_probe_report(
+        probes_path,
+        probes,
+        "NVIDIA GeForce RTX 3060",
+        width_orders=(exp.WIDTHS,) * exp.LATENCY_TRIALS,
+        dolphin=dolphin,
+    )
+    trial_rows = tuple(
+        exp.LatencyTrialRow(trial, exp.WIDTHS.index(row.width), row)
+        for trial in range(exp.LATENCY_TRIALS)
+        for row in rows
+    )
+    digest = exp.write_latency_manifest(
+        path,
+        rows,
+        trial_rows,
+        "NVIDIA GeForce RTX 3060",
+        raw_digest,
+        dolphin,
+    )
 
     loaded, actual = exp.load_latency_manifest(path)
 
@@ -243,8 +283,15 @@ def test_latency_manifest_is_hashed_and_strict(tmp_path: Path) -> None:
         exp.load_latency_manifest(path)
 
     diagnostic_rows = (replace(rows[0], batch_size=4), *rows[1:])
-    with pytest.raises(ValueError, match="requires eager B32"):
-        exp.write_latency_manifest(path, diagnostic_rows, "NVIDIA GeForce RTX 3060")
+    with pytest.raises(ValueError, match="requires eager B1"):
+        exp.write_latency_manifest(
+            path,
+            diagnostic_rows,
+            trial_rows,
+            "NVIDIA GeForce RTX 3060",
+            raw_digest,
+            dolphin,
+        )
 
 
 def test_latency_probe_report_preserves_raw_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,13 +311,20 @@ def test_latency_probe_report_preserves_raw_samples(tmp_path: Path, monkeypatch:
     )
     path = tmp_path / "latency.probes.json"
 
-    exp.write_latency_probe_report(path, (probe,), "NVIDIA GeForce RTX 3060")
+    digest = exp.write_latency_probe_report(path, (probe,), "NVIDIA GeForce RTX 3060")
     payload = exp.json.loads(path.read_text())
 
+    assert payload["sha256"] == digest
     assert payload["device_total_memory_bytes"] == 12 * 2**30
     assert payload["probes"][0]["samples_seconds"] == [0.010, 0.020, 0.030]
     assert probe.percentile_seconds(99) == pytest.approx(0.0298)
     assert probe.meets_deadline
+    loaded, actual = exp.load_latency_probe_report(path)
+    assert actual == digest
+    loaded["probes"][0]["samples_seconds"][0] = 1.0
+    path.write_text(exp.json.dumps({**loaded, "sha256": digest}))
+    with pytest.raises(ValueError, match="probe SHA-256"):
+        exp.load_latency_probe_report(path)
 
 
 def test_latency_probe_distinguishes_oom_from_a_deadline_miss() -> None:
@@ -294,8 +348,7 @@ def test_latency_preflight_measures_all_widths_before_rejecting(
 ) -> None:
     measured: list[int] = []
 
-    def benchmark(width: int, *, on_probe):
-        del on_probe
+    def benchmark(width: int, **_kwargs):
         measured.append(width)
         if width in (512, 1024):
             raise exp.LatencyProbeFailure(f"width {width} missed")
@@ -304,12 +357,88 @@ def test_latency_preflight_measures_all_widths_before_rejecting(
 
     monkeypatch.setattr(exp.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(exp.torch.cuda, "get_device_name", lambda: "NVIDIA GeForce RTX 3060")
+    monkeypatch.setattr(
+        exp.torch.cuda, "get_device_properties", lambda _device: SimpleNamespace(total_memory=12 * 2**30)
+    )
     monkeypatch.setattr(exp, "benchmark_width_latency", benchmark)
+    load = SimpleNamespace(
+        evidence=exp.DolphinLoadEvidence("AppRun", "d" * 64),
+        raise_if_failed=lambda: None,
+    )
+    monkeypatch.setattr(exp, "production_dolphin_load", lambda: nullcontext(load))
 
-    with pytest.raises(exp.LatencyProbeFailure, match="width 512 missed; width 1024 missed"):
+    with pytest.raises(exp.LatencyProbeFailure, match="width 512 missed"):
         exp.run_latency_preflight(tmp_path / "latency.json")
 
-    assert measured == list(exp.WIDTHS)
+    assert sorted(measured) == sorted(exp.WIDTHS * exp.LATENCY_TRIALS)
+
+
+def test_latency_preflight_selects_timing_that_passes_all_three_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def benchmark(width: int, **kwargs):
+        trial = kwargs["trial_index"]
+        requested = kwargs.get("delay")
+        local_delay = 2 if width == 128 and trial == 1 else 1
+        delay = local_delay if requested is None else requested
+        probe = exp.LatencyProbe(
+            width=width,
+            inference_delay_frames=delay,
+            replan_interval_frames=delay,
+            prediction_frames=2 * delay,
+            status="measured",
+            samples_seconds=(0.001,) * exp.LATENCY_MEASURED_CALLS,
+            peak_allocated_bytes=0,
+            peak_reserved_bytes=0,
+            trial_index=trial,
+            phase=kwargs["phase"],
+        )
+        kwargs["on_probe"](probe)
+        return exp.LatencyRow(width, delay, delay, 2 * delay, 0.001, 1 / 60)
+
+    monkeypatch.setattr(exp.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(exp.torch.cuda, "get_device_name", lambda: "NVIDIA GeForce RTX 3060")
+    monkeypatch.setattr(
+        exp.torch.cuda, "get_device_properties", lambda _device: SimpleNamespace(total_memory=12 * 2**30)
+    )
+    monkeypatch.setattr(exp, "benchmark_width_latency", benchmark)
+    load = SimpleNamespace(
+        evidence=exp.DolphinLoadEvidence("AppRun", "d" * 64),
+        raise_if_failed=lambda: None,
+    )
+    monkeypatch.setattr(exp, "production_dolphin_load", lambda: nullcontext(load))
+    path = tmp_path / "latency.json"
+
+    exp.run_latency_preflight(path)
+    rows, _digest = exp.load_latency_manifest(path)
+
+    assert rows[128].inference_delay_frames == 2
+    assert all(rows[width].inference_delay_frames == 1 for width in exp.WIDTHS[1:])
+    probes, _raw_digest = exp.load_latency_probe_report(path.with_suffix(".probes.json"))
+    assert len(probes["width_orders"]) == exp.LATENCY_TRIALS
+    assert all(sorted(order) == list(exp.WIDTHS) for order in probes["width_orders"])
+
+
+def test_study_matrix_adds_only_missing_fixed_data_frontier_runs() -> None:
+    rows = {
+        width: exp.LatencyRow(width, delay, delay, 2 * delay, 0.001, 1 / 60)
+        for width, delay in zip(exp.WIDTHS, (1, 2, 2, 2, 2, 3, 3, 3), strict=True)
+    }
+
+    endpoints = exp.study_endpoints(rows)
+
+    assert len(endpoints) == 11
+    assert {(endpoint.width, endpoint.updates) for endpoint in endpoints if endpoint.roles == ("fixed-D",)} == {
+        (128, 16_384),
+        (640, 16_384),
+    }
+    assert next(endpoint for endpoint in endpoints if endpoint.width == 1024).roles == ("C3", "fixed-D")
+    commands = exp.study_launch_commands(rows, Path("docs/experiments/054_latency_manifest.json"))
+    assert len(commands) == 11
+    assert all(
+        command[:6] == ("uv", "run", "scripts/launch_modal.py", "--gpu", "RTX-PRO-6000", "--app-name")
+        for command in commands
+    )
 
 
 def test_checkpoint_contains_no_advantage_or_value_configuration() -> None:
@@ -331,6 +460,41 @@ def test_analysis_requires_a_concave_bracketed_capacity_vertex() -> None:
         exp.fit_quadratic_vertex((100, 1_000, 10_000), (0.0, -1.0, 0.0))
     with pytest.raises(ValueError, match="not bracketed"):
         exp.fit_quadratic_vertex((100, 1_000, 10_000), (-9.0, -4.0, -1.0))
+
+
+def test_analysis_writes_scaling_fit_and_fixed_data_latency_plot(tmp_path: Path) -> None:
+    latency = {
+        width: exp.LatencyRow(width, delay, delay, 2 * delay, 0.001 * delay, 1 / 60)
+        for width, delay in zip(exp.WIDTHS, (1, 2, 2, 2, 2, 3, 3, 3), strict=True)
+    }
+    responses = {
+        pair: response
+        for line in exp.ISO_COMPUTE_CHECKPOINTS.values()
+        for pair, response in zip(line, (0.0, 1.0, 0.0), strict=True)
+    }
+    endpoints = {}
+    for endpoint in exp.study_endpoints(latency):
+        pair = (endpoint.width, endpoint.updates)
+        counts = exp.PARAMETER_COUNT_CONTRACTS[endpoint.width]
+        cfg = exp.config_for_width(endpoint.width, updates=endpoint.updates)
+        endpoints[pair] = exp.AnalysisEndpoint(
+            run_id=f"run-{endpoint.width}-{endpoint.updates}",
+            run_name=f"W{endpoint.width}",
+            width=endpoint.width,
+            updates=endpoint.updates,
+            effective_parameters=exp.effective_parameter_count(counts),
+            bc_parameters=counts["total"],
+            compute=exp.training_compute(cfg, counts),
+            net_stock_per_min=responses.get(pair, 0.5),
+            net_stock_lcb=responses.get(pair, 0.5) - 0.1,
+        )
+
+    report = exp.write_analysis_artifacts(endpoints, latency, tmp_path)
+
+    assert set(report["iso_compute_fits"]) == {"C1", "C2", "C3"}
+    assert report["fixed_data_widths"] == [128, 640, 1024]
+    assert (tmp_path / "endpoints.csv").is_file()
+    assert (tmp_path / "fixed_data_latency.png").is_file()
 
 
 def test_config_rejects_an_unmeasured_inference_path() -> None:

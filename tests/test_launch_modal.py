@@ -504,10 +504,41 @@ def test_closed_loop_evaluator_runs_verified_o50_protocol(monkeypatch: pytest.Mo
         lambda command, **kwargs: calls.append((command, kwargs)),
     )
 
-    _MODULE._run_closed_loop_eval("run-1", 8192, "a" * 64, 96)
+    _MODULE._run_closed_loop_eval(
+        "experiments/050_scaled_temporal_awr.py",
+        "run-1",
+        8192,
+        "a" * 64,
+        96,
+    )
 
     command, kwargs = calls[0]
     assert command[:4] == ["uv", "run", "experiments/050_scaled_temporal_awr.py", "eval"]
+    assert "--shared-wandb" in command
+    assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
+    assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
+
+
+def test_closed_loop_evaluator_runs_verified_o54_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {"TEST": "1"})
+    monkeypatch.setattr(
+        _MODULE.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    _MODULE._run_closed_loop_eval(
+        "experiments/054_bc_capacity_latency.py",
+        "run-1",
+        54_048,
+        "a" * 64,
+        96,
+    )
+
+    command, kwargs = calls[0]
+    assert command[:4] == ["uv", "run", "experiments/054_bc_capacity_latency.py", "eval"]
+    assert command[command.index("--checkpoint") + 1] == "final.pt"
     assert "--shared-wandb" in command
     assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
     assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
@@ -672,7 +703,7 @@ def test_training_brokers_evaluation_through_same_app_handle(tmp_path: Path, mon
 
     assert (
         _MODULE._run_training(
-            ("uv", "run", "python", "-c", script),
+            (sys.executable, "-c", script, "experiments/050_scaled_temporal_awr.py"),
             RunState(status="running"),
             env=dict(_MODULE.os.environ),
             state_path=tmp_path / "state.json",
@@ -683,7 +714,7 @@ def test_training_brokers_evaluation_through_same_app_handle(tmp_path: Path, mon
         == 0
     )
 
-    assert calls == [("run-1", 8192, "a" * 64, 96)]
+    assert calls == [("experiments/050_scaled_temporal_awr.py", "run-1", 8192, "a" * 64, 96)]
     assert states[-1] == RunState(status="succeeded", run_name="run-1")
 
 

@@ -25,6 +25,7 @@ Run:
 from __future__ import annotations
 
 import contextlib
+import csv
 import functools
 import gc
 import hashlib
@@ -33,6 +34,7 @@ import json
 import math
 import os
 import re
+import shlex
 import threading
 import time
 from collections import defaultdict
@@ -52,6 +54,7 @@ from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import ClassVar
 from typing import Final
 from typing import Literal
@@ -74,6 +77,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import wandb
 from hal import r2
 from hal import streams
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
@@ -92,10 +96,16 @@ from hal.eval.policy_sampling import sample_categorical
 from hal.eval.self_play import DecodeTelemetry
 from hal.eval.self_play import canonical_context
 from hal.eval.self_play import synthetic_context as build_synthetic_context
+from hal.paths import ISO_PATH
+from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.inputs import action_vec_to_controller
+from hal.sim.netplay import tested_dolphin_version
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.rollout import covering_power_of_two
+from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
+from hal.sim.session import Session
 from hal.sim.vec import Slot
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
@@ -165,8 +175,13 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "054_bc_capacity_latency_v2"
+_EXPERIMENT_ID: Final[str] = "054_bc_capacity_latency_v3"
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
+LATENCY_BATCH_SIZE: Final[int] = 1
+LATENCY_WARMUP_CALLS: Final[int] = 50
+LATENCY_MEASURED_CALLS: Final[int] = 500
+LATENCY_TRIALS: Final[int] = 3
+LATENCY_ORDER_SEED: Final[int] = 54_3060
 
 
 @contextlib.contextmanager
@@ -312,6 +327,7 @@ ISO_COMPUTE_CHECKPOINTS: Final[dict[str, tuple[tuple[int, int], ...]]] = {
     "C2": ((256, 84_320), (384, 33_472), (512, 16_384)),
     "C3": ((512, 97_696), (768, 35_072), (1024, 16_384)),
 }
+FIXED_DATA_UPDATES: Final[int] = 16_384
 PARAMETER_COUNT_CONTRACTS: Final[dict[int, dict[str, int]]] = {
     128: {
         "trunk": 589_824,
@@ -659,7 +675,7 @@ def validate_config(cfg: TrainConfig) -> None:
 
 
 def proxy_config() -> TrainConfig:
-    """Return the 15M, 16-layer fixed-D proxy treatment."""
+    """Return the W256/L5 fixed-D proxy treatment."""
     return config_for_width(256, updates=16_384)
 
 
@@ -2038,9 +2054,9 @@ class LatencyRow:
     prediction_frames: int
     p99_seconds: float
     frame_period_seconds: float
-    batch_size: int = 32
-    warmup_calls: int = 50
-    measured_calls: int = 500
+    batch_size: int = LATENCY_BATCH_SIZE
+    warmup_calls: int = LATENCY_WARMUP_CALLS
+    measured_calls: int = LATENCY_MEASURED_CALLS
 
     def __post_init__(self) -> None:
         if self.width not in WIDTHS:
@@ -2083,9 +2099,11 @@ class LatencyProbe:
     peak_allocated_bytes: int
     peak_reserved_bytes: int
     frame_period_seconds: float = 1 / 60
-    batch_size: int = 32
-    warmup_calls: int = 50
-    measured_calls: int = 500
+    batch_size: int = LATENCY_BATCH_SIZE
+    warmup_calls: int = LATENCY_WARMUP_CALLS
+    measured_calls: int = LATENCY_MEASURED_CALLS
+    trial_index: int = 0
+    phase: Literal["search", "validation", "diagnostic"] = "search"
 
     def __post_init__(self) -> None:
         TimingConfig(
@@ -2102,6 +2120,8 @@ class LatencyProbe:
             raise ValueError("OOM latency probe cannot contain timing samples")
         if self.peak_allocated_bytes < 0 or self.peak_reserved_bytes < self.peak_allocated_bytes:
             raise ValueError("latency probe has invalid CUDA memory peaks")
+        if not 0 <= self.trial_index < LATENCY_TRIALS:
+            raise ValueError(f"latency trial index must be in [0, {LATENCY_TRIALS})")
 
     @property
     def deadline_seconds(self) -> float:
@@ -2122,6 +2142,116 @@ class LatencyProbeFailure(RuntimeError):
     """One width cannot satisfy the measured deployment contract."""
 
 
+@dataclass(frozen=True, slots=True)
+class DolphinLoadEvidence:
+    executable_name: str
+    executable_sha256: str
+    graphics_backend: Literal["Vulkan"] = "Vulkan"
+    internal_resolution_scale: int = 2
+    emulation_speed: float = 0.0
+    frame_pacing_hz: int = 60
+    sessions: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.executable_name or re.fullmatch(r"[0-9a-f]{64}", self.executable_sha256) is None:
+            raise ValueError("Dolphin load evidence has no valid executable identity")
+        if (
+            self.graphics_backend != "Vulkan"
+            or self.internal_resolution_scale != 2
+            or self.emulation_speed != 0.0
+            or self.frame_pacing_hz != 60
+            or self.sessions != 1
+        ):
+            raise ValueError("latency preflight requires one real-time native-resolution Vulkan Dolphin session")
+
+
+@dataclass(frozen=True, slots=True)
+class LatencyTrialRow:
+    trial_index: int
+    width_order_index: int
+    row: LatencyRow
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.trial_index < LATENCY_TRIALS:
+            raise ValueError(f"latency trial index must be in [0, {LATENCY_TRIALS})")
+        if not 0 <= self.width_order_index < len(WIDTHS):
+            raise ValueError("latency width-order index is invalid")
+
+
+class _DolphinLoad:
+    def __init__(self, session: Session, evidence: DolphinLoadEvidence) -> None:
+        self.session = session
+        self.evidence = evidence
+        self.stop = threading.Event()
+        self.failure: Exception | None = None
+        self.thread = threading.Thread(target=self._drive, name="o54-dolphin-load", daemon=True)
+
+    def _drive(self) -> None:
+        try:
+            next_frame = time.perf_counter()
+            while not self.stop.is_set():
+                _frame, live = self.session.step({1: NEUTRAL_CONTROLLER_ACTION})
+                if not live:
+                    raise RuntimeError("Dolphin load session left active gameplay")
+                next_frame += 1 / self.evidence.frame_pacing_hz
+                self.stop.wait(max(0.0, next_frame - time.perf_counter()))
+        except Exception as error:
+            self.failure = error
+
+    def raise_if_failed(self) -> None:
+        if self.failure is not None:
+            raise RuntimeError("production Dolphin load failed during the latency preflight") from self.failure
+
+
+@contextlib.contextmanager
+def production_dolphin_load() -> Iterator[_DolphinLoad]:
+    """Keep one production-renderer Dolphin match active during timing."""
+    executable = Path(NETPLAY_EMULATOR_PATH)
+    iso = Path(ISO_PATH)
+    if not executable.is_file() or not iso.is_file():
+        raise RuntimeError(f"latency preflight needs Dolphin at {executable} and the game image at {iso}")
+    with executable.open("rb") as source:
+        executable_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+    dolphin_version = tested_dolphin_version(str(executable))
+    evidence = DolphinLoadEvidence(executable.name, executable_sha256)
+    matchup = Matchup(
+        stage=melee.Stage.FINAL_DESTINATION,
+        players=(
+            PlayerSetup(1, melee.Character.FOX),
+            PlayerSetup(
+                2,
+                melee.Character.FOX,
+                cpu_level=9,
+            ),
+        ),
+    )
+    with Session(
+        iso,
+        dolphin_path=executable,
+        blocking_input=True,
+        emulation_speed=0.0,
+        use_exi_inputs=False,
+        enable_ffw=False,
+        disable_audio=True,
+        polling_mode=True,
+        instant_match_restart=True,
+        gfx_backend="Vulkan",
+        internal_resolution_scale=2,
+        dolphin_version=dolphin_version,
+    ) as session:
+        session.start_match(matchup)
+        load = _DolphinLoad(session, evidence)
+        load.thread.start()
+        try:
+            yield load
+            load.raise_if_failed()
+        finally:
+            load.stop.set()
+            load.thread.join(timeout=10)
+            if load.thread.is_alive():
+                raise RuntimeError("production Dolphin load did not stop")
+
+
 def _latency_architecture_family() -> list[dict[str, object]]:
     family: list[dict[str, object]] = []
     for width in WIDTHS:
@@ -2131,29 +2261,63 @@ def _latency_architecture_family() -> list[dict[str, object]]:
     return family
 
 
-def _latency_manifest_payload(rows: Sequence[LatencyRow], gpu_name: str) -> dict[str, object]:
+def _latency_manifest_payload(
+    rows: Sequence[LatencyRow],
+    trial_rows: Sequence[LatencyTrialRow],
+    gpu_name: str,
+    raw_probe_sha256: str,
+    dolphin: DolphinLoadEvidence,
+) -> dict[str, object]:
     return {
-        "schema": 2,
+        "schema": 3,
         "experiment_id": _EXPERIMENT_ID,
         "gpu_name": gpu_name,
         "inference_mode": "eager",
+        "raw_probe_sha256": raw_probe_sha256,
+        "dolphin_load": asdict(dolphin),
         "architecture_family": _latency_architecture_family(),
         "rows": [asdict(row) for row in rows],
+        "trial_rows": [asdict(row) for row in trial_rows],
     }
 
 
 def _is_official_latency_row(row: LatencyRow) -> bool:
-    return (row.batch_size, row.warmup_calls, row.measured_calls) == (32, 50, 500)
+    return (row.batch_size, row.warmup_calls, row.measured_calls) == (
+        LATENCY_BATCH_SIZE,
+        LATENCY_WARMUP_CALLS,
+        LATENCY_MEASURED_CALLS,
+    )
 
 
-def write_latency_manifest(path: Path, rows: Sequence[LatencyRow], gpu_name: str) -> str:
+def write_latency_manifest(
+    path: Path,
+    rows: Sequence[LatencyRow],
+    trial_rows: Sequence[LatencyTrialRow],
+    gpu_name: str,
+    raw_probe_sha256: str,
+    dolphin: DolphinLoadEvidence,
+) -> str:
+    if "RTX 3060" not in gpu_name:
+        raise ValueError(f"latency manifest requires the target RTX 3060, got {gpu_name!r}")
     if tuple(row.width for row in rows) != WIDTHS:
         raise ValueError(f"latency manifest must cover widths {WIDTHS} in order")
     if any(not row.meets_deadline for row in rows):
         raise ValueError("latency manifest contains a row that misses its deadline")
     if any(not _is_official_latency_row(row) for row in rows):
-        raise ValueError("latency manifest requires eager B32 with 50 warm-ups and 500 measurements")
-    payload = _latency_manifest_payload(rows, gpu_name)
+        raise ValueError("latency manifest requires eager B1 with 50 warm-ups and 500 measurements")
+    expected_trials = {(trial, width) for trial in range(LATENCY_TRIALS) for width in WIDTHS}
+    actual_trials = {(trial.trial_index, trial.row.width) for trial in trial_rows}
+    selected_delays = {row.width: row.inference_delay_frames for row in rows}
+    if (
+        len(trial_rows) != len(expected_trials)
+        or actual_trials != expected_trials
+        or any(not trial.row.meets_deadline or not _is_official_latency_row(trial.row) for trial in trial_rows)
+        or any(trial.row.inference_delay_frames != selected_delays[trial.row.width] for trial in trial_rows)
+    ):
+        raise ValueError("latency manifest requires three passing B1 trials at every selected timing")
+    if re.fullmatch(r"[0-9a-f]{64}", raw_probe_sha256) is None:
+        raise ValueError("latency manifest has no valid raw-probe SHA-256")
+    payload = _latency_manifest_payload(rows, trial_rows, gpu_name, raw_probe_sha256, dolphin)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(encoded).hexdigest()
     document = {**payload, "sha256": digest}
@@ -2172,41 +2336,146 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
     if digest != actual:
         raise ValueError(f"latency manifest SHA-256 mismatch: {digest!r} != {actual}")
     if (
-        document.get("schema") != 2
+        document.get("schema") != 3
         or document.get("experiment_id") != _EXPERIMENT_ID
         or document.get("inference_mode") != "eager"
         or document.get("architecture_family") != _latency_architecture_family()
     ):
         raise ValueError("unsupported latency manifest")
+    if "RTX 3060" not in str(document.get("gpu_name", "")):
+        raise ValueError("latency manifest was not measured on the target RTX 3060")
     raw_rows = document.get("rows")
-    if not isinstance(raw_rows, list):
+    raw_trial_rows = document.get("trial_rows")
+    raw_probe_sha256 = document.get("raw_probe_sha256")
+    raw_dolphin = document.get("dolphin_load")
+    if (
+        not isinstance(raw_rows, list)
+        or not isinstance(raw_trial_rows, list)
+        or not isinstance(raw_probe_sha256, str)
+        or not isinstance(raw_dolphin, dict)
+    ):
         raise ValueError("latency manifest has no rows")
     rows = tuple(LatencyRow(**row) for row in raw_rows)
+    trial_rows = tuple(
+        LatencyTrialRow(
+            trial_index=row["trial_index"],
+            width_order_index=row["width_order_index"],
+            row=LatencyRow(**row["row"]),
+        )
+        for row in raw_trial_rows
+    )
+    dolphin = DolphinLoadEvidence(**raw_dolphin)
     if (
         tuple(row.width for row in rows) != WIDTHS
         or any(not row.meets_deadline for row in rows)
         or any(not _is_official_latency_row(row) for row in rows)
     ):
         raise ValueError("latency manifest does not contain the accepted width matrix")
+    expected_payload = _latency_manifest_payload(rows, trial_rows, document["gpu_name"], raw_probe_sha256, dolphin)
+    if document != expected_payload:
+        raise ValueError("latency manifest contains unsupported fields")
+    expected_trials = {(trial, width) for trial in range(LATENCY_TRIALS) for width in WIDTHS}
+    if (
+        {(trial.trial_index, trial.row.width) for trial in trial_rows} != expected_trials
+        or len(trial_rows) != len(expected_trials)
+        or any(not trial.row.meets_deadline for trial in trial_rows)
+        or any(
+            trial.row.inference_delay_frames != rows[WIDTHS.index(trial.row.width)].inference_delay_frames
+            for trial in trial_rows
+        )
+    ):
+        raise ValueError("latency manifest does not contain three accepted trials")
+    probe_path = path.with_suffix(".probes.json")
+    probe_document, probe_sha256 = load_latency_probe_report(probe_path)
+    if probe_sha256 != raw_probe_sha256:
+        raise ValueError("latency manifest raw-probe SHA-256 does not match its probe artifact")
+    if probe_document.get("gpu_name") != document["gpu_name"] or probe_document.get("dolphin_load") != asdict(dolphin):
+        raise ValueError("latency manifest and raw probes used different hardware load")
+    raw_orders = probe_document.get("width_orders")
+    raw_probes = probe_document.get("probes")
+    if (
+        not isinstance(raw_orders, list)
+        or not all(isinstance(order, list) for order in raw_orders)
+        or not isinstance(raw_probes, list)
+        or not all(isinstance(probe, dict) for probe in raw_probes)
+    ):
+        raise ValueError("latency probe artifact has no trial evidence")
+    typed_orders = cast(list[list[object]], raw_orders)
+    if tuple(tuple(order) for order in typed_orders) != tuple(
+        tuple(
+            trial.row.width
+            for trial in sorted(trial_rows, key=lambda item: item.width_order_index)
+            if trial.trial_index == index
+        )
+        for index in range(LATENCY_TRIALS)
+    ):
+        raise ValueError("latency trial order differs from the raw probe artifact")
+    probes = tuple(LatencyProbe(**probe) for probe in cast(list[dict], raw_probes))
+    for trial in trial_rows:
+        candidates = [
+            probe
+            for probe in probes
+            if probe.trial_index == trial.trial_index
+            and probe.width == trial.row.width
+            and probe.inference_delay_frames == trial.row.inference_delay_frames
+            and probe.status == "measured"
+        ]
+        if len(candidates) != 1 or candidates[0].percentile_seconds(99) != trial.row.p99_seconds:
+            raise ValueError("accepted latency trial is not present in the raw probe artifact")
+    for row in rows:
+        if row.p99_seconds != max(trial.row.p99_seconds for trial in trial_rows if trial.row.width == row.width):
+            raise ValueError("latency manifest p99 is not the worst accepted trial")
     return {row.width: row for row in rows}, actual
 
 
-def write_latency_probe_report(path: Path, probes: Sequence[LatencyProbe], gpu_name: str) -> None:
+def write_latency_probe_report(
+    path: Path,
+    probes: Sequence[LatencyProbe],
+    gpu_name: str,
+    *,
+    width_orders: Sequence[Sequence[int]] = (),
+    dolphin: DolphinLoadEvidence | None = None,
+) -> str:
     """Atomically persist every raw latency sample, including partial runs."""
     payload = {
-        "schema": 2,
+        "schema": 3,
         "experiment_id": _EXPERIMENT_ID,
         "gpu_name": gpu_name,
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device_total_memory_bytes": torch.cuda.get_device_properties(0).total_memory,
         "architecture_family": _latency_architecture_family(),
+        "latency_order_seed": LATENCY_ORDER_SEED,
+        "width_orders": [list(order) for order in width_orders],
+        "dolphin_load": None if dolphin is None else asdict(dolphin),
         "probes": [asdict(probe) for probe in probes],
     }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    document = {**payload, "sha256": digest}
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    temporary.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n")
     temporary.replace(path)
+    return digest
+
+
+def load_latency_probe_report(path: Path) -> tuple[dict[str, object], str]:
+    document = json.loads(path.read_text())
+    if not isinstance(document, dict):
+        raise ValueError("latency probe artifact must be a JSON object")
+    digest = document.pop("sha256", None)
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    actual = hashlib.sha256(encoded).hexdigest()
+    if digest != actual:
+        raise ValueError(f"latency probe SHA-256 mismatch: {digest!r} != {actual}")
+    if (
+        document.get("schema") != 3
+        or document.get("experiment_id") != _EXPERIMENT_ID
+        or document.get("architecture_family") != _latency_architecture_family()
+    ):
+        raise ValueError("unsupported latency probe artifact")
+    return document, actual
 
 
 def _log_latency_probe(probe: LatencyProbe) -> None:
@@ -2250,28 +2519,95 @@ def latency_bucket_frontier(rows: Mapping[int, LatencyRow]) -> tuple[int, ...]:
     return tuple(frontier[delay] for delay in sorted(frontier))
 
 
+@dataclass(frozen=True, slots=True)
+class StudyEndpoint:
+    width: int
+    updates: int
+    roles: tuple[str, ...]
+
+
+def study_endpoints(rows: Mapping[int, LatencyRow]) -> tuple[StudyEndpoint, ...]:
+    """Return independent iso-compute runs plus the deduplicated fixed-D frontier."""
+    endpoints = [
+        StudyEndpoint(width, updates, (line,))
+        for line, line_endpoints in ISO_COMPUTE_CHECKPOINTS.items()
+        for width, updates in line_endpoints
+    ]
+    for width in latency_bucket_frontier(rows):
+        pair = (width, FIXED_DATA_UPDATES)
+        for index, endpoint in enumerate(endpoints):
+            if (endpoint.width, endpoint.updates) == pair:
+                endpoints[index] = replace(endpoint, roles=(*endpoint.roles, "fixed-D"))
+                break
+        else:
+            endpoints.append(StudyEndpoint(width, FIXED_DATA_UPDATES, ("fixed-D",)))
+    return tuple(endpoints)
+
+
+def study_launch_commands(
+    rows: Mapping[int, LatencyRow],
+    latency_manifest: Path,
+) -> tuple[tuple[str, ...], ...]:
+    """Build the exact detached Modal commands without submitting them."""
+    commands = []
+    for endpoint in study_endpoints(rows):
+        role = "-".join(endpoint.roles).lower()
+        app_name = f"o54-{role}-w{endpoint.width}-u{endpoint.updates}"
+        commands.append(
+            (
+                "uv",
+                "run",
+                "scripts/launch_modal.py",
+                "--gpu",
+                "RTX-PRO-6000",
+                "--app-name",
+                app_name,
+                "--",
+                "uv",
+                "run",
+                "experiments/054_bc_capacity_latency.py",
+                "train",
+                "--width",
+                str(endpoint.width),
+                "--updates",
+                str(endpoint.updates),
+                "--latency-manifest",
+                str(latency_manifest),
+                "--comment",
+                role,
+            )
+        )
+    return tuple(commands)
+
+
 @torch.no_grad()
 def benchmark_width_latency(
     width: int,
     *,
-    batch_size: int = 32,
+    delay: int | None = None,
+    batch_size: int = LATENCY_BATCH_SIZE,
     frame_period_seconds: float = 1 / 60,
-    warmup_calls: int = 50,
-    measured_calls: int = 500,
+    warmup_calls: int = LATENCY_WARMUP_CALLS,
+    measured_calls: int = LATENCY_MEASURED_CALLS,
+    trial_index: int = 0,
+    phase: Literal["search", "validation", "diagnostic"] = "search",
     on_probe: Callable[[LatencyProbe], None] | None = None,
 ) -> LatencyRow:
     if not torch.cuda.is_available():
         raise RuntimeError("latency preflight requires the target CUDA GPU")
     if batch_size < 1:
         raise ValueError("latency batch size must be positive")
+    if delay is not None and not 1 <= delay <= 6:
+        raise ValueError("latency delay must be in [1, 6]")
     device = torch.device("cuda")
-    for delay in range(1, 7):
+    delays = range(1, 7) if delay is None else (delay,)
+    for candidate_delay in delays:
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         cfg = replace(
             config_for_width(width, updates=1),
-            timing=TimingConfig(delay, delay, 2 * delay),
+            timing=TimingConfig(candidate_delay, candidate_delay, 2 * candidate_delay),
             inference_mode="eager",
             compile_trunk=False,
             compile_temporal=False,
@@ -2295,9 +2631,9 @@ def benchmark_width_latency(
                 samples[index] = time.perf_counter() - started
             probe = LatencyProbe(
                 width=width,
-                inference_delay_frames=delay,
-                replan_interval_frames=delay,
-                prediction_frames=2 * delay,
+                inference_delay_frames=candidate_delay,
+                replan_interval_frames=candidate_delay,
+                prediction_frames=2 * candidate_delay,
                 status="measured",
                 samples_seconds=tuple(map(float, samples)),
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
@@ -2306,13 +2642,15 @@ def benchmark_width_latency(
                 batch_size=batch_size,
                 warmup_calls=warmup_calls,
                 measured_calls=measured_calls,
+                trial_index=trial_index,
+                phase=phase,
             )
         except torch.cuda.OutOfMemoryError as error:
             probe = LatencyProbe(
                 width=width,
-                inference_delay_frames=delay,
-                replan_interval_frames=delay,
-                prediction_frames=2 * delay,
+                inference_delay_frames=candidate_delay,
+                replan_interval_frames=candidate_delay,
+                prediction_frames=2 * candidate_delay,
                 status="oom",
                 samples_seconds=(),
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
@@ -2321,11 +2659,15 @@ def benchmark_width_latency(
                 batch_size=batch_size,
                 warmup_calls=warmup_calls,
                 measured_calls=measured_calls,
+                trial_index=trial_index,
+                phase=phase,
             )
             _log_latency_probe(probe)
             if on_probe is not None:
                 on_probe(probe)
-            raise LatencyProbeFailure(f"B{batch_size} width {width} ran out of CUDA memory at d={delay}") from error
+            raise LatencyProbeFailure(
+                f"B{batch_size} width {width} ran out of CUDA memory at d={candidate_delay}"
+            ) from error
         finally:
             del inference, model, context
             gc.collect()
@@ -2337,9 +2679,9 @@ def benchmark_width_latency(
         assert p99 is not None
         row = LatencyRow(
             width=width,
-            inference_delay_frames=delay,
-            replan_interval_frames=delay,
-            prediction_frames=2 * delay,
+            inference_delay_frames=candidate_delay,
+            replan_interval_frames=candidate_delay,
+            prediction_frames=2 * candidate_delay,
             p99_seconds=p99,
             frame_period_seconds=frame_period_seconds,
             batch_size=batch_size,
@@ -2359,22 +2701,87 @@ def run_latency_preflight(path: Path) -> str:
         raise RuntimeError(f"latency preflight requires the target RTX 3060, found {gpu_name!r}")
     report_path = path.with_suffix(".probes.json")
     probes: list[LatencyProbe] = []
-
-    def record(probe: LatencyProbe) -> None:
-        probes.append(probe)
-        write_latency_probe_report(report_path, probes, gpu_name)
+    rng = np.random.default_rng(LATENCY_ORDER_SEED)
+    width_orders = tuple(tuple(map(int, rng.permutation(WIDTHS))) for _ in range(LATENCY_TRIALS))
 
     print(f"[latency] raw probe report: {report_path}", flush=True)
-    rows: list[LatencyRow] = []
-    failures: list[str] = []
-    for width in WIDTHS:
-        try:
-            rows.append(benchmark_width_latency(width, on_probe=record))
-        except LatencyProbeFailure as error:
-            failures.append(str(error))
-    if failures:
-        raise LatencyProbeFailure(f"latency preflight rejected widths: {'; '.join(failures)}")
-    return write_latency_manifest(path, rows, gpu_name)
+    with production_dolphin_load() as dolphin_load:
+        raw_probe_sha256 = write_latency_probe_report(
+            report_path,
+            probes,
+            gpu_name,
+            width_orders=width_orders,
+            dolphin=dolphin_load.evidence,
+        )
+
+        def record(probe: LatencyProbe) -> None:
+            nonlocal raw_probe_sha256
+            probes.append(probe)
+            raw_probe_sha256 = write_latency_probe_report(
+                report_path,
+                probes,
+                gpu_name,
+                width_orders=width_orders,
+                dolphin=dolphin_load.evidence,
+            )
+
+        search_rows: dict[tuple[int, int], LatencyRow] = {}
+        failures: list[str] = []
+        for trial_index, order in enumerate(width_orders):
+            print(f"[latency] trial {trial_index + 1}/{LATENCY_TRIALS} width order: {order}", flush=True)
+            for width in order:
+                dolphin_load.raise_if_failed()
+                try:
+                    search_rows[trial_index, width] = benchmark_width_latency(
+                        width,
+                        trial_index=trial_index,
+                        phase="search",
+                        on_probe=record,
+                    )
+                except LatencyProbeFailure as error:
+                    failures.append(f"trial {trial_index + 1}: {error}")
+        if failures:
+            raise LatencyProbeFailure(f"latency preflight rejected trials: {'; '.join(failures)}")
+
+        selected_delays = {
+            width: max(search_rows[trial, width].inference_delay_frames for trial in range(LATENCY_TRIALS))
+            for width in WIDTHS
+        }
+        accepted_trials: list[LatencyTrialRow] = []
+        for trial_index, order in enumerate(width_orders):
+            for width_order_index, width in enumerate(order):
+                dolphin_load.raise_if_failed()
+                row = search_rows[trial_index, width]
+                selected_delay = selected_delays[width]
+                if row.inference_delay_frames != selected_delay:
+                    row = benchmark_width_latency(
+                        width,
+                        delay=selected_delay,
+                        trial_index=trial_index,
+                        phase="validation",
+                        on_probe=record,
+                    )
+                accepted_trials.append(LatencyTrialRow(trial_index, width_order_index, row))
+        rows = [
+            LatencyRow(
+                width=width,
+                inference_delay_frames=selected_delays[width],
+                replan_interval_frames=selected_delays[width],
+                prediction_frames=2 * selected_delays[width],
+                p99_seconds=max(trial.row.p99_seconds for trial in accepted_trials if trial.row.width == width),
+                frame_period_seconds=1 / 60,
+            )
+            for width in WIDTHS
+        ]
+        dolphin_load.raise_if_failed()
+    return write_latency_manifest(
+        path,
+        rows,
+        accepted_trials,
+        gpu_name,
+        raw_probe_sha256,
+        dolphin_load.evidence,
+    )
 
 
 def run_latency_diagnostic(path: Path, batch_sizes: Sequence[int]) -> None:
@@ -2399,7 +2806,12 @@ def run_latency_diagnostic(path: Path, batch_sizes: Sequence[int]) -> None:
     for batch_size in batch_sizes:
         for width in WIDTHS:
             try:
-                benchmark_width_latency(width, batch_size=batch_size, on_probe=record)
+                benchmark_width_latency(
+                    width,
+                    batch_size=batch_size,
+                    phase="diagnostic",
+                    on_probe=record,
+                )
             except LatencyProbeFailure as error:
                 failures.append(str(error))
     if failures:
@@ -3133,6 +3545,148 @@ def fit_optimal_capacity_scaling(compute: Sequence[float], optimal_parameters: S
     return float(exponent), float(intercept)
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisEndpoint:
+    run_id: str
+    run_name: str
+    width: int
+    updates: int
+    effective_parameters: int
+    bc_parameters: int
+    compute: int
+    net_stock_per_min: float
+    net_stock_lcb: float
+
+
+def _analysis_endpoints(runs: Iterable[Any], latency_sha256: str) -> dict[tuple[int, int], AnalysisEndpoint]:
+    endpoints: dict[tuple[int, int], AnalysisEndpoint] = {}
+    for run in runs:
+        config = dict(run.config)
+        if config.get("experiment_id") != _EXPERIMENT_ID:
+            continue
+        architecture = config.get("arch")
+        if not isinstance(architecture, dict):
+            raise ValueError(f"O54 run {run.id} has no architecture config")
+        width = int(architecture["d_model"])
+        updates = int(config["max_steps"])
+        if config.get("latency_manifest_sha256") != latency_sha256:
+            raise ValueError(f"O54 run {run.id} uses a different latency manifest")
+        summary = dict(run.summary)
+        if (
+            run.state != "finished"
+            or int(summary.get("eval/boots", 0)) != 96
+            or float(summary.get("eval/crashed", 1.0)) != 0.0
+        ):
+            continue
+        response = float(summary.get("eval/net_stock_per_min", math.nan))
+        lcb = float(summary.get("eval/net_stock_lcb", math.nan))
+        if not math.isfinite(response) or not math.isfinite(lcb):
+            raise ValueError(f"O54 run {run.id} has no complete gameplay response")
+        counts = PARAMETER_COUNT_CONTRACTS[width]
+        cfg = config_for_width(width, updates=updates)
+        endpoint = AnalysisEndpoint(
+            run_id=str(run.id),
+            run_name=str(run.name),
+            width=width,
+            updates=updates,
+            effective_parameters=effective_parameter_count(counts),
+            bc_parameters=counts["total"],
+            compute=training_compute(cfg, counts),
+            net_stock_per_min=response,
+            net_stock_lcb=lcb,
+        )
+        key = (width, updates)
+        if key in endpoints:
+            raise ValueError(f"multiple complete O54 evaluations exist for W{width} at {updates} updates")
+        endpoints[key] = endpoint
+    return endpoints
+
+
+def write_analysis_artifacts(
+    endpoints: Mapping[tuple[int, int], AnalysisEndpoint],
+    latency_rows: Mapping[int, LatencyRow],
+    output: Path,
+) -> dict[str, object]:
+    """Fit the registered scaling laws and write the fixed-data latency plot."""
+    expected = study_endpoints(latency_rows)
+    missing = [
+        (endpoint.width, endpoint.updates)
+        for endpoint in expected
+        if (endpoint.width, endpoint.updates) not in endpoints
+    ]
+    if missing:
+        raise ValueError(f"O54 analysis is missing complete endpoints: {missing}")
+    output.mkdir(parents=True, exist_ok=True)
+    ordered = [endpoints[endpoint.width, endpoint.updates] for endpoint in expected]
+    with (output / "endpoints.csv").open("w", newline="") as destination:
+        writer = csv.DictWriter(destination, fieldnames=tuple(asdict(ordered[0])))
+        writer.writeheader()
+        writer.writerows(asdict(endpoint) for endpoint in ordered)
+
+    fits: dict[str, dict[str, float]] = {}
+    optimal_compute = []
+    optimal_bc_parameters = []
+    for line, line_endpoints in ISO_COMPUTE_CHECKPOINTS.items():
+        line_rows = [endpoints[pair] for pair in line_endpoints]
+        vertex_effective, vertex_response = fit_quadratic_vertex(
+            [row.effective_parameters for row in line_rows],
+            [row.net_stock_per_min for row in line_rows],
+        )
+        vertex_width, vertex_bc = vertex_capacity(vertex_effective)
+        compute = math.exp(sum(math.log(row.compute) for row in line_rows) / len(line_rows))
+        fits[line] = {
+            "compute": compute,
+            "optimal_effective_parameters": vertex_effective,
+            "optimal_width": vertex_width,
+            "optimal_bc_parameters": vertex_bc,
+            "predicted_net_stock_per_min": vertex_response,
+        }
+        optimal_compute.append(compute)
+        optimal_bc_parameters.append(vertex_bc)
+    exponent, intercept = fit_optimal_capacity_scaling(optimal_compute, optimal_bc_parameters)
+
+    fixed_rows = [endpoints[endpoint.width, endpoint.updates] for endpoint in expected if "fixed-D" in endpoint.roles]
+    fixed_rows.sort(key=lambda row: latency_rows[row.width].p99_seconds)
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(7, 4.5))
+    axis.plot(
+        [latency_rows[row.width].p99_seconds * 1e3 for row in fixed_rows],
+        [row.net_stock_per_min for row in fixed_rows],
+        marker="o",
+    )
+    for row in fixed_rows:
+        axis.annotate(
+            f"W{row.width}",
+            (latency_rows[row.width].p99_seconds * 1e3, row.net_stock_per_min),
+            xytext=(4, 4),
+            textcoords="offset points",
+        )
+    axis.set_xlabel("RTX 3060 eager B1 p99 latency (ms)")
+    axis.set_ylabel("Mean net stocks/min")
+    axis.set_title("O54 fixed-data gameplay strength vs latency")
+    axis.grid(alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(output / "fixed_data_latency.png", dpi=180)
+    plt.close(figure)
+
+    report: dict[str, object] = {
+        "schema": 1,
+        "primary_response": "mean net stocks/min",
+        "iso_compute_fits": fits,
+        "optimal_bc_parameter_scaling": {
+            "exponent": exponent,
+            "log_intercept": intercept,
+        },
+        "fixed_data_widths": [row.width for row in fixed_rows],
+    }
+    (output / "analysis.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    return report
+
+
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
     return (
@@ -3513,6 +4067,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "constant-lr",
         ],
         config={
+            "experiment_id": _EXPERIMENT_ID,
             **asdict(cfg),
             "max_steps": cfg.max_steps,
             "warmup_steps": cfg.warmup_steps,
@@ -4501,7 +5056,7 @@ class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
     width: int | None = None
     updates: int | None = None
-    latency_manifest: Path = Path("runs/054_latency_manifest.json")
+    latency_manifest: Path = Path("docs/experiments/054_latency_manifest.json")
     proxy: bool = False
     comment: str = ""
     resume: str | None = None
@@ -4532,13 +5087,25 @@ class EvalArgs:
 
 @dataclass
 class LatencyPreflightArgs:
-    output: Path = Path("runs/054_latency_manifest.json")
+    output: Path = Path("docs/experiments/054_latency_manifest.json")
 
 
 @dataclass
 class LatencyDiagnosticArgs:
-    output: Path = Path("runs/054_latency_b1_b4.probes.json")
-    batch_sizes: tuple[int, ...] = (1, 4)
+    output: Path = Path("runs/054_latency_b4.probes.json")
+    batch_sizes: tuple[int, ...] = (4,)
+
+
+@dataclass
+class StudyPlanArgs:
+    latency_manifest: Path = Path("docs/experiments/054_latency_manifest.json")
+
+
+@dataclass
+class AnalyzeArgs:
+    wandb_path: str = "ericyuegu/hal"
+    latency_manifest: Path = Path("docs/experiments/054_latency_manifest.json")
+    output: Path = Path("results/054_bc_capacity_latency")
 
 
 type Command = (
@@ -4546,6 +5113,8 @@ type Command = (
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[LatencyPreflightArgs, tyro.conf.subcommand(name="latency-preflight")]
     | Annotated[LatencyDiagnosticArgs, tyro.conf.subcommand(name="latency-diagnostic")]
+    | Annotated[StudyPlanArgs, tyro.conf.subcommand(name="study-plan")]
+    | Annotated[AnalyzeArgs, tyro.conf.subcommand(name="analyze")]
 )
 
 
@@ -4560,6 +5129,52 @@ def _parse_character(name: str | None) -> melee.Character | None:
 
 
 def main(args: Command) -> None:
+    if isinstance(args, AnalyzeArgs):
+        latency_rows, latency_sha256 = load_latency_manifest(args.latency_manifest)
+        api = wandb.Api(timeout=120)
+        runs = api.runs(
+            args.wandb_path,
+            filters={
+                "config.experiment_id": _EXPERIMENT_ID,
+                "config.latency_manifest_sha256": latency_sha256,
+            },
+        )
+        endpoints = _analysis_endpoints(runs, latency_sha256)
+        report = write_analysis_artifacts(endpoints, latency_rows, args.output)
+        print(json.dumps(report, sort_keys=True, indent=2), flush=True)
+        return
+    if isinstance(args, StudyPlanArgs):
+        latency_rows, latency_sha256 = load_latency_manifest(args.latency_manifest)
+        endpoints = study_endpoints(latency_rows)
+        computes = tuple(
+            training_compute(
+                config_for_width(endpoint.width, updates=endpoint.updates),
+                PARAMETER_COUNT_CONTRACTS[endpoint.width],
+            )
+            for endpoint in endpoints
+        )
+        total_compute = sum(computes)
+        print(
+            f"[study] latency_manifest_sha256={latency_sha256} runs={len(endpoints)} "
+            f"compute={total_compute / 1e18:.3f} EFLOPs working_cost=$275 intervention=$825",
+            flush=True,
+        )
+        print("[study] wall-time and revised cost require approved RTX PRO 6000 throughput probes", flush=True)
+        for endpoint, compute, command in zip(
+            endpoints,
+            computes,
+            study_launch_commands(latency_rows, args.latency_manifest),
+            strict=True,
+        ):
+            working_cost = 275 * compute / total_compute
+            print(
+                f"[study] W{endpoint.width}/L{TRUNK_DEPTHS[endpoint.width]} updates={endpoint.updates:,} "
+                f"roles={','.join(endpoint.roles)} compute={compute / 1e18:.4f} EFLOPs "
+                f"working_cost=${working_cost:.2f}",
+                flush=True,
+            )
+            print(shlex.join(command), flush=True)
+        return
     if isinstance(args, LatencyDiagnosticArgs):
         run_latency_diagnostic(args.output, args.batch_sizes)
         return

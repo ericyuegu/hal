@@ -11,6 +11,7 @@ match. Use as a context manager.
 """
 
 import atexit
+import configparser
 import os
 import subprocess
 import sys
@@ -46,6 +47,8 @@ from hal.wire import slp_stage_to_libmelee
 # input. A long grace period stalls every wave boundary and adds no replay
 # safety: ``finalize_replay_dir`` repairs an interrupted .slp below.
 _DOLPHIN_TERM_GRACE_SECONDS = 0.25
+_NATIVE_EFB_SCALE = 2
+_DOLPHIN_VERSION_PATCH_LOCK = threading.RLock()
 
 
 class FrameTimeout(TimeoutError):
@@ -187,6 +190,53 @@ def fix_dolphin_ini_case(console: melee.Console) -> None:
     ini_path.write_text("".join(output))
 
 
+class _CaseSensitiveConfigParser(configparser.ConfigParser):
+    def optionxform(self, optionstr: str) -> str:
+        return optionstr
+
+
+def set_dolphin_internal_resolution(console: melee.Console, scale: int = _NATIVE_EFB_SCALE) -> None:
+    """Set Dolphin's EFB scale in the isolated profile."""
+    if not isinstance(scale, int) or isinstance(scale, bool) or scale < 1:
+        raise ValueError(f"Dolphin internal-resolution scale must be a positive integer, got {scale!r}")
+    config_path = Path(console._get_dolphin_config_path())
+    config_path.mkdir(parents=True, exist_ok=True)
+    ini_path = config_path / "GFX.ini"
+    config = _CaseSensitiveConfigParser(interpolation=None)
+    config.read(ini_path)
+    if not config.has_section("Settings"):
+        config.add_section("Settings")
+    # Pinned libmelee 0.47.0 does not expose EFBScale. Remove this boundary
+    # workaround when libmelee can configure the internal resolution directly.
+    config.set("Settings", "EFBScale", str(scale))
+    with ini_path.open("w") as output:
+        config.write(output)
+
+
+@contextmanager
+def known_dolphin_version(version: melee.console.DolphinVersion | None) -> Iterator[None]:
+    """Use an already validated version instead of probing a GUI executable.
+
+    Pinned libmelee 0.47.0 can hang while probing the Slippi GUI executable.
+    Remove this workaround when libmelee bounds that probe or accepts a
+    validated version directly.
+    """
+    if version is None:
+        yield
+        return
+    with _DOLPHIN_VERSION_PATCH_LOCK:
+        original = melee.console.get_dolphin_version
+
+        def known_version(_path: str) -> melee.console.DolphinVersion:
+            return version
+
+        melee.console.__dict__["get_dolphin_version"] = known_version
+        try:
+            yield
+        finally:
+            melee.console.__dict__["get_dolphin_version"] = original
+
+
 def kill_dolphin(console: melee.Console | None) -> None:
     """Hard-kill Dolphin if it is still running."""
     if console is None:
@@ -326,6 +376,9 @@ class Session:
         disable_audio: bool = False,
         polling_mode: bool = False,
         instant_match_restart: bool = False,
+        gfx_backend: Literal["Vulkan"] | None = None,
+        internal_resolution_scale: int | None = None,
+        dolphin_version: melee.console.DolphinVersion | None = None,
     ) -> None:
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
@@ -383,6 +436,17 @@ class Session:
         # stage-select menu. The eval driver navigates the menu once per boot and
         # then plays many matches; see hal/sim/vec.drive_vec.
         self.instant_match_restart = instant_match_restart
+        if gfx_backend not in (None, "Vulkan"):
+            raise ValueError(f"unsupported Dolphin graphics backend {gfx_backend!r}")
+        if internal_resolution_scale is not None and (
+            not isinstance(internal_resolution_scale, int)
+            or isinstance(internal_resolution_scale, bool)
+            or internal_resolution_scale < 1
+        ):
+            raise ValueError("internal_resolution_scale must be a positive integer")
+        self.gfx_backend = gfx_backend
+        self.internal_resolution_scale = internal_resolution_scale
+        self.dolphin_version = dolphin_version
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._pending_flush_ports: set[int] = set()
@@ -402,7 +466,7 @@ class Session:
 
     def _boot(self) -> None:
         """Construct Console — Dolphin doesn't launch until ``start_match``."""
-        self._console = melee.Console(
+        console_options: dict[str, Any] = dict(
             path=self.dolphin_path,
             slippi_port=self.slippi_port,
             blocking_input=self.blocking_input,
@@ -423,11 +487,17 @@ class Session:
             # stage, so the eval driver navigates the stage-select menu only once per boot.
             instant_match_restart=self.instant_match_restart,
         )
+        if self.gfx_backend is not None:
+            console_options["gfx_backend"] = self.gfx_backend
+        with known_dolphin_version(self.dolphin_version):
+            self._console = melee.Console(**console_options)
         # libmelee writes Dolphin.ini via Python configparser, which lowercases
         # option names ("slippireplaydir = ..."); Slippi-Ishiiruka's own parser
         # only honors the CamelCase ``SlippiReplayDir``, so without this fixup
         # ``replay_dir`` is silently ignored and .slps land in ~/Slippi.
         fix_dolphin_ini_case(self._console)
+        if self.internal_resolution_scale is not None:
+            set_dolphin_internal_resolution(self._console, self.internal_resolution_scale)
         # Belt-and-suspenders cleanup: if Python exits between __enter__ and
         # __exit__ (e.g. unhandled exception in __enter__ caller, sys.exit
         # mid-test, hard interpreter shutdown), still SIGKILL Dolphin.

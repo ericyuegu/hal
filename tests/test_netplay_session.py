@@ -69,7 +69,7 @@ def test_console_uses_blocking_uncapped_non_exi_settings(tmp_path: Path, monkeyp
         if melee.console.get_dolphin_version("ignored") is version
         else pytest.fail("Console construction did not use the validated Dolphin version")
     )
-    monkeypatch.setattr("hal.sim.netplay._tested_dolphin_version", lambda _path: version)
+    monkeypatch.setattr("hal.sim.netplay.tested_dolphin_version", lambda _path: version)
     monkeypatch.setattr("hal.sim.netplay.melee.Console", console_type)
     monkeypatch.setattr("hal.sim.netplay.teardown_console", Mock())
     with _session(tmp_path):
@@ -96,7 +96,7 @@ def test_console_sets_native_internal_resolution(tmp_path: Path) -> None:
     ini_path.write_text("[Settings]\nMSAA = 1\nEFBScale = 4\n")
     console = SimpleNamespace(_get_dolphin_config_path=lambda: str(config_path))
 
-    netplay._set_native_internal_resolution(console)
+    netplay.set_dolphin_internal_resolution(console)
 
     config = configparser.ConfigParser()
     config.read(ini_path)
@@ -254,14 +254,14 @@ def test_unknown_dolphin_build_is_rejected(tmp_path: Path) -> None:
     executable = tmp_path / "Slippi.AppImage"
     executable.write_bytes(b"not the tested build")
     with pytest.raises(RuntimeError, match="requires the tested Slippi 3.6.4 Linux AppImage"):
-        netplay._tested_dolphin_version(str(executable))
+        netplay.tested_dolphin_version(str(executable))
 
 
 def test_tested_dolphin_fingerprint_returns_pinned_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     executable = tmp_path / "Slippi.AppImage"
     executable.write_bytes(b"tested build")
     monkeypatch.setattr(netplay, "_SLIPPI_3_6_4_LINUX_SHA256", hashlib.sha256(b"tested build").hexdigest())
-    version = netplay._tested_dolphin_version(str(executable))
+    version = netplay.tested_dolphin_version(str(executable))
     assert version == _dolphin_version()
 
 

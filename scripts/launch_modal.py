@@ -83,7 +83,10 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
 )
 STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
-CLOSED_LOOP_EXPERIMENT: Final[str] = "experiments/050_scaled_temporal_awr.py"
+CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
+    "experiments/050_scaled_temporal_awr.py": None,
+    "experiments/054_bc_capacity_latency.py": frozenset({6_496, 16_384, 33_472, 35_072, 54_048, 84_320, 97_696}),
+}
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
 CLOSED_LOOP_EVERY: Final[int] = 8192
@@ -617,7 +620,19 @@ def _drain_run_names(
             loguru.logger.info(f"saved retry run name {found!r}")
 
 
-def _broker_response(line: bytes, evaluator: modal.Function) -> bytes:
+def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
+    selected = [token for token in argv if token in CLOSED_LOOP_EXPERIMENTS]
+    if len(selected) > 1:
+        raise ValueError(f"training command names multiple evaluation experiments: {selected}")
+    return selected[0] if selected else None
+
+
+def _valid_evaluation_update(experiment: str, update: int) -> bool:
+    allowed = CLOSED_LOOP_EXPERIMENTS[experiment]
+    return update > 0 and (update % CLOSED_LOOP_EVERY == 0 if allowed is None else update in allowed)
+
+
+def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) -> bytes:
     """Validate and dispatch one evaluation request from the training child."""
     try:
         value = json.loads(line)
@@ -632,15 +647,15 @@ def _broker_response(line: bytes, evaluator: modal.Function) -> bytes:
     n_matchups = value["n_matchups"]
     if not isinstance(run_name, str) or not RUN_NAME.fullmatch(run_name):
         error = f"invalid training run name: {run_name!r}"
-    elif type(update) is not int or update <= 0 or update % CLOSED_LOOP_EVERY:
-        error = f"closed-loop update must be a positive multiple of {CLOSED_LOOP_EVERY}"
+    elif type(update) is not int or not _valid_evaluation_update(experiment, update):
+        error = f"unsupported closed-loop update {update!r} for {experiment}"
     elif not isinstance(checkpoint_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha):
         error = "expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters"
     elif n_matchups != CLOSED_LOOP_MATCHUPS:
         error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
     else:
         try:
-            call = evaluator.spawn(run_name, update, checkpoint_sha, n_matchups)
+            call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups)
             call_id = call.object_id
         except Exception as e:
             # This boundary must return Modal failures to the waiting child process.
@@ -664,6 +679,7 @@ def _service_closed_loop_broker(
     broker: socket.socket,
     buffer: bytearray,
     evaluator: modal.Function,
+    experiment: str,
 ) -> None:
     while select.select([broker], [], [], 0.0)[0]:
         chunk = os.read(broker.fileno(), CLOSED_LOOP_REQUEST_MAX_BYTES)
@@ -677,7 +693,7 @@ def _service_closed_loop_broker(
             response = {"error": f"evaluation request exceeds {CLOSED_LOOP_REQUEST_MAX_BYTES} bytes"}
             _write_all(broker.fileno(), json.dumps(response).encode() + b"\n")
         else:
-            _write_all(broker.fileno(), _broker_response(bytes(line), evaluator))
+            _write_all(broker.fileno(), _broker_response(bytes(line), evaluator, experiment))
     if len(buffer) >= CLOSED_LOOP_REQUEST_MAX_BYTES:
         buffer.clear()
         response = {"error": f"evaluation request exceeds {CLOSED_LOOP_REQUEST_MAX_BYTES} bytes"}
@@ -716,7 +732,8 @@ def _run_training(
     child_env = env.copy()
     child_env.pop(CLOSED_LOOP_BROKER_FD, None)
     pass_fds: tuple[int, ...] = ()
-    if evaluator is not None:
+    evaluation_experiment = _evaluation_experiment(argv)
+    if evaluator is not None and evaluation_experiment is not None:
         broker, child_broker = socket.socketpair()
         child_env[CLOSED_LOOP_BROKER_FD] = str(child_broker.fileno())
         pass_fds = (child_broker.fileno(),)
@@ -759,8 +776,8 @@ def _run_training(
                     if failure is not None:
                         _kill_group(process.pid, signal.SIGKILL)
                         break
-                    if broker is not None and evaluator is not None:
-                        _service_closed_loop_broker(broker, broker_buffer, evaluator)
+                    if broker is not None and evaluator is not None and evaluation_experiment is not None:
+                        _service_closed_loop_broker(broker, broker_buffer, evaluator, evaluation_experiment)
                     quiet_s = time.time() - log_path.stat().st_mtime
                     if quiet_s >= stall_s:
                         failure = f"no training log output for {int(quiet_s)} seconds"
@@ -845,26 +862,31 @@ def _run_remote(spec: LaunchSpec, evaluator: modal.Function) -> int:
 
 
 def _run_closed_loop_eval(
+    experiment: str,
     run_name: str,
     update: int,
     expected_checkpoint_sha256: str,
     n_matchups: int,
 ) -> None:
-    """Evaluate one uploaded O50 milestone and publish its evidence."""
+    """Evaluate one uploaded training endpoint and publish its evidence."""
+    if experiment not in CLOSED_LOOP_EXPERIMENTS:
+        raise ValueError(f"unsupported closed-loop experiment: {experiment!r}")
     if not RUN_NAME.fullmatch(run_name):
         raise ValueError(f"invalid training run name: {run_name!r}")
-    if update <= 0 or update % CLOSED_LOOP_EVERY:
-        raise ValueError(f"closed-loop update must be a positive multiple of {CLOSED_LOOP_EVERY}")
+    if not _valid_evaluation_update(experiment, update):
+        raise ValueError(f"unsupported closed-loop update {update!r} for {experiment}")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_checkpoint_sha256):
         raise ValueError("expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
     if n_matchups != CLOSED_LOOP_MATCHUPS:
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
     env = _prepare_remote(skip_sm120_probe=False)
-    checkpoint = f"checkpoints/step-{update:07d}.pt"
+    checkpoint = (
+        f"checkpoints/step-{update:07d}.pt" if experiment.endswith("050_scaled_temporal_awr.py") else "final.pt"
+    )
     command = [
         "uv",
         "run",
-        CLOSED_LOOP_EXPERIMENT,
+        experiment,
         "eval",
         "--checkpoint",
         checkpoint,
