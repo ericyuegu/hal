@@ -1,4 +1,4 @@
-/* Fig: batch size at fixed examples, each arm minus batch 2,048 with a 95% interval. */
+/* Fig: batch size at fixed examples, batch 2,048 → each arm with a 95% interval. */
 (function () {
   'use strict';
   var D = window.HALDIAG, CI = window.HALFIG_CI;
@@ -12,7 +12,7 @@
   });
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.batchEffects = function () {
-    return rows.filter(function (r) { return !r.baseline; }).map(function (r) { return {comparison: r.label + ' vs batch 2,048', treatment_run: r.run, baseline_run: 'rri7scjc', method: r.method, stock_delta: r.stock.delta, stock_ci95_lo: r.stock.lo, stock_ci95_hi: r.stock.hi, damage_delta: r.damage.delta, damage_ci95_lo: r.damage.lo, damage_ci95_hi: r.damage.hi}; });
+    return rows.filter(function (r) { return !r.baseline; }).map(function (r) { return {comparison: 'batch 2,048 → ' + r.label, treatment_run: r.run, baseline_run: 'rri7scjc', method: r.method, stock_delta: r.stock.delta, stock_ci95_lo: r.stock.lo, stock_ci95_hi: r.stock.hi, damage_delta: r.damage.delta, damage_ci95_lo: r.damage.lo, damage_ci95_hi: r.damage.hi}; });
   };
-  D.forest(svg, rows, {rowH: 46});
+  D.forest(svg, rows, {rowH: 46, header: 'batch 2,048 → each row · 95% interval'});
 }());

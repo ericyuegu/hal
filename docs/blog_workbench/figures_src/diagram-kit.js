@@ -77,7 +77,7 @@ window.HALDIAG = (function () {
     return {end: cx - o.gap, producedStart: start, arrowStart: arrowStart};
   }
 
-  /* ---- treatment − baseline with its 95% interval ---- */
+  /* ---- baseline → treatment: Δ = after − before with its 95% interval ---- */
   function signed(v, digits) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(digits); }
   function scale(range, lo, hi) { return function (v) { return range[0] + (v - lo) / (hi - lo) * (range[1] - range[0]); }; }
   function niceStep(span) {
@@ -124,7 +124,7 @@ window.HALDIAG = (function () {
     var yEnd = o.top + rows.length * o.rowH - 8;
     effectAxis(svg, xs[0], doms[0], o.top - 14, yEnd, 'Δ net stocks / min');
     effectAxis(svg, xs[1], doms[1], o.top - 14, yEnd, 'Δ net damage / min');
-    text(svg, o.labelX, o.top - 14 - 14, o.header || 'treatment − baseline · dot and 95% interval', {class: 'diagram-note'});
+    text(svg, o.labelX, o.top - 14 - 14, o.header || 'baseline → treatment · 95% interval', {class: 'diagram-note'});
     rows.forEach(function (r, i) {
       var y = o.top + i * o.rowH + o.rowH / 2 - 6;
       text(svg, o.labelX, y + (r.sub ? 0 : 4), r.label, {class: 'diagram-title' + (r.accent ? ' accent' : '')});

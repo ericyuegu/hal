@@ -41,7 +41,7 @@
   D.text(svg, GRP, 28, 'within the frame · given', {class: 'diagram-note'});
   D.text(svg, (COL.stock[0] + COL.stock[1]) / 2, 28, 'Δ net stocks / min', {class: 'diagram-note', 'text-anchor': 'middle'});
   D.text(svg, (COL.damage[0] + COL.damage[1]) / 2, 28, 'Δ net damage / min', {class: 'diagram-note', 'text-anchor': 'middle'});
-  D.text(svg, 908, 14, 'vs the cell conditioned on nothing · dot and 95% interval', {class: 'diagram-note', 'text-anchor': 'end'});
+  D.text(svg, 908, 14, 'conditioned on nothing → each cell · 95% interval', {class: 'diagram-note', 'text-anchor': 'end'});
 
   var live = CELLS.filter(function (c) { return c.vs; });
   var sdom = D.domain(live.map(function (c) { return c.vs.stock; })), ddom = D.domain(live.map(function (c) { return c.vs.damage; }));

@@ -49,6 +49,6 @@
     svg.appendChild(D.el('line', {x1: W - R + 24, y1: ly, x2: W - R + 44, y2: ly, class: 'effect-line' + (s.accent ? ' accent' : '')}));
     svg.appendChild(D.el('circle', {cx: W - R + 34, cy: ly, r: 3.2, class: 'effect-pt' + (s.accent ? ' accent' : '')}));
     D.text(svg, W - R + 54, ly + 4, s.name, {class: 'diagram-title' + (s.accent ? ' accent' : '')});
-    D.text(svg, W - R + 54, ly + 18, D.signed(last.stock.delta, 2) + ' at 6 frames', {class: 'diagram-note'});
+    D.text(svg, W - R + 54, ly + 18, '1 → 6 frames: ' + D.signed(last.stock.delta, 2), {class: 'diagram-note'});
   });
 }());
