@@ -1,0 +1,11 @@
+<figure class="breakout architecture-figure loader-figure" id="shard-loader">
+  <div class="artifact interactive">
+    <div class="figure-head">
+      <div>
+        <h4>The physical-shard loader</h4>
+        <p>Shards are read once in a fixed order; a replay ring decides which windows share a batch.</p>
+      </div>
+    </div>
+    <svg class="model-diagram" id="loader-diagram" role="img" aria-label="Three stages. Physical shards are read in one keyed order and each replay is decoded once into W windows. The windows enter a FIFO replay ring of C slots in cohorts of L replays; every batch retires the oldest cohort. A batch takes window k from cohorts about k times P batches old, so one replay's windows are spread across the ring's period and no batch holds a replay twice."></svg>
+  </div>
+</figure>

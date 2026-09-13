@@ -16,7 +16,7 @@
  {
   "key": "action-dependencies",
   "name": "What a predicted action is given",
-  "caption": "The four O37 cells, same parameters, data, updates and deployment. Across-frame feedback hands the decoder the frames it has already written; within-frame feedback chains the four controller groups. Averaged over the other axis, across-frame feedback was worth +0.361 stocks/min and +13.49 damage/min, within-frame feedback +0.245 and +8.48.",
+  "caption": "The four O37 cells, same parameters, data, updates and deployment. Across-frame conditioning hands the decoder the frames it has already written; within-frame conditioning hands each controller group the groups already chosen in that frame. Averaged over the other axis, across-frame conditioning was worth +0.361 stocks/min and +13.49 damage/min, within-frame conditioning +0.245 and +8.48.",
   "studies": [
    "action_factorization_o37",
    "within_frame_order",
@@ -72,5 +72,15 @@
   "data": [
    "awrLedgerRows"
   ]
+ },
+ {
+  "key": "shard-loader",
+  "name": "The physical-shard loader",
+  "caption": "Shards are read once in a keyed order that is fixed for the run. Each replay is decoded once into W windows of context plus chunk at distinct starts, and enters a FIFO replay ring of C slots in cohorts of L = B/W replays; every batch retires the oldest cohort. A batch takes its k-th group of windows from cohorts about k·P/W batches old (P = C/B), jittered within a phase block, so one replay’s windows are spread over the ring’s period, no two are closer than P − block + 1 batches, and no batch holds a replay twice. O52: W = 8 windows, C = 112,128 slots, batch 512, 25-batch phase block, minimum gap 195 batches. The checkpoint stores the cursor and a locator per slot, not the decoded arrays.",
+  "studies": [
+   "windows_per_replay",
+   "dataset_v8_cleaning"
+  ],
+  "data": []
  }
 ]

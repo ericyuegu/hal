@@ -43,6 +43,13 @@ body{margin:0;background:var(--paper);color:var(--ink);font:var(--fs-body)/var(-
 .wb-block[data-type="callout"] .wb-body{background:var(--surface-aside);border:1px solid var(--aside-border);padding:14px 18px;margin:1.4rem 0;max-width:var(--measure)}
 .wb-block[data-type="callout"] .wb-body p:last-child{margin-bottom:0}
 
+/* the one card: white, ink hairline, hard offset shadow, an ink tab notched over the corner */
+.wb-block[data-type="card"] .wb-body{position:relative;background:var(--white);border:1px solid var(--frame-border);box-shadow:var(--shadow-frame);padding:22px 20px 14px;margin:1.8rem 0 1.6rem;max-width:var(--measure)}
+.wb-card-tab{position:absolute;top:-11px;left:14px;background:var(--ink);color:var(--paper);font:600 .62rem/1.3 var(--font-mono);letter-spacing:.12em;text-transform:uppercase;padding:3px 9px}
+.wb-block[data-type="card"] .wb-body ul,.wb-block[data-type="card"] .wb-body ol{margin:.2rem 0 0}
+.wb-block[data-type="card"] .wb-body p:last-child{margin-bottom:0}
+body.wb-edit .wb-block[data-type="card"] .wb-body{cursor:text}
+
 /* figure blocks — the numbered caption is derived from order */
 .wb-block[data-type="figure"]{margin:var(--space-fig) 0}
 .wb-block[data-type="figure"] .fig-src{display:block}

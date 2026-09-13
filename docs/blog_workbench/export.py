@@ -56,7 +56,7 @@ def export(outline: dict, blocks: dict[str, dict], notes: bool) -> str:
             md = re.sub(
                 r"\{\{\s*fig:([a-z0-9-]+)\s*\}\}", lambda m: f"Fig {fig_nums.get(m.group(1), '?')}", b.get("md", "")
             )
-            if b["type"] == "callout":
+            if b["type"] in ("callout", "card"):
                 md = "\n".join("> " + line for line in md.split("\n"))
             out.append(md)
         if notes and b.get("note"):

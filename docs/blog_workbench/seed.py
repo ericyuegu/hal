@@ -411,6 +411,8 @@ def compose() -> None:
     a["conditioned-action-plan"]["fig"] = "action-dependencies"
     a["conditioned-action-plan"]["caption"] = CAPTIONS["action-dependencies"]
     a["factorization-ablation"]["hidden"] = True  # its results now live in Fig 2 (2026-09-13); dropped from the store
+    a["loader-lineage"]["fig"] = "shard-loader"  # the throughput lineage became a mechanism diagram (2026-09-13)
+    a["loader-lineage"]["caption"] = CAPTIONS["shard-loader"]
 
     with after(a["How to read the results"], skip_text=True):
         callout(
@@ -450,7 +452,6 @@ def compose() -> None:
     with after(a["representation-branches"]):
         text(blocks_md("Block name: Derived geometry never reached a valid test"))
         text(blocks_md("Block name: Compress holds into action spans"))
-        figure("rle-action-spans", note=fig_note("Figure name: Run-Length Actions"))
         text(blocks_md("Block name: One token for the full controller"))
         text(blocks_md("Block name: Predicting future state did not improve action choice"))
         text(blocks_md("Block name: Let the output head reread history"))

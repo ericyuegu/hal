@@ -404,6 +404,12 @@
       body.innerHTML = headingHtml(b, secNums, id);
       return node;
     }
+    if (b.type === 'card') {
+      var lines = (b.md || '').split('\n');
+      var tab = lines.shift() || '';
+      body.innerHTML = '<div class="wb-card"><span class="wb-card-tab">' + escapeHtml(tab.replace(/^#+\s*/, '')) + '</span>' + md2html(lines.join('\n').trim(), figNums) + '</div>';
+      return node;
+    }
     body.innerHTML = md2html(b.md || '', figNums);
     return node;
   }
@@ -416,12 +422,12 @@
       e.stopPropagation();
       closeMenus();
       var menu = el('div', {class: 'wb-insert-menu', role: 'menu'});
-      [['heading', 'heading'], ['text', 'text'], ['callout', 'callout'], ['figure', 'figure…']].forEach(function (pair) {
+      [['heading', 'heading'], ['text', 'text'], ['callout', 'callout'], ['card', 'card'], ['figure', 'figure…']].forEach(function (pair) {
         menu.appendChild(el('button', {type: 'button', role: 'menuitem', text: pair[1], onclick: function (ev) {
           ev.stopPropagation();
           closeMenus();
           if (pair[0] === 'figure') { openPicker(index); return; }
-          var block = pair[0] === 'heading' ? {type: 'heading', level: 2, md: 'New section'} : {type: pair[0], md: pair[0] === 'callout' ? '**NB.** ' : 'New paragraph.'};
+          var block = pair[0] === 'heading' ? {type: 'heading', level: 2, md: 'New section'} : {type: pair[0], md: pair[0] === 'callout' ? '**NB.** ' : pair[0] === 'card' ? 'Card title\n\n- item' : 'New paragraph.'};
           var id = insertAt(index, block);
           setTimeout(function () { openEditor(id); }, 0);
         }}));
@@ -698,7 +704,7 @@
         return;
       }
       var md = (b.md || '').replace(/\{\{\s*fig:([a-z0-9-]+)\s*\}\}/gi, function (_, k) { return figNums[k] ? 'Fig ' + figNums[k] : 'Fig ?'; });
-      if (b.type === 'callout') md = md.split('\n').map(function (l) { return '> ' + l; }).join('\n');
+      if (b.type === 'callout' || b.type === 'card') md = md.split('\n').map(function (l) { return '> ' + l; }).join('\n');
       out.push(md);
       out.push('');
     });
