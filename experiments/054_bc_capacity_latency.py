@@ -677,6 +677,17 @@ def train_microbatch_size(cfg: TrainConfig) -> int:
         raise ValueError(f"width {cfg.arch.d_model} has no training microbatch contract") from error
 
 
+def _training_compile_mode(cfg: TrainConfig) -> str:
+    """Disable CUDA graphs when one optimizer step needs multiple backwards."""
+    if train_microbatch_size(cfg) < cfg.batch_size:
+        return "default"
+    return cfg.train_compile_mode
+
+
+def _training_uses_cuda_graphs(cfg: TrainConfig) -> bool:
+    return _training_compile_mode(cfg) == "reduce-overhead"
+
+
 def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
     """Build the fixed base observation with projectile columns."""
     context = build_synthetic_context(
@@ -4695,6 +4706,8 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
     temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
+    compile_mode = _training_compile_mode(cfg)
+    graph_note = " (CUDA graphs disabled for gradient accumulation)" if compile_mode != cfg.train_compile_mode else ""
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.
@@ -4703,20 +4716,23 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
             raise RuntimeError(
                 f"compiled CUDA training requires a fused attention path, resolved {model.trunk.attn_path!r} instead"
             )
-        print(f"[compile] calling torch.compile for trunk (mode={cfg.train_compile_mode})", flush=True)
+        print(f"[compile] calling torch.compile for trunk (mode={compile_mode}){graph_note}", flush=True)
         trunk_fn = torch.compile(
             trunk_fn,
             dynamic=False,
             fullgraph=True,
-            mode=cfg.train_compile_mode,
+            mode=compile_mode,
         )
     if DEVICE == "cuda" and cfg.compile_temporal:
-        print(f"[compile] calling torch.compile for temporal model (mode={cfg.train_compile_mode})", flush=True)
+        print(
+            f"[compile] calling torch.compile for temporal model (mode={compile_mode}){graph_note}",
+            flush=True,
+        )
         temporal_fn = torch.compile(
             temporal_fn,
             dynamic=False,
             fullgraph=True,
-            mode=cfg.train_compile_mode,
+            mode=compile_mode,
         )
     return trunk_fn, temporal_fn
 
@@ -4837,7 +4853,7 @@ def _backward_training_batch(
     nll_sum: Tensor | None = None
     metrics: dict[str, Tensor] = {}
     for microbatch in microbatches:
-        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
+        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal) and _training_uses_cuda_graphs(cfg):
             torch.compiler.cudagraph_mark_step_begin()
         loss, microbatch_nll_sum, microbatch_metrics = microbatch_loss(
             model,

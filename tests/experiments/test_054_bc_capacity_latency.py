@@ -101,6 +101,16 @@ def test_w1024_microbatches_preserve_the_optimizer_batch() -> None:
     assert exp.train_microbatch_size(exp.config_for_width(768)) == 512
 
 
+def test_gradient_accumulation_disables_training_cuda_graphs() -> None:
+    w768 = exp.config_for_width(768)
+    w1024 = exp.config_for_width(1024)
+
+    assert exp._training_compile_mode(w768) == "reduce-overhead"
+    assert exp._training_uses_cuda_graphs(w768)
+    assert exp._training_compile_mode(w1024) == "default"
+    assert not exp._training_uses_cuda_graphs(w1024)
+
+
 def test_microbatch_backward_matches_full_batch_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = exp.config_for_width(1024)
     model = exp.nn.Linear(1, 1, bias=False)
