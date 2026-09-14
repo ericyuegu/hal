@@ -170,6 +170,30 @@ def test_device_prefetcher_close_releases_phase_owned_batches() -> None:
     assert prefetcher._loader is None
 
 
+def test_prepared_training_data_releases_handoff_references() -> None:
+    resources = exp.ExitStack()
+    closed: list[bool] = []
+    resources.callback(closed.append, True)
+    prepared = exp.PreparedTrainingData(
+        phase_index=0,
+        loader=SimpleNamespace(),
+        validation=[],
+        iterator=iter(()),
+        first_batch_future=exp.Future(),
+        resources=resources,
+        worker_start_seconds=1.0,
+        first_batch_seconds=[2.0],
+    )
+
+    prepared.release_handoff_references()
+
+    assert closed == [True]
+    assert not hasattr(prepared, "loader")
+    assert not hasattr(prepared, "iterator")
+    assert not hasattr(prepared, "first_batch_future")
+    assert prepared.validation == []
+
+
 def test_final_readout_lr_uses_the_declared_fan_in_scaling() -> None:
     for width in exp.WIDTHS:
         cfg = exp.config_for_width(width)

@@ -4499,6 +4499,13 @@ class PreparedTrainingData:
     worker_start_seconds: float
     first_batch_seconds: list[float]
 
+    def release_handoff_references(self) -> None:
+        """Drop duplicate ownership after the prefetcher takes over."""
+        self.resources.close()
+        del self.loader
+        del self.iterator
+        del self.first_batch_future
+
 
 def _prepare_training_data(
     cfg: TrainConfig,
@@ -5222,7 +5229,7 @@ def train(
             first_batch_future=prepared_data.first_batch_future,
         )
     finally:
-        prepared_data.resources.close()
+        prepared_data.release_handoff_references()
     if len(prepared_data.first_batch_seconds) != 1:
         raise RuntimeError("first physical-shard batch did not record its fill time")
     cold_fill_seconds = prepared_data.first_batch_seconds[0]
