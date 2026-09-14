@@ -1453,8 +1453,8 @@ class DeviceBatchPrefetcher:
         iterator: Iterator[TrainBatch] | None = None,
         first_batch_future: Future[TrainBatch] | None = None,
     ) -> None:
-        self._loader = loader
-        self._iterator = iter(loader) if iterator is None else iterator
+        self._loader: Iterable[TrainBatch] | None = loader
+        self._iterator: Iterator[TrainBatch] | None = iter(loader) if iterator is None else iterator
         self._cfg = cfg
         self._device = torch.device(device)
         self._identity_masker = identity_masker
@@ -1469,6 +1469,8 @@ class DeviceBatchPrefetcher:
         self.stage_next()
 
     def _load_cpu_batch(self) -> TrainBatch:
+        if self._iterator is None or self._loader is None:
+            raise RuntimeError("device batch prefetcher is closed")
         try:
             return next(self._iterator)
         except StopIteration:
@@ -1552,8 +1554,12 @@ class DeviceBatchPrefetcher:
         return self._staged is None and not self._futures
 
     def close(self) -> None:
-        """Release the background loader thread."""
+        """Release the background loader thread and all phase-owned batches."""
         self._pool.shutdown(wait=True, cancel_futures=True)
+        self._futures.clear()
+        self._staged = None
+        self._iterator = None
+        self._loader = None
 
 
 class _UpdateTimer:

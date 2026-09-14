@@ -157,6 +157,19 @@ def test_microbatch_backward_matches_full_batch_gradient(monkeypatch: pytest.Mon
     assert float(metrics["stability/button_margin_mean"]) == pytest.approx(float(batch.target.mean()))
 
 
+def test_device_prefetcher_close_releases_phase_owned_batches() -> None:
+    cfg = replace(exp.config_for_width(256, updates=1), compile_trunk=False, compile_temporal=False)
+    batch = exp.synthetic_batch(cfg, exp.torch.device("cpu"))
+    prefetcher = exp.DeviceBatchPrefetcher([batch], cfg, "cpu")
+
+    assert prefetcher._staged is not None
+    prefetcher.close()
+
+    assert prefetcher._staged is None
+    assert prefetcher._iterator is None
+    assert prefetcher._loader is None
+
+
 def test_final_readout_lr_uses_the_declared_fan_in_scaling() -> None:
     for width in exp.WIDTHS:
         cfg = exp.config_for_width(width)

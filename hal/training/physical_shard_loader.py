@@ -2155,6 +2155,7 @@ class PhysicalShardReplayLoader[BatchT]:
         iterator = self._data_iterator
         self._data_iterator = None
         self._ordered_chunks = None
+        self._iterator = None
         _shutdown_data_loader_workers(iterator)
         close_adapter = getattr(self.adapter, "close", None)
         if callable(close_adapter):

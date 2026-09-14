@@ -1128,6 +1128,16 @@ def test_close_releases_the_storage_adapter_once() -> None:
     assert adapter.close_calls == 1
 
 
+def test_close_releases_the_parent_iterator_cycle() -> None:
+    loader = _loader(seed=5)
+    iter(loader)
+
+    assert loader._iterator is not None
+    loader.close()
+
+    assert loader._iterator is None
+
+
 def test_mds_adapter_explicitly_releases_mosaic_local_directories() -> None:
     calls = 0
 
