@@ -1,52 +1,6 @@
 (function () {
 "use strict";
 const WB = id => `https://wandb.ai/ericyuegu/hal/runs/${id}`;
-const TOTAL_PARAMS = 15053039;
-
-/* ---------- stage specification (from experiments/043_legacy_codec.py) ---------- */
-const STAGES = {
-  obs: {
-    n:"01", name:"Observation encoder", sec:"observation", color:"var(--s1)", params:185388,
-    role:"Turns one frame of gamestate, the previous controller frame, the item slots and the match conditioning into a single token.",
-    shapes:["MDS columns", "[B, 128, 384]"],
-    cfg:[["d_model","384"],["L_ctx","128"],["action_state_embed_dim","48"],["char_dim / stage_dim","8 / 4"],["observation_bundle","base"],["item slots","4, spawn-ordered"]],
-    parts:"ctx_proj 135,552 · categorical tables 49,190 · character 256 · stage 128",
-    tests:["Observation feature set","Past-action input encoding","Item and projectile features","One-hot button class count"]
-  },
-  trunk: {
-    n:"02", name:"Transformer trunk", sec:"trunk", color:"var(--s2)", params:14155776,
-    role:"Eight causal pre-norm blocks read the 128-frame window and produce one state per frame.",
-    shapes:["[B, 128, 384]", "[B, 128, 384]"],
-    cfg:[["n_layers","8"],["n_heads","6 × 64"],["d_model","384"],["attn_window","0 (full)"],["mlp","384 → 1536 → 384"],["norm","RMS, no affine"]],
-    parts:"1,769,472 per block · no bias anywhere · rotary positions",
-    tests:["Model size","Architecture package"]
-  },
-  dec: {
-    n:"03", name:"Temporal action decoder", sec:"decoder", color:"var(--s3)", params:489568,
-    role:"Expands each trunk state into ten selected future offsets. Every step reads the action the step before it chose.",
-    shapes:["[B, 128, 384]", "[B, 128, 10, 128]"],
-    cfg:[["head_offsets","1 2 3 4 5 6 9 12 16 20"],["temporal_d_model","128"],["temporal_layers","2"],["temporal_heads","4 × 32"],["temporal_ff_dim","256"],["offset_embed_dim","16"]],
-    parts:"token projection 59,520 · 2 blocks 262,144 · group conditioning 25,344 · trunk-logit skip 136,320 · shared codec 5,904",
-    tests:["Predicted-action feedback","Plan length and replan interval","Future targets and next-frame share","Decoder type","Future target offsets"]
-  },
-  groups: {
-    n:"04", name:"Within-frame group chain", sec:"groups", color:"var(--s4)", params:222307,
-    role:"Picks four controller groups in a fixed order. Each pick scales and shifts the state for the next.",
-    shapes:["[B, 128, 10, 128]", "14-channel controller frame"],
-    cfg:[["group_order","c_stick → main_stick → triggers → buttons"],["group_head_dim","256"],["head","RMSNorm → SiLU → linear"],["conditioning","state × (1 + tanh γ) + β"],["legality","shoulder click masks buttons"]],
-    parts:"four nonlinear heads over the retained legacy classes: 9, 37, 5 and 6",
-    tests:["Controller-part conditioning","Action-head capacity","Architecture package"]
-  },
-  loop: {
-    n:"05", name:"Closed-loop execution", sec:"timing", color:"var(--s5)", params:0,
-    role:"The runtime, not the model. It decides when a predicted frame reaches the emulator.",
-    shapes:["controller frame", "Dolphin, at 60 Hz"],
-    cfg:[["prediction delay d","1"],["plan length H","1"],["replan interval R","1"],["decode","ancestral, one group at a time"],["temperature","1.0, frozen"],["inference","compiled, bucketed"]],
-    parts:"a plan covers frames [t+d, t+d+H) · the newest eligible plan wins",
-    tests:["Prediction delay","Plan length and replan interval"]
-  }
-};
-
 /* ---------- the audited comparison table ---------- */
 const EV = window.HALFIG_EXPLORER_EV = [
  {r:1, c:"recipe", t:"Training objective: BC → offline Q learning", a:"behaviour cloning +0.16", b:"IQL −1.85", d:-2.01, l:-2.05, q:"weak", runs:["cqbbbg77","06fi5jms"],
@@ -109,62 +63,6 @@ const SEC_OF = Object.fromEntries(COMPS.map(([k,,s]) => [k,s]));
 /* ---------- tiny helpers ---------- */
 function fmt(v, sign){ if (v === null || v === undefined) return "—"; const s = v.toFixed(2); return sign && v > 0 ? "+" + s : s; }
 function cls(v){ return v > 0 ? "pos" : v < 0 ? "neg" : ""; }
-
-/* ---------- spec panel ---------- */
-const diagram = document.getElementById("diagram");
-const spec = document.getElementById("spec");
-
-function renderSpec(key){
-  const s = STAGES[key];
-  const pct = s.params ? (100 * s.params / TOTAL_PARAMS) : 0;
-  const shapeHTML = s.shapes.map(x => `<span class="chip">${x}</span>`).join('<span class="arw">→</span>');
-  const cfgHTML = s.cfg.map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
-  const testHTML = s.tests.map(t => `<span class="chip">${t}</span>`).join(" ");
-  spec.style.setProperty("--stage", s.color);
-  spec.innerHTML = `
-    <div class="spec-grid">
-      <div>
-        <span class="spec-tag"><i class="dot"></i>STAGE ${s.n}</span>
-        <h3>${s.name}</h3>
-        <p class="role">${s.role}</p>
-        <a class="jump" href="#${s.sec}">Read section ${s.n} →</a>
-      </div>
-      <div>
-        <dl>
-          <dt>Shapes</dt><dd><span class="shapes">${shapeHTML}</span></dd>
-          <dt>Parameters</dt><dd>${s.params ? s.params.toLocaleString("en-US") + " · " + pct.toFixed(2) + " %" : "none — this stage is runtime"}
-            <span class="parambar"><i style="width:${Math.max(pct, 0.6)}%"></i></span></dd>
-        </dl>
-        <p class="parts">${s.parts}</p>
-      </div>
-      <div><dl>${cfgHTML}</dl></div>
-    </div>
-    <div class="spec-tests"><span class="spec-tag">Tested by</span>${testHTML}</div>`;
-}
-
-let selected = null;
-function select(key, scroll){
-  selected = key;
-  diagram.setAttribute("data-selected", key);
-  diagram.querySelectorAll(".stage").forEach(g => g.classList.toggle("is-sel", g.dataset.stage === key));
-  renderSpec(key);
-  if (scroll) { const sec = document.getElementById(STAGES[key].sec); if (sec) sec.scrollIntoView({behavior:"smooth", block:"start"}); }
-}
-function clearSelect(){
-  selected = null;
-  diagram.removeAttribute("data-selected");
-  diagram.querySelectorAll(".stage").forEach(g => g.classList.remove("is-sel"));
-  renderSpec("trunk");
-}
-diagram.querySelectorAll(".stage").forEach(g => {
-  const key = g.dataset.stage;
-  g.addEventListener("click", () => select(key, false));
-  g.addEventListener("mouseenter", () => { if (!selected) renderSpec(key); });
-  g.addEventListener("focus", () => renderSpec(key));
-  g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); select(key, false); } });
-});
-document.addEventListener("keydown", e => { if (e.key === "Escape" && selected) clearSelect(); });
-renderSpec("trunk");
 
 /* ---------- tooltip ---------- */
 const tip = document.getElementById("xtip");
@@ -265,8 +163,6 @@ function drawRank(){
   }
 }
 drawRank();
-
-
 
 /* ---------- glossary: the netplay timing figure is drawn from three settings ---------- */
 (function(){
@@ -574,74 +470,6 @@ function legend(id, items){
   });
 })();
 
-/* ---- 3. batch size ---- */
-(function(){
-  const data = [[128,-0.32],[256,-0.49],[512,-0.72],[1024,-0.56],[2048,-0.79]];
-  const W = 420, H = 240, pad = {l:38, r:14, t:30, b:40};
-  const s = frame("chart-batch", W, H, pad);
-  const y = v => pad.t + (0 - v) / 0.9 * (H - pad.t - pad.b);
-  const bw = (W - pad.l - pad.r) / data.length;
-  E(s, "text", {x:pad.l, y:14, "font-size":11, fill:"var(--ink)", "font-family":"var(--mono)"}, "batch size at 2.097M examples");
-  grid(s, pad, W, H, [0, -0.3, -0.6, -0.9], y);
-  data.forEach(([n, v], i) => {
-    const cx = pad.l + i * bw + bw / 2;
-    const h = y(v) - y(0);
-    E(s, "rect", {x:cx - bw * 0.3, y:y(0), width:bw * 0.6, height:h, rx:3, fill:B});
-    E(s, "text", {x:cx, y:y(v) + 15, "text-anchor":"middle", "font-size":10.5,
-      fill:"var(--ink2)", "font-family":"var(--mono)"}, v.toFixed(2));
-    E(s, "text", {x:cx, y:H - pad.b + 16, "text-anchor":"middle", "font-size":10,
-      fill:"var(--ink3)", "font-family":"var(--mono)"}, String(n));
-    const hit = E(s, "rect", {x:cx - bw/2, y:pad.t, width:bw, height:H - pad.t - pad.b, fill:"transparent"});
-    hit.addEventListener("mousemove", ev => put(
-      `<span class="hd">batch ${n}</span>${v.toFixed(2)} net stocks / min<br>` +
-      `<span style="color:var(--ink3)">${(2097152 / n).toLocaleString("en-US")} optimizer updates</span>`, ev.clientX, ev.clientY));
-    hit.addEventListener("mouseleave", off);
-  });
-})();
-
-/* ---- 4. learning-rate pair ---- */
-(function(){
-  const data = [[".014",-0.59],[".028",-0.43],[".040",-0.37],[".056",-0.46],[".080",-0.54],[".112",-0.51]];
-  const adam = [".000595",".00119",".00170",".00238",".00340",".00476"];
-  const W = 420, H = 240, pad = {l:38, r:16, t:30, b:44};
-  const s = frame("chart-lr", W, H, pad);
-  const x = i => pad.l + i / (data.length - 1) * (W - pad.l - pad.r);
-  const y = v => pad.t + (-0.30 - v) / (-0.30 + 0.65) * (H - pad.t - pad.b);
-  E(s, "text", {x:pad.l, y:14, "font-size":11, fill:"var(--ink)", "font-family":"var(--mono)"}, "paired Muon / AdamW rates");
-  grid(s, pad, W, H, [-0.3, -0.4, -0.5, -0.6], y);
-  E(s, "polyline", {points: data.map(([, v], i) => `${x(i)},${y(v)}`).join(" "),
-    fill:"none", stroke:A, "stroke-width":2, "stroke-linejoin":"round"});
-  data.forEach(([lbl, v], i) => {
-    const best = v === -0.37;
-    E(s, "circle", {cx:x(i), cy:y(v), r: best ? 6.5 : 4.5, fill: best ? "var(--accent)" : A,
-      stroke:"var(--panel)", "stroke-width":2});
-    E(s, "text", {x:x(i), y:H - pad.b + 15, "text-anchor":"middle", "font-size":10,
-      fill:"var(--ink3)", "font-family":"var(--mono)"}, lbl);
-    const hit = E(s, "circle", {cx:x(i), cy:y(v), r:13, fill:"transparent"});
-    hit.addEventListener("mousemove", ev => put(
-      `<span class="hd">Muon ${lbl} · AdamW ${adam[i]}</span>${v.toFixed(2)} net stocks / min` +
-      (best ? "<br><span style='color:var(--accent)'>best point in the sweep</span>" : ""), ev.clientX, ev.clientY));
-    hit.addEventListener("mouseleave", off);
-  });
-  E(s, "text", {x:(W)/2, y:H - 8, "text-anchor":"middle", "font-size":10,
-    fill:"var(--ink3)", "font-family":"var(--mono)"}, "Muon rate · AdamW rate scales with it");
-})();
-
-/* ---- spine scroll spy ---- */
-(function(){
-  const links = [...document.querySelectorAll(".spine a")];
-  const map = new Map(links.map(a => [a.getAttribute("href").slice(1), a]));
-  const obs = new IntersectionObserver(entries => {
-    entries.forEach(e => {
-      const a = map.get(e.target.id);
-      if (a && e.isIntersecting) {
-        links.forEach(l => l.removeAttribute("aria-current"));
-        a.setAttribute("aria-current", "true");
-      }
-    });
-  }, {rootMargin:"-15% 0px -70% 0px"});
-  map.forEach((a, id) => { const el = document.getElementById(id); if (el) obs.observe(el); });
-})();
 })();
 
 "use strict";

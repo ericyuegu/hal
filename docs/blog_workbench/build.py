@@ -29,7 +29,7 @@ ASSETS = HERE / "assets"
 
 
 def legacy_figures() -> list[dict]:
-    """Frozen figures: html fragments (or svg files) plus registry metadata; `retired` ones only feed the hidden pool."""
+    """Frozen figures: html fragments (or svg files) plus registry metadata."""
     out = []
     for e in json.loads((LEGACY / "manifest.json").read_text()):
         if e["source"] == "svg":
@@ -94,17 +94,17 @@ def build() -> None:
     legacy = legacy_figures()
     modules = custom_figures()
     custom = [f for f in modules if "attach" not in f]
-    figures = [f for f in legacy if not f["retired"]] + custom
+    figures = legacy + custom
     keys = [f["key"] for f in figures]
     assert len(keys) == len(set(keys)), "duplicate figure keys"
 
-    # retired legacy figures stay in the hidden pool so their shared scripts still find their ids; they never render
+    # orphans.html holds containers anatomy.js still renders into but no placed figure shows
     pool = [
         '<div class="fig-src anatomy" data-fig="orphans"><figure>'
         + (LEGACY / "orphans.html").read_text()
         + "</figure></div>"
     ]
-    for f in figures + [f for f in legacy if f["retired"] and f["source"] != "svg"]:
+    for f in figures:
         cls = "xfig" if f["source"] == "explorer" else f["source"]
         pool.append(f'<div class="fig-src {cls}" data-fig="{f["key"]}">\n{f["html"]}\n</div>')
 

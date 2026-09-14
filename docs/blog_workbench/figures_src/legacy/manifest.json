@@ -1,32 +1,5 @@
 [
  {
-  "key": "flagship-model-architecture",
-  "name": "Flagship model architecture",
-  "source": "anatomy",
-  "caption": "Each context token concatenates state and action. One shared decoder head predicts a future action chunk at every context prefix. In play, the action prefix grows one frame at a time; each frame is decoded C → M → T → B. Internal model: O50. W&B tgpuo1be.",
-  "data": [
-   "architectureModules",
-   "architectureEdges"
-  ],
-  "studies": [
-   "training_checkpoint_series",
-   "optimizer_full_scale"
-  ],
-  "retired": true
- },
- {
-  "key": "conditioned-action-plan",
-  "name": "From one action to a conditioned plan",
-  "source": "anatomy",
-  "caption": "Every predicted action receives hₜ. In autoregressive MTP, action i can also attend to actions 1…i−1. Four consecutive actions are shown for clarity. The production model trains offsets 1–6, 9, 12, 16, and 20. next-frame · independent MTP · autoregressive MTP.",
-  "data": [],
-  "studies": [
-   "decoder_lineage",
-   "action_factorization_o37"
-  ],
-  "retired": true
- },
- {
   "key": "factorization-ablation",
   "name": "Factorization ablation",
   "source": "anatomy",
@@ -37,8 +10,7 @@
   "studies": [
    "action_factorization_o37",
    "within_frame_order"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "controller-representations",
@@ -49,8 +21,7 @@
   "studies": [
    "codec_legacy_cartesian",
    "codec_cartesian_polar"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "representation-branches",
@@ -70,50 +41,7 @@
    "joint_action_chords",
    "future_state_expert",
    "fixed_long_delay"
-  ],
-  "retired": false
- },
- {
-  "key": "advantage-weighted-behavior-cloning",
-  "name": "Advantage-weighted behavior cloning",
-  "source": "anatomy",
-  "caption": "Mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.",
-  "data": [
-   "awrRows"
-  ],
-  "studies": [
-   "awr_actor_weighting",
-   "awr_gamma",
-   "rank_weighted_bc"
-  ],
-  "retired": true
- },
- {
-  "key": "objective-decoder-branches",
-  "name": "Objective and decoder branches",
-  "source": "anatomy",
-  "caption": "Flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with the same behavior-cloning baseline; neither beats it.",
-  "data": [
-   "objectiveBranches"
-  ],
-  "studies": [
-   "endpoint_flow",
-   "continuous_action_flow",
-   "attached_iql",
-   "exploration_modeling"
-  ],
-  "retired": true
- },
- {
-  "key": "replay-diversity",
-  "name": "Replay diversity inside a batch",
-  "source": "anatomy",
-  "caption": "Four windows per replay → one changed stock score from −0.598 to +0.130, a +0.728 gain. Damage changed from +40.50 to +34.27. four windows · one window.",
-  "data": [],
-  "studies": [
-   "windows_per_replay"
-  ],
-  "retired": true
+  ]
  },
  {
   "key": "loader-lineage",
@@ -126,21 +54,7 @@
   "studies": [
    "windows_per_replay",
    "dataset_v8_cleaning"
-  ],
-  "retired": false
- },
- {
-  "key": "execution-horizon",
-  "name": "Execution horizon",
-  "source": "anatomy",
-  "caption": "The four factorization checkpoints at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.",
-  "data": [
-   "horizonSeries"
-  ],
-  "studies": [
-   "execution_horizon"
-  ],
-  "retired": true
+  ]
  },
  {
   "key": "capacity-against-delay",
@@ -152,8 +66,7 @@
   ],
   "studies": [
    "capacity_and_latency"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "deployment-frontier",
@@ -165,8 +78,7 @@
   ],
   "studies": [
    "capacity_and_latency"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "nll-closed-loop-play",
@@ -180,8 +92,7 @@
   "studies": [
    "capacity_and_latency",
    "training_checkpoint_series"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "iso-flop-fit",
@@ -194,8 +105,7 @@
   ],
   "studies": [
    "capacity_and_latency"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "experiment-ledger",
@@ -205,8 +115,7 @@
   "data": [
    "experiments"
   ],
-  "studies": [],
-  "retired": false
+  "studies": []
  },
  {
   "key": "closed-loop-training-path",
@@ -220,8 +129,7 @@
   "studies": [
    "training_checkpoint_series",
    "optimizer_full_scale"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "past-action-encoding",
@@ -235,8 +143,7 @@
   "studies": [
    "past_action_encoding",
    "onehot_button_pruning"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "scaling-points-table",
@@ -248,17 +155,7 @@
   ],
   "studies": [
    "capacity_and_latency"
-  ],
-  "retired": false
- },
- {
-  "key": "stage-map",
-  "name": "The five stages, on one time axis",
-  "source": "explorer",
-  "caption": "",
-  "data": [],
-  "studies": [],
-  "retired": true
+  ]
  },
  {
   "key": "plan-timing",
@@ -269,20 +166,7 @@
   "studies": [
    "rtc",
    "execution_horizon"
-  ],
-  "retired": false
- },
- {
-  "key": "ar-axes",
-  "name": "The three autoregressive orderings",
-  "source": "explorer",
-  "caption": "Three orderings, three independent switches. Experiment 037 turned ② and ③ on and off in every combination while holding everything else fixed.",
-  "data": [],
-  "studies": [
-   "decoder_lineage",
-   "action_factorization_o37"
-  ],
-  "retired": true
+  ]
  },
  {
   "key": "io-paths",
@@ -293,8 +177,7 @@
   "studies": [
    "past_action_encoding",
    "onehot_button_pruning"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "evidence-ranking",
@@ -302,8 +185,7 @@
   "source": "explorer",
   "caption": "",
   "data": [],
-  "studies": [],
-  "retired": false
+  "studies": []
  },
  {
   "key": "capacity-explorer",
@@ -313,8 +195,7 @@
   "data": [],
   "studies": [
    "capacity_and_latency"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "horizon-panels",
@@ -324,30 +205,7 @@
   "data": [],
   "studies": [
    "execution_horizon"
-  ],
-  "retired": false
- },
- {
-  "key": "batch-sweep",
-  "name": "Batch size at a fixed example budget",
-  "source": "explorer",
-  "caption": "Batch size at a fixed 2.097 million examples. Every arm saw the same data, so a smaller batch simply bought more optimizer updates. One seed.",
-  "data": [],
-  "studies": [
-   "batch_size_fixed_examples"
-  ],
-  "retired": true
- },
- {
-  "key": "lr-sweep",
-  "name": "Paired Muon and AdamW learning rates",
-  "source": "explorer",
-  "caption": "The Muon and AdamW rates move together as one pair. The interior minimum near .040 / .00170 is a real bracket, not an endpoint.",
-  "data": [],
-  "studies": [
-   "learning_rate_sweep"
-  ],
-  "retired": true
+  ]
  },
  {
   "key": "svg-codec-bridges",
@@ -359,8 +217,7 @@
   "studies": [
    "codec_legacy_cartesian",
    "codec_cartesian_polar"
-  ],
-  "retired": false
+  ]
  },
  {
   "key": "svg-observation-inputs",
@@ -372,20 +229,7 @@
   "studies": [
    "projectile_inputs",
    "ice_climbers_inputs"
-  ],
-  "retired": false
- },
- {
-  "key": "svg-rle-action-spans",
-  "name": "Run-length actions (draft SVG)",
-  "source": "svg",
-  "file": "rle-action-spans.svg",
-  "caption": "Frame actions followed by the variable-length span tokens learned by BPE.",
-  "data": [],
-  "studies": [
-   "rle_bpe_actions"
-  ],
-  "retired": true
+  ]
  },
  {
   "key": "svg-two-axes-action-feedback",
@@ -396,22 +240,6 @@
   "data": [],
   "studies": [
    "action_factorization_o37"
-  ],
-  "retired": false
- },
- {
-  "key": "svg-action-logit-paths",
-  "name": "Action logit paths (draft SVG)",
-  "source": "svg",
-  "file": "action-logit-paths.svg",
-  "caption": "Three paths into the action logits and the one-change deltas.",
-  "data": [],
-  "studies": [
-   "o43_action_head_components",
-   "film_vs_concatenation",
-   "o26_to_o42_package",
-   "old_head_capacity"
-  ],
-  "retired": true
+  ]
  }
 ]
