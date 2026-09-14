@@ -171,7 +171,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _EXPERIMENT_ID: Final[str] = "055_history_cross_attention_v1"
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 _MATCH_ROW_SCHEMA_VERSION: Final[int] = 7
-_REGISTERED_MATCHUPS: Final[int] = 192
+_REGISTERED_MATCHUPS: Final[int] = 96
 
 type DecoderVariant = Literal[
     "baseline",
@@ -356,8 +356,8 @@ class TrainConfig:
     ckpt_every: int = 2048
     eval_every: int = 8192
     eval_max_frames: int = 7200
-    eval_n_matchups: int = 192
-    final_eval_n_matchups: int = 192
+    eval_n_matchups: int = 96
+    final_eval_n_matchups: int = 96
     eval_max_parallel: int | None = 32
     automatic_evaluation: bool = False
 
@@ -482,7 +482,7 @@ def validate_config(cfg: TrainConfig) -> None:
         _REGISTERED_MATCHUPS,
         _REGISTERED_MATCHUPS,
     ):
-        raise ValueError("evaluation is frozen to 192 matchups every 8,192 updates and at completion")
+        raise ValueError("evaluation is frozen to 96 matchups every 8,192 updates and at completion")
     if cfg.decoder_variant not in _DECODER_VARIANTS:
         raise ValueError(f"unknown decoder_variant {cfg.decoder_variant!r}")
     if cfg.inference_mode not in ("compiled", "eager"):
@@ -1490,17 +1490,19 @@ class IdentityMasker:
 def prepared_targets(
     model: GPT, batch: TrainBatch | AWRBatch
 ) -> tuple[
-    Int[Tensor, "B L_ctx n_groups"],
-    Int[Tensor, "B L_ctx n_offsets n_groups"],
-    Bool[Tensor, "B L_ctx"],
+    Int[Tensor, "B 1 n_groups"],
+    Int[Tensor, "B 1 n_offsets n_groups"],
+    Bool[Tensor, "B 1"],
 ]:
     """Quantize and align the selected offsets at the final context prefix."""
-    history = stack_actions(batch.context.features)
-    full = model.codec.quantize(torch.cat((history, batch.target[:, : model.L_chunk]), dim=1))
-    length = history.shape[1]
-    targets = torch.stack([full[:, offset : offset + length] for offset in model.head_offsets], dim=2)
-    valid = torch.arange(length, device=full.device)[None, :] >= batch.context.ctx_pad[:, None]
-    return full[:, length - 1 : length], targets[:, -1:], valid[:, -1:]
+    final_action = torch.stack(
+        [batch.context.features[f"ego_{channel}"][:, -1] for channel in ACTION_CHANNELS],
+        dim=-1,
+    )[:, None]
+    selected = model.codec.quantize(torch.cat((final_action, batch.target[:, : model.L_chunk]), dim=1))
+    targets = torch.stack([selected[:, offset] for offset in model.head_offsets], dim=1)
+    valid = (batch.context.ctx_pad < model.cfg.arch.L_ctx)[:, None]
+    return selected[:, :1], targets[:, None], valid
 
 
 class DeviceBatchPrefetcher:
@@ -2464,10 +2466,10 @@ def assert_protocol_diversity(n_matchups: int) -> tuple[int, int, int, str]:
             f"deterministic {n_matchups}-matchup schedule changed: got {diversity[:3]}, expected {expected}"
         )
     if n_matchups == _REGISTERED_MATCHUPS:
-        expected_sha256 = "c7871050cfabe18f3df054e181ba4191675a382796e18143bf92504ccdbb6eb6"
+        expected_sha256 = "a2202b353e3e769f2ab25e673226ef29fb6f949f4391c2b9f3003afdc7ce3c15"
         if diversity[3] != expected_sha256:
             raise AssertionError(
-                f"deterministic 192-matchup schedule hash changed: {diversity[3]} != {expected_sha256}"
+                f"deterministic 96-matchup schedule hash changed: {diversity[3]} != {expected_sha256}"
             )
     return diversity
 

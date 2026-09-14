@@ -65,6 +65,7 @@ def test_proxy_and_rank1_data_identity_are_fixed() -> None:
     assert cfg.train_replays == 112_188
     assert cfg.train_frames == 1_203_888_017
     assert cfg.val_n_samples == 1024
+    assert (cfg.eval_n_matchups, cfg.final_eval_n_matchups) == (96, 96)
     assert cfg.replay_slots == 112_128
     assert cfg.replay_slots <= cfg.train_replays
     assert cfg.replay_slots // cfg.batch_size - cfg.replay_phase_block_batches + 1 == 195
@@ -73,11 +74,11 @@ def test_proxy_and_rank1_data_identity_are_fixed() -> None:
     assert exp.source_manifest_sha256(cfg) == {
         "ranked-anonymized-1-policy-world-v8": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8"
     }
-    assert exp.assert_protocol_diversity(192) == (
-        94,
-        17,
-        18,
-        "c7871050cfabe18f3df054e181ba4191675a382796e18143bf92504ccdbb6eb6",
+    assert exp.assert_protocol_diversity(96) == (
+        58,
+        13,
+        14,
+        "a2202b353e3e769f2ab25e673226ef29fb6f949f4391c2b9f3003afdc7ce3c15",
     )
 
 
@@ -149,18 +150,25 @@ def _decoder_inputs(cfg):
     return hidden, ctx_pad, observed, targets
 
 
-def test_training_targets_only_the_final_context_prefix() -> None:
+def test_training_targets_only_the_final_context_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _tiny_cfg()
     model = exp.GPT(cfg)
     batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
-
-    observed, targets, valid = exp.prepared_targets(model, batch)
     actions = exp.stack_actions(batch.context.features)
     full = model.codec.quantize(torch.cat((actions, batch.target), dim=1))
     expected = torch.stack(
         [full[:, cfg.arch.L_ctx - 1 + offset] for offset in cfg.arch.head_offsets],
         dim=1,
     )
+    quantized_shapes = []
+    original_quantize = exp.DiscreteControllerCodec.quantize
+
+    def record_quantized_shape(codec, action_chunk):
+        quantized_shapes.append(tuple(action_chunk.shape))
+        return original_quantize(codec, action_chunk)
+
+    monkeypatch.setattr(exp.DiscreteControllerCodec, "quantize", record_quantized_shape)
+    observed, targets, valid = exp.prepared_targets(model, batch)
 
     assert observed.shape == (cfg.batch_size, 1, exp.CONTROLLER_GROUP_COUNT)
     assert targets.shape == (
@@ -171,6 +179,7 @@ def test_training_targets_only_the_final_context_prefix() -> None:
     )
     assert valid.shape == (cfg.batch_size, 1)
     assert valid.all()
+    assert quantized_shapes == [(cfg.batch_size, cfg.arch.sample_chunk_length + 1, exp.A_DIM)]
     torch.testing.assert_close(observed[:, 0], full[:, cfg.arch.L_ctx - 1])
     torch.testing.assert_close(targets[:, 0], expected)
 

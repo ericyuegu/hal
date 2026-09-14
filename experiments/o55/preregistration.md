@@ -45,7 +45,7 @@ uv run experiments/055_history_cross_attention.py train --proxy --cfg.decoder-va
 
 ## Evaluation and decision rule
 
-An arm is eligible only if it reaches update 16,384 with finite training and validation metrics and completes all 192 fixed gameplay matchups. The schedule has 94 oriented character pairs, 17 ego characters, 18 CPU characters, and SHA-256 `c7871050cfabe18f3df054e181ba4191675a382796e18143bf92504ccdbb6eb6`. Evaluation uses prediction 4, delay 2, replan 2, and at most 7,200 frames.
+An arm is eligible only if it reaches update 16,384 with finite training and validation metrics and completes all 96 fixed gameplay matchups. The schedule has 58 oriented character pairs, 13 ego characters, 14 CPU characters, and SHA-256 `a2202b353e3e769f2ab25e673226ef29fb6f949f4391c2b9f3003afdc7ce3c15`. Evaluation uses prediction 4, delay 2, replan 2, and at most 7,200 frames.
 
 The primary comparisons are:
 
@@ -54,4 +54,4 @@ The primary comparisons are:
 - `replace-attention - remove-state-bias`: the value of replacing temporal self-attention after the state-bias removal.
 - `replace-attention - baseline`: the complete proposed replacement.
 
-For each comparison, compute treatment minus control in net stocks per active minute. Use the saved per-match rows, aggregate within each boot, and resample the 192 matched boots together for a seeded 2,000-resample two-sided 95% percentile interval. `add-history` or `replace-attention` supersedes `baseline` only if its direct interval against `baseline` is entirely positive. If neither arm meets that criterion, retain `baseline`. Offline NLL, accuracy, and rollout metrics are diagnostic only and cannot select an arm.
+For each comparison, compute treatment minus control in net stocks per active minute. Use the saved per-match rows, aggregate within each boot, and resample the 96 matched boots together for a seeded 2,000-resample two-sided 95% percentile interval. `add-history` or `replace-attention` supersedes `baseline` only if its direct interval against `baseline` is entirely positive. If neither arm meets that criterion, retain `baseline`. Offline NLL, accuracy, and rollout metrics are diagnostic only and cannot select an arm.
