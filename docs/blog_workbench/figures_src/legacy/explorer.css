@@ -1,0 +1,260 @@
+
+.xfig{
+  --bg:var(--paper); --panel:var(--surface-card); --inset:var(--surface-aside); --sunk:var(--paper-warm);
+  --ink2:var(--ink-soft); --ink3:var(--ink-mono);
+  --rule:var(--rule-underline); --hair:var(--rule);
+  --accent:var(--oxblood); --accent-soft:color-mix(in srgb, var(--oxblood) 12%, transparent);
+  --indigo:var(--ink); --ochre:var(--oxblood);
+  --gain:var(--ink); --loss:var(--oxblood);
+  --s1:var(--ink-soft); --s2:var(--ink); --s3:var(--ink); --s4:var(--ink-soft); --s5:var(--ink-faint);
+  --shadow:var(--shadow-frame-sm);
+  --display:var(--font-serif); --body:var(--font-serif); --mono:var(--font-mono);
+  font-family:var(--font-serif); font-size:16px; line-height:1.55; color:var(--ink);
+}
+.xfig .pill[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.xfig .pill.k[aria-pressed="true"]{background:var(--oxblood);border-color:var(--oxblood);color:var(--paper)}
+.xfig .lbl{font-family:var(--font-mono)!important;font-weight:600}
+.xfig svg .lbl{font-family:var(--font-mono)!important}
+@media (prefers-color-scheme: dark){}
+.xfig [hidden]{display:none !important}
+@media (prefers-reduced-motion: reduce){}
+.xfig /* ---------- shell: frame-ruler spine + content ---------- */
+.shell{display:grid; grid-template-columns:76px minmax(0,1fr); max-width:1240px; margin:0 auto; gap:0}
+.xfig .spine{position:sticky; top:0; align-self:start; height:100vh; padding:34px 0 34px 20px; border-right:1px solid var(--hair)}
+.xfig .spine ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px}
+.xfig .spine a{
+  display:flex; align-items:center; gap:8px; text-decoration:none;
+  font-family:var(--mono); font-size:10px; font-weight:500; letter-spacing:.04em;
+  color:var(--ink3); padding:5px 0; border-left:2px solid transparent; padding-left:10px; margin-left:-12px;
+}
+.xfig .spine a:hover{color:var(--ink)}
+.xfig .spine a[aria-current="true"]{color:var(--ink); border-left-color:var(--accent)}
+.xfig .spine .tick{display:block; width:14px; height:1px; background:currentColor; opacity:.5}
+.xfig .spine .grp{margin-top:14px; font-family:var(--mono); font-size:9px; letter-spacing:.16em; color:var(--ink3); padding-left:10px; margin-left:-12px; text-transform:uppercase}
+.xfig main{padding:34px 30px 100px; min-width:0}
+@media (max-width: 900px){.xfig .shell{grid-template-columns:minmax(0,1fr)}
+.xfig .spine{display:none}
+.xfig main{padding:24px 18px 72px}}
+.xfig /* ---------- type ---------- */
+h1,.xfig h2,.xfig h3,.xfig h4{font-family:var(--display); font-weight:600; line-height:1.14; letter-spacing:-.015em; text-wrap:balance; margin:0}
+.xfig h1{font-size:clamp(2.3rem,5.6vw,3.9rem); font-weight:700; letter-spacing:-.03em}
+.xfig h2{font-size:clamp(1.5rem,3vw,2rem); margin:0 0 6px}
+.xfig h3{font-size:1.12rem; margin:30px 0 8px}
+.xfig h4{font-size:.95rem; margin:20px 0 6px}
+.xfig p{margin:11px 0; max-width:68ch}
+.xfig a{color:var(--ink); text-decoration:underline; text-decoration-color:var(--rule); text-underline-offset:3px}
+.xfig a:hover{text-decoration-color:var(--accent)}
+.xfig code,.xfig .mono,.xfig .num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+.xfig code{font-size:.83em; background:var(--inset); border:1px solid var(--hair); border-radius:0; padding:.05em .3em}
+.xfig .eyebrow{font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:.18em; text-transform:uppercase; color:var(--ink3); margin:0 0 12px}
+.xfig .lede{font-size:1.22rem; line-height:1.5; color:var(--ink2); max-width:60ch; margin:16px 0 0}
+.xfig .small{font-size:.86rem; color:var(--ink2)}
+.xfig :focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:0}
+.xfig /* ---------- header ---------- */
+header.hero{padding:26px 0 6px; border-bottom:1px solid var(--rule); margin-bottom:34px}
+.xfig .hero-top{display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:14px}
+.xfig .hero-top .eyebrow{margin:0}
+.xfig .theme-toggle{
+  display:inline-flex; align-items:center; gap:7px; flex:none;
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
+  padding:6px 12px; border:1px solid var(--rule); border-radius:0;
+  background:var(--panel); color:var(--ink2); cursor:pointer; transition:border-color .14s ease, color .14s ease;
+}
+.xfig .theme-toggle:hover{border-color:var(--accent); color:var(--ink)}
+.xfig .theme-toggle .tt-icon{display:inline-flex}
+.xfig .theme-toggle svg{width:13px; height:13px; display:block}
+.xfig .hero-meta{display:flex; flex-wrap:wrap; gap:8px 26px; margin-top:24px; padding-bottom:26px; font-family:var(--mono); font-size:11.5px; color:var(--ink2)}
+.xfig .hero-meta b{color:var(--ink); font-weight:500}
+.xfig /* ---------- figure names ---------- */
+.fig-name{
+  display:inline-flex; align-items:center; gap:6px; margin:0 0 10px;
+  font-family:var(--mono); font-size:10px; letter-spacing:.06em;
+  padding:2px 8px 2px 6px; border:1px solid var(--rule); border-radius:0;
+  color:var(--ink3); background:var(--inset); text-decoration:none; white-space:nowrap;
+}
+.xfig .fig-name::before{content:"⌗"; color:var(--accent); font-weight:700}
+.xfig .fig-name:hover{color:var(--ink); border-color:var(--accent)}
+.xfig .fig-name-row{grid-column:1 / -1; margin-bottom:-6px}
+.xfig .fig-index{display:flex; flex-wrap:wrap; gap:6px 8px; align-items:center; margin:18px 0 0}
+.xfig .fig-index > span{font-family:var(--mono); font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3); margin-right:6px}
+.xfig .fig-index .fig-name{margin:0}
+.xfig :target > .fig-name,.xfig .fig-name:target{border-color:var(--accent); color:var(--ink)}
+.xfig /* ---------- callouts ---------- */
+.callout{border-left:3px solid var(--rule); background:var(--panel); padding:14px 18px; margin:22px 0; border-radius:0; max-width:780px}
+.xfig .callout.key{border-left-color:var(--accent)}
+.xfig .callout.warn{border-left-color:var(--loss)}
+.xfig .callout p{margin:6px 0}
+.xfig .callout p:first-child{margin-top:0}
+.xfig .callout p:last-child{margin-bottom:0}
+.xfig /* ---------- section frame ---------- */
+section{padding:52px 0 8px; border-top:1px solid var(--hair); margin-top:34px}
+.xfig section:first-of-type{border-top:0}
+.xfig .sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:4px}
+.xfig .sec-num{font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:.08em; color:var(--stage,var(--ink3)); padding-top:4px}
+.xfig .sec-sub{color:var(--ink2); max-width:66ch; margin:8px 0 0}
+.xfig /* ---------- panels ---------- */
+.panel{background:var(--panel); border:1px solid var(--hair); border-radius:0; box-shadow:var(--shadow)}
+.xfig /* ---------- hero diagram + spec panel ---------- */
+.stack{display:grid; grid-template-columns:minmax(0,1fr); gap:16px; margin:22px 0 8px}
+.xfig .diagram{padding:14px 12px 8px; overflow-x:auto}
+.xfig .diagram svg{display:block; width:100%; min-width:880px; height:auto}
+.xfig .stage{cursor:pointer}
+.xfig .stage .plate{transition:fill .16s ease, stroke .16s ease}
+.xfig .stage:hover .plate,.xfig .stage:focus-visible .plate{stroke-width:2}
+.xfig .diagram[data-selected] .stage{opacity:.34; transition:opacity .18s ease}
+.xfig .diagram[data-selected] .stage.is-sel{opacity:1}
+.xfig .diagram[data-selected] .stage.is-sel .plate{stroke-width:2}
+.xfig .diagram[data-selected] .flow{opacity:.4}
+.xfig .stage .lbl{font-family:"Chivo","Helvetica Neue",Arial,sans-serif; font-weight:600; letter-spacing:.02em}
+.xfig .diag-hint{font-family:var(--mono); font-size:10.5px; color:var(--ink3); text-align:center; padding:2px 0 6px}
+.xfig .narrow-only{display:none}
+@media (max-width: 760px){.xfig .narrow-only{display:inline}}
+.xfig .spec{padding:18px 22px 20px}
+.xfig .spec-grid{display:grid; grid-template-columns:minmax(220px,.8fr) minmax(250px,1fr) minmax(240px,1fr); gap:0; align-items:start}
+.xfig .spec-grid > div{padding-right:28px}
+.xfig .spec-grid > div + div{border-left:1px solid var(--hair); padding-left:28px}
+@media (max-width: 860px){.xfig .spec-grid{grid-template-columns:minmax(0,1fr)}
+.xfig .spec-grid > div + div{border-left:0; padding-left:0; border-top:1px solid var(--hair); padding-top:14px; margin-top:14px}}
+.xfig .spec-tests{margin-top:16px; padding-top:14px; border-top:1px solid var(--hair); display:flex; flex-wrap:wrap; gap:6px; align-items:center}
+.xfig .spec .parts{margin:10px 0 0; font-family:var(--mono); font-size:10.5px; line-height:1.65; color:var(--ink3)}
+.xfig .spec-tag{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink3)}
+.xfig .spec-tag .dot{width:9px; height:9px; border-radius:0; background:var(--stage,var(--ink3))}
+.xfig .spec h3{margin:9px 0 2px; font-size:1.24rem}
+.xfig .spec .role{color:var(--ink2); font-size:.92rem; margin:6px 0 14px; max-width:46ch}
+.xfig .spec dl{display:grid; grid-template-columns:auto 1fr; gap:0; margin:0; border-top:1px solid var(--hair)}
+.xfig .spec dt{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink3); padding:7px 12px 7px 0; border-bottom:1px solid var(--hair); white-space:nowrap}
+.xfig .spec dd{margin:0; padding:7px 0; border-bottom:1px solid var(--hair); font-family:var(--mono); font-size:11px; line-height:1.6; text-align:right; color:var(--ink)}
+.xfig .shapes{display:flex; flex-wrap:wrap; gap:6px; align-items:center; justify-content:flex-end}
+.xfig .shapes .arw{color:var(--ink3)}
+.xfig .chip{display:inline-block; font-family:var(--mono); font-size:10.5px; padding:2px 7px; border:1px solid var(--rule); border-radius:0; background:var(--inset); white-space:nowrap}
+.xfig .parambar{height:6px; border-radius:0; background:var(--sunk); overflow:hidden; margin-top:7px}
+.xfig .parambar i{display:block; height:100%; background:var(--stage,var(--indigo))}
+.xfig .spec .jump{display:inline-block; margin-top:16px; font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--ink); text-decoration:none; border-bottom:1px solid var(--accent); padding-bottom:1px}
+.xfig /* ---------- ranked chart ---------- */
+.toolbar{display:flex; flex-wrap:wrap; gap:16px 24px; align-items:flex-end; margin:20px 0 12px}
+.xfig .fieldset{display:flex; flex-direction:column; gap:7px}
+.xfig .fieldset > span{font-family:var(--mono); font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3)}
+.xfig .pills{display:flex; flex-wrap:wrap; gap:5px}
+.xfig .pill{
+  font-family:var(--mono); font-size:11px; letter-spacing:.02em;
+  padding:4px 10px; border:1px solid var(--rule); border-radius:0;
+  background:var(--panel); color:var(--ink2); cursor:pointer; transition:all .13s ease;
+}
+.xfig .pill:hover{border-color:var(--ink3); color:var(--ink)}
+.xfig .pill:disabled{opacity:.35; cursor:not-allowed; text-decoration:line-through}
+.xfig .pill:disabled:hover{border-color:var(--rule); color:var(--ink2)}
+.xfig .pill[aria-pressed="true"]{background:var(--ink); border-color:var(--ink); color:var(--bg)}
+.xfig .pill.k[aria-pressed="true"]{background:var(--accent); border-color:var(--accent); color:#fff}
+@media (prefers-color-scheme: light){}
+.xfig .rank-wrap{padding:16px 18px 10px; overflow-x:auto}
+.xfig .rank{width:100%; border-collapse:collapse; min-width:700px; table-layout:fixed}
+.xfig .rank tr{cursor:pointer}
+.xfig .rank tr:hover td{background:var(--inset)}
+.xfig .rank td{padding:6px 8px; border-bottom:1px solid var(--hair); vertical-align:middle}
+.xfig .rank td.f{font-size:.9rem; line-height:1.32}
+.xfig .rank td.f small{display:block; color:var(--ink3); font-family:var(--mono); font-size:10px; letter-spacing:.02em; margin-top:2px}
+.xfig .rank td.d{padding-right:16px}
+.xfig .rank td.v{font-family:var(--mono); font-size:12px; text-align:right; white-space:nowrap}
+.xfig .rank td.q{padding-left:14px}
+.xfig .bar{position:relative; height:20px}
+.xfig .bar .zero{position:absolute; top:-3px; bottom:-3px; width:1px; background:var(--rule)}
+.xfig .bar i{position:absolute; top:4px; height:12px; border-radius:0}
+.xfig .bar u{position:absolute; top:1px; height:18px; width:2px; border-radius:0; opacity:.75; text-decoration:none}
+.xfig .gain{background:var(--gain)}
+.xfig .loss{background:var(--loss)}
+.xfig .badge{display:inline-block; font-family:var(--mono); font-size:9px; letter-spacing:.09em; text-transform:uppercase; padding:2px 6px; border-radius:0; border:1px solid var(--rule); color:var(--ink2); white-space:nowrap}
+.xfig .badge.strong{border-color:var(--gain); color:var(--gain)}
+.xfig .badge.near{border-color:var(--ink3); color:var(--ink2)}
+.xfig .badge.combined{border-color:var(--accent); color:var(--accent)}
+.xfig .badge.weak{border-color:var(--loss); color:var(--loss)}
+.xfig .lcbmini{display:none}
+@media (max-width: 760px){.xfig .rank{min-width:0; table-layout:auto}
+.xfig .rank col{width:auto !important}
+.xfig .rank td.d,.xfig .rank-wrap .axis{display:none}
+.xfig .rank td.v{padding-right:4px}
+.xfig .rank td.q{padding-left:8px; width:1%}
+.xfig .rank td.f{font-size:.86rem}
+.xfig .lcbmini{display:block; color:var(--ink3); font-size:10px; font-weight:400}}
+.xfig .axis{display:grid; grid-template-columns:29% 46% 25%; font-family:var(--mono); font-size:10px; color:var(--ink3); padding:6px 8px 2px; border-top:1px solid var(--hair); min-width:700px}
+.xfig .axis .ax{display:flex; justify-content:space-between}
+.xfig /* ---------- evidence tables ---------- */
+.table-wrap{overflow-x:auto; margin:16px 0 8px; border:1px solid var(--hair); border-radius:0; background:var(--panel)}
+.xfig table.ev{width:100%; border-collapse:collapse; min-width:620px; font-size:.88rem}
+.xfig table.ev caption{text-align:left; font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink3); padding:12px 14px 8px}
+.xfig table.ev th{text-align:left; font-family:var(--mono); font-weight:500; font-size:9.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink3); padding:8px 12px; border-bottom:1px solid var(--rule)}
+.xfig table.ev td{padding:9px 12px; border-bottom:1px solid var(--hair); vertical-align:top; line-height:1.45}
+.xfig table.ev tr:last-child td{border-bottom:0}
+.xfig table.ev td.n{font-family:var(--mono); text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums}
+.xfig table.ev tr.flash td{background:var(--accent-soft); transition:background 1.4s ease}
+.xfig .pos{color:var(--gain)}
+.xfig .neg{color:var(--loss)}
+.xfig /* ---------- charts ---------- */
+.chart-row{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; margin:18px 0}
+.xfig figure{margin:0; background:var(--panel); border:1px solid var(--hair); border-radius:0; padding:14px 14px 10px}
+.xfig figure svg{display:block; width:100%; max-width:560px; height:auto; margin-inline:auto}
+.xfig figcaption{font-size:.83rem; color:var(--ink2); margin-top:10px; line-height:1.45}
+.xfig .legend{display:flex; flex-wrap:wrap; gap:6px 16px; font-family:var(--mono); font-size:10.5px; color:var(--ink2); margin:2px 0 8px}
+.xfig .legend span{display:inline-flex; align-items:center; gap:6px}
+.xfig .legend i{width:14px; height:3px; border-radius:0; display:inline-block}
+.xfig .tip{
+  position:fixed; z-index:40; pointer-events:none; opacity:0; transform:translateY(4px);
+  background:var(--panel); border:1px solid var(--rule); border-radius:0; box-shadow:var(--shadow);
+  padding:9px 11px; font-family:var(--mono); font-size:11px; line-height:1.55; max-width:290px; color:var(--ink);
+  transition:opacity .12s ease, transform .12s ease;
+}
+.xfig .tip.on{opacity:1; transform:translateY(0)}
+.xfig .tip b{font-weight:700}
+.xfig .tip .hd{font-family:var(--display); font-size:12.5px; font-weight:600; margin-bottom:4px; display:block}
+.xfig /* ---------- 039 capacity explorer ---------- */
+.explorer{padding:16px 18px 14px; margin:20px 0 6px}
+.xfig .exp-head{display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:14px; padding-bottom:12px; border-bottom:1px solid var(--hair)}
+.xfig .exp-head h3{font-size:1.16rem}
+.xfig .exp-controls{display:flex; flex-wrap:wrap; gap:14px 26px; align-items:flex-end; padding:12px 0 4px}
+.xfig .exp-controls .fieldset[hidden]{display:none}
+.xfig .exp-body{overflow-x:auto; padding:4px 0}
+.xfig .exp-body svg{display:block; width:100%; min-width:720px; height:auto}
+.xfig .exp-note{margin:8px 0 0; font-size:.86rem; color:var(--ink2); max-width:86ch; line-height:1.5}
+.xfig .cap-cell{cursor:default}
+.xfig .cap-ramp{display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; padding:4px 0 2px; font-family:var(--mono); font-size:10px; color:var(--ink3)}
+.xfig .cap-ramp i{width:15px; height:9px; border-radius:0; display:inline-block}
+.xfig /* ---------- glossary ---------- */
+.toy{margin:4px 0 6px}
+.xfig .toy svg{max-width:840px}
+.xfig .toy [data-part]{transition:opacity .16s ease}
+.xfig .toy.hl [data-part]{opacity:.16}
+.xfig .toy.hl [data-part].lit{opacity:1}
+@media (max-width: 760px){.xfig .toy{overflow-x:auto}
+.xfig .toy svg{min-width:660px}}
+.xfig .gterm[data-fig]{cursor:default}
+.xfig .gterm[data-fig] dt{border-bottom:1px dotted var(--rule); display:inline-block; padding-bottom:1px}
+.xfig .gterm[data-fig]:hover dt,.xfig .gterm[data-fig]:focus-within dt{color:var(--accent); border-bottom-color:var(--accent)}
+.xfig .gloss{display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:0 40px; margin:6px 0 22px}
+.xfig .gterm{border-top:1px solid var(--hair); padding:11px 0 12px}
+.xfig .gterm dt{font-family:var(--display); font-weight:600; font-size:.98rem; margin:0 0 3px}
+.xfig .gterm dt .alias{font-family:var(--mono); font-size:10px; color:var(--ink3); letter-spacing:.05em; font-weight:400; margin-left:8px}
+.xfig .gterm dd{margin:0; font-size:.88rem; color:var(--ink2); line-height:1.5}
+.xfig .gterm dd .vs{display:block; margin-top:6px; padding-left:10px; border-left:2px solid var(--accent); color:var(--ink3); font-size:.84rem}
+.xfig .toy-controls .fieldset > span{text-transform:none; letter-spacing:.08em}
+.xfig .toy-controls .fieldset sub{font-size:.8em; line-height:0}
+.xfig .toy-controls{display:flex; flex-wrap:wrap; gap:12px 24px; align-items:flex-end; margin:0 0 12px; padding-bottom:12px; border-bottom:1px solid var(--hair)}
+.xfig .gterm dd sub,.xfig .gterm dt sub{font-size:.75em; line-height:0}
+.xfig .gloss-head{font-family:var(--mono); font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3); margin:30px 0 2px}
+.xfig /* ---------- failed-branch cards ---------- */
+.cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(268px,1fr)); gap:14px; margin:20px 0}
+.xfig .card{background:var(--panel); border:1px solid var(--hair); border-radius:0; padding:15px 16px 14px; display:flex; flex-direction:column; gap:6px}
+.xfig .card .hd{display:flex; align-items:baseline; justify-content:space-between; gap:10px}
+.xfig .card h4{margin:0; font-size:1rem}
+.xfig .card .exp{font-family:var(--mono); font-size:10px; color:var(--ink3); letter-spacing:.06em}
+.xfig .card .score{font-family:var(--mono); font-size:1.28rem; font-weight:500; letter-spacing:-.01em}
+.xfig .card p{margin:0; font-size:.87rem; line-height:1.48; color:var(--ink2); max-width:none}
+.xfig .card .runs{display:flex; flex-wrap:wrap; gap:5px; margin-top:2px}
+.xfig .card .runs a{font-family:var(--mono); font-size:10px; padding:2px 7px; border:1px solid var(--rule); border-radius:0; text-decoration:none; color:var(--ink2)}
+.xfig .card .runs a:hover{border-color:var(--accent); color:var(--ink)}
+.xfig /* ---------- open questions ---------- */
+.oq{display:grid; grid-template-columns:34px minmax(0,1fr); gap:0 16px; padding:15px 0; border-bottom:1px solid var(--hair)}
+.xfig .oq:last-child{border-bottom:0}
+.xfig .oq .n{font-family:var(--mono); font-size:1.05rem; color:var(--ink3); font-weight:500}
+.xfig .oq h4{margin:0 0 4px}
+.xfig .oq p{margin:4px 0 0; font-size:.9rem; color:var(--ink2)}
+.xfig .oq .fix{font-family:var(--mono); font-size:.8rem; color:var(--ink2); margin-top:7px; padding-left:11px; border-left:2px solid var(--accent)}
+.xfig footer{margin-top:56px; padding-top:22px; border-top:1px solid var(--rule); font-family:var(--mono); font-size:10.5px; color:var(--ink3); display:flex; flex-wrap:wrap; gap:6px 22px}

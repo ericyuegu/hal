@@ -1,0 +1,19 @@
+<figure class="breakout">
+        <div class="artifact interactive">
+          <div class="figure-head">
+            <div>
+              <h4>Capacity against imposed delay</h4>
+              <p>Capacity-sweep checkpoints at <span class="mono">D = 2³⁰</span> supervised positions.</p>
+            </div>
+            <div class="controls" style="padding:0">
+              <select id="delay-model" aria-label="Model size"></select>
+              <div class="segmented" aria-label="Delay chart metric">
+                <button type="button" data-delay-metric="stock" aria-pressed="true">stocks</button>
+                <button type="button" data-delay-metric="damage" aria-pressed="false">damage</button>
+              </div>
+            </div>
+          </div>
+          <svg id="delay-chart" class="chart" viewBox="0 0 900 390" role="img" aria-label="Model performance at several imposed delays"></svg>
+          <p id="delay-note" class="chart-note"></p>
+        </div>
+      </figure>

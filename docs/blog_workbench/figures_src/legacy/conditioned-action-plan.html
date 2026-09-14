@@ -1,0 +1,24 @@
+<figure class="breakout">
+        <div class="artifact">
+          <div class="figure-head">
+            <div>
+              <h4>From one action to a conditioned plan</h4>
+              <p>Three candidate views of the same dependency change.</p>
+            </div>
+          </div>
+          <div class="mtp-candidates" aria-label="Action decoder lineage candidates">
+            <section class="mtp-candidate">
+              <div class="candidate-head"><b>A · dependency wires</b><span>direct edges</span></div>
+              <svg id="mtp-wires" class="model-diagram mtp-diagram" role="img" aria-label="Dependency-wire comparison of next-frame, independent MTP, and autoregressive MTP"></svg>
+            </section>
+            <section class="mtp-candidate">
+              <div class="candidate-head"><b>B · attention masks</b><span>one cell per available input</span></div>
+              <svg id="mtp-masks" class="model-diagram mtp-diagram" role="img" aria-label="Attention-mask comparison of next-frame, independent MTP, and autoregressive MTP"></svg>
+            </section>
+            <section class="mtp-candidate">
+              <div class="candidate-head"><b>C · receptive sets</b><span>inputs available to each action</span></div>
+              <svg id="mtp-sets" class="model-diagram mtp-diagram" role="img" aria-label="Receptive-set comparison of next-frame, independent MTP, and autoregressive MTP"></svg>
+            </section>
+          </div>
+        </div>
+      </figure>

@@ -1,0 +1,23 @@
+<figure class="breakout">
+        <div class="artifact interactive">
+          <div class="figure-head">
+            <div>
+              <h4>Iso-FLOP fit</h4>
+              <p><span class="mono">L(N,D) = 1.6350 + 89.11/N<sup>.368</sup> + 2009/D<sup>.498</sup></span></p>
+            </div>
+          </div>
+          <svg id="isoflop-chart" class="chart" viewBox="0 0 900 430" role="img" aria-label="Fitted validation NLL at a fixed compute budget"></svg>
+          <div class="control-plate">
+            <div class="slider-row">
+              <label class="control-label" for="compute-slider">training FLOPs</label>
+              <input id="compute-slider" type="range" min="16.699" max="19.623" value="18" step=".01">
+              <output id="compute-output" class="mono">1.0e18</output>
+            </div>
+          </div>
+          <div class="fit-readout">
+            <div><b id="fit-n">—</b><span>predicted optimal effective parameters</span></div>
+            <div><b id="fit-d">—</b><span>predicted processed positions</span></div>
+            <div><b id="fit-loss">—</b><span>predicted validation NLL</span></div>
+          </div>
+        </div>
+      </figure>

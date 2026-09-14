@@ -1,0 +1,417 @@
+[
+ {
+  "key": "flagship-model-architecture",
+  "name": "Flagship model architecture",
+  "source": "anatomy",
+  "caption": "Each context token concatenates state and action. One shared decoder head predicts a future action chunk at every context prefix. In play, the action prefix grows one frame at a time; each frame is decoded C → M → T → B. Internal model: O50. W&B tgpuo1be.",
+  "data": [
+   "architectureModules",
+   "architectureEdges"
+  ],
+  "studies": [
+   "training_checkpoint_series",
+   "optimizer_full_scale"
+  ],
+  "retired": true
+ },
+ {
+  "key": "conditioned-action-plan",
+  "name": "From one action to a conditioned plan",
+  "source": "anatomy",
+  "caption": "Every predicted action receives hₜ. In autoregressive MTP, action i can also attend to actions 1…i−1. Four consecutive actions are shown for clarity. The production model trains offsets 1–6, 9, 12, 16, and 20. next-frame · independent MTP · autoregressive MTP.",
+  "data": [],
+  "studies": [
+   "decoder_lineage",
+   "action_factorization_o37"
+  ],
+  "retired": true
+ },
+ {
+  "key": "factorization-ablation",
+  "name": "Factorization ablation",
+  "source": "anatomy",
+  "caption": "The complete 2×2. Across-frame feedback adds +0.361 stocks/min and +13.49 damage/min on average. Within-frame feedback adds +0.245 and +8.48. Internal experiment: O37. independent MTP · within-frame only · across-frame only · autoregressive MTP.",
+  "data": [
+   "factorRows"
+  ],
+  "studies": [
+   "action_factorization_o37",
+   "within_frame_order"
+  ],
+  "retired": false
+ },
+ {
+  "key": "controller-representations",
+  "name": "Controller codecs",
+  "source": "anatomy",
+  "caption": "In matched comparisons, Cartesian beat legacy by +0.292 stocks/min and +16.16 damage/min. Polar beat Cartesian by +0.095 and +0.88; stock LCB crossed zero (−0.074 → +0.016). Internal experiments: O43, O26/O52, and O53. legacy · Cartesian, first comparison · Cartesian, second comparison · polar.",
+  "data": [],
+  "studies": [
+   "codec_legacy_cartesian",
+   "codec_cartesian_polar"
+  ],
+  "retired": false
+ },
+ {
+  "key": "representation-branches",
+  "name": "Representation branches",
+  "source": "anatomy",
+  "caption": "Each row locates the changed component and compares the two mechanisms. None of these produced a matched win; the outcome column says why no delta is reported.",
+  "data": [
+   "representationBranches"
+  ],
+  "studies": [
+   "past_action_encoding",
+   "hand_features",
+   "lean_feature_bundle",
+   "temporal_head_cross_attention",
+   "flattened_action_tokens",
+   "rle_bpe_actions",
+   "joint_action_chords",
+   "future_state_expert",
+   "fixed_long_delay"
+  ],
+  "retired": false
+ },
+ {
+  "key": "advantage-weighted-behavior-cloning",
+  "name": "Advantage-weighted behavior cloning",
+  "source": "anatomy",
+  "caption": "Mean closed-loop scores. The BC evaluation used 96 boots and the AWR evaluation used 128; they were not paired.",
+  "data": [
+   "awrRows"
+  ],
+  "studies": [
+   "awr_actor_weighting",
+   "awr_gamma",
+   "rank_weighted_bc"
+  ],
+  "retired": true
+ },
+ {
+  "key": "objective-decoder-branches",
+  "name": "Objective and decoder branches",
+  "source": "anatomy",
+  "caption": "Flow matching, attached IQL, and exploration modeling. The bars use the same ±3 stocks/min and ±180 damage/min scales as Fig. 5. K=1 and K=8 are each compared with the same behavior-cloning baseline; neither beats it.",
+  "data": [
+   "objectiveBranches"
+  ],
+  "studies": [
+   "endpoint_flow",
+   "continuous_action_flow",
+   "attached_iql",
+   "exploration_modeling"
+  ],
+  "retired": true
+ },
+ {
+  "key": "replay-diversity",
+  "name": "Replay diversity inside a batch",
+  "source": "anatomy",
+  "caption": "Four windows per replay → one changed stock score from −0.598 to +0.130, a +0.728 gain. Damage changed from +40.50 to +34.27. four windows · one window.",
+  "data": [],
+  "studies": [
+   "windows_per_replay"
+  ],
+  "retired": true
+ },
+ {
+  "key": "loader-lineage",
+  "name": "Loader lineage",
+  "source": "anatomy",
+  "caption": "Loader lineage. These are infrastructure measurements, not model-quality comparisons.",
+  "data": [
+   "lineage"
+  ],
+  "studies": [
+   "windows_per_replay",
+   "dataset_v8_cleaning"
+  ],
+  "retired": false
+ },
+ {
+  "key": "execution-horizon",
+  "name": "Execution horizon",
+  "source": "anatomy",
+  "caption": "The four factorization checkpoints at execution horizons 1, 2, 4, and 6. This is not a replan-only result because execution length and replan interval change together.",
+  "data": [
+   "horizonSeries"
+  ],
+  "studies": [
+   "execution_horizon"
+  ],
+  "retired": true
+ },
+ {
+  "key": "capacity-against-delay",
+  "name": "Capacity against imposed delay",
+  "source": "anatomy",
+  "caption": "Select a model. Delay 1 is not automatically best, and size does not give a stable ordering. Internal experiment: O39. Capacity-scaling source.",
+  "data": [
+   "delayModels"
+  ],
+  "studies": [
+   "capacity_and_latency"
+  ],
+  "retired": false
+ },
+ {
+  "key": "deployment-frontier",
+  "name": "The closest complete deployment frontier",
+  "source": "anatomy",
+  "caption": "Best measured deployable damage result at each delay for the D = 2³⁰ checkpoints. The stock view shows those same damage-selected models.",
+  "data": [
+   "frontierRows"
+  ],
+  "studies": [
+   "capacity_and_latency"
+  ],
+  "retired": false
+ },
+ {
+  "key": "nll-closed-loop-play",
+  "name": "Validation NLL vs. closed-loop play",
+  "source": "anatomy",
+  "caption": "Hover a point for its model, data budget, and score. This is an association inside one capacity sweep, not a model-selection rule.",
+  "data": [
+   "scalingPoints",
+   "rhoByDelay"
+  ],
+  "studies": [
+   "capacity_and_latency",
+   "training_checkpoint_series"
+  ],
+  "retired": false
+ },
+ {
+  "key": "iso-flop-fit",
+  "name": "Iso-FLOP fit",
+  "source": "anatomy",
+  "caption": "Robust fit over 35 non-diverged cooldown checkpoints; RMS residual 0.0046 NLL, maximum 0.0112. The fit predicts offline NLL only. Values beyond the measured model range or past one corpus epoch are extrapolations.",
+  "data": [
+   "FIT",
+   "scalingPoints"
+  ],
+  "studies": [
+   "capacity_and_latency"
+  ],
+  "retired": false
+ },
+ {
+  "key": "experiment-ledger",
+  "name": "Experiment ledger",
+  "source": "anatomy",
+  "caption": "Mean changes, not lower bounds. Open a row for the comparison caveat. “No stable order” is retained where a scalar delta would be misleading.",
+  "data": [
+   "experiments"
+  ],
+  "studies": [],
+  "retired": false
+ },
+ {
+  "key": "closed-loop-training-path",
+  "name": "The earlier Muon run did not improve monotonically",
+  "source": "anatomy",
+  "caption": "Closed-loop evaluations during the earlier Muon scale-up. The final checkpoint recovered, but the middle of training regressed while NLL continued to improve. Internal experiment: O50. W&B p1fyyp1z.",
+  "data": [
+   "production",
+   "adamwProduction"
+  ],
+  "studies": [
+   "training_checkpoint_series",
+   "optimizer_full_scale"
+  ],
+  "retired": false
+ },
+ {
+  "key": "past-action-encoding",
+  "name": "Past-action encoding",
+  "source": "anatomy",
+  "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus its physical stick and trigger values. One-hot → physical: +0.26 [+0.08, +0.44] stocks/min, +23.7 [+13.8, +33.6] damage/min, despite fewer examples and fewer parameters.",
+  "data": [
+   "pastActionEffect",
+   "representationBranches"
+  ],
+  "studies": [
+   "past_action_encoding",
+   "onehot_button_pruning"
+  ],
+  "retired": false
+ },
+ {
+  "key": "scaling-points-table",
+  "name": "The 33 capacity-sweep points",
+  "source": "anatomy",
+  "caption": "Every healthy model-budget point behind the NLL and iso-FLOP figures, with its run.",
+  "data": [
+   "scalingPoints"
+  ],
+  "studies": [
+   "capacity_and_latency"
+  ],
+  "retired": false
+ },
+ {
+  "key": "stage-map",
+  "name": "The five stages, on one time axis",
+  "source": "explorer",
+  "caption": "",
+  "data": [],
+  "studies": [],
+  "retired": true
+ },
+ {
+  "key": "plan-timing",
+  "name": "One plan against the transport queue",
+  "source": "explorer",
+  "caption": "",
+  "data": [],
+  "studies": [
+   "rtc",
+   "execution_horizon"
+  ],
+  "retired": false
+ },
+ {
+  "key": "ar-axes",
+  "name": "The three autoregressive orderings",
+  "source": "explorer",
+  "caption": "Three orderings, three independent switches. Experiment 037 turned ② and ③ on and off in every combination while holding everything else fixed.",
+  "data": [],
+  "studies": [
+   "decoder_lineage",
+   "action_factorization_o37"
+  ],
+  "retired": true
+ },
+ {
+  "key": "io-paths",
+  "name": "Input path and output path, one shared class set",
+  "source": "explorer",
+  "caption": "The two paths share one class set, and that is the only thing they share. Changing how the past is fed in and changing what the head predicts are separate experiments.",
+  "data": [],
+  "studies": [
+   "past_action_encoding",
+   "onehot_button_pruning"
+  ],
+  "retired": false
+ },
+ {
+  "key": "evidence-ranking",
+  "name": "All 24 comparisons by size of effect",
+  "source": "explorer",
+  "caption": "",
+  "data": [],
+  "studies": [],
+  "retired": false
+ },
+ {
+  "key": "capacity-explorer",
+  "name": "Experiment 039: size × data × control regime",
+  "source": "explorer",
+  "caption": "",
+  "data": [],
+  "studies": [
+   "capacity_and_latency"
+  ],
+  "retired": false
+ },
+ {
+  "key": "horizon-panels",
+  "name": "Experiment 037 across executed frames",
+  "source": "explorer",
+  "caption": "",
+  "data": [],
+  "studies": [
+   "execution_horizon"
+  ],
+  "retired": false
+ },
+ {
+  "key": "batch-sweep",
+  "name": "Batch size at a fixed example budget",
+  "source": "explorer",
+  "caption": "Batch size at a fixed 2.097 million examples. Every arm saw the same data, so a smaller batch simply bought more optimizer updates. One seed.",
+  "data": [],
+  "studies": [
+   "batch_size_fixed_examples"
+  ],
+  "retired": true
+ },
+ {
+  "key": "lr-sweep",
+  "name": "Paired Muon and AdamW learning rates",
+  "source": "explorer",
+  "caption": "The Muon and AdamW rates move together as one pair. The interior minimum near .040 / .00170 is a real bracket, not an endpoint.",
+  "data": [],
+  "studies": [
+   "learning_rate_sweep"
+  ],
+  "retired": true
+ },
+ {
+  "key": "svg-codec-bridges",
+  "name": "Codec bridges (draft SVG)",
+  "source": "svg",
+  "file": "controller-codec-bridges.svg",
+  "caption": "Two matched codec tests, drawn as two small panels.",
+  "data": [],
+  "studies": [
+   "codec_legacy_cartesian",
+   "codec_cartesian_polar"
+  ],
+  "retired": false
+ },
+ {
+  "key": "svg-observation-inputs",
+  "name": "Observation inputs (draft SVG)",
+  "source": "svg",
+  "file": "observation-input-path.svg",
+  "caption": "How the player blocks, past action, conditioning and pooled projectile slots become one token.",
+  "data": [],
+  "studies": [
+   "projectile_inputs",
+   "ice_climbers_inputs"
+  ],
+  "retired": false
+ },
+ {
+  "key": "svg-rle-action-spans",
+  "name": "Run-length actions (draft SVG)",
+  "source": "svg",
+  "file": "rle-action-spans.svg",
+  "caption": "Frame actions followed by the variable-length span tokens learned by BPE.",
+  "data": [],
+  "studies": [
+   "rle_bpe_actions"
+  ],
+  "retired": true
+ },
+ {
+  "key": "svg-two-axes-action-feedback",
+  "name": "Two axes of action feedback (draft SVG)",
+  "source": "svg",
+  "file": "action-factorization.svg",
+  "caption": "The O37 two-by-two: across-frame and within-frame feedback.",
+  "data": [],
+  "studies": [
+   "action_factorization_o37"
+  ],
+  "retired": false
+ },
+ {
+  "key": "svg-action-logit-paths",
+  "name": "Action logit paths (draft SVG)",
+  "source": "svg",
+  "file": "action-logit-paths.svg",
+  "caption": "Three paths into the action logits and the one-change deltas.",
+  "data": [],
+  "studies": [
+   "o43_action_head_components",
+   "film_vs_concatenation",
+   "o26_to_o42_package",
+   "old_head_capacity"
+  ],
+  "retired": true
+ }
+]

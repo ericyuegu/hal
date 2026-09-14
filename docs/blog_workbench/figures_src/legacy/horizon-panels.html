@@ -1,0 +1,14 @@
+<div class="chart-row" data-name="horizon-panels" data-name-title="Experiment 037 across executed frames, split by future conditioning">
+    <figure>
+      <h4 style="margin:0 0 8px">Future conditioning off</h4>
+      <div class="legend" id="lg-hz"></div>
+      <svg id="chart-hz-a" role="img" aria-label="Net stock lower bound against executed frames, for the two cells without future conditioning."></svg>
+      <figcaption>Without access to its own earlier predictions, the decoder falls apart as more planned frames execute.</figcaption>
+    </figure>
+    <figure>
+      <h4 style="margin:0 0 8px">Future conditioning on</h4>
+      <div class="legend" id="lg-hz2"></div>
+      <svg id="chart-hz-b" role="img" aria-label="Net stock lower bound against executed frames, for the two cells with future conditioning."></svg>
+      <figcaption>With that access, the same model holds its score from one executed frame to six.</figcaption>
+    </figure>
+  </div>

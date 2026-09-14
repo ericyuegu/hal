@@ -1,6 +1,6 @@
 """Treatment-minus-baseline differences with 95% intervals for every number the article quotes.
 
-Reads ../blog_experiment_data.json (its ``computed_differences`` and raw boot rows) plus
+Reads evidence.json (its ``computed_differences`` and raw boot rows) plus
 wandb_sweep_evals.json (W&B aggregates for runs whose match rows were not archived), and
 writes ci.json. Three estimators:
 
@@ -26,7 +26,7 @@ import numpy as np
 from scipy import stats
 
 HERE = Path(__file__).parent
-DATA = json.loads((HERE / ".." / "blog_experiment_data.json").read_text())
+DATA = json.loads((HERE / "evidence.json").read_text())
 SWEEP = json.loads((HERE / "wandb_sweep_evals.json").read_text())
 EVALS = DATA["raw_evaluation_data"]["evaluations"]
 RESAMPLES = 10_000

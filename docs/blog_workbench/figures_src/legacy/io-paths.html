@@ -1,0 +1,51 @@
+<figure class="toy" id="fig-codec" data-name="io-paths" data-name-title="Input path and output path, one shared class set">
+    <svg viewBox="0 0 700 210" role="img" aria-label="Two lanes sharing one class set. The upper lane is the input path: a past controller frame is quantized to class ids and embedded into an input token. The lower lane is the output path: a decoder state becomes logits over the same classes, which are masked and sampled into a controller frame.">
+      <defs><marker id="ca" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 1 L10 5 L0 9 Z" fill="currentColor"/></marker></defs>
+
+      <g data-part="input">
+        <text x="56" y="36" font-size="10" font-family="var(--mono)" fill="var(--s1)" letter-spacing=".08em">INPUT PATH · WHAT THE MODEL READS</text>
+        <rect x="56" y="48" width="130" height="30" rx="4" fill="var(--panel)" stroke="var(--s1)"/>
+        <text x="121" y="67" text-anchor="middle" font-size="10.5" fill="var(--ink)">past controller frame</text>
+        <rect x="246" y="48" width="100" height="30" rx="4" fill="var(--panel)" stroke="var(--s1)"/>
+        <text x="296" y="67" text-anchor="middle" font-size="10.5" fill="var(--ink)">class ids</text>
+        <rect x="406" y="48" width="180" height="30" rx="4" fill="var(--panel)" stroke="var(--s1)"/>
+        <text x="496" y="67" text-anchor="middle" font-size="10.5" fill="var(--ink)">embedding + value projection</text>
+        <g color="var(--s1)">
+          <line x1="346" y1="63" x2="402" y2="63" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+          <line x1="590" y1="63" x2="640" y2="63" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        </g>
+        <text x="644" y="67" font-size="10.5" fill="var(--ink2)">trunk</text>
+      </g>
+      <g data-part="input quantize" color="var(--s1)">
+        <line x1="190" y1="63" x2="242" y2="63" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        <text x="216" y="88" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">quantize</text>
+      </g>
+
+      <g data-part="codebook">
+        <rect x="246" y="98" width="220" height="30" rx="4" fill="var(--accent)" opacity=".12"/>
+        <rect x="246" y="98" width="220" height="30" rx="4" fill="none" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <text x="356" y="117" text-anchor="middle" font-size="10.5" fill="var(--ink)">one shared class set · 9 · 37 · 5 · 6</text>
+        <g stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 3">
+          <line x1="296" y1="78" x2="296" y2="98"/><line x1="356" y1="128" x2="356" y2="148"/>
+        </g>
+      </g>
+
+      <g data-part="output">
+        <rect x="56" y="148" width="130" height="30" rx="4" fill="var(--panel)" stroke="var(--s4)"/>
+        <text x="121" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink)">decoder state</text>
+        <rect x="246" y="148" width="220" height="30" rx="4" fill="var(--panel)" stroke="var(--s4)"/>
+        <text x="356" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink)">logits over the same classes</text>
+        <rect x="526" y="148" width="130" height="30" rx="4" fill="var(--panel)" stroke="var(--s4)"/>
+        <text x="591" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink)">controller frame</text>
+        <g color="var(--s4)">
+          <line x1="190" y1="163" x2="242" y2="163" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        </g>
+        <text x="216" y="143" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">head</text>
+        <text x="56" y="200" font-size="10" font-family="var(--mono)" fill="var(--s4)" letter-spacing=".08em">OUTPUT PATH · WHAT THE MODEL PREDICTS</text>
+      </g>
+      <g data-part="output mask" color="var(--s4)">
+        <line x1="470" y1="163" x2="522" y2="163" stroke="currentColor" stroke-width="1.2" marker-end="url(#ca)"/>
+        <text x="496" y="143" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--ink3)">mask + sample</text>
+      </g>
+    </svg>
+  </figure>

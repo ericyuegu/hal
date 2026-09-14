@@ -1,0 +1,23 @@
+<figure class="breakout">
+        <div class="artifact interactive">
+          <div class="figure-head">
+            <div>
+              <h4>Advantage-weighted behavior cloning</h4>
+              <p>Observed actions receive more weight when their return exceeds the detached value estimate.</p>
+            </div>
+            <div class="segmented" aria-label="AWR metric">
+              <button type="button" data-awr-metric="stock" aria-pressed="true">stocks</button>
+              <button type="button" data-awr-metric="damage" aria-pressed="false">damage</button>
+            </div>
+          </div>
+          <div class="lineage-body">
+            <svg id="awr-chart" class="chart" viewBox="0 0 610 280" role="img" aria-label="Behavior cloning compared with AWR"></svg>
+            <div class="lineage-copy">
+              <h4><span class="mono">w = min(3.5, exp(βA))</span></h4>
+              <p><span class="mono">A = G(t+1) − V(s<sub>t</sub>)</span>. The actor loss does not backpropagate through the value estimate.</p>
+              <p>In the modern comparison, AWR changed stock score by <span class="mono">+0.076</span> and damage by <span class="mono">+10.80</span>. Helpful, but smaller than action-sequence modeling.</p>
+              <p class="source-line"><a href="https://wandb.ai/ericyuegu/hal/runs/5wfk2esf">BC 5wfk2esf</a> · <a href="https://wandb.ai/ericyuegu/hal/runs/hwzv0k9a">AWR hwzv0k9a</a></p>
+            </div>
+          </div>
+        </div>
+      </figure>

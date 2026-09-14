@@ -1,0 +1,32 @@
+<figure class="breakout">
+        <div class="artifact interactive">
+          <div class="figure-head">
+            <div>
+              <h4>Experiment ledger</h4>
+              <p>Sort by the effect you care about; select a row to connect it to the final recipe.</p>
+            </div>
+          </div>
+          <div class="ledger-controls">
+            <div class="segmented" aria-label="Ledger metric">
+              <button type="button" data-ledger-metric="stock" aria-pressed="true">stocks</button>
+              <button type="button" data-ledger-metric="damage" aria-pressed="false">damage</button>
+            </div>
+            <div style="display:flex;gap:8px">
+              <select id="ledger-category" aria-label="Filter experiment category"></select>
+              <select id="ledger-sort" aria-label="Sort experiments">
+                <option value="magnitude">absolute impact ↓</option>
+                <option value="gain_desc">gain ↓</option>
+                <option value="gain_asc">gain ↑</option>
+                <option value="chronology">chronology</option>
+                <option value="category">category</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="ledger-table">
+              <thead><tr><th>Experiment</th><th>Change</th><th id="ledger-delta-head">Stock Δ</th></tr></thead>
+              <tbody id="ledger-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </figure>

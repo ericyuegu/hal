@@ -1,0 +1,52 @@
+<figure class="breakout">
+        <div class="artifact">
+          <div class="figure-head">
+            <div>
+              <h4>Controller codecs</h4>
+              <p>How each codec discretises the buttons and the main stick.</p>
+            </div>
+          </div>
+          <div class="codec-lineage" aria-label="Legacy, Cartesian, and polar controller codecs">
+            <section class="codec-stage">
+              <div class="codec-stage-head"><b>Legacy</b><span>one button at a time</span></div>
+              <div class="codec-button-demo">
+                <span class="codec-lane-label">A + B</span>
+                <div class="codec-collapse"><span class="codec-chord">A + B</span><i>→</i><span class="codec-class">A</span></div>
+              </div>
+              <div class="codec-stick">
+                <div class="codec-stick-head"><b>Main stick</b><span>37 targets</span></div>
+                <svg class="codec-stick-map" data-stick-codec="legacy" viewBox="0 0 240 132" role="img" aria-label="Legacy main-stick class centers"></svg>
+              </div>
+            </section>
+
+            <section class="codec-stage">
+              <div class="codec-stage-head"><b>Cartesian</b><span>8-bit button mask</span></div>
+              <div class="codec-button-demo">
+                <span class="codec-lane-label">A + B</span>
+                <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
+                <div class="bit-values"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span></div>
+                <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
+              </div>
+              <div class="codec-stick">
+                <div class="codec-stick-head"><b>Main stick</b><span>65 XY targets</span></div>
+                <svg class="codec-stick-map" data-stick-codec="cartesian" viewBox="0 0 240 132" role="img" aria-label="Cartesian main-stick class centers"></svg>
+              </div>
+            </section>
+
+            <section class="codec-stage polar">
+              <div class="codec-stage-head"><b>Polar</b><span>8-bit button mask</span></div>
+              <div class="codec-button-demo">
+                <span class="codec-lane-label">A + B</span>
+                <div class="bit-labels"><span>D↑</span><span>L</span><span>R</span><span>Z</span><span>Y</span><span>X</span><span>B</span><span>A</span></div>
+                <div class="bit-values"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span></div>
+                <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
+              </div>
+              <div class="codec-stick">
+                <div class="codec-stick-head"><b>Main stick</b><span>85 polar targets</span></div>
+                <svg class="codec-stick-map" data-stick-codec="polar" viewBox="0 0 240 132" role="img" aria-label="Polar main-stick class centers"></svg>
+              </div>
+            </section>
+          </div>
+          
+        </div>
+      </figure>

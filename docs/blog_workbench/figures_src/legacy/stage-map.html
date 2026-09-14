@@ -1,0 +1,230 @@
+<div class="stack">
+    <div class="panel diagram" id="diagram" data-name="stage-map" data-name-title="The five stages, on one time axis">
+      <svg viewBox="0 0 992 606" role="img" aria-labelledby="mapT mapD">
+        <title id="mapT">How the Melee policy turns 128 observed frames into future controller frames</title>
+        <desc id="mapD">Time runs left to right. On the left, an observation encoder makes one token per observed frame and an eight-block causal trunk attends back over 128 of them, ending in one state for the current frame. That state passes to the right of the "now" line into a temporal decoder, whose ten steps sit at their true future offsets: a dense run at one to six frames ahead, then sparse steps at nine, twelve, sixteen and twenty. Below each step, a four-cell comb marks the four controller groups that step must choose. A detail panel expands one step into that chain: C-stick, main stick, triggers, buttons, and then a fourteen-channel controller frame. A final band shows which predicted frames the runtime actually sends to the emulator.</desc>
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0.5 L10 5 L0 9.5 Z" fill="currentColor"/></marker>
+          <marker id="fs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto"><path d="M0 0.5 L10 5 L0 9.5 Z" fill="currentColor"/></marker>
+        </defs>
+
+        <!-- shared time frame: guides, now line, axis -->
+        <g class="flow">
+          <g stroke="var(--s2)" stroke-width="1" stroke-dasharray="2 4" opacity=".55">
+            <line x1="60" y1="134" x2="60" y2="212"/><line x1="153" y1="134" x2="153" y2="212"/>
+            <line x1="246" y1="134" x2="246" y2="212"/><line x1="339" y1="134" x2="339" y2="212"/>
+            <line x1="432" y1="134" x2="432" y2="212"/>
+          </g>
+          <line x1="556" y1="134" x2="556" y2="312" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="2 4" opacity=".45"/>
+          <line x1="589" y1="44" x2="589" y2="340" stroke="var(--ink2)" stroke-width="1.2" stroke-dasharray="6 4"/>
+          <text x="589" y="38" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--ink2)">now</text>
+          <line x1="46" y1="320" x2="946" y2="320" stroke="var(--rule)" stroke-width="1"/>
+          <g font-family="var(--mono)" font-size="10.5" fill="var(--ink3)">
+            <text x="300" y="313" text-anchor="middle">← 128 frames the model has seen</text>
+            <text x="800" y="313" text-anchor="middle">20 frames the model predicts →</text>
+            <g stroke="var(--rule)" stroke-width="1">
+              <line x1="60" y1="320" x2="60" y2="325"/><line x1="308" y1="320" x2="308" y2="325"/><line x1="556" y1="320" x2="556" y2="325"/>
+              <line x1="619" y1="320" x2="619" y2="325"/><line x1="702" y1="320" x2="702" y2="325"/>
+              <line x1="801.6" y1="320" x2="801.6" y2="325"/><line x1="934.4" y1="320" x2="934.4" y2="325"/>
+            </g>
+            <g text-anchor="middle" font-size="10">
+              <text x="60" y="336">t−127</text><text x="308" y="336">t−64</text><text x="556" y="336">t</text>
+              <text x="619" y="336">t+1</text><text x="702" y="336">t+6</text><text x="801.6" y="336">t+12</text><text x="934.4" y="336">t+20</text>
+            </g>
+          </g>
+        </g>
+
+        <!-- 01 observation encoder -->
+        <g class="stage" data-stage="obs" tabindex="0" role="button" aria-label="Stage 1, observation encoder">
+          <rect class="plate" x="36" y="44" width="546" height="96" rx="7" fill="var(--inset)" stroke="var(--s1)" stroke-width="1.2"/>
+          <text x="52" y="66" class="lbl" font-size="12.5" fill="var(--s1)" letter-spacing="1.3">01 · OBSERVATION ENCODER</text>
+          <text x="566" y="66" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">185,388 params</text>
+          <text x="52" y="81" font-size="11" fill="var(--ink2)">every observed frame becomes one 384-dimension token</text>
+          <g font-size="10.5">
+            <rect x="52" y="88" width="122" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="62" y="103" fill="var(--ink)">player state ×4</text>
+            <rect x="180" y="88" width="122" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="190" y="103" fill="var(--ink)">previous action</text>
+            <rect x="308" y="88" width="122" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="318" y="103" fill="var(--ink)">item slots ×4</text>
+            <rect x="436" y="88" width="130" height="22" rx="3" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="446" y="103" fill="var(--ink)">characters + stage</text>
+          </g>
+          <g fill="var(--s1)" opacity=".78">
+            <rect x="50" y="118" width="20" height="16" rx="2"/><rect x="81" y="118" width="20" height="16" rx="2"/>
+            <rect x="143" y="118" width="20" height="16" rx="2"/>
+            <rect x="174" y="118" width="20" height="16" rx="2"/><rect x="205" y="118" width="20" height="16" rx="2"/>
+            <rect x="236" y="118" width="20" height="16" rx="2"/><rect x="267" y="118" width="20" height="16" rx="2"/>
+            <rect x="298" y="118" width="20" height="16" rx="2"/><rect x="329" y="118" width="20" height="16" rx="2"/>
+            <rect x="360" y="118" width="20" height="16" rx="2"/><rect x="391" y="118" width="20" height="16" rx="2"/>
+            <rect x="422" y="118" width="20" height="16" rx="2"/><rect x="453" y="118" width="20" height="16" rx="2"/>
+            <rect x="484" y="118" width="20" height="16" rx="2"/><rect x="515" y="118" width="20" height="16" rx="2"/>
+          </g>
+          <rect x="546" y="116" width="20" height="20" rx="2" fill="var(--s1)"/>
+          <text x="122" y="131" text-anchor="middle" font-size="13" fill="var(--ink3)" font-family="var(--mono)">···</text>
+        </g>
+
+        <!-- 02 trunk -->
+        <g class="stage" data-stage="trunk" tabindex="0" role="button" aria-label="Stage 2, Transformer trunk">
+          <rect class="plate" x="36" y="152" width="546" height="148" rx="7" fill="var(--inset)" stroke="var(--s2)" stroke-width="1.2"/>
+          <text x="52" y="172" class="lbl" font-size="12.5" fill="var(--s2)" letter-spacing="1.3">02 · TRANSFORMER TRUNK</text>
+          <text x="566" y="172" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">14,155,776 params · 94 %</text>
+          <text x="52" y="188" font-size="11" fill="var(--ink2)">8 causal blocks · d384 · 6 heads × 64 · one state per observed frame</text>
+
+          <g fill="var(--s2)" opacity=".4">
+            <rect x="50" y="200" width="20" height="10" rx="2"/><rect x="81" y="200" width="20" height="10" rx="2"/>
+            <rect x="143" y="200" width="20" height="10" rx="2"/><rect x="174" y="200" width="20" height="10" rx="2"/>
+            <rect x="205" y="200" width="20" height="10" rx="2"/><rect x="236" y="200" width="20" height="10" rx="2"/>
+            <rect x="267" y="200" width="20" height="10" rx="2"/><rect x="298" y="200" width="20" height="10" rx="2"/>
+            <rect x="329" y="200" width="20" height="10" rx="2"/><rect x="360" y="200" width="20" height="10" rx="2"/>
+            <rect x="391" y="200" width="20" height="10" rx="2"/><rect x="422" y="200" width="20" height="10" rx="2"/>
+            <rect x="453" y="200" width="20" height="10" rx="2"/><rect x="484" y="200" width="20" height="10" rx="2"/>
+            <rect x="515" y="200" width="20" height="10" rx="2"/>
+          </g>
+          <text x="122" y="209" text-anchor="middle" font-size="12" fill="var(--ink3)" font-family="var(--mono)">···</text>
+          <rect x="546" y="196" width="20" height="18" rx="3" fill="var(--s2)"/>
+          <text x="556" y="192" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--s2)">h_t</text>
+
+          <g fill="none" stroke="var(--s2)" stroke-width="1.3" color="var(--s2)" opacity=".9">
+            <path d="M 60 212 Q 308 236 550 214" marker-end="url(#fs)"/>
+            <path d="M 153 212 Q 354.5 232 550 214" marker-end="url(#fs)"/>
+            <path d="M 246 212 Q 401 229 550 214" marker-end="url(#fs)"/>
+            <path d="M 339 212 Q 447.5 225 550 214" marker-end="url(#fs)"/>
+            <path d="M 432 212 Q 494 222 550 214" marker-end="url(#fs)"/>
+          </g>
+          <g fill="var(--s2)">
+            <circle cx="60" cy="212" r="2.6"/><circle cx="153" cy="212" r="2.6"/><circle cx="246" cy="212" r="2.6"/>
+            <circle cx="339" cy="212" r="2.6"/><circle cx="432" cy="212" r="2.6"/>
+          </g>
+
+          <g fill="var(--s2)" opacity=".26">
+            <rect x="52" y="248" width="18" height="18" rx="3"/><rect x="76" y="248" width="18" height="18" rx="3"/>
+            <rect x="100" y="248" width="18" height="18" rx="3"/><rect x="124" y="248" width="18" height="18" rx="3"/>
+            <rect x="148" y="248" width="18" height="18" rx="3"/><rect x="172" y="248" width="18" height="18" rx="3"/>
+            <rect x="196" y="248" width="18" height="18" rx="3"/><rect x="220" y="248" width="18" height="18" rx="3"/>
+          </g>
+          <g fill="none" stroke="var(--s2)" stroke-width="1" opacity=".65">
+            <rect x="52" y="248" width="18" height="18" rx="3"/><rect x="76" y="248" width="18" height="18" rx="3"/>
+            <rect x="100" y="248" width="18" height="18" rx="3"/><rect x="124" y="248" width="18" height="18" rx="3"/>
+            <rect x="148" y="248" width="18" height="18" rx="3"/><rect x="172" y="248" width="18" height="18" rx="3"/>
+            <rect x="196" y="248" width="18" height="18" rx="3"/><rect x="220" y="248" width="18" height="18" rx="3"/>
+          </g>
+          <text x="248" y="256" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">the attention above runs once per block</text>
+          <text x="248" y="268" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">×8 · pre-norm · rotary · no bias</text>
+          <text x="52" y="290" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">every frame gets a state; only the state at t, h_t, drives the plan</text>
+        </g>
+
+        <!-- trunk state hands off to the decoder -->
+        <g class="flow" color="var(--s3)">
+          <path d="M 566 205 C 584 205, 596 222, 606 228" fill="none" stroke="var(--s3)" stroke-width="1.8" marker-end="url(#fa)"/>
+        </g>
+
+        <!-- 03 temporal decoder -->
+        <g class="stage" data-stage="dec" tabindex="0" role="button" aria-label="Stage 3, temporal action decoder">
+          <rect class="plate" x="596" y="152" width="360" height="148" rx="7" fill="var(--inset)" stroke="var(--s3)" stroke-width="1.2"/>
+          <text x="612" y="174" class="lbl" font-size="12.5" fill="var(--s3)" letter-spacing="1.3">03 · TEMPORAL DECODER</text>
+          <text x="940" y="174" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">489,568</text>
+          <text x="612" y="190" font-size="11" fill="var(--ink2)">ten steps, placed at the offsets they predict</text>
+          <g fill="none" stroke="var(--s3)" stroke-width="1.2" color="var(--s3)">
+            <path d="M 619 214 Q 627.3 202 635.6 214" marker-end="url(#fs)"/>
+            <path d="M 635.6 214 Q 643.9 202 652.2 214" marker-end="url(#fs)"/>
+            <path d="M 652.2 214 Q 660.5 202 668.8 214" marker-end="url(#fs)"/>
+            <path d="M 668.8 214 Q 677.1 202 685.4 214" marker-end="url(#fs)"/>
+            <path d="M 685.4 214 Q 693.7 202 702 214" marker-end="url(#fs)"/>
+            <path d="M 702 214 Q 726.9 198 751.8 214" marker-end="url(#fs)"/>
+            <path d="M 751.8 214 Q 776.7 198 801.6 214" marker-end="url(#fs)"/>
+            <path d="M 801.6 214 Q 834.8 196 868 214" marker-end="url(#fs)"/>
+            <path d="M 868 214 Q 901.2 196 934.4 214" marker-end="url(#fs)"/>
+          </g>
+          <g fill="var(--s3)">
+            <rect x="612" y="214" width="14" height="32" rx="2"/><rect x="628.6" y="214" width="14" height="32" rx="2"/>
+            <rect x="645.2" y="214" width="14" height="32" rx="2"/><rect x="661.8" y="214" width="14" height="32" rx="2"/>
+            <rect x="678.4" y="214" width="14" height="32" rx="2"/><rect x="695" y="214" width="14" height="32" rx="2"/>
+            <rect x="744.8" y="214" width="14" height="32" rx="2"/><rect x="794.6" y="214" width="14" height="32" rx="2"/>
+            <rect x="861" y="214" width="14" height="32" rx="2"/><rect x="927.4" y="214" width="14" height="32" rx="2"/>
+          </g>
+          <g fill="var(--s4)" opacity=".62">
+            <rect x="612" y="252" width="14" height="5" rx="1"/><rect x="612" y="259" width="14" height="5" rx="1"/><rect x="612" y="266" width="14" height="5" rx="1"/><rect x="612" y="273" width="14" height="5" rx="1"/>
+            <rect x="628.6" y="252" width="14" height="5" rx="1"/><rect x="628.6" y="259" width="14" height="5" rx="1"/><rect x="628.6" y="266" width="14" height="5" rx="1"/><rect x="628.6" y="273" width="14" height="5" rx="1"/>
+            <rect x="645.2" y="252" width="14" height="5" rx="1"/><rect x="645.2" y="259" width="14" height="5" rx="1"/><rect x="645.2" y="266" width="14" height="5" rx="1"/><rect x="645.2" y="273" width="14" height="5" rx="1"/>
+            <rect x="661.8" y="252" width="14" height="5" rx="1"/><rect x="661.8" y="259" width="14" height="5" rx="1"/><rect x="661.8" y="266" width="14" height="5" rx="1"/><rect x="661.8" y="273" width="14" height="5" rx="1"/>
+            <rect x="678.4" y="252" width="14" height="5" rx="1"/><rect x="678.4" y="259" width="14" height="5" rx="1"/><rect x="678.4" y="266" width="14" height="5" rx="1"/><rect x="678.4" y="273" width="14" height="5" rx="1"/>
+            <rect x="695" y="252" width="14" height="5" rx="1"/><rect x="695" y="259" width="14" height="5" rx="1"/><rect x="695" y="266" width="14" height="5" rx="1"/><rect x="695" y="273" width="14" height="5" rx="1"/>
+            <rect x="744.8" y="252" width="14" height="5" rx="1"/><rect x="744.8" y="259" width="14" height="5" rx="1"/><rect x="744.8" y="266" width="14" height="5" rx="1"/><rect x="744.8" y="273" width="14" height="5" rx="1"/>
+            <rect x="794.6" y="252" width="14" height="5" rx="1"/><rect x="794.6" y="259" width="14" height="5" rx="1"/><rect x="794.6" y="266" width="14" height="5" rx="1"/><rect x="794.6" y="273" width="14" height="5" rx="1"/>
+            <rect x="861" y="252" width="14" height="5" rx="1"/><rect x="861" y="259" width="14" height="5" rx="1"/><rect x="861" y="266" width="14" height="5" rx="1"/><rect x="861" y="273" width="14" height="5" rx="1"/>
+            <rect x="927.4" y="252" width="14" height="5" rx="1"/><rect x="927.4" y="259" width="14" height="5" rx="1"/><rect x="927.4" y="266" width="14" height="5" rx="1"/><rect x="927.4" y="273" width="14" height="5" rx="1"/>
+          </g>
+          <text x="612" y="292" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">each step also picks four controller groups ↓</text>
+        </g>
+
+        <!-- 04 group chain -->
+        <g class="stage" data-stage="groups" tabindex="0" role="button" aria-label="Stage 4, within-frame group chain">
+          <rect class="plate" x="36" y="350" width="920" height="108" rx="7" fill="var(--inset)" stroke="var(--s4)" stroke-width="1.2"/>
+          <text x="52" y="372" class="lbl" font-size="12.5" fill="var(--s4)" letter-spacing="1.3">04 · WITHIN-FRAME GROUP CHAIN</text>
+          <text x="940" y="372" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">222,307 params · 1.5 %</text>
+          <text x="52" y="388" font-size="11" fill="var(--ink2)">any one step above, opened up · each pick shifts and scales the state for the next</text>
+          <g fill="var(--s4)" opacity=".62">
+            <rect x="52" y="396" width="14" height="5" rx="1"/><rect x="52" y="403" width="14" height="5" rx="1"/><rect x="52" y="410" width="14" height="5" rx="1"/><rect x="52" y="417" width="14" height="5" rx="1"/>
+          </g>
+          <path d="M 68 397 L 100 396 M 68 421 L 100 432" fill="none" stroke="var(--s4)" stroke-width="1" stroke-dasharray="3 3" opacity=".75"/>
+          <g>
+            <rect x="100" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="112" y="412" font-size="11.5" fill="var(--ink)">c_stick</text><text x="112" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">9 classes</text>
+            <rect x="272" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="284" y="412" font-size="11.5" fill="var(--ink)">main_stick</text><text x="284" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">37 classes</text>
+            <rect x="444" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="456" y="412" font-size="11.5" fill="var(--ink)">triggers</text><text x="456" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">5 classes</text>
+            <rect x="616" y="396" width="146" height="36" rx="4" fill="var(--panel)" stroke="var(--hair)"/>
+            <text x="628" y="412" font-size="11.5" fill="var(--ink)">buttons</text><text x="628" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">6 classes</text>
+            <rect x="788" y="396" width="152" height="36" rx="4" fill="var(--s4)" opacity=".14"/>
+            <rect x="788" y="396" width="152" height="36" rx="4" fill="none" stroke="var(--s4)"/>
+            <text x="800" y="412" font-size="11.5" fill="var(--ink)">controller frame</text><text x="800" y="425" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">14 channels</text>
+            <g color="var(--s4)" font-family="var(--mono)" font-size="9.5" fill="var(--ink3)">
+              <line x1="248" y1="414" x2="268" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+              <text x="258" y="408" text-anchor="middle">FiLM</text>
+              <line x1="420" y1="414" x2="440" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+              <text x="430" y="408" text-anchor="middle">FiLM</text>
+              <line x1="592" y1="414" x2="612" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+              <text x="602" y="408" text-anchor="middle">FiLM</text>
+              <line x1="764" y1="414" x2="784" y2="414" stroke="currentColor" stroke-width="1.2" marker-end="url(#fs)"/>
+            </g>
+          </g>
+          <text x="52" y="449" font-size="10.5" fill="var(--ink3)" font-family="var(--mono)">a held shoulder click forces its analog value, so contradicting button classes are masked before sampling</text>
+        </g>
+
+        <!-- 05 closed loop -->
+        <g class="stage" data-stage="loop" tabindex="0" role="button" aria-label="Stage 5, closed-loop execution">
+          <rect class="plate" x="36" y="472" width="920" height="118" rx="7" fill="var(--sunk)" stroke="var(--s5)" stroke-width="1.2" stroke-dasharray="5 4"/>
+          <text x="52" y="494" class="lbl" font-size="12.5" fill="var(--s5)" letter-spacing="1.3">05 · CLOSED-LOOP EXECUTION</text>
+          <text x="940" y="494" font-size="11" fill="var(--ink3)" font-family="var(--mono)" text-anchor="end">no parameters</text>
+          <text x="52" y="510" font-size="11" fill="var(--ink2)">the runtime, not the model · it decides which predicted frames reach the game</text>
+          <g font-family="var(--mono)" font-size="10.5">
+            <text x="52" y="534" fill="var(--ink)">prediction delay d = 1 · plan length H = 1 · replan interval R = 1</text>
+            <text x="52" y="550" fill="var(--ink3)">observe, decide, act, repeat — once per frame</text>
+            <text x="52" y="572" fill="var(--ink3)">the other nine offsets never reach Dolphin; they shape the trunk in training</text>
+          </g>
+          <g>
+            <rect x="612" y="524" width="14" height="18" rx="2" fill="var(--gain)"/>
+            <g fill="var(--s5)" opacity=".55">
+              <rect x="628.6" y="524" width="14" height="18" rx="2"/><rect x="645.2" y="524" width="14" height="18" rx="2"/>
+              <rect x="661.8" y="524" width="14" height="18" rx="2"/><rect x="678.4" y="524" width="14" height="18" rx="2"/>
+              <rect x="695" y="524" width="14" height="18" rx="2"/>
+            </g>
+            <g fill="var(--s5)" opacity=".26">
+              <rect x="744.8" y="524" width="14" height="18" rx="2"/><rect x="794.6" y="524" width="14" height="18" rx="2"/>
+              <rect x="861" y="524" width="14" height="18" rx="2"/><rect x="927.4" y="524" width="14" height="18" rx="2"/>
+            </g>
+            <g font-family="var(--mono)" font-size="10" fill="var(--ink3)">
+              <text x="612" y="518">t+1</text>
+              <text x="619" y="558" text-anchor="middle" fill="var(--gain)">sent</text>
+              <text x="836" y="558" text-anchor="middle">computed in training, never sent</text>
+            </g>
+          </g>
+        </g>
+      </svg>
+      <p class="diag-hint"><span class="narrow-only">swipe the map sideways · </span>tap a stage to inspect it · press Escape to clear</p>
+    </div>
+
+    <div class="panel spec" id="spec" aria-live="polite"></div>
+  </div>

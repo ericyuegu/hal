@@ -1,10 +1,9 @@
 """Turn a dump of the workbench document store into markdown.
 
 The dump is what `read_db --out_dir <dir>` writes: <dir>/doc/outline.json and
-<dir>/blocks/<id>.json (the seed/ directory has the same shape).
+<dir>/blocks/<id>.json.
 
-    uv run export.py seed export/policy_anatomy.md
-    uv run export.py /path/to/db-dump export/policy_anatomy.md --notes
+    uv run export.py /path/to/db-dump export/hillclimbing_melee.md --notes
 
 Figures export as the same stand-in blockquotes the draft used, keyed by their
 stable registry key; `{{fig:key}}` references become "Fig N".

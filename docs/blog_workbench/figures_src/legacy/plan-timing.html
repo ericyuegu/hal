@@ -1,0 +1,10 @@
+<figure class="toy" id="fig-timing" data-name="plan-timing" data-name-title="One plan against the transport queue and the replan deadline">
+    <div class="toy-controls">
+      <div class="fieldset"><span>d<sub>transport</sub></span><div class="pills" id="tm-d"></div></div>
+      <div class="fieldset"><span>prediction horizon H</span><div class="pills" id="tm-H"></div></div>
+      <div class="fieldset"><span>replan interval R</span><div class="pills" id="tm-R"></div></div>
+      <div class="fieldset"><span>d<sub>inference</sub></span><div class="pills" id="tm-ms"></div></div>
+    </div>
+    <svg id="fig-timing-svg" viewBox="0 0 760 330" role="img" aria-label="One planning step on a frame timeline. The model sees the true present state and the actions before it. Slippi already holds d committed actions for the next d frames. The decoder is given those d actions and writes H minus d new ones; only the first R are entered before the next plan replaces the rest. Inference must finish inside those R frames."></svg>
+    <figcaption id="fig-timing-cap"></figcaption>
+  </figure>

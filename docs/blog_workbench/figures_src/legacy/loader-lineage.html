@@ -1,0 +1,16 @@
+<figure class="breakout">
+        <div class="artifact">
+          <div class="pipeline" aria-label="Production replay loading pipeline">
+            <div class="pipe-box"><b>7,191</b>physical shards</div><div class="pipe-arrow">→</div>
+            <div class="pipe-box"><b>131,072</b>replay ring</div><div class="pipe-arrow">→</div>
+            <div class="pipe-box"><b>waves</b>window slots</div><div class="pipe-arrow">→</div>
+            <div class="pipe-box"><b>B512</b>training batch</div>
+          </div>
+          <div class="stats">
+            <div class="stat"><span class="stat-value">259/s</span><span class="stat-label">generic loader shakedown</span></div>
+            <div class="stat"><span class="stat-value">550/s</span><span class="stat-label">first physical ring</span></div>
+            <div class="stat"><span class="stat-value">1,377/s</span><span class="stat-label">production throughput</span></div>
+            <div class="stat"><span class="stat-value">38 ms</span><span class="stat-label">uncovered loader wait/update</span></div>
+          </div>
+        </div>
+      </figure>
