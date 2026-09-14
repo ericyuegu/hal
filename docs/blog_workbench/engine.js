@@ -471,9 +471,15 @@
     var ids = order();
     var figNums = figureNumbers();
     var secNums = sectionNumbers();
-    var frag = document.createDocumentFragment();
     var missing = 0;
-    frag.appendChild(insertBar(0));
+    // Reconcile in place: nodes are moved within the live document, never detached into a
+    // fragment, so the page height never collapses and the scroll position survives a render.
+    var cursor = docEl.firstChild;
+    function place(node) {
+      if (node === cursor) cursor = cursor.nextSibling;
+      else docEl.insertBefore(node, cursor);
+    }
+    place(insertBar(0));
     ids.forEach(function (id, index) {
       var b = state.blocks[id];
       if (!b) { missing += 1; return; }
@@ -481,10 +487,11 @@
         if (b.type === 'figure' && b.fig && state.els[id] && state.els[id].parentNode) releaseFigure(b.fig);
         return;
       }
-      frag.appendChild(paintBlock(id, b, figNums, secNums));
-      frag.appendChild(insertBar(index + 1));
+      place(paintBlock(id, b, figNums, secNums));
+      place(insertBar(index + 1));
     });
-    // detach elements that no longer belong, returning their figures to the pool
+    // everything after the cursor is stale: old insert bars and blocks that no longer belong
+    while (cursor) { var stale = cursor; cursor = cursor.nextSibling; docEl.removeChild(stale); }
     Object.keys(state.els).forEach(function (id) {
       var b = state.blocks[id];
       if (!b || b.hidden || ids.indexOf(id) === -1) {
@@ -494,7 +501,6 @@
         if (node.parentNode) node.parentNode.removeChild(node);
       }
     });
-    docEl.replaceChildren(frag);
     renderParked();
     renderToc();
     var figCount = Object.keys(figNums).filter(function (k) { return k.slice(0, 2) === 'b_' || state.blocks[k]; }).length;

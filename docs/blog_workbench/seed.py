@@ -400,7 +400,7 @@ def compose() -> None:
 
     # the title carries the draft's h1; give the intro an anchor block for the release list
     title = a["Anatomy of a *Melee* policy"]
-    title["md"] = "Anatomy of a *Melee* policy"
+    title["md"] = "Hillclimbing *Melee*"
     # the two front-matter headings are not numbered sections
     a["What I’m releasing"]["level"] = 3
     a["How to read the results"]["level"] = 3
@@ -598,7 +598,7 @@ def write() -> None:
         (OUT / "blocks" / f"{bid}.json").write_text(json.dumps(b, ensure_ascii=False, indent=1))
     outline = {
         "order": order,
-        "title": "Anatomy of a Melee policy",
+        "title": "Hillclimbing Melee",
         "updatedAt": "2026-09-12T00:00:00Z",
         "seededFrom": "docs/blog_workbench/seed.py",
     }
