@@ -85,7 +85,7 @@ STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
 CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
     "experiments/050_scaled_temporal_awr.py": None,
-    "experiments/054_bc_capacity_latency.py": frozenset({6_496, 16_384, 33_472, 35_072, 54_048, 84_320, 97_696}),
+    "experiments/054_bc_capacity_latency.py": frozenset({4_096, 8_192, 16_384, 32_768}),
 }
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
@@ -100,6 +100,8 @@ class Args:
     """Command after ``--``. Automatic recovery requires an ``experiments/*.py`` command."""
     gpu: str = "B200"
     """Modal GPU type. Use 'none' for CPU-only work; comma-separated fallbacks are accepted."""
+    closed_loop_gpu: str = "L40S"
+    """Modal GPU type for spawned closed-loop evaluations."""
     cpu: float = 32.0
     """Requested physical CPU cores."""
     cpu_limit: float = 48.0
@@ -238,6 +240,8 @@ def validate_args(args: Args) -> None:
         raise SystemExit("--timeout-hours must be between 1 and Modal's 24-hour Function limit.")
     if args.startup_timeout_minutes <= 0 or args.max_retries < 0 or args.stall_minutes <= 0:
         raise SystemExit("startup timeout and stall duration must be positive; retries cannot be negative.")
+    if gpu_request(args.closed_loop_gpu) is None:
+        raise SystemExit("--closed-loop-gpu must request a GPU.")
     if args.auto_resume and experiment_script(args.cmd) is None:
         raise SystemExit(
             "automatic recovery only supports commands containing an existing experiments/*.py script; "
@@ -880,9 +884,7 @@ def _run_closed_loop_eval(
     if n_matchups != CLOSED_LOOP_MATCHUPS:
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
     env = _prepare_remote(skip_sm120_probe=False)
-    checkpoint = (
-        f"checkpoints/step-{update:07d}.pt" if experiment.endswith("050_scaled_temporal_awr.py") else "final.pt"
-    )
+    checkpoint = f"checkpoints/step-{update:07d}.pt"
     command = [
         "uv",
         "run",
@@ -1000,7 +1002,8 @@ def _print_request(
         f"gpu={resources['gpu']} cpu={resources['cpu']} "
         f"memory=({memory_request},{memory_limit})GiB "
         f"ephemeral_ssd={resources['ephemeral_disk'] / 1024:g}GiB "
-        f"cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
+        f"cloud={args.cloud or 'auto'} region={args.region or 'auto'} "
+        f"closed_loop_gpu={gpu_request(args.closed_loop_gpu)}"
     )
     loguru.logger.info(
         f"attempt_timeout={args.timeout_hours}h retries={args.max_retries} secret={args.secret!r} "
@@ -1046,7 +1049,7 @@ def main(args: Args) -> None:
     evaluator = app.function(
         image=image,
         secrets=[secret],
-        gpu="L40S",
+        gpu=gpu_request(args.closed_loop_gpu),
         cpu=32.0,
         memory=64 * 1024,
         ephemeral_disk=512 * 1024,

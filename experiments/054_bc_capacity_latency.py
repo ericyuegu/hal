@@ -33,6 +33,7 @@ import itertools
 import json
 import math
 import os
+import random
 import re
 import shlex
 import threading
@@ -81,6 +82,7 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
+from hal.eval.cross_stage import FRAMES_PER_MINUTE
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
@@ -175,12 +177,13 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "054_bc_capacity_latency_v3"
+_EXPERIMENT_ID: Final[str] = "054_latency_capacity_iso_data_v1"
+_LATENCY_EXPERIMENT_ID: Final[str] = _EXPERIMENT_ID
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 LATENCY_BATCH_SIZE: Final[int] = 1
 LATENCY_WARMUP_CALLS: Final[int] = 50
 LATENCY_MEASURED_CALLS: Final[int] = 500
-LATENCY_TRIALS: Final[int] = 3
+LATENCY_TRIALS: Final[int] = 1
 LATENCY_ORDER_SEED: Final[int] = 54_3060
 
 
@@ -221,7 +224,7 @@ class Architecture:
     sample_chunk_length: int = 20
     head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20)
     temporal_d_model: int = 512
-    temporal_layers: int = 4
+    temporal_layers: int = 8
     temporal_heads: int = 8
     temporal_ff_dim: int = 1536
     group_head_dim: int = 512
@@ -240,13 +243,14 @@ class Architecture:
 
     @classmethod
     def for_width(cls, width: int) -> Architecture:
-        if width not in WIDTHS:
-            raise ValueError(f"width must be one of {WIDTHS}, got {width}")
+        if width not in MODEL_WIDTHS:
+            raise ValueError(f"width must be one of {MODEL_WIDTHS}, got {width}")
         return cls(
             d_model=width,
             n_layers=TRUNK_DEPTHS[width],
             n_heads=width // 64,
             temporal_d_model=width // 2,
+            temporal_layers=TEMPORAL_DEPTHS[width],
             temporal_heads=width // 128,
             temporal_ff_dim=3 * width // 2,
             group_head_dim=width // 2,
@@ -291,100 +295,57 @@ class TimingConfig:
             raise ValueError("inference_delay_frames + replan_interval_frames must not exceed prediction_frames")
 
 
-WIDTHS: Final[tuple[int, ...]] = (128, 256, 384, 512, 640, 768, 896, 1024)
+WIDTHS: Final[tuple[int, ...]] = (256, 512, 768, 1024)
+MODEL_WIDTHS: Final[tuple[int, ...]] = WIDTHS
 TRUNK_DEPTHS: Final[dict[int, int]] = {
-    128: 3,
     256: 5,
-    384: 8,
     512: 11,
-    640: 13,
     768: 16,
-    896: 19,
     1024: 21,
 }
+TEMPORAL_DEPTHS: Final[dict[int, int]] = {256: 2, 512: 4, 768: 6, 1024: 8}
+DEDUPLICATED_SOURCE_ROWS: Final[dict[str, tuple[int, ...]]] = {
+    "professional-monotheon-policy-world-v8": (14_136, 14_139),
+}
 INITIAL_DELAYS: Final[dict[int, int]] = {
-    128: 1,
     256: 1,
-    384: 2,
     512: 2,
-    640: 3,
-    768: 4,
-    896: 5,
+    768: 3,
     1024: 6,
 }
-MAX_UPDATES: Final[dict[int, int]] = {
-    128: 54_048,
-    256: 84_320,
-    384: 33_472,
-    512: 97_696,
-    640: 16_384,
-    768: 35_072,
-    896: 16_384,
-    1024: 16_384,
+DATA_EXPONENTS: Final[tuple[int, ...]] = (28, 29, 30, 31)
+DATA_POSITIONS: Final[tuple[int, ...]] = tuple(2**exponent for exponent in DATA_EXPONENTS)
+DATA_UPDATES: Final[tuple[int, ...]] = tuple(positions // (512 * 128) for positions in DATA_POSITIONS)
+DATA_REPLAYS: Final[tuple[int, ...]] = tuple(positions // (32 * 128) for positions in DATA_POSITIONS)
+DATA_PHASE_REPLAYS: Final[tuple[int, ...]] = tuple(
+    cumulative - (0 if index == 0 else DATA_REPLAYS[index - 1]) for index, cumulative in enumerate(DATA_REPLAYS)
+)
+B200_REFERENCE_UPDATE_SECONDS: Final[dict[int, float]] = {
+    256: 0.25,
+    512: 0.30,
+    768: 0.40,
+    1024: 1.00,
 }
-ISO_COMPUTE_CHECKPOINTS: Final[dict[str, tuple[tuple[int, int], ...]]] = {
-    "C1": ((128, 54_048), (256, 16_384), (384, 6_496)),
-    "C2": ((256, 84_320), (384, 33_472), (512, 16_384)),
-    "C3": ((512, 97_696), (768, 35_072), (1024, 16_384)),
-}
-FIXED_DATA_UPDATES: Final[int] = 16_384
+MODAL_TRAINING_DOLLARS_PER_HOUR: Final[float] = 8.781696
+STUDY_WORKING_COST_DOLLARS: Final[int] = 225
+
+
+def _derived_parameter_count_contract(width: int) -> dict[str, int]:
+    trunk = 12 * width * width * TRUNK_DEPTHS[width]
+    temporal = (width * width + 535 * width) // 2 + 12_144 + TEMPORAL_DEPTHS[width] * (5 * width * width // 2)
+    group_heads = width * width + 1065 * width // 2 + 355
+    inputs = 481 * width + 738_246
+    return {
+        "trunk": trunk,
+        "temporal_decoder": temporal,
+        "group_heads": group_heads,
+        "inputs": inputs,
+        "total": trunk + temporal + group_heads + inputs,
+    }
+
+
 PARAMETER_COUNT_CONTRACTS: Final[dict[int, dict[str, int]]] = {
-    128: {
-        "trunk": 589_824,
-        "temporal_decoder": 218_416,
-        "group_heads": 84_899,
-        "inputs": 799_814,
-        "total": 1_692_953,
-    },
-    256: {
-        "trunk": 3_932_160,
-        "temporal_decoder": 768_752,
-        "group_heads": 202_211,
-        "inputs": 861_382,
-        "total": 5_764_505,
-    },
-    384: {
-        "trunk": 14_155_776,
-        "temporal_decoder": 1_663_152,
-        "group_heads": 352_291,
-        "inputs": 922_950,
-        "total": 17_094_169,
-    },
-    512: {
-        "trunk": 34_603_008,
-        "temporal_decoder": 2_901_616,
-        "group_heads": 535_139,
-        "inputs": 984_518,
-        "total": 39_024_281,
-    },
-    640: {
-        "trunk": 63_897_600,
-        "temporal_decoder": 4_484_144,
-        "group_heads": 750_755,
-        "inputs": 1_046_086,
-        "total": 70_178_585,
-    },
-    768: {
-        "trunk": 113_246_208,
-        "temporal_decoder": 6_410_736,
-        "group_heads": 999_139,
-        "inputs": 1_107_654,
-        "total": 121_763_737,
-    },
-    896: {
-        "trunk": 183_042_048,
-        "temporal_decoder": 8_681_392,
-        "group_heads": 1_280_291,
-        "inputs": 1_169_222,
-        "total": 194_172_953,
-    },
-    1024: {
-        "trunk": 264_241_152,
-        "temporal_decoder": 11_296_112,
-        "group_heads": 1_594_211,
-        "inputs": 1_230_790,
-        "total": 278_362_265,
-    },
+    width: _derived_parameter_count_contract(width) for width in WIDTHS
 }
 
 POWERLINES_EXPONENT: Final[float] = 0.52
@@ -412,7 +373,7 @@ def timing_for_width(width: int) -> TimingConfig:
     try:
         delay = INITIAL_DELAYS[width]
     except KeyError as error:
-        raise ValueError(f"width must be one of {WIDTHS}, got {width}") from error
+        raise ValueError(f"width must be one of {MODEL_WIDTHS}, got {width}") from error
     return TimingConfig(delay, delay, 2 * delay)
 
 
@@ -427,8 +388,8 @@ class TrainConfig:
     train_compile_mode: ClassVar[str] = "reduce-overhead"
     raw_shard_materialization_threads: ClassVar[int] = 64
     materialization_threads_env: ClassVar[str] = "HAL_O54_MATERIALIZATION_THREADS"
-    data_protocol: ClassVar[str] = "o54-all44-nested-replay-ring-v1"
-    selection_sha256: ClassVar[str] = "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
+    data_protocol: ClassVar[str] = "o54-all44-disjoint-nested-phases-v2"
+    selection_sha256: ClassVar[str] = "75736da2e9d165781fb4ac34a79b8c99b49e96991f1ee0eab9f629d154805c23"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
     replay_slots: ClassVar[int] = 65_536
@@ -446,7 +407,6 @@ class TrainConfig:
 
     inference_mode: str = "eager"
     latency_manifest_sha256: str = ""
-    fixed_d_frontier: bool = False
     # Hardware-derived by default. An explicit power of two is a reproducibility
     # or memory-pressure override, not an architecture parameter.
     compiled_inference_bucket: int | None = None
@@ -490,7 +450,7 @@ class TrainConfig:
     player_sidecar_sha256: str = "54ccf8a2497fe240313117297ca2ea31158e08db2cc53c67e7aa46853a8dac1c"
     player_vocab_sha256: str = "c67c97c995ad033ea7f5b2223efce5b061394566439f091ff6e7aaa6a9d1cfd6"
     player_vocab_size: int = 21_181
-    target_positions: int = 2**30
+    target_positions: int = DATA_POSITIONS[-1]
     depth_alpha: float = 0.5
     hidden_std_multiplier: float = 0.5
     readout_init: Literal["mup-normal"] = "mup-normal"
@@ -524,7 +484,7 @@ class TrainConfig:
 
     @property
     def adam_weight_decay(self) -> float:
-        return powerlines_weight_decay(self.target_positions, self.arch.parameter_count_contract["total"])
+        return powerlines_weight_decay(DATA_POSITIONS[-1], self.arch.parameter_count_contract["total"])
 
     @property
     def source_list_sha256(self) -> str:
@@ -533,7 +493,10 @@ class TrainConfig:
 
     @property
     def train_replays(self) -> int:
-        return sum(streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] for name in self.source_names)
+        return sum(
+            streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] - len(DEDUPLICATED_SOURCE_ROWS.get(name, ()))
+            for name in self.source_names
+        )
 
     @property
     def train_frames(self) -> int:
@@ -599,6 +562,15 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("buffered timing requires R=d and H=2d")
     if (cfg.eval_n_matchups, cfg.final_eval_n_matchups) != (96, 96):
         raise ValueError("gameplay evaluation is frozen to 96 matchups")
+    if (
+        cfg.batch_size != 512
+        or cfg.arch.direct_loss_start != 128
+        or cfg.replay_slots != 65_536
+        or cfg.windows_per_generation * cfg.generations_per_replay != 32
+        or DATA_UPDATES != (4096, 8192, 16_384, 32_768)
+        or DATA_REPLAYS != (65_536, 131_072, 262_144, 524_288)
+    ):
+        raise ValueError("O54 nested-data geometry changed")
     if cfg.inference_mode != "eager":
         raise ValueError("O54 requires the eager inference path measured by the latency preflight")
     if cfg.latency_manifest_sha256 and (
@@ -635,8 +607,8 @@ def validate_config(cfg: TrainConfig) -> None:
     ):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive, got {value!r}")
-    if cfg.amp_dtype not in ("bfloat16", "float32"):
-        raise ValueError("amp_dtype must be bfloat16 or float32")
+    if cfg.amp_dtype != "bfloat16":
+        raise ValueError("O54 requires BF16 training and inference")
     if not isinstance(cfg.num_workers, int) or isinstance(cfg.num_workers, bool) or not 0 <= cfg.num_workers <= 48:
         raise ValueError(f"num_workers must be an integer in [0, 48], got {cfg.num_workers!r}")
     if not math.isfinite(cfg.grad_clip) or cfg.grad_clip <= 0:
@@ -675,16 +647,15 @@ def validate_config(cfg: TrainConfig) -> None:
 
 
 def proxy_config() -> TrainConfig:
-    """Return the W256/L5 fixed-D proxy treatment."""
-    return config_for_width(256, updates=16_384)
+    """Return the W256/L5 full nested-data proxy treatment."""
+    return config_for_width(256)
 
 
 def config_for_width(width: int, *, updates: int | None = None) -> TrainConfig:
     if updates is None:
-        try:
-            updates = MAX_UPDATES[width]
-        except KeyError as error:
-            raise ValueError(f"width {width} has no core training trajectory") from error
+        if width not in MODEL_WIDTHS:
+            raise ValueError(f"width {width} has no architecture contract")
+        updates = DATA_UPDATES[-1]
     if updates < 1:
         raise ValueError("updates must be positive")
     return TrainConfig(
@@ -849,7 +820,7 @@ def short_causal_attention(
     key: Float[Tensor, "B H L D"],
     value: Float[Tensor, "B H L D"],
 ) -> Float[Tensor, "B H L D"]:
-    """Use explicit causal attention for the 11-token training sequence.
+    """Use explicit causal attention for the 14-token training sequence.
 
     On a B200, cuDNN flash SDPA used 149 ms per step for forward and
     backward. At this length, its launch and layout costs were more than the
@@ -1918,6 +1889,9 @@ class BF16Inference:
     ) -> None:
         self.model = model
         self.cfg = cfg
+        parameter = next(model.parameters())
+        if parameter.device.type == "cuda" and parameter.dtype != torch.bfloat16:
+            raise ValueError("O54 CUDA inference requires BF16 model parameters")
         if bucket is not None and compiled_buckets is not None:
             raise ValueError("pass bucket or compiled_buckets, not both")
         chosen = (bucket,) if bucket is not None else compiled_buckets
@@ -2059,7 +2033,7 @@ class LatencyRow:
     measured_calls: int = LATENCY_MEASURED_CALLS
 
     def __post_init__(self) -> None:
-        if self.width not in WIDTHS:
+        if self.width not in MODEL_WIDTHS:
             raise ValueError(f"unsupported latency width {self.width}")
         if not 1 <= self.inference_delay_frames <= 6:
             raise ValueError("latency delay must be in [1, 6]")
@@ -2174,7 +2148,7 @@ class LatencyTrialRow:
     def __post_init__(self) -> None:
         if not 0 <= self.trial_index < LATENCY_TRIALS:
             raise ValueError(f"latency trial index must be in [0, {LATENCY_TRIALS})")
-        if not 0 <= self.width_order_index < len(WIDTHS):
+        if not 0 <= self.width_order_index < len(MODEL_WIDTHS):
             raise ValueError("latency width-order index is invalid")
 
 
@@ -2252,13 +2226,17 @@ def production_dolphin_load() -> Iterator[_DolphinLoad]:
                 raise RuntimeError("production Dolphin load did not stop")
 
 
-def _latency_architecture_family() -> list[dict[str, object]]:
+def _architecture_family(widths: Sequence[int]) -> list[dict[str, object]]:
     family: list[dict[str, object]] = []
-    for width in WIDTHS:
+    for width in widths:
         values: dict[str, object] = asdict(Architecture.for_width(width))
         values["head_offsets"] = list(cast(tuple[int, ...], values["head_offsets"]))
         family.append(values)
     return family
+
+
+def _latency_architecture_family() -> list[dict[str, object]]:
+    return _architecture_family(WIDTHS)
 
 
 def _latency_manifest_payload(
@@ -2270,7 +2248,7 @@ def _latency_manifest_payload(
 ) -> dict[str, object]:
     return {
         "schema": 3,
-        "experiment_id": _EXPERIMENT_ID,
+        "experiment_id": _LATENCY_EXPERIMENT_ID,
         "gpu_name": gpu_name,
         "inference_mode": "eager",
         "raw_probe_sha256": raw_probe_sha256,
@@ -2314,7 +2292,7 @@ def write_latency_manifest(
         or any(not trial.row.meets_deadline or not _is_official_latency_row(trial.row) for trial in trial_rows)
         or any(trial.row.inference_delay_frames != selected_delays[trial.row.width] for trial in trial_rows)
     ):
-        raise ValueError("latency manifest requires three passing B1 trials at every selected timing")
+        raise ValueError("latency manifest requires one passing B1 trial at every selected timing")
     if re.fullmatch(r"[0-9a-f]{64}", raw_probe_sha256) is None:
         raise ValueError("latency manifest has no valid raw-probe SHA-256")
     payload = _latency_manifest_payload(rows, trial_rows, gpu_name, raw_probe_sha256, dolphin)
@@ -2337,7 +2315,7 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
         raise ValueError(f"latency manifest SHA-256 mismatch: {digest!r} != {actual}")
     if (
         document.get("schema") != 3
-        or document.get("experiment_id") != _EXPERIMENT_ID
+        or document.get("experiment_id") != _LATENCY_EXPERIMENT_ID
         or document.get("inference_mode") != "eager"
         or document.get("architecture_family") != _latency_architecture_family()
     ):
@@ -2384,7 +2362,7 @@ def load_latency_manifest(path: Path) -> tuple[dict[int, LatencyRow], str]:
             for trial in trial_rows
         )
     ):
-        raise ValueError("latency manifest does not contain three accepted trials")
+        raise ValueError("latency manifest does not contain one accepted trial")
     probe_path = path.with_suffix(".probes.json")
     probe_document, probe_sha256 = load_latency_probe_report(probe_path)
     if probe_sha256 != raw_probe_sha256:
@@ -2439,7 +2417,7 @@ def write_latency_probe_report(
     """Atomically persist every raw latency sample, including partial runs."""
     payload = {
         "schema": 3,
-        "experiment_id": _EXPERIMENT_ID,
+        "experiment_id": _LATENCY_EXPERIMENT_ID,
         "gpu_name": gpu_name,
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
@@ -2471,7 +2449,7 @@ def load_latency_probe_report(path: Path) -> tuple[dict[str, object], str]:
         raise ValueError(f"latency probe SHA-256 mismatch: {digest!r} != {actual}")
     if (
         document.get("schema") != 3
-        or document.get("experiment_id") != _EXPERIMENT_ID
+        or document.get("experiment_id") != _LATENCY_EXPERIMENT_ID
         or document.get("architecture_family") != _latency_architecture_family()
     ):
         raise ValueError("unsupported latency probe artifact")
@@ -2527,21 +2505,10 @@ class StudyEndpoint:
 
 
 def study_endpoints(rows: Mapping[int, LatencyRow]) -> tuple[StudyEndpoint, ...]:
-    """Return independent iso-compute runs plus the deduplicated fixed-D frontier."""
-    endpoints = [
-        StudyEndpoint(width, updates, (line,))
-        for line, line_endpoints in ISO_COMPUTE_CHECKPOINTS.items()
-        for width, updates in line_endpoints
-    ]
-    for width in latency_bucket_frontier(rows):
-        pair = (width, FIXED_DATA_UPDATES)
-        for index, endpoint in enumerate(endpoints):
-            if (endpoint.width, endpoint.updates) == pair:
-                endpoints[index] = replace(endpoint, roles=(*endpoint.roles, "fixed-D"))
-                break
-        else:
-            endpoints.append(StudyEndpoint(width, FIXED_DATA_UPDATES, ("fixed-D",)))
-    return tuple(endpoints)
+    """Return one D=2^31 trajectory for each declared architecture."""
+    if set(rows) != set(WIDTHS):
+        raise ValueError(f"study latency rows must cover exactly {WIDTHS}")
+    return tuple(StudyEndpoint(width, DATA_UPDATES[-1], ("nested-D28-D31",)) for width in WIDTHS)
 
 
 def study_launch_commands(
@@ -2551,14 +2518,16 @@ def study_launch_commands(
     """Build the exact detached Modal commands without submitting them."""
     commands = []
     for endpoint in study_endpoints(rows):
-        role = "-".join(endpoint.roles).lower()
-        app_name = f"o54-{role}-w{endpoint.width}-u{endpoint.updates}"
+        role = "nested-d28-d31"
+        app_name = f"o54-{role}-w{endpoint.width}"
         commands.append(
             (
                 "uv",
                 "run",
                 "scripts/launch_modal.py",
                 "--gpu",
+                "B200",
+                "--closed-loop-gpu",
                 "RTX-PRO-6000",
                 "--app-name",
                 app_name,
@@ -2617,6 +2586,11 @@ def benchmark_width_latency(
         context: Context | None = None
         try:
             model = GPT(cfg).to(device=device, dtype=torch.bfloat16).eval()
+            actual_counts = subsystem_parameter_counts(model)
+            if actual_counts != cfg.arch.parameter_count_contract:
+                raise RuntimeError(
+                    f"W{width} parameter contract changed: {actual_counts} != {cfg.arch.parameter_count_contract}"
+                )
             inference = BF16Inference(model, cfg, compiled=False)
             context = synthetic_context(cfg, batch_size, device)
             generator = torch.Generator(device=device).manual_seed(cfg.eval_seed)
@@ -3497,52 +3471,55 @@ def training_compute(cfg: TrainConfig, parameter_counts: Mapping[str, int]) -> i
     return 6 * cfg.target_positions * effective_parameter_count(parameter_counts)
 
 
-def fit_quadratic_vertex(effective_parameters: Sequence[int], responses: Sequence[float]) -> tuple[float, float]:
-    """Fit response against log10(N_eff) and return a bracketed concave vertex."""
-    if len(effective_parameters) != len(responses) or len(responses) < 3:
-        raise ValueError("a quadratic fit needs at least three paired observations")
-    x = np.log10(np.asarray(effective_parameters, dtype=np.float64))
+@dataclass(frozen=True, slots=True)
+class LearningCurveFit:
+    """A monotone saturating power curve anchored at D=2^28."""
+
+    response_at_d28: float
+    asymptotic_gain: float
+    exponent: float
+    residual_sum_squares: float
+
+    def predict(self, positions: float) -> float:
+        if not math.isfinite(positions) or positions <= 0:
+            raise ValueError("learning-curve positions must be finite and positive")
+        ratio = positions / DATA_POSITIONS[0]
+        return self.response_at_d28 + self.asymptotic_gain * (1 - ratio ** (-self.exponent))
+
+
+def fit_gameplay_learning_curve(positions: Sequence[int], responses: Sequence[float]) -> LearningCurveFit:
+    """Fit ``S(D)=S_28+A*(1-(D/2^28)^-alpha)`` with ``A>=0``."""
+    from scipy.optimize import least_squares
+
+    if len(positions) != len(responses) or len(responses) < 3:
+        raise ValueError("a gameplay learning curve needs at least three paired observations")
+    x = np.asarray(positions, dtype=np.float64)
     y = np.asarray(responses, dtype=np.float64)
-    if not np.isfinite(x).all() or not np.isfinite(y).all():
-        raise ValueError("quadratic observations must be finite and positive in N_eff")
-    quadratic, linear, constant = np.polyfit(x, y, 2)
-    if quadratic >= 0:
-        raise ValueError("quadratic response is not concave")
-    vertex = -linear / (2 * quadratic)
-    if not float(x.min()) < vertex < float(x.max()):
-        raise ValueError("quadratic vertex is not bracketed by measured capacities")
-    response = quadratic * vertex**2 + linear * vertex + constant
-    return 10**vertex, float(response)
+    if np.any(x <= 0) or not np.isfinite(x).all() or not np.isfinite(y).all():
+        raise ValueError("gameplay learning-curve observations must be finite and positive in D")
+    ratio = x / DATA_POSITIONS[0]
 
+    def residuals(parameters: np.ndarray) -> np.ndarray:
+        baseline, gain, exponent = parameters
+        return baseline + gain * (1 - ratio**-exponent) - y
 
-def vertex_capacity(effective_parameters: float) -> tuple[float, float]:
-    """Interpolate one N_eff vertex to width and literal BC parameters."""
-    if not math.isfinite(effective_parameters) or effective_parameters <= 0:
-        raise ValueError("effective parameter vertex must be finite and positive")
-    widths = np.asarray(WIDTHS, dtype=np.float64)
-    totals = np.asarray([PARAMETER_COUNT_CONTRACTS[width]["total"] for width in WIDTHS], dtype=np.float64)
-    effective = np.asarray(
-        [effective_parameter_count(PARAMETER_COUNT_CONTRACTS[width]) for width in WIDTHS],
-        dtype=np.float64,
+    initial_gain = max(float(y.max() - y[0]), 0.1)
+    fit = least_squares(
+        residuals,
+        x0=np.asarray((y[0], initial_gain, 0.5)),
+        bounds=((-np.inf, 0.0, 0.01), (np.inf, np.inf, 4.0)),
+        max_nfev=10_000,
     )
-    log_effective = math.log(effective_parameters)
-    if not math.log(effective[0]) <= log_effective <= math.log(effective[-1]):
-        raise ValueError("effective parameter vertex is outside the benchmarked width family")
-    width = math.exp(float(np.interp(log_effective, np.log(effective), np.log(widths))))
-    total = math.exp(float(np.interp(log_effective, np.log(effective), np.log(totals))))
-    return width, total
+    if not fit.success or not np.isfinite(fit.x).all():
+        raise RuntimeError(f"gameplay learning-curve fit failed: {fit.message}")
+    baseline, gain, exponent = map(float, fit.x)
+    return LearningCurveFit(baseline, gain, exponent, float(np.square(fit.fun).sum()))
 
 
-def fit_optimal_capacity_scaling(compute: Sequence[float], optimal_parameters: Sequence[float]) -> tuple[float, float]:
-    """Fit ``log(N_opt) = intercept + exponent * log(C)``."""
-    if len(compute) != len(optimal_parameters) or len(compute) < 2:
-        raise ValueError("capacity scaling needs at least two paired compute budgets")
-    x = np.asarray(compute, dtype=np.float64)
-    y = np.asarray(optimal_parameters, dtype=np.float64)
-    if np.any(x <= 0) or np.any(y <= 0) or not np.isfinite(x).all() or not np.isfinite(y).all():
-        raise ValueError("capacity scaling inputs must be finite and positive")
-    exponent, intercept = np.polyfit(np.log(x), np.log(y), 1)
-    return float(exponent), float(intercept)
+def _response_order(responses: Mapping[int, float]) -> tuple[int, ...]:
+    if not responses or any(not math.isfinite(value) for value in responses.values()):
+        raise ValueError("response ordering needs finite observations")
+    return tuple(sorted(responses, key=lambda width: (-responses[width], width)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -3558,6 +3535,186 @@ class AnalysisEndpoint:
     net_stock_lcb: float
 
 
+def _validate_analysis_eval_protocol(protocol: Mapping[str, object], timing: LatencyRow) -> None:
+    pairs, egos, cpus, schedule_sha256 = assert_protocol_diversity(96)
+    expected: dict[str, object] = {
+        "fixed_ego_character": None,
+        "ego_player_id": MASKED_PLAYER_ID,
+        "ego_player_code": None,
+        "opponent_identity_conditioned": False,
+        "n_matchups": 96,
+        "max_parallel": 32,
+        "max_frames": 7_200,
+        "seed": 0,
+        "cpu_level": 9,
+        "ego_port": 1,
+        "seed_stage": int(PRIOR_SWEEP_SEED_STAGE.value),
+        "matchup_schedule_sha256": schedule_sha256,
+        "oriented_pairs": pairs,
+        "ego_characters": egos,
+        "cpu_characters": cpus,
+        "prediction_frames": timing.prediction_frames,
+        "delay_frames": timing.inference_delay_frames,
+        "replan_interval_frames": timing.replan_interval_frames,
+        "transport_delay_frames": 0,
+        "timing_model": "buffered",
+        "dtype": "torch.bfloat16",
+        "inference_mode": "eager",
+        "inference_compile_mode": "default",
+        "inference_attention_backend": "dense_sdpa",
+        "compiled_inference_bucket": 32,
+        "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
+        "start_retries": DEFAULT_START_RETRIES,
+    }
+    changed = {name: (protocol.get(name), value) for name, value in expected.items() if protocol.get(name) != value}
+    checkpoint = protocol.get("checkpoint_sha256")
+    if not isinstance(checkpoint, str) or re.fullmatch(r"[0-9a-f]{64}", checkpoint) is None:
+        changed["checkpoint_sha256"] = (checkpoint, "64 lowercase hexadecimal characters")
+    if changed:
+        raise ValueError(f"evaluation endpoint changed the frozen O54 protocol: {changed}")
+
+
+def load_analysis_match_rows(
+    endpoints: Mapping[tuple[int, int], AnalysisEndpoint],
+    latency_rows: Mapping[int, LatencyRow],
+    output: Path,
+) -> dict[tuple[int, int], tuple[MatchRow, ...]]:
+    """Download and validate the common 96-block evaluation evidence."""
+    destination_root = output / "match_rows"
+    destination_root.mkdir(parents=True, exist_ok=True)
+    client = r2.client()
+    loaded: dict[tuple[int, int], tuple[MatchRow, ...]] = {}
+    schedule: tuple[tuple[int, int], ...] | None = None
+    schedule_sha256: str | None = None
+    for key, endpoint in sorted(endpoints.items()):
+        width, update = key
+        destination = destination_root / f"w{width}-step-{update:07d}.json"
+        object_key = f"runs/{endpoint.run_name}/checkpoints/eval96-step-{update:07d}/match_rows.json"
+        client.download_file(r2.bucket(), object_key, str(destination))
+        payload = json.loads(destination.read_text())
+        protocol = payload.get("protocol") if isinstance(payload, dict) else None
+        raw_rows = payload.get("rows") if isinstance(payload, dict) else None
+        if payload.get("schema_version") != 6 or not isinstance(protocol, dict) or not isinstance(raw_rows, list):
+            raise ValueError(f"W{width} update {update} has invalid match-row evidence")
+        timing = latency_rows[width]
+        try:
+            _validate_analysis_eval_protocol(protocol, timing)
+        except ValueError as error:
+            raise ValueError(f"W{width} update {update} used the wrong evaluation protocol") from error
+        rows = tuple(MatchRow.from_dict(row) for row in raw_rows)
+        by_boot: dict[int, list[MatchRow]] = defaultdict(list)
+        for row in rows:
+            by_boot[row.boot_index].append(row)
+        if tuple(sorted(by_boot)) != tuple(range(96)):
+            raise ValueError(f"W{width} update {update} does not contain all 96 complete blocks")
+        local_schedule = []
+        for boot_index in range(96):
+            pairs = {(row.ego_character, row.opp_character) for row in by_boot[boot_index]}
+            if len(pairs) != 1:
+                raise ValueError(f"W{width} update {update} block {boot_index} has mixed matchups")
+            local_schedule.append(next(iter(pairs)))
+        typed_schedule = tuple(local_schedule)
+        local_sha = protocol.get("matchup_schedule_sha256")
+        if schedule is None:
+            schedule = typed_schedule
+            schedule_sha256 = cast(str, local_sha)
+        elif typed_schedule != schedule or local_sha != schedule_sha256:
+            raise ValueError("evaluation endpoints do not use the same 96 matchup blocks")
+        loaded[key] = rows
+    return loaded
+
+
+def _boot_net_stock_components(rows: Sequence[MatchRow]) -> tuple[np.ndarray, np.ndarray]:
+    numerators = np.zeros(96, dtype=np.float64)
+    active_minutes = np.zeros(96, dtype=np.float64)
+    for row in rows:
+        if row.active_frames <= 0:
+            continue
+        numerators[row.boot_index] += row.stocks_taken - row.stocks_lost
+        active_minutes[row.boot_index] += row.active_frames / FRAMES_PER_MINUTE
+    if np.any(active_minutes <= 0):
+        raise ValueError("every evaluation block must contain active gameplay")
+    return numerators, active_minutes
+
+
+def bootstrap_learning_curve_analysis(
+    endpoints: Mapping[tuple[int, int], AnalysisEndpoint],
+    match_rows: Mapping[tuple[int, int], Sequence[MatchRow]],
+    widths: Sequence[int],
+    *,
+    holdout_passed: bool,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = 54,
+) -> dict[str, object]:
+    """Resample the same complete matchup blocks across every endpoint."""
+    if resamples < 1:
+        raise ValueError("bootstrap resamples must be positive")
+    expected = {(width, update) for width in widths for update in DATA_UPDATES}
+    if set(match_rows) != expected:
+        raise ValueError("bootstrap match rows do not cover the full endpoint matrix")
+    components = {key: _boot_net_stock_components(rows) for key, rows in match_rows.items()}
+    for key, (numerator, minutes) in components.items():
+        point = float(numerator.sum() / minutes.sum())
+        logged = endpoints[key].net_stock_per_min
+        if not math.isclose(point, logged, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError(f"raw match rows disagree with the logged primary response at {key}")
+    indices = np.random.default_rng(seed).integers(0, 96, size=(resamples, 96))
+    responses = {
+        key: numerator[indices].sum(axis=1) / minutes[indices].sum(axis=1)
+        for key, (numerator, minutes) in components.items()
+    }
+    holdout_matches = 0
+    failed_fits = 0
+    winners = {width: 0 for width in widths}
+    d34_predictions = {width: [] for width in widths}
+    for sample in range(resamples):
+        try:
+            initial = {
+                width: fit_gameplay_learning_curve(
+                    DATA_POSITIONS[:3],
+                    [responses[width, update][sample] for update in DATA_UPDATES[:3]],
+                )
+                for width in widths
+            }
+            predicted = {width: initial[width].predict(DATA_POSITIONS[-1]) for width in widths}
+            observed = {width: responses[width, DATA_UPDATES[-1]][sample] for width in widths}
+            holdout_matches += _response_order(predicted) == _response_order(observed)
+            if holdout_passed:
+                refits = {
+                    width: fit_gameplay_learning_curve(
+                        DATA_POSITIONS,
+                        [responses[width, update][sample] for update in DATA_UPDATES],
+                    )
+                    for width in widths
+                }
+                projected = {width: refits[width].predict(2**34) for width in widths}
+                winners[_response_order(projected)[0]] += 1
+                for width, value in projected.items():
+                    d34_predictions[width].append(value)
+        except RuntimeError:
+            failed_fits += 1
+    completed = resamples - failed_fits
+    if completed < 0.95 * resamples:
+        raise RuntimeError(f"only {completed}/{resamples} block-bootstrap curve fits completed")
+    report: dict[str, object] = {
+        "unit": "complete matchup boot",
+        "shared_resample_indices": True,
+        "requested_resamples": resamples,
+        "completed_resamples": completed,
+        "holdout_order_match_fraction": holdout_matches / completed,
+    }
+    if holdout_passed:
+        report["d34_winner_fraction"] = {str(width): winners[width] / completed for width in widths}
+        report["d34_prediction_95_interval"] = {
+            str(width): [
+                float(np.percentile(d34_predictions[width], 2.5)),
+                float(np.percentile(d34_predictions[width], 97.5)),
+            ]
+            for width in widths
+        }
+    return report
+
+
 def _analysis_endpoints(runs: Iterable[Any], latency_sha256: str) -> dict[tuple[int, int], AnalysisEndpoint]:
     endpoints: dict[tuple[int, int], AnalysisEndpoint] = {}
     for run in runs:
@@ -3568,37 +3725,50 @@ def _analysis_endpoints(runs: Iterable[Any], latency_sha256: str) -> dict[tuple[
         if not isinstance(architecture, dict):
             raise ValueError(f"O54 run {run.id} has no architecture config")
         width = int(architecture["d_model"])
-        updates = int(config["max_steps"])
+        if int(config["max_steps"]) != DATA_UPDATES[-1]:
+            raise ValueError(f"O54 run {run.id} is not a complete D=2^31 trajectory")
         if config.get("latency_manifest_sha256") != latency_sha256:
             raise ValueError(f"O54 run {run.id} uses a different latency manifest")
-        summary = dict(run.summary)
-        if (
-            run.state != "finished"
-            or int(summary.get("eval/boots", 0)) != 96
-            or float(summary.get("eval/crashed", 1.0)) != 0.0
-        ):
+        if run.state != "finished":
             continue
-        response = float(summary.get("eval/net_stock_per_min", math.nan))
-        lcb = float(summary.get("eval/net_stock_lcb", math.nan))
-        if not math.isfinite(response) or not math.isfinite(lcb):
-            raise ValueError(f"O54 run {run.id} has no complete gameplay response")
-        counts = PARAMETER_COUNT_CONTRACTS[width]
-        cfg = config_for_width(width, updates=updates)
-        endpoint = AnalysisEndpoint(
-            run_id=str(run.id),
-            run_name=str(run.name),
-            width=width,
-            updates=updates,
-            effective_parameters=effective_parameter_count(counts),
-            bc_parameters=counts["total"],
-            compute=training_compute(cfg, counts),
-            net_stock_per_min=response,
-            net_stock_lcb=lcb,
+        history = run.scan_history(
+            keys=[
+                "global_step",
+                "eval/checkpoint_step",
+                "eval/boots",
+                "eval/crashed",
+                "eval/net_stock_per_min",
+                "eval/net_stock_lcb",
+            ],
+            page_size=1_000,
         )
-        key = (width, updates)
-        if key in endpoints:
-            raise ValueError(f"multiple complete O54 evaluations exist for W{width} at {updates} updates")
-        endpoints[key] = endpoint
+        for row in history:
+            update = int(row.get("eval/checkpoint_step", row.get("global_step", -1)))
+            if update not in DATA_UPDATES:
+                continue
+            if int(row.get("eval/boots", 0)) != 96 or float(row.get("eval/crashed", 1.0)) != 0.0:
+                continue
+            response = float(row.get("eval/net_stock_per_min", math.nan))
+            lcb = float(row.get("eval/net_stock_lcb", math.nan))
+            if not math.isfinite(response) or not math.isfinite(lcb):
+                raise ValueError(f"O54 run {run.id} has an invalid evaluation at update {update}")
+            counts = PARAMETER_COUNT_CONTRACTS[width]
+            cfg = config_for_width(width, updates=update)
+            endpoint = AnalysisEndpoint(
+                run_id=str(run.id),
+                run_name=str(run.name),
+                width=width,
+                updates=update,
+                effective_parameters=effective_parameter_count(counts),
+                bc_parameters=counts["total"],
+                compute=training_compute(cfg, counts),
+                net_stock_per_min=response,
+                net_stock_lcb=lcb,
+            )
+            key = (width, update)
+            if key in endpoints:
+                raise ValueError(f"multiple complete O54 evaluations exist for W{width} at update {update}")
+            endpoints[key] = endpoint
     return endpoints
 
 
@@ -3606,83 +3776,146 @@ def write_analysis_artifacts(
     endpoints: Mapping[tuple[int, int], AnalysisEndpoint],
     latency_rows: Mapping[int, LatencyRow],
     output: Path,
+    *,
+    match_rows: Mapping[tuple[int, int], Sequence[MatchRow]] | None = None,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
 ) -> dict[str, object]:
-    """Fit the registered scaling laws and write the fixed-data latency plot."""
-    expected = study_endpoints(latency_rows)
-    missing = [
-        (endpoint.width, endpoint.updates)
-        for endpoint in expected
-        if (endpoint.width, endpoint.updates) not in endpoints
-    ]
+    """Test the registered D=2^31 holdout, then conditionally extrapolate to D=2^34."""
+    widths = tuple(endpoint.width for endpoint in study_endpoints(latency_rows))
+    expected = tuple((width, update) for width in widths for update in DATA_UPDATES)
+    missing = [key for key in expected if key not in endpoints]
     if missing:
         raise ValueError(f"O54 analysis is missing complete endpoints: {missing}")
     output.mkdir(parents=True, exist_ok=True)
-    ordered = [endpoints[endpoint.width, endpoint.updates] for endpoint in expected]
+    ordered = [endpoints[key] for key in expected]
     with (output / "endpoints.csv").open("w", newline="") as destination:
         writer = csv.DictWriter(destination, fieldnames=tuple(asdict(ordered[0])))
         writer.writeheader()
         writer.writerows(asdict(endpoint) for endpoint in ordered)
 
-    fits: dict[str, dict[str, float]] = {}
-    optimal_compute = []
-    optimal_bc_parameters = []
-    for line, line_endpoints in ISO_COMPUTE_CHECKPOINTS.items():
-        line_rows = [endpoints[pair] for pair in line_endpoints]
-        vertex_effective, vertex_response = fit_quadratic_vertex(
-            [row.effective_parameters for row in line_rows],
-            [row.net_stock_per_min for row in line_rows],
+    initial_fits = {
+        width: fit_gameplay_learning_curve(
+            DATA_POSITIONS[:3],
+            [endpoints[width, update].net_stock_per_min for update in DATA_UPDATES[:3]],
         )
-        vertex_width, vertex_bc = vertex_capacity(vertex_effective)
-        compute = math.exp(sum(math.log(row.compute) for row in line_rows) / len(line_rows))
-        fits[line] = {
-            "compute": compute,
-            "optimal_effective_parameters": vertex_effective,
-            "optimal_width": vertex_width,
-            "optimal_bc_parameters": vertex_bc,
-            "predicted_net_stock_per_min": vertex_response,
-        }
-        optimal_compute.append(compute)
-        optimal_bc_parameters.append(vertex_bc)
-    exponent, intercept = fit_optimal_capacity_scaling(optimal_compute, optimal_bc_parameters)
+        for width in widths
+    }
+    predicted_d31 = {width: initial_fits[width].predict(DATA_POSITIONS[-1]) for width in widths}
+    observed_d31 = {width: endpoints[width, DATA_UPDATES[-1]].net_stock_per_min for width in widths}
+    predicted_order = _response_order(predicted_d31)
+    observed_order = _response_order(observed_d31)
+    holdout_passed = predicted_order == observed_order
 
-    fixed_rows = [endpoints[endpoint.width, endpoint.updates] for endpoint in expected if "fixed-D" in endpoint.roles]
-    fixed_rows.sort(key=lambda row: latency_rows[row.width].p99_seconds)
+    refits: dict[int, LearningCurveFit] = {}
+    predicted_d34: dict[int, float] = {}
+    if holdout_passed:
+        refits = {
+            width: fit_gameplay_learning_curve(
+                DATA_POSITIONS,
+                [endpoints[width, update].net_stock_per_min for update in DATA_UPDATES],
+            )
+            for width in widths
+        }
+        predicted_d34 = {width: refits[width].predict(2**34) for width in widths}
+
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     figure, axis = plt.subplots(figsize=(7, 4.5))
-    axis.plot(
-        [latency_rows[row.width].p99_seconds * 1e3 for row in fixed_rows],
-        [row.net_stock_per_min for row in fixed_rows],
-        marker="o",
-    )
-    for row in fixed_rows:
-        axis.annotate(
-            f"W{row.width}",
-            (latency_rows[row.width].p99_seconds * 1e3, row.net_stock_per_min),
-            xytext=(4, 4),
-            textcoords="offset points",
+    for exponent, update in zip(DATA_EXPONENTS, DATA_UPDATES, strict=True):
+        axis.plot(
+            [latency_rows[width].p99_seconds * 1e3 for width in widths],
+            [endpoints[width, update].net_stock_per_min for width in widths],
+            marker="o",
+            label=f"D=2^{exponent}",
         )
     axis.set_xlabel("RTX 3060 eager B1 p99 latency (ms)")
     axis.set_ylabel("Mean net stocks/min")
-    axis.set_title("O54 fixed-data gameplay strength vs latency")
+    axis.set_title("O54 gameplay strength vs deployed latency")
     axis.grid(alpha=0.25)
+    axis.legend()
     figure.tight_layout()
-    figure.savefig(output / "fixed_data_latency.png", dpi=180)
+    figure.savefig(output / "iso_data_latency.png", dpi=180)
+    plt.close(figure)
+
+    figure, axis = plt.subplots(figsize=(7, 4.5))
+    fit_exponents = np.linspace(DATA_EXPONENTS[0], 34 if holdout_passed else DATA_EXPONENTS[-1], 200)
+    for width in widths:
+        axis.scatter(
+            DATA_EXPONENTS,
+            [endpoints[width, update].net_stock_per_min for update in DATA_UPDATES],
+            label=f"W{width} observations",
+        )
+        fit = refits.get(width, initial_fits[width])
+        axis.plot(fit_exponents, [fit.predict(2**value) for value in fit_exponents], label=f"W{width} fit")
+    axis.axvline(31, color="black", linestyle="--", linewidth=1, alpha=0.6)
+    axis.set_xlabel("log2 supervised positions D")
+    axis.set_ylabel("Mean net stocks/min")
+    axis.set_title("O54 gameplay learning curves")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize="small", ncol=2)
+    figure.tight_layout()
+    figure.savefig(output / "learning_curves.png", dpi=180)
     plt.close(figure)
 
     report: dict[str, object] = {
-        "schema": 1,
+        "schema": 2,
         "primary_response": "mean net stocks/min",
-        "iso_compute_fits": fits,
-        "optimal_bc_parameter_scaling": {
-            "exponent": exponent,
-            "log_intercept": intercept,
+        "learning_curve": "S(D)=S_28+A*(1-(D/2^28)^-alpha), A>=0, 0.01<=alpha<=4",
+        "deployed_models": {
+            str(width): {
+                "bc_parameters": PARAMETER_COUNT_CONTRACTS[width]["total"],
+                "effective_parameters": effective_parameter_count(PARAMETER_COUNT_CONTRACTS[width]),
+                "latency_ms": latency_rows[width].p99_seconds * 1e3,
+                "delay_frames": latency_rows[width].inference_delay_frames,
+            }
+            for width in widths
         },
-        "fixed_data_widths": [row.width for row in fixed_rows],
+        "observed_winner_by_data_scale": {
+            f"2^{exponent}": _response_order({width: endpoints[width, update].net_stock_per_min for width in widths})[
+                0
+            ]
+            for exponent, update in zip(DATA_EXPONENTS, DATA_UPDATES, strict=True)
+        },
+        "fit_through_d30": {
+            str(width): {
+                **asdict(initial_fits[width]),
+                "predicted_d31": predicted_d31[width],
+                "observed_d31": observed_d31[width],
+            }
+            for width in widths
+        },
+        "d31_holdout": {
+            "predicted_order": list(predicted_order),
+            "observed_order": list(observed_order),
+            "passed": holdout_passed,
+        },
+        "d34": (
+            {
+                "reported": True,
+                "predicted_net_stock_per_min": {str(width): predicted_d34[width] for width in widths},
+                "winner_width": _response_order(predicted_d34)[0],
+                "winner_bc_parameters": PARAMETER_COUNT_CONTRACTS[_response_order(predicted_d34)[0]]["total"],
+                "winner_latency_ms": latency_rows[_response_order(predicted_d34)[0]].p99_seconds * 1e3,
+                "refit_all_points": {str(width): asdict(refits[width]) for width in widths},
+            }
+            if holdout_passed
+            else {
+                "reported": False,
+                "reason": "the through-D=2^30 curve fits did not predict the observed D=2^31 ordering",
+            }
+        ),
     }
+    if match_rows is not None:
+        report["block_bootstrap"] = bootstrap_learning_curve_analysis(
+            endpoints,
+            match_rows,
+            widths,
+            holdout_passed=holdout_passed,
+            resamples=bootstrap_resamples,
+        )
     (output / "analysis.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
     return report
 
@@ -3717,11 +3950,18 @@ def log_wandb_code(run: wandb.Run) -> None:
 
 
 def data_selection(cfg: TrainConfig) -> PhysicalShardSelection:
-    """Return the frozen all-44 policy-world-v8 replay order."""
+    """Return the frozen deduplicated all-44 policy-world-v8 replay order."""
     expected = tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
     if cfg.source_names != expected:
         raise ValueError("O54 selection requires the all-44 policy-world-v8 source order")
-    sources = tuple(SourceRowSelection(name, streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name]) for name in cfg.source_names)
+    sources = tuple(
+        SourceRowSelection(
+            name,
+            streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name],
+            DEDUPLICATED_SOURCE_ROWS.get(name, ()),
+        )
+        for name in cfg.source_names
+    )
     selection = PhysicalShardSelection.from_sources(sources)
     if selection.sha256 != cfg.selection_sha256:
         raise RuntimeError(f"policy-world-v8 selection hash changed: {selection.sha256} != {cfg.selection_sha256}")
@@ -3730,9 +3970,211 @@ def data_selection(cfg: TrainConfig) -> PhysicalShardSelection:
     return selection
 
 
+def _proportional_source_row_counts(cfg: TrainConfig, target_replays: int) -> tuple[int, ...]:
+    """Allocate an exact all-source prefix with largest-remainder rounding."""
+    available = tuple(
+        streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] - len(DEDUPLICATED_SOURCE_ROWS.get(name, ()))
+        for name in cfg.source_names
+    )
+    total = sum(available)
+    if not 1 <= target_replays <= total:
+        raise ValueError(f"target replay count must be in [1, {total}], got {target_replays}")
+    numerators = tuple(target_replays * count for count in available)
+    counts = [numerator // total for numerator in numerators]
+    remainder = target_replays - sum(counts)
+    order = sorted(range(len(counts)), key=lambda index: (-(numerators[index] % total), index))
+    for index in order[:remainder]:
+        counts[index] += 1
+    if sum(counts) != target_replays or any(count > limit for count, limit in zip(counts, available, strict=True)):
+        raise RuntimeError("proportional replay allocation is invalid")
+    return tuple(counts)
+
+
+def _raw_prefix_stop(unique_rows: int, excluded_rows: tuple[int, ...]) -> int:
+    """Convert a unique-row prefix length to its exclusive physical-row stop."""
+    stop = unique_rows
+    for row in excluded_rows:
+        if row < stop:
+            stop += 1
+    return stop
+
+
+def _source_unique_range(source: str, unique_start: int, unique_stop: int) -> SourceRowSelection:
+    exclusions = DEDUPLICATED_SOURCE_ROWS.get(source, ())
+    start = _raw_prefix_stop(unique_start, exclusions)
+    stop = _raw_prefix_stop(unique_stop, exclusions)
+    selected_exclusions = tuple(row for row in exclusions if start <= row < stop)
+    return SourceRowSelection(source, stop, selected_exclusions, start)
+
+
+def cumulative_data_selection(cfg: TrainConfig, data_exponent: int) -> PhysicalShardSelection:
+    """Return the nested replay prefix exposed through one data endpoint."""
+    try:
+        target_replays = DATA_REPLAYS[DATA_EXPONENTS.index(data_exponent)]
+    except ValueError as error:
+        raise ValueError(f"data exponent must be one of {DATA_EXPONENTS}, got {data_exponent}") from error
+    counts = _proportional_source_row_counts(cfg, target_replays)
+    selection = PhysicalShardSelection.from_sources(
+        tuple(_source_unique_range(name, 0, stop) for name, stop in zip(cfg.source_names, counts, strict=True))
+    )
+    if selection.row_count != target_replays:
+        raise RuntimeError("nested cumulative selection has the wrong replay count")
+    return selection
+
+
+def phase_data_selection(cfg: TrainConfig, phase_index: int) -> PhysicalShardSelection:
+    """Return only the new replay rows admitted during one nested-data phase."""
+    if not 0 <= phase_index < len(DATA_EXPONENTS):
+        raise ValueError(f"data phase index must be in [0, {len(DATA_EXPONENTS)}), got {phase_index}")
+    stops = _proportional_source_row_counts(cfg, DATA_REPLAYS[phase_index])
+    starts = (
+        (0,) * len(cfg.source_names)
+        if phase_index == 0
+        else _proportional_source_row_counts(cfg, DATA_REPLAYS[phase_index - 1])
+    )
+    selection = PhysicalShardSelection.from_sources(
+        tuple(
+            _source_unique_range(name, start, stop)
+            for name, start, stop in zip(cfg.source_names, starts, stops, strict=True)
+        )
+    )
+    if selection.row_count != DATA_PHASE_REPLAYS[phase_index]:
+        raise RuntimeError("nested phase selection has the wrong replay count")
+    return selection
+
+
+def data_phase_for_completed_updates(completed_updates: int) -> int:
+    """Return the phase that owns the next update, or the terminal phase count."""
+    if not 0 <= completed_updates <= DATA_UPDATES[-1]:
+        raise ValueError(f"completed updates must be in [0, {DATA_UPDATES[-1]}]")
+    return next(
+        (index for index, endpoint in enumerate(DATA_UPDATES) if completed_updates < endpoint),
+        len(DATA_UPDATES),
+    )
+
+
+_NESTED_LOADER_STATE_SCHEMA: Final[int] = 1
+_TRAINING_RNG_STATE_SCHEMA: Final[int] = 1
+
+
+def capture_training_rng_state() -> dict[str, object]:
+    """Capture every process RNG that can affect an O54 update."""
+    return {
+        "schema": _TRAINING_RNG_STATE_SCHEMA,
+        "torch_cpu": torch.get_rng_state().cpu(),
+        "torch_cuda": (
+            tuple(state.cpu() for state in torch.cuda.get_rng_state_all()) if torch.cuda.is_available() else None
+        ),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+    }
+
+
+def restore_training_rng_state(state: object) -> None:
+    """Restore a complete O54 process-RNG checkpoint."""
+    if not isinstance(state, Mapping):
+        raise ValueError("resume checkpoint has no complete O54 RNG state")
+    typed_state = cast(Mapping[str, object], state)
+    if set(typed_state) != {
+        "schema",
+        "torch_cpu",
+        "torch_cuda",
+        "numpy",
+        "python",
+    }:
+        raise ValueError("resume checkpoint has no complete O54 RNG state")
+    if typed_state["schema"] != _TRAINING_RNG_STATE_SCHEMA:
+        raise ValueError("resume checkpoint has an unsupported O54 RNG-state schema")
+    cpu = typed_state["torch_cpu"]
+    cuda = typed_state["torch_cuda"]
+    if not isinstance(cpu, Tensor):
+        raise ValueError("resume checkpoint has an invalid Torch CPU RNG state")
+    if torch.cuda.is_available():
+        if (
+            not isinstance(cuda, tuple)
+            or len(cuda) != torch.cuda.device_count()
+            or not all(isinstance(item, Tensor) for item in cuda)
+        ):
+            raise ValueError("resume checkpoint has no complete Torch CUDA RNG state")
+        cuda_states = cast(tuple[Tensor, ...], cuda)
+        torch.cuda.set_rng_state_all([item.cpu() for item in cuda_states])
+    elif cuda is not None:
+        raise ValueError("cannot exactly resume a CUDA checkpoint without CUDA")
+    torch.set_rng_state(cpu.cpu())
+    try:
+        np.random.set_state(cast(tuple, typed_state["numpy"]))
+        random.setstate(cast(tuple, typed_state["python"]))
+    except (TypeError, ValueError) as error:
+        raise ValueError("resume checkpoint has an invalid Python or NumPy RNG state") from error
+
+
+def nested_loader_checkpoint_state(
+    cfg: TrainConfig,
+    *,
+    update: int,
+    phase_index: int,
+    loader_state: dict[str, object],
+) -> dict[str, object]:
+    """Persist an exact phase-local loader state without admitting future rows."""
+    expected_phase = data_phase_for_completed_updates(update - 1)
+    if phase_index != expected_phase:
+        raise ValueError(f"update {update} belongs to data phase {expected_phase}, got {phase_index}")
+    phase_complete = update in DATA_UPDATES
+    next_phase = phase_index + 1 if phase_complete else phase_index
+    return {
+        "schema": _NESTED_LOADER_STATE_SCHEMA,
+        "completed_updates": update,
+        "phase_index": next_phase,
+        "phase_selection_sha256": (
+            None if next_phase == len(DATA_UPDATES) else phase_data_selection(cfg, next_phase).sha256
+        ),
+        "physical_loader": None if phase_complete else loader_state,
+    }
+
+
+def resume_data_phase(
+    cfg: TrainConfig,
+    resume_state: dict[str, object] | None,
+) -> tuple[int, dict[str, object] | None]:
+    """Validate and return the phase-local physical-loader resume state."""
+    if resume_state is None:
+        return 0, None
+    raw_step = resume_state["step"]
+    if not isinstance(raw_step, int) or isinstance(raw_step, bool):
+        raise ValueError("resume checkpoint has an invalid optimizer step")
+    completed_updates = raw_step + 1
+    expected_phase = data_phase_for_completed_updates(completed_updates)
+    raw = resume_state.get("loader")
+    if not isinstance(raw, Mapping):
+        raise ValueError("resume checkpoint does not contain nested O54 replay-loader state")
+    typed_raw = cast(Mapping[str, object], raw)
+    if typed_raw.get("schema") != _NESTED_LOADER_STATE_SCHEMA:
+        raise ValueError("resume checkpoint does not contain nested O54 replay-loader state")
+    if typed_raw.get("completed_updates") != completed_updates or typed_raw.get("phase_index") != expected_phase:
+        raise ValueError("resume checkpoint data phase does not match its optimizer update")
+    expected_sha = None if expected_phase == len(DATA_UPDATES) else phase_data_selection(cfg, expected_phase).sha256
+    if typed_raw.get("phase_selection_sha256") != expected_sha:
+        raise ValueError("resume checkpoint data-phase selection changed")
+    physical = typed_raw.get("physical_loader")
+    if expected_phase == len(DATA_UPDATES):
+        if physical is not None:
+            raise ValueError("terminal replay-loader state must not contain a physical loader")
+        return expected_phase, None
+    if completed_updates in DATA_UPDATES:
+        if physical is not None:
+            raise ValueError("a completed data phase must not retain prefetched replay state")
+        return expected_phase, None
+    if not isinstance(physical, dict):
+        raise ValueError("within-phase resume has no physical replay-loader state")
+    return expected_phase, cast(dict[str, object], physical)
+
+
 def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
-    """Return the natural MDS replay-count mixture."""
-    return tuple(float(streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name]) for name in cfg.source_names)
+    """Return the deduplicated natural replay-count mixture."""
+    return tuple(
+        float(streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] - len(DEDUPLICATED_SOURCE_ROWS.get(name, ())))
+        for name in cfg.source_names
+    )
 
 
 def source_manifest_sha256(cfg: TrainConfig) -> dict[str, str]:
@@ -3834,6 +4276,7 @@ def save_boundary_checkpoint(
             "identity_masker": (
                 loader_state.get("identity_masker") if identity_masker_state is None else identity_masker_state
             ),
+            "rng": capture_training_rng_state(),
         },
     )
     os.replace(temporary, snapshot)
@@ -3897,8 +4340,9 @@ def _make_train_loader(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
     player_lookup: ReplayPlayerLookup,
+    phase_index: int,
 ) -> PhysicalShardReplayLoader[TrainBatch]:
-    selection = data_selection(cfg)
+    selection = phase_data_selection(cfg, phase_index)
     adapter = MDSStorageAdapter(selection, download_retry=cfg.download_retry)
     adapter.validate_manifests(
         expected_sha256=source_manifest_sha256(cfg),
@@ -3937,8 +4381,8 @@ def _make_train_loader(
     )
     try:
         _require_loader_disk(train_loader)
-        if sum(train_loader.source_sample_counts.values()) != cfg.train_replays:
-            raise ValueError("physical-shard loader does not expose every selected all-44 training row")
+        if sum(train_loader.source_sample_counts.values()) != DATA_PHASE_REPLAYS[phase_index]:
+            raise ValueError("physical-shard loader does not expose every selected nested-phase row")
         if train_loader.minimum_replay_gap_batches < cfg.minimum_replay_gap_batches:
             raise ValueError(
                 f"replay ring is too small for the {cfg.minimum_replay_gap_batches}-batch reuse-gap contract"
@@ -3952,12 +4396,13 @@ def _make_train_loader(
 def _make_loaders(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
+    phase_index: int,
     player_lookup: ReplayPlayerLookup | None = None,
 ) -> tuple[PhysicalShardReplayLoader[TrainBatch], list[TrainBatch]]:
     """Build physical-shard training and the unchanged generic validation cohort."""
     if player_lookup is None:
         player_lookup = ReplayPlayerLookup(load_identity_sidecar(cfg).by_replay)
-    train_loader = _make_train_loader(cfg, stats, player_lookup)
+    train_loader = _make_train_loader(cfg, stats, player_lookup, phase_index)
     try:
         val_loader = make_loader(
             data_root=None,
@@ -3989,6 +4434,7 @@ def _make_loaders(
 
 @dataclass(slots=True)
 class PreparedTrainingData:
+    phase_index: int
     loader: PhysicalShardReplayLoader[TrainBatch]
     validation: list[TrainBatch]
     iterator: Iterator[TrainBatch]
@@ -4005,13 +4451,18 @@ def _prepare_training_data(
     resume_state: dict[str, object] | None,
 ) -> PreparedTrainingData:
     """Start shard workers and the first batch before CUDA allocation."""
-    train_loader, validation = _make_loaders(cfg, stats, ReplayPlayerLookup(sidecar.by_replay))
+    phase_index, physical_resume_state = resume_data_phase(cfg, resume_state)
+    if phase_index == len(DATA_UPDATES):
+        raise ValueError("cannot resume a completed nested-data trajectory")
+    train_loader, validation = _make_loaders(
+        cfg,
+        stats,
+        phase_index,
+        ReplayPlayerLookup(sidecar.by_replay),
+    )
     try:
-        if resume_state is not None:
-            loader_state = resume_state.get("loader")
-            if not isinstance(loader_state, dict):
-                raise ValueError("resume checkpoint does not contain O54 replay-loader state")
-            train_loader.load_state_dict(cast(dict[str, object], loader_state))
+        if physical_resume_state is not None:
+            train_loader.load_state_dict(physical_resume_state)
         worker_started = time.monotonic()
         train_iterator = iter(train_loader)
         worker_start_seconds = time.monotonic() - worker_started
@@ -4035,6 +4486,7 @@ def _prepare_training_data(
         train_loader.close()
         raise
     return PreparedTrainingData(
+        phase_index,
         train_loader,
         validation,
         train_iterator,
@@ -4048,6 +4500,8 @@ def _prepare_training_data(
 def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> None:
     """Start tracking and declare the experiment's logging semantics."""
     selection = data_selection(cfg)
+    cumulative_selections = tuple(cumulative_data_selection(cfg, exponent) for exponent in DATA_EXPONENTS)
+    phase_selections = tuple(phase_data_selection(cfg, index) for index in range(len(DATA_EXPONENTS)))
     wandb.init(
         project="hal",
         name=run_name,
@@ -4078,6 +4532,11 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "powerlines_reference_weight_decay": POWERLINES_REFERENCE_WEIGHT_DECAY,
             "data_protocol": cfg.data_protocol,
             "source_selection_sha256": selection.sha256,
+            "nested_cumulative_selection_sha256": [item.sha256 for item in cumulative_selections],
+            "nested_phase_selection_sha256": [item.sha256 for item in phase_selections],
+            "data_exponents": DATA_EXPONENTS,
+            "data_endpoint_updates": DATA_UPDATES,
+            "data_endpoint_replays": DATA_REPLAYS,
             "source_manifest_sha256": source_manifest_sha256(cfg),
             "mds_manifest_schema_sha256": cfg.mds_manifest_schema_sha256,
         },
@@ -4104,7 +4563,14 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     )
     wandb.run.summary["optimizer/adam_update_clip_threshold"] = None
     wandb.run.summary["optimizer/lr_schedule"] = "512-update linear warmup then constant"
+    wandb.run.summary["optimizer/weight_decay_treatment"] = "fixed at the D=2^31 endpoint for the full trajectory"
     wandb.run.summary["optimizer/update_clip_semantics"] = "global pre-step gradient norm clipping only"
+    wandb.run.summary["data/nesting"] = (
+        "each phase reads only its disjoint source-row range; cumulative replay unions are nested"
+    )
+    wandb.run.summary["data/representation_metadata"] = (
+        "frozen O52 all-44 normalization statistics and player vocabulary; no future-phase replay enters a batch"
+    )
     wandb.run.summary["evaluation/automatic"] = cfg.automatic_evaluation
     if cfg.wandb_log_code:
         log_wandb_code(wandb.run)
@@ -4125,19 +4591,19 @@ def _log_training_summary(
     for name, value in parameter_counts.items():
         wandb.run.summary[f"parameters/{name}"] = value
 
-    unique_replays = cfg.train_replays
-    unique_frames = cfg.train_frames
+    unique_replays = DATA_REPLAYS[-1]
     source_weights = source_mixture_weights(cfg)
     source_weight_total = sum(source_weights)
     wandb.run.summary["data/unique_replays"] = unique_replays
-    wandb.run.summary["data/unique_frames"] = unique_frames
+    wandb.run.summary["data/reference_corpus_replays"] = cfg.train_replays
+    wandb.run.summary["data/reference_corpus_frames"] = cfg.train_frames
     wandb.run.summary["data/source_list_sha256"] = cfg.source_list_sha256
-    wandb.run.summary["data/source_selection_sha256"] = cfg.selection_sha256
+    wandb.run.summary["data/reference_corpus_selection_sha256"] = cfg.selection_sha256
+    wandb.run.summary["data/initial_phase_selection_sha256"] = train_loader.selection.sha256
     wandb.run.summary["data/mds_manifest_schema_sha256"] = cfg.mds_manifest_schema_sha256
     wandb.run.summary["data/loader_protocol"] = cfg.data_protocol
     supervised_positions = cfg.max_steps * cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start)
     wandb.run.summary["data/processed_loss_positions"] = supervised_positions
-    wandb.run.summary["data/effective_epochs"] = supervised_positions / unique_frames
     wandb.run.summary["data/D_over_N"] = supervised_positions / parameter_counts["total"]
     wandb.run.summary["data/nominal_loss_positions_per_update"] = cfg.batch_size * (
         cfg.arch.L_ctx - cfg.arch.direct_loss_start
@@ -4148,7 +4614,7 @@ def _log_training_summary(
     wandb.run.summary["data/replay_slots"] = train_loader.replay_slots
     wandb.run.summary["data/generation_windows"] = cfg.windows_per_generation
     wandb.run.summary["data/generations_per_replay"] = cfg.generations_per_replay
-    wandb.run.summary["data/epoch_semantics"] = "replay generations committed to ring / unique train replays"
+    wandb.run.summary["data/epoch_semantics"] = "phase-local replay generations committed to ring / phase replays"
     wandb.run.summary["data/replay_phase_block_batches"] = cfg.replay_phase_block_batches
     wandb.run.summary["data/minimum_replay_gap_batches"] = train_loader.minimum_replay_gap_batches
     wandb.run.summary["system/disk/required_bytes"] = train_loader.required_disk_bytes
@@ -4526,19 +4992,9 @@ def _loader_state_boundaries(cfg: TrainConfig, run_stop: int) -> tuple[int, ...]
     return tuple(sorted(boundaries))
 
 
-def iso_compute_updates(width: int) -> tuple[int, ...]:
-    return tuple(
-        update
-        for checkpoints in ISO_COMPUTE_CHECKPOINTS.values()
-        for candidate_width, update in checkpoints
-        if candidate_width == width
-    )
-
-
 def scientific_checkpoint_updates(cfg: TrainConfig) -> tuple[int, ...]:
-    is_iso_compute_endpoint = cfg.max_steps in iso_compute_updates(cfg.arch.d_model)
-    is_fixed_d_endpoint = cfg.fixed_d_frontier and cfg.max_steps == 16_384
-    return (cfg.max_steps,) if is_iso_compute_endpoint or is_fixed_d_endpoint else ()
+    """Return every nested-data endpoint reached by this trajectory."""
+    return tuple(update for update in DATA_UPDATES if update <= cfg.max_steps)
 
 
 def train(
@@ -4555,6 +5011,8 @@ def train(
     validate_config(cfg)
     if not smoke and not cfg.latency_manifest_sha256:
         raise ValueError("production training requires the measured latency manifest SHA-256")
+    if not smoke and cfg.target_positions != DATA_POSITIONS[-1]:
+        raise ValueError(f"production nested-data training must end at D=2^31, got {cfg.target_positions}")
     if not smoke and stop_after_update is not None:
         raise ValueError("stop_after_update is a smoke-only control")
     if stop_after_update is not None and not 1 <= stop_after_update <= cfg.max_steps:
@@ -4602,6 +5060,7 @@ def train(
         if not isinstance(identity_state, dict):
             raise ValueError("resume checkpoint has no identity-mask RNG state")
         identity_masker.load_state_dict(identity_state)
+        restore_training_rng_state(resume_state.get("rng"))
         start_step = int(resume_state["step"]) + 1
         positions_per_update = cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start)
         actual_positions = int(resume_state.get("actual_loss_positions", start_step * positions_per_update))
@@ -4611,6 +5070,7 @@ def train(
             )
 
     trunk_fn, temporal_fn = _training_functions(model, cfg)
+    phase_index = prepared_data.phase_index
     train_loader, val_cache = prepared_data.loader, prepared_data.validation
     _compile_synthetic_forward_backward(
         model,
@@ -4673,6 +5133,7 @@ def train(
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
             eval_due = update in evaluation_updates and update < run_stop
             scientific_due = update in scientific_checkpoint_updates(cfg) and update < run_stop
+            data_phase_due = update in DATA_UPDATES
             ckpt_due = (cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop) or scientific_due
             boundary_due = val_due or eval_due or ckpt_due
             state_boundary_due = boundary_due or update == run_stop
@@ -4745,6 +5206,8 @@ def train(
                     "data/supervised_prefixes": actual_positions,
                     "data/future_targets": actual_positions * len(cfg.arch.head_offsets),
                     "data/dropped_windows": 0,
+                    "data/phase_index": phase_index,
+                    "data/admitted_unique_replays": DATA_REPLAYS[phase_index],
                     "loader/queue_depth": submitted_batches,
                     "loader/submitted_cpu_batches": submitted_batches,
                     "loader/ready_cpu_batches": ready_batches,
@@ -4807,7 +5270,12 @@ def train(
                     milestone=scientific_due,
                     wandb_id=None if wandb.run is None else wandb.run.id,
                     actual_loss_positions=actual_positions,
-                    loader_state=train_loader.state_dict(),
+                    loader_state=nested_loader_checkpoint_state(
+                        cfg,
+                        update=update,
+                        phase_index=phase_index,
+                        loader_state=train_loader.state_dict(),
+                    ),
                     identity_masker_state=identity_masker.state_dict(),
                 )
             boundary_metrics: dict[str, float] = {}
@@ -4827,7 +5295,24 @@ def train(
                 )
             if boundary_metrics:
                 wandb.log({"global_step": update, **boundary_metrics})
-            if update < run_stop and boundary_due:
+            transitioned_phase = data_phase_due and update < run_stop
+            if transitioned_phase:
+                batch_prefetcher.close()
+                train_loader.close()
+                phase_index += 1
+                train_loader = _make_train_loader(
+                    cfg,
+                    stats,
+                    ReplayPlayerLookup(sidecar.by_replay),
+                    phase_index,
+                )
+                batch_prefetcher = DeviceBatchPrefetcher(train_loader, cfg, DEVICE, identity_masker)
+                print(
+                    f"[data] admitted phase {phase_index + 1}/{len(DATA_UPDATES)} "
+                    f"selection={train_loader.selection.sha256}",
+                    flush=True,
+                )
+            if update < run_stop and boundary_due and not transitioned_phase:
                 next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary > update)
                 batch_prefetcher.fill_lookahead(next_state_boundary - update)
                 batch_prefetcher.stage_next()
@@ -4844,7 +5329,12 @@ def train(
             replay_dir=replay_dir,
             uploader=uploader,
             loader_wait_fractions=loader_wait_fractions,
-            loader_state=train_loader.state_dict(),
+            loader_state=nested_loader_checkpoint_state(
+                cfg,
+                update=run_stop,
+                phase_index=phase_index,
+                loader_state=train_loader.state_dict(),
+            ),
             identity_masker_state=identity_masker.state_dict(),
             update=run_stop,
             actual_loss_positions=actual_positions,
@@ -4912,6 +5402,8 @@ def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfi
     vocabulary = PlayerVocabulary(decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
     model = GPT(cfg, vocabulary).to(device)
     model.load_state_dict(state["model"])
+    if torch.device(device).type == "cuda":
+        model.to(dtype=torch.bfloat16)
     model.eval()
     stats = load_stats(cfg)
     return model, cfg, stats, state
@@ -5056,7 +5548,7 @@ class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
     width: int | None = None
     updates: int | None = None
-    latency_manifest: Path = Path("docs/experiments/054_latency_manifest.json")
+    latency_manifest: Path = Path("docs/experiments/054_iso_data_latency_manifest.json")
     proxy: bool = False
     comment: str = ""
     resume: str | None = None
@@ -5087,7 +5579,7 @@ class EvalArgs:
 
 @dataclass
 class LatencyPreflightArgs:
-    output: Path = Path("docs/experiments/054_latency_manifest.json")
+    output: Path = Path("docs/experiments/054_iso_data_latency_manifest.json")
 
 
 @dataclass
@@ -5098,13 +5590,13 @@ class LatencyDiagnosticArgs:
 
 @dataclass
 class StudyPlanArgs:
-    latency_manifest: Path = Path("docs/experiments/054_latency_manifest.json")
+    latency_manifest: Path = Path("docs/experiments/054_iso_data_latency_manifest.json")
 
 
 @dataclass
 class AnalyzeArgs:
     wandb_path: str = "ericyuegu/hal"
-    latency_manifest: Path = Path("docs/experiments/054_latency_manifest.json")
+    latency_manifest: Path = Path("docs/experiments/054_iso_data_latency_manifest.json")
     output: Path = Path("results/054_bc_capacity_latency")
 
 
@@ -5140,7 +5632,13 @@ def main(args: Command) -> None:
             },
         )
         endpoints = _analysis_endpoints(runs, latency_sha256)
-        report = write_analysis_artifacts(endpoints, latency_rows, args.output)
+        expected = {(endpoint.width, update) for endpoint in study_endpoints(latency_rows) for update in DATA_UPDATES}
+        if set(endpoints) != expected:
+            missing = sorted(expected - set(endpoints))
+            extra = sorted(set(endpoints) - expected)
+            raise ValueError(f"O54 analysis endpoint mismatch: missing={missing}, extra={extra}")
+        match_rows = load_analysis_match_rows(endpoints, latency_rows, args.output)
+        report = write_analysis_artifacts(endpoints, latency_rows, args.output, match_rows=match_rows)
         print(json.dumps(report, sort_keys=True, indent=2), flush=True)
         return
     if isinstance(args, StudyPlanArgs):
@@ -5154,23 +5652,33 @@ def main(args: Command) -> None:
             for endpoint in endpoints
         )
         total_compute = sum(computes)
+        training_hours = sum(
+            endpoint.updates * B200_REFERENCE_UPDATE_SECONDS[endpoint.width] / 3_600 for endpoint in endpoints
+        )
         print(
             f"[study] latency_manifest_sha256={latency_sha256} runs={len(endpoints)} "
-            f"compute={total_compute / 1e18:.3f} EFLOPs working_cost=$275 intervention=$825",
+            f"compute={total_compute / 1e18:.3f} EFLOPs projected_training_hours={training_hours:.1f} "
+            f"working_cost=${STUDY_WORKING_COST_DOLLARS} "
+            f"warning=${2 * STUDY_WORKING_COST_DOLLARS} intervention=${3 * STUDY_WORKING_COST_DOLLARS}",
             flush=True,
         )
-        print("[study] wall-time and revised cost require approved RTX PRO 6000 throughput probes", flush=True)
+        print(
+            "[study] projection uses conservative per-width B200 update times "
+            "W256=0.25s W512=0.30s W768=0.40s W1024=1.00s; verify after launch",
+            flush=True,
+        )
         for endpoint, compute, command in zip(
             endpoints,
             computes,
             study_launch_commands(latency_rows, args.latency_manifest),
             strict=True,
         ):
-            working_cost = 275 * compute / total_compute
+            endpoint_hours = endpoint.updates * B200_REFERENCE_UPDATE_SECONDS[endpoint.width] / 3_600
+            training_cost = endpoint_hours * MODAL_TRAINING_DOLLARS_PER_HOUR
             print(
                 f"[study] W{endpoint.width}/L{TRUNK_DEPTHS[endpoint.width]} updates={endpoint.updates:,} "
                 f"roles={','.join(endpoint.roles)} compute={compute / 1e18:.4f} EFLOPs "
-                f"working_cost=${working_cost:.2f}",
+                f"projected_training_hours={endpoint_hours:.2f} training_cost=${training_cost:.2f}",
                 flush=True,
             )
             print(shlex.join(command), flush=True)
@@ -5261,7 +5769,7 @@ def main(args: Command) -> None:
         num_workers=cfg.num_workers if args.resume_num_workers is None else args.resume_num_workers,
         eval_max_parallel=cfg.eval_max_parallel if args.eval_max_parallel is None else args.eval_max_parallel,
     )
-    if not args.smoke:
+    if not args.smoke or args.latency_manifest.is_file():
         latency_rows, latency_sha256 = load_latency_manifest(args.latency_manifest)
         try:
             latency_row = latency_rows[cfg.arch.d_model]
@@ -5275,10 +5783,7 @@ def main(args: Command) -> None:
             cfg,
             timing=latency_row.timing,
             latency_manifest_sha256=latency_sha256,
-            fixed_d_frontier=cfg.arch.d_model in latency_bucket_frontier(latency_rows),
         )
-        if cfg.arch.d_model in (640, 896) and not cfg.fixed_d_frontier:
-            raise SystemExit(f"width {cfg.arch.d_model} does not fill an observed latency bucket")
     stats = load_stats(cfg)
     train(
         cfg,

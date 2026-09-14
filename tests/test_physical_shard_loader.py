@@ -68,6 +68,15 @@ def test_selection_from_sources_owns_the_canonical_identity() -> None:
     assert selection.sha256 == "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
 
 
+def test_selection_range_has_distinct_identity_and_validates_exclusions() -> None:
+    selection = PhysicalShardSelection.from_sources((SourceRowSelection("source", 19, (11,), start=7),))
+
+    assert selection.row_count == 11
+    assert selection.sha256 != PhysicalShardSelection.from_sources((SourceRowSelection("source", 12),)).sha256
+    with pytest.raises(ValueError, match="outside"):
+        SourceRowSelection("source", 19, (3,), start=7)
+
+
 def _manifest_payload(*, rows: int = 19, version: int = 2, encoding: str = "value") -> bytes:
     return json.dumps(
         {
@@ -144,6 +153,21 @@ def test_shard_plan_covers_prefix_once_and_excludes_only_sidecar_rows() -> None:
     assert exposed == [row for row in range(19) if row not in (3, 11)]
     assert tasks[-1].row_stop == 7
     assert sum(task.row_count for task in tasks) == selection.row_count
+
+
+def test_shard_plan_covers_a_cross_shard_range_once() -> None:
+    selection = PhysicalShardSelection.from_sources((SourceRowSelection("source", 25, (11, 19), start=7),))
+    shard_sizes = (5, 7, 11, 13)
+
+    tasks = build_shard_plan(selection, {"source": SourceManifest("source", shard_sizes)})
+    exposed = [sum(shard_sizes[: task.shard]) + row for task in tasks for row in task.selected_rows]
+
+    assert exposed == [row for row in range(7, 25) if row not in (11, 19)]
+    assert [(task.shard, task.row_start, task.row_stop) for task in tasks] == [
+        (1, 2, 7),
+        (2, 0, 11),
+        (3, 0, 2),
+    ]
 
 
 def test_shard_permutation_is_deterministic_and_stable_across_epochs() -> None:

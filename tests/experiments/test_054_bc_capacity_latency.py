@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 from contextlib import nullcontext
+from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,7 +30,7 @@ exp = _load()
 
 
 def test_official_timing_rows_and_offset_weights() -> None:
-    expected_delays = (1, 1, 2, 2, 3, 4, 5, 6)
+    expected_delays = (1, 2, 3, 6)
     for width, delay in zip(exp.WIDTHS, expected_delays, strict=True):
         timing = exp.timing_for_width(width)
         assert timing == exp.TimingConfig(delay, delay, 2 * delay)
@@ -56,28 +57,38 @@ def test_behavior_cloning_objective_normalizes_by_offset_weight_sum() -> None:
 
 
 def test_parameter_and_compute_contracts() -> None:
-    expected_totals = {
-        128: 1_692_953,
-        256: 5_764_505,
-        384: 17_094_169,
-        512: 39_024_281,
-        640: 70_178_585,
-        768: 121_763_737,
-        896: 194_172_953,
-        1024: 278_362_265,
+    expected_counts = {
+        256: (3_932_160, 441_072, 202_211, 861_382, 5_436_825),
+        512: (34_603_008, 2_901_616, 535_139, 984_518, 39_024_281),
+        768: (113_246_208, 9_359_856, 999_139, 1_107_654, 124_712_857),
+        1024: (264_241_152, 21_781_872, 1_594_211, 1_230_790, 288_848_025),
     }
-    for width, expected in expected_totals.items():
+    for width, expected in expected_counts.items():
         cfg = exp.config_for_width(width)
         assert cfg.arch.n_layers == exp.TRUNK_DEPTHS[width]
+        assert cfg.arch.temporal_layers == exp.TEMPORAL_DEPTHS[width]
         model = exp.GPT(cfg)
         counts = exp.subsystem_parameter_counts(model)
-        assert counts["total"] == expected
+        assert (
+            tuple(counts[name] for name in ("trunk", "temporal_decoder", "group_heads", "inputs", "total")) == expected
+        )
         assert exp.approximate_training_flops_per_update(cfg, counts) == (
             6 * 512 * 128 * exp.effective_parameter_count(counts)
         )
-    assert exp.iso_compute_updates(256) == (16_384, 84_320)
-    assert exp.scientific_checkpoint_updates(exp.config_for_width(768)) == (35_072,)
-    assert exp.scientific_checkpoint_updates(exp.config_for_width(256)) == (84_320,)
+    assert exp.DATA_UPDATES == (4_096, 8_192, 16_384, 32_768)
+    assert exp.DATA_REPLAYS == (65_536, 131_072, 262_144, 524_288)
+    assert exp.scientific_checkpoint_updates(exp.config_for_width(768)) == exp.DATA_UPDATES
+
+
+def test_final_readout_lr_uses_the_declared_fan_in_scaling() -> None:
+    for width in exp.WIDTHS:
+        cfg = exp.config_for_width(width)
+        roles = exp.optimizer_roles(exp.GPT(cfg), cfg)
+        output_roles = [role for role in roles.values() if role.lr_kind == "output"]
+
+        assert output_roles
+        assert {role.fan_in_multiplier for role in output_roles} == {width / 256}
+        assert {exp._role_lr(role, cfg) for role in output_roles} == {cfg.adam_lr * 256 / width}
 
 
 def test_data_selection_is_the_frozen_all_44_order() -> None:
@@ -86,21 +97,90 @@ def test_data_selection_is_the_frozen_all_44_order() -> None:
 
     assert len(selection.sources) == 44
     assert selection.sha256 == cfg.selection_sha256
-    assert selection.row_count == cfg.train_replays == 1_295_370
+    assert selection.row_count == cfg.train_replays == 1_295_368
+    assert {
+        source.source: source.excluded_rows for source in selection.sources if source.excluded_rows
+    } == exp.DEDUPLICATED_SOURCE_ROWS
     assert cfg.replay_slots == 65_536
     assert cfg.generations_per_replay * cfg.windows_per_generation == 32
 
 
-def test_powerlines_weight_decay_scales_with_duration_and_capacity() -> None:
-    short = exp.config_for_width(128, updates=1_000)
-    long = exp.config_for_width(128, updates=10_000)
+def test_nested_data_phases_are_disjoint_and_have_exact_cumulative_unions() -> None:
+    cfg = exp.config_for_width(256)
+    phases = [exp.phase_data_selection(cfg, index) for index in range(len(exp.DATA_EXPONENTS))]
+    cumulative = [exp.cumulative_data_selection(cfg, exponent) for exponent in exp.DATA_EXPONENTS]
+
+    assert tuple(selection.row_count for selection in phases) == exp.DATA_PHASE_REPLAYS
+    assert tuple(selection.row_count for selection in cumulative) == exp.DATA_REPLAYS
+    for source_index in range(len(cfg.source_names)):
+        phase_ranges = [
+            (selection.sources[source_index].start, selection.sources[source_index].stop) for selection in phases
+        ]
+        assert phase_ranges[0][0] == 0
+        assert all(left[1] == right[0] for left, right in zip(phase_ranges[:-1], phase_ranges[1:], strict=True))
+        assert tuple(stop for _start, stop in phase_ranges) == tuple(
+            selection.sources[source_index].stop for selection in cumulative
+        )
+
+
+def test_nested_loader_checkpoint_discards_a_completed_phase() -> None:
+    cfg = exp.config_for_width(256)
+    within = exp.nested_loader_checkpoint_state(
+        cfg,
+        update=4_095,
+        phase_index=0,
+        loader_state={"cursor": "exact"},
+    )
+    boundary = exp.nested_loader_checkpoint_state(
+        cfg,
+        update=4_096,
+        phase_index=0,
+        loader_state={"cursor": "must-not-leak"},
+    )
+
+    assert within["physical_loader"] == {"cursor": "exact"}
+    assert boundary["physical_loader"] is None
+    resume = {"step": 4_095, "loader": boundary}
+    phase_index, physical = exp.resume_data_phase(cfg, resume)
+    assert phase_index == 1
+    assert physical is None
+
+
+def test_training_rng_state_restores_the_next_random_draws() -> None:
+    exp.torch.manual_seed(54)
+    exp.np.random.seed(55)
+    exp.random.seed(56)
+    state = exp.capture_training_rng_state()
+
+    expected_torch = exp.torch.rand(4)
+    expected_numpy = exp.np.random.random(4)
+    expected_python = [exp.random.random() for _ in range(4)]
+    exp.torch.manual_seed(1)
+    exp.np.random.seed(2)
+    exp.random.seed(3)
+
+    exp.restore_training_rng_state(state)
+
+    exp.torch.testing.assert_close(exp.torch.rand(4), expected_torch)
+    np.testing.assert_array_equal(exp.np.random.random(4), expected_numpy)
+    assert [exp.random.random() for _ in range(4)] == expected_python
+
+
+def test_training_rng_state_is_required_for_resume() -> None:
+    with pytest.raises(ValueError, match="complete O54 RNG state"):
+        exp.restore_training_rng_state(None)
+
+
+def test_powerlines_weight_decay_is_fixed_at_d31_within_each_model() -> None:
+    short = exp.config_for_width(256, updates=1_000)
+    long = exp.config_for_width(256, updates=10_000)
     short_optimizer = exp.make_optimizer(exp.GPT(short), short)
     long_optimizer = exp.make_optimizer(exp.GPT(long), long)
 
-    assert exp.config_for_width(512, updates=16_384).adam_weight_decay == pytest.approx(1e-4)
-    assert short.adam_weight_decay > long.adam_weight_decay
+    assert exp.powerlines_weight_decay(2**30, exp.PARAMETER_COUNT_CONTRACTS[512]["total"]) == pytest.approx(1e-4)
+    assert short.adam_weight_decay == long.adam_weight_decay
     assert short.adam_weight_decay == pytest.approx(
-        exp.powerlines_weight_decay(short.target_positions, exp.PARAMETER_COUNT_CONTRACTS[128]["total"])
+        exp.powerlines_weight_decay(2**31, exp.PARAMETER_COUNT_CONTRACTS[256]["total"])
     )
     assert {group["lr"] for group in short_optimizer.param_groups} == {
         group["lr"] for group in long_optimizer.param_groups
@@ -231,7 +311,7 @@ def test_latency_manifest_is_hashed_and_strict(tmp_path: Path, monkeypatch: pyte
     )
     rows = tuple(
         exp.LatencyRow(width, delay, delay, 2 * delay, 0.001, 1 / 60)
-        for width, delay in zip(exp.WIDTHS, (1, 1, 2, 2, 3, 4, 5, 6), strict=True)
+        for width, delay in zip(exp.WIDTHS, (1, 2, 3, 4), strict=True)
     )
     path = tmp_path / "latency.json"
     dolphin = exp.DolphinLoadEvidence("AppRun", "d" * 64)
@@ -276,7 +356,7 @@ def test_latency_manifest_is_hashed_and_strict(tmp_path: Path, monkeypatch: pyte
 
     assert actual == digest
     assert tuple(loaded) == exp.WIDTHS
-    assert exp.latency_bucket_frontier(loaded) == (256, 512, 640, 768, 896, 1024)
+    assert exp.latency_bucket_frontier(loaded) == exp.WIDTHS
     document = path.read_text().replace('"p99_seconds": 0.001', '"p99_seconds": 0.002', 1)
     path.write_text(document)
     with pytest.raises(ValueError, match="SHA-256"):
@@ -373,13 +453,11 @@ def test_latency_preflight_measures_all_widths_before_rejecting(
     assert sorted(measured) == sorted(exp.WIDTHS * exp.LATENCY_TRIALS)
 
 
-def test_latency_preflight_selects_timing_that_passes_all_three_trials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_latency_preflight_selects_smallest_passing_timing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def benchmark(width: int, **kwargs):
         trial = kwargs["trial_index"]
         requested = kwargs.get("delay")
-        local_delay = 2 if width == 128 and trial == 1 else 1
+        local_delay = 2 if width == 512 else 1
         delay = local_delay if requested is None else requested
         probe = exp.LatencyProbe(
             width=width,
@@ -412,31 +490,41 @@ def test_latency_preflight_selects_timing_that_passes_all_three_trials(
     exp.run_latency_preflight(path)
     rows, _digest = exp.load_latency_manifest(path)
 
-    assert rows[128].inference_delay_frames == 2
-    assert all(rows[width].inference_delay_frames == 1 for width in exp.WIDTHS[1:])
+    assert rows[512].inference_delay_frames == 2
+    assert all(rows[width].inference_delay_frames == 1 for width in (256, 768, 1024))
     probes, _raw_digest = exp.load_latency_probe_report(path.with_suffix(".probes.json"))
     assert len(probes["width_orders"]) == exp.LATENCY_TRIALS
     assert all(sorted(order) == list(exp.WIDTHS) for order in probes["width_orders"])
 
 
-def test_study_matrix_adds_only_missing_fixed_data_frontier_runs() -> None:
+def test_study_matrix_uses_one_nested_trajectory_per_architecture() -> None:
     rows = {
         width: exp.LatencyRow(width, delay, delay, 2 * delay, 0.001, 1 / 60)
-        for width, delay in zip(exp.WIDTHS, (1, 2, 2, 2, 2, 3, 3, 3), strict=True)
+        for width, delay in zip(exp.WIDTHS, (1, 2, 3, 4), strict=True)
     }
 
     endpoints = exp.study_endpoints(rows)
 
-    assert len(endpoints) == 11
-    assert {(endpoint.width, endpoint.updates) for endpoint in endpoints if endpoint.roles == ("fixed-D",)} == {
-        (128, 16_384),
-        (640, 16_384),
-    }
-    assert next(endpoint for endpoint in endpoints if endpoint.width == 1024).roles == ("C3", "fixed-D")
-    commands = exp.study_launch_commands(rows, Path("docs/experiments/054_latency_manifest.json"))
-    assert len(commands) == 11
+    assert [(endpoint.width, endpoint.updates) for endpoint in endpoints] == [
+        (256, 32_768),
+        (512, 32_768),
+        (768, 32_768),
+        (1024, 32_768),
+    ]
+    commands = exp.study_launch_commands(rows, Path("docs/experiments/054_iso_data_latency_manifest.json"))
+    assert len(commands) == 4
     assert all(
-        command[:6] == ("uv", "run", "scripts/launch_modal.py", "--gpu", "RTX-PRO-6000", "--app-name")
+        command[:8]
+        == (
+            "uv",
+            "run",
+            "scripts/launch_modal.py",
+            "--gpu",
+            "B200",
+            "--closed-loop-gpu",
+            "RTX-PRO-6000",
+            "--app-name",
+        )
         for command in commands
     )
 
@@ -448,53 +536,158 @@ def test_checkpoint_contains_no_advantage_or_value_configuration() -> None:
     assert not any("awr" in name or "value" in name or "return" in name for name in state)
 
 
-def test_analysis_requires_a_concave_bracketed_capacity_vertex() -> None:
-    optimum, response = exp.fit_quadratic_vertex((100, 1_000, 10_000), (0.0, 1.0, 0.0))
-
-    assert optimum == pytest.approx(1_000)
-    assert response == pytest.approx(1.0)
-    width, total = exp.vertex_capacity(exp.effective_parameter_count(exp.PARAMETER_COUNT_CONTRACTS[512]))
-    assert width == pytest.approx(512)
-    assert total == pytest.approx(exp.PARAMETER_COUNT_CONTRACTS[512]["total"])
-    with pytest.raises(ValueError, match="not concave"):
-        exp.fit_quadratic_vertex((100, 1_000, 10_000), (0.0, -1.0, 0.0))
-    with pytest.raises(ValueError, match="not bracketed"):
-        exp.fit_quadratic_vertex((100, 1_000, 10_000), (-9.0, -4.0, -1.0))
+def test_experiment_rejects_a_non_bfloat16_treatment() -> None:
+    with pytest.raises(ValueError, match="BF16 training and inference"):
+        exp.validate_config(replace(exp.config_for_width(256), amp_dtype="float32"))
 
 
-def test_analysis_writes_scaling_fit_and_fixed_data_latency_plot(tmp_path: Path) -> None:
+def test_analysis_rejects_an_evaluation_from_a_different_inference_path() -> None:
+    timing = exp.LatencyRow(256, 1, 1, 2, 0.01, 1 / 60)
+    pairs, egos, cpus, schedule_sha256 = exp.assert_protocol_diversity(96)
+    protocol = asdict(
+        exp.EvalProtocol(
+            fixed_ego_character=None,
+            ego_player_id=exp.MASKED_PLAYER_ID,
+            ego_player_code=None,
+            opponent_identity_conditioned=False,
+            n_matchups=96,
+            allowed_cpus=32,
+            hardware_wave_bucket=32,
+            max_parallel=32,
+            max_frames=7_200,
+            seed=0,
+            cpu_level=9,
+            ego_port=1,
+            seed_stage=int(exp.PRIOR_SWEEP_SEED_STAGE.value),
+            matchup_schedule_sha256=schedule_sha256,
+            oriented_pairs=pairs,
+            ego_characters=egos,
+            cpu_characters=cpus,
+            prediction_frames=2,
+            delay_frames=1,
+            replan_interval_frames=1,
+            transport_delay_frames=0,
+            timing_model="buffered",
+            dtype="torch.bfloat16",
+            inference_mode="eager",
+            inference_compile_mode="default",
+            inference_attention_backend="dense_sdpa",
+            compiled_inference_bucket=32,
+            checkpoint_sha256="a" * 64,
+        )
+    )
+
+    exp._validate_analysis_eval_protocol(protocol, timing)
+    protocol["dtype"] = "torch.float32"
+    with pytest.raises(ValueError, match="frozen O54 protocol"):
+        exp._validate_analysis_eval_protocol(protocol, timing)
+
+
+def test_gameplay_learning_curve_recovers_a_saturating_power() -> None:
+    responses = [1.0 + 2.0 * (1 - (positions / 2**28) ** -0.5) for positions in exp.DATA_POSITIONS]
+
+    fit = exp.fit_gameplay_learning_curve(exp.DATA_POSITIONS, responses)
+
+    assert fit.response_at_d28 == pytest.approx(1.0)
+    assert fit.asymptotic_gain == pytest.approx(2.0)
+    assert fit.exponent == pytest.approx(0.5)
+    assert fit.predict(2**34) == pytest.approx(2.75)
+
+
+def test_analysis_tests_d31_before_reporting_a_d34_winner(tmp_path: Path) -> None:
     latency = {
         width: exp.LatencyRow(width, delay, delay, 2 * delay, 0.001 * delay, 1 / 60)
-        for width, delay in zip(exp.WIDTHS, (1, 2, 2, 2, 2, 3, 3, 3), strict=True)
-    }
-    responses = {
-        pair: response
-        for line in exp.ISO_COMPUTE_CHECKPOINTS.values()
-        for pair, response in zip(line, (0.0, 1.0, 0.0), strict=True)
+        for width, delay in zip(exp.WIDTHS, (1, 2, 3, 4), strict=True)
     }
     endpoints = {}
     for endpoint in exp.study_endpoints(latency):
-        pair = (endpoint.width, endpoint.updates)
-        counts = exp.PARAMETER_COUNT_CONTRACTS[endpoint.width]
-        cfg = exp.config_for_width(endpoint.width, updates=endpoint.updates)
-        endpoints[pair] = exp.AnalysisEndpoint(
-            run_id=f"run-{endpoint.width}-{endpoint.updates}",
-            run_name=f"W{endpoint.width}",
-            width=endpoint.width,
-            updates=endpoint.updates,
-            effective_parameters=exp.effective_parameter_count(counts),
-            bc_parameters=counts["total"],
-            compute=exp.training_compute(cfg, counts),
-            net_stock_per_min=responses.get(pair, 0.5),
-            net_stock_lcb=responses.get(pair, 0.5) - 0.1,
-        )
+        for data_index, update in enumerate(exp.DATA_UPDATES):
+            pair = (endpoint.width, update)
+            counts = exp.PARAMETER_COUNT_CONTRACTS[endpoint.width]
+            cfg = exp.config_for_width(endpoint.width, updates=update)
+            response = endpoint.width / 1_000 + 0.2 * (1 - 2 ** (-0.5 * data_index))
+            endpoints[pair] = exp.AnalysisEndpoint(
+                run_id=f"run-{endpoint.width}",
+                run_name=f"W{endpoint.width}",
+                width=endpoint.width,
+                updates=update,
+                effective_parameters=exp.effective_parameter_count(counts),
+                bc_parameters=counts["total"],
+                compute=exp.training_compute(cfg, counts),
+                net_stock_per_min=response,
+                net_stock_lcb=response - 0.1,
+            )
 
     report = exp.write_analysis_artifacts(endpoints, latency, tmp_path)
 
-    assert set(report["iso_compute_fits"]) == {"C1", "C2", "C3"}
-    assert report["fixed_data_widths"] == [128, 640, 1024]
+    assert report["d31_holdout"]["passed"] is True
+    assert report["d34"]["reported"] is True
+    assert report["d34"]["winner_width"] == 1024
     assert (tmp_path / "endpoints.csv").is_file()
-    assert (tmp_path / "fixed_data_latency.png").is_file()
+    assert (tmp_path / "iso_data_latency.png").is_file()
+    assert (tmp_path / "learning_curves.png").is_file()
+
+    final_key = (256, exp.DATA_UPDATES[-1])
+    failed_endpoints = {
+        **endpoints,
+        final_key: replace(endpoints[final_key], net_stock_per_min=99.0),
+    }
+    failed = exp.write_analysis_artifacts(failed_endpoints, latency, tmp_path / "failed")
+    assert failed["d31_holdout"]["passed"] is False
+    assert failed["d34"] == {
+        "reported": False,
+        "reason": "the through-D=2^30 curve fits did not predict the observed D=2^31 ordering",
+    }
+
+
+def test_learning_curve_bootstrap_resamples_shared_complete_blocks() -> None:
+    widths = exp.WIDTHS
+    endpoints = {}
+    rows = {}
+    for rank, width in enumerate(widths, start=1):
+        counts = exp.PARAMETER_COUNT_CONTRACTS[width]
+        for update in exp.DATA_UPDATES:
+            key = (width, update)
+            cfg = exp.config_for_width(width, updates=update)
+            endpoints[key] = exp.AnalysisEndpoint(
+                run_id=f"run-{width}",
+                run_name=f"W{width}",
+                width=width,
+                updates=update,
+                effective_parameters=exp.effective_parameter_count(counts),
+                bc_parameters=counts["total"],
+                compute=exp.training_compute(cfg, counts),
+                net_stock_per_min=float(rank),
+                net_stock_lcb=float(rank),
+            )
+            rows[key] = tuple(
+                exp.MatchRow(
+                    ego_character=boot % 13,
+                    opp_character=boot % 14,
+                    stage=1,
+                    boot_index=boot,
+                    match_ordinal=0,
+                    active_frames=3_600,
+                    total_frames=3_600,
+                    damage_dealt=0.0,
+                    damage_taken=0.0,
+                    stocks_taken=rank,
+                    stocks_lost=0,
+                )
+                for boot in range(96)
+            )
+
+    report = exp.bootstrap_learning_curve_analysis(
+        endpoints,
+        rows,
+        widths,
+        holdout_passed=True,
+        resamples=4,
+    )
+
+    assert report["shared_resample_indices"] is True
+    assert report["holdout_order_match_fraction"] == 1.0
+    assert report["d34_winner_fraction"]["1024"] == 1.0
 
 
 def test_config_rejects_an_unmeasured_inference_path() -> None:

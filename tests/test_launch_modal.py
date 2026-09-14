@@ -126,6 +126,8 @@ def test_validate_args_requires_experiment_for_auto_resume() -> None:
     validate_args(Args(cmd=["uv", "run", EXPERIMENT]))
     validate_args(Args(cmd=["python", "train.py"], auto_resume=False))
 
+    with pytest.raises(SystemExit, match="closed-loop-gpu must request a GPU"):
+        validate_args(Args(cmd=["uv", "run", EXPERIMENT], closed_loop_gpu="none"))
     with pytest.raises(SystemExit, match="automatic recovery"):
         validate_args(Args(cmd=["python", "train.py"]))
 
@@ -531,14 +533,14 @@ def test_closed_loop_evaluator_runs_verified_o54_endpoint(monkeypatch: pytest.Mo
     _MODULE._run_closed_loop_eval(
         "experiments/054_bc_capacity_latency.py",
         "run-1",
-        54_048,
+        4_096,
         "a" * 64,
         96,
     )
 
     command, kwargs = calls[0]
     assert command[:4] == ["uv", "run", "experiments/054_bc_capacity_latency.py", "eval"]
-    assert command[command.index("--checkpoint") + 1] == "final.pt"
+    assert command[command.index("--checkpoint") + 1] == "checkpoints/step-0004096.pt"
     assert "--shared-wandb" in command
     assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
     assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}

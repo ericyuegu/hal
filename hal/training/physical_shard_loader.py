@@ -58,25 +58,26 @@ type BatchTransform[T] = Callable[[tuple[str, ...], Mapping[str, np.ndarray]], T
 
 @dataclass(frozen=True, slots=True)
 class SourceRowSelection:
-    """A selected prefix of one source, less explicit excluded rows."""
+    """A selected source-row range, less explicit excluded rows."""
 
     source: str
     stop: int
     excluded_rows: tuple[int, ...] = ()
+    start: int = 0
 
     def __post_init__(self) -> None:
         if not self.source:
             raise ValueError("source name must not be empty")
-        if self.stop < 1:
-            raise ValueError(f"source row stop must be positive for {self.source}")
+        if not 0 <= self.start < self.stop:
+            raise ValueError(f"source row range must be non-empty for {self.source}")
         if self.excluded_rows != tuple(sorted(set(self.excluded_rows))):
             raise ValueError(f"excluded rows are not sorted and unique for {self.source}")
-        if any(not 0 <= row < self.stop for row in self.excluded_rows):
-            raise ValueError(f"excluded row is outside {self.source}[0:{self.stop}]")
+        if any(not self.start <= row < self.stop for row in self.excluded_rows):
+            raise ValueError(f"excluded row is outside {self.source}[{self.start}:{self.stop}]")
 
     @property
     def row_count(self) -> int:
-        return self.stop - len(self.excluded_rows)
+        return self.stop - self.start - len(self.excluded_rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,14 +97,16 @@ class PhysicalShardSelection:
     @classmethod
     def from_sources(cls, sources: tuple[SourceRowSelection, ...]) -> PhysicalShardSelection:
         """Construct a selection with its canonical persisted identity."""
-        payload = [
-            {
+        payload = []
+        for source in sources:
+            item: dict[str, object] = {
                 "source": source.source,
                 "stop": source.stop,
                 "excluded_rows": list(source.excluded_rows),
             }
-            for source in sources
-        ]
+            if source.start:
+                item["start"] = source.start
+            payload.append(item)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return cls(sources, hashlib.sha256(encoded).hexdigest())
 
@@ -340,7 +343,7 @@ def build_shard_plan(
     selection: PhysicalShardSelection,
     manifests: Mapping[str, SourceManifest | Sequence[int]],
 ) -> tuple[ShardTask, ...]:
-    """Expose each selected prefix row exactly once, grouped by physical shard."""
+    """Expose each selected source row exactly once, grouped by physical shard."""
     selected_sources = {view.source for view in selection.sources}
     if set(manifests) != selected_sources:
         missing = selected_sources - set(manifests)
@@ -354,16 +357,17 @@ def build_shard_plan(
         source_row = 0
         selected = 0
         for shard, samples in enumerate(manifest.samples_per_shard):
-            selected_stop = min(samples, max(0, view.stop - source_row))
-            if selected_stop:
+            selected_start = max(view.start, source_row)
+            selected_stop = min(view.stop, source_row + samples)
+            if selected_start < selected_stop:
                 exclusions = tuple(
-                    row - source_row for row in view.excluded_rows if source_row <= row < source_row + selected_stop
+                    row - source_row for row in view.excluded_rows if selected_start <= row < selected_stop
                 )
                 task = ShardTask(
                     source=view.source,
                     shard=shard,
-                    row_start=0,
-                    row_stop=selected_stop,
+                    row_start=selected_start - source_row,
+                    row_stop=selected_stop - source_row,
                     excluded_rows=exclusions,
                     source_index=source_index,
                     global_shard=global_shard,

@@ -1,136 +1,187 @@
-# O54: BC capacity-latency scaling
+# O54: latency-capacity scaling across data
 
-Status: latency preflight accepted; throughput probes not launched
+Status: code review and one-trial latency preflight complete; B200 Modal dry
+runs pending
 
-O54 measures compute-optimal behavior-cloning capacity under a buffered
-deployment-latency constraint. It keeps O52's representation, temporal decoder,
-initialization, identity conditioning, context length, and statistical batch.
-It removes AWR, returns, and the value head.
+O54 asks which deployed model is strongest at a given data budget when model
+capacity and control latency increase together. Four independent pure-BC
+trajectories each run through the same nested data endpoints:
+
+| Endpoint | Updates | Cumulative replays | Supervised positions |
+|---:|---:|---:|---:|
+| `D=2^28` | 4,096 | 65,536 | 268,435,456 |
+| `D=2^29` | 8,192 | 131,072 | 536,870,912 |
+| `D=2^30` | 16,384 | 262,144 | 1,073,741,824 |
+| `D=2^31` | 32,768 | 524,288 | 2,147,483,648 |
 
 ## Model family
 
-The treatment is joint trunk width and depth. The aspect ratio follows O48's
-nearest-integer `depth = width / 48` family. O52's four-layer temporal decoder
-stays fixed in depth and scales proportionally in width.
+Both the trunk and temporal decoder scale. The decoder width is half the trunk
+width. The selected depth ratios are explicit experiment choices, not a rule
+that can add architectures at launch time.
 
-| Width | Trunk depth | Total BC parameters | `N_eff` |
-|---:|---:|---:|---:|
-| 128 | 3 | 1,692,953 | 7,025,686 |
-| 256 | 5 | 5,764,505 | 23,180,566 |
-| 384 | 8 | 17,094,169 | 58,373,654 |
-| 512 | 11 | 39,024,281 | 119,289,622 |
-| 640 | 13 | 70,178,585 | 203,175,958 |
-| 768 | 16 | 121,763,737 | 332,445,974 |
-| 896 | 19 | 194,172,953 | 507,886,102 |
-| 1024 | 21 | 278,362,265 | 711,408,406 |
-
-`N_eff = 2 * (trunk + inputs) + 14 * (temporal decoder + heads)`.
-
-## Iso-compute endpoints
-
-The three compute lines are anchored by `D=2^30` at W256, W512, and W1024.
-Update counts are rounded to the nearest 32 updates. Each row is a separate
-optimizer trajectory.
-
-| Line | Width | Updates | Supervised positions | Approximate FLOPs |
+| Model | Temporal decoder | BC parameters | `N_eff` | Training through `2^31` |
 |---|---:|---:|---:|---:|
-| C1 | 128 | 54,048 | 3,542,089,728 | 1.4931e17 |
-| C1 | 256 | 16,384 | 1,073,741,824 | 1.4934e17 |
-| C1 | 384 | 6,496 | 425,721,856 | 1.4911e17 |
-| C2 | 256 | 84,320 | 5,525,995,520 | 7.6857e17 |
-| C2 | 384 | 33,472 | 2,193,620,992 | 7.6830e17 |
-| C2 | 512 | 16,384 | 1,073,741,824 | 7.6852e17 |
-| C3 | 512 | 97,696 | 6,402,605,056 | 4.5826e18 |
-| C3 | 768 | 35,072 | 2,298,478,592 | 4.5847e18 |
-| C3 | 1024 | 16,384 | 1,073,741,824 | 4.5832e18 |
+| W256/L5 | W128/L2 | 5,436,825 | 18,593,046 | 0.240 EFLOPs |
+| W512/L11 | W256/L4 | 39,024,281 | 119,289,622 | 1.537 EFLOPs |
+| W768/L16 | W384/L6 | 124,712,857 | 373,733,654 | 4.816 EFLOPs |
+| W1024/L21 | W512/L8 | 288,848,025 | 858,209,046 | 11.058 EFLOPs |
 
-For the fixed-`D=2^30` latency frontier, train the largest width in each
-measured latency bucket. A frontier point not already present at `D=2^30`
-needs a separate trajectory.
+The four training trajectories total approximately 17.650 EFLOPs. Here
+`N_eff = 2 * (trunk + inputs) + 14 * (temporal decoder + heads)`, which
+accounts for two trunk passes and fourteen temporal-offset losses per
+supervised position.
 
-## Optimizer
+The invariant model components are O52's representation, projectile set
+encoder, controller codec, trunk and temporal parameterization, readout
+scaling, identity conditioning, and 256-frame context. O54 has no returns, AWR,
+or value head.
 
-All learned parameters use AdamW. The learning rate is `8e-4`, betas are
-`(0.9, 0.95)`, epsilon is `1e-12`, and gradient clipping is `1.0`. Final
-readouts retain O52's fan-in learning-rate scaling. The schedule is 512 updates
-of linear warm-up followed by a constant learning rate.
+## Objective and optimizer
 
-Weight decay follows the [Power Lines](https://arxiv.org/abs/2505.13738)
-AdamW-timescale rule:
+Each 276-frame window contains 256 context frames and 20 future frames. The
+last 128 context positions are supervised at offsets
+`1...12, 16, 20`. Offsets through the deployed horizon `H` have weight 1;
+later offsets have weight 0.5. The loss divides by the sum of offset weights
+and the number of valid supervised positions.
+
+All learned parameters use AdamW with learning rate `8e-4`, betas
+`(0.9, 0.95)`, epsilon `1e-12`, and global gradient clipping at 1.0. The
+learning rate warms up linearly for 512 updates and is then constant. O52's
+fan-in scaling remains on the final readouts.
+
+Weight decay is fixed for the entire trajectory of each model:
 
 ```text
-lambda = lambda_ref * (D_ref / D) * ((D / N) / (D_ref / N_ref))^0.52
+lambda = 1e-4 * (2^30 / 2^31)
+         * (((2^31 / N) / (2^30 / N_W512)) ** 0.52)
 ```
 
-The declared anchor is the O54 W512/L11 BC model at `D_ref=2^30`, with
-`lambda_ref=1e-4`. `N` is the literal BC parameter count. Because weight decay
-depends on the endpoint's `D` and `N`, a long trajectory cannot provide a
-shorter endpoint for the scaling fit.
+Fixing the decay at the final `D=2^31` treatment lets the earlier checkpoints
+belong to the same optimizer trajectory. It means those checkpoints do not
+represent independently tuned shorter runs.
 
-## Invariants
+## Nested replay sampling
 
-All endpoints use the same deduplicated all-44 v8 replay manifest, physical
-shard order, nested replay policy, objective offsets, batch size, supervised
-positions per window, seeds, and gameplay matchups. Model geometry, endpoint
-length, derived weight decay, and measured buffered timing are the treatment.
+The source identity is the frozen ordered set of all 44 policy-world-v8 train
+manifests. The union excludes Monotheon v8 rows 14,136 and 14,139, which are
+copies of two Daniel replays. This leaves 1,295,368 unique replay rows. For
+each cumulative endpoint, replay counts are allocated across sources in
+proportion to their deduplicated row counts with deterministic
+largest-remainder rounding. Each source contributes a physical row prefix.
+The four cumulative selections are nested.
 
-## Buffered latency contract
+Training opens only the new range needed for a phase:
 
-The production timing contract is eager BF16 inference at batch size one on the
-RTX 3060. For each width, measure the smallest `d <= 6` that has p99 latency
-below `d / 60` seconds, using 50 warm-ups and 500 synchronized measurements.
-Use `R=d`, `H=2d`, and execute offsets `d+1...2d` from the preceding plan.
+| Phase ending at | New replay rows |
+|---:|---:|
+| `D=2^28` | 65,536 |
+| `D=2^29` | 65,536 |
+| `D=2^30` | 131,072 |
+| `D=2^31` | 262,144 |
 
-Run the search three times in deterministic randomized width orders while one
-real-time, native-resolution Vulkan Dolphin session is active on the same GPU.
-The accepted delay is the largest of the three trial delays. If needed, repeat
-the faster trials at that accepted delay so all three timing rows measure the
-exact production configuration. A width is rejected if any accepted-delay
-trial misses its deadline.
+The physical-shard loader uses 65,536 replay slots. It draws four generations
+of eight distinct windows per replay. A batch contains one window from each of
+512 distinct replay IDs. The 25-batch phase-block schedule gives a minimum
+104-batch gap before another window from the same replay. Each phase has
+exactly enough updates to consume 32 windows from every new replay once.
 
-The v3 timing manifest hashes the joint architecture family, the three accepted
-rows per width, the raw probe artifact, and the Dolphin executable and render
-configuration. Both JSON files belong in `docs/experiments/` and must be
-committed before a training launch. Earlier B32 and fixed-depth timing artifacts
-are invalid.
+At a data boundary, CPU lookahead is empty before the checkpoint is written.
+The current phase loader is then closed. Only after the checkpoint and
+evaluation request exist does training construct the next phase loader. Thus a
+`D=2^k` checkpoint cannot contain a batch from a later replay range. A
+within-phase checkpoint stores the physical source cursor, ring descriptors,
+per-replay window counters, optimizer and scheduler, identity-mask RNG, CPU
+RNG, CUDA RNG, and W&B identity. A boundary checkpoint intentionally drops the
+completed ring and records the hash of the next phase selection.
 
-The September 13, 2026 preflight used PyTorch 2.11.0 with CUDA 13.0 on the
-12 GiB RTX 3060. The concurrent executable was the fingerprinted Slippi 3.6.4
-build, running Vulkan at native EFB scale and paced at 60 Hz. The table reports
-the worst p99 from the three accepted trials.
+Normalization statistics and the player vocabulary remain the frozen O52
+all-44 artifacts. They are representation metadata; future-phase replay rows
+do not enter training batches.
 
-| Width | Delay | Horizon | Worst p99 | Deadline |
-|---:|---:|---:|---:|---:|
-| 128 | 1 | 2 | 15.004 ms | 16.667 ms |
-| 256 | 1 | 2 | 15.513 ms | 16.667 ms |
-| 384 | 2 | 4 | 26.253 ms | 33.333 ms |
-| 512 | 2 | 4 | 28.563 ms | 33.333 ms |
-| 640 | 2 | 4 | 29.722 ms | 33.333 ms |
-| 768 | 2 | 4 | 31.780 ms | 33.333 ms |
-| 896 | 3 | 6 | 43.355 ms | 50.000 ms |
-| 1024 | 3 | 6 | 43.660 ms | 50.000 ms |
+## Buffered deployment
 
-The accepted timing-manifest digest is
-`28b844ba35c54137221cec7e8ab92fa6507b3ef7d0b8e27933659d04244f3cfa`.
-The embedded raw-probe digest is
-`b5070a742a22d4aaa69dbfd845d2d81ae1c59d2ca48dd5a46b0e6d267d198617`.
+The production contract is eager inference with BF16 model parameters at batch
+size one on the local RTX 3060 while one real-time Vulkan Dolphin session uses
+the same GPU. Each exact architecture gets one randomized timing pass with 50
+warm-ups and 500 synchronized calls per candidate delay.
 
-The final timing manifest determines the fixed-data frontier. Run
-`study-plan` only after that manifest exists; it deduplicates fixed-`D` points
-already present in the nine iso-compute trajectories and prints detached Modal
-commands without starting them.
+For each architecture, select the smallest `d <= 6` whose p99 is less than
+`d / 60` seconds. Deployment uses `R=d` and `H=2d`. One inference call
+stages offsets `d+1...2d`; the policy executes the corresponding slice from
+the preceding call. A new or reset slot executes neutral actions for its first
+`d` frames while the first plan is staged. Reset drops context, executing
+actions, and staged actions for that slot.
 
-The accepted buckets select W256, W768, and W1024. W256 and W1024 are already
-fixed-`D` iso-compute endpoints, so the final matrix adds only the W768
-fixed-`D` trajectory: 10 runs and 18.645 EFLOPs in total.
+The timing manifest hashes the architecture family, raw samples, chosen rows,
+GPU identity, Dolphin executable, and renderer configuration. Training rejects
+a missing, changed, non-RTX-3060, non-B1, or non-eager manifest. Earlier O54
+timing artifacts used a fixed four-layer decoder and are not valid for this
+study.
 
-After all endpoint evaluations finish, `analyze` accepts only completed
-96-block evaluations bound to the same timing manifest. It fits a concave,
-bracketed quadratic in `log10(N_eff)` for each compute line, fits BC parameter
-count against compute, and writes the fixed-data gameplay-strength versus B1
-p99 latency plot.
+The September 13, 2026 preflight used PyTorch 2.11.0 and CUDA 13.0 on the
+12 GiB RTX 3060. It measured this deployment:
 
-The commands printed by `study-plan` use the working `$275` allocation and
-`$825` intervention threshold. They are not approval-ready until W256 and
-W1024 RTX PRO 6000 smoke runs supply measured update throughput, wall-time, and
-the revised cost estimate. No command printed by the planner executes Modal.
+| Model | Delay | Horizon | p99 | Deadline | Margin |
+|---:|---:|---:|---:|---:|---:|
+| W256/L5 + decoder L2 | 1 | 2 | 13.903 ms | 16.667 ms | 2.764 ms |
+| W512/L11 + decoder L4 | 2 | 4 | 29.132 ms | 33.333 ms | 4.201 ms |
+| W768/L16 + decoder L6 | 3 | 6 | 48.868 ms | 50.000 ms | 1.132 ms |
+| W1024/L21 + decoder L8 | 6 | 12 | 99.183 ms | 100.000 ms | 0.817 ms |
+
+The W1024 model missed d4 and d5. Its d6 acceptance is valid under the
+one-trial rule but has little timing margin. The manifest digest is
+`51a31ddcd8b26c0b3817404b59aa53ce724593243352228e9194cd92c97381b7`.
+
+## Gameplay evaluation and analysis
+
+Every one of the 16 model-data endpoints gets one 96-block evaluation against a
+level-9 CPU. The matchup schedule is deterministic and identical across
+endpoints: 96 prior-weighted character-pair boots, port 1 as the model, the same
+seed stage, and 7,200 frames per boot. Instant restart plays multiple matches
+within a boot. Rates exclude countdown frames.
+
+Evaluation uses the checkpoint's measured `d/R/H`, the same feature
+projection and controller codec as training, masked ego identity, eager BF16
+inference, and at most 32 concurrent Dolphin sessions on one RTX PRO 6000
+evaluator.
+It stores the checkpoint hash, full protocol, match rows, and aggregate
+metrics. The primary response is pooled mean net stocks per active minute.
+Uncertainty resamples the same complete 96 blocks across every endpoint.
+
+For each deployed model, fit
+
+```text
+S(D) = S_28 + A * (1 - (D / 2^28)^(-alpha))
+A >= 0, 0.01 <= alpha <= 4
+```
+
+through `D=2^30`. Compare the predicted complete model ordering with the
+observed ordering at `D=2^31`. Only if that holdout ordering matches, refit
+all four points and report the predicted winner among the four deployed models
+at `D=2^34`. Otherwise, report the holdout failure and no `D=2^34` winner.
+
+## Launch gate
+
+Before paid training:
+
+1. Run focused and repository checks.
+2. Run finite-gradient checks for W256/L2 and W1024/L8 on the RTX 3060.
+3. Produce and commit the one-trial RTX 3060 timing artifacts.
+4. Dry-run all four B200 commands and verify the Modal Secret.
+5. Verify observed throughput and memory after launch before accepting the
+   projections.
+
+The projection uses conservative update times of 0.25, 0.30, 0.40, and 1.00
+seconds for W256 through W1024. These include margin over the closest
+batch-512 B200 measurements in `cl0nqptn`, `k80jesjp`, `n8fm1otc`, and
+`pq4g0ivv`. They project 17.7 aggregate training hours; the longest run,
+W1024, takes 9.1 training hours.
+[Modal's September 14 rates](https://modal.com/pricing) and the launcher's
+32-core, 128-GiB training reservation total $8.7817/hour. Training therefore
+costs about $156. Sixteen comparable 96-block RTX PRO 6000 evaluations add
+about $22.
+Allowing for startup and retries gives a $225 working estimate and
+approximately 10--12 hours of elapsed study time when the four training apps
+run in parallel. Warn at $450. Intervene at $675. Replace the throughput
+projection with observed O54 telemetry after launch.
