@@ -573,6 +573,18 @@ class MDSStorageAdapter:
         self.split = split
         self.manifests = self._manifests()
         self.last_read_bytes = 0
+        self._closed = False
+
+    def close(self) -> None:
+        """Release Mosaic's local-directory registration before adapter reuse."""
+        if self._closed:
+            return
+        self._closed = True
+        # Mosaic Streaming 0.13.0 releases this registration only in __del__.
+        # The physical loader retains its adapter, so deterministic phase
+        # transitions must invoke that cleanup explicitly. Remove this call
+        # when the pinned dependency provides a public close operation.
+        self.dataset.__del__()
 
     def _manifests(self) -> dict[str, SourceManifest]:
         manifests: dict[str, SourceManifest] = {}
@@ -2144,3 +2156,6 @@ class PhysicalShardReplayLoader[BatchT]:
         self._data_iterator = None
         self._ordered_chunks = None
         _shutdown_data_loader_workers(iterator)
+        close_adapter = getattr(self.adapter, "close", None)
+        if callable(close_adapter):
+            close_adapter()

@@ -654,6 +654,15 @@ class _DelayedFakeAdapter(_FakeAdapter):
         return super().decode_chunk(request, task, **kwargs)
 
 
+class _ClosingFakeAdapter(_FakeAdapter):
+    def __init__(self, rows: int, length: int) -> None:
+        super().__init__(rows, length)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 class _BlockingFakeAdapter(_FakeAdapter):
     def __init__(self, rows: int, length: int, started: threading.Event, release: threading.Event) -> None:
         super().__init__(rows, length)
@@ -1107,6 +1116,34 @@ def test_context_manager_closes_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(calls) == 1
     with pytest.raises(RuntimeError, match="closed"):
         iter(loader)
+
+
+def test_close_releases_the_storage_adapter_once() -> None:
+    adapter = _ClosingFakeAdapter(113, 5)
+    loader = _loader(seed=5, adapter=adapter)
+
+    loader.close()
+    loader.close()
+
+    assert adapter.close_calls == 1
+
+
+def test_mds_adapter_explicitly_releases_mosaic_local_directories() -> None:
+    calls = 0
+
+    class Dataset:
+        def __del__(self) -> None:
+            nonlocal calls
+            calls += 1
+
+    adapter = object.__new__(MDSStorageAdapter)
+    adapter.dataset = Dataset()
+    adapter._closed = False
+
+    adapter.close()
+    adapter.close()
+
+    assert calls == 1
 
 
 def test_private_worker_shutdown_isolated_in_one_function() -> None:

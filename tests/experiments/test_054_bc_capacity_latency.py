@@ -80,6 +80,73 @@ def test_parameter_and_compute_contracts() -> None:
     assert exp.scientific_checkpoint_updates(exp.config_for_width(768)) == exp.DATA_UPDATES
 
 
+def test_w1024_microbatches_preserve_the_optimizer_batch() -> None:
+    cfg = exp.config_for_width(1024)
+    rows = cfg.batch_size
+    batch = exp.TrainBatch(
+        context=exp.Context(
+            features={"row": exp.torch.arange(rows)[:, None]},
+            ctx_pad=exp.torch.zeros(rows, dtype=exp.torch.long),
+        ),
+        target=exp.torch.arange(rows)[:, None],
+        replay_ids=tuple(str(index) for index in range(rows)),
+    )
+
+    microbatches = exp.training_microbatches(batch, cfg)
+
+    assert exp.train_microbatch_size(cfg) == 256
+    assert tuple(item.target.shape[0] for item in microbatches) == (256, 256)
+    assert exp.torch.equal(exp.torch.cat([item.target for item in microbatches]), batch.target)
+    assert tuple(replay_id for item in microbatches for replay_id in item.replay_ids or ()) == batch.replay_ids
+    assert exp.train_microbatch_size(exp.config_for_width(768)) == 512
+
+
+def test_microbatch_backward_matches_full_batch_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = exp.config_for_width(1024)
+    model = exp.nn.Linear(1, 1, bias=False)
+    batch = exp.TrainBatch(
+        context=exp.Context(
+            features={"row": exp.torch.ones(cfg.batch_size, 1)},
+            ctx_pad=exp.torch.zeros(cfg.batch_size, dtype=exp.torch.long),
+        ),
+        target=exp.torch.arange(cfg.batch_size, dtype=exp.torch.float32)[:, None],
+    )
+
+    def fake_loss(model, batch, _cfg, *, valid_prefixes, **_kwargs):
+        loss = model.weight.squeeze() * batch.target.sum() / valid_prefixes
+        value = loss.detach()
+        metrics = {
+            "train/loss": value,
+            "train/objective": value,
+            "stability/button_pre_norm_rms_min": batch.target.amin(),
+            "stability/button_input_abs_p999": batch.target.amax(),
+            "stability/button_logit_abs_p999": batch.target.amax(),
+            "stability/button_margin_mean": batch.target.mean(),
+        }
+        return loss, batch.target.sum().reshape(1), metrics
+
+    monkeypatch.setattr(exp, "DEVICE", "cpu")
+    monkeypatch.setattr(exp, "microbatch_loss", fake_loss)
+    nll_sum, metrics = exp._backward_training_batch(
+        model,
+        batch,
+        cfg,
+        step=0,
+        valid_prefixes=cfg.batch_size,
+        trunk_fn=lambda: None,
+        temporal_fn=lambda: None,
+        phase_timer=None,
+    )
+
+    assert model.weight.grad is not None
+    assert float(model.weight.grad) == pytest.approx(float(batch.target.mean()))
+    assert float(nll_sum) == pytest.approx(float(batch.target.sum()))
+    assert float(metrics["train/objective"]) == pytest.approx(
+        float(model.weight.detach().squeeze() * batch.target.mean())
+    )
+    assert float(metrics["stability/button_margin_mean"]) == pytest.approx(float(batch.target.mean()))
+
+
 def test_final_readout_lr_uses_the_declared_fan_in_scaling() -> None:
     for width in exp.WIDTHS:
         cfg = exp.config_for_width(width)

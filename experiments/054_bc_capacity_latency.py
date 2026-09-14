@@ -326,6 +326,7 @@ B200_REFERENCE_UPDATE_SECONDS: Final[dict[int, float]] = {
     768: 0.40,
     1024: 1.00,
 }
+TRAIN_MICROBATCH_SIZES: Final[dict[int, int]] = {256: 512, 512: 512, 768: 512, 1024: 256}
 MODAL_TRAINING_DOLLARS_PER_HOUR: Final[float] = 8.781696
 STUDY_WORKING_COST_DOLLARS: Final[int] = 225
 
@@ -571,6 +572,9 @@ def validate_config(cfg: TrainConfig) -> None:
         or DATA_REPLAYS != (65_536, 131_072, 262_144, 524_288)
     ):
         raise ValueError("O54 nested-data geometry changed")
+    microbatch_size = train_microbatch_size(cfg)
+    if cfg.batch_size % microbatch_size:
+        raise ValueError(f"training microbatch {microbatch_size} must divide optimizer batch {cfg.batch_size}")
     if cfg.inference_mode != "eager":
         raise ValueError("O54 requires the eager inference path measured by the latency preflight")
     if cfg.latency_manifest_sha256 and (
@@ -663,6 +667,14 @@ def config_for_width(width: int, *, updates: int | None = None) -> TrainConfig:
         timing=timing_for_width(width),
         target_positions=updates * 512 * 128,
     )
+
+
+def train_microbatch_size(cfg: TrainConfig) -> int:
+    """Return the execution batch that preserves the 512-window optimizer batch."""
+    try:
+        return TRAIN_MICROBATCH_SIZES[cfg.arch.d_model]
+    except KeyError as error:
+        raise ValueError(f"width {cfg.arch.d_model} has no training microbatch contract") from error
 
 
 def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
@@ -3423,6 +3435,33 @@ def _button_gradient_abs_max(model: GPT) -> Tensor:
     return torch.stack(maxima).amax()
 
 
+def training_microbatches(batch: TrainBatch, cfg: TrainConfig) -> tuple[TrainBatch, ...]:
+    """Split only the execution batch; replay sampling and optimizer cadence stay fixed."""
+    size = train_microbatch_size(cfg)
+    batch_size = batch.target.shape[0]
+    if batch_size != cfg.batch_size:
+        raise ValueError(f"expected optimizer batch {cfg.batch_size}, got {batch_size}")
+    if batch_size % size:
+        raise ValueError(f"training microbatch {size} must divide optimizer batch {batch_size}")
+    chunks: list[TrainBatch] = []
+    for start in range(0, batch_size, size):
+        stop = start + size
+        context = batch.context
+        chunks.append(
+            TrainBatch(
+                context=Context(
+                    features={name: value[start:stop] for name, value in context.features.items()},
+                    ctx_pad=context.ctx_pad[start:stop],
+                    slot_ids=None if context.slot_ids is None else context.slot_ids[start:stop],
+                    reset=None if context.reset is None else context.reset[start:stop],
+                ),
+                target=batch.target[start:stop],
+                replay_ids=None if batch.replay_ids is None else batch.replay_ids[start:stop],
+            )
+        )
+    return tuple(chunks)
+
+
 def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     all_parameters = tuple(model.parameters())
     trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
@@ -4534,6 +4573,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "source_selection_sha256": selection.sha256,
             "nested_cumulative_selection_sha256": [item.sha256 for item in cumulative_selections],
             "nested_phase_selection_sha256": [item.sha256 for item in phase_selections],
+            "train_microbatch_size": train_microbatch_size(cfg),
             "data_exponents": DATA_EXPONENTS,
             "data_endpoint_updates": DATA_UPDATES,
             "data_endpoint_replays": DATA_REPLAYS,
@@ -4565,6 +4605,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["optimizer/lr_schedule"] = "512-update linear warmup then constant"
     wandb.run.summary["optimizer/weight_decay_treatment"] = "fixed at the D=2^31 endpoint for the full trajectory"
     wandb.run.summary["optimizer/update_clip_semantics"] = "global pre-step gradient norm clipping only"
+    wandb.run.summary["training/optimizer_batch_size"] = cfg.batch_size
+    wandb.run.summary["training/microbatch_size"] = train_microbatch_size(cfg)
+    wandb.run.summary["stability/microbatch_p999_aggregation"] = "maximum of per-microbatch p99.9 estimates"
     wandb.run.summary["data/nesting"] = (
         "each phase reads only its disjoint source-row range; cumulative replay unions are nested"
     )
@@ -4746,6 +4789,78 @@ class _TrainingMetricAccumulator:
         return values, updates, valid_prefixes
 
 
+def _merge_microbatch_metrics(
+    accumulated: dict[str, Tensor],
+    current: dict[str, Tensor],
+    *,
+    batch_fraction: float,
+) -> None:
+    """Merge execution-microbatch diagnostics without changing the loss."""
+    sum_names = {"train/loss", "train/objective"}
+    min_names = {"stability/button_pre_norm_rms_min"}
+    max_names = {
+        "stability/button_input_abs_p999",
+        "stability/button_logit_abs_p999",
+    }
+    mean_names = {"stability/button_margin_mean"}
+    expected = sum_names | min_names | max_names | mean_names
+    if set(current) != expected:
+        raise RuntimeError(f"microbatch metrics changed: expected {sorted(expected)}, got {sorted(current)}")
+    for name, value in current.items():
+        detached = value.detach()
+        if name not in accumulated:
+            accumulated[name] = detached.mul(batch_fraction) if name in mean_names else detached.clone()
+        elif name in sum_names:
+            accumulated[name].add_(detached)
+        elif name in min_names:
+            accumulated[name] = torch.minimum(accumulated[name], detached)
+        elif name in max_names:
+            accumulated[name] = torch.maximum(accumulated[name], detached)
+        else:
+            accumulated[name].add_(detached, alpha=batch_fraction)
+
+
+def _backward_training_batch(
+    model: GPT,
+    batch: TrainBatch,
+    cfg: TrainConfig,
+    *,
+    step: int,
+    valid_prefixes: int,
+    trunk_fn: Callable,
+    temporal_fn: Callable,
+    phase_timer: CudaPhaseTimer | None,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    """Backpropagate one optimizer batch as one or more execution microbatches."""
+    microbatches = training_microbatches(batch, cfg)
+    profile = phase_timer if len(microbatches) == 1 else None
+    nll_sum: Tensor | None = None
+    metrics: dict[str, Tensor] = {}
+    for microbatch in microbatches:
+        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
+            torch.compiler.cudagraph_mark_step_begin()
+        loss, microbatch_nll_sum, microbatch_metrics = microbatch_loss(
+            model,
+            microbatch,
+            cfg,
+            step=step,
+            valid_prefixes=valid_prefixes,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+            phase_timer=profile,
+        )
+        loss.backward()
+        nll_sum = microbatch_nll_sum.clone() if nll_sum is None else nll_sum.add(microbatch_nll_sum)
+        _merge_microbatch_metrics(
+            metrics,
+            microbatch_metrics,
+            batch_fraction=microbatch.target.shape[0] / batch.target.shape[0],
+        )
+    if nll_sum is None:
+        raise RuntimeError("optimizer batch contained no execution microbatches")
+    return nll_sum, metrics
+
+
 def train_step(
     model: GPT,
     batch: TrainBatch,
@@ -4761,10 +4876,8 @@ def train_step(
     phase_timer: CudaPhaseTimer | None = None,
 ) -> TrainStepResult:
     """Run one complete optimization step on a device-resident batch."""
-    if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
-        torch.compiler.cudagraph_mark_step_begin()
     optimizer.zero_grad()
-    loss, nll_sum, metrics = microbatch_loss(
+    nll_sum, metrics = _backward_training_batch(
         model,
         batch,
         cfg,
@@ -4774,7 +4887,6 @@ def train_step(
         temporal_fn=temporal_fn,
         phase_timer=phase_timer,
     )
-    loss.backward()
     if phase_timer is not None:
         phase_timer.record("backward_end")
     metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
@@ -4950,11 +5062,9 @@ def _compile_synthetic_forward_backward(
         with heartbeat:
             model.train()
             model.zero_grad(set_to_none=True)
-            if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
-                torch.compiler.cudagraph_mark_step_begin()
             batch = synthetic_batch(cfg, torch.device(DEVICE))
             valid_prefixes = cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start)
-            loss, _nll, _metrics = microbatch_loss(
+            _backward_training_batch(
                 model,
                 batch,
                 cfg,
@@ -4962,8 +5072,8 @@ def _compile_synthetic_forward_backward(
                 valid_prefixes=valid_prefixes,
                 trunk_fn=trunk_fn,
                 temporal_fn=temporal_fn,
+                phase_timer=None,
             )
-            loss.backward()
             nonfinite = [
                 name
                 for name, parameter in model.named_parameters()

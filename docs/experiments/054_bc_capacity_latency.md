@@ -1,7 +1,7 @@
 # O54: latency-capacity scaling across data
 
-Status: code review and one-trial latency preflight complete; B200 Modal dry
-runs pending
+Status: B200 training launched; W1024 relaunch pending after the initial
+batch-512 execution OOM
 
 O54 asks which deployed model is strongest at a given data budget when model
 capacity and control latency increase together. Four independent pure-BC
@@ -36,6 +36,13 @@ The invariant model components are O52's representation, projectile set
 encoder, controller codec, trunk and temporal parameterization, readout
 scaling, identity conditioning, and 256-frame context. O54 has no returns, AWR,
 or value head.
+
+Every optimizer update still contains 512 replay windows. W256, W512, and
+W768 execute that batch at once. W1024 accumulates two 256-window
+microbatches because a full-batch CUDA graph uses more than the B200's 178.35
+GiB. Loss normalization remains over the complete optimizer batch, and AdamW,
+clipping, scheduling, data endpoints, and replay admission advance once per
+512-window update.
 
 ## Objective and optimizer
 
