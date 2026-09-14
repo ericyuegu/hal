@@ -464,12 +464,20 @@ def test_checkpoint_and_run_names_record_the_treatment() -> None:
     cfg = exp.proxy_config()
     state = exp._checkpoint_config(cfg)
     tag = exp.model_tag(cfg)
+    run_name = exp.make_run_name(
+        "055_history_cross_attention",
+        tag,
+        "ranked-anonymized-1/policy-world-v8",
+        "o55-d-replace-attention",
+    )
 
     assert state["experiment_id"] == "055_history_cross_attention_v1"
     assert exp.config_from_state(state) == cfg
     assert "all-adamw" in tag
     assert "baseline-final-prefix" in tag
     assert "alr0.0017" in tag
+    assert "ranked-anon-1" in run_name
+    assert len(run_name.encode()) <= 255
     assert "muon" not in {field.name for field in fields(exp.TrainConfig)}
     assert cfg.automatic_evaluation is False
 

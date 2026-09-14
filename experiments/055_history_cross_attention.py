@@ -3116,12 +3116,10 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 
 def model_tag(cfg: TrainConfig) -> str:
     offsets = "-".join(map(str, cfg.arch.head_offsets))
-    treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
     return (
         f"attention055-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-d2r2-"
-        f"{cfg.decoder_variant}-final-prefix-nonlinear-head-trunk-skip-projectiles-v8-all-adamw-"
-        f"alr{cfg.adam_lr:g}-awd{cfg.adam_weight_decay:g}-{treatment}"
+        f"{cfg.decoder_variant}-final-prefix-all-adamw-alr{cfg.adam_lr:g}-g{cfg.awr.gamma:g}"
     )
 
 
@@ -3985,7 +3983,7 @@ def train(
     run_name = resume_run or make_run_name(
         Path(__file__).stem,
         model_tag(cfg),
-        "ranked-anon-1-policy-world-v8",
+        "ranked-anonymized-1/policy-world-v8",
         comment,
     )
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
