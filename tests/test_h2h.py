@@ -86,9 +86,23 @@ def test_vec_match_pins_characters_to_ports():
     assert vec.model_ports == (1, 2)
     assert vec.matchup.stage is spec.config.stage
     assert {p.port: p.character for p in vec.matchup.players} == {
-        1: spec.config.character_port_1,
-        2: spec.config.character_port_2,
+        1: spec.character_port_1,
+        2: spec.character_port_2,
     }
+
+
+def test_match_specs_fixed_character_follows_model_across_orientations():
+    specs = match_specs(
+        mirrored_configs(1),
+        name_a="IBDW#0",
+        name_b="MASTER",
+        fixed_characters={"IBDW#0": melee.Character.FOX},
+    )
+
+    assert specs[0].model_port_1 == "IBDW#0"
+    assert specs[0].character_port_1 is melee.Character.FOX
+    assert specs[1].model_port_2 == "IBDW#0"
+    assert specs[1].character_port_2 is melee.Character.FOX
 
 
 # ---------------------------------------------------------------------------

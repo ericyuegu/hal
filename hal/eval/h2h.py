@@ -10,8 +10,9 @@ Mirrored paired design
 ----------------------
 A *config* is ``(character_port_1, character_port_2, stage)``. The characters come from
 ``hal.eval.matchups.matchups_for`` (the frozen training prior, deterministic and
-prefix-stable in ``n``); the stage cycles ``hal.policy.INCLUDED_STAGES``. Characters are
-pinned to PORTS. The two orientations of a config swap which MODEL sits on which port.
+prefix-stable in ``n``); the stage cycles ``hal.policy.INCLUDED_STAGES``. By default,
+characters are pinned to PORTS. A caller can instead fix a character to one model for a
+behavioral evaluation. The two orientations of a config swap which MODEL sits on which port.
 The sum of a config's two orientations therefore gives each model the same set of
 ``(port, character)`` assignments, which cancels the port advantage and the
 character-matchup advantage.
@@ -164,6 +165,8 @@ class MatchSpec:
     orientation: int  # 0 = model A on port 1; 1 = the mirror
     model_port_1: str
     model_port_2: str
+    character_port_1: melee.Character
+    character_port_2: melee.Character
 
     @property
     def match_id(self) -> str:
@@ -182,23 +185,42 @@ class MatchSpec:
             matchup=Matchup(
                 stage=self.config.stage,
                 players=(
-                    PlayerSetup(port=1, character=self.config.character_port_1, cpu_level=0),
-                    PlayerSetup(port=2, character=self.config.character_port_2, cpu_level=0),
+                    PlayerSetup(port=1, character=self.character_port_1, cpu_level=0),
+                    PlayerSetup(port=2, character=self.character_port_2, cpu_level=0),
                 ),
             ),
             model_ports=(1, 2),
         )
 
 
-def match_specs(configs: Sequence[MatchConfig], *, name_a: str, name_b: str) -> list[MatchSpec]:
-    """Both orientations of every config, config-major then orientation-major."""
+def match_specs(
+    configs: Sequence[MatchConfig],
+    *,
+    name_a: str,
+    name_b: str,
+    fixed_characters: Mapping[str, melee.Character] | None = None,
+) -> list[MatchSpec]:
+    """Both orientations of every config, with optional model-bound characters."""
     if name_a == name_b:
         raise ValueError(f"the two models need distinct names, got {name_a!r} twice")
+    character_overrides = dict(fixed_characters or {})
+    unexpected = character_overrides.keys() - {name_a, name_b}
+    if unexpected:
+        raise ValueError(f"fixed characters name unknown models: {sorted(unexpected)}")
     specs: list[MatchSpec] = []
     for config in configs:
         for orientation in (0, 1):
             port_1, port_2 = (name_a, name_b) if orientation == 0 else (name_b, name_a)
-            specs.append(MatchSpec(config=config, orientation=orientation, model_port_1=port_1, model_port_2=port_2))
+            specs.append(
+                MatchSpec(
+                    config=config,
+                    orientation=orientation,
+                    model_port_1=port_1,
+                    model_port_2=port_2,
+                    character_port_1=character_overrides.get(port_1, config.character_port_1),
+                    character_port_2=character_overrides.get(port_2, config.character_port_2),
+                )
+            )
     return specs
 
 
@@ -703,10 +725,10 @@ def match_record(
         stage_id=int(spec.config.stage.value),
         model_port_1=spec.model_port_1,
         model_port_2=spec.model_port_2,
-        character_port_1=spec.config.character_port_1.name,
-        character_port_2=spec.config.character_port_2.name,
-        character_id_port_1=int(spec.config.character_port_1.value),
-        character_id_port_2=int(spec.config.character_port_2.value),
+        character_port_1=spec.character_port_1.name,
+        character_port_2=spec.character_port_2.name,
+        character_id_port_1=int(spec.character_port_1.value),
+        character_id_port_2=int(spec.character_port_2.value),
         replay_path=None if replay is None else str(replay),
         replay_status=replay_status,
         replay_trimmed=replay_trimmed,
@@ -784,6 +806,7 @@ def run_h2h(
     session_cfg: SessionConfig | None = None,
     stamp_identity: bool = True,
     verify_inputs: bool = True,
+    fixed_characters: Mapping[str, melee.Character] | None = None,
     meta: Mapping[str, Any] | None = None,
     on_orientation_done: Callable[[int], None] | None = None,
 ) -> list[MatchRecord]:
@@ -794,7 +817,9 @@ def run_h2h(
     ``matches.jsonl`` (appended after each orientation, so a crash in the second sweep
     cannot lose the first) and the replays. Nothing is uploaded: the caller owns transfer.
 
-    ``max_parallel`` 0 means one concurrent Dolphin boot per USABLE CPU. ``session_cfg`` defaults
+    ``fixed_characters`` binds selected characters to models as the models swap ports. Without
+    it, the original characters stay pinned to ports. ``max_parallel`` 0 means one concurrent
+    Dolphin boot per USABLE CPU. ``session_cfg`` defaults
     to the standard headless eval session; a supplied one has its ``replay_dir`` replaced
     per orientation. ``meta`` is merged into ``meta.json``, which is where a caller
     records the checkpoints and decode settings behind its policy builders.
@@ -811,7 +836,12 @@ def run_h2h(
         raise ValueError(f"n_configs must be >= 1, got {n_configs}")
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    specs = match_specs(mirrored_configs(n_configs, stages=stages), name_a=name_a, name_b=name_b)
+    specs = match_specs(
+        mirrored_configs(n_configs, stages=stages),
+        name_a=name_a,
+        name_b=name_b,
+        fixed_characters=fixed_characters,
+    )
     builders = {name_a: build_policy_a, name_b: build_policy_b}
     parallel = max_parallel or usable_cpus()
 

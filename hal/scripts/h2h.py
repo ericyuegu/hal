@@ -32,6 +32,7 @@ import hashlib
 import importlib
 import importlib.util
 import os
+import re
 import sys
 from contextlib import contextmanager
 
@@ -39,6 +40,7 @@ os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import subprocess
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -48,12 +50,20 @@ import melee
 import tyro
 from loguru import logger
 
+from hal import r2
+from hal.data.schema import Rank
 from hal.eval.h2h import DEFAULT_MAX_FRAMES
 from hal.eval.h2h import DEFAULT_START_RETRIES
 from hal.eval.h2h import PolicyBuilder
+from hal.eval.h2h import orientation_replay_dir
 from hal.eval.h2h import run_h2h
 from hal.eval.paired import summarize_paired
+from hal.inference.checkpoints import resolve_checkpoint
 from hal.policy import INCLUDED_STAGES
+from hal.training.checkpoints import BackgroundUploader
+from hal.training.checkpoints import checkpoint_sha256
+from hal.training.player_identity import PlayerVocabulary
+from hal.training.player_identity import decode_player_codes
 
 # Decode families. A receding-horizon experiment (013 / 016 / 019 / 020) takes the model
 # in ``_decode_settings`` and per-knob keywords in ``make_policy``; an RLE token
@@ -77,6 +87,16 @@ class ModelArgs:
     exec_cadence: int = 1
     """rle_token only: frames between replans. 1 replans every frame; 0 is token-native,
     which collapses in closed loop, so a token-native run must ask for it explicitly."""
+    player_identity: str | None = None
+    """temporal_mtp only: exact connect code or PLATINUM, DIAMOND, or MASTER."""
+    prediction_frames: int | None = None
+    """temporal_mtp only: dense action heads to decode."""
+    delay_frames: int | None = None
+    """temporal_mtp only: transport-delay frames discarded from each plan."""
+    replan_interval_frames: int | None = None
+    """temporal_mtp only: actions executed before decoding another plan."""
+    character: str | None = None
+    """Fixed Melee character for this model. None keeps the prior draw."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +121,8 @@ class Args:
     """Stage names. Empty means hal.policy.INCLUDED_STAGES."""
     verify_inputs: bool = True
     """Read each .slp back for per-port controller activity (the dead-policy tripwire)."""
+    upload_run: str | None = None
+    """Unique evaluation name below the R2 h2h-evals prefix. None keeps artifacts local."""
 
 
 def import_experiment(spec: str) -> ModuleType:
@@ -210,14 +232,18 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
         if not hasattr(module, symbol):
             raise ValueError(f"{args.experiment} has no {symbol}; it does not follow the checkpoint convention")
     load_checkpoint = module.load_checkpoint if args.family == "temporal_mtp" else module._load_ckpt
-    model, cfg, stats, state = load_checkpoint(args.checkpoint)
+    checkpoint = resolve_checkpoint(args.checkpoint) if args.checkpoint.startswith("r2://") else Path(args.checkpoint)
+    model, cfg, stats, state = load_checkpoint(str(checkpoint))
+    architecture: Any = getattr(cfg, "arch", None)
+    context_frames = cfg.L_ctx if hasattr(cfg, "L_ctx") else architecture.L_ctx
     protocol: dict[str, Any] = {
         "name": args.name,
         "experiment": args.experiment,
         "checkpoint": args.checkpoint,
+        "checkpoint_sha256": checkpoint_sha256(checkpoint),
         "family": args.family,
         "step": int(state["step"]),
-        "L_ctx": cfg.L_ctx,
+        "L_ctx": context_frames,
         "model_dtype": str(next(model.parameters()).dtype),
     }
     source = getattr(module, "__hal_source__", None)
@@ -241,16 +267,83 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
         return build_historical_interleaved, protocol
 
     if args.family == "temporal_mtp":
+        head_offsets = tuple(cfg.head_offsets if hasattr(cfg, "head_offsets") else cfg.arch.head_offsets)
+        if args.prediction_frames is not None:
+            dense_offsets = tuple(range(1, args.prediction_frames + 1))
+            if head_offsets[: args.prediction_frames] != dense_offsets:
+                raise ValueError(
+                    f"prediction_frames={args.prediction_frames} requires dense heads {dense_offsets}, "
+                    f"got {head_offsets[: args.prediction_frames]}"
+                )
+            if not hasattr(cfg, "delay_frames"):
+                raise ValueError(f"{args.experiment} does not support prediction_frames overrides")
+            cfg = replace(cfg, prediction_frames=args.prediction_frames)
+            model.cfg = cfg
+            model.temporal.live_horizons = (args.prediction_frames,)
+        deployment_override = any(
+            value is not None
+            for value in (
+                args.player_identity,
+                args.prediction_frames,
+                args.delay_frames,
+                args.replan_interval_frames,
+            )
+        )
+        if deployment_override and not hasattr(cfg, "delay_frames"):
+            raise ValueError(f"{args.experiment} does not support player or deployment-timing overrides")
+        if deployment_override:
+            delay = cfg.delay_frames if args.delay_frames is None else args.delay_frames
+            replan = cfg.replan_interval_frames if args.replan_interval_frames is None else args.replan_interval_frames
+            if delay + replan > cfg.prediction_frames:
+                raise ValueError(
+                    "delay_frames + replan_interval_frames must not exceed prediction_frames: "
+                    f"{delay} + {replan} > {cfg.prediction_frames}"
+                )
+            identity = args.player_identity
+            if identity is None:
+                player_id = 0
+            else:
+                rank = Rank.__members__.get(identity)
+                if rank is not None:
+                    player_id = int(rank)
+                else:
+                    encoded = model.get_buffer("player_code_bytes")
+                    vocabulary = PlayerVocabulary(decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
+                    player_id = vocabulary.id_for_code(identity)
+        else:
+            identity = None
+            player_id = 0
         protocol.update(
             {
                 "decode_settings": {"temp": float(cfg.decode_temp)},
-                "exec_horizon": int(cfg.exec_horizon),
-                "head_offsets": list(cfg.head_offsets),
+                "player_identity": identity,
+                "player_id": int(player_id),
+                "head_offsets": list(head_offsets),
             }
         )
+        if deployment_override:
+            protocol.update(
+                {
+                    "prediction_frames": int(cfg.prediction_frames),
+                    "delay_frames": int(delay),
+                    "replan_interval_frames": int(replan),
+                }
+            )
+        else:
+            protocol["exec_horizon"] = int(cfg.exec_horizon)
 
         def build_temporal_mtp(seed: int) -> Any:
-            return module.make_policy(model, stats, cfg, exec_horizon=cfg.exec_horizon, decode_seed=seed)
+            if not deployment_override:
+                return module.make_policy(model, stats, cfg, exec_horizon=cfg.exec_horizon, decode_seed=seed)
+            return module.make_policy(
+                model,
+                stats,
+                cfg,
+                decode_seed=seed,
+                ego_player_id=player_id,
+                delay_frames=delay,
+                replan_interval_frames=replan,
+            )
 
         return build_temporal_mtp, protocol
 
@@ -326,29 +419,64 @@ def _git_revision() -> str:
     return result.stdout.strip()
 
 
+def _require_empty_upload_prefix(name: str) -> None:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None:
+        raise ValueError(f"upload_run must be one safe path component, got {name!r}")
+    prefix = f"h2h-evals/{name}/"
+    client = r2.client()
+    result = client.list_objects_v2(Bucket=r2.bucket(), Prefix=prefix, MaxKeys=1)
+    if result.get("KeyCount", 0):
+        raise FileExistsError(f"refusing to overwrite existing R2 prefix r2://{r2.bucket()}/{prefix}")
+
+
 def main(args: Args) -> None:
     stages = INCLUDED_STAGES if not args.stages else tuple(getattr(melee.Stage, s.upper()) for s in args.stages)
+    out_dir = Path(args.out_dir).resolve()
+    if out_dir.exists():
+        raise FileExistsError(f"refusing to overwrite existing output directory {out_dir}")
+    if args.upload_run is not None:
+        _require_empty_upload_prefix(args.upload_run)
     logger.info(f"loading {args.model_a.name} and {args.model_b.name}")
     build_a, protocol_a = load_policy_builder(args.model_a)
     build_b, protocol_b = load_policy_builder(args.model_b)
     for protocol in (protocol_a, protocol_b):
         logger.info(f"  {protocol}")
 
-    records = run_h2h(
-        build_a,
-        build_b,
-        name_a=args.model_a.name,
-        name_b=args.model_b.name,
-        n_configs=args.n_configs,
-        out_dir=args.out_dir,
-        stages=stages,
-        max_frames=args.max_frames,
-        max_parallel=args.max_parallel,
-        start_retries=args.start_retries,
-        seed=args.seed,
-        verify_inputs=args.verify_inputs,
-        meta={"models": {args.model_a.name: protocol_a, args.model_b.name: protocol_b}, "git": _git_revision()},
-    )
+    fixed_characters = {
+        model.name: getattr(melee.Character, model.character.upper())
+        for model in (args.model_a, args.model_b)
+        if model.character is not None
+    }
+    uploader = None if args.upload_run is None else BackgroundUploader(args.upload_run, prefix="h2h-evals")
+
+    def upload_orientation(orientation: int) -> None:
+        if uploader is not None:
+            replay_dir = orientation_replay_dir(out_dir, args.model_a.name, orientation)
+            uploader.upload_tree(replay_dir, base=out_dir.parent)
+            uploader.wait()
+
+    try:
+        records = run_h2h(
+            build_a,
+            build_b,
+            name_a=args.model_a.name,
+            name_b=args.model_b.name,
+            n_configs=args.n_configs,
+            out_dir=out_dir,
+            stages=stages,
+            max_frames=args.max_frames,
+            max_parallel=args.max_parallel,
+            start_retries=args.start_retries,
+            seed=args.seed,
+            verify_inputs=args.verify_inputs,
+            fixed_characters=fixed_characters,
+            meta={"models": {args.model_a.name: protocol_a, args.model_b.name: protocol_b}, "git": _git_revision()},
+            on_orientation_done=upload_orientation,
+        )
+    finally:
+        if uploader is not None:
+            uploader.upload_tree(out_dir, base=out_dir.parent)
+            uploader.close()
     print(summarize_paired(records, focal_model=args.model_a.name).format_table())
 
 

@@ -1,5 +1,6 @@
 """Checkpoint/source adapters in the torch-carrying H2H CLI."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 import torch
 
 from hal.scripts import h2h
+from hal.training.player_identity import encode_player_codes
 
 
 class _CapturedPolicy:
@@ -37,6 +39,7 @@ def _fake_historical_module() -> ModuleType:
 def test_historical_builder_records_source_and_uses_private_seeded_rng(monkeypatch) -> None:
     module = _fake_historical_module()
     monkeypatch.setattr(h2h, "import_experiment", lambda _spec: module)
+    monkeypatch.setattr(h2h, "checkpoint_sha256", lambda _path: "a" * 64)
     build, protocol = h2h.load_policy_builder(
         h2h.ModelArgs(
             name="013",
@@ -93,3 +96,85 @@ def test_real_026_checkpoint_loads_through_temporal_mtp_builder() -> None:
     assert protocol["exec_horizon"] == 4
     assert policy.runtime_spec.context_frames == 128
     assert policy.runtime_spec.prediction_frames == 4
+
+
+@dataclass(frozen=True)
+class _O50Architecture:
+    L_ctx: int = 256
+    head_offsets: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 9, 12)
+
+
+@dataclass(frozen=True)
+class _O50Config:
+    arch: _O50Architecture = _O50Architecture()
+    prediction_frames: int = 4
+    delay_frames: int = 2
+    replan_interval_frames: int = 2
+    decode_temp: float = 1.0
+
+
+class _FakeO50(torch.nn.Module):
+    def __init__(self, cfg: _O50Config) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(()))
+        self.register_buffer(
+            "player_code_bytes",
+            torch.from_numpy(np.frombuffer(encode_player_codes(("IBDW#0",)), dtype=np.uint8).copy()),
+        )
+        self.cfg = cfg
+        self.temporal = SimpleNamespace(live_horizons=(cfg.prediction_frames,))
+
+
+def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -> None:
+    module = ModuleType("fake_o50")
+    cfg = _O50Config()
+    model = _FakeO50(cfg)
+    module.load_checkpoint = lambda _path: (model, cfg, {}, {"step": 99})
+    module.make_policy = lambda _model, _stats, _cfg, **kwargs: _CapturedPolicy(**kwargs)
+    monkeypatch.setattr(h2h, "import_experiment", lambda _spec: module)
+    monkeypatch.setattr(h2h, "checkpoint_sha256", lambda _path: "a" * 64)
+
+    build, protocol = h2h.load_policy_builder(
+        h2h.ModelArgs(
+            name="IBDW#0",
+            checkpoint="checkpoint.pt",
+            experiment="experiments/050_scaled_temporal_awr.py",
+            family="temporal_mtp",
+            player_identity="IBDW#0",
+            prediction_frames=6,
+            delay_frames=2,
+            replan_interval_frames=3,
+        )
+    )
+    policy = build(17)
+
+    assert protocol["player_identity"] == "IBDW#0"
+    assert protocol["prediction_frames"] == 6
+    assert protocol["delay_frames"] == 2
+    assert protocol["replan_interval_frames"] == 3
+    assert model.cfg.prediction_frames == 6
+    assert model.temporal.live_horizons == (6,)
+    assert policy.ego_player_id == 4
+    assert policy.delay_frames == 2
+    assert policy.replan_interval_frames == 3
+
+
+def test_o50_builder_rejects_sparse_heads_as_dense_horizon(monkeypatch) -> None:
+    module = ModuleType("fake_o50")
+    cfg = _O50Config()
+    model = _FakeO50(cfg)
+    module.load_checkpoint = lambda _path: (model, cfg, {}, {"step": 99})
+    module.make_policy = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(h2h, "import_experiment", lambda _spec: module)
+    monkeypatch.setattr(h2h, "checkpoint_sha256", lambda _path: "a" * 64)
+
+    with pytest.raises(ValueError, match="requires dense heads"):
+        h2h.load_policy_builder(
+            h2h.ModelArgs(
+                name="IBDW#0",
+                checkpoint="checkpoint.pt",
+                experiment="experiments/050_scaled_temporal_awr.py",
+                family="temporal_mtp",
+                prediction_frames=8,
+            )
+        )
