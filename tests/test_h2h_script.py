@@ -110,7 +110,6 @@ class _O50Config:
     prediction_frames: int = 4
     delay_frames: int = 2
     replan_interval_frames: int = 2
-    decode_temp: float = 1.0
 
 
 class _FakeO50(torch.nn.Module):
@@ -152,6 +151,7 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
     assert protocol["prediction_frames"] == 6
     assert protocol["delay_frames"] == 2
     assert protocol["replan_interval_frames"] == 3
+    assert protocol["decode_settings"] == {"temp": 1.0}
     assert model.cfg.prediction_frames == 6
     assert model.temporal.live_horizons == (6,)
     assert policy.ego_player_id == 4

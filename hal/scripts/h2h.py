@@ -268,6 +268,9 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
 
     if args.family == "temporal_mtp":
         head_offsets = tuple(cfg.head_offsets if hasattr(cfg, "head_offsets") else cfg.arch.head_offsets)
+        decode_temp = getattr(cfg, "decode_temp", 1.0)
+        if decode_temp != 1.0:
+            raise ValueError("temporal_mtp H2H requires the fixed sampling temperature 1")
         if args.prediction_frames is not None:
             dense_offsets = tuple(range(1, args.prediction_frames + 1))
             if head_offsets[: args.prediction_frames] != dense_offsets:
@@ -315,7 +318,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
             player_id = 0
         protocol.update(
             {
-                "decode_settings": {"temp": float(cfg.decode_temp)},
+                "decode_settings": {"temp": 1.0},
                 "player_identity": identity,
                 "player_id": int(player_id),
                 "head_offsets": list(head_offsets),
