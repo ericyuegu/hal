@@ -68,6 +68,15 @@ def test_selection_from_sources_owns_the_canonical_identity() -> None:
     assert selection.sha256 == "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
 
 
+def test_selection_range_has_distinct_identity_and_validates_exclusions() -> None:
+    selection = PhysicalShardSelection.from_sources((SourceRowSelection("source", 19, (11,), start=7),))
+
+    assert selection.row_count == 11
+    assert selection.sha256 != PhysicalShardSelection.from_sources((SourceRowSelection("source", 12),)).sha256
+    with pytest.raises(ValueError, match="outside"):
+        SourceRowSelection("source", 19, (3,), start=7)
+
+
 def _manifest_payload(*, rows: int = 19, version: int = 2, encoding: str = "value") -> bytes:
     return json.dumps(
         {
@@ -144,6 +153,21 @@ def test_shard_plan_covers_prefix_once_and_excludes_only_sidecar_rows() -> None:
     assert exposed == [row for row in range(19) if row not in (3, 11)]
     assert tasks[-1].row_stop == 7
     assert sum(task.row_count for task in tasks) == selection.row_count
+
+
+def test_shard_plan_covers_a_cross_shard_range_once() -> None:
+    selection = PhysicalShardSelection.from_sources((SourceRowSelection("source", 25, (11, 19), start=7),))
+    shard_sizes = (5, 7, 11, 13)
+
+    tasks = build_shard_plan(selection, {"source": SourceManifest("source", shard_sizes)})
+    exposed = [sum(shard_sizes[: task.shard]) + row for task in tasks for row in task.selected_rows]
+
+    assert exposed == [row for row in range(7, 25) if row not in (11, 19)]
+    assert [(task.shard, task.row_start, task.row_stop) for task in tasks] == [
+        (1, 2, 7),
+        (2, 0, 11),
+        (3, 0, 2),
+    ]
 
 
 def test_shard_permutation_is_deterministic_and_stable_across_epochs() -> None:
@@ -250,6 +274,70 @@ def test_window_start_selection_is_uniform() -> None:
     chi_square = float(np.sum((counts - expected) ** 2 / expected))
     z_score = (chi_square - (valid_starts - 1)) / np.sqrt(2 * (valid_starts - 1))
     assert abs(z_score) < 5
+
+
+def test_four_generation_window_starts_are_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed_ranges: tuple[tuple[int, int], ...] = ()
+
+    def decode_slices(
+        _compact: Mapping[str, object], ranges: Sequence[tuple[int, int]]
+    ) -> tuple[dict[str, np.ndarray], ...]:
+        nonlocal observed_ranges
+        observed_ranges = tuple(ranges)
+        return tuple({"value": np.zeros(stop - start, dtype=np.float32)} for start, stop in ranges)
+
+    def make_test_window(
+        sample: dict[str, object],
+        *,
+        ego_prefix: str,
+        start: int,
+        pad: int,
+        length: int,
+        projection: object,
+    ) -> dict[str, np.ndarray]:
+        del ego_prefix, start, pad, length, projection
+        return {"value": np.asarray(sample["value"])}
+
+    monkeypatch.setattr(physical_shard_loader, "decode_policy_world_replay_slices", decode_slices)
+    monkeypatch.setattr(physical_shard_loader, "make_window", make_test_window)
+
+    _replay_id, windows = _decode_generation(
+        {"replay_id": "replay-1", "num_frames": 64, "source_schema_version": 7},
+        task=ShardTask("source", 0, 0, 1),
+        row=0,
+        epoch=0,
+        seed=1,
+        context_length=2,
+        chunk_length=1,
+        windows_per_generation=8,
+        generations_per_replay=4,
+        schema_version=7,
+        labels=_no_labels,
+        projection=None,
+    )
+
+    assert len(windows) == 32
+    assert len({start for start, _stop in observed_ranges}) == 32
+
+
+def test_four_generation_schedule_has_exact_exposure_and_gap() -> None:
+    schedule = _ReplayRingSchedule(65_536, 512, 8, 25, 54, generations_per_replay=4)
+    counts = np.zeros(schedule.capacity, dtype=np.int16)
+
+    for fifo_head in range(schedule.cohort_count):
+        slots = schedule.selected_slots(fifo_head)
+        assert len(np.unique(slots)) == 512
+        counts[slots] += 1
+
+    assert schedule.replay_lanes == 16
+    assert schedule.minimum_gap_batches == 104
+    assert schedule.maximum_gap_batches == 152
+    assert np.all(counts == 32)
+    assert all(
+        len(set(map(int, offsets[start : start + 8]))) == 8
+        for offsets in schedule.phase_offsets
+        for start in range(0, 32, 8)
+    )
 
 
 def test_short_replay_error_identifies_the_physical_row() -> None:
@@ -504,23 +592,27 @@ class _FakeAdapter:
         task: ShardTask,
         row: int,
         epoch: int,
+        windows: int = 4,
     ) -> tuple[str, tuple[dict[str, np.ndarray], ...]]:
         replay_id = f"replay-{task.shard}-{row}"
-        windows = []
-        for ordinal in range(4):
+        window_rows = []
+        for ordinal in range(windows):
             value = np.float32(epoch * 10_000 + task.shard * 1_000 + row * 4 + ordinal)
             window = {f"ego_{channel}": np.full(self.length, value, dtype=np.float32) for channel in ACTION_CHANNELS}
             window["ctx_pad"] = np.asarray(0, dtype=np.int64)
-            windows.append(window)
-        return replay_id, tuple(windows)
+            window_rows.append(window)
+        return replay_id, tuple(window_rows)
 
     def decode_chunk(
         self,
         request: _DecodeChunkRequest,
         task: ShardTask,
-        **_kwargs: object,
+        **kwargs: object,
     ) -> DecodedChunk:
-        generations = [self._generation(task, row, request.epoch) for row in request.rows]
+        windows_per_generation = cast(int, kwargs.get("windows_per_generation", 4))
+        generations_per_replay = cast(int, kwargs.get("generations_per_replay", 1))
+        windows = windows_per_generation * generations_per_replay
+        generations = [self._generation(task, row, request.epoch, windows) for row in request.rows]
         names = tuple(generations[0][1][0])
         columns = {
             name: np.stack([[window[name] for window in generation[1]] for generation in generations])
@@ -532,13 +624,17 @@ class _FakeAdapter:
             replay_ids=tuple(generation[0] for generation in generations),
             locators=tuple(PhysicalRow(task.source, task.shard, row) for row in request.rows),
             columns=columns,
-            windows_per_generation=4,
+            windows_per_generation=windows_per_generation,
+            generations_per_replay=generations_per_replay,
         )
 
     def decode_generations(
-        self, task: ShardTask, requests: Sequence[tuple[int, int]], **_kwargs: object
+        self, task: ShardTask, requests: Sequence[tuple[int, int]], **kwargs: object
     ) -> Mapping[tuple[int, int], tuple[str, tuple[dict[str, np.ndarray], ...]]]:
-        return {request: self._generation(task, request[0], request[1]) for request in requests}
+        windows = cast(int, kwargs.get("windows_per_generation", 4)) * cast(
+            int, kwargs.get("generations_per_replay", 1)
+        )
+        return {request: self._generation(task, request[0], request[1], windows) for request in requests}
 
 
 class _DelayedFakeAdapter(_FakeAdapter):
@@ -556,6 +652,15 @@ class _DelayedFakeAdapter(_FakeAdapter):
     ) -> DecodedChunk:
         time.sleep(0.005 * (3 - task.shard))
         return super().decode_chunk(request, task, **kwargs)
+
+
+class _ClosingFakeAdapter(_FakeAdapter):
+    def __init__(self, rows: int, length: int) -> None:
+        super().__init__(rows, length)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class _BlockingFakeAdapter(_FakeAdapter):
@@ -658,6 +763,11 @@ def _loader(
     delayed: bool = False,
     adapter: _FakeAdapter | None = None,
     materialization_threads: int = 0,
+    batch_size: int = 4,
+    replay_slots: int = 100,
+    windows_per_generation: int = 4,
+    generations_per_replay: int = 1,
+    phase_block_batches: int = 25,
 ) -> PhysicalShardReplayLoader[_Batch]:
     if adapter is not None:
         rows = adapter.rows
@@ -679,14 +789,15 @@ def _loader(
         labels=_no_labels,
         projection=None,
         batch_transform=_collate_batch,
-        batch_size=4,
-        replay_slots=100,
+        batch_size=batch_size,
+        replay_slots=replay_slots,
         seed=seed,
         num_workers=workers,
         context_length=3,
         chunk_length=2,
-        windows_per_generation=4,
-        replay_phase_block_batches=25,
+        windows_per_generation=windows_per_generation,
+        generations_per_replay=generations_per_replay,
+        replay_phase_block_batches=phase_block_batches,
         schema_version=7,
         reserved_disk_bytes=0,
         pin_memory=False,
@@ -823,6 +934,48 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
     for left, right in zip(expected, actual, strict=True):
         assert left.replay_ids == right.replay_ids
         torch.testing.assert_close(left.values, right.values)
+
+
+def test_four_generation_resume_preserves_progress_and_exact_next_batches() -> None:
+    original = _loader(
+        seed=54,
+        rows=113,
+        batch_size=8,
+        replay_slots=32,
+        windows_per_generation=2,
+        generations_per_replay=2,
+        phase_block_batches=2,
+    )
+    original_iterator = iter(original)
+    for _ in range(19):
+        batch = next(original_iterator)
+        assert len(set(batch.replay_ids)) == 8
+    state = original.state_dict()
+    expected = [next(original_iterator) for _ in range(24)]
+
+    assert state["schema"] == physical_shard_loader.MULTI_GENERATION_CHECKPOINT_SCHEMA
+    assert state["generation_rng"] == {"kind": "counter-based", "seed": 54}
+    slots = cast(Sequence[Any], state["slots"])
+    assert all(descriptor.windows_seen <= 4 for descriptor in slots)
+    assert original.unique_replays > 0
+
+    restored = _loader(
+        seed=54,
+        rows=113,
+        batch_size=8,
+        replay_slots=32,
+        windows_per_generation=2,
+        generations_per_replay=2,
+        phase_block_batches=2,
+    )
+    restored.load_state_dict(state)
+    restored_iterator = iter(restored)
+    actual = [next(restored_iterator) for _ in range(24)]
+
+    for left, right in zip(expected, actual, strict=True):
+        assert left.replay_ids == right.replay_ids
+        torch.testing.assert_close(left.values, right.values)
+    assert restored.unique_replays == original.unique_replays
 
 
 def test_resume_reproduces_the_next_optimizer_update() -> None:
@@ -963,6 +1116,44 @@ def test_context_manager_closes_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(calls) == 1
     with pytest.raises(RuntimeError, match="closed"):
         iter(loader)
+
+
+def test_close_releases_the_storage_adapter_once() -> None:
+    adapter = _ClosingFakeAdapter(113, 5)
+    loader = _loader(seed=5, adapter=adapter)
+
+    loader.close()
+    loader.close()
+
+    assert adapter.close_calls == 1
+
+
+def test_close_releases_the_parent_iterator_cycle() -> None:
+    loader = _loader(seed=5)
+    iter(loader)
+
+    assert loader._iterator is not None
+    loader.close()
+
+    assert loader._iterator is None
+
+
+def test_mds_adapter_explicitly_releases_mosaic_local_directories() -> None:
+    calls = 0
+
+    class Dataset:
+        def __del__(self) -> None:
+            nonlocal calls
+            calls += 1
+
+    adapter = object.__new__(MDSStorageAdapter)
+    adapter.dataset = Dataset()
+    adapter._closed = False
+
+    adapter.close()
+    adapter.close()
+
+    assert calls == 1
 
 
 def test_private_worker_shutdown_isolated_in_one_function() -> None:

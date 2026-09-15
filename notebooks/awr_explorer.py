@@ -3,7 +3,7 @@
 Extract per-frame percent/stock traces from a folder of .slp games and write one
 self-contained HTML page. The page computes rewards, discounted returns, and AWR
 weights in the browser, so the knobs (gamma, beta, stock value, damage weight,
-w_max, baseline) respond instantly. Each chart links into a local slippilab
+weight max, baseline) respond instantly. Each chart links into a local slippilab
 viewer, so you can click a weight spike and watch that moment as gameplay.
 
 Run:
@@ -12,9 +12,8 @@ Then:
     cd ~/src/slippilab && npm run dev      # serves the viewer and the .slp files
     xdg-open ~/data/scratch/awr-explorer/explorer.html
 
-Page units are percent: damage counts 1 per percent, one stock is worth the
-"stock value" slider (Eric's 200:1 idea = default 200). The footer shows the
-exact TrainConfig equivalents (code units use stock = +-1).
+Page units match AWRCalibration: damage counts one reward unit per percent,
+scaled by ``damage_shaping``. The footer shows the exact constructor values.
 """
 
 # %%
@@ -27,7 +26,8 @@ import numpy as np
 from hal.data.extract import extract_replay
 
 try:
-    from pyo3_runtime import PanicException  # peppi surfaces torn files as Rust panics
+    # peppi surfaces torn files as Rust panics.
+    from pyo3_runtime import PanicException  # ty: ignore[unresolved-import]
 except ImportError:  # older peppi builds raise plain Exceptions instead
 
     class PanicException(Exception):  # type: ignore[no-redef]
@@ -116,28 +116,29 @@ footer { margin:20px 18px; color:#8b97a1; font-size:13px; }
 </head>
 <body>
 <h1>AWR reward/weight explorer</h1>
-<div class="sub">Units are percent. One stock = the stock-value slider. w = clip(exp(A/&beta;), w_max),
- A = G &minus; baseline, G = discounted return of (damage dealt &minus; damage taken + stock events + match win).
+<div class="sub">Rewards use AWRCalibration units. w = clip(exp(A/&beta;), weight_max),
+ A = G &minus; baseline, G = discounted return of (shaped damage + stock events + match win).
  The match-win value adds ON TOP of the last stock's value, and only when a stock count reaches 0
- (a game that ends by quit-out has no win event). Click a chart to open that moment in slippilab.</div>
+ (a game that ends by quit-out has no win event). Training normalizes eligible weights to mean 1 after
+ this cap; the page plots the raw weights. Click a chart to open that moment in slippilab.</div>
 <div id="knobs">
   <div class="k"><label>discount half-life (s)</label>
-    <input id="hl" type="range" min="-0.52" max="1.48" step="0.01" value="0.06">
+    <input id="hl" type="range" min="-0.52" max="1.48" step="any" value="0.4797800219637384">
     <output id="hlv"></output></div>
-  <div class="k"><label>stock value (percent)</label>
-    <input id="sv" type="range" min="0" max="500" step="10" value="200">
+  <div class="k"><label>stock_value (reward)</label>
+    <input id="sv" type="range" min="0" max="500" step="10" value="120">
     <output id="svv"></output></div>
-  <div class="k"><label>match-win value (percent)</label>
-    <input id="wv" type="range" min="0" max="2000" step="50" value="600">
+  <div class="k"><label>win_reward (reward)</label>
+    <input id="wv" type="range" min="0" max="2000" step="10" value="50">
     <output id="wvv"></output></div>
-  <div class="k"><label>damage weight</label>
+  <div class="k"><label>damage_shaping</label>
     <input id="dw" type="range" min="0" max="2" step="0.05" value="1">
     <output id="dwv"></output></div>
-  <div class="k"><label>&beta; (percent)</label>
-    <input id="beta" type="range" min="0" max="3" step="0.02" value="1.7">
+  <div class="k"><label>beta (reward)</label>
+    <input id="beta" type="range" min="0" max="3" step="any" value="2.299942900022767">
     <output id="betav"></output></div>
-  <div class="k"><label>w_max</label>
-    <input id="wmax" type="range" min="0.3" max="2.3" step="0.05" value="1.3">
+  <div class="k"><label>weight_max</label>
+    <input id="wmax" type="range" min="0.3" max="2.3" step="any" value="0.5440680443502757">
     <output id="wmaxv"></output></div>
   <div class="k"><label>baseline</label>
     <select id="base">
@@ -265,16 +266,21 @@ function computeAll() {
     stat("a kill outweighs a 20% hit up to", cross ? cross.toFixed(1) + " s before it" : "never") +
     stat("match point outweighs it up to", crossW ? crossW.toFixed(1) + " s before it" : "never") +
     stat("gamma / frame", gamma.toFixed(5));
-  el.hlv.textContent = k.hl.toFixed(2) + " s  (horizon ~" + (1 / (1 - gamma) / FPS).toFixed(1) + " s)";
-  el.svv.textContent = k.S + "%"; el.wvv.textContent = k.W + "%"; el.dwv.textContent = k.d.toFixed(2);
-  el.betav.textContent = k.beta.toFixed(1) + "%"; el.wmaxv.textContent = k.wmax.toFixed(1);
+  el.hlv.textContent = k.hl.toFixed(2) + " s  (gamma = " + gamma.toFixed(5) + ")";
+  el.svv.textContent = "stock_value = " + k.S.toFixed(1);
+  el.wvv.textContent = "win_reward = " + k.W.toFixed(1);
+  el.dwv.textContent = "damage_shaping = " + k.d.toFixed(2);
+  el.betav.textContent = "beta = " + k.beta.toFixed(1);
+  el.wmaxv.textContent = "weight_max = " + k.wmax.toFixed(1);
   syncEss();
-  el.foot.innerHTML = "TrainConfig equivalents (code stock = &plusmn;1): <code>awr_gamma=" + gamma.toFixed(5) +
-    "</code> <code>awr_damage_shaping=" + (k.S ? (k.d / k.S).toFixed(5) : "n/a (stock value 0)") +
-    "</code> <code>awr_beta=" + (k.S ? (k.beta / k.S).toFixed(4) : "n/a") +
-    "</code> <code>awr_weight_max=" + k.wmax.toFixed(1) +
-    "</code> <code>awr_win_reward=" + (k.S ? (k.W / k.S).toFixed(2) : "n/a") + "</code> (win knob is NEW" +
-    " — not in 020_awr.py yet)" +
+  el.foot.innerHTML = "Current constructor values: <code>AWRCalibration(" +
+    "beta=" + k.beta.toFixed(1) +
+    ", weight_max=" + k.wmax.toFixed(1) +
+    ", gamma=" + gamma.toFixed(5) +
+    ", stock_value=" + k.S.toFixed(1) +
+    ", damage_shaping=" + k.d.toFixed(2) +
+    ", win_reward=" + k.W.toFixed(1) +
+    ", value_loss_weight=1.0, auxiliary_loss_weight=0.5)</code>" +
     "<br>Baseline note: the training run learns V(s) from the trunk; this page uses analytic baselines" +
     " because V depends on the knobs. &beta; here is directly comparable only at matched baseline quality.";
   for (const g of DATA) draw(g);

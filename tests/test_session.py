@@ -55,6 +55,36 @@ def test_polling_waits_for_one_frame_before_flushing_again(monkeypatch: pytest.M
     assert kwargs["polling_timeout"] == 7.5
 
 
+def test_session_configures_vulkan_native_resolution(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs: dict[str, object] = {}
+    version = melee.console.DolphinVersion(False, "3.6.4", melee.console.DolphinBuild.NETPLAY)
+    original_get_version = melee.console.get_dolphin_version
+
+    class Console:
+        def __init__(self, **values: object) -> None:
+            assert melee.console.get_dolphin_version("unused") is version
+            kwargs.update(values)
+
+        def _get_dolphin_config_path(self) -> str:
+            return str(tmp_path)
+
+    monkeypatch.setattr(session_module.melee, "Console", Console)
+    monkeypatch.setattr(session_module.atexit, "register", lambda _callback: None)
+    session = Session(
+        iso_path="unused.iso",
+        dolphin_path="unused",
+        gfx_backend="Vulkan",
+        internal_resolution_scale=2,
+        dolphin_version=version,
+    )
+
+    session._boot()
+
+    assert kwargs["gfx_backend"] == "Vulkan"
+    assert "EFBScale = 2" in (tmp_path / "GFX.ini").read_text()
+    assert melee.console.get_dolphin_version is original_get_version
+
+
 def test_navigate_to_live_times_out_when_menu_never_goes_live() -> None:
     s = _session(0.05)
     s._step_blocking = lambda: _FakeGameState(melee.Menu.MAIN_MENU)  # type: ignore[method-assign]

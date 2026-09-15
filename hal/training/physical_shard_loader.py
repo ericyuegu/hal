@@ -46,6 +46,7 @@ from hal.training.features import FeatureProjection
 
 PREFETCH_FACTOR: Final[int] = 2
 CHECKPOINT_SCHEMA: Final[int] = 3
+MULTI_GENERATION_CHECKPOINT_SCHEMA: Final[int] = 4
 MAX_DECODE_CHUNK_ROWS: Final[int] = 64
 MATERIALIZATION_LOG_INTERVAL_S: Final[float] = 60.0
 
@@ -57,25 +58,26 @@ type BatchTransform[T] = Callable[[tuple[str, ...], Mapping[str, np.ndarray]], T
 
 @dataclass(frozen=True, slots=True)
 class SourceRowSelection:
-    """A selected prefix of one source, less explicit excluded rows."""
+    """A selected source-row range, less explicit excluded rows."""
 
     source: str
     stop: int
     excluded_rows: tuple[int, ...] = ()
+    start: int = 0
 
     def __post_init__(self) -> None:
         if not self.source:
             raise ValueError("source name must not be empty")
-        if self.stop < 1:
-            raise ValueError(f"source row stop must be positive for {self.source}")
+        if not 0 <= self.start < self.stop:
+            raise ValueError(f"source row range must be non-empty for {self.source}")
         if self.excluded_rows != tuple(sorted(set(self.excluded_rows))):
             raise ValueError(f"excluded rows are not sorted and unique for {self.source}")
-        if any(not 0 <= row < self.stop for row in self.excluded_rows):
-            raise ValueError(f"excluded row is outside {self.source}[0:{self.stop}]")
+        if any(not self.start <= row < self.stop for row in self.excluded_rows):
+            raise ValueError(f"excluded row is outside {self.source}[{self.start}:{self.stop}]")
 
     @property
     def row_count(self) -> int:
-        return self.stop - len(self.excluded_rows)
+        return self.stop - self.start - len(self.excluded_rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,14 +97,16 @@ class PhysicalShardSelection:
     @classmethod
     def from_sources(cls, sources: tuple[SourceRowSelection, ...]) -> PhysicalShardSelection:
         """Construct a selection with its canonical persisted identity."""
-        payload = [
-            {
+        payload = []
+        for source in sources:
+            item: dict[str, object] = {
                 "source": source.source,
                 "stop": source.stop,
                 "excluded_rows": list(source.excluded_rows),
             }
-            for source in sources
-        ]
+            if source.start:
+                item["start"] = source.start
+            payload.append(item)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return cls(sources, hashlib.sha256(encoded).hexdigest())
 
@@ -292,6 +296,7 @@ class DecodedChunk:
     columns: Mapping[str, np.ndarray]
     windows_per_generation: int
     raw_bytes_read: int = 0
+    generations_per_replay: int = 1
 
     def __post_init__(self) -> None:
         rows = len(self.replay_ids)
@@ -306,20 +311,24 @@ class DecodedChunk:
             raise ValueError("a decoded chunk has no columns")
         if self.raw_bytes_read < 0:
             raise ValueError("raw bytes read must be non-negative")
-        if self.windows_per_generation < 1:
-            raise ValueError("windows per generation must be positive")
-        expected_shape = (rows, self.windows_per_generation)
+        if self.windows_per_generation < 1 or self.generations_per_replay < 1:
+            raise ValueError("generation geometry must be positive")
+        expected_shape = (rows, self.windows_per_replay)
         bad = {
             name: value.shape
             for name, value in self.columns.items()
             if not isinstance(value, np.ndarray) or value.ndim < 2 or value.shape[:2] != expected_shape
         }
         if bad:
-            raise ValueError(f"decoded chunk columns must begin [R, {self.windows_per_generation}], got {bad}")
+            raise ValueError(f"decoded chunk columns must begin [R, {self.windows_per_replay}], got {bad}")
 
     @property
     def epoch(self) -> int:
         return self.request.epoch
+
+    @property
+    def windows_per_replay(self) -> int:
+        return self.windows_per_generation * self.generations_per_replay
 
 
 def _coerce_manifest(source: str, value: SourceManifest | Sequence[int]) -> SourceManifest:
@@ -334,7 +343,7 @@ def build_shard_plan(
     selection: PhysicalShardSelection,
     manifests: Mapping[str, SourceManifest | Sequence[int]],
 ) -> tuple[ShardTask, ...]:
-    """Expose each selected prefix row exactly once, grouped by physical shard."""
+    """Expose each selected source row exactly once, grouped by physical shard."""
     selected_sources = {view.source for view in selection.sources}
     if set(manifests) != selected_sources:
         missing = selected_sources - set(manifests)
@@ -348,16 +357,17 @@ def build_shard_plan(
         source_row = 0
         selected = 0
         for shard, samples in enumerate(manifest.samples_per_shard):
-            selected_stop = min(samples, max(0, view.stop - source_row))
-            if selected_stop:
+            selected_start = max(view.start, source_row)
+            selected_stop = min(view.stop, source_row + samples)
+            if selected_start < selected_stop:
                 exclusions = tuple(
-                    row - source_row for row in view.excluded_rows if source_row <= row < source_row + selected_stop
+                    row - source_row for row in view.excluded_rows if selected_start <= row < selected_stop
                 )
                 task = ShardTask(
                     source=view.source,
                     shard=shard,
-                    row_start=0,
-                    row_stop=selected_stop,
+                    row_start=selected_start - source_row,
+                    row_stop=selected_stop - source_row,
                     excluded_rows=exclusions,
                     source_index=source_index,
                     global_shard=global_shard,
@@ -461,6 +471,7 @@ def _decode_generation(
     context_length: int,
     chunk_length: int,
     windows_per_generation: int,
+    generations_per_replay: int = 1,
     schema_version: int,
     labels: ReplayLabels,
     projection: FeatureProjection | None,
@@ -468,7 +479,8 @@ def _decode_generation(
     replay_id = str(compact["replay_id"])
     frames = int(cast(Any, compact["num_frames"]))
     window_length = context_length + chunk_length
-    required_frames = window_length + windows_per_generation - 1
+    windows_per_replay = windows_per_generation * generations_per_replay
+    required_frames = window_length + windows_per_replay - 1
     if frames < required_frames:
         raise ValueError(
             f"short replay {replay_id!r} at source={task.source} shard={task.shard} row={row}: "
@@ -481,7 +493,7 @@ def _decode_generation(
         frames,
         context_length,
         chunk_length,
-        windows_per_generation,
+        windows_per_replay,
         rng,
     )
     ranges = tuple((int(start), int(start) + window_length) for start in starts)
@@ -561,6 +573,18 @@ class MDSStorageAdapter:
         self.split = split
         self.manifests = self._manifests()
         self.last_read_bytes = 0
+        self._closed = False
+
+    def close(self) -> None:
+        """Release Mosaic's local-directory registration before adapter reuse."""
+        if self._closed:
+            return
+        self._closed = True
+        # Mosaic Streaming 0.13.0 releases this registration only in __del__.
+        # The physical loader retains its adapter, so deterministic phase
+        # transitions must invoke that cleanup explicitly. Remove this call
+        # when the pinned dependency provides a public close operation.
+        self.dataset.__del__()
 
     def _manifests(self) -> dict[str, SourceManifest]:
         manifests: dict[str, SourceManifest] = {}
@@ -703,6 +727,7 @@ class MDSStorageAdapter:
         context_length: int,
         chunk_length: int,
         windows_per_generation: int,
+        generations_per_replay: int = 1,
         schema_version: int,
         labels: ReplayLabels,
         projection: FeatureProjection | None,
@@ -722,6 +747,7 @@ class MDSStorageAdapter:
                 context_length=context_length,
                 chunk_length=chunk_length,
                 windows_per_generation=windows_per_generation,
+                generations_per_replay=generations_per_replay,
                 schema_version=schema_version,
                 labels=labels,
                 projection=projection,
@@ -737,6 +763,7 @@ class MDSStorageAdapter:
         context_length: int,
         chunk_length: int,
         windows_per_generation: int,
+        generations_per_replay: int = 1,
         schema_version: int,
         labels: ReplayLabels,
         projection: FeatureProjection | None,
@@ -752,6 +779,7 @@ class MDSStorageAdapter:
                 context_length=context_length,
                 chunk_length=chunk_length,
                 windows_per_generation=windows_per_generation,
+                generations_per_replay=generations_per_replay,
                 schema_version=schema_version,
                 labels=labels,
                 projection=projection,
@@ -765,9 +793,10 @@ class MDSStorageAdapter:
             locators=tuple(PhysicalRow(task.source, task.shard, row) for row in request.rows),
             columns=_stack_window_rows(
                 tuple(generation[1] for generation in generations),
-                windows_per_generation=windows_per_generation,
+                windows_per_generation=windows_per_generation * generations_per_replay,
             ),
             windows_per_generation=windows_per_generation,
+            generations_per_replay=generations_per_replay,
             raw_bytes_read=self.last_read_bytes,
         )
 
@@ -817,6 +846,7 @@ class ShardStorageAdapter(Protocol):
         context_length: int,
         chunk_length: int,
         windows_per_generation: int,
+        generations_per_replay: int = 1,
         schema_version: int,
         labels: ReplayLabels,
         projection: FeatureProjection | None,
@@ -831,6 +861,7 @@ class ShardStorageAdapter(Protocol):
         context_length: int,
         chunk_length: int,
         windows_per_generation: int,
+        generations_per_replay: int = 1,
         schema_version: int,
         labels: ReplayLabels,
         projection: FeatureProjection | None,
@@ -847,6 +878,7 @@ class _ChunkDataset(Dataset[DecodedChunk]):
         context_length: int,
         chunk_length: int,
         windows_per_generation: int,
+        generations_per_replay: int = 1,
         schema_version: int,
         labels: ReplayLabels,
         projection: FeatureProjection | None,
@@ -857,6 +889,7 @@ class _ChunkDataset(Dataset[DecodedChunk]):
         self.context_length = context_length
         self.chunk_length = chunk_length
         self.windows_per_generation = windows_per_generation
+        self.generations_per_replay = generations_per_replay
         self.schema_version = schema_version
         self.labels = labels
         self.projection = projection
@@ -865,6 +898,19 @@ class _ChunkDataset(Dataset[DecodedChunk]):
         return 2**63 - 1
 
     def __getitem__(self, index: _DecodeChunkRequest) -> DecodedChunk:
+        if self.generations_per_replay > 1:
+            return self.adapter.decode_chunk(
+                index,
+                self.tasks[index.task_index],
+                seed=self.seed,
+                context_length=self.context_length,
+                chunk_length=self.chunk_length,
+                windows_per_generation=self.windows_per_generation,
+                generations_per_replay=self.generations_per_replay,
+                schema_version=self.schema_version,
+                labels=self.labels,
+                projection=self.projection,
+            )
         return self.adapter.decode_chunk(
             index,
             self.tasks[index.task_index],
@@ -993,17 +1039,23 @@ class _ReplayRingSchedule:
         windows_per_generation: int,
         phase_block_batches: int,
         seed: int,
+        generations_per_replay: int = 1,
     ) -> None:
         if capacity < 1 or batch_size < 1:
             raise ValueError("replay-ring capacity and batch size must be positive")
         if not 2 <= windows_per_generation <= phase_block_batches:
             raise ValueError("phase block must cover at least two windows per generation")
-        if capacity % batch_size or batch_size % windows_per_generation:
+        if generations_per_replay < 1:
+            raise ValueError("generations per replay must be positive")
+        windows_per_replay = windows_per_generation * generations_per_replay
+        if capacity % batch_size or batch_size % windows_per_replay:
             raise ValueError("replay-ring geometry must divide evenly")
         self.capacity = capacity
         self.batch_size = batch_size
         self.windows_per_generation = windows_per_generation
-        self.replay_lanes = batch_size // windows_per_generation
+        self.generations_per_replay = generations_per_replay
+        self.windows_per_replay = windows_per_replay
+        self.replay_lanes = batch_size // windows_per_replay
         self.period_batches = capacity // batch_size
         self.cohort_count = capacity // self.replay_lanes
         if self.period_batches < phase_block_batches:
@@ -1013,21 +1065,26 @@ class _ReplayRingSchedule:
         rng = np.random.default_rng(seed)
         self.phase_offsets = np.stack(
             [
-                rng.choice(
-                    phase_block_batches,
-                    size=self.windows_per_generation,
-                    replace=False,
+                np.concatenate(
+                    [
+                        rng.choice(
+                            phase_block_batches,
+                            size=self.windows_per_generation,
+                            replace=False,
+                        )
+                        for _ in range(self.generations_per_replay)
+                    ]
                 )
                 for _ in range(self.replay_lanes)
             ]
         ).astype(np.int16, copy=False)
         self.phase_offsets.flags.writeable = False
         self._window_ordinals = np.repeat(
-            np.arange(self.windows_per_generation, dtype=np.int64),
+            np.arange(self.windows_per_replay, dtype=np.int64),
             self.replay_lanes,
         )
         self._window_ordinals.flags.writeable = False
-        self._lane_indices = np.tile(np.arange(self.replay_lanes, dtype=np.int64), self.windows_per_generation)
+        self._lane_indices = np.tile(np.arange(self.replay_lanes, dtype=np.int64), self.windows_per_replay)
         self._lane_indices.flags.writeable = False
         phases = self.phase_offsets[self._lane_indices, self._window_ordinals]
         ages = self._window_ordinals * self.period_batches + phases
@@ -1078,11 +1135,20 @@ class RingSlotDescriptor:
     replay_checksum: int
 
 
+@dataclass(frozen=True, slots=True)
+class MultiGenerationRingSlotDescriptor:
+    slot: int
+    locator: PhysicalRow
+    epoch: int
+    replay_checksum: int
+    windows_seen: int
+
+
 def _materialization_task_order(
     tasks: tuple[ShardTask, ...],
     task_order: tuple[int, ...],
     cursor_task_offset: int,
-    resume_descriptors: Sequence[RingSlotDescriptor],
+    resume_descriptors: Sequence[RingSlotDescriptor | MultiGenerationRingSlotDescriptor],
 ) -> tuple[int, ...]:
     """Prioritize the cursor and resume ring within deterministic shard order."""
     if sorted(task_order) != list(range(len(tasks))):
@@ -1270,6 +1336,7 @@ class _ReplayRing:
         windows_per_generation: int,
         phase_block_batches: int,
         seed: int,
+        generations_per_replay: int = 1,
     ) -> None:
         if capacity < batch_size:
             raise ValueError("replay ring must cover one batch")
@@ -1279,11 +1346,14 @@ class _ReplayRing:
             windows_per_generation,
             phase_block_batches,
             seed,
+            generations_per_replay,
         )
         self.columns: dict[str, np.ndarray] = {}
         self.replay_ids: list[str | None] = [None] * capacity
         self.locators: list[PhysicalRow | None] = [None] * capacity
         self.epochs = np.full(capacity, -1, dtype=np.int64)
+        self.windows_seen = np.zeros(capacity, dtype=np.int16)
+        self.completed_replays = 0
         self._size = 0
         self.fifo_head = 0
         self.batch_index = 0
@@ -1305,7 +1375,10 @@ class _ReplayRing:
         *,
         require_empty: bool,
     ) -> None:
-        if chunk.windows_per_generation != self.schedule.windows_per_generation:
+        if (
+            chunk.windows_per_generation != self.schedule.windows_per_generation
+            or chunk.generations_per_replay != self.schedule.generations_per_replay
+        ):
             raise ValueError("decoded chunk does not match replay-ring window geometry")
         self._initialize_columns(chunk)
         if set(self.columns) != set(chunk.columns):
@@ -1332,6 +1405,7 @@ class _ReplayRing:
             self.replay_ids[slot] = replay_id
             self.locators[slot] = locator
         self.epochs[slots] = chunk.epoch
+        self.windows_seen[slots] = 0
 
     def append_chunk(self, chunk: DecodedChunk) -> None:
         stop = self.size + len(chunk.replay_ids)
@@ -1361,6 +1435,9 @@ class _ReplayRing:
             raise RuntimeError("replay-ring batch contains a repeated replay identity")
         ordinals = self.schedule.window_ordinals
         columns = {name: values[slots, ordinals] for name, values in self.columns.items()}
+        self.windows_seen[slots] += 1
+        if np.any(self.windows_seen[slots] > self.schedule.windows_per_replay):
+            raise RuntimeError("replay-ring schedule reused a window slot")
         return replay_ids, columns
 
     def replace_oldest(self, chunks: Sequence[DecodedChunk]) -> None:
@@ -1371,11 +1448,56 @@ class _ReplayRing:
         if len(set(replay_ids)) != rows:
             raise ValueError("replacement cohort repeats a replay identity")
         start = self.fifo_head * self.schedule.replay_lanes
+        replaced = np.arange(start, start + rows)
+        if self.schedule.generations_per_replay > 1:
+            counts = self.windows_seen[replaced]
+            if np.any(counts != self.schedule.windows_per_replay):
+                raise RuntimeError(
+                    f"FIFO replacement saw replay window counts {np.unique(counts).tolist()}, "
+                    f"expected {self.schedule.windows_per_replay}"
+                )
+            self.completed_replays += rows
         offset = 0
         for chunk in chunks:
             stop = offset + len(chunk.replay_ids)
             self._write_chunk(chunk, np.arange(start + offset, start + stop), require_empty=False)
             offset = stop
+        self.fifo_head = (self.fifo_head + 1) % self.schedule.cohort_count
+        self.batch_index += 1
+
+    @property
+    def completed_cohorts(self) -> tuple[int, ...]:
+        if self.schedule.generations_per_replay == 1:
+            return ()
+        counts = self.windows_seen.reshape(self.schedule.cohort_count, self.schedule.replay_lanes)
+        complete = np.all(counts == self.schedule.windows_per_replay, axis=1)
+        return tuple(map(int, np.flatnonzero(complete)))
+
+    def replace_completed(self, chunks: Sequence[DecodedChunk], cohorts: Sequence[int]) -> None:
+        if self.schedule.generations_per_replay == 1:
+            raise RuntimeError("single-generation rings use FIFO replacement")
+        if tuple(cohorts) != self.completed_cohorts:
+            raise RuntimeError("replacement cohorts do not match completed replay exposures")
+        rows = len(cohorts) * self.schedule.replay_lanes
+        if sum(len(chunk.replay_ids) for chunk in chunks) != rows:
+            raise ValueError(f"completed replacement needs {rows} rows")
+        slots = np.concatenate(
+            [
+                np.arange(
+                    cohort * self.schedule.replay_lanes,
+                    (cohort + 1) * self.schedule.replay_lanes,
+                )
+                for cohort in cohorts
+            ]
+        )
+        at = 0
+        for chunk in chunks:
+            stop = at + len(chunk.replay_ids)
+            self._write_chunk(chunk, slots[at:stop], require_empty=False)
+            at = stop
+        self.completed_replays += rows
+
+    def advance_schedule(self) -> None:
         self.fifo_head = (self.fifo_head + 1) % self.schedule.cohort_count
         self.batch_index += 1
 
@@ -1389,22 +1511,38 @@ class _ReplayRing:
         self.fifo_head = fifo_head
         self.batch_index = batch_index
 
-    def descriptors(self) -> tuple[RingSlotDescriptor, ...]:
+    def descriptors(self) -> tuple[RingSlotDescriptor | MultiGenerationRingSlotDescriptor, ...]:
         out = []
         for slot, replay_id in enumerate(self.replay_ids):
             if replay_id is None:
                 continue
             locator = self.locators[slot]
             assert locator is not None
-            out.append(
-                RingSlotDescriptor(
-                    slot=slot,
-                    locator=locator,
-                    epoch=int(self.epochs[slot]),
-                    replay_checksum=_replay_checksum(replay_id),
+            if self.schedule.generations_per_replay == 1:
+                out.append(
+                    RingSlotDescriptor(
+                        slot=slot,
+                        locator=locator,
+                        epoch=int(self.epochs[slot]),
+                        replay_checksum=_replay_checksum(replay_id),
+                    )
                 )
-            )
+            else:
+                out.append(
+                    MultiGenerationRingSlotDescriptor(
+                        slot=slot,
+                        locator=locator,
+                        epoch=int(self.epochs[slot]),
+                        replay_checksum=_replay_checksum(replay_id),
+                        windows_seen=int(self.windows_seen[slot]),
+                    )
+                )
         return tuple(out)
+
+    @property
+    def unique_replays_seen(self) -> int:
+        active = int(np.count_nonzero(self.windows_seen[: self.size]))
+        return self.completed_replays + active
 
 
 class _PhysicalShardIterator[BatchT](Iterator[BatchT]):
@@ -1464,7 +1602,7 @@ class _PhysicalShardIterator[BatchT](Iterator[BatchT]):
             decoded_bytes = sum(values.nbytes for values in decoded.columns.values())
             self.loader._max_decoded_chunk_bytes = max(self.loader._max_decoded_chunk_bytes, decoded_bytes)
             self.loader._max_decoded_chunk_size = max(self.loader._max_decoded_chunk_size, count)
-            self.loader._decoded_generations += count
+            self.loader._decoded_generations += count * self.loader.generations_per_replay
             chunks.append(decoded)
             rows += count
         return tuple(chunks)
@@ -1505,6 +1643,7 @@ class PhysicalShardReplayLoader[BatchT]:
         reserved_disk_bytes: int,
         pin_memory: bool,
         materialization_threads: int = 0,
+        generations_per_replay: int = 1,
     ) -> None:
         if replay_slots > selection.row_count:
             raise ValueError("replay slots exceed the selected source rows")
@@ -1514,7 +1653,7 @@ class PhysicalShardReplayLoader[BatchT]:
             raise ValueError("shard tasks do not cover the source selection")
         if num_workers < 0:
             raise ValueError("num_workers must be non-negative")
-        if context_length < 1 or chunk_length < 0 or windows_per_generation < 1:
+        if context_length < 1 or chunk_length < 0 or windows_per_generation < 1 or generations_per_replay < 1:
             raise ValueError("window geometry is invalid")
         if reserved_disk_bytes < 0:
             raise ValueError("reserved disk bytes must be non-negative")
@@ -1552,6 +1691,7 @@ class PhysicalShardReplayLoader[BatchT]:
         self.context_length = context_length
         self.chunk_length = chunk_length
         self.windows_per_generation = windows_per_generation
+        self.generations_per_replay = generations_per_replay
         self.schema_version = schema_version
         self.reserved_disk_bytes = reserved_disk_bytes
         self.pin_memory = pin_memory
@@ -1567,8 +1707,9 @@ class PhysicalShardReplayLoader[BatchT]:
             windows_per_generation,
             replay_phase_block_batches,
             seed ^ 0x51B0FF,
+            generations_per_replay,
         )
-        self._resume_descriptors: tuple[RingSlotDescriptor, ...] | None = None
+        self._resume_descriptors: tuple[RingSlotDescriptor | MultiGenerationRingSlotDescriptor, ...] | None = None
         self._resume_position: tuple[int, int] | None = None
         self._iterator: _PhysicalShardIterator[BatchT] | None = None
         self._data_iterator: Iterator[DecodedChunk] | None = None
@@ -1591,6 +1732,7 @@ class PhysicalShardReplayLoader[BatchT]:
                 "data/epoch": generation_epoch,
                 "data/decoded_generations": float(self._decoded_generations),
                 "data/replay_generations": float(generation_count),
+                "data/unique_replays": float(self.unique_replays),
                 "data/raw_bytes_read": float(self._raw_bytes_read),
                 "data/replay_generation_epoch": generation_epoch,
                 "data/max_decoded_chunk_size": float(self._max_decoded_chunk_size),
@@ -1637,7 +1779,16 @@ class PhysicalShardReplayLoader[BatchT]:
     @property
     def generation_count(self) -> int:
         """Return logical source generations committed to the replay ring."""
-        return self._ring.size + self._ring.batch_index * self._ring.schedule.replay_lanes
+        if self.generations_per_replay == 1:
+            rows = self._ring.size + self._ring.batch_index * self._ring.schedule.replay_lanes
+        else:
+            rows = self._ring.size + self._ring.completed_replays
+        return rows * self.generations_per_replay
+
+    @property
+    def unique_replays(self) -> int:
+        """Return exact physical replay rows that contributed at least one window."""
+        return self._ring.unique_replays_seen
 
     @property
     def max_decoded_chunk_size(self) -> int:
@@ -1675,6 +1826,7 @@ class PhysicalShardReplayLoader[BatchT]:
             context_length=self.context_length,
             chunk_length=self.chunk_length,
             windows_per_generation=self.windows_per_generation,
+            generations_per_replay=self.generations_per_replay,
             schema_version=self.schema_version,
             labels=self.labels,
             projection=self.projection,
@@ -1766,8 +1918,15 @@ class PhysicalShardReplayLoader[BatchT]:
                 self._ring.append_chunk(chunk)
         replay_ids, columns = self._ring.sample()
         transformed = self.batch_transform(replay_ids, columns)
-        replacements = iterator.take_cohort()
-        self._ring.replace_oldest(replacements)
+        if self.generations_per_replay == 1:
+            replacements = iterator.take_cohort()
+            self._ring.replace_oldest(replacements)
+        else:
+            cohorts = self._ring.completed_cohorts
+            if cohorts:
+                replacements = tuple(chunk for _cohort in cohorts for chunk in iterator.take_cohort())
+                self._ring.replace_completed(replacements, cohorts)
+            self._ring.advance_schedule()
         if not self.pin_memory:
             return transformed
         pin_memory = getattr(transformed, "pin_memory", None)
@@ -1782,8 +1941,8 @@ class PhysicalShardReplayLoader[BatchT]:
             raise RuntimeError("cannot checkpoint while parent-side next() is active")
         if self._ring.size != self.replay_slots:
             raise RuntimeError("cannot checkpoint before the replay ring is full")
-        return {
-            "schema": CHECKPOINT_SCHEMA,
+        state: dict[str, object] = {
+            "schema": (CHECKPOINT_SCHEMA if self.generations_per_replay == 1 else MULTI_GENERATION_CHECKPOINT_SCHEMA),
             "data_protocol": self.data_protocol,
             "source_selection_sha256": self._selection_hash,
             "source_manifest_sha256": self.source_manifest_sha256,
@@ -1798,12 +1957,19 @@ class PhysicalShardReplayLoader[BatchT]:
                 "window_length": self.context_length + self.chunk_length,
             },
         }
+        if self.generations_per_replay > 1:
+            geometry = state["buffer_geometry"]
+            geometry["generations_per_replay"] = self.generations_per_replay
+            state["completed_replays"] = self._ring.completed_replays
+            state["generation_rng"] = {"kind": "counter-based", "seed": self.seed}
+        return state
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Schedule a strict restore before workers are started."""
         if self._iterator is not None:
             raise RuntimeError("load state before creating the physical-shard iterator")
-        if state.get("schema") != CHECKPOINT_SCHEMA:
+        expected_schema = CHECKPOINT_SCHEMA if self.generations_per_replay == 1 else MULTI_GENERATION_CHECKPOINT_SCHEMA
+        if state.get("schema") != expected_schema:
             raise ValueError(f"unsupported physical-shard loader schema {state.get('schema')!r}")
         if state.get("data_protocol") != self.data_protocol:
             raise ValueError("data protocol changed across resume")
@@ -1817,6 +1983,10 @@ class PhysicalShardReplayLoader[BatchT]:
             "batch_size": self.batch_size,
             "window_length": self.context_length + self.chunk_length,
         }
+        if self.generations_per_replay > 1:
+            expected_geometry["generations_per_replay"] = self.generations_per_replay
+            if state.get("generation_rng") != {"kind": "counter-based", "seed": self.seed}:
+                raise ValueError("generation RNG state changed across resume")
         if state.get("buffer_geometry") != expected_geometry:
             raise ValueError("replay-ring geometry changed across resume")
         cursor = state.get("cursor")
@@ -1832,7 +2002,8 @@ class PhysicalShardReplayLoader[BatchT]:
         batch_index = state.get("batch_index")
         if not isinstance(descriptors, tuple) or len(descriptors) != self.replay_slots:
             raise ValueError("checkpoint does not describe every replay slot")
-        if not all(isinstance(descriptor, RingSlotDescriptor) for descriptor in descriptors):
+        descriptor_type = RingSlotDescriptor if self.generations_per_replay == 1 else MultiGenerationRingSlotDescriptor
+        if not all(isinstance(descriptor, descriptor_type) for descriptor in descriptors):
             raise ValueError("checkpoint contains an invalid replay descriptor")
         if not isinstance(fifo_head, int) or not isinstance(batch_index, int):
             raise ValueError("checkpoint has no replay-ring position")
@@ -1848,10 +2019,19 @@ class PhysicalShardReplayLoader[BatchT]:
             raise ValueError("committed row cursor exceeds its shard")
         prior_rows = sum(self.tasks[self._task_order[offset]].row_count for offset in range(task_offset))
         source_position = epoch * self.selection.row_count + prior_rows + row_offset
-        expected_source_position = self.replay_slots + batch_index * self._ring.schedule.replay_lanes
+        if self.generations_per_replay == 1:
+            expected_source_position = self.replay_slots + batch_index * self._ring.schedule.replay_lanes
+        else:
+            completed_replays = state.get("completed_replays")
+            if not isinstance(completed_replays, int):
+                raise ValueError("checkpoint contains no completed replay count")
+            expected_source_position = self.replay_slots + completed_replays
         if source_position != expected_source_position:
             raise ValueError("committed source cursor does not match the replay-ring position")
-        typed_descriptors = cast(tuple[RingSlotDescriptor, ...], descriptors)
+        typed_descriptors = cast(
+            tuple[RingSlotDescriptor | MultiGenerationRingSlotDescriptor, ...],
+            descriptors,
+        )
         if sorted(descriptor.slot for descriptor in typed_descriptors) != list(range(self.replay_slots)):
             raise ValueError("checkpoint replay slots are not a complete permutation")
         tasks_by_shard = {(task.source, task.shard): task for task in self.tasks}
@@ -1865,18 +2045,30 @@ class PhysicalShardReplayLoader[BatchT]:
                 or descriptor.locator.row in task.excluded_rows
             ):
                 raise ValueError("checkpoint contains an invalid replay descriptor")
+            if (
+                isinstance(descriptor, MultiGenerationRingSlotDescriptor)
+                and not 0 <= descriptor.windows_seen <= self._ring.schedule.windows_per_replay
+            ):
+                raise ValueError("checkpoint contains an invalid replay window counter")
+        completed_replays = state.get("completed_replays", 0)
+        if not isinstance(completed_replays, int) or completed_replays < 0:
+            raise ValueError("checkpoint contains an invalid completed replay count")
         self._cursor = typed_cursor
         self._resume_descriptors = typed_descriptors
         self._resume_position = (fifo_head, batch_index)
+        self._ring.completed_replays = completed_replays
 
     def _restore_ring(
         self,
-        descriptors: tuple[RingSlotDescriptor, ...],
+        descriptors: tuple[RingSlotDescriptor | MultiGenerationRingSlotDescriptor, ...],
         fifo_head: int,
         batch_index: int,
     ) -> None:
         tasks = {(task.source, task.shard): (task_index, task) for task_index, task in enumerate(self.tasks)}
-        cohorts: dict[tuple[str, int, int], list[RingSlotDescriptor]] = {}
+        cohorts: dict[
+            tuple[str, int, int],
+            list[RingSlotDescriptor | MultiGenerationRingSlotDescriptor],
+        ] = {}
         for descriptor in descriptors:
             key = (descriptor.locator.source, descriptor.locator.shard, descriptor.epoch)
             cohorts.setdefault(key, []).append(descriptor)
@@ -1897,6 +2089,7 @@ class PhysicalShardReplayLoader[BatchT]:
                     context_length=self.context_length,
                     chunk_length=self.chunk_length,
                     windows_per_generation=self.windows_per_generation,
+                    generations_per_replay=self.generations_per_replay,
                     schema_version=self.schema_version,
                     labels=self.labels,
                     projection=self.projection,
@@ -1924,16 +2117,20 @@ class PhysicalShardReplayLoader[BatchT]:
                     locators=tuple(descriptor.locator for descriptor in ordered),
                     columns=_stack_window_rows(
                         windows,
-                        windows_per_generation=self.windows_per_generation,
+                        windows_per_generation=(self.windows_per_generation * self.generations_per_replay),
                     ),
                     windows_per_generation=self.windows_per_generation,
+                    generations_per_replay=self.generations_per_replay,
                 )
-                self._ring.restore_chunk(
-                    chunk,
-                    np.asarray([descriptor.slot for descriptor in ordered]),
-                )
+                slots = np.asarray([descriptor.slot for descriptor in ordered])
+                self._ring.restore_chunk(chunk, slots)
+                if self.generations_per_replay > 1:
+                    self._ring.windows_seen[slots] = np.asarray(
+                        [cast(MultiGenerationRingSlotDescriptor, descriptor).windows_seen for descriptor in ordered],
+                        dtype=np.int16,
+                    )
                 count = len(ordered)
-                self._decoded_generations += count
+                self._decoded_generations += count * self.generations_per_replay
                 self._max_decoded_chunk_size = max(self._max_decoded_chunk_size, count)
                 decoded_bytes = sum(values.nbytes for values in chunk.columns.values())
                 self._max_decoded_chunk_bytes = max(self._max_decoded_chunk_bytes, decoded_bytes)
@@ -1958,4 +2155,8 @@ class PhysicalShardReplayLoader[BatchT]:
         iterator = self._data_iterator
         self._data_iterator = None
         self._ordered_chunks = None
+        self._iterator = None
         _shutdown_data_loader_workers(iterator)
+        close_adapter = getattr(self.adapter, "close", None)
+        if callable(close_adapter):
+            close_adapter()

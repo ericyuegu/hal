@@ -83,7 +83,10 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
 )
 STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
-CLOSED_LOOP_EXPERIMENT: Final[str] = "experiments/050_scaled_temporal_awr.py"
+CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
+    "experiments/050_scaled_temporal_awr.py": None,
+    "experiments/054_bc_capacity_latency.py": frozenset({4_096, 8_192, 16_384, 32_768}),
+}
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
 CLOSED_LOOP_EVERY: Final[int] = 8192
@@ -97,6 +100,8 @@ class Args:
     """Command after ``--``. Automatic recovery requires an ``experiments/*.py`` command."""
     gpu: str = "B200"
     """Modal GPU type. Use 'none' for CPU-only work; comma-separated fallbacks are accepted."""
+    closed_loop_gpu: str = "L40S"
+    """Modal GPU type for spawned closed-loop evaluations."""
     cpu: float = 32.0
     """Requested physical CPU cores."""
     cpu_limit: float = 48.0
@@ -235,6 +240,8 @@ def validate_args(args: Args) -> None:
         raise SystemExit("--timeout-hours must be between 1 and Modal's 24-hour Function limit.")
     if args.startup_timeout_minutes <= 0 or args.max_retries < 0 or args.stall_minutes <= 0:
         raise SystemExit("startup timeout and stall duration must be positive; retries cannot be negative.")
+    if gpu_request(args.closed_loop_gpu) is None:
+        raise SystemExit("--closed-loop-gpu must request a GPU.")
     if args.auto_resume and experiment_script(args.cmd) is None:
         raise SystemExit(
             "automatic recovery only supports commands containing an existing experiments/*.py script; "
@@ -617,7 +624,19 @@ def _drain_run_names(
             loguru.logger.info(f"saved retry run name {found!r}")
 
 
-def _broker_response(line: bytes, evaluator: modal.Function) -> bytes:
+def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
+    selected = [token for token in argv if token in CLOSED_LOOP_EXPERIMENTS]
+    if len(selected) > 1:
+        raise ValueError(f"training command names multiple evaluation experiments: {selected}")
+    return selected[0] if selected else None
+
+
+def _valid_evaluation_update(experiment: str, update: int) -> bool:
+    allowed = CLOSED_LOOP_EXPERIMENTS[experiment]
+    return update > 0 and (update % CLOSED_LOOP_EVERY == 0 if allowed is None else update in allowed)
+
+
+def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) -> bytes:
     """Validate and dispatch one evaluation request from the training child."""
     try:
         value = json.loads(line)
@@ -632,15 +651,15 @@ def _broker_response(line: bytes, evaluator: modal.Function) -> bytes:
     n_matchups = value["n_matchups"]
     if not isinstance(run_name, str) or not RUN_NAME.fullmatch(run_name):
         error = f"invalid training run name: {run_name!r}"
-    elif type(update) is not int or update <= 0 or update % CLOSED_LOOP_EVERY:
-        error = f"closed-loop update must be a positive multiple of {CLOSED_LOOP_EVERY}"
+    elif type(update) is not int or not _valid_evaluation_update(experiment, update):
+        error = f"unsupported closed-loop update {update!r} for {experiment}"
     elif not isinstance(checkpoint_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha):
         error = "expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters"
     elif n_matchups != CLOSED_LOOP_MATCHUPS:
         error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
     else:
         try:
-            call = evaluator.spawn(run_name, update, checkpoint_sha, n_matchups)
+            call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups)
             call_id = call.object_id
         except Exception as e:
             # This boundary must return Modal failures to the waiting child process.
@@ -664,6 +683,7 @@ def _service_closed_loop_broker(
     broker: socket.socket,
     buffer: bytearray,
     evaluator: modal.Function,
+    experiment: str,
 ) -> None:
     while select.select([broker], [], [], 0.0)[0]:
         chunk = os.read(broker.fileno(), CLOSED_LOOP_REQUEST_MAX_BYTES)
@@ -677,7 +697,7 @@ def _service_closed_loop_broker(
             response = {"error": f"evaluation request exceeds {CLOSED_LOOP_REQUEST_MAX_BYTES} bytes"}
             _write_all(broker.fileno(), json.dumps(response).encode() + b"\n")
         else:
-            _write_all(broker.fileno(), _broker_response(bytes(line), evaluator))
+            _write_all(broker.fileno(), _broker_response(bytes(line), evaluator, experiment))
     if len(buffer) >= CLOSED_LOOP_REQUEST_MAX_BYTES:
         buffer.clear()
         response = {"error": f"evaluation request exceeds {CLOSED_LOOP_REQUEST_MAX_BYTES} bytes"}
@@ -716,7 +736,8 @@ def _run_training(
     child_env = env.copy()
     child_env.pop(CLOSED_LOOP_BROKER_FD, None)
     pass_fds: tuple[int, ...] = ()
-    if evaluator is not None:
+    evaluation_experiment = _evaluation_experiment(argv)
+    if evaluator is not None and evaluation_experiment is not None:
         broker, child_broker = socket.socketpair()
         child_env[CLOSED_LOOP_BROKER_FD] = str(child_broker.fileno())
         pass_fds = (child_broker.fileno(),)
@@ -759,8 +780,8 @@ def _run_training(
                     if failure is not None:
                         _kill_group(process.pid, signal.SIGKILL)
                         break
-                    if broker is not None and evaluator is not None:
-                        _service_closed_loop_broker(broker, broker_buffer, evaluator)
+                    if broker is not None and evaluator is not None and evaluation_experiment is not None:
+                        _service_closed_loop_broker(broker, broker_buffer, evaluator, evaluation_experiment)
                     quiet_s = time.time() - log_path.stat().st_mtime
                     if quiet_s >= stall_s:
                         failure = f"no training log output for {int(quiet_s)} seconds"
@@ -845,16 +866,19 @@ def _run_remote(spec: LaunchSpec, evaluator: modal.Function) -> int:
 
 
 def _run_closed_loop_eval(
+    experiment: str,
     run_name: str,
     update: int,
     expected_checkpoint_sha256: str,
     n_matchups: int,
 ) -> None:
-    """Evaluate one uploaded O50 milestone and publish its evidence."""
+    """Evaluate one uploaded training endpoint and publish its evidence."""
+    if experiment not in CLOSED_LOOP_EXPERIMENTS:
+        raise ValueError(f"unsupported closed-loop experiment: {experiment!r}")
     if not RUN_NAME.fullmatch(run_name):
         raise ValueError(f"invalid training run name: {run_name!r}")
-    if update <= 0 or update % CLOSED_LOOP_EVERY:
-        raise ValueError(f"closed-loop update must be a positive multiple of {CLOSED_LOOP_EVERY}")
+    if not _valid_evaluation_update(experiment, update):
+        raise ValueError(f"unsupported closed-loop update {update!r} for {experiment}")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_checkpoint_sha256):
         raise ValueError("expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
     if n_matchups != CLOSED_LOOP_MATCHUPS:
@@ -864,7 +888,7 @@ def _run_closed_loop_eval(
     command = [
         "uv",
         "run",
-        CLOSED_LOOP_EXPERIMENT,
+        experiment,
         "eval",
         "--checkpoint",
         checkpoint,
@@ -978,7 +1002,8 @@ def _print_request(
         f"gpu={resources['gpu']} cpu={resources['cpu']} "
         f"memory=({memory_request},{memory_limit})GiB "
         f"ephemeral_ssd={resources['ephemeral_disk'] / 1024:g}GiB "
-        f"cloud={args.cloud or 'auto'} region={args.region or 'auto'}"
+        f"cloud={args.cloud or 'auto'} region={args.region or 'auto'} "
+        f"closed_loop_gpu={gpu_request(args.closed_loop_gpu)}"
     )
     loguru.logger.info(
         f"attempt_timeout={args.timeout_hours}h retries={args.max_retries} secret={args.secret!r} "
@@ -1024,7 +1049,7 @@ def main(args: Args) -> None:
     evaluator = app.function(
         image=image,
         secrets=[secret],
-        gpu="L40S",
+        gpu=gpu_request(args.closed_loop_gpu),
         cpu=32.0,
         memory=64 * 1024,
         ephemeral_disk=512 * 1024,

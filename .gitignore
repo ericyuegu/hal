@@ -17,6 +17,7 @@ notebooks/.*/
 /.claude/*.settings.json
 /.claude/*.lock
 /.claude/worktrees/
+/.o*-launch-*/
 
 # Secrets
 /secrets/

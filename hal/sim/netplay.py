@@ -1,13 +1,9 @@
 """One local Dolphin session for Slippi direct-connect netplay."""
 
 import atexit
-import configparser
 import hashlib
-import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
-from contextlib import contextmanager
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,21 +21,16 @@ from hal.sim.session import LIVE_MENU_STATES
 from hal.sim.session import canonical_frame
 from hal.sim.session import fix_dolphin_ini_case
 from hal.sim.session import kill_dolphin
+from hal.sim.session import known_dolphin_version
 from hal.sim.session import popen_with_pdeathsig
+from hal.sim.session import set_dolphin_internal_resolution
 from hal.sim.session import step_blocking
 from hal.sim.session import teardown_console
 
 _SLIPPI_3_6_4_LINUX_SHA256 = "e0f984e5bbecb98e3a746da1f173a475b06c3a1ba6b73e2e31bbe85a5f5a5e8a"
-_DOLPHIN_VERSION_PATCH_LOCK = threading.RLock()
-_NATIVE_EFB_SCALE = "2"
 
 
-class _CaseSensitiveConfigParser(configparser.ConfigParser):
-    def optionxform(self, optionstr: str) -> str:
-        return optionstr
-
-
-def _tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
+def tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
     """Validate the exact GUI Slippi build tested for blocking netplay."""
     executable = Path(melee.console.get_exe_path(dolphin_path))
     try:
@@ -57,43 +48,6 @@ def _tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
         version="3.6.4",
         build=melee.console.DolphinBuild.NETPLAY,
     )
-
-
-def _set_native_internal_resolution(console: melee.Console) -> None:
-    """Set native rendering in the isolated Slippi 3.6.4 profile."""
-    config_path = Path(console._get_dolphin_config_path())
-    config_path.mkdir(parents=True, exist_ok=True)
-    ini_path = config_path / "GFX.ini"
-    config = _CaseSensitiveConfigParser(interpolation=None)
-    config.read(ini_path)
-    if not config.has_section("Settings"):
-        config.add_section("Settings")
-    # Pinned libmelee 0.47.0 does not expose EFBScale. Slippi uses 2 for
-    # native resolution and defaults to 4 (2x). Remove this when libmelee can
-    # configure the internal resolution directly.
-    config.set("Settings", "EFBScale", _NATIVE_EFB_SCALE)
-    with ini_path.open("w") as output:
-        config.write(output)
-
-
-@contextmanager
-def _known_dolphin_version(version: melee.console.DolphinVersion) -> Iterator[None]:
-    """Bypass libmelee 0.47.0's hanging GUI ``--version`` probe.
-
-    Remove this boundary workaround when the pinned libmelee either bounds its
-    GUI version probe or accepts an already validated version.
-    """
-    with _DOLPHIN_VERSION_PATCH_LOCK:
-        original = melee.console.get_dolphin_version
-
-        def known_version(_path: str) -> melee.console.DolphinVersion:
-            return version
-
-        melee.console.__dict__["get_dolphin_version"] = known_version
-        try:
-            yield
-        finally:
-            melee.console.__dict__["get_dolphin_version"] = original
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +94,8 @@ class NetplaySession:
         self._atexit_kill = self._kill_dolphin_only
 
     def __enter__(self) -> Self:
-        version = _tested_dolphin_version(self.dolphin_path)
-        with _known_dolphin_version(version):
+        version = tested_dolphin_version(self.dolphin_path)
+        with known_dolphin_version(version):
             self._console = melee.Console(
                 path=self.dolphin_path,
                 slippi_port=self.slippi_port,
@@ -169,7 +123,7 @@ class NetplaySession:
                 enable_ffw=False,
             )
         fix_dolphin_ini_case(self._console)
-        _set_native_internal_resolution(self._console)
+        set_dolphin_internal_resolution(self._console)
         atexit.register(self._atexit_kill)
         return self
 
