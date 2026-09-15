@@ -625,7 +625,7 @@ def _drain_run_names(
 
 
 def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
-    selected = [token for token in argv if token in CLOSED_LOOP_EXPERIMENTS]
+    selected = list(dict.fromkeys(token for token in argv if token in CLOSED_LOOP_EXPERIMENTS))
     if len(selected) > 1:
         raise ValueError(f"training command names multiple evaluation experiments: {selected}")
     return selected[0] if selected else None

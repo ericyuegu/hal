@@ -25,6 +25,7 @@ drain_run_names = _MODULE._drain_run_names
 configure_compiler_cache = _MODULE._configure_compiler_cache
 configure_tracking_context = _MODULE._configure_tracking_context
 closed_loop_retry_policy = _MODULE.closed_loop_retry_policy
+evaluation_experiment = _MODULE._evaluation_experiment
 function_resources = _MODULE.function_resources
 gpu_request = _MODULE.gpu_request
 requested_disk_gib = _MODULE.requested_disk_gib
@@ -39,6 +40,22 @@ validate_args = _MODULE.validate_args
 write_state = _MODULE.write_state
 
 EXPERIMENT = "experiments/028_onehot_controller.py"
+
+
+def test_evaluation_experiment_allows_the_same_experiment_for_both_players() -> None:
+    experiment = "experiments/050_scaled_temporal_awr.py"
+
+    assert evaluation_experiment((experiment, "--opponent-experiment", experiment)) == experiment
+
+
+def test_evaluation_experiment_rejects_distinct_experiments() -> None:
+    with pytest.raises(ValueError, match="multiple evaluation experiments"):
+        evaluation_experiment(
+            (
+                "experiments/050_scaled_temporal_awr.py",
+                "experiments/054_bc_capacity_latency.py",
+            )
+        )
 
 
 def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
