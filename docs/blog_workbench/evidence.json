@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "as_of": "2026-09-12",
+  "as_of": "2026-09-14",
   "purpose": "Canonical, deduplicated evidence for the HAL experiment blog. It contains study descriptions, source locations, unique closed-loop evaluations, boot-level sufficient statistics, and derived uncertainty.",
   "metrics": {
     "stock": "net stocks per active game minute; higher is better",
@@ -28,6 +28,119 @@
   ],
   "wandb_run_url_template": "https://wandb.ai/ericyuegu/hal/runs/{run}",
   "studies": [
+    {
+      "id": "o55_history_cross_attention",
+      "section": "architecture",
+      "title": "History cross-attention with final-prefix supervision versus dense O52",
+      "evidence": "package",
+      "code": [
+        "experiments/052_adamw_temporal_awr.py",
+        "experiments/055_history_cross_attention.py",
+        "tests/experiments/test_055_history_cross_attention.py"
+      ],
+      "setup": "O55 A-D trained on one final-prefix action chunk per trajectory window. O52 supervised chunks at every prefix in the final 128 positions of the 256-position context. All runs used batch 512, 16,384 updates, 8,388,608 windows, trunk width 256 with 16 layers, decoder width 128 with 4 layers and 2 heads, and offsets 1-6, 9, 12, 16, 20. The data source, manifests, seed, learning rate 0.0017, AWR gamma 0.99855, and gameplay evaluation protocol were matched. Each final evaluation used 96 boots and had zero crashes.",
+      "provenance": {
+        "source": "Results and paired analysis reported in the HAL experiment conversation on 2026-09-13; entered on 2026-09-14.",
+        "o55_source_git_sha": "ba34f1827e62dd172349c7d9315fcd53e00ba4c7",
+        "artifact_status": "Aggregate results only in this entry. O55 W&B run IDs and boot-level artifacts have not been consolidated here. Reported confidence limits are rounded to four decimal places; bootstrap seed is not recorded in this entry."
+      },
+      "arms": [
+        {
+          "name": "O52 dense baseline",
+          "run": "0ksityvv",
+          "supervised_prefixes_per_window": 128,
+          "supervised_chunks": 1073741824,
+          "stock": 0.39785160135,
+          "stock_lcb_one_sided": 0.3022536456
+        },
+        {
+          "name": "A",
+          "decoder_variant": "baseline",
+          "description": "W_h h_t plus four causal self-attention blocks over action tokens.",
+          "supervised_prefixes_per_window": 1,
+          "supervised_chunks": 8388608,
+          "stock": -0.7231852054,
+          "stock_lcb_one_sided": -0.8516429168
+        },
+        {
+          "name": "B",
+          "decoder_variant": "add-history",
+          "description": "A plus one history cross-attention layer after the first decoder block; retains W_h h_t and action self-attention.",
+          "supervised_prefixes_per_window": 1,
+          "supervised_chunks": 8388608,
+          "stock": -0.6591576249,
+          "stock_lcb_one_sided": -0.7764038244
+        },
+        {
+          "name": "C",
+          "decoder_variant": "remove-state-bias",
+          "description": "B with the W_h h_t input removed; retains action self-attention.",
+          "supervised_prefixes_per_window": 1,
+          "supervised_chunks": 8388608,
+          "stock": -0.7765819755,
+          "stock_lcb_one_sided": -0.8942435070
+        },
+        {
+          "name": "D",
+          "decoder_variant": "replace-attention",
+          "description": "Removes W_h h_t and replaces all four action self-attention layers with history cross-attention; retains decoder feed-forward layers. All arms retain the direct trunk-to-logit skip.",
+          "supervised_prefixes_per_window": 1,
+          "supervised_chunks": 8388608,
+          "stock": -0.8352470718,
+          "stock_lcb_one_sided": -0.9526430426
+        }
+      ],
+      "comparisons": [
+        {"treatment": "A", "control": "O52 dense baseline", "stock_delta": -1.1210, "delta_ci95": [-1.3137, -0.9348]},
+        {"treatment": "B", "control": "O52 dense baseline", "stock_delta": -1.0570, "delta_ci95": [-1.2392, -0.8807]},
+        {"treatment": "C", "control": "O52 dense baseline", "stock_delta": -1.1744, "delta_ci95": [-1.3620, -1.0089]},
+        {"treatment": "D", "control": "O52 dense baseline", "stock_delta": -1.2331, "delta_ci95": [-1.4159, -1.0517]},
+        {"treatment": "B", "control": "A", "stock_delta": 0.0640, "delta_ci95": [-0.1074, 0.2452]},
+        {"treatment": "C", "control": "A", "stock_delta": -0.0534, "delta_ci95": [-0.2252, 0.1227]},
+        {"treatment": "D", "control": "A", "stock_delta": -0.1121, "delta_ci95": [-0.3060, 0.0916]}
+      ],
+      "uncertainty_note": "Reported two-sided 95% paired bootstrap intervals for treatment-minus-control net stocks per minute, using 2,000 resamples of the shared 96 boots. These quantify evaluation uncertainty, not variation across training seeds.",
+      "claim": "Dense O52 clearly outperformed every sparse O55 arm. B had the best sparse point estimate, but its interval versus A includes zero. This does not establish whether cross-attention improves a densely supervised decoder: B-D versus O52 also change supervision density. A versus O52 tests the supervision change at fixed windows and optimizer updates, not fixed FLOPs.",
+      "dense_compute_projection": {
+        "status": "Analytical estimate only; dense B-D were not trained or benchmarked for these results.",
+        "units": "TFLOP per optimizer update, including approximate forward and backward matrix arithmetic; decimal 10^12 FLOPs.",
+        "geometry": {
+          "batch_size": 512,
+          "context_positions": 256,
+          "supervised_prefixes": 128,
+          "action_tokens_per_prefix": 10,
+          "trunk_width": 256,
+          "decoder_width": 128,
+          "decoder_layers": 4,
+          "mean_valid_history_length": 192.5,
+          "valid_query_key_pairs_per_sample_per_cross_layer": 246400
+        },
+        "assumptions": [
+          "Project all 256 trunk states to K/V once per trajectory per cross-attention layer, and share those projections across the 128 supervised prefixes.",
+          "A query at prefix t attends only to h_1 through h_t. Future trunk states must be masked to prevent future observation and action leakage.",
+          "Count forward plus backward as approximately three times forward matrix FLOPs. The baseline uses the existing subsystem parameter-use estimate plus trunk and decoder attention matrix products; it is not an exact operator count.",
+          "Exclude optimizer, normalization, softmax, activation, memory traffic, kernel launch, compilation, and evaluation costs. FLOP ratios do not predict wall-clock ratios."
+        ],
+        "formula": {
+          "symbols": "b=512, L=256, S=128, H=10, d=128, D=256; P=H*sum(129..256)=246400.",
+          "cross_layer_training_flops": "6*b*(L*2*D*d + S*H*2*d*d) + 12*b*d*P",
+          "removed_state_projection_training_flops": "6*b*S*D*d",
+          "removed_self_attention_layer_training_flops": "6*b*S*H*4*d*d + 12*b*d*S*H*(H+1)/2",
+          "dense_baseline_training_flops": "6*b*(L*(12582912+861382) + S*65665 + S*H*(768752+202211)) + 12*b*16*D*L*(L+1)/2 + 12*b*4*d*S*H*(H+1)/2"
+        },
+        "causal_pair_arithmetic": [
+          {"arm": "A", "total_tflops_per_update": 15.266826289152, "extra_tflops_per_update": 0, "extra_percent": 0},
+          {"arm": "B", "total_tflops_per_update": 15.640991760384, "extra_tflops_per_update": 0.374165471232, "extra_percent": 2.45, "extra_pflops_over_16384_updates": 6.130327080665088},
+          {"arm": "C", "total_tflops_per_update": 15.628106858496, "extra_tflops_per_update": 0.361280569344, "extra_percent": 2.37, "extra_pflops_over_16384_updates": 5.919220848132096},
+          {"arm": "D", "total_tflops_per_update": 15.697665196032, "extra_tflops_per_update": 0.43083890688, "extra_percent": 2.82, "extra_pflops_over_16384_updates": 7.05886465032192}
+        ],
+        "rectangular_cross_attention_arithmetic": {
+          "note": "If cross-attention computes all 256 keys per query before masking, replace P with S*H*L=327680. Other terms use the same baseline approximation.",
+          "extra_percent_by_arm": {"B": 2.87, "C": 2.79, "D": 4.50}
+        },
+        "implementation_risk": "Reprojecting history independently for each prefix would increase estimated total training compute by about 35-46% for B/C and 131-176% for D. Shared K/V is essential. Actual throughput and peak memory still require measurement."
+      }
+    },
     {
       "id": "codec_legacy_cartesian",
       "section": "action_space",
@@ -2857,11 +2970,274 @@
         "experiments/047_legacy_capacity_scaling.py",
         "experiments/048_iso_flop_scaling.py",
         "experiments/054_bc_capacity_latency.py",
+        "docs/experiments/054_bc_capacity_latency.md",
+        "docs/experiments/054_iso_data_latency_manifest.json",
         "results/039_capacity_scaling"
       ],
-      "setup": "The older O39 sweep shows strong interactions between size and deployment timing. O54 is the replacement measurement and is still outside this frozen evidence set.",
+      "setup": "O54 trained four pure-BC model families through nested D=2^28, 2^29, 2^30, and 2^31 endpoints. Capacity and deployed control delay increased together. Every endpoint used the same 96 matchup blocks; all 16 evaluations completed with zero crashed boots. Stock intervals are two-sided 95% boot-cluster percentile intervals over 2,000 seeded resamples.",
+      "arms": [
+        {
+          "name": "W256/d1 at D28",
+          "run": "ss478s9q",
+          "data_exponent": 28,
+          "supervised_positions": 268435456,
+          "cumulative_replays": 65536,
+          "bc_parameters": 5436825,
+          "delay_frames": 1,
+          "latency_p99_ms": 13.902696351287887,
+          "stock": -0.9794223714619034,
+          "stock_ci95": [
+            -1.135445020624736,
+            -0.8246032351701547
+          ]
+        },
+        {
+          "name": "W256/d1 at D29",
+          "run": "ss478s9q",
+          "data_exponent": 29,
+          "supervised_positions": 536870912,
+          "cumulative_replays": 131072,
+          "bc_parameters": 5436825,
+          "delay_frames": 1,
+          "latency_p99_ms": 13.902696351287887,
+          "stock": -1.0180920102875266,
+          "stock_ci95": [
+            -1.1784660321561935,
+            -0.8684415773914115
+          ]
+        },
+        {
+          "name": "W256/d1 at D30",
+          "run": "ss478s9q",
+          "data_exponent": 30,
+          "supervised_positions": 1073741824,
+          "cumulative_replays": 262144,
+          "bc_parameters": 5436825,
+          "delay_frames": 1,
+          "latency_p99_ms": 13.902696351287887,
+          "stock": -1.0971891186535467,
+          "stock_ci95": [
+            -1.247368877778886,
+            -0.957499048720489
+          ]
+        },
+        {
+          "name": "W256/d1 at D31",
+          "run": "ss478s9q",
+          "data_exponent": 31,
+          "supervised_positions": 2147483648,
+          "cumulative_replays": 524288,
+          "bc_parameters": 5436825,
+          "delay_frames": 1,
+          "latency_p99_ms": 13.902696351287887,
+          "stock": -0.8990238409774004,
+          "stock_ci95": [
+            -1.0271218278108327,
+            -0.770704972537818
+          ]
+        },
+        {
+          "name": "W512/d2 at D28",
+          "run": "wacv61om",
+          "data_exponent": 28,
+          "supervised_positions": 268435456,
+          "cumulative_replays": 65536,
+          "bc_parameters": 39024281,
+          "delay_frames": 2,
+          "latency_p99_ms": 29.132063660217682,
+          "stock": -0.9540348835659942,
+          "stock_ci95": [
+            -1.120672777228789,
+            -0.7770251689944919
+          ]
+        },
+        {
+          "name": "W512/d2 at D29",
+          "run": "wacv61om",
+          "data_exponent": 29,
+          "supervised_positions": 536870912,
+          "cumulative_replays": 131072,
+          "bc_parameters": 39024281,
+          "delay_frames": 2,
+          "latency_p99_ms": 29.132063660217682,
+          "stock": -0.6212966691595239,
+          "stock_ci95": [
+            -0.7602894957890335,
+            -0.4776632892648078
+          ]
+        },
+        {
+          "name": "W512/d2 at D30",
+          "run": "wacv61om",
+          "data_exponent": 30,
+          "supervised_positions": 1073741824,
+          "cumulative_replays": 262144,
+          "bc_parameters": 39024281,
+          "delay_frames": 2,
+          "latency_p99_ms": 29.132063660217682,
+          "stock": -0.334433365479045,
+          "stock_ci95": [
+            -0.451305568723057,
+            -0.21748833918538124
+          ]
+        },
+        {
+          "name": "W512/d2 at D31",
+          "run": "wacv61om",
+          "data_exponent": 31,
+          "supervised_positions": 2147483648,
+          "cumulative_replays": 524288,
+          "bc_parameters": 39024281,
+          "delay_frames": 2,
+          "latency_p99_ms": 29.132063660217682,
+          "stock": -0.44620065454566915,
+          "stock_ci95": [
+            -0.5898707637739997,
+            -0.2972959342489634
+          ]
+        },
+        {
+          "name": "W768/d3 at D28",
+          "run": "w3o895iq",
+          "data_exponent": 28,
+          "supervised_positions": 268435456,
+          "cumulative_replays": 65536,
+          "bc_parameters": 124712857,
+          "delay_frames": 3,
+          "latency_p99_ms": 48.86795108737714,
+          "stock": -0.7874248488108821,
+          "stock_ci95": [
+            -0.9428476306736213,
+            -0.6272410662344224
+          ]
+        },
+        {
+          "name": "W768/d3 at D29",
+          "run": "w3o895iq",
+          "data_exponent": 29,
+          "supervised_positions": 536870912,
+          "cumulative_replays": 131072,
+          "bc_parameters": 124712857,
+          "delay_frames": 3,
+          "latency_p99_ms": 48.86795108737714,
+          "stock": -0.42405886172589036,
+          "stock_ci95": [
+            -0.5458809999297058,
+            -0.30205583441193534
+          ]
+        },
+        {
+          "name": "W768/d3 at D30",
+          "run": "w3o895iq",
+          "data_exponent": 30,
+          "supervised_positions": 1073741824,
+          "cumulative_replays": 262144,
+          "bc_parameters": 124712857,
+          "delay_frames": 3,
+          "latency_p99_ms": 48.86795108737714,
+          "stock": -0.5679028726862604,
+          "stock_ci95": [
+            -0.7012262605693038,
+            -0.42959033545413694
+          ]
+        },
+        {
+          "name": "W768/d3 at D31",
+          "run": "w3o895iq",
+          "data_exponent": 31,
+          "supervised_positions": 2147483648,
+          "cumulative_replays": 524288,
+          "bc_parameters": 124712857,
+          "delay_frames": 3,
+          "latency_p99_ms": 48.86795108737714,
+          "stock": -0.010599629896256069,
+          "stock_ci95": [
+            -0.11661704552482091,
+            0.09009685411817707
+          ]
+        },
+        {
+          "name": "W1024/d6 at D28",
+          "run": "x7thsb6d",
+          "data_exponent": 28,
+          "supervised_positions": 268435456,
+          "cumulative_replays": 65536,
+          "bc_parameters": 288848025,
+          "delay_frames": 6,
+          "latency_p99_ms": 99.18326959581464,
+          "stock": -0.7592483618198955,
+          "stock_ci95": [
+            -0.876967980527292,
+            -0.6371228287147135
+          ]
+        },
+        {
+          "name": "W1024/d6 at D29",
+          "run": "x7thsb6d",
+          "data_exponent": 29,
+          "supervised_positions": 536870912,
+          "cumulative_replays": 131072,
+          "bc_parameters": 288848025,
+          "delay_frames": 6,
+          "latency_p99_ms": 99.18326959581464,
+          "stock": -0.770426258252195,
+          "stock_ci95": [
+            -0.9138890891797041,
+            -0.6267371795284166
+          ]
+        },
+        {
+          "name": "W1024/d6 at D30",
+          "run": "x7thsb6d",
+          "data_exponent": 30,
+          "supervised_positions": 1073741824,
+          "cumulative_replays": 262144,
+          "bc_parameters": 288848025,
+          "delay_frames": 6,
+          "latency_p99_ms": 99.18326959581464,
+          "stock": -0.5357924378997998,
+          "stock_ci95": [
+            -0.6470820490390933,
+            -0.4137249266523094
+          ]
+        },
+        {
+          "name": "W1024/d6 at D31",
+          "run": "x7thsb6d",
+          "data_exponent": 31,
+          "supervised_positions": 2147483648,
+          "cumulative_replays": 524288,
+          "bc_parameters": 288848025,
+          "delay_frames": 6,
+          "latency_p99_ms": 99.18326959581464,
+          "stock": -0.41906479590483514,
+          "stock_ci95": [
+            -0.5413678099919623,
+            -0.29148982214704344
+          ]
+        }
+      ],
       "comparison": null,
-      "claim": "Do not publish one monotonic size claim from the older sweep. Use the new matched size and latency results when complete."
+      "holdout": {
+        "fit_through_data_exponent": 30,
+        "predicted_d31_order": [
+          512,
+          1024,
+          768,
+          256
+        ],
+        "observed_d31_order": [
+          768,
+          1024,
+          512,
+          256
+        ],
+        "ordering_passed": false,
+        "bootstrap_order_match_fraction": 0.0015,
+        "bootstrap_resamples": 2000,
+        "d34_winner_reported": false
+      },
+      "claim": "The through-D30 fits did not predict the D31 ordering, so O54 reports no D34 winner. At D31, W768/d3 was strongest; W1024's lower imitation loss did not repay its d6 control delay."
     }
   ],
   "raw_evaluation_data": {

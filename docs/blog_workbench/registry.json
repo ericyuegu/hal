@@ -240,6 +240,30 @@
   ]
  },
  {
+  "key": "comparison-key",
+  "name": "How a comparison is drawn",
+  "source": "custom",
+  "caption": "The legend for every result on this page. A baseline model and a treatment that changes one thing are both played against the level-9 CPU on the same 96 seeded match-ups; the difference in net stocks per minute is the result, drawn as a dot with its 95% interval against a zero line. Legacy codec → Cartesian codec: +0.29 [+0.08, +0.51]. Intervals measure evaluation noise, not variation between training seeds.",
+  "data": [
+   "comparisonKey"
+  ],
+  "studies": [
+   "codec_legacy_cartesian"
+  ]
+ },
+ {
+  "key": "training-curve",
+  "name": "Loss and play across one training run",
+  "source": "custom",
+  "caption": "The 216M Muon production run (O50). Top: validation negative log-likelihood every 4,096 updates. Bottom: net stocks per minute at the nine checkpoints that were played, 96 games each; per-checkpoint intervals were not archived, so the dots are means. Play rose to +0.16 at 24,576 updates and fell to −0.18 at 57,344 while the loss held at 1.44, then climbed to +0.34 as the loss fell to 1.38. Checkpoints are picked by play.",
+  "data": [
+   "trainingCurve"
+  ],
+  "studies": [
+   "training_checkpoint_series"
+  ]
+ },
+ {
   "key": "architecture",
   "name": "The policy, end to end",
   "source": "custom",
@@ -322,9 +346,9 @@
  },
  {
   "key": "shard-loader",
-  "name": "The physical-shard loader",
+  "name": "The shard loader",
   "source": "custom",
-  "caption": "Shards are read once in a keyed order that is fixed for the run. Each replay is decoded once into W windows of context plus chunk at distinct starts, and enters a FIFO replay ring of C slots in cohorts of L = B/W replays; every batch retires the oldest cohort. A batch takes its k-th group of windows from cohorts about k·P/W batches old (P = C/B), jittered within a phase block, so one replay’s windows are spread over the ring’s period, no two are closer than P − block + 1 batches, and no batch holds a replay twice. O52: W = 8 windows, C = 112,128 slots, batch 512, 25-batch phase block, minimum gap 195 batches. The checkpoint stores the cursor and a locator per slot, not the decoded arrays.",
+  "caption": "Shards are read once, in an order fixed for the run. Each replay is decoded once into W windows (context plus chunk) at different starts and enters a FIFO ring of C slots; every batch of B windows draws each window from a different replay. Window k of a replay is used about k·P batches after the replay entered, P = C/B, jittered inside a phase block, so one replay's windows are ≈ P batches apart and never share a batch. O52: W = 8, C = 112,128, B = 512, P = 219, phase block 25, so consecutive windows are 195–243 batches apart. The checkpoint stores the cursor and one locator per slot, not the decoded arrays.",
   "data": [],
   "studies": [
    "windows_per_replay",
@@ -420,6 +444,147 @@
   "studies": [
    "codec_legacy_cartesian",
    "codec_cartesian_polar"
+  ]
+ },
+ {
+  "key": "identity-effects",
+  "name": "Player identity",
+  "source": "custom",
+  "caption": "One 16M model trained with a player-identity input, then played four times with a different identity each time, against itself with the identity masked. Masked → Cody: +0.08 [−0.10, +0.26] stocks/min but +31.3 [+17.4, +45.2] damage/min. Masked → Platinum: −0.32 [−0.48, −0.16] stocks/min. Identity changes how the model plays more than how well.",
+  "data": [
+   "identityEffects"
+  ],
+  "studies": [
+   "player_identity"
+  ]
+ },
+ {
+  "key": "optimizer-effects",
+  "name": "Optimizer and rate recipe",
+  "source": "custom",
+  "caption": "Each row changes the optimizer and its learning rates together, so this is a recipe comparison, not a pure algorithm test. Early 7M test, AdamW → Muon + AdamW: +0.03 [−0.77, +0.83] stocks/min under the old, unpaired evaluation. Production 216M run, Muon + AdamW → all AdamW: +0.15 [−0.03, +0.33] stocks/min, +15.2 [+2.8, +27.5] damage/min. Muon reached the lower validation loss in the small test; AdamW did in production.",
+  "data": [
+   "optimizerEffects"
+  ],
+  "studies": [
+   "optimizer_full_scale"
+  ]
+ },
+ {
+  "key": "data-source-effects",
+  "name": "One data source or all 44",
+  "source": "custom",
+  "caption": "Ranked-anonymized replays only → the natural mix of all 44 sources, same architecture and update count: −0.06 [−0.22, +0.10] stocks/min, +6.3 [−4.3, +17.2] damage/min. No clear gameplay gain from the wider mix in this test.",
+  "data": [
+   "dataSourceEffects"
+  ],
+  "studies": [
+   "data_source_mix"
+  ]
+ },
+ {
+  "key": "loss-allocation",
+  "name": "Where the loss goes",
+  "source": "custom",
+  "caption": "The decoder predicts ten frames at offsets 1–6, 9, 12, 16 and 20. O26 gave the four near frames one unit of loss between them and the six far frames another. The tested split gives the next frame a whole unit and spreads the second over the other nine. O26 split → half on the next frame, same legacy codec and O43 architecture: +0.14 [−0.08, +0.36] stocks/min, +3.7 [−9.6, +17.1] damage/min. Positive, but not separated from zero.",
+  "data": [
+   "lossAllocation"
+  ],
+  "studies": [
+   "next_frame_loss_share"
+  ]
+ },
+ {
+  "key": "supervision-density",
+  "name": "Supervising every position, or only the last",
+  "source": "custom",
+  "caption": "O52 trains the decoder at each of the last 128 positions of a 256-frame window; O55 trains it only at the final position, with the same windows, updates, model and data. Dense → sparse: −1.12 [−1.31, −0.93] stocks/min. Inside the sparse setup, adding one history cross-attention layer (A → B): +0.06 [−0.11, +0.25]; dropping the trunk-state input from B (A → C): −0.05 [−0.23, +0.12]; replacing the decoder's self-attention with cross-attention (A → D): −0.11 [−0.31, +0.09]. Paired bootstrap over 96 shared boots. Cross-attention on a densely supervised decoder was not trained.",
+  "data": [
+   "supervisionDensity"
+  ],
+  "studies": [
+   "o55_history_cross_attention",
+   "temporal_head_cross_attention"
+  ]
+ },
+ {
+  "key": "failed-ideas",
+  "name": "Ideas that did not pan out",
+  "source": "custom",
+  "caption": "Each row is one idea, the test that was run, and what else moved in that test. Matched tests are given as baseline → treatment differences in net stocks per minute with a 95% interval; unmatched systems get their arm scores only, and unfinished runs get nothing. The other objective-level failures (flow matching, value critics, exploration modeling) are in the figure above; the history cross-attention test is in the architecture section.",
+  "data": [
+   "failedIdeas"
+  ],
+  "studies": [
+   "rle_bpe_actions",
+   "fixed_long_delay",
+   "rank_weighted_bc",
+   "future_state_expert",
+   "lean_feature_bundle",
+   "hand_features",
+   "joint_action_chords",
+   "flattened_action_tokens"
+  ]
+ },
+ {
+  "key": "storage-bars",
+  "name": "Bytes per corpus, before and after the compact layout",
+  "source": "custom",
+  "caption": "The ranked training split, 112,409 replays. The old row format expanded to 802 GB of decoded arrays before a window could be cut; the compact policy layout reads 76 GB for the same frames, and the compressed shards fell from 30 GB to 13 GB. Fewer bytes per window is what let the shard loader keep the GPU fed. No matched throughput benchmark was kept across the change, so only the sizes are shown.",
+  "data": [
+   "storageBars"
+  ],
+  "studies": [
+   "dataset_v8_cleaning",
+   "windows_per_replay"
+  ]
+ },
+ {
+  "key": "rtc-timeline",
+  "name": "Real-time chunking",
+  "source": "custom",
+  "caption": "By the time a plan returns, the game already holds the next d actions in its input queue. Real-time chunking (O46) hands those d actions back to the decoder as a fixed prefix and writes only the frames after them, so a new plan agrees with what is about to happen; training draws d at random from 0 to 4 at every step and puts no loss on the prefix. The one retained treatment run, c6yd7zxx, stopped at 4,096 updates (−1.17 stocks/min on the character suite, −0.62 on the Fox suite) and its planned dense control was never run, so the idea is unresolved, not rejected.",
+  "data": [
+   "rtcTimeline"
+  ],
+  "studies": [
+   "rtc"
+  ]
+ },
+ {
+  "key": "capacity-panels",
+  "name": "Model size against its own delay, at four data budgets",
+  "source": "custom",
+  "caption": "O54: four pure behavior-cloning models (5M, 39M, 125M and 289M parameters), each deployed at the delay its inference forces (1, 2, 3 and 6 frames), trained through nested data budgets of 2²⁸ to 2³¹ supervised positions. All 16 evaluations use the same 96 match-ups; intervals are 95% boot-cluster percentiles. At 2³¹ the 125M model at 3 frames is strongest, −0.01 [−0.12, +0.09] stocks/min; the 289M model reaches a lower imitation loss but plays at −0.42 [−0.54, −0.29]. Size and delay move together, so this is a deployment frontier, not a size effect.",
+  "data": [
+   "capacityPanels"
+  ],
+  "studies": [
+   "capacity_and_latency"
+  ]
+ },
+ {
+  "key": "tier-prediction",
+  "name": "Predicting the next data budget",
+  "source": "custom",
+  "caption": "For each O54 model, S(D) = S₂₈ + A·(1 − (D/2²⁸)⁻ᵅ) was fitted through the 2²⁸, 2²⁹ and 2³⁰ scores and read off at 2³¹. The fit put the 39M model first (−0.09 predicted, −0.45 observed) and the 125M model third (−0.49 predicted, −0.01 observed). Because the predicted ordering failed, no winner is reported for larger budgets. Fits and predictions are recomputed from the study table; the O54 bootstrap matched the observed order in 0.15% of resamples.",
+  "data": [
+   "tierPrediction"
+  ],
+  "studies": [
+   "capacity_and_latency"
+  ]
+ },
+ {
+  "key": "iso-flop",
+  "name": "Validation loss against model size and data",
+  "source": "custom",
+  "caption": "The O39 capacity sweep: seven trunk sizes from 5 to 18 layers (30M to 500M effective parameters, N = trunk + 36 · decoder, the count the run's FLOP formula uses) trained to five nested data budgets of 2²⁶ to 2³⁰ supervised positions on the ranked corpus, 33 finished runs. One curve, L(N, D) = 1.635 + 89.1/N⁰·³⁶⁸ + 2009/D⁰·⁴⁹⁸, is fitted through all of them; every run lands within 0.012 of it, and no run was held out. Along a fixed compute budget of 6·N·D the curve's minimum gives a compute-optimal size (≈150M at 10¹⁸ FLOPs). The fit is only trusted inside the shaded size range; the dedicated iso-FLOP study (O48) was canceled before launch.",
+  "data": [
+   "isoFlop"
+  ],
+  "studies": [
+   "capacity_and_latency"
   ]
  }
 ]

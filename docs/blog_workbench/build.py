@@ -7,6 +7,7 @@ Inputs (all under this directory):
                                             own css/js (anatomy.*, explorer.*) and manifest.json
   evidence.json                             the study table behind the evidence blocks
   ci.json                                   every treatment − baseline interval (ci_stats.py)
+  figures_src/figure-data.json              series behind the charts that evidence.json lacks (figure_data.py)
   assets/                                   Charter fonts + controller illustration
 
 Outputs (dist/):
@@ -112,8 +113,11 @@ def build() -> None:
     shutil.copy(LEGACY / "explorer.js", DIST / "figures" / "explorer.js")
     kit = (SRC / "diagram-kit.js").read_text()
     ledger = "window.HALFIG_AWR_LEDGER = " + (SRC / "awr-ledger.json").read_text().strip() + ";\n"
+    series = "window.HALFIG_DATA = " + json.dumps(json.loads((SRC / "figure-data.json").read_text())) + ";\n"
     ci = "window.HALFIG_CI = " + json.dumps(json.loads((HERE / "ci.json").read_text())) + ";\n"
-    (DIST / "figures" / "custom.js").write_text(kit + "\n" + ledger + ci + "\n".join(f["js"] for f in modules))
+    (DIST / "figures" / "custom.js").write_text(
+        kit + "\n" + ledger + series + ci + "\n".join(f["js"] for f in modules)
+    )
 
     shell = (HERE / "shell.html").read_text()
     html = (

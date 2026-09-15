@@ -1,0 +1,11 @@
+<figure class="breakout architecture-figure effects-figure" id="supervision-density">
+  <div class="artifact interactive">
+    <div class="figure-head">
+      <div>
+        <h4>Supervising every position, or only the last</h4>
+        <p>How many places in a training window the decoder learns from, and whether letting it look back over the history helps.</p>
+      </div>
+    </div>
+    <svg class="model-diagram" id="supervision-density-diagram" role="img" aria-label="Top: one training window of 256 frames drawn as a token strip. In the dense setup the decoder is trained at each of the last 128 positions; in the sparse setup only at the final position. Bottom: four comparisons of net stocks per minute. Dense to sparse loses 1.12 with an interval from minus 1.31 to minus 0.93. Within the sparse setup, adding history cross-attention gains 0.06 with an interval spanning zero; removing the trunk-state input or replacing self-attention with cross-attention are both near zero."></svg>
+  </div>
+</figure>

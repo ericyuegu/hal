@@ -14,5 +14,7 @@
   function line(name, m, digits) {
     return '<div class="delta-row" style="grid-template-columns:auto 1fr"><span class="delta-name">' + name + '</span><span class="delta-value">' + D.signed(m.delta, digits) + ' [' + D.signed(m.lo, digits) + ', ' + D.signed(m.hi, digits) + ']</span></div>';
   }
-  block.innerHTML = '<div class="delta-block-title">one-hot → physical · Δ and 95% interval</div>' + line('stocks / min', d.stock, 2) + line('damage / min', d.damage, 1);
+  // the budgets differ: the one-hot arm saw twice the examples (batch 1,024 · 16.78M) against batch 512 · 8.39M
+  block.innerHTML = '<div class="delta-block-title">one-hot → physical · Δ and 95% interval</div>' + line('stocks / min', d.stock, 2) + line('damage / min', d.damage, 1) +
+    '<div class="delta-block-title" style="margin-top:8px">one-hot: batch 1,024 · 16.8M examples<br>physical: batch 512 · 8.4M examples · fewer, and still ahead</div>';
 }());

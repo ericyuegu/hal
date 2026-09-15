@@ -1,0 +1,11 @@
+<figure class="breakout architecture-figure effects-figure" id="rtc-timeline">
+  <div class="artifact interactive">
+    <div class="artifact-head figure-head">
+      <div>
+        <h4>Real-time chunking</h4>
+        <p>The actions already queued are handed back to the decoder as its prefix; only the frames after them are written fresh.</p>
+      </div>
+    </div>
+    <svg class="model-diagram" id="rtc-timeline-diagram" role="img" aria-label="Two given-to-produced rows. Playing: the trunk state and the d committed actions still in the game's queue are given, and the decoder writes the frames after them, which are the only ones that can still change. Training: each step draws d at random from 0 to 4, gives the first d true actions with no loss, and puts the loss on the rest."></svg>
+  </div>
+</figure>

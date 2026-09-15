@@ -138,6 +138,19 @@ window.HALDIAG = (function () {
     });
     return {xs: xs, doms: doms};
   }
+  /* The study table the page embeds (evidence.json without the boot rows). */
+  var evidenceCache;
+  function evidence() {
+    if (evidenceCache === undefined) {
+      var node = document.getElementById('wb-evidence');
+      try { evidenceCache = node ? JSON.parse(node.textContent) : null; } catch (err) { evidenceCache = null; }
+    }
+    return evidenceCache;
+  }
+  function study(id) {
+    var ev = evidence();
+    return ev && ev.studies ? ev.studies.filter(function (s) { return s.id === id; })[0] || null : null;
+  }
   function focus(svg, moduleId) {
     Array.prototype.forEach.call(svg.querySelectorAll('[data-module]'), function (p) {
       p.classList.remove('module-dim', 'module-focus');
@@ -145,5 +158,5 @@ window.HALDIAG = (function () {
       p.classList.add(p.getAttribute('data-module') === moduleId ? 'module-focus' : 'module-dim');
     });
   }
-  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest};
+  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest, evidence: evidence, study: study};
 }());

@@ -2,10 +2,10 @@
   <div class="artifact interactive">
     <div class="figure-head">
       <div>
-        <h4>The physical-shard loader</h4>
-        <p>Shards are read once in a fixed order; a replay ring decides which windows share a batch.</p>
+        <h4>The shard loader</h4>
+        <p>Each replay is read from disk once, cut into a few windows, and those windows are spread across batches far apart.</p>
       </div>
     </div>
-    <svg class="model-diagram" id="loader-diagram" role="img" aria-label="Three stages. Physical shards are read in one keyed order and each replay is decoded once into W windows. The windows enter a FIFO replay ring of C slots in cohorts of L replays; every batch retires the oldest cohort. A batch takes window k from cohorts about k times P batches old, so one replay's windows are spread across the ring's period and no batch holds a replay twice."></svg>
+    <svg class="model-diagram" id="loader-diagram" role="img" aria-label="Top: shards are read once in a fixed order; one replay is decoded into four windows. Below: a row of batches in training order. The four windows of that replay land in four batches about P batches apart, one window per batch, among windows from other replays; a second, older replay's windows are interleaved on the same schedule."></svg>
   </div>
 </figure>

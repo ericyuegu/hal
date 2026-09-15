@@ -192,6 +192,7 @@ def main() -> None:
     ci["awr_actor_weighting"] = independent("hwzv0k9a", "5wfk2esf")
     ci["exploration_modeling:XM K=8"] = independent("feic18gt@shared_k", "cqbbbg77")
     ci["windows_per_replay"] = independent("shjnxxsu", "uw05bvm2")
+    ci["optimizer_small"] = independent("vlim96s9", "o3nihah5")  # AdamW → Muon + AdamW, June-era small model
     batch = {128: "nt4gh4mk", 256: "phxqvexa", 512: "980k3yla", 1024: "7ok39dju", 2048: "rri7scjc"}
     for b, run in batch.items():
         if b != 2048:

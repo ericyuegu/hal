@@ -98,3 +98,39 @@
   .codec-stage { display: flex; flex-direction: column; }
   .codec-button-demo { flex: 1; }
 }
+
+/* ---------- charts: series over an axis, with a hover cursor and a readout line ---------- */
+.model-diagram .chart-line{fill:none;stroke:var(--ink);stroke-width:1.6;stroke-linejoin:round}
+.model-diagram .chart-line.faint{stroke:var(--ink-faint);stroke-width:1.2}
+.model-diagram .chart-band{fill:color-mix(in srgb,var(--oxblood) 7%,transparent)}
+.model-diagram .chart-cursor{stroke:var(--ink-faint);stroke-width:1;stroke-dasharray:3 3;pointer-events:none}
+.model-diagram .accent-text{fill:var(--oxblood)}
+.chart-hover{cursor:crosshair}
+.chart-readout{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:8px;font:400 .72rem/1.5 var(--mono);color:var(--ink-mono);font-variant-numeric:tabular-nums;min-height:1.5em}
+.chart-readout b{color:var(--ink);font-weight:500}
+.model-diagram .loss-bar{fill:color-mix(in srgb,var(--ink) 22%,var(--paper));stroke:var(--ink);stroke-width:1}
+.model-diagram .loss-bar.accent{fill:color-mix(in srgb,var(--oxblood) 14%,var(--paper));stroke:var(--oxblood)}
+
+/* ---------- failed ideas table ---------- */
+.ideas-table-wrap{overflow-x:auto}
+.ideas-table{width:100%;border-collapse:collapse;font:400 .8rem/1.45 var(--mono);color:var(--ink-soft);min-width:720px}
+.ideas-table th{text-align:left;font:600 .62rem/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mono);padding:10px 10px 8px 0;border-bottom:1px solid var(--rule)}
+.ideas-table td{vertical-align:top;padding:9px 12px 9px 0;border-bottom:1px dotted var(--rule-dotted)}
+.ideas-table td:last-child,.ideas-table th:last-child{padding-right:0}
+.ideas-table tr.group td{padding:14px 0 6px;font:600 .66rem/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink);border-bottom:1px solid var(--rule)}
+.ideas-table td.idea{color:var(--ink);font-weight:600;width:19%}
+.ideas-table td.res{font-variant-numeric:tabular-nums;width:21%}
+.ideas-table td.res b{white-space:nowrap}
+.ideas-table th:nth-child(2){width:30%}
+.ideas-table td.res b{display:block;color:var(--oxblood);font-weight:600}
+.ideas-table td.res.soft b{color:var(--ink)}
+.ideas-table td.res span{display:block;font-size:.66rem;color:var(--ink-mono)}
+.ideas-table .ev{display:inline-block;font-size:.64rem;letter-spacing:.06em;text-transform:uppercase;line-height:1.5;border:1px solid var(--rule-dotted);padding:1px 6px;color:var(--ink-mono)}
+.ideas-table .ev-strong,.ideas-table .ev-strong_rejection{border-color:var(--ink);color:var(--ink)}
+.ideas-table .ev-missing{border-style:dashed}
+.model-diagram .pred-pt{fill:var(--paper);stroke:var(--ink);stroke-width:1.4}
+
+/* ---------- shard loader ---------- */
+.model-diagram .loader-win{fill:color-mix(in srgb,var(--ink) 9%,var(--paper));stroke:var(--rule-dotted);stroke-width:1}
+.model-diagram .loader-win.r{fill:color-mix(in srgb,var(--oxblood) 16%,var(--paper));stroke:var(--oxblood)}
+.model-diagram .loader-win.q{fill:color-mix(in srgb,var(--ink) 45%,var(--paper));stroke:var(--ink)}

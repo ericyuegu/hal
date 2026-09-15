@@ -441,5 +441,31 @@
   "eval/stocks_taken_per_min": 0.9811764393902564,
   "eval/stocks_taken_per_min_ci_hi": 1.0660349422564408,
   "eval/stocks_taken_per_min_ci_lo": 0.9019443872293432
+ },
+ "o3nihah5": {
+  "group": "optimizer_small",
+  "setting": "AdamW",
+  "eval/crashed": 0,
+  "eval/damage_dealt_per_min": 138.87538523771462,
+  "eval/damage_taken_per_min": 116.9196160569254,
+  "eval/frames": 7171.5625,
+  "eval/net_dmg_lcb": -1.9627780941243849,
+  "eval/net_stock_lcb": -0.8830633747445558,
+  "eval/stocks_lost_per_min": 1.129460978691882,
+  "eval/stocks_taken_per_min": 0.7216000697198135,
+  "val/loss": 1.012882363210714
+ },
+ "vlim96s9": {
+  "group": "optimizer_small",
+  "setting": "Muon + AdamW",
+  "eval/crashed": 0,
+  "eval/damage_dealt_per_min": 134.17970142364,
+  "eval/damage_taken_per_min": 142.3309179683579,
+  "eval/frames": 7150.6875,
+  "eval/net_dmg_lcb": -32.06976381963152,
+  "eval/net_stock_lcb": -0.8527885370418581,
+  "eval/stocks_lost_per_min": 1.25862023756457,
+  "eval/stocks_taken_per_min": 0.8810341662951989,
+  "val/loss": 0.9836503000609116
  }
 }
