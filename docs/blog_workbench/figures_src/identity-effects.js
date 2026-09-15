@@ -12,5 +12,5 @@
   window.HALFIG_CUSTOM.data.identityEffects = function () {
     return rows.filter(function (r) { return !r.baseline; }).map(function (r) { return {comparison: 'masked → ' + r.label, method: r.method, boots: r.n_boots, stock_delta: r.stock.delta, stock_ci95_lo: r.stock.lo, stock_ci95_hi: r.stock.hi, damage_delta: r.damage.delta, damage_ci95_lo: r.damage.lo, damage_ci95_hi: r.damage.hi}; });
   };
-  D.forest(svg, rows, {rowH: 44, header: 'identity masked → each identity · 95% interval'});
+  D.forest(svg, rows, {rowH: 44, header: 'masked → each identity · 95% interval'});
 }());

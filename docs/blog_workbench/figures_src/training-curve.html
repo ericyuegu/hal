@@ -3,10 +3,10 @@
     <div class="figure-head">
       <div>
         <h4>Loss and play across one training run</h4>
-        <p>The 216M production run: validation loss at every 4,096 updates, and net stocks per minute at each evaluated checkpoint.</p>
+        <p>The 216M production run: validation loss at every 4,096 updates, and net stocks per minute at every checkpoint that was played.</p>
       </div>
     </div>
-    <svg class="model-diagram chart-hover" id="training-curve-diagram" role="img" aria-label="Two panels aligned on training updates. Validation negative log-likelihood falls from 1.58 to 1.38 across 131,072 updates. Net stocks per minute at nine checkpoints rises to 0.16 at 24,576 updates, falls to minus 0.18 at 57,344 while the loss keeps improving, then climbs to 0.34 at the end."></svg>
+    <svg class="model-diagram chart-hover" id="training-curve-diagram" role="img" aria-label="Two panels aligned on training updates. Validation negative log-likelihood falls from 1.58 to 1.38 across 131,072 updates. Net stocks per minute at sixteen checkpoints, each with a 95% interval, rises to 0.16 at 24,576 updates, falls to minus 0.18 at 57,344 while the loss holds near 1.44, then climbs to 0.34 at the end."></svg>
     <div class="chart-readout" id="training-curve-readout"></div>
   </div>
 </figure>

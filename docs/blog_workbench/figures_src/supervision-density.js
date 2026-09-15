@@ -11,8 +11,8 @@
   var ROWS = [
     {label: 'dense → sparse (A)', sub: 'O52 → A · 128 trained positions → 1 · same windows and updates', d: cmp['A<O52 dense baseline'], accent: true},
     {label: 'A → B · + history cross-attention', sub: 'one decoder layer reads the trunk history', d: cmp['B<A']},
-    {label: 'A → C · B without the hₜ input', sub: 'the history reaches the decoder only by cross-attention', d: cmp['C<A']},
-    {label: 'A → D · cross-attention replaces self-attention', sub: 'every decoder attention layer reads the history', d: cmp['D<A']}
+    {label: 'A → C · add history attention, drop the hₜ input', sub: 'the history reaches the decoder only through cross-attention', d: cmp['C<A']},
+    {label: 'A → D · replace action attention, drop the hₜ input', sub: 'every decoder attention layer reads the history · all arms keep the trunk skip', d: cmp['D<A']}
   ];
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.supervisionDensity = function () {

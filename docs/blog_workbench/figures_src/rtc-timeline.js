@@ -15,13 +15,7 @@
   function sub(n) { return String(n).replace(/\d/g, function (c) { return '₀₁₂₃₄₅₆₇₈₉'[c]; }); }
   var d = 3, tw = 52, gap = 6, x0 = 150;
 
-  // timeline over the play row
-  var tl = 40;
-  for (var i = 0; i < 8; i++) {
-    var x = x0 + 62 + i * (tw + gap) + tw / 2;
-    D.text(svg, x, tl, i === 0 ? 't' : 't+' + i, {class: 'diagram-note', 'text-anchor': 'middle'});
-  }
-  D.text(svg, x0 + 62 + 8 * (tw + gap) + 4, tl, '···', {class: 'diagram-note'});
+  var tl = 40;  // the frame each token belongs to, placed over the token itself (drawn after the rows)
 
   function row(y, title, note, givenLabels, producedLabels, givenNote, producedNote, producedCls) {
     D.text(svg, 16, y + 18, title, {class: 'diagram-title'});
@@ -34,7 +28,14 @@
   }
   var given = ['hₜ']; for (var k = 0; k < d; k++) given.push(k ? 'aₜ₊' + sub(k) : 'aₜ');
   var produced = []; for (k = d; k < 7; k++) produced.push('aₜ₊' + sub(k));
-  row(80, 'playing', 'd = ' + d + ' queued', given, produced, 'committed · cannot change', 'written now · can still change', 'played');
+  var play = row(80, 'playing', 'd = ' + d + ' queued', given, produced, 'committed · cannot change', 'written now · can still change', 'played');
+
+  // frame labels over the play row, one per action token, given and produced alike
+  for (var i = 0; i < 7; i++) {
+    var cx = i < d ? x0 + (tw + gap) * (i + 1) + tw / 2 : play.producedStart + (i - d) * (tw + gap) + tw / 2;
+    D.text(svg, cx, tl, i === 0 ? 't' : 't+' + i, {class: 'diagram-note', 'text-anchor': 'middle'});
+  }
+  D.text(svg, play.end + 8, tl, '···', {class: 'diagram-note'});
 
   // the same rule at training time
   var y2 = 190;

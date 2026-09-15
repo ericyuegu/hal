@@ -5,7 +5,7 @@
   var table = document.getElementById('failed-ideas-table');
   if (!D || !CI || !table) return;
   var GROUPS = [
-    {title: 'Tested against a matched baseline · did not help', rows: [
+    {title: 'Completed comparisons · did not help', rows: [
       {id: 'rle_bpe_actions', idea: 'Merge held inputs into span tokens', what: 'One symbol per frame, BPE merges repeated holds into spans of up to 16 frames; a span plays to completion.', also: 'Execution cadence, parameter count and crash rate changed with it; 25 vs 95 boots.'},
       {id: 'fixed_long_delay', idea: 'Predict 12 frames ahead', what: 'Delay 1 → delay 12 on the O43 model.', also: 'A longer future-data buffer came with the delay; 32 vs 96 boots.'},
       {id: 'rank_weighted_bc', idea: 'Weight replays by player rank', what: 'Platinum, Diamond and Master replays weighted 1, 2 and 4.', also: 'Nothing else changed.'},
@@ -21,7 +21,7 @@
   function fmt(d) { return D.signed(d.delta, 2) + ' [' + D.signed(d.lo, 2) + ', ' + D.signed(d.hi, 2) + ']'; }
   function result(r) {
     var ci = CI[r.id], s = D.study(r.id);
-    if (ci) return {text: fmt(ci.stock), unit: 'stocks / min · ' + (ci.method === 'welch' ? 'unpaired' : 'paired'), num: true};
+    if (ci) return {text: fmt(ci.stock), unit: (ci.control || '') + ' → ' + (ci.treatment || '') + ' · stocks / min · ' + (ci.method === 'welch' ? 'unpaired' : 'paired'), num: true};
     var arms = (s && s.arms || []).filter(function (a) { return typeof a.stock === 'number'; });
     if (arms.length) return {text: arms.map(function (a) { return D.signed(a.stock, 2); }).join(' · '), unit: 'arm scores only · no matched control', num: false};
     return {text: 'no result', unit: 'run did not complete', num: false};

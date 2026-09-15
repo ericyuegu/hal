@@ -17,7 +17,7 @@
   var W = 880, H = 330, L = 64, R = 16, top = 54, bottom = 262, pw = (W - L - R - 3 * 18) / 4;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   var y = D.scale([bottom, top], -1.3, 0.2);
-  D.text(svg, L, 22, 'net stocks / min · fit S(D) = S₂₈ + A · (1 − (D/2²⁸)⁻ᵅ) through 2³⁰ · hollow = predicted at 2³¹, filled = observed', {class: 'diagram-note'});
+  D.text(svg, L, 22, 'each model\u2019s own score against the CPU · fit through 2³⁰ · hollow = predicted at 2³¹ · filled = observed', {class: 'diagram-note'});
   [-1, -0.5, 0].forEach(function (v) { D.text(svg, L - 8, y(v) + 4, D.signed(v, 1), {class: 'diagram-note', 'text-anchor': 'end'}); });
   T.models.forEach(function (m, k) {
     var px = L + k * (pw + 18);

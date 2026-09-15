@@ -29,7 +29,7 @@
   var dom = D.domain([d]), x = D.scale([480, 700], dom.lo, dom.hi);
   D.effectAxis(svg, x, dom, y - 30, y + 30, null);
   D.effect(svg, x, y, d, {accent: true, digits: 2, valueX: 716});
-  D.text(svg, 770, y + 4, 'stocks / min', {class: 'diagram-note'});
+  D.text(svg, 716, y + 18, 'stocks / min', {class: 'diagram-note'});
 
   // — annotations: one label per part, a thin leader each; arms below, axis parts above
   function callout(x1, y1, x2, y2, label, anchor) {

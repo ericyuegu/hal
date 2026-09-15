@@ -6,8 +6,8 @@
   if (!D || !CI || !DATA || !svg) return;
   var V = DATA.optimizer;
   var rows = [
-    Object.assign({label: 'AdamW → Muon + AdamW', sub: 'o3nihah5 → vlim96s9 · 7M · 32k · unpaired eval', loss: [V.o3nihah5, V.vlim96s9]}, CI.optimizer_small),
-    Object.assign({label: 'Muon + AdamW → AdamW', sub: 'p1fyyp1z → tgpuo1be · 216M · 131k updates', accent: true, loss: [V.p1fyyp1z, V.tgpuo1be]}, CI.optimizer_full_scale)
+    Object.assign({label: 'AdamW → Muon + AdamW', sub: 'o3nihah5 → vlim96s9 · 7M · unpaired', loss: [V.o3nihah5, V.vlim96s9]}, CI.optimizer_small),
+    Object.assign({label: 'Muon + AdamW → AdamW', sub: 'p1fyyp1z → tgpuo1be · 216M production', accent: true, loss: [V.p1fyyp1z, V.tgpuo1be]}, CI.optimizer_full_scale)
   ];
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.optimizerEffects = function () {

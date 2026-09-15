@@ -5,14 +5,14 @@
   var svg = document.getElementById('storage-bars-diagram');
   if (!D || !svg) return;
   var ROWS = [
-    {label: 'decoded training arrays', sub: 'what the loader reads', before: 802.47, after: 76.19},
-    {label: 'compressed shards on disk', sub: 'Zstd, as stored', before: 29.82, after: 13.34}
+    {label: 'decoded training arrays', sub: 'train split · what the loader reads', before: 802.47, after: 76.19},
+    {label: 'compressed shards on disk', sub: 'whole artifact · Zstd, as stored', before: 29.82, after: 13.34}
   ];
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.storageBars = function () {
     return ROWS.map(function (r) { return {quantity: r.label, corpus: 'ranked-anonymized-1 train · 112,409 replays', mds_v7_gb: r.before, compact_policy_v7_gb: r.after, reduction: +(r.before / r.after).toFixed(2)}; });
   };
-  var W = 880, H = 200, x0 = 250, x1 = 720;
+  var W = 880, H = 200, x0 = 300, x1 = 720;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   var x = D.scale([x0, x1], 0, 820);
   function bar(y, v, cls, name) {

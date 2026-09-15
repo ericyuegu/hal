@@ -17,12 +17,13 @@
     return S.arms.map(function (a) { return {model: a.name.split(' at ')[0], run: a.run, data_exponent: a.data_exponent, bc_parameters: a.bc_parameters, delay_frames: a.delay_frames, latency_p99_ms: +a.latency_p99_ms.toFixed(1), stock: a.stock, stock_ci95_lo: a.stock_ci95[0], stock_ci95_hi: a.stock_ci95[1]}; });
   };
 
-  var W = 880, H = 330, L = 64, R = 16, top = 54, bottom = 268, pw = (W - L - R - 3 * 18) / 4;
+  var W = 880, H = 340, L = 64, R = 16, top = 54, bottom = 262, pw = (W - L - R - 3 * 18) / 4;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   var lo = -1.3, hi = 0.2;
   var y = D.scale([bottom, top], lo, hi);
   var superscript = function (n) { return String(n).replace(/\d/g, function (c) { return '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]; }); };
-  D.text(svg, L, 22, 'net stocks / min · dot and 95% interval · x = deployed delay in frames', {class: 'diagram-note'});
+  D.text(svg, L, 22, 'net stocks / min · each model\u2019s own score against the CPU, dot and 95% interval · no baseline here', {class: 'diagram-note'});
+  D.text(svg, W - R, bottom + 34, 'deployed delay, frames', {class: 'diagram-note', 'text-anchor': 'end'});
   [-1, -0.5, 0].forEach(function (v) {
     D.text(svg, L - 8, y(v) + 4, D.signed(v, 1), {class: 'diagram-note', 'text-anchor': 'end'});
   });

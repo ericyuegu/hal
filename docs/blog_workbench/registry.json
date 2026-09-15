@@ -243,7 +243,7 @@
   "key": "comparison-key",
   "name": "How a comparison is drawn",
   "source": "custom",
-  "caption": "The legend for every result on this page. A baseline model and a treatment that changes one thing are both played against the level-9 CPU on the same 96 seeded match-ups; the difference in net stocks per minute is the result, drawn as a dot with its 95% interval against a zero line. Legacy codec → Cartesian codec: +0.29 [+0.08, +0.51]. Intervals measure evaluation noise, not variation between training seeds.",
+  "caption": "The legend for the results on this page. A baseline model and a treatment that changes one thing are both played against the level-9 CPU; the difference in net stocks per minute is the result, drawn as a dot with its 95% interval against a zero line. This example, legacy codec → Cartesian codec, shares 96 seeded two-minute episodes between the arms: +0.29 [+0.08, +0.51]. Where a comparison could not be matched (older protocols, unequal budgets, unfinished runs) the figure says so. Intervals measure evaluation noise, not variation between training seeds.",
   "data": [
    "comparisonKey"
   ],
@@ -255,7 +255,7 @@
   "key": "training-curve",
   "name": "Loss and play across one training run",
   "source": "custom",
-  "caption": "The 216M Muon production run (O50). Top: validation negative log-likelihood every 4,096 updates. Bottom: net stocks per minute at the nine checkpoints that were played, 96 games each; per-checkpoint intervals were not archived, so the dots are means. Play rose to +0.16 at 24,576 updates and fell to −0.18 at 57,344 while the loss held at 1.44, then climbed to +0.34 as the loss fell to 1.38. Checkpoints are picked by play.",
+  "caption": "The 216M Muon production run (O50). Top: validation negative log-likelihood every 4,096 updates. Bottom: net stocks per minute at each of the 16 checkpoints that were played, 96 two-minute episodes each, with a 95% interval. Play rose to +0.16 at 24,576 updates and fell to −0.18 at 57,344 while the loss held near 1.44, then climbed to +0.34 as the loss fell to 1.38. Checkpoints are picked by play.",
   "data": [
    "trainingCurve"
   ],
@@ -450,7 +450,7 @@
   "key": "identity-effects",
   "name": "Player identity",
   "source": "custom",
-  "caption": "One 16M model trained with a player-identity input, then played four times with a different identity each time, against itself with the identity masked. Masked → Cody: +0.08 [−0.10, +0.26] stocks/min but +31.3 [+17.4, +45.2] damage/min. Masked → Platinum: −0.32 [−0.48, −0.16] stocks/min. Identity changes how the model plays more than how well.",
+  "caption": "One 16M model trained with a player-identity input. It was played against the CPU four times, once per identity, and each is compared with the same model played with the identity masked. Masked → Cody: +0.08 [−0.10, +0.26] stocks/min and +31.3 [+17.1, +45.4] damage/min. Masked → Platinum: −0.32 [−0.48, −0.16] stocks/min. The identity input moves damage more clearly than stocks.",
   "data": [
    "identityEffects"
   ],
@@ -474,7 +474,7 @@
   "key": "data-source-effects",
   "name": "One data source or all 44",
   "source": "custom",
-  "caption": "Ranked-anonymized replays only → the natural mix of all 44 sources, same architecture and update count: −0.06 [−0.22, +0.10] stocks/min, +6.3 [−4.3, +17.2] damage/min. No clear gameplay gain from the wider mix in this test.",
+  "caption": "Ranked-anonymized replays only → the natural mix of all 44 sources, same architecture and update count: −0.06 [−0.22, +0.10] stocks/min, +6.3 [−4.8, +17.4] damage/min. No clear gameplay gain from the wider mix in this test.",
   "data": [
    "dataSourceEffects"
   ],
@@ -486,7 +486,7 @@
   "key": "loss-allocation",
   "name": "Where the loss goes",
   "source": "custom",
-  "caption": "The decoder predicts ten frames at offsets 1–6, 9, 12, 16 and 20. O26 gave the four near frames one unit of loss between them and the six far frames another. The tested split gives the next frame a whole unit and spreads the second over the other nine. O26 split → half on the next frame, same legacy codec and O43 architecture: +0.14 [−0.08, +0.36] stocks/min, +3.7 [−9.6, +17.1] damage/min. Positive, but not separated from zero.",
+  "caption": "The decoder predicts ten frames at offsets 1–6, 9, 12, 16 and 20. O26 gave the four near frames one unit of loss between them and the six far frames another. The tested split gives the next frame a whole unit and spreads the second over the other nine. O26 split → half on the next frame, same legacy codec and O43 architecture: +0.14 [−0.08, +0.36] stocks/min, +3.7 [−10.0, +17.3] damage/min. Positive, but not separated from zero.",
   "data": [
    "lossAllocation"
   ],
@@ -498,7 +498,7 @@
   "key": "supervision-density",
   "name": "Supervising every position, or only the last",
   "source": "custom",
-  "caption": "O52 trains the decoder at each of the last 128 positions of a 256-frame window; O55 trains it only at the final position, with the same windows, updates, model and data. Dense → sparse: −1.12 [−1.31, −0.93] stocks/min. Inside the sparse setup, adding one history cross-attention layer (A → B): +0.06 [−0.11, +0.25]; dropping the trunk-state input from B (A → C): −0.05 [−0.23, +0.12]; replacing the decoder's self-attention with cross-attention (A → D): −0.11 [−0.31, +0.09]. Paired bootstrap over 96 shared boots. Cross-attention on a densely supervised decoder was not trained.",
+  "caption": "O52 trains the decoder at each of the last 128 positions of a 256-frame window; O55 trains it only at the final position, with the same windows, updates, model and data. Dense → sparse (A): −1.12 [−1.31, −0.93] stocks/min. Inside the sparse setup, against A: adding one history cross-attention layer (B) +0.06 [−0.11, +0.25]; adding it and removing the trunk-state input (C) −0.05 [−0.23, +0.12]; replacing the decoder's action self-attention with history attention and removing the trunk-state input (D) −0.11 [−0.31, +0.09]. Every arm keeps the direct trunk-to-logit skip. Paired bootstrap over 96 shared boots. Cross-attention on a densely supervised decoder was not trained.",
   "data": [
    "supervisionDensity"
   ],
@@ -530,7 +530,7 @@
   "key": "storage-bars",
   "name": "Bytes per corpus, before and after the compact layout",
   "source": "custom",
-  "caption": "The ranked training split, 112,409 replays. The old row format expanded to 802 GB of decoded arrays before a window could be cut; the compact policy layout reads 76 GB for the same frames, and the compressed shards fell from 30 GB to 13 GB. Fewer bytes per window is what let the shard loader keep the GPU fed. No matched throughput benchmark was kept across the change, so only the sizes are shown.",
+  "caption": "The ranked corpus, 112,409 training replays. The old row format expanded the train split to 802 GB of decoded arrays before a window could be cut; the compact policy layout reads 76 GB for the same frames. On disk, the compressed artifact fell from 30 GB to 13 GB. Fewer bytes per window means fewer bytes read per batch; no matched throughput benchmark was kept across the change, so only the sizes are shown.",
   "data": [
    "storageBars"
   ],
@@ -555,7 +555,7 @@
   "key": "capacity-panels",
   "name": "Model size against its own delay, at four data budgets",
   "source": "custom",
-  "caption": "O54: four pure behavior-cloning models (5M, 39M, 125M and 289M parameters), each deployed at the delay its inference forces (1, 2, 3 and 6 frames), trained through nested data budgets of 2²⁸ to 2³¹ supervised positions. All 16 evaluations use the same 96 match-ups; intervals are 95% boot-cluster percentiles. At 2³¹ the 125M model at 3 frames is strongest, −0.01 [−0.12, +0.09] stocks/min; the 289M model reaches a lower imitation loss but plays at −0.42 [−0.54, −0.29]. Size and delay move together, so this is a deployment frontier, not a size effect.",
+  "caption": "O54: four pure behavior-cloning models (5M, 39M, 125M and 289M parameters), each deployed at the delay its inference forces (1, 2, 3 and 6 frames), trained through nested data budgets of 2²⁸ to 2³¹ supervised positions. Each dot is that model's own score against the CPU, not a difference; all 16 evaluations use the same 96 match-ups, and intervals are 95% boot-cluster percentiles. At 2³¹ the 125M model at 3 frames is highest, −0.01 [−0.12, +0.09] stocks/min; the 289M model reaches a lower imitation loss but plays at −0.42 [−0.54, −0.29]. Size and delay move together, so this is a deployment frontier, not a size effect.",
   "data": [
    "capacityPanels"
   ],
@@ -567,7 +567,7 @@
   "key": "tier-prediction",
   "name": "Predicting the next data budget",
   "source": "custom",
-  "caption": "For each O54 model, S(D) = S₂₈ + A·(1 − (D/2²⁸)⁻ᵅ) was fitted through the 2²⁸, 2²⁹ and 2³⁰ scores and read off at 2³¹. The fit put the 39M model first (−0.09 predicted, −0.45 observed) and the 125M model third (−0.49 predicted, −0.01 observed). Because the predicted ordering failed, no winner is reported for larger budgets. Fits and predictions are recomputed from the study table; the O54 bootstrap matched the observed order in 0.15% of resamples.",
+  "caption": "For each O54 model, S(D) = S₂₈ + A·(1 − (D/2²⁸)⁻ᵅ) with A ≥ 0 and 0.01 ≤ α ≤ 4 was fitted through the 2²⁸, 2²⁹ and 2³⁰ scores and read off at 2³¹. The fit put the 39M model first (−0.09 predicted, −0.45 observed) and the 125M model third (−0.49 predicted, −0.01 observed). Because the predicted ordering failed, no winner is reported for larger budgets. Fits and predictions are recomputed from the study table; the O54 bootstrap matched the observed order in 0.15% of resamples.",
   "data": [
    "tierPrediction"
   ],

@@ -27,7 +27,7 @@
     svg.appendChild(D.el('rect', {x: x, y: 34, width: 50, height: 24, class: 'loader-win r'}));
     D.text(svg, x + 25, 50, 'w' + (k + 1), {'text-anchor': 'middle', class: 'diagram-label accent-text'});
   });
-  D.text(svg, 672, 50, 'W windows · context + chunk', {class: 'diagram-note'});
+  D.text(svg, 672, 50, 'W windows', {class: 'diagram-note'});
 
   /* ---- 2 · the batches that follow, in order ---- */
   var by = 130, bh = 150, bw = 38, slots = 6, gap = 6, x0 = 16;
@@ -70,9 +70,8 @@
   var ly = 366;
   svg.appendChild(D.el('rect', {x: x0, y: ly - 9, width: 14, height: 10, class: 'loader-win r'}));
   D.text(svg, x0 + 20, ly, 'the replay above · one window per batch', {class: 'diagram-note'});
-  svg.appendChild(D.el('rect', {x: x0 + 330, y: ly - 9, width: 14, height: 10, class: 'loader-win q'}));
-  D.text(svg, x0 + 350, ly, 'an older replay, same schedule', {class: 'diagram-note'});
-  svg.appendChild(D.el('rect', {x: x0 + 600, y: ly - 9, width: 14, height: 10, class: 'loader-win'}));
-  D.text(svg, x0 + 620, ly, 'other replays', {class: 'diagram-note'});
-  D.text(svg, x0, ly + 18, 'every window in a batch comes from a different replay', {class: 'diagram-note'});
+  svg.appendChild(D.el('rect', {x: x0 + 400, y: ly - 9, width: 14, height: 10, class: 'loader-win q'}));
+  D.text(svg, x0 + 420, ly, 'an older replay, same schedule', {class: 'diagram-note'});
+  svg.appendChild(D.el('rect', {x: x0, y: ly + 9, width: 14, height: 10, class: 'loader-win'}));
+  D.text(svg, x0 + 20, ly + 18, 'other replays · every window in a batch comes from a different replay', {class: 'diagram-note'});
 }());

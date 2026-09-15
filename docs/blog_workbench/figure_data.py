@@ -11,12 +11,14 @@ Writes figures_src/figure-data.json (inlined by build.py as ``window.HALFIG_DATA
 * ``tier``       — O54: S(D) = S₂₈ + A · (1 − (D/2²⁸)^−α) fitted per model through D = 2³⁰, and the
                    D = 2³¹ prediction next to the observation.
 
-Run from the repo root:  uv run --no-project --with wandb,pandas,scipy docs/blog_workbench/figure_data.py
+Run from the repo root:  uv run --no-project --with wandb,pandas,scipy docs/blog_workbench/figure_data.py [--results <039 csv>]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -35,20 +37,41 @@ FIT = {"base": 1.6350, "aScale": 89.11, "aPower": 0.368, "dScale": 2009, "dPower
 def val_series(api: wandb.Api, run_id: str, key: str) -> list[tuple[int, float]]:
     run = api.run(f"ericyuegu/hal/{run_id}")
     rows = run.scan_history(keys=["global_step", key])
-    return [(int(r["global_step"]), float(r[key])) for r in rows if r.get(key) is not None]
+    out = [(int(r["global_step"]), float(r[key])) for r in rows if r.get(key) is not None]
+    steps = [u for u, _ in out]
+    assert steps == sorted(set(steps)), f"{run_id}: {key} has duplicate or unordered steps (a resumed run?)"
+    return out
+
+
+def val_at(api: wandb.Api, run_id: str, key: str, step: int) -> float:
+    return dict(val_series(api, run_id, key))[step]
 
 
 def o50(api: wandb.Api) -> dict:
+    """Validation NLL from W&B; every archived 96-boot evaluation of the run from evidence.json."""
     s = STUDIES["training_checkpoint_series"]
     nll = val_series(api, s["run"], "val/nll")
-    return {
-        "run": s["run"],
-        "val_updates": [u for u, _ in nll],
-        "val_nll": [v for _, v in nll],
-        "eval_updates": s["series"]["updates"],
-        "eval_stock": s["series"]["stock"],
-        "eval_damage": s["series"]["damage"],
-    }
+    evals = []
+    for eval_id, e in EVIDENCE["raw_evaluation_data"]["evaluations"].items():
+        if s["run"] not in e.get("run_ids", []):
+            continue
+        step = re.search(r"step-0*(\d+)", e["sources"][0]["path"])
+        assert step, f"{eval_id} has no checkpoint step in its source path"
+        st, dmg = e["statistics"]["net_stocks_per_min"], e["statistics"]["net_damage_per_min"]
+        evals.append(
+            {
+                "updates": int(step.group(1)),
+                "evaluation_id": eval_id,
+                "boots": e["statistics"]["n_boots"],
+                "stock": st["pooled_mean"],
+                "stock_ci95": st["ci95"],
+                "damage": dmg["pooled_mean"],
+                "damage_ci95": dmg["ci95"],
+            }
+        )
+    evals.sort(key=lambda e: e["updates"])
+    assert [e["updates"] for e in evals if e["updates"] in s["series"]["updates"]] == s["series"]["updates"]
+    return {"run": s["run"], "val_updates": [u for u, _ in nll], "val_nll": [v for _, v in nll], "evals": evals}
 
 
 def optimizer(api: wandb.Api) -> dict:
@@ -59,15 +82,24 @@ def optimizer(api: wandb.Api) -> dict:
             "val_loss": float(api.run(f"ericyuegu/hal/{run_id}").summary["val/loss"]),
             "metric": "val/loss",
         }
-    for run_id, arm in [("p1fyyp1z", "Muon + AdamW"), ("tgpuo1be", "AdamW")]:
-        out[run_id] = {"arm": arm, "val_loss": val_series(api, run_id, "val/nll")[-1][1], "metric": "val/nll"}
+    for run_id, arm in [
+        ("p1fyyp1z", "Muon + AdamW"),
+        ("tgpuo1be", "AdamW"),
+    ]:  # both compared at their final 131,072nd update
+        out[run_id] = {
+            "arm": arm,
+            "val_loss": val_at(api, run_id, "val/nll", 131072),
+            "metric": "val/nll",
+            "updates": 131072,
+        }
     return out
 
 
-def iso_flop() -> dict:
-    # results/ is untracked; a worktree falls back to the main checkout's copy
-    rel = Path("results") / "039_capacity_scaling" / "experiment_039_raw_outcomes.csv"
-    csv = next(p for p in (REPO / rel, Path.home() / "src" / "hal" / rel) if p.exists())
+def iso_flop(csv: Path) -> dict:
+    if not csv.exists():
+        raise SystemExit(
+            f"{csv} is missing: results/ is untracked, pass --results <path to experiment_039_raw_outcomes.csv>"
+        )
     df = pd.read_csv(csv, low_memory=False)
     runs = df[df.record_type == "run"].drop_duplicates("run_id").set_index("run_id")
     # the model × 2^k grid after cooldown; prefix checkpoints, crashed runs and the iso-FLOP
@@ -98,7 +130,14 @@ def iso_flop() -> dict:
                 "residual": float(r.validation_nll - pred),
             }
         )
-    return {"fit": FIT, "compute": "6 · D · N_eff", "n_eff": "trunk + 36 · decoder", "points": pts}
+    assert len(pts) == 33, f"expected the 33 cooled-down O39 grid runs, got {len(pts)}"
+    return {
+        "fit": FIT,
+        "compute": "6 · D · N_eff",
+        "n_eff": "trunk + 36 · decoder",
+        "source_csv": str(csv),
+        "points": pts,
+    }
 
 
 def tier() -> dict:
@@ -115,8 +154,11 @@ def tier() -> dict:
     for width, rows in sorted(by.items()):
         d_exp = np.array([28.0, 29.0, 30.0])
         y = np.array([rows[int(e)]["stock"] for e in d_exp])
+        # docs/experiments/054_bc_capacity_latency.md: A >= 0, 0.01 <= alpha <= 4; S28 free
         fit = least_squares(
-            lambda p, e=d_exp, target=y: curve(p, e) - target, x0=[y[0], 0.5, 0.5], bounds=([-5, 0, 0.01], [5, 10, 4])
+            lambda p, e=d_exp, target=y: curve(p, e) - target,
+            x0=[y[0], 0.5, 0.5],
+            bounds=([-np.inf, 0, 0.01], [np.inf, np.inf, 4]),
         )
         first = rows[28]
         models.append(
@@ -140,8 +182,13 @@ def tier() -> dict:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument(
+        "--results", type=Path, default=REPO / "results" / "039_capacity_scaling" / "experiment_039_raw_outcomes.csv"
+    )
+    args = ap.parse_args()
     api = wandb.Api()
-    data = {"o50": o50(api), "optimizer": optimizer(api), "iso_flop": iso_flop(), "tier": tier()}
+    data = {"o50": o50(api), "optimizer": optimizer(api), "iso_flop": iso_flop(args.results), "tier": tier()}
     OUT.write_text(json.dumps(data, indent=1))
     print(OUT, f"{OUT.stat().st_size // 1024} KB")
 

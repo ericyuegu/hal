@@ -87,6 +87,7 @@
     svg.appendChild(D.el('circle', {cx: sx(p.nll), cy: sy(p.fit_nll), r: 3, fill: shade(tiers.indexOf(p.d_exp)), stroke: 'var(--paper)', 'stroke-width': 1}));
   });
   D.text(svg, side[1], 36, 'largest miss ' + worst.toFixed(3) + ' · none held out', {class: 'diagram-note', 'text-anchor': 'end'});
-  D.text(svg, L0, H - 8, 'L(N, D) = ' + F.base.toFixed(3) + ' + ' + F.aScale.toFixed(1) + ' / N^' + F.aPower + ' + ' + F.dScale + ' / D^' + F.dPower + ' · D = supervised positions · compute = 6 · N · D', {class: 'diagram-note'});
+  D.text(svg, L0, H - 8, 'L(N, D) = ' + F.base.toFixed(3) + ' + ' + F.aScale.toFixed(1) + ' / N^' + F.aPower + ' + ' + F.dScale + ' / D^' + F.dPower, {class: 'diagram-note'});
+  D.text(svg, W - 16, H - 8, 'D = supervised positions · compute = 6 · N · D', {class: 'diagram-note', 'text-anchor': 'end'});
   svg.addEventListener('mouseleave', function () { readout.innerHTML = ''; });
 }());

@@ -92,6 +92,13 @@
 .model-diagram .model-token.window{fill:var(--paper);stroke:var(--rule-dotted)}
 .model-diagram .model-token.window.hot{fill:var(--ink);stroke:var(--ink)}
 @media (max-width:760px){.effects-figure .model-diagram{min-width:0}}
+/* the page bumps diagram type at narrow widths; the effect charts are denser, so bump them less */
+@media (max-width:900px){
+  .effects-figure .model-diagram text,.loader-figure .model-diagram text{font-size:12px}
+  .effects-figure .model-diagram .diagram-title,.loader-figure .model-diagram .diagram-title{font-size:13px}
+  .effects-figure .model-diagram .diagram-label,.loader-figure .model-diagram .diagram-label{font-size:12px}
+  .effects-figure .model-diagram .diagram-note,.loader-figure .model-diagram .diagram-note{font-size:11.5px}
+}
 
 /* Fig 2a: the three codec columns share row heights so the stick maps sit level */
 @media (min-width: 721px) {

@@ -22,7 +22,7 @@
 
   var W = 880, H = 396;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-  var x0 = 250, tw = 48, gap = 12, barMax = 60;
+  var x0 = 262, tw = 48, gap = 11, barMax = 60;
   function sub(o) { return 'aₜ₊' + String(o).replace(/\d/g, function (c) { return '₀₁₂₃₄₅₆₇₈₉'[c]; }); }
   ROWS.forEach(function (r, k) {
     var base = 118 + k * 130, cls = r.accent ? ' accent' : '';
