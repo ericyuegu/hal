@@ -142,6 +142,27 @@ def test_inference_reads_identity_from_the_runtime_context() -> None:
     assert torch.equal(captured["player_id"], torch.full((2, cfg.arch.L_ctx), 7))
 
 
+def test_inference_passes_sampling_temperature_to_temporal_decoder(monkeypatch) -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    inference = exp.BF16Inference(model, cfg, bucket=2, compiled=False, temperature=0.1)
+    captured = {}
+
+    def sample_indices(hidden, observed, offsets, *, argmax, uniforms, temperature):
+        captured["temperature"] = temperature
+        return torch.zeros(hidden.shape[0], len(offsets), 4, dtype=torch.long)
+
+    monkeypatch.setattr(model.temporal, "sample_indices", sample_indices)
+    decoder = inference._decoder(2, cfg.prediction_frames)
+    decoder(
+        torch.zeros(2, cfg.arch.L_ctx, cfg.arch.d_model),
+        torch.zeros(2, 4, dtype=torch.long),
+        torch.zeros(cfg.prediction_frames, 4, 2),
+    )
+
+    assert captured["temperature"] == 0.1
+
+
 @pytest.mark.parametrize(
     ("delay", "replan", "expected"),
     [

@@ -1,5 +1,6 @@
 """Deterministic categorical sampling for batched policy evaluation."""
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -11,18 +12,31 @@ from hal.training.features import Context
 _UINT64_MASK = (1 << 64) - 1
 
 
+def validate_sampling_temperature(temperature: float) -> float:
+    if (
+        not isinstance(temperature, int | float)
+        or isinstance(temperature, bool)
+        or not math.isfinite(temperature)
+        or temperature <= 0
+    ):
+        raise ValueError(f"sampling temperature must be finite and positive, got {temperature!r}")
+    return float(temperature)
+
+
 def sample_categorical(
     logits: Tensor,
     *,
     argmax: bool,
     uniform: Tensor | None = None,
     generator: torch.Generator | None = None,
+    temperature: float = 1.0,
 ) -> Tensor:
     """Sample class indices, optionally from caller-provided uniforms."""
+    temperature = validate_sampling_temperature(temperature)
     values = logits.float()
     if argmax:
         return values.argmax(dim=-1)
-    probabilities = F.softmax(values, dim=-1)
+    probabilities = F.softmax(values / temperature, dim=-1)
     if uniform is None:
         return torch.multinomial(probabilities, 1, generator=generator).squeeze(-1)
     if uniform.shape != probabilities.shape[:-1]:

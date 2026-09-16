@@ -87,6 +87,7 @@ from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.policy_sampling import SlotGroupRng
 from hal.eval.policy_sampling import sample_categorical
+from hal.eval.policy_sampling import validate_sampling_temperature
 from hal.eval.self_play import DecodeTelemetry
 from hal.eval.self_play import canonical_context
 from hal.eval.self_play import synthetic_context as build_synthetic_context
@@ -1167,7 +1168,9 @@ class CausalTemporalDecoder(nn.Module):
         argmax: bool,
         uniforms: Tensor | None = None,
         gen: torch.Generator | None = None,
+        temperature: float = 1.0,
     ) -> Tensor:
+        temperature = validate_sampling_temperature(temperature)
         allowed = tuple(self.head_offsets[:horizon] for horizon in self.live_horizons)
         if offsets not in allowed:
             raise ValueError(f"live decode offsets must select one of the dense prefixes {allowed}")
@@ -1192,7 +1195,13 @@ class CausalTemporalDecoder(nn.Module):
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
                 group = CONTROLLER_GROUP_INDEX[name]
                 uniform = None if uniforms is None else uniforms[depth, group]
-                pick = sample_categorical(logits, argmax=argmax, uniform=uniform, generator=gen)
+                pick = sample_categorical(
+                    logits,
+                    argmax=argmax,
+                    uniform=uniform,
+                    generator=gen,
+                    temperature=temperature,
+                )
                 picks[name] = pick
                 embedded[name] = self.codec.group_embedding(name, pick)
             indices = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
@@ -2465,6 +2474,7 @@ class BF16Inference:
         compiled: bool | None = None,
         compile_mode: str = "default",
         compiled_buckets: tuple[int, ...] | None = None,
+        temperature: float = 1.0,
     ) -> None:
         self.model = model
         self.cfg = cfg
@@ -2480,6 +2490,7 @@ class BF16Inference:
         requested = cfg.inference_mode == "compiled" if compiled is None else compiled
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
         self.compile_mode = compile_mode
+        self.temperature = validate_sampling_temperature(temperature)
         self.attention_backend = "dense_sdpa"
         self.compile_seconds = 0.0
         self._warmed: set[tuple[int, int]] = set()
@@ -2519,7 +2530,14 @@ class BF16Inference:
             offsets = self.model.head_offsets[:horizon]
 
             def fn(hidden, observed, uniforms):
-                return self.model.temporal.sample_indices(hidden, observed, offsets, argmax=False, uniforms=uniforms)
+                return self.model.temporal.sample_indices(
+                    hidden,
+                    observed,
+                    offsets,
+                    argmax=False,
+                    uniforms=uniforms,
+                    temperature=self.temperature,
+                )
 
             self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
         return self._decoders[key]
@@ -2589,7 +2607,11 @@ class BF16Inference:
             hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
             if argmax:
                 indices = self.model.temporal.sample_indices(
-                    hidden, observed[:, -1], self.model.head_offsets[:horizon], argmax=True
+                    hidden,
+                    observed[:, -1],
+                    self.model.head_offsets[:horizon],
+                    argmax=True,
+                    temperature=self.temperature,
                 )
             else:
                 indices = self._decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
@@ -2686,13 +2708,17 @@ def make_policy(
     ego_player_id: int = MASKED_PLAYER_ID,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
+    decode_temperature: float = 1.0,
     device: str = DEVICE,
 ) -> DelayedTruncationPolicy:
     horizon = cfg.prediction_frames
     delay = cfg.delay_frames if delay_frames is None else delay_frames
     replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
     _validate_deployment_timing(horizon, delay, replan)
-    engine = BF16Inference(model, cfg) if inference is None else inference
+    temperature = validate_sampling_temperature(decode_temperature)
+    engine = BF16Inference(model, cfg, temperature=temperature) if inference is None else inference
+    if engine.temperature != temperature:
+        raise ValueError(f"inference temperature {engine.temperature} does not match policy temperature {temperature}")
     random_streams = None if decode_seed is None else SlotGroupRng(decode_seed, CONTROLLER_GROUP_NAMES)
     generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)
 

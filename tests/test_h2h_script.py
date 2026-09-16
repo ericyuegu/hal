@@ -129,7 +129,11 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
     cfg = _O50Config()
     model = _FakeO50(cfg)
     module.load_checkpoint = lambda _path: (model, cfg, {}, {"step": 99})
-    module.make_policy = lambda _model, _stats, _cfg, **kwargs: _CapturedPolicy(**kwargs)
+
+    def make_policy(_model, _stats, _cfg, *, decode_temperature=1.0, **kwargs):
+        return _CapturedPolicy(decode_temperature=decode_temperature, **kwargs)
+
+    module.make_policy = make_policy
     monkeypatch.setattr(h2h, "import_experiment", lambda _spec: module)
     monkeypatch.setattr(h2h, "checkpoint_sha256", lambda _path: "a" * 64)
 
@@ -143,6 +147,7 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
             prediction_frames=6,
             delay_frames=2,
             replan_interval_frames=3,
+            temperature=0.1,
         )
     )
     policy = build(17)
@@ -151,12 +156,34 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
     assert protocol["prediction_frames"] == 6
     assert protocol["delay_frames"] == 2
     assert protocol["replan_interval_frames"] == 3
-    assert protocol["decode_settings"] == {"temp": 1.0}
+    assert protocol["decode_settings"] == {"temp": 0.1}
     assert model.cfg.prediction_frames == 6
     assert model.temporal.live_horizons == (6,)
     assert policy.ego_player_id == 4
     assert policy.delay_frames == 2
     assert policy.replan_interval_frames == 3
+    assert policy.decode_temperature == 0.1
+
+
+def test_nested_upload_prefix_must_be_empty_and_safe(monkeypatch) -> None:
+    calls = []
+    client = SimpleNamespace(
+        list_objects_v2=lambda **kwargs: calls.append(kwargs) or {"KeyCount": 0},
+    )
+    monkeypatch.setattr(h2h.r2, "client", lambda: client)
+    monkeypatch.setattr(h2h.r2, "bucket", lambda: "hal")
+
+    h2h._require_empty_upload_prefix("eval-temp01", "runs/training-run/h2h-evals")
+
+    assert calls == [
+        {
+            "Bucket": "hal",
+            "Prefix": "runs/training-run/h2h-evals/eval-temp01/",
+            "MaxKeys": 1,
+        }
+    ]
+    with pytest.raises(ValueError, match="safe path components"):
+        h2h._require_empty_upload_prefix("eval-temp01", "runs/../h2h-evals")
 
 
 def test_o50_builder_rejects_sparse_heads_as_dense_horizon(monkeypatch) -> None:

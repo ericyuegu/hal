@@ -31,6 +31,8 @@ Historical interleaved-token 013 (use the exact commit recorded by W&B):
 import hashlib
 import importlib
 import importlib.util
+import inspect
+import math
 import os
 import re
 import sys
@@ -97,6 +99,8 @@ class ModelArgs:
     """temporal_mtp only: actions executed before decoding another plan."""
     character: str | None = None
     """Fixed Melee character for this model. None keeps the prior draw."""
+    temperature: float | None = None
+    """temporal_mtp only: categorical sampling temperature. None keeps the experiment default."""
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,8 @@ class Args:
     """Read each .slp back for per-port controller activity (the dead-policy tripwire)."""
     upload_run: str | None = None
     """Unique evaluation name below the R2 h2h-evals prefix. None keeps artifacts local."""
+    upload_prefix: str = "h2h-evals"
+    """R2 prefix containing upload_run. Each path component must be alphanumeric, dot, underscore, or hyphen."""
 
 
 def import_experiment(spec: str) -> ModuleType:
@@ -222,6 +228,8 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
     which decode settings produced the replays.
     """
     module = import_experiment(args.experiment)
+    if args.temperature is not None and args.family != "temporal_mtp":
+        raise ValueError("temperature overrides require family='temporal_mtp'")
     if args.family == "historical_interleaved_groups":
         required = ("_load_ckpt", "decode", "RecedingHorizon")
     elif args.family == "temporal_mtp":
@@ -268,9 +276,20 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
 
     if args.family == "temporal_mtp":
         head_offsets = tuple(cfg.head_offsets if hasattr(cfg, "head_offsets") else cfg.arch.head_offsets)
-        decode_temp = getattr(cfg, "decode_temp", 1.0)
-        if decode_temp != 1.0:
-            raise ValueError("temporal_mtp H2H requires the fixed sampling temperature 1")
+        decode_temp = getattr(cfg, "decode_temp", 1.0) if args.temperature is None else args.temperature
+        if (
+            not isinstance(decode_temp, int | float)
+            or isinstance(decode_temp, bool)
+            or not math.isfinite(decode_temp)
+            or decode_temp <= 0
+        ):
+            raise ValueError(f"sampling temperature must be finite and positive, got {decode_temp!r}")
+        decode_temp = float(decode_temp)
+        if (
+            args.temperature is not None
+            and "decode_temperature" not in inspect.signature(module.make_policy).parameters
+        ):
+            raise ValueError(f"{args.experiment} does not support temperature overrides")
         if args.prediction_frames is not None:
             dense_offsets = tuple(range(1, args.prediction_frames + 1))
             if head_offsets[: args.prediction_frames] != dense_offsets:
@@ -318,7 +337,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
             player_id = 0
         protocol.update(
             {
-                "decode_settings": {"temp": 1.0},
+                "decode_settings": {"temp": decode_temp},
                 "player_identity": identity,
                 "player_id": int(player_id),
                 "head_offsets": list(head_offsets),
@@ -337,7 +356,26 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
 
         def build_temporal_mtp(seed: int) -> Any:
             if not deployment_override:
-                return module.make_policy(model, stats, cfg, exec_horizon=cfg.exec_horizon, decode_seed=seed)
+                if args.temperature is None:
+                    return module.make_policy(model, stats, cfg, exec_horizon=cfg.exec_horizon, decode_seed=seed)
+                return module.make_policy(
+                    model,
+                    stats,
+                    cfg,
+                    exec_horizon=cfg.exec_horizon,
+                    decode_seed=seed,
+                    decode_temperature=decode_temp,
+                )
+            if args.temperature is None:
+                return module.make_policy(
+                    model,
+                    stats,
+                    cfg,
+                    decode_seed=seed,
+                    ego_player_id=player_id,
+                    delay_frames=delay,
+                    replan_interval_frames=replan,
+                )
             return module.make_policy(
                 model,
                 stats,
@@ -346,6 +384,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
                 ego_player_id=player_id,
                 delay_frames=delay,
                 replan_interval_frames=replan,
+                decode_temperature=decode_temp,
             )
 
         return build_temporal_mtp, protocol
@@ -422,10 +461,13 @@ def _git_revision() -> str:
     return result.stdout.strip()
 
 
-def _require_empty_upload_prefix(name: str) -> None:
+def _require_empty_upload_prefix(name: str, prefix_root: str) -> None:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None:
         raise ValueError(f"upload_run must be one safe path component, got {name!r}")
-    prefix = f"h2h-evals/{name}/"
+    components = prefix_root.split("/")
+    if not components or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part) is None for part in components):
+        raise ValueError(f"upload_prefix must contain only safe path components, got {prefix_root!r}")
+    prefix = f"{prefix_root}/{name}/"
     client = r2.client()
     result = client.list_objects_v2(Bucket=r2.bucket(), Prefix=prefix, MaxKeys=1)
     if result.get("KeyCount", 0):
@@ -438,7 +480,7 @@ def main(args: Args) -> None:
     if out_dir.exists():
         raise FileExistsError(f"refusing to overwrite existing output directory {out_dir}")
     if args.upload_run is not None:
-        _require_empty_upload_prefix(args.upload_run)
+        _require_empty_upload_prefix(args.upload_run, args.upload_prefix)
     logger.info(f"loading {args.model_a.name} and {args.model_b.name}")
     build_a, protocol_a = load_policy_builder(args.model_a)
     build_b, protocol_b = load_policy_builder(args.model_b)
@@ -450,7 +492,7 @@ def main(args: Args) -> None:
         for model in (args.model_a, args.model_b)
         if model.character is not None
     }
-    uploader = None if args.upload_run is None else BackgroundUploader(args.upload_run, prefix="h2h-evals")
+    uploader = None if args.upload_run is None else BackgroundUploader(args.upload_run, prefix=args.upload_prefix)
 
     def upload_orientation(orientation: int) -> None:
         if uploader is not None:
