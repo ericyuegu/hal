@@ -130,13 +130,14 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
     model = _FakeO50(cfg)
     module.load_checkpoint = lambda _path: (model, cfg, {}, {"step": 99})
 
-    def make_policy(_model, _stats, _cfg, *, decode_temperature=1.0, **kwargs):
-        return _CapturedPolicy(decode_temperature=decode_temperature, **kwargs)
+    def make_policy(_model, _stats, _cfg, *, decode_temperature=1.0, action_trace=None, **kwargs):
+        return _CapturedPolicy(decode_temperature=decode_temperature, action_trace=action_trace, **kwargs)
 
     module.make_policy = make_policy
     monkeypatch.setattr(h2h, "import_experiment", lambda _spec: module)
     monkeypatch.setattr(h2h, "checkpoint_sha256", lambda _path: "a" * 64)
 
+    trace = object()
     build, protocol = h2h.load_policy_builder(
         h2h.ModelArgs(
             name="IBDW#0",
@@ -148,7 +149,8 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
             delay_frames=2,
             replan_interval_frames=3,
             temperature=0.1,
-        )
+        ),
+        action_trace=trace,
     )
     policy = build(17)
 
@@ -157,12 +159,14 @@ def test_o50_builder_applies_identity_and_dense_deployment_timing(monkeypatch) -
     assert protocol["delay_frames"] == 2
     assert protocol["replan_interval_frames"] == 3
     assert protocol["decode_settings"] == {"temp": 0.1}
+    assert protocol["action_trace_schema_version"] == 1
     assert model.cfg.prediction_frames == 6
     assert model.temporal.live_horizons == (6,)
     assert policy.ego_player_id == 4
     assert policy.delay_frames == 2
     assert policy.replan_interval_frames == 3
     assert policy.decode_temperature == 0.1
+    assert policy.action_trace is trace
 
 
 def test_nested_upload_prefix_must_be_empty_and_safe(monkeypatch) -> None:

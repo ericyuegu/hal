@@ -74,6 +74,7 @@ from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.eval.action_trace import ActionTraceWriter
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
@@ -1170,6 +1171,53 @@ class CausalTemporalDecoder(nn.Module):
         gen: torch.Generator | None = None,
         temperature: float = 1.0,
     ) -> Tensor:
+        indices, _ = self._sample_indices_and_logits(
+            hidden,
+            observed,
+            offsets,
+            argmax=argmax,
+            uniforms=uniforms,
+            gen=gen,
+            temperature=temperature,
+            capture_logits=False,
+        )
+        return indices
+
+    def sample_indices_with_logits(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        offsets: tuple[int, ...],
+        *,
+        argmax: bool,
+        uniforms: Tensor | None = None,
+        gen: torch.Generator | None = None,
+        temperature: float = 1.0,
+    ) -> tuple[Tensor, tuple[Tensor, ...]]:
+        """Sample once and return the exact conditional logits used by each draw."""
+        return self._sample_indices_and_logits(
+            hidden,
+            observed,
+            offsets,
+            argmax=argmax,
+            uniforms=uniforms,
+            gen=gen,
+            temperature=temperature,
+            capture_logits=True,
+        )
+
+    def _sample_indices_and_logits(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        offsets: tuple[int, ...],
+        *,
+        argmax: bool,
+        uniforms: Tensor | None,
+        gen: torch.Generator | None,
+        temperature: float,
+        capture_logits: bool,
+    ) -> tuple[Tensor, tuple[Tensor, ...]]:
         temperature = validate_sampling_temperature(temperature)
         allowed = tuple(self.head_offsets[:horizon] for horizon in self.live_horizons)
         if offsets not in allowed:
@@ -1182,6 +1230,7 @@ class CausalTemporalDecoder(nn.Module):
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         frames: list[Tensor] = []
+        captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
         for depth, offset in enumerate(offsets):
             state, caches = self._decode_step(previous, offset, state_bias, caches)
             embedded: dict[str, Tensor] = {}
@@ -1193,6 +1242,8 @@ class CausalTemporalDecoder(nn.Module):
                 )
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
+                if capture_logits:
+                    captured[name].append(logits)
                 group = CONTROLLER_GROUP_INDEX[name]
                 uniform = None if uniforms is None else uniforms[depth, group]
                 pick = sample_categorical(
@@ -1207,7 +1258,10 @@ class CausalTemporalDecoder(nn.Module):
             indices = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
             frames.append(indices)
             previous = indices
-        return torch.stack(frames, dim=1)
+        logits_by_group = (
+            tuple(torch.stack(captured[name], dim=1) for name in CONTROLLER_GROUP_NAMES) if capture_logits else ()
+        )
+        return torch.stack(frames, dim=1), logits_by_group
 
     def rollout_conditioned_logits(self, hidden: Tensor, observed: Tensor) -> tuple[list[dict[str, Tensor]], Tensor]:
         """Offline ancestral diagnostic across every selected offset.
@@ -2457,6 +2511,14 @@ def _condition_ego_player(ctx: Context, player_id: int) -> Context:
     return replace(ctx, features=features)
 
 
+@dataclass(frozen=True, slots=True)
+class DecodedPlan:
+    actions: Tensor
+    indices: Tensor
+    logits: tuple[Tensor, ...]
+    uniforms: Tensor
+
+
 class BF16Inference:
     """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
 
@@ -2496,6 +2558,7 @@ class BF16Inference:
         self._warmed: set[tuple[int, int]] = set()
         self._trunks: dict[int, Callable] = {}
         self._decoders: dict[tuple[int, int], Callable] = {}
+        self._trace_decoders: dict[tuple[int, int], Callable] = {}
 
     @property
     def uses_cuda_graphs(self) -> bool:
@@ -2542,6 +2605,57 @@ class BF16Inference:
             self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
         return self._decoders[key]
 
+    def _trace_decoder(self, bucket: int, horizon: int) -> Callable:
+        key = (bucket, horizon)
+        if key not in self._trace_decoders:
+            offsets = self.model.head_offsets[:horizon]
+
+            def fn(hidden, observed, uniforms):
+                return self.model.temporal.sample_indices_with_logits(
+                    hidden,
+                    observed,
+                    offsets,
+                    argmax=False,
+                    uniforms=uniforms,
+                    temperature=self.temperature,
+                )
+
+            self._trace_decoders[key] = (
+                torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
+            )
+        return self._trace_decoders[key]
+
+    def _decode_inputs(
+        self,
+        ctx: Context,
+        horizon: int,
+        *,
+        streams: SlotGroupRng | None,
+        gen: torch.Generator | None,
+    ) -> tuple[int, int, Context, Tensor, Tensor]:
+        if horizon != self.cfg.prediction_frames:
+            raise ValueError(f"horizon must be {self.cfg.prediction_frames}")
+        rows = ctx.ctx_pad.shape[0]
+        bucket = self._bucket(rows)
+        padded = _pad_context(ctx, bucket)
+        if "ego_player_id" not in padded.features:
+            padded = _condition_ego_player(padded, MASKED_PLAYER_ID)
+        padded = canonical_context(padded, "base", items=True)
+        observed = self.model.codec.quantize(stack_actions(padded.features))
+        uniform_parts: list[Tensor] = []
+        if streams is not None:
+            streams.begin(ctx)
+        for _ in range(horizon):
+            groups = []
+            for name in CONTROLLER_GROUP_NAMES:
+                if streams is None:
+                    real = torch.rand(rows, device=ctx.ctx_pad.device, generator=gen)
+                else:
+                    real = streams.uniforms(name)
+                groups.append(F.pad(real, (0, bucket - rows), value=0.5))
+            uniform_parts.append(torch.stack(groups))
+        return rows, bucket, padded, observed, torch.stack(uniform_parts)
+
     @torch.no_grad()
     def prewarm(self, rows: int, horizon: int) -> float:
         """Compile and replay the exact evaluation program before Dolphin starts."""
@@ -2575,28 +2689,7 @@ class BF16Inference:
         argmax: bool = False,
         gen: torch.Generator | None = None,
     ) -> Tensor:
-        if horizon != self.cfg.prediction_frames:
-            raise ValueError(f"horizon must be {self.cfg.prediction_frames}")
-        rows = ctx.ctx_pad.shape[0]
-        bucket = self._bucket(rows)
-        padded = _pad_context(ctx, bucket)
-        if "ego_player_id" not in padded.features:
-            padded = _condition_ego_player(padded, MASKED_PLAYER_ID)
-        padded = canonical_context(padded, "base", items=True)
-        observed = self.model.codec.quantize(stack_actions(padded.features))
-        uniform_parts: list[Tensor] = []
-        if streams is not None:
-            streams.begin(ctx)
-        for _ in range(horizon):
-            groups = []
-            for name in CONTROLLER_GROUP_NAMES:
-                if streams is None:
-                    real = torch.rand(rows, device=ctx.ctx_pad.device, generator=gen)
-                else:
-                    real = streams.uniforms(name)
-                groups.append(F.pad(real, (0, bucket - rows), value=0.5))
-            uniform_parts.append(torch.stack(groups))
-        uniforms = torch.stack(uniform_parts)
+        rows, bucket, padded, observed, uniforms = self._decode_inputs(ctx, horizon, streams=streams, gen=gen)
         if self.uses_cuda_graphs:
             # The trunk and decoder are separate CUDA Graph trees.  Mark one
             # complete decode as a graph step so the next trunk replay may
@@ -2616,6 +2709,29 @@ class BF16Inference:
             else:
                 indices = self._decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
         return self.model.codec.dequantize(indices[:rows])
+
+    @torch.no_grad()
+    def decode_with_trace(
+        self,
+        ctx: Context,
+        horizon: int,
+        *,
+        streams: SlotGroupRng,
+    ) -> DecodedPlan:
+        """Decode once and retain the exact logits and uniforms used to sample."""
+        rows, bucket, padded, observed, uniforms = self._decode_inputs(ctx, horizon, streams=streams, gen=None)
+        if self.uses_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
+        with amp_context(self.cfg, ctx.ctx_pad.device):
+            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
+            indices, logits = self._trace_decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
+        real_indices = indices[:rows]
+        return DecodedPlan(
+            actions=self.model.codec.dequantize(real_indices),
+            indices=real_indices,
+            logits=tuple(values[:rows] for values in logits),
+            uniforms=uniforms[:, :, :rows],
+        )
 
 
 def _validate_deployment_timing(prediction_frames: int, delay_frames: int, replan_interval_frames: int) -> None:
@@ -2709,6 +2825,7 @@ def make_policy(
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
     decode_temperature: float = 1.0,
+    action_trace: ActionTraceWriter | None = None,
     device: str = DEVICE,
 ) -> DelayedTruncationPolicy:
     horizon = cfg.prediction_frames
@@ -2721,25 +2838,45 @@ def make_policy(
         raise ValueError(f"inference temperature {engine.temperature} does not match policy temperature {temperature}")
     random_streams = None if decode_seed is None else SlotGroupRng(decode_seed, CONTROLLER_GROUP_NAMES)
     generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)
+    if action_trace is not None and (decode_seed is None or random_streams is None):
+        raise ValueError("action tracing requires a fixed decode_seed")
 
     @torch.no_grad()
     def predict(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
         if committed is not None:
             raise ValueError("O50 uses truncation only and never conditions on a committed prefix")
         started = time.perf_counter()
-        result = (
-            engine.decode(
-                _condition_ego_player(ctx, ego_player_id),
+        conditioned = _condition_ego_player(ctx, ego_player_id)
+        if action_trace is None:
+            result = engine.decode(
+                conditioned,
                 horizon,
                 streams=random_streams,
                 gen=generator,
             )
-            .cpu()
-            .numpy()
-        )
+        else:
+            if ctx.slot_ids is None:
+                raise ValueError("action tracing requires evaluation slot_ids")
+            if decode_seed is None or random_streams is None:
+                raise RuntimeError("validated action-trace sampling state is missing")
+            decoded = engine.decode_with_trace(conditioned, horizon, streams=random_streams)
+            action_trace.record_plan(
+                decode_seed=decode_seed,
+                slot_ids=ctx.slot_ids,
+                resets=ctx.reset,
+                indices=decoded.indices,
+                logits=decoded.logits,
+                uniforms=decoded.uniforms,
+                head_offsets=model.head_offsets[:horizon],
+                temperature=engine.temperature,
+                delay_frames=delay,
+                replan_interval_frames=replan,
+            )
+            result = decoded.actions
+        result_array = result.cpu().numpy()
         if telemetry is not None:
             telemetry.record(rows=ctx.ctx_pad.shape[0], horizon=horizon, seconds=time.perf_counter() - started)
-        return result
+        return result_array
 
     return DelayedTruncationPolicy(
         predict_chunk=predict,

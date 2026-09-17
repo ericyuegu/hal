@@ -54,10 +54,13 @@ from loguru import logger
 
 from hal import r2
 from hal.data.schema import Rank
+from hal.eval.action_trace import ACTION_TRACE_SCHEMA_VERSION
+from hal.eval.action_trace import ActionTraceWriter
 from hal.eval.h2h import DEFAULT_MAX_FRAMES
 from hal.eval.h2h import DEFAULT_START_RETRIES
 from hal.eval.h2h import PolicyBuilder
 from hal.eval.h2h import orientation_replay_dir
+from hal.eval.h2h import path_safe
 from hal.eval.h2h import run_h2h
 from hal.eval.paired import summarize_paired
 from hal.inference.checkpoints import resolve_checkpoint
@@ -129,6 +132,8 @@ class Args:
     """Unique evaluation name below the R2 h2h-evals prefix. None keeps artifacts local."""
     upload_prefix: str = "h2h-evals"
     """R2 prefix containing upload_run. Each path component must be alphanumeric, dot, underscore, or hyphen."""
+    trace_actions: bool = False
+    """Persist the exact logits and likelihood of each executed temporal-MTP action."""
 
 
 def import_experiment(spec: str) -> ModuleType:
@@ -221,13 +226,19 @@ def _import_git_experiment(spec: str) -> ModuleType:
     return module
 
 
-def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]:
+def load_policy_builder(
+    args: ModelArgs,
+    *,
+    action_trace: ActionTraceWriter | None = None,
+) -> tuple[PolicyBuilder, dict[str, Any]]:
     """Resolve one model spec into a per-wave policy builder plus its eval protocol.
 
     The protocol is what goes into ``meta.json``: enough to reconstruct which weights and
     which decode settings produced the replays.
     """
     module = import_experiment(args.experiment)
+    if action_trace is not None and args.family != "temporal_mtp":
+        raise ValueError("action tracing requires family='temporal_mtp'")
     if args.temperature is not None and args.family != "temporal_mtp":
         raise ValueError("temperature overrides require family='temporal_mtp'")
     if args.family == "historical_interleaved_groups":
@@ -275,6 +286,8 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
         return build_historical_interleaved, protocol
 
     if args.family == "temporal_mtp":
+        if action_trace is not None and "action_trace" not in inspect.signature(module.make_policy).parameters:
+            raise ValueError(f"{args.experiment} does not support action tracing")
         head_offsets = tuple(cfg.head_offsets if hasattr(cfg, "head_offsets") else cfg.arch.head_offsets)
         decode_temp = getattr(cfg, "decode_temp", 1.0) if args.temperature is None else args.temperature
         if (
@@ -343,6 +356,9 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
                 "head_offsets": list(head_offsets),
             }
         )
+        if action_trace is not None:
+            protocol["action_trace_schema_version"] = ACTION_TRACE_SCHEMA_VERSION
+        trace_kwargs = {} if action_trace is None else {"action_trace": action_trace}
         if deployment_override:
             protocol.update(
                 {
@@ -357,7 +373,14 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
         def build_temporal_mtp(seed: int) -> Any:
             if not deployment_override:
                 if args.temperature is None:
-                    return module.make_policy(model, stats, cfg, exec_horizon=cfg.exec_horizon, decode_seed=seed)
+                    return module.make_policy(
+                        model,
+                        stats,
+                        cfg,
+                        exec_horizon=cfg.exec_horizon,
+                        decode_seed=seed,
+                        **trace_kwargs,
+                    )
                 return module.make_policy(
                     model,
                     stats,
@@ -365,6 +388,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
                     exec_horizon=cfg.exec_horizon,
                     decode_seed=seed,
                     decode_temperature=decode_temp,
+                    **trace_kwargs,
                 )
             if args.temperature is None:
                 return module.make_policy(
@@ -375,6 +399,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
                     ego_player_id=player_id,
                     delay_frames=delay,
                     replan_interval_frames=replan,
+                    **trace_kwargs,
                 )
             return module.make_policy(
                 model,
@@ -385,6 +410,7 @@ def load_policy_builder(args: ModelArgs) -> tuple[PolicyBuilder, dict[str, Any]]
                 delay_frames=delay,
                 replan_interval_frames=replan,
                 decode_temperature=decode_temp,
+                **trace_kwargs,
             )
 
         return build_temporal_mtp, protocol
@@ -481,18 +507,8 @@ def main(args: Args) -> None:
         raise FileExistsError(f"refusing to overwrite existing output directory {out_dir}")
     if args.upload_run is not None:
         _require_empty_upload_prefix(args.upload_run, args.upload_prefix)
-    logger.info(f"loading {args.model_a.name} and {args.model_b.name}")
-    build_a, protocol_a = load_policy_builder(args.model_a)
-    build_b, protocol_b = load_policy_builder(args.model_b)
-    for protocol in (protocol_a, protocol_b):
-        logger.info(f"  {protocol}")
-
-    fixed_characters = {
-        model.name: getattr(melee.Character, model.character.upper())
-        for model in (args.model_a, args.model_b)
-        if model.character is not None
-    }
     uploader = None if args.upload_run is None else BackgroundUploader(args.upload_run, prefix=args.upload_prefix)
+    trace_writers: list[ActionTraceWriter] = []
 
     def upload_orientation(orientation: int) -> None:
         if uploader is not None:
@@ -501,6 +517,27 @@ def main(args: Args) -> None:
             uploader.wait()
 
     try:
+        traces: tuple[ActionTraceWriter | None, ActionTraceWriter | None] = (None, None)
+        if args.trace_actions:
+            trace_root = out_dir / "action-traces"
+            trace_writers.append(
+                ActionTraceWriter(trace_root / f"model-a-{path_safe(args.model_a.name)}", model=args.model_a.name)
+            )
+            trace_writers.append(
+                ActionTraceWriter(trace_root / f"model-b-{path_safe(args.model_b.name)}", model=args.model_b.name)
+            )
+            traces = (trace_writers[0], trace_writers[1])
+        logger.info(f"loading {args.model_a.name} and {args.model_b.name}")
+        build_a, protocol_a = load_policy_builder(args.model_a, action_trace=traces[0])
+        build_b, protocol_b = load_policy_builder(args.model_b, action_trace=traces[1])
+        for protocol in (protocol_a, protocol_b):
+            logger.info(f"  {protocol}")
+
+        fixed_characters = {
+            model.name: getattr(melee.Character, model.character.upper())
+            for model in (args.model_a, args.model_b)
+            if model.character is not None
+        }
         records = run_h2h(
             build_a,
             build_b,
@@ -519,6 +556,8 @@ def main(args: Args) -> None:
             on_orientation_done=upload_orientation,
         )
     finally:
+        for writer in trace_writers:
+            writer.close()
         if uploader is not None:
             uploader.upload_tree(out_dir, base=out_dir.parent)
             uploader.close()

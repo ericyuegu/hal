@@ -163,6 +163,64 @@ def test_inference_passes_sampling_temperature_to_temporal_decoder(monkeypatch) 
     assert captured["temperature"] == 0.1
 
 
+def test_temporal_trace_returns_logits_from_the_same_sample() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    batch = 2
+    hidden = torch.randn(batch, cfg.arch.L_ctx, cfg.arch.d_model)
+    observed = torch.zeros(batch, 4, dtype=torch.long)
+    offsets = model.head_offsets[: cfg.prediction_frames]
+    uniforms = torch.rand(cfg.prediction_frames, 4, batch)
+
+    expected = model.temporal.sample_indices(
+        hidden,
+        observed,
+        offsets,
+        argmax=False,
+        uniforms=uniforms,
+        temperature=0.3,
+    )
+    actual, logits = model.temporal.sample_indices_with_logits(
+        hidden,
+        observed,
+        offsets,
+        argmax=False,
+        uniforms=uniforms,
+        temperature=0.3,
+    )
+
+    assert torch.equal(actual, expected)
+    assert tuple(tuple(values.shape) for values in logits) == tuple(
+        (batch, cfg.prediction_frames, vocab) for vocab in exp.CONTROLLER_GROUP_VOCABS
+    )
+    for group, values in enumerate(logits):
+        probabilities = torch.softmax(values.float() / 0.3, dim=-1)
+        reconstructed = (probabilities.cumsum(-1) < uniforms[:, group].T[..., None]).sum(-1)
+        assert torch.equal(actual[..., group], reconstructed)
+
+
+def test_trace_decode_matches_the_normal_inference_path() -> None:
+    cfg = _tiny_cfg()
+    model = exp.GPT(cfg)
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    inference = exp.BF16Inference(model, cfg, bucket=2, compiled=False, temperature=0.3)
+    expected = inference.decode(
+        context,
+        cfg.prediction_frames,
+        streams=exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES),
+    )
+
+    traced = inference.decode_with_trace(
+        context,
+        cfg.prediction_frames,
+        streams=exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES),
+    )
+
+    assert torch.equal(traced.actions, expected)
+    assert traced.indices.shape == (2, cfg.prediction_frames, 4)
+    assert traced.uniforms.shape == (cfg.prediction_frames, 4, 2)
+
+
 @pytest.mark.parametrize(
     ("delay", "replan", "expected"),
     [
