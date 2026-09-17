@@ -1,9 +1,9 @@
-"""CLI: emit slippilab viewer URLs for local or R2 `.slp` files.
+"""CLI: emit Slippilab viewer URLs for local or R2 `.slp` files.
 
-slippilab's vite dev server serves files from its `public/` dir. This stages each
-`.slp` into a served directory, mirroring its absolute path so replays that share a
-basename (`Game_<timestamp>.slp` across many match dirs) stay distinct, and prints
-`<url>/?replayUrl=...`.
+Slippilab's Vite dev server serves files from its `public/` dir. Replay-only
+links mirror the source path so repeated basenames stay distinct. Replay and
+advantage pairs use a short bundle ID and fixed `match.slp` and
+`advantage.json` names.
 
 R2 inputs use short-lived presigned URLs, so the replay is downloaded directly by
 the browser only when its link is opened. The R2 bucket must allow browser GETs
@@ -19,6 +19,7 @@ Usage:
 """
 
 import fnmatch
+import hashlib
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,8 @@ SERVE_DIR = Path(REPO_DIR) / "data" / "scratch" / "slippilab"
 SLIPPILAB_PUBLIC = Path("~/src/slippilab/public").expanduser()
 SLIPPILAB_URL = "http://localhost:5173"
 SERVE_MOUNT = "hal-runs"
+BUNDLE_MOUNT = "b"
+BUNDLE_ID_LENGTH = 16
 R2_SCHEME = "r2:"
 DEFAULT_EXPIRES_IN = 3_600
 MIN_EXPIRES_IN = 1
@@ -84,8 +87,40 @@ def _staged_path(slp: Path) -> Path:
     return SERVE_DIR / resolved.relative_to(resolved.anchor)
 
 
-def _link(slp: Path) -> str:
+def _bundle_id(slp: Path, sidecar: Path) -> str:
+    identity = f"{slp.resolve()}\0{sidecar.resolve()}".encode()
+    return hashlib.sha256(identity).hexdigest()[:BUNDLE_ID_LENGTH]
+
+
+def _stage_bundle(slp: Path, sidecar: Path) -> str:
+    if sidecar.suffix.lower() != ".json" or not sidecar.is_file():
+        raise SystemExit(f"advantage sidecar does not exist or is not JSON: {sidecar}")
+    bundle_id = _bundle_id(slp, sidecar)
+    bundle = SERVE_DIR / BUNDLE_MOUNT / bundle_id
+    staged_replay = bundle / "match.slp"
+    staged_sidecar = bundle / "advantage.json"
+
+    expected = ((staged_replay, slp.resolve()), (staged_sidecar, sidecar.resolve()))
+    for staged, source in expected:
+        if staged.is_symlink() and (not staged.exists() or staged.resolve() != source):
+            staged.unlink()
+        elif staged.exists() and (not staged.is_symlink() or staged.resolve() != source):
+            raise SystemExit(f"bundle ID collision at {staged}")
+        if not staged.exists():
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.symlink_to(source)
+    return bundle_id
+
+
+def _link(slp: Path, *, advantage: Path | None = None, slippilab_url: str | None = None) -> str:
     """Stage one `.slp` under the served dir; return its viewer URL."""
+    base_url = SLIPPILAB_URL if slippilab_url is None else slippilab_url.rstrip("/")
+    if advantage is not None:
+        if not is_finalized(slp):
+            raise SystemExit("advantage bundles require a finalized Slippi replay")
+        bundle_id = _stage_bundle(slp, advantage)
+        return f"{base_url}/?{urllib.parse.urlencode({'bundle': bundle_id})}"
+
     staged = _staged_path(slp)
     if staged.is_symlink() and not staged.exists():
         staged.unlink()  # dangling: the source it was staged from is gone
@@ -104,12 +139,27 @@ def _link(slp: Path) -> str:
                 raise SystemExit(f"not a Slippi .slp file: {slp}")
             staged.write_bytes(finalized)
     served = staged.relative_to(SERVE_DIR).as_posix()
-    replay_url = f"{SLIPPILAB_URL}/{SERVE_MOUNT}/{urllib.parse.quote(served)}"
-    return _viewer_link(replay_url)
+    replay_url = f"{base_url}/{SERVE_MOUNT}/{urllib.parse.quote(served)}"
+    return _viewer_link(replay_url, slippilab_url=base_url)
 
 
-def _viewer_link(replay_url: str) -> str:
-    return f"{SLIPPILAB_URL}/?replayUrl={urllib.parse.quote(replay_url, safe=':/')}"
+def _viewer_link(
+    replay_url: str,
+    *,
+    advantage_url: str | None = None,
+    slippilab_url: str | None = None,
+) -> str:
+    base_url = SLIPPILAB_URL if slippilab_url is None else slippilab_url.rstrip("/")
+    query = {"replayUrl": replay_url}
+    if advantage_url is not None:
+        query["advantageUrl"] = advantage_url
+    return f"{base_url}/?{urllib.parse.urlencode(query, safe=':/')}"
+
+
+def link_replay(slp: Path, *, advantage: Path | None = None, slippilab_url: str | None = None) -> str:
+    """Stage one local replay and optional value sidecar, then return a viewer URL."""
+    _ensure_mount()
+    return _link(slp, advantage=advantage, slippilab_url=slippilab_url)
 
 
 def _parse_r2(value: str) -> R2Object:
@@ -193,6 +243,8 @@ def _collect(paths: list[Path]) -> list[Path]:
 def slp_link(
     paths: Annotated[list[str], tyro.conf.Positional],
     expires_in: int = DEFAULT_EXPIRES_IN,
+    advantage: str | None = None,
+    slippilab_url: str = SLIPPILAB_URL,
 ) -> None:
     """Print slippilab URLs for local paths/directories or ``r2:bucket/prefix`` inputs."""
     if not MIN_EXPIRES_IN <= expires_in <= MAX_EXPIRES_IN:
@@ -200,6 +252,8 @@ def slp_link(
 
     local_paths = [Path(value) for value in paths if not value.startswith(R2_SCHEME)]
     remote_locators = [_parse_r2(value) for value in paths if value.startswith(R2_SCHEME)]
+    if advantage is not None and remote_locators:
+        raise SystemExit("--advantage requires exactly one local replay")
     slps = _collect(local_paths)
 
     client = None
@@ -215,12 +269,15 @@ def slp_link(
 
     if not slps and not remote_objects:
         raise SystemExit("no .slp files found")
+    if advantage is not None and len(slps) != 1:
+        raise SystemExit("--advantage requires exactly one local replay")
 
     if slps:
         _ensure_mount()
     for slp in slps:
         print(f"{slp.relative_to(Path(REPO_DIR)) if slp.is_relative_to(Path(REPO_DIR)) else slp}")
-        print(f"  {_link(slp)}")
+        sidecar = None if advantage is None else Path(advantage)
+        print(f"  {_link(slp, advantage=sidecar, slippilab_url=slippilab_url)}")
 
     if remote_objects:
         assert client is not None

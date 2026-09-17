@@ -74,6 +74,77 @@ def test_link_is_idempotent(tmp_path, serve_dir):
     assert slp_link._staged_path(src).resolve() == src
 
 
+def test_link_stages_short_advantage_bundle(tmp_path, serve_dir):
+    replay = tmp_path / "match one" / "Game.slp"
+    sidecar = tmp_path / "analysis" / "advantage.json"
+    _slp(replay, finalized=True)
+    sidecar.parent.mkdir()
+    sidecar.write_text('{"schema_version":2}')
+
+    link = slp_link._link(replay, advantage=sidecar, slippilab_url="http://127.0.0.1:5173/")
+    parsed = urllib.parse.urlparse(link)
+    query = urllib.parse.parse_qs(parsed.query)
+    bundle_id = query["bundle"][0]
+    bundle = serve_dir / slp_link.BUNDLE_MOUNT / bundle_id
+
+    assert parsed.netloc == "127.0.0.1:5173"
+    assert query == {"bundle": [bundle_id]}
+    assert len(bundle_id) == slp_link.BUNDLE_ID_LENGTH
+    assert (bundle / "match.slp").resolve() == replay
+    assert (bundle / "advantage.json").resolve() == sidecar
+
+
+def test_advantage_bundle_is_stable_and_distinguishes_analyses(tmp_path, serve_dir):
+    replay = tmp_path / "Game.slp"
+    sidecars = [tmp_path / "a" / "advantage.json", tmp_path / "b" / "advantage.json"]
+    _slp(replay, finalized=True)
+    for sidecar in sidecars:
+        sidecar.parent.mkdir()
+        sidecar.write_text('{"schema_version":2}')
+
+    first = slp_link._link(replay, advantage=sidecars[0])
+
+    assert slp_link._link(replay, advantage=sidecars[0]) == first
+    assert slp_link._link(replay, advantage=sidecars[1]) != first
+
+
+def test_advantage_bundle_requires_a_finalized_replay(tmp_path, serve_dir):
+    replay = tmp_path / "Game.slp"
+    sidecar = tmp_path / "advantage.json"
+    _slp(replay, finalized=False)
+    sidecar.write_text('{"schema_version":2}')
+
+    with pytest.raises(SystemExit, match="finalized"):
+        slp_link._link(replay, advantage=sidecar)
+
+
+def test_viewer_link_preserves_nested_query_strings() -> None:
+    replay_url = "https://r2.example/Game.slp?X-Amz-Signature=abc&x-id=GetObject"
+    advantage_url = "http://127.0.0.1:5173/hal-runs/advantage.v1.json"
+
+    link = slp_link._viewer_link(
+        replay_url,
+        advantage_url=advantage_url,
+        slippilab_url="http://127.0.0.1:5173",
+    )
+
+    assert urllib.parse.parse_qs(urllib.parse.urlparse(link).query) == {
+        "replayUrl": [replay_url],
+        "advantageUrl": [advantage_url],
+    }
+
+
+def test_advantage_requires_one_local_replay(tmp_path, monkeypatch):
+    replay = tmp_path / "Game.slp"
+    sidecar = tmp_path / "advantage.json"
+    _slp(replay, finalized=True)
+    sidecar.write_text("{}")
+    monkeypatch.setattr(slp_link, "REPO_DIR", str(tmp_path))
+
+    with pytest.raises(SystemExit, match="exactly one local replay"):
+        slp_link.slp_link([str(replay), "r2:hal/Game.slp"], advantage=str(sidecar))
+
+
 def test_unfinalized_is_staged_as_a_finalized_copy(tmp_path, serve_dir):
     """A match killed mid-game leaves rawLength == 0; slippilab needs the repaired bytes."""
     src = tmp_path / "Game.slp"
