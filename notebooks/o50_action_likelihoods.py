@@ -50,6 +50,18 @@ trace[["model", "decode_seed", "slot_id", "generation"]].drop_duplicates().sort_
 )
 
 # %%
+# Summarize every recorded stream before selecting one for frame-level inspection.
+stream_columns = ["model", "decode_seed", "slot_id", "generation", "group"]
+trace.groupby(stream_columns).agg(
+    frames=("execution_frame", "size"),
+    sampled_index_zero_percent=("sampled_index", lambda values: 100.0 * (values == 0).mean()),
+    sampled_top_one_percent=("rank", lambda values: 100.0 * (values == 1).mean()),
+    minimum_sampling_probability_percent=("sampled_probability", lambda values: 100.0 * values.min()),
+    minimum_base_probability_percent=("base_probability", lambda values: 100.0 * values.min()),
+    median_base_probability_percent=("base_probability", lambda values: 100.0 * values.median()),
+)
+
+# %%
 # Select one match-side stream. Change these values to inspect another game.
 MODEL = sorted(trace.model.unique())[0]
 model_trace = trace[trace.model == MODEL]
@@ -79,7 +91,7 @@ actions = selected.drop_duplicates("execution_frame").copy()
 actions["joint_probability_percent"] = 100.0 * np.exp(actions.action_log_probability.astype(float))
 actions["surprise_bits"] = -actions.action_log_probability.astype(float) / math.log(2.0)
 
-fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True, constrained_layout=True)
+fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True, constrained_layout=True)
 for group, rows in selected.groupby("group", sort=False):
     axes[0].plot(
         rows.execution_frame,
@@ -94,13 +106,26 @@ axes[0].set_ylabel("sampled group likelihood (%)")
 axes[0].legend(ncol=4)
 axes[0].grid(alpha=0.2)
 
-axes[1].plot(actions.execution_frame, actions.joint_probability_percent, linewidth=1, color="#b279a2")
+for group, rows in selected.groupby("group", sort=False):
+    axes[1].plot(
+        rows.execution_frame,
+        100.0 * rows.base_probability,
+        marker=".",
+        linewidth=1,
+        label=group,
+        color=group_colors[group],
+    )
 axes[1].set_yscale("log")
-axes[1].set_ylabel("joint action likelihood (%)")
+axes[1].set_ylabel("likelihood at T=1 (%)")
 axes[1].grid(alpha=0.2)
 
+axes[2].plot(actions.execution_frame, actions.joint_probability_percent, linewidth=1, color="#b279a2")
+axes[2].set_yscale("log")
+axes[2].set_ylabel("joint action likelihood (%)")
+axes[2].grid(alpha=0.2)
+
 for group, rows in selected.groupby("group", sort=False):
-    axes[2].scatter(
+    axes[3].scatter(
         rows.execution_frame,
         rows["rank"],
         s=9,
@@ -108,11 +133,11 @@ for group, rows in selected.groupby("group", sort=False):
         label=group,
         color=group_colors[group],
     )
-axes[2].set_yscale("log", base=2)
-axes[2].invert_yaxis()
-axes[2].set_ylabel("sampled rank (1 is best)")
-axes[2].set_xlabel("executed game frame")
-axes[2].grid(alpha=0.2)
+axes[3].set_yscale("log", base=2)
+axes[3].invert_yaxis()
+axes[3].set_ylabel("sampled rank (1 is best)")
+axes[3].set_xlabel("executed game frame")
+axes[3].grid(alpha=0.2)
 fig.suptitle(f"{MODEL} sampled-action likelihood")
 
 if SAVE_FIGURES:
@@ -177,7 +202,8 @@ for axis, (_, row) in zip(axes.flat, frame_rows.iterrows(), strict=True):
                 "group": row.group,
                 "index": shown[::-1],
                 "action": [action_label(row.group, int(index)) for index in shown[::-1]],
-                "likelihood_percent": 100.0 * probs[shown[::-1]],
+                "sampling_likelihood_percent": 100.0 * probs[shown[::-1]],
+                "base_likelihood_percent": 100.0 * probabilities(np.asarray(row.logits), 1.0)[shown[::-1]],
                 "sampled": shown[::-1] == sampled,
             }
         )
@@ -191,6 +217,10 @@ plt.show()
 # %%
 # The compact per-frame table is useful for sorting or export.
 frame_summary = selected.pivot(
-    index="execution_frame", columns="group", values=["sampled_index", "sampled_probability", "rank"]
+    index="execution_frame",
+    columns="group",
+    values=["sampled_index", "sampled_probability", "base_probability", "rank"],
 )
-frame_summary.join(actions.set_index("execution_frame")[["joint_probability_percent", "surprise_bits"]]).head(30)
+action_summary = actions.set_index("execution_frame")[["joint_probability_percent", "surprise_bits"]]
+action_summary.columns = pd.MultiIndex.from_product((("action",), action_summary.columns))
+frame_summary.join(action_summary).head(30)
