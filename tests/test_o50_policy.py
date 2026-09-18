@@ -73,7 +73,7 @@ def _stats() -> dict[str, FeatureStats]:
 
 
 def _resolved_stats() -> o50._ResolvedStats:
-    names = tuple(f"source-{index:02d}" for index in range(44))
+    names = tuple(source.name for source in o50.streams.POLICY_WORLD_V8_SOURCES)
     return o50._ResolvedStats(
         stats=_stats(),
         source_names=names,
@@ -485,6 +485,31 @@ def test_masked_identity_requires_explicit_runtime_opt_in(monkeypatch: pytest.Mo
     assert not policy.spec.requires_player_identity
     assert policy._states[3].player_id == 0
     assert len(output) == 1
+
+
+def test_decode_observer_measures_only_replans(monkeypatch: pytest.MonkeyPatch) -> None:
+    model, config, codes, _player_codes = _model()
+    observations = []
+    policy = O50Policy(
+        model,
+        config,
+        _stats(),
+        codes,
+        name="observed O50",
+        device=torch.device("cpu"),
+        seed=7,
+        compiled=False,
+        decode_observer=lambda rows, horizon, seconds: observations.append((rows, horizon, seconds)),
+    )
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2,)))
+    monkeypatch.setattr(policy, "_decode", lambda *_args: torch.zeros(1, 4, 14))
+
+    policy.step([_input(0, 2, reset=True)])
+    policy.step([_input(1, 2)])
+
+    assert len(observations) == 1
+    assert observations[0][:2] == (1, 4)
+    assert observations[0][2] >= 0.0
 
 
 def test_statistics_payload_accepts_a_frozen_source_subset() -> None:

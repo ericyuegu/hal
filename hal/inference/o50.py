@@ -8,6 +8,7 @@ import math
 import re
 import secrets
 import tempfile
+import time
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -157,18 +158,22 @@ class _ResolvedStats:
     mds_schema_version: int
 
 
+def _validate_source_names(source_names: tuple[str, ...]) -> None:
+    if not source_names or len(set(source_names)) != len(source_names):
+        raise ValueError("O50 source_names must be non-empty and unique")
+    known_names = tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
+    selected = set(source_names)
+    expected_order = tuple(name for name in known_names if name in selected)
+    if source_names != expected_order:
+        raise ValueError("O50 sources must be a canonical ordered subset of policy-world-v8")
+
+
 def _resolve_export_stats(checkpoint_config: Mapping[str, object]) -> _ResolvedStats:
     raw_names = checkpoint_config.get("source_names")
     if not isinstance(raw_names, (list, tuple)) or any(not isinstance(name, str) for name in raw_names):
         raise ValueError("O50 checkpoint source_names must be a sequence of strings")
     source_names = cast(tuple[str, ...], tuple(raw_names))
-    expected_names = tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
-    if not source_names or len(set(source_names)) != len(source_names):
-        raise ValueError("O50 checkpoint source_names must be non-empty and unique")
-    selected = set(source_names)
-    expected_order = tuple(name for name in expected_names if name in selected)
-    if source_names != expected_order:
-        raise ValueError("O50 checkpoint sources must be a canonical ordered subset of policy-world-v8")
+    _validate_source_names(source_names)
     raw_mds_schema_version = checkpoint_config.get("mds_schema_version")
     if raw_mds_schema_version != 7 or isinstance(raw_mds_schema_version, bool):
         raise ValueError(f"O50 checkpoint needs mds_schema_version=7, got {raw_mds_schema_version!r}")
@@ -258,8 +263,7 @@ def _decode_stats(encoded: bytes, config: O50Config) -> dict[str, FeatureStats]:
     if not isinstance(names_value, list) or any(not isinstance(name, str) or not name for name in names_value):
         raise ValueError("O50 statistics source_names must be non-empty strings")
     source_names = cast(list[str], names_value)
-    if not source_names or len(set(source_names)) != len(source_names):
-        raise ValueError("O50 statistics must identify at least one unique source")
+    _validate_source_names(tuple(source_names))
     if raw["source_count"] != len(source_names) or isinstance(raw["source_count"], bool):
         raise ValueError("O50 statistics source_count does not match source_names")
     expected_sources = set(source_names)
@@ -421,6 +425,7 @@ class O50Checkpoint:
         seed: int | None,
         compiled: bool,
         allow_masked_player_identity: bool = False,
+        decode_observer: DecodeObserver | None = None,
         name: str | None = None,
     ) -> O50Policy:
         """Build fresh stream and sampling state over the validated weights."""
@@ -434,6 +439,7 @@ class O50Checkpoint:
             seed=seed,
             compiled=compiled,
             allow_masked_player_identity=allow_masked_player_identity,
+            decode_observer=decode_observer,
         )
 
 
@@ -607,6 +613,7 @@ class _StreamState:
 
 TrunkCall = Callable[[dict[str, Tensor], Tensor, Tensor], Tensor]
 DecoderCall = Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], Tensor]
+DecodeObserver = Callable[[int, int, float], None]
 
 
 class O50Policy:
@@ -624,6 +631,7 @@ class O50Policy:
         seed: int | None,
         compiled: bool,
         allow_masked_player_identity: bool = False,
+        decode_observer: DecodeObserver | None = None,
     ) -> None:
         if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
             raise ValueError("O50 sampling seed must be an integer or None")
@@ -640,6 +648,7 @@ class O50Policy:
         self._seed = secrets.randbits(64) if seed is None else seed
         self._compiled_requested = compiled
         self._allow_masked_player_identity = allow_masked_player_identity
+        self._decode_observer = decode_observer
         self._compiled = False
         self._runtime: RuntimeConfig | None = None
         self._states: dict[int, _StreamState] = {}
@@ -929,8 +938,11 @@ class O50Policy:
         ]
         uniforms = torch.stack(draws)
         uniforms = F.pad(uniforms, (0, inference_rows - real_rows), value=0.5)
+        started = time.perf_counter()
         planned = self._decode(features, padding, forced, force_mask_tensor, uniforms)[:real_rows]
         values = planned.float().cpu().numpy()
+        if self._decode_observer is not None:
+            self._decode_observer(real_rows, horizon, time.perf_counter() - started)
         for row, (item, state) in enumerate(due):
             delay = len(item.pending_actions)
             replan = self._replan_for_delay(delay, runtime.replan_interval_frames)
@@ -959,6 +971,7 @@ def load_o50_policy(
     seed: int | None,
     compiled: bool = False,
     allow_masked_player_identity: bool = False,
+    decode_observer: DecodeObserver | None = None,
 ) -> Policy:
     """Load and validate a portable O50 bundle without importing an experiment."""
     target = torch.device(device)
@@ -999,4 +1012,5 @@ def load_o50_policy(
         seed=seed,
         compiled=compiled,
         allow_masked_player_identity=allow_masked_player_identity,
+        decode_observer=decode_observer,
     )

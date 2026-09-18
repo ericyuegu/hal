@@ -248,6 +248,8 @@ def test_eval_protocol_versions_conditioned_transport() -> None:
     assert exp._MATCH_ROW_SCHEMA_VERSION == 7
     assert protocol.transport_semantics == "conditioned_pending_actions_v1"
     assert protocol.pending_prefix_conditioned
+    assert protocol.evaluation_protocol_version == 2
+    assert not protocol.forced_prefix_consumes_sampling_draws
 
 
 def test_eval_checkpoint_routes_through_portable_conditioned_source(
@@ -277,16 +279,14 @@ def test_eval_checkpoint_routes_through_portable_conditioned_source(
         str(checkpoint),
         n_matchups=1,
         eager=True,
-        output_name="conditioned-eval",
-        player_code="IBDW#0",
     )
 
     assert metrics == {"boots": 1.0, "crashed": 0.0}
     assert observed["source"] is source
     assert observed["cfg"] == cfg
-    assert observed["kwargs"]["ego_player_id"] == 4
-    assert observed["kwargs"]["ego_player_code"] == "IBDW#0"
-    assert observed["kwargs"]["replay_dir"] == tmp_path / "conditioned-eval"
+    assert observed["kwargs"]["ego_player_id"] == 0
+    assert observed["kwargs"]["ego_player_code"] is None
+    assert observed["kwargs"]["replay_dir"] == tmp_path / "eval_replays_conditioned_v1"
 
 
 def test_paired_behavior_delta_resamples_matched_boots() -> None:

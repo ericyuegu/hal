@@ -2261,6 +2261,8 @@ class EvalProtocol:
     replan_interval_frames: int
     transport_semantics: Literal["conditioned_pending_actions_v1"]
     pending_prefix_conditioned: Literal[True]
+    evaluation_protocol_version: Literal[2]
+    forced_prefix_consumes_sampling_draws: Literal[False]
     dtype: str
     inference_mode: str
     inference_compile_mode: str
@@ -2340,6 +2342,8 @@ def _eval_protocol(
         replan_interval_frames=replan,
         transport_semantics="conditioned_pending_actions_v1",
         pending_prefix_conditioned=True,
+        evaluation_protocol_version=2,
+        forced_prefix_consumes_sampling_draws=False,
         dtype=str(next(model.parameters()).dtype),
         inference_mode=cfg.inference_mode if inference_mode is None else inference_mode,
         inference_compile_mode=inference_compile_mode,
@@ -2657,12 +2661,17 @@ def eval_vs_cpu(
         replan_interval_frames=protocol.replan_interval_frames,
     )
     policies: list[PolicyBatchAdapter] = []
+    telemetry = DecodeTelemetry()
+
+    def record_decode(rows: int, horizon: int, seconds: float) -> None:
+        telemetry.record(rows=rows, horizon=horizon, seconds=seconds)
 
     def build_policy(seed: int) -> PolicyBatchAdapter:
         policy = source.new_policy(
             seed=seed,
             compiled=compiled,
             allow_masked_player_identity=ego_player_code is None,
+            decode_observer=record_decode,
         )
         policy.prepare(runtime)
         adapter = PolicyBatchAdapter(policy, runtime, player_identity=ego_player_code)
@@ -2710,6 +2719,7 @@ def eval_vs_cpu(
     metrics["ego_player_id"] = float(protocol.ego_player_id)
     if protocol.fixed_ego_character is not None:
         metrics["fixed_ego_character"] = float(protocol.fixed_ego_character)
+    metrics.update(telemetry.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)
     return metrics
 
@@ -4300,7 +4310,7 @@ def eval_checkpoint(
     fixed_ego_character: melee.Character | None = None,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
-    wandb_namespace: str = "eval",
+    wandb_namespace: str = "eval_conditioned",
     allow_control_checkpoint: bool = False,
 ) -> dict[str, float]:
     source = load_o50_checkpoint(path, device=DEVICE)
@@ -4326,13 +4336,13 @@ def eval_checkpoint(
     )
     if is_variant and upload_run is not None and output_name is None:
         raise ValueError("evaluation overrides uploaded to a run require an explicit output_name")
-    if is_variant and shared_wandb and wandb_namespace == "eval":
+    if is_variant and shared_wandb and wandb_namespace == "eval_conditioned":
         raise ValueError("evaluation overrides require a distinct W&B namespace")
     update = source.step + 1
     if upload_run is not None:
-        default_name = f"eval_step_{update:07d}_s{horizon}"
+        default_name = f"eval_conditioned_v1_step_{update:07d}_s{horizon}"
     else:
-        default_name = "eval_replays_s6" if horizon == 6 else "eval_replays"
+        default_name = "eval_replays_conditioned_v1_s6" if horizon == 6 else "eval_replays_conditioned_v1"
     if output_name is not None and (Path(output_name).name != output_name or output_name in ("", ".", "..")):
         raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
     replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
@@ -4409,7 +4419,7 @@ class EvalArgs:
     fixed_ego_character: str | None = None
     delay_frames: int | None = None
     replan_interval_frames: int | None = None
-    wandb_namespace: str = "eval"
+    wandb_namespace: str = "eval_conditioned"
     allow_control_checkpoint: bool = False
 
 

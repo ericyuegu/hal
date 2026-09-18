@@ -99,7 +99,8 @@ class ModelArgs:
     """Experiment module: a dotted name (experiments.016_spatial_features) or a .py path."""
     family: Family = "receding_horizon"
     """Decode family. ``historical_interleaved_groups`` is the June 2026 013
-    four-full-trunk-pass decoder; its source may be loaded straight from Git."""
+    four-full-trunk-pass decoder; ``conditioned_temporal_mtp`` is required for
+    O50-family checkpoints evaluated with positive transport delay."""
     exec_cadence: int = 1
     """rle_token only: frames between replans. 1 replans every frame; 0 is token-native,
     which collapses in closed loop, so a token-native run must ask for it explicitly."""
@@ -108,7 +109,7 @@ class ModelArgs:
     prediction_frames: int | None = None
     """temporal_mtp only: dense action heads to decode."""
     delay_frames: int | None = None
-    """temporal_mtp only: transport-delay frames discarded from each plan."""
+    """Temporal MTP only: pending controller actions at each replan."""
     replan_interval_frames: int | None = None
     """temporal_mtp only: actions executed before decoding another plan."""
     character: str | None = None
@@ -304,6 +305,12 @@ def load_policy_builder(
         return build_historical_interleaved, protocol
 
     if args.family == "temporal_mtp":
+        requested_delay = getattr(cfg, "delay_frames", 0) if args.delay_frames is None else args.delay_frames
+        if requested_delay > 0:
+            raise ValueError(
+                "positive-delay temporal MTP evaluation requires family='conditioned_temporal_mtp'; "
+                "the legacy temporal_mtp wrapper discards delayed predictions"
+            )
         if action_trace is not None and "action_trace" not in inspect.signature(module.make_policy).parameters:
             raise ValueError(f"{args.experiment} does not support action tracing")
         head_offsets = tuple(cfg.head_offsets if hasattr(cfg, "head_offsets") else cfg.arch.head_offsets)
@@ -597,6 +604,8 @@ def _require_empty_upload_prefix(name: str, prefix_root: str) -> None:
 
 
 def main(args: Args) -> None:
+    if args.n_configs < 1:
+        raise ValueError(f"n_configs must be >= 1, got {args.n_configs}")
     stages = INCLUDED_STAGES if not args.stages else tuple(getattr(melee.Stage, s.upper()) for s in args.stages)
     out_dir = Path(args.out_dir).resolve()
     if out_dir.exists():
