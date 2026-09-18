@@ -67,6 +67,7 @@ from hal.training.features import stack_actions
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import RingSlotDescriptor
 from hal.training.player_identity import FIRST_CONNECT_CODE_ID
+from hal.training.player_identity import MASKED_PLAYER_ID
 from hal.training.player_identity import PlayerVocabulary
 from hal.training.player_identity import decode_player_codes
 from hal.training.player_identity import encode_player_codes
@@ -77,7 +78,6 @@ from hal.wire import item_column
 _CONFIG_MEMBER: Final[str] = "backend.json"
 _STATS_SCHEMA_VERSION: Final[int] = 1
 _STATS_ALGORITHM: Final[str] = "replay-weighted-consolidated-mixture-v1"
-_SOURCE_COUNT: Final[int] = 44
 _SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _SUPPORTED_DELAYS: Final[tuple[int, ...]] = (0, 2, 3)
 _ACTION_FIELDS: Final[frozenset[str]] = frozenset(f"ego_{name}" for name in ACTION_CHANNELS)
@@ -163,8 +163,12 @@ def _resolve_export_stats(checkpoint_config: Mapping[str, object]) -> _ResolvedS
         raise ValueError("O50 checkpoint source_names must be a sequence of strings")
     source_names = cast(tuple[str, ...], tuple(raw_names))
     expected_names = tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
-    if source_names != expected_names or len(source_names) != _SOURCE_COUNT:
-        raise ValueError("O50 checkpoint does not name the frozen 44 policy-world-v8 sources in order")
+    if not source_names or len(set(source_names)) != len(source_names):
+        raise ValueError("O50 checkpoint source_names must be non-empty and unique")
+    selected = set(source_names)
+    expected_order = tuple(name for name in expected_names if name in selected)
+    if source_names != expected_order:
+        raise ValueError("O50 checkpoint sources must be a canonical ordered subset of policy-world-v8")
     raw_mds_schema_version = checkpoint_config.get("mds_schema_version")
     if raw_mds_schema_version != 7 or isinstance(raw_mds_schema_version, bool):
         raise ValueError(f"O50 checkpoint needs mds_schema_version=7, got {raw_mds_schema_version!r}")
@@ -254,8 +258,8 @@ def _decode_stats(encoded: bytes, config: O50Config) -> dict[str, FeatureStats]:
     if not isinstance(names_value, list) or any(not isinstance(name, str) or not name for name in names_value):
         raise ValueError("O50 statistics source_names must be non-empty strings")
     source_names = cast(list[str], names_value)
-    if len(source_names) != _SOURCE_COUNT or len(set(source_names)) != len(source_names):
-        raise ValueError(f"O50 statistics must identify exactly {_SOURCE_COUNT} unique sources")
+    if not source_names or len(set(source_names)) != len(source_names):
+        raise ValueError("O50 statistics must identify at least one unique source")
     if raw["source_count"] != len(source_names) or isinstance(raw["source_count"], bool):
         raise ValueError("O50 statistics source_count does not match source_names")
     expected_sources = set(source_names)
@@ -385,6 +389,131 @@ def export_o50_policy(
         )
 
 
+@dataclass(frozen=True, slots=True)
+class O50Checkpoint:
+    """Validated raw O50-family checkpoint ready to build live policies."""
+
+    path: Path
+    source_sha256: str
+    checkpoint_config: Mapping[str, object]
+    config: O50Config
+    model: O50Model
+    stats: Mapping[str, FeatureStats]
+    player_codes: tuple[str, ...]
+    step: int
+    wandb_id: str | None
+    transport_delay: int
+    replan_interval_frames: int
+    device: torch.device
+
+    def player_id(self, identity: str | None) -> int:
+        """Resolve the exact runtime identity, including explicit masking."""
+        if identity is None:
+            return MASKED_PLAYER_ID
+        rank = Rank.__members__.get(identity)
+        if rank is not None:
+            return PlayerVocabulary(self.player_codes).id_for_rank(rank)
+        return PlayerVocabulary(self.player_codes).id_for_code(identity)
+
+    def new_policy(
+        self,
+        *,
+        seed: int | None,
+        compiled: bool,
+        allow_masked_player_identity: bool = False,
+        name: str | None = None,
+    ) -> O50Policy:
+        """Build fresh stream and sampling state over the validated weights."""
+        return O50Policy(
+            self.model,
+            self.config,
+            self.stats,
+            self.player_codes,
+            name=f"O50 {self.path.stem}" if name is None else name,
+            device=self.device,
+            seed=seed,
+            compiled=compiled,
+            allow_masked_player_identity=allow_masked_player_identity,
+        )
+
+
+def _checkpoint_int(
+    values: Mapping[str, object],
+    name: str,
+    *,
+    minimum: int,
+) -> int:
+    value = values.get(name)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise ValueError(f"O50 checkpoint {name} must be an integer >= {minimum}, got {value!r}")
+    return value
+
+
+def load_o50_checkpoint(
+    checkpoint_source: str | Path,
+    *,
+    device: str,
+    cache_root: str | Path = Path("runs"),
+) -> O50Checkpoint:
+    """Load a validated raw O50/O52/O56 checkpoint for corrected live evaluation."""
+    checkpoint = resolve_checkpoint(str(checkpoint_source), cache_root=cache_root)
+    raw = _safe_load_checkpoint(checkpoint)
+    checkpoint_config = _mapping(raw.get("cfg"), "checkpoint config")
+    model_state = _mapping(raw.get("model"), "checkpoint model state")
+    encoded_codes = model_state.get("player_code_bytes")
+    if not isinstance(encoded_codes, Tensor) or encoded_codes.dtype != torch.uint8 or encoded_codes.ndim != 1:
+        raise ValueError("O50 checkpoint has no one-dimensional uint8 player_code_bytes buffer")
+    player_code_bytes = encoded_codes.detach().cpu().contiguous().numpy().tobytes()
+    player_codes = decode_player_codes(player_code_bytes)
+    if encode_player_codes(player_codes) != player_code_bytes:
+        raise ValueError("O50 checkpoint player vocabulary is not canonically encoded")
+
+    resolved_stats = _resolve_export_stats(checkpoint_config)
+    _stats_json, stats_sha256 = _encode_stats(resolved_stats)
+    config = O50Config.from_checkpoint(
+        checkpoint_config,
+        player_code_bytes=len(player_code_bytes),
+        stats_sha256=stats_sha256,
+    )
+    if config.player_vocab_sha256 != _sha256_bytes(player_code_bytes):
+        raise ValueError("O50 checkpoint player vocabulary SHA-256 does not match its bytes")
+    if config.player_vocab_size != FIRST_CONNECT_CODE_ID + len(player_codes):
+        raise ValueError("O50 checkpoint player vocabulary size does not match its codes")
+
+    transport_delay = _checkpoint_int(checkpoint_config, "delay_frames", minimum=0)
+    replan_interval_frames = _checkpoint_int(checkpoint_config, "replan_interval_frames", minimum=1)
+    if transport_delay + replan_interval_frames > config.prediction_frames:
+        raise ValueError(
+            "O50 checkpoint delay_frames + replan_interval_frames exceeds prediction_frames: "
+            f"{transport_delay} + {replan_interval_frames} > {config.prediction_frames}"
+        )
+    step = raw.get("step")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+        raise ValueError(f"O50 checkpoint step must be a non-negative integer, got {step!r}")
+    wandb_id = raw.get("wandb_id")
+    if wandb_id is not None and (not isinstance(wandb_id, str) or not wandb_id):
+        raise ValueError("O50 checkpoint wandb_id must be a non-empty string or None")
+
+    target = torch.device(device)
+    model = O50Model(config).to(target)
+    model.load_state_dict(cast(Mapping[str, Tensor], model_state), strict=True)
+    model.eval()
+    return O50Checkpoint(
+        path=checkpoint,
+        source_sha256=checkpoint_sha256(checkpoint),
+        checkpoint_config=dict(checkpoint_config),
+        config=config,
+        model=model,
+        stats=resolved_stats.stats,
+        player_codes=player_codes,
+        step=step,
+        wandb_id=wandb_id,
+        transport_delay=transport_delay,
+        replan_interval_frames=replan_interval_frames,
+        device=target,
+    )
+
+
 def _validate_manifest(manifest: PolicyBundleManifest) -> None:
     expected = (
         manifest.backend == O50_BACKEND,
@@ -494,11 +623,14 @@ class O50Policy:
         device: torch.device,
         seed: int | None,
         compiled: bool,
+        allow_masked_player_identity: bool = False,
     ) -> None:
         if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
             raise ValueError("O50 sampling seed must be an integer or None")
         if not isinstance(compiled, bool):
             raise ValueError("O50 compiled must be a boolean")
+        if not isinstance(allow_masked_player_identity, bool):
+            raise ValueError("allow_masked_player_identity must be a boolean")
         self._model = model
         self._config = config
         self._stats = dict(stats)
@@ -507,6 +639,7 @@ class O50Policy:
         self._device = device
         self._seed = secrets.randbits(64) if seed is None else seed
         self._compiled_requested = compiled
+        self._allow_masked_player_identity = allow_masked_player_identity
         self._compiled = False
         self._runtime: RuntimeConfig | None = None
         self._states: dict[int, _StreamState] = {}
@@ -518,7 +651,7 @@ class O50Policy:
             backend=O50_BACKEND,
             required_observation_fields=O50_REQUIRED_OBSERVATION_FIELDS,
             supported_transport_delays=_SUPPORTED_DELAYS,
-            requires_player_identity=True,
+            requires_player_identity=not allow_masked_player_identity,
         )
 
     @property
@@ -664,6 +797,8 @@ class O50Policy:
 
     def _player_id(self, identity: str | None) -> int:
         if identity is None:
+            if self._allow_masked_player_identity:
+                return MASKED_PLAYER_ID
             raise ValueError("O50 requires a player identity")
         rank = Rank.__members__.get(identity)
         if rank is not None:
@@ -823,6 +958,7 @@ def load_o50_policy(
     device: str,
     seed: int | None,
     compiled: bool = False,
+    allow_masked_player_identity: bool = False,
 ) -> Policy:
     """Load and validate a portable O50 bundle without importing an experiment."""
     target = torch.device(device)
@@ -862,4 +998,5 @@ def load_o50_policy(
         device=target,
         seed=seed,
         compiled=compiled,
+        allow_masked_player_identity=allow_masked_player_identity,
     )

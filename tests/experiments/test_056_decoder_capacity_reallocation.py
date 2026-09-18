@@ -7,6 +7,7 @@ import sys
 from dataclasses import asdict
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -232,6 +233,60 @@ def test_proxy_smoke_uses_the_treatment_model(monkeypatch: pytest.MonkeyPatch) -
 def test_fresh_training_requires_the_fixed_proxy_arm() -> None:
     with pytest.raises(SystemExit, match="only the fixed proxy treatment"):
         exp.main(exp.TrainArgs())
+
+
+def test_eval_protocol_versions_conditioned_transport() -> None:
+    cfg = _tiny_cfg()
+    protocol = exp._eval_protocol(
+        cfg,
+        exp.GPT(cfg),
+        n_matchups=1,
+        checkpoint_sha256="0" * 64,
+        max_parallel=1,
+    )
+
+    assert exp._MATCH_ROW_SCHEMA_VERSION == 7
+    assert protocol.transport_semantics == "conditioned_pending_actions_v1"
+    assert protocol.pending_prefix_conditioned
+
+
+def test_eval_checkpoint_routes_through_portable_conditioned_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = exp.proxy_config()
+    checkpoint = tmp_path / "final.pt"
+    observed = {}
+    source = SimpleNamespace(
+        source_sha256="a" * 64,
+        checkpoint_config=exp._checkpoint_config(cfg),
+        step=16_383,
+        wandb_id="treatment-run",
+        player_id=lambda _identity: 4,
+    )
+    monkeypatch.setattr(exp, "load_o50_checkpoint", lambda path, *, device: source)
+
+    def eval_vs_cpu(loaded_source, loaded_cfg, **kwargs):
+        observed.update(source=loaded_source, cfg=loaded_cfg, kwargs=kwargs)
+        return {"boots": 1.0, "crashed": 0.0}
+
+    monkeypatch.setattr(exp, "eval_vs_cpu", eval_vs_cpu)
+    monkeypatch.setattr(exp, "require_complete_eval", lambda _metrics, _expected: None)
+
+    metrics = exp.eval_checkpoint(
+        str(checkpoint),
+        n_matchups=1,
+        eager=True,
+        output_name="conditioned-eval",
+        player_code="IBDW#0",
+    )
+
+    assert metrics == {"boots": 1.0, "crashed": 0.0}
+    assert observed["source"] is source
+    assert observed["cfg"] == cfg
+    assert observed["kwargs"]["ego_player_id"] == 4
+    assert observed["kwargs"]["ego_player_code"] == "IBDW#0"
+    assert observed["kwargs"]["replay_dir"] == tmp_path / "conditioned-eval"
 
 
 def test_paired_behavior_delta_resamples_matched_boots() -> None:

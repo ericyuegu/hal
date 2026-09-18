@@ -32,6 +32,8 @@ O50_EXPERIMENT_IDS: Final[tuple[str, ...]] = (
     "050_scaled_temporal_awr_v4",
     "050_scaled_temporal_awr_v5",
     "050_scaled_temporal_awr_v6",
+    "052_adamw_temporal_awr_v1",
+    "056_decoder_capacity_reallocation_v1",
 )
 _SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 

@@ -63,6 +63,8 @@ def test_adapter_pairs_actual_actions_and_orders_pending_queue(
     assert returned == [NEUTRAL_CONTROLLER_ACTION] * delay + tags[:3]
     assert policy.inputs[delay].pending_actions == tuple(tags[:delay])
     assert policy.inputs[delay + 1].applied_action == tags[0]
+    assert adapter.total_actions == delay + 3
+    assert adapter.neutral_actions == delay
 
 
 def test_adapter_resets_transport_on_frame_discontinuity(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -209,3 +209,91 @@ def test_o50_builder_rejects_sparse_heads_as_dense_horizon(monkeypatch) -> None:
                 prediction_frames=8,
             )
         )
+
+
+def test_conditioned_o52_builder_uses_portable_transport_path(monkeypatch) -> None:
+    prepared = []
+    built = []
+
+    class FakePolicy:
+        def prepare(self, runtime) -> None:
+            prepared.append(runtime)
+
+    source = SimpleNamespace(
+        config=SimpleNamespace(
+            experiment_id="052_adamw_temporal_awr_v1",
+            prediction_frames=4,
+            architecture=SimpleNamespace(L_ctx=256, head_offsets=(1, 2, 3, 4, 5, 6, 9, 12)),
+        ),
+        transport_delay=2,
+        replan_interval_frames=2,
+        source_sha256="a" * 64,
+        step=16_383,
+        model=torch.nn.Linear(1, 1),
+        player_id=lambda identity: 0 if identity is None else 4,
+    )
+
+    def new_policy(**kwargs):
+        built.append(kwargs)
+        return FakePolicy()
+
+    source.new_policy = new_policy
+    monkeypatch.setattr(h2h, "load_o50_checkpoint", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(h2h, "import_experiment", lambda _spec: pytest.fail("legacy wrapper was imported"))
+    monkeypatch.setattr(h2h.torch.cuda, "is_available", lambda: False)
+
+    build, protocol = h2h.load_policy_builder(
+        h2h.ModelArgs(
+            name="052",
+            checkpoint="control.pt",
+            experiment="experiments/052_adamw_temporal_awr.py",
+            family="conditioned_temporal_mtp",
+        ),
+        max_batch_size=8,
+    )
+    adapter = build(19)
+
+    assert isinstance(adapter, h2h.PolicyBatchAdapter)
+    assert prepared[0].max_batch_size == 8
+    assert prepared[0].transport_delays == (2,)
+    assert prepared[0].replan_interval_frames == 2
+    assert built == [
+        {
+            "seed": 19,
+            "compiled": False,
+            "allow_masked_player_identity": True,
+            "name": "052",
+        }
+    ]
+    assert protocol["pending_prefix_conditioned"] is True
+    assert protocol["transport_semantics"] == "conditioned_pending_actions_v1"
+    assert protocol["forced_prefix_consumes_sampling_draws"] is False
+
+
+def test_conditioned_builder_rejects_horizon_shorter_than_delay_and_cadence(monkeypatch) -> None:
+    source = SimpleNamespace(
+        config=SimpleNamespace(
+            experiment_id="052_adamw_temporal_awr_v1",
+            prediction_frames=4,
+            architecture=SimpleNamespace(L_ctx=256, head_offsets=(1, 2, 3, 4)),
+        ),
+        transport_delay=2,
+        replan_interval_frames=2,
+        source_sha256="a" * 64,
+        step=16_383,
+        model=torch.nn.Linear(1, 1),
+    )
+    monkeypatch.setattr(h2h, "load_o50_checkpoint", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(h2h.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(ValueError, match=r"3 \+ 2 > 4"):
+        h2h.load_policy_builder(
+            h2h.ModelArgs(
+                name="052",
+                checkpoint="control.pt",
+                experiment="experiments/052_adamw_temporal_awr.py",
+                family="conditioned_temporal_mtp",
+                delay_frames=3,
+                replan_interval_frames=2,
+            )
+        )

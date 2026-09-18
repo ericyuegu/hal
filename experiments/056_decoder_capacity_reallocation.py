@@ -93,11 +93,15 @@ from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
+from hal.eval.policy import PolicyBatchAdapter
 from hal.eval.policy_sampling import SlotGroupRng
 from hal.eval.policy_sampling import sample_categorical
 from hal.eval.self_play import DecodeTelemetry
 from hal.eval.self_play import canonical_context
 from hal.eval.self_play import synthetic_context as build_synthetic_context
+from hal.inference.api import RuntimeConfig
+from hal.inference.o50 import O50Checkpoint
+from hal.inference.o50 import load_o50_checkpoint
 from hal.sim.inputs import action_vec_to_controller
 from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.rollout import covering_power_of_two
@@ -177,7 +181,7 @@ _CONTROL_EXPERIMENT_ID: Final[str] = "052_adamw_temporal_awr_v1"
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 _CONTROL_INFERENCE_PARAMETER_USES: Final[int] = 17_328_146
 _CONTROL_TRAINING_FLOPS_PER_UPDATE: Final[int] = 14_416_825_417_728
-_MATCH_ROW_SCHEMA_VERSION: Final[int] = 6
+_MATCH_ROW_SCHEMA_VERSION: Final[int] = 7
 _ANALYSIS_SCHEMA_VERSION: Final[int] = 1
 
 
@@ -2255,6 +2259,8 @@ class EvalProtocol:
     prediction_frames: int
     delay_frames: int
     replan_interval_frames: int
+    transport_semantics: Literal["conditioned_pending_actions_v1"]
+    pending_prefix_conditioned: Literal[True]
     dtype: str
     inference_mode: str
     inference_compile_mode: str
@@ -2290,7 +2296,7 @@ def assert_protocol_diversity(n_matchups: int) -> tuple[int, int, int, str]:
 
 def _eval_protocol(
     cfg: TrainConfig,
-    model: GPT,
+    model: nn.Module,
     *,
     n_matchups: int,
     checkpoint_sha256: str,
@@ -2332,6 +2338,8 @@ def _eval_protocol(
         prediction_frames=cfg.prediction_frames,
         delay_frames=delay,
         replan_interval_frames=replan,
+        transport_semantics="conditioned_pending_actions_v1",
+        pending_prefix_conditioned=True,
         dtype=str(next(model.parameters()).dtype),
         inference_mode=cfg.inference_mode if inference_mode is None else inference_mode,
         inference_compile_mode=inference_compile_mode,
@@ -2612,14 +2620,12 @@ def analyze_evidence(
 
 
 def eval_vs_cpu(
-    model: GPT,
-    stats: dict[str, FeatureStats],
+    source: O50Checkpoint,
     cfg: TrainConfig,
     *,
     n_matchups: int,
     replay_dir: Path,
     checkpoint_sha256: str = "unavailable",
-    inference: BF16Inference | None = None,
     eager: bool = False,
     max_parallel: int | None = None,
     fixed_ego_character: melee.Character | None = None,
@@ -2628,79 +2634,69 @@ def eval_vs_cpu(
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
 ) -> dict[str, float]:
-    horizon = cfg.prediction_frames
     inference_mode = "eager" if eager else cfg.inference_mode
-    inference = (
-        BF16Inference(
-            model,
-            cfg,
-            bucket=_eval_inference_bucket(cfg, n_matchups, max_parallel),
-            compiled=inference_mode == "compiled",
-        )
-        if inference is None
-        else inference
-    )
-    if inference.model is not model:
-        raise ValueError("the supplied inference engine must own the evaluation model")
     protocol = _eval_protocol(
         cfg,
-        model,
+        source.model,
         n_matchups=n_matchups,
         checkpoint_sha256=checkpoint_sha256,
         max_parallel=max_parallel,
         inference_mode=inference_mode,
-        inference_compile_mode=inference.compile_mode,
-        inference_attention_backend=inference.attention_backend,
         fixed_ego_character=fixed_ego_character,
         ego_player_id=ego_player_id,
         ego_player_code=ego_player_code,
         delay_frames=delay_frames,
         replan_interval_frames=replan_interval_frames,
     )
-    if next(model.parameters()).device.type == "cuda" and (
-        protocol.inference_mode != "compiled" or not inference.compiled
-    ):
+    compiled = protocol.inference_mode == "compiled" and source.device.type == "cuda"
+    if source.device.type == "cuda" and not compiled:
         raise RuntimeError("official CUDA evaluation requires compiled BF16 inference")
-    telemetry = DecodeTelemetry()
-    policy_index = itertools.count()
-    policies: list[DelayedTruncationPolicy] = []
+    runtime = RuntimeConfig(
+        max_batch_size=protocol.max_parallel,
+        transport_delays=(protocol.delay_frames,),
+        replan_interval_frames=protocol.replan_interval_frames,
+    )
+    policies: list[PolicyBatchAdapter] = []
 
-    def factory() -> RecedingHorizon:
-        policy = make_policy(
-            model,
-            stats,
-            cfg,
-            decode_seed=protocol.seed + next(policy_index),
-            inference=inference,
-            telemetry=telemetry,
-            ego_player_id=protocol.ego_player_id,
-            delay_frames=protocol.delay_frames,
-            replan_interval_frames=protocol.replan_interval_frames,
+    def build_policy(seed: int) -> PolicyBatchAdapter:
+        policy = source.new_policy(
+            seed=seed,
+            compiled=compiled,
+            allow_masked_player_identity=ego_player_code is None,
         )
-        policies.append(policy)
-        return policy
+        policy.prepare(runtime)
+        adapter = PolicyBatchAdapter(policy, runtime, player_identity=ego_player_code)
+        policies.append(adapter)
+        return adapter
 
-    was_training = model.training
-    model.eval()
     total_started = time.perf_counter()
-    try:
-        compile_seconds = inference.prewarm(protocol.max_parallel, horizon)
-        started = time.perf_counter()
-        with torch.compiler.set_stance("fail_on_recompile"):
-            results, rows = sweep_vs_cpu_prior_with_rows(
-                factory,
-                session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
-                n_matchups=protocol.n_matchups,
-                max_parallel=protocol.max_parallel,
-                max_frames=protocol.max_frames,
-                cpu_level=protocol.cpu_level,
-                ego_port=protocol.ego_port,
-                seed_stage=melee.Stage(protocol.seed_stage),
-                start_retries=protocol.start_retries,
-                fixed_ego_character=fixed_ego_character,
-            )
-    finally:
-        model.train(was_training)
+    prepare_started = time.perf_counter()
+    first_policy: PolicyBatchAdapter | None = build_policy(protocol.seed)
+    compile_seconds = time.perf_counter() - prepare_started if compiled else 0.0
+    policy_index = itertools.count(1)
+
+    def factory() -> PolicyBatchAdapter:
+        nonlocal first_policy
+        if first_policy is not None:
+            policy = first_policy
+            first_policy = None
+            return policy
+        return build_policy(protocol.seed + next(policy_index))
+
+    started = time.perf_counter()
+    with torch.compiler.set_stance("fail_on_recompile"):
+        results, rows = sweep_vs_cpu_prior_with_rows(
+            factory,
+            session_cfg=default_session_cfg(replay_dir, instant_match_restart=True),
+            n_matchups=protocol.n_matchups,
+            max_parallel=protocol.max_parallel,
+            max_frames=protocol.max_frames,
+            cpu_level=protocol.cpu_level,
+            ego_port=protocol.ego_port,
+            seed_stage=melee.Stage(protocol.seed_stage),
+            start_retries=protocol.start_retries,
+            fixed_ego_character=fixed_ego_character,
+        )
     metrics = vs_cpu_metrics(results, seed=protocol.seed)
     metrics["eval_wall_seconds"] = time.perf_counter() - started
     metrics["eval_total_wall_seconds"] = time.perf_counter() - total_started
@@ -2714,7 +2710,6 @@ def eval_vs_cpu(
     metrics["ego_player_id"] = float(protocol.ego_player_id)
     if protocol.fixed_ego_character is not None:
         metrics["fixed_ego_character"] = float(protocol.fixed_ego_character)
-    metrics.update(telemetry.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)
     return metrics
 
@@ -4308,22 +4303,19 @@ def eval_checkpoint(
     wandb_namespace: str = "eval",
     allow_control_checkpoint: bool = False,
 ) -> dict[str, float]:
-    actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
+    source = load_o50_checkpoint(path, device=DEVICE)
+    actual_checkpoint_sha256 = source.source_sha256
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
         raise ValueError(
             f"checkpoint SHA-256 mismatch: expected {expected_checkpoint_sha256}, got {actual_checkpoint_sha256}"
         )
-    model, cfg, stats, state = load_checkpoint(path, allow_control_checkpoint=allow_control_checkpoint)
+    cfg = config_from_state(dict(source.checkpoint_config), allow_control_checkpoint=allow_control_checkpoint)
     validate_config(cfg)
     if player_code is None:
         ego_player_id = MASKED_PLAYER_ID
         ego_player_code = None
     else:
-        encoded = model.get_buffer("player_code_bytes")
-        if not encoded.numel():
-            raise ValueError("checkpoint has no embedded identity vocabulary")
-        vocabulary = PlayerVocabulary(decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
-        ego_player_id = vocabulary.id_for_code(player_code)
+        ego_player_id = source.player_id(player_code)
         ego_player_code = player_code.strip()
     horizon = cfg.prediction_frames
     delay = cfg.delay_frames if delay_frames is None else delay_frames
@@ -4336,7 +4328,7 @@ def eval_checkpoint(
         raise ValueError("evaluation overrides uploaded to a run require an explicit output_name")
     if is_variant and shared_wandb and wandb_namespace == "eval":
         raise ValueError("evaluation overrides require a distinct W&B namespace")
-    update = int(state["step"]) + 1
+    update = source.step + 1
     if upload_run is not None:
         default_name = f"eval_step_{update:07d}_s{horizon}"
     else:
@@ -4345,8 +4337,7 @@ def eval_checkpoint(
         raise ValueError(f"evaluation output name must be one directory name, got {output_name!r}")
     replay_dir = Path(path).resolve().parent / (default_name if output_name is None else output_name)
     values = eval_vs_cpu(
-        model,
-        stats,
+        source,
         cfg,
         n_matchups=cfg.final_eval_n_matchups if n_matchups is None else n_matchups,
         replay_dir=replay_dir,
@@ -4363,7 +4354,7 @@ def eval_checkpoint(
     if upload_run is not None:
         _upload_eval_evidence(upload_run, replay_dir)
     if shared_wandb:
-        wandb_id = state.get("wandb_id")
+        wandb_id = source.wandb_id
         if not isinstance(wandb_id, str):
             raise RuntimeError("checkpoint has no W&B run id for shared logging")
         _log_shared_eval_metrics(wandb_id, update, values, namespace=wandb_namespace)

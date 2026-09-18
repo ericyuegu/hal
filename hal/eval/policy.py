@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.inference.api import Policy
 from hal.inference.api import PolicyInput
@@ -38,6 +39,8 @@ class PolicyBatchAdapter:
         self.runtime = runtime
         self.player_identity = player_identity
         self._states: dict[Slot, _StreamState] = {}
+        self.neutral_actions = 0
+        self.total_actions = 0
 
     def __call__(
         self,
@@ -87,4 +90,6 @@ class PolicyBatchAdapter:
             due = state.transport.submit(outputs[item.stream_id])
             state.expected_applied = due
             result[slot] = due
+            self.total_actions += 1
+            self.neutral_actions += int(due == NEUTRAL_CONTROLLER_ACTION)
         return result

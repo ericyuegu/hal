@@ -49,6 +49,7 @@ from typing import Any
 from typing import Literal
 
 import melee
+import torch
 import tyro
 from loguru import logger
 
@@ -62,8 +63,12 @@ from hal.eval.h2h import PolicyBuilder
 from hal.eval.h2h import orientation_replay_dir
 from hal.eval.h2h import path_safe
 from hal.eval.h2h import run_h2h
+from hal.eval.harness import usable_cpus
 from hal.eval.paired import summarize_paired
+from hal.eval.policy import PolicyBatchAdapter
+from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
+from hal.inference.o50 import load_o50_checkpoint
 from hal.policy import INCLUDED_STAGES
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import checkpoint_sha256
@@ -73,7 +78,13 @@ from hal.training.player_identity import decode_player_codes
 # Decode families. A receding-horizon experiment (013 / 016 / 019 / 020) takes the model
 # in ``_decode_settings`` and per-knob keywords in ``make_policy``; an RLE token
 # experiment (018) takes only the cfg and passes the settings object straight through.
-Family = Literal["receding_horizon", "rle_token", "historical_interleaved_groups", "temporal_mtp"]
+Family = Literal[
+    "receding_horizon",
+    "rle_token",
+    "historical_interleaved_groups",
+    "temporal_mtp",
+    "conditioned_temporal_mtp",
+]
 
 
 @dataclass(frozen=True)
@@ -230,12 +241,19 @@ def load_policy_builder(
     args: ModelArgs,
     *,
     action_trace: ActionTraceWriter | None = None,
+    max_batch_size: int = 1,
 ) -> tuple[PolicyBuilder, dict[str, Any]]:
     """Resolve one model spec into a per-wave policy builder plus its eval protocol.
 
     The protocol is what goes into ``meta.json``: enough to reconstruct which weights and
     which decode settings produced the replays.
     """
+    if args.family == "conditioned_temporal_mtp":
+        return _load_conditioned_temporal_builder(
+            args,
+            action_trace=action_trace,
+            max_batch_size=max_batch_size,
+        )
     module = import_experiment(args.experiment)
     if action_trace is not None and args.family != "temporal_mtp":
         raise ValueError("action tracing requires family='temporal_mtp'")
@@ -450,6 +468,84 @@ def load_policy_builder(
     return build_receding_horizon, protocol
 
 
+def _load_conditioned_temporal_builder(
+    args: ModelArgs,
+    *,
+    action_trace: ActionTraceWriter | None,
+    max_batch_size: int,
+) -> tuple[PolicyBuilder, dict[str, Any]]:
+    """Build an O50-family policy with explicit transport-prefix conditioning."""
+    if action_trace is not None:
+        raise ValueError("conditioned_temporal_mtp does not yet support action tracing")
+    if not isinstance(max_batch_size, int) or isinstance(max_batch_size, bool) or max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be a positive integer, got {max_batch_size!r}")
+    if args.temperature not in (None, 1.0):
+        raise ValueError("conditioned_temporal_mtp currently supports only temperature 1.0")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    source = load_o50_checkpoint(args.checkpoint, device=device)
+    horizon = source.config.prediction_frames
+    if args.prediction_frames is not None and args.prediction_frames != horizon:
+        raise ValueError(
+            f"conditioned_temporal_mtp checkpoint has prediction_frames={horizon}, "
+            f"got override {args.prediction_frames}"
+        )
+    delay = source.transport_delay if args.delay_frames is None else args.delay_frames
+    replan = source.replan_interval_frames if args.replan_interval_frames is None else args.replan_interval_frames
+    if (
+        not isinstance(delay, int)
+        or isinstance(delay, bool)
+        or delay < 0
+        or not isinstance(replan, int)
+        or isinstance(replan, bool)
+        or replan < 1
+    ):
+        raise ValueError("delay_frames and replan_interval_frames must be non-negative/positive integers")
+    if delay + replan > horizon:
+        raise ValueError(
+            f"delay_frames + replan_interval_frames must not exceed prediction_frames: {delay} + {replan} > {horizon}"
+        )
+    runtime = RuntimeConfig(
+        max_batch_size=max_batch_size,
+        transport_delays=(delay,),
+        replan_interval_frames=replan,
+    )
+    identity = args.player_identity
+
+    def build(seed: int) -> PolicyBatchAdapter:
+        policy = source.new_policy(
+            seed=seed,
+            compiled=device == "cuda",
+            allow_masked_player_identity=identity is None,
+            name=args.name,
+        )
+        policy.prepare(runtime)
+        return PolicyBatchAdapter(policy, runtime, player_identity=identity)
+
+    protocol: dict[str, Any] = {
+        "name": args.name,
+        "experiment": args.experiment,
+        "experiment_id": source.config.experiment_id,
+        "checkpoint": args.checkpoint,
+        "checkpoint_sha256": source.source_sha256,
+        "family": args.family,
+        "step": source.step,
+        "L_ctx": source.config.architecture.L_ctx,
+        "model_dtype": str(next(source.model.parameters()).dtype),
+        "decode_settings": {"temp": 1.0},
+        "player_identity": identity,
+        "player_id": source.player_id(identity),
+        "head_offsets": list(source.config.architecture.head_offsets),
+        "prediction_frames": horizon,
+        "delay_frames": delay,
+        "replan_interval_frames": replan,
+        "pending_prefix_conditioned": True,
+        "transport_semantics": "conditioned_pending_actions_v1",
+        "evaluation_protocol_version": 2,
+        "forced_prefix_consumes_sampling_draws": False,
+    }
+    return build, protocol
+
+
 def _build_historical_interleaved_policy(
     module: ModuleType, model: Any, stats: dict[str, Any], cfg: Any, *, temp: float, seed: int
 ) -> Any:
@@ -528,8 +624,17 @@ def main(args: Args) -> None:
             )
             traces = (trace_writers[0], trace_writers[1])
         logger.info(f"loading {args.model_a.name} and {args.model_b.name}")
-        build_a, protocol_a = load_policy_builder(args.model_a, action_trace=traces[0])
-        build_b, protocol_b = load_policy_builder(args.model_b, action_trace=traces[1])
+        max_batch_size = min(args.n_configs, args.max_parallel or usable_cpus())
+        build_a, protocol_a = load_policy_builder(
+            args.model_a,
+            action_trace=traces[0],
+            max_batch_size=max_batch_size,
+        )
+        build_b, protocol_b = load_policy_builder(
+            args.model_b,
+            action_trace=traces[1],
+            max_batch_size=max_batch_size,
+        )
         for protocol in (protocol_a, protocol_b):
             logger.info(f"  {protocol}")
 

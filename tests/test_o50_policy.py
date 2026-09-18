@@ -3,6 +3,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import asdict
+from dataclasses import replace
 from multiprocessing import Pipe
 from pathlib import Path
 from types import MethodType
@@ -22,6 +23,7 @@ from hal.inference.api import RuntimeConfig
 from hal.inference.o50 import O50_REQUIRED_OBSERVATION_FIELDS
 from hal.inference.o50 import O50Policy
 from hal.inference.o50 import export_o50_policy
+from hal.inference.o50 import load_o50_checkpoint
 from hal.inference.o50 import load_o50_policy
 from hal.inference.o50_model import CONTROLLER_GROUP_COUNT
 from hal.inference.o50_model import O50Architecture
@@ -136,7 +138,7 @@ def _input(
     *,
     stream_id: int = 3,
     controlled_port: int = 1,
-    player_identity: str = "IBDW#0",
+    player_identity: str | None = "IBDW#0",
     reset: bool = False,
 ) -> PolicyInput:
     pending = tuple(
@@ -198,6 +200,48 @@ def test_export_uses_safe_checkpoint_types_and_loads_without_experiment(
     assert policy.spec.required_observation_fields == O50_REQUIRED_OBSERVATION_FIELDS
 
 
+def test_raw_o52_checkpoint_loads_for_conditioned_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_config, _codes, _player_codes = _config()
+    config = replace(base_config, experiment_id="052_adamw_temporal_awr_v1")
+    model, _base_config, _codes, _player_codes = _model()
+    checkpoint_config = {
+        "experiment_id": config.experiment_id,
+        "architecture": asdict(config.architecture),
+        "prediction_frames": config.prediction_frames,
+        "delay_frames": 2,
+        "replan_interval_frames": 2,
+        "player_vocab_size": config.player_vocab_size,
+        "player_vocab_sha256": config.player_vocab_sha256,
+        "amp_dtype": config.amp_dtype,
+        "depth_alpha": config.depth_alpha,
+        "mds_schema_version": config.mds_schema_version,
+        "source_names": ("ranked-anonymized-1-policy-world-v8",),
+    }
+    checkpoint = tmp_path / "o52.pt"
+    torch.save(
+        {
+            "cfg": checkpoint_config,
+            "model": model.state_dict(),
+            "step": 16_383,
+            "wandb_id": "control-run",
+        },
+        checkpoint,
+    )
+    monkeypatch.setattr(o50, "_resolve_export_stats", lambda _config: _resolved_stats())
+
+    source = load_o50_checkpoint(checkpoint, device="cpu")
+
+    assert source.config.experiment_id == "052_adamw_temporal_awr_v1"
+    assert source.transport_delay == 2
+    assert source.replan_interval_frames == 2
+    assert source.step == 16_383
+    assert source.wandb_id == "control-run"
+    assert source.player_id(None) == 0
+
+
 def test_stats_content_and_provenance_hashes_are_strict() -> None:
     config, _codes, _player_codes = _config()
     encoded, digest = o50._encode_stats(_resolved_stats())
@@ -242,6 +286,8 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
     expected_forced = policy._model.codec.quantize(pending)
     assert torch.equal(forced_calls[0][0][0, :delay], expected_forced)
     assert forced_calls[0][1][0].tolist() == [index < delay for index in range(4)]
+    assert policy._rng is not None
+    assert {counter for *_key, counter in policy._rng.state()} == {frames}
 
 
 def test_runtime_batches_delay_two_and_three_without_crossing_stream_state(
@@ -416,6 +462,46 @@ def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
     assert policy._player_id("IBDW#0") == FIRST_CONNECT_CODE_ID
     with pytest.raises(ValueError, match="Platinum, Diamond, or Master"):
         policy._player_id("PRO")
+
+
+def test_masked_identity_requires_explicit_runtime_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    model, config, codes, _player_codes = _model()
+    policy = O50Policy(
+        model,
+        config,
+        _stats(),
+        codes,
+        name="masked O50",
+        device=torch.device("cpu"),
+        seed=7,
+        compiled=False,
+        allow_masked_player_identity=True,
+    )
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2,)))
+    monkeypatch.setattr(policy, "_decode", lambda *_args: torch.zeros(1, 4, 14))
+
+    output = policy.step([_input(0, 2, player_identity=None, reset=True)])
+
+    assert not policy.spec.requires_player_identity
+    assert policy._states[3].player_id == 0
+    assert len(output) == 1
+
+
+def test_statistics_payload_accepts_a_frozen_source_subset() -> None:
+    resolved = o50._ResolvedStats(
+        stats=_stats(),
+        source_names=("ranked-anonymized-1-policy-world-v8",),
+        source_replay_weights={"ranked-anonymized-1-policy-world-v8": 1},
+        source_manifest_sha256={"ranked-anonymized-1-policy-world-v8": "a" * 64},
+        source_stats_sha256={"ranked-anonymized-1-policy-world-v8": "b" * 64},
+        mds_schema_version=7,
+    )
+    encoded, stats_sha256 = o50._encode_stats(resolved)
+    config, _codes, _player_codes = _config()
+
+    decoded = o50._decode_stats(encoded, replace(config, stats_sha256=stats_sha256))
+
+    assert decoded == _stats()
 
 
 def test_port_relative_adapter_and_applied_action_alignment() -> None:

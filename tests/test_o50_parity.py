@@ -3,6 +3,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+import pytest
 import torch
 
 from hal.inference.o50_model import BASE_PLAYER_PREFIXES
@@ -16,9 +17,9 @@ from hal.inference.o50_model import O50Model
 from hal.inference.o50_model import item_column
 
 
-def _experiment():
-    path = Path(__file__).parents[1] / "experiments" / "050_scaled_temporal_awr.py"
-    spec = importlib.util.spec_from_file_location("o50_parity_experiment", path)
+def _experiment(filename: str):
+    path = Path(__file__).parents[1] / "experiments" / filename
+    spec = importlib.util.spec_from_file_location(f"parity_{path.stem}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -26,8 +27,19 @@ def _experiment():
     return module
 
 
-def test_portable_model_matches_frozen_o50_trunk_and_decoder() -> None:
-    experiment = _experiment()
+@pytest.mark.parametrize(
+    ("filename", "experiment_id"),
+    [
+        ("050_scaled_temporal_awr.py", "050_scaled_temporal_awr_v6"),
+        ("052_adamw_temporal_awr.py", "052_adamw_temporal_awr_v1"),
+        ("056_decoder_capacity_reallocation.py", "056_decoder_capacity_reallocation_v1"),
+    ],
+)
+def test_portable_model_matches_frozen_o50_family_trunk_and_decoder(
+    filename: str,
+    experiment_id: str,
+) -> None:
+    experiment = _experiment(filename)
     architecture = {
         **asdict(experiment.Architecture()),
         "d_model": 32,
@@ -61,7 +73,7 @@ def test_portable_model_matches_frozen_o50_trunk_and_decoder() -> None:
     frozen = experiment.GPT(training_config, vocabulary)
     checkpoint_config = asdict(training_config)
     checkpoint_config["architecture"] = checkpoint_config.pop("arch")
-    checkpoint_config["experiment_id"] = "050_scaled_temporal_awr_v6"
+    checkpoint_config["experiment_id"] = experiment_id
     portable_config = O50Config.from_checkpoint(
         checkpoint_config,
         player_code_bytes=frozen.player_code_bytes.numel(),

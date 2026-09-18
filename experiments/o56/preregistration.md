@@ -41,6 +41,10 @@ The treatment is eligible only if it reaches update 16,384 with finite training 
 
 This is a one-seed measurement experiment. No metric automatically selects or adopts the treatment. Offline metrics are diagnostic only.
 
+## Evaluation correction
+
+After training launched, inspection found that the inherited O52 head-to-head adapter discarded the first `delay_frames` predictions instead of conditioning each new plan on the actions already committed to transport. This does not affect training. All control and treatment gameplay evidence used for the comparison must be regenerated with `conditioned_pending_actions_v1`: the committed prefix is forced through the temporal decoder, only its uncommitted tail is sampled, and bootstrap transport contains neutral actions. Match-row schema 7 records this semantic contract. Earlier schema-6 truncation evaluations are ineligible.
+
 ## Command
 
 ```text
