@@ -83,6 +83,30 @@ def test_study_configuration_and_rank1_selection_are_fixed() -> None:
         exp.validate_config(replace(production, adam_lr=1e-3))
 
 
+def test_validation_summary_uses_final_configured_offset() -> None:
+    cfg = _tiny_cfg()
+    values = {
+        "loss_unweighted": 1.0,
+        "flow_loss_near_unweighted": 2.0,
+        "flow_loss_far_unweighted": 3.0,
+        "exact_frame_acc": 0.1,
+        "dense_four_sequence_acc": 0.2,
+        "change_f1": 0.3,
+        "sampled_transition_rate": 0.4,
+        "shuffled_context_relative_hidden_change": 0.5,
+        "multi_noise_plan_diversity": 0.6,
+    }
+    final_offset = cfg.arch.head_offsets[-1]
+    for group, name in enumerate(exp.CONTROLLER_GROUP_NAMES, start=1):
+        values[f"rollout_nll_o{final_offset:02d}_{name}"] = float(group)
+        values[f"exposure_gap_o{final_offset:02d}_{name}"] = float(10 * group)
+
+    summary = exp._validation_wandb_metrics(values, cfg)
+
+    assert summary["rollout_nll"] == 10.0
+    assert summary["exposure_gap"] == 100.0
+
+
 def test_run_provenance_records_and_validates_persisted_identities(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAL_GIT_SHA", "a" * 40)
     monkeypatch.setattr(exp, "checkpoint_sha256", lambda _path: "b" * 64)
