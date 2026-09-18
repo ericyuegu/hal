@@ -110,6 +110,22 @@ def controller_actions_match(
     )
 
 
+def controller_to_action_vec(action: ControllerInputs) -> np.ndarray:
+    """Encode logical inputs in canonical policy channel order."""
+    return np.asarray(
+        [
+            action.main_x,
+            action.main_y,
+            action.c_x,
+            action.c_y,
+            action.trigger_l,
+            action.trigger_r,
+            *(float(bool(action.buttons & BUTTON_BITS[name.removeprefix("button_")])) for name in ACTION_CHANNELS[6:]),
+        ],
+        dtype=np.float64,
+    )
+
+
 def action_vec_to_controller(action: np.ndarray) -> ControllerInputsValue:
     """Convert one canonical policy action vector to logical controller inputs.
 

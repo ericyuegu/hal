@@ -18,6 +18,8 @@ from loguru import logger
 
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import action_vec_to_controller
+from hal.sim.inputs import canonical_pre_to_action
+from hal.sim.inputs import controller_to_action_vec
 from hal.sim.ipc import ControlMessage
 from hal.sim.ipc import MessageType
 from hal.sim.ipc import ResultArena
@@ -100,12 +102,17 @@ def session_worker(
                     view = {**current, "_matchup": metadata}
                     flat = flatten_canonical_frame(view)
                     for port in model_ports:
+                        applied = actions[port]
+                        if runtime.observed_actions:
+                            applied = controller_to_action_vec(
+                                canonical_pre_to_action(current["ports"][port]["leader"]["pre"])
+                            )
                         arena.write_observation(
                             arena_slot_of[port],
                             sequence,
                             int(current["id"]),
                             flat,
-                            actions[port],
+                            applied,
                             reset=reset,
                         )
 

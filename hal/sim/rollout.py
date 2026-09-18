@@ -29,6 +29,9 @@ class PolicyRuntimeSpec:
     committed_frames: int
     action_dim: int
     action_token_groups: int = 0
+    # Public live policies require the recorded input, including wire rounding.
+    # Historical chunk policies retain the originally submitted action.
+    observed_actions: bool = False
 
     def __post_init__(self) -> None:
         if self.context_frames < 1:

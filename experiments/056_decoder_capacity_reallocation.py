@@ -94,18 +94,13 @@ from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.policy import PolicyBatchAdapter
-from hal.eval.policy_sampling import SlotGroupRng
 from hal.eval.policy_sampling import sample_categorical
 from hal.eval.self_play import DecodeTelemetry
-from hal.eval.self_play import canonical_context
 from hal.eval.self_play import synthetic_context as build_synthetic_context
 from hal.inference.api import RuntimeConfig
 from hal.inference.o50 import O50Checkpoint
 from hal.inference.o50 import load_o50_checkpoint
-from hal.sim.inputs import action_vec_to_controller
-from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.rollout import covering_power_of_two
-from hal.sim.vec import Slot
 from hal.training import returns as returns_lib
 from hal.training import scoring
 from hal.training.checkpoints import BackgroundUploader
@@ -114,7 +109,6 @@ from hal.training.checkpoints import checkpoint_sha256
 from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
 from hal.training.checkpoints import save_checkpoint
-from hal.training.closed_loop import RecedingHorizon
 from hal.training.controller_codec import BUTTON_LEFT_CHANNEL
 from hal.training.controller_codec import BUTTON_RIGHT_CHANNEL
 from hal.training.controller_codec import BUTTONS_GROUP
@@ -131,19 +125,15 @@ from hal.training.dataloader import make_loader
 from hal.training.dataloader import train_batch_from_columns
 from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.features import A_DIM
-from hal.training.features import ACTION_CHANNELS
-from hal.training.features import BASE_ITEMS_PROJECTION
 from hal.training.features import BASE_PLAYER_PREFIXES
 from hal.training.features import CAT_FEATURES
 from hal.training.features import FLOAT_FEATURES
 from hal.training.features import ITEM_CAT_VOCABS
-from hal.training.features import ITEM_COLUMNS
 from hal.training.features import ITEM_FLOATS
 from hal.training.features import ITEM_PLAYER_COLUMNS
 from hal.training.features import ITEM_PLAYER_PROJECTION
 from hal.training.features import ITEM_PRESENCE_SUFFIX
 from hal.training.features import ITEM_PROBE_COLUMN
-from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import AWRBatch
 from hal.training.features import Context
 from hal.training.features import FeatureProjection
@@ -1909,204 +1899,6 @@ def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dic
     }
 
 
-def _pad_context(ctx: Context, bucket: int) -> Context:
-    rows = ctx.ctx_pad.shape[0]
-    if rows == bucket:
-        return ctx
-    if rows > bucket:
-        raise ValueError("cannot pad a context to a smaller bucket")
-    extra = bucket - rows
-    features = {
-        name: torch.cat((value, torch.zeros((extra, *value.shape[1:]), dtype=value.dtype, device=value.device)))
-        for name, value in ctx.features.items()
-    }
-    ctx_pad = torch.cat(
-        (
-            ctx.ctx_pad,
-            torch.full(
-                (extra,),
-                ctx.features[next(iter(ctx.features))].shape[1] - 1,
-                dtype=ctx.ctx_pad.dtype,
-                device=ctx.ctx_pad.device,
-            ),
-        )
-    )
-    slot_ids = None
-    reset = None
-    if ctx.slot_ids is not None:
-        slot_ids = torch.cat(
-            (ctx.slot_ids, torch.full((extra,), -1, dtype=ctx.slot_ids.dtype, device=ctx.slot_ids.device))
-        )
-    if ctx.reset is not None:
-        reset = torch.cat((ctx.reset, torch.ones(extra, dtype=ctx.reset.dtype, device=ctx.reset.device)))
-    return Context(features=features, ctx_pad=ctx_pad, slot_ids=slot_ids, reset=reset)
-
-
-def _condition_ego_player(ctx: Context, player_id: int) -> Context:
-    """Attach one runtime ego identity without specializing the compiled graph."""
-    if "opp_player_id" in ctx.features:
-        raise ValueError("opponent identity must never enter inference")
-    if not isinstance(player_id, int) or isinstance(player_id, bool) or player_id < 0:
-        raise ValueError(f"player_id must be a non-negative integer, got {player_id!r}")
-    reference = ctx.features[next(iter(ctx.features))]
-    features = dict(ctx.features)
-    features["ego_player_id"] = torch.full(
-        reference.shape[:2],
-        player_id,
-        dtype=torch.long,
-        device=reference.device,
-    )
-    return replace(ctx, features=features)
-
-
-class BF16Inference:
-    """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
-
-    Evaluation compiles each required program synchronously on first use. Runtime
-    calls use the smallest compiled bucket that fits. Padding and slot-keyed random
-    streams leave real rows unchanged.
-    """
-
-    def __init__(
-        self,
-        model: GPT,
-        cfg: TrainConfig,
-        *,
-        bucket: int | None = None,
-        compiled: bool | None = None,
-        compile_mode: str = "default",
-        compiled_buckets: tuple[int, ...] | None = None,
-    ) -> None:
-        self.model = model
-        self.cfg = cfg
-        if bucket is not None and compiled_buckets is not None:
-            raise ValueError("pass bucket or compiled_buckets, not both")
-        chosen = (bucket,) if bucket is not None else compiled_buckets
-        chosen = _planned_inference_buckets(cfg) if chosen is None else chosen
-        self.compiled_buckets = tuple(sorted(set(chosen)))
-        if not self.compiled_buckets:
-            raise ValueError("compiled_buckets must contain at least one bucket")
-        if any(bucket < 1 or bucket & (bucket - 1) for bucket in self.compiled_buckets):
-            raise ValueError(f"compiled_buckets must be positive powers of two, got {self.compiled_buckets}")
-        requested = cfg.inference_mode == "compiled" if compiled is None else compiled
-        self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
-        self.compile_mode = compile_mode
-        self.attention_backend = "dense_sdpa"
-        self.compile_seconds = 0.0
-        self._warmed: set[tuple[int, int]] = set()
-        self._trunks: dict[int, Callable] = {}
-        self._decoders: dict[tuple[int, int], Callable] = {}
-
-    @property
-    def uses_cuda_graphs(self) -> bool:
-        return self.compiled and self.compile_mode == "reduce-overhead"
-
-    def _bucket(self, rows: int) -> int:
-        if self.compiled:
-            try:
-                return next(bucket for bucket in self.compiled_buckets if bucket >= rows)
-            except StopIteration as exc:
-                raise ValueError(
-                    f"inference batch {rows} exceeds largest compiled bucket {self.compiled_buckets[-1]}"
-                ) from exc
-        try:
-            return next(bucket for bucket in self.cfg.inference_buckets if bucket >= rows)
-        except StopIteration:
-            return covering_power_of_two(rows)
-
-    def _trunk(self, bucket: int) -> Callable:
-        if bucket not in self._trunks:
-            forward = self.model.forward_dense
-            self._trunks[bucket] = (
-                torch.compile(forward, dynamic=False, fullgraph=True, mode=self.compile_mode)
-                if self.compiled
-                else forward
-            )
-        return self._trunks[bucket]
-
-    def _decoder(self, bucket: int, horizon: int) -> Callable:
-        key = (bucket, horizon)
-        if key not in self._decoders:
-            offsets = self.model.head_offsets[:horizon]
-
-            def fn(hidden, observed, uniforms):
-                return self.model.temporal.sample_indices(hidden, observed, offsets, argmax=False, uniforms=uniforms)
-
-            self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
-        return self._decoders[key]
-
-    @torch.no_grad()
-    def prewarm(self, rows: int, horizon: int) -> float:
-        """Compile and replay the exact evaluation program before Dolphin starts."""
-        bucket = self._bucket(rows)
-        key = (bucket, horizon)
-        if key in self._warmed or not self.compiled:
-            self._warmed.add(key)
-            return 0.0
-        device = next(self.model.parameters()).device
-        started = time.perf_counter()
-        context = synthetic_context(self.cfg, rows, device)
-        self.decode(context, horizon)
-        self.decode(context, horizon)
-        torch.cuda.synchronize(device)
-        elapsed = time.perf_counter() - started
-        self.compile_seconds += elapsed
-        self._warmed.add(key)
-        print(
-            f"[inference] synchronously compiled batch {bucket}, horizon {horizon} in {elapsed:.1f}s",
-            flush=True,
-        )
-        return elapsed
-
-    @torch.no_grad()
-    def decode(
-        self,
-        ctx: Context,
-        horizon: int,
-        *,
-        streams: SlotGroupRng | None = None,
-        argmax: bool = False,
-        gen: torch.Generator | None = None,
-    ) -> Tensor:
-        if horizon != self.cfg.prediction_frames:
-            raise ValueError(f"horizon must be {self.cfg.prediction_frames}")
-        rows = ctx.ctx_pad.shape[0]
-        bucket = self._bucket(rows)
-        padded = _pad_context(ctx, bucket)
-        if "ego_player_id" not in padded.features:
-            padded = _condition_ego_player(padded, MASKED_PLAYER_ID)
-        padded = canonical_context(padded, "base", items=True)
-        observed = self.model.codec.quantize(stack_actions(padded.features))
-        uniform_parts: list[Tensor] = []
-        if streams is not None:
-            streams.begin(ctx)
-        for _ in range(horizon):
-            groups = []
-            for name in CONTROLLER_GROUP_NAMES:
-                if streams is None:
-                    real = torch.rand(rows, device=ctx.ctx_pad.device, generator=gen)
-                else:
-                    real = streams.uniforms(name)
-                groups.append(F.pad(real, (0, bucket - rows), value=0.5))
-            uniform_parts.append(torch.stack(groups))
-        uniforms = torch.stack(uniform_parts)
-        if self.uses_cuda_graphs:
-            # The trunk and decoder are separate CUDA Graph trees.  Mark one
-            # complete decode as a graph step so the next trunk replay may
-            # safely reuse its managed output storage after the decoder has
-            # consumed it.
-            torch.compiler.cudagraph_mark_step_begin()
-        with amp_context(self.cfg, ctx.ctx_pad.device):
-            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
-            if argmax:
-                indices = self.model.temporal.sample_indices(
-                    hidden, observed[:, -1], self.model.head_offsets[:horizon], argmax=True
-                )
-            else:
-                indices = self._decoder(bucket, horizon)(hidden, observed[:, -1], uniforms)
-        return self.model.codec.dequantize(indices[:rows])
-
-
 def _validate_deployment_timing(prediction_frames: int, delay_frames: int, replan_interval_frames: int) -> None:
     if not isinstance(delay_frames, int) or isinstance(delay_frames, bool) or delay_frames < 0:
         raise ValueError(f"delay_frames must be a non-negative integer, got {delay_frames!r}")
@@ -2121,124 +1913,6 @@ def _validate_deployment_timing(prediction_frames: int, delay_frames: int, repla
             "delay_frames + replan_interval_frames must not exceed prediction_frames: "
             f"{delay_frames} + {replan_interval_frames} > {prediction_frames}"
         )
-
-
-@dataclass
-class DelayedTruncationPolicy(RecedingHorizon):
-    """Discard delayed predictions and enqueue one execution-stride slice."""
-
-    delay_frames: int = 2
-    _queues: dict[Slot, list[np.ndarray]] = dataclass_field(default_factory=dict)
-    _phases: dict[Slot, int] = dataclass_field(default_factory=dict)
-    neutral_actions: int = 0
-    total_actions: int = 0
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        _validate_deployment_timing(self.L_chunk, self.delay_frames, self.s)
-
-    @property
-    def inference_delay(self) -> int:
-        return self.delay_frames
-
-    @property
-    def runtime_spec(self) -> PolicyRuntimeSpec:
-        return PolicyRuntimeSpec(
-            context_frames=self.L_ctx,
-            prediction_frames=self.L_chunk,
-            execution_stride=self.s,
-            committed_frames=self.inference_delay,
-            action_dim=len(ACTION_CHANNELS),
-        )
-
-    def __call__(self, frame_index: int, obs: Mapping[Slot, dict]):
-        del frame_index
-        live = list(obs)
-        self._ingest(live, obs)
-        due: list[Slot] = []
-        for slot in live:
-            state = self._slots[slot]
-            if state.reset_pending or slot not in self._queues:
-                self._queues[slot] = [NEUTRAL_ACTION.copy() for _ in range(self.inference_delay)]
-                self._phases[slot] = 0
-            if self._phases[slot] % self.s == 0:
-                due.append(slot)
-        if due:
-            context = self._context(due)
-            plans = self.predict_chunk(context, None)
-            if plans.shape[:2] != (len(due), self.L_chunk):
-                raise ValueError("predictor returned the wrong batch or prediction length")
-            for row, slot in enumerate(due):
-                start = self.inference_delay
-                self._queues[slot].extend(plans[row, start : start + self.s].astype(np.float32))
-        actions = {}
-        for slot in live:
-            action = self._queues[slot].pop(0)
-            actions[slot] = action
-            self._push_ego(slot, action)
-            self._phases[slot] += 1
-            self.total_actions += 1
-            self.neutral_actions += int(np.array_equal(action, NEUTRAL_ACTION))
-        return {slot: action_vec_to_controller(action) for slot, action in actions.items()}
-
-    @property
-    def neutral_action_fraction(self) -> float:
-        return self.neutral_actions / max(self.total_actions, 1)
-
-
-def make_policy(
-    model: GPT,
-    stats: dict[str, FeatureStats],
-    cfg: TrainConfig,
-    *,
-    decode_seed: int | None = None,
-    inference: BF16Inference | None = None,
-    telemetry: DecodeTelemetry | None = None,
-    ego_player_id: int = MASKED_PLAYER_ID,
-    delay_frames: int | None = None,
-    replan_interval_frames: int | None = None,
-    device: str = DEVICE,
-) -> DelayedTruncationPolicy:
-    horizon = cfg.prediction_frames
-    delay = cfg.delay_frames if delay_frames is None else delay_frames
-    replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
-    _validate_deployment_timing(horizon, delay, replan)
-    engine = BF16Inference(model, cfg) if inference is None else inference
-    random_streams = None if decode_seed is None else SlotGroupRng(decode_seed, CONTROLLER_GROUP_NAMES)
-    generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)
-
-    @torch.no_grad()
-    def predict(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        if committed is not None:
-            raise ValueError("O52 uses truncation only and never conditions on a committed prefix")
-        started = time.perf_counter()
-        result = (
-            engine.decode(
-                _condition_ego_player(ctx, ego_player_id),
-                horizon,
-                streams=random_streams,
-                gen=generator,
-            )
-            .cpu()
-            .numpy()
-        )
-        if telemetry is not None:
-            telemetry.record(rows=ctx.ctx_pad.shape[0], horizon=horizon, seconds=time.perf_counter() - started)
-        return result
-
-    return DelayedTruncationPolicy(
-        predict_chunk=predict,
-        stats=stats,
-        L_ctx=cfg.arch.L_ctx,
-        L_chunk=horizon,
-        s=replan,
-        d=0,
-        delay_frames=delay,
-        device=device,
-        float_dtype=next(model.parameters()).dtype,
-        extra=ITEM_COLUMNS,
-        projection=BASE_ITEMS_PROJECTION,
-    )
 
 
 @dataclass(frozen=True, slots=True)
