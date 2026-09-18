@@ -179,7 +179,8 @@ def _resolve_export_stats(checkpoint_config: Mapping[str, object]) -> _ResolvedS
         raise ValueError(f"O50 checkpoint needs mds_schema_version=7, got {raw_mds_schema_version!r}")
     mds_schema_version = cast(int, raw_mds_schema_version)
 
-    paths = tuple(streams.ensure_stats(source.local_root / "stats.json") for source in streams.POLICY_WORLD_V8_SOURCES)
+    sources = tuple(streams.BY_NAME[name] for name in source_names)
+    paths = tuple(streams.ensure_stats(source.local_root / "stats.json") for source in sources)
     weights = {name: streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] for name in source_names}
     stats = load_consolidated_mixture_stats(
         paths,

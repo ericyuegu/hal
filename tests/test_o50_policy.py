@@ -529,6 +529,38 @@ def test_statistics_payload_accepts_a_frozen_source_subset() -> None:
     assert decoded == _stats()
 
 
+def test_resolve_export_stats_loads_only_checkpoint_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    name = "ranked-anonymized-1-policy-world-v8"
+    source = o50.streams.BY_NAME[name]
+    observed: dict[str, object] = {}
+
+    def load_mixture(
+        paths: tuple[Path, ...],
+        proportions: list[float],
+        *,
+        expected_mds_schema_version: int,
+    ) -> dict[str, FeatureStats]:
+        observed.update(
+            paths=tuple(paths),
+            proportions=tuple(proportions),
+            mds_schema_version=expected_mds_schema_version,
+        )
+        return _stats()
+
+    monkeypatch.setattr(o50.streams, "ensure_stats", lambda path: path)
+    monkeypatch.setattr(o50, "load_consolidated_mixture_stats", load_mixture)
+    monkeypatch.setattr(o50, "_sha256_file", lambda _path: "b" * 64)
+
+    resolved = o50._resolve_export_stats({"source_names": (name,), "mds_schema_version": 7})
+
+    assert observed == {
+        "paths": (source.local_root / "stats.json",),
+        "proportions": (float(o50.streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name]),),
+        "mds_schema_version": 7,
+    }
+    assert resolved.source_names == (name,)
+
+
 def test_port_relative_adapter_and_applied_action_alignment() -> None:
     policy = _policy()
     policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
