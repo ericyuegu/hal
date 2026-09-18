@@ -1,7 +1,10 @@
 """Use the public policy interface in HAL's local Dolphin evaluator."""
 
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+import numpy as np
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
@@ -12,10 +15,15 @@ from hal.inference.api import validate_policy_inputs
 from hal.inference.api import validate_policy_outputs
 from hal.inference.transport import ActionTransport
 from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import action_vec_to_controller
 from hal.sim.inputs import canonical_pre_to_action
 from hal.sim.inputs import controller_actions_match
+from hal.sim.inputs import controller_to_action_vec
+from hal.sim.rollout import ObservationRow
+from hal.sim.rollout import PolicyRuntimeSpec
 from hal.sim.vec import Slot
 from hal.training.canonical import flatten_canonical_frame
+from hal.wire import ACTION_DIM
 
 
 @dataclass(slots=True)
@@ -42,24 +50,47 @@ class PolicyBatchAdapter:
         self.neutral_actions = 0
         self.total_actions = 0
 
+    @property
+    def runtime_spec(self) -> PolicyRuntimeSpec:
+        # The adapter owns transport and the policy owns replanning. Workers
+        # exchange one frame at a time and must not add a second delay queue.
+        return PolicyRuntimeSpec(1, 1, 1, 0, ACTION_DIM, observed_actions=True)
+
+    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]:
+        observations: dict[Slot, ObservationRow] = {}
+        for slot, values in rows.items():
+            if len(values) != 1:
+                raise ValueError("frame policy requires exactly one observation per worker request")
+            observations[slot] = values[0]
+        outputs = self._step(observations)
+        return {slot: controller_to_action_vec(action)[None, :] for slot, action in outputs.items()}
+
     def __call__(
         self,
         frame_index: int,
         obs: Mapping[Slot, dict],
     ) -> Mapping[Slot, ControllerInputs]:
         del frame_index
+        rows = {}
+        for slot, frame in obs.items():
+            applied = canonical_pre_to_action(frame["ports"][slot.port]["leader"]["pre"])
+            action = controller_to_action_vec(applied)
+            rows[slot] = ObservationRow(int(frame["id"]), flatten_canonical_frame(frame), action)
+        return self._step(rows)
+
+    def _step(self, obs: Mapping[Slot, ObservationRow]) -> Mapping[Slot, ControllerAction]:
         if not obs:
             return {}
         delay = self.runtime.require_single_delay()
         items = []
         for slot, frame in obs.items():
-            frame_id = int(frame["id"])
+            frame_id = frame.frame_id
             state = self._states.get(slot)
-            reset = state is None or frame_id != state.last_frame_id + 1
+            reset = frame.reset or state is None or frame_id != state.last_frame_id + 1
             if reset:
                 state = _StreamState(ActionTransport(delay), frame_id)
                 self._states[slot] = state
-            applied = canonical_pre_to_action(frame["ports"][slot.port]["leader"]["pre"])
+            applied = action_vec_to_controller(frame.action)
             if (
                 state.expected_applied is not None
                 and not reset
@@ -75,7 +106,7 @@ class PolicyBatchAdapter:
                     stream_id=slot.match * 8 + slot.port,
                     frame_id=frame_id,
                     controlled_port=slot.port,
-                    observation=flatten_canonical_frame(frame),
+                    observation=frame.flat,
                     applied_action=applied,
                     pending_actions=state.transport.pending,
                     player_identity=self.player_identity,
