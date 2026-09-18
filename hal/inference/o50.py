@@ -52,6 +52,8 @@ from hal.inference.o50_model import O50Config
 from hal.inference.o50_model import O50Model
 from hal.inference.o50_model import amp_context
 from hal.training.checkpoints import checkpoint_sha256
+from hal.training.context_history import ContextHistory
+from hal.training.context_history import stack_context_windows
 from hal.training.ego_stats import consolidate_key
 from hal.training.ego_stats import load_consolidated_mixture_stats
 from hal.training.features import ACTION_CHANNELS
@@ -63,7 +65,6 @@ from hal.training.features import ITEM_COLUMNS
 from hal.training.features import ITEM_FLOATS
 from hal.training.features import Context
 from hal.training.features import feature_kind
-from hal.training.features import preprocess
 from hal.training.features import stack_actions
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import RingSlotDescriptor
@@ -596,7 +597,8 @@ def _relative_observation(item: PolicyInput) -> dict[str, ObservationScalar]:
 
 @dataclass(slots=True)
 class _StreamState:
-    history: deque[dict[str, ObservationScalar]] = field(default_factory=deque)
+    history: ContextHistory | None = None
+    observation_types: dict[str, bool] = field(default_factory=dict)
     queued: deque[ControllerAction] = field(default_factory=deque)
     last_frame_id: int | None = None
     controlled_port: int | None = None
@@ -605,7 +607,8 @@ class _StreamState:
     reset_pending: bool = True
 
     def reset(self) -> None:
-        self.history.clear()
+        self.history = None
+        self.observation_types.clear()
         self.queued.clear()
         self.last_frame_id = None
         self.controlled_port = None
@@ -857,50 +860,44 @@ class O50Policy:
         state.player_id = player_id
         state.transport_delay = delay
         state.last_frame_id = item.frame_id
-        state.history.append(_relative_observation(item))
-        while len(state.history) > self._config.architecture.L_ctx:
-            state.history.popleft()
+        observation = _relative_observation(item)
+        flat = {name: observation[name] for name in _MODEL_OBSERVATION_FIELDS}
+        numeric_types = {name: isinstance(value, int) for name, value in flat.items()}
+        if state.history is None:
+            state.observation_types = numeric_types
+            state.history = ContextHistory.from_frame(
+                flat, "p1", self._stats, self._config.architecture.L_ctx, ITEM_COLUMNS, BASE_ITEMS_PROJECTION
+            )
+        elif numeric_types != state.observation_types:
+            raise ValueError("O50 observation changed numeric type within a stream")
+        state.history.gather(flat, _action_vector(item.applied_action))
+        state.history.push(None)
         return state
 
     def _context(self, due: Sequence[tuple[PolicyInput, _StreamState]]) -> Context:
         length = self._config.architecture.L_ctx
         rows = len(due)
-        columns: dict[str, np.ndarray] = {}
-        for name in sorted(BASE_ITEMS_PROJECTION.columns):
-            first = due[0][1].history[0][name]
-            integer = isinstance(first, int)
-            for _item, state in due:
-                if any(isinstance(frame[name], int) != integer for frame in state.history):
-                    raise ValueError(f"O50 observation field {name!r} changed numeric type within a batch")
-            columns[name] = np.zeros((rows, length), dtype=np.int32 if integer else np.float32)
+        histories = []
         pads = np.empty(rows, dtype=np.int64)
         player_ids = np.empty(rows, dtype=np.int64)
         for row, (_item, state) in enumerate(due):
-            history = tuple(state.history)
-            pad = length - len(history)
-            pads[row] = pad
+            if state.history is None:
+                raise RuntimeError("O50 stream has no observed history")
+            if state.observation_types != due[0][1].observation_types:
+                raise ValueError("O50 observation changed numeric type within a batch")
+            histories.append(state.history)
+            pads[row] = length - state.history.count
             if state.player_id is None:
                 raise RuntimeError("O50 stream has no resolved player ID")
             player_ids[row] = state.player_id
-            for name in columns:
-                columns[name][row, pad:] = [frame[name] for frame in history]
-        features = preprocess(columns, self._stats, extra=ITEM_COLUMNS, projection=BASE_ITEMS_PROJECTION)
-        for prefix in BASE_PLAYER_PREFIXES:
-            for name in FLOAT_FEATURES:
-                key = f"{prefix}_{name}"
-                features.setdefault(f"{key}_mask", torch.zeros_like(features[key]))
-        for slot in range(ITEM_SLOTS):
-            for name in ITEM_FLOATS:
-                key = item_column(slot, name)
-                features.setdefault(f"{key}_mask", torch.zeros_like(features[key]))
-        features["ego_player_id"] = torch.from_numpy(np.repeat(player_ids[:, None], length, axis=1))
-        context = Context(
+        features = stack_context_windows(histories, length).features(self._device, all_masks=True)
+        features["ego_player_id"] = torch.from_numpy(np.repeat(player_ids[:, None], length, axis=1)).to(self._device)
+        return Context(
             features={name: features[name] for name in sorted(features)},
-            ctx_pad=torch.from_numpy(pads),
-            slot_ids=torch.tensor([item.stream_id for item, _state in due], dtype=torch.long),
-            reset=torch.tensor([state.reset_pending for _item, state in due], dtype=torch.bool),
+            ctx_pad=torch.from_numpy(pads).to(self._device),
+            slot_ids=torch.tensor([item.stream_id for item, _state in due], dtype=torch.long, device=self._device),
+            reset=torch.tensor([state.reset_pending for _item, state in due], dtype=torch.bool, device=self._device),
         )
-        return context.to(self._device)
 
     def _pad_context(self, context: Context, rows: int) -> tuple[dict[str, Tensor], Tensor]:
         real_rows = context.ctx_pad.shape[0]

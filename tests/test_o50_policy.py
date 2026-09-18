@@ -32,6 +32,7 @@ from hal.inference.o50_model import O50Model
 from hal.netplay_service.inference import ContinuousBatcher
 from hal.netplay_service.inference import RemotePolicy
 from hal.netplay_service.inference import ServingArena
+from hal.training.features import preprocess
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import RingSlotDescriptor
 from hal.training.player_identity import FIRST_CONNECT_CODE_ID
@@ -704,7 +705,8 @@ def test_new_stream_requires_reset_and_frame_gap_clears_context() -> None:
         policy.step([_input(0, 3)])
     policy.step([_input(0, 3, reset=True)])
     policy.step([_input(2, 3)])
-    assert len(policy._states[3].history) == 1
+    assert policy._states[3].history is not None
+    assert policy._states[3].history.count == 1
 
 
 def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None:
@@ -728,6 +730,75 @@ def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None
     context = policy._context([(item, state)])
     assert context.features["item0_type"][0, -1].item() == 0
     assert context.features["item0_state"][0, -1].item() == 0
+
+
+def _reference_context_features(policy: O50Policy, histories: list[list[dict[str, float | int]]]) -> dict[str, Tensor]:
+    """Window reconstruction used before the shared incremental context builder."""
+    length = policy._config.architecture.L_ctx
+    columns = {}
+    for name in sorted(o50.BASE_ITEMS_PROJECTION.columns):
+        dtype = np.int32 if isinstance(histories[0][0][name], int) else np.float32
+        column = np.zeros((len(histories), length), dtype=dtype)
+        for row, history in enumerate(histories):
+            column[row, length - len(history) :] = [frame[name] for frame in history]
+        columns[name] = column
+    features = preprocess(columns, policy._stats, extra=o50.ITEM_COLUMNS, projection=o50.BASE_ITEMS_PROJECTION)
+    for prefix in o50.BASE_PLAYER_PREFIXES:
+        for name in o50.FLOAT_FEATURES:
+            key = f"{prefix}_{name}"
+            features.setdefault(f"{key}_mask", torch.zeros_like(features[key]))
+    for slot in range(o50.ITEM_SLOTS):
+        for name in o50.ITEM_FLOATS:
+            key = o50.item_column(slot, name)
+            features.setdefault(f"{key}_mask", torch.zeros_like(features[key]))
+    features["ego_player_id"] = torch.full((len(histories), length), policy._player_id("IBDW#0"))
+    return features
+
+
+def test_incremental_context_matches_previous_window_builder() -> None:
+    policy = _policy()
+    policy._stats = {name: FeatureStats(mean=0.17, std=0.73, min=-3.1, max=4.7) for name in policy._stats}
+    histories: dict[int, list[dict[str, float | int]]] = {1: [], 2: []}
+    for frame_id in range(15):
+        due = []
+        # Change batch order; reset one stream without touching the other.
+        ports = (1, 2) if frame_id % 2 else (2, 1)
+        for port in ports:
+            reset = frame_id == 0 or (port == 1 and frame_id == 9)
+            item = _input(frame_id, 2, stream_id=port, controlled_port=port, reset=reset)
+            observation = dict(item.observation)
+            observation["p1_position_x"] = frame_id * 0.23
+            observation["p2_position_x"] = -frame_id * 0.47
+            observation["p1_percent"] = float("nan") if frame_id % 3 == 0 else float(frame_id)
+            observation["item0_type"] = (1 << 31) - 1 if frame_id % 3 == 0 else 1
+            observation["item0_state"] = 0
+            action = ControllerAction(frame_id / 20, -0.2, 0.0, 0.0, 0.3, 0.0, 0x100)
+            item = replace(item, observation=observation, applied_action=action)
+            if reset:
+                histories[port].clear()
+            histories[port].append(o50._relative_observation(item))
+            histories[port] = histories[port][-policy._config.architecture.L_ctx :]
+            due.append((item, policy._ingest(item)))
+        context = policy._context(due)
+        reference = _reference_context_features(policy, [histories[port] for port in ports])
+        assert context.features.keys() == reference.keys()
+        for name, expected in reference.items():
+            torch.testing.assert_close(context.features[name], expected, rtol=0, atol=0, msg=name)
+        assert context.ctx_pad.tolist() == [4 - len(histories[port]) for port in ports]
+        assert context.slot_ids.tolist() == list(ports)
+
+
+def test_incremental_context_rejects_numeric_type_changes() -> None:
+    policy = _policy()
+    first = _input(0, 2, reset=True)
+    policy._ingest(first)
+    changed = replace(first, frame_id=1, reset=False, observation={**first.observation, "item0_type": 1})
+    with pytest.raises(ValueError, match="numeric type within a stream"):
+        policy._ingest(changed)
+    second = replace(changed, stream_id=4, reset=True)
+    second_state = policy._ingest(second)
+    with pytest.raises(ValueError, match="numeric type within a batch"):
+        policy._context([(first, policy._states[first.stream_id]), (second, second_state)])
 
 
 def test_model_import_does_not_load_melee_or_experiments() -> None:

@@ -15,6 +15,7 @@ from hal.inference.o50_model import ITEM_SLOTS
 from hal.inference.o50_model import O50Config
 from hal.inference.o50_model import O50Model
 from hal.inference.o50_model import item_column
+from hal.training.features import ACTION_CHANNELS
 
 
 def _experiment(filename: str):
@@ -90,7 +91,7 @@ def test_portable_model_matches_frozen_o50_family_trunk_and_decoder(
             features[f"{prefix}_{name}_mask"] = torch.zeros(batch, length)
         for name, (vocabulary_size, _width) in CAT_FEATURES.items():
             features[f"{prefix}_{name}"] = torch.randint(vocabulary_size, (batch, length))
-    for name in experiment.ACTION_CHANNELS:
+    for name in ACTION_CHANNELS:
         values = torch.rand(batch, length)
         if name.startswith("button_"):
             values = values.round()
