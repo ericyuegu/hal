@@ -87,6 +87,7 @@ CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
     "experiments/050_scaled_temporal_awr.py": None,
     "experiments/054_bc_capacity_latency.py": frozenset({4_096, 8_192, 16_384, 32_768}),
     "experiments/056_decoder_capacity_reallocation.py": None,
+    "experiments/057_scaled_endpoint_flow.py": None,
 }
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
@@ -833,6 +834,13 @@ def _run_training(
     return code
 
 
+def _remote_environment(spec: LaunchSpec) -> dict[str, str]:
+    env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
+    env["HAL_GIT_SHA"] = spec.git_sha
+    _configure_tracking_context(env, spec.modal_app_url)
+    return env
+
+
 def _run_remote(spec: LaunchSpec, evaluator: modal.Function) -> int:
     """One Modal Function attempt. Modal serializes this function into the configured image."""
     os.chdir(REMOTE_ROOT)
@@ -853,8 +861,7 @@ def _run_remote(spec: LaunchSpec, evaluator: modal.Function) -> int:
             f"launch {spec.launch_id} already failed with exit code {attempt.state.exit_code}; refusing to rerun"
         )
     _commit_state(state_path, attempt.state, spec.state_volume)
-    env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
-    _configure_tracking_context(env, spec.modal_app_url)
+    env = _remote_environment(spec)
     return _run_training(
         attempt.argv,
         attempt.state,
