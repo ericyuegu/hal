@@ -1378,32 +1378,42 @@ class FlowRandomDraws:
 class FlowTrainingRandom:
     """Width-independent random streams for one optimizer update."""
 
-    def __init__(self, seed: int, step: int) -> None:
+    def __init__(self, seed: int, step: int, device: torch.device | str = "cpu") -> None:
         base = seed + 0x0570_0000 + step * 16
-        self._tau = torch.Generator(device="cpu").manual_seed(base + 1)
-        self._commit_decision = torch.Generator(device="cpu").manual_seed(base + 2)
-        self._commit_length = torch.Generator(device="cpu").manual_seed(base + 3)
+        self._device = torch.device(device)
+        self._tau = torch.Generator(device=self._device).manual_seed(base + 1)
+        self._commit_decision = torch.Generator(device=self._device).manual_seed(base + 2)
+        self._commit_length = torch.Generator(device=self._device).manual_seed(base + 3)
         self._noise = tuple(
-            torch.Generator(device="cpu").manual_seed(base + 4 + group) for group in range(CONTROLLER_GROUP_COUNT)
+            torch.Generator(device=self._device).manual_seed(base + 4 + group)
+            for group in range(CONTROLLER_GROUP_COUNT)
         )
 
     def draw(self, prefix: tuple[int, ...], offsets: tuple[int, ...], device: torch.device) -> FlowRandomDraws:
-        tau = torch.rand(prefix, generator=self._tau)
-        conditioned = torch.rand(prefix, generator=self._commit_decision) < 0.5
-        lengths = torch.randint(1, 5, prefix, generator=self._commit_length)
+        if device != self._device:
+            raise ValueError(f"flow RNG is on {self._device}, not {device}")
+        tau = torch.rand(prefix, generator=self._tau, device=device)
+        conditioned = torch.rand(prefix, generator=self._commit_decision, device=device) < 0.5
+        lengths = torch.randint(1, 5, prefix, generator=self._commit_length, device=device)
         lengths = torch.where(conditioned, lengths, torch.zeros_like(lengths))
-        offset_values = torch.tensor(offsets)
+        offset_values = torch.tensor(offsets, device=device)
         committed = offset_values.view(*(1 for _ in prefix), -1) <= lengths[..., None]
         noise = tuple(
             math.sqrt(2.0)
-            * torch.erfinv(torch.rand(*prefix, len(offsets), vocab, generator=generator).clamp(1e-7, 1 - 1e-7) * 2 - 1)
+            * torch.erfinv(
+                torch.rand(
+                    *prefix,
+                    len(offsets),
+                    vocab,
+                    generator=generator,
+                    device=device,
+                ).clamp(1e-7, 1 - 1e-7)
+                * 2
+                - 1
+            )
             for vocab, generator in zip(CONTROLLER_GROUP_VOCABS, self._noise, strict=True)
         )
-        return FlowRandomDraws(
-            tau=tau.to(device),
-            committed=committed.to(device),
-            noise=tuple(value.to(device) for value in noise),
-        )
+        return FlowRandomDraws(tau=tau, committed=committed, noise=noise)
 
 
 _UINT64_MASK: Final[int] = (1 << 64) - 1
@@ -1908,7 +1918,7 @@ def microbatch_loss(
     valid_prefixes: int,
     trunk_fn: Callable,
     flow_fn: Callable,
-    flow_random: FlowTrainingRandom | None = None,
+    flow_draws: FlowRandomDraws | None = None,
     eligible_prefixes: int | None = None,
     phase_timer: CudaPhaseTimer | None = None,
 ) -> tuple[Tensor, FlowMetricSums, dict[str, Tensor]]:
@@ -1925,8 +1935,10 @@ def microbatch_loss(
             phase_timer.record("trunk_end")
         suffix_start = cfg.arch.direct_loss_start
         hidden = hidden[:, suffix_start:]
-    random = FlowTrainingRandom(cfg.seed, step) if flow_random is None else flow_random
-    draws = random.draw(hidden.shape[:-1], model.head_offsets, hidden.device)
+    draws = flow_draws
+    if draws is None:
+        random = FlowTrainingRandom(cfg.seed, step, hidden.device)
+        draws = random.draw(hidden.shape[:-1], model.head_offsets, hidden.device)
     with amp_context(cfg, DEVICE):
         dense_nll, correct = flow_fn(hidden, targets, draws.tau, draws.committed, *draws.noise)
         if phase_timer is not None:
@@ -3970,11 +3982,12 @@ def train_step(
     if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_flow):
         torch.compiler.cudagraph_mark_step_begin()
     optimizer.zero_grad()
-    flow_random = FlowTrainingRandom(cfg.seed, step)
     suffix_start = cfg.arch.direct_loss_start
     suffix_positions = torch.arange(cfg.arch.L_ctx - suffix_start, device=batch.context.ctx_pad.device)
     suffix_pad = (batch.context.ctx_pad - suffix_start).clamp_min(0)
     suffix_valid = suffix_positions[None] >= suffix_pad[:, None]
+    flow_random = FlowTrainingRandom(cfg.seed, step, batch.context.ctx_pad.device)
+    flow_draws = flow_random.draw(tuple(suffix_valid.shape), model.head_offsets, batch.context.ctx_pad.device)
     eligible_prefixes = int((batch.eligible[:, suffix_start:] & suffix_valid).sum())
     flow_metric_sums: FlowMetricSums | None = None
     metric_sums: dict[str, Tensor] = {}
@@ -3990,7 +4003,11 @@ def train_step(
             valid_prefixes=valid_prefixes,
             trunk_fn=trunk_fn,
             flow_fn=flow_fn,
-            flow_random=flow_random,
+            flow_draws=FlowRandomDraws(
+                tau=flow_draws.tau[start:stop],
+                committed=flow_draws.committed[start:stop],
+                noise=tuple(value[start:stop] for value in flow_draws.noise),
+            ),
             eligible_prefixes=eligible_prefixes,
             phase_timer=phase_timer if microbatches == 0 else None,
         )
