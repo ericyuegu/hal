@@ -249,6 +249,43 @@ def test_random_streams_are_split_invariant_and_width_independent() -> None:
         torch.testing.assert_close(complete, torch.cat((one, two)))
 
 
+def test_train_step_draws_one_logical_batch_before_splitting(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _tiny_cfg(execution_batch_size=1)
+    model = exp.GPT(cfg)
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    valid = cfg.batch_size * (cfg.arch.L_ctx - cfg.arch.direct_loss_start)
+    draw_prefixes: list[tuple[int, ...]] = []
+    original_draw = exp.FlowTrainingRandom.draw
+
+    def record_draw(
+        random: exp.FlowTrainingRandom,
+        prefix: tuple[int, ...],
+        offsets: tuple[int, ...],
+        device: torch.device,
+    ) -> exp.FlowRandomDraws:
+        draw_prefixes.append(prefix)
+        return original_draw(random, prefix, offsets, device)
+
+    monkeypatch.setattr(exp.FlowTrainingRandom, "draw", record_draw)
+    optimizer = exp.make_optimizer(model, cfg)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, exp.lr_schedule(cfg))
+
+    exp.train_step(
+        model,
+        batch,
+        cfg,
+        step=0,
+        update=1,
+        valid_prefixes=valid,
+        trunk_fn=model.forward,
+        flow_fn=model.flow.training_statistics,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+
+    assert draw_prefixes == [(cfg.batch_size, cfg.arch.L_ctx - cfg.arch.direct_loss_start)]
+
+
 def test_slot_flow_random_is_order_independent_and_resets_per_slot() -> None:
     def context(slot_ids: list[int], reset: list[bool]):
         rows = len(slot_ids)
