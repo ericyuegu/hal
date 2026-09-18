@@ -2229,9 +2229,9 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
 
 def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dict[str, float]:
     """Reduce detailed validation evidence to orthogonal W&B signals."""
-    horizon = cfg.prediction_frames
-    rollout_nll = sum(values[f"rollout_nll_o{horizon:02d}_{name}"] for name in CONTROLLER_GROUP_NAMES)
-    exposure_gap = sum(values[f"exposure_gap_o{horizon:02d}_{name}"] for name in CONTROLLER_GROUP_NAMES)
+    final_offset = cfg.arch.head_offsets[-1]
+    rollout_nll = sum(values[f"rollout_nll_o{final_offset:02d}_{name}"] for name in CONTROLLER_GROUP_NAMES)
+    exposure_gap = sum(values[f"exposure_gap_o{final_offset:02d}_{name}"] for name in CONTROLLER_GROUP_NAMES)
     return {
         "nll": values["loss_unweighted"],
         "near_nll": values["flow_loss_near_unweighted"],
