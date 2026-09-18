@@ -64,6 +64,8 @@ SUMMARY_METRICS: Final[tuple[str, ...]] = (
     "counter_hit_ratio",
     "successful_conversion_ratio",
     "wavedashes_per_min",
+    "failed_wavedash_attempts_per_min",
+    "wavedash_success_rate",
     "dash_dances_per_min",
     "ledge_grabs_per_min",
     "idle_frac",

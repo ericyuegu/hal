@@ -48,6 +48,12 @@ def test_evaluation_experiment_allows_the_same_experiment_for_both_players() -> 
     assert evaluation_experiment((experiment, "--opponent-experiment", experiment)) == experiment
 
 
+def test_evaluation_experiment_recognizes_o56() -> None:
+    experiment = "experiments/056_decoder_capacity_reallocation.py"
+
+    assert evaluation_experiment(("uv", "run", experiment, "train", "--proxy")) == experiment
+
+
 def test_evaluation_experiment_rejects_distinct_experiments() -> None:
     with pytest.raises(ValueError, match="multiple evaluation experiments"):
         evaluation_experiment(

@@ -282,6 +282,7 @@ class Death:
 @dataclass(frozen=True, slots=True)
 class Movement:
     wavedashes: int
+    failed_wavedash_attempts: int
     wavelands: int
     waveshines: int
     full_hops: int
@@ -518,21 +519,27 @@ def death_y_mean(deaths: tuple[Death, ...]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _wavedash_onsets(p: PlayerBehaviorFrames) -> tuple[list[int], list[int]]:
-    """(jump-initiated, from-air) airdodge onsets that land in LANDING_SPECIAL."""
+def _wavedash_onsets(p: PlayerBehaviorFrames) -> tuple[list[int], list[int], list[int]]:
+    """Return successful, failed, and airborne airdodge onset indices."""
     airdodge = onsets(p.action == Action.AIRDODGE.value)
     landing_special = p.action == Action.LANDING_SPECIAL.value
     knee_bend = p.action == Action.KNEE_BEND.value
     jump_initiated: list[int] = []
+    failed_jump_initiated: list[int] = []
     from_air: list[int] = []
     for i in airdodge:
-        if not any_in_window(landing_special, int(i), 1, WAVEDASH_LAND_WINDOW + 1):
+        onset = int(i)
+        started_from_jump = any_in_window(knee_bend, onset, -WAVEDASH_JUMP_WINDOW, 0)
+        landed = any_in_window(landing_special, onset, 1, WAVEDASH_LAND_WINDOW + 1)
+        if not landed:
+            if started_from_jump and onset + WAVEDASH_LAND_WINDOW < len(p.action):
+                failed_jump_initiated.append(onset)
             continue
-        if any_in_window(knee_bend, int(i), -WAVEDASH_JUMP_WINDOW, 0):
-            jump_initiated.append(int(i))
+        if started_from_jump:
+            jump_initiated.append(onset)
         else:
-            from_air.append(int(i))
-    return jump_initiated, from_air
+            from_air.append(onset)
+    return jump_initiated, failed_jump_initiated, from_air
 
 
 def _jump_events(p: PlayerBehaviorFrames) -> tuple[list[int], list[int], float]:
@@ -614,7 +621,7 @@ def _shield_frac(p: PlayerBehaviorFrames, active: np.ndarray) -> float:
 def movement(p: PlayerBehaviorFrames, active: np.ndarray) -> Movement:
     """Movement-quality event counts over the whole replay, plus the idle and
     shield fractions (the rates whose denominator is ``active``)."""
-    jump_wd, air_wd = _wavedash_onsets(p)
+    jump_wd, failed_jump_wd, air_wd = _wavedash_onsets(p)
     full, short, rise = _jump_events(p)
     waveshines = 0
     if p.character in SPACIES:
@@ -625,6 +632,7 @@ def movement(p: PlayerBehaviorFrames, active: np.ndarray) -> Movement:
                 waveshines += 1
     return Movement(
         wavedashes=len(jump_wd),
+        failed_wavedash_attempts=len(failed_jump_wd),
         wavelands=len(air_wd),
         waveshines=waveshines,
         full_hops=len(full),

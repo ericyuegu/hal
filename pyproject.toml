@@ -110,6 +110,7 @@ ignore = ["E501"]
 "experiments/053_polar_controller.py" = ["F722"]
 "experiments/054_bc_capacity_latency.py" = ["F722"]
 "experiments/055_history_cross_attention.py" = ["F722"]
+"experiments/056_decoder_capacity_reallocation.py" = ["F722"]
 "hal/training/trunk.py" = ["F722"]  # same jaxtyping dim specs as the experiment copies
 
 [tool.pytest.ini_options]

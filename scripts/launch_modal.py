@@ -86,6 +86,7 @@ INTERRUPT_GRACE_S: Final[int] = 20
 CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
     "experiments/050_scaled_temporal_awr.py": None,
     "experiments/054_bc_capacity_latency.py": frozenset({4_096, 8_192, 16_384, 32_768}),
+    "experiments/056_decoder_capacity_reallocation.py": None,
 }
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32

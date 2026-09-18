@@ -148,6 +148,33 @@ def test_undefined_ratios_are_nan_not_zero() -> None:
     assert math.isnan(stats.damage_per_opening)
     assert math.isnan(stats.openings_per_kill)
     assert math.isnan(stats.neutral_win_ratio)
+    assert math.isnan(loser.movement.wavedash_success_rate)
+
+
+def test_wavedash_success_rate_pools_successful_and_failed_attempts() -> None:
+    action = [Action.STANDING.value] * 60
+    action[5:9] = [
+        Action.KNEE_BEND.value,
+        Action.AIRDODGE.value,
+        Action.LANDING_SPECIAL.value,
+        Action.STANDING.value,
+    ]
+    action[20:23] = [Action.KNEE_BEND.value, Action.AIRDODGE.value, Action.FALLING.value]
+    player = make_player(1, action)
+    opponent = make_player(2, [Action.STANDING.value] * len(action), is_cpu=True)
+    match = BehaviorFrames(
+        stage=Stage.FINAL_DESTINATION,
+        edge_x=EDGE_X[Stage.FINAL_DESTINATION],
+        blastzones=BLASTZONES[Stage.FINAL_DESTINATION],
+        frame_id=np.arange(len(action), dtype=np.int64),
+        players=(player, opponent),
+    )
+
+    row, _ = behavior_rows(match)
+
+    assert row.movement.wavedashes_per_min == pytest.approx(60.0)
+    assert row.movement.failed_wavedash_attempts_per_min == pytest.approx(60.0)
+    assert row.movement.wavedash_success_rate == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------

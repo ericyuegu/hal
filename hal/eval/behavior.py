@@ -183,6 +183,8 @@ class MovementRates:
     for a character with no shine."""
 
     wavedashes_per_min: float
+    failed_wavedash_attempts_per_min: float
+    wavedash_success_rate: float
     wavelands_per_min: float
     waveshines_per_min: float
     full_hops_per_min: float
@@ -364,8 +366,11 @@ def _positioning(
 
 def _movement_rates(p: PlayerBehaviorFrames, active: np.ndarray, minutes: float) -> MovementRates:
     mv = movement(p, active)
+    wavedash_attempts = mv.wavedashes + mv.failed_wavedash_attempts
     return MovementRates(
         wavedashes_per_min=_per_minute(mv.wavedashes, minutes),
+        failed_wavedash_attempts_per_min=_per_minute(mv.failed_wavedash_attempts, minutes),
+        wavedash_success_rate=mv.wavedashes / wavedash_attempts if wavedash_attempts else math.nan,
         wavelands_per_min=_per_minute(mv.wavelands, minutes),
         waveshines_per_min=_per_minute(mv.waveshines, minutes) if p.character in SPACIES else math.nan,
         full_hops_per_min=_per_minute(mv.full_hops, minutes),

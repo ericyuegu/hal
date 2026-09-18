@@ -324,12 +324,28 @@ def test_wavedash_needs_a_jumpsquat_waveland_does_not() -> None:
     assert (mv.wavedashes, mv.wavelands) == (0, 1)
 
 
-def test_airdodge_without_landing_special_is_neither() -> None:
+def test_jump_airdodge_without_landing_special_is_a_failed_wavedash_attempt() -> None:
     action = [Action.KNEE_BEND.value] * 2 + [Action.AIRDODGE.value] + [Action.FALLING.value] * 20
     p = make_player(1, action)
     opp = make_player(2, _standing(len(action)))
     mv = movement(p, active_mask(p, opp, make_frames(p, opp)))
-    assert (mv.wavedashes, mv.wavelands) == (0, 0)
+    assert (mv.wavedashes, mv.failed_wavedash_attempts, mv.wavelands) == (0, 1, 0)
+
+
+def test_non_jump_airdodge_is_not_a_failed_wavedash_attempt() -> None:
+    action = [Action.FALLING.value] * 2 + [Action.AIRDODGE.value] + [Action.FALLING.value] * 20
+    p = make_player(1, action)
+    opp = make_player(2, _standing(len(action)))
+    mv = movement(p, active_mask(p, opp, make_frames(p, opp)))
+    assert (mv.wavedashes, mv.failed_wavedash_attempts, mv.wavelands) == (0, 0, 0)
+
+
+def test_replay_end_does_not_turn_a_censored_airdodge_into_a_failure() -> None:
+    action = [Action.KNEE_BEND.value] * 2 + [Action.AIRDODGE.value] + [Action.FALLING.value] * 5
+    p = make_player(1, action)
+    opp = make_player(2, _standing(len(action)))
+    mv = movement(p, active_mask(p, opp, make_frames(p, opp)))
+    assert mv.failed_wavedash_attempts == 0
 
 
 def test_full_vs_short_hop_reads_the_held_jump_input() -> None:
