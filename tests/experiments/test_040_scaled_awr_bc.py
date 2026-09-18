@@ -28,8 +28,7 @@ from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.training import returns as returns_lib
 from hal.training.canonical import flatten_canonical_frame
-from hal.training.closed_loop import _build_layout
-from hal.training.closed_loop import _Rings
+from hal.training.context_history import ContextHistory
 from hal.training.dataloader import make_loader
 from hal.training.dataloader import relabel_ego
 from hal.training.features import A_DIM
@@ -1436,8 +1435,8 @@ def test_ring_item_rows_match_preprocess_on_the_offline_dtypes() -> None:
     flat = flatten_canonical_frame(_obs_with_two_items())
     action = np.linspace(-1.0, 1.0, A_DIM, dtype=np.float32)
 
-    layout = _build_layout(flat, EGO_PREFIX, stats, extra, projection)
-    rings = _Rings(layout, cfg.arch.L_ctx)
+    rings = ContextHistory.from_frame(flat, EGO_PREFIX, stats, cfg.arch.L_ctx, extra, projection)
+    layout = rings.layout
     rings.gather(flat, action)
     rings.push(None)
     newest = rings.window(1)
