@@ -183,6 +183,10 @@ _CONTROL_INFERENCE_PARAMETER_USES: Final[int] = 17_328_146
 _CONTROL_TRAINING_FLOPS_PER_UPDATE: Final[int] = 14_416_825_417_728
 _MATCH_ROW_SCHEMA_VERSION: Final[int] = 7
 _ANALYSIS_SCHEMA_VERSION: Final[int] = 1
+_TIMING_ANALYSIS_SCHEMA_VERSION: Final[int] = 1
+_TIMING_CHECKPOINT_SHA256: Final[str] = "16c702fe3964a59c2f26d88207ef90137d93c07bf67a5d4213f4fde5d25b8631"
+_TIMING_EVIDENCE_NAME: Final[str] = "eval96-conditioned-v2-timing-d2-h3-4-5-6-step-0016384"
+_TIMING_CONFIGS: Final[tuple[tuple[int, int], ...]] = ((3, 1), (4, 2), (5, 3), (6, 4))
 
 
 @contextlib.contextmanager
@@ -2309,6 +2313,7 @@ def _eval_protocol(
     fixed_ego_character: melee.Character | None = None,
     ego_player_id: int = MASKED_PLAYER_ID,
     ego_player_code: str | None = None,
+    prediction_frames: int | None = None,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
 ) -> EvalProtocol:
@@ -2316,9 +2321,10 @@ def _eval_protocol(
         pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
     else:
         pairs, egos, cpus, schedule_sha = matchup_diversity(n_matchups, fixed_ego_character)
+    horizon = cfg.prediction_frames if prediction_frames is None else prediction_frames
     delay = cfg.delay_frames if delay_frames is None else delay_frames
     replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
-    _validate_deployment_timing(cfg.prediction_frames, delay, replan)
+    _validate_deployment_timing(horizon, delay, replan)
     return EvalProtocol(
         fixed_ego_character=None if fixed_ego_character is None else int(fixed_ego_character.value),
         ego_player_id=ego_player_id,
@@ -2337,7 +2343,7 @@ def _eval_protocol(
         oriented_pairs=pairs,
         ego_characters=egos,
         cpu_characters=cpus,
-        prediction_frames=cfg.prediction_frames,
+        prediction_frames=horizon,
         delay_frames=delay,
         replan_interval_frames=replan,
         transport_semantics="conditioned_pending_actions_v1",
@@ -2623,6 +2629,88 @@ def analyze_evidence(
     }
 
 
+def _load_eval_metrics(eval_dir: Path) -> dict[str, float]:
+    path = eval_dir / "metrics.json"
+    values = json.loads(path.read_text())
+    if not isinstance(values, dict) or not all(
+        isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool)
+        for name, value in values.items()
+    ):
+        raise ValueError(f"{path} is not a numeric metrics object")
+    return cast(dict[str, float], values)
+
+
+def _timing_eval_dir(root: Path, horizon: int, replan: int) -> Path:
+    return root / f"d2_r{replan}_h{horizon}"
+
+
+def analyze_timing_evidence(
+    root: Path,
+    *,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = 0,
+) -> dict[str, object]:
+    """Compare each conditioned O52 timing against the matched H4 timing."""
+    if bootstrap_resamples < 1:
+        raise ValueError("bootstrap_resamples must be positive")
+    protocols: dict[int, dict[str, object]] = {}
+    boots: dict[int, dict[int, BehaviorBoot]] = {}
+    metrics: dict[int, dict[str, float]] = {}
+    evidence_sha256: dict[int, str] = {}
+    for horizon, replan in _TIMING_CONFIGS:
+        eval_dir = _timing_eval_dir(root, horizon, replan)
+        protocol, rows = _load_eval_evidence(eval_dir)
+        expected_timing = {
+            "prediction_frames": horizon,
+            "delay_frames": 2,
+            "replan_interval_frames": replan,
+            "transport_semantics": "conditioned_pending_actions_v1",
+            "pending_prefix_conditioned": True,
+            "evaluation_protocol_version": 2,
+            "forced_prefix_consumes_sampling_draws": False,
+        }
+        actual_timing = {name: protocol[name] for name in expected_timing}
+        if actual_timing != expected_timing:
+            raise ValueError(f"{eval_dir} timing protocol differs: {actual_timing} != {expected_timing}")
+        protocols[horizon] = protocol
+        boots[horizon] = _behavior_boots(eval_dir, protocol, rows)
+        metrics[horizon] = _load_eval_metrics(eval_dir)
+        evidence_sha256[horizon] = _eval_evidence_sha256(eval_dir)
+
+    varying = {"prediction_frames", "replan_interval_frames"}
+    reference_protocol = {name: value for name, value in protocols[4].items() if name not in varying}
+    for horizon, protocol in protocols.items():
+        invariants = {name: value for name, value in protocol.items() if name not in varying}
+        if invariants != reference_protocol:
+            raise ValueError(f"H{horizon} protocol differs from H4 outside horizon and replan interval")
+        for boot_index in range(96):
+            if boots[horizon][boot_index].matchup != boots[4][boot_index].matchup:
+                raise ValueError(f"H{horizon} boot {boot_index} matchup differs from H4")
+
+    sample = np.random.default_rng(seed).integers(0, 96, size=(bootstrap_resamples, 96))
+    reference = [boots[4][index] for index in range(96)]
+    comparisons: dict[str, object] = {}
+    for horizon in (3, 5, 6):
+        treatment = [boots[horizon][index] for index in range(96)]
+        comparisons[f"h{horizon}_minus_h4"] = {
+            "reference_horizon": 4,
+            "treatment_horizon": horizon,
+            "metrics": {
+                metric: _paired_ratio_delta(reference, treatment, metric, sample=sample) for metric in _RATIO_METRICS
+            },
+        }
+    return {
+        "schema_version": _TIMING_ANALYSIS_SCHEMA_VERSION,
+        "bootstrap_resamples": bootstrap_resamples,
+        "seed": seed,
+        "reference_horizon": 4,
+        "checkpoint_sha256": protocols[4]["checkpoint_sha256"],
+        "evidence_sha256": {f"h{horizon}": evidence_sha256[horizon] for horizon, _ in _TIMING_CONFIGS},
+        "evaluations": {f"h{horizon}": metrics[horizon] for horizon, _ in _TIMING_CONFIGS},
+        "comparisons": comparisons,
+    }
+
+
 def eval_vs_cpu(
     source: O50Checkpoint,
     cfg: TrainConfig,
@@ -2635,6 +2723,7 @@ def eval_vs_cpu(
     fixed_ego_character: melee.Character | None = None,
     ego_player_id: int = MASKED_PLAYER_ID,
     ego_player_code: str | None = None,
+    prediction_frames: int | None = None,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
 ) -> dict[str, float]:
@@ -2649,6 +2738,7 @@ def eval_vs_cpu(
         fixed_ego_character=fixed_ego_character,
         ego_player_id=ego_player_id,
         ego_player_code=ego_player_code,
+        prediction_frames=prediction_frames,
         delay_frames=delay_frames,
         replan_interval_frames=replan_interval_frames,
     )
@@ -2670,6 +2760,7 @@ def eval_vs_cpu(
         policy = source.new_policy(
             seed=seed,
             compiled=compiled,
+            prediction_frames=protocol.prediction_frames,
             allow_masked_player_identity=ego_player_code is None,
             decode_observer=record_decode,
         )
@@ -2713,7 +2804,7 @@ def eval_vs_cpu(
     neutral = sum(policy.neutral_actions for policy in policies)
     actions = sum(policy.total_actions for policy in policies)
     metrics["neutral_action_fraction"] = neutral / max(actions, 1)
-    metrics["prediction_frames"] = float(cfg.prediction_frames)
+    metrics["prediction_frames"] = float(protocol.prediction_frames)
     metrics["delay_frames"] = float(protocol.delay_frames)
     metrics["replan_interval_frames"] = float(protocol.replan_interval_frames)
     metrics["ego_player_id"] = float(protocol.ego_player_id)
@@ -2753,11 +2844,12 @@ def require_complete_eval(metrics: dict[str, float], expected_boots: int) -> Non
     scheduled = int(metrics.get("scheduled_boots", 0.0))
     completed = int(metrics.get("completed_boots", 0.0))
     active = int(metrics.get("boots", 0.0))
-    if scheduled != expected_boots or completed != expected_boots or active != expected_boots:
+    crashed = float(metrics.get("crashed", 1.0))
+    if scheduled != expected_boots or completed != expected_boots or active != expected_boots or crashed != 0.0:
         raise RuntimeError(
             "closed-loop evaluation is incomplete: "
             f"scheduled={scheduled}/{expected_boots}, completed={completed}/{expected_boots}, "
-            f"active={active}/{expected_boots}"
+            f"active={active}/{expected_boots}, crashed={crashed}"
         )
 
 
@@ -4308,6 +4400,7 @@ def eval_checkpoint(
     expected_checkpoint_sha256: str | None = None,
     player_code: str | None = None,
     fixed_ego_character: melee.Character | None = None,
+    prediction_frames: int | None = None,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
     wandb_namespace: str = "eval_conditioned",
@@ -4327,12 +4420,13 @@ def eval_checkpoint(
     else:
         ego_player_id = source.player_id(player_code)
         ego_player_code = player_code.strip()
-    horizon = cfg.prediction_frames
+    horizon = cfg.prediction_frames if prediction_frames is None else prediction_frames
     delay = cfg.delay_frames if delay_frames is None else delay_frames
     replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
     _validate_deployment_timing(horizon, delay, replan)
     is_variant = any(
-        value is not None for value in (player_code, fixed_ego_character, delay_frames, replan_interval_frames)
+        value is not None
+        for value in (player_code, fixed_ego_character, prediction_frames, delay_frames, replan_interval_frames)
     )
     if is_variant and upload_run is not None and output_name is None:
         raise ValueError("evaluation overrides uploaded to a run require an explicit output_name")
@@ -4357,6 +4451,7 @@ def eval_checkpoint(
         fixed_ego_character=fixed_ego_character,
         ego_player_id=ego_player_id,
         ego_player_code=ego_player_code,
+        prediction_frames=horizon,
         delay_frames=delay,
         replan_interval_frames=replan,
     )
@@ -4374,6 +4469,79 @@ def eval_checkpoint(
         flush=True,
     )
     return values
+
+
+def _checkpoint_run_root(path: Path) -> Path:
+    resolved = path.resolve()
+    return resolved.parent.parent if resolved.parent.name == "checkpoints" else resolved.parent
+
+
+def eval_timing_checkpoint(
+    path: str,
+    *,
+    upload_run: str | None,
+    shared_wandb: bool,
+    expected_checkpoint_sha256: str = _TIMING_CHECKPOINT_SHA256,
+    max_parallel: int = 32,
+) -> dict[str, object]:
+    """Evaluate the immutable O52 checkpoint at all conditioned d2 timings."""
+    source = load_o50_checkpoint(path, device=DEVICE)
+    if source.source_sha256 != expected_checkpoint_sha256:
+        raise ValueError(
+            f"checkpoint SHA-256 mismatch: expected {expected_checkpoint_sha256}, got {source.source_sha256}"
+        )
+    if source.config.experiment_id != _CONTROL_EXPERIMENT_ID:
+        raise ValueError(f"timing evaluation requires {_CONTROL_EXPERIMENT_ID}, got {source.config.experiment_id!r}")
+    if source.step + 1 != 16_384:
+        raise ValueError(f"timing evaluation requires checkpoint update 16384, got {source.step + 1}")
+    cfg = config_from_state(dict(source.checkpoint_config), allow_control_checkpoint=True)
+    validate_config(cfg)
+    if cfg.final_eval_n_matchups != 96 or cfg.eval_max_frames != 7_200:
+        raise ValueError(
+            "timing evaluation requires 96 boots and 7200 frames per boot, got "
+            f"{cfg.final_eval_n_matchups} boots and {cfg.eval_max_frames} frames"
+        )
+    root = _checkpoint_run_root(Path(path)) / _TIMING_EVIDENCE_NAME
+    if root.exists():
+        raise FileExistsError(f"timing evidence directory already exists: {root}")
+    root.mkdir(parents=True)
+    values_by_horizon: dict[int, dict[str, float]] = {}
+    for horizon, replan in _TIMING_CONFIGS:
+        replay_dir = _timing_eval_dir(root, horizon, replan)
+        values = eval_vs_cpu(
+            source,
+            cfg,
+            n_matchups=96,
+            replay_dir=replay_dir,
+            checkpoint_sha256=source.source_sha256,
+            max_parallel=max_parallel,
+            prediction_frames=horizon,
+            delay_frames=2,
+            replan_interval_frames=replan,
+        )
+        require_complete_eval(values, 96)
+        values_by_horizon[horizon] = values
+        print(f"[timing-eval] d2 r{replan} h{horizon}: {values}", flush=True)
+
+    analysis = analyze_timing_evidence(root, bootstrap_resamples=BOOTSTRAP_RESAMPLES, seed=0)
+    analysis_path = root / "analysis.json"
+    temporary = analysis_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+    temporary.replace(analysis_path)
+    if upload_run is not None:
+        _upload_eval_evidence(upload_run, root)
+    if shared_wandb:
+        if not isinstance(source.wandb_id, str):
+            raise RuntimeError("checkpoint has no W&B run id for shared logging")
+        for horizon, replan in _TIMING_CONFIGS:
+            _log_shared_eval_metrics(
+                source.wandb_id,
+                source.step + 1,
+                values_by_horizon[horizon],
+                namespace=f"eval_conditioned_timing/d2_r{replan}_h{horizon}",
+            )
+    print(json.dumps(analysis, indent=2, sort_keys=True), flush=True)
+    return analysis
 
 
 def _resolve_eval_checkpoint(checkpoint: str, run: str | None) -> Path:
@@ -4417,6 +4585,7 @@ class EvalArgs:
     expected_checkpoint_sha256: str | None = None
     player_code: str | None = None
     fixed_ego_character: str | None = None
+    prediction_frames: int | None = None
     delay_frames: int | None = None
     replan_interval_frames: int | None = None
     wandb_namespace: str = "eval_conditioned"
@@ -4432,10 +4601,29 @@ class AnalyzeArgs:
     seed: int = 0
 
 
+@dataclass
+class TimingEvalArgs:
+    checkpoint: str
+    run: str
+    max_parallel: int = 32
+    shared_wandb: bool = True
+    expected_checkpoint_sha256: str = _TIMING_CHECKPOINT_SHA256
+
+
+@dataclass
+class TimingAnalyzeArgs:
+    root: Path
+    out: Path | None = None
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES
+    seed: int = 0
+
+
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[AnalyzeArgs, tyro.conf.subcommand(name="analyze")]
+    | Annotated[TimingEvalArgs, tyro.conf.subcommand(name="timing-eval")]
+    | Annotated[TimingAnalyzeArgs, tyro.conf.subcommand(name="timing-analyze")]
 )
 
 
@@ -4450,6 +4638,29 @@ def _parse_character(name: str | None) -> melee.Character | None:
 
 
 def main(args: Command) -> None:
+    if isinstance(args, TimingAnalyzeArgs):
+        result = analyze_timing_evidence(
+            args.root,
+            bootstrap_resamples=args.bootstrap_resamples,
+            seed=args.seed,
+        )
+        output = args.root / "analysis.json" if args.out is None else args.out
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(output.suffix + ".tmp")
+        temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        temporary.replace(output)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if isinstance(args, TimingEvalArgs):
+        checkpoint = _resolve_eval_checkpoint(args.checkpoint, args.run)
+        eval_timing_checkpoint(
+            str(checkpoint),
+            upload_run=args.run,
+            shared_wandb=args.shared_wandb,
+            expected_checkpoint_sha256=args.expected_checkpoint_sha256,
+            max_parallel=args.max_parallel,
+        )
+        return
     if isinstance(args, AnalyzeArgs):
         result = analyze_evidence(
             args.control,
@@ -4476,6 +4687,7 @@ def main(args: Command) -> None:
             expected_checkpoint_sha256=args.expected_checkpoint_sha256,
             player_code=args.player_code,
             fixed_ego_character=_parse_character(args.fixed_ego_character),
+            prediction_frames=args.prediction_frames,
             delay_frames=args.delay_frames,
             replan_interval_frames=args.replan_interval_frames,
             wandb_namespace=args.wandb_namespace,

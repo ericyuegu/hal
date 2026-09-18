@@ -45,8 +45,8 @@ def _architecture() -> O50Architecture:
         n_heads=1,
         attn_window=0,
         L_ctx=4,
-        sample_chunk_length=4,
-        head_offsets=(1, 2, 3, 4),
+        sample_chunk_length=6,
+        head_offsets=(1, 2, 3, 4, 5, 6),
         temporal_d_model=8,
         temporal_layers=1,
         temporal_heads=1,
@@ -114,7 +114,7 @@ def _model() -> tuple[O50Model, O50Config, tuple[str, ...], bytes]:
     return model, config, codes, player_codes
 
 
-def _policy(*, seed: int = 7) -> O50Policy:
+def _policy(*, seed: int = 7, prediction_frames: int | None = None) -> O50Policy:
     model, config, codes, _player_codes = _model()
     return O50Policy(
         model,
@@ -125,6 +125,7 @@ def _policy(*, seed: int = 7) -> O50Policy:
         device=torch.device("cpu"),
         seed=seed,
         compiled=False,
+        prediction_frames=prediction_frames,
     )
 
 
@@ -233,8 +234,14 @@ def test_raw_o52_checkpoint_loads_for_conditioned_evaluation(
     monkeypatch.setattr(o50, "_resolve_export_stats", lambda _config: _resolved_stats())
 
     source = load_o50_checkpoint(checkpoint, device="cpu")
+    checkpoint_hash = source.source_sha256
+    policy = source.new_policy(seed=7, compiled=False, prediction_frames=6)
 
     assert source.config.experiment_id == "052_adamw_temporal_awr_v1"
+    assert source.config.prediction_frames == 4
+    assert policy._prediction_frames == 6
+    assert source.source_sha256 == checkpoint_hash
+    assert o50.checkpoint_sha256(checkpoint) == checkpoint_hash
     assert source.transport_delay == 2
     assert source.replan_interval_frames == 2
     assert source.step == 16_383
@@ -288,6 +295,68 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
     assert forced_calls[0][1][0].tolist() == [index < delay for index in range(4)]
     assert policy._rng is not None
     assert {counter for *_key, counter in policy._rng.state()} == {frames}
+
+
+@pytest.mark.parametrize(("horizon", "replan"), [(3, 1), (4, 2), (5, 3), (6, 4)])
+def test_runtime_sizes_conditioned_decode_and_queue_from_selected_horizon(
+    horizon: int,
+    replan: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy(prediction_frames=horizon)
+    policy.prepare(
+        RuntimeConfig(
+            max_batch_size=1,
+            transport_delays=(2,),
+            replan_interval_frames=replan,
+        )
+    )
+    calls: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = []
+
+    def fake_decode(
+        _features: dict[str, Tensor],
+        _padding: Tensor,
+        forced: Tensor,
+        force_mask: Tensor,
+        uniforms: Tensor,
+    ) -> Tensor:
+        calls.append((tuple(forced.shape), tuple(force_mask.shape), tuple(uniforms.shape)))
+        output = torch.zeros(1, horizon, 14)
+        output[:, 2:, 0] = torch.arange(1, replan + 1) / 4
+        return output
+
+    monkeypatch.setattr(policy, "_decode", fake_decode)
+    first = policy.step([_input(0, 2, reset=True)])[0]
+
+    assert first.action.main_x == 0.25
+    assert calls == [((1, horizon, 4), (1, horizon), (horizon, 4, 1))]
+    assert len(policy._states[3].queued) == replan - 1
+    assert policy._rng is not None
+    assert {counter for *_key, counter in policy._rng.state()} == {horizon - 2}
+
+
+def test_prediction_horizon_requires_a_dense_available_head_prefix() -> None:
+    _policy(prediction_frames=6)
+    with pytest.raises(ValueError, match="prediction_frames=7 requires dense heads"):
+        _policy(prediction_frames=7)
+
+    model, config, codes, _player_codes = _model()
+    sparse_architecture = replace(config.architecture, head_offsets=(1, 2, 3, 4, 6))
+    sparse_config = replace(config, architecture=sparse_architecture)
+    sparse_model = O50Model(sparse_config)
+    sparse_model.load_state_dict(model.state_dict(), strict=False)
+    with pytest.raises(ValueError, match="prediction_frames=5 requires dense heads"):
+        O50Policy(
+            sparse_model,
+            sparse_config,
+            _stats(),
+            codes,
+            name="sparse O50",
+            device=torch.device("cpu"),
+            seed=7,
+            compiled=False,
+            prediction_frames=5,
+        )
 
 
 def test_runtime_batches_delay_two_and_three_without_crossing_stream_state(
@@ -447,6 +516,46 @@ def test_temporal_decoder_advances_through_every_forced_action(
     assert torch.equal(seen[0], observed)
     for depth in range(1, delay + 1):
         assert torch.equal(seen[depth], forced[:, depth - 1])
+
+
+def test_temporal_decoder_advances_forced_prefix_before_h6_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, config, _codes, _player_codes = _model()
+    decoder = model.temporal
+    seen: list[Tensor] = []
+
+    def record_step(
+        _self: object,
+        previous: Tensor,
+        _offset: int,
+        state_bias: Tensor,
+        caches: list[tuple[Tensor, Tensor] | None],
+    ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
+        seen.append(previous.clone())
+        return torch.zeros(previous.shape[0], config.architecture.temporal_d_model), caches
+
+    monkeypatch.setattr(decoder, "_decode_step", MethodType(record_step, decoder))
+    observed = torch.zeros(1, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    forced = torch.zeros(1, 6, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    forced[:, :2] = torch.tensor([1, 2])[None, :, None]
+    force_mask = torch.arange(6)[None, :] < 2
+    uniforms = torch.full((6, CONTROLLER_GROUP_COUNT, 1), 0.5)
+
+    sampled = decoder.sample_conditioned(
+        torch.zeros(1, config.architecture.L_ctx, config.architecture.d_model),
+        observed,
+        forced,
+        force_mask,
+        uniforms,
+        argmax=True,
+        sample_start=2,
+    )
+
+    assert sampled.shape == (1, 6, CONTROLLER_GROUP_COUNT)
+    assert torch.equal(seen[0], observed)
+    assert torch.equal(seen[1], forced[:, 0])
+    assert torch.equal(seen[2], forced[:, 1])
 
 
 def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
