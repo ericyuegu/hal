@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 import sys
+import threading
 from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
@@ -622,6 +623,34 @@ def test_loader_and_identity_rng_resume_the_exact_next_batch() -> None:
         expected_batch.context.features["ego_player_id"],
     )
     assert restored_masker.state_dict()["forced"] == masker.state_dict()["forced"]
+
+
+def test_device_batch_staging_overlaps_current_update() -> None:
+    cfg = _tiny_cfg()
+
+    class SignalingMasker(exp.IdentityMasker):
+        def __init__(self) -> None:
+            super().__init__(23, 0.5)
+            self.called = threading.Event()
+
+        def __call__(self, batch):
+            masked = super().__call__(batch)
+            self.called.set()
+            return masked
+
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    masker = SignalingMasker()
+    prefetcher = exp.DeviceBatchPrefetcher(iter([batch, batch]), cfg, "cpu", masker)
+    try:
+        prefetcher.next()
+        masker.called.clear()
+        prefetcher.fill_lookahead(1)
+
+        assert masker.called.wait(timeout=5.0)
+        assert prefetcher.submitted_batches == 1
+        prefetcher.stage_next()
+    finally:
+        prefetcher.close()
 
 
 def test_accumulated_and_unsplit_updates_match() -> None:

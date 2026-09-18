@@ -1544,7 +1544,7 @@ def prepared_targets(
 
 
 class DeviceBatchPrefetcher:
-    """Keep a bounded serial CPU lookahead and stage one device batch."""
+    """Keep bounded CPU lookahead and stage one device batch during compute."""
 
     def __init__(
         self,
@@ -1563,12 +1563,16 @@ class DeviceBatchPrefetcher:
         self._identity_masker = identity_masker
         self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
         self._staged: tuple[AWRBatch, AWRBatch, int] | None = None
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
+        self._load_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cpu-batch-prefetch")
+        self._stage_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
         self._futures: deque[Future[AWRBatch]] = deque()
+        self._stage_source: Future[AWRBatch] | None = None
+        self._stage_future: Future[tuple[AWRBatch, AWRBatch, int]] | None = None
         if first_batch_future is None:
             self.fill_lookahead(1)
         else:
             self._futures.append(first_batch_future)
+            self._start_stage()
         self.stage_next()
 
     def _load_cpu_batch(self) -> AWRBatch:
@@ -1587,7 +1591,7 @@ class DeviceBatchPrefetcher:
         validate_batch_geometry(cpu_batch, self._cfg, self._cfg.batch_size)
         return cpu_batch
 
-    def _stage(self, cpu_batch: AWRBatch) -> None:
+    def _stage(self, cpu_batch: AWRBatch) -> tuple[AWRBatch, AWRBatch, int]:
         start = self._cfg.arch.direct_loss_start
         suffix_pad = (cpu_batch.context.ctx_pad - start).clamp_min(0)
         valid_prefixes = int((self._cfg.arch.L_ctx - start - suffix_pad).sum())
@@ -1598,7 +1602,17 @@ class DeviceBatchPrefetcher:
         else:
             with torch.cuda.stream(self._copy_stream):
                 device_batch = cpu_batch.to(self._device)
-        self._staged = (device_batch, cpu_batch, valid_prefixes)
+        return device_batch, cpu_batch, valid_prefixes
+
+    def _prepare_and_stage(self, cpu_batch_future: Future[AWRBatch]) -> tuple[AWRBatch, AWRBatch, int]:
+        cpu_batch = self._prepare_cpu_batch(cpu_batch_future.result())
+        return self._stage(cpu_batch)
+
+    def _start_stage(self) -> None:
+        if self._stage_future is not None or not self._futures:
+            return
+        self._stage_source = self._futures.popleft()
+        self._stage_future = self._stage_pool.submit(self._prepare_and_stage, self._stage_source)
 
     def fill_lookahead(self, batch_limit: int) -> None:
         """Submit up to four batches without crossing the next state boundary."""
@@ -1606,22 +1620,25 @@ class DeviceBatchPrefetcher:
             raise ValueError("lookahead batch limit must be non-negative")
         if self._staged is not None:
             raise RuntimeError("consume the staged batch before filling lookahead")
-        if len(self._futures) > batch_limit:
+        submitted = len(self._futures) + int(self._stage_future is not None)
+        if submitted > batch_limit:
             raise RuntimeError("queued batches cross the next state boundary")
         target = min(self._cfg.train_prefetch_factor, batch_limit)
-        while len(self._futures) < target:
-            self._futures.append(self._pool.submit(self._load_cpu_batch))
+        while submitted < target:
+            self._futures.append(self._load_pool.submit(self._load_cpu_batch))
+            submitted += 1
+        self._start_stage()
 
     def stage_next(self) -> float:
         """Stage the oldest queued batch and return its uncovered wait."""
         if self._staged is not None:
             raise RuntimeError("consume the staged batch before staging another")
-        if not self._futures:
+        if self._stage_future is None:
             raise RuntimeError("fill lookahead before staging another batch")
         started = time.monotonic()
-        future = self._futures.popleft()
-        cpu_batch = self._prepare_cpu_batch(future.result())
-        self._stage(cpu_batch)
+        self._staged = self._stage_future.result()
+        self._stage_future = None
+        self._stage_source = None
         return time.monotonic() - started
 
     def next(self) -> tuple[AWRBatch, int]:
@@ -1644,19 +1661,23 @@ class DeviceBatchPrefetcher:
 
     @property
     def submitted_batches(self) -> int:
-        return len(self._futures)
+        return len(self._futures) + int(self._stage_future is not None)
 
     @property
     def ready_batches(self) -> int:
-        return sum(future.done() and not future.cancelled() and future.exception() is None for future in self._futures)
+        sources = list(self._futures)
+        if self._stage_source is not None:
+            sources.append(self._stage_source)
+        return sum(future.done() and not future.cancelled() and future.exception() is None for future in sources)
 
     @property
     def drained(self) -> bool:
-        return self._staged is None and not self._futures
+        return self._staged is None and self._stage_future is None and not self._futures
 
     def close(self) -> None:
-        """Release the background loader thread."""
-        self._pool.shutdown(wait=True, cancel_futures=True)
+        """Release the background loader and staging threads."""
+        self._stage_pool.shutdown(wait=True, cancel_futures=True)
+        self._load_pool.shutdown(wait=True, cancel_futures=True)
 
 
 class _UpdateTimer:
