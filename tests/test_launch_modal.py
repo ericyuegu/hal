@@ -520,7 +520,14 @@ def test_retry_policy_uses_requested_attempt_count_without_delay() -> None:
     assert eval_retries.initial_delay.total_seconds() == 1
 
 
-def test_closed_loop_evaluator_runs_verified_o50_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "experiment",
+    ["experiments/050_scaled_temporal_awr.py", "experiments/057_scaled_endpoint_flow.py"],
+)
+def test_closed_loop_evaluator_runs_verified_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+    experiment: str,
+) -> None:
     calls = []
     monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {"TEST": "1"})
     monkeypatch.setattr(
@@ -530,7 +537,7 @@ def test_closed_loop_evaluator_runs_verified_o50_protocol(monkeypatch: pytest.Mo
     )
 
     _MODULE._run_closed_loop_eval(
-        "experiments/050_scaled_temporal_awr.py",
+        experiment,
         "run-1",
         8192,
         "a" * 64,
@@ -538,7 +545,7 @@ def test_closed_loop_evaluator_runs_verified_o50_protocol(monkeypatch: pytest.Mo
     )
 
     command, kwargs = calls[0]
-    assert command[:4] == ["uv", "run", "experiments/050_scaled_temporal_awr.py", "eval"]
+    assert command[:4] == ["uv", "run", experiment, "eval"]
     assert "--shared-wandb" in command
     assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
     assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
@@ -574,6 +581,22 @@ def test_serialized_remote_function_references_loguru_by_module() -> None:
     # configured Logger directly also captures its TTY-backed stderr sink.
     assert _MODULE._run_remote.__globals__["loguru"] is loguru
     assert "logger" not in _MODULE._run_remote.__globals__
+
+
+def test_remote_environment_records_launch_git_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {"TEST": "1"})
+    monkeypatch.setattr(_MODULE, "_configure_tracking_context", lambda _env, _url: None)
+    spec = _MODULE.LaunchSpec(
+        argv=("uv", "run", EXPERIMENT),
+        launch_id="launch-1",
+        git_sha="a" * 40,
+        state_volume="state",
+        auto_resume=True,
+        stall_s=60,
+        skip_sm120_probe=False,
+    )
+
+    assert _MODULE._remote_environment(spec) == {"TEST": "1", "HAL_GIT_SHA": "a" * 40}
 
 
 def test_redact_argv_hides_conventional_secret_values() -> None:
