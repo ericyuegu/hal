@@ -66,6 +66,7 @@ def test_study_configuration_and_rank1_selection_are_fixed() -> None:
     assert proxy.max_steps == production.max_steps == 16_384
     assert proxy.warmup_steps == production.warmup_steps == 512
     assert proxy.arch.L_ctx == production.arch.L_ctx == 256
+    assert proxy.num_workers == production.num_workers == 32
     assert proxy.arch.flow_d_model == 128
     assert production.arch.flow_d_model == 512
     assert production.arch.head_offsets == (1, 2, 3, 4, 5, 6, 9, 12, 16, 20)

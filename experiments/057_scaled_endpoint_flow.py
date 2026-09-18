@@ -356,7 +356,7 @@ class TrainConfig:
     policy_world_schema_version: int = POLICY_WORLD_SCHEMA_VERSION
     download_retry: int = 8
     val_split: str = "val"
-    num_workers: int = 24
+    num_workers: int = 32
     push_to_r2: bool = True
     system_metrics_every: int = 25
     system_metrics_interval_s: float = 5.0
