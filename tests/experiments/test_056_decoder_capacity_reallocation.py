@@ -197,6 +197,25 @@ def test_checkpoint_and_run_names_record_the_treatment() -> None:
     assert cfg.automatic_evaluation is False
 
 
+def test_control_checkpoint_identity_requires_explicit_eval_permission() -> None:
+    cfg = exp.proxy_config()
+    state = exp._checkpoint_config(cfg)
+    state["experiment_id"] = "052_adamw_temporal_awr_v1"
+
+    with pytest.raises(ValueError, match="052_adamw_temporal_awr_v1"):
+        exp.config_from_state(state)
+
+    assert exp.config_from_state(state, allow_control_checkpoint=True) == cfg
+
+
+def test_control_checkpoint_permission_rejects_unknown_experiments() -> None:
+    state = exp._checkpoint_config(exp.proxy_config())
+    state["experiment_id"] = "unknown_experiment"
+
+    with pytest.raises(ValueError, match="unknown_experiment"):
+        exp.config_from_state(state, allow_control_checkpoint=True)
+
+
 def test_proxy_smoke_uses_the_treatment_model(monkeypatch: pytest.MonkeyPatch) -> None:
     observed = {}
     monkeypatch.setattr(exp, "load_stats", lambda _cfg: {})

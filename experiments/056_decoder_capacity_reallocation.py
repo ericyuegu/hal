@@ -173,6 +173,7 @@ from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _EXPERIMENT_ID: Final[str] = "056_decoder_capacity_reallocation_v1"
+_CONTROL_EXPERIMENT_ID: Final[str] = "052_adamw_temporal_awr_v1"
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 _CONTROL_INFERENCE_PARAMETER_USES: Final[int] = 17_328_146
 _CONTROL_TRAINING_FLOPS_PER_UPDATE: Final[int] = 14_416_825_417_728
@@ -4201,7 +4202,7 @@ def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
     }
 
 
-def config_from_state(values: dict) -> TrainConfig:
+def config_from_state(values: dict, *, allow_control_checkpoint: bool = False) -> TrainConfig:
     """Restore a checkpoint written by the current experiment definition."""
     derived_fields = {"max_steps", "warmup_steps"}
     runtime_fields = {item.name for item in fields(TrainConfig)} - {"arch", "awr"}
@@ -4210,8 +4211,13 @@ def config_from_state(values: dict) -> TrainConfig:
     unexpected = values.keys() - expected
     if missing or unexpected:
         raise ValueError(f"checkpoint config mismatch: missing={sorted(missing)}, unexpected={sorted(unexpected)}")
-    if values["experiment_id"] != _EXPERIMENT_ID:
-        raise ValueError(f"checkpoint experiment_id {values['experiment_id']!r} != {_EXPERIMENT_ID!r}")
+    allowed_experiment_ids = {_EXPERIMENT_ID}
+    if allow_control_checkpoint:
+        allowed_experiment_ids.add(_CONTROL_EXPERIMENT_ID)
+    if values["experiment_id"] not in allowed_experiment_ids:
+        raise ValueError(
+            f"checkpoint experiment_id {values['experiment_id']!r} not in {sorted(allowed_experiment_ids)!r}"
+        )
     architecture_values = values["architecture"]
     calibration_values = values["awr_calibration"]
     if set(architecture_values) != {item.name for item in fields(Architecture)}:
@@ -4229,9 +4235,14 @@ def config_from_state(values: dict) -> TrainConfig:
     return cfg
 
 
-def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
+def load_checkpoint(
+    path: str,
+    *,
+    device: str = DEVICE,
+    allow_control_checkpoint: bool = False,
+) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(path, map_location=device, weights_only=False)
-    cfg = config_from_state(state["cfg"])
+    cfg = config_from_state(state["cfg"], allow_control_checkpoint=allow_control_checkpoint)
     validate_config(cfg)
     encoded = state["model"].get("player_code_bytes")
     if not isinstance(encoded, Tensor) or not encoded.numel():
@@ -4295,13 +4306,14 @@ def eval_checkpoint(
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
     wandb_namespace: str = "eval",
+    allow_control_checkpoint: bool = False,
 ) -> dict[str, float]:
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
         raise ValueError(
             f"checkpoint SHA-256 mismatch: expected {expected_checkpoint_sha256}, got {actual_checkpoint_sha256}"
         )
-    model, cfg, stats, state = load_checkpoint(path)
+    model, cfg, stats, state = load_checkpoint(path, allow_control_checkpoint=allow_control_checkpoint)
     validate_config(cfg)
     if player_code is None:
         ego_player_id = MASKED_PLAYER_ID
@@ -4407,6 +4419,7 @@ class EvalArgs:
     delay_frames: int | None = None
     replan_interval_frames: int | None = None
     wandb_namespace: str = "eval"
+    allow_control_checkpoint: bool = False
 
 
 @dataclass
@@ -4465,6 +4478,7 @@ def main(args: Command) -> None:
             delay_frames=args.delay_frames,
             replan_interval_frames=args.replan_interval_frames,
             wandb_namespace=args.wandb_namespace,
+            allow_control_checkpoint=args.allow_control_checkpoint,
         )
         return
     if args.resume is None and not args.proxy:
