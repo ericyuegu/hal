@@ -638,7 +638,15 @@ class _CausalTemporalDecoder(nn.Module):
         sample_start: int = 0,
     ) -> Tensor:
         """Force each row's committed prefix and sample its uncommitted tail."""
-        horizon = 4
+        if forced.ndim != 3:
+            raise ValueError("O50 forced actions must be a three-dimensional tensor")
+        horizon = forced.shape[1]
+        expected_offsets = tuple(range(1, horizon + 1))
+        if self.head_offsets[:horizon] != expected_offsets:
+            raise ValueError(
+                f"O50 prediction horizon {horizon} requires dense heads {expected_offsets}, "
+                f"got {self.head_offsets[:horizon]}"
+            )
         if forced.shape != (hidden.shape[0], horizon, CONTROLLER_GROUP_COUNT):
             raise ValueError("O50 forced actions have the wrong shape")
         if force_mask.shape != (hidden.shape[0], horizon):

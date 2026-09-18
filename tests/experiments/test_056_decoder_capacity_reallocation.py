@@ -289,6 +289,61 @@ def test_eval_checkpoint_routes_through_portable_conditioned_source(
     assert observed["kwargs"]["replay_dir"] == tmp_path / "eval_replays_conditioned_v1"
 
 
+def test_timing_eval_loads_checkpoint_once_and_runs_all_conditioned_horizons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = exp.proxy_config()
+    checkpoint = tmp_path / "checkpoints" / "step-0016384.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    source = SimpleNamespace(
+        source_sha256="a" * 64,
+        checkpoint_config=exp._checkpoint_config(cfg) | {"experiment_id": exp._CONTROL_EXPERIMENT_ID},
+        config=SimpleNamespace(experiment_id=exp._CONTROL_EXPERIMENT_ID),
+        step=16_383,
+        wandb_id="control-run",
+    )
+    loads: list[Path] = []
+    calls: list[dict[str, object]] = []
+
+    def load(path, *, device):
+        loads.append(Path(path))
+        return source
+
+    def evaluate(loaded_source, loaded_cfg, **kwargs):
+        assert loaded_source is source
+        assert loaded_cfg == cfg
+        calls.append(kwargs)
+        return {
+            "scheduled_boots": 96.0,
+            "completed_boots": 96.0,
+            "boots": 96.0,
+            "crashed": 0.0,
+        }
+
+    monkeypatch.setattr(exp, "load_o50_checkpoint", load)
+    monkeypatch.setattr(exp, "eval_vs_cpu", evaluate)
+    monkeypatch.setattr(exp, "analyze_timing_evidence", lambda root, **_kwargs: {"root": str(root)})
+
+    result = exp.eval_timing_checkpoint(
+        str(checkpoint),
+        upload_run=None,
+        shared_wandb=False,
+        expected_checkpoint_sha256="a" * 64,
+    )
+
+    assert loads == [checkpoint]
+    assert [(call["prediction_frames"], call["replan_interval_frames"]) for call in calls] == [
+        (3, 1),
+        (4, 2),
+        (5, 3),
+        (6, 4),
+    ]
+    assert all(call["delay_frames"] == 2 and call["max_parallel"] == 32 for call in calls)
+    assert result["root"] == str(tmp_path / exp._TIMING_EVIDENCE_NAME)
+
+
 def test_paired_behavior_delta_resamples_matched_boots() -> None:
     control = [exp.BehaviorBoot((1, 2), 1, 1, 1.0, 0.0, 0.0, 1.0) for _ in range(96)]
     treatment = [exp.BehaviorBoot((1, 2), 2, 0, 1.0, 1.0, 10.0, 1.0) for _ in range(96)]
@@ -316,6 +371,102 @@ def test_paired_behavior_delta_resamples_matched_boots() -> None:
         "delta_ci_lo": 0.5,
         "delta_ci_hi": 0.5,
     }
+
+
+def test_timing_analysis_pairs_every_horizon_against_h4(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _tiny_cfg()
+    protocols = {
+        horizon: asdict(
+            exp._eval_protocol(
+                cfg,
+                exp.GPT(cfg),
+                n_matchups=96,
+                checkpoint_sha256="a" * 64,
+                max_parallel=32,
+                prediction_frames=horizon,
+                delay_frames=2,
+                replan_interval_frames=replan,
+            )
+        )
+        for horizon, replan in exp._TIMING_CONFIGS
+    }
+
+    def horizon_for(path: Path) -> int:
+        return int(path.name.rsplit("h", maxsplit=1)[1])
+
+    monkeypatch.setattr(
+        exp,
+        "_load_eval_evidence",
+        lambda path: (protocols[horizon_for(path)], []),
+    )
+    monkeypatch.setattr(
+        exp,
+        "_behavior_boots",
+        lambda _path, protocol, _rows: {
+            boot: exp.BehaviorBoot(
+                (boot % 13, boot % 14),
+                int(protocol["prediction_frames"]),
+                6 - int(protocol["prediction_frames"]),
+                1.0,
+                float(int(protocol["prediction_frames"]) - 4),
+                float(10 * (int(protocol["prediction_frames"]) - 4)),
+                1.0,
+            )
+            for boot in range(96)
+        },
+    )
+    monkeypatch.setattr(
+        exp,
+        "_load_eval_metrics",
+        lambda path: {"decode_p95_ms": float(horizon_for(path)), "boots": 96.0},
+    )
+    monkeypatch.setattr(exp, "_eval_evidence_sha256", lambda path: str(horizon_for(path)) * 64)
+
+    result = exp.analyze_timing_evidence(tmp_path, bootstrap_resamples=2_000, seed=0)
+
+    assert result["checkpoint_sha256"] == "a" * 64
+    assert result["evaluations"]["h6"]["decode_p95_ms"] == 6.0
+    comparisons = result["comparisons"]
+    assert set(comparisons) == {"h3_minus_h4", "h5_minus_h4", "h6_minus_h4"}
+    assert comparisons["h6_minus_h4"]["metrics"]["net_stock_per_min"]["delta"] == 2.0
+
+
+def test_timing_analysis_rejects_a_changed_invariant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _tiny_cfg()
+    protocols = {
+        horizon: asdict(
+            exp._eval_protocol(
+                cfg,
+                exp.GPT(cfg),
+                n_matchups=96,
+                checkpoint_sha256="a" * 64,
+                max_parallel=32,
+                prediction_frames=horizon,
+                delay_frames=2,
+                replan_interval_frames=replan,
+            )
+        )
+        for horizon, replan in exp._TIMING_CONFIGS
+    }
+    protocols[3]["seed"] = int(protocols[3]["seed"]) + 1
+
+    def load(path: Path):
+        horizon = int(path.name.rsplit("h", maxsplit=1)[1])
+        return protocols[horizon], []
+
+    monkeypatch.setattr(exp, "_load_eval_evidence", load)
+    monkeypatch.setattr(exp, "_behavior_boots", lambda *_args: {})
+    monkeypatch.setattr(exp, "_load_eval_metrics", lambda *_args: {})
+    monkeypatch.setattr(exp, "_eval_evidence_sha256", lambda *_args: "0" * 64)
+
+    with pytest.raises(ValueError, match="outside horizon and replan interval"):
+        exp.analyze_timing_evidence(tmp_path)
 
 
 def test_evidence_loader_rejects_an_incomplete_boot_set(tmp_path: Path) -> None:

@@ -425,6 +425,7 @@ class O50Checkpoint:
         *,
         seed: int | None,
         compiled: bool,
+        prediction_frames: int | None = None,
         allow_masked_player_identity: bool = False,
         decode_observer: DecodeObserver | None = None,
         name: str | None = None,
@@ -439,6 +440,7 @@ class O50Checkpoint:
             device=self.device,
             seed=seed,
             compiled=compiled,
+            prediction_frames=prediction_frames,
             allow_masked_player_identity=allow_masked_player_identity,
             decode_observer=decode_observer,
         )
@@ -631,6 +633,7 @@ class O50Policy:
         device: torch.device,
         seed: int | None,
         compiled: bool,
+        prediction_frames: int | None = None,
         allow_masked_player_identity: bool = False,
         decode_observer: DecodeObserver | None = None,
     ) -> None:
@@ -640,8 +643,18 @@ class O50Policy:
             raise ValueError("O50 compiled must be a boolean")
         if not isinstance(allow_masked_player_identity, bool):
             raise ValueError("allow_masked_player_identity must be a boolean")
+        selected_horizon = config.prediction_frames if prediction_frames is None else prediction_frames
+        if not isinstance(selected_horizon, int) or isinstance(selected_horizon, bool) or selected_horizon < 1:
+            raise ValueError(f"O50 prediction_frames must be a positive integer, got {selected_horizon!r}")
+        expected_offsets = tuple(range(1, selected_horizon + 1))
+        if config.architecture.head_offsets[:selected_horizon] != expected_offsets:
+            raise ValueError(
+                f"O50 prediction_frames={selected_horizon} requires dense heads {expected_offsets}, "
+                f"got {config.architecture.head_offsets[:selected_horizon]}"
+            )
         self._model = model
         self._config = config
+        self._prediction_frames = selected_horizon
         self._stats = dict(stats)
         self._player_vocabulary = PlayerVocabulary(codes)
         self._code_to_id = {code: FIRST_CONNECT_CODE_ID + index for index, code in enumerate(codes)}
@@ -722,7 +735,11 @@ class O50Policy:
 
     def _replan_for_delay(self, delay: int, override: int | None) -> int:
         if delay in (2, 3):
-            expected = self._config.prediction_frames - delay
+            expected = self._prediction_frames - delay
+            if expected < 1:
+                raise ValueError(
+                    f"O50 prediction horizon {self._prediction_frames} must exceed transport delay {delay}"
+                )
             replan = expected if override is None else override
             if replan != expected:
                 raise ValueError(f"O50 delay {delay} requires replan interval {expected}, got {replan}")
@@ -762,16 +779,16 @@ class O50Policy:
         rows = runtime.max_batch_size if self._compiled else 1
         features = self._synthetic_features(rows)
         padding = torch.zeros(rows, dtype=torch.long, device=self._device)
-        neutral = torch.zeros(rows, self._config.prediction_frames, len(ACTION_CHANNELS), device=self._device)
+        neutral = torch.zeros(rows, self._prediction_frames, len(ACTION_CHANNELS), device=self._device)
         forced = self._model.codec.quantize(neutral)
         delays = torch.tensor(
             [runtime.transport_delays[row % len(runtime.transport_delays)] for row in range(rows)],
             device=self._device,
         )
-        depths = torch.arange(self._config.prediction_frames, device=self._device)
+        depths = torch.arange(self._prediction_frames, device=self._device)
         force_mask = depths[None, :] < delays[:, None]
         uniforms = torch.full(
-            (self._config.prediction_frames, CONTROLLER_GROUP_COUNT, rows),
+            (self._prediction_frames, CONTROLLER_GROUP_COUNT, rows),
             0.5,
             device=self._device,
         )
@@ -916,7 +933,7 @@ class O50Policy:
         real_rows = len(due)
         inference_rows = runtime.max_batch_size if self._compiled else real_rows
         features, padding = self._pad_context(context, inference_rows)
-        horizon = self._config.prediction_frames
+        horizon = self._prediction_frames
         forced_actions = np.zeros((inference_rows, horizon, len(ACTION_CHANNELS)), dtype=np.float32)
         force_mask = np.zeros((inference_rows, horizon), dtype=np.bool_)
         delays = []
