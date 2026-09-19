@@ -336,6 +336,57 @@ def test_runtime_sizes_conditioned_decode_and_queue_from_selected_horizon(
     assert {counter for *_key, counter in policy._rng.state()} == {horizon - 2}
 
 
+@pytest.mark.parametrize("horizon", [1, 2, 3])
+def test_zero_delay_runtime_consumes_the_selected_horizon(
+    horizon: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy(prediction_frames=horizon)
+    policy.prepare(
+        RuntimeConfig(
+            max_batch_size=1,
+            transport_delays=(0,),
+            replan_interval_frames=horizon,
+        )
+    )
+    calls: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = []
+
+    def fake_decode(
+        _features: dict[str, Tensor],
+        _padding: Tensor,
+        forced: Tensor,
+        force_mask: Tensor,
+        uniforms: Tensor,
+    ) -> Tensor:
+        calls.append((tuple(forced.shape), tuple(force_mask.shape), tuple(uniforms.shape)))
+        output = torch.zeros(1, horizon, 14)
+        output[:, :, 0] = torch.arange(1, horizon + 1) / 4
+        assert not force_mask.any()
+        return output
+
+    monkeypatch.setattr(policy, "_decode", fake_decode)
+    outputs = [policy.step([_input(frame, 0, reset=frame == 0)])[0] for frame in range(horizon)]
+
+    assert [output.action.main_x for output in outputs] == [0.25 * (index + 1) for index in range(horizon)]
+    assert calls == [((1, horizon, 4), (1, horizon), (horizon, 4, 1))]
+    assert not policy._states[3].queued
+    assert policy._rng is not None
+    assert {counter for *_key, counter in policy._rng.state()} == {horizon}
+
+
+def test_zero_delay_replan_interval_cannot_exceed_selected_horizon() -> None:
+    policy = _policy(prediction_frames=3)
+
+    with pytest.raises(ValueError, match="replan interval from 1 through 3"):
+        policy.prepare(
+            RuntimeConfig(
+                max_batch_size=1,
+                transport_delays=(0,),
+                replan_interval_frames=4,
+            )
+        )
+
+
 def test_prediction_horizon_requires_a_dense_available_head_prefix() -> None:
     _policy(prediction_frames=6)
     with pytest.raises(ValueError, match="prediction_frames=7 requires dense heads"):

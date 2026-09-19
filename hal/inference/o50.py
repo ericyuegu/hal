@@ -748,8 +748,10 @@ class O50Policy:
                 raise ValueError(f"O50 delay {delay} requires replan interval {expected}, got {replan}")
             return replan
         replan = 1 if override is None else override
-        if replan not in (1, 2):
-            raise ValueError("O50 delay 0 supports replan interval 1 or 2")
+        if replan < 1 or replan > self._prediction_frames:
+            raise ValueError(
+                f"O50 delay 0 requires a replan interval from 1 through {self._prediction_frames}, got {replan}"
+            )
         return replan
 
     def _synthetic_features(self, rows: int) -> dict[str, Tensor]:

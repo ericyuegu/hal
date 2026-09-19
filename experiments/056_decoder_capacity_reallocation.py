@@ -177,6 +177,8 @@ _TIMING_ANALYSIS_SCHEMA_VERSION: Final[int] = 1
 _TIMING_CHECKPOINT_SHA256: Final[str] = "16c702fe3964a59c2f26d88207ef90137d93c07bf67a5d4213f4fde5d25b8631"
 _TIMING_EVIDENCE_NAME: Final[str] = "eval96-conditioned-v2-timing-d2-h3-4-5-6-step-0016384"
 _TIMING_CONFIGS: Final[tuple[tuple[int, int], ...]] = ((3, 1), (4, 2), (5, 3), (6, 4))
+_ZERO_DELAY_TIMING_EVIDENCE_NAME: Final[str] = "eval96-conditioned-v2-timing-d0-h1-2-3-step-0016384"
+_ZERO_DELAY_TIMING_CONFIGS: Final[tuple[tuple[int, int], ...]] = ((1, 1), (2, 2), (3, 3))
 
 
 @contextlib.contextmanager
@@ -2314,29 +2316,31 @@ def _load_eval_metrics(eval_dir: Path) -> dict[str, float]:
     return cast(dict[str, float], values)
 
 
-def _timing_eval_dir(root: Path, horizon: int, replan: int) -> Path:
-    return root / f"d2_r{replan}_h{horizon}"
+def _timing_eval_dir(root: Path, horizon: int, replan: int, *, delay: int = 2) -> Path:
+    return root / f"d{delay}_r{replan}_h{horizon}"
 
 
-def analyze_timing_evidence(
+def _analyze_timing_evidence(
     root: Path,
     *,
-    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
-    seed: int = 0,
+    configs: tuple[tuple[int, int], ...],
+    delay: int,
+    reference_horizon: int,
+    bootstrap_resamples: int,
+    seed: int,
 ) -> dict[str, object]:
-    """Compare each conditioned O52 timing against the matched H4 timing."""
     if bootstrap_resamples < 1:
         raise ValueError("bootstrap_resamples must be positive")
     protocols: dict[int, dict[str, object]] = {}
     boots: dict[int, dict[int, BehaviorBoot]] = {}
     metrics: dict[int, dict[str, float]] = {}
     evidence_sha256: dict[int, str] = {}
-    for horizon, replan in _TIMING_CONFIGS:
-        eval_dir = _timing_eval_dir(root, horizon, replan)
+    for horizon, replan in configs:
+        eval_dir = _timing_eval_dir(root, horizon, replan, delay=delay)
         protocol, rows = _load_eval_evidence(eval_dir)
         expected_timing = {
             "prediction_frames": horizon,
-            "delay_frames": 2,
+            "delay_frames": delay,
             "replan_interval_frames": replan,
             "transport_semantics": "conditioned_pending_actions_v1",
             "pending_prefix_conditioned": True,
@@ -2352,22 +2356,26 @@ def analyze_timing_evidence(
         evidence_sha256[horizon] = _eval_evidence_sha256(eval_dir)
 
     varying = {"prediction_frames", "replan_interval_frames"}
-    reference_protocol = {name: value for name, value in protocols[4].items() if name not in varying}
+    reference_protocol = {name: value for name, value in protocols[reference_horizon].items() if name not in varying}
     for horizon, protocol in protocols.items():
         invariants = {name: value for name, value in protocol.items() if name not in varying}
         if invariants != reference_protocol:
-            raise ValueError(f"H{horizon} protocol differs from H4 outside horizon and replan interval")
+            raise ValueError(
+                f"H{horizon} protocol differs from H{reference_horizon} outside horizon and replan interval"
+            )
         for boot_index in range(96):
-            if boots[horizon][boot_index].matchup != boots[4][boot_index].matchup:
-                raise ValueError(f"H{horizon} boot {boot_index} matchup differs from H4")
+            if boots[horizon][boot_index].matchup != boots[reference_horizon][boot_index].matchup:
+                raise ValueError(f"H{horizon} boot {boot_index} matchup differs from H{reference_horizon}")
 
     sample = np.random.default_rng(seed).integers(0, 96, size=(bootstrap_resamples, 96))
-    reference = [boots[4][index] for index in range(96)]
+    reference = [boots[reference_horizon][index] for index in range(96)]
     comparisons: dict[str, object] = {}
-    for horizon in (3, 5, 6):
+    for horizon, _replan in configs:
+        if horizon == reference_horizon:
+            continue
         treatment = [boots[horizon][index] for index in range(96)]
-        comparisons[f"h{horizon}_minus_h4"] = {
-            "reference_horizon": 4,
+        comparisons[f"h{horizon}_minus_h{reference_horizon}"] = {
+            "reference_horizon": reference_horizon,
             "treatment_horizon": horizon,
             "metrics": {
                 metric: _paired_ratio_delta(reference, treatment, metric, sample=sample) for metric in _RATIO_METRICS
@@ -2377,12 +2385,46 @@ def analyze_timing_evidence(
         "schema_version": _TIMING_ANALYSIS_SCHEMA_VERSION,
         "bootstrap_resamples": bootstrap_resamples,
         "seed": seed,
-        "reference_horizon": 4,
-        "checkpoint_sha256": protocols[4]["checkpoint_sha256"],
-        "evidence_sha256": {f"h{horizon}": evidence_sha256[horizon] for horizon, _ in _TIMING_CONFIGS},
-        "evaluations": {f"h{horizon}": metrics[horizon] for horizon, _ in _TIMING_CONFIGS},
+        "reference_horizon": reference_horizon,
+        "checkpoint_sha256": protocols[reference_horizon]["checkpoint_sha256"],
+        "evidence_sha256": {f"h{horizon}": evidence_sha256[horizon] for horizon, _ in configs},
+        "evaluations": {f"h{horizon}": metrics[horizon] for horizon, _ in configs},
         "comparisons": comparisons,
     }
+
+
+def analyze_timing_evidence(
+    root: Path,
+    *,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = 0,
+) -> dict[str, object]:
+    """Compare each conditioned O52 timing against the matched H4 timing."""
+    return _analyze_timing_evidence(
+        root,
+        configs=_TIMING_CONFIGS,
+        delay=2,
+        reference_horizon=4,
+        bootstrap_resamples=bootstrap_resamples,
+        seed=seed,
+    )
+
+
+def analyze_zero_delay_timing_evidence(
+    root: Path,
+    *,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = 0,
+) -> dict[str, object]:
+    """Compare d0 H1 and H3 against matched H2 evidence."""
+    return _analyze_timing_evidence(
+        root,
+        configs=_ZERO_DELAY_TIMING_CONFIGS,
+        delay=0,
+        reference_horizon=2,
+        bootstrap_resamples=bootstrap_resamples,
+        seed=seed,
+    )
 
 
 def eval_vs_cpu(
@@ -4218,6 +4260,74 @@ def eval_timing_checkpoint(
     return analysis
 
 
+def eval_zero_delay_timing_checkpoint(
+    path: str,
+    *,
+    upload_run: str | None,
+    shared_wandb: bool,
+    expected_checkpoint_sha256: str = _TIMING_CHECKPOINT_SHA256,
+    max_parallel: int = 32,
+) -> dict[str, object]:
+    """Evaluate the immutable O52 checkpoint at d0 H1, H2, and H3."""
+    source = load_o50_checkpoint(path, device=DEVICE)
+    if source.source_sha256 != expected_checkpoint_sha256:
+        raise ValueError(
+            f"checkpoint SHA-256 mismatch: expected {expected_checkpoint_sha256}, got {source.source_sha256}"
+        )
+    if source.config.experiment_id != _CONTROL_EXPERIMENT_ID:
+        raise ValueError(f"timing evaluation requires {_CONTROL_EXPERIMENT_ID}, got {source.config.experiment_id!r}")
+    if source.step + 1 != 16_384:
+        raise ValueError(f"timing evaluation requires checkpoint update 16384, got {source.step + 1}")
+    cfg = config_from_state(dict(source.checkpoint_config), allow_control_checkpoint=True)
+    validate_config(cfg)
+    if cfg.final_eval_n_matchups != 96 or cfg.eval_max_frames != 7_200:
+        raise ValueError(
+            "timing evaluation requires 96 boots and 7200 frames per boot, got "
+            f"{cfg.final_eval_n_matchups} boots and {cfg.eval_max_frames} frames"
+        )
+    root = _checkpoint_run_root(Path(path)) / _ZERO_DELAY_TIMING_EVIDENCE_NAME
+    if root.exists():
+        raise FileExistsError(f"timing evidence directory already exists: {root}")
+    root.mkdir(parents=True)
+    values_by_horizon: dict[int, dict[str, float]] = {}
+    for horizon, replan in _ZERO_DELAY_TIMING_CONFIGS:
+        replay_dir = _timing_eval_dir(root, horizon, replan, delay=0)
+        values = eval_vs_cpu(
+            source,
+            cfg,
+            n_matchups=96,
+            replay_dir=replay_dir,
+            checkpoint_sha256=source.source_sha256,
+            max_parallel=max_parallel,
+            prediction_frames=horizon,
+            delay_frames=0,
+            replan_interval_frames=replan,
+        )
+        require_complete_eval(values, 96)
+        values_by_horizon[horizon] = values
+        print(f"[timing-eval] d0 r{replan} h{horizon}: {values}", flush=True)
+
+    analysis = analyze_zero_delay_timing_evidence(root, bootstrap_resamples=BOOTSTRAP_RESAMPLES, seed=0)
+    analysis_path = root / "analysis.json"
+    temporary = analysis_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+    temporary.replace(analysis_path)
+    if upload_run is not None:
+        _upload_eval_evidence(upload_run, root)
+    if shared_wandb:
+        if not isinstance(source.wandb_id, str):
+            raise RuntimeError("checkpoint has no W&B run id for shared logging")
+        for horizon, replan in _ZERO_DELAY_TIMING_CONFIGS:
+            _log_shared_eval_metrics(
+                source.wandb_id,
+                source.step + 1,
+                values_by_horizon[horizon],
+                namespace=f"eval_conditioned_timing/d0_r{replan}_h{horizon}",
+            )
+    print(json.dumps(analysis, indent=2, sort_keys=True), flush=True)
+    return analysis
+
+
 def _resolve_eval_checkpoint(checkpoint: str, run: str | None) -> Path:
     if run is None:
         return Path(checkpoint)
@@ -4292,12 +4402,31 @@ class TimingAnalyzeArgs:
     seed: int = 0
 
 
+@dataclass
+class ZeroDelayTimingEvalArgs:
+    checkpoint: str
+    run: str
+    max_parallel: int = 32
+    shared_wandb: bool = True
+    expected_checkpoint_sha256: str = _TIMING_CHECKPOINT_SHA256
+
+
+@dataclass
+class ZeroDelayTimingAnalyzeArgs:
+    root: Path
+    out: Path | None = None
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES
+    seed: int = 0
+
+
 type Command = (
     Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
     | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
     | Annotated[AnalyzeArgs, tyro.conf.subcommand(name="analyze")]
     | Annotated[TimingEvalArgs, tyro.conf.subcommand(name="timing-eval")]
     | Annotated[TimingAnalyzeArgs, tyro.conf.subcommand(name="timing-analyze")]
+    | Annotated[ZeroDelayTimingEvalArgs, tyro.conf.subcommand(name="zero-delay-timing-eval")]
+    | Annotated[ZeroDelayTimingAnalyzeArgs, tyro.conf.subcommand(name="zero-delay-timing-analyze")]
 )
 
 
@@ -4312,6 +4441,29 @@ def _parse_character(name: str | None) -> melee.Character | None:
 
 
 def main(args: Command) -> None:
+    if isinstance(args, ZeroDelayTimingAnalyzeArgs):
+        result = analyze_zero_delay_timing_evidence(
+            args.root,
+            bootstrap_resamples=args.bootstrap_resamples,
+            seed=args.seed,
+        )
+        output = args.root / "analysis.json" if args.out is None else args.out
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(output.suffix + ".tmp")
+        temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        temporary.replace(output)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if isinstance(args, ZeroDelayTimingEvalArgs):
+        checkpoint = _resolve_eval_checkpoint(args.checkpoint, args.run)
+        eval_zero_delay_timing_checkpoint(
+            str(checkpoint),
+            upload_run=args.run,
+            shared_wandb=args.shared_wandb,
+            expected_checkpoint_sha256=args.expected_checkpoint_sha256,
+            max_parallel=args.max_parallel,
+        )
+        return
     if isinstance(args, TimingAnalyzeArgs):
         result = analyze_timing_evidence(
             args.root,
