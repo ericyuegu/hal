@@ -669,7 +669,7 @@ def test_behavior_analysis_rejects_missing_replays(tmp_path: Path) -> None:
         exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)
 
 
-def test_behavior_analysis_ignores_countdown_only_tail_replays(
+def test_behavior_analysis_ignores_zero_behavior_tail_replays(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -701,7 +701,7 @@ def test_behavior_analysis_ignores_countdown_only_tail_replays(
             stage=3,
             boot_index=0,
             match_ordinal=1,
-            active_frames=0,
+            active_frames=1,
             total_frames=50,
             damage_dealt=0.0,
             damage_taken=0.0,
@@ -739,4 +739,8 @@ def test_behavior_analysis_ignores_countdown_only_tail_replays(
     assert boots[0].wavedashes == 1
     assert boots[0].failed_wavedash_attempts == 2
     assert boots[0].behavior_minutes == pytest.approx(1.0 / 60.0)
-    assert boots[0].gameplay_minutes == 1.0
+    assert boots[0].gameplay_minutes == pytest.approx(3601.0 / 3600.0)
+
+    monkeypatch.setattr(exp, "active_mask", lambda *_args: torch.zeros(60))
+    with pytest.raises(ValueError, match="boot 0 has no active behavior"):
+        exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)
