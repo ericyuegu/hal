@@ -3,7 +3,7 @@
           <div class="figure-head">
             <div>
               <h4>Controller codecs</h4>
-              <p>How each codec discretises the buttons and the main stick.</p>
+              <p>How each codec discretises the buttons, the triggers and the main stick.</p>
             </div>
           </div>
           <div class="codec-lineage" aria-label="Legacy, Cartesian, and polar controller codecs">
@@ -14,11 +14,14 @@
                 <div class="codec-collapse"><span class="codec-chord">A + B</span><i>→</i><span class="codec-class">A</span></div>
               </div>
               <div class="codec-stick">
+                <div class="codec-stick-head"><b>Triggers</b><span>max(L, R) · 5 targets</span></div>
+                <svg class="codec-trigger-map" data-trigger-codec="legacy" viewBox="0 0 240 96" role="img" aria-label="Legacy fuses both shoulders into one value with five targets"></svg>
+              </div>
+              <div class="codec-stick">
                 <div class="codec-stick-head"><b>Main stick</b><span>37 targets</span></div>
-                <svg class="codec-stick-map" data-stick-codec="legacy" viewBox="0 0 240 132" role="img" aria-label="Legacy main-stick class centers"></svg>
+                <svg class="codec-stick-map" data-stick-codec="legacy" viewBox="0 0 240 132" role="img" aria-label="legacy main-stick class centers"></svg>
               </div>
             </section>
-
             <section class="codec-stage">
               <div class="codec-stage-head"><b>Cartesian</b><span>8-bit button mask</span></div>
               <div class="codec-button-demo">
@@ -28,11 +31,14 @@
                 <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
               </div>
               <div class="codec-stick">
+                <div class="codec-stick-head"><b>Triggers</b><span>L × R · 25 targets</span></div>
+                <svg class="codec-trigger-map" data-trigger-codec="cartesian" viewBox="0 0 240 96" role="img" aria-label="Cartesian keeps L and R separate, five targets each"></svg>
+              </div>
+              <div class="codec-stick">
                 <div class="codec-stick-head"><b>Main stick</b><span>65 XY targets</span></div>
-                <svg class="codec-stick-map" data-stick-codec="cartesian" viewBox="0 0 240 132" role="img" aria-label="Cartesian main-stick class centers"></svg>
+                <svg class="codec-stick-map" data-stick-codec="cartesian" viewBox="0 0 240 132" role="img" aria-label="cartesian main-stick class centers"></svg>
               </div>
             </section>
-
             <section class="codec-stage polar">
               <div class="codec-stage-head"><b>Polar</b><span>8-bit button mask</span></div>
               <div class="codec-button-demo">
@@ -42,11 +48,14 @@
                 <div class="bit-equation"><span>00000011₂</span><strong>2⁸ = 256</strong></div>
               </div>
               <div class="codec-stick">
+                <div class="codec-stick-head"><b>Triggers</b><span>L × R · 25 targets</span></div>
+                <svg class="codec-trigger-map" data-trigger-codec="polar" viewBox="0 0 240 96" role="img" aria-label="Polar keeps L and R separate, five targets each"></svg>
+              </div>
+              <div class="codec-stick">
                 <div class="codec-stick-head"><b>Main stick</b><span>85 polar targets</span></div>
-                <svg class="codec-stick-map" data-stick-codec="polar" viewBox="0 0 240 132" role="img" aria-label="Polar main-stick class centers"></svg>
+                <svg class="codec-stick-map" data-stick-codec="polar" viewBox="0 0 240 132" role="img" aria-label="polar main-stick class centers"></svg>
               </div>
             </section>
           </div>
-          
         </div>
       </figure>

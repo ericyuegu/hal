@@ -207,11 +207,24 @@
     });
     return {src: out, spans: spans};
   }
+  /* Footnotes: `[^k]` in the text becomes a superscript link; `[^k]: …` lines collect below the block. */
+  function splitFootnotes(src) {
+    var notes = [];
+    var body = src.replace(/^\[\^([^\]]+)\]:[ \t]*(.+)$/gm, function (_, k, txt) { notes.push([k, txt]); return ''; });
+    body = body.replace(/\[\^([^\]]+)\]/g, function (_, k) { return '<sup class="wb-fnref"><a href="#fn-' + escapeHtml(k) + '" id="fnref-' + escapeHtml(k) + '">' + escapeHtml(k) + '</a></sup>'; });
+    return {src: body, notes: notes};
+  }
   function md2html(md, figNums) {
     var src = resolveFigRefs(md || '', figNums || figureNumbers());
     if (!window.marked) return '<pre>' + escapeHtml(src) + '</pre>';
-    var kept = protectMath(src);
+    var fn = splitFootnotes(src);
+    var kept = protectMath(fn.src);
     var html = window.marked.parse(kept.src).replace(/\u0000MATH(\d+)\u0000/g, function (_, i) { return kept.spans[Number(i)]; });
+    if (fn.notes.length) {
+      html += '<ol class="wb-footnotes">' + fn.notes.map(function (n) {
+        return '<li id="fn-' + escapeHtml(n[0]) + '" value="' + escapeHtml(n[0]) + '">' + window.marked.parseInline(n[1]) + ' <a href="#fnref-' + escapeHtml(n[0]) + '" class="wb-fnback">↩</a></li>';
+      }).join('') + '</ol>';
+    }
     // wide tables scroll on their own
     return html.replace(/<table>/g, '<div class="wb-body-tablewrap"><table>').replace(/<\/table>/g, '</table></div>');
   }

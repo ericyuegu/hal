@@ -77,4 +77,10 @@
   D.jointToken(svg, TX, TY, TW, 34, 'sₜ', 'aₜ₋₁');
   svg.appendChild(D.el('rect', {x: 16, y: 478, width: 26, height: 14, class: 'model-token queued'}));
   D.note(svg, 50, 489, 'may be absent · absent block: values zero, mask set · empty slot: gate zero');
+  // the matched difference for the projectile slots
+  var CI = window.HALFIG_CI;
+  if (CI && CI.projectile_inputs) {
+    D.effectBars(svg, [Object.assign({label: 'projectiles', sub: 'off → on · O41'}, CI.projectile_inputs)],
+      {x: 716, y: 300, panelW: 160, panelH: 180, barW: 34, axisW: 44, metrics: ['stock']});
+  }
 }());

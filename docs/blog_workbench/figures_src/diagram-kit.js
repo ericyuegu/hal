@@ -138,6 +138,37 @@ window.HALDIAG = (function () {
     });
     return {xs: xs, doms: doms};
   }
+  /* Vertical Δ bars with 95% whiskers: rows of {label, sub, stock, damage, accent}; one panel per metric,
+     laid out left to right from (o.x, o.y). Returns the drawn width and height. */
+  function effectBars(target, rows, opts) {
+    var o = Object.assign({x: 0, y: 0, panelW: 300, panelH: 190, gap: 44, barW: 26, axisW: 40, labelH: 34,
+      metrics: ['stock', 'damage'], titles: {stock: 'Δ net stocks / min', damage: 'Δ net damage / min'},
+      digits: {stock: 2, damage: 1}}, opts || {});
+    o.metrics.forEach(function (m, k) {
+      var g = el('g', {transform: 'translate(' + (o.x + k * (o.panelW + o.gap)) + ',' + o.y + ')'});
+      target.appendChild(g);
+      var dom = domain(rows.map(function (r) { return r[m]; }));
+      var top = 30, bottom = o.panelH - o.labelH;
+      var yy = scale([bottom, top], dom.lo, dom.hi);
+      text(g, 0, 12, o.titles[m], {class: 'diagram-note'});
+      dom.ticks.forEach(function (v) {
+        g.appendChild(el('line', {x1: o.axisW, y1: yy(v), x2: o.panelW, y2: yy(v), class: v === 0 ? 'effect-zero' : 'effect-grid'}));
+        text(g, o.axisW - 6, yy(v) + 4, signed(v, dom.digits), {class: 'diagram-note', 'text-anchor': 'end'});
+      });
+      var slot = (o.panelW - o.axisW) / rows.length;
+      rows.forEach(function (r, i) {
+        var d = r[m], cx = o.axisW + slot * (i + 0.5), cls = r.accent ? ' accent' : '';
+        var y0 = yy(0), y1 = yy(d.delta);
+        g.appendChild(el('rect', {x: cx - o.barW / 2, y: Math.min(y0, y1), width: o.barW, height: Math.max(1, Math.abs(y1 - y0)), class: 'effect-bar' + cls}));
+        g.appendChild(el('line', {x1: cx, y1: yy(d.lo), x2: cx, y2: yy(d.hi), class: 'effect-ci' + cls}));
+        [d.lo, d.hi].forEach(function (v) { g.appendChild(el('line', {x1: cx - 5, y1: yy(v), x2: cx + 5, y2: yy(v), class: 'effect-ci' + cls})); });
+        text(g, cx, yy(d.hi) - 7, signed(d.delta, o.digits[m]), {class: 'diagram-label effect-val' + cls, 'text-anchor': 'middle'});
+        text(g, cx, bottom + 18, r.label, {class: 'diagram-label', 'text-anchor': 'middle'});
+        if (r.sub) text(g, cx, bottom + 31, r.sub, {class: 'diagram-note', 'text-anchor': 'middle'});
+      });
+    });
+    return {width: o.metrics.length * o.panelW + (o.metrics.length - 1) * o.gap, height: o.panelH};
+  }
   /* The study table the page embeds (evidence.json without the boot rows). */
   var evidenceCache;
   function evidence() {
@@ -158,5 +189,5 @@ window.HALDIAG = (function () {
       p.classList.add(p.getAttribute('data-module') === moduleId ? 'module-focus' : 'module-dim');
     });
   }
-  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest, evidence: evidence, study: study};
+  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest, effectBars: effectBars, evidence: evidence, study: study};
 }());

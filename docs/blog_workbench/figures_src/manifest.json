@@ -85,6 +85,18 @@
   "data": []
  },
  {
+  "key": "past-action-encoding",
+  "name": "Past-action encoding",
+  "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus a linear map of its physical stick and trigger values. One-hot → learned: +0.26 [+0.08, +0.44] stocks/min, +23.7 [+13.8, +33.6] damage/min, despite fewer examples and fewer parameters.",
+  "studies": [
+   "past_action_encoding",
+   "onehot_button_pruning"
+  ],
+  "data": [
+   "pastActionEffect"
+  ]
+ },
+ {
   "key": "awr-ledger",
   "name": "Reward, return and weight, frame by frame",
   "caption": "One game from the ego port’s side. Damage dealt and taken and stock changes are the reward; the return discounts it with the chosen half-life; the weight is the capped exponential of the return over a baseline, divided by β. The knobs default to the O52 values.",
@@ -179,8 +191,14 @@
   ]
  },
  {
-  "key": "past-action-effect",
-  "attach": "past-action-encoding"
+  "key": "controller-representations",
+  "name": "Controller codecs",
+  "caption": "Legacy emits one button per frame and one fused shoulder value with five targets; Cartesian and polar emit an 8-bit button mask and keep L and R separate, five targets each, and differ in how the main stick is quantised.",
+  "studies": [
+   "codec_legacy_cartesian",
+   "codec_cartesian_polar"
+  ],
+  "data": []
  },
  {
   "key": "codec-effects",

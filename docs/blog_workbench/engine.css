@@ -193,3 +193,10 @@ body.wb-edit .wb-block[data-type="text"] .wb-body,body.wb-edit .wb-block[data-ty
 
 .wb-math{font-size:.95em}
 div.wb-math{margin:0 0 var(--space-para);overflow-x:auto;max-width:var(--measure)}
+
+/* footnotes */
+.wb-fnref{font-size:.7em;line-height:0;vertical-align:super}
+.wb-fnref a{text-decoration:none;color:var(--oxblood)}
+.wb-footnotes{margin:1.2rem 0 0;padding:.6rem 0 0 1.4rem;border-top:1px solid var(--rule);font-size:.86em;color:var(--ink-soft)}
+.wb-footnotes li{margin:.25rem 0}
+.wb-fnback{text-decoration:none;color:var(--ink-faint)}

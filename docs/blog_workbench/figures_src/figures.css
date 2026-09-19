@@ -85,6 +85,8 @@
 .model-diagram .effect-ci.accent{stroke:var(--oxblood)}
 .model-diagram .effect-pt.accent{fill:var(--oxblood)}
 .model-diagram .effect-val.accent{fill:var(--oxblood)}
+.model-diagram .effect-bar{fill:color-mix(in srgb,var(--ink) 14%,var(--paper));stroke:var(--ink);stroke-width:1}
+.model-diagram .effect-bar.accent{fill:color-mix(in srgb,var(--oxblood) 16%,var(--paper));stroke:var(--oxblood)}
 .model-diagram .effect-zero{stroke:var(--ink);stroke-width:1}
 .model-diagram .effect-grid{stroke:var(--rule);stroke-width:1}
 .model-diagram .effect-line{fill:none;stroke:var(--ink-faint);stroke-width:1.2}
@@ -141,3 +143,14 @@
 .model-diagram .loader-win{fill:color-mix(in srgb,var(--ink) 9%,var(--paper));stroke:var(--rule-dotted);stroke-width:1}
 .model-diagram .loader-win.r{fill:color-mix(in srgb,var(--oxblood) 16%,var(--paper));stroke:var(--oxblood)}
 .model-diagram .loader-win.q{fill:color-mix(in srgb,var(--ink) 45%,var(--paper));stroke:var(--ink)}
+
+/* controller codecs: trigger maps share the stick-map frame */
+.codec-trigger-map{display:block;width:100%;height:96px;margin:5px 0 1px}
+.codec-trigger-map .trig-axis{stroke:var(--rule);stroke-width:1}
+.codec-trigger-map .trig-grid{stroke:var(--rule-dotted);stroke-width:1;stroke-dasharray:2 3}
+.codec-trigger-map .trig-point{fill:var(--ink);opacity:.68}
+.codec-stage.polar .codec-trigger-map .trig-point{fill:var(--oxblood);opacity:.88}
+.codec-trigger-map text{font:500 9px var(--mono);fill:var(--ink-faint)}
+.codec-trigger-map .trig-fuse{fill:none;stroke:var(--ink-faint);stroke-width:1}
+/* mini effect panel beside a mechanism diagram */
+.effect-mini .diagram-note{font-size:11px}
