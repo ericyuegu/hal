@@ -669,6 +669,17 @@ def test_behavior_analysis_rejects_missing_replays(tmp_path: Path) -> None:
         exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)
 
 
+def test_character_identity_allows_only_sheik_zelda_transformations() -> None:
+    sheik = int(exp.melee.Character.SHEIK.value)
+    zelda = int(exp.melee.Character.ZELDA.value)
+    fox = int(exp.melee.Character.FOX.value)
+
+    assert exp._same_character_identity(sheik, zelda)
+    assert exp._same_character_identity(zelda, sheik)
+    assert exp._same_character_identity(fox, fox)
+    assert not exp._same_character_identity(sheik, fox)
+
+
 def test_behavior_analysis_ignores_zero_behavior_tail_replays(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

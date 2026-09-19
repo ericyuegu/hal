@@ -2080,6 +2080,14 @@ _RATIO_METRICS: Final[tuple[RatioMetric, ...]] = (
     "net_stock_per_min",
     "net_damage_per_min",
 )
+_SHEIK_ZELDA_CHARACTER_IDS: Final[frozenset[int]] = frozenset(
+    {int(melee.Character.SHEIK.value), int(melee.Character.ZELDA.value)}
+)
+
+
+def _same_character_identity(scheduled: int, replay: int) -> bool:
+    """Treat Sheik and Zelda as one selectable identity across transformations."""
+    return scheduled == replay or {scheduled, replay} == _SHEIK_ZELDA_CHARACTER_IDS
 
 
 def _load_eval_evidence(eval_dir: Path) -> tuple[dict[str, object], list[MatchRow]]:
@@ -2181,7 +2189,10 @@ def _behavior_boots(
             if player.is_cpu or not opponent.is_cpu:
                 raise ValueError(f"{replay_path} does not have the model on port {ego_port} against a CPU")
             replay_matchup = (player.character, opponent.character)
-            if replay_matchup != matchup:
+            if not all(
+                _same_character_identity(scheduled, observed)
+                for scheduled, observed in zip(matchup, replay_matchup, strict=True)
+            ):
                 raise ValueError(f"{replay_path} matchup {replay_matchup} != recorded {matchup}")
             active = active_mask(player, opponent, frames)
             minutes = float(active.sum()) / (FPS * 60.0)
