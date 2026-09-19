@@ -406,6 +406,43 @@ def test_run_matches_vec_retries_failed_start(monkeypatch: pytest.MonkeyPatch) -
     assert ports == [51441, 51442]  # initial attempt, then a fresh port (base + max_parallel)
 
 
+def test_run_matches_vec_removes_failed_attempt_replays_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matches = [VecMatch(matchup=_matchup((1, 2)), model_ports=(1,))]
+    successful = object()
+    attempts = 0
+
+    def fake_drive_wave(
+        _session_cfg,
+        indices,
+        _matches,
+        _policy_factory,
+        *,
+        max_frames,
+        base_replay,
+        slippi_port_base,
+        process_telemetry,
+        process_cohorts,
+    ):
+        del max_frames, slippi_port_base, process_telemetry, process_cohorts
+        nonlocal attempts
+        attempts += 1
+        replay_dir = base_replay / "boot_000"
+        replay_dir.mkdir(parents=True, exist_ok=True)
+        (replay_dir / f"attempt-{attempts}.slp").touch()
+        return {indices[0]: [] if attempts == 1 else [successful]}
+
+    monkeypatch.setattr("hal.eval.harness._drive_wave", fake_drive_wave)
+    cfg = SessionConfig(iso_path="unused.iso", dolphin_path="unused", replay_dir=tmp_path)
+
+    boots = run_matches_vec(cfg, matches, RecordingPolicy, max_frames=20, max_parallel=1, start_retries=1)
+
+    assert boots == [[successful]]
+    assert [path.name for path in (tmp_path / "boot_000").glob("*.slp")] == ["attempt-2.slp"]
+
+
 def test_run_matches_vec_gives_up_after_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     # Every attempt stalls → the match stays None after start_retries are spent,
     # logged-and-skipped rather than hanging the sweep.

@@ -284,6 +284,11 @@ def run_matches_vec(
     for wave_start in range(0, len(matches), max_parallel):
         pending = list(range(wave_start, min(wave_start + max_parallel, len(matches))))
         for attempt in range(start_retries + 1):
+            if attempt > 0 and base_replay is not None:
+                # Rejected attempts can leave replays with no matching trajectory row.
+                for gi in pending:
+                    for replay in (base_replay / f"boot_{gi:03d}").glob("*.slp"):
+                        replay.unlink()
             # Fresh ports per attempt so a stuck-but-not-yet-reaped Dolphin from the
             # previous try can't collide with the retry's slippstream server.
             slippi_port_base = base_slippi_port + (attempt % 8) * max_parallel
