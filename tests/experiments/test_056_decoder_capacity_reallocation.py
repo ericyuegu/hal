@@ -720,7 +720,7 @@ def test_behavior_analysis_ignores_zero_behavior_tail_replays(
             ]
         )
 
-    monkeypatch.setattr(exp.peppi_py, "read_slippi", lambda path, **_kwargs: path)
+    monkeypatch.setattr(exp, "read_replay_tolerant", lambda path: str(path))
     monkeypatch.setattr(exp, "behavior_frames", frames_for)
     monkeypatch.setattr(
         exp,
@@ -743,4 +743,34 @@ def test_behavior_analysis_ignores_zero_behavior_tail_replays(
 
     monkeypatch.setattr(exp, "active_mask", lambda *_args: torch.zeros(60))
     with pytest.raises(ValueError, match="boot 0 has no active behavior"):
+        exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)
+
+
+def test_behavior_analysis_rejects_replay_that_tolerant_reader_cannot_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        exp.MatchRow(
+            ego_character=1,
+            opp_character=2,
+            stage=3,
+            boot_index=boot,
+            match_ordinal=0,
+            active_frames=3600,
+            total_frames=3723,
+            damage_dealt=0.0,
+            damage_taken=0.0,
+            stocks_taken=0,
+            stocks_lost=0,
+        )
+        for boot in range(96)
+    ]
+    for boot in range(96):
+        boot_dir = tmp_path / f"boot_{boot:03d}"
+        boot_dir.mkdir()
+        (boot_dir / "match.slp").touch()
+    monkeypatch.setattr(exp, "read_replay_tolerant", lambda _path: None)
+
+    with pytest.raises(ValueError, match="is unreadable after final-frame repair"):
         exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)

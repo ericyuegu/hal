@@ -60,7 +60,6 @@ from typing import cast
 
 import melee
 import numpy as np
-import peppi_py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,6 +81,7 @@ from hal.data.behavior import behavior_frames
 from hal.data.behavior import movement
 from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.eval.behavior import read_replay_tolerant
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import MatchRow
@@ -2169,7 +2169,9 @@ def _behavior_boots(
         failed = 0
         behavior_minutes = 0.0
         for replay_path in replay_paths:
-            game = peppi_py.read_slippi(str(replay_path), skip_frames=False)
+            game = read_replay_tolerant(replay_path)
+            if game is None:
+                raise ValueError(f"{replay_path} is unreadable after final-frame repair")
             frames = behavior_frames(game)
             if frames is None:
                 raise ValueError(f"{replay_path} is not a usable 1v1 replay")
