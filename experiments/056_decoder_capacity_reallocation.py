@@ -2168,7 +2168,7 @@ def _behavior_boots(
         wavedashes = 0
         failed = 0
         behavior_minutes = 0.0
-        for replay_path in replay_paths:
+        for replay_path, row in zip(replay_paths, boot_rows, strict=True):
             game = peppi_py.read_slippi(str(replay_path), skip_frames=False)
             frames = behavior_frames(game)
             if frames is None:
@@ -2183,8 +2183,12 @@ def _behavior_boots(
                 raise ValueError(f"{replay_path} matchup {replay_matchup} != recorded {matchup}")
             active = active_mask(player, opponent, frames)
             minutes = float(active.sum()) / (FPS * 60.0)
+            if row.active_frames == 0:
+                if minutes != 0.0:
+                    raise ValueError(f"{replay_path} has active behavior but its match row has no active frames")
+                continue
             if minutes <= 0.0:
-                raise ValueError(f"{replay_path} has no active gameplay")
+                raise ValueError(f"{replay_path} has no active behavior during recorded gameplay")
             events = movement(player, active)
             wavedashes += events.wavedashes
             failed += events.failed_wavedash_attempts

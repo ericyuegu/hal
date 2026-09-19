@@ -667,3 +667,76 @@ def test_behavior_analysis_rejects_missing_replays(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="has 0 replays for 1 match rows"):
         exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)
+
+
+def test_behavior_analysis_ignores_countdown_only_tail_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = []
+    for boot in range(96):
+        boot_dir = tmp_path / f"boot_{boot:03d}"
+        boot_dir.mkdir()
+        (boot_dir / "active.slp").touch()
+        rows.append(
+            exp.MatchRow(
+                ego_character=1,
+                opp_character=2,
+                stage=3,
+                boot_index=boot,
+                match_ordinal=0,
+                active_frames=3600,
+                total_frames=3723,
+                damage_dealt=10.0,
+                damage_taken=5.0,
+                stocks_taken=1,
+                stocks_lost=0,
+            )
+        )
+    (tmp_path / "boot_000" / "tail.slp").touch()
+    rows.append(
+        exp.MatchRow(
+            ego_character=1,
+            opp_character=2,
+            stage=3,
+            boot_index=0,
+            match_ordinal=1,
+            active_frames=0,
+            total_frames=50,
+            damage_dealt=0.0,
+            damage_taken=0.0,
+            stocks_taken=0,
+            stocks_lost=0,
+        )
+    )
+    rows.sort(key=lambda row: (row.boot_index, row.match_ordinal))
+
+    def frames_for(path: str):
+        tail = path.endswith("tail.slp")
+        return SimpleNamespace(
+            players=[
+                SimpleNamespace(port=1, is_cpu=False, character=1, tail=tail),
+                SimpleNamespace(port=2, is_cpu=True, character=2, tail=tail),
+            ]
+        )
+
+    monkeypatch.setattr(exp.peppi_py, "read_slippi", lambda path, **_kwargs: path)
+    monkeypatch.setattr(exp, "behavior_frames", frames_for)
+    monkeypatch.setattr(
+        exp,
+        "active_mask",
+        lambda player, _opponent, _frames: torch.zeros(60) if player.tail else torch.ones(60),
+    )
+    monkeypatch.setattr(
+        exp,
+        "movement",
+        lambda _player, _active: SimpleNamespace(wavedashes=1, failed_wavedash_attempts=2),
+    )
+
+    boots = exp._behavior_boots(tmp_path, {"ego_port": 1}, rows)
+
+    assert len(boots) == 96
+    assert boots[0].wavedashes == 1
+    assert boots[0].failed_wavedash_attempts == 2
+    assert boots[0].behavior_minutes == pytest.approx(1.0 / 60.0)
+    assert boots[0].gameplay_minutes == 1.0
