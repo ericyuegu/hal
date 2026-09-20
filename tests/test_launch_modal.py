@@ -804,3 +804,37 @@ def test_training_interrupt_preserves_recoverable_state(tmp_path: Path, monkeypa
 
     assert states
     assert states[-1] == RunState(status="running", run_name="run-1")
+
+
+def test_o59_broker_and_evaluator_separate_unconditioned_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    class Call:
+        object_id = "fc-eval"
+
+    class Evaluator:
+        def spawn(self, *args):
+            calls.append(args)
+            return Call()
+
+    request = {
+        "run_name": "run-1",
+        "update": 98304,
+        "expected_checkpoint_sha256": "a" * 64,
+        "n_matchups": 96,
+        "return_target": "unconditioned",
+    }
+    experiment = "experiments/059_muon_history_decoder.py"
+    response = _MODULE._broker_response(json.dumps(request).encode(), Evaluator(), experiment)
+    assert json.loads(response) == {"function_call_id": "fc-eval"}
+    assert calls == [(experiment, "run-1", 98304, "a" * 64, 96, "unconditioned")]
+    commands = []
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **kwargs: {})
+    monkeypatch.setattr(_MODULE.subprocess, "run", lambda command, **kwargs: commands.append(command))
+    _MODULE._run_closed_loop_eval(*calls[0])
+    command = commands[0]
+    assert command[command.index("--output-name") + 1] == "eval96-step-0098304-unconditioned"
+    assert command[command.index("--wandb-namespace") + 1] == "eval_unconditioned"
+    assert command[command.index("--return-target") + 1] == "unconditioned"
+    bad = {**request, "return_target": "median"}
+    assert "error" in json.loads(_MODULE._broker_response(json.dumps(bad).encode(), Evaluator(), experiment))

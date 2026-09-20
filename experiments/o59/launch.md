@@ -1,33 +1,45 @@
-# O59 v3 production run
+# O59 v4 production run
 
-Train the 268,857,469-parameter policy from seed zero through update 98,304.
-This is the stable parent run. A separate decay continuation can branch from
-its immutable checkpoint for 32,768 updates; this launch does not start that
-continuation.
+Train the 246,862,205-parameter return-conditioned policy from seed zero through
+update 98,304. This is a fresh stable run. A later decay continuation requires
+a separate launch.
 
-## Treatment and reference
+## Recipe
 
-The model has a 16-layer, width-1024 trunk and a four-layer, width-1024 temporal
-decoder. The decoder MLP has width 4096. Both the decoder and trunk-skip action
-heads use RMSNorm, a width-1024 SiLU hidden layer, and a vocabulary projection.
+The trunk has 12 layers; the temporal decoder has six. Both have width 1024 and
+16 attention heads. The decoder MLP has width 4096. The action heads and
+trunk-skip heads retain their nonlinear projections and normalization.
 
-Version 3 fixes button-head normalization parity: epsilon is 1e-5 in training,
-diagnostics, and inference. Other heads retain 1e-6. Training arithmetic is
-unchanged from v2. Versions 1 and 2 are rejected at checkpoint load because
-their model behavior differs.
+A return conditioner embeds the discounted reward over future frames 1 through
+60 into 128 channels. Each decoder block receives attention and MLP scale/shift
+vectors before its normalized projections. The projections start at zero. Their
+biases let a valid zero return differ from absent conditioning. Absent values
+are replaced with zero before arithmetic, then the projected vectors are masked.
+Return conditioning is enabled with independent 20% dropout per context position.
 
-There is no concurrent control run. The v1 benchmark is a historical execution
-reference; its 1,403.7 samples/s and 29.6% MFU do not describe this model. Measure
-v3 throughput and memory after compilation. Use gameplay evaluation to assess
-the trained policy; offline validation is diagnostic.
+The trunk, critic, history key/value projection, and trunk-skip heads receive no
+return input. History cross-attention remains after the first decoder block.
+Action-group FiLM retains its `tanh`; return FiLM has no `tanh`. Residual depth
+scaling is unchanged.
 
-Fixed inputs are the complete 44-source policy-world-v8 corpus, its pinned MDS
-manifests and schemas, production mixture statistics, identity artifacts,
-seed zero, batch 512, and the existing Muon/Adam parameterization. Sample 32
-policy prefixes per window and retain all 128 suffix prefixes for the critic.
-Use BF16 and max-autotune. Keep production diagnostics and eager Muon.
+AWR uses beta 150, maximum weight 10, and gamma 0.99855. It retains next-frame
+alignment, 32 sampled policy prefixes per window, and all 128 suffix positions
+for the critic and AWR normalizer. Return conditioning uses the sampled context
+position itself. Batch 512, BF16, Muon/AdamW, and WSD schedule rules are unchanged.
+The complete 44-source policy-world-v8 corpus, manifests, schemas, identity
+artifacts, and natural replay-count mixture remain fixed.
+
+The positive-return p90 freezes after the first 65,536 consumed training windows.
+It uses available labels at the final context position before dropout, with
+linear quantile interpolation. Checkpoints store the ordered values, validity,
+replay IDs, target, and calibration hash. Prefetch does not advance calibration
+until training consumes a batch.
 
 ## Launch
+
+Use the execution choices in [the throughput report](throughput.md). The launch
+uses action-embedding reuse, `reduce-overhead`, production diagnostics, and
+eager Muon. History reuse and groupwise loss remain disabled.
 
 ```sh
 uv run scripts/launch_modal.py \
@@ -36,69 +48,44 @@ uv run scripts/launch_modal.py \
   --memory-gib 128 --memory-limit-gib 384 --disk-gib 2048 \
   --timeout-hours 24 \
   -- uv run experiments/059_muon_history_decoder.py train \
-  --cfg.train-compile-mode max-autotune \
+  --cfg.train-compile-mode reduce-overhead \
   --stop-after-update 98304 \
-  --comment v3-b512
+  --comment v4-b512
 ```
 
-Pass the stop explicitly so automatic retries retain the same boundary. A fresh
-production run otherwise stops at 98,304 by default, while a resumed run without
-this flag can continue to the configured maximum of 131,072.
+Pass the stop explicitly so retries keep the same boundary. The 24-hour timeout
+applies to each attempt. The launcher retains infrastructure recovery and refuses
+to restart a terminal training failure. It requires a clean, pushed commit and
+records Git, Modal App, FunctionCall, launch ID, and state Volume identities.
 
-The launcher requires a clean, pushed commit and verifies the Modal profile and
-the `hal` Secret. It records the Git SHA, App ID, FunctionCall ID, and launch ID.
-The checkpoint records the resolved model/training configuration, optimizer and
-scheduler, loader cursor, all RNG state, dataset identities, statistics hashes,
-identity hashes, and environment. Training artifacts go to the run's R2 prefix;
-benchmark artifacts remain in their separate Modal Volume.
+The experiment identity is `059_muon_history_decoder_v4`, checkpoint format 3,
+and data protocol `o59-replay-ring-v2`. Older checkpoints are rejected. Resume
+restores the model, optimizer, scheduler, loader cursor, global RNGs, prefix RNG,
+identity and return maskers, and calibration. Checkpoints occur only when
+prefetched batches have been consumed. Disabling conditioning keeps the same
+parameter structure.
 
-## Boundaries and monitoring
+## Evaluation and monitoring
 
-- Warmup: 4,096 updates. AWR begins at update 4,097.
-- Durable checkpoint: every 2,048 updates.
-- Offline validation: every 4,096 updates.
-- Gameplay: 96 matchups every 8,192 updates and at completion, on spawned L40S
-  workers. These evaluations use additional GPU allocations.
-- Stop: 98,304 updates, with `final.pt` and the numbered boundary checkpoint.
-- Recovery: launcher retries infrastructure failures and resumes a compatible
-  R2 checkpoint. A terminal training error does not trigger a fresh training run.
+- Warmup ends at update 4,096. AWR starts at update 4,097.
+- Durable checkpoints occur every 2,048 updates; offline validation every 4,096.
+- L40S gameplay evaluations use p90 for 96 matchups every 8,192 updates and at
+  completion. Evaluation rejects incomplete p90 calibration.
+- The final checkpoint also gets a separate, matched unconditioned evaluation.
+  Its directory ends in `-unconditioned`; its W&B namespace is
+  `eval_unconditioned`. P90 uses `eval`. Both artifacts record the mode, numeric
+  target, calibration hash, checkpoint hash, and matchup schedule.
+- Offline validation and its rollout diagnostics use actual available labels.
+  Gameplay evaluation determines policy quality; offline loss is diagnostic.
+- Completion requires update 98,304, `final.pt`, the numbered checkpoint,
+  successful launcher state, and both final evaluation artifacts.
 
-Establish v3's own warmed throughput, MFU, loader-wait, and memory baselines.
-Watch loss and gradients, GPU memory, cgroup current/peak/limit, checkpoint age,
-and attempt identity. Exclude compilation, validation, checkpoint work, and
-profiler windows from throughput comparisons. The larger model's full-size B200
-memory fit remains a startup check; small local CUDA tests do not establish it.
+A new Sol babysitter receives the exact Modal and W&B identities after launch.
+It should establish this run's own warmed throughput, MFU, loader-wait, and memory
+baselines. The fixed-bank benchmark does not measure sustained decoding from all
+44 sources. Exclude compilation, validation, checkpoints, and profiling from
+throughput comparisons. Track the current container separately from the logical
+FunctionCall, since recovery changes the attempt identity.
 
-Completion requires the FunctionCall result, launcher state, W&B run, and R2
-artifacts to agree. Preserve the last healthy checkpoint if a failure occurs.
-
-## Local validation before launch
-
-All commands passed on 2026-09-20:
-
-```sh
-uv run ruff format --check .
-uv run ruff check .
-uv run ty check --python-version 3.14 --error-on-warning \
-  hal experiments/051_muon_parameterization.py \
-  scripts/cache_modal_fixtures.py scripts/launch_gce.py \
-  scripts/launch_modal.py scripts/launch_vast.py scripts/replay_policy_fault.py \
-  experiments/059_muon_history_decoder.py
-uv run pytest -q tests/experiments/test_059_muon_history_decoder.py \
-  tests/test_muon.py tests/test_benchmark_o59_modal.py
-uv run pytest -q --ignore=tests/experiments -m 'not integration' \
-  --basetemp=results/o59-launch-preflight/tmp/unit
-HAL_REQUIRE_INTEGRATION=1 uv run pytest -q \
-  tests/test_roundtrip.py tests/test_session_cleanup.py -m integration \
-  --basetemp=results/o59-launch-preflight/tmp/integration
-```
-
-Focused: 74 passed, 15 warnings. Broad: 1,166 passed, 18 integration tests
-deselected, 29 warnings. Required Dolphin integration: 7 passed, 2 non-integration
-tests deselected, 7 warnings. No tests skipped. CUDA resume checks ran locally.
-
-The new near-zero button-input regression failed before the fix, with maximum
-absolute logit difference 0.165, and passed afterward. The focused checks also
-verify exact head output/gradient parity and reject v1/v2 checkpoint identities.
-One sandboxed uv probe could not write its cache; rerunning with the existing
-uv permission succeeded.
+[Validation results](validation.md) include the required repository checks,
+Dolphin integration, CUDA parity, and exact loader-to-update resume coverage.

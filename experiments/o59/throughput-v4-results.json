@@ -1,0 +1,97 @@
+{
+  "format": "o59-throughput-results-v2",
+  "experiment_id": "059_muon_history_decoder_v4",
+  "base_git_sha": "6c0ec8690e5a82cd50dc0102b3f4bf1b6d8e26ba",
+  "batch_size": 512,
+  "compile_mode": "reduce-overhead",
+  "selection_rule": "all three active-AWR prefetch treatment windows exceed all three control windows",
+  "bank_sha256": "88dc62db8e3bfca85c3d70bed103716357c0c72ce57e4afe3d0e63a6294d926d",
+  "reference_sha256": "43ac38b2c2bebb4d2e3c6dc1a5d4a88ca2215d21d311d8457e7780694ee73998",
+  "modal": {
+    "app_id": "ap-6uQmiSy24usVefPXgl56On",
+    "function_call_id": "fc-01M30GC4MHVSJXGB3N7B8PZPYG",
+    "launch_id": "5aa49af7ca9942989a12ce3f5ed7a31c",
+    "dashboard": "https://modal.com/apps/ap-6uQmiSy24usVefPXgl56On",
+    "elapsed_seconds": 3217.261461887,
+    "compiler_cache_sha256": "cab8700f5fe73ea8da3d69a2209b76110d127ab84c96e6a87d477483a2e737d8"
+  },
+  "candidates": [
+    {
+      "case": "baseline",
+      "job_id": "9d7fae3217104ab7960e61bffa2fa894",
+      "source_sha256": "1b6e7c4dd6970ad4596930cd68dc8bbb930e1cb08bb7a7f3ac292e43e4f80c6e",
+      "active_prefetch_samples_per_second": [1286.824069346798, 1286.3635320490778, 1283.850707058541]
+    },
+    {
+      "case": "reuse-history",
+      "job_id": "aecb556f2cfc4e7f894a616c74418e85",
+      "source_sha256": "2320c6935ec367936bf0a1615d4dbe6558551b7975c58b7a0e8211169b6648d1",
+      "active_prefetch_samples_per_second": [1266.1943216229379, 1261.468941928216, 1261.2291508269052],
+      "promoted": false
+    },
+    {
+      "case": "reuse-embeddings",
+      "job_id": "ba1f5ad64db54abaa22dc535ac8a9505",
+      "source_sha256": "cbf11f03732e7e6bcf6fbab12135174f3409717778c87518c3c6fd92c7fd259a",
+      "active_prefetch_samples_per_second": [1294.825250644526, 1292.3891513504764, 1289.8303021202169],
+      "advanced": true
+    },
+    {
+      "case": "groupwise-loss",
+      "job_id": "f64de992725e488787b7a94c86fbb14e",
+      "source_sha256": "2018b74e6f55dc664408b984ad7087523da7d096e04b81385d3d12aaa05c6983",
+      "active_prefetch_samples_per_second": [1291.3126376595585, 1288.4151085725548, 1283.573499170742],
+      "promoted": false
+    },
+    {
+      "case": "repeated-control",
+      "job_id": "e440a9a2ff4e4def9eb8b592764010aa",
+      "source_sha256": "f1177766abc3fe884e9170b16cdb8ad60345e6fefa92712c3208b25eae0c93fc",
+      "active_prefetch_samples_per_second": [1262.5884881572317, 1260.0276552321775, 1257.461854874321]
+    },
+    {
+      "case": "production-control",
+      "job_id": "a70ec2a4085045ec921baddaa77969b7",
+      "source_sha256": "546f0d0e3aa9771cba082258ff2d0ae3ad4c6237920e1e245ceddd15aaefa578",
+      "active_prefetch_samples_per_second": [1290.1940205170633, 1286.6357067021331, 1286.4566147604328],
+      "median_samples_per_second": 1286.6357067021331,
+      "peak_reserved_bytes": 139194269696
+    },
+    {
+      "case": "production-reuse-embeddings",
+      "job_id": "87c4c797fef142efb520243afde10d96",
+      "source_sha256": "807dd9a971a791bd279e1ceb0bb9569fdf28454787882b547415dbdcf4dd2720",
+      "active_prefetch_samples_per_second": [1297.5883880402362, 1295.3617316611935, 1295.1899565641247],
+      "median_samples_per_second": 1295.3617316611935,
+      "median_gain_percent": 0.6782047873851393,
+      "active_device_samples_per_second": [1307.3861984955754, 1302.2590798224437, 1299.6284292414996],
+      "peak_reserved_bytes": 138862919680,
+      "promoted": true
+    }
+  ],
+  "numerical_tolerances": {
+    "parameters": [0.000002, 0.00002],
+    "gradients": [0.0002, 0.01],
+    "updates": [0.000002, 0.02]
+  },
+  "production_treatment_differences": {
+    "objective_abs": 0.000003814697265625,
+    "parameter_max_abs": 0.00000023562461137771606,
+    "gradient_max_abs": 0.00013238750398159027,
+    "update_max_abs": 0.00000023562461137771606
+  },
+  "profile_share": {
+    "rmsnorm_percent_of_gpu_kernel_time": 7.5195,
+    "short_attention_upper_bound_percent_of_gpu_kernel_time": 7.126,
+    "optimizer_percent_of_update_time": 3.92,
+    "custom_kernel_threshold_percent": 10.0
+  },
+  "selected_execution": {
+    "reuse_quantized_history": false,
+    "reuse_action_embeddings": true,
+    "groupwise_training_loss": false,
+    "custom_rmsnorm_film": false,
+    "custom_short_attention": false,
+    "compiled_muon": false
+  }
+}

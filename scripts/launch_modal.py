@@ -647,23 +647,32 @@ def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) ->
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         return json.dumps({"error": f"invalid evaluation request JSON: {e}"}).encode() + b"\n"
     fields = {"run_name", "update", "expected_checkpoint_sha256", "n_matchups"}
+    conditioned_experiment = experiment == "experiments/059_muon_history_decoder.py"
+    if conditioned_experiment and isinstance(value, dict) and "return_target" in value:
+        fields.add("return_target")
     if not isinstance(value, dict) or set(value) != fields:
         return json.dumps({"error": f"evaluation request must contain exactly {sorted(fields)}"}).encode() + b"\n"
     run_name = value["run_name"]
     update = value["update"]
     checkpoint_sha = value["expected_checkpoint_sha256"]
     n_matchups = value["n_matchups"]
+    return_target = value.get("return_target", "p90")
     if not isinstance(run_name, str) or not RUN_NAME.fullmatch(run_name):
         error = f"invalid training run name: {run_name!r}"
     elif type(update) is not int or not _valid_evaluation_update(experiment, update):
         error = f"unsupported closed-loop update {update!r} for {experiment}"
     elif not isinstance(checkpoint_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha):
         error = "expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters"
+    elif return_target not in ("p90", "unconditioned"):
+        error = "unsupported return target"
     elif n_matchups != CLOSED_LOOP_MATCHUPS:
         error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
     else:
         try:
-            call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups)
+            if conditioned_experiment:
+                call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups, return_target)
+            else:
+                call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups)
             call_id = call.object_id
         except Exception as e:
             # This boundary must return Modal failures to the waiting child process.
@@ -881,6 +890,7 @@ def _run_closed_loop_eval(
     update: int,
     expected_checkpoint_sha256: str,
     n_matchups: int,
+    return_target: str = "p90",
 ) -> None:
     """Evaluate one uploaded training endpoint and publish its evidence."""
     if experiment not in CLOSED_LOOP_EXPERIMENTS:
@@ -893,6 +903,10 @@ def _run_closed_loop_eval(
         raise ValueError("expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
     if n_matchups != CLOSED_LOOP_MATCHUPS:
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
+    if return_target not in ("p90", "unconditioned"):
+        raise ValueError("unsupported return target")
+    if return_target != "p90" and experiment != "experiments/059_muon_history_decoder.py":
+        raise ValueError("return target overrides require O59")
     env = _prepare_remote(skip_sm120_probe=False)
     checkpoint = f"checkpoints/step-{update:07d}.pt"
     command = [
@@ -909,11 +923,15 @@ def _run_closed_loop_eval(
         "--max-parallel",
         str(CLOSED_LOOP_MAX_PARALLEL),
         "--output-name",
-        f"eval96-step-{update:07d}",
+        f"eval96-step-{update:07d}" + ("-unconditioned" if return_target == "unconditioned" else ""),
         "--shared-wandb",
         "--expected-checkpoint-sha256",
         expected_checkpoint_sha256,
     ]
+    if experiment == "experiments/059_muon_history_decoder.py":
+        command.extend(["--return-target", return_target])
+        if return_target == "unconditioned":
+            command.extend(["--wandb-namespace", "eval_unconditioned"])
     subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
 
 

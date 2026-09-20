@@ -8,7 +8,8 @@ schema-v6 projectile block (``item{0..3}_*``) in every observation.
 This file is deliberately standalone. It retains the O41 detached-value light
 AWR and O49 ego-identity contracts without importing another experiment. The
 temporal decoder uses 4x MLP expansion and matched nonlinear decoder and
-trunk-skip logit heads.
+trunk-skip logit heads. A 60-frame return modulates each decoder block's norms;
+the trunk, critic, history memory, and trunk-skip heads remain return-independent.
 
 The four item slots are ordered by ascending spawn id, so a slot keeps its item
 until an OLDER item despawns and the remaining items shift down. A pooled set
@@ -85,6 +86,7 @@ import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
+from hal.data.policy_schema import unpack_player_stock
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.eval.action_trace import ActionTraceWriter
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
@@ -144,7 +146,6 @@ from hal.training.features import ITEM_PLAYER_PROJECTION
 from hal.training.features import ITEM_PRESENCE_SUFFIX
 from hal.training.features import ITEM_PROBE_COLUMN
 from hal.training.features import NEUTRAL_ACTION
-from hal.training.features import AWRBatch
 from hal.training.features import Context
 from hal.training.features import FeatureProjection
 from hal.training.features import TrainBatch
@@ -179,8 +180,8 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v3"
-_CHECKPOINT_FORMAT_VERSION: Final[int] = 2
+_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v4"
+_CHECKPOINT_FORMAT_VERSION: Final[int] = 3
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (
@@ -201,6 +202,206 @@ OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (
     0.015,
     0.015,
 )
+
+
+RETURN_HORIZON: Final[int] = 60
+RETURN_SCALE: Final[float] = 120.0
+CALIBRATION_WINDOWS: Final[int] = 65_536
+
+
+def conditioning_protocol() -> dict[str, object]:
+    return {
+        "version": 1,
+        "horizon": RETURN_HORIZON,
+        "gamma": 0.99855,
+        "reward": "damage_opp-damage_ego+120*(stock_loss_opp-stock_loss_ego)+50*(last_stock_opp-last_stock_ego)",
+        "scale": RETURN_SCALE,
+        "alignment": "sum(k=1..60, gamma**(k-1)*r[t+k])",
+        "availability": "full observed horizon or known terminal with zero rewards thereafter",
+        "evaluation": "positive p90 at every replan; separate unconditioned comparison",
+        "modulation": "per-block RMSNorm affine, 128-wide SiLU, biased zero-initialized projections",
+        "dropout": "independent CPU generator, per context position",
+        "calibration_windows": CALIBRATION_WINDOWS,
+    }
+
+
+def future_return_labels(sample: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    reward = returns_lib.frame_reward(
+        sample,
+        ego="p1",
+        opp="p2",
+        damage_shaping=1.0,
+        win_reward=50.0,
+        stock_value=120.0,
+    )
+    terminal_events = returns_lib.match_point_events(sample["p1_stock"]) + returns_lib.match_point_events(
+        sample["p2_stock"]
+    )
+    terminal_indices = np.flatnonzero(terminal_events)
+    terminal = bool(terminal_indices.size) or returns_lib.infer_terminal_replay(sample)
+    if terminal_indices.size:
+        reward[int(terminal_indices[0]) + 1 :] = 0.0
+    frames = len(reward)
+    values = np.zeros(frames, dtype=np.float64)
+    for offset in range(1, min(RETURN_HORIZON, frames - 1) + 1):
+        values[:-offset] += 0.99855 ** (offset - 1) * reward[offset:].astype(np.float64)
+    available = (np.arange(frames) + RETURN_HORIZON < frames) | terminal
+    values = np.where(available, values, np.nan).astype(np.float32)
+    return {
+        "p1_return60": values,
+        "p2_return60": -values,
+        "p1_return60_valid": available,
+        "p2_return60_valid": available.copy(),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnLabels:
+    full_match: returns_lib.PolicyReturnLabels
+
+    def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
+        labels = self.full_match(compact)
+        frames = int(np.asarray(compact["num_frames"]).item())
+        labels = {
+            name: np.full(frames, value.item(), dtype=value.dtype) if value.shape == () else value
+            for name, value in labels.items()
+        }
+        sample = {}
+        for port in ("p1", "p2"):
+            sample[f"{port}_percent"] = np.asarray(compact[f"{port}_percent"], dtype=np.float32)
+            sample[f"{port}_stock"] = unpack_player_stock(np.asarray(compact[f"{port}_state"]))
+        if "mc_terminated" in compact:
+            sample["mc_terminated"] = np.asarray(compact["mc_terminated"])
+        return {**labels, **future_return_labels(sample)}
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnBatch:
+    batch: TrainBatch
+    returns: Tensor
+    eligible: Tensor
+    future_return: Tensor
+    available: Tensor
+    condition_present: Tensor
+
+    @property
+    def context(self) -> Context:
+        return self.batch.context
+
+    @property
+    def target(self) -> Tensor:
+        return self.batch.target
+
+    def to(self, device: str | torch.device) -> ReturnBatch:
+        return ReturnBatch(
+            self.batch.to(device),
+            self.returns.to(device, non_blocking=True),
+            self.eligible.to(device, non_blocking=True),
+            self.future_return.to(device, non_blocking=True),
+            self.available.to(device, non_blocking=True),
+            self.condition_present.to(device, non_blocking=True),
+        )
+
+    def pin_memory(self) -> ReturnBatch:
+        return ReturnBatch(
+            self.batch.pin_memory(),
+            self.returns.pin_memory(),
+            self.eligible.pin_memory(),
+            self.future_return.pin_memory(),
+            self.available.pin_memory(),
+            self.condition_present.pin_memory(),
+        )
+
+    def record_stream(self, stream: torch.cuda.Stream) -> None:
+        self.batch.record_stream(stream)
+        for tensor in (self.returns, self.eligible, self.future_return, self.available, self.condition_present):
+            tensor.record_stream(stream)
+
+    def slice(self, count: int) -> ReturnBatch:
+        return ReturnBatch(
+            TrainBatch(
+                Context(
+                    {name: value[:count] for name, value in self.context.features.items()},
+                    self.context.ctx_pad[:count],
+                    None if self.context.slot_ids is None else self.context.slot_ids[:count],
+                    None if self.context.reset is None else self.context.reset[:count],
+                ),
+                self.target[:count],
+                None if self.batch.replay_ids is None else self.batch.replay_ids[:count],
+            ),
+            self.returns[:count],
+            self.eligible[:count],
+            self.future_return[:count],
+            self.available[:count],
+            self.condition_present[:count],
+        )
+
+
+class ReturnCalibration:
+    def __init__(self) -> None:
+        self.values: list[float] = []
+        self.valid: list[bool] = []
+        self.replay_ids: list[str] = []
+
+    def observe(self, batch: ReturnBatch) -> None:
+        remaining = CALIBRATION_WINDOWS - len(self.values)
+        if remaining <= 0:
+            return
+        count = min(remaining, len(batch.future_return))
+        if batch.batch.replay_ids is None:
+            raise ValueError("calibration requires replay identities")
+        valid = batch.available[:count, -1].detach().cpu()
+        values = torch.where(valid, batch.future_return[:count, -1].detach().cpu(), 0.0)
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError("nonfinite valid calibration return")
+        self.values.extend(values.tolist())
+        self.valid.extend(valid.tolist())
+        self.replay_ids.extend(batch.batch.replay_ids[:count])
+
+    def targets(self) -> tuple[float, float, float]:
+        if len(self.values) != CALIBRATION_WINDOWS:
+            raise ValueError("return calibration is incomplete")
+        positive = np.asarray(self.values)[np.asarray(self.valid) & (np.asarray(self.values) > 0)]
+        if not positive.size:
+            raise ValueError("calibration has no strictly positive valid returns")
+        median, p90 = np.quantile(positive, [0.5, 0.9], method="linear")
+        return 0.0, float(median), float(p90)
+
+    def state_dict(self) -> dict[str, object]:
+        data = {"values": self.values.copy(), "valid": self.valid.copy(), "replay_ids": self.replay_ids.copy()}
+        identity = hashlib.sha256(json.dumps(data, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        return {
+            "version": 1,
+            **data,
+            "sha256": identity,
+            "targets": self.targets() if len(self.values) == CALIBRATION_WINDOWS else None,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        if set(state) != {"version", "values", "valid", "replay_ids", "sha256", "targets"} or state["version"] != 1:
+            raise ValueError("incompatible return calibration")
+        if not all(isinstance(state[name], list) for name in ("values", "valid", "replay_ids")):
+            raise ValueError("calibration samples must be ordered lists")
+        values = cast(list[float], state["values"])
+        valid = cast(list[bool], state["valid"])
+        replay_ids = cast(list[str], state["replay_ids"])
+        if (
+            any(type(value) is not float or not math.isfinite(value) for value in values)
+            or any(type(value) is not bool for value in valid)
+            or any(not isinstance(value, str) or not value for value in replay_ids)
+        ):
+            raise ValueError("invalid calibration sample types")
+        self.values = values.copy()
+        self.valid = list(cast(list[bool], state["valid"]))
+        self.replay_ids = list(cast(list[str], state["replay_ids"]))
+        if (
+            len(self.values) != len(self.valid)
+            or len(self.values) != len(self.replay_ids)
+            or len(self.values) > CALIBRATION_WINDOWS
+        ):
+            raise ValueError("invalid calibration lengths")
+        if self.state_dict() != state:
+            raise ValueError("return calibration identity or targets changed")
 
 
 @contextlib.contextmanager
@@ -232,7 +433,7 @@ class Architecture:
     temporal_reference_attention_scale: ClassVar[float] = 0.5
 
     d_model: int = 1024
-    n_layers: int = 16
+    n_layers: int = 12
     n_heads: int = 16
     attn_window: int = 0
     L_ctx: int = 256
@@ -240,10 +441,11 @@ class Architecture:
     sample_chunk_length: int = 28
     head_offsets: tuple[int, ...] = (*range(1, 13), 16, 20, 24, 28)
     temporal_d_model: int = 1024
-    temporal_layers: int = 4
+    temporal_layers: int = 6
     temporal_heads: int = 16
     temporal_ff_dim: int = 4096
     group_head_dim: int = 1024
+    return_embed_dim: int = 128
     action_embed_dim: int = 32
     offset_embed_dim: int = 16
     action_vocab: int = 1024
@@ -268,20 +470,21 @@ class Architecture:
     def parameter_count_contract(self) -> dict[str, int]:
         if self == Architecture():
             return {
-                "trunk": 201_326_592,
-                "temporal_decoder": 56_134_640,
+                "trunk": 150_994_944,
+                "temporal_decoder": 81_300_464,
                 "group_heads": 4_558_179,
                 "trunk_skip_heads": 4_558_179,
                 "value_head": 1_049_089,
+                "return_conditioner": 3_170_560,
                 "other": 1_230_790,
-                "total": 268_857_469,
+                "total": 246_862_205,
             }
         proxy = Architecture(
             d_model=256,
-            n_layers=16,
+            n_layers=12,
             n_heads=4,
             temporal_d_model=256,
-            temporal_layers=4,
+            temporal_layers=6,
             temporal_heads=4,
             temporal_ff_dim=1024,
             group_head_dim=256,
@@ -289,13 +492,14 @@ class Architecture:
         )
         if self == proxy:
             return {
-                "trunk": 12_582_912,
-                "temporal_decoder": 3_622_640,
+                "trunk": 9_437_184,
+                "temporal_decoder": 5_195_504,
                 "group_heads": 353_379,
                 "trunk_skip_heads": 353_379,
                 "value_head": 65_665,
+                "return_conditioner": 792_832,
                 "other": 861_382,
-                "total": 17_839_357,
+                "total": 17_059_325,
             }
         raise ValueError(f"no parameter contract for architecture {self}")
 
@@ -306,9 +510,9 @@ class AWRCalibration:
     near_offsets: ClassVar[int] = 6
     start_update: ClassVar[int] = 4097
 
-    beta: float = 199.5
-    weight_max: float = 3.5
-    gamma: float = 0.99618
+    beta: float = 150.0
+    weight_max: float = 10.0
+    gamma: float = 0.99855
     stock_value: float = 120.0
     damage_shaping: float = 1.0
     win_reward: float = 50.0
@@ -338,7 +542,7 @@ class TrainConfig:
     train_prefetch_factor: ClassVar[int] = 4
     raw_shard_materialization_threads: ClassVar[int] = 64
     materialization_threads_env: ClassVar[str] = "HAL_O59_MATERIALIZATION_THREADS"
-    data_protocol: ClassVar[str] = "o59-replay-ring-v1"
+    data_protocol: ClassVar[str] = "o59-replay-ring-v2"
     selection_sha256: ClassVar[str] = "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
@@ -401,6 +605,11 @@ class TrainConfig:
     cache_metrics_interval_s: float = 30.0
     phase_timing_every: int = 256
     identity_dropout: float = 0.10
+    return_conditioning: bool = True
+    return_dropout: float = 0.2
+    reuse_quantized_history: bool = False
+    reuse_action_embeddings: bool = True
+    groupwise_training_loss: bool = False
     continuation_diagnostics: Annotated[bool, tyro.conf.Suppress] = False
     parent_run_name: Annotated[str | None, tyro.conf.Suppress] = None
     parent_checkpoint_name: Annotated[str | None, tyro.conf.Suppress] = None
@@ -549,7 +758,7 @@ def validate_config(cfg: TrainConfig) -> None:
     if cfg.awr.auxiliary_loss_weight != 1.0:
         raise ValueError("auxiliary_loss_weight must remain 1.0 for checkpoint compatibility")
     if cfg.awr != AWRCalibration():
-        raise ValueError("O59 freezes O50's value and AWR calibration")
+        raise ValueError("O59 freezes its value and AWR calibration")
     for name, value in (
         ("system_metrics_every", cfg.system_metrics_every),
         ("phase_timing_every", cfg.phase_timing_every),
@@ -579,6 +788,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(f"grad_clip must be finite and positive, got {cfg.grad_clip}")
     if not 0.0 <= cfg.identity_dropout <= 1.0:
         raise ValueError("identity_dropout must be in [0, 1]")
+    if not isinstance(cfg.return_conditioning, bool) or not 0.0 <= cfg.return_dropout <= 1.0:
+        raise ValueError("return conditioning requires a boolean enablement and dropout in [0, 1]")
     expected_identity = TrainConfig()
     if cfg.player_vocab_size != expected_identity.player_vocab_size:
         raise ValueError(f"player_vocab_size must be {expected_identity.player_vocab_size}")
@@ -660,14 +871,14 @@ def validate_config(cfg: TrainConfig) -> None:
 
 
 def proxy_config() -> TrainConfig:
-    """Return the 18M, 16-layer, D0 proxy treatment."""
+    """Return the fixed-width proxy with the same 12/6 depth split."""
     return TrainConfig(
         arch=Architecture(
             d_model=256,
-            n_layers=16,
+            n_layers=12,
             n_heads=4,
             temporal_d_model=256,
-            temporal_layers=4,
+            temporal_layers=6,
             temporal_heads=4,
             temporal_ff_dim=1024,
             group_head_dim=256,
@@ -698,13 +909,20 @@ def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -
     )
 
 
-def synthetic_awr_batch(cfg: TrainConfig, device: torch.device) -> AWRBatch:
+def synthetic_awr_batch(cfg: TrainConfig, device: torch.device) -> ReturnBatch:
     """Build one fully valid production-shaped batch without touching the corpus."""
     context = synthetic_context(cfg, cfg.batch_size, device)
     target = torch.zeros(cfg.batch_size, cfg.arch.sample_chunk_length, A_DIM, device=device)
     returns = torch.zeros(cfg.batch_size, cfg.arch.L_ctx, device=device)
     eligible = torch.ones(cfg.batch_size, cfg.arch.L_ctx, dtype=torch.bool, device=device)
-    return AWRBatch(batch=TrainBatch(context=context, target=target), returns=returns, eligible=eligible)
+    return ReturnBatch(
+        TrainBatch(context=context, target=target),
+        returns,
+        eligible,
+        returns.clone(),
+        eligible.clone(),
+        eligible.clone(),
+    )
 
 
 def _eval_parallelism(cfg: TrainConfig, n_matchups: int, max_parallel: int | None = None) -> int:
@@ -914,6 +1132,40 @@ def depth_rule(stack: Literal["trunk", "temporal"], layers: int, alpha: float) -
     return DepthRule(attention=base_attention * branch, mlp=branch)
 
 
+class ReturnConditioner(nn.Module):
+    """Modulate decoder norms once per prefix; absence is exactly neutral."""
+
+    def __init__(self, cfg: TrainConfig) -> None:
+        super().__init__()
+        self.width = cfg.arch.temporal_d_model
+        self.enabled = cfg.return_conditioning
+        self.embedding = nn.Linear(1, cfg.arch.return_embed_dim, bias=True)
+        self.projections = nn.ModuleList(
+            nn.Linear(cfg.arch.return_embed_dim, 4 * self.width, bias=True) for _ in range(cfg.arch.temporal_layers)
+        )
+        nn.init.normal_(self.embedding.weight, std=cfg.hidden_std_multiplier)
+        nn.init.zeros_(self.embedding.bias)
+        for module in self.projections:
+            projection = cast(nn.Linear, module)
+            nn.init.zeros_(projection.weight)
+            nn.init.zeros_(projection.bias)
+
+    def forward(self, return_value: Tensor, condition_present: Tensor) -> tuple[Tensor, ...]:
+        if return_value.shape != condition_present.shape or condition_present.dtype != torch.bool:
+            raise ValueError("return values and boolean presence must have the same shape")
+        present = condition_present & self.enabled
+        safe = torch.where(present, return_value, 0.0)
+        embedded = F.silu(self.embedding((safe / RETURN_SCALE)[..., None]))
+        return tuple(
+            torch.where(
+                present[..., None, None],
+                projection(embedded).reshape(*return_value.shape, 4, self.width),
+                0.0,
+            )
+            for projection in self.projections
+        )
+
+
 class TemporalBlock(nn.Module):
     """RoPE causal block with O51 depth scaling on both branches."""
 
@@ -931,14 +1183,15 @@ class TemporalBlock(nn.Module):
         self.up = nn.Linear(self.d_model, cfg.arch.temporal_ff_dim, bias=False)
         self.down = nn.Linear(cfg.arch.temporal_ff_dim, self.d_model, bias=False)
 
-    def _qkv(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def _qkv(self, x: Tensor, scale: Tensor, shift: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         batch, length, _ = x.shape
-        q, k, v = self.qkv(decoder_rmsnorm(x)).split(self.d_model, dim=-1)
+        q, k, v = self.qkv((1 + scale) * decoder_rmsnorm(x) + shift).split(self.d_model, dim=-1)
         shape = (batch, length, self.n_heads, self.head_dim)
         return q.view(shape), k.view(shape), v.view(shape)
 
-    def forward(self, x: Tensor) -> Tensor:
-        q, k, v = self._qkv(x)
+    def forward(self, x: Tensor, modulation: Tensor) -> Tensor:
+        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        q, k, v = self._qkv(x, scale_attn, shift_attn)
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
@@ -959,10 +1212,13 @@ class TemporalBlock(nn.Module):
         )
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        return x + self.mlp_scale * self.down(F.silu(self.up(decoder_rmsnorm(x))))
+        return x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
 
-    def forward_step(self, x: Tensor, past: tuple[Tensor, Tensor] | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        q, k, v = self._qkv(x[:, None])
+    def forward_step(
+        self, x: Tensor, past: tuple[Tensor, Tensor] | None, modulation: Tensor
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        q, k, v = self._qkv(x[:, None], scale_attn[:, None], shift_attn[:, None])
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         if past is not None:
@@ -974,7 +1230,7 @@ class TemporalBlock(nn.Module):
         attended = F.scaled_dot_product_attention(q, rotated_k, v)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        x = x + self.mlp_scale * self.down(F.silu(self.up(decoder_rmsnorm(x))))
+        x = x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
         return x, (k, v)
 
 
@@ -1058,6 +1314,8 @@ class CausalTemporalDecoder(nn.Module):
         self.live_horizons = (cfg.prediction_frames,)
         self.d_model = cfg.arch.temporal_d_model
         self.training_diagnostics = cfg.optimizer == "adamw"
+        self.reuse_action_embeddings = cfg.reuse_action_embeddings
+        self.groupwise_training_loss = cfg.groupwise_training_loss
         controller_width = CONTROLLER_GROUP_COUNT * cfg.arch.action_embed_dim
         self.offset_embedding = nn.Embedding(cfg.arch.sample_chunk_length + 1, cfg.arch.offset_embed_dim)
         self.token_projection = nn.Linear(
@@ -1097,6 +1355,8 @@ class CausalTemporalDecoder(nn.Module):
         self.trunk_width = cfg.arch.d_model
         self.controller_width = controller_width
 
+    return_conditioner: ReturnConditioner
+
     def _state_bias(self, trunk: Tensor) -> Tensor:
         """The trunk share of the token projection, computed once per position.
 
@@ -1110,12 +1370,12 @@ class CausalTemporalDecoder(nn.Module):
         weight = self.token_projection.weight
         return F.linear(trunk, weight[:, : self.trunk_width], self.token_projection.bias)
 
-    def _step_features(self, previous: Tensor, offsets: Tensor) -> Tensor:
+    def _step_features(self, previous: Tensor, offsets: Tensor, embedded: Tensor | None = None) -> Tensor:
         """The per-step share of the token projection: previous action and offset."""
         weight = self.token_projection.weight
         action_weight = weight[:, self.trunk_width : self.trunk_width + self.controller_width]
         offset_weight = weight[:, self.trunk_width + self.controller_width :]
-        action = F.linear(self.codec.embed_frame(previous), action_weight)
+        action = F.linear(self.codec.embed_frame(previous) if embedded is None else embedded, action_weight)
         return action + F.linear(self.offset_embedding(offsets), offset_weight)
 
     def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
@@ -1129,6 +1389,7 @@ class CausalTemporalDecoder(nn.Module):
         state_bias: Tensor,
         caches: list[tuple[Tensor, Tensor] | None],
         history: tuple[Tensor, Tensor, Tensor, Tensor],
+        conditioning: tuple[Tensor, ...],
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
         """Advance the temporal chain by one selected frame offset."""
         offsets = torch.full((previous.shape[0],), offset, device=previous.device, dtype=torch.long)
@@ -1136,7 +1397,7 @@ class CausalTemporalDecoder(nn.Module):
         next_caches: list[tuple[Tensor, Tensor] | None] = []
         for index, (module, past) in enumerate(zip(self.blocks, caches, strict=True)):
             block = cast(TemporalBlock, module)
-            state, present = block.forward_step(state, past)
+            state, present = block.forward_step(state, past, conditioning[index])
             if index == 0:
                 key, value, ctx_pad, prefix_positions = history
                 state = self.history_attention.forward_projected(
@@ -1157,6 +1418,9 @@ class CausalTemporalDecoder(nn.Module):
         prefix_positions: Tensor,
         observed: Tensor,
         targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+        target_embeddings: dict[str, Tensor] | None = None,
     ) -> Tensor:
         prefix_shape = tuple(prefix_positions.shape)
         expected = (*prefix_shape, len(self.head_offsets), CONTROLLER_GROUP_COUNT)
@@ -1168,13 +1432,20 @@ class CausalTemporalDecoder(nn.Module):
         batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
         selected_hidden = hidden[batch_indices, prefix_positions]
         previous = torch.cat((observed[:, :, None], targets[..., :-1, :]), dim=2)
+        previous_embedded = None
+        if self.reuse_action_embeddings:
+            embedded = self.codec.embed_groups(targets) if target_embeddings is None else target_embeddings
+            target_frame = self.codec.embed_frame(targets, embedded)
+            observed_frame = self.codec.embed_frame(observed)
+            previous_embedded = torch.cat((observed_frame[:, :, None], target_frame[..., :-1, :]), dim=2)
         trunk = decoder_rmsnorm(selected_hidden)
         offsets = torch.tensor(self.head_offsets, device=hidden.device)
-        x = self._state_bias(trunk)[:, :, None] + self._step_features(previous, offsets)
+        x = self._state_bias(trunk)[:, :, None] + self._step_features(previous, offsets, previous_embedded)
         x = decoder_rmsnorm(x)
         x = x.reshape(hidden.shape[0] * prefix_positions.shape[1], len(self.head_offsets), self.d_model)
+        conditioning = self.return_conditioner(return_value, condition_present)
         for index, block in enumerate(self.blocks):
-            x = block(x)
+            x = block(x, conditioning[index].reshape(-1, 1, 4, self.d_model))
             if index == 0:
                 packed = x.view(hidden.shape[0], -1, self.d_model)
                 key, value = self.history_attention.project_memory(hidden)
@@ -1206,16 +1477,22 @@ class CausalTemporalDecoder(nn.Module):
         prefix_positions: Tensor,
         observed: Tensor,
         targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
     ) -> tuple[
         dict[str, Tensor],
         tuple[Tensor, Tensor, Tensor, Tensor],
         dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
     ]:
         """Return group logits and tensors at the action projection boundaries."""
-        states = self.teacher_forced_states(hidden, ctx_pad, prefix_positions, observed, targets)
+        embedded = self.codec.embed_groups(targets) if self.reuse_action_embeddings else None
+        states = self.teacher_forced_states(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present, embedded
+        )
         batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
         selected_hidden = hidden[batch_indices, prefix_positions]
-        embedded = self.codec.embed_groups(targets)
+        if embedded is None:
+            embedded = self.codec.embed_groups(targets)
         logits: dict[str, Tensor] = {}
         projection_values: dict[
             str,
@@ -1251,10 +1528,17 @@ class CausalTemporalDecoder(nn.Module):
         return logits, (*button_values, button_mask), projection_values
 
     def teacher_forced_logits_by_group(
-        self, hidden: Tensor, ctx_pad: Tensor, prefix_positions: Tensor, observed: Tensor, targets: Tensor
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
     ) -> dict[str, Tensor]:
         logits, _button_values, _projection_values = self._teacher_forced_outputs(
-            hidden, ctx_pad, prefix_positions, observed, targets
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
         return logits
 
@@ -1271,9 +1555,29 @@ class CausalTemporalDecoder(nn.Module):
         return torch.stack(losses, dim=-1)
 
     def teacher_forced_nll(
-        self, hidden: Tensor, ctx_pad: Tensor, prefix_positions: Tensor, observed: Tensor, targets: Tensor
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
     ) -> Tensor:
-        logits = self.teacher_forced_logits_by_group(hidden, ctx_pad, prefix_positions, observed, targets)
+        if self.groupwise_training_loss:
+            return self.teacher_forced_groupwise_nll(
+                hidden,
+                ctx_pad,
+                prefix_positions,
+                observed,
+                targets,
+                return_value,
+                condition_present,
+                diagnostics=False,
+            )[0]
+        logits = self.teacher_forced_logits_by_group(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
+        )
         return self.nll_from_logits(logits, targets)
 
     def teacher_forced_nll_with_diagnostics(
@@ -1283,12 +1587,27 @@ class CausalTemporalDecoder(nn.Module):
         prefix_positions: Tensor,
         observed: Tensor,
         targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Return NLL plus a compact button-boundary stability signal."""
+        if self.groupwise_training_loss:
+            return self.teacher_forced_groupwise_nll(
+                hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present, diagnostics=True
+            )
         logits, button_values, projection_values = self._teacher_forced_outputs(
-            hidden, ctx_pad, prefix_positions, observed, targets
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
-        features, head_input, raw_logits, button_mask = button_values
+        metrics = self._button_metrics(*button_values, targets)
+        if self.training_diagnostics:
+            for name, values in projection_values.items():
+                metrics.update(self._group_metrics(name, values, logits[name]))
+        return self.nll_from_logits(logits, targets), metrics
+
+    @staticmethod
+    def _button_metrics(
+        features: Tensor, head_input: Tensor, raw_logits: Tensor, button_mask: Tensor, targets: Tensor
+    ) -> dict[str, Tensor]:
         feature_rms = features.detach().float().square().mean(dim=-1).sqrt()
         input_values = head_input.detach()
         raw_logits_values = raw_logits.detach()
@@ -1297,40 +1616,109 @@ class CausalTemporalDecoder(nn.Module):
         legal_logits = raw_logits_values.masked_fill(button_mask, float("-inf"))
         competing_logits = legal_logits.scatter(-1, button_targets, float("-inf")).amax(dim=-1).float()
         margin = target_logits - competing_logits
-        metrics = {
+        return {
             "stability/button_pre_norm_rms_min": feature_rms.amin(),
             "stability/button_input_abs_p999": _sampled_quantile(input_values, 99.9, absolute=True),
             "stability/button_logit_abs_p999": _sampled_quantile(raw_logits_values, 99.9, absolute=True),
             "stability/button_margin_mean": margin.mean(),
         }
-        if self.training_diagnostics:
-            for name, values in projection_values.items():
-                (
+
+    @staticmethod
+    def _group_metrics(
+        name: str, values: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor], logits: Tensor
+    ) -> dict[str, Tensor]:
+        (
+            head_input,
+            up_output,
+            down_input,
+            down_output,
+            trunk_input,
+            trunk_up_output,
+            trunk_down_input,
+            trunk_output,
+        ) = values
+        metrics: dict[str, Tensor] = {}
+        prefix = f"diagnostics/activations/action/{name}"
+        metrics.update(_activation_input_metrics(f"{prefix}/up", head_input))
+        metrics.update(_activation_output_metrics(f"{prefix}/up", up_output))
+        metrics.update(_activation_input_metrics(f"{prefix}/down", down_input))
+        metrics.update(_activation_output_metrics(f"{prefix}/down", down_output))
+        metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/up", trunk_input))
+        metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/up", trunk_up_output))
+        metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/down", trunk_down_input))
+        metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/down", trunk_output))
+        metrics.update(_activation_output_metrics(f"{prefix}/combined_centered_logits", logits))
+        return metrics
+
+    def teacher_forced_groupwise_nll(
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+        *,
+        diagnostics: bool,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        embedded = self.codec.embed_groups(targets)
+        states = self.teacher_forced_states(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present, embedded
+        )
+        rows = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
+        selected_hidden = hidden[rows, prefix_positions]
+        losses: list[Tensor] = []
+        metrics: dict[str, Tensor] = {}
+        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
+            features = self.group_features(states, name, embedded)
+            head = cast(NonlinearActionHead, self.outputs[name])
+            head_output, head_input, up_output, down_input = head.projection_activations(features)
+            trunk_head = cast(NonlinearActionHead, self.trunk_outputs[name])
+            trunk_output, trunk_input, trunk_up_output, trunk_down_input = trunk_head.projection_activations(
+                selected_hidden
+            )
+            raw_logits = head_output + trunk_output[..., None, :]
+            logits = self._center(raw_logits)
+            if name == "buttons":
+                mask = self.codec.button_mask(targets[..., TRIGGERS_GROUP])
+                logits = logits.masked_fill(mask, float("-inf"))
+                if diagnostics:
+                    metrics.update(self._button_metrics(features, head_input, raw_logits, mask, targets))
+            losses.append(
+                F.cross_entropy(
+                    logits.float().reshape(-1, CONTROLLER_GROUP_VOCABS[group]),
+                    targets[..., group].reshape(-1),
+                    reduction="none",
+                ).view(*targets.shape[:-1])
+            )
+            if diagnostics and self.training_diagnostics:
+                values = (
                     head_input,
                     up_output,
                     down_input,
-                    down_output,
+                    head_output,
                     trunk_input,
                     trunk_up_output,
                     trunk_down_input,
                     trunk_output,
-                ) = values
-                prefix = f"diagnostics/activations/action/{name}"
-                metrics.update(_activation_input_metrics(f"{prefix}/up", head_input))
-                metrics.update(_activation_output_metrics(f"{prefix}/up", up_output))
-                metrics.update(_activation_input_metrics(f"{prefix}/down", down_input))
-                metrics.update(_activation_output_metrics(f"{prefix}/down", down_output))
-                metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/up", trunk_input))
-                metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/up", trunk_up_output))
-                metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/down", trunk_down_input))
-                metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/down", trunk_output))
-                metrics.update(_activation_output_metrics(f"{prefix}/combined_centered_logits", logits[name]))
-        return self.nll_from_logits(logits, targets), metrics
+                )
+                metrics.update(self._group_metrics(name, values, logits))
+        return torch.stack(losses, dim=-1), metrics
 
     def teacher_forced_logits(
-        self, hidden: Tensor, ctx_pad: Tensor, prefix_positions: Tensor, observed: Tensor, targets: Tensor
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
     ) -> list[dict[str, Tensor]]:
-        values = self.teacher_forced_logits_by_group(hidden, ctx_pad, prefix_positions, observed, targets)
+        values = self.teacher_forced_logits_by_group(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
+        )
         return [
             {name: logits[..., depth, :] for name, logits in values.items()} for depth in range(len(self.head_offsets))
         ]
@@ -1344,7 +1732,14 @@ class CausalTemporalDecoder(nn.Module):
         return (*self.history_attention.project_memory(hidden), ctx_pad, prefix_positions)
 
     def forced_stepwise_logits(
-        self, hidden: Tensor, observed: Tensor, targets: Tensor, *, ctx_pad: Tensor | None = None
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+        *,
+        ctx_pad: Tensor | None = None,
     ) -> list[dict[str, Tensor]]:
         if targets.shape != (hidden.shape[0], len(self.head_offsets), CONTROLLER_GROUP_COUNT):
             raise ValueError("stepwise targets have the wrong shape")
@@ -1355,9 +1750,10 @@ class CausalTemporalDecoder(nn.Module):
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         history = self._live_history(hidden, ctx_pad)
+        conditioning = self.return_conditioner(return_value, condition_present)
         out: list[dict[str, Tensor]] = []
         for depth, offset in enumerate(self.head_offsets):
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history)
+            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
             target = targets[:, depth]
             embedded = self.codec.embed_groups(target)
             group_logits = {
@@ -1376,6 +1772,8 @@ class CausalTemporalDecoder(nn.Module):
         hidden: Tensor,
         observed: Tensor,
         offsets: tuple[int, ...],
+        return_value: Tensor,
+        condition_present: Tensor,
         *,
         argmax: bool,
         uniforms: Tensor | None = None,
@@ -1388,6 +1786,8 @@ class CausalTemporalDecoder(nn.Module):
             hidden,
             observed,
             offsets,
+            return_value,
+            condition_present,
             argmax=argmax,
             uniforms=uniforms,
             gen=gen,
@@ -1403,6 +1803,8 @@ class CausalTemporalDecoder(nn.Module):
         hidden: Tensor,
         observed: Tensor,
         offsets: tuple[int, ...],
+        return_value: Tensor,
+        condition_present: Tensor,
         *,
         argmax: bool,
         uniforms: Tensor | None = None,
@@ -1416,6 +1818,8 @@ class CausalTemporalDecoder(nn.Module):
             hidden,
             observed,
             offsets,
+            return_value,
+            condition_present,
             argmax=argmax,
             uniforms=uniforms,
             gen=gen,
@@ -1430,6 +1834,8 @@ class CausalTemporalDecoder(nn.Module):
         hidden: Tensor,
         observed: Tensor,
         offsets: tuple[int, ...],
+        return_value: Tensor,
+        condition_present: Tensor,
         *,
         argmax: bool,
         uniforms: Tensor | None,
@@ -1459,10 +1865,11 @@ class CausalTemporalDecoder(nn.Module):
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         history = self._live_history(hidden, ctx_pad)
+        conditioning = self.return_conditioner(return_value, condition_present)
         frames: list[Tensor] = []
         captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
         for depth, offset in enumerate(offsets):
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history)
+            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
@@ -1496,7 +1903,13 @@ class CausalTemporalDecoder(nn.Module):
         return torch.stack(frames, dim=1), logits_by_group
 
     def rollout_conditioned_logits(
-        self, hidden: Tensor, observed: Tensor, *, ctx_pad: Tensor | None = None
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+        *,
+        ctx_pad: Tensor | None = None,
     ) -> tuple[list[dict[str, Tensor]], Tensor]:
         """Offline ancestral diagnostic across every selected offset.
 
@@ -1511,10 +1924,11 @@ class CausalTemporalDecoder(nn.Module):
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         history = self._live_history(hidden, ctx_pad)
+        conditioning = self.return_conditioner(return_value, condition_present)
         frames: list[Tensor] = []
         all_logits: list[dict[str, Tensor]] = []
         for offset in self.head_offsets:
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history)
+            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             frame_logits: dict[str, Tensor] = {}
@@ -1595,6 +2009,9 @@ class GPT(nn.Module):
         # Closed-loop inference never reads it.
         self.value_head = SwiGLU(cfg.arch.d_model, cfg.arch.value_hidden_dim, 1, output_bias=True)
         initialize_o51_parameters(self, cfg)
+        with torch.random.fork_rng(devices=[]):
+            self.temporal.return_conditioner = ReturnConditioner(cfg)
+        self.return_calibration = ReturnCalibration()
 
     def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
         ref = features[f"{prefix}_position_x"]
@@ -1683,7 +2100,7 @@ class IdentityMasker:
         self.total = 0
         self.masked = 0
 
-    def __call__(self, batch: AWRBatch) -> AWRBatch:
+    def __call__(self, batch: ReturnBatch) -> ReturnBatch:
         features = dict(batch.context.features)
         player_id = features["ego_player_id"]
         drop = torch.rand(player_id.shape[0], generator=self.generator) < self.probability
@@ -1697,7 +2114,7 @@ class IdentityMasker:
             target=batch.target,
             replay_ids=batch.batch.replay_ids,
         )
-        return AWRBatch(train_batch, batch.returns, batch.eligible)
+        return replace(batch, batch=train_batch)
 
     def state_dict(self) -> dict[str, object]:
         return {
@@ -1723,6 +2140,42 @@ class IdentityMasker:
             "data/id_dropout_fraction": self.forced / denominator,
             "data/id_masked_fraction": self.masked / denominator,
         }
+
+
+class ReturnMasker:
+    """Checkpointable per-position dropout, independent of prefix selection."""
+
+    def __init__(self, seed: int, probability: float, *, enabled: bool = True) -> None:
+        if not 0 <= probability <= 1 or not isinstance(enabled, bool):
+            raise ValueError("invalid return dropout configuration")
+        self.probability = probability
+        self.enabled = enabled
+        self.generator = torch.Generator(device="cpu").manual_seed(seed)
+
+    def __call__(self, batch: ReturnBatch) -> ReturnBatch:
+        keep = torch.rand(batch.available.shape, generator=self.generator) >= self.probability
+        return replace(batch, condition_present=batch.available & keep & self.enabled)
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "probability": self.probability,
+            "enabled": self.enabled,
+            "generator": self.generator.get_state(),
+        }
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        if (
+            set(state) != {"version", "probability", "enabled", "generator"}
+            or state["version"] != 1
+            or state["probability"] != self.probability
+            or state["enabled"] != self.enabled
+        ):
+            raise ValueError("incompatible return masker state")
+        generator = state["generator"]
+        if not isinstance(generator, Tensor):
+            raise TypeError("return masker RNG state must be a tensor")
+        self.generator.set_state(generator.cpu())
 
 
 class PrefixSampler:
@@ -1759,11 +2212,12 @@ class PrefixSampler:
 
 @jaxtyped(typechecker=beartype)
 def prepared_targets(
-    model: GPT, batch: TrainBatch | AWRBatch
+    model: GPT, batch: TrainBatch | ReturnBatch
 ) -> tuple[
     Int[Tensor, "B L_ctx n_groups"],
     Int[Tensor, "B L_ctx n_offsets n_groups"],
     Bool[Tensor, "B L_ctx"],
+    Int[Tensor, "B full_context n_groups"],
 ]:
     """Quantize history+future exactly once, then align every selected offset."""
     history = stack_actions(batch.context.features)
@@ -1772,7 +2226,7 @@ def prepared_targets(
     targets = torch.stack([full[:, offset : offset + length] for offset in model.head_offsets], dim=2)
     valid = torch.arange(length, device=full.device)[None, :] >= batch.context.ctx_pad[:, None]
     suffix = slice(length // 2, None)
-    return full[:, :length][:, suffix], targets[:, suffix], valid[:, suffix]
+    return full[:, :length][:, suffix], targets[:, suffix], valid[:, suffix], full[:, :length]
 
 
 class DeviceBatchPrefetcher:
@@ -1780,46 +2234,52 @@ class DeviceBatchPrefetcher:
 
     def __init__(
         self,
-        loader: Iterable[AWRBatch],
+        loader: Iterable[ReturnBatch],
         cfg: TrainConfig,
         device: str | torch.device,
         identity_masker: IdentityMasker | None = None,
         *,
-        iterator: Iterator[AWRBatch] | None = None,
-        first_batch_future: Future[AWRBatch] | None = None,
+        return_masker: ReturnMasker | None = None,
+        calibration: ReturnCalibration | None = None,
+        iterator: Iterator[ReturnBatch] | None = None,
+        first_batch_future: Future[ReturnBatch] | None = None,
     ) -> None:
         self._loader = loader
         self._iterator = iter(loader) if iterator is None else iterator
         self._cfg = cfg
         self._device = torch.device(device)
         self._identity_masker = identity_masker
+        self._return_masker = return_masker
+        self._calibration = calibration
         self._copy_stream = torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
-        self._staged: tuple[AWRBatch, AWRBatch, int] | None = None
+        self._staged: tuple[ReturnBatch, ReturnBatch, int] | None = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-batch-prefetch")
-        self._futures: deque[Future[AWRBatch]] = deque()
+        self._futures: deque[Future[ReturnBatch]] = deque()
         if first_batch_future is None:
             self.fill_lookahead(1)
         else:
             self._futures.append(first_batch_future)
         self.stage_next()
 
-    def _load_cpu_batch(self) -> AWRBatch:
+    def _load_cpu_batch(self) -> ReturnBatch:
         try:
             return next(self._iterator)
         except StopIteration:
             self._iterator = iter(self._loader)
             return next(self._iterator)
 
-    def _prepare_cpu_batch(self, cpu_batch: AWRBatch) -> AWRBatch:
+    def _prepare_cpu_batch(self, cpu_batch: ReturnBatch) -> ReturnBatch:
         """Apply the parent-side transforms to an already-fetched batch."""
-        if not isinstance(cpu_batch, AWRBatch):
-            raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected AWRBatch")
+        if not isinstance(cpu_batch, ReturnBatch):
+            raise TypeError(f"advantage loader yielded {type(cpu_batch).__name__}, expected ReturnBatch")
         if self._identity_masker is not None:
             cpu_batch = self._identity_masker(cpu_batch)
+        if self._return_masker is not None:
+            cpu_batch = self._return_masker(cpu_batch)
         validate_batch_geometry(cpu_batch, self._cfg, self._cfg.batch_size)
         return cpu_batch
 
-    def _stage(self, cpu_batch: AWRBatch) -> None:
+    def _stage(self, cpu_batch: ReturnBatch) -> None:
         start = self._cfg.arch.direct_loss_start
         if bool((cpu_batch.context.ctx_pad > start).any()):
             raise ValueError("O59 requires all 128 suffix positions for dense value and AWR normalization")
@@ -1855,7 +2315,7 @@ class DeviceBatchPrefetcher:
         self._stage(cpu_batch)
         return time.monotonic() - started
 
-    def next(self) -> tuple[AWRBatch, int]:
+    def next(self) -> tuple[ReturnBatch, int]:
         """Wait only for the uncovered tail of the staged transfer."""
         if self._staged is None:
             raise RuntimeError("preload a batch before consuming it")
@@ -1865,6 +2325,8 @@ class DeviceBatchPrefetcher:
             compute_stream.wait_stream(self._copy_stream)
             device_batch.record_stream(compute_stream)
         self._staged = None
+        if self._calibration is not None:
+            self._calibration.observe(cpu_batch)
         del cpu_batch
         return device_batch, valid_prefixes
 
@@ -1923,16 +2385,21 @@ class _UpdateTimer:
         return mean, p95
 
 
-def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> AWRBatch:
+def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> ReturnBatch:
     """Attach ``G_{t+1}`` and its validity mask to each context position."""
     next_frames = slice(1, L_ctx + 1)
     calibration = AWRCalibration()
     returns = np.stack([window[calibration.ego_return_column] for window in windows])[:, next_frames]
     eligible = np.stack([window[calibration.ego_return_valid_column] for window in windows])[:, next_frames]
-    return AWRBatch(
+    return ReturnBatch(
         batch=batch,
         returns=torch.from_numpy(np.ascontiguousarray(returns)),
         eligible=torch.from_numpy(np.ascontiguousarray(eligible)).bool(),
+        future_return=torch.from_numpy(np.stack([window["ego_return60"][:L_ctx] for window in windows])),
+        available=torch.from_numpy(np.stack([window["ego_return60_valid"][:L_ctx] for window in windows])).bool(),
+        condition_present=torch.from_numpy(
+            np.stack([window["ego_return60_valid"][:L_ctx] for window in windows])
+        ).bool(),
     )
 
 
@@ -2116,7 +2583,7 @@ def value_with_activation_diagnostics(head: SwiGLU, inputs: Tensor) -> tuple[Ten
 
 def microbatch_loss(
     model: GPT,
-    batch: AWRBatch,
+    batch: ReturnBatch,
     cfg: TrainConfig,
     *,
     step: int,
@@ -2131,13 +2598,15 @@ def microbatch_loss(
     Weighting stays outside the compiled policy functions, so crossing the
     warmup boundary does not trigger recompilation. Logged NLLs are unweighted.
     """
-    if not isinstance(batch, AWRBatch):
-        raise TypeError(f"advantage training needs an AWRBatch, got {type(batch).__name__}")
-    dense_history, dense_targets, dense_valid = prepared_targets(model, batch)
+    if not isinstance(batch, ReturnBatch):
+        raise TypeError(f"advantage training needs an ReturnBatch, got {type(batch).__name__}")
+    dense_history, dense_targets, dense_valid, context_actions = prepared_targets(model, batch)
     if phase_timer is not None:
         phase_timer.record("target_prep_end")
     with amp_context(cfg, DEVICE):
-        hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, None)
+        hidden = trunk_fn(
+            batch.context.features, batch.context.ctx_pad, context_actions if cfg.reuse_quantized_history else None
+        )
         if phase_timer is not None:
             phase_timer.record("trunk_end")
         suffix_start = cfg.arch.direct_loss_start
@@ -2152,6 +2621,8 @@ def microbatch_loss(
             prefix_positions,
             history,
             targets,
+            batch.future_return[batch_indices, prefix_positions],
+            batch.condition_present[batch_indices, prefix_positions],
         )
         if isinstance(temporal_output, Tensor):
             dense_nll = temporal_output
@@ -2282,7 +2753,7 @@ def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) ->
 
 
 @torch.no_grad()
-def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict[str, float]:
+def val_metrics(model: GPT, batches: list[ReturnBatch], cfg: TrainConfig) -> dict[str, float]:
     """Score teacher-forced and rollout policies on the same final-prefix rows."""
     was_training = model.training
     model.eval()
@@ -2302,14 +2773,24 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
     try:
         for cpu_batch in batches:
             batch = cpu_batch.to(device)
-            history, targets, valid = prepared_targets(model, batch)
+            history, targets, valid, context_actions = prepared_targets(model, batch)
             with amp_context(cfg, device):
-                hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, None)
+                hidden = model.forward_dense(
+                    batch.context.features,
+                    batch.context.ctx_pad,
+                    context_actions if cfg.reuse_quantized_history else None,
+                )
                 prefix_positions = torch.arange(cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=device).expand(
                     hidden.shape[0], -1
                 )
                 logits = model.temporal.teacher_forced_logits_by_group(
-                    hidden, batch.context.ctx_pad, prefix_positions, history, targets
+                    hidden,
+                    batch.context.ctx_pad,
+                    prefix_positions,
+                    history,
+                    targets,
+                    batch.future_return[:, cfg.arch.direct_loss_start :],
+                    batch.available[:, cfg.arch.direct_loss_start :],
                 )
                 dense_nll = model.temporal.nll_from_logits(logits, targets)
             row_valid = batch.context.ctx_pad < cfg.arch.L_ctx
@@ -2332,7 +2813,11 @@ def val_metrics(model: GPT, batches: list[TrainBatch], cfg: TrainConfig) -> dict
             last_observed = history[:, -1][row_valid]
             with amp_context(cfg, device):
                 rollout_logits, sampled_all = model.temporal.rollout_conditioned_logits(
-                    hidden[row_valid], last_observed, ctx_pad=batch.context.ctx_pad[row_valid]
+                    hidden[row_valid],
+                    last_observed,
+                    batch.future_return[row_valid, -1],
+                    batch.available[row_valid, -1],
+                    ctx_pad=batch.context.ctx_pad[row_valid],
                 )
             sampled = sampled_all[:, :6]
             target_rows.append(target_last.cpu())
@@ -2491,6 +2976,36 @@ def _train_batch_sha256(batch: TrainBatch) -> str:
     return digest.hexdigest()
 
 
+RETURN_BATCH_FIELDS = ("returns", "eligible", "future_return", "available", "condition_present")
+
+
+def _return_batch_state(batch: ReturnBatch) -> dict[str, object]:
+    return {
+        "batch": _train_batch_state(batch.batch),
+        **{name: getattr(batch, name).detach().cpu().contiguous() for name in RETURN_BATCH_FIELDS},
+    }
+
+
+def _return_batch_from_state(state: Mapping[str, object]) -> ReturnBatch:
+    if set(state) != {"batch", *RETURN_BATCH_FIELDS} or not isinstance(state["batch"], dict):
+        raise ValueError("incompatible return batch fields")
+    tensors = [state[name] for name in RETURN_BATCH_FIELDS]
+    if not all(isinstance(value, Tensor) for value in tensors):
+        raise TypeError("return batch labels and masks must be tensors")
+    return ReturnBatch(_train_batch_from_state(cast(dict[str, object], state["batch"])), *cast(list[Tensor], tensors))
+
+
+def _return_batch_sha256(batch: ReturnBatch) -> str:
+    digest = hashlib.sha256(_train_batch_sha256(batch.batch).encode())
+    for name in RETURN_BATCH_FIELDS:
+        tensor = getattr(batch, name).detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(tensor.dtype).encode())
+        digest.update(json.dumps(tuple(tensor.shape)).encode())
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
 @contextlib.contextmanager
 def _capture_linear_outputs(modules: Iterable[nn.Linear]) -> Iterator[list[Tensor]]:
     outputs: list[Tensor] = []
@@ -2534,7 +3049,7 @@ def _normalized_attention_entropy(qkv: Tensor, n_heads: int, mask: Tensor, rotar
 @torch.no_grad()
 def fixed_policy_diagnostics(
     model: GPT,
-    batch: TrainBatch,
+    batch: ReturnBatch,
     cfg: TrainConfig,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor], Tensor]:
     """Return fixed-batch log probabilities and stability diagnostics."""
@@ -2551,14 +3066,24 @@ def fixed_policy_diagnostics(
             _capture_linear_outputs(trunk_modules) as trunk_qkv,
             _capture_linear_outputs(temporal_modules) as temporal_qkv,
         ):
-            history, targets, valid = prepared_targets(model, device_batch)
+            history, targets, valid, context_actions = prepared_targets(model, device_batch)
             with amp_context(cfg, device_batch.target.device):
-                hidden = model.forward_dense(device_batch.context.features, device_batch.context.ctx_pad)
+                hidden = model.forward_dense(
+                    device_batch.context.features,
+                    device_batch.context.ctx_pad,
+                    context_actions if cfg.reuse_quantized_history else None,
+                )
                 prefix_positions = torch.arange(
                     cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=hidden.device
                 ).expand(hidden.shape[0], -1)
                 logits = model.temporal.teacher_forced_logits_by_group(
-                    hidden, device_batch.context.ctx_pad, prefix_positions, history, targets
+                    hidden,
+                    device_batch.context.ctx_pad,
+                    prefix_positions,
+                    history,
+                    targets,
+                    device_batch.future_return[:, cfg.arch.direct_loss_start :],
+                    device_batch.available[:, cfg.arch.direct_loss_start :],
                 )
     finally:
         model.train(was_training)
@@ -2646,7 +3171,7 @@ def _fixed_policy_kl(
 
 @dataclass(slots=True)
 class FixedDiagnosticTracker:
-    batch: TrainBatch
+    batch: ReturnBatch
     batch_sha256: str
     baseline_log_probabilities: dict[str, Tensor]
     previous_log_probabilities: dict[str, Tensor]
@@ -2656,20 +3181,20 @@ class FixedDiagnosticTracker:
     def create(
         cls,
         model: GPT,
-        validation: list[TrainBatch],
+        validation: list[ReturnBatch],
         cfg: TrainConfig,
         update: int,
     ) -> tuple[FixedDiagnosticTracker, dict[str, Tensor]]:
         if not validation or validation[0].context.batch < 8:
             raise RuntimeError("validation does not contain the eight-row fixed diagnostic batch")
-        batch = _slice_train_batch(validation[0], 8)
+        batch = validation[0].slice(8).to("cpu")
         if bool((batch.context.ctx_pad != 0).any()):
             raise RuntimeError("the fixed diagnostic batch must have complete contexts")
         log_probabilities, metrics, valid = fixed_policy_diagnostics(model, batch, cfg)
         metrics.update(_fixed_policy_kl(log_probabilities, log_probabilities, valid, "from_parent"))
         metrics.update(_fixed_policy_kl(log_probabilities, log_probabilities, valid, "from_previous"))
         return (
-            cls(batch, _train_batch_sha256(batch), log_probabilities, log_probabilities, update),
+            cls(batch, _return_batch_sha256(batch), log_probabilities, log_probabilities, update),
             metrics,
         )
 
@@ -2687,9 +3212,9 @@ class FixedDiagnosticTracker:
         batch_state = state["batch"]
         if not isinstance(batch_state, dict):
             raise TypeError("fixed diagnostic batch state must be a mapping")
-        batch = _train_batch_from_state(cast(dict[str, object], batch_state))
+        batch = _return_batch_from_state(cast(dict[str, object], batch_state))
         batch_sha256 = state["batch_sha256"]
-        if not isinstance(batch_sha256, str) or batch_sha256 != _train_batch_sha256(batch):
+        if not isinstance(batch_sha256, str) or batch_sha256 != _return_batch_sha256(batch):
             raise ValueError("fixed diagnostic batch hash does not match its tensors")
         baseline = state["baseline_log_probabilities"]
         previous = state["previous_log_probabilities"]
@@ -2712,7 +3237,7 @@ class FixedDiagnosticTracker:
 
     def state_dict(self) -> dict[str, object]:
         return {
-            "batch": _train_batch_state(self.batch),
+            "batch": _return_batch_state(self.batch),
             "batch_sha256": self.batch_sha256,
             "baseline_log_probabilities": self.baseline_log_probabilities,
             "previous_log_probabilities": self.previous_log_probabilities,
@@ -2814,6 +3339,8 @@ class _PreparedDecode:
     observed: Tensor
     uniforms: Tensor
     forced_prefix: Tensor
+    return_value: Tensor
+    condition_present: Tensor
 
 
 class BF16Inference:
@@ -2834,7 +3361,11 @@ class BF16Inference:
         compile_mode: str = "default",
         compiled_buckets: tuple[int, ...] | None = None,
         temperature: float = 1.0,
+        desired_return: float | None = None,
     ) -> None:
+        if desired_return is not None and (not math.isfinite(desired_return) or not cfg.return_conditioning):
+            raise ValueError("desired return requires finite input and enabled conditioning")
+        self.desired_return = desired_return
         self.model = model
         self.cfg = cfg
         if bucket is not None and compiled_buckets is not None:
@@ -2889,11 +3420,21 @@ class BF16Inference:
         if key not in self._decoders:
             offsets = self.model.head_offsets[:horizon]
 
-            def fn(hidden, ctx_pad, observed, uniforms, forced_prefix):
+            def fn(
+                hidden: Tensor,
+                ctx_pad: Tensor,
+                observed: Tensor,
+                uniforms: Tensor,
+                forced_prefix: Tensor,
+                return_value: Tensor,
+                condition_present: Tensor,
+            ):
                 return self.model.temporal.sample_indices(
                     hidden,
                     observed,
                     offsets,
+                    return_value,
+                    condition_present,
                     argmax=False,
                     uniforms=uniforms,
                     temperature=self.temperature,
@@ -2909,11 +3450,21 @@ class BF16Inference:
         if key not in self._trace_decoders:
             offsets = self.model.head_offsets[:horizon]
 
-            def fn(hidden, ctx_pad, observed, uniforms, forced_prefix):
+            def fn(
+                hidden: Tensor,
+                ctx_pad: Tensor,
+                observed: Tensor,
+                uniforms: Tensor,
+                forced_prefix: Tensor,
+                return_value: Tensor,
+                condition_present: Tensor,
+            ):
                 return self.model.temporal.sample_indices_with_logits(
                     hidden,
                     observed,
                     offsets,
+                    return_value,
+                    condition_present,
                     argmax=False,
                     uniforms=uniforms,
                     temperature=self.temperature,
@@ -2978,7 +3529,21 @@ class BF16Inference:
             else:
                 padded_committed = F.pad(committed, (0, 0, 0, 0, 0, bucket - rows))
                 forced_prefix = self.model.codec.quantize(padded_committed)
-        return _PreparedDecode(rows, bucket, padded.ctx_pad, hidden, observed[:, -1], uniforms, forced_prefix)
+        return_value = torch.full(
+            (bucket,), 0.0 if self.desired_return is None else self.desired_return, device=hidden.device
+        )
+        condition_present = (torch.arange(bucket, device=hidden.device) < rows) & (self.desired_return is not None)
+        return _PreparedDecode(
+            rows,
+            bucket,
+            padded.ctx_pad,
+            hidden,
+            observed[:, -1],
+            uniforms,
+            forced_prefix,
+            return_value,
+            condition_present,
+        )
 
     @torch.no_grad()
     def prewarm(self, rows: int, horizon: int, *, committed_frames: int) -> float:
@@ -3024,6 +3589,8 @@ class BF16Inference:
                     prepared.hidden,
                     prepared.observed,
                     self.model.head_offsets[:horizon],
+                    prepared.return_value,
+                    prepared.condition_present,
                     argmax=True,
                     temperature=self.temperature,
                     ctx_pad=prepared.ctx_pad,
@@ -3031,7 +3598,13 @@ class BF16Inference:
                 )
             else:
                 indices = self._decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
-                    prepared.hidden, prepared.ctx_pad, prepared.observed, prepared.uniforms, prepared.forced_prefix
+                    prepared.hidden,
+                    prepared.ctx_pad,
+                    prepared.observed,
+                    prepared.uniforms,
+                    prepared.forced_prefix,
+                    prepared.return_value,
+                    prepared.condition_present,
                 )
         return self.model.codec.dequantize(indices[: prepared.rows])
 
@@ -3048,7 +3621,13 @@ class BF16Inference:
         prepared = self._prepare_decode(ctx, horizon, streams=streams, gen=None, committed=committed)
         with amp_context(self.cfg, ctx.ctx_pad.device):
             indices, logits = self._trace_decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
-                prepared.hidden, prepared.ctx_pad, prepared.observed, prepared.uniforms, prepared.forced_prefix
+                prepared.hidden,
+                prepared.ctx_pad,
+                prepared.observed,
+                prepared.uniforms,
+                prepared.forced_prefix,
+                prepared.return_value,
+                prepared.condition_present,
             )
         real_indices = indices[: prepared.rows]
         return DecodedPlan(
@@ -3183,7 +3762,7 @@ class EvalProtocol:
     replan_interval_frames: int
     transport_semantics: Literal["conditioned_pending_actions_v1"]
     pending_prefix_conditioned: Literal[True]
-    evaluation_protocol_version: Literal[2]
+    evaluation_protocol_version: Literal[3]
     forced_prefix_consumes_sampling_draws: Literal[False]
     dtype: str
     inference_mode: str
@@ -3191,6 +3770,9 @@ class EvalProtocol:
     inference_attention_backend: str
     compiled_inference_bucket: int
     checkpoint_sha256: str
+    return_target: Literal["p90", "unconditioned"]
+    desired_return: float | None
+    return_calibration_sha256: str | None
     bootstrap_resamples: int = BOOTSTRAP_RESAMPLES
     start_retries: int = DEFAULT_START_RETRIES
 
@@ -3233,6 +3815,8 @@ def _eval_protocol(
     ego_player_code: str | None = None,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
+    desired_return: float | None = None,
+    return_calibration_sha256: str | None = None,
 ) -> EvalProtocol:
     if fixed_ego_character is None:
         pairs, egos, cpus, schedule_sha = assert_protocol_diversity(n_matchups)
@@ -3264,7 +3848,7 @@ def _eval_protocol(
         replan_interval_frames=replan,
         transport_semantics="conditioned_pending_actions_v1",
         pending_prefix_conditioned=True,
-        evaluation_protocol_version=2,
+        evaluation_protocol_version=3,
         forced_prefix_consumes_sampling_draws=False,
         dtype=str(next(model.parameters()).dtype),
         inference_mode=cfg.inference_mode if inference_mode is None else inference_mode,
@@ -3272,7 +3856,23 @@ def _eval_protocol(
         inference_attention_backend=inference_attention_backend,
         compiled_inference_bucket=_eval_inference_bucket(cfg, n_matchups, max_parallel),
         checkpoint_sha256=checkpoint_sha256,
+        return_target="unconditioned" if desired_return is None else "p90",
+        desired_return=desired_return,
+        return_calibration_sha256=return_calibration_sha256,
     )
+
+
+def _validate_eval_directory(replay_dir: Path, protocol: EvalProtocol) -> None:
+    path = replay_dir / "match_rows.json"
+    if not path.exists():
+        return
+    previous = json.loads(path.read_text())
+    if (
+        not isinstance(previous, dict)
+        or previous.get("schema_version") != 7
+        or previous.get("protocol") != asdict(protocol)
+    ):
+        raise ValueError("evaluation directory contains evidence from a different protocol")
 
 
 def _write_eval_evidence(
@@ -3280,7 +3880,7 @@ def _write_eval_evidence(
 ) -> None:
     replay_dir.mkdir(parents=True, exist_ok=True)
     rows_payload = {
-        "schema_version": 6,
+        "schema_version": 7,
         "protocol": asdict(protocol),
         "rows": [row.as_dict() for row in rows],
     }
@@ -3309,6 +3909,8 @@ def eval_vs_cpu(
     ego_player_code: str | None = None,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
+    desired_return: float | None = None,
+    return_calibration_sha256: str | None = None,
 ) -> dict[str, float]:
     horizon = cfg.prediction_frames
     inference_mode = "eager" if eager else cfg.inference_mode
@@ -3318,10 +3920,13 @@ def eval_vs_cpu(
             cfg,
             bucket=_eval_inference_bucket(cfg, n_matchups, max_parallel),
             compiled=inference_mode == "compiled",
+            desired_return=desired_return,
         )
         if inference is None
         else inference
     )
+    if inference.desired_return != desired_return:
+        raise ValueError("inference desired return differs from evaluation protocol")
     if inference.model is not model:
         raise ValueError("the supplied inference engine must own the evaluation model")
     protocol = _eval_protocol(
@@ -3338,7 +3943,10 @@ def eval_vs_cpu(
         ego_player_code=ego_player_code,
         delay_frames=delay_frames,
         replan_interval_frames=replan_interval_frames,
+        desired_return=desired_return,
+        return_calibration_sha256=return_calibration_sha256,
     )
+    _validate_eval_directory(replay_dir, protocol)
     if next(model.parameters()).device.type == "cuda" and (
         protocol.inference_mode != "compiled" or not inference.compiled
     ):
@@ -3607,7 +4215,7 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
             roles[name] = OptimizerRole(cfg.optimizer, "hidden", True, logical_splits=2)
         elif name.startswith(embedding_prefixes):
             roles[name] = OptimizerRole("adamw", "input", False)
-        elif name.startswith(finite_prefixes):
+        elif name.startswith((*finite_prefixes, "temporal.return_conditioner.")):
             roles[name] = OptimizerRole("adamw", "input" if parameter.ndim >= 2 else "vector", parameter.ndim >= 2)
         elif name == "temporal.token_projection.bias":
             roles[name] = OptimizerRole("adamw", "vector", False)
@@ -3699,8 +4307,11 @@ def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
     trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
     head_ids = {id(parameter) for parameter in model.temporal.outputs.parameters()}
     trunk_skip_ids = {id(parameter) for parameter in model.temporal.trunk_outputs.parameters()}
+    conditioner_ids = {id(parameter) for parameter in model.temporal.return_conditioner.parameters()}
     temporal_ids = {
-        id(parameter) for parameter in model.temporal.parameters() if id(parameter) not in head_ids | trunk_skip_ids
+        id(parameter)
+        for parameter in model.temporal.parameters()
+        if id(parameter) not in head_ids | trunk_skip_ids | conditioner_ids
     }
     value_ids = {id(parameter) for parameter in model.value_head.parameters()}
     other_ids = (
@@ -3710,6 +4321,7 @@ def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
         - head_ids
         - trunk_skip_ids
         - value_ids
+        - conditioner_ids
     )
     partition_ids = {
         "trunk": trunk_ids,
@@ -3717,6 +4329,7 @@ def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
         "group_heads": head_ids,
         "trunk_skip_heads": trunk_skip_ids,
         "value_head": value_ids,
+        "return_conditioner": conditioner_ids,
         "other": other_ids,
     }
     partitions = {
@@ -4090,21 +4703,18 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
     parameter_uses = (
         full * trunk_and_inputs
         + suffix * parameter_counts["value_head"]
-        + policy_prefixes * parameter_counts["trunk_skip_heads"]
+        + policy_prefixes * (parameter_counts["trunk_skip_heads"] + parameter_counts["return_conditioner"])
         + policy_prefixes * len(cfg.arch.head_offsets) * temporal_and_heads
     )
     return 6 * cfg.batch_size * parameter_uses
 
 
 def model_tag(cfg: TrainConfig) -> str:
-    offsets = "-".join(map(str, cfg.arch.head_offsets))
-    treatment = f"awr-v-near-b{cfg.awr.beta:g}-g{cfg.awr.gamma:g}-wu{cfg.warmup_steps}"
-    optimizer = "" if cfg.optimizer == "muon" else f"all-adamw-alr{cfg.adam_lr:g}-"
     return (
-        f"o59-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
+        f"o59v4-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
-        f"o{offsets}-d2r2-dual-nonlinear-head-projectiles-v8-o51-parameterized-{optimizer}"
-        f"mwd{cfg.muon_weight_decay:g}-awd{cfg.adam_weight_decay:g}-wsd-{treatment}"
+        f"dual-nonlinear-head-rc{int(cfg.return_conditioning)}e{cfg.arch.return_embed_dim}-drop{cfg.return_dropout:g}-"
+        f"{cfg.optimizer}-wsd-b{cfg.awr.beta:g}-wmax{cfg.awr.weight_max:g}-g{cfg.awr.gamma:g}"
     )
 
 
@@ -4145,8 +4755,21 @@ def source_mixture_weights(cfg: TrainConfig) -> tuple[float, ...]:
 
 
 def validate_batch_geometry(
-    batch: TrainBatch | AWRBatch, cfg: TrainConfig, expected_batch_size: int | None = None
+    batch: TrainBatch | ReturnBatch, cfg: TrainConfig, expected_batch_size: int | None = None
 ) -> None:
+    if isinstance(batch, ReturnBatch):
+        expected = (batch.target.shape[0], cfg.arch.L_ctx)
+        for name in RETURN_BATCH_FIELDS:
+            value = getattr(batch, name)
+            if value.shape != expected:
+                raise ValueError(f"{name} must have shape {expected}")
+        for name in ("eligible", "available", "condition_present"):
+            if getattr(batch, name).dtype != torch.bool:
+                raise ValueError(f"{name} must be boolean")
+        if bool((batch.condition_present & ~batch.available).any()):
+            raise ValueError("conditioning cannot be present for unavailable labels")
+        if not bool(torch.isfinite(batch.future_return[batch.available]).all()):
+            raise ValueError("available return labels must be finite")
     if batch.target.shape[1:] != (cfg.arch.sample_chunk_length, A_DIM):
         raise ValueError(
             f"target must be [B, {cfg.arch.sample_chunk_length}, {A_DIM}], got {tuple(batch.target.shape)}"
@@ -4165,25 +4788,18 @@ def validate_batch_geometry(
         raise ValueError(f"context features have the wrong geometry: {wrong}")
 
 
-def cache_validation(loader: Iterable[TrainBatch], n_samples: int) -> list[TrainBatch]:
+def cache_validation(loader: Iterable[ReturnBatch], n_samples: int) -> list[ReturnBatch]:
     print(f"[validation] caching {n_samples:,} samples", flush=True)
     started = time.monotonic()
     last_progress_log = started
-    batches: list[TrainBatch] = []
+    batches: list[ReturnBatch] = []
     count = 0
     for batch in loader:
         remaining = n_samples - count
         if remaining <= 0:
             break
         if batch.target.shape[0] > remaining:
-            batch = TrainBatch(
-                context=Context(
-                    features={name: value[:remaining] for name, value in batch.context.features.items()},
-                    ctx_pad=batch.context.ctx_pad[:remaining],
-                ),
-                target=batch.target[:remaining],
-                replay_ids=None if batch.replay_ids is None else batch.replay_ids[:remaining],
-            )
+            batch = batch.slice(remaining)
         batches.append(batch)
         count += batch.target.shape[0]
         now = time.monotonic()
@@ -4212,6 +4828,7 @@ def save_boundary_checkpoint(
     wandb_id: str | None,
     actual_loss_positions: int,
     loader_state: dict[str, object],
+    return_masker_state: dict[str, object],
     identity_masker_state: dict[str, object] | None = None,
     prefix_sampler_state: dict[str, object] | None = None,
     fixed_diagnostic_state: dict[str, object] | None = None,
@@ -4243,6 +4860,9 @@ def save_boundary_checkpoint(
                 else "decay"
             ),
             "rng": rng_state(),
+            "conditioning_protocol": conditioning_protocol(),
+            "return_masker": return_masker_state,
+            "return_calibration": model.return_calibration.state_dict(),
             "provenance": run_provenance(cfg),
             "loader": loader_state,
             "identity_masker": (
@@ -4365,7 +4985,7 @@ def _collate_o59_batch(
     context_length: int,
     return_column: str,
     return_valid_column: str,
-) -> AWRBatch:
+) -> ReturnBatch:
     batch = train_batch_from_columns(
         columns,
         stats=stats,
@@ -4377,14 +4997,17 @@ def _collate_o59_batch(
     next_frames = slice(1, context_length + 1)
     returns = columns[return_column][:, next_frames]
     eligible = columns[return_valid_column][:, next_frames]
-    return AWRBatch(
+    return ReturnBatch(
         batch,
         torch.from_numpy(np.ascontiguousarray(returns)),
         torch.from_numpy(np.ascontiguousarray(eligible)).bool(),
+        torch.from_numpy(np.ascontiguousarray(columns["ego_return60"][:, :context_length])),
+        torch.from_numpy(np.ascontiguousarray(columns["ego_return60_valid"][:, :context_length])).bool(),
+        torch.from_numpy(np.ascontiguousarray(columns["ego_return60_valid"][:, :context_length])).bool(),
     )
 
 
-def _require_loader_disk(loader: PhysicalShardReplayLoader[AWRBatch]) -> None:
+def _require_loader_disk(loader: PhysicalShardReplayLoader[ReturnBatch]) -> None:
     required = loader.required_disk_bytes
     available = loader.disk_free_bytes
     if available < required:
@@ -4398,7 +5021,7 @@ def _make_train_loader(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
     player_lookup: ReplayPlayerLookup,
-) -> PhysicalShardReplayLoader[AWRBatch]:
+) -> PhysicalShardReplayLoader[ReturnBatch]:
     selection = data_selection(cfg)
     adapter = MDSStorageAdapter(selection, download_retry=cfg.download_retry)
     adapter.validate_manifests(
@@ -4408,10 +5031,11 @@ def _make_train_loader(
         expected_rows=streams.POLICY_WORLD_V8_TRAIN_REPLAYS,
     )
     projection = FeatureProjection(
-        columns=ITEM_PLAYER_PROJECTION.columns | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column},
+        columns=ITEM_PLAYER_PROJECTION.columns
+        | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
         derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
     )
-    train_loader = PhysicalShardReplayLoader[AWRBatch](
+    train_loader = PhysicalShardReplayLoader[ReturnBatch](
         selection=selection,
         adapter=adapter,
         tasks=build_shard_plan(selection, adapter.manifests),
@@ -4429,13 +5053,15 @@ def _make_train_loader(
         replay_slots=cfg.replay_slots,
         seed=cfg.seed,
         num_workers=cfg.num_workers,
-        labels=returns_lib.PolicyReturnLabels(
-            player_lookup=player_lookup,
-            gamma=cfg.awr.gamma,
-            damage_shaping=cfg.awr.damage_shaping,
-            win_reward=cfg.awr.win_reward,
-            stock_value=cfg.awr.stock_value,
-            suffix=cfg.awr.return_suffix,
+        labels=ReturnLabels(
+            returns_lib.PolicyReturnLabels(
+                player_lookup=player_lookup,
+                gamma=cfg.awr.gamma,
+                damage_shaping=cfg.awr.damage_shaping,
+                win_reward=cfg.awr.win_reward,
+                stock_value=cfg.awr.stock_value,
+                suffix=cfg.awr.return_suffix,
+            )
         ),
         projection=projection,
         context_length=cfg.arch.L_ctx,
@@ -4463,7 +5089,7 @@ def _make_loaders(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
     player_lookup: ReplayPlayerLookup | None = None,
-) -> tuple[PhysicalShardReplayLoader[AWRBatch], list[TrainBatch]]:
+) -> tuple[PhysicalShardReplayLoader[ReturnBatch], list[ReturnBatch]]:
     """Build physical-shard training and the unchanged generic validation cohort."""
     if player_lookup is None:
         player_lookup = ReplayPlayerLookup(load_identity_sidecar(cfg).by_replay)
@@ -4484,9 +5110,23 @@ def _make_loaders(
             num_workers=0,
             schema_version=cfg.mds_schema_version,
             extra=ITEM_PLAYER_COLUMNS,
-            projection=ITEM_PLAYER_PROJECTION,
+            projection=FeatureProjection(
+                columns=ITEM_PLAYER_PROJECTION.columns
+                | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
+                derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
+            ),
+            batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx),
             replay_format="policy-world",
-            replay_labels=player_lookup,
+            replay_labels=ReturnLabels(
+                returns_lib.PolicyReturnLabels(
+                    player_lookup,
+                    cfg.awr.gamma,
+                    cfg.awr.damage_shaping,
+                    cfg.awr.win_reward,
+                    cfg.awr.stock_value,
+                    cfg.awr.return_suffix,
+                )
+            ),
             require_full_context=True,
             shuffle=True,
         )
@@ -4499,10 +5139,10 @@ def _make_loaders(
 
 @dataclass(slots=True)
 class PreparedTrainingData:
-    loader: PhysicalShardReplayLoader[AWRBatch]
-    validation: list[TrainBatch]
-    iterator: Iterator[AWRBatch]
-    first_batch_future: Future[AWRBatch]
+    loader: PhysicalShardReplayLoader[ReturnBatch]
+    validation: list[ReturnBatch]
+    iterator: Iterator[ReturnBatch]
+    first_batch_future: Future[ReturnBatch]
     resources: ExitStack
     worker_start_seconds: float
     first_batch_seconds: list[float]
@@ -4530,7 +5170,7 @@ def _prepare_training_data(
         raise
     first_batch_seconds: list[float] = []
 
-    def load_first_batch() -> AWRBatch:
+    def load_first_batch() -> ReturnBatch:
         started = time.monotonic()
         batch = next(train_iterator)
         first_batch_seconds.append(time.monotonic() - started)
@@ -4567,6 +5207,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "gpt",
             "temporal-mtp",
             "advantage-weighted-bc",
+            "return-conditioned",
             "scaled",
             "059",
             "architecture-stability",
@@ -4576,6 +5217,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
         ],
         config={
             **asdict(cfg),
+            "experiment_id": _EXPERIMENT_ID,
+            "checkpoint_format_version": _CHECKPOINT_FORMAT_VERSION,
+            "conditioning_protocol": conditioning_protocol(),
             "max_steps": cfg.max_steps,
             "warmup_steps": cfg.warmup_steps,
             "data_protocol": cfg.data_protocol,
@@ -4627,7 +5271,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
 def _log_training_summary(
     cfg: TrainConfig,
     parameter_counts: dict[str, int],
-    train_loader: PhysicalShardReplayLoader[AWRBatch],
+    train_loader: PhysicalShardReplayLoader[ReturnBatch],
     *,
     flops_per_update: int,
     device_name: str | None,
@@ -4671,7 +5315,8 @@ def _log_training_summary(
     wandb.run.summary["system/disk/reserved_bytes"] = cfg.reserved_disk_bytes
     wandb.run.summary["training/approx_flops_per_update"] = flops_per_update
     wandb.run.summary["training/flops_formula"] = (
-        "6*B*(L_ctx*(N_trunk+N_other)+128*N_value+32*N_trunk_skip_heads+32*n_offsets*(N_temporal+N_group_heads))"
+        "6*B*(L_ctx*(N_trunk+N_other)+128*N_value+32*(N_trunk_skip_heads+N_return_conditioner)"
+        "+32*n_offsets*(N_temporal+N_group_heads))"
     )
     input_lr = cfg.adam_lr * math.sqrt(scaling_multipliers(cfg)[0] / scaling_multipliers(cfg)[1])
     if cfg.optimizer == "muon":
@@ -4830,7 +5475,7 @@ class _TrainingMetricAccumulator:
 
 def train_step(
     model: GPT,
-    batch: AWRBatch,
+    batch: ReturnBatch,
     cfg: TrainConfig,
     *,
     step: int,
@@ -4927,6 +5572,8 @@ def spawn_closed_loop_evaluation(
     update: int,
     expected_checkpoint_sha256: str,
     n_matchups: int,
+    *,
+    return_target: Literal["p90", "unconditioned"] = "p90",
 ) -> str:
     """Ask the launcher to spawn its same-app L40S evaluator."""
     raw_fd = os.environ.get("HAL_MODAL_EVAL_FD")
@@ -4941,6 +5588,7 @@ def spawn_closed_loop_evaluation(
         "update": update,
         "expected_checkpoint_sha256": expected_checkpoint_sha256,
         "n_matchups": n_matchups,
+        "return_target": return_target,
     }
     payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
     while payload:
@@ -4976,13 +5624,14 @@ def _finalize_training(
     scheduler: LambdaLR,
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
-    val_cache: list[TrainBatch],
+    val_cache: list[ReturnBatch],
     run_dir: Path,
     replay_dir: Path,
     uploader: BackgroundUploader | None,
     loader_wait_fractions: list[float],
     loader_state: dict[str, object],
     identity_masker_state: dict[str, object],
+    return_masker_state: dict[str, object],
     prefix_sampler_state: dict[str, object],
     update: int,
     actual_loss_positions: int,
@@ -5003,6 +5652,7 @@ def _finalize_training(
         actual_loss_positions=actual_loss_positions,
         loader_state=loader_state,
         identity_masker_state=identity_masker_state,
+        return_masker_state=return_masker_state,
         prefix_sampler_state=prefix_sampler_state,
         fixed_diagnostic_state=None if fixed_diagnostics is None else fixed_diagnostics.state_dict(),
     )
@@ -5019,6 +5669,9 @@ def _finalize_training(
             raise RuntimeError("production evaluation requires R2 checkpoint upload")
         uploader.wait()
         spawn_closed_loop_evaluation(run_dir.name, update, checkpoint_sha, cfg.final_eval_n_matchups)
+        spawn_closed_loop_evaluation(
+            run_dir.name, update, checkpoint_sha, cfg.final_eval_n_matchups, return_target="unconditioned"
+        )
     wandb.log({"global_step": update, **final_metrics})
 
     mean_wait = float(np.mean(loader_wait_fractions)) if loader_wait_fractions else 0.0
@@ -5159,8 +5812,12 @@ def train(
     start_step = 0
     actual_positions = 0
     identity_masker = IdentityMasker(cfg.seed ^ 0x0501D, cfg.identity_dropout)
+    return_masker = ReturnMasker(cfg.seed ^ 0x059C0D, cfg.return_dropout, enabled=cfg.return_conditioning)
     prefix_sampler = PrefixSampler(cfg.seed ^ 0x059A11, DEVICE)
     if resume_state is not None:
+        validate_conditioning_state(resume_state, cfg)
+        return_masker.load_state_dict(resume_state["return_masker"])
+        model.return_calibration.load_state_dict(resume_state["return_calibration"])
         model.load_state_dict(resume_state["model"])
         optimizer.load_state_dict(resume_state["opt"])
         scheduler.load_state_dict(resume_state["sched"])
@@ -5220,6 +5877,8 @@ def train(
             cfg,
             DEVICE,
             identity_masker,
+            return_masker=return_masker,
+            calibration=model.return_calibration,
             iterator=prepared_data.iterator,
             first_batch_future=prepared_data.first_batch_future,
         )
@@ -5429,6 +6088,7 @@ def train(
                     actual_loss_positions=actual_positions,
                     loader_state=train_loader.state_dict(),
                     identity_masker_state=identity_masker.state_dict(),
+                    return_masker_state=return_masker.state_dict(),
                     prefix_sampler_state=prefix_sampler.state_dict(),
                     fixed_diagnostic_state=(None if fixed_diagnostics is None else fixed_diagnostics.state_dict()),
                 )
@@ -5468,6 +6128,7 @@ def train(
             loader_wait_fractions=loader_wait_fractions,
             loader_state=train_loader.state_dict(),
             identity_masker_state=identity_masker.state_dict(),
+            return_masker_state=return_masker.state_dict(),
             prefix_sampler_state=prefix_sampler.state_dict(),
             update=run_stop,
             actual_loss_positions=actual_positions,
@@ -5501,11 +6162,6 @@ def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
 
 def config_from_state(values: dict) -> TrainConfig:
     """Restore a checkpoint written by the current experiment definition."""
-    if values.get("checkpoint_format_version") == 1:
-        # Version 1 froze this execution choice in source rather than storing it.
-        if "train_compile_mode" in values:
-            raise ValueError("version 1 checkpoints cannot contain train_compile_mode")
-        values = {**values, "checkpoint_format_version": 2, "train_compile_mode": "reduce-overhead"}
     derived_fields = {"max_steps", "warmup_steps"}
     runtime_fields = {item.name for item in fields(TrainConfig)} - {"arch", "awr"}
     expected = {
@@ -5541,16 +6197,31 @@ def config_from_state(values: dict) -> TrainConfig:
     return cfg
 
 
+def validate_conditioning_state(state: Mapping[str, object], cfg: TrainConfig) -> None:
+    if state.get("conditioning_protocol") != conditioning_protocol():
+        raise ValueError("incompatible conditioning protocol")
+    calibration = state.get("return_calibration")
+    masker = state.get("return_masker")
+    if not isinstance(calibration, dict) or not isinstance(masker, dict):
+        raise ValueError("checkpoint lacks return calibration or masker state")
+    ReturnCalibration().load_state_dict(cast(dict[str, object], calibration))
+    ReturnMasker(0, cfg.return_dropout, enabled=cfg.return_conditioning).load_state_dict(
+        cast(Mapping[str, object], masker)
+    )
+
+
 def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(path, map_location=device, weights_only=False)
     cfg = config_from_state(state["cfg"])
     validate_config(cfg)
+    validate_conditioning_state(state, cfg)
     encoded = state["model"].get("player_code_bytes")
     if not isinstance(encoded, Tensor) or not encoded.numel():
         raise ValueError("checkpoint has no embedded identity vocabulary")
     vocabulary = PlayerVocabulary(decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
     model = GPT(cfg, vocabulary).to(device)
     model.load_state_dict(state["model"])
+    model.return_calibration.load_state_dict(state["return_calibration"])
     model.eval()
     stats = load_stats(cfg)
     return model, cfg, stats, state
@@ -5607,6 +6278,7 @@ def eval_checkpoint(
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
     wandb_namespace: str = "eval",
+    return_target: Literal["p90", "unconditioned"] = "p90",
 ) -> dict[str, float]:
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
@@ -5615,6 +6287,12 @@ def eval_checkpoint(
         )
     model, cfg, stats, state = load_checkpoint(path)
     validate_config(cfg)
+    if return_target not in ("p90", "unconditioned"):
+        raise ValueError("unknown return target")
+    desired_return = model.return_calibration.targets()[2] if return_target == "p90" else None
+    calibration_hash = cast(str, model.return_calibration.state_dict()["sha256"])
+    if return_target == "unconditioned" and (output_name is None or wandb_namespace == "eval"):
+        raise ValueError("unconditioned comparisons require a separate output directory and W&B namespace")
     if player_code is None:
         ego_player_id = MASKED_PLAYER_ID
         ego_player_code = None
@@ -5658,6 +6336,8 @@ def eval_checkpoint(
         ego_player_code=ego_player_code,
         delay_frames=delay,
         replan_interval_frames=replan,
+        desired_return=desired_return,
+        return_calibration_sha256=calibration_hash,
     )
     require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
     if upload_run is not None:
@@ -5693,37 +6373,40 @@ def _remote_run_exists(run_name: str) -> bool:
 @dataclass(frozen=True, slots=True)
 class BenchmarkArgs:
     output: Path = Path("results/o59-throughput")
-    batch_sizes: tuple[int, ...] = (512, 1024, 2048)
     bank_examples: int = 2048
-    budget_seconds: int = 6900
-    case: str | None = None
+    case: str = "baseline"
     batch_size: int = 512
     bank_sha256: str | None = None
+    existing_bank: Path | None = None
+    reference_state: Path | None = None
+    reference_sha256: str | None = None
 
 
 def validate_benchmark_args(args: BenchmarkArgs) -> None:
-    if not args.batch_sizes or args.batch_sizes != (512, 1024, 2048)[: len(args.batch_sizes)]:
-        raise ValueError("benchmark batches must be a prefix of (512, 1024, 2048)")
-    if args.batch_size not in (512, 1024, 2048):
-        raise ValueError("benchmark batch_size must be 512, 1024, or 2048")
-    if args.bank_examples < max(args.batch_sizes) or args.bank_examples % 2048:
-        raise ValueError("bank_examples must be a multiple of 2048 covering every batch")
-    if not 1 <= args.budget_seconds <= 6900:
-        raise ValueError("benchmark budget must be in [1, 6900] seconds")
+    if args.batch_size != 512:
+        raise ValueError("O59 execution comparisons require batch 512")
+    if args.bank_examples < 2048 or args.bank_examples % 2048:
+        raise ValueError("bank_examples must be a positive multiple of 2048")
+    if (args.reference_state is None) != (args.reference_sha256 is None):
+        raise ValueError("reference state requires its SHA-256")
+    if args.existing_bank is not None and args.bank_sha256 is None:
+        raise ValueError("existing bank requires its SHA-256")
     if args.case not in (
-        None,
         "baseline",
         "cpu-validation",
         "max-autotune",
         "compiled-muon",
         "no-diagnostics",
+        "reuse-history",
+        "reuse-embeddings",
+        "groupwise-loss",
         "combined",
     ):
         raise ValueError(f"unknown benchmark case {args.case!r}")
 
 
-def _benchmark_slice(bank: AWRBatch, start: int, stop: int) -> AWRBatch:
-    return AWRBatch(
+def _benchmark_slice(bank: ReturnBatch, start: int, stop: int) -> ReturnBatch:
+    return ReturnBatch(
         TrainBatch(
             Context(
                 {name: value[start:stop] for name, value in bank.context.features.items()},
@@ -5734,6 +6417,9 @@ def _benchmark_slice(bank: AWRBatch, start: int, stop: int) -> AWRBatch:
         ),
         bank.returns[start:stop],
         bank.eligible[start:stop],
+        bank.future_return[start:stop],
+        bank.available[start:stop],
+        bank.condition_present[start:stop],
     )
 
 
@@ -5744,16 +6430,19 @@ def _prepare_benchmark_bank(args: BenchmarkArgs, cfg: TrainConfig) -> None:
     source = "ranked-anonymized-6-policy-world-v8"
     selection = PhysicalShardSelection.from_sources((SourceRowSelection(source, args.bank_examples // 8),))
     projection = FeatureProjection(
-        columns=ITEM_PLAYER_PROJECTION.columns | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column},
+        columns=ITEM_PLAYER_PROJECTION.columns
+        | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
         derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
     )
-    labels = returns_lib.PolicyReturnLabels(
-        player_lookup=ReplayPlayerLookup(sidecar.by_replay),
-        gamma=cfg.awr.gamma,
-        damage_shaping=cfg.awr.damage_shaping,
-        win_reward=cfg.awr.win_reward,
-        stock_value=cfg.awr.stock_value,
-        suffix=cfg.awr.return_suffix,
+    labels = ReturnLabels(
+        returns_lib.PolicyReturnLabels(
+            player_lookup=ReplayPlayerLookup(sidecar.by_replay),
+            gamma=cfg.awr.gamma,
+            damage_shaping=cfg.awr.damage_shaping,
+            win_reward=cfg.awr.win_reward,
+            stock_value=cfg.awr.stock_value,
+            suffix=cfg.awr.return_suffix,
+        )
     )
     replay_ids: list[str] = []
     windows: list[dict[str, np.ndarray]] = []
@@ -5797,14 +6486,21 @@ def _prepare_benchmark_bank(args: BenchmarkArgs, cfg: TrainConfig) -> None:
     )
     # Freeze identity dropout in reference-sized batches before comparing transports.
     masker = IdentityMasker(cfg.seed ^ 0x0501D, cfg.identity_dropout)
-    masked = [masker(_benchmark_slice(bank, start, start + 512)) for start in range(0, args.bank_examples, 512)]
+    return_masker = ReturnMasker(cfg.seed ^ 0x059C0D, cfg.return_dropout, enabled=cfg.return_conditioning)
+    masked = [
+        return_masker(masker(_benchmark_slice(bank, start, start + 512)))
+        for start in range(0, args.bank_examples, 512)
+    ]
+    bank = replace(bank, condition_present=torch.cat([batch.condition_present for batch in masked]))
     bank.context.features["ego_player_id"] = torch.cat([batch.context.features["ego_player_id"] for batch in masked])
     torch.save(
         {
-            "format": "o59-benchmark-bank-v1",
-            "batch": _train_batch_state(bank.batch),
-            "returns": bank.returns,
-            "eligible": bank.eligible,
+            "format": "o59-benchmark-bank-v2",
+            "batch": _return_batch_state(bank),
+            "batch_sha256": _return_batch_sha256(bank),
+            "conditioning_protocol": conditioning_protocol(),
+            "identity_masker": masker.state_dict(),
+            "return_masker": return_masker.state_dict(),
             "locators": locators,
             "vocabulary": sidecar.vocabulary,
             "provenance": run_provenance(cfg),
@@ -5816,7 +6512,7 @@ def _prepare_benchmark_bank(args: BenchmarkArgs, cfg: TrainConfig) -> None:
     (args.output / "bank.json").write_text(
         json.dumps(
             {
-                "format": "o59-benchmark-bank-v1",
+                "format": "o59-benchmark-bank-v2",
                 "sha256": checkpoint_sha256(args.output / "bank.pt"),
                 "source": source,
                 "locators": locators,
@@ -5840,9 +6536,20 @@ def _benchmark_optimizer(model: GPT, cfg: TrainConfig, *, compiled_muon: bool) -
     return optimizer
 
 
-def _benchmark_state(model: GPT, result: TrainStepResult, sampler: PrefixSampler) -> dict[str, object]:
+def _benchmark_state(
+    model: GPT,
+    result: TrainStepResult,
+    sampler: PrefixSampler,
+    *,
+    initial: Mapping[str, Tensor] | None = None,
+    batch_sha256: str | None = None,
+) -> dict[str, object]:
+    parameters = {name: value.detach().cpu().clone() for name, value in model.named_parameters()}
     return {
-        "parameters": {name: value.detach().cpu().clone() for name, value in model.named_parameters()},
+        "parameters": parameters,
+        "updates": {name: value - initial[name].cpu() for name, value in parameters.items()}
+        if initial is not None
+        else {},
         "gradients": {
             name: value.grad.detach().cpu().clone()
             for name, value in model.named_parameters()
@@ -5850,28 +6557,81 @@ def _benchmark_state(model: GPT, result: TrainStepResult, sampler: PrefixSampler
         },
         "metrics": _download_scalar_metrics({**result.metrics, "gradient_norm": result.gradient_norm}, 1),
         "sampler": sampler.generator.get_state().cpu(),
+        "rng": rng_state(),
+        "batch_sha256": batch_sha256,
+        "conditioning": model.return_calibration.state_dict(),
     }
 
 
+def _require_exact_state(expected: object, actual: object, path: str) -> None:
+    if isinstance(expected, Tensor):
+        equal = isinstance(actual, Tensor) and torch.equal(expected.cpu(), actual.cpu())
+    elif isinstance(expected, np.ndarray):
+        equal = isinstance(actual, np.ndarray) and np.array_equal(expected, actual)
+    elif isinstance(expected, Mapping) and isinstance(actual, Mapping):
+        if expected.keys() != actual.keys():
+            raise AssertionError(f"execution treatment changed {path} fields")
+        for key in expected:
+            _require_exact_state(
+                cast(Mapping[object, object], expected)[key],
+                cast(Mapping[object, object], actual)[key],
+                f"{path}/{key}",
+            )
+        return
+    elif isinstance(expected, (tuple, list)) and isinstance(actual, type(expected)):
+        if len(expected) != len(actual):
+            raise AssertionError(f"execution treatment changed {path} length")
+        for index, (left, right) in enumerate(zip(expected, actual, strict=True)):
+            _require_exact_state(left, right, f"{path}/{index}")
+        return
+    else:
+        equal = expected == actual
+    if not equal:
+        raise AssertionError(f"execution treatment changed {path}")
+
+
+# Fixed before throughput measurements. BF16 execution changes may alter rounding,
+# but must preserve each gradient and update within these error bounds.
+BENCHMARK_TOLERANCES = {
+    "parameters": (2e-6, 2e-5),
+    "gradients": (2e-4, 0.01),
+    "updates": (2e-6, 0.02),
+}
+
+
 def _benchmark_difference(reference: dict, actual: dict) -> dict[str, float]:
-    if not torch.equal(reference["sampler"], actual["sampler"]):
-        raise AssertionError("execution treatment changed prefix RNG advancement")
-    differences = {}
-    for field in ("parameters", "gradients"):
+    for field in ("sampler", "rng", "batch_sha256", "conditioning"):
+        _require_exact_state(reference[field], actual[field], field)
+    differences: dict[str, float] = {}
+    for field, (atol, rtol) in BENCHMARK_TOLERANCES.items():
         if reference[field].keys() != actual[field].keys():
             raise AssertionError(f"execution treatment changed {field} membership")
         absolute = squared = norm = 0.0
         for name, expected in reference[field].items():
             observed = actual[field][name]
-            if not bool(torch.isfinite(observed).all()):
+            if not bool(torch.isfinite(observed).all()) or not bool(torch.isfinite(expected).all()):
                 raise FloatingPointError(f"non-finite {field}: {name}")
             delta = observed.float() - expected.float()
-            absolute = max(absolute, float(delta.abs().max()))
-            squared += float(delta.square().sum())
-            norm += float(expected.float().square().sum())
+            maximum = float(delta.abs().max())
+            error_l2 = float(delta.square().sum()) ** 0.5
+            expected_l2 = float(expected.float().square().sum()) ** 0.5
+            # Absolute tolerance applies elementwise; relative tolerance applies
+            # to each parameter's L2 norm, including zero-initialized projections.
+            if maximum > atol and error_l2 > rtol * expected_l2:
+                raise AssertionError(
+                    f"numerical acceptance failed for {field}/{name}: max_abs={maximum}, relative_l2={error_l2 / max(expected_l2, 1e-30)}"
+                )
+            differences[f"{field}/{name}/max_abs"] = maximum
+            differences[f"{field}/{name}/relative_l2"] = error_l2 / max(expected_l2, 1e-30)
+            absolute = max(absolute, maximum)
+            squared += error_l2**2
+            norm += expected_l2**2
         differences[f"{field}_max_abs"] = absolute
         differences[f"{field}_relative_l2"] = math.sqrt(squared / max(norm, 1e-30))
-    differences["objective_abs"] = abs(reference["metrics"]["train/objective"] - actual["metrics"]["train/objective"])
+    objective = abs(reference["metrics"]["train/objective"] - actual["metrics"]["train/objective"])
+    if not math.isfinite(objective) or objective > 2e-4:
+        raise AssertionError(f"numerical acceptance failed for objective: {objective}")
+    differences["objective_abs"] = objective
     return differences
 
 
@@ -5888,18 +6648,74 @@ def _require_validation_parity(differences: Mapping[str, float]) -> None:
         raise AssertionError(f"CPU validation changed the update: {dict(differences)}")
 
 
+def _load_benchmark_bank(path: Path, expected_sha256: str) -> dict:
+    if checkpoint_sha256(path) != expected_sha256:
+        raise ValueError("benchmark bank SHA-256 mismatch")
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    if saved.get("format") != "o59-benchmark-bank-v2":
+        raise ValueError("unsupported benchmark bank format")
+    if saved.get("conditioning_protocol") != conditioning_protocol():
+        raise ValueError("benchmark conditioning protocol mismatch")
+    batch = _return_batch_from_state(saved["batch"])
+    if _return_batch_sha256(batch) != saved["batch_sha256"]:
+        raise ValueError("benchmark return batch identity mismatch")
+    return saved
+
+
+def _validate_benchmark_reference(reference: dict, saved: dict, bank_sha256: str, cfg: TrainConfig) -> None:
+    if reference.get("format") != "o59-benchmark-reference-v2" or reference["bank_sha256"] != bank_sha256:
+        raise ValueError("incompatible benchmark reference")
+    if reference.get("conditioning_protocol") != conditioning_protocol():
+        raise ValueError("benchmark reference conditioning protocol mismatch")
+    execution_fields = {
+        "train_compile_mode",
+        "reuse_quantized_history",
+        "reuse_action_embeddings",
+        "groupwise_training_loss",
+    }
+    expected = {name: value for name, value in reference["config"].items() if name not in execution_fields}
+    actual = {name: value for name, value in asdict(cfg).items() if name not in execution_fields}
+    _require_exact_state(expected, actual, "scientific configuration")
+    for name in ("identity_masker", "return_masker"):
+        _require_exact_state(reference[name], saved[name], name)
+
+
 def _run_benchmark_case(args: BenchmarkArgs) -> None:
     if torch.cuda.device_count() != 1 or "B200" not in torch.cuda.get_device_name():
         raise RuntimeError("the O59 throughput benchmark requires exactly one B200")
-    bank_path = args.output / "bank.pt"
-    if args.bank_sha256 is None or checkpoint_sha256(bank_path) != args.bank_sha256:
-        raise ValueError("benchmark bank SHA-256 mismatch")
-    saved = torch.load(bank_path, map_location="cpu", weights_only=False)
-    if saved["format"] != "o59-benchmark-bank-v1":
-        raise ValueError("unsupported benchmark bank format")
-    mode = "max-autotune" if args.case in ("max-autotune", "combined") else "reduce-overhead"
-    cfg = replace(TrainConfig(), batch_size=args.batch_size, train_compile_mode=mode)
-    bank = AWRBatch(_train_batch_from_state(saved["batch"]), saved["returns"], saved["eligible"])
+    args.output.mkdir(parents=True, exist_ok=True)
+    if args.existing_bank is None:
+        if args.case != "baseline":
+            raise ValueError("candidates require an existing bank and reference state")
+        _prepare_benchmark_bank(args, TrainConfig())
+        args = replace(
+            args, existing_bank=args.output / "bank.pt", bank_sha256=checkpoint_sha256(args.output / "bank.pt")
+        )
+    bank_path = args.existing_bank
+    if bank_path is None:
+        raise RuntimeError("benchmark bank was not prepared")
+    if args.bank_sha256 is None:
+        raise ValueError("benchmark bank requires its SHA-256")
+    saved = _load_benchmark_bank(bank_path, args.bank_sha256)
+    reference = None
+    if args.reference_state is not None:
+        if checkpoint_sha256(args.reference_state) != args.reference_sha256:
+            raise ValueError("benchmark reference SHA-256 mismatch")
+        reference = torch.load(args.reference_state, map_location="cpu", weights_only=False)
+    elif args.case != "baseline":
+        raise ValueError("candidate requires the saved reference state")
+    mode = "max-autotune" if args.case == "max-autotune" else "reduce-overhead"
+    cfg = replace(
+        TrainConfig(),
+        batch_size=args.batch_size,
+        train_compile_mode=mode,
+        reuse_quantized_history=args.case in ("reuse-history", "combined"),
+        reuse_action_embeddings=args.case in ("reuse-embeddings", "combined"),
+        groupwise_training_loss=args.case in ("groupwise-loss", "combined"),
+    )
+    if reference is not None:
+        _validate_benchmark_reference(reference, saved, args.bank_sha256, cfg)
+    bank = _return_batch_from_state(saved["batch"])
     cpu_batches = [
         _benchmark_slice(bank, start, start + cfg.batch_size).pin_memory()
         for start in range(0, bank.target.shape[0], cfg.batch_size)
@@ -5913,9 +6729,17 @@ def _run_benchmark_case(args: BenchmarkArgs) -> None:
     np.random.seed(cfg.seed)
     torch.set_float32_matmul_precision("high")
     model = GPT(cfg, saved["vocabulary"]).cuda().train()
-    initial = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+    initial = (
+        {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+        if reference is None
+        else reference["initial"]
+    )
+    model.load_state_dict(initial)
+    initial_rng = rng_state() if reference is None else reference["rng"]
+    initial_calibration = model.return_calibration.state_dict() if reference is None else reference["conditioning"]
     diagnostics = args.case != "no-diagnostics"
-    validated = args.case in ("cpu-validation", "combined")
+    # Match production: the CPU preparation path has checked the full suffix.
+    validated = True
     optimizer = _benchmark_optimizer(model, cfg, compiled_muon=args.case == "compiled-muon")
     scheduler = LambdaLR(optimizer, lr_schedule(replace(cfg, batch_size=512)))
     initial_scheduler = scheduler.state_dict()
@@ -5923,10 +6747,13 @@ def _run_benchmark_case(args: BenchmarkArgs) -> None:
     trunk_fn, temporal_fn = _training_functions(model, cfg, compile_mode=mode, diagnostics=diagnostics)
     flops = approximate_training_flops_per_update(cfg, subsystem_parameter_counts(model))
     report: dict[str, object] = {
-        "format": "o59-benchmark-result-v1",
+        "format": "o59-benchmark-result-v2",
         "case": args.case,
         "batch_size": cfg.batch_size,
         "bank_sha256": args.bank_sha256,
+        "reference_sha256": args.reference_sha256,
+        "batch_sha256": saved["batch_sha256"],
+        "numerical_tolerances": BENCHMARK_TOLERANCES,
         "compile_mode": mode,
         "config": asdict(cfg),
         "optimizer_reference_batch": 512,
@@ -5950,9 +6777,10 @@ def _run_benchmark_case(args: BenchmarkArgs) -> None:
         for group, lr in zip(optimizer.param_groups, scheduler.base_lrs, strict=True):
             group["lr"] = lr * lr_schedule(replace(cfg, batch_size=512))(0)
         sampler.generator.manual_seed(cfg.seed ^ 0x059A11)
-        torch.manual_seed(cfg.seed)
+        restore_rng(initial_rng)
+        model.return_calibration.load_state_dict(initial_calibration)
 
-    def update(batch: AWRBatch, index: int, active: bool, timer: CudaPhaseTimer | None = None) -> TrainStepResult:
+    def update(batch: ReturnBatch, index: int, active: bool, timer: CudaPhaseTimer | None = None) -> TrainStepResult:
         return train_step(
             model,
             batch,
@@ -6004,21 +6832,38 @@ def _run_benchmark_case(args: BenchmarkArgs) -> None:
         raise AssertionError("CPU validation changed GPU sampling or RNG advancement")
     report["exact_sampling_parity"] = True
     persist()
-    reset()
-    with torch.compiler.set_stance("fail_on_recompile"):
-        result = update(device_batches[0], 0, True)
-    actual = _benchmark_state(model, result, sampler)
-    reference_path = args.output / f"reference-{cfg.batch_size}.pt"
-    if args.case == "baseline":
-        torch.save(actual, reference_path)
-    else:
-        reference = torch.load(reference_path, map_location="cpu", weights_only=False)
-        differences = _benchmark_difference(reference, actual)
-        report["correctness"] = differences
-        if args.case == "cpu-validation":
-            _require_validation_parity(differences)
-        del reference
-    del actual
+    expected_states: dict[str, object] = {}
+    for active in (False, True):
+        reset()
+        with torch.compiler.set_stance("fail_on_recompile"):
+            for index in range(2):
+                result = update(device_batches[index % len(device_batches)], index, active)
+        actual = _benchmark_state(model, result, sampler, initial=initial, batch_sha256=saved["batch_sha256"])
+        if reference is None:
+            expected_states[str(active)] = actual
+        else:
+            differences = _benchmark_difference(reference["expected"][str(active)], actual)
+            cast(dict, report["correctness"])[str(active)] = differences
+        del actual
+    if reference is None:
+        reference_path = args.output / "reference-state.pt"
+        torch.save(
+            {
+                "format": "o59-benchmark-reference-v2",
+                "initial": initial,
+                "rng": initial_rng,
+                "conditioning": initial_calibration,
+                "bank_sha256": args.bank_sha256,
+                "expected": expected_states,
+                "conditioning_protocol": conditioning_protocol(),
+                "config": asdict(cfg),
+                "identity_masker": saved["identity_masker"],
+                "return_masker": saved["return_masker"],
+            },
+            reference_path,
+        )
+        report["reference_sha256"] = checkpoint_sha256(reference_path)
+    del expected_states, reference
     persist()
     windows = cast(list[dict[str, object]], report["windows"])
     for transport in ("device", "prefetch"):
@@ -6095,6 +6940,21 @@ def _run_benchmark_case(args: BenchmarkArgs) -> None:
             profile.step()
     torch.cuda.synchronize()
     report["phases"] = _mean_phase_metrics(timers)
+    (args.output / f"{args.case}-{cfg.batch_size}.operators.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": event.key,
+                    "self_cuda_us": event.self_device_time_total,
+                    "self_cpu_us": event.self_cpu_time_total,
+                    "calls": event.count,
+                }
+                for event in profile.key_averages()
+            ],
+            indent=2,
+        )
+        + "\n"
+    )
     profile.export_chrome_trace(str(args.output / f"{args.case}-{cfg.batch_size}.trace.json"))
     report["status"] = "complete"
     persist()
@@ -6122,112 +6982,10 @@ def benchmark_repeatable_gain(control: dict, treatment: dict) -> bool:
     return min(treatment_speeds) > max(control_speeds)
 
 
-def recommend_benchmark_batch(results: list[dict]) -> int | None:
-    eligible = [result for result in results if min(row["free_memory_fraction"] for row in result["windows"]) >= 0.10]
-    if not eligible:
-        return None
-    best = max(benchmark_score(result) for result in results)
-    candidates = [result["batch_size"] for result in eligible if benchmark_score(result) >= best * 0.95]
-    return min(candidates) if candidates else None
-
-
 def benchmark(args: BenchmarkArgs) -> None:
+    """Run one immutable job; the Modal queue owns sequencing and deadlines."""
     validate_benchmark_args(args)
-    if args.case is not None:
-        _run_benchmark_case(args)
-        return
-    started = time.monotonic()
-    deadline = started + args.budget_seconds
-    args.output.mkdir(parents=True, exist_ok=False)
-    cfg = TrainConfig()
-    validate_config(cfg)
-    _prepare_benchmark_bank(args, cfg)
-    bank_hash = checkpoint_sha256(args.output / "bank.pt")
-    summary: dict[str, object] = {
-        "format": "o59-benchmark-suite-v1",
-        "results": [],
-        "unfinished": [],
-        "budget_seconds": args.budget_seconds,
-    }
-    results = cast(list[dict], summary["results"])
-
-    def persist() -> None:
-        summary["elapsed_seconds"] = time.monotonic() - started
-        (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-
-    def run(case: str, batch_size: int) -> dict | None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 30:
-            cast(list[str], summary["unfinished"]).append(f"{case}-{batch_size}: budget exhausted")
-            persist()
-            return None
-        command = [
-            sys.executable,
-            __file__,
-            "benchmark",
-            "--case",
-            case,
-            "--batch-size",
-            str(batch_size),
-            "--output",
-            str(args.output),
-            "--bank-sha256",
-            bank_hash,
-        ]
-        print(f"[benchmark] starting {case} batch={batch_size}; {remaining:.0f}s budget remains", flush=True)
-        with (args.output / f"{case}-{batch_size}.log").open("w") as log:
-            try:
-                completed = subprocess.run(
-                    command, stdout=log, stderr=subprocess.STDOUT, timeout=remaining - 20, check=False
-                )
-            except subprocess.TimeoutExpired:
-                cast(list[str], summary["unfinished"]).append(f"{case}-{batch_size}: budget exhausted")
-                persist()
-                return None
-        if completed.returncode:
-            detail = (args.output / f"{case}-{batch_size}.log").read_text()
-            status = "out_of_memory" if "OutOfMemoryError" in detail else "failed"
-            results.append({"case": case, "batch_size": batch_size, "status": status, "error_tail": detail[-8000:]})
-            print(detail[-8000:], flush=True)
-            persist()
-            return None
-        result = json.loads((args.output / f"{case}-{batch_size}.json").read_text())
-        results.append(result)
-        persist()
-        return result
-
-    baselines: list[dict] = []
-    for batch_size in args.batch_sizes:
-        result = run("baseline", batch_size)
-        if result is None:
-            break
-        baselines.append(result)
-        if len(baselines) > 1 and benchmark_score(result) < benchmark_score(baselines[-2]) * 1.05:
-            break
-    selected = recommend_benchmark_batch(baselines)
-    summary["recommended_batch"] = selected
-    if selected is not None:
-        baseline = next(result for result in baselines if result["batch_size"] == selected)
-        validation_result = run("cpu-validation", selected)
-        compilation_result = run("max-autotune", selected)
-        phases = baseline["phases"]
-        optimizer_fraction = phases["profile/optimizer_s"] / sum(phases.values())
-        summary["optimizer_fraction"] = optimizer_fraction
-        if optimizer_fraction >= 0.10:
-            run("compiled-muon", selected)
-        if (
-            validation_result is not None
-            and compilation_result is not None
-            and benchmark_repeatable_gain(baseline, validation_result)
-            and benchmark_repeatable_gain(baseline, compilation_result)
-        ):
-            run("combined", selected)
-        run("no-diagnostics", selected)
-    else:
-        cast(list[str], summary["unfinished"]).append(
-            "execution comparisons: no completed batch with required memory margin"
-        )
-    persist()
+    _run_benchmark_case(args)
 
 
 @dataclass
@@ -6260,6 +7018,7 @@ class EvalArgs:
     delay_frames: int | None = None
     replan_interval_frames: int | None = None
     wandb_namespace: str = "eval"
+    return_target: Literal["p90", "unconditioned"] = "p90"
 
 
 type Command = (
@@ -6299,6 +7058,7 @@ def main(args: Command) -> None:
             delay_frames=args.delay_frames,
             replan_interval_frames=args.replan_interval_frames,
             wandb_namespace=args.wandb_namespace,
+            return_target=args.return_target,
         )
         return
     resume_run = resume_state = None
