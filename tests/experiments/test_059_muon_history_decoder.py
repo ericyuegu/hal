@@ -36,7 +36,7 @@ def _tiny_cfg(*, batch_size=2, **changes):
         "temporal_d_model": 32,
         "temporal_layers": 2,
         "temporal_heads": 4,
-        "temporal_ff_dim": 64,
+        "temporal_ff_dim": 128,
         "group_head_dim": 32,
         "value_hidden_dim": 16,
         "item_hidden_dim": 8,
@@ -61,6 +61,8 @@ def test_production_contract_and_full_run_adam_scaling() -> None:
     assert cfg.warmup_steps == 4_096
     assert cfg.policy_prefixes_per_update == 2**14
     assert cfg.value_prefixes_per_update == 2**16
+    assert cfg.arch.temporal_ff_dim == 4 * cfg.arch.temporal_d_model
+    assert exp.proxy_config().arch.temporal_ff_dim == 4 * exp.proxy_config().arch.temporal_d_model
     assert cfg.arch.head_offsets == (*range(1, 13), 16, 20, 24, 28)
     assert cfg.minimum_replay_frames == 291
     assert exp.scaled_adam_betas(cfg) == pytest.approx((0.9875, 0.99375))
@@ -222,6 +224,25 @@ def test_optimizer_membership_and_logical_splits_are_complete() -> None:
     assert {id(parameter) for parameter in members} == {id(parameter) for parameter in model.parameters()}
     assert roles["temporal.blocks.0.qkv.weight"].logical_splits == 3
     assert roles["temporal.history_attention.key_value.weight"].logical_splits == 2
+    assert roles["temporal.trunk_outputs.buttons.up.weight"].optimizer == "muon"
+    assert roles["temporal.trunk_outputs.buttons.up.weight"].lr_kind == "hidden"
+    assert roles["temporal.trunk_outputs.buttons.down.weight"].optimizer == "adamw"
+    assert roles["temporal.trunk_outputs.buttons.down.weight"].lr_kind == "output"
+
+
+def test_trunk_skip_uses_matching_nonlinear_heads_and_parameter_contract() -> None:
+    cfg = exp.proxy_config()
+    model = exp.GPT(cfg)
+
+    for name in exp.CONTROLLER_GROUP_NAMES:
+        decoder_head = model.temporal.outputs[name]
+        trunk_head = model.temporal.trunk_outputs[name]
+        assert isinstance(decoder_head, exp.NonlinearActionHead)
+        assert isinstance(trunk_head, exp.NonlinearActionHead)
+        assert trunk_head.up.weight.shape == decoder_head.up.weight.shape
+        assert trunk_head.down.weight.shape == decoder_head.down.weight.shape
+    assert exp.subsystem_parameter_counts(model) == cfg.arch.parameter_count_contract
+    assert "dual-nonlinear-head" in exp.model_tag(cfg)
 
 
 def _live_inputs():
@@ -695,6 +716,7 @@ def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
     cfg = replace(exp.TrainConfig(), train_compile_mode="max-autotune")
     exp.validate_config(cfg)
     payload = exp._checkpoint_config(cfg)
+    assert payload["experiment_id"] == "059_muon_history_decoder_v2"
     assert payload["checkpoint_format_version"] == 2
     assert exp.config_from_state(payload).train_compile_mode == "max-autotune"
     legacy = {key: value for key, value in payload.items() if key != "train_compile_mode"}
@@ -705,5 +727,7 @@ def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
         exp.config_from_state({**payload, "checkpoint_format_version": 1})
     with pytest.raises(ValueError, match="checkpoint config mismatch"):
         exp.config_from_state({**legacy, "checkpoint_format_version": 2})
+    with pytest.raises(ValueError, match="checkpoint experiment_id"):
+        exp.config_from_state({**payload, "experiment_id": "059_muon_history_decoder_v1"})
     with pytest.raises(ValueError, match="unsupported training compile mode"):
         exp.validate_config(replace(cfg, train_compile_mode="unsupported"))

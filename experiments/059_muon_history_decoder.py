@@ -5,9 +5,10 @@ value head estimates the return from each trunk state, and the detached
 ``G_{t+1} - V(s_t)`` advantage weights the policy objective. It includes the
 schema-v6 projectile block (``item{0..3}_*``) in every observation.
 
-This file is deliberately standalone. It freezes the verified O26 temporal
-policy, O41 detached-value light AWR, and O49 ego-identity contracts without
-importing another experiment.
+This file is deliberately standalone. It retains the O41 detached-value light
+AWR and O49 ego-identity contracts without importing another experiment. The
+temporal decoder uses 4x MLP expansion and matched nonlinear decoder and
+trunk-skip logit heads.
 
 The four item slots are ordered by ascending spawn id, so a slot keeps its item
 until an OLDER item despawns and the remaining items shift down. A pooled set
@@ -178,7 +179,7 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v1"
+_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v2"
 _CHECKPOINT_FORMAT_VERSION: Final[int] = 2
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
@@ -241,7 +242,7 @@ class Architecture:
     temporal_d_model: int = 1024
     temporal_layers: int = 4
     temporal_heads: int = 16
-    temporal_ff_dim: int = 3072
+    temporal_ff_dim: int = 4096
     group_head_dim: int = 1024
     action_embed_dim: int = 32
     offset_embed_dim: int = 16
@@ -268,11 +269,12 @@ class Architecture:
         if self == Architecture():
             return {
                 "trunk": 201_326_592,
-                "temporal_decoder": 47_746_032,
-                "group_heads": 4_921_699,
+                "temporal_decoder": 56_134_640,
+                "group_heads": 4_558_179,
+                "trunk_skip_heads": 4_558_179,
                 "value_head": 1_049_089,
                 "other": 1_230_790,
-                "total": 256_274_202,
+                "total": 268_857_469,
             }
         proxy = Architecture(
             d_model=256,
@@ -281,18 +283,19 @@ class Architecture:
             temporal_d_model=256,
             temporal_layers=4,
             temporal_heads=4,
-            temporal_ff_dim=768,
+            temporal_ff_dim=1024,
             group_head_dim=256,
             value_hidden_dim=128,
         )
         if self == proxy:
             return {
                 "trunk": 12_582_912,
-                "temporal_decoder": 3_098_352,
-                "group_heads": 444_259,
+                "temporal_decoder": 3_622_640,
+                "group_heads": 353_379,
+                "trunk_skip_heads": 353_379,
                 "value_head": 65_665,
                 "other": 861_382,
-                "total": 17_052_570,
+                "total": 17_839_357,
             }
         raise ValueError(f"no parameter contract for architecture {self}")
 
@@ -657,7 +660,7 @@ def validate_config(cfg: TrainConfig) -> None:
 
 
 def proxy_config() -> TrainConfig:
-    """Return the 15M, 16-layer, D0 proxy treatment."""
+    """Return the 18M, 16-layer, D0 proxy treatment."""
     return TrainConfig(
         arch=Architecture(
             d_model=256,
@@ -666,7 +669,7 @@ def proxy_config() -> TrainConfig:
             temporal_d_model=256,
             temporal_layers=4,
             temporal_heads=4,
-            temporal_ff_dim=768,
+            temporal_ff_dim=1024,
             group_head_dim=256,
             value_hidden_dim=128,
         ),
@@ -1087,7 +1090,11 @@ class CausalTemporalDecoder(nn.Module):
         )
         self.trunk_outputs = nn.ModuleDict(
             {
-                name: nn.Linear(cfg.arch.d_model, CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]], bias=False)
+                name: NonlinearActionHead(
+                    cfg.arch.d_model,
+                    cfg.arch.group_head_dim,
+                    CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]],
+                )
                 for name in CONTROLLER_GROUP_NAMES
             }
         )
@@ -1114,6 +1121,10 @@ class CausalTemporalDecoder(nn.Module):
         offset_weight = weight[:, self.trunk_width + self.controller_width :]
         action = F.linear(self.codec.embed_frame(previous), action_weight)
         return action + F.linear(self.offset_embedding(offsets), offset_weight)
+
+    def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
+        """Compute context-only logits once for all decoded offsets."""
+        return {name: self.trunk_outputs[name](hidden) for name in CONTROLLER_GROUP_NAMES}
 
     def _decode_step(
         self,
@@ -1202,7 +1213,7 @@ class CausalTemporalDecoder(nn.Module):
     ) -> tuple[
         dict[str, Tensor],
         tuple[Tensor, Tensor, Tensor, Tensor],
-        dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
+        dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
     ]:
         """Return group logits and tensors at the action projection boundaries."""
         states = self.teacher_forced_states(hidden, ctx_pad, prefix_positions, observed, targets)
@@ -1210,7 +1221,10 @@ class CausalTemporalDecoder(nn.Module):
         selected_hidden = hidden[batch_indices, prefix_positions]
         embedded = self.codec.embed_groups(targets)
         logits: dict[str, Tensor] = {}
-        projection_values: dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = {}
+        projection_values: dict[
+            str,
+            tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
+        ] = {}
         button_values: tuple[Tensor, Tensor, Tensor] | None = None
         for name in CONTROLLER_GROUP_NAMES:
             features = self.group_features(states, name, embedded)
@@ -1219,14 +1233,19 @@ class CausalTemporalDecoder(nn.Module):
                 features,
                 safer_norm=name == "buttons",
             )
-            trunk_output = self.trunk_outputs[name](selected_hidden)
+            trunk_head = cast(NonlinearActionHead, self.trunk_outputs[name])
+            trunk_output, trunk_input, trunk_up_output, trunk_down_input = trunk_head.projection_activations(
+                selected_hidden
+            )
             combined_logits = head_output + trunk_output[..., None, :]
             projection_values[name] = (
                 head_input,
                 up_output,
                 down_input,
                 head_output,
-                selected_hidden,
+                trunk_input,
+                trunk_up_output,
+                trunk_down_input,
                 trunk_output,
             )
             if name == "buttons":
@@ -1293,14 +1312,25 @@ class CausalTemporalDecoder(nn.Module):
         }
         if self.training_diagnostics:
             for name, values in projection_values.items():
-                head_input, up_output, down_input, down_output, trunk_input, trunk_output = values
+                (
+                    head_input,
+                    up_output,
+                    down_input,
+                    down_output,
+                    trunk_input,
+                    trunk_up_output,
+                    trunk_down_input,
+                    trunk_output,
+                ) = values
                 prefix = f"diagnostics/activations/action/{name}"
                 metrics.update(_activation_input_metrics(f"{prefix}/up", head_input))
                 metrics.update(_activation_output_metrics(f"{prefix}/up", up_output))
                 metrics.update(_activation_input_metrics(f"{prefix}/down", down_input))
                 metrics.update(_activation_output_metrics(f"{prefix}/down", down_output))
-                metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip", trunk_input))
-                metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip", trunk_output))
+                metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/up", trunk_input))
+                metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/up", trunk_up_output))
+                metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/down", trunk_down_input))
+                metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/down", trunk_output))
                 metrics.update(_activation_output_metrics(f"{prefix}/combined_centered_logits", logits[name]))
         return self.nll_from_logits(logits, targets), metrics
 
@@ -1328,6 +1358,7 @@ class CausalTemporalDecoder(nn.Module):
         raw_trunk = hidden[:, -1]
         trunk = decoder_rmsnorm(raw_trunk)
         state_bias = self._state_bias(trunk)
+        trunk_logits = self._trunk_skip_logits(raw_trunk)
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         history = self._live_history(hidden, ctx_pad)
@@ -1337,10 +1368,7 @@ class CausalTemporalDecoder(nn.Module):
             target = targets[:, depth]
             embedded = self.codec.embed_groups(target)
             group_logits = {
-                name: self._center(
-                    self.outputs[name](self.group_features(state, name, embedded))
-                    + self.trunk_outputs[name](raw_trunk)
-                )
+                name: self._center(self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name])
                 for name in CONTROLLER_GROUP_NAMES
             }
             group_logits["buttons"] = group_logits["buttons"].masked_fill(
@@ -1434,6 +1462,7 @@ class CausalTemporalDecoder(nn.Module):
         raw_trunk = hidden[:, -1]
         trunk = decoder_rmsnorm(raw_trunk)
         state_bias = self._state_bias(trunk)
+        trunk_logits = self._trunk_skip_logits(raw_trunk)
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         history = self._live_history(hidden, ctx_pad)
@@ -1445,8 +1474,7 @@ class CausalTemporalDecoder(nn.Module):
             picks: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
                 logits = self._center(
-                    self.outputs[name](self.group_features(state, name, embedded))
-                    + self.trunk_outputs[name](raw_trunk)
+                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
                 )
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
@@ -1486,6 +1514,7 @@ class CausalTemporalDecoder(nn.Module):
         raw_trunk = hidden[:, -1]
         trunk = decoder_rmsnorm(raw_trunk)
         state_bias = self._state_bias(trunk)
+        trunk_logits = self._trunk_skip_logits(raw_trunk)
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         history = self._live_history(hidden, ctx_pad)
@@ -1498,8 +1527,7 @@ class CausalTemporalDecoder(nn.Module):
             frame_logits: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
                 logits = self._center(
-                    self.outputs[name](self.group_features(state, name, embedded))
-                    + self.trunk_outputs[name](raw_trunk)
+                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
                 )
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
@@ -3463,7 +3491,9 @@ def mup_readout_std(fan_in: int, base_fan_in: int) -> float:
 
 def _final_readouts(model: GPT) -> tuple[tuple[nn.Linear, int], ...]:
     action = tuple((cast(nn.Linear, model.temporal.outputs[name].down), 128) for name in CONTROLLER_GROUP_NAMES)
-    trunk_skip = tuple((cast(nn.Linear, model.temporal.trunk_outputs[name]), 256) for name in CONTROLLER_GROUP_NAMES)
+    trunk_skip = tuple(
+        (cast(NonlinearActionHead, model.temporal.trunk_outputs[name]).down, 128) for name in CONTROLLER_GROUP_NAMES
+    )
     return (*action, *trunk_skip, (model.value_head.down, 128))
 
 
@@ -3527,7 +3557,7 @@ class OptimizerRole:
 def _is_final_readout(name: str) -> bool:
     return (
         (name.startswith("temporal.outputs.") and ".down." in name)
-        or name.startswith("temporal.trunk_outputs.")
+        or (name.startswith("temporal.trunk_outputs.") and ".down." in name)
         or name.startswith("value_head.down.")
     )
 
@@ -3536,7 +3566,7 @@ def _output_fan_in_multiplier(name: str, cfg: TrainConfig) -> float:
     if name.startswith("temporal.outputs."):
         return cfg.arch.group_head_dim / 128
     if name.startswith("temporal.trunk_outputs."):
-        return cfg.arch.d_model / 256
+        return cfg.arch.group_head_dim / 128
     if name.startswith("value_head.down."):
         return cfg.arch.value_hidden_dim / 128
     raise ValueError(f"{name!r} is not a final readout")
@@ -3577,7 +3607,7 @@ def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
             splits = 2 if name.endswith("key_value.weight") else 1
             roles[name] = OptimizerRole(cfg.optimizer, "hidden", True, logical_splits=splits)
         elif name == "temporal.token_projection.weight" or (
-            name.startswith("temporal.outputs.") and name.endswith("up.weight")
+            name.startswith(("temporal.outputs.", "temporal.trunk_outputs.")) and name.endswith("up.weight")
         ):
             roles[name] = OptimizerRole(cfg.optimizer, "hidden", True)
         elif name == "value_head.up.weight":
@@ -3674,15 +3704,25 @@ def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
     """Partition every parameter by the model subsystem that owns it."""
     all_parameters = tuple(model.parameters())
     trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
-    head_modules = nn.ModuleList([model.temporal.outputs, model.temporal.trunk_outputs])
-    head_ids = {id(parameter) for parameter in head_modules.parameters()}
-    temporal_ids = {id(parameter) for parameter in model.temporal.parameters() if id(parameter) not in head_ids}
+    head_ids = {id(parameter) for parameter in model.temporal.outputs.parameters()}
+    trunk_skip_ids = {id(parameter) for parameter in model.temporal.trunk_outputs.parameters()}
+    temporal_ids = {
+        id(parameter) for parameter in model.temporal.parameters() if id(parameter) not in head_ids | trunk_skip_ids
+    }
     value_ids = {id(parameter) for parameter in model.value_head.parameters()}
-    other_ids = {id(parameter) for parameter in all_parameters} - trunk_ids - temporal_ids - head_ids - value_ids
+    other_ids = (
+        {id(parameter) for parameter in all_parameters}
+        - trunk_ids
+        - temporal_ids
+        - head_ids
+        - trunk_skip_ids
+        - value_ids
+    )
     partition_ids = {
         "trunk": trunk_ids,
         "temporal_decoder": temporal_ids,
         "group_heads": head_ids,
+        "trunk_skip_heads": trunk_skip_ids,
         "value_head": value_ids,
         "other": other_ids,
     }
@@ -3921,8 +3961,9 @@ def logical_parameter_samples(model: GPT) -> dict[str, LogicalMatrixSample]:
         head = cast(NonlinearActionHead, model.temporal.outputs[name])
         add(f"action/{name}/up", head.up.weight)
         add(f"action/{name}/down", head.down.weight)
-        trunk_output = cast(nn.Linear, model.temporal.trunk_outputs[name])
-        add(f"action/{name}/trunk_skip", trunk_output.weight)
+        trunk_output = cast(NonlinearActionHead, model.temporal.trunk_outputs[name])
+        add(f"action/{name}/trunk_skip/up", trunk_output.up.weight)
+        add(f"action/{name}/trunk_skip/down", trunk_output.down.weight)
 
     value_midpoint = model.value_head.up.weight.shape[0] // 2
     add("value/gate", model.value_head.up.weight, row_stop=value_midpoint)
@@ -4056,6 +4097,7 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
     parameter_uses = (
         full * trunk_and_inputs
         + suffix * parameter_counts["value_head"]
+        + policy_prefixes * parameter_counts["trunk_skip_heads"]
         + policy_prefixes * len(cfg.arch.head_offsets) * temporal_and_heads
     )
     return 6 * cfg.batch_size * parameter_uses
@@ -4067,8 +4109,8 @@ def model_tag(cfg: TrainConfig) -> str:
     optimizer = "" if cfg.optimizer == "muon" else f"all-adamw-alr{cfg.adam_lr:g}-"
     return (
         f"o59-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-Lc{cfg.arch.L_ctx}-"
-        f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-o{offsets}-d2r2-"
-        f"nonlinear-head-trunk-skip-projectiles-v8-o51-parameterized-{optimizer}"
+        f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
+        f"o{offsets}-d2r2-dual-nonlinear-head-projectiles-v8-o51-parameterized-{optimizer}"
         f"mwd{cfg.muon_weight_decay:g}-awd{cfg.adam_weight_decay:g}-wsd-{treatment}"
     )
 
@@ -4636,7 +4678,7 @@ def _log_training_summary(
     wandb.run.summary["system/disk/reserved_bytes"] = cfg.reserved_disk_bytes
     wandb.run.summary["training/approx_flops_per_update"] = flops_per_update
     wandb.run.summary["training/flops_formula"] = (
-        "6*B*(L_ctx*(N_trunk+N_other)+128*N_value+32*n_offsets*(N_temporal+N_group_heads))"
+        "6*B*(L_ctx*(N_trunk+N_other)+128*N_value+32*N_trunk_skip_heads+32*n_offsets*(N_temporal+N_group_heads))"
     )
     input_lr = cfg.adam_lr * math.sqrt(scaling_multipliers(cfg)[0] / scaling_multipliers(cfg)[1])
     if cfg.optimizer == "muon":

@@ -1,5 +1,9 @@
 # O59 BF16 throughput results
 
+These measurements apply to `059_muon_history_decoder_v1`. The later v2 model
+uses nonlinear trunk-skip heads and a 4x temporal MLP, so its throughput and MFU
+must be measured separately.
+
 Use physical batch **512**, CPU prefix validation, and `max-autotune` for long
 training runs. Keep production diagnostics and eager Muon. Active-AWR throughput
 rose from **1,340.3 to 1,403.7 samples/s (+4.73%)** on one B200. Each of the three
