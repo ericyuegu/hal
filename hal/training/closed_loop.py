@@ -15,7 +15,7 @@ of closed-loop play that is *invariant* across model architectures:
   plain open-loop; an instant restart resets that slot's clock and pending chunk;
 * the real-time-chunking commitment: when the inference delay ``d > 0``, each new
   chunk is conditioned on the ``d`` actions already committed for its first frames
-  (the previous chunk's ``[s : s+d]``; ``None`` at bootstrap), so the handoff is
+  (the previous chunk's ``[s : s+d]``; optionally neutral at bootstrap), so the handoff is
   continuous (constraint ``d <= L_chunk - s``);
 * stacking every live slot into one batch → :class:`Context`, and scattering the
   predicted chunks back.
@@ -70,8 +70,8 @@ from hal.training.features import FeatureProjection
 # A bound model + integration scheme: (Context, committed-action prefix or None)
 # → predicted action chunks ``[n_live, L_chunk, d_action]`` (numpy, for the
 # rolling-buffer plumbing). ``committed`` is ``[n_live, d, d_action]`` — the
-# already-locked actions the new chunk's prefix is conditioned on (``None`` when
-# ``d == 0`` or at bootstrap).
+# already-locked actions the new chunk's prefix is conditioned on. Historical
+# bootstrap uses ``None``; neutral bootstrap always supplies an array, even at d=0.
 PredictChunk = Callable[[Context, np.ndarray | None], np.ndarray]
 
 _PORT_TO_PREFIX: dict[int, Literal["p1", "p2"]] = {1: "p1", 2: "p2"}
@@ -87,6 +87,14 @@ class _SlotState:
     last_id: int | None = None  # previous frame's canonical id; a drop = instant-restart boundary
     reset_pending: bool = True
     last_action: np.ndarray | None = None  # the action returned for the PREVIOUS frame
+
+
+@dataclass(frozen=True, slots=True)
+class _FaultInput:
+    windows: ContextWindows
+    slots: tuple[Slot, ...]
+    pads: np.ndarray
+    resets: np.ndarray
 
 
 @dataclass
@@ -105,6 +113,10 @@ class RecedingHorizon:
     unrelated boots keep their current chunks.
 
     Construct fresh per eval wave (rolling state must not leak across waves).
+
+    ``bootstrap_committed="neutral"`` starts each slot with ``d`` neutral actions
+    and preserves committed values exactly in returned chunks. The default keeps
+    historical bootstrap, batching, and predictor output semantics.
     """
 
     predict_chunk: PredictChunk
@@ -123,15 +135,17 @@ class RecedingHorizon:
     extra: ExtraColumns | None = None
     projection: FeatureProjection | None = None
     fault_metadata: Callable[[], Mapping[str, object]] | None = None
+    bootstrap_committed: Literal["none", "neutral"] = field(default="none", kw_only=True)
     _slots: dict[Slot, _SlotState] = field(default_factory=dict)
-    _last_fault_arrays: dict[str, np.ndarray] = field(default_factory=dict, init=False)
-    _last_fault_metadata: dict[str, object] = field(default_factory=dict, init=False)
+    _last_fault_input: _FaultInput | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if not 0 < self.s <= self.L_chunk:
             raise ValueError(f"execution horizon s={self.s} must satisfy 0 < s <= L_chunk={self.L_chunk}")
         if not 0 <= self.d <= self.L_chunk - self.s:
             raise ValueError(f"inference delay d={self.d} must satisfy 0 <= d <= L_chunk - s={self.L_chunk - self.s}")
+        if self.bootstrap_committed not in ("none", "neutral"):
+            raise ValueError(f"unsupported bootstrap commitment {self.bootstrap_committed!r}")
 
     @property
     def runtime_spec(self) -> PolicyRuntimeSpec:
@@ -147,23 +161,8 @@ class RecedingHorizon:
     def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]:
         live = list(obs)
         self._ingest(live, obs)
-        # No neutral-hold warm-up: the policy acts from frame 0. The still-empty context
-        # prefix is hidden from attention via ctx_pad (see _replan), so the model sees
-        # only real frames and the context fills with REAL gameplay rather than frames
-        # produced by an idling model.
         due = [sl for sl in live if self._slots[sl].pending is None or self._slots[sl].offset >= self.s]
-        if self.d == 0:
-            if due:
-                self._replan(due, committed=None)
-        else:
-            # A bootstrap/reset has no prior commitment. Continuing slots do, so the
-            # two cases need separate forwards when both occur on the same frame.
-            bootstrap = [sl for sl in due if self._slots[sl].pending is None]
-            continuing = [sl for sl in due if self._slots[sl].pending is not None]
-            if bootstrap:
-                self._replan(bootstrap, committed=None)
-            if continuing:
-                self._replan(continuing, committed=self._committed(continuing))
+        self._plan(due, separate_bootstrap=self.d > 0)
         actions: dict[Slot, np.ndarray] = {}
         for sl in live:
             st = self._slots[sl]
@@ -191,14 +190,25 @@ class RecedingHorizon:
                 raise ValueError(f"slot {slot} requested a plan without observation rows")
             for row in slot_rows:
                 self._ingest_row(slot, row)
+        self._plan(live, separate_bootstrap=True)
+        return {slot: np.asarray(self._slots[slot].pending, dtype=np.float32) for slot in live}
+
+    def _plan(self, live: list[Slot], *, separate_bootstrap: bool) -> None:
+        if not live:
+            return
+        if self.bootstrap_committed == "neutral":
+            self._replan(live, committed=self._committed(live))
+            return
+        # Preserve each historical entry point's batching and random-draw order.
+        if not separate_bootstrap:
+            self._replan(live, committed=None)
+            return
         bootstrap = [slot for slot in live if self._slots[slot].pending is None]
         continuing = [slot for slot in live if self._slots[slot].pending is not None]
         if bootstrap:
             self._replan(bootstrap, committed=None)
         if continuing:
-            committed = self._committed(continuing) if self.d else None
-            self._replan(continuing, committed=committed)
-        return {slot: np.asarray(self._slots[slot].pending, dtype=np.float32) for slot in live}
+            self._replan(continuing, committed=self._committed(continuing))
 
     @staticmethod
     def _reset_state(st: _SlotState) -> None:
@@ -273,22 +283,12 @@ class RecedingHorizon:
         The batch always carries the full ``L_ctx`` window. Building the batch consumes each slot's
         reset flag. The model sees a match boundary once, in the first context after it."""
         windows = self._stack_windows(live, self.L_ctx, truncate_left_edge=True)
-        layout = windows.layout
         # These arrays already exist for the H2D transfer. Retaining references costs
         # no copies in the hot path and lets the parent serialize the exact input if
         # asynchronous CUDA execution later reports a fault.
-        pads = [max(0, self.L_ctx - self._count(sl)) for sl in live]
-        resets = [self._slots[sl].reset_pending for sl in live]
-        self._last_fault_arrays = {"floats": windows.floats, "cats": windows.cats}
-        self._last_fault_metadata = {
-            "slots": [{"match": sl.match, "port": sl.port} for sl in live],
-            "ctx_pad": pads,
-            "reset": resets,
-            "value_names": list(layout.value_names),
-            "mask_names": list(layout.mask_names),
-            "cat_names": list(layout.cat_names),
-            "emitted_masks": windows.emitted.tolist(),
-        }
+        pads = np.fromiter((max(0, self.L_ctx - self._count(sl)) for sl in live), dtype=np.int64)
+        resets = np.fromiter((self._slots[sl].reset_pending for sl in live), dtype=np.bool_)
+        self._last_fault_input = _FaultInput(windows, tuple(live), pads, resets)
         # One host→device transfer per dtype. Moving ~73 feature tensors independently
         # makes CUDA scheduling/allocator overhead dominate when a trainer shares the
         # device; the rings already hold the batch packed, so this copies contiguous
@@ -309,10 +309,25 @@ class RecedingHorizon:
 
     def fault_snapshot(self) -> tuple[dict[str, object], dict[str, np.ndarray]]:
         """Return the last already-packed host input without touching CUDA."""
-        metadata = dict(self._last_fault_metadata)
+        metadata: dict[str, object] = {}
+        arrays: dict[str, np.ndarray] = {}
+        if self._last_fault_input is not None:
+            captured = self._last_fault_input
+            windows = captured.windows
+            layout = windows.layout
+            metadata = {
+                "slots": [{"match": sl.match, "port": sl.port} for sl in captured.slots],
+                "ctx_pad": captured.pads.tolist(),
+                "reset": captured.resets.tolist(),
+                "value_names": list(layout.value_names),
+                "mask_names": list(layout.mask_names),
+                "cat_names": list(layout.cat_names),
+                "emitted_masks": windows.emitted.tolist(),
+            }
+            arrays = {"floats": windows.floats, "cats": windows.cats}
         if self.fault_metadata is not None:
             metadata.update(self.fault_metadata())
-        return metadata, dict(self._last_fault_arrays)
+        return metadata, arrays
 
     def _replan(self, live: list[Slot], committed: np.ndarray | None) -> None:
         """One batched forward over every live slot. ``live`` order is fixed by
@@ -326,7 +341,10 @@ class RecedingHorizon:
                 f"with prefix {expected}"
             )
         for i, sl in enumerate(live):
-            self._slots[sl].pending = plans[i]
+            pending = plans[i].copy()
+            if self.bootstrap_committed == "neutral" and committed is not None:
+                pending[: self.d] = committed[i]
+            self._slots[sl].pending = pending
             self._slots[sl].offset = 0
 
     def _count(self, slot: Slot) -> int:
@@ -336,14 +354,24 @@ class RecedingHorizon:
     def _committed(self, live: list[Slot]) -> np.ndarray | None:
         """The ``d`` already-committed actions each new chunk is conditioned on:
         the previous chunk's actions for the new chunk's prefix frames (its
-        ``[s : s+d]``, since the new chunk is anchored ``s`` frames later). ``None``
-        at bootstrap (no previous chunk) or when ``d == 0`` (open-loop)."""
+        ``[s : s+d]``, since the new chunk is anchored ``s`` frames later).
+
+        Neutral mode includes bootstrap slots and returns an empty prefix at d=0.
+        Historical mode requires continuing slots and returns None at d=0.
+        """
+        if self.bootstrap_committed == "neutral":
+            committed = np.broadcast_to(NEUTRAL_ACTION, (len(live), self.d, len(ACTION_CHANNELS))).copy()
+            for row, sl in enumerate(live):
+                pending = self._slots[sl].pending
+                if pending is not None:
+                    committed[row] = pending[self.s : self.s + self.d]
+            return committed
         if self.d <= 0:
             return None
-        committed: list[np.ndarray] = []
+        prefixes: list[np.ndarray] = []
         for sl in live:
             pending = self._slots[sl].pending
             if pending is None:
                 raise RuntimeError(f"cannot build a committed prefix for bootstrap slot {sl}")
-            committed.append(pending[self.s : self.s + self.d].astype(np.float32))
-        return np.stack(committed, axis=0)
+            prefixes.append(pending[self.s : self.s + self.d].astype(np.float32))
+        return np.stack(prefixes, axis=0)

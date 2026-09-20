@@ -78,6 +78,7 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
         "--resume-as",
         "--resume-checkpoint",
         "--resume-muon-lr-multiplier",
+        "--decay-duration",
         "--target-positions",
     }
 )
@@ -88,6 +89,7 @@ CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
     "experiments/054_bc_capacity_latency.py": frozenset({4_096, 8_192, 16_384, 32_768}),
     "experiments/056_decoder_capacity_reallocation.py": None,
     "experiments/057_scaled_endpoint_flow.py": None,
+    "experiments/059_muon_history_decoder.py": None,
 }
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32

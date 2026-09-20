@@ -499,3 +499,172 @@ def test_shared_row_planning_uses_policy_schedule_and_resets_context() -> None:
     assert policy.runtime_spec.execution_stride == 4
     assert first.shape == second.shape == reset_plan.shape == (L_CHUNK, ACTION_DIM)
     assert pads == [L_CTX - 1, L_CTX - 5, L_CTX - 1]
+
+
+@pytest.mark.parametrize(("stride", "delay"), [(2, 0), (2, 1), (2, 2), (2, 3), (3, 1), (1, 3)])
+def test_neutral_commitment_frame_and_chunk_paths_match(stride: int, delay: int) -> None:
+    from hal.eval.policy_sampling import SlotGroupRng
+    from hal.sim.inputs import controller_to_action_vec
+
+    class Predictor:
+        def __init__(self) -> None:
+            self.rng = SlotGroupRng(71, ("x", "y"))
+            self.calls = []
+
+        def __call__(self, ctx, committed):
+            assert committed.shape == (ctx.batch, delay, ACTION_DIM)
+            self.rng.begin(ctx)
+            plans = np.zeros((ctx.batch, L_CHUNK, ACTION_DIM), dtype=np.float32)
+            draws = []
+            for depth in range(delay, L_CHUNK):
+                values = torch.stack([self.rng.uniforms(name) for name in ("x", "y")], dim=-1)
+                draws.append(values.clone())
+                plans[:, depth, :2] = values.numpy() * 1.8 - 0.9
+            # The scheduler must retain the supplied commitment, even if the
+            # predictor changes it during quantization or uses a shared buffer.
+            plans[:, :delay] = -0.37
+            self.calls.append((ctx, committed.copy(), torch.stack(draws), self.rng.state()))
+            return plans
+
+    frame_predictor, row_predictor = Predictor(), Predictor()
+
+    def policy(predictor):
+        return RecedingHorizon(
+            predictor,
+            _stats(False, False),
+            5,
+            L_CHUNK,
+            stride,
+            delay,
+            device="cpu",
+            bootstrap_committed="neutral",
+        )
+
+    frame_policy, row_policy = policy(frame_predictor), policy(row_predictor)
+    slots = [Slot(0, 1), Slot(0, 2), Slot(1, 1)]
+    buffers = {slot: [] for slot in slots}
+    plans = {}
+    positions = {}
+    previous = {slot: NEUTRAL_ACTION.copy() for slot in slots}
+    ids = {slot: 100 for slot in slots}
+    for tick in range(10 * stride + 7):
+        live = slots[:2] if tick < 2 * stride else slots
+        live = live if tick % 2 else list(reversed(live))
+        observations, requests = {}, {}
+        for slot in live:
+            reset = (slot == slots[0] and tick == 3 * stride + 1) or (slot == slots[1] and tick == 4 * stride)
+            ids[slot] = -123 if reset else ids[slot] + 1
+            frame = _obs(tick, ids[slot], v6=False, follower=False)
+            observations[slot] = frame
+            buffers[slot].append(
+                ObservationRow(
+                    ids[slot],
+                    flatten_canonical_frame(frame),
+                    NEUTRAL_ACTION.copy() if reset else previous[slot].copy(),
+                    reset=reset,
+                )
+            )
+            if reset or slot not in plans or positions[slot] >= stride:
+                requests[slot] = buffers[slot]
+                buffers[slot] = []
+        for slot, plan in row_policy.plan_rows(requests).items():
+            plans[slot] = plan
+            positions[slot] = 0
+        actions = frame_policy(tick, observations)
+        for slot in live:
+            actual = controller_to_action_vec(actions[slot])
+            np.testing.assert_array_equal(actual, plans[slot][positions[slot]])
+            previous[slot] = actual
+            positions[slot] += 1
+
+    assert len(frame_predictor.calls) == len(row_predictor.calls)
+    for frame_call, row_call in zip(frame_predictor.calls, row_predictor.calls, strict=True):
+        frame_ctx, frame_committed, frame_draws, frame_rng = frame_call
+        row_ctx, row_committed, row_draws, row_rng = row_call
+        assert frame_ctx.features.keys() == row_ctx.features.keys()
+        for name in frame_ctx.features:
+            torch.testing.assert_close(frame_ctx.features[name], row_ctx.features[name], rtol=0, atol=0)
+        for name in ("ctx_pad", "slot_ids", "reset"):
+            assert torch.equal(getattr(frame_ctx, name), getattr(row_ctx, name))
+        np.testing.assert_array_equal(frame_committed, row_committed)
+        assert torch.equal(frame_draws, row_draws)
+        assert frame_rng == row_rng
+    np.testing.assert_array_equal(frame_predictor.calls[0][1], np.zeros((2, delay, ACTION_DIM)))
+    assert any(call[0].reset.tolist().count(True) == 1 and call[0].batch > 1 for call in frame_predictor.calls)
+
+
+@pytest.mark.parametrize("delay", [0, 2])
+@pytest.mark.parametrize("entry", ["frames", "rows"])
+def test_historical_bootstrap_keeps_its_grouping_and_predictions(delay: int, entry: str) -> None:
+    calls = []
+    output = np.full((2, L_CHUNK, ACTION_DIM), 0.25, dtype=np.float32)
+
+    def predict(ctx, committed):
+        calls.append((ctx.slot_ids.tolist(), committed))
+        return output[: ctx.batch]
+
+    policy = RecedingHorizon(predict, _stats(False, False), 5, L_CHUNK, 1, delay, device="cpu")
+    first, second = Slot(0, 1), Slot(0, 2)
+
+    def step(tick, slots):
+        frame = _obs(tick, 100 + tick, v6=False, follower=False)
+        if entry == "frames":
+            policy(tick, {slot: frame for slot in slots})
+        else:
+            policy.plan_rows(
+                {slot: [ObservationRow(100 + tick, flatten_canonical_frame(frame), NEUTRAL_ACTION)] for slot in slots}
+            )
+
+    step(0, [first])
+    step(1, [first, second])
+    assert calls[0] == ([1], None)
+    if entry == "frames" and delay == 0:
+        assert calls[1] == ([1, 2], None)
+    else:
+        assert calls[1] == ([2], None)
+        assert calls[2][0] == [1]
+        if delay:
+            np.testing.assert_array_equal(calls[2][1], output[:1, 1 : 1 + delay])
+        else:
+            assert calls[2][1] is None
+    np.testing.assert_array_equal(policy._slots[first].pending, output[0])
+    output.fill(0.75)
+    assert np.all(policy._slots[first].pending == 0.25)
+
+
+def test_fault_snapshot_retains_values_before_reset_flags_change() -> None:
+    policy = RecedingHorizon(
+        lambda ctx, committed: np.zeros((ctx.batch, L_CHUNK, ACTION_DIM), dtype=np.float32),
+        _stats(False, False),
+        5,
+        L_CHUNK,
+        3,
+        2,
+        device="cpu",
+        bootstrap_committed="neutral",
+        fault_metadata=lambda: {"experiment": "test"},
+    )
+    assert policy.fault_snapshot() == ({"experiment": "test"}, {})
+    slots = [Slot(0, 1), Slot(0, 2)]
+    policy(0, {slot: _obs(0, 100, v6=False, follower=False) for slot in slots})
+    metadata, arrays = policy.fault_snapshot()
+    assert all(not policy._slots[slot].reset_pending for slot in slots)
+    assert metadata["reset"] == [True, True]
+    assert metadata["ctx_pad"] == [4, 4]
+    assert metadata["slots"] == [{"match": 0, "port": 1}, {"match": 0, "port": 2}]
+    assert set(metadata) == {
+        "slots",
+        "ctx_pad",
+        "reset",
+        "value_names",
+        "mask_names",
+        "cat_names",
+        "emitted_masks",
+        "experiment",
+    }
+    expected_arrays = {name: value.copy() for name, value in arrays.items()}
+    policy(1, {slot: _obs(1, 101, v6=False, follower=False) for slot in slots})
+    later_metadata, later_arrays = policy.fault_snapshot()
+    assert later_metadata == metadata
+    for name, expected in expected_arrays.items():
+        np.testing.assert_array_equal(later_arrays[name], expected)
